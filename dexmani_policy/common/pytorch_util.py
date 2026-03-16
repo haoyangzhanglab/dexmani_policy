@@ -1,4 +1,6 @@
 import torch
+import random
+import numpy as np
 import collections
 import torch.nn as nn
 from typing import Dict, Callable, List
@@ -18,3 +20,18 @@ def dict_apply(
         else:
             result[key] = func(value)
     return result
+
+
+def optimizer_to(optimizer, device):
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device=device)
+    return optimizer
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
