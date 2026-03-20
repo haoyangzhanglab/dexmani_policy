@@ -234,7 +234,7 @@ class DiT_Diffusion(nn.Module):
             no_decay_names=["pos_embed"],
         )
 
-    def forward(self, x, timestep, global_cond):
+    def forward(self, x, timestep, context):
 
         if not torch.is_tensor(timestep):
             timestep = torch.tensor([timestep], dtype=torch.long, device=x.device)
@@ -245,8 +245,8 @@ class DiT_Diffusion(nn.Module):
         x = self.x_embedder(x) + self.pos_embed.to(device=x.device, dtype=x.dtype)
         t_emb = self.time_embedder(t)
 
-        global_cond = global_cond.reshape(global_cond.shape[0], -1)
-        cond_emb = self.cond_embedder(global_cond)
+        context = context.reshape(context.shape[0], -1)
+        cond_emb = self.cond_embedder(context)
 
         c = t_emb + cond_emb
 
@@ -339,7 +339,7 @@ class DiT_FlowMatch(nn.Module):
             no_decay_names=["pos_embed"],
         )
 
-    def forward(self, x, timestep, target_t, global_cond):
+    def forward(self, x, timestep, target_t, context):
         x = self.x_embedder(x) + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
         if not torch.is_tensor(timestep):
@@ -359,8 +359,8 @@ class DiT_FlowMatch(nn.Module):
         time_c = torch.cat([t_emb, target_t_emb], dim=-1)
         time_c = self.timestep_and_target_t_fusion(time_c)        
 
-        global_cond = global_cond.reshape(global_cond.shape[0], -1)
-        cond = self.cond_embedder(global_cond)
+        context = context.reshape(context.shape[0], -1)
+        cond = self.cond_embedder(context)
 
         c = time_c + cond
 

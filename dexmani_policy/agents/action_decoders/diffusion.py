@@ -33,31 +33,33 @@ class Diffusion(nn.Module):
         self.num_inference_steps = num_inference_steps
 
 
-    def compute_loss(self, cond, action):
-        B = action.shape[0]
+    def compute_loss(self, cond, actions, **kwargs):
+        B = actions.shape[0]
 
-        noise = torch.randn_like(action, device=action.device)
-        timestep = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (B,), device=action.device).long()
-        noisy_action = self.noise_scheduler.add_noise(action, noise, timestep)
+        noise = torch.randn_like(actions, device=actions.device)
+        timestep = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device).long()
+        noisy_action = self.noise_scheduler.add_noise(actions, noise, timestep)
 
         pred = self.model(
             x=noisy_action,
             timestep=timestep,
-            global_cond=cond,
+            context=cond,
         )
 
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':
             target = noise
         elif pred_type == 'sample':
-            target = action
+            target = actions
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")      
 
         loss = F.mse_loss(pred, target, reduction='none')
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
-        return loss
+        loss_dict = {"loss": loss}
+
+        return loss, loss_dict
 
 
     @torch.no_grad()
@@ -71,14 +73,14 @@ class Diffusion(nn.Module):
             output = self.model(
                 x = traj[-1],
                 timestep = t,
-                global_cond = cond,
+                context = cond,
             )
             traj.append(self.noise_scheduler.step(output, t, traj[-1]).prev_sample)
         
         return traj
     
 
-    def predict_action(self, action_template, cond, denoise_timesteps=None):
+    def predict_action(self, cond, action_template, denoise_timesteps=None):
         '''
         sample: zero_data for action seq, in order to get the shape and device
         '''

@@ -143,7 +143,7 @@ class ConditionalUnet1D(nn.Module):
     def __init__(
             self, 
             input_dim,
-            global_cond_dim,
+            context_dim,
             diffusion_step_embed_dim=256,
             down_dims=[256,512,1024],
             kernel_size=5,
@@ -167,7 +167,7 @@ class ConditionalUnet1D(nn.Module):
             nn.Mish(),
             nn.Linear(dsed * 4, dsed),
         )
-        cond_dim = dsed + global_cond_dim
+        cond_dim = dsed + context_dim
         
         all_dims = [input_dim] + list(down_dims)
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
@@ -228,7 +228,7 @@ class ConditionalUnet1D(nn.Module):
         return get_default_optim_group(self, weight_decay)
 
 
-    def forward(self, x, timestep, global_cond):
+    def forward(self, x, timestep, context):
 
         x = einops.rearrange(x, 'b h t -> b t h')
 
@@ -240,16 +240,16 @@ class ConditionalUnet1D(nn.Module):
         t_embed = self.diffusion_step_encoder(timestep)
         
         if 'cross_attention' in self.condition_type:
-            # 判断 global_cond是否满足shape: (batch, n_obs, cond_dim)
-            assert len(global_cond.shape) == 3, f"Expected global_cond shape (batch, n_obs, cond_dim) when use cross-attn, but got {global_cond.shape}"
-            t_embed = t_embed.unsqueeze(1).expand(-1, global_cond.shape[1], -1)
-        global_cond = torch.cat([t_embed, global_cond], axis=-1)
+            # 判断 context是否满足shape: (batch, n_obs, cond_dim)
+            assert len(context.shape) == 3, f"Expected context shape (batch, n_obs, cond_dim) when use cross-attn, but got {context.shape}"
+            t_embed = t_embed.unsqueeze(1).expand(-1, context.shape[1], -1)
+        cond = torch.cat([t_embed, context], axis=-1)
         
         h = []
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
             if self.use_down_condition:
-                x = resnet(x, global_cond)
-                x = resnet2(x, global_cond)
+                x = resnet(x, cond)
+                x = resnet2(x, cond)
             else:
                 x = resnet(x)
                 x = resnet2(x)
@@ -258,15 +258,15 @@ class ConditionalUnet1D(nn.Module):
 
         for mid_module in self.mid_modules:
             if self.use_mid_condition:
-                x = mid_module(x, global_cond)
+                x = mid_module(x, cond)
             else:
                 x = mid_module(x)
 
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
             x = torch.cat((x, h.pop()), dim=1)
             if self.use_up_condition:
-                x = resnet(x, global_cond)
-                x = resnet2(x, global_cond)
+                x = resnet(x, cond)
+                x = resnet2(x, cond)
             else:
                 x = resnet(x)
                 x = resnet2(x)

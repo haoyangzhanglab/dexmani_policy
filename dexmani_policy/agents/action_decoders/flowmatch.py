@@ -106,7 +106,7 @@ class FlowMatch_With_Consistency(nn.Module):
                 x = xt_next,
                 timestep = t_next.squeeze(),
                 target_t = target_t_next,
-                global_cond = cond, 
+                context = cond, 
             )
         
         pred_x1_ct = xt_next + v_avg_to_next_target * (1.0 - t_next)
@@ -122,7 +122,10 @@ class FlowMatch_With_Consistency(nn.Module):
 
 
 
-    def compute_loss(self, cond, actions, ema_model):
+    def compute_loss(self, cond, actions, **kwargs):
+        ema_model = kwargs.get("ema_model", None)
+        assert ema_model is not None, "EMA model is required for computing consistency loss in FlowMatch_With_Consistency"
+
         B = actions.shape[0]
         flow_batchsize = int(B * self.flow_batch_ratio)
 
@@ -134,7 +137,7 @@ class FlowMatch_With_Consistency(nn.Module):
             x = flow_targets["xt"],
             timestep = flow_targets["t"].squeeze(),
             target_t = flow_targets["dt"].squeeze(),
-            global_cond = cond[:flow_batchsize],
+            context = cond[:flow_batchsize],
         )
 
         vt_flow_target = flow_targets["vt_target"]
@@ -149,7 +152,7 @@ class FlowMatch_With_Consistency(nn.Module):
             x = consistency_targets["xt"],
             timestep = consistency_targets["t"].squeeze(),
             target_t = consistency_targets["dt"].squeeze(),
-            global_cond = cond[flow_batchsize:],
+            context = cond[flow_batchsize:],
         )
 
         vt_consistency_target = consistency_targets["vt_target"]
@@ -200,7 +203,7 @@ class FlowMatch_With_Consistency(nn.Module):
                 x = x,
                 timestep = ti,
                 target_t = target_ti,
-                global_cond = cond,
+                context = cond,
             )
             x = x + vti_pred * dt
             traj.append(x.clone())
@@ -208,7 +211,7 @@ class FlowMatch_With_Consistency(nn.Module):
         return traj
     
 
-    def predict_action(self, action_template, cond, denoise_timesteps=None):
+    def predict_action(self, cond, action_template, denoise_timesteps=None):
         '''
         sample: zero_data for action seq, in order to get the shape and device
         '''       
