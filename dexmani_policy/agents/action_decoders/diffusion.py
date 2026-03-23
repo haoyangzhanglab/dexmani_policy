@@ -8,17 +8,15 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 class Diffusion(nn.Module):
 
     def __init__(
-            self, 
-            model,
-            device,
-            num_training_steps = 100,
-            num_inference_steps = 10,
-            prediction_type = "sample",
+        self, 
+        model,
+        num_training_steps = 100,
+        num_inference_steps = 10,
+        prediction_type = "sample",
     ):
         super().__init__()
 
         self.model = model
-        self.device = device
 
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_training_steps,

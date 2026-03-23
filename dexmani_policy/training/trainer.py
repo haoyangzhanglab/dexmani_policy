@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from typing import Optional, Dict, Any, Callable
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
 from dexmani_policy.training.common.logging import to_log_scalars
 from dexmani_policy.training.common.workspace import TrainWorkspace
@@ -9,49 +10,30 @@ from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply
 
 
-# 默认的 loss 参数构造函数，不向 compute_loss 额外传入参数。
-def default_loss_kwargs(
-    stage: str,
-    batch: Dict[str, Any],
-    policy,
-    model,
-    ema_model,
-) -> Dict[str, Any]:
-    return {}
-
-
-# 为一致性损失提供 EMA teacher 参数。
-def consistency_loss_kwargs(
-    stage: str,
-    batch: Dict[str, Any],
-    policy,
-    model,
-    ema_model,
-) -> Dict[str, Any]:
-    if ema_model is None:
-        raise ValueError("consistency_loss_kwargs requires ema_model")
-    return {"ema_teacher": ema_model}
-
-
+@dataclass
+class TrainLoopConfig:
+    num_epochs: int
+    log_interval_steps: int
+    val_interval_epochs: int
+    eval_interval_epochs: int
+    sample_interval_epochs: int
+    
+    
 class Trainer:
     def __init__(
         self,
         device,
-        model: nn.Module,
+        model,
+        ema_model,
+        ema_updater,
         optimizer,
         scheduler,
         train_loader,
         val_loader,
+        env_runner,
         workspace: TrainWorkspace,
-        total_epochs: int,
-        val_every: int,
-        eval_every: int,
-        sample_every: int,
-        log_every_steps: int = 20,
-        ema_model: Optional[nn.Module] = None,
-        ema_updater=None,
-        loss_kwargs_fn: Optional[Callable[..., Dict[str, Any]]] = None,
-        env_runner=None,
+        train_loop_cfg: TrainLoopConfig,    # 训练流程控制参数
+        use_ema_teacher_for_consistency: bool,
     ):
         self.device = device
 
@@ -67,39 +49,41 @@ class Trainer:
         self.env_runner = env_runner
         self.workspace = workspace
 
-        self.total_epochs = int(total_epochs)
-        self.val_every = int(val_every)
-        self.eval_every = int(eval_every)
-        self.sample_every = int(sample_every)
-        self.log_every_steps = int(log_every_steps)
-
-        self.loss_kwargs_fn = loss_kwargs_fn or default_loss_kwargs
+        self.num_epochs = train_loop_cfg.num_epochs
+        self.log_interval_steps = train_loop_cfg.log_interval_steps
+        self.val_interval_epochs = train_loop_cfg.val_interval_epochs
+        self.eval_interval_epochs = train_loop_cfg.eval_interval_epochs
+        self.sample_interval_epochs = train_loop_cfg.sample_interval_epochs
+        self.enable_env_eval = (self.env_runner is not None) and (self.eval_interval_epochs > 0)
+        self.checkpoint_interval_epochs = self.eval_interval_epochs if self.enable_env_eval else self.val_interval_epochs
 
         self.use_ema = self.ema_model is not None
-        self.online_eval = (self.env_runner is not None) and (self.eval_every > 0)
-        self.save_every = self.eval_every if self.online_eval else self.val_every
+        self.use_ema_teacher_for_consistency = use_ema_teacher_for_consistency and self.use_ema
+        
 
+    def plan_epoch_end_tasks(self, epoch: int) -> Dict[str, bool]:
+        epoch_idx = epoch + 1
+        is_last_epoch = epoch_idx == self.num_epochs
 
-    def _plan_epoch_end_operations(self, epoch: int) -> Dict[str, bool]:
-        is_last_epoch = (epoch == self.total_epochs - 1)
+        should_sample = is_last_epoch or (epoch_idx % self.sample_interval_epochs == 0)
+        should_validate = is_last_epoch or (epoch_idx % self.val_interval_epochs == 0)
+        should_evaluate = self.enable_env_eval and (
+            is_last_epoch or (epoch_idx % self.eval_interval_epochs == 0)
+        )
+        should_save = is_last_epoch or (epoch_idx % self.checkpoint_interval_epochs == 0)
+
         return {
-            "sample": ((epoch + 1) % self.sample_every == 0) or is_last_epoch,
-            "validate": ((epoch + 1) % self.val_every == 0) or is_last_epoch,
-            "evaluate": self.online_eval and (((epoch + 1) % self.eval_every == 0) or is_last_epoch),
-            "save": ((epoch + 1) % self.save_every == 0) or is_last_epoch,
+            "sample": should_sample,
+            "validate": should_validate,
+            "evaluate": should_evaluate,
+            "save_checkpoint": should_save,
         }
 
 
-    def _train_one_step(self, batch: Dict[str, Any]):
+    def train_one_step(self, batch: Dict[str, Any]):
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
 
-        loss_kwargs = self.loss_kwargs_fn(
-            stage="train",
-            batch=batch,
-            policy=self.model,
-            model=self.model,
-            ema_model=self.ema_model,
-        )
+        loss_kwargs = {'ema_model': self.ema_model.backbone} if self.use_ema_teacher_for_consistency else {}
         loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         loss.backward()
@@ -114,53 +98,46 @@ class Trainer:
 
 
     @torch.no_grad()
-    def _validate(self, policy) -> Optional[float]:
-        loss_sum = torch.zeros((), device=self.device)
+    def validate(self, agent) -> Optional[float]:
         count = 0
+        loss_sum = torch.zeros((), device=self.device)
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-            loss_kwargs = self.loss_kwargs_fn(
-                stage="val",
-                batch=batch,
-                policy=policy,
-                model=self.model,
-                ema_model=self.ema_model,
-            )
-            loss, _ = policy.compute_loss(batch, **loss_kwargs)
+            loss_kwargs = {'ema_model': self.ema_model.backbone} if self.use_ema_teacher_for_consistency else {}
+            loss, _ = agent.compute_loss(batch, **loss_kwargs)
 
             loss_sum += loss.detach()
             count += 1
 
         if count == 0:
             return None
-
         return (loss_sum / count).item()
 
 
     @torch.no_grad()
-    def _sample_train_batch_mse(self, policy, batch: Dict[str, Any]) -> float:
+    def compute_action_mse_for_one_batch(self, agent, batch: Dict[str, Any]) -> float:
         obs = batch["obs"]
         gt_action = batch["action"]
-        pred_action = policy.predict_action(obs)
+        pred_action = agent.predict_action(obs)["pred_action"]
         return nn.functional.mse_loss(pred_action, gt_action).item()
 
 
     @torch.no_grad()
-    def _evaluate(self, policy) -> Dict[str, Any]:
-        result = self.env_runner.run(policy)
+    def evaluate(self, agent) -> Dict[str, Any]:
+        result = self.env_runner.run(agent)
         metrics = {
-            "eval/success_rate": result["success_rate"],
-            "eval/avg_done_steps": result["avg_done_steps"],
+            "eval/success_rate": result["success_rate"] * 100,
+            "eval/avg_steps": result["avg_steps"],
         }
-        for item in result.get("video", []):
+        for item in result.get("videos", []):
             for key, value in item.items():
                 metrics[f"eval/rollout_{key}_video"] = value
         return metrics
 
 
     # 执行完整训练流程，并在需要时从已有 checkpoint 断点续训。
-    def train(self, resume_tag: Optional[str] = "latest"):
+    def train(self, resume_tag: str = "latest"):
         global_step, start_epoch = self.workspace.load_for_resume(
             model=self.model,
             ema_model=self.ema_model,
@@ -178,7 +155,7 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         epoch_pbar = tqdm(
-            range(start_epoch, self.total_epochs),
+            range(start_epoch, self.num_epochs),
             desc="Epoch",
             position=0,
             mininterval=1.0,
@@ -186,45 +163,46 @@ class Trainer:
 
         for epoch in epoch_pbar:
             self.model.train()
-            last_batch = None
 
+            sample_batch = None
             for batch in self.train_loader:
-                batch, log_dict = self._train_one_step(batch)
+                sample_batch, log_dict = self.train_one_step(batch)
 
-                if (global_step % self.log_every_steps) == 0:
+                if (global_step % self.log_interval_steps) == 0:
                     step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
                     for key, value in to_log_scalars(log_dict).items():
                         step_metrics[f"train/{key}"] = value
 
-                    self.workspace.log(step_metrics, step=global_step)
                     epoch_pbar.set_postfix(
                         global_step=global_step,
                         loss=step_metrics.get("train/loss", None),
                     )
+                    self.workspace.log(step_metrics, step=global_step)
 
                 global_step += 1
-                last_batch = batch
-
+                
             self.model.eval()
-            policy = self.ema_model if self.use_ema else self.model
-            epoch_end_ops = self._plan_epoch_end_operations(epoch)
+            
             epoch_metrics = {}
+            epoch_end_tasks = self.plan_epoch_end_tasks(epoch)
+            
+            if epoch_end_tasks["sample"] and sample_batch is not None:
+                epoch_metrics["train/action_mse_error"] = self.compute_action_mse_for_one_batch(self.model, sample_batch)
 
-            if epoch_end_ops["sample"] and last_batch is not None:
-                epoch_metrics["train/action_mse_error"] = self._sample_train_batch_mse(policy, last_batch)
-
-            if epoch_end_ops["validate"]:
-                val_loss = self._validate(policy)
+            if epoch_end_tasks["validate"]:
+                val_loss = self.validate(self.model)
                 if val_loss is not None:
                     epoch_metrics["val/loss"] = val_loss
 
-            if epoch_end_ops["evaluate"]:
-                epoch_metrics.update(self._evaluate(policy))
+            # 使用ema_model与env做交互
+            if epoch_end_tasks["evaluate"]:
+                eval_model = self.ema_model if self.use_ema else self.model
+                epoch_metrics.update(self.evaluate(eval_model))
 
             self.workspace.log(epoch_metrics, step=global_step)
 
-            if epoch_end_ops["save"]:
-                if self.online_eval:
+            if epoch_end_tasks["save_checkpoint"]:
+                if self.enable_env_eval:
                     test_mean_score = epoch_metrics["eval/success_rate"]
                 elif "val/loss" in epoch_metrics:
                     test_mean_score = -epoch_metrics["val/loss"]

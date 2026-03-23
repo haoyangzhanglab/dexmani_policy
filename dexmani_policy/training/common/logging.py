@@ -83,30 +83,29 @@ class JsonlLogger(Logger):
 class WandbLogger(Logger):
     def __init__(
         self,
-        wandb_mode: str,
         output_dir: Path,
         project: str,
-        run_name: str,
-        cfg: Any,
-        run_group: Optional[str] = None,
-        run_id: Optional[str] = None,
-        resume: str = "auto",
-        video_fps: int = 30,
+        name: str,
+        group: str,
+        id: str,
+        resume: str,
+        mode: str,
+        video_fps: int,
     ):
-        self.video_fps = int(video_fps)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.run = wandb.init(
             dir=str(self.output_dir),
             project=project,
-            name=run_name,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            group=run_group,
-            id=run_id,
+            name=name,
+            group=group,
+            id=id,
             resume=resume,
-            mode=wandb_mode,
+            mode=mode,
         )
+        self.video_fps = int(video_fps)
+
         atexit.register(self.close)
 
 

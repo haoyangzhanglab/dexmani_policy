@@ -26,10 +26,10 @@ class BaseAgent(ModuleAttrMixin):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
 
-    def configure_optimizers(self, lr: float, weight_decay: float,
+    def configure_optimizer(self, lr: float, weight_decay: float,
                              obs_lr: float = None, obs_weight_decay: float = None,
                              betas: Tuple[float, float]=(0.9,0.95)):
-        action_optim_groups = self.action_model.get_optim_groups(weight_decay)
+        action_optim_groups = self.backbone.get_optim_groups(weight_decay)
         for group in action_optim_groups:
             group['lr'] = lr
 
@@ -49,33 +49,7 @@ class BaseAgent(ModuleAttrMixin):
         return optimizer
 
 
-    def preprocess_obs(self, obs_dict:Dict, **kwargs) -> Dict:
-        nobs = self.normalizer.normalize(obs_dict)
-        this_obs = dict_apply(nobs, lambda x: x[:, :self.n_obs_steps, ...] if torch.is_tensor(x) else x)
-
-        def preprocess_point_cloud(num_points:int=1024, use_coord_only:bool=True):
-            if use_coord_only:
-                this_obs['point_cloud'] = this_obs['point_cloud'][..., :3]
-
-            current_num_points = this_obs['point_cloud'].shape[2]
-            if current_num_points < num_points:
-                raise ValueError(f"Point cloud shape wrong, required {num_points} points, got {current_num_points} points")
-            elif current_num_points == num_points:
-                pass
-            else:
-                downsample_point_cloud, _ = fps(this_obs['point_cloud'].flatten(0, 1), num_points=num_points)
-                B, T = this_obs['point_cloud'].shape[:2]
-                this_obs['point_cloud'] = downsample_point_cloud.reshape(B, T, num_points, -1)
-            return this_obs
-        
-        if 'point_cloud' in this_obs:
-            this_obs = preprocess_point_cloud(num_points=kwargs.get('num_points', 1024), use_coord_only=kwargs.get('use_coord_only', True))
-        
-        return this_obs
-
-
-    def encode_obs_to_cond(self, obs_dict:Dict) -> torch.Tensor:
-        # 在这里调用preprocess_obs, 并使用self.obs_encoder对obs进行编码，得到cond
+    def encode_obs_as_condition(self, obs_dict:Dict) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -87,14 +61,44 @@ class BaseAgent(ModuleAttrMixin):
 
 
     @torch.no_grad()
-    def predict_action(self, obs_dict:Dict[str, torch.Tensor]) -> torch.Tensor:
+    def predict_action(self, obs_dict:Dict[str, torch.Tensor], denoise_timesteps=None) -> torch.Tensor:
         cond = self.encode_obs_to_cond(obs_dict)
         action_template = torch.zeros((cond.shape[0], self.horizon, self.action_dim), device=cond.device, dtype=cond.dtype)
-        pred_naction = self.action_expert.predict_action(cond, action_template)
+        pred_naction = self.action_expert.predict_action(cond, action_template, denoise_timesteps)
         pred_action = self.normalizer['action'].unnormalize(pred_naction) 
 
         start = self.n_obs_steps - 1
         end = start + self.n_action_steps
         action = pred_action[:,start:end]
 
-        return action    
+        return {
+            "pred_action": pred_action,
+            "control_action": action,
+        }
+
+
+    #################################################################################
+    #                   处理输入数据，在encode_obs_as_condition中调用
+    #################################################################################
+    def normalize_and_slice_obs(self, obs_dict:Dict) -> Dict:
+        nobs = self.normalizer.normalize(obs_dict)
+        this_obs = dict_apply(nobs, lambda x: x[:, :self.n_obs_steps, ...] if torch.is_tensor(x) else x)
+        return this_obs
+
+
+    @staticmethod
+    def preprocess_point_cloud(this_obs:Dict[str, torch.Tensor], num_points:int=1024, use_coord_only:bool=True):
+        if use_coord_only:
+            this_obs['point_cloud'] = this_obs['point_cloud'][..., :3]
+
+        current_num_points = this_obs['point_cloud'].shape[2]
+        if current_num_points < num_points:
+            raise ValueError(f"Point cloud shape wrong, required {num_points} points, got {current_num_points} points")
+        elif current_num_points == num_points:
+            pass
+        else:
+            downsample_point_cloud, _ = fps(this_obs['point_cloud'].flatten(0, 1), num_points=num_points)
+            B, T = this_obs['point_cloud'].shape[:2]
+            this_obs['point_cloud'] = downsample_point_cloud.reshape(B, T, num_points, -1)
+
+        return this_obs

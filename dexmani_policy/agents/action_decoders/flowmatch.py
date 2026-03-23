@@ -7,22 +7,20 @@ from dexmani_policy.agents.common.sample_util import SampleStrategy
 
 class FlowMatch_With_Consistency(nn.Module):
     def __init__(
-            self,
-            model,
-            device,
-            denoise_timesteps = 10,
-            flow_batch_ratio = 0.75,
-            consistency_batch_ratio = 0.25,
-            t_sample_mode_for_flow = "beta",
-            t_sample_mode_for_consistency = "discrete",
-            dt_sample_mode_for_consistency = "uniform",
-            target_t_sample_mode = "relative",
+        self,
+        model,
+        denoise_timesteps = 10,
+        flow_batch_ratio = 0.75,
+        consistency_batch_ratio = 0.25,
+        t_sample_mode_for_flow = "beta",
+        t_sample_mode_for_consistency = "discrete",
+        dt_sample_mode_for_consistency = "uniform",
+        target_t_sample_mode = "relative",
 
     ):
         super().__init__()
 
         self.model = model
-        self.device = device
         self.denoise_timesteps = denoise_timesteps
         self.flow_batch_ratio = flow_batch_ratio
         self.consistency_batch_ratio = consistency_batch_ratio

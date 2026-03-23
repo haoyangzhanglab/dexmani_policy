@@ -16,7 +16,6 @@ warnings.filterwarnings("ignore")
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
-
 def build_train_components(cfg):
     dataset = hydra.utils.instantiate(cfg.dataset)
     normalizer = dataset.get_normalizer()
@@ -27,7 +26,7 @@ def build_train_components(cfg):
         **cfg.training.val_dataloader,
     )
 
-    model = hydra.utils.instantiate(cfg.policy)
+    model = hydra.utils.instantiate(cfg.agent)
     model.set_normalizer(normalizer)
 
     ema_model = None

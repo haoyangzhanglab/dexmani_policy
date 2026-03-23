@@ -4,6 +4,7 @@ import signal
 import atexit
 from pathlib import Path
 from omegaconf import OmegaConf
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from dexmani_policy.training.common.logging import (
@@ -17,7 +18,6 @@ from dexmani_policy.training.common.checkpoint_io import (
     TopKCheckpointTracker,
 )
 
-
 def load_cfg_from_experiment(exp_dir: Path):
     exp_dir = exp_dir.resolve()
     cfg_path = exp_dir / "config.yaml"
@@ -26,49 +26,62 @@ def load_cfg_from_experiment(exp_dir: Path):
     return cfg, cfg_path
 
 
+@dataclass
+class CheckpointConfig:
+    monitor_key: str
+    mode: str
+    topk: int
+
+
+@dataclass
+class WandbConfig:
+    project: str
+    group: str
+    name: str
+    id: str
+    resume: str
+    mode: str
+    video_fps: int
+
 
 class TrainWorkspace:
-    def __init__(self, cfg, output_dir: Path):
+    def __init__(
+        self,
+        output_dir: str,
+        wandb_cfg: WandbConfig,
+        checkpoint_cfg: CheckpointConfig
+    ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
         self.checkpoint_dir = self.output_dir / "checkpoints"
+
         self.checkpoint_store = CheckpointStore(self.checkpoint_dir)
 
-        checkpoint_cfg = cfg.logging.checkpoint
         self.topk_tracker = TopKCheckpointTracker(
             checkpoint_dir=self.checkpoint_dir,
             monitor_key=checkpoint_cfg.monitor_key,
             mode=checkpoint_cfg.mode,
-            k=checkpoint_cfg.top_k,
+            k=checkpoint_cfg.topk,
         )
 
-        self.logger = self._build_logger(cfg)
-        self._save_config(cfg)
+        json_logger = JsonlLogger(output_dir=self.output_dir)
+        wandb_logger = WandbLogger(
+            output_dir=self.output_dir,
+            project=wandb_cfg.project,
+            name=wandb_cfg.name,
+            group=wandb_cfg.group,
+            id=wandb_cfg.id,
+            resume=wandb_cfg.resume,
+            mode=wandb_cfg.mode,
+            video_fps=wandb_cfg.video_fps
+        )
+        self.logger = MultiLogger([json_logger, wandb_logger])
+
         self._install_shutdown_hooks()
 
 
-    def _build_logger(self, cfg) -> MultiLogger:
-        wandb_cfg = cfg.logging.wandb
-        loggers = [
-            JsonlLogger(output_dir=self.output_dir),
-            WandbLogger(
-                wandb_mode=wandb_cfg.mode,
-                output_dir=self.output_dir,
-                project=wandb_cfg.project,
-                run_name=wandb_cfg.name,
-                cfg=cfg,
-                run_group=wandb_cfg.group,
-                run_id=wandb_cfg.run_id,
-                resume=wandb_cfg.get("resume", "auto"),
-                video_fps=wandb_cfg.video_fps,
-            ),
-        ]
-        return MultiLogger(loggers)
-
-
-    def _save_config(self, cfg):
-        OmegaConf.save(cfg, self.output_dir / "config.yaml", resolve=True)
+    def save_hydra_config(self, hydra_config):
+        OmegaConf.save(hydra_config, self.output_dir / "config.yaml", resolve=True)
 
 
     def _resolve_checkpoint_path(self, tag_or_path: str) -> Path:

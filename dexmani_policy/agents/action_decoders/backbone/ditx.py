@@ -238,7 +238,7 @@ class DiTX_FlowMatch(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        n_obs_step: int,
+        n_obs_steps: int,
         obs_seq_len: int,
         obs_feat_dim: int,
         timestep_embed_dim: int = 128,
@@ -264,7 +264,7 @@ class DiTX_FlowMatch(nn.Module):
         self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
 
         self.context_embedder = nn.Linear(obs_feat_dim, hidden_dim)
-        self.context_pos_embed = nn.Parameter(torch.zeros(1, obs_seq_len * n_obs_step, hidden_dim))
+        self.context_pos_embed = nn.Parameter(torch.zeros(1, obs_seq_len * n_obs_steps, hidden_dim))
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
         
@@ -398,7 +398,7 @@ class DiTX_Diffusion(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        n_obs_step: int,
+        n_obs_steps: int,
         obs_seq_len: int,
         obs_feat_dim: int,
         timestep_embed_dim: int = 128,
@@ -423,7 +423,7 @@ class DiTX_Diffusion(nn.Module):
         self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
 
         self.context_embedder = nn.Linear(obs_feat_dim, hidden_dim)
-        self.context_pos_embed = nn.Parameter(torch.zeros(1, obs_seq_len * n_obs_step, hidden_dim))
+        self.context_pos_embed = nn.Parameter(torch.zeros(1, obs_seq_len * n_obs_steps, hidden_dim))
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
         

@@ -111,11 +111,10 @@ class DP3Encoder(nn.Module):
         pc_out_dim: int = 256,
         point_wise: bool = False,
         state_dim: int = 19,
-        modality_keys: List[str] = ["point_cloud", "joint_state"], 
     ):
         super().__init__()
 
-        self.modality_keys = modality_keys
+        self.modality_keys = ["point_cloud", "joint_state"]
 
         if type == "dp3":
             self.pointnet = PointNet(
@@ -135,7 +134,7 @@ class DP3Encoder(nn.Module):
         self.state_mlp = create_mlp(state_dim, [64, 64])
 
 
-    def forward(self, observations: Dict):
+    def forward(self, observations: Dict) -> torch.Tensor:
         for key in self.modality_keys:
             assert key in observations, f"Required modality key '{key}' missed"
         point_cloud, state = observations["point_cloud"], observations["joint_state"]
