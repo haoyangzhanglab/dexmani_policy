@@ -83,7 +83,7 @@ class Trainer:
     def train_one_step(self, batch: Dict[str, Any]):
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
 
-        loss_kwargs = {'ema_model': self.ema_model.backbone} if self.use_ema_teacher_for_consistency else {}
+        loss_kwargs = {'ema_model': self.ema_model} if self.use_ema_teacher_for_consistency else {}
         loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         loss.backward()
@@ -104,7 +104,7 @@ class Trainer:
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-            loss_kwargs = {'ema_model': self.ema_model.backbone} if self.use_ema_teacher_for_consistency else {}
+            loss_kwargs = {'ema_model': self.ema_model} if self.use_ema_teacher_for_consistency else {}
             loss, _ = agent.compute_loss(batch, **loss_kwargs)
 
             loss_sum += loss.detach()

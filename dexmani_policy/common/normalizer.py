@@ -23,7 +23,7 @@ class DictOfTensorMixin(nn.Module):
     def device(self):
         return next(iter(self.parameters())).device
 
-    def _load_from_state_dict(self, state_dict, prefix):
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         def dfs_add(dest, keys, value: torch.Tensor):
             if len(keys) == 1:
                 dest[keys[0]] = value
