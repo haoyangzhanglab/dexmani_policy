@@ -356,7 +356,7 @@ class DiTX_FlowMatch(nn.Module):
             self,
             weight_decay=weight_decay,
             no_decay_names=["input_pos_embed", "context_pos_embed"],
-            extra_blacklist=(RmsNorm),
+            extra_blacklist=(RmsNorm,),
         )
 
 
@@ -499,7 +499,7 @@ class DiTX_Diffusion(nn.Module):
             self,
             weight_decay=weight_decay,
             no_decay_names=["input_pos_embed", "context_pos_embed"],
-            extra_blacklist=(RmsNorm),
+            extra_blacklist=(RmsNorm,),
         )
 
 

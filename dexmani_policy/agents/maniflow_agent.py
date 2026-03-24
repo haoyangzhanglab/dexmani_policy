@@ -53,7 +53,7 @@ class ManiFlowAgent(BaseAgent):
         )
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
-        self.obs_cond_dim = DP3Encoder.out_shape
+        self.obs_cond_dim = self.obs_encoder.out_shape
 
         self.backbone = DiTX_FlowMatch(
             horizon=horizon,
@@ -86,7 +86,7 @@ class ManiFlowAgent(BaseAgent):
 
 
     def encode_obs_as_condition(self, obs_dict):
-        B = obs_dict["point_cloud"].shape(0)
+        B = obs_dict["point_cloud"].shape[0]
 
         this_obs_dict = self.normalize_and_slice_obs(obs_dict)
         this_obs_dict = self.preprocess_point_cloud(this_obs_dict, self.num_points, self.use_coord_only)

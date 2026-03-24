@@ -44,7 +44,13 @@ class DP3Agent(BaseAgent):
         )
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
-        self.obs_cond_dim = DP3Encoder.out_shape
+
+        if condition_type == "film":
+            self.obs_cond_dim = self.obs_encoder.out_shape * n_obs_steps
+        elif condition_type == "cross_attention_film":
+            self.obs_cond_dim = self.obs_encoder.out_shape
+        else:
+            raise ValueError(f"{condition_type} is not implemented")  
 
         self.backbone = ConditionalUnet1D(
             input_dim=action_dim,
@@ -68,14 +74,19 @@ class DP3Agent(BaseAgent):
 
 
     def encode_obs_as_condition(self, obs_dict):
-        B = obs_dict["point_cloud"].shape(0)
+        B = obs_dict["point_cloud"].shape[0]
 
         this_obs_dict = self.normalize_and_slice_obs(obs_dict)
         this_obs_dict = self.preprocess_point_cloud(this_obs_dict, self.num_points, self.use_coord_only)
         this_obs_dict = dict_apply(this_obs_dict, lambda x: x.flatten(0, 1) if torch.is_tensor(x) else x)
         
         feat = self.obs_encoder(this_obs_dict)
-        feat = feat.reshape(B, -1)
+        if self.backbone.condition_type == "film":
+            feat = feat.reshape(B, -1)
+        elif self.backbone.condition_type == "cross_attention_film":
+            feat = feat.reshape(B, self.n_obs_steps, -1)
+        else:
+            raise ValueError(f"{self.backbone.condition_type} is not implemented") 
 
         return feat
 

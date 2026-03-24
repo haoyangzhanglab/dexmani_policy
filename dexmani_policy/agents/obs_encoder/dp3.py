@@ -30,6 +30,7 @@ class PointNet(nn.Module):
         super().__init__()
 
         self.point_wise = point_wise
+        self.out_channels = out_channels
         if in_channels > 3:
             block_channels = [64, 128, 256, 512]
         else:

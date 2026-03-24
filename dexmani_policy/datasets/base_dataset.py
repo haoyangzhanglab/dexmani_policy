@@ -42,7 +42,7 @@ class BaseDataset(torch.utils.data.Dataset):
         pad_after=0,
         val_ratio=0.0,
         max_train_episodes=None,
-        sensor_modalities=['point_cloud', 'state'],
+        sensor_modalities=['point_cloud', 'joint_state'],
     ):
         super().__init__()
 

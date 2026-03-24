@@ -54,7 +54,7 @@ class BaseAgent(ModuleAttrMixin):
 
 
     def compute_loss(self, batch, **kwargs):
-        cond = self.encode_obs_to_cond(batch['obs'])
+        cond = self.encode_obs_as_condition(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
         loss, loss_dict = self.action_expert.compute_loss(cond, nactions, **kwargs)
         return loss, loss_dict
@@ -62,7 +62,7 @@ class BaseAgent(ModuleAttrMixin):
 
     @torch.no_grad()
     def predict_action(self, obs_dict:Dict[str, torch.Tensor], denoise_timesteps=None) -> torch.Tensor:
-        cond = self.encode_obs_to_cond(obs_dict)
+        cond = self.encode_obs_as_condition(obs_dict)
         action_template = torch.zeros((cond.shape[0], self.horizon, self.action_dim), device=cond.device, dtype=cond.dtype)
         pred_naction = self.action_expert.predict_action(cond, action_template, denoise_timesteps)
         pred_action = self.normalizer['action'].unnormalize(pred_naction) 

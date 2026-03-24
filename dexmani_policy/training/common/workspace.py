@@ -18,13 +18,6 @@ from dexmani_policy.training.common.checkpoint_io import (
     TopKCheckpointTracker,
 )
 
-def load_cfg_from_experiment(exp_dir: Path):
-    exp_dir = exp_dir.resolve()
-    cfg_path = exp_dir / "config.yaml"
-    assert cfg_path.is_file(), f"Can't find config.yaml: {cfg_path}"
-    cfg = OmegaConf.load(cfg_path)
-    return cfg, cfg_path
-
 
 @dataclass
 class CheckpointConfig:

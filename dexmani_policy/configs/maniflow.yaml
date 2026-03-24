@@ -1,0 +1,127 @@
+# Robot imitation learning config for ManiFlow policy training.
+# Update zarr_path / action_dim / state_dim to match your robot dataset.
+
+zarr_path: /path/to/robot_il_dataset.zarr
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_dim: 8
+state_dim: 14
+pc_dim: 3
+pc_out_dim: 128
+num_points: 1024
+
+dataloader:
+  batch_size: 64
+  shuffle: true
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+val_dataloader:
+  batch_size: 64
+  shuffle: false
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+
+dataset:
+  _target_: dexmani_policy.datasets.base_dataset.BaseDataset
+  zarr_path: ${zarr_path}
+  seed: ${training.seed}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  val_ratio: 0.05
+  max_train_episodes: null
+  sensor_modalities: [point_cloud, joint_state]
+
+agent:
+  _target_: dexmani_policy.agents.maniflow_agent.ManiFlowAgent
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+  encoder_type: idp3
+  pc_dim: ${pc_dim}
+  pc_out_dim: ${pc_out_dim}
+  state_dim: ${state_dim}
+  num_points: ${num_points}
+  timestep_embed_dim: 128
+  target_t_embed_dim: 128
+  n_layers: 12
+  hidden_dim: 768
+  n_head: 8
+  mlp_ratio: 4.0
+  p_drop_attn: 0.1
+  qkv_bias: true
+  qk_norm: true
+  pre_norm_modality: false
+  denoise_timesteps: 10
+  flow_batch_ratio: 0.75
+  consistency_batch_ratio: 0.25
+  t_sample_mode_for_flow: beta
+  t_sample_mode_for_consistency: discrete
+  dt_sample_mode_for_consistency: uniform
+  target_t_sample_mode: relative
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+  betas: [0.9, 0.95]
+
+ema:
+  _target_: dexmani_policy.training.common.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.6666666667
+  min_value: 0.0
+  max_value: 0.9999
+
+workspace:
+  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+  wandb_cfg:
+    _target_: dexmani_policy.training.common.workspace.WandbConfig
+    project: dexmani_policy_il
+    group: robot_imitation
+    name: maniflow_il
+    id: null
+    resume: allow
+    mode: disabled
+    video_fps: 20
+  checkpoint_cfg:
+    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
+    monitor_key: test_mean_score
+    mode: max
+    topk: 3
+
+training:
+  seed: 42
+  device: cuda:0
+  use_ema: true
+  use_ema_teacher_for_consistency: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  loop:
+    num_epochs: 200
+    log_interval_steps: 10
+    val_interval_epochs: 10
+    eval_interval_epochs: 0
+    sample_interval_epochs: 10
+
+env_runner: null
+
+eval:
+  seed: ${training.seed}
+  sim:
+    ckpt_tag_or_path: best
+    eval_episodes: 100
+    denoise_timesteps_list: [10]
+    use_ema_for_eval: true
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_maniflow
