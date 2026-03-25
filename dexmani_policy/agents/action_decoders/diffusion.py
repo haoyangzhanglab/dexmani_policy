@@ -6,7 +6,6 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 
 class Diffusion(nn.Module):
-
     def __init__(
         self, 
         model,
@@ -17,7 +16,6 @@ class Diffusion(nn.Module):
         super().__init__()
 
         self.model = model
-
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_training_steps,
             beta_start=0.0001,

@@ -86,15 +86,14 @@ class ManiFlowAgent(BaseAgent):
 
 
     def compute_loss(self, batch, **kwargs):
+        ema_model = kwargs.get('ema_model')
+        if ema_model is None:
+            raise ValueError("maniflow agent need ema teacher for computing consistency loss")
+        
         cond = self.encode_obs_as_condition(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
-
-        ema_model = kwargs.get('ema_model', None)
-        loss_kwargs = {}
-        if ema_model is not None:
-            loss_kwargs['ema_model'] = ema_model.backbone
-
-        loss, loss_dict = self.action_expert.compute_loss(cond, nactions, **loss_kwargs)
+        loss, loss_dict = self.action_expert.compute_loss(cond, nactions, ema_model=ema_model.backbone)
+        
         return loss, loss_dict
 
 

@@ -80,6 +80,7 @@ class SimEvaluator:
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
+
     @torch.no_grad()
     def run(
         self,
@@ -100,7 +101,7 @@ class SimEvaluator:
         eval_run_dir = self.create_eval_run_dir()
         recorder = SimEvalRecorder(
             output_dir=eval_run_dir,
-            video_fps=self.env_runner.video_fps,
+            video_fps=self.env_runner.env_video_fps,
         )
         if eval_config is not None:
             recorder.save_config(eval_config)
@@ -116,15 +117,14 @@ class SimEvaluator:
         }
 
         cprint("=" * 30 + " eval in sim ... " + "=" * 30, "red")
-        for steps in denoise_timesteps_list:
+        for denoise_timesteps in denoise_timesteps_list:
             result = self.env_runner.run(
                 self.agent,
-                denoise_timesteps=steps,
-                episodes=eval_episodes,
+                denoise_timesteps=denoise_timesteps,
+                eval_episodes=eval_episodes,
             )
-            case_metrics = recorder.save_case_result(result, denoise_timesteps=steps)
-            summary["metrics"][f"denoise_timesteps{steps}"] = case_metrics
+            case_metrics = recorder.save_case_result(result, denoise_timesteps=denoise_timesteps)
+            summary["metrics"][f"denoise_timesteps{denoise_timesteps}"] = case_metrics
         cprint("=" * 30 + " saving data ... " + "=" * 30, "red")
 
         recorder.save_summary(summary)
-        return summary
