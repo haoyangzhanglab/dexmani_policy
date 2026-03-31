@@ -2,9 +2,10 @@ import torch
 import numpy as np
 from termcolor import cprint
 from collections import deque
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dexmani_policy.common.pytorch_util import dict_apply
+
 
 class BaseRunner:
     def __init__(
@@ -100,7 +101,10 @@ class BaseRunner:
         self.update_obs(obs)
 
         truncated = False
-        task_done_step = 1
+        done = False
+        prev_done = False
+        task_done_step = 0
+
         while not truncated:
             nobs = self.get_nobs(device=agent.device)
             action_chunk = self.get_action_chunk(nobs, agent, denoise_timesteps=denoise_timesteps)
@@ -108,8 +112,10 @@ class BaseRunner:
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
                 self.update_obs(obs)
 
-                if not done:
-                    task_done_step += 1
+                if done and not prev_done:
+                    task_done_step = env.action_cnt
+                prev_done = done
+
                 if truncated:
                     break
 
@@ -133,10 +139,13 @@ class BaseRunner:
                 video = env.get_video()
 
                 postfix = "success" if done else "fail"
-                cprint(f"Agent rollout for env seed {eval_seed}: {postfix}ed! Complete task in {task_done_step} steps")
+                if done and task_done_step is not None:
+                    cprint(f"Agent rollout for env seed {eval_seed}: {postfix}ed! Complete task in {task_done_step} steps")
+                else:
+                    cprint(f"Agent rollout for env seed {eval_seed}: {postfix}ed!")
 
                 success_list.append(done)
-                if done:
+                if done and task_done_step is not None:
                     task_done_step_list.append(task_done_step) 
                 episode_video_list.append({
                     f"episode_{eval_seed}_{postfix}": video
@@ -162,4 +171,3 @@ class BaseRunner:
 
     def get_seed_list(self) -> List[int]:
         raise NotImplementedError
-

@@ -1,30 +1,30 @@
-# Robot imitation learning config for DP3 policy training.
-# Update zarr_path / action_dim / state_dim to match your robot dataset.
+policy_name: dp3
 
-zarr_path: /path/to/robot_il_dataset.zarr
+task_name: pick_apple_messy
+zarr_path: ${hydra:runtime.output_dir}/robot_data/sim/${task_name}.zarr
+
+
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_dim: 8
-state_dim: 14
-pc_dim: 3
-pc_out_dim: 256
-num_points: 1024
+action_dim: 19
 
 
 dataloader:
-  batch_size: 64
+  batch_size: 256
   shuffle: true
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   persistent_workers: true
 
+
 val_dataloader:
-  batch_size: 64
+  batch_size: 256
   shuffle: false
-  num_workers: 2
+  num_workers: 8
   pin_memory: true
-  persistent_workers: true
+  persistent_workers: false
+
 
 dataset:
   _target_: dexmani_policy.datasets.base_dataset.BaseDataset
@@ -35,7 +35,8 @@ dataset:
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.05
   max_train_episodes: null
-  sensor_modalities: [point_cloud, joint_state]
+  sensor_modalities: ["point_cloud", "joint_state"]
+
 
 agent:
   _target_: dexmani_policy.agents.dp3_agent.DP3Agent
@@ -45,13 +46,13 @@ agent:
   action_dim: ${action_dim}
 
   encoder_type: dp3
-  pc_dim: ${pc_dim}
-  pc_out_dim: ${pc_out_dim}
-  state_dim: ${state_dim}
-  num_points: ${num_points}
+  pc_dim: 3
+  pc_out_dim: 256
+  state_dim: 19
+  num_points: 1024
 
   diffusion_step_embed_dim: 256
-  down_dims: [256, 512, 1024]
+  down_dims: [512, 1024, 2048]
   kernel_size: 5
   n_groups: 8
   condition_type: film
@@ -66,14 +67,14 @@ optimizer:
   weight_decay: 1.0e-6
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
-  betas: [0.9, 0.95]
+  betas: [0.95, 0.999]
 
 
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
   update_after_step: 0
   inv_gamma: 1.0
-  power: 0.6666666667
+  power: 0.75
   min_value: 0.0
   max_value: 0.9999
 
@@ -84,19 +85,20 @@ workspace:
 
   wandb_cfg:
     _target_: dexmani_policy.training.common.workspace.WandbConfig
-    project: dexmani_policy_il
-    group: robot_imitation
-    name: dp3_il
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
     id: null
     resume: allow
-    mode: disabled
-    video_fps: 20
+    mode: offline
+    video_fps: ${env_runner.env_video_fps}
 
   checkpoint_cfg:
     _target_: dexmani_policy.training.common.workspace.CheckpointConfig
     monitor_key: test_mean_score
     mode: max
     topk: 3
+
 
 
 training:
@@ -107,13 +109,21 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 500
   loop:
-    num_epochs: 200
-    log_interval_steps: 10
-    val_interval_epochs: 10
-    eval_interval_epochs: 0
-    sample_interval_epochs: 10
+    num_epochs: 1000
+    log_interval_steps: 50
+    val_interval_epochs: 25
+    eval_interval_epochs: 200
+    sample_interval_epochs: 5
 
-env_runner: null
+
+env_runner: 
+  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
+  task_name: ${task_name}
+  n_obs_steps: ${n_obs_steps}
+  env_video_fps: 10
+  default_eval_episodes: 20
+  sensor_modalities: ${dataset.sensor_modalities}
+
 
 eval:
   seed: ${training.seed}
@@ -123,6 +133,12 @@ eval:
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
 
+
 hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
   run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_dp3
+    dir: experiment_log/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+  sweep:
+    dir: experiment_log/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    subdir: ${hydra.job.num}
