@@ -1,3 +1,13 @@
+import os
+import sys
+import pathlib
+
+# 设置项目根目录，以便在训练脚本中正确导入模块，并且在运行训练脚本时保持当前工作目录为项目根目录
+ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
+sys.path.append(ROOT_DIR)
+os.chdir(ROOT_DIR)
+
+
 import hydra
 import torch
 import warnings
@@ -40,6 +50,7 @@ class SimEvalBuilder:
 
     @staticmethod
     def build_components(cfg) -> EvalComponents:
+        cfg.workspace.wandb_cfg.mode = "disabled"   # 禁用wandb日志记录，因为评估过程中不需要记录训练指标
         return EvalComponents(
             device=torch.device(cfg.training.device),
             agent=hydra.utils.instantiate(cfg.agent),
@@ -57,7 +68,9 @@ class SimEvalBuilder:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp-dir", type=str, required=True)
+    parser.add_argument("--agent-name", type=str, required=True)
+    parser.add_argument("--task-name", type=str, required=True)
+    parser.add_argument("--exp-name", type=str, required=True)
     parser.add_argument(
         "overrides",
         nargs="*",
@@ -93,7 +106,8 @@ def run_eval(exp_dir: Path, overrides: Sequence[str]):
 
 def main() -> None:
     args = parse_args()
-    run_eval(Path(args.exp_dir), args.overrides)
+    exp_dir = Path(ROOT_DIR) / "experiments" / args.agent_name / args.task_name / args.exp_name
+    run_eval(exp_dir, args.overrides)
 
 
 if __name__ == "__main__":

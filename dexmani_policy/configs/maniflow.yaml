@@ -1,7 +1,9 @@
 policy_name: maniflow
 
 task_name: pick_apple_messy
-zarr_path: ${hydra:runtime.output_dir}/robot_data/sim/${task_name}.zarr
+zarr_path: /home/zhanghaoyang/Desktop/DexMani_Policy/robot_data/sim/${task_name}.zarr
+
+seed: 42
 
 horizon: 16
 n_obs_steps: 2
@@ -104,7 +106,7 @@ workspace:
     topk: 3
 
 training:
-  seed: 42
+  seed: ${seed}
   device: cuda:0
   use_ema: true
   use_ema_teacher_for_consistency: true
@@ -126,7 +128,7 @@ env_runner:
   sensor_modalities: ${dataset.sensor_modalities}
 
 eval:
-  seed: ${training.seed}
+  seed: ${seed}
   sim:
     ckpt_tag_or_path: best
     eval_episodes: 100
@@ -137,7 +139,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiment_log/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
   sweep:
-    dir: experiment_log/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
     subdir: ${hydra.job.num}

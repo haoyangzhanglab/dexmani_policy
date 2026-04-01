@@ -132,7 +132,7 @@ class Trainer:
         }
         for item in result.get("videos", []):
             for key, value in item.items():
-                metrics[f"eval/rollout_{key}_video"] = value
+                metrics[f"eval/{key}_video"] = value
         return metrics
 
 

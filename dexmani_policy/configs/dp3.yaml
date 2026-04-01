@@ -1,8 +1,9 @@
 policy_name: dp3
 
 task_name: pick_apple_messy
-zarr_path: ${hydra:runtime.output_dir}/robot_data/sim/${task_name}.zarr
+zarr_path: robot_data/sim/${task_name}.zarr
 
+seed: 42
 
 horizon: 16
 n_obs_steps: 2
@@ -45,14 +46,14 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: dp3
+  encoder_type: idp3
   pc_dim: 3
-  pc_out_dim: 256
+  pc_out_dim: 128
   state_dim: 19
   num_points: 1024
 
-  diffusion_step_embed_dim: 256
-  down_dims: [512, 1024, 2048]
+  diffusion_step_embed_dim: 128
+  down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
   condition_type: film
@@ -102,7 +103,7 @@ workspace:
 
 
 training:
-  seed: 42
+  seed: ${seed}
   device: cuda:0
   use_ema: true
   use_ema_teacher_for_consistency: false
@@ -112,7 +113,7 @@ training:
     num_epochs: 1000
     log_interval_steps: 50
     val_interval_epochs: 25
-    eval_interval_epochs: 200
+    eval_interval_epochs: 250
     sample_interval_epochs: 5
 
 
@@ -121,12 +122,12 @@ env_runner:
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
   env_video_fps: 10
-  default_eval_episodes: 20
+  default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
 
 
 eval:
-  seed: ${training.seed}
+  seed: ${seed}
   sim:
     ckpt_tag_or_path: best
     eval_episodes: 100
@@ -138,7 +139,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiment_log/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
   sweep:
-    dir: experiment_log/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
     subdir: ${hydra.job.num}

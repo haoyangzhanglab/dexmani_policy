@@ -1,9 +1,11 @@
 import torch
 from typing import Dict, Tuple
+
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.agents.common.module_attr_mixin import ModuleAttrMixin
-from dexmani_policy.agents.obs_encoder.common.point_cloud_utils import fps
+
+from dexmani_policy.agents.obs_encoder.backbone_3d.utils import farthest_point_sample
 
 
 class BaseAgent(ModuleAttrMixin):
@@ -97,7 +99,7 @@ class BaseAgent(ModuleAttrMixin):
         elif current_num_points == num_points:
             pass
         else:
-            downsample_point_cloud, _ = fps(this_obs['point_cloud'].flatten(0, 1), num_points=num_points)
+            downsample_point_cloud, _ = farthest_point_sample(this_obs['point_cloud'].flatten(0, 1), num_points=num_points)
             B, T = this_obs['point_cloud'].shape[:2]
             this_obs['point_cloud'] = downsample_point_cloud.reshape(B, T, num_points, -1)
 

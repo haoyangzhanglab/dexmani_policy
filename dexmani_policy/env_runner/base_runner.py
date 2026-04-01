@@ -132,32 +132,33 @@ class BaseRunner:
         task_done_step_list = []
         episode_video_list = []
 
+        print("=" * 90)
+
         for ep_idx in range(num_episodes):
             eval_seed = eval_seeds[ep_idx % len(eval_seeds)]
             try:
                 done, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
                 video = env.get_video()
 
-                postfix = "success" if done else "fail"
-                if done and task_done_step is not None:
-                    cprint(f"Agent rollout for env seed {eval_seed}: {postfix}ed! Complete task in {task_done_step} steps")
-                else:
-                    cprint(f"Agent rollout for env seed {eval_seed}: {postfix}ed!")
+                status = "success" if done else "fail"
+                cprint(f"[progress {ep_idx}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {task_done_step}", "cyan")
 
                 success_list.append(done)
                 if done and task_done_step is not None:
                     task_done_step_list.append(task_done_step) 
                 episode_video_list.append({
-                    f"episode_{eval_seed}_{postfix}": video
+                    f"episode_{eval_seed}": video
                 })
             except Exception as e:
-                cprint(f"Error during evaluation with seed {eval_seed}: {e}", "grey")
+                cprint(f"[progress {ep_idx}/{num_episodes}] Error during evaluation: seed {eval_seed}, error: {e}", "grey")
         
         # 统计指标
         success_rate = float(np.mean(success_list)) if len(success_list) > 0 else 0.0
         avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else 0
-        cprint(f"Eval Agent for {num_episodes} eposides, success rate {success_rate*100.0:1f}%, average complete steps {avg_steps}", "yellow")
+        cprint(f"[result] effective episode num: {len(success_list)}, success rate {success_rate*100.0:1f}%, average done steps {avg_steps}", "yellow")
+        print("=" * 90)
 
+        env.close()
         return {
             "success_rate": success_rate,
             "avg_steps": avg_steps,

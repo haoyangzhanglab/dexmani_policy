@@ -31,7 +31,7 @@ class SimRunner(BaseRunner):
         return ''.join(part.capitalize() for part in re.split(r'[_\s-]+', name) if part)
 
 
-    def _make_env(self):
+    def make_env(self):
         full_module_path = f"{ENV_PREFIX}.{self.task_name}"
         try:
             env_module = importlib.import_module(full_module_path)
@@ -42,10 +42,10 @@ class SimRunner(BaseRunner):
             env_class = getattr(env_module, env_name)
         except AttributeError as e:
             raise ImportError(f"Class {env_name} not found in module {full_module_path}") from e
-        return env_class()
+        return env_class(render_mode="rgb_array")
 
 
-    def _get_seed_list(self) -> List[int]:
+    def get_seed_list(self) -> List[int]:
         seed_file = DATA_DIR / "eval_seeds"/  f"{self.task_name}.txt"
         assert seed_file.exists(), f"Seed file not found: {seed_file}"
         content = seed_file.read_text().split()

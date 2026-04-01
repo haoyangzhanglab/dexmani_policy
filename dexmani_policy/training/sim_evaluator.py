@@ -116,7 +116,6 @@ class SimEvaluator:
             "metrics": {},
         }
 
-        cprint("=" * 30 + " eval in sim ... " + "=" * 30, "red")
         for denoise_timesteps in denoise_timesteps_list:
             result = self.env_runner.run(
                 self.agent,
@@ -125,6 +124,5 @@ class SimEvaluator:
             )
             case_metrics = recorder.save_case_result(result, denoise_timesteps=denoise_timesteps)
             summary["metrics"][f"denoise_timesteps{denoise_timesteps}"] = case_metrics
-        cprint("=" * 30 + " saving data ... " + "=" * 30, "red")
 
         recorder.save_summary(summary)

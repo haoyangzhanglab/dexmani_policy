@@ -1,3 +1,13 @@
+import os
+import sys
+import pathlib
+
+# 设置项目根目录，以便在训练脚本中正确导入模块，并且在运行训练脚本时保持当前工作目录为项目根目录
+ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
+sys.path.append(ROOT_DIR)
+os.chdir(ROOT_DIR)
+
+
 import copy
 import hydra
 import torch
