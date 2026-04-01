@@ -140,4 +140,4 @@ dmypy.json
 .pyre/
 
 robot_data/
-experiment_log/
+experiments/
