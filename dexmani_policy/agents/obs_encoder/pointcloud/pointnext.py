@@ -1,16 +1,13 @@
 import torch
 import torch.nn as nn
-from dexmani_policy.agents.obs_encoder.pointcloud.utils import (
-    farthest_point_sample,
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
     group,
-    index_points,
-    query_ball_point,
     sample_and_group,
     sample_and_group_all,
 )
-from dexmani_policy.agents.obs_encoder.pointcloud.position_encodings import (
-    RelativePositionalEncoding3D, 
+from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings import (
     SinusoidalPosEmb3D,
+    RelativePositionalEncoding3D, 
 )
 
 

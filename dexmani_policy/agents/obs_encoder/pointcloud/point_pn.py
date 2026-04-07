@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from dexmani_policy.agents.obs_encoder.pointcloud.utils import (
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
     farthest_point_sample,
     index_points,
     knn_point,

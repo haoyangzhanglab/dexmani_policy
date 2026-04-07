@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from einops import reduce
 import torch.nn.functional as F
-from dexmani_policy.agents.common.sample_util import SampleStrategy
+from dexmani_policy.agents.action_decoders.common.sample_util import SampleStrategy
 
 
 class FlowMatch_With_Consistency(nn.Module):

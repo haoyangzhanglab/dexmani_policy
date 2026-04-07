@@ -4,8 +4,7 @@ from typing import Dict, Tuple
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.agents.common.module_attr_mixin import ModuleAttrMixin
-
-from dexmani_policy.agents.obs_encoder.pointcloud.utils import farthest_point_sample
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import farthest_point_sample
 
 
 class BaseAgent(ModuleAttrMixin):

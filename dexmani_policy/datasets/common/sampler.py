@@ -17,7 +17,7 @@ def create_indices(
     debug:bool=True,
 ) -> np.ndarray:
     
-    episode_mask.shape == episode_ends.shape        
+    assert episode_mask.shape == episode_ends.shape
     pad_before = min(max(pad_before, 0), sequence_length-1)
     pad_after = min(max(pad_after, 0), sequence_length-1)
 

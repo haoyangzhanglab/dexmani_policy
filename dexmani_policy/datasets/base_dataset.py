@@ -4,32 +4,9 @@ import numpy as np
 from typing import Dict
 
 from dexmani_policy.common.pytorch_util import dict_apply
+from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
-from dexmani_policy.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask, downsample_mask
-
-
-def create_rgb_normalizer():
-    # Imagenet normalization stats
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-    scale = 1.0 / std
-    offset = -mean / std
-
-    # 输入数据是[0, 1]范围内的RGB图像，输出数据是经过Imagenet标准化后的图像
-    imagenet_normalizer = SingleFieldLinearNormalizer.create_manual(
-        scale=scale,
-        offset=offset,
-        input_stats_dict={
-            'min': np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            'max': np.array([1.0, 1.0, 1.0], dtype=np.float32),
-            'mean': mean,
-            'std': std,
-        }
-    )     
-    return imagenet_normalizer
-
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -42,7 +19,7 @@ class BaseDataset(torch.utils.data.Dataset):
         pad_after=0,
         val_ratio=0.0,
         max_train_episodes=None,
-        sensor_modalities=['point_cloud', 'joint_state'],
+        sensor_modalities=['joint_state',],
     ):
         super().__init__()
 
@@ -63,6 +40,7 @@ class BaseDataset(torch.utils.data.Dataset):
             mask=train_mask, 
             max_n=max_train_episodes,  
         )
+        self.val_mask = val_mask
         self.train_mask = train_mask
 
         self.sampler = SequenceSampler(
@@ -85,9 +63,8 @@ class BaseDataset(torch.utils.data.Dataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before, 
             pad_after=self.pad_after,
-            episode_mask=~self.train_mask
+            episode_mask=self.val_mask
         )
-        val_set.train_mask = ~self.train_mask
         return val_set
 
 
@@ -105,21 +82,18 @@ class BaseDataset(torch.utils.data.Dataset):
     def _sample_to_data(self, sample):
         data = {'obs': {}}
         for modality in self.sensor_modalities:
-            data['obs'][modality] = sample[modality].astype(np.float32)
-    
-        data['action'] = sample['action'].astype(np.float32)
+            data['obs'][modality] = sample[modality]
+        data['action'] = sample['action'].astype(np.float32, copy=False)
         return data
 
-
+    # 子类需要重定义这个函数来适应不同模态的归一化方式
     def get_normalizer(self, mode='limits', **kwargs):
-        data = {'action': self.replay_buffer['action']}
+        data = {
+            'joint_state': self.replay_buffer['joint_state'],
+            'action': self.replay_buffer['action']
+        }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
 
-        # 默认观察量不进行归一化
-        for modality in self.sensor_modalities:
-            normalizer[modality] = SingleFieldLinearNormalizer.create_identity()
-
         return normalizer
-
 

@@ -1,143 +1,266 @@
 import torch
 import torch.nn as nn
 import torchvision
+from typing import Dict, Literal, Optional, Sequence
 
-from dexmani_policy.agents.obs_encoder.img.utils import (
-    ImageTransform, 
-    IMAGENET_MEAN, 
-    IMAGENET_STD,
+from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
+from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
+from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
+    flatten_batch,
+    restore_batch,
+    reshape_patch_tokens_to_map,
 )
 
-FEATURE_DIM = {
-    "resnet18": 512,
-    "resnet34": 512,
-    "resnet50": 2048,
-}
+TuneMode = Literal["freeze", "full"]
+NormMode = Literal["frozen_bn", "group_norm"]
+GlobalTokenType = Literal["avg"]
 
 
-class ResNetEncoder(nn.Module):
+class FrozenBatchNorm2d(nn.Module):
+    def __init__(self, num_features: int):
+        super().__init__()
+        self.register_buffer("weight", torch.ones(num_features))
+        self.register_buffer("bias", torch.zeros(num_features))
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        key = prefix + "num_batches_tracked"
+        if key in state_dict:
+            del state_dict[key]
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self.weight.view(1, -1, 1, 1)
+        bias = self.bias.view(1, -1, 1, 1)
+        running_mean = self.running_mean.view(1, -1, 1, 1)
+        running_var = self.running_var.view(1, -1, 1, 1)
+        scale = weight * (running_var + 1e-5).rsqrt()
+        bias = bias - running_mean * scale
+        return x * scale + bias
+
+
+def replace_batch_norm_with_group_norm(module: nn.Module) -> nn.Module:
+    for name, child in module.named_children():
+        if isinstance(child, nn.BatchNorm2d):
+            num_groups = min(32, child.num_features)
+            while child.num_features % num_groups != 0:
+                num_groups -= 1
+            setattr(module, name, nn.GroupNorm(num_groups=num_groups, num_channels=child.num_features))
+        else:
+            replace_batch_norm_with_group_norm(child)
+    return module
+
+
+class ResNet(nn.Module):
     def __init__(
         self,
         model_name: str = "resnet18",
-        weight_source: str | None = None,
-        global_token_type: str = "avg",
-        resize_shape=(240, 240),
-        crop_shape=(224, 224),
-        random_crop: bool = False,
-        device: str = "cuda",
+        tune_mode: TuneMode = "freeze",
+        norm_mode: NormMode = "frozen_bn",
+        global_token_type: GlobalTokenType = "avg",
+        out_dim: Optional[int] = None,
+        weights=None,
     ):
         super().__init__()
-        self.device = torch.device(device)
+
         self.model_name = model_name
-        self.weight_source = weight_source
+        self.tune_mode = tune_mode
         self.global_token_type = global_token_type
-        self.feature_dim = FEATURE_DIM[model_name]
+        self.norm_mode = norm_mode
+        self.output_stride = 32
 
-        self.image_transform = ImageTransform(
-            resize_shape=resize_shape,
-            crop_shape=crop_shape,
-            random_crop=random_crop,
-            mean=IMAGENET_MEAN,
-            std=IMAGENET_STD,
+        if not hasattr(torchvision.models, model_name):
+            raise ValueError(f"Unsupported ResNet model: {model_name}")
+
+        norm_layer = FrozenBatchNorm2d if norm_mode == "frozen_bn" else nn.BatchNorm2d
+        backbone = getattr(torchvision.models, model_name)(weights=weights, norm_layer=norm_layer)
+
+        if norm_mode == "group_norm":
+            backbone = replace_batch_norm_with_group_norm(backbone)
+
+        self.backbone = nn.Sequential(*list(backbone.children())[:-2])
+        self.hidden_dim = int(backbone.fc.in_features)
+        self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
+
+        self.proj = nn.Identity() if self.out_dim == self.hidden_dim else nn.Conv2d(
+            self.hidden_dim,
+            self.out_dim,
+            kernel_size=1,
         )
+        self.geometry_processor = GeometryProcessor()
 
-        self.backbone = self.buildBackbone(model_name, weight_source).to(self.device)
+        self.set_tune_mode(tune_mode)
 
-        self.stem = nn.Sequential(
-            self.backbone.conv1,
-            self.backbone.bn1,
-            self.backbone.relu,
-            self.backbone.maxpool,
-        )
-        self.layer1 = self.backbone.layer1
-        self.layer2 = self.backbone.layer2
-        self.layer3 = self.backbone.layer3
-        self.layer4 = self.backbone.layer4
-        self.avgpool = self.backbone.avgpool
 
-    def buildBackbone(self, model_name: str, weight_source: str | None):
-        if weight_source is None:
-            return getattr(torchvision.models, model_name)(weights=None)
+    def set_tune_mode(self, tune_mode: TuneMode) -> None:
+        self.tune_mode = tune_mode
 
-        if weight_source == "r3m":
-            # cd r3m && pip install -e . &&
-            import r3m
+        if tune_mode == "freeze":
+            self.backbone.requires_grad_(False)
+            self.backbone.eval()
+            return
 
-            r3m.device = "cpu"
-            model = r3m.load_r3m(model_name)
-            if hasattr(model, "module"):
-                model = model.module
-            if hasattr(model, "convnet"):
-                model = model.convnet
-            return model
+        if tune_mode == "full":
+            self.backbone.requires_grad_(True)
+            return
 
-        raise ValueError("weight_source only supports None or 'r3m'")
+        raise ValueError(f"Unsupported tune_mode: {tune_mode}")
 
-    def preprocessRgb(self, rgb: torch.Tensor):
-        rgb = rgb.to(self.device, non_blocking=True)
-        rgb = self.image_transform(rgb)
-        leading_shape = rgb.shape[:-3]
-        rgb = rgb.reshape(-1, *rgb.shape[-3:])
-        return rgb, leading_shape
 
-    def encodeFeatureMap(self, rgb: torch.Tensor):
-        x = self.stem(rgb)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        return x
-
-    def buildPatchTokens(self, feature_map: torch.Tensor):
-        return feature_map.flatten(2).transpose(1, 2).contiguous()
-
-    def buildGlobalToken(self, feature_map: torch.Tensor, patch_tokens: torch.Tensor):
+    def get_global_token(self, feature_map: torch.Tensor) -> torch.Tensor:
         if self.global_token_type == "avg":
-            return patch_tokens.mean(dim=1)
-        return self.avgpool(feature_map).flatten(1)
+            return feature_map.mean(dim=(-2, -1))
 
-    def forward(self, rgb: torch.Tensor):
-        rgb, leading_shape = self.preprocessRgb(rgb)
-        feature_map = self.encodeFeatureMap(rgb)
-        patch_tokens = self.buildPatchTokens(feature_map)
-        global_token = self.buildGlobalToken(feature_map, patch_tokens)
+        raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
 
-        patch_tokens = patch_tokens.reshape(*leading_shape, patch_tokens.shape[1], patch_tokens.shape[2])
-        feature_map = feature_map.reshape(*leading_shape, feature_map.shape[1], feature_map.shape[2], feature_map.shape[3])
-        global_token = global_token.reshape(*leading_shape, global_token.shape[-1])
+
+    def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if rgb.ndim < 4 or rgb.shape[-3] != 3:
+            raise ValueError(f"rgb should have shape [..., 3, H, W], got {tuple(rgb.shape)}")
+
+        if self.tune_mode == "freeze":
+            self.backbone.eval()
+
+        flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
+        feature_map = self.backbone(flat_rgb)
+        feature_map = self.proj(feature_map)
+
+        patch_tokens = feature_map.flatten(2).transpose(1, 2).contiguous()
+        global_token = self.get_global_token(feature_map)
 
         return {
-            "patch_tokens": patch_tokens,
-            "feature_map": feature_map,
-            "global_token": global_token,
+            "patch_tokens": restore_batch(patch_tokens, leading_shape),
+            "global_token": restore_batch(global_token, leading_shape),
         }
 
 
-@torch.no_grad()
-def example():
+    def backproject(
+        self,
+        depth: torch.Tensor,
+        intrinsics: torch.Tensor,
+        camera_to_world: Optional[torch.Tensor] = None,
+        depth_scale: float = 1000.0,
+        min_depth: float = 0.0,
+        max_depth: Optional[float] = None,
+    ) -> Dict[str, torch.Tensor]:
+
+        dense_geometry = self.geometry_processor.backproject_depth(
+            depth=depth,
+            intrinsics=intrinsics,
+            camera_to_world=camera_to_world,
+            depth_scale=depth_scale,
+            min_depth=min_depth,
+            max_depth=max_depth,
+            collapse_repeated_camera=True,
+        )
+
+        patch_geometry = self.geometry_processor.pool_patch_coordinates(
+            coords=dense_geometry.coords,
+            valid_mask=dense_geometry.valid_mask,
+            patch_size=self.output_stride,
+        )
+
+        return {
+            "patch_coords": patch_geometry.patch_coords,
+            "patch_valid_mask": patch_geometry.patch_valid_mask,
+        }
+
+
+    def patch_tokens_to_featmap(self, patch_tokens: torch.Tensor, image_hw: Sequence[int]) -> torch.Tensor:
+        feature_h = (int(image_hw[0]) + self.output_stride - 1) // self.output_stride
+        feature_w = (int(image_hw[1]) + self.output_stride - 1) // self.output_stride
+
+        flat_patch_tokens, leading_shape = flatten_batch(patch_tokens, trailing_ndim=2)
+        feature_map = reshape_patch_tokens_to_map(flat_patch_tokens, (feature_h, feature_w))
+        return restore_batch(feature_map, leading_shape)
+
+
+
+def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_name = "resnet18"
 
-    rgb_bt = torch.randint(0, 256, (2, 3, 480, 640, 3), dtype=torch.uint8, device=device)
-    rgb_btn = torch.randint(0, 256, (2, 3, 2, 480, 640, 3), dtype=torch.uint8, device=device)
+    image_processor = ImageProcessor.from_preset("resnet")
 
-    scratch_encoder = ResNetEncoder(
-        model_name="resnet18",
-        weight_source=None,
-        device=device,
+    images = torch.randint(0, 256, (16, 2, 480, 640, 3), dtype=torch.uint8)
+    depths = torch.randint(1, 2000, (16, 2, 480, 640), dtype=torch.int32)
+    intrinsics = torch.tensor(
+        [[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]],
+        dtype=torch.float32,
     )
-    scratch_encoder.eval()
+    camera_to_world = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.5]],
+        dtype=torch.float32,
+    )
 
-    out_bt = scratch_encoder(rgb_bt)
-    out_btn = scratch_encoder(rgb_btn)
+    intrinsics = intrinsics.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
+    camera_to_world = camera_to_world.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
 
-    print("scratch BT patch_tokens :", tuple(out_bt["patch_tokens"].shape))
-    print("scratch BT feature_map  :", tuple(out_bt["feature_map"].shape))
-    print("scratch BT global_token :", tuple(out_bt["global_token"].shape))
-    print("scratch BTN patch_tokens:", tuple(out_btn["patch_tokens"].shape))
-    print("scratch BTN feature_map :", tuple(out_btn["feature_map"].shape))
-    print("scratch BTN global_token:", tuple(out_btn["global_token"].shape))
+    try:
+        encoder = ResNet(
+            model_name=model_name,
+            tune_mode="freeze",
+            norm_mode="frozen_bn",
+            out_dim=512,
+            weights=None,
+        ).to(device)
+        encoder.eval()
 
-    print("r3m usage: ResNetEncoder(model_name='resnet18', weight_source='r3m', device=device)")
+        rgbd_batch = image_processor.process_rgbd(
+            images=images,
+            depths=depths,
+            intrinsics=intrinsics,
+            camera_to_world=camera_to_world,
+        )
+
+        rgb = rgbd_batch.image.to(device)
+        depth = rgbd_batch.depth.to(device)
+        intrinsics = rgbd_batch.intrinsics.to(device)
+        camera_to_world = None if rgbd_batch.camera_to_world is None else rgbd_batch.camera_to_world.to(device)
+
+        with torch.no_grad():
+            vision_out = encoder(rgb)
+            geometry_out = encoder.backproject(
+                depth=depth,
+                intrinsics=intrinsics,
+                camera_to_world=camera_to_world,
+                depth_scale=1000.0,
+                min_depth=0.01,
+                max_depth=3.0,
+            )
+            feature_map = encoder.patch_tokens_to_featmap(
+                vision_out["patch_tokens"],
+                image_hw=rgb.shape[-2:],
+            )
+
+        print("rgb             :", tuple(rgb.shape))
+        print("patch_tokens    :", tuple(vision_out["patch_tokens"].shape))
+        print("global_token    :", tuple(vision_out["global_token"].shape))
+        print("feature_map     :", tuple(feature_map.shape))
+        print("patch_coords    :", tuple(geometry_out["patch_coords"].shape))
+        print("patch_valid_mask:", tuple(geometry_out["patch_valid_mask"].shape))
+
+    except Exception as error:
+        print("resnet example needs a valid torchvision runtime.")
+        print(error)
 
 
 if __name__ == "__main__":
