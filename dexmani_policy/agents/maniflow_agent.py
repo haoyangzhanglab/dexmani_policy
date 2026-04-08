@@ -7,6 +7,7 @@ from dexmani_policy.agents.base_agent import BaseAgent
 from dexmani_policy.agents.obs_encoder.dp3 import DP3Encoder
 from dexmani_policy.agents.action_decoders.backbone.ditx import DiTX_FlowMatch
 from dexmani_policy.agents.action_decoders.flowmatch import FlowMatch_With_Consistency
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import farthest_point_sample
 
 
 class ManiFlowAgent(BaseAgent):
@@ -84,6 +85,32 @@ class ManiFlowAgent(BaseAgent):
             target_t_sample_mode=target_t_sample_mode
         )
 
+    def preprocess(self, obs_dict):
+        this_obs = self.normalizer.normalize(obs_dict)
+        this_obs = dict_apply(
+            this_obs,
+            lambda x: x[:, :self.n_obs_steps, ...] if torch.is_tensor(x) else x,
+        )
+
+        if self.use_coord_only:
+            this_obs["point_cloud"] = this_obs["point_cloud"][..., :3]
+
+        current_num_points = this_obs["point_cloud"].shape[2]
+        if current_num_points < self.num_points:
+            raise ValueError(
+                f"Point cloud shape wrong, required {self.num_points} points, got {current_num_points} points"
+            )
+        if current_num_points > self.num_points:
+            downsample_point_cloud, _ = farthest_point_sample(
+                this_obs["point_cloud"].flatten(0, 1),
+                num_samples=self.num_points,
+            )
+            batch_size, time_steps = this_obs["point_cloud"].shape[:2]
+            this_obs["point_cloud"] = downsample_point_cloud.reshape(batch_size, time_steps, self.num_points, -1)
+
+        this_obs = dict_apply(this_obs, lambda x: x.flatten(0, 1) if torch.is_tensor(x) else x)
+        return this_obs
+
 
     def compute_loss(self, batch, **kwargs):
         ema_model = kwargs.get('ema_model')
@@ -99,12 +126,8 @@ class ManiFlowAgent(BaseAgent):
 
     def encode_obs_as_condition(self, obs_dict):
         B = obs_dict["point_cloud"].shape[0]
-
-        this_obs_dict = self.normalize_and_slice_obs(obs_dict)
-        this_obs_dict = self.preprocess_point_cloud(this_obs_dict, self.num_points, self.use_coord_only)
-        this_obs_dict = dict_apply(this_obs_dict, lambda x: x.flatten(0, 1) if torch.is_tensor(x) else x)
+        this_obs_dict = self.preprocess(obs_dict)
         
         feat = self.obs_encoder(this_obs_dict)
         feat = feat.reshape(B, -1, self.obs_cond_dim)
         return feat
-

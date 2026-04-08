@@ -1,0 +1,141 @@
+policy_name: dp
+
+task_name: pick_apple_messy
+zarr_path: robot_data/sim/${task_name}.zarr
+
+seed: 42
+
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_dim: 19
+
+
+dataloader:
+  batch_size: 256
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+
+
+val_dataloader:
+  batch_size: 256
+  shuffle: false
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+
+
+dataset:
+  _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
+  zarr_path: ${zarr_path}
+  seed: ${training.seed}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  val_ratio: 0.05
+  max_train_episodes: null
+  sensor_modalities: ["rgb", "joint_state"]
+
+
+agent:
+  _target_: dexmani_policy.agents.dp_agent.DPAgent
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+
+  rgb_backbone_name: dino
+  state_dim: 19
+
+  diffusion_step_embed_dim: 128
+  down_dims: [256, 512, 1024]
+  kernel_size: 5
+  n_groups: 8
+  condition_type: film
+
+  num_training_steps: 100
+  num_inference_steps: 10
+  prediction_type: sample
+
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+
+
+ema:
+  _target_: dexmani_policy.training.common.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+
+workspace:
+  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+
+  wandb_cfg:
+    _target_: dexmani_policy.training.common.workspace.WandbConfig
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
+    id: null
+    resume: allow
+    mode: offline
+    video_fps: ${env_runner.env_video_fps}
+
+  checkpoint_cfg:
+    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
+    monitor_key: test_mean_score
+    mode: max
+    topk: 3
+
+
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_ema: true
+  use_ema_teacher_for_consistency: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  loop:
+    num_epochs: 1000
+    log_interval_steps: 50
+    val_interval_epochs: 25
+    eval_interval_epochs: 250
+    sample_interval_epochs: 5
+
+
+env_runner:
+  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
+  task_name: ${task_name}
+  n_obs_steps: ${n_obs_steps}
+  env_video_fps: 10
+  default_eval_episodes: 25
+  sensor_modalities: ${dataset.sensor_modalities}
+
+
+eval:
+  seed: ${seed}
+  sim:
+    ckpt_tag_or_path: best
+    eval_episodes: 100
+    denoise_timesteps_list: [10]
+    use_ema_for_eval: true
+
+
+hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    subdir: ${hydra.job.num}

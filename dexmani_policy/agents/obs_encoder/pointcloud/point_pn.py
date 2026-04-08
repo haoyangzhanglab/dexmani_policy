@@ -7,31 +7,44 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
 )
 
 
-class PointLayerNorm1d(nn.Module):
-    def __init__(self, num_channels: int):
+def resolve_stage_values(value, num_stages: int, name: str):
+    if isinstance(value, int):
+        return (value,) * num_stages
+    if len(value) != num_stages:
+        raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
+    return tuple(value)
+
+
+def pick_num_groups(num_channels: int, max_groups: int = 8, min_channels_per_group: int = 8) -> int:
+    for groups in (max_groups, 4, 2, 1):
+        if num_channels % groups == 0 and num_channels // groups >= min_channels_per_group:
+            return groups
+    return 1
+
+
+class PointGroupNorm1d(nn.Module):
+    def __init__(self, num_channels: int, max_groups: int = 8):
         super().__init__()
-        self.norm = nn.LayerNorm(num_channels)
+        self.norm = nn.GroupNorm(pick_num_groups(num_channels, max_groups=max_groups), num_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(x.transpose(1, 2)).transpose(1, 2)
+        return self.norm(x)
 
 
-class PointLayerNorm2d(nn.Module):
-    def __init__(self, num_channels: int):
+class PointGroupNorm2d(nn.Module):
+    def __init__(self, num_channels: int, max_groups: int = 8):
         super().__init__()
-        self.norm = nn.LayerNorm(num_channels)
+        self.norm = nn.GroupNorm(pick_num_groups(num_channels, max_groups=max_groups), num_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.permute(0, 2, 3, 1)
-        x = self.norm(x)
-        return x.permute(0, 3, 1, 2)
+        return self.norm(x)
 
 
 class RawPointEmbedding(nn.Module):
-    def __init__(self, in_channels: int, embed_dim: int):
+    def __init__(self, in_channels: int, embed_dim: int, max_groups: int = 8):
         super().__init__()
         self.proj = nn.Conv1d(in_channels, embed_dim, kernel_size=1, bias=False)
-        self.norm = PointLayerNorm1d(embed_dim)
+        self.norm = PointGroupNorm1d(embed_dim, max_groups=max_groups)
         self.act = nn.GELU()
 
     def forward(self, point_features: torch.Tensor) -> torch.Tensor:
@@ -39,13 +52,13 @@ class RawPointEmbedding(nn.Module):
 
 
 class ResidualPointMLP2d(nn.Module):
-    def __init__(self, channels: int, stage_index: int = 0):
+    def __init__(self, channels: int, expansion: float = 0.5, max_groups: int = 8):
         super().__init__()
-        hidden_channels = 32 if stage_index == 2 else max(channels // 2, 1)
-        self.net1 = nn.Conv2d(channels, hidden_channels, kernel_size=1, bias=True)
-        self.norm1 = PointLayerNorm2d(hidden_channels)
-        self.net2 = nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=True)
-        self.norm2 = PointLayerNorm2d(channels)
+        hidden_channels = max(int(channels * expansion), 32)
+        self.net1 = nn.Conv2d(channels, hidden_channels, kernel_size=1, bias=False)
+        self.norm1 = PointGroupNorm2d(hidden_channels, max_groups=max_groups)
+        self.net2 = nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=False)
+        self.norm2 = PointGroupNorm2d(channels, max_groups=max_groups)
         self.act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -59,16 +72,17 @@ class PositionalEncodingGeometry(nn.Module):
     def __init__(self, out_dim: int, alpha: float, beta: float):
         super().__init__()
         self.out_dim = out_dim
-        self.alpha = alpha
         self.beta = beta
         self.in_dim = 3
 
+        feat_dim = max((self.out_dim + self.in_dim * 2 - 1) // (self.in_dim * 2), 1)
+        feat_range = torch.arange(feat_dim, dtype=torch.float32)
+        dim_embed = torch.pow(torch.tensor(alpha, dtype=torch.float32), feat_range / feat_dim)
+        self.register_buffer("dim_embed", dim_embed, persistent=False)
+
     def forward(self, knn_xyz: torch.Tensor, knn_x: torch.Tensor) -> torch.Tensor:
         batch_size, _, group_num, neighbor_num = knn_xyz.shape
-        feat_dim = (self.out_dim + self.in_dim * 2 - 1) // (self.in_dim * 2)
-        feat_range = torch.arange(feat_dim, device=knn_xyz.device, dtype=knn_xyz.dtype)
-        alpha = torch.tensor(self.alpha, device=knn_xyz.device, dtype=knn_xyz.dtype)
-        dim_embed = torch.pow(alpha, feat_range / max(feat_dim, 1))
+        dim_embed = self.dim_embed.to(device=knn_xyz.device, dtype=knn_xyz.dtype)
         div_embed = self.beta * knn_xyz.unsqueeze(-1) / dim_embed
         sin_embed = torch.sin(div_embed)
         cos_embed = torch.cos(div_embed)
@@ -103,14 +117,22 @@ class LocalGeometryAggregation(nn.Module):
         alpha: float,
         beta: float,
         block_num: int,
-        stage_index: int,
         point_cloud_type: str,
+        residual_expansion: float = 0.5,
+        max_groups: int = 8,
     ):
         super().__init__()
         self.point_cloud_type = point_cloud_type
         self.positional_encoding = PositionalEncodingGeometry(out_dim, alpha, beta)
         self.residual_blocks = nn.Sequential(
-            *[ResidualPointMLP2d(out_dim, stage_index=stage_index) for _ in range(block_num)]
+            *[
+                ResidualPointMLP2d(
+                    out_dim,
+                    expansion=residual_expansion,
+                    max_groups=max_groups,
+                )
+                for _ in range(block_num)
+            ]
         )
 
     def normalize_knn_coordinates(
@@ -118,17 +140,18 @@ class LocalGeometryAggregation(nn.Module):
         local_coordinates: torch.Tensor,
         knn_coordinates: torch.Tensor,
     ) -> torch.Tensor:
-        if self.point_cloud_type == "mn40":
-            center = local_coordinates.unsqueeze(2)
-            scale = torch.std(knn_coordinates - center).clamp_min(1e-5)
-            return (knn_coordinates - center) / scale
+        center = local_coordinates.unsqueeze(2)
+        relative_xyz = knn_coordinates - center
 
         if self.point_cloud_type == "scan":
-            relative_xyz = knn_coordinates - local_coordinates.unsqueeze(2)
             scale = relative_xyz.abs().amax(dim=2, keepdim=True).clamp_min(1e-5)
             return relative_xyz / scale
 
-        return knn_coordinates - local_coordinates.unsqueeze(2)
+        if self.point_cloud_type == "mn40":
+            scale = torch.std(relative_xyz).clamp_min(1e-5)
+            return relative_xyz / scale
+
+        return relative_xyz
 
     def forward(
         self,
@@ -137,14 +160,12 @@ class LocalGeometryAggregation(nn.Module):
         knn_coordinates: torch.Tensor,
         knn_features: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, group_num, neighbor_num, _ = knn_features.shape
-
         knn_coordinates = self.normalize_knn_coordinates(local_coordinates, knn_coordinates)
-        center_features = local_features.unsqueeze(2).expand(-1, -1, neighbor_num, -1)
+        center_features = local_features.unsqueeze(2).expand(-1, -1, knn_features.size(2), -1)
         knn_features = torch.cat([knn_features, center_features], dim=-1)
 
-        knn_coordinates = knn_coordinates.permute(0, 3, 1, 2)
-        knn_features = knn_features.permute(0, 3, 1, 2).reshape(batch_size, -1, group_num, neighbor_num)
+        knn_coordinates = knn_coordinates.permute(0, 3, 1, 2).contiguous()
+        knn_features = knn_features.permute(0, 3, 1, 2).contiguous()
 
         knn_features = self.positional_encoding(knn_coordinates, knn_features)
         return self.residual_blocks(knn_features)
@@ -162,73 +183,96 @@ class ParametricEncoder(nn.Module):
         input_points: int,
         num_stages: int,
         embed_dim: int,
-        k_neighbors: int,
+        k_neighbors,
         alpha: float,
         beta: float,
         lga_blocks,
         dim_expansion,
         point_cloud_type: str,
+        residual_expansion: float = 0.5,
+        max_groups: int = 8,
     ):
         super().__init__()
-        self.raw_point_embedding = RawPointEmbedding(in_channels, embed_dim)
+        self.raw_point_embedding = RawPointEmbedding(in_channels, embed_dim, max_groups=max_groups)
         self.fps_knn_stages = nn.ModuleList()
         self.local_geometry_aggregation_stages = nn.ModuleList()
         self.pooling_stages = nn.ModuleList()
+
+        k_neighbors = resolve_stage_values(k_neighbors, num_stages, "k_neighbors")
+        lga_blocks = resolve_stage_values(lga_blocks, num_stages, "lga_blocks")
+        dim_expansion = resolve_stage_values(dim_expansion, num_stages, "dim_expansion")
 
         out_dim = embed_dim
         group_num = input_points
         for stage_index in range(num_stages):
             out_dim = out_dim * dim_expansion[stage_index]
             group_num = max(group_num // 2, 1)
-            self.fps_knn_stages.append(FPSkNN(group_num=group_num, k_neighbors=k_neighbors))
+
+            self.fps_knn_stages.append(
+                FPSkNN(
+                    group_num=group_num,
+                    k_neighbors=k_neighbors[stage_index],
+                )
+            )
             self.local_geometry_aggregation_stages.append(
                 LocalGeometryAggregation(
                     out_dim=out_dim,
                     alpha=alpha,
                     beta=beta,
                     block_num=lga_blocks[stage_index],
-                    stage_index=stage_index,
                     point_cloud_type=point_cloud_type,
+                    residual_expansion=residual_expansion,
+                    max_groups=max_groups,
                 )
             )
             self.pooling_stages.append(Pooling())
 
     def forward(self, point_coordinates: torch.Tensor, point_features: torch.Tensor):
         point_features = self.raw_point_embedding(point_features)
-        intermediate_outputs = {"raw_point_feature": point_features.transpose(1, 2)}
+        intermediate_outputs = {
+            "raw_point_feature": point_features,
+        }
 
         for stage_index, (fps_knn, lga, pooling) in enumerate(
             zip(self.fps_knn_stages, self.local_geometry_aggregation_stages, self.pooling_stages)
         ):
             local_coordinates, local_features, knn_coordinates, knn_features = fps_knn(
                 point_coordinates,
-                point_features.transpose(1, 2),
+                point_features.transpose(1, 2).contiguous(),
             )
             knn_features = lga(local_coordinates, local_features, knn_coordinates, knn_features)
             point_coordinates = local_coordinates
             point_features = pooling(knn_features)
 
             intermediate_outputs[f"stage_{stage_index}_coordinates"] = point_coordinates
-            intermediate_outputs[f"stage_{stage_index}_feature"] = point_features.transpose(1, 2)
+            intermediate_outputs[f"stage_{stage_index}_feature"] = point_features
 
+        intermediate_outputs["global_feature"] = point_features.max(dim=-1).values
         return point_coordinates, point_features, intermediate_outputs
 
 
 class PointPNEncoder(nn.Module):
     def __init__(
         self,
-        in_channels: int = 3,
+        in_channels: int = 6,
         input_points: int = 1024,
         num_stages: int = 3,
-        embed_dim: int = 96,
-        beta: float = 100.0,
-        alpha: float = 1000.0,
-        lga_blocks=(2, 1, 1),
+        embed_dim: int = 64,
+        beta: float = 16.0,
+        alpha: float = 100.0,
+        lga_blocks=(2, 2, 1),
         dim_expansion=(2, 2, 2),
-        point_cloud_type: str = "mn40",
-        k_neighbors: int = 81,
+        point_cloud_type: str = "scan",
+        k_neighbors=(24, 24, 16),
+        residual_expansion: float = 0.5,
+        max_groups: int = 8,
     ):
         super().__init__()
+        if in_channels < 3:
+            raise ValueError("in_channels must be at least 3 because xyz is required")
+
+        self.in_channels = in_channels
+        self.input_points = input_points
         self.encoder = ParametricEncoder(
             in_channels=in_channels,
             input_points=input_points,
@@ -240,38 +284,69 @@ class PointPNEncoder(nn.Module):
             lga_blocks=lga_blocks,
             dim_expansion=dim_expansion,
             point_cloud_type=point_cloud_type,
+            residual_expansion=residual_expansion,
+            max_groups=max_groups,
         )
         self.out_channels = embed_dim
-        for expansion in dim_expansion[:num_stages]:
+        for expansion in resolve_stage_values(dim_expansion, num_stages, "dim_expansion"):
             self.out_channels *= expansion
 
-    def forward(self, point_features: torch.Tensor, point_coordinates: torch.Tensor):
-        return self.encoder(point_coordinates, point_features)
+    def forward(
+        self,
+        pointcloud: torch.Tensor,
+        return_intermediate: bool = False,
+    ):
+        if pointcloud.ndim != 3:
+            raise ValueError(f"pointcloud must be [B, N, C], but got shape {tuple(pointcloud.shape)}")
+        if pointcloud.size(1) != self.input_points:
+            raise ValueError(
+                f"pointcloud has {pointcloud.size(1)} points, but input_points={self.input_points}"
+            )
+        if pointcloud.size(-1) < self.in_channels:
+            raise ValueError(
+                f"pointcloud has {pointcloud.size(-1)} channels, but in_channels={self.in_channels}"
+            )
 
+        point_coordinates = pointcloud[..., :3]
+        point_features = pointcloud[..., : self.in_channels].transpose(1, 2).contiguous()
+        final_coordinates, final_features, intermediate_outputs = self.encoder(point_coordinates, point_features)
 
-Point_PN_scan = PointPNEncoder
+        if return_intermediate:
+            return final_coordinates, final_features, intermediate_outputs
+        return final_coordinates, final_features
+
 
 
 def example():
-    batch_size, num_points = 2, 64
-    point_coordinates = torch.randn(batch_size, num_points, 3)
-    point_features = point_coordinates.transpose(1, 2).contiguous()
+    batch_size, num_points = 2, 1024
+
+    xyz = torch.empty(batch_size, num_points, 3)
+    xyz[..., 0] = torch.rand(batch_size, num_points) * 0.6 - 0.3
+    xyz[..., 1] = torch.rand(batch_size, num_points) * 0.8 - 0.4
+    xyz[..., 2] = torch.rand(batch_size, num_points) * 0.5
+
+    rgb = torch.rand(batch_size, num_points, 3)
+    pointcloud = torch.cat([xyz, rgb], dim=-1)
 
     model = PointPNEncoder(
-        in_channels=3,
+        in_channels=6,
         input_points=num_points,
         num_stages=3,
-        embed_dim=32,
-        lga_blocks=(2, 1, 1),
+        embed_dim=64,
+        beta=16.0,
+        alpha=100.0,
+        lga_blocks=(2, 2, 1),
         dim_expansion=(2, 2, 2),
-        point_cloud_type="mn40",
-        k_neighbors=16,
+        point_cloud_type="scan",
+        k_neighbors=(24, 24, 16),
     )
 
-    final_coordinates, final_features, intermediate_outputs = model(point_features, point_coordinates)
+    final_coordinates, final_features, intermediate_outputs = model(
+        pointcloud,
+        return_intermediate=True,
+    )
 
-    print("input_coordinates:", tuple(point_coordinates.shape))
-    print("input_features:", tuple(point_features.shape))
+    print("input_pointcloud:", tuple(pointcloud.shape))
     for name, value in intermediate_outputs.items():
         print(f"{name}: {tuple(value.shape)}")
     print("final_coordinates:", tuple(final_coordinates.shape))

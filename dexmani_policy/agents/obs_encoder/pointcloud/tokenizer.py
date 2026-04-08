@@ -2,14 +2,11 @@ import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
     farthest_point_sample,
-    group,
     index_points,
     query_ball_point,
-    sample_and_group,
-    sample_and_group_all,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings import (
-    RelativePositionalEncoding3D, 
+    RelativePositionalEncoding3D,
     SinusoidalPosEmb3D,
 )
 
@@ -35,12 +32,19 @@ class GeometryStem(nn.Module):
             PointMLP(stem_channels, stem_channels),
         )
 
-    def forward(self, pointcloud: torch.Tensor) -> torch.Tensor:
-        return self.stem(pointcloud)
+    def forward(self, point_feature: torch.Tensor) -> torch.Tensor:
+        return self.stem(point_feature)
 
 
 class LocalPatchEncoder(nn.Module):
-    def __init__(self, stem_channels: int, patch_channels: int, radius: float, num_neighbors: int, position_encoding_dim: int = 24):
+    def __init__(
+        self,
+        stem_channels: int,
+        patch_channels: int,
+        radius: float,
+        num_neighbors: int,
+        position_encoding_dim: int = 24,
+    ):
         super().__init__()
         self.radius = radius
         self.num_neighbors = num_neighbors
@@ -67,10 +71,13 @@ class MultiScalePatchTokenizer(nn.Module):
         stem_channels: int,
         token_channels: int,
         num_patches: int,
-        patch_radii: tuple[float, float],
-        patch_neighbors: tuple[int, int],
+        patch_radii: tuple[float, ...],
+        patch_neighbors: tuple[int, ...],
     ):
         super().__init__()
+        if len(patch_radii) != len(patch_neighbors):
+            raise ValueError("patch_radii and patch_neighbors must have the same length")
+
         self.num_patches = num_patches
         self.scale_encoders = nn.ModuleList(
             [
@@ -109,7 +116,13 @@ class MultiScalePatchTokenizer(nn.Module):
 
 
 class GlobalSceneTokenizer(nn.Module):
-    def __init__(self, stem_channels: int, token_channels: int, radius: float = 0.20, num_neighbors: int = 32):
+    def __init__(
+        self,
+        stem_channels: int,
+        token_channels: int,
+        radius: float = 0.16,
+        num_neighbors: int = 32,
+    ):
         super().__init__()
         self.radius = radius
         self.num_neighbors = num_neighbors
@@ -148,14 +161,23 @@ class GlobalSceneTokenizer(nn.Module):
 class PointNextPatchTokenizer(nn.Module):
     def __init__(
         self,
-        input_channels: int = 3,
+        input_channels: int = 6,
         stem_channels: int = 64,
-        token_channels: int = 96,
-        num_patches: int = 128,
-        patch_radii: tuple[float, float] = (0.05, 0.10),
-        patch_neighbors: tuple[int, int] = (16, 32),
+        token_channels: int = 128,
+        num_patches: int = 64,
+        patch_radii: tuple[float, ...] = (0.04, 0.08),
+        patch_neighbors: tuple[int, ...] = (16, 32),
+        global_radius: float = 0.16,
+        global_neighbors: int = 32,
     ):
         super().__init__()
+        if input_channels < 3:
+            raise ValueError("input_channels must be at least 3 because xyz is required")
+
+        self.input_channels = input_channels
+        self.stem_channels = stem_channels
+        self.token_channels = token_channels
+
         self.geometry_stem = GeometryStem(input_channels, stem_channels)
         self.local_patch_tokenizer = MultiScalePatchTokenizer(
             stem_channels=stem_channels,
@@ -164,36 +186,68 @@ class PointNextPatchTokenizer(nn.Module):
             patch_radii=patch_radii,
             patch_neighbors=patch_neighbors,
         )
-        self.global_scene_tokenizer = GlobalSceneTokenizer(stem_channels, token_channels)
+        self.global_scene_tokenizer = GlobalSceneTokenizer(
+            stem_channels=stem_channels,
+            token_channels=token_channels,
+            radius=global_radius,
+            num_neighbors=global_neighbors,
+        )
 
     def forward(self, pointcloud: torch.Tensor, return_intermediate: bool = False):
+        if pointcloud.ndim != 3:
+            raise ValueError(f"pointcloud must be [B, N, C], but got shape {tuple(pointcloud.shape)}")
+        if pointcloud.size(-1) < self.input_channels:
+            raise ValueError(
+                f"pointcloud has {pointcloud.size(-1)} channels, but input_channels={self.input_channels}"
+            )
+
         xyz = pointcloud[..., :3]
-        point_feature = self.geometry_stem(pointcloud)
+        input_feature = pointcloud[..., : self.input_channels]
+        point_feature = self.geometry_stem(input_feature)
         patch_token, patch_traces = self.local_patch_tokenizer(xyz, point_feature)
+        patch_centers = patch_traces["patch_center"]
         global_scene_token, global_traces = self.global_scene_tokenizer(xyz, point_feature)
 
         traces = {
             "input_xyz": xyz,
+            "input_feature": input_feature,
             "stem_feature": point_feature,
             **patch_traces,
             **global_traces,
         }
 
         if return_intermediate:
-            return patch_token, global_scene_token, traces
-        return patch_token, global_scene_token
+            return patch_token, patch_centers, global_scene_token, traces
+        return patch_token, patch_centers, global_scene_token
 
 
 def example() -> None:
-    pointcloud = torch.randn(1, 1024, 3)
-    model = PointNextPatchTokenizer(input_channels=3, stem_channels=64, token_channels=96, num_patches=16)
-    with torch.no_grad():
-        patch_token, global_scene_token, traces = model(pointcloud, return_intermediate=True)
+    batch_size, num_points = 2, 1024
 
-    print("=== PointNextPatchTokenizer V2 Example ===")
+    xyz = torch.empty(batch_size, num_points, 3)
+    xyz[..., 0] = torch.rand(batch_size, num_points) * 0.6 - 0.3
+    xyz[..., 1] = torch.rand(batch_size, num_points) * 0.8 - 0.4
+    xyz[..., 2] = torch.rand(batch_size, num_points) * 0.5
+    rgb = torch.rand(batch_size, num_points, 3)
+    pointcloud = torch.cat([xyz, rgb], dim=-1)
+
+    model = PointNextPatchTokenizer(
+        input_channels=6,
+        stem_channels=64,
+        token_channels=128,
+        num_patches=96,
+        patch_radii=(0.04, 0.08),
+        patch_neighbors=(16, 32),
+        global_radius=0.16,
+        global_neighbors=32,
+    )
+    with torch.no_grad():
+        patch_token, patch_centers, global_scene_token, traces = model(pointcloud, return_intermediate=True)
+
+    print("=== PointNextPatchTokenizer Example ===")
     print("input:", tuple(pointcloud.shape))
     print("stem_feature:", tuple(traces["stem_feature"].shape))
-    print("patch_center:", tuple(traces["patch_center"].shape))
+    print("patch_centers:", tuple(patch_centers.shape))
     for scale_index, neighbor_idx in enumerate(traces["scale_neighbor_indices"]):
         print(f"scale_{scale_index}_neighbor_idx:", tuple(neighbor_idx.shape))
         print(f"scale_{scale_index}_feature:", tuple(traces['scale_features'][scale_index].shape))

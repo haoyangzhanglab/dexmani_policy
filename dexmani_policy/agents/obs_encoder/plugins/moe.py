@@ -6,19 +6,16 @@ from typing import Dict, Optional
 
 @dataclass
 class MoEAux:
-    router_logits: torch.Tensor
-    router_probs: torch.Tensor
-    topk_idx: torch.Tensor
-    topk_weight: torch.Tensor
-    f_i: torch.Tensor
-    p_i: torch.Tensor
+    expert_token_count: torch.Tensor
+    expert_activation_rate: torch.Tensor
     load_balance_loss: torch.Tensor
     entropy_loss: torch.Tensor
     aux_loss: torch.Tensor
+    expert_token_count_by_group: Optional[torch.Tensor] = None
+    expert_activation_rate_by_group: Optional[torch.Tensor] = None
 
 
 class Expert(nn.Module):
-    """单个 expert, 保持最小 MLP 形式。"""
     def __init__(
         self,
         in_dim: int,
@@ -26,7 +23,7 @@ class Expert(nn.Module):
         out_dim: Optional[int] = None,
         num_layers: int = 2,
         activation: type[nn.Module] = nn.GELU,
-    ) -> None:
+    ):
         super().__init__()
 
         d = in_dim
@@ -58,7 +55,7 @@ class MoE(nn.Module):
         temperature: float = 1.0,
         residual: bool = True,
         activation: type[nn.Module] = nn.GELU,
-    ) -> None:
+    ):
         super().__init__()
 
         out_dim = in_dim if out_dim is None else out_dim
@@ -98,6 +95,7 @@ class MoE(nn.Module):
         topk_idx: Optional[torch.Tensor] = None,
         topk_weight: Optional[torch.Tensor] = None,
         return_aux: bool = False,
+        num_groups: Optional[int] = None,
     ):
         if x.ndim < 2:
             raise ValueError("x must have shape [B, C] or [..., C]")
@@ -112,10 +110,22 @@ class MoE(nn.Module):
             topk_weight, topk_idx = torch.topk(router_probs, k=self.top_k, dim=-1)
         else:
             topk_idx = topk_idx.reshape(-1, self.top_k).to(device=x.device, dtype=torch.long)
+            if topk_idx.shape[0] != x.shape[0]:
+                if x.shape[0] % topk_idx.shape[0] == 0:
+                    repeat = x.shape[0] // topk_idx.shape[0]
+                    topk_idx = topk_idx.repeat_interleave(repeat, dim=0)
+                elif topk_idx.shape[0] == 1:
+                    topk_idx = topk_idx.expand(x.shape[0], -1)
             if topk_weight is None:
                 topk_weight = torch.gather(router_probs, dim=-1, index=topk_idx)
             else:
                 topk_weight = topk_weight.reshape(-1, self.top_k).to(device=x.device, dtype=x.dtype)
+                if topk_weight.shape[0] != x.shape[0]:
+                    if x.shape[0] % topk_weight.shape[0] == 0:
+                        repeat = x.shape[0] // topk_weight.shape[0]
+                        topk_weight = topk_weight.repeat_interleave(repeat, dim=0)
+                    elif topk_weight.shape[0] == 1:
+                        topk_weight = topk_weight.expand(x.shape[0], -1)
 
         topk_weight = topk_weight / topk_weight.sum(dim=-1, keepdim=True).clamp_min(1e-9)
 
@@ -130,10 +140,10 @@ class MoE(nn.Module):
         expert_idx = topk_idx.reshape(-1)
         expert_weight = topk_weight.reshape(-1)
 
-        for i, expert in enumerate(self.experts):
+        active_expert_idx = torch.unique(expert_idx)
+        for i in active_expert_idx.tolist():
+            expert = self.experts[i]
             mask = expert_idx == i
-            if not torch.any(mask):
-                continue
             token_idx_i = token_idx[mask]
             y_i = expert(x.index_select(0, token_idx_i))
             y.index_add_(0, token_idx_i, y_i * expert_weight[mask].unsqueeze(-1))
@@ -146,25 +156,37 @@ class MoE(nn.Module):
         if not return_aux:
             return y
 
-        dispatch = torch.zeros_like(router_probs)
-        dispatch.scatter_(1, topk_idx, 1.0)
-
-        f_i = dispatch.mean(dim=0) / float(self.top_k)
+        # Per-expert routing load: raw top-k assignment count and count normalized by total tokens.
+        expert_token_count = torch.bincount(expert_idx, minlength=self.num_experts).to(dtype=router_probs.dtype)
+        expert_activation_rate = expert_token_count / float(x.shape[0])
+        f_i = expert_token_count / float(x.shape[0] * self.top_k)
         p_i = router_probs.mean(dim=0)
         load_balance_loss = self.num_experts * torch.sum(f_i * p_i)
         entropy_loss = -(router_probs * torch.log(router_probs.clamp_min(1e-9))).sum(dim=-1).mean()
         aux_loss = self.lambda_load * load_balance_loss + self.beta_entropy * entropy_loss
 
+        expert_token_count_by_group = None
+        expert_activation_rate_by_group = None
+        if num_groups is not None and num_groups > 0 and x.shape[0] % num_groups == 0:
+            tokens_per_group = x.shape[0] // num_groups
+            group_idx = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
+            group_idx = torch.div(group_idx, tokens_per_group, rounding_mode="floor")
+            group_idx = group_idx.unsqueeze(1).expand(-1, self.top_k).reshape(-1)
+            flat_group_expert_idx = group_idx * self.num_experts + expert_idx
+            expert_token_count_by_group = torch.bincount(
+                flat_group_expert_idx,
+                minlength=num_groups * self.num_experts,
+            ).reshape(num_groups, self.num_experts).to(dtype=router_probs.dtype)
+            expert_activation_rate_by_group = expert_token_count_by_group / float(tokens_per_group)
+
         aux = MoEAux(
-            router_logits=router_logits.reshape(*token_shape, self.num_experts),
-            router_probs=router_probs.reshape(*token_shape, self.num_experts),
-            topk_idx=topk_idx.reshape(*token_shape, self.top_k),
-            topk_weight=topk_weight.reshape(*token_shape, self.top_k),
-            f_i=f_i,
-            p_i=p_i,
+            expert_token_count=expert_token_count,
+            expert_activation_rate=expert_activation_rate,
             load_balance_loss=load_balance_loss,
             entropy_loss=entropy_loss,
             aux_loss=aux_loss,
+            expert_token_count_by_group=expert_token_count_by_group,
+            expert_activation_rate_by_group=expert_activation_rate_by_group,
         )
         return y, aux
 
@@ -209,9 +231,16 @@ class MoEConditioner(nn.Module):
         topk_idx: Optional[torch.Tensor] = None,
         topk_weight: Optional[torch.Tensor] = None,
         return_aux: bool = False,
+        num_groups: Optional[int] = None,
     ):
         z = self.encoder(obs)
-        return self.moe(z, topk_idx=topk_idx, topk_weight=topk_weight, return_aux=return_aux)
+        return self.moe(
+            z,
+            topk_idx=topk_idx,
+            topk_weight=topk_weight,
+            return_aux=return_aux,
+            num_groups=num_groups,
+        )
 
     @property
     def out_shape(self) -> int:
@@ -247,8 +276,8 @@ if __name__ == "__main__":
 
     z, aux = conditioner(obs, return_aux=True)
     print("z:", z.shape)
-    print("router_probs:", aux.router_probs.shape)
-    print("topk_idx:", aux.topk_idx.shape)
+    print("expert_token_count:", aux.expert_token_count)
+    print("expert_activation_rate:", aux.expert_activation_rate)
     print("aux_loss:", float(aux.aux_loss))
 
     forced_idx = torch.tensor([[1, 3]]).repeat(B, 1)

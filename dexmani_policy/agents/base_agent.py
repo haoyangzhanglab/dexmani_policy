@@ -1,10 +1,8 @@
 import torch
 from typing import Dict, Tuple
 
-from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.agents.common.module_attr_mixin import ModuleAttrMixin
-from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import farthest_point_sample
 
 
 class BaseAgent(ModuleAttrMixin):
@@ -53,6 +51,9 @@ class BaseAgent(ModuleAttrMixin):
     def encode_obs_as_condition(self, obs_dict:Dict) -> torch.Tensor:
         raise NotImplementedError
 
+    def preprocess(self, obs_dict: Dict) -> Dict:
+        raise NotImplementedError
+
 
     def compute_loss(self, batch, **kwargs):
         cond = self.encode_obs_as_condition(batch['obs'])
@@ -76,30 +77,3 @@ class BaseAgent(ModuleAttrMixin):
             "pred_action": pred_action,
             "control_action": action,
         }
-
-
-    #################################################################################
-    #                   处理输入数据，在encode_obs_as_condition中调用
-    #################################################################################
-    def normalize_and_slice_obs(self, obs_dict:Dict) -> Dict:
-        nobs = self.normalizer.normalize(obs_dict)
-        this_obs = dict_apply(nobs, lambda x: x[:, :self.n_obs_steps, ...] if torch.is_tensor(x) else x)
-        return this_obs
-
-
-    @staticmethod
-    def preprocess_point_cloud(this_obs:Dict[str, torch.Tensor], num_points:int=1024, use_coord_only:bool=True):
-        if use_coord_only:
-            this_obs['point_cloud'] = this_obs['point_cloud'][..., :3]
-
-        current_num_points = this_obs['point_cloud'].shape[2]
-        if current_num_points < num_points:
-            raise ValueError(f"Point cloud shape wrong, required {num_points} points, got {current_num_points} points")
-        elif current_num_points == num_points:
-            pass
-        else:
-            downsample_point_cloud, _ = farthest_point_sample(this_obs['point_cloud'].flatten(0, 1), num_points=num_points)
-            B, T = this_obs['point_cloud'].shape[:2]
-            this_obs['point_cloud'] = downsample_point_cloud.reshape(B, T, num_points, -1)
-
-        return this_obs
