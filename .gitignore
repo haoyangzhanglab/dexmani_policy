@@ -141,3 +141,5 @@ dmypy.json
 
 robot_data/
 experiments/
+
+.codex
