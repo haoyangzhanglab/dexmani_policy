@@ -6,7 +6,7 @@ from .clip import CLIP
 from .dino import DINO
 from .resnet import ResNet
 from .siglip import SigLIP
-from .common.image_processor import ImageProcessor, build_image_processor
+from .common.image_processor import ImageProcessor
 
 BackboneName = Literal["resnet", "clip", "dino", "siglip"]
 
@@ -71,5 +71,5 @@ def build_backbone(
         cfg = resolve_resnet_weights(cfg)
 
     backbone = backbone_cls(**cfg)
-    image_processor = build_image_processor(name)
+    image_processor = ImageProcessor.from_preset(name)
     return backbone, image_processor

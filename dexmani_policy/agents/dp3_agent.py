@@ -4,7 +4,7 @@ from typing import List
 
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.agents.base_agent import BaseAgent
-from dexmani_policy.agents.obs_encoder.dp3 import DP3Encoder
+from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
 from dexmani_policy.agents.common.mlp import create_mlp
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
@@ -39,14 +39,11 @@ class DP3Agent(BaseAgent):
     ):
         super().__init__(horizon, n_obs_steps, n_action_steps, action_dim)
 
-        self.obs_encoder = DP3Encoder(
-            type=encoder_type,
-            pc_dim=pc_dim,
-            pc_out_dim=pc_out_dim,
-            point_wise=False,
+        self._pc_encoder, self._pc_seq_len, self._pc_out_dim = build_pc_global_encoder(
+            encoder_type, pc_dim, config={"pc_out_dim": pc_out_dim}
         )
         self.state_mlp = create_mlp(state_dim, [64, self.STATE_OUT_DIM])
-        self.pc_out_dim = pc_out_dim
+        self.pc_out_dim = self._pc_out_dim
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
 
@@ -112,7 +109,8 @@ class DP3Agent(BaseAgent):
         pc = this_obs_dict["point_cloud"]
         state = this_obs_dict["joint_state"]
 
-        _, _, global_token = self.obs_encoder(pc)
+        result = self._pc_encoder(pc)
+        global_token = result["global_token"].unsqueeze(1)
         state_feat = self.state_mlp(state)
         feat = torch.cat([global_token.squeeze(1), state_feat], dim=-1)
 

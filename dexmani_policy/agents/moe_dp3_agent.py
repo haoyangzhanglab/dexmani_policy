@@ -3,13 +3,17 @@ from typing import Dict, List, Optional
 
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.agents.base_agent import BaseAgent
-from dexmani_policy.agents.obs_encoder.moe_dp3 import MoEDP3Encoder
+from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
+from dexmani_policy.agents.common.mlp import create_mlp
+from dexmani_policy.agents.obs_encoder.plugins.moe import MoEAux, MoE
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import farthest_point_sample
 
 
 class MoEDP3Agent(BaseAgent):
+    STATE_OUT_DIM = 64
+
     def __init__(
         self,
         horizon: int,
@@ -45,29 +49,33 @@ class MoEDP3Agent(BaseAgent):
     ):
         super().__init__(horizon, n_obs_steps, n_action_steps, action_dim)
 
-        self.obs_encoder = MoEDP3Encoder(
-            encoder_type=encoder_type,
-            pc_dim=pc_dim,
-            pc_out_dim=pc_out_dim,
-            point_wise=False,
-            state_dim=state_dim,
+        self._pc_encoder, self._pc_seq_len, self._pc_out_dim = build_pc_global_encoder(
+            encoder_type, pc_dim, config={"pc_out_dim": pc_out_dim}
+        )
+        self.state_mlp = create_mlp(state_dim, [64, self.STATE_OUT_DIM])
+        self.num_points = num_points
+        self.use_coord_only = (pc_dim == 3)
+
+        encoder_out_dim = self._pc_out_dim + self.STATE_OUT_DIM
+        self._moe_out_dim = encoder_out_dim if moe_out_dim is None else moe_out_dim
+
+        self.moe = MoE(
+            in_dim=encoder_out_dim,
             num_experts=num_experts,
             top_k=top_k,
-            moe_hidden_dim=moe_hidden_dim,
-            moe_out_dim=moe_out_dim,
-            moe_num_layers=moe_num_layers,
+            hidden_dim=moe_hidden_dim,
+            out_dim=self._moe_out_dim,
+            num_layers=moe_num_layers,
             lambda_load=lambda_load,
             beta_entropy=beta_entropy,
             temperature=temperature,
             residual=residual,
         )
-        self.num_points = num_points
-        self.use_coord_only = (pc_dim == 3)
 
         if condition_type == "film":
-            self.obs_cond_dim = self.obs_encoder.out_shape * n_obs_steps
+            self.obs_cond_dim = self._moe_out_dim * n_obs_steps
         elif condition_type == "cross_attention_film":
-            self.obs_cond_dim = self.obs_encoder.out_shape
+            self.obs_cond_dim = self._moe_out_dim
         else:
             raise ValueError(f"{condition_type} is not implemented")
 
@@ -90,6 +98,10 @@ class MoEDP3Agent(BaseAgent):
             num_inference_steps=num_inference_steps,
             prediction_type=prediction_type,
         )
+
+    @property
+    def out_shape(self) -> int:
+        return self._moe_out_dim
 
     def preprocess(self, obs_dict):
         this_obs = self.normalizer.normalize(obs_dict)
@@ -130,10 +142,18 @@ class MoEDP3Agent(BaseAgent):
         if topk_weight is not None and not torch.is_tensor(topk_weight):
             topk_weight = torch.as_tensor(topk_weight)
 
-        feat, aux = self.obs_encoder(
-            this_obs_dict,
+        pc = this_obs_dict["point_cloud"]
+        state = this_obs_dict["joint_state"]
+
+        _, _, global_token = self._pc_encoder(pc)
+        state_feat = self.state_mlp(state)
+        z = torch.cat([global_token.squeeze(1), state_feat], dim=-1)
+
+        feat, aux = self.moe(
+            z,
             topk_idx=topk_idx,
             topk_weight=topk_weight,
+            return_aux=True,
             num_groups=batch_size,
         )
 

@@ -257,10 +257,6 @@ class ImageProcessor:
         )
 
 
-def build_image_processor(name: str) -> ImageProcessor:
-    return ImageProcessor.from_preset(name)
-
-
 def example():
     processor = ImageProcessor.from_preset("dino")
 

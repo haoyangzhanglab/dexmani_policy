@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from typing import Dict
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
     group,
     sample_and_group,
@@ -9,25 +10,13 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings impo
     SinusoidalPosEmb3D,
     RelativePositionalEncoding3D,
 )
+from dexmani_policy.agents.obs_encoder.pointcloud.common.layers import PointMLP
 
 
 def resolve_stage_values(value, num_stages: int, name: str):
     if len(value) != num_stages:
         raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
     return tuple(value)
-
-
-class PointMLP(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
-        super().__init__()
-        self.linear = nn.Linear(in_channels, out_channels)
-        self.norm = nn.LayerNorm(out_channels)
-        self.activation = nn.GELU() if use_activation else nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear(x)
-        x = self.norm(x)
-        return self.activation(x)
 
 
 class SetAbstraction(nn.Module):
@@ -155,7 +144,6 @@ class PointNextEncoder(nn.Module):
         self,
         input_channels: int = 6,
         output_channels: int = 256,
-        point_wise: bool = False,
         stage_depths: tuple[int, ...] = (1, 2, 2),
         stage_strides: tuple[int, ...] = (1, 2, 2),
         stage_channels: tuple[int, ...] = (64, 128, 256),
@@ -177,7 +165,6 @@ class PointNextEncoder(nn.Module):
 
         self.input_channels = input_channels
         self.output_channels = output_channels
-        self.point_wise = point_wise
 
         self.stages = nn.ModuleList()
         current_channels = input_channels
@@ -213,7 +200,7 @@ class PointNextEncoder(nn.Module):
             nn.LayerNorm(output_channels),
         )
 
-    def forward(self, pointcloud: torch.Tensor, return_intermediate: bool = False):
+    def forward(self, pointcloud: torch.Tensor) -> Dict[str, torch.Tensor]:
         if pointcloud.size(-1) < self.input_channels:
             raise ValueError(
                 f"pointcloud has {pointcloud.size(-1)} channels, but input_channels={self.input_channels}"
@@ -222,39 +209,21 @@ class PointNextEncoder(nn.Module):
         position = pointcloud[..., :3]
         feature = pointcloud[..., : self.input_channels]
 
-        traces = {
-            "input_xyz": position,
-            "input_feature": feature,
-            "stage_positions": [],
-            "stage_features": [],
-        }
-
         for stage in self.stages:
             for block in stage:
                 position, feature = block(position, feature)
-            traces["stage_positions"].append(position)
-            traces["stage_features"].append(feature)
 
-        traces["final_position"] = position
+        global_token = self._get_global_token(feature, position)
+        return {"global_token": global_token}
 
-        if self.point_wise:
-            point_feature = self.output_projection(feature)
-            traces["point_feature"] = point_feature
-            if return_intermediate:
-                return point_feature, traces
-            return point_feature
-
-        pooled_feature = feature.max(dim=1).values
-        pooled_position = position.mean(dim=1)
+    def _get_global_token(self, patch_token: torch.Tensor, patch_center: torch.Tensor) -> torch.Tensor:
+        """从逐点特征和位置衍生全局向量: max pool + position encoding → (B, C)."""
+        pooled_feature = patch_token.max(dim=1).values
+        pooled_position = patch_center.mean(dim=1)
         global_feature = pooled_feature + self.global_position_projection(
             self.global_position_embedding(pooled_position)
         )
-        global_feature = self.output_projection(global_feature)
-        traces["global_feature"] = global_feature
-
-        if return_intermediate:
-            return global_feature, traces
-        return global_feature
+        return self.output_projection(global_feature)  # (B, C)
 
 
 def example() -> None:
@@ -267,20 +236,9 @@ def example() -> None:
     rgb = torch.rand(batch_size, num_points, 3)
     pointcloud = torch.cat([xyz, rgb], dim=-1)
 
-    global_model = PointNextEncoder(
+    model = PointNextEncoder(
         input_channels=6,
         output_channels=256,
-        point_wise=False,
-        stage_depths=(1, 2, 2),
-        stage_strides=(1, 2, 2),
-        stage_channels=(64, 128, 256),
-        radii=(0.04, 0.08, 0.16),
-        num_neighbors=(24, 24, 32),
-    )
-    point_model = PointNextEncoder(
-        input_channels=6,
-        output_channels=256,
-        point_wise=True,
         stage_depths=(1, 2, 2),
         stage_strides=(1, 2, 2),
         stage_channels=(64, 128, 256),
@@ -289,17 +247,12 @@ def example() -> None:
     )
 
     with torch.no_grad():
-        global_feature, global_traces = global_model(pointcloud, return_intermediate=True)
-        point_feature, point_traces = point_model(pointcloud, return_intermediate=True)
+        out = model(pointcloud)
 
     print("=== PointNextEncoder Example ===")
     print("input:", tuple(pointcloud.shape))
-    for stage_index, (position, feature) in enumerate(zip(global_traces["stage_positions"], global_traces["stage_features"])):
-        print(f"stage_{stage_index}_position:", tuple(position.shape))
-        print(f"stage_{stage_index}_feature:", tuple(feature.shape))
-    print("global_feature:", tuple(global_feature.shape))
-    print("point_feature:", tuple(point_feature.shape))
-    print("point_feature_position:", tuple(point_traces["final_position"].shape))
+    print("global_token:", tuple(out["global_token"].shape))
+    print("out_shape:", model.output_channels)
 
 
 if __name__ == "__main__":

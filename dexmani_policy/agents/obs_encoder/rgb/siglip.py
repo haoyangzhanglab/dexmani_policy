@@ -91,7 +91,7 @@ class SigLIP(nn.Module):
             if pooler_output is not None:
                 return self.proj(pooler_output)
 
-        return self.proj(outputs.last_hidden_state[:, 0])
+        return self.proj(outputs.last_hidden_state[:, 0])  # CLS token, projected once here
 
 
     def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -104,7 +104,7 @@ class SigLIP(nn.Module):
         flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
         outputs = self.backbone(pixel_values=flat_rgb, return_dict=True)
 
-        patch_tokens = self.proj(outputs.last_hidden_state)
+        patch_tokens = self.proj(outputs.last_hidden_state[:, 1:])
         global_token = self.get_global_token(outputs, patch_tokens)
 
         return {

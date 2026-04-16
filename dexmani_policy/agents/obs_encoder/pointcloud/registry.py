@@ -1,16 +1,54 @@
 import torch
 import torch.nn as nn
-from typing import Callable, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
-from dexmani_policy.agents.obs_encoder.dp3 import DP3Encoder
-from dexmani_policy.agents.obs_encoder.pointcloud.point_pn import PointPNEncoder
-from dexmani_policy.agents.obs_encoder.pointcloud.tokenizer import PointNextPatchTokenizer
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet, MultiStagePointNet
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnext import PointNextEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.point_pn import PointPNTokenizer
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnext_tokenizer import PointNextPatchTokenizer
 
-PC_ENCODER_CONFIGS: Dict[str, Dict] = {
-    "idp3": {
-        "pc_out_dim": 128,
-        "num_points": 1024,
-    },
+
+def build_pc_global_encoder(
+    type: str,
+    pc_dim: int,
+    config: Optional[Dict] = None,
+) -> Tuple[nn.Module, int, int]:
+    """构建全局点云编码器。返回 (encoder, seq_len=1, out_dim)。"""
+    if type == "dp3":
+        cfg = {"pc_out_dim": 256}
+        if config:
+            cfg.update(config)
+        encoder = PointNet(in_channels=pc_dim, out_channels=cfg["pc_out_dim"])
+        out_dim = cfg["pc_out_dim"]
+
+    elif type == "idp3":
+        cfg = {"pc_out_dim": 256}
+        if config:
+            cfg.update(config)
+        encoder = MultiStagePointNet(in_channels=pc_dim, out_channels=cfg["pc_out_dim"])
+        out_dim = cfg["pc_out_dim"]
+
+    elif type == "pointnext":
+        cfg = {
+            "output_channels": 256,
+            "stage_depths": (1, 2, 2),
+            "stage_strides": (1, 2, 2),
+            "stage_channels": (64, 128, 256),
+            "radii": (0.04, 0.08, 0.16),
+            "num_neighbors": (24, 24, 32),
+        }
+        if config:
+            cfg.update(config)
+        encoder = PointNextEncoder(input_channels=pc_dim, **cfg)
+        out_dim = cfg["output_channels"]
+
+    else:
+        raise ValueError(f"Unknown global encoder type: {type}")
+
+    return encoder, 1, out_dim
+
+
+PC_TOKENIZER_CONFIGS: Dict[str, Dict] = {
     "pointpn": {
         "num_points": 1024,
         "num_stages": 3,
@@ -32,92 +70,45 @@ PC_ENCODER_CONFIGS: Dict[str, Dict] = {
 }
 
 
-def build_idp3(
-    pc_dim: int, config: Dict
-) -> Tuple[nn.Module, int, int, Callable]:
-    encoder = DP3Encoder(
-        type="idp3",
-        pc_dim=pc_dim,
-        pc_out_dim=config["pc_out_dim"],
-        point_wise=True,
-    )
-    seq_len = config["num_points"] + 1  # +1 for global_token
-    out_dim = config["pc_out_dim"]
-
-    def extract_fn(pc: torch.Tensor) -> torch.Tensor:
-        patch_token, patch_center, global_token = encoder(pc)
-        return torch.cat([global_token, patch_token], dim=1)
-
-    return encoder, seq_len, out_dim, extract_fn
-
-
-def build_pointpn(
-    pc_dim: int, config: Dict
-) -> Tuple[nn.Module, int, int, Callable]:
-    encoder = PointPNEncoder(
-        in_channels=pc_dim,
-        input_points=config["num_points"],
-        num_stages=config["num_stages"],
-        embed_dim=config["embed_dim"],
-        k_neighbors=config["k_neighbors"],
-        lga_blocks=config["lga_blocks"],
-        dim_expansion=config["dim_expansion"],
-        point_cloud_type=config["point_cloud_type"],
-    )
-    seq_len = config["num_points"] // (2 ** config["num_stages"]) + 1  # +1 for global_token
-    out_dim = encoder.out_channels
-
-    def extract_fn(pc: torch.Tensor) -> torch.Tensor:
-        patch_token, patch_center, global_token = encoder(pc)
-        return torch.cat([global_token, patch_token], dim=1)
-
-    return encoder, seq_len, out_dim, extract_fn
-
-
-def build_tokenizer(
-    pc_dim: int, config: Dict
-) -> Tuple[nn.Module, int, int, Callable]:
-    encoder = PointNextPatchTokenizer(
-        input_channels=pc_dim,
-        stem_channels=config["stem_channels"],
-        token_channels=config["token_channels"],
-        num_patches=config["num_patches"],
-        patch_radii=config["patch_radii"],
-        patch_neighbors=config["patch_neighbors"],
-        global_radius=config["global_radius"],
-        global_neighbors=config["global_neighbors"],
-    )
-    seq_len = config["num_patches"] + 1
-    out_dim = config["token_channels"]
-
-    def extract_fn(pc: torch.Tensor) -> torch.Tensor:
-        patch_token, patch_center, global_token = encoder(pc)
-        return torch.cat([global_token, patch_token], dim=1)
-
-    return encoder, seq_len, out_dim, extract_fn
-
-
-PC_BUILDERS: Dict[str, Callable] = {
-    "idp3": build_idp3,
-    "pointpn": build_pointpn,
-    "tokenizer": build_tokenizer,
-}
-
-
-def build_pc_encoder(
+def build_pc_patch_tokenizer(
     type: str,
     pc_dim: int,
     config: Optional[Dict] = None,
-) -> Tuple[nn.Module, int, int, Callable]:
-    """Build a point cloud encoder.
-
-    Returns:
-        (encoder, seq_len, out_dim, extract_fn)
-
-    所有编码器统一返回 (patch_token, patch_center, global_token) 三 tuple，
-    语义与 PointNextPatchTokenizer 一致。
-    """
-    cfg = dict(PC_ENCODER_CONFIGS[type])
+) -> Tuple[nn.Module, int, int]:
+    """构建点云 patch tokenizer。返回 (tokenizer, seq_len, out_dim)。"""
+    cfg = dict(PC_TOKENIZER_CONFIGS[type])
     if config:
         cfg.update(config)
-    return PC_BUILDERS[type](pc_dim, cfg)
+
+    if type == "pointpn":
+        encoder = PointPNTokenizer(
+            in_channels=pc_dim,
+            input_points=cfg["num_points"],
+            num_stages=cfg["num_stages"],
+            embed_dim=cfg["embed_dim"],
+            k_neighbors=cfg["k_neighbors"],
+            lga_blocks=cfg["lga_blocks"],
+            dim_expansion=cfg["dim_expansion"],
+            point_cloud_type=cfg["point_cloud_type"],
+        )
+        seq_len = cfg["num_points"] // (2 ** cfg["num_stages"]) + 1
+        out_dim = encoder.out_channels
+
+    elif type == "tokenizer":
+        encoder = PointNextPatchTokenizer(
+            input_channels=pc_dim,
+            stem_channels=cfg["stem_channels"],
+            token_channels=cfg["token_channels"],
+            num_patches=cfg["num_patches"],
+            patch_radii=cfg["patch_radii"],
+            patch_neighbors=cfg["patch_neighbors"],
+            global_radius=cfg["global_radius"],
+            global_neighbors=cfg["global_neighbors"],
+        )
+        seq_len = cfg["num_patches"] + 1
+        out_dim = cfg["token_channels"]
+
+    else:
+        raise ValueError(f"Unknown tokenizer type: {type}")
+
+    return encoder, seq_len, out_dim

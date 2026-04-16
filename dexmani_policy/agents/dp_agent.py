@@ -4,12 +4,15 @@ from typing import List
 
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.agents.base_agent import BaseAgent
-from dexmani_policy.agents.obs_encoder.dp import DPEncoder
+from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
+from dexmani_policy.agents.common.mlp import create_mlp
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 
 
 class DPAgent(BaseAgent):
+    STATE_OUT_DIM = 64
+
     def __init__(
         self,
         horizon: int,
@@ -32,15 +35,13 @@ class DPAgent(BaseAgent):
     ):
         super().__init__(horizon, n_obs_steps, n_action_steps, action_dim)
 
-        self.obs_encoder = DPEncoder(
-            rgb_backbone_name=rgb_backbone_name,
-            state_dim=state_dim,
-        )
+        self.rgb_backbone, self.image_processor = build_backbone(rgb_backbone_name)
+        self.state_mlp = create_mlp(state_dim, [64, self.STATE_OUT_DIM])
 
         if condition_type == "film":
-            self.obs_cond_dim = self.obs_encoder.out_shape * n_obs_steps
+            self.obs_cond_dim = (self.rgb_backbone.out_dim + self.STATE_OUT_DIM) * n_obs_steps
         elif condition_type == "cross_attention_film":
-            self.obs_cond_dim = self.obs_encoder.out_shape
+            self.obs_cond_dim = self.rgb_backbone.out_dim + self.STATE_OUT_DIM
         else:
             raise ValueError(f"{condition_type} is not implemented")
 
@@ -77,7 +78,11 @@ class DPAgent(BaseAgent):
         batch_size = obs_dict["rgb"].shape[0]
         this_obs_dict = self.preprocess(obs_dict)
 
-        feat = self.obs_encoder(this_obs_dict)
+        rgb = self.image_processor.process_images(this_obs_dict["rgb"]).image
+        image_feat = self.rgb_backbone(rgb)["global_token"]
+        state_feat = self.state_mlp(this_obs_dict["joint_state"])
+        feat = torch.cat([image_feat, state_feat], dim=-1)
+
         if self.backbone.condition_type == "film":
             feat = feat.reshape(batch_size, -1)
         elif self.backbone.condition_type == "cross_attention_film":
@@ -86,3 +91,7 @@ class DPAgent(BaseAgent):
             raise ValueError(f"{self.backbone.condition_type} is not implemented")
 
         return feat
+
+    @property
+    def out_shape(self) -> int:
+        return self.rgb_backbone.out_dim + self.STATE_OUT_DIM

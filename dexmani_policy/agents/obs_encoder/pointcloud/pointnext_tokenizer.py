@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from typing import Tuple
+
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
     farthest_point_sample,
     index_points,
@@ -9,31 +11,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings impo
     RelativePositionalEncoding3D,
     SinusoidalPosEmb3D,
 )
-
-
-class PointMLP(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
-        super().__init__()
-        self.linear = nn.Linear(in_channels, out_channels)
-        self.norm = nn.LayerNorm(out_channels)
-        self.activation = nn.GELU() if use_activation else nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear(x)
-        x = self.norm(x)
-        return self.activation(x)
-
-
-class GeometryStem(nn.Module):
-    def __init__(self, input_channels: int, stem_channels: int):
-        super().__init__()
-        self.stem = nn.Sequential(
-            PointMLP(input_channels, stem_channels),
-            PointMLP(stem_channels, stem_channels),
-        )
-
-    def forward(self, point_feature: torch.Tensor) -> torch.Tensor:
-        return self.stem(point_feature)
+from dexmani_policy.agents.obs_encoder.pointcloud.common.layers import PointMLP
 
 
 class LocalPatchEncoder(nn.Module):
@@ -71,8 +49,8 @@ class MultiScalePatchTokenizer(nn.Module):
         stem_channels: int,
         token_channels: int,
         num_patches: int,
-        patch_radii: tuple[float, ...],
-        patch_neighbors: tuple[int, ...],
+        patch_radii: Tuple[float, ...],
+        patch_neighbors: Tuple[int, ...],
     ):
         super().__init__()
         if len(patch_radii) != len(patch_neighbors):
@@ -96,23 +74,14 @@ class MultiScalePatchTokenizer(nn.Module):
         center_feature = index_points(point_feature, center_idx)
 
         scale_features = []
-        scale_neighbor_indices = []
         for scale_encoder in self.scale_encoders:
             patch_feature, neighbor_idx = scale_encoder(xyz, point_feature, patch_center)
             scale_features.append(patch_feature)
-            scale_neighbor_indices.append(neighbor_idx)
 
         center_position = self.center_position_encoding(patch_center)
         patch_token = self.token_projection(torch.cat((center_feature, *scale_features, center_position), dim=-1))
 
-        traces = {
-            "patch_center": patch_center,
-            "center_feature": center_feature,
-            "scale_neighbor_indices": scale_neighbor_indices,
-            "scale_features": scale_features,
-            "patch_token": patch_token,
-        }
-        return patch_token, traces
+        return patch_token, patch_center
 
 
 class GlobalSceneTokenizer(nn.Module):
@@ -150,23 +119,20 @@ class GlobalSceneTokenizer(nn.Module):
         scene_point_feature = self.scene_point_mlp(grouped_input).max(dim=2).values
         global_scene_token = self.scene_projection(scene_point_feature.max(dim=1, keepdim=True).values)
 
-        traces = {
-            "scene_neighbor_indices": neighbor_idx,
-            "scene_point_feature": scene_point_feature,
-            "global_scene_token": global_scene_token,
-        }
-        return global_scene_token, traces
+        return global_scene_token
 
 
 class PointNextPatchTokenizer(nn.Module):
+    """多尺度 Point Patch Token 提取器。"""
+
     def __init__(
         self,
         input_channels: int = 6,
         stem_channels: int = 64,
         token_channels: int = 128,
         num_patches: int = 64,
-        patch_radii: tuple[float, ...] = (0.04, 0.08),
-        patch_neighbors: tuple[int, ...] = (16, 32),
+        patch_radii: Tuple[float, ...] = (0.04, 0.08),
+        patch_neighbors: Tuple[int, ...] = (16, 32),
         global_radius: float = 0.16,
         global_neighbors: int = 32,
     ):
@@ -175,10 +141,12 @@ class PointNextPatchTokenizer(nn.Module):
             raise ValueError("input_channels must be at least 3 because xyz is required")
 
         self.input_channels = input_channels
-        self.stem_channels = stem_channels
         self.token_channels = token_channels
 
-        self.geometry_stem = GeometryStem(input_channels, stem_channels)
+        self.geometry_stem = nn.Sequential(
+            PointMLP(input_channels, stem_channels),
+            PointMLP(stem_channels, stem_channels),
+        )
         self.local_patch_tokenizer = MultiScalePatchTokenizer(
             stem_channels=stem_channels,
             token_channels=token_channels,
@@ -193,7 +161,7 @@ class PointNextPatchTokenizer(nn.Module):
             num_neighbors=global_neighbors,
         )
 
-    def forward(self, pointcloud: torch.Tensor, return_intermediate: bool = False):
+    def forward(self, pointcloud: torch.Tensor):
         if pointcloud.ndim != 3:
             raise ValueError(f"pointcloud must be [B, N, C], but got shape {tuple(pointcloud.shape)}")
         if pointcloud.size(-1) < self.input_channels:
@@ -204,21 +172,21 @@ class PointNextPatchTokenizer(nn.Module):
         xyz = pointcloud[..., :3]
         input_feature = pointcloud[..., : self.input_channels]
         point_feature = self.geometry_stem(input_feature)
-        patch_token, patch_traces = self.local_patch_tokenizer(xyz, point_feature)
-        patch_centers = patch_traces["patch_center"]
-        global_scene_token, global_traces = self.global_scene_tokenizer(xyz, point_feature)
 
-        traces = {
-            "input_xyz": xyz,
-            "input_feature": input_feature,
-            "stem_feature": point_feature,
-            **patch_traces,
-            **global_traces,
-        }
+        patch_token, patch_center = self.local_patch_tokenizer(xyz, point_feature)
+        # 缓存用于 get_global_token
+        self._last_xyz = xyz
+        self._last_point_feature = point_feature
 
-        if return_intermediate:
-            return patch_token, patch_centers, global_scene_token, traces
-        return patch_token, patch_centers, global_scene_token
+        return patch_token, patch_center
+
+    def get_global_token(self, patch_token: torch.Tensor) -> torch.Tensor:
+        """从 patch_token 衍生全局向量，委托 GlobalSceneTokenizer 做复杂聚合。"""
+        return self.global_scene_tokenizer(self._last_xyz, self._last_point_feature)
+
+    @property
+    def out_shape(self) -> int:
+        return self.token_channels
 
 
 def example() -> None:
@@ -231,6 +199,7 @@ def example() -> None:
     rgb = torch.rand(batch_size, num_points, 3)
     pointcloud = torch.cat([xyz, rgb], dim=-1)
 
+    print("=== PointNextPatchTokenizer Example ===")
     model = PointNextPatchTokenizer(
         input_channels=6,
         stem_channels=64,
@@ -242,18 +211,14 @@ def example() -> None:
         global_neighbors=32,
     )
     with torch.no_grad():
-        patch_token, patch_centers, global_scene_token, traces = model(pointcloud, return_intermediate=True)
+        patch_token, patch_center = model(pointcloud)
+        global_token = model.get_global_token(patch_token)
 
-    print("=== PointNextPatchTokenizer Example ===")
     print("input:", tuple(pointcloud.shape))
-    print("stem_feature:", tuple(traces["stem_feature"].shape))
-    print("patch_centers:", tuple(patch_centers.shape))
-    for scale_index, neighbor_idx in enumerate(traces["scale_neighbor_indices"]):
-        print(f"scale_{scale_index}_neighbor_idx:", tuple(neighbor_idx.shape))
-        print(f"scale_{scale_index}_feature:", tuple(traces['scale_features'][scale_index].shape))
     print("patch_token:", tuple(patch_token.shape))
-    print("scene_point_feature:", tuple(traces["scene_point_feature"].shape))
-    print("global_scene_token:", tuple(global_scene_token.shape))
+    print("patch_center:", tuple(patch_center.shape))
+    print("global_token:", tuple(global_token.shape))
+    print("out_shape:", model.out_shape)
 
 
 if __name__ == "__main__":
