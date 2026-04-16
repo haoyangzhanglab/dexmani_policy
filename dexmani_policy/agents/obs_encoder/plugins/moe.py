@@ -89,6 +89,30 @@ class MoE(nn.Module):
             ]
         )
 
+    @staticmethod
+    def expand_forced_tensor(t: torch.Tensor, target_rows: int, top_k: int, name: str) -> torch.Tensor:
+        """将按 observation 给的 forced routing 张量扩展到 flattened token 维度。
+
+        允许三种情况:
+        - t 已有 target_rows 行: 直接 reshape 返回
+        - target_rows % t.shape[0] == 0: 按倍数 repeat_interleave（隐含所有 obs token 数相同）
+        - t.shape[0] == 1: 单个 observation 的路由，expand 到全部 token
+        """
+        t = t.reshape(-1, top_k)
+        if t.shape[0] == target_rows:
+            return t
+        if not (target_rows % t.shape[0] == 0 or t.shape[0] == 1):
+            raise ValueError(
+                f"{name} shape mismatch: {name} has {t.shape[0]} rows "
+                f"but target is {target_rows} flattened tokens. "
+                f"{name}[0] must be 1 or divide target_rows exactly."
+            )
+        if target_rows % t.shape[0] == 0:
+            t = t.repeat_interleave(target_rows // t.shape[0], dim=0)
+        else:
+            t = t.expand(target_rows, -1)
+        return t
+
     def forward(
         self,
         x: torch.Tensor,
@@ -109,23 +133,15 @@ class MoE(nn.Module):
         if topk_idx is None:
             topk_weight, topk_idx = torch.topk(router_probs, k=self.top_k, dim=-1)
         else:
-            topk_idx = topk_idx.reshape(-1, self.top_k).to(device=x.device, dtype=torch.long)
-            if topk_idx.shape[0] != x.shape[0]:
-                if x.shape[0] % topk_idx.shape[0] == 0:
-                    repeat = x.shape[0] // topk_idx.shape[0]
-                    topk_idx = topk_idx.repeat_interleave(repeat, dim=0)
-                elif topk_idx.shape[0] == 1:
-                    topk_idx = topk_idx.expand(x.shape[0], -1)
+            topk_idx = self.expand_forced_tensor(
+                topk_idx, x.shape[0], self.top_k, "topk_idx"
+            ).to(device=x.device, dtype=torch.long)
             if topk_weight is None:
                 topk_weight = torch.gather(router_probs, dim=-1, index=topk_idx)
             else:
-                topk_weight = topk_weight.reshape(-1, self.top_k).to(device=x.device, dtype=x.dtype)
-                if topk_weight.shape[0] != x.shape[0]:
-                    if x.shape[0] % topk_weight.shape[0] == 0:
-                        repeat = x.shape[0] // topk_weight.shape[0]
-                        topk_weight = topk_weight.repeat_interleave(repeat, dim=0)
-                    elif topk_weight.shape[0] == 1:
-                        topk_weight = topk_weight.expand(x.shape[0], -1)
+                topk_weight = self.expand_forced_tensor(
+                    topk_weight, x.shape[0], self.top_k, "topk_weight"
+                ).to(device=x.device, dtype=x.dtype)
 
         topk_weight = topk_weight / topk_weight.sum(dim=-1, keepdim=True).clamp_min(1e-9)
 

@@ -1,23 +1,9 @@
 import torch
 import torch.nn as nn
-from typing import List, Dict
+from typing import Dict
+from dexmani_policy.agents.common.mlp import create_mlp
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnext import PointNextEncoder
-
-
-def create_mlp(
-    in_channels: int,
-    layer_channels: List[int],
-    activation: type[nn.Module] = nn.ReLU
-):
-    layers = []
-    prev = in_channels
-    for h in layer_channels:
-        layers.append(nn.Linear(prev, h))
-        layers.append(nn.LayerNorm(h))
-        layers.append(activation())
-        prev = h
-    return nn.Sequential(*layers)
 
 
 class PointNet(nn.Module):
@@ -48,8 +34,7 @@ class PointNet(nn.Module):
         x = self.final_projection(x)
         if not self.point_wise:
             return x.amax(dim=1)
-        else:
-            return x
+        return x
 
 
 class MultiStagePointNet(nn.Module):
@@ -103,6 +88,13 @@ class MultiStagePointNet(nn.Module):
 
 
 class DP3Encoder(nn.Module):
+    """点云编码器，统一返回 (patch_token, patch_center, global_token)。
+
+    point_wise=True 时输出逐点特征 (B, N, C)：
+        patch_token = pointnet(pc), patch_center = pc 坐标, global_token = max pool
+    point_wise=False 时输出全局特征 (B, C)：
+        patch_token = global_token, patch_center = 零占位, global_token = feat.unsqueeze(1)
+    """
 
     def __init__(
         self,
@@ -110,13 +102,11 @@ class DP3Encoder(nn.Module):
         pc_dim: int = 3,
         pc_out_dim: int = 256,
         point_wise: bool = False,
-        state_dim: int = 19,
     ):
         super().__init__()
 
-        self.modality_keys = ["point_cloud", "joint_state"]
         self.pc_out_dim = pc_out_dim
-        self.state_out_dim = 64
+        self.point_wise = point_wise
 
         if type == "dp3":
             self.pointnet = PointNet(
@@ -139,34 +129,35 @@ class DP3Encoder(nn.Module):
         else:
             raise ValueError(f"Unsupported pointnet type: {type}")
 
-        self.state_mlp = create_mlp(state_dim, [64, self.state_out_dim])
+    def forward(self, pointcloud: torch.Tensor) -> tuple:
+        """
+        Args:
+            pointcloud: (B, N, C) 点云 tensor
+        Returns:
+            (patch_token, patch_center, global_token)
+                patch_token:  (B, seq_len, C)  或 (B, 1, C)
+                patch_center: (B, seq_len, 3)  或 (B, 1, 3) 零占位
+                global_token: (B, 1, C)
+        """
+        feat = self.pointnet(pointcloud)
 
-    def forward(self, observations: Dict) -> torch.Tensor:
-        for key in self.modality_keys:
-            if key not in observations:
-                raise KeyError(f"Required modality key '{key}' missed")
-        point_cloud, state = observations["point_cloud"], observations["joint_state"]
-        if point_cloud.shape[:-2] != state.shape[:-1]:
-            raise ValueError(
-                f"point_cloud leading dims {tuple(point_cloud.shape[:-2])} != "
-                f"joint_state leading dims {tuple(state.shape[:-1])}"
-            )
+        if self.point_wise:
+            patch_token = feat  # (B, N, C)
+            patch_center = pointcloud[..., :3]  # (B, N, 3)
+            global_token = patch_token.max(dim=1, keepdim=True).values  # (B, 1, C)
+        else:
+            global_token = feat.unsqueeze(1)  # (B, 1, C)
+            patch_token = global_token
+            patch_center = torch.zeros(feat.size(0), 1, 3, device=feat.device, dtype=feat.dtype)
 
-        pc_feat = self.pointnet(point_cloud)
-        state_feat = self.state_mlp(state)
-
-        if self.pointnet.point_wise:
-            state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
-
-        feat = torch.cat([pc_feat, state_feat], dim=-1)
-        return feat
-
-    @property
-    def out_shape(self):
-        return self.pc_out_dim + self.state_out_dim
+        return patch_token, patch_center, global_token
 
     def get_optim_groups(self, weight_decay):
         return get_optim_group_with_no_decay(self, weight_decay)
+
+    @property
+    def out_shape(self):
+        return self.pc_out_dim
 
 
 def example():
@@ -180,35 +171,53 @@ def example():
     rgb = torch.rand(batch_size, num_points, 3)
     point_cloud = torch.cat([xyz, rgb], dim=-1)
 
-    observations = {
-        "point_cloud": point_cloud,
-        "joint_state": torch.randn(batch_size, state_dim),
-    }
+    state = torch.randn(batch_size, state_dim)
 
+    print("=== DP3Encoder Example ===")
+    print("point_cloud:", tuple(point_cloud.shape))
+    print("joint_state:", tuple(state.shape))
+
+    # point_wise=True 时返回三 tuple
+    encoder = DP3Encoder(
+        type="dp3",
+        pc_dim=6,
+        pc_out_dim=256,
+        point_wise=True,
+    )
+    with torch.no_grad():
+        patch_token, patch_center, global_token = encoder(point_cloud)
+    print("point_wise=True:")
+    print("  patch_token: ", tuple(patch_token.shape))
+    print("  patch_center:", tuple(patch_center.shape))
+    print("  global_token:", tuple(global_token.shape))
+
+    # point_wise=False 时全局特征
     global_encoder = DP3Encoder(
         type="dp3",
         pc_dim=6,
         pc_out_dim=256,
         point_wise=False,
-        state_dim=state_dim,
     )
-    point_wise_encoder = DP3Encoder(
-        type="dp3",
-        pc_dim=6,
-        pc_out_dim=256,
-        point_wise=True,
-        state_dim=state_dim,
-    )
-
     with torch.no_grad():
-        global_feat = global_encoder(observations)
-        point_wise_feat = point_wise_encoder(observations)
+        patch_token, patch_center, global_token = global_encoder(point_cloud)
+    print("point_wise=False:")
+    print("  patch_token: ", tuple(patch_token.shape))
+    print("  patch_center:", tuple(patch_center.shape))
+    print("  global_token:", tuple(global_token.shape))
 
-    print("=== DP3Encoder Example ===")
-    print("point_cloud:", tuple(observations["point_cloud"].shape))
-    print("joint_state:", tuple(observations["joint_state"].shape))
-    print("global_feat:", tuple(global_feat.shape))
-    print("point_wise_feat:", tuple(point_wise_feat.shape))
+    # idp3 type
+    idp3_encoder = DP3Encoder(
+        type="idp3",
+        pc_dim=6,
+        pc_out_dim=128,
+        point_wise=True,
+    )
+    with torch.no_grad():
+        patch_token, patch_center, global_token = idp3_encoder(point_cloud)
+    print("idp3 point_wise=True:")
+    print("  patch_token: ", tuple(patch_token.shape))
+    print("  patch_center:", tuple(patch_center.shape))
+    print("  global_token:", tuple(global_token.shape))
 
 
 if __name__ == "__main__":

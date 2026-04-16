@@ -22,7 +22,13 @@ def pick_num_groups(num_channels: int, max_groups: int = 8, min_channels_per_gro
     return 1
 
 
-class PointGroupNorm1d(nn.Module):
+class PointGroupNorm(nn.Module):
+    """Group normalization wrapper for point cloud features.
+
+    Used for both 1D (point-level) and 2D (patch-level) features.
+    The implementation is identical; naming was historically separate
+    for 1d vs 2d stages but has been unified.
+    """
     def __init__(self, num_channels: int, max_groups: int = 8):
         super().__init__()
         self.norm = nn.GroupNorm(pick_num_groups(num_channels, max_groups=max_groups), num_channels)
@@ -31,13 +37,9 @@ class PointGroupNorm1d(nn.Module):
         return self.norm(x)
 
 
-class PointGroupNorm2d(nn.Module):
-    def __init__(self, num_channels: int, max_groups: int = 8):
-        super().__init__()
-        self.norm = nn.GroupNorm(pick_num_groups(num_channels, max_groups=max_groups), num_channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(x)
+# Backward-compat aliases (may diverge in the future).
+PointGroupNorm1d = PointGroupNorm
+PointGroupNorm2d = PointGroupNorm
 
 
 class RawPointEmbedding(nn.Module):
@@ -311,9 +313,14 @@ class PointPNEncoder(nn.Module):
         point_features = pointcloud[..., : self.in_channels].transpose(1, 2).contiguous()
         final_coordinates, final_features, intermediate_outputs = self.encoder(point_coordinates, point_features)
 
+        # 统一为 (patch_token, patch_center, global_token) 三 tuple
+        patch_token = final_features.permute(0, 2, 1).contiguous()  # (B, seq_len, C)
+        patch_center = final_coordinates  # (B, seq_len, 3)
+        global_token = patch_token.max(dim=1, keepdim=True).values  # (B, 1, C)
+
         if return_intermediate:
-            return final_coordinates, final_features, intermediate_outputs
-        return final_coordinates, final_features
+            return patch_token, patch_center, global_token, intermediate_outputs
+        return patch_token, patch_center, global_token
 
 
 
@@ -341,7 +348,7 @@ def example():
         k_neighbors=(24, 24, 16),
     )
 
-    final_coordinates, final_features, intermediate_outputs = model(
+    patch_token, patch_center, global_token, intermediate_outputs = model(
         pointcloud,
         return_intermediate=True,
     )
@@ -349,8 +356,9 @@ def example():
     print("input_pointcloud:", tuple(pointcloud.shape))
     for name, value in intermediate_outputs.items():
         print(f"{name}: {tuple(value.shape)}")
-    print("final_coordinates:", tuple(final_coordinates.shape))
-    print("final_features:", tuple(final_features.shape))
+    print("patch_token:", tuple(patch_token.shape))
+    print("patch_center:", tuple(patch_center.shape))
+    print("global_token:", tuple(global_token.shape))
 
 
 if __name__ == "__main__":

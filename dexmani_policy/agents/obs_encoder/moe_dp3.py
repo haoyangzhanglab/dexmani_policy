@@ -2,12 +2,15 @@ import torch
 import torch.nn as nn
 from typing import Dict, Optional, Tuple
 
+from dexmani_policy.agents.common.mlp import create_mlp
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.obs_encoder.dp3 import DP3Encoder
-from dexmani_policy.agents.obs_encoder.plugins.moe import MoEAux, MoEConditioner
+from dexmani_policy.agents.obs_encoder.plugins.moe import MoEAux, MoE
 
 
 class MoEDP3Encoder(nn.Module):
+    STATE_OUT_DIM = 64
+
     def __init__(
         self,
         # dp3 encoder params
@@ -34,14 +37,19 @@ class MoEDP3Encoder(nn.Module):
             pc_dim=pc_dim,
             pc_out_dim=pc_out_dim,
             point_wise=point_wise,
-            state_dim=state_dim,
         )
-        self.conditioner = MoEConditioner(
-            encoder=self.encoder,
+        self.state_mlp = create_mlp(state_dim, [64, self.STATE_OUT_DIM])
+        self.pc_out_dim = pc_out_dim
+
+        encoder_out_dim = self.pc_out_dim + self.STATE_OUT_DIM
+        self.moe_out_dim = encoder_out_dim if moe_out_dim is None else moe_out_dim
+
+        self.moe = MoE(
+            in_dim=encoder_out_dim,
             num_experts=num_experts,
             top_k=top_k,
             hidden_dim=moe_hidden_dim,
-            out_dim=moe_out_dim,
+            out_dim=self.moe_out_dim,
             num_layers=moe_num_layers,
             lambda_load=lambda_load,
             beta_entropy=beta_entropy,
@@ -56,8 +64,15 @@ class MoEDP3Encoder(nn.Module):
         topk_weight: Optional[torch.Tensor] = None,
         num_groups: Optional[int] = None,
     ) -> Tuple[torch.Tensor, MoEAux]:
-        return self.conditioner(
-            obs=obs,
+        pc = obs["point_cloud"]
+        state = obs["joint_state"]
+
+        _, _, global_token = self.encoder(pc)
+        state_feat = self.state_mlp(state)
+        z = torch.cat([global_token.squeeze(1), state_feat], dim=-1)
+
+        return self.moe(
+            z,
             topk_idx=topk_idx,
             topk_weight=topk_weight,
             return_aux=True,
@@ -66,7 +81,7 @@ class MoEDP3Encoder(nn.Module):
 
     @property
     def out_shape(self) -> int:
-        return self.conditioner.out_shape
+        return self.moe_out_dim
 
     def get_optim_groups(self, weight_decay: float):
         return get_optim_group_with_no_decay(self, weight_decay)

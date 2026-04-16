@@ -42,7 +42,8 @@ class BaseAgent(ModuleAttrMixin):
         optim_groups = [g for g in optim_groups if len(g["params"]) > 0]
         all_params = [p for g in optim_groups for p in g["params"]]
         assert len(all_params) == len(set(map(id, all_params))), \
-            "Some parameters appear in more than one optimizer group"
+            f"Some parameters appear in more than one optimizer group: " \
+            f"{len(all_params)} total, {len(set(map(id, all_params)))} unique"
 
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=betas)
         return optimizer

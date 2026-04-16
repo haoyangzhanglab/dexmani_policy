@@ -1,87 +1,12 @@
 import torch
-import torchvision
 import torch.nn as nn
-from typing import Dict, List, Literal, Tuple
+from typing import Dict
 
-from dexmani_policy.agents.obs_encoder.rgb.clip import CLIP
-from dexmani_policy.agents.obs_encoder.rgb.dino import DINO
-from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNet
-from dexmani_policy.agents.obs_encoder.rgb.siglip import SigLIP
-from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import (
-    ImageProcessor,
-    build_image_processor,
-)
+from dexmani_policy.agents.common.mlp import create_mlp
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
-
-BackboneName = Literal["resnet", "clip", "dino", "siglip"]
-
-
-def create_mlp(
-    in_channels: int,
-    layer_channels: List[int],
-    activation: type[nn.Module] = nn.ReLU,
-):
-    layers = []
-    prev = in_channels
-    for h in layer_channels:
-        layers.append(nn.Linear(prev, h))
-        layers.append(nn.LayerNorm(h))
-        layers.append(activation())
-        prev = h
-    return nn.Sequential(*layers)
-
-
-RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
-    "resnet": {
-        "model_name": "resnet18",
-        "tune_mode": "full",
-        "norm_mode": "group_norm",
-        "global_token_type": "avg",
-        "out_dim": 512,
-        "weights": None,
-    },
-    "clip": {
-        "model_name": "openai/clip-vit-base-patch32",
-        "tune_mode": "freeze",
-        "global_token_type": "avg",
-        "out_dim": 512,
-    },
-    "dino": {
-        "model_name": "facebook/dinov2-base",
-        "tune_mode": "freeze",
-        "global_token_type": "avg",
-        "out_dim": 512,
-    },
-    "siglip": {
-        "model_name": "google/siglip-base-patch16-224",
-        "tune_mode": "freeze",
-        "global_token_type": "avg",
-        "out_dim": 512,
-    },
-}
-
-
-def build_backbone_and_image_processor(name: BackboneName) -> Tuple[nn.Module, ImageProcessor]:
-    cfg = dict(RGB_BACKBONE_CONFIGS[name])
-
-    if name == "resnet":
-        model_name = str(cfg["model_name"])
-        weights_value = cfg.pop("weights")
-        if isinstance(weights_value, str):
-            weights_enum = torchvision.models.get_model_weights(model_name)
-            cfg["weights"] = getattr(weights_enum, weights_value)
-        else:
-            cfg["weights"] = weights_value
-        backbone = ResNet(**cfg)
-    elif name == "clip":
-        backbone = CLIP(**cfg)
-    elif name == "dino":
-        backbone = DINO(**cfg)
-    else:
-        backbone = SigLIP(**cfg)
-
-    image_processor = build_image_processor(name)
-    return backbone, image_processor
+from dexmani_policy.agents.obs_encoder.rgb.registry import (
+    build_backbone, BackboneName, build_backbone as build_backbone_and_image_processor,
+)
 
 
 class DPEncoder(nn.Module):
@@ -97,17 +22,21 @@ class DPEncoder(nn.Module):
         self.state_out_dim = 64
         self.state_mlp = create_mlp(state_dim, [64, self.state_out_dim])
 
+
     def forward(self, observations: Dict) -> torch.Tensor:
         for key in self.modality_keys:
             if key not in observations:
                 raise KeyError(f"Required modality key '{key}' missed")
+            
         rgb = observations["rgb"]
         state = observations["joint_state"]
+    
         if rgb.shape[:-3] != state.shape[:-1]:
             raise ValueError(
                 f"rgb leading dims {tuple(rgb.shape[:-3])} != "
                 f"joint_state leading dims {tuple(state.shape[:-1])}"
             )
+        
         rgb = self.image_processor.process_images(rgb).image
         vision_out = self.backbone(rgb)
         image_feat = vision_out["global_token"]
@@ -121,6 +50,7 @@ class DPEncoder(nn.Module):
 
     def get_optim_groups(self, weight_decay):
         return get_optim_group_with_no_decay(self, weight_decay)
+
 
 
 def example():

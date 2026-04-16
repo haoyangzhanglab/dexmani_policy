@@ -42,12 +42,38 @@ agent:
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
+
+  # ------------------------------------------------------------------ #
+  # encoder_type: idp3 | pointpn | tokenizer
+  # ------------------------------------------------------------------ #
   encoder_type: idp3
   pc_dim: 3
-  pc_out_dim: 128
   state_dim: 19
   num_points: 1024
 
+  # 点云编码器配置字典（通过 pc_encoder_config 传递到 ManiFlowEncoder）
+  pc_encoder_config:
+    # idp3 专用（encoder_type: idp3 时生效）
+    pc_out_dim: 128
+
+    # pointpn 专用（encoder_type: pointpn 时生效）
+    num_stages: 3
+    embed_dim: 64
+    k_neighbors: [24, 24, 16]
+    lga_blocks: [2, 2, 1]
+    dim_expansion: [2, 2, 2]
+    point_cloud_type: scan
+
+    # tokenizer 专用（encoder_type: tokenizer 时生效）
+    stem_channels: 64
+    token_channels: 128
+    num_patches: 96        # obs_seq_len = num_patches + 1 = 97
+    patch_radii: [0.04, 0.08]
+    patch_neighbors: [16, 32]
+    global_radius: 0.16
+    global_neighbors: 32
+
+  # ------------------------------------------------------------------ #
   n_layers: 12
   hidden_dim: 768
   n_head: 8
@@ -100,7 +126,7 @@ workspace:
     video_fps: ${env_runner.env_video_fps}
 
   checkpoint_cfg:
-    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
+    _target_: dexmani_policy.training.common.checkpoint_io.CheckpointConfig
     monitor_key: test_mean_score
     mode: max
     topk: 3
