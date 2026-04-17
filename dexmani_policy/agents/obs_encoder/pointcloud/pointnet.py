@@ -1,20 +1,18 @@
 import torch
 import torch.nn as nn
 from typing import Dict
-
 from dexmani_policy.agents.common.mlp import create_mlp
-from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
+
 
 
 class PointNet(nn.Module):
-    """PointNet 风格全局向量提取器。"""
-
     def __init__(
         self,
         in_channels: int = 3,
         out_channels: int = 256,
     ):
         super().__init__()
+
         self.in_channels = in_channels
         self.out_channels = out_channels
 
@@ -35,17 +33,12 @@ class PointNet(nn.Module):
         global_token = x.amax(dim=1)
         return {"global_token": global_token}
 
-    def get_optim_groups(self, weight_decay: float):
-        return get_optim_group_with_no_decay(self, weight_decay)
-
     @property
     def out_shape(self) -> int:
         return self.out_channels
 
 
 class MultiStagePointNet(nn.Module):
-    """改进版 Multi-Stage PointNet 全局向量提取器。"""
-
     def __init__(
         self,
         in_channels: int = 3,
@@ -86,9 +79,6 @@ class MultiStagePointNet(nn.Module):
         global_token = x.amax(dim=-1)
         return {"global_token": global_token}
 
-    def get_optim_groups(self, weight_decay: float):
-        return get_optim_group_with_no_decay(self, weight_decay)
-
     @property
     def out_shape(self) -> int:
         return self.out_channels
@@ -112,7 +102,7 @@ def example():
     print("global_token:", tuple(out["global_token"].shape))
     print("out_shape:", model.out_shape)
 
-    print("\n=== MultiStagePointNet Example ===")
+    print("=== MultiStagePointNet Example ===")
     model = MultiStagePointNet(in_channels=6, out_channels=128)
     with torch.no_grad():
         out = model(pointcloud)

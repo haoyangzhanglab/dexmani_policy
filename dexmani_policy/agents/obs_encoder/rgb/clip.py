@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionModelWithProjection
-from typing import Dict, Literal, Optional, Sequence
+from typing import Dict, Literal, Optional, Sequence, Union, Any
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
@@ -21,7 +21,7 @@ class CLIP(nn.Module):
         self,
         model_name: str = "openai/clip-vit-base-patch32",
         tune_mode: TuneMode = "freeze",
-        global_token_type: GlobalTokenType = "pooler",
+        global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
     ):
         super().__init__()
@@ -45,13 +45,15 @@ class CLIP(nn.Module):
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
 
         self.proj = nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
-        self.global_proj = nn.Identity() if self.out_dim == self.model_dim else nn.Linear(self.model_dim, self.out_dim)
         self.geometry_processor = GeometryProcessor()
 
         self.set_tune_mode(tune_mode)
 
 
     def set_tune_mode(self, tune_mode: TuneMode) -> None:
+        # NOTE:
+        # tune_mode only controls the pretrained backbone.
+        # Projection layers defined in this wrapper remain trainable unless handled outside.
         self.tune_mode = tune_mode
 
         if tune_mode == "freeze":
@@ -91,12 +93,23 @@ class CLIP(nn.Module):
         if self.global_token_type == "avg":
             return patch_tokens.mean(dim=1)
 
+        if self.global_token_type == "cls":
+            return self.proj(outputs.last_hidden_state[:, 0])
+
         if self.global_token_type == "pooler":
             image_embeds = getattr(outputs, "image_embeds", None)
-            if image_embeds is not None:
-                return self.global_proj(image_embeds)
+            if image_embeds is None:
+                raise ValueError(f"{self.model_name} does not provide image_embeds for pooler output.")
 
-        return self.proj(outputs.last_hidden_state[:, 0])
+            if self.out_dim != self.model_dim:
+                raise ValueError(
+                    "For CLIP global_token_type='pooler', out_dim must equal backbone projection_dim. "
+                    "Otherwise the pooled token would go through a randomly initialized extra projection. "
+                    "Use global_token_type='avg' or set out_dim to CLIP projection_dim."
+                )
+            return image_embeds
+
+        raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
 
 
     def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -127,7 +140,8 @@ class CLIP(nn.Module):
         depth_scale: float = 1000.0,
         min_depth: float = 0.0,
         max_depth: Optional[float] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
+        
         dense_geometry = self.geometry_processor.backproject_depth(
             depth=depth,
             intrinsics=intrinsics,
@@ -147,6 +161,15 @@ class CLIP(nn.Module):
         return {
             "patch_coords": patch_geometry.patch_coords,
             "patch_valid_mask": patch_geometry.patch_valid_mask,
+            "geometry_meta": {
+                "coord_frame": dense_geometry.meta.coord_frame,
+                "depth_scale": dense_geometry.meta.depth_scale,
+                "min_depth": dense_geometry.meta.min_depth,
+                "max_depth": dense_geometry.meta.max_depth,
+                "patch_grid_size": patch_geometry.meta.patch_grid_size,
+                "patch_hw": patch_geometry.meta.patch_hw,
+                "leading_shape": patch_geometry.meta.leading_shape,
+            },
         }
 
 
@@ -217,7 +240,7 @@ def example() -> None:
         print("patch_valid_mask:", tuple(geometry_out["patch_valid_mask"].shape))
 
     except Exception as error:
-        print("clip example needs model weights and a valid transformers runtime.")
+        print("clip example failed.")
         print(error)
 
 

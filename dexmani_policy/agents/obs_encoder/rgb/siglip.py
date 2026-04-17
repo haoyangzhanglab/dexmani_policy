@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import SiglipVisionModel
-from typing import Dict, Literal, Optional, Sequence
+from typing import Dict, Literal, Optional, Sequence, Union, Any
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
@@ -13,6 +13,7 @@ from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
 )
 
 TuneMode = Literal["freeze", "lora", "full"]
+# keep "cls" for interface compatibility; runtime rejects it for SigLIP
 GlobalTokenType = Literal["cls", "avg", "pooler"]
 
 
@@ -47,6 +48,9 @@ class SigLIP(nn.Module):
 
 
     def set_tune_mode(self, tune_mode: TuneMode) -> None:
+        # NOTE:
+        # tune_mode only controls the pretrained backbone.
+        # Projection layers defined in this wrapper remain trainable unless handled outside.
         self.tune_mode = tune_mode
 
         if tune_mode == "freeze":
@@ -90,8 +94,15 @@ class SigLIP(nn.Module):
             pooler_output = getattr(outputs, "pooler_output", None)
             if pooler_output is not None:
                 return self.proj(pooler_output)
+            return patch_tokens.mean(dim=1)
 
-        return self.proj(outputs.last_hidden_state[:, 0])  # CLS token, projected once here
+        if self.global_token_type == "cls":
+            raise ValueError(
+                "SigLIP vision backbone does not expose an explicit CLS token. "
+                "Use global_token_type='avg' or 'pooler'."
+            )
+
+        raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
 
 
     def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -104,7 +115,7 @@ class SigLIP(nn.Module):
         flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
         outputs = self.backbone(pixel_values=flat_rgb, return_dict=True)
 
-        patch_tokens = self.proj(outputs.last_hidden_state[:, 1:])
+        patch_tokens = self.proj(outputs.last_hidden_state)
         global_token = self.get_global_token(outputs, patch_tokens)
 
         return {
@@ -121,7 +132,7 @@ class SigLIP(nn.Module):
         depth_scale: float = 1000.0,
         min_depth: float = 0.0,
         max_depth: Optional[float] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
         dense_geometry = self.geometry_processor.backproject_depth(
             depth=depth,
             intrinsics=intrinsics,
@@ -141,6 +152,15 @@ class SigLIP(nn.Module):
         return {
             "patch_coords": patch_geometry.patch_coords,
             "patch_valid_mask": patch_geometry.patch_valid_mask,
+            "geometry_meta": {
+                "coord_frame": dense_geometry.meta.coord_frame,
+                "depth_scale": dense_geometry.meta.depth_scale,
+                "min_depth": dense_geometry.meta.min_depth,
+                "max_depth": dense_geometry.meta.max_depth,
+                "patch_grid_size": patch_geometry.meta.patch_grid_size,
+                "patch_hw": patch_geometry.meta.patch_hw,
+                "leading_shape": patch_geometry.meta.leading_shape,
+            },
         }
 
 
@@ -211,7 +231,7 @@ def example() -> None:
         print("patch_valid_mask:", tuple(geometry_out["patch_valid_mask"].shape))
 
     except Exception as error:
-        print("siglip example needs model weights and a valid transformers runtime.")
+        print("siglip example failed.")
         print(error)
 
 

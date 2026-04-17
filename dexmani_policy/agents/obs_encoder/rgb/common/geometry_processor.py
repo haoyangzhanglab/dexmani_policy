@@ -64,6 +64,9 @@ class GeometryProcessor:
     def __init__(self):
         self.pixel_grid_cache: Dict[Tuple[int, int, str, str], Tuple[torch.Tensor, torch.Tensor]] = {}
 
+    def clear_cache(self) -> None:
+        self.pixel_grid_cache.clear()
+
     def get_pixel_grid(
         self,
         image_h: int,
@@ -127,6 +130,10 @@ class GeometryProcessor:
         cx = flat_intrinsics[:, 0, 2].view(batch_size, 1, 1)
         cy = flat_intrinsics[:, 1, 2].view(batch_size, 1, 1)
 
+        eps = 1e-12
+        if torch.any(fx.abs() < eps) or torch.any(fy.abs() < eps):
+            raise ValueError("Invalid intrinsics: fx/fy must be non-zero.")
+
         z = depth_metric[:, 0]
         x = (u - cx) / fx * z
         y = (v - cy) / fy * z
@@ -159,6 +166,7 @@ class GeometryProcessor:
         valid_mask: torch.Tensor,
         patch_size: Optional[int] = None,
         patch_grid_size: Optional[Tuple[int, int]] = None,
+        min_valid_ratio: float = 0.25,
     ) -> PatchGeometryBatch:
         if coords.ndim < 4 or coords.shape[-3] != 3:
             raise ValueError(f"coords should have shape [..., 3, H, W], got {tuple(coords.shape)}")
@@ -166,6 +174,8 @@ class GeometryProcessor:
             raise ValueError(f"valid_mask should have shape [..., 1, H, W], got {tuple(valid_mask.shape)}")
         if coords.shape[:-3] != valid_mask.shape[:-3] or coords.shape[-2:] != valid_mask.shape[-2:]:
             raise ValueError("coords and valid_mask should share the same leading dims and spatial size.")
+        if not (0.0 <= min_valid_ratio <= 1.0):
+            raise ValueError(f"min_valid_ratio should be in [0, 1], got {min_valid_ratio}")
 
         image_h, image_w = coords.shape[-2:]
         grid_h, grid_w = resolve_patch_grid_size(
@@ -198,7 +208,8 @@ class GeometryProcessor:
         )
 
         coord_map = coord_num / coord_den.clamp_min(1e-6)
-        coord_valid_map = coord_den > 1e-6
+        coord_valid_map = coord_den >= float(min_valid_ratio)
+
         patch_coords = coord_map.flatten(2).transpose(1, 2).contiguous()
         patch_valid_mask = coord_valid_map.flatten(2).transpose(1, 2).contiguous()
 

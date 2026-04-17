@@ -217,7 +217,6 @@ class PointNextEncoder(nn.Module):
         return {"global_token": global_token}
 
     def _get_global_token(self, patch_token: torch.Tensor, patch_center: torch.Tensor) -> torch.Tensor:
-        """从逐点特征和位置衍生全局向量: max pool + position encoding → (B, C)."""
         pooled_feature = patch_token.max(dim=1).values
         pooled_position = patch_center.mean(dim=1)
         global_feature = pooled_feature + self.global_position_projection(

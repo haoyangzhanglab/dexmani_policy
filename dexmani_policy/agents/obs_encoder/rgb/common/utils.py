@@ -63,7 +63,7 @@ def to_rgb_tensor(images: ArrayLike) -> torch.Tensor:
     images = to_tensor(images)
     if images.ndim < 3:
         raise ValueError("images should have at least 3 dims.")
-    
+
     if images.shape[-3] != 3:
         if images.shape[-1] != 3:
             raise ValueError("Cannot infer RGB channel dimension.")
@@ -73,6 +73,13 @@ def to_rgb_tensor(images: ArrayLike) -> torch.Tensor:
         images = images.to(torch.float32).div_(255.0)
     else:
         images = images.to(torch.float32)
+        image_min = float(images.amin().item())
+        image_max = float(images.amax().item())
+        if image_min < -1e-6 or image_max > 1.0 + 1e-6:
+            raise ValueError(
+                f"Float RGB images are expected to be in [0, 1], got value range [{image_min}, {image_max}]."
+            )
+
     return images.contiguous()
 
 
@@ -108,7 +115,6 @@ def prepare_matrix_batch(
     collapse_repeated: bool = True,
 ) -> MatrixBatchSpec:
     matrix = to_tensor(matrix).to(torch.float32)
-    expected_shape = (*leading_shape, *mat_shape)
     num_items = int(np.prod(leading_shape)) if len(leading_shape) > 0 else 1
 
     if tuple(matrix.shape) == mat_shape:
@@ -120,11 +126,39 @@ def prepare_matrix_batch(
             storage_leading_shape=tuple(),
         )
 
-    if tuple(matrix.shape) != expected_shape:
-        raise ValueError(f"Expected matrix shape {mat_shape} or {expected_shape}, got {tuple(matrix.shape)}.")
+    if tuple(matrix.shape[-2:]) != mat_shape:
+        raise ValueError(
+            f"Expected matrix trailing shape {mat_shape}, got {tuple(matrix.shape[-2:])}."
+        )
+
+    matrix_leading_shape = tuple(matrix.shape[:-2])
+    if len(matrix_leading_shape) > len(leading_shape):
+        raise ValueError(
+            f"Expected matrix shape {mat_shape} or leading dims compatible with {leading_shape}, "
+            f"got {tuple(matrix.shape)}."
+        )
+
+    # Missing leading dims are interpreted as shared trailing items.
+    # Example: leading_shape = (B, T), matrix shape = (B, 3, 3) -> (B, 1, 3, 3).
+    padded_leading_shape = matrix_leading_shape + (1,) * (len(leading_shape) - len(matrix_leading_shape))
+    broadcastable = all(
+        m == t or m == 1
+        for m, t in zip(padded_leading_shape, leading_shape)
+    )
+    if not broadcastable:
+        raise ValueError(
+            f"Expected matrix leading dims broadcastable to {leading_shape}, got {matrix_leading_shape}."
+        )
+
+    matrix = matrix.reshape(*padded_leading_shape, *mat_shape)
+    if padded_leading_shape != leading_shape:
+        matrix = matrix.expand(*leading_shape, *mat_shape).contiguous()
+    else:
+        matrix = matrix.contiguous()
 
     storage_leading_shape = leading_shape
     base = matrix.reshape(-1, *mat_shape).contiguous()
+
     if collapse_repeated and len(leading_shape) > 0:
         grouped_matrix = matrix.reshape(*leading_shape, *mat_shape).contiguous()
         for prefix_len in range(len(leading_shape) + 1):

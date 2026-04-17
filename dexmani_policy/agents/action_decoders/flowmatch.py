@@ -6,15 +6,6 @@ from dexmani_policy.agents.action_decoders.common.sample_util import SampleStrat
 
 
 class FlowMatch_With_Consistency(nn.Module):
-    """Flow matching action decoder with consistency distillation loss.
-
-    Splits each batch into flow-matching and consistency targets,
-    then combines both losses for joint training.
-
-    Tensor shapes:
-        cond:    (B, T*seq_len, D)          — observation context
-        actions: (B, horizon, action_dim)    — ground-truth action sequence
-    """
     def __init__(
         self,
         model,
@@ -51,19 +42,6 @@ class FlowMatch_With_Consistency(nn.Module):
     
 
     def get_flow_velocity(self, actions):
-        """Generate flow matching training samples and supervision signals.
-
-        Returns (x_t, t, dt) and v_target for each sample in the batch.
-
-        Args:
-            actions: (B, horizon, action_dim) — ground-truth actions (x1)
-        Returns:
-            dict with keys:
-                xt:          (B, horizon, action_dim) — interpolated point at time t
-                t:           (B, 1, 1)                 — sampled time
-                dt:          (B,)                       — time delta (zero for flow)
-                vt_target:   (B, horizon, action_dim) — target velocity (x1 - x0)
-        """
         B = actions.shape[0]
 
         t_flow = self.sampler.sample(B, self.t_sample_mode_for_flow, device=actions.device)
@@ -90,22 +68,6 @@ class FlowMatch_With_Consistency(nn.Module):
     
 
     def get_consistency_velocity(self, actions, cond, ema_model):
-        """Construct consistency supervision via EMA model look-ahead.
-
-        Uses the EMA model to predict the velocity at a further timestep (t+dt),
-        then back-projects to get a global trend signal rather than local tangent.
-
-        Args:
-            actions: (B, horizon, action_dim)
-            cond:    (B, T*seq_len, D)
-            ema_model: EMA-weighted backbone (set to eval mode)
-        Returns:
-            dict with keys:
-                xt:        (B, horizon, action_dim) — interpolated at t
-                t:         (B, 1, 1)                 — sampled time
-                dt:        (B,)                       — input time delta
-                vt_target: (B, horizon, action_dim) — consistency target velocity
-        """
         B = actions.shape[0]
 
         t_ct = self.sampler.sample(B, self.t_sample_mode_for_consistency, device=actions.device)
@@ -153,31 +115,13 @@ class FlowMatch_With_Consistency(nn.Module):
 
 
     def compute_loss(self, cond, actions, **kwargs):
-        """Compute combined flow matching + consistency distillation loss.
-
-        Args:
-            cond:    (B, T*seq_len, D) — observation context
-            actions: (B, horizon, action_dim) — ground-truth actions
-            ema_model: keyword arg, required — EMA-weighted backbone
-        Returns:
-            loss: scalar tensor
-            loss_dict: dict with per-component losses and auxiliary metrics
-        """
         ema_model = kwargs.get("ema_model", None)
         assert ema_model is not None, "EMA model is required for computing consistency loss in FlowMatch_With_Consistency"
 
         B = actions.shape[0]
         flow_batchsize = int(B * self.flow_batch_ratio)
-        # Split: actions[:flow_batchsize] → flow matching, actions[flow_batchsize:] → consistency
 
         loss = 0.
-
-        # Flow matching loss: predict velocity field at interpolated points.
-        # flow_targets["xt"]:        (flow_batchsize, horizon, action_dim)
-        # flow_targets["t"]:         (flow_batchsize, 1, 1)
-        # flow_targets["dt"]:        (flow_batchsize,)
-        # flow_targets["vt_target"]: (flow_batchsize, horizon, action_dim)
-        # pred_vt_flow:              (flow_batchsize, horizon, action_dim)
         flow_targets = self.get_flow_velocity(actions[:flow_batchsize])
         pred_vt_flow = self.model(
             x = flow_targets["xt"],
@@ -192,12 +136,6 @@ class FlowMatch_With_Consistency(nn.Module):
         loss += loss_flow.mean()
         loss_flow = loss_flow.mean()  # scalar
 
-        # Consistency distillation loss: EMA-guided velocity targets.
-        # consistency_targets["xt"]:        (consistency_batchsize, horizon, action_dim)
-        # consistency_targets["t"]:         (consistency_batchsize, 1, 1)
-        # consistency_targets["dt"]:        (consistency_batchsize,)
-        # consistency_targets["vt_target"]: (consistency_batchsize, horizon, action_dim)
-        # pred_vt_consistency:              (consistency_batchsize, horizon, action_dim)
         consistency_targets = self.get_consistency_velocity(actions[flow_batchsize:], cond[flow_batchsize:], ema_model)
         pred_vt_consistency = self.model(
             x = consistency_targets["xt"],
@@ -213,8 +151,6 @@ class FlowMatch_With_Consistency(nn.Module):
         loss_consistency = loss_consistency.mean()  # scalar
 
 
-        # Auxiliary metrics: predicted velocity magnitudes
-        # Both scalars, used for monitoring training stability.
         pred_vt_flow_magnitude = torch.sqrt(torch.mean(pred_vt_flow ** 2))
         pred_vt_consistency_magnitude = torch.sqrt(torch.mean(pred_vt_consistency ** 2))
 
@@ -233,15 +169,6 @@ class FlowMatch_With_Consistency(nn.Module):
 
     @torch.no_grad()
     def sample_ode(self, x0, N, cond):
-        """ODE sampling via Euler method.
-
-        Args:
-            x0:   (B, horizon, action_dim) — noise (N(0, I))
-            N:    int — number of integration steps
-            cond: (B, T*seq_len, D) — observation context
-        Returns:
-            traj: list of (B, horizon, action_dim) — trajectory at each step including x0
-        """
         B = x0.shape[0]
         x = x0.clone()
 
@@ -272,16 +199,7 @@ class FlowMatch_With_Consistency(nn.Module):
     
 
     def predict_action(self, cond, action_template, denoise_timesteps=None):
-        """Generate action sequence from noise via ODE sampling.
-
-        Args:
-            cond:             (B, T*seq_len, D) — observation context
-            action_template:  (B, horizon, action_dim) — used for shape/device
-            denoise_timesteps: int — ODE steps (default: self.denoise_timesteps)
-        Returns:
-            actions: (B, horizon, action_dim) — predicted action sequence
-        """
-        noise = torch.randn_like(action_template, device=action_template.device)  # (B, horizon, action_dim)
+        noise = torch.randn_like(action_template, device=action_template.device)
 
         if denoise_timesteps is None:
             denoise_timesteps = self.denoise_timesteps

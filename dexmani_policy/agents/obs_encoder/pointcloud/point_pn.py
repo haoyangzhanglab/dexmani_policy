@@ -1,4 +1,3 @@
-from typing import Tuple
 import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
@@ -9,10 +8,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
 
 
 class PointGroupNorm(nn.Module):
-    """Group normalization wrapper for point cloud features.
-
-    Used for both 1D (point-level) and 2D (patch-level) features.
-    """
     def __init__(self, num_channels: int, max_groups: int = 8):
         super().__init__()
         # Pick the largest groups where channels are divisible and >= 8 per group
@@ -297,7 +292,6 @@ class PointPNTokenizer(nn.Module):
         return patch_token, patch_center
 
     def get_global_token(self, patch_token: torch.Tensor) -> torch.Tensor:
-        """从 patch_token 衍生全局向量: max pooling → (B, 1, C)."""
         return patch_token.max(dim=1, keepdim=True).values  # (B, 1, C)
 
     @staticmethod
@@ -305,6 +299,7 @@ class PointPNTokenizer(nn.Module):
         if len(value) != num_stages:
             raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
         return tuple(value)
+
 
 def example():
     batch_size, num_points = 2, 1024

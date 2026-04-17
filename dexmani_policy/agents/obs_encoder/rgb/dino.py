@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModel
-from typing import Dict, Literal, Optional, Sequence
+from typing import Dict, Literal, Optional, Sequence, Union, Any
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
-    flatten_batch, 
-    restore_batch, 
-    get_patch_grid_size, 
-    reshape_patch_tokens_to_map
+    flatten_batch,
+    restore_batch,
+    get_patch_grid_size,
+    reshape_patch_tokens_to_map,
 )
 
 TuneMode = Literal["freeze", "lora", "full"]
@@ -49,6 +49,9 @@ class DINO(nn.Module):
 
 
     def set_tune_mode(self, tune_mode: TuneMode) -> None:
+        # NOTE:
+        # tune_mode only controls the pretrained backbone.
+        # Projection layers defined in this wrapper remain trainable unless handled outside.
         self.tune_mode = tune_mode
 
         if tune_mode == "freeze":
@@ -92,12 +95,19 @@ class DINO(nn.Module):
         if self.global_token_type == "avg":
             return patch_tokens.mean(dim=1)
 
+        if self.global_token_type == "cls":
+            return self.proj(outputs.last_hidden_state[:, 0])
+
         if self.global_token_type == "pooler":
             pooler_output = getattr(outputs, "pooler_output", None)
-            if pooler_output is not None:
-                return self.proj(pooler_output)
+            if pooler_output is None:
+                raise ValueError(
+                    f"{self.model_name} does not provide pooler_output. "
+                    "Use global_token_type='cls' or 'avg'."
+                )
+            return self.proj(pooler_output)
 
-        return self.proj(outputs.last_hidden_state[:, 0])
+        raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
 
 
     def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -128,8 +138,8 @@ class DINO(nn.Module):
         depth_scale: float = 1000.0,
         min_depth: float = 0.0,
         max_depth: Optional[float] = None,
-    ) -> Dict[str, torch.Tensor]:
-        
+    ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
+
         dense_geometry = self.geometry_processor.backproject_depth(
             depth=depth,
             intrinsics=intrinsics,
@@ -149,7 +159,17 @@ class DINO(nn.Module):
         return {
             "patch_coords": patch_geometry.patch_coords,
             "patch_valid_mask": patch_geometry.patch_valid_mask,
+            "geometry_meta": {
+                "coord_frame": dense_geometry.meta.coord_frame,
+                "depth_scale": dense_geometry.meta.depth_scale,
+                "min_depth": dense_geometry.meta.min_depth,
+                "max_depth": dense_geometry.meta.max_depth,
+                "patch_grid_size": patch_geometry.meta.patch_grid_size,
+                "patch_hw": patch_geometry.meta.patch_hw,
+                "leading_shape": patch_geometry.meta.leading_shape,
+            },
         }
+
 
 
     def patch_tokens_to_featmap(self, patch_tokens: torch.Tensor, image_hw: Sequence[int]) -> torch.Tensor:
@@ -220,7 +240,7 @@ def example() -> None:
         print("patch_valid_mask:", tuple(geometry_out["patch_valid_mask"].shape))
 
     except Exception as error:
-        print("dino example needs model weights and a valid transformers runtime.")
+        print("dino example failed.")
         print(error)
 
 

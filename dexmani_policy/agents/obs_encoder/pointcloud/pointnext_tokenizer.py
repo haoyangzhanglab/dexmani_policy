@@ -123,8 +123,6 @@ class GlobalSceneTokenizer(nn.Module):
 
 
 class PointNextPatchTokenizer(nn.Module):
-    """多尺度 Point Patch Token 提取器。"""
-
     def __init__(
         self,
         input_channels: int = 6,
@@ -181,7 +179,6 @@ class PointNextPatchTokenizer(nn.Module):
         return patch_token, patch_center
 
     def get_global_token(self, patch_token: torch.Tensor) -> torch.Tensor:
-        """从 patch_token 衍生全局向量，委托 GlobalSceneTokenizer 做复杂聚合。"""
         return self.global_scene_tokenizer(self._last_xyz, self._last_point_feature)
 
     @property

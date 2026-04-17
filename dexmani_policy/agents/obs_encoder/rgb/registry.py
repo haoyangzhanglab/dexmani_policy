@@ -1,11 +1,7 @@
+import warnings
 import torchvision
 import torch.nn as nn
-from typing import Dict, Literal, Optional, Tuple
-
-from .clip import CLIP
-from .dino import DINO
-from .resnet import ResNet
-from .siglip import SigLIP
+from typing import Dict, Literal, Optional, Tuple, Type
 from .common.image_processor import ImageProcessor
 
 BackboneName = Literal["resnet", "clip", "dino", "siglip"]
@@ -39,12 +35,21 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     },
 }
 
-RGB_BACKBONE_CLASSES: Dict[str, type] = {
-    "resnet": ResNet,
-    "clip": CLIP,
-    "dino": DINO,
-    "siglip": SigLIP,
-}
+
+def get_backbone_cls(name: BackboneName) -> Type[nn.Module]:
+    if name == "resnet":
+        from .resnet import ResNet
+        return ResNet
+    if name == "clip":
+        from .clip import CLIP
+        return CLIP
+    if name == "dino":
+        from .dino import DINO
+        return DINO
+    if name == "siglip":
+        from .siglip import SigLIP
+        return SigLIP
+    raise ValueError(f"Unsupported backbone name: {name}")
 
 
 def resolve_resnet_weights(cfg: Dict) -> Dict:
@@ -59,17 +64,30 @@ def resolve_resnet_weights(cfg: Dict) -> Dict:
 
 
 def build_backbone(
-    name: str, config: Optional[Dict] = None
+    name: BackboneName,
+    config: Optional[Dict] = None,
 ) -> Tuple[nn.Module, ImageProcessor]:
-    """用 type 指定 RGB backbone，返回 (backbone, image_processor)。"""
-    cfg = dict(RGB_BACKBONE_CONFIGS[name])
+    
+    if name not in RGB_BACKBONE_CONFIGS:
+        raise ValueError(f"Unsupported backbone name: {name}")
+
+    base_cfg = dict(RGB_BACKBONE_CONFIGS[name])
+    cfg = dict(base_cfg)
     if config:
         cfg.update(config)
 
-    backbone_cls = RGB_BACKBONE_CLASSES[name]
+    backbone_cls = get_backbone_cls(name)
     if name == "resnet":
         cfg = resolve_resnet_weights(cfg)
 
     backbone = backbone_cls(**cfg)
+
+    if str(cfg.get("model_name")) != str(base_cfg.get("model_name")):
+        warnings.warn(
+            f"build_backbone(name='{name}') is using model_name='{cfg.get('model_name')}', "
+            f"but ImageProcessor is still selected by preset name='{name}'. "
+            "Please make sure the processor matches the checkpoint's resize / crop / normalization."
+        )
+
     image_processor = ImageProcessor.from_preset(name)
     return backbone, image_processor
