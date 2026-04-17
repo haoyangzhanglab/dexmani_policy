@@ -1,22 +1,27 @@
 import torch
 import torch.nn as nn
 from typing import Dict
-from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
-    group,
-    sample_and_group,
-    sample_and_group_all,
-)
+
 from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings import (
-    SinusoidalPosEmb3D,
     RelativePositionalEncoding3D,
+    SinusoidalPosEmb3D,
 )
-from dexmani_policy.agents.obs_encoder.pointcloud.common.layers import PointMLP
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
+    group, sample_and_group, sample_and_group_all, resolve_stage_values
+)
 
 
-def resolve_stage_values(value, num_stages: int, name: str):
-    if len(value) != num_stages:
-        raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
-    return tuple(value)
+class PointMLP(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
+        super().__init__()
+        self.linear = nn.Linear(in_channels, out_channels)
+        self.norm = nn.LayerNorm(out_channels)
+        self.activation = nn.GELU() if use_activation else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear(x)
+        x = self.norm(x)
+        return self.activation(x)
 
 
 class SetAbstraction(nn.Module):
@@ -39,7 +44,7 @@ class SetAbstraction(nn.Module):
         self.num_neighbors = num_neighbors
         self.is_head = is_head
         self.global_aggr = global_aggr
-        self.use_residual = use_residual and (not self.is_head) and (not self.global_aggr)
+        self.use_residual = use_residual and (not is_head) and (not global_aggr)
         self.relative_position_encoding = None if is_head else RelativePositionalEncoding3D(position_encoding_dim)
 
         if is_head:
@@ -51,8 +56,8 @@ class SetAbstraction(nn.Module):
 
         blocks = []
         for i in range(len(channels) - 1):
-            use_activation_i = i < len(channels) - 2 or not self.use_residual
-            blocks.append(PointMLP(channels[i], channels[i + 1], use_activation=use_activation_i))
+            use_activation = i < len(channels) - 2 or not self.use_residual
+            blocks.append(PointMLP(channels[i], channels[i + 1], use_activation=use_activation))
         self.point_mlp = nn.Sequential(*blocks)
 
         if self.use_residual:
@@ -67,8 +72,7 @@ class SetAbstraction(nn.Module):
 
     def forward(self, position: torch.Tensor, feature: torch.Tensor):
         if self.is_head:
-            feature = self.point_mlp(feature)
-            return position, feature
+            return position, self.point_mlp(feature)
 
         if self.global_aggr:
             new_position, grouped_feature = sample_and_group_all(position, feature)
@@ -135,8 +139,7 @@ class InvertedResidualPointBlock(nn.Module):
         identity = feature
         feature = self.local_aggregation(position, feature)
         feature = self.channel_mlp(feature)
-        feature = self.activation(feature + identity)
-        return position, feature
+        return position, self.activation(feature + identity)
 
 
 class PointNextEncoder(nn.Module):
@@ -181,7 +184,6 @@ class PointNextEncoder(nn.Module):
                     layers=1 if stage_index == 0 and stride == 1 else sa_layers,
                     use_residual=use_residual,
                     is_head=stage_index == 0 and stride == 1,
-                    global_aggr=False,
                 )
             ]
             for _ in range(1, depth):
@@ -201,6 +203,8 @@ class PointNextEncoder(nn.Module):
         )
 
     def forward(self, pointcloud: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if pointcloud.ndim != 3:
+            raise ValueError(f"pointcloud must be [B, N, C], but got shape {tuple(pointcloud.shape)}")
         if pointcloud.size(-1) < self.input_channels:
             raise ValueError(
                 f"pointcloud has {pointcloud.size(-1)} channels, but input_channels={self.input_channels}"
@@ -222,7 +226,15 @@ class PointNextEncoder(nn.Module):
         global_feature = pooled_feature + self.global_position_projection(
             self.global_position_embedding(pooled_position)
         )
-        return self.output_projection(global_feature)  # (B, C)
+        return self.output_projection(global_feature)
+
+    @property
+    def out_dim(self) -> int:
+        return self.output_channels
+
+    @property
+    def out_shape(self) -> tuple[int, int]:
+        return (1, self.output_channels)
 
 
 def example() -> None:
@@ -251,7 +263,8 @@ def example() -> None:
     print("=== PointNextEncoder Example ===")
     print("input:", tuple(pointcloud.shape))
     print("global_token:", tuple(out["global_token"].shape))
-    print("out_shape:", model.output_channels)
+    print("out_dim:", model.out_dim)
+    print("out_shape:", model.out_shape)
 
 
 if __name__ == "__main__":

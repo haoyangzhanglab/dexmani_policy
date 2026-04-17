@@ -2,16 +2,29 @@ import torch
 import torch.nn as nn
 from typing import Tuple
 
+
+from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings import (
+    RelativePositionalEncoding3D,
+    SinusoidalPosEmb3D,
+)
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
     farthest_point_sample,
     index_points,
     query_ball_point,
 )
-from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings import (
-    RelativePositionalEncoding3D,
-    SinusoidalPosEmb3D,
-)
-from dexmani_policy.agents.obs_encoder.pointcloud.common.layers import PointMLP
+
+
+class PointMLP(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
+        super().__init__()
+        self.linear = nn.Linear(in_channels, out_channels)
+        self.norm = nn.LayerNorm(out_channels)
+        self.activation = nn.GELU() if use_activation else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear(x)
+        x = self.norm(x)
+        return self.activation(x)
 
 
 class LocalPatchEncoder(nn.Module):
@@ -32,15 +45,14 @@ class LocalPatchEncoder(nn.Module):
             PointMLP(patch_channels, patch_channels, use_activation=False),
         )
 
-    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor, patch_center: torch.Tensor):
+    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor, patch_center: torch.Tensor) -> torch.Tensor:
         neighbor_idx = query_ball_point(self.radius, self.num_neighbors, xyz, patch_center)
         grouped_xyz = index_points(xyz, neighbor_idx)
         grouped_feature = index_points(point_feature, neighbor_idx)
         relative_xyz = grouped_xyz - patch_center.unsqueeze(2)
         relative_position = self.relative_position_encoding(relative_xyz)
         grouped_input = torch.cat((grouped_feature, relative_xyz, relative_position), dim=-1)
-        patch_feature = self.point_mlp(grouped_input).max(dim=2).values
-        return patch_feature, neighbor_idx
+        return self.point_mlp(grouped_input).max(dim=2).values
 
 
 class MultiScalePatchTokenizer(nn.Module):
@@ -73,14 +85,9 @@ class MultiScalePatchTokenizer(nn.Module):
         patch_center, center_idx = farthest_point_sample(xyz, self.num_patches)
         center_feature = index_points(point_feature, center_idx)
 
-        scale_features = []
-        for scale_encoder in self.scale_encoders:
-            patch_feature, neighbor_idx = scale_encoder(xyz, point_feature, patch_center)
-            scale_features.append(patch_feature)
-
+        scale_features = [scale_encoder(xyz, point_feature, patch_center) for scale_encoder in self.scale_encoders]
         center_position = self.center_position_encoding(patch_center)
         patch_token = self.token_projection(torch.cat((center_feature, *scale_features, center_position), dim=-1))
-
         return patch_token, patch_center
 
 
@@ -106,7 +113,7 @@ class GlobalSceneTokenizer(nn.Module):
             PointMLP(token_channels, token_channels, use_activation=False),
         )
 
-    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
+    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor) -> torch.Tensor:
         neighbor_idx = query_ball_point(self.radius, self.num_neighbors, xyz, xyz)
         grouped_xyz = index_points(xyz, neighbor_idx)
         grouped_feature = index_points(point_feature, neighbor_idx)
@@ -117,9 +124,7 @@ class GlobalSceneTokenizer(nn.Module):
 
         grouped_input = torch.cat((grouped_feature, relative_xyz, relative_position, absolute_position), dim=-1)
         scene_point_feature = self.scene_point_mlp(grouped_input).max(dim=2).values
-        global_scene_token = self.scene_projection(scene_point_feature.max(dim=1, keepdim=True).values)
-
-        return global_scene_token
+        return self.scene_projection(scene_point_feature.max(dim=1, keepdim=True).values)
 
 
 class PointNextPatchTokenizer(nn.Module):
@@ -139,7 +144,10 @@ class PointNextPatchTokenizer(nn.Module):
             raise ValueError("input_channels must be at least 3 because xyz is required")
 
         self.input_channels = input_channels
+        self.num_patches = num_patches
         self.token_channels = token_channels
+        self._last_xyz = None
+        self._last_point_feature = None
 
         self.geometry_stem = nn.Sequential(
             PointMLP(input_channels, stem_channels),
@@ -170,20 +178,24 @@ class PointNextPatchTokenizer(nn.Module):
         xyz = pointcloud[..., :3]
         input_feature = pointcloud[..., : self.input_channels]
         point_feature = self.geometry_stem(input_feature)
-
         patch_token, patch_center = self.local_patch_tokenizer(xyz, point_feature)
-        # 缓存用于 get_global_token
+
         self._last_xyz = xyz
         self._last_point_feature = point_feature
-
         return patch_token, patch_center
 
-    def get_global_token(self, patch_token: torch.Tensor) -> torch.Tensor:
+    def get_global_token(self) -> torch.Tensor:
+        if self._last_xyz is None or self._last_point_feature is None:
+            raise RuntimeError("get_global_token() must be called after forward() on the same module instance")
         return self.global_scene_tokenizer(self._last_xyz, self._last_point_feature)
 
     @property
-    def out_shape(self) -> int:
+    def out_dim(self) -> int:
         return self.token_channels
+
+    @property
+    def out_shape(self) -> tuple[int, int]:
+        return (self.num_patches, self.token_channels)
 
 
 def example() -> None:
@@ -209,12 +221,13 @@ def example() -> None:
     )
     with torch.no_grad():
         patch_token, patch_center = model(pointcloud)
-        global_token = model.get_global_token(patch_token)
+        global_token = model.get_global_token()
 
     print("input:", tuple(pointcloud.shape))
     print("patch_token:", tuple(patch_token.shape))
     print("patch_center:", tuple(patch_center.shape))
     print("global_token:", tuple(global_token.shape))
+    print("out_dim:", model.out_dim)
     print("out_shape:", model.out_shape)
 
 

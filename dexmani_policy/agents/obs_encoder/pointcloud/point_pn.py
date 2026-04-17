@@ -1,16 +1,13 @@
 import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
-    farthest_point_sample,
-    index_points,
-    knn_point,
+    farthest_point_sample, index_points, knn_point, resolve_stage_values
 )
 
 
 class PointGroupNorm(nn.Module):
     def __init__(self, num_channels: int, max_groups: int = 8):
         super().__init__()
-        # Pick the largest groups where channels are divisible and >= 8 per group
         for groups in (max_groups, 4, 2, 1):
             if num_channels % groups == 0 and num_channels // groups >= 8:
                 break
@@ -172,9 +169,9 @@ class ParametricEncoder(nn.Module):
         self.fps_knn_stages = nn.ModuleList()
         self.local_geometry_aggregation_stages = nn.ModuleList()
 
-        k_neighbors = PointPNTokenizer.resolve_stage_values(k_neighbors, num_stages, "k_neighbors")
-        lga_blocks = PointPNTokenizer.resolve_stage_values(lga_blocks, num_stages, "lga_blocks")
-        dim_expansion = PointPNTokenizer.resolve_stage_values(dim_expansion, num_stages, "dim_expansion")
+        k_neighbors = resolve_stage_values(k_neighbors, num_stages, "k_neighbors")
+        lga_blocks = resolve_stage_values(lga_blocks, num_stages, "lga_blocks")
+        dim_expansion = resolve_stage_values(dim_expansion, num_stages, "dim_expansion")
 
         out_dim = embed_dim
         group_num = input_points
@@ -202,9 +199,7 @@ class ParametricEncoder(nn.Module):
 
     def forward(self, point_coordinates: torch.Tensor, point_features: torch.Tensor):
         point_features = self.raw_point_embedding(point_features)
-        intermediate_outputs = {
-            "raw_point_feature": point_features,
-        }
+        intermediate_outputs = {"raw_point_feature": point_features}
 
         for stage_index, (fps_knn, lga) in enumerate(
             zip(self.fps_knn_stages, self.local_geometry_aggregation_stages)
@@ -215,7 +210,7 @@ class ParametricEncoder(nn.Module):
             )
             knn_features = lga(local_coordinates, local_features, knn_coordinates, knn_features)
             point_coordinates = local_coordinates
-            point_features = knn_features.max(dim=-1).values  # inline Pooling
+            point_features = knn_features.max(dim=-1).values
 
             intermediate_outputs[f"stage_{stage_index}_coordinates"] = point_coordinates
             intermediate_outputs[f"stage_{stage_index}_feature"] = point_features
@@ -244,8 +239,16 @@ class PointPNTokenizer(nn.Module):
         if in_channels < 3:
             raise ValueError("in_channels must be at least 3 because xyz is required")
 
+        dim_expansion = resolve_stage_values(dim_expansion, num_stages, "dim_expansion")
+
         self.in_channels = in_channels
         self.input_points = input_points
+        self.num_stages = num_stages
+        self.num_patches = self.compute_num_patches(input_points, num_stages)
+        self.out_channels = embed_dim
+        for expansion in dim_expansion:
+            self.out_channels *= expansion
+
         self.encoder = ParametricEncoder(
             in_channels=in_channels,
             input_points=input_points,
@@ -260,9 +263,6 @@ class PointPNTokenizer(nn.Module):
             residual_expansion=residual_expansion,
             max_groups=max_groups,
         )
-        self.out_channels = embed_dim
-        for expansion in self.resolve_stage_values(dim_expansion, num_stages, "dim_expansion"):
-            self.out_channels *= expansion
 
     def forward(
         self,
@@ -284,24 +284,33 @@ class PointPNTokenizer(nn.Module):
         point_features = pointcloud[..., : self.in_channels].transpose(1, 2).contiguous()
         final_coordinates, final_features, intermediate_outputs = self.encoder(point_coordinates, point_features)
 
-        patch_token = final_features.permute(0, 2, 1).contiguous()  # (B, seq_len, C)
-        patch_center = final_coordinates  # (B, seq_len, 3)
+        patch_token = final_features.permute(0, 2, 1).contiguous()
+        patch_center = final_coordinates
 
         if return_intermediate:
             return patch_token, patch_center, intermediate_outputs
         return patch_token, patch_center
 
     def get_global_token(self, patch_token: torch.Tensor) -> torch.Tensor:
-        return patch_token.max(dim=1, keepdim=True).values  # (B, 1, C)
+        return patch_token.max(dim=1, keepdim=True).values
+
+    @property
+    def out_dim(self) -> int:
+        return self.out_channels
+
+    @property
+    def out_shape(self) -> tuple[int, int]:
+        return (self.num_patches, self.out_channels)
 
     @staticmethod
-    def resolve_stage_values(value, num_stages: int, name: str):
-        if len(value) != num_stages:
-            raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
-        return tuple(value)
+    def compute_num_patches(input_points: int, num_stages: int) -> int:
+        num_patches = input_points
+        for _ in range(num_stages):
+            num_patches = max(num_patches // 2, 1)
+        return num_patches
 
 
-def example():
+def example() -> None:
     batch_size, num_points = 2, 1024
 
     xyz = torch.empty(batch_size, num_points, 3)
@@ -325,10 +334,7 @@ def example():
         k_neighbors=(24, 24, 16),
     )
 
-    patch_token, patch_center, intermediate_outputs = model(
-        pointcloud,
-        return_intermediate=True,
-    )
+    patch_token, patch_center, intermediate_outputs = model(pointcloud, return_intermediate=True)
     global_token = model.get_global_token(patch_token)
 
     print("input_pointcloud:", tuple(pointcloud.shape))
@@ -337,6 +343,8 @@ def example():
     print("patch_token:", tuple(patch_token.shape))
     print("patch_center:", tuple(patch_center.shape))
     print("global_token:", tuple(global_token.shape))
+    print("out_dim:", model.out_dim)
+    print("out_shape:", model.out_shape)
 
 
 if __name__ == "__main__":
