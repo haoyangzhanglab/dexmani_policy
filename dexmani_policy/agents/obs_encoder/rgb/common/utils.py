@@ -1,33 +1,9 @@
 import torch
 import numpy as np
-from dataclasses import asdict, dataclass
 from typing import Dict, Optional, Tuple, Union
 
 HW = Tuple[int, int]
 ArrayLike = Union[np.ndarray, torch.Tensor]
-
-
-@dataclass(frozen=True)
-class MatrixBatchSpec:
-    """Bookkeeping structure for batched camera matrices."""
-    base: torch.Tensor
-    has_leading: bool
-    num_items: int
-    leading_shape: Tuple[int, ...]
-    storage_leading_shape: Tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class SpatialTransformMeta:
-    """Metadata produced by image-space resize / crop operations."""
-    orig_hw: HW
-    resized_hw: HW
-    processed_hw: HW
-    resize_scale_xy: Tuple[float, float]
-    crop_top_left: Tuple[int, int]
-
-    def to_dict(self) -> Dict[str, object]:
-        return asdict(self)
 
 
 def to_tensor(x: ArrayLike) -> torch.Tensor:
@@ -50,12 +26,8 @@ def to_hw(size: Union[int, Tuple[int, int], None]) -> Optional[HW]:
 
 def get_interpolation(name: str) -> str:
     name = name.lower()
-    if name == "bilinear":
-        return "bilinear"
-    if name == "bicubic":
-        return "bicubic"
-    if name == "nearest":
-        return "nearest"
+    if name in {"bilinear", "bicubic", "nearest"}:
+        return name
     raise ValueError(f"Unsupported interpolation: {name}")
 
 
@@ -104,32 +76,45 @@ def flatten_batch(x: torch.Tensor, trailing_ndim: int) -> Tuple[torch.Tensor, Tu
 
 def restore_batch(x: torch.Tensor, leading_shape: Tuple[int, ...]) -> torch.Tensor:
     if len(leading_shape) == 0:
-        return x
+        if x.shape[0] != 1:
+            raise ValueError(f"Expected flattened batch size 1 for unbatched restore, got {tuple(x.shape)}")
+        return x.reshape(*x.shape[1:])
     return x.reshape(*leading_shape, *x.shape[1:])
 
 
-def prepare_matrix_batch(
+def make_spatial_transform_meta(
+    orig_hw: HW,
+    resized_hw: HW,
+    processed_hw: HW,
+    resize_scale_xy: Tuple[float, float],
+    crop_top_left: Tuple[int, int],
+) -> Dict[str, object]:
+    return {
+        "orig_hw": orig_hw,
+        "resized_hw": resized_hw,
+        "processed_hw": processed_hw,
+        "resize_scale_xy": resize_scale_xy,
+        "crop_top_left": crop_top_left,
+    }
+
+
+def broadcast_matrix(
     matrix: ArrayLike,
     mat_shape: Tuple[int, int],
     leading_shape: Tuple[int, ...],
-    collapse_repeated: bool = True,
-) -> MatrixBatchSpec:
-    matrix = to_tensor(matrix).to(torch.float32)
-    num_items = int(np.prod(leading_shape)) if len(leading_shape) > 0 else 1
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    matrix = to_tensor(matrix).to(device=device, dtype=dtype)
 
     if tuple(matrix.shape) == mat_shape:
-        return MatrixBatchSpec(
-            base=matrix.view(1, *mat_shape).contiguous(),
-            has_leading=False,
-            num_items=num_items,
-            leading_shape=leading_shape,
-            storage_leading_shape=tuple(),
-        )
+        view_shape = (*([1] * len(leading_shape)), *mat_shape)
+        if len(leading_shape) == 0:
+            return matrix.reshape(*mat_shape)
+        return matrix.reshape(*view_shape).expand(*leading_shape, *mat_shape).contiguous()
 
     if tuple(matrix.shape[-2:]) != mat_shape:
-        raise ValueError(
-            f"Expected matrix trailing shape {mat_shape}, got {tuple(matrix.shape[-2:])}."
-        )
+        raise ValueError(f"Expected matrix trailing shape {mat_shape}, got {tuple(matrix.shape[-2:])}.")
 
     matrix_leading_shape = tuple(matrix.shape[:-2])
     if len(matrix_leading_shape) > len(leading_shape):
@@ -138,70 +123,45 @@ def prepare_matrix_batch(
             f"got {tuple(matrix.shape)}."
         )
 
-    # Missing leading dims are interpreted as shared trailing items.
-    # Example: leading_shape = (B, T), matrix shape = (B, 3, 3) -> (B, 1, 3, 3).
     padded_leading_shape = matrix_leading_shape + (1,) * (len(leading_shape) - len(matrix_leading_shape))
-    broadcastable = all(
-        m == t or m == 1
-        for m, t in zip(padded_leading_shape, leading_shape)
-    )
-    if not broadcastable:
+    if not all(m == t or m == 1 for m, t in zip(padded_leading_shape, leading_shape)):
         raise ValueError(
             f"Expected matrix leading dims broadcastable to {leading_shape}, got {matrix_leading_shape}."
         )
 
     matrix = matrix.reshape(*padded_leading_shape, *mat_shape)
     if padded_leading_shape != leading_shape:
-        matrix = matrix.expand(*leading_shape, *mat_shape).contiguous()
-    else:
-        matrix = matrix.contiguous()
+        matrix = matrix.expand(*leading_shape, *mat_shape)
+    return matrix.contiguous()
 
-    storage_leading_shape = leading_shape
-    base = matrix.reshape(-1, *mat_shape).contiguous()
 
-    if collapse_repeated and len(leading_shape) > 0:
-        grouped_matrix = matrix.reshape(*leading_shape, *mat_shape).contiguous()
-        for prefix_len in range(len(leading_shape) + 1):
-            prefix_shape = leading_shape[:prefix_len]
-            suffix_num_items = int(np.prod(leading_shape[prefix_len:])) if prefix_len < len(leading_shape) else 1
-            candidate = grouped_matrix.reshape(*prefix_shape, suffix_num_items, *mat_shape)
-            repeated_reference = candidate[..., :1, :, :]
-            if torch.equal(candidate, repeated_reference.expand_as(candidate)):
-                storage_leading_shape = prefix_shape
-                base = candidate[..., 0, :, :].reshape(-1, *mat_shape).contiguous()
-                break
-
-    return MatrixBatchSpec(
-        base=base,
-        has_leading=True,
-        num_items=num_items,
+def flatten_matrix_batch(
+    matrix: ArrayLike,
+    mat_shape: Tuple[int, int],
+    leading_shape: Tuple[int, ...],
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    matrix = broadcast_matrix(
+        matrix=matrix,
+        mat_shape=mat_shape,
         leading_shape=leading_shape,
-        storage_leading_shape=storage_leading_shape,
+        device=device,
+        dtype=dtype,
     )
+    if len(leading_shape) == 0:
+        return matrix.reshape(1, *mat_shape)
+    return matrix.reshape(-1, *mat_shape)
 
 
-def _expand_collapsed_matrix_batch(matrix_batch: torch.Tensor, spec: MatrixBatchSpec) -> torch.Tensor:
-    if spec.storage_leading_shape == spec.leading_shape:
+def restore_matrix_batch(matrix_batch: torch.Tensor, leading_shape: Tuple[int, ...]) -> torch.Tensor:
+    if matrix_batch.ndim == 2:
         return matrix_batch
-
-    mat_shape = tuple(matrix_batch.shape[-2:])
-    matrix_batch = matrix_batch.reshape(*spec.storage_leading_shape, *mat_shape)
-    expand_suffix_ndim = len(spec.leading_shape) - len(spec.storage_leading_shape)
-    view_shape = (*spec.storage_leading_shape, *([1] * expand_suffix_ndim), *mat_shape)
-    matrix_batch = matrix_batch.reshape(*view_shape)
-    matrix_batch = matrix_batch.expand(*spec.leading_shape, *mat_shape)
-    return matrix_batch.reshape(-1, *mat_shape)
-
-
-def restore_matrix_batch(matrix_batch: torch.Tensor, spec: MatrixBatchSpec) -> torch.Tensor:
-    if spec.has_leading:
-        matrix_batch = _expand_collapsed_matrix_batch(matrix_batch, spec)
-        return matrix_batch.reshape(*spec.leading_shape, *matrix_batch.shape[-2:])
-    return matrix_batch[0]
-
-
-def expand_matrix_batch(matrix_batch: torch.Tensor, spec: MatrixBatchSpec) -> torch.Tensor:
-    return _expand_collapsed_matrix_batch(matrix_batch, spec)
+    if len(leading_shape) == 0:
+        if matrix_batch.shape[0] != 1:
+            raise ValueError(f"Expected flattened batch size 1 for unbatched restore, got {tuple(matrix_batch.shape)}")
+        return matrix_batch.reshape(*matrix_batch.shape[-2:])
+    return matrix_batch.reshape(*leading_shape, *matrix_batch.shape[-2:])
 
 
 def update_intrinsics_after_spatial_ops(
@@ -221,6 +181,8 @@ def update_intrinsics_after_spatial_ops(
 
 def get_patch_grid_size(image_hw: HW, patch_size: int) -> HW:
     image_h, image_w = image_hw
+    if patch_size <= 0:
+        raise ValueError(f"patch_size should be positive, got {patch_size}.")
     if image_h % patch_size != 0 or image_w % patch_size != 0:
         raise ValueError(f"Input size {(image_h, image_w)} must be divisible by patch size {patch_size}.")
     return image_h // patch_size, image_w // patch_size
@@ -234,7 +196,11 @@ def resolve_patch_grid_size(
     if (patch_size is None) == (patch_grid_size is None):
         raise ValueError("Specify exactly one of patch_size or patch_grid_size.")
     if patch_grid_size is not None:
-        return to_hw(patch_grid_size)  # type: ignore[return-value]
+        grid = to_hw(patch_grid_size)
+        assert grid is not None
+        if grid[0] <= 0 or grid[1] <= 0:
+            raise ValueError(f"patch_grid_size should be positive, got {grid}.")
+        return grid
     return get_patch_grid_size(image_hw=image_hw, patch_size=int(patch_size))
 
 
@@ -243,4 +209,4 @@ def reshape_patch_tokens_to_map(patch_tokens: torch.Tensor, patch_grid_size: HW)
     grid_h, grid_w = patch_grid_size
     if token_num != grid_h * grid_w:
         raise ValueError(f"Patch token number {token_num} does not match patch grid size {patch_grid_size}.")
-    return patch_tokens.view(batch_size, grid_h, grid_w, channel_dim).permute(0, 3, 1, 2).contiguous()
+    return patch_tokens.reshape(batch_size, grid_h, grid_w, channel_dim).permute(0, 3, 1, 2).contiguous()

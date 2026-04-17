@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModel
-from typing import Dict, Literal, Optional, Sequence, Union, Any
+from typing import Dict, Literal, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
@@ -47,11 +47,7 @@ class DINO(nn.Module):
 
         self.set_tune_mode(tune_mode)
 
-
     def set_tune_mode(self, tune_mode: TuneMode) -> None:
-        # NOTE:
-        # tune_mode only controls the pretrained backbone.
-        # Projection layers defined in this wrapper remain trainable unless handled outside.
         self.tune_mode = tune_mode
 
         if tune_mode == "freeze":
@@ -90,7 +86,6 @@ class DINO(nn.Module):
 
         raise ValueError(f"Unsupported tune_mode: {tune_mode}")
 
-
     def get_global_token(self, outputs, patch_tokens: torch.Tensor) -> torch.Tensor:
         if self.global_token_type == "avg":
             return patch_tokens.mean(dim=1)
@@ -108,7 +103,6 @@ class DINO(nn.Module):
             return self.proj(pooler_output)
 
         raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
-
 
     def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
         if rgb.ndim < 4 or rgb.shape[-3] != 3:
@@ -129,7 +123,6 @@ class DINO(nn.Module):
             "global_token": restore_batch(global_token, leading_shape),
         }
 
-
     def backproject(
         self,
         depth: torch.Tensor,
@@ -138,8 +131,7 @@ class DINO(nn.Module):
         depth_scale: float = 1000.0,
         min_depth: float = 0.0,
         max_depth: Optional[float] = None,
-    ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
-
+    ) -> Dict[str, object]:
         dense_geometry = self.geometry_processor.backproject_depth(
             depth=depth,
             intrinsics=intrinsics,
@@ -151,34 +143,31 @@ class DINO(nn.Module):
         )
 
         patch_geometry = self.geometry_processor.pool_patch_coordinates(
-            coords=dense_geometry.coords,
-            valid_mask=dense_geometry.valid_mask,
+            coords=dense_geometry["coords"],
+            valid_mask=dense_geometry["valid_mask"],
             patch_size=self.patch_size,
         )
 
+        patch_coords = patch_geometry["patch_coords"]
         return {
-            "patch_coords": patch_geometry.patch_coords,
-            "patch_valid_mask": patch_geometry.patch_valid_mask,
+            "patch_coords": patch_coords,
+            "patch_valid_mask": patch_geometry["patch_valid_mask"],
             "geometry_meta": {
-                "coord_frame": dense_geometry.meta.coord_frame,
-                "depth_scale": dense_geometry.meta.depth_scale,
-                "min_depth": dense_geometry.meta.min_depth,
-                "max_depth": dense_geometry.meta.max_depth,
-                "patch_grid_size": patch_geometry.meta.patch_grid_size,
-                "patch_hw": patch_geometry.meta.patch_hw,
-                "leading_shape": patch_geometry.meta.leading_shape,
+                "coord_frame": dense_geometry["coord_frame"],
+                "depth_scale": dense_geometry["depth_scale"],
+                "min_depth": dense_geometry["min_depth"],
+                "max_depth": dense_geometry["max_depth"],
+                "patch_grid_size": patch_geometry["patch_grid_size"],
+                "patch_hw": patch_geometry["patch_hw"],
+                "leading_shape": tuple(patch_coords.shape[:-2]),
             },
         }
-
-
 
     def patch_tokens_to_featmap(self, patch_tokens: torch.Tensor, image_hw: Sequence[int]) -> torch.Tensor:
         patch_grid_size = get_patch_grid_size((int(image_hw[0]), int(image_hw[1])), self.patch_size)
         flat_patch_tokens, leading_shape = flatten_batch(patch_tokens, trailing_ndim=2)
         feature_map = reshape_patch_tokens_to_map(flat_patch_tokens, patch_grid_size)
         return restore_batch(feature_map, leading_shape)
-
-
 
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -212,10 +201,10 @@ def example() -> None:
             collapse_repeated_camera=True,
         )
 
-        rgb = rgbd_batch.image.to(device)
-        depth = rgbd_batch.depth.to(device)
-        intrinsics = rgbd_batch.intrinsics.to(device)
-        camera_to_world = None if rgbd_batch.camera_to_world is None else rgbd_batch.camera_to_world.to(device)
+        rgb = rgbd_batch["image"].to(device)
+        depth = rgbd_batch["depth"].to(device)
+        intrinsics = rgbd_batch["intrinsics"].to(device)
+        camera_to_world = None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
 
         with torch.no_grad():
             vision_out = encoder(rgb)
