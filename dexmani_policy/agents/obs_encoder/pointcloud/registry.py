@@ -1,21 +1,21 @@
 import torch.nn as nn
 from typing import Dict, Optional
 
-from dexmani_policy.agents.obs_encoder.pointcloud import(
-    PointNet,
+from dexmani_policy.agents.obs_encoder.pointcloud import (
     MultiStagePointNet,
+    PointNet,
     PointNextEncoder,
-    PointPNTokenizer,
     PointNextPatchTokenizer,
+    PointPNTokenizer,
 )
 
 
 GLOBAL_ENCODER_CONFIGS: Dict[str, Dict] = {
     "dp3": {
-        "pc_out_dim": 256,
+        "output_channels": 256,
     },
     "idp3": {
-        "pc_out_dim": 256,
+        "output_channels": 256,
     },
     "pointnext": {
         "output_channels": 256,
@@ -30,22 +30,20 @@ GLOBAL_ENCODER_CONFIGS: Dict[str, Dict] = {
 
 PATCH_TOKENIZER_CONFIGS: Dict[str, Dict] = {
     "pointpn": {
-        "num_points": 1024,
+        "input_points": 1024,
         "num_stages": 3,
-        "embed_dim": 64,
-        "k_neighbors": (24, 24, 16),
-        "lga_blocks": (2, 2, 1),
-        "dim_expansion": (2, 2, 2),
+        "embed_channels": 64,
+        "stage_num_neighbors": (24, 24, 16),
+        "stage_lga_blocks": (2, 2, 1),
+        "stage_channel_expansion": (2, 2, 2),
         "point_cloud_type": "scan",
     },
-    "tokenizer": {
+    "pointnext_tokenizer": {
         "stem_channels": 64,
         "token_channels": 128,
         "num_patches": 96,
         "patch_radii": (0.04, 0.08),
         "patch_neighbors": (16, 32),
-        "global_radius": 0.16,
-        "global_neighbors": 32,
     },
 }
 
@@ -72,14 +70,14 @@ def build_pc_global_encoder(
 
     if encoder_type == "dp3":
         return PointNet(
-            in_channels=pc_dim,
-            out_channels=cfg["pc_out_dim"],
+            input_channels=pc_dim,
+            output_channels=cfg["output_channels"],
         )
 
     if encoder_type == "idp3":
         return MultiStagePointNet(
-            in_channels=pc_dim,
-            out_channels=cfg["pc_out_dim"],
+            input_channels=pc_dim,
+            output_channels=cfg["output_channels"],
         )
 
     if encoder_type == "pointnext":
@@ -111,17 +109,17 @@ def build_pc_patch_tokenizer(
 
     if tokenizer_type == "pointpn":
         return PointPNTokenizer(
-            in_channels=pc_dim,
-            input_points=cfg["num_points"],
+            input_channels=pc_dim,
+            input_points=cfg["input_points"],
             num_stages=cfg["num_stages"],
-            embed_dim=cfg["embed_dim"],
-            k_neighbors=cfg["k_neighbors"],
-            lga_blocks=cfg["lga_blocks"],
-            dim_expansion=cfg["dim_expansion"],
+            embed_channels=cfg["embed_channels"],
+            stage_num_neighbors=cfg["stage_num_neighbors"],
+            stage_lga_blocks=cfg["stage_lga_blocks"],
+            stage_channel_expansion=cfg["stage_channel_expansion"],
             point_cloud_type=cfg["point_cloud_type"],
         )
 
-    if tokenizer_type == "tokenizer":
+    if tokenizer_type == "pointnext_tokenizer":
         return PointNextPatchTokenizer(
             input_channels=pc_dim,
             stem_channels=cfg["stem_channels"],
@@ -129,8 +127,6 @@ def build_pc_patch_tokenizer(
             num_patches=cfg["num_patches"],
             patch_radii=cfg["patch_radii"],
             patch_neighbors=cfg["patch_neighbors"],
-            global_radius=cfg["global_radius"],
-            global_neighbors=cfg["global_neighbors"],
         )
 
     raise ValueError(f"Unknown patch tokenizer type: {tokenizer_type}")

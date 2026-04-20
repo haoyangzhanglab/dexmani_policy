@@ -7,8 +7,15 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings impo
     SinusoidalPosEmb3D,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
-    group, sample_and_group, sample_and_group_all, resolve_stage_values
+    group,
+    resolve_stage_values,
+    sample_and_group,
+    sample_and_group_all,
 )
+
+
+def normalize_relative_xyz(relative_xyz: torch.Tensor, radius: float, eps: float = 1e-6) -> torch.Tensor:
+    return relative_xyz / max(radius, eps)
 
 
 class PointMLP(nn.Module):
@@ -27,8 +34,8 @@ class PointMLP(nn.Module):
 class SetAbstraction(nn.Module):
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
+        input_channels: int,
+        output_channels: int,
         stride: int,
         radius: float,
         num_neighbors: int,
@@ -36,7 +43,7 @@ class SetAbstraction(nn.Module):
         use_residual: bool = True,
         is_head: bool = False,
         global_aggr: bool = False,
-        position_encoding_dim: int = 16,
+        position_encoding_channels: int = 16,
     ):
         super().__init__()
         self.stride = stride
@@ -45,84 +52,100 @@ class SetAbstraction(nn.Module):
         self.is_head = is_head
         self.global_aggr = global_aggr
         self.use_residual = use_residual and (not is_head) and (not global_aggr)
-        self.relative_position_encoding = None if is_head else RelativePositionalEncoding3D(position_encoding_dim)
+        self.relative_position_encoding = None if is_head else RelativePositionalEncoding3D(position_encoding_channels)
 
         if is_head:
-            channels = [in_channels] + [out_channels] * layers
+            mlp_channels = [input_channels] + [output_channels] * layers
         else:
-            grouped_in_channels = in_channels + 3 + position_encoding_dim
-            hidden_channels = out_channels if stride == 1 else max(out_channels // 2, 1)
-            channels = [grouped_in_channels] + [hidden_channels] * (layers - 1) + [out_channels]
+            group_input_channels = input_channels + 3 + position_encoding_channels
+            hidden_channels = output_channels if stride == 1 else max(output_channels // 2, 1)
+            mlp_channels = [group_input_channels] + [hidden_channels] * (layers - 1) + [output_channels]
 
         blocks = []
-        for i in range(len(channels) - 1):
-            use_activation = i < len(channels) - 2 or not self.use_residual
-            blocks.append(PointMLP(channels[i], channels[i + 1], use_activation=use_activation))
+        for block_index in range(len(mlp_channels) - 1):
+            use_activation_in_block = block_index < len(mlp_channels) - 2 or not self.use_residual
+            blocks.append(
+                PointMLP(
+                    mlp_channels[block_index],
+                    mlp_channels[block_index + 1],
+                    use_activation=use_activation_in_block,
+                )
+            )
         self.point_mlp = nn.Sequential(*blocks)
 
         if self.use_residual:
             self.residual_projection = (
                 nn.Identity()
-                if in_channels == out_channels
-                else PointMLP(in_channels, out_channels, use_activation=False)
+                if input_channels == output_channels
+                else PointMLP(input_channels, output_channels, use_activation=False)
             )
         else:
             self.residual_projection = None
         self.output_activation = nn.GELU()
 
-    def forward(self, position: torch.Tensor, feature: torch.Tensor):
+    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
         if self.is_head:
-            return position, self.point_mlp(feature)
+            return xyz, self.point_mlp(point_feature)
 
         if self.global_aggr:
-            new_position, grouped_feature = sample_and_group_all(position, feature)
-            identity = None
+            center_xyz, neighbor_feature = sample_and_group_all(xyz, point_feature)
+            center_feature = None
         else:
             sample_ratio = min(1.0 / self.stride, 1.0)
-            new_position, grouped_feature, identity = sample_and_group(
+            center_xyz, neighbor_feature, center_feature = sample_and_group(
                 sample_ratio,
                 self.radius,
                 self.num_neighbors,
-                position,
-                feature,
+                xyz,
+                point_feature,
             )
 
-        relative_xyz = grouped_feature[..., :3]
-        relative_position = self.relative_position_encoding(relative_xyz)
-        grouped_feature = torch.cat((grouped_feature, relative_position), dim=-1)
-        new_feature = self.point_mlp(grouped_feature).max(dim=2).values
+        relative_xyz = neighbor_feature[..., :3]
+        normalized_relative_xyz = normalize_relative_xyz(relative_xyz, self.radius)
+        relative_pos_feature = self.relative_position_encoding(normalized_relative_xyz)
+        group_input = torch.cat(
+            (normalized_relative_xyz, neighbor_feature[..., 3:], relative_pos_feature),
+            dim=-1,
+        )
+        center_feature_out = self.point_mlp(group_input).max(dim=2).values
 
-        if self.use_residual and identity is not None:
-            new_feature = self.output_activation(new_feature + self.residual_projection(identity))
+        if self.use_residual and center_feature is not None:
+            center_feature_out = self.output_activation(
+                center_feature_out + self.residual_projection(center_feature)
+            )
 
-        return new_position, new_feature
+        return center_xyz, center_feature_out
 
 
 class LocalAggregation(nn.Module):
     def __init__(
         self,
-        in_channels: int,
+        input_channels: int,
         radius: float,
         num_neighbors: int,
         expansion: int = 2,
-        position_encoding_dim: int = 16,
+        position_encoding_channels: int = 16,
     ):
         super().__init__()
         self.radius = radius
         self.num_neighbors = num_neighbors
-        self.relative_position_encoding = RelativePositionalEncoding3D(position_encoding_dim)
-        hidden_channels = in_channels * expansion
+        self.relative_position_encoding = RelativePositionalEncoding3D(position_encoding_channels)
+        hidden_channels = input_channels * expansion
         self.point_mlp = nn.Sequential(
-            PointMLP(in_channels + 3 + position_encoding_dim, hidden_channels),
-            PointMLP(hidden_channels, in_channels, use_activation=False),
+            PointMLP(input_channels + 3 + position_encoding_channels, hidden_channels),
+            PointMLP(hidden_channels, input_channels, use_activation=False),
         )
 
-    def forward(self, position: torch.Tensor, feature: torch.Tensor) -> torch.Tensor:
-        grouped_feature = group(self.radius, self.num_neighbors, position, feature)
-        relative_xyz = grouped_feature[..., :3]
-        relative_position = self.relative_position_encoding(relative_xyz)
-        grouped_feature = torch.cat((grouped_feature, relative_position), dim=-1)
-        return self.point_mlp(grouped_feature).max(dim=2).values
+    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor) -> torch.Tensor:
+        neighbor_feature = group(self.radius, self.num_neighbors, xyz, point_feature)
+        relative_xyz = neighbor_feature[..., :3]
+        normalized_relative_xyz = normalize_relative_xyz(relative_xyz, self.radius)
+        relative_pos_feature = self.relative_position_encoding(normalized_relative_xyz)
+        group_input = torch.cat(
+            (normalized_relative_xyz, neighbor_feature[..., 3:], relative_pos_feature),
+            dim=-1,
+        )
+        return self.point_mlp(group_input).max(dim=2).values
 
 
 class InvertedResidualPointBlock(nn.Module):
@@ -135,11 +158,11 @@ class InvertedResidualPointBlock(nn.Module):
         )
         self.activation = nn.GELU()
 
-    def forward(self, position: torch.Tensor, feature: torch.Tensor):
-        identity = feature
-        feature = self.local_aggregation(position, feature)
-        feature = self.channel_mlp(feature)
-        return position, self.activation(feature + identity)
+    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
+        residual_feature = point_feature
+        point_feature = self.local_aggregation(xyz, point_feature)
+        point_feature = self.channel_mlp(point_feature)
+        return xyz, self.activation(point_feature + residual_feature)
 
 
 class PointNextEncoder(nn.Module):
@@ -176,8 +199,8 @@ class PointNextEncoder(nn.Module):
         ):
             blocks = [
                 SetAbstraction(
-                    in_channels=current_channels,
-                    out_channels=channels,
+                    input_channels=current_channels,
+                    output_channels=channels,
                     stride=stride,
                     radius=radius,
                     num_neighbors=neighbors,
@@ -210,23 +233,23 @@ class PointNextEncoder(nn.Module):
                 f"pointcloud has {pointcloud.size(-1)} channels, but input_channels={self.input_channels}"
             )
 
-        position = pointcloud[..., :3]
-        feature = pointcloud[..., : self.input_channels]
+        xyz = pointcloud[..., :3]
+        point_feature = pointcloud[..., : self.input_channels]
 
         for stage in self.stages:
             for block in stage:
-                position, feature = block(position, feature)
+                xyz, point_feature = block(xyz, point_feature)
 
-        global_token = self._get_global_token(feature, position)
+        global_token = self._get_global_token(point_feature, xyz)
         return {"global_token": global_token}
 
-    def _get_global_token(self, patch_token: torch.Tensor, patch_center: torch.Tensor) -> torch.Tensor:
-        pooled_feature = patch_token.max(dim=1).values
-        pooled_position = patch_center.mean(dim=1)
-        global_feature = pooled_feature + self.global_position_projection(
-            self.global_position_embedding(pooled_position)
+    def _get_global_token(self, final_point_feature: torch.Tensor, final_xyz: torch.Tensor) -> torch.Tensor:
+        pooled_point_feature = final_point_feature.max(dim=1).values
+        pooled_xyz = final_xyz.mean(dim=1)
+        global_token_feature = pooled_point_feature + self.global_position_projection(
+            self.global_position_embedding(pooled_xyz)
         )
-        return self.output_projection(global_feature)
+        return self.output_projection(global_token_feature)
 
     @property
     def out_dim(self) -> int:
@@ -247,7 +270,7 @@ def example() -> None:
     rgb = torch.rand(batch_size, num_points, 3)
     pointcloud = torch.cat([xyz, rgb], dim=-1)
 
-    model = PointNextEncoder(
+    pointnext = PointNextEncoder(
         input_channels=6,
         output_channels=256,
         stage_depths=(1, 2, 2),
@@ -258,13 +281,13 @@ def example() -> None:
     )
 
     with torch.no_grad():
-        out = model(pointcloud)
+        out = pointnext(pointcloud)
 
     print("=== PointNextEncoder Example ===")
     print("input:", tuple(pointcloud.shape))
     print("global_token:", tuple(out["global_token"].shape))
-    print("out_dim:", model.out_dim)
-    print("out_shape:", model.out_shape)
+    print("out_dim:", pointnext.out_dim)
+    print("out_shape:", pointnext.out_shape)
 
 
 if __name__ == "__main__":

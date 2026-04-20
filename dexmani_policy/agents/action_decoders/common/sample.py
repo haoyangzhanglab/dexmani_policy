@@ -55,7 +55,7 @@ def sample_discrete_pow(batch_size, denoise_timesteps, device="cuda"):
     return t
 
 
-class SampleStrategy:
+class SampleLibrary:
 
     def __init__(
         self,

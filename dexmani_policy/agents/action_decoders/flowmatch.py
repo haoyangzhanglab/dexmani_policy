@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from einops import reduce
 import torch.nn.functional as F
-from dexmani_policy.agents.action_decoders.common.sample_util import SampleStrategy
+from dexmani_policy.agents.action_decoders.common.sample import SampleLibrary
 
 
 class FlowMatch_With_Consistency(nn.Module):
@@ -32,7 +32,7 @@ class FlowMatch_With_Consistency(nn.Module):
         self.dt_sample_mode_for_consistency = dt_sample_mode_for_consistency
         self.target_t_sample_mode = target_t_sample_mode    # relative: input DiT-X with (t, dt); absolute: input (t, t+dt)
     
-        self.sampler = SampleStrategy(denoise_timesteps=denoise_timesteps)
+        self.sampler = SampleLibrary(denoise_timesteps=denoise_timesteps)
     
 
     def linear_interpolate(self, noise, target, timestep, epsilon=0.0):
