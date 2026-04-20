@@ -47,8 +47,8 @@ class PointNet(nn.Module):
             )
 
         point_feature = self.mlp(pointcloud[..., : self.input_channels])
-        point_feature = self.output_projection(point_feature)
         global_token = point_feature.amax(dim=1)
+        global_token = self.output_projection(global_token)
         return {"global_token": global_token}
 
     @property
