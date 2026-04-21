@@ -58,7 +58,9 @@ def build_train_components(cfg) -> TrainComponents:
     if cfg.training.use_ema:
         try:
             ema_model = copy.deepcopy(model)
-        except Exception:
+        except Exception as e:
+            import warnings
+            warnings.warn(f"copy.deepcopy(model) failed ({e}), falling back to fresh instantiation. EMA weights will be random until checkpoint is loaded.")
             ema_model = hydra.utils.instantiate(cfg.agent)
 
         ema_model.load_normalizer_from_dataset(normalizer)

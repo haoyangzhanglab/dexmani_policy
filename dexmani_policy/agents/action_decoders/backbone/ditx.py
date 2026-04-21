@@ -46,8 +46,7 @@ class AdaLNZero(nn.Module):
     
     def initialize_weights(self):
         nn.init.zeros_(self.cond_linear.weight)
-        nn.init.constant_(self.cond_linear.bias[:self.dim], 1.)
-        nn.init.zeros_(self.cond_linear.bias[self.dim:])
+        nn.init.zeros_(self.cond_linear.bias)
     
     def forward(self, x, cond):
         x = self.norm(x)
@@ -233,14 +232,14 @@ class FinalLayer(nn.Module):
 #################################################################################
 #                           Ditx Transformer                          
 #################################################################################
-class DiTX_FlowMatch(nn.Module):
+class DiTXFlowMatch(nn.Module):
     def __init__(
         self,
         horizon: int,
         action_dim: int,
         n_obs_steps: int,
-        obs_seq_len: int,
-        obs_feat_dim: int,
+        num_obs_tokens: int,
+        obs_token_dim: int,
         timestep_embed_dim: int = 128,
         target_t_embed_dim: int = 128,
         n_layers: int = 12,
@@ -263,8 +262,8 @@ class DiTX_FlowMatch(nn.Module):
         self.input_embedder = nn.Linear(action_dim, hidden_dim)
         self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
 
-        self.context_embedder = nn.Linear(obs_feat_dim, hidden_dim)
-        self.context_pos_embed = nn.Parameter(torch.zeros(1, obs_seq_len * n_obs_steps, hidden_dim))
+        self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
+        self.context_pos_embed = nn.Parameter(torch.zeros(1, num_obs_tokens, hidden_dim))
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
         
@@ -388,19 +387,21 @@ class DiTX_FlowMatch(nn.Module):
         
         x = self.final_layer(x)
 
+        # action token 与 context token 分离（cross-attention），输入始终是 (B, horizon, D)，切片等价于 x 本身。
+        # 若未来将 obs token 与 action token 拼接输入，此处取最后 horizon 步才有实际意义。
         x = x[:, -self.horizon:]
         return x
 
 
 
-class DiTX_Diffusion(nn.Module):
+class DiTXDiffusion(nn.Module):
     def __init__(
         self,
         horizon: int,
         action_dim: int,
         n_obs_steps: int,
-        obs_seq_len: int,
-        obs_feat_dim: int,
+        num_obs_tokens: int,
+        obs_token_dim: int,
         timestep_embed_dim: int = 128,
         n_layers: int = 12,
         hidden_dim: int = 768,
@@ -422,8 +423,8 @@ class DiTX_Diffusion(nn.Module):
         self.input_embedder = nn.Linear(action_dim, hidden_dim)
         self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
 
-        self.context_embedder = nn.Linear(obs_feat_dim, hidden_dim)
-        self.context_pos_embed = nn.Parameter(torch.zeros(1, obs_seq_len * n_obs_steps, hidden_dim))
+        self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
+        self.context_pos_embed = nn.Parameter(torch.zeros(1, num_obs_tokens, hidden_dim))
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
         
@@ -524,5 +525,6 @@ class DiTX_Diffusion(nn.Module):
         
         x = self.final_layer(x)
 
+        # 同 DiTXFlowMatch：当前 action/context 分离，切片为预留接口。
         x = x[:, -self.horizon:]
         return x

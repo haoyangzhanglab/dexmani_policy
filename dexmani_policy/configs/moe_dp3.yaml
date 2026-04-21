@@ -40,7 +40,7 @@ dataset:
 
 
 agent:
-  _target_: dexmani_policy.agents.moe_dp3_agent.MoEDP3Agent
+  _target_: dexmani_policy.agents.core.moe.MoEAgent
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
@@ -59,8 +59,6 @@ agent:
   moe_num_layers: 2
   lambda_load: 0.1
   beta_entropy: 0.01
-  temperature: 1.0
-  residual: true
 
   diffusion_step_embed_dim: 128
   down_dims: [256, 512, 1024]

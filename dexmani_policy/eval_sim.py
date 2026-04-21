@@ -68,7 +68,7 @@ class SimEvalBuilder:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agent-name", type=str, required=True)
+    parser.add_argument("--policy-name", type=str, required=True)
     parser.add_argument("--task-name", type=str, required=True)
     parser.add_argument("--exp-name", type=str, required=True)
     parser.add_argument(
@@ -106,7 +106,7 @@ def run_eval(exp_dir: Path, overrides: Sequence[str]):
 
 def main() -> None:
     args = parse_args()
-    exp_dir = Path(ROOT_DIR) / "experiments" / args.agent_name / args.task_name / args.exp_name
+    exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
     run_eval(exp_dir, args.overrides)
 
 

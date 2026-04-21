@@ -1,5 +1,4 @@
 import os
-import shutil
 import signal
 import atexit
 from pathlib import Path
@@ -112,11 +111,10 @@ class TrainWorkspace:
     # 将指定 checkpoint 更新为 latest.pt，便于后续断点续训。
     def save_latest(self, checkpoint_path: Path) -> Path:
         latest_path = self.checkpoint_dir / "latest.pt"
-        tmp_path = latest_path.with_suffix(".tmp")
-        try:
-            os.link(checkpoint_path, tmp_path)
-        except OSError:
-            shutil.copy2(checkpoint_path, tmp_path)
+        tmp_path = latest_path.with_suffix(".tmp.pt")
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink()
+        tmp_path.symlink_to(checkpoint_path.name)
         os.replace(tmp_path, latest_path)
         return latest_path
 

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from dexmani_policy.agents.action_decoders.common.sample import SampleLibrary
 
 
-class FlowMatch_With_Consistency(nn.Module):
+class FlowMatchWithConsistency(nn.Module):
     def __init__(
         self,
         model,
@@ -24,7 +24,7 @@ class FlowMatch_With_Consistency(nn.Module):
         self.denoise_timesteps = denoise_timesteps
         self.flow_batch_ratio = flow_batch_ratio
         self.consistency_batch_ratio = consistency_batch_ratio
-        assert flow_batch_ratio + consistency_batch_ratio == 1.0, "flow_batch_ratio and consistency_batch_ratio should sum to 1.0"
+        assert abs(flow_batch_ratio + consistency_batch_ratio - 1.0) < 1e-6, "flow_batch_ratio and consistency_batch_ratio should sum to 1.0"
 
         # Changing the default sampling strategy may cause shape errors, especially for dt.
         self.t_sample_mode_for_flow = t_sample_mode_for_flow
@@ -61,7 +61,7 @@ class FlowMatch_With_Consistency(nn.Module):
         flow_target_dict = {
             "xt": xt_flow,
             "t": t_flow,
-            "dt": target_t_flow,
+            "target_t": target_t_flow,
             "vt_target": vt_flow_target,
         }
         return flow_target_dict
@@ -74,7 +74,7 @@ class FlowMatch_With_Consistency(nn.Module):
         t_ct = t_ct.view(-1, 1, 1)
 
         dt1 = self.sampler.sample(B, self.dt_sample_mode_for_consistency, device=actions.device)
-        dt2 = dt1.clone() # 可以使用同样的dt, 也可以随机采样
+        dt2 = dt1.clone() # 当前设计：教师与学生使用相同的 dt；若需解耦，改为对 dt2 独立采样
 
         # 用更远一步的趋势，估计数据点大概在什么位置，把“现在到终点”的整体速度作为监督信号，指导模型学会更全局的趋势，而不是局部的切线趋势
         t_next = t_ct.squeeze() + dt1
@@ -107,7 +107,10 @@ class FlowMatch_With_Consistency(nn.Module):
         consistency_target_dict = {
             "xt": xt_ct,
             "t": t_ct,
-            "dt": dt1 if self.target_t_sample_mode == "relative" else t_next.squeeze(),  # 输入DitX的dt
+            # relative 模式下，教师调用时传入的是 target_t_next=dt2，此处学生侧传入 dt1。
+            # 由于 dt2 = dt1.clone()，数值相同，无实际影响。
+            # 若将来解耦 dt1/dt2（独立采样），此处应改为 dt2 以保持语义一致。
+            "target_t": dt1 if self.target_t_sample_mode == "relative" else t_next.squeeze(),
             "vt_target": vt_target_ct,
         }
         return consistency_target_dict
@@ -116,46 +119,42 @@ class FlowMatch_With_Consistency(nn.Module):
 
     def compute_loss(self, cond, actions, **kwargs):
         ema_model = kwargs.get("ema_model", None)
-        assert ema_model is not None, "EMA model is required for computing consistency loss in FlowMatch_With_Consistency"
+        assert ema_model is not None, "EMA model is required for computing consistency loss in FlowMatchWithConsistency"
 
         B = actions.shape[0]
-        flow_batchsize = int(B * self.flow_batch_ratio)
+        assert B >= 2, f"batch size must be >= 2 for flow+consistency split, got {B}"
+        flow_batchsize = max(1, min(B - 1, int(B * self.flow_batch_ratio)))
 
         loss = 0.
         flow_targets = self.get_flow_velocity(actions[:flow_batchsize])
         pred_vt_flow = self.model(
             x = flow_targets["xt"],
             timestep = flow_targets["t"].squeeze(),
-            target_t = flow_targets["dt"].squeeze(),
+            target_t = flow_targets["target_t"].squeeze(),
             context = cond[:flow_batchsize],
         )
 
         vt_flow_target = flow_targets["vt_target"]
         loss_flow = F.mse_loss(pred_vt_flow, vt_flow_target, reduction='none')
-        loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean')  # (flow_batchsize,)
-        loss += loss_flow.mean()
-        loss_flow = loss_flow.mean()  # scalar
+        loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()  # scalar
+        loss = loss + loss_flow
 
         consistency_targets = self.get_consistency_velocity(actions[flow_batchsize:], cond[flow_batchsize:], ema_model)
         pred_vt_consistency = self.model(
             x = consistency_targets["xt"],
             timestep = consistency_targets["t"].squeeze(),
-            target_t = consistency_targets["dt"].squeeze(),
+            target_t = consistency_targets["target_t"].squeeze(),
             context = cond[flow_batchsize:],
         )
 
         vt_consistency_target = consistency_targets["vt_target"]
         loss_consistency = F.mse_loss(pred_vt_consistency, vt_consistency_target, reduction='none')
-        loss_consistency = reduce(loss_consistency, 'b ... -> b (...)', 'mean')  # (consistency_batchsize,)
-        loss += loss_consistency.mean()
-        loss_consistency = loss_consistency.mean()  # scalar
-
+        loss_consistency = reduce(loss_consistency, 'b ... -> b (...)', 'mean').mean()  # scalar
+        loss = loss + loss_consistency
 
         pred_vt_flow_magnitude = torch.sqrt(torch.mean(pred_vt_flow ** 2))
         pred_vt_consistency_magnitude = torch.sqrt(torch.mean(pred_vt_consistency ** 2))
-
         # Return final loss scalar and dict
-        loss = loss.mean()
         loss_dict = {
             "loss": loss,
             "loss_flow": loss_flow,

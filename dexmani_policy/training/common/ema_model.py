@@ -1,5 +1,5 @@
 import torch
-from torch.nn.modules.batchnorm import _BatchNorm
+
 
 class EMAModel:
     def __init__(
@@ -50,18 +50,22 @@ class EMAModel:
     def step(self, new_model):
         self.decay = self.get_decay(self.optimization_step)
 
-        for module, ema_module in zip(new_model.modules(), self.averaged_model.modules()):            
-            for param, ema_param in zip(module.parameters(recurse=False), ema_module.parameters(recurse=False)):
+        ema_params = dict(self.averaged_model.named_parameters())
+        ema_buffers = dict(self.averaged_model.named_buffers())
 
-                if isinstance(param, dict):
-                    raise RuntimeError('Dict parameter not supported')
-                
-                if isinstance(module, _BatchNorm):
-                    ema_param.copy_(param.to(dtype=ema_param.dtype).data)
-                elif not param.requires_grad:
-                    ema_param.copy_(param.to(dtype=ema_param.dtype).data)
-                else:
-                    ema_param.mul_(self.decay)
-                    ema_param.add_(param.data.to(dtype=ema_param.dtype), alpha=1 - self.decay)
+        for name, param in new_model.named_parameters():
+            ema_param = ema_params.get(name)
+            if ema_param is None:
+                raise KeyError(f"EMA model missing parameter '{name}'. Model structure may have changed since EMA was initialized.")
+            if not param.requires_grad:
+                ema_param.copy_(param.to(dtype=ema_param.dtype).data)
+            else:
+                ema_param.mul_(self.decay).add_(
+                    param.data.to(dtype=ema_param.dtype), alpha=1 - self.decay
+                )
+
+        for name, buf in new_model.named_buffers():
+            if name in ema_buffers:
+                ema_buffers[name].copy_(buf.to(dtype=ema_buffers[name].dtype).data)
 
         self.optimization_step += 1

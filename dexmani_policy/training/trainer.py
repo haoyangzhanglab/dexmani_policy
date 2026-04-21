@@ -87,6 +87,7 @@ class Trainer:
         loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
@@ -154,6 +155,8 @@ class Trainer:
         optimizer_to(self.optimizer, self.device)
         self.optimizer.zero_grad(set_to_none=True)
 
+        sample_batch = dict_apply(next(iter(self.train_loader)), lambda x: x.to(self.device, non_blocking=True))
+
         epoch_pbar = tqdm(
             range(start_epoch, self.num_epochs),
             desc="Epoch",
@@ -164,9 +167,8 @@ class Trainer:
         for epoch in epoch_pbar:
             self.model.train()
 
-            sample_batch = None
             for batch in self.train_loader:
-                sample_batch, log_dict = self.train_one_step(batch)
+                _, log_dict = self.train_one_step(batch)
 
                 if (global_step % self.log_interval_steps) == 0:
                     step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
@@ -190,7 +192,8 @@ class Trainer:
                 epoch_metrics["train/action_mse_error"] = self.compute_action_mse_for_one_batch(self.model, sample_batch)
 
             if epoch_end_tasks["validate"]:
-                val_loss = self.validate(self.model)
+                val_agent = self.ema_model if self.use_ema else self.model
+                val_loss = self.validate(val_agent)
                 if val_loss is not None:
                     epoch_metrics["val/loss"] = val_loss
 
@@ -203,7 +206,7 @@ class Trainer:
 
             if epoch_end_tasks["save_checkpoint"]:
                 if self.enable_env_eval:
-                    test_mean_score = epoch_metrics["eval/success_rate"]
+                    test_mean_score = epoch_metrics.get("eval/success_rate")
                 elif "val/loss" in epoch_metrics:
                     test_mean_score = -epoch_metrics["val/loss"]
                 else:

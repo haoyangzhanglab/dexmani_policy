@@ -40,7 +40,7 @@ dataset:
 
 
 agent:
-  _target_: dexmani_policy.agents.dp3_agent.DP3Agent
+  _target_: dexmani_policy.agents.core.dp3.DP3Agent
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}

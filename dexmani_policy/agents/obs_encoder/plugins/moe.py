@@ -109,49 +109,13 @@ class MoE(nn.Module):
         return z_moe, aux
 
 
-class MoEConditioner(nn.Module):
-    def __init__(
-        self,
-        encoder,
-        num_experts=16,
-        top_k=2,
-        hidden_dim=256,
-        out_dim=None,
-        num_layers=2,
-        lambda_load=0.1,
-        beta_entropy=0.01,
-        activation=nn.GELU,
-    ):
-        super().__init__()
-        self.encoder = encoder
-        self.moe = MoE(
-            dim=encoder.out_shape,
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_dim=hidden_dim,
-            out_dim=encoder.out_shape if out_dim is None else out_dim,
-            num_layers=num_layers,
-            lambda_load=lambda_load,
-            beta_entropy=beta_entropy,
-            activation=activation,
-        )
-
-    def forward(self, obs, override_idx=None, return_aux=False):
-        z = self.encoder(obs)
-        return self.moe(z, override_idx=override_idx, return_aux=return_aux)
-
-    @property
-    def out_shape(self):
-        return self.moe.out_dim
-
-
 def example():
     torch.manual_seed(0)
 
     class DummyEncoder(nn.Module):
         def __init__(self, obs_dim, feat_dim):
             super().__init__()
-            self.out_shape = feat_dim
+            self.out_dim = feat_dim
             self.net = nn.Sequential(
                 nn.Linear(obs_dim, 128),
                 nn.ReLU(),
@@ -168,8 +132,8 @@ def example():
     top_k = 2
 
     encoder = DummyEncoder(obs_dim, feat_dim)
-    conditioner = MoEConditioner(
-        encoder=encoder,
+    moe = MoE(
+        dim=encoder.out_dim,
         num_experts=num_experts,
         top_k=top_k,
         hidden_dim=128,
@@ -179,14 +143,14 @@ def example():
         beta_entropy=0.01,
     )
 
-    obs = {
-        "state": torch.randn(B, obs_dim)
-    }
+    obs = {"state": torch.randn(B, obs_dim)}
 
-    z = conditioner(obs)
+    z_enc = encoder(obs)
+
+    z = moe(z_enc)
     print("normal z:", z.shape)
 
-    z, aux = conditioner(obs, return_aux=True)
+    z, aux = moe(z_enc, return_aux=True)
     print("z:", z.shape)
     print("aux loss:", float(aux["loss"]))
     print("load balance loss:", float(aux["load_balance_loss"]))
@@ -196,7 +160,7 @@ def example():
     print("topk_idx:", aux["topk_idx"])
 
     override_idx = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.long)
-    z_override, aux_override = conditioner(obs, override_idx=override_idx, return_aux=True)
+    z_override, aux_override = moe(z_enc, override_idx=override_idx, return_aux=True)
     print("override z:", z_override.shape)
     print("override topk_idx:", aux_override["topk_idx"].squeeze(-1))
 
@@ -205,8 +169,8 @@ def example():
     loss.backward()
 
     print("total loss:", float(loss))
-    print("router grad mean:", conditioner.moe.router.weight.grad.abs().mean().item())
-    print("expert0 grad mean:", conditioner.moe.experts[0].net[0].weight.grad.abs().mean().item())
+    print("router grad mean:", moe.router.weight.grad.abs().mean().item())
+    print("expert0 grad mean:", moe.experts[0].net[0].weight.grad.abs().mean().item())
 
     return {
         "z": z,

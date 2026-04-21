@@ -91,8 +91,6 @@ def build_pc_global_encoder(
             num_neighbors=cfg["num_neighbors"],
         )
 
-    raise ValueError(f"Unknown global encoder type: {encoder_type}")
-
 
 def build_pc_patch_tokenizer(
     tokenizer_type: str,
@@ -128,5 +126,3 @@ def build_pc_patch_tokenizer(
             patch_radii=cfg["patch_radii"],
             patch_neighbors=cfg["patch_neighbors"],
         )
-
-    raise ValueError(f"Unknown patch tokenizer type: {tokenizer_type}")

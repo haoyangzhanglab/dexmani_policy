@@ -1,7 +1,7 @@
 policy_name: maniflow
 
 task_name: pick_apple_messy
-zarr_path: /home/zhanghaoyang/Desktop/DexMani_Policy/robot_data/sim/${task_name}.zarr
+zarr_path: robot_data/sim/${task_name}.zarr
 
 seed: 42
 
@@ -37,41 +37,36 @@ dataset:
   sensor_modalities: [point_cloud, joint_state]
 
 agent:
-  _target_: dexmani_policy.agents.maniflow_agent.ManiFlowAgent
+  _target_: dexmani_policy.agents.core.maniflow.ManiFlowAgent
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
   # ------------------------------------------------------------------ #
-  # encoder_type: idp3 | pointpn | tokenizer
+  # encoder_type: pointpn | pointnext_tokenizer
   # ------------------------------------------------------------------ #
-  encoder_type: idp3
+  encoder_type: pointpn
   pc_dim: 3
   state_dim: 19
   num_points: 1024
 
-  # 点云编码器配置字典（通过 pc_encoder_config 传递到 ManiFlowEncoder）
+  # 点云编码器配置字典；切换 encoder_type 时对应子块自动生效
   pc_encoder_config:
-    # idp3 专用（encoder_type: idp3 时生效）
-    pc_out_dim: 128
+    pointpn:
+      num_stages: 3
+      embed_channels: 64
+      stage_num_neighbors: [24, 24, 16]
+      stage_lga_blocks: [2, 2, 1]
+      stage_channel_expansion: [2, 2, 2]
+      point_cloud_type: scan
 
-    # pointpn 专用（encoder_type: pointpn 时生效）
-    num_stages: 3
-    embed_dim: 64
-    k_neighbors: [24, 24, 16]
-    lga_blocks: [2, 2, 1]
-    dim_expansion: [2, 2, 2]
-    point_cloud_type: scan
-
-    # tokenizer 专用（encoder_type: tokenizer 时生效）
-    stem_channels: 64
-    token_channels: 128
-    num_patches: 96        # obs_seq_len = num_patches + 1 = 97
-    patch_radii: [0.04, 0.08]
-    patch_neighbors: [16, 32]
-    global_radius: 0.16
-    global_neighbors: 32
+    pointnext_tokenizer:
+      stem_channels: 64
+      token_channels: 128
+      num_patches: 96      # num_obs_tokens = (num_patches + 1) * n_obs_steps = 97 * 2 = 194 (仅当 encoder_type: pointnext_tokenizer 时生效)
+      patch_radii: [0.04, 0.08]
+      patch_neighbors: [16, 32]
 
   # ------------------------------------------------------------------ #
   n_layers: 12
@@ -126,7 +121,7 @@ workspace:
     video_fps: ${env_runner.env_video_fps}
 
   checkpoint_cfg:
-    _target_: dexmani_policy.training.common.checkpoint_io.CheckpointConfig
+    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
     monitor_key: test_mean_score
     mode: max
     topk: 3

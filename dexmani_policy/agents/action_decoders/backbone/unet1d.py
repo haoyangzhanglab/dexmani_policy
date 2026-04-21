@@ -34,6 +34,7 @@ class CrossAttention(nn.Module):
         self.query_proj = nn.Linear(in_dim, out_dim)
         self.key_proj = nn.Linear(cond_dim, out_dim)
         self.value_proj = nn.Linear(cond_dim, out_dim)
+        self.scale = out_dim ** -0.5
 
     def forward(self, x, cond):
 
@@ -41,7 +42,7 @@ class CrossAttention(nn.Module):
         key = self.key_proj(cond)
         value = self.value_proj(cond)
 
-        attn_weights = torch.matmul(query, key.transpose(-2, -1))
+        attn_weights = torch.matmul(query, key.transpose(-2, -1)) * self.scale
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_output = torch.matmul(attn_weights, value)
         
@@ -112,7 +113,7 @@ class ConditionalResidualBlock1D(nn.Module):
                 Rearrange('batch t -> batch t 1'), 
             )
         elif condition_type == 'cross_attention_film':
-            self.cond_encoder = CrossAttention(in_channels, cond_dim, cond_channels)
+            self.cond_encoder = CrossAttention(out_channels, cond_dim, cond_channels)
         else:
             raise NotImplementedError(f"Unsupported condition type: {condition_type}")
 
