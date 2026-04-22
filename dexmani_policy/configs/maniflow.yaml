@@ -26,7 +26,7 @@ val_dataloader:
   persistent_workers: false
 
 dataset:
-  _target_: dexmani_policy.datasets.base_dataset.BaseDataset
+  _target_: dexmani_policy.datasets.pc_dataset.PCDataset
   zarr_path: ${zarr_path}
   seed: ${training.seed}
   horizon: ${horizon}

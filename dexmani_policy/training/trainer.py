@@ -105,11 +105,12 @@ class Trainer:
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-            loss_kwargs = {'ema_model': self.ema_model} if self.use_ema_teacher_for_consistency else {}
+            loss_kwargs = {}
             loss, _ = agent.compute_loss(batch, **loss_kwargs)
 
-            loss_sum += loss.detach()
-            count += 1
+            n = batch['action'].shape[0]
+            loss_sum += loss.detach() * n
+            count += n
 
         if count == 0:
             return None
@@ -155,8 +156,6 @@ class Trainer:
         optimizer_to(self.optimizer, self.device)
         self.optimizer.zero_grad(set_to_none=True)
 
-        sample_batch = dict_apply(next(iter(self.train_loader)), lambda x: x.to(self.device, non_blocking=True))
-
         epoch_pbar = tqdm(
             range(start_epoch, self.num_epochs),
             desc="Epoch",
@@ -188,7 +187,8 @@ class Trainer:
             epoch_metrics = {}
             epoch_end_tasks = self.plan_epoch_end_tasks(epoch)
             
-            if epoch_end_tasks["sample"] and sample_batch is not None:
+            if epoch_end_tasks["sample"]:
+                sample_batch = dict_apply(next(iter(self.train_loader)), lambda x: x.to(self.device, non_blocking=True))
                 epoch_metrics["train/action_mse_error"] = self.compute_action_mse_for_one_batch(self.model, sample_batch)
 
             if epoch_end_tasks["validate"]:

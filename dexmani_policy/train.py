@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.pytorch_util import set_seed
+from dexmani_policy.datasets.augmentation import worker_init_fn
 from dexmani_policy.training.trainer import Trainer
 from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.lr_scheduler import get_scheduler
@@ -44,7 +45,7 @@ def build_train_components(cfg) -> TrainComponents:
     dataset = hydra.utils.instantiate(cfg.dataset)
     normalizer = dataset.get_normalizer()
 
-    train_loader = DataLoader(dataset, **cfg.dataloader)
+    train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
     val_loader = DataLoader(
         dataset.get_validation_dataset(),
         **cfg.val_dataloader,

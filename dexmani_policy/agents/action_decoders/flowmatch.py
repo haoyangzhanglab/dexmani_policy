@@ -119,26 +119,31 @@ class FlowMatchWithConsistency(nn.Module):
 
     def compute_loss(self, cond, actions, **kwargs):
         ema_model = kwargs.get("ema_model", None)
-        assert ema_model is not None, "EMA model is required for computing consistency loss in FlowMatchWithConsistency"
 
         B = actions.shape[0]
-        assert B >= 2, f"batch size must be >= 2 for flow+consistency split, got {B}"
-        flow_batchsize = max(1, min(B - 1, int(B * self.flow_batch_ratio)))
+        if B < 2:
+            return torch.tensor(0.0, device=actions.device), {"loss": torch.tensor(0.0, device=actions.device)}
 
-        loss = 0.
-        flow_targets = self.get_flow_velocity(actions[:flow_batchsize])
+        flow_targets = self.get_flow_velocity(actions)
         pred_vt_flow = self.model(
             x = flow_targets["xt"],
             timestep = flow_targets["t"].squeeze(),
             target_t = flow_targets["target_t"].squeeze(),
-            context = cond[:flow_batchsize],
+            context = cond,
         )
-
         vt_flow_target = flow_targets["vt_target"]
         loss_flow = F.mse_loss(pred_vt_flow, vt_flow_target, reduction='none')
-        loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()  # scalar
-        loss = loss + loss_flow
+        loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()
 
+        if ema_model is None:
+            loss_dict = {
+                "loss": loss_flow,
+                "loss_flow": loss_flow,
+                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_vt_flow ** 2)),
+            }
+            return loss_flow, loss_dict
+
+        flow_batchsize = max(1, min(B - 1, int(B * self.flow_batch_ratio)))
         consistency_targets = self.get_consistency_velocity(actions[flow_batchsize:], cond[flow_batchsize:], ema_model)
         pred_vt_consistency = self.model(
             x = consistency_targets["xt"],
@@ -146,23 +151,18 @@ class FlowMatchWithConsistency(nn.Module):
             target_t = consistency_targets["target_t"].squeeze(),
             context = cond[flow_batchsize:],
         )
-
         vt_consistency_target = consistency_targets["vt_target"]
         loss_consistency = F.mse_loss(pred_vt_consistency, vt_consistency_target, reduction='none')
-        loss_consistency = reduce(loss_consistency, 'b ... -> b (...)', 'mean').mean()  # scalar
-        loss = loss + loss_consistency
+        loss_consistency = reduce(loss_consistency, 'b ... -> b (...)', 'mean').mean()
 
-        pred_vt_flow_magnitude = torch.sqrt(torch.mean(pred_vt_flow ** 2))
-        pred_vt_consistency_magnitude = torch.sqrt(torch.mean(pred_vt_consistency ** 2))
-        # Return final loss scalar and dict
+        loss = loss_flow + loss_consistency
         loss_dict = {
             "loss": loss,
             "loss_flow": loss_flow,
             "loss_consistency": loss_consistency,
-            "pred_vt_flow_magnitude": pred_vt_flow_magnitude,
-            "pred_vt_consistency_magnitude": pred_vt_consistency_magnitude,
+            "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_vt_flow ** 2)),
+            "pred_vt_consistency_magnitude": torch.sqrt(torch.mean(pred_vt_consistency ** 2)),
         }
-
         return loss, loss_dict
 
 
