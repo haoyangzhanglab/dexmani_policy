@@ -115,6 +115,8 @@ training:
     val_interval_epochs: 25
     eval_interval_epochs: 250
     sample_interval_epochs: 5
+    gradient_accumulate_every: 1
+    grad_clip_norm: 1.0
 
 
 env_runner: 

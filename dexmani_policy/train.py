@@ -2,7 +2,6 @@ import os
 import sys
 import pathlib
 
-# 设置项目根目录，以便在训练脚本中正确导入模块，并且在运行训练脚本时保持当前工作目录为项目根目录
 ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
 sys.path.append(ROOT_DIR)
 os.chdir(ROOT_DIR)
@@ -42,6 +41,11 @@ class TrainComponents:
 
 
 def build_train_components(cfg) -> TrainComponents:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available. This training script requires GPU.")
+
+    device = torch.device(cfg.training.device)
+
     dataset = hydra.utils.instantiate(cfg.dataset)
     normalizer = dataset.get_normalizer()
 
@@ -53,6 +57,7 @@ def build_train_components(cfg) -> TrainComponents:
 
     model = hydra.utils.instantiate(cfg.agent)
     model.load_normalizer_from_dataset(normalizer)
+    model.to(device)
 
     ema_model = None
     ema_updater = None
@@ -60,17 +65,22 @@ def build_train_components(cfg) -> TrainComponents:
         try:
             ema_model = copy.deepcopy(model)
         except Exception as e:
-            import warnings
             warnings.warn(f"copy.deepcopy(model) failed ({e}), falling back to fresh instantiation. EMA weights will be random until checkpoint is loaded.")
             ema_model = hydra.utils.instantiate(cfg.agent)
 
         ema_model.load_normalizer_from_dataset(normalizer)
+        ema_model.to(device)
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
-    total_steps = len(train_loader) * cfg.training.loop.num_epochs
+    # 计算实际的优化器更新步数（考虑梯度累积）
+    gradient_accumulate_every = cfg.training.loop.gradient_accumulate_every
+    batches_per_epoch = len(train_loader)
+    optimizer_steps_per_epoch = (batches_per_epoch + gradient_accumulate_every - 1) // gradient_accumulate_every
+    total_steps = optimizer_steps_per_epoch * cfg.training.loop.num_epochs
+
     scheduler = get_scheduler(
         optimizer=optimizer,
         name=cfg.training.lr_scheduler,
@@ -85,7 +95,7 @@ def build_train_components(cfg) -> TrainComponents:
         env_runner = hydra.utils.instantiate(cfg.env_runner)
 
     return TrainComponents(
-        device=torch.device(cfg.training.device),
+        device=device,
         model=model,
         ema_model=ema_model,
         ema_updater=ema_updater,

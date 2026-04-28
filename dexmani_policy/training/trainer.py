@@ -8,6 +8,7 @@ from dexmani_policy.training.common.logging import to_log_scalars
 from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply
+from dexmani_policy.common.ddp_util import unwrap_model
 
 
 @dataclass
@@ -17,6 +18,12 @@ class TrainLoopConfig:
     val_interval_epochs: int
     eval_interval_epochs: int
     sample_interval_epochs: int
+    gradient_accumulate_every: int = 1
+    grad_clip_norm: float = 1.0
+
+    def __post_init__(self):
+        if self.gradient_accumulate_every < 1:
+            raise ValueError(f"gradient_accumulate_every must be >= 1, got {self.gradient_accumulate_every}")
     
     
 class Trainer:
@@ -32,7 +39,7 @@ class Trainer:
         val_loader,
         env_runner,
         workspace: TrainWorkspace,
-        train_loop_cfg: TrainLoopConfig,    # 训练流程控制参数
+        train_loop_cfg: TrainLoopConfig,
         use_ema_teacher_for_consistency: bool,
     ):
         self.device = device
@@ -54,11 +61,14 @@ class Trainer:
         self.val_interval_epochs = train_loop_cfg.val_interval_epochs
         self.eval_interval_epochs = train_loop_cfg.eval_interval_epochs
         self.sample_interval_epochs = train_loop_cfg.sample_interval_epochs
+        self.gradient_accumulate_every = train_loop_cfg.gradient_accumulate_every
+        self.grad_clip_norm = train_loop_cfg.grad_clip_norm
         self.enable_env_eval = (self.env_runner is not None) and (self.eval_interval_epochs > 0)
         self.checkpoint_interval_epochs = self.eval_interval_epochs if self.enable_env_eval else self.val_interval_epochs
 
         self.use_ema = self.ema_model is not None
         self.use_ema_teacher_for_consistency = use_ema_teacher_for_consistency and self.use_ema
+        self.accum_step = 0
         
 
     def plan_epoch_end_tasks(self, epoch: int) -> Dict[str, bool]:
@@ -84,22 +94,31 @@ class Trainer:
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
 
         loss_kwargs = {'ema_model': self.ema_model} if self.use_ema_teacher_for_consistency else {}
-        loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
+        raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
+        loss = raw_loss / self.gradient_accumulate_every
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.optimizer.step()
-        self.scheduler.step()
-        self.optimizer.zero_grad(set_to_none=True)
 
-        if self.use_ema and self.ema_updater is not None:
-            self.ema_updater.step(self.model)
+        self.accum_step += 1
+
+        if self.accum_step % self.gradient_accumulate_every == 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
+            self.optimizer.step()
+            self.scheduler.step()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            if self.use_ema and self.ema_updater is not None:
+                model_to_update = unwrap_model(self.model)
+                self.ema_updater.step(model_to_update)
 
         return batch, log_dict
 
 
     @torch.no_grad()
     def validate(self, agent) -> Optional[float]:
+        if self.val_loader is None:
+            return None
+
         count = 0
         loss_sum = torch.zeros((), device=self.device)
 
@@ -138,7 +157,6 @@ class Trainer:
         return metrics
 
 
-    # 执行完整训练流程，并在需要时从已有 checkpoint 断点续训。
     def train(self, resume_tag: str = "latest"):
         global_step, start_epoch = self.workspace.load_for_resume(
             model=self.model,
@@ -147,6 +165,9 @@ class Trainer:
             scheduler=self.scheduler,
             tag_or_path=resume_tag,
         )
+
+        if start_epoch > 0:
+            print(f"Resuming training from epoch {start_epoch}, step {global_step}")
 
         self.model.to(self.device)
         if self.use_ema:
@@ -197,7 +218,6 @@ class Trainer:
                 if val_loss is not None:
                     epoch_metrics["val/loss"] = val_loss
 
-            # 使用ema_model与env做交互
             if epoch_end_tasks["evaluate"]:
                 eval_model = self.ema_model if self.use_ema else self.model
                 epoch_metrics.update(self.evaluate(eval_model))
@@ -228,6 +248,7 @@ class Trainer:
 
                 if test_mean_score is None:
                     tag = f"epoch={epoch:04d}-step={global_step:08d}"
+                    print(f"Warning: No monitor metric at epoch {epoch}, saving as latest only")
                 else:
                     tag = f"epoch={epoch:04d}-step={global_step:08d}-score={test_mean_score:.4f}"
 

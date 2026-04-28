@@ -1,0 +1,33 @@
+# @package _global_
+
+# DDP多卡训练配置，继承maniflow.yaml
+defaults:
+  - maniflow
+
+# 覆盖policy_name以区分实验
+policy_name: maniflow_ddp
+
+# DDP特定配置
+training:
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]  # 指定使用哪几张GPU，null表示使用前num_gpus张卡
+  device: cuda:0
+
+# DDP训练时可能需要调整的参数
+dataloader:
+  batch_size: 32  # 每张卡的batch size（总batch = 32 * 4 = 128）
+  num_workers: 4  # 每张卡的worker数
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 4
+
+# Hydra输出目录
+hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    subdir: ${hydra.job.num}

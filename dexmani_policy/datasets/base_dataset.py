@@ -53,12 +53,17 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
+
+        # 拷贝 mask，防止训练集和验证集共享可变对象
+        val_set.train_mask = self.train_mask.copy()
+        val_set.val_mask = self.val_mask.copy()
+
         val_set.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer,
             sequence_length=self.horizon,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
-            episode_mask=self.val_mask,
+            episode_mask=val_set.val_mask,
         )
         val_set.augmentation_cfg = None
         return val_set

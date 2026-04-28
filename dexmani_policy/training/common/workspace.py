@@ -97,18 +97,15 @@ class TrainWorkspace:
             ema_model.load_state_dict(checkpoint.ema_model_state, strict=True)
 
 
-    # 将一条训练日志写入当前工作区的日志后端。
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
         self.logger.log(data, step=step)
 
 
-    # 将当前训练状态保存为一个 checkpoint 文件。
     def save_checkpoint(self, tag: str, checkpoint: TrainCheckpoint) -> Path:
         filename = tag if str(tag).endswith(".pt") else f"{tag}.pt"
         return self.checkpoint_store.save(filename, checkpoint)
 
 
-    # 将指定 checkpoint 更新为 latest.pt，便于后续断点续训。
     def save_latest(self, checkpoint_path: Path) -> Path:
         latest_path = self.checkpoint_dir / "latest.pt"
         tmp_path = latest_path.with_suffix(".tmp.pt")
@@ -119,19 +116,16 @@ class TrainWorkspace:
         return latest_path
 
 
-    # 根据监控指标更新 top-k checkpoint 清单，并返回当前 best 路径。
     def save_topk(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
         return self.topk_tracker.update(checkpoint_path, checkpoint)
 
 
-    # 按标签或路径加载一个 checkpoint。
     def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
         path = self._resolve_checkpoint_path(tag_or_path)
         print("Loading checkpoint from:", path)
         return self.checkpoint_store.load(path)
 
 
-    # 为推理加载模型权重，可按需优先使用 EMA 权重。
     def load_for_inference(
         self,
         model,
@@ -146,9 +140,8 @@ class TrainWorkspace:
             model.load_state_dict(checkpoint.model_state, strict=True)
 
 
-    # 为断点续训恢复模型、优化器和调度器状态，并返回起始 step 和 epoch。
     def load_for_resume(
-        self, 
+        self,
         model,
         ema_model,
         optimizer,
@@ -168,12 +161,13 @@ class TrainWorkspace:
         optimizer.load_state_dict(checkpoint.optimizer_state)
         scheduler.load_state_dict(checkpoint.scheduler_state)
 
-        start_step = checkpoint.global_step
-        start_epoch = checkpoint.epoch + 1
-        return start_step, start_epoch
+        # next_step: 已完成的训练步数，训练循环会从此继续递增
+        # next_epoch: 下一个要训练的 epoch（checkpoint.epoch + 1）
+        next_step = checkpoint.global_step
+        next_epoch = checkpoint.epoch + 1
+        return next_step, next_epoch
 
 
-    # 关闭日志后端并释放当前工作区资源。
     def close(self):
         self.logger.close()
 
@@ -187,3 +181,38 @@ class TrainWorkspace:
                 raise KeyboardInterrupt
         signal.signal(signal.SIGINT, _handle_signal)
         signal.signal(signal.SIGTERM, _handle_signal)
+
+
+class DummyWorkspace:
+    def save_hydra_config(self, hydra_config):
+        pass
+
+    def log(self, data: Dict[str, Any], step: Optional[int] = None):
+        pass
+
+    def save_checkpoint(self, tag: str, checkpoint: TrainCheckpoint) -> Path:
+        return Path("dummy")
+
+    def save_latest(self, checkpoint_path: Path) -> Path:
+        return Path("dummy")
+
+    def save_topk(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
+        return None
+
+    def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
+        raise NotImplementedError("DummyWorkspace.load_checkpoint should not be called")
+
+    def load_for_resume(
+        self,
+        model,
+        ema_model,
+        optimizer,
+        scheduler,
+        tag_or_path: str,
+    ) -> Tuple[int, int]:
+        import warnings
+        warnings.warn("DummyWorkspace.load_for_resume called - this should only happen in non-main DDP processes")
+        return 0, 0
+
+    def close(self):
+        pass
