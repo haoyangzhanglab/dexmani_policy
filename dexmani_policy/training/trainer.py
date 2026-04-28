@@ -8,7 +8,7 @@ from dexmani_policy.training.common.logging import to_log_scalars
 from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply
-from dexmani_policy.common.ddp_util import unwrap_model
+from dexmani_policy.training.common.ddp_util import unwrap_model
 
 
 @dataclass

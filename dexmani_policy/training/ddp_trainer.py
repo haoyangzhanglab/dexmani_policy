@@ -11,7 +11,7 @@ from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.common.ddp_util import unwrap_model, get_model_state_dict
+from dexmani_policy.training.common.ddp_util import unwrap_model, get_model_state_dict
 
 
 class DDPTrainer:
