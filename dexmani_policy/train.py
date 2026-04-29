@@ -65,17 +65,17 @@ def build_train_components(cfg) -> TrainComponents:
         try:
             ema_model = copy.deepcopy(model)
         except Exception as e:
-            warnings.warn(f"copy.deepcopy(model) failed ({e}), falling back to fresh instantiation. EMA weights will be random until checkpoint is loaded.")
+            warnings.warn(f"copy.deepcopy(model) failed ({e}), falling back to fresh instantiation.")
             ema_model = hydra.utils.instantiate(cfg.agent)
+            ema_model.load_normalizer_from_dataset(normalizer)
+            ema_model.load_state_dict(model.state_dict())
 
-        ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.to(device)
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
-    # 计算实际的优化器更新步数（考虑梯度累积）
     gradient_accumulate_every = cfg.training.loop.gradient_accumulate_every
     batches_per_epoch = len(train_loader)
     optimizer_steps_per_epoch = (batches_per_epoch + gradient_accumulate_every - 1) // gradient_accumulate_every

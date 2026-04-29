@@ -8,7 +8,6 @@ from dexmani_policy.training.common.logging import to_log_scalars
 from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply
-from dexmani_policy.training.common.ddp_util import unwrap_model
 
 
 @dataclass
@@ -108,8 +107,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             if self.use_ema and self.ema_updater is not None:
-                model_to_update = unwrap_model(self.model)
-                self.ema_updater.step(model_to_update)
+                self.ema_updater.step(self.model)
 
         return batch, log_dict
 
@@ -124,9 +122,7 @@ class Trainer:
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-            # 不传入 ema_model：验证时 agent 已经是 ema_model（见 train() 中 val_agent 的赋值）
-            # 如果传入会导致 teacher=student=ema_model，consistency loss 退化为自我一致性检查，失去 distillation 意义
-            # 当前只计算 flow loss，用于监控 flow matching 的泛化（checkpoint 选择基于 success_rate，不依赖 val_loss）
+            # 验证时 agent 已经是 ema_model，不传入 teacher 避免自我一致性检查
             loss_kwargs = {}
             loss, _ = agent.compute_loss(batch, **loss_kwargs)
 
@@ -164,6 +160,7 @@ class Trainer:
         global_step, start_epoch = self.workspace.load_for_resume(
             model=self.model,
             ema_model=self.ema_model,
+            ema_updater=self.ema_updater,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             tag_or_path=resume_tag,
@@ -243,6 +240,7 @@ class Trainer:
                     global_step=global_step,
                     model_state=self.model.state_dict(),
                     ema_model_state=self.ema_model.state_dict() if self.use_ema else None,
+                    ema_updater_state=self.ema_updater.state_dict() if self.use_ema and self.ema_updater else None,
                     optimizer_state=self.optimizer.state_dict(),
                     scheduler_state=self.scheduler.state_dict(),
                     monitor=monitor,

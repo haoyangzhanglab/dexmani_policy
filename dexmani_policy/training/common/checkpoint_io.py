@@ -16,6 +16,7 @@ class TrainCheckpoint:
 
     model_state: Dict[str, Any]
     ema_model_state: Optional[Dict[str, Any]]
+    ema_updater_state: Optional[Dict[str, Any]]
 
     optimizer_state: Dict[str, Any]
     scheduler_state: Dict[str, Any]
@@ -39,6 +40,7 @@ class CheckpointStore:
             "weights": {
                 "model": checkpoint.model_state,
                 "ema_model": checkpoint.ema_model_state,
+                "ema_updater": checkpoint.ema_updater_state,
                 "optimizer": checkpoint.optimizer_state,
                 "scheduler": checkpoint.scheduler_state,
             },
@@ -56,11 +58,11 @@ class CheckpointStore:
             monitor=state.get("monitor", {}),
             model_state=weights["model"],
             ema_model_state=weights.get("ema_model"),
+            ema_updater_state=weights.get("ema_updater"),
             optimizer_state=weights["optimizer"],
             scheduler_state=weights["scheduler"],
         )
 
-    # 将训练状态原子性保存到指定 checkpoint 文件。
     def save(self, filename: str, checkpoint: TrainCheckpoint) -> Path:
         path = self.checkpoint_dir / filename
         tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -68,7 +70,6 @@ class CheckpointStore:
         tmp_path.replace(path)
         return path
 
-    # 从指定 checkpoint 文件加载训练状态到 CPU。
     def load(self, path: Path) -> TrainCheckpoint:
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         return self._deserialize(payload)
@@ -140,7 +141,6 @@ class TopKCheckpointTracker:
                 except Exception:
                     pass
 
-    # 根据监控指标更新 top-k 清单，并返回当前 best checkpoint 路径。
     def update(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
         if self.k <= 0:
             return self.best_path()
@@ -166,7 +166,6 @@ class TopKCheckpointTracker:
         return self.best_path()
 
 
-    # 返回当前 top-k 清单中的最佳 checkpoint 路径。
     def best_path(self) -> Optional[Path]:
         items = self._manifest.get("items", [])
         if not items:

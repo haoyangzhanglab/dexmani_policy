@@ -69,3 +69,13 @@ class EMAModel:
                 ema_buffers[name].copy_(buf.to(dtype=ema_buffers[name].dtype).data)
 
         self.optimization_step += 1
+
+    def state_dict(self):
+        return {
+            'decay': self.decay,
+            'optimization_step': self.optimization_step,
+        }
+
+    def load_state_dict(self, state_dict):
+        self.decay = state_dict['decay']
+        self.optimization_step = state_dict['optimization_step']

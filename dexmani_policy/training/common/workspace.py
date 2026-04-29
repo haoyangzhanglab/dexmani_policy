@@ -144,6 +144,7 @@ class TrainWorkspace:
         self,
         model,
         ema_model,
+        ema_updater,
         optimizer,
         scheduler,
         tag_or_path: str,
@@ -161,8 +162,9 @@ class TrainWorkspace:
         optimizer.load_state_dict(checkpoint.optimizer_state)
         scheduler.load_state_dict(checkpoint.scheduler_state)
 
-        # next_step: 已完成的训练步数，训练循环会从此继续递增
-        # next_epoch: 下一个要训练的 epoch（checkpoint.epoch + 1）
+        if ema_updater is not None and checkpoint.ema_updater_state is not None:
+            ema_updater.load_state_dict(checkpoint.ema_updater_state)
+
         next_step = checkpoint.global_step
         next_epoch = checkpoint.epoch + 1
         return next_step, next_epoch
@@ -183,9 +185,27 @@ class TrainWorkspace:
         signal.signal(signal.SIGTERM, _handle_signal)
 
 
-class DummyWorkspace:
+class ReadOnlyWorkspace:
+    """只读 workspace，用于 DDP 非主进程"""
+    def __init__(self, output_dir: str):
+        self.output_dir = Path(output_dir)
+        self.checkpoint_dir = self.output_dir / "checkpoints"
+        self.checkpoint_store = CheckpointStore(self.checkpoint_dir)
+
+    def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
+        if tag_or_path == "latest":
+            path = self.checkpoint_dir / "latest.pt"
+        elif tag_or_path == "best":
+            raise NotImplementedError("ReadOnlyWorkspace does not support 'best' tag")
+        else:
+            path = Path(tag_or_path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+        return self.checkpoint_store.load(path)
+
     def save_hydra_config(self, hydra_config):
-        pass
+        pass  # 由 rank 0 负责
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
         pass
@@ -198,21 +218,6 @@ class DummyWorkspace:
 
     def save_topk(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
         return None
-
-    def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
-        raise NotImplementedError("DummyWorkspace.load_checkpoint should not be called")
-
-    def load_for_resume(
-        self,
-        model,
-        ema_model,
-        optimizer,
-        scheduler,
-        tag_or_path: str,
-    ) -> Tuple[int, int]:
-        import warnings
-        warnings.warn("DummyWorkspace.load_for_resume called - this should only happen in non-main DDP processes")
-        return 0, 0
 
     def close(self):
         pass

@@ -99,17 +99,17 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         try:
             ema_model = copy.deepcopy(model)
         except Exception as e:
-            warnings.warn(f"copy.deepcopy(model) failed ({e}), falling back to fresh instantiation. EMA weights will be random until checkpoint is loaded.")
+            warnings.warn(f"copy.deepcopy(model) failed ({e}), falling back to fresh instantiation.")
             ema_model = hydra.utils.instantiate(cfg.agent)
+            ema_model.load_normalizer_from_dataset(normalizer)
+            ema_model.load_state_dict(model.state_dict())
 
-        ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.to(device)
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
-    # 计算实际的优化器更新步数（考虑梯度累积）
     gradient_accumulate_every = cfg.training.loop.gradient_accumulate_every
     batches_per_epoch = len(train_loader)
     optimizer_steps_per_epoch = (batches_per_epoch + gradient_accumulate_every - 1) // gradient_accumulate_every
@@ -127,8 +127,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         workspace = hydra.utils.instantiate(cfg.workspace)
         workspace.save_hydra_config(cfg)
     else:
-        from dexmani_policy.training.common.workspace import DummyWorkspace
-        workspace = DummyWorkspace()
+        from dexmani_policy.training.common.workspace import ReadOnlyWorkspace
+        workspace = ReadOnlyWorkspace(output_dir=cfg.workspace.output_dir)
 
     env_runner = None
     if rank == 0 and cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
