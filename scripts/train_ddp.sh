@@ -1,26 +1,13 @@
 #!/bin/bash
-# DDP 多卡训练启动脚本
-# 用法: bash scripts/train_ddp.sh <config_name> <task_name> <num_gpus>
-# 示例: bash scripts/train_ddp.sh dp3 sim/pick_apple_messy 4
+# DDP 多卡训练（必须使用 train_ddp.py，config 须含 training.num_gpus）
+# 用法: bash scripts/train_ddp.sh <config_name> [overrides...]
+# 示例: bash scripts/train_ddp.sh maniflow_ddp task_name=sim/pick_apple_messy
+# 示例（指定 GPU）: bash scripts/train_ddp.sh maniflow_ddp training.gpu_ids=[0,1,2,3]
+# 示例（环境变量选卡）: CUDA_VISIBLE_DEVICES=2,3,5,6 bash scripts/train_ddp.sh maniflow_ddp training.num_gpus=4 training.gpu_ids=null
 
-CONFIG=$1
-TASK=$2
-NUM_GPUS=${3:-4}
+set -euo pipefail
 
-if [ -z "$CONFIG" ] || [ -z "$TASK" ]; then
-    echo "用法: bash scripts/train_ddp.sh <config_name> <task_name> [num_gpus]"
-    echo "示例: bash scripts/train_ddp.sh dp3 sim/pick_apple_messy 4"
-    exit 1
-fi
+CONFIG=${1:?"用法: bash scripts/train_ddp.sh <config_name> [overrides...]"}
+shift
 
-echo "=========================================="
-echo "DDP 多卡训练"
-echo "配置: ${CONFIG}"
-echo "任务: ${TASK}"
-echo "GPU 数量: ${NUM_GPUS}"
-echo "=========================================="
-
-python dexmani_policy/train.py \
-    --config-name=${CONFIG}.yaml \
-    task_name=${TASK} \
-    training.num_gpus=${NUM_GPUS}
+python dexmani_policy/train_ddp.py --config-name="${CONFIG}" "$@"

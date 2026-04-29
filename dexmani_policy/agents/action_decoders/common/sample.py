@@ -42,16 +42,18 @@ def sample_beta(batch_size, s=0.999, alpha=1.0, beta=1.5, device="cuda"):
 
 def sample_discrete_pow(batch_size, denoise_timesteps, device="cuda"):
     log2_sections = int(math.log2(denoise_timesteps)) + 1
-    dt_base = np.repeat(
-        log2_sections - 1 - np.arange(log2_sections),
+    dt_base = torch.repeat_interleave(
+        torch.arange(log2_sections - 1, -1, -1, dtype=torch.long, device=device),
         batch_size // log2_sections,
     )
-    dt_base = np.concatenate([dt_base, np.zeros(batch_size - dt_base.shape[0])])
+    remaining = batch_size - dt_base.shape[0]
+    if remaining > 0:
+        dt_base = torch.cat([dt_base, torch.zeros(remaining, dtype=torch.long, device=device)])
 
     dt_sections = 2 ** dt_base
-    t = np.random.randint(0, dt_sections, size=batch_size).astype(np.float32)
-    t = t / dt_sections
-    t = torch.tensor(t, device=device).float()
+    t = torch.rand(batch_size, device=device) * dt_sections.float()
+    t = torch.floor(t).long()
+    t = t.float() / dt_sections.float()
     return t
 
 

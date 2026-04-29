@@ -37,9 +37,10 @@ class DDPTrainer:
         self.world_size = world_size
         self.is_main = (rank == 0)
 
+        # 只对主 model 做 DDP 包装；EMA model 是 eval/no_grad 的纯推理副本，
+        # 不参与梯度同步，不应被 DDP 包装（否则会注册不必要的 all-reduce hook，
+        # 且通过 .module 才能访问真实属性，导致 compute_loss / validate 内部访问出错）。
         model = DDP(model, device_ids=[actual_gpu_id], output_device=actual_gpu_id)
-        if ema_model is not None:
-            ema_model = DDP(ema_model, device_ids=[actual_gpu_id], output_device=actual_gpu_id)
 
         self.trainer = Trainer(
             device=device,
@@ -63,39 +64,43 @@ class DDPTrainer:
 
     def synchronize_states(self):
         """
-        同步 EMA 模型和 normalizer 的状态到所有进程
+        将 rank-0 的完整训练状态广播到所有进程。
 
-        使用标准的 state_dict() API 进行同步，避免依赖内部实现细节。
+        必须在 load_for_resume 之后调用：rank-0 已从 checkpoint 加载权重，
+        其他 rank 只有随机初始化或空权重，需要由此函数对齐。
+        DDP 初始化时只在第一次构造时广播参数，resume 后不会再次自动广播，
+        因此需要手动同步以下三块状态：
+          1. 主 model 参数（DDP-wrapped 的底层 module）
+          2. EMA model 参数（未被 DDP 包装，rank-0 从 checkpoint 加载）
+          3. Normalizer 参数（各 rank 从各自 dataset 实例化，数值应相同，但显式同步更安全）
         """
-        # 1. 同步 EMA 模型
-        if self.trainer.use_ema:
-            ema_model = unwrap_model(self.trainer.ema_model)
-            ema_state = ema_model.state_dict()
+        # 1. 同步主 model 参数（unwrap DDP，广播 rank-0 的权重）
+        main_model = unwrap_model(self.trainer.model)
+        main_state = main_model.state_dict()
+        for key in main_state:
+            if isinstance(main_state[key], torch.Tensor):
+                dist.broadcast(main_state[key], src=0)
+        if self.rank != 0:
+            main_model.load_state_dict(main_state)
 
-            # 广播所有参数
-            for key in ema_state.keys():
+        # 2. 同步 EMA 模型（未被 DDP 包装，需手动广播）
+        if self.trainer.use_ema:
+            ema_model = self.trainer.ema_model   # 直接是裸 Module，无需 unwrap
+            ema_state = ema_model.state_dict()
+            for key in ema_state:
                 if isinstance(ema_state[key], torch.Tensor):
                     dist.broadcast(ema_state[key], src=0)
-
-            # 非主进程加载同步后的状态
             if self.rank != 0:
                 ema_model.load_state_dict(ema_state)
 
-        # 2. 同步 Normalizer
-        model = unwrap_model(self.trainer.model)
-        if hasattr(model, 'normalizer'):
-            normalizer = model.normalizer
-
-            # 检查 normalizer 是否是 nn.Module（有 state_dict）
+        # 3. 同步 Normalizer
+        if hasattr(main_model, 'normalizer'):
+            normalizer = main_model.normalizer
             if isinstance(normalizer, nn.Module):
                 norm_state = normalizer.state_dict()
-
-                # 广播所有参数
-                for key in norm_state.keys():
+                for key in norm_state:
                     if isinstance(norm_state[key], torch.Tensor):
                         dist.broadcast(norm_state[key], src=0)
-
-                # 非主进程加载同步后的状态
                 if self.rank != 0:
                     normalizer.load_state_dict(norm_state)
             else:
@@ -136,6 +141,7 @@ class DDPTrainer:
 
             for batch in self.trainer.train_loader:
                 _, log_dict = self.trainer.train_one_step(batch)
+                global_step += 1
 
                 if self.is_main and (global_step % self.trainer.log_interval_steps) == 0:
                     step_metrics = {"train/lr": self.trainer.scheduler.get_last_lr()[0]}
@@ -149,8 +155,6 @@ class DDPTrainer:
                             loss=step_metrics.get("train/loss", None),
                         )
                     self.trainer.workspace.log(step_metrics, step=global_step)
-
-                global_step += 1
 
             self.trainer.model.eval()
 

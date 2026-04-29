@@ -226,7 +226,8 @@ class ConditionalUnet1D(nn.Module):
 
     
     def get_optim_groups(self, weight_decay):
-        return get_default_optim_group(self, weight_decay)
+        # return get_default_optim_group(self, weight_decay)
+        return get_optim_group_with_no_decay(self, weight_decay=weight_decay)
 
 
     def forward(self, x, timestep, context):

@@ -71,9 +71,10 @@ class MoE(nn.Module):
         return (picked * topk_prob.unsqueeze(-1)).sum(dim=1)
 
     def aux_loss(self, probs):
-        dispatch = probs.argmax(dim=-1)
+        topk_idx = torch.topk(probs, self.top_k, dim=-1)[1]
+        dispatch = topk_idx.reshape(-1)
         f_i = torch.bincount(dispatch, minlength=self.num_experts).to(probs.dtype)
-        f_i = f_i / probs.shape[0]
+        f_i = f_i / dispatch.numel()
 
         p_i = probs.mean(dim=0)
 

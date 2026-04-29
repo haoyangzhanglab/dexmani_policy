@@ -55,8 +55,9 @@ class BaseAgent(nn.Module):
         )
         pred = self.action_decoder.predict_action(cond, template, denoise_timesteps)
         pred = self.normalizer['action'].unnormalize(pred)
-        # horizon 的第 0 步对应最旧的观测帧，第 n_obs_steps-1 步才是"下一步"起点。
-        # 例如 n_obs_steps=2：pred[:,0] 对应 t-1 时刻，pred[:,1] 起才是待执行动作。
+        # 训练时 obs 和 action 窗口起点对齐：obs[t:t+n_obs_steps] → action[t:t+horizon]
+        # 推理时 obs 窗口最后一帧是当前时刻，因此 pred[n_obs_steps-1] 对应当前应执行的动作
+        # pred[0:n_obs_steps-1] 是历史动作，不应再执行（符合 Diffusion Policy 等主流工作的标准做法）
         s = self.n_obs_steps - 1
         return {
             'pred_action': pred,
@@ -68,8 +69,8 @@ class BaseAgent(nn.Module):
         obs_lr=None, obs_weight_decay=None,
         betas=(0.9, 0.95),
     ):
-        obs_lr = obs_lr or lr
-        obs_wd = obs_weight_decay or weight_decay
+        obs_lr = obs_lr if obs_lr is not None else lr
+        obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
         action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
         for g in action_groups:
             g['lr'] = lr

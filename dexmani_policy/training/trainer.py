@@ -124,6 +124,9 @@ class Trainer:
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
+            # 不传入 ema_model：验证时 agent 已经是 ema_model（见 train() 中 val_agent 的赋值）
+            # 如果传入会导致 teacher=student=ema_model，consistency loss 退化为自我一致性检查，失去 distillation 意义
+            # 当前只计算 flow loss，用于监控 flow matching 的泛化（checkpoint 选择基于 success_rate，不依赖 val_loss）
             loss_kwargs = {}
             loss, _ = agent.compute_loss(batch, **loss_kwargs)
 
@@ -189,6 +192,7 @@ class Trainer:
 
             for batch in self.train_loader:
                 _, log_dict = self.train_one_step(batch)
+                global_step += 1
 
                 if (global_step % self.log_interval_steps) == 0:
                     step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
@@ -200,8 +204,6 @@ class Trainer:
                         loss=step_metrics.get("train/loss", None),
                     )
                     self.workspace.log(step_metrics, step=global_step)
-
-                global_step += 1
                 
             self.model.eval()
             
