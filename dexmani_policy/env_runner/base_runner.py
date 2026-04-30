@@ -17,7 +17,7 @@ class BaseRunner:
     ):
         self.n_obs_steps = n_obs_steps
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
-        self.obs_deque = deque(maxlen=n_obs_steps + 1)
+        self.obs_deque = deque(maxlen=n_obs_steps + 1)  # +1 安全余量，避免边界情况 deque 满导致 drop
 
         self.env_video_fps = env_video_fps
         self.default_eval_episodes = default_eval_episodes
@@ -26,7 +26,8 @@ class BaseRunner:
     @staticmethod
     def _stack_last_n(all_items,  n_steps):
         all_list = list(all_items)
-        assert len(all_list) > 0, "Empty input to _stack_last_n()."
+        if len(all_list) == 0:
+            raise RuntimeError("Empty input to _stack_last_n()")
         head = all_list[0]
 
         if isinstance(head, np.ndarray):
@@ -34,15 +35,17 @@ class BaseRunner:
             start_idx = -min(n_steps, len(all_list))
             result[start_idx:] = np.asarray(all_list[start_idx:])
             if n_steps > len(all_list):
+                # 重复最早帧填充，与训练数据集的 pad 策略一致 (sampler.py:165)
                 result[:start_idx] = result[start_idx]
             return result
-        
+
         if isinstance(head, torch.Tensor):
             shape = (n_steps,) + tuple(all_list[-1].shape)
             result = torch.zeros(shape, dtype=all_list[-1].dtype, device=all_list[-1].device)
             start_idx = -min(n_steps, len(all_list))
             result[start_idx:] = torch.stack(list(all_list[start_idx:]), dim=0)
             if n_steps > len(all_list):
+                # 重复最早帧填充，与训练数据集的 pad 策略一致 (sampler.py:165)
                 result[:start_idx] = result[start_idx]
             return result
 
@@ -58,14 +61,20 @@ class BaseRunner:
     
 
     def get_stacked_obs(self) -> Dict[str, Any]:
-        assert len(self.obs_deque) > 0, "No observation in deque"
+        if len(self.obs_deque) == 0:
+            raise RuntimeError("No observation in deque")
         keys = list(self.obs_deque[-1].keys())
         out: Dict[str, Any] = {}
+        dropped_keys = []
         for k in keys:
             if k in self.sensor_modalities:
                 out[k] = self._stack_last_n((frame[k] for frame in self.obs_deque), self.n_obs_steps)
-        # 断言out不为空
-        assert len(out) > 0, "Stacked observation dict is empty."
+            else:
+                dropped_keys.append(k)
+        if len(out) == 0:
+            raise RuntimeError("Stacked observation dict is empty")
+        if dropped_keys:
+            cprint(f"⚠️ Dropped obs keys {dropped_keys} (not in sensor_modalities={self.sensor_modalities})", "yellow")
         return out
 
 
@@ -103,7 +112,7 @@ class BaseRunner:
         truncated = False
         done = False
         prev_done = False
-        task_done_step = 0
+        task_done_step = None  # None 表示未成功完成，区分于成功时的 action_cnt
 
         while not truncated:
             nobs = self.get_nobs(device=agent.device)
@@ -116,6 +125,8 @@ class BaseRunner:
                     task_done_step = env.action_cnt
                 prev_done = done
 
+                # dexmani_sim 不实现 done auto-reset，done 后继续 step 仅产生多余动作，不会 crash。
+                # 与实机 teleoperation 行为一致：无自动终止信号，走满固定步数。
                 if truncated:
                     break
 
@@ -127,42 +138,84 @@ class BaseRunner:
         eval_seeds = self.get_seed_list()
         eval_episodes = eval_episodes if eval_episodes is not None else self.default_eval_episodes
 
-        num_episodes = min(eval_episodes, len(eval_seeds))
+        if eval_episodes > len(eval_seeds):
+            cprint(f"⚠️ eval_episodes ({eval_episodes}) > available seeds ({len(eval_seeds)}), limiting to {len(eval_seeds)}", "yellow")
+            eval_episodes = len(eval_seeds)
+
+        num_episodes = eval_episodes
         success_list = []
         task_done_step_list = []
         episode_video_list = []
+        episode_details = []  # per-episode: {seed, success, steps}
+        env_failed_seeds = []
 
         print("=" * 90)
 
-        for ep_idx in range(num_episodes):
-            eval_seed = eval_seeds[ep_idx % len(eval_seeds)]
+        seed_idx = 0
+        while len(success_list) < num_episodes and seed_idx < len(eval_seeds):
+            eval_seed = eval_seeds[seed_idx]
+            seed_idx += 1
+
             try:
                 done, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
                 video = env.get_video()
 
                 status = "success" if done else "fail"
-                cprint(f"[progress {ep_idx}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {task_done_step}", "cyan")
+                done_step_str = task_done_step if task_done_step is not None else "N/A"
+                cprint(f"[progress {len(success_list)+1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}", "cyan")
 
                 success_list.append(done)
                 if done and task_done_step is not None:
-                    task_done_step_list.append(task_done_step) 
-                episode_video_list.append({
-                    f"episode_{eval_seed}": video
+                    task_done_step_list.append(task_done_step)
+                episode_details.append({
+                    "seed": eval_seed,
+                    "success": done,
+                    "steps": task_done_step,
                 })
+                if video is not None:
+                    episode_video_list.append({
+                        f"episode_{eval_seed}": video
+                    })
+                else:
+                    cprint(f"⚠️ No video for seed {eval_seed}", "yellow")
             except Exception as e:
-                cprint(f"[progress {ep_idx}/{num_episodes}] Error during evaluation: seed {eval_seed}, error: {e}", "grey")
+                # dexmani_sim base_env.py:316 raises RuntimeError("Reset Failed for seed {seed}! Unstable objects: ...")
+                # dexmani_sim base_env.py:429/473 raises ValueError("Failed to sample ... positions ...")
+                error_msg = str(e)
+                if "Reset Failed" in error_msg or "Unstable" in error_msg or "Failed to sample" in error_msg:
+                    env_failed_seeds.append(eval_seed)
+                    cprint(f"⚠️ Seed {eval_seed} env init failed, skipping", "yellow")
+                else:
+                    success_list.append(False)
+                    episode_details.append({
+                        "seed": eval_seed,
+                        "success": False,
+                        "steps": None,
+                        "error": str(e),
+                    })
+                    cprint(f"❌ Seed {eval_seed} policy failed: {e}", "red")
         
         # 统计指标
-        success_rate = float(np.mean(success_list)) if len(success_list) > 0 else 0.0
-        avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else 0
-        cprint(f"[result] effective episode num: {len(success_list)}, success rate {success_rate*100.0:1f}%, average done steps {avg_steps}", "yellow")
+        if len(success_list) < num_episodes:
+            cprint(f"⚠️ Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")
+
+        success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
+        avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
+
+        sr_str = 'N/A' if success_rate is None else f'{success_rate*100.0:.1f}%'
+        avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
+        if len(env_failed_seeds) > 0:
+            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Env failed: {len(env_failed_seeds)} seeds, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
+        else:
+            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
         print("=" * 90)
 
         env.close()
         return {
             "success_rate": success_rate,
             "avg_steps": avg_steps,
-            "videos": episode_video_list
+            "videos": episode_video_list,
+            "episode_details": episode_details,
         }
     
 

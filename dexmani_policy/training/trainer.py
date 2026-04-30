@@ -146,8 +146,9 @@ class Trainer:
     @torch.no_grad()
     def evaluate(self, agent) -> Dict[str, Any]:
         result = self.env_runner.run(agent)
+        success_rate = result["success_rate"]
         metrics = {
-            "eval/success_rate": result["success_rate"] * 100,
+            "eval/success_rate": success_rate * 100 if success_rate is not None else None,
             "eval/avg_steps": result["avg_steps"],
         }
         for item in result.get("videos", []):

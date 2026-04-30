@@ -36,6 +36,9 @@ class SimEvalRecorder:
             "success_rate": success_rate,
             "avg_steps": avg_steps,
         }
+        episode_details = result.get("episode_details", [])
+        if episode_details:
+            case_metrics["episode_details"] = episode_details
         self.save_json(case_metrics, case_dir / "metrics.json")
         return case_metrics
 
@@ -75,7 +78,7 @@ class SimEvaluator:
         self.eval_root_dir.mkdir(parents=True, exist_ok=True)
 
     def create_eval_run_dir(self) -> Path:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = self.eval_root_dir / f"{timestamp}"
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
@@ -90,11 +93,17 @@ class SimEvaluator:
         use_ema_for_eval: bool = True,
         eval_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        self.workspace.load_for_inference(
-            model=self.agent,
-            tag_or_path=ckpt_tag_or_path,
-            use_ema=use_ema_for_eval,
-        )
+        cprint(f"Loading checkpoint: {ckpt_tag_or_path} (EMA={use_ema_for_eval})", "cyan")
+        try:
+            self.workspace.load_for_inference(
+                model=self.agent,
+                tag_or_path=ckpt_tag_or_path,
+                use_ema=use_ema_for_eval,
+            )
+            cprint(f"✅ Checkpoint loaded successfully", "green")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load checkpoint: {ckpt_tag_or_path}") from e
+
         self.agent.to(self.device)
         self.agent.eval()
 
@@ -116,6 +125,9 @@ class SimEvaluator:
             "metrics": {},
         }
 
+        if not denoise_timesteps_list:
+            raise ValueError("denoise_timesteps_list cannot be empty")
+
         for denoise_timesteps in denoise_timesteps_list:
             result = self.env_runner.run(
                 self.agent,
@@ -126,3 +138,4 @@ class SimEvaluator:
             summary["metrics"][f"denoise_timesteps{denoise_timesteps}"] = case_metrics
 
         recorder.save_summary(summary)
+        return summary

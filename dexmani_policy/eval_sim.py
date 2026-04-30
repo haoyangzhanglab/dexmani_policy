@@ -14,6 +14,7 @@ import warnings
 import argparse
 from pathlib import Path
 from omegaconf import OmegaConf
+from termcolor import cprint
 from typing import Any, Sequence
 from dataclasses import dataclass
 
@@ -84,24 +85,30 @@ def run_eval(exp_dir: Path, overrides: Sequence[str]):
     if not exp_dir.is_dir():
         raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
 
-    cfg = SimEvalBuilder.build_cfg(exp_dir, overrides)
-    set_seed(cfg.eval.seed)
-    components = SimEvalBuilder.build_components(cfg)
+    try:
+        cfg = SimEvalBuilder.build_cfg(exp_dir, overrides)
+        set_seed(cfg.eval.seed)  # 仅影响 numpy/torch 随机数，不影响环境 seed（环境用 seed_list）
+        components = SimEvalBuilder.build_components(cfg)
 
-    evaluator = SimEvaluator(
-        device=components.device,
-        agent=components.agent,
-        env_runner=components.env_runner,
-        workspace=components.workspace,
-    )
+        evaluator = SimEvaluator(
+            device=components.device,
+            agent=components.agent,
+            env_runner=components.env_runner,
+            workspace=components.workspace,
+        )
 
-    evaluator.run(
-        eval_episodes=int(cfg.eval.sim.eval_episodes),
-        denoise_timesteps_list=list(cfg.eval.sim.denoise_timesteps_list),
-        ckpt_tag_or_path=cfg.eval.sim.ckpt_tag_or_path,
-        use_ema_for_eval=bool(cfg.eval.sim.use_ema_for_eval),
-        eval_config=SimEvalBuilder.build_eval_record(cfg, exp_dir),
-    )
+        summary = evaluator.run(
+            eval_episodes=int(cfg.eval.sim.eval_episodes),
+            denoise_timesteps_list=list(cfg.eval.sim.denoise_timesteps_list),
+            ckpt_tag_or_path=cfg.eval.sim.ckpt_tag_or_path,
+            use_ema_for_eval=bool(cfg.eval.sim.use_ema_for_eval),
+            eval_config=SimEvalBuilder.build_eval_record(cfg, exp_dir),
+        )
+
+        cprint(f"✅ Evaluation completed, results saved to {evaluator.eval_root_dir}", "green")
+    except Exception as e:
+        cprint(f"❌ Evaluation failed: {e}", "red")
+        raise
 
 
 def main() -> None:
