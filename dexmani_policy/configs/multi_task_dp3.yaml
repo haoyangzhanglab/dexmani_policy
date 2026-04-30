@@ -1,0 +1,141 @@
+# @package _global_
+
+defaults:
+  - dataset: multi_task_pc
+  - agent: dp3
+  - _self_
+
+# 实验名称
+exp_name: multi_task_dp3
+
+# 数据集配置（引用 dataset/multi_task_pc.yaml）
+dataset:
+  sampling_strategy: balanced  # 各任务等概率采样
+  normalizer_mode: shared      # 共享 normalizer（要求 action space 相同）
+
+# Agent 配置：包装为多任务 Agent
+agent:
+  _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
+  num_tasks: 3  # 任务数量
+  task_embedding_dim: 64
+  task_cond_mode: concat  # 只支持 'concat' 模式
+  task_dropout: 0.1
+  base_agent:
+    _target_: dexmani_policy.agents.core.dp3.DP3Agent
+    obs_encoder:
+      _target_: dexmani_policy.agents.obs_encoder.pc_proprio_encoder.PCProprioEncoder
+      pc_encoder:
+        _target_: dexmani_policy.agents.obs_encoder.pointcloud.idp3.iDP3Encoder
+        in_channels: 6
+        out_channels: 512
+        num_sampling_level: 2
+        sampling_ratio: 0.25
+        ball_radius: 0.05
+        max_num_neighbors: 64
+        shared_mlp_specs: [[64, 64, 128], [128, 128, 256]]
+      state_encoder:
+        _target_: dexmani_policy.agents.obs_encoder.proprio.state_mlp.StateMLP
+        in_channels: ${eval:'19'}
+        out_channels: 128
+        hidden_dims: [256, 256]
+        activation: relu
+        use_layernorm: true
+      fusion_hidden_dim: 512
+      fusion_output_dim: 512
+    action_decoder:
+      _target_: dexmani_policy.agents.action_decoders.diffusion.Diffusion
+      model:
+        _target_: dexmani_policy.agents.action_decoders.backbone.unet1d.ConditionalUnet1D
+        input_dim: ${eval:'19'}
+        global_cond_dim: ${eval:'512 + 64'}  # obs_cond + task_emb
+        diffusion_step_embed_dim: 128
+        down_dims: [512, 1024, 2048]
+        kernel_size: 5
+        n_groups: 8
+        cond_predict_scale: true
+      noise_scheduler:
+        _target_: diffusers.DDIMScheduler
+        num_train_timesteps: 100
+        beta_start: 0.0001
+        beta_end: 0.02
+        beta_schedule: squaredcos_cap_v2
+        clip_sample: true
+        set_alpha_to_one: true
+        steps_offset: 0
+        prediction_type: sample
+      denoise_timesteps: 10
+    horizon: 16
+    n_obs_steps: 2
+    n_action_steps: 8
+    action_dim: ${eval:'19'}
+
+# DataLoader 配置
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: true
+  pin_memory: true
+  persistent_workers: true
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 4
+  shuffle: false
+  pin_memory: true
+  persistent_workers: true
+
+# 训练配置
+training:
+  seed: 42
+  device: cuda:0
+  use_ema: true
+  use_ema_teacher_for_consistency: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  loop:
+    num_epochs: 1000
+    gradient_accumulate_every: 1
+    eval_interval_epochs: 50
+    save_interval_epochs: 50
+    log_interval_steps: 10
+
+# 优化器配置
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  obs_lr: 5.0e-5
+  obs_weight_decay: 1.0e-6
+  betas: [0.9, 0.95]
+
+# EMA 配置
+ema:
+  _target_: dexmani_policy.training.common.ema.EMAModel
+  power: 0.75
+  max_value: 0.9999
+
+# Workspace 配置
+workspace:
+  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+  wandb_cfg:
+    project: dexmani_policy
+    group: multi_task
+    name: ${exp_name}
+    id: null
+    resume: allow
+    mode: online
+    video_fps: 10
+  checkpoint_cfg:
+    monitor_key: success_rate
+    mode: max
+    topk: 3
+
+# 环境评估配置（可选）
+env_runner: null  # 多任务评估需要自定义 runner
+
+# Hydra 配置
+hydra:
+  run:
+    dir: outputs/${exp_name}/${now:%Y-%m-%d_%H-%M}_${now:%f}
+  job:
+    chdir: true

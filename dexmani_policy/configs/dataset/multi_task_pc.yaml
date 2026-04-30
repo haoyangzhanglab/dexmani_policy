@@ -1,0 +1,85 @@
+# 多任务点云数据集配置示例
+_target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
+
+# 随机种子（用于索引映射的可复现性）
+seed: 42
+
+# 采样策略: 'proportional' | 'balanced' | 'weighted'
+sampling_strategy: balanced
+
+# Normalizer 模式: 'shared' | 'per_task'
+normalizer_mode: shared
+
+# 任务列表
+task_names:
+  - pick_apple
+  - pick_banana
+  - stack_blocks
+
+# 任务权重（仅当 sampling_strategy='weighted' 时生效）
+# 如果使用 'balanced' 或 'proportional' 策略，可以删除此字段
+task_weights:
+  - 1.0
+  - 1.0
+  - 2.0  # stack_blocks 采样概率是其他任务的 2 倍
+
+# 各任务的数据集配置
+# 注意: 以下配置有重复，可以使用 Hydra defaults 简化
+# 例如: 创建 configs/dataset/base_pc_task.yaml 作为基础配置
+datasets:
+  - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+    zarr_path: robot_data/sim/pick_apple_messy.zarr
+    seed: 42
+    horizon: 16
+    pad_before: 1
+    pad_after: 7
+    val_ratio: 0.05
+    max_train_episodes: null
+    sensor_modalities: ['joint_state', 'point_cloud']
+    # enable_color_aug: true  # 如需启用点云颜色增强，取消注释并配置下方 augmentation_cfg.pc
+    augmentation_cfg:
+      pc:
+        enable_color: true
+        color_jitter_prob: 0.5
+        brightness: 0.2
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.1
+
+  - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+    zarr_path: robot_data/sim/pick_banana_messy.zarr
+    seed: 42
+    horizon: 16
+    pad_before: 1
+    pad_after: 7
+    val_ratio: 0.05
+    max_train_episodes: null
+    sensor_modalities: ['joint_state', 'point_cloud']
+    # enable_color_aug: true  # 如需启用点云颜色增强，取消注释并配置下方 augmentation_cfg.pc
+    augmentation_cfg:
+      pc:
+        enable_color: true
+        color_jitter_prob: 0.5
+        brightness: 0.2
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.1
+
+  - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+    zarr_path: robot_data/sim/stack_blocks.zarr
+    seed: 42
+    horizon: 16
+    pad_before: 1
+    pad_after: 7
+    val_ratio: 0.05
+    max_train_episodes: null
+    sensor_modalities: ['joint_state', 'point_cloud']
+    # enable_color_aug: true  # 如需启用点云颜色增强，取消注释并配置下方 augmentation_cfg.pc
+    augmentation_cfg:
+      pc:
+        enable_color: true
+        color_jitter_prob: 0.5
+        brightness: 0.2
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.1

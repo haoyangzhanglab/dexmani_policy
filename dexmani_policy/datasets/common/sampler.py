@@ -34,7 +34,15 @@ def create_indices(
         
         min_start = -pad_before
         max_start = episode_length - sequence_length + pad_after
-        
+
+        if max_start < min_start:
+            min_required_length = sequence_length - pad_before - pad_after
+            raise ValueError(
+                f"Episode {i} is too short: length={episode_length}, "
+                f"min_required={min_required_length} "
+                f"(sequence_length={sequence_length} - pad_before={pad_before} - pad_after={pad_after})"
+            )
+
         for idx in range(min_start, max_start+1):
             buffer_start_idx = max(idx, 0) + start_idx
             buffer_end_idx = min(idx+sequence_length, episode_length) + start_idx
@@ -101,15 +109,18 @@ class SequenceSampler:
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
 
-        if np.any(episode_mask):
-            indices = create_indices(episode_ends, 
-                sequence_length=sequence_length, 
-                pad_before=pad_before, 
-                pad_after=pad_after,
-                episode_mask=episode_mask
-                )
-        else:
-            indices = np.zeros((0,4), dtype=np.int64)
+        if not np.any(episode_mask):
+            raise ValueError(
+                f"All episodes are masked out. Cannot create dataset. "
+                f"episode_mask.sum()=0, n_episodes={len(episode_ends)}"
+            )
+
+        indices = create_indices(episode_ends,
+            sequence_length=sequence_length,
+            pad_before=pad_before,
+            pad_after=pad_after,
+            episode_mask=episode_mask
+            )
 
         self.keys = list(keys)
         self.indices = indices 

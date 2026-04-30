@@ -52,10 +52,21 @@ def build_train_components(cfg) -> TrainComponents:
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
     val_loader = DataLoader(
         dataset.get_validation_dataset(),
+        worker_init_fn=worker_init_fn,
         **cfg.val_dataloader,
     )
 
     model = hydra.utils.instantiate(cfg.agent)
+
+    # 对于多任务 Agent，验证配置一致性
+    if hasattr(model, 'num_tasks') and hasattr(dataset, 'task_names'):
+        if model.num_tasks != len(dataset.task_names):
+            raise ValueError(
+                f"Configuration mismatch: agent.num_tasks={model.num_tasks} but "
+                f"dataset has {len(dataset.task_names)} tasks {dataset.task_names}. "
+                f"Please update agent.num_tasks in the config file."
+            )
+
     model.load_normalizer_from_dataset(normalizer)
     model.to(device)
 

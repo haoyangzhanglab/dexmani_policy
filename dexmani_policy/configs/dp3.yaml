@@ -22,7 +22,7 @@ dataloader:
 val_dataloader:
   batch_size: 256
   shuffle: false
-  num_workers: 8
+  num_workers: 4
   pin_memory: true
   persistent_workers: false
 
@@ -37,6 +37,10 @@ dataset:
   val_ratio: 0.05
   max_train_episodes: null
   sensor_modalities: ["point_cloud", "joint_state"]
+  # 启用点云颜色增强：取消注释下方配置
+  # augmentation_cfg:
+  #   pc:
+  #     color_std: 0.05
 
 
 agent:

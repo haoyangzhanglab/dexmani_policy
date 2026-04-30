@@ -57,7 +57,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     torch.cuda.set_device(device)
     set_seed(cfg.training.seed + rank)
 
-    dataset = hydra.utils.instantiate(cfg.dataset)
+    # 为多任务数据集设置不同的种子（如果有 seed 参数）
+    dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
+    if 'seed' in dataset_cfg:
+        dataset_cfg['seed'] = dataset_cfg['seed'] + rank
+    dataset = hydra.utils.instantiate(dataset_cfg)
     normalizer = dataset.get_normalizer()
 
     train_sampler = DistributedSampler(
@@ -87,9 +91,20 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
             pin_memory=cfg.val_dataloader.pin_memory,
             persistent_workers=cfg.val_dataloader.persistent_workers,
             shuffle=False,
+            worker_init_fn=worker_init_fn,
         )
 
     model = hydra.utils.instantiate(cfg.agent)
+
+    # 对于多任务 Agent，验证配置一致性
+    if hasattr(model, 'num_tasks') and hasattr(dataset, 'task_names'):
+        if model.num_tasks != len(dataset.task_names):
+            raise ValueError(
+                f"Configuration mismatch: agent.num_tasks={model.num_tasks} but "
+                f"dataset has {len(dataset.task_names)} tasks {dataset.task_names}. "
+                f"Please update agent.num_tasks in the config file."
+            )
+
     model.load_normalizer_from_dataset(normalizer)
     model.to(device)
 

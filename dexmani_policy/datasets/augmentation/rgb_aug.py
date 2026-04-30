@@ -11,5 +11,10 @@ class RGBAug:
         )
 
     def __call__(self, images):
-        # (T, H, W, 3) uint8 numpy → same shape/dtype; per-frame independent aug by design
-        return np.stack([np.array(self.jitter(Image.fromarray(f))) for f in images])
+        # (T, H, W, 3) uint8 numpy → same shape/dtype
+        # Apply same augmentation params to all frames for temporal consistency
+        transform = self.jitter.get_params(
+            self.jitter.brightness, self.jitter.contrast,
+            self.jitter.saturation, self.jitter.hue
+        )
+        return np.stack([np.array(transform(Image.fromarray(f))) for f in images])

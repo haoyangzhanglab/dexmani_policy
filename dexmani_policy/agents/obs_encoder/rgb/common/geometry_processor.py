@@ -62,12 +62,18 @@ class GeometryProcessor:
 
         flat_camera_to_world = None
         if camera_to_world is not None:
-            flat_camera_to_world = flatten_matrix_batch(
+            cam_shape = tuple(torch.as_tensor(camera_to_world).shape[-2:])
+            if cam_shape not in [(3, 4), (4, 4)]:
+                raise ValueError(
+                    f"camera_to_world must have shape [..., 3, 4] or [..., 4, 4], got [..., {cam_shape[0]}, {cam_shape[1]}]"
+                )
+            cam_tensor = flatten_matrix_batch(
                 matrix=camera_to_world,
-                mat_shape=(3, 4),
+                mat_shape=(4, 4) if cam_shape == (4, 4) else (3, 4),
                 leading_shape=leading_shape,
                 device=flat_depth.device,
             )
+            flat_camera_to_world = cam_tensor[:, :3, :] if cam_tensor.shape[-2] == 4 else cam_tensor
 
         depth_metric = flat_depth / float(depth_scale)
 
@@ -176,7 +182,7 @@ def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     geometry = GeometryProcessor()
 
-    depth = torch.randint(1, 2000, (2, 4, 224, 224), dtype=torch.int32, device=device)
+    depth = torch.randint(1, 2000, (2, 4, 224, 224), dtype=torch.uint16, device=device)
     intrinsics = torch.tensor(
         [[600.0, 0.0, 112.0], [0.0, 600.0, 112.0], [0.0, 0.0, 1.0]],
         dtype=torch.float32,

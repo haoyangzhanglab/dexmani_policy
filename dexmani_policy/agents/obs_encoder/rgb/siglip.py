@@ -170,7 +170,7 @@ def example() -> None:
     image_processor = ImageProcessor.from_preset("siglip")
 
     images = torch.randint(0, 256, (16, 2, 480, 640, 3), dtype=torch.uint8)
-    depths = torch.randint(1, 2000, (16, 2, 480, 640), dtype=torch.int32)
+    depths = torch.randint(1, 2000, (16, 2, 480, 640), dtype=torch.uint16)
     intrinsics = torch.tensor(
         [[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]],
         dtype=torch.float32,

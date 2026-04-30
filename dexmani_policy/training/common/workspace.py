@@ -85,6 +85,8 @@ class TrainWorkspace:
                 raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}.")
         else:
             path = Path(tag_or_path)
+            if not path.is_absolute():
+                path = self.checkpoint_dir / path
 
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
@@ -196,9 +198,19 @@ class ReadOnlyWorkspace:
         if tag_or_path == "latest":
             path = self.checkpoint_dir / "latest.pt"
         elif tag_or_path == "best":
-            raise NotImplementedError("ReadOnlyWorkspace does not support 'best' tag")
+            topk_file = self.checkpoint_dir / "topk_checkpoints.json"
+            if not topk_file.exists():
+                raise FileNotFoundError(f"No topk tracker file found: {topk_file}")
+            import json
+            with open(topk_file) as f:
+                topk_data = json.load(f)
+            if not topk_data:
+                raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
+            path = Path(topk_data[0]['path'])
         else:
             path = Path(tag_or_path)
+            if not path.is_absolute():
+                path = self.checkpoint_dir / path
 
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")

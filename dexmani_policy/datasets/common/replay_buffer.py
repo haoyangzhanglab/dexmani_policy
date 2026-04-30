@@ -89,16 +89,29 @@ class ReplayBuffer:
     Assumes first dimension to be time. Only chunk in time dimension.
     """
     def __init__(
-        self, 
-        root: Union[zarr.Group, 
+        self,
+        root: Union[zarr.Group,
         Dict[str,dict]]
     ):
         """
         Dummy constructor. Use copy_from* and create_from* class methods instead.
         """
-        assert('data' in root) and ('meta' in root) and ('episode_ends' in root['meta'])
+        if 'data' not in root or 'meta' not in root:
+            raise ValueError(
+                f"Invalid root structure: missing 'data' or 'meta'. "
+                f"Available keys: {list(root.keys())}"
+            )
+        if 'episode_ends' not in root['meta']:
+            raise ValueError(
+                f"Invalid root structure: missing 'episode_ends' in meta. "
+                f"Available meta keys: {list(root['meta'].keys())}"
+            )
         for key, value in root['data'].items():
-            assert(value.shape[0] == root['meta']['episode_ends'][-1])
+            if value.shape[0] != root['meta']['episode_ends'][-1]:
+                raise ValueError(
+                    f"Data shape mismatch for key '{key}': "
+                    f"shape[0]={value.shape[0]}, expected={root['meta']['episode_ends'][-1]}"
+                )
         self.root = root
     
     # ============= create constructors ===============
@@ -168,7 +181,11 @@ class ReplayBuffer:
             data = dict()
             for key in keys:
                 arr = src_root['data'][key]
-                data[key] = arr[:]
+                arr_data = arr[:]
+                if key == 'action' and arr_data.dtype != np.float32:
+                    data[key] = arr_data.astype(np.float32)
+                else:
+                    data[key] = arr_data
             root = {
                 'meta': meta,
                 'data': data

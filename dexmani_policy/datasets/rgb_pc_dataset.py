@@ -17,7 +17,6 @@ class RGBPCDataset(BaseDataset):
         sensor_modalities=['joint_state', 'rgb', 'depth', 'point_cloud',
                            'camera_intrinsic', 'camera_extrinsic'],
         augmentation_cfg=None,
-        use_pc_color=False,
     ):
         super().__init__(
             zarr_path=zarr_path,
@@ -30,11 +29,10 @@ class RGBPCDataset(BaseDataset):
             sensor_modalities=sensor_modalities,
             augmentation_cfg=augmentation_cfg,
         )
-        self.use_pc_color = use_pc_color
         rgb_cfg = (augmentation_cfg or {}).get('rgb')
         pc_cfg = (augmentation_cfg or {}).get('pc')
         self.rgb_aug = RGBAug(**rgb_cfg) if rgb_cfg is not None else None
-        self.pc_aug = PCAug(**pc_cfg) if (use_pc_color and pc_cfg is not None) else None
+        self.pc_aug = PCAug(**pc_cfg) if pc_cfg else None
 
     def apply_augmentation(self, data):
         if self.augmentation_cfg is None:
@@ -47,7 +45,6 @@ class RGBPCDataset(BaseDataset):
 
     def get_normalizer(self, mode='limits', **kwargs):
         data = {
-            'point_cloud': self.replay_buffer['point_cloud'],
             'joint_state': self.replay_buffer['joint_state'],
             'action': self.replay_buffer['action'],
         }

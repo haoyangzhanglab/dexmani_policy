@@ -27,6 +27,20 @@ class BaseDataset(torch.utils.data.Dataset):
             zarr_path,
             keys=sensor_modalities + ['action'],
         )
+
+        # 验证所有必需字段是否存在
+        required_keys = set(sensor_modalities + ['action'])
+        available_keys = set(self.replay_buffer.keys())
+        missing_keys = required_keys - available_keys
+
+        if missing_keys:
+            raise ValueError(
+                f"Zarr file missing required keys: {sorted(missing_keys)}\n"
+                f"Required: {sorted(required_keys)}\n"
+                f"Available: {sorted(available_keys)}\n"
+                f"Path: {zarr_path}"
+            )
+
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
 
@@ -52,19 +66,18 @@ class BaseDataset(torch.utils.data.Dataset):
         self.pad_after = pad_after
 
     def get_validation_dataset(self):
-        val_set = copy.copy(self)
+        """创建验证集，与训练集完全隔离"""
+        val_set = copy.deepcopy(self)
 
-        # 拷贝 mask，防止训练集和验证集共享可变对象
-        val_set.train_mask = self.train_mask.copy()
-        val_set.val_mask = self.val_mask.copy()
-
+        # 重新创建 sampler，使用验证集 mask
         val_set.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer,
+            replay_buffer=self.replay_buffer,  # 共享 replay_buffer 节省内存
             sequence_length=self.horizon,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
-            episode_mask=val_set.val_mask,
+            episode_mask=self.val_mask,
         )
+        # 验证集不使用数据增强
         val_set.augmentation_cfg = None
         return val_set
 
@@ -81,7 +94,7 @@ class BaseDataset(torch.utils.data.Dataset):
         data = {'obs': {}}
         for modality in self.sensor_modalities:
             data['obs'][modality] = sample[modality]
-        data['action'] = sample['action'].astype(np.float32, copy=False)
+        data['action'] = sample['action']
         return data
 
     def apply_augmentation(self, data):

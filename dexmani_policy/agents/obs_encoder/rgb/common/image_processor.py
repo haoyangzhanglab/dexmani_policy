@@ -186,12 +186,18 @@ class ImageProcessor:
 
         flat_camera_to_world = None
         if camera_to_world is not None:
-            flat_camera_to_world = flatten_matrix_batch(
+            cam_shape = tuple(torch.as_tensor(camera_to_world).shape[-2:])
+            if cam_shape not in [(3, 4), (4, 4)]:
+                raise ValueError(
+                    f"camera_to_world must have shape [..., 3, 4] or [..., 4, 4], got [..., {cam_shape[0]}, {cam_shape[1]}]"
+                )
+            cam_tensor = flatten_matrix_batch(
                 matrix=camera_to_world,
-                mat_shape=(3, 4),
+                mat_shape=(4, 4) if cam_shape == (4, 4) else (3, 4),
                 leading_shape=leading_shape,
                 device=flat_images.device,
             )
+            flat_camera_to_world = cam_tensor[:, :3, :] if cam_tensor.shape[-2] == 4 else cam_tensor
 
         flat_images, flat_depths, spatial = self.apply_spatial_transform(flat_images, flat_depths)
         flat_images = self.normalize(flat_images)
@@ -223,7 +229,7 @@ def example() -> None:
     processor = ImageProcessor.from_preset("dino")
 
     images = torch.randint(0, 256, (4, 480, 640, 3), dtype=torch.uint8)
-    depths = torch.randint(1, 2000, (4, 480, 640), dtype=torch.int32)
+    depths = torch.randint(1, 2000, (4, 480, 640), dtype=torch.uint16)
     intrinsics = torch.tensor(
         [[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]],
         dtype=torch.float32,
