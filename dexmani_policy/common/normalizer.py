@@ -1,7 +1,5 @@
 import zarr
 import torch
-import warnings
-import unittest
 import numpy as np
 import torch.nn as nn
 from typing import Union, Dict
@@ -39,7 +37,8 @@ class DictOfTensorMixin(nn.Module):
                 value: torch.Tensor
                 if key.startswith(prefix):
                     param_keys = key[len(prefix):].split('.')[1:]
-                    dfs_add(out_dict, param_keys, value.clone())
+                    if param_keys:
+                        dfs_add(out_dict, param_keys, value.clone())
             return out_dict
 
         self.params_dict = load_dict(state_dict, prefix + 'params_dict')
@@ -146,7 +145,7 @@ def _normalize(x, params, forward=True):
 #################################################################################
 class SingleFieldLinearNormalizer(DictOfTensorMixin):
 
-    avaliable_modes = ['limits', 'gaussian']
+    available_modes = ['limits', 'gaussian']
     
     @torch.no_grad()
     def fit(
@@ -235,7 +234,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
 #################################################################################
 class LinearNormalizer(DictOfTensorMixin):
 
-    avaliable_modes = ['limits', 'gaussian']
+    available_modes = ['limits', 'gaussian']
     
     @torch.no_grad()
     def fit(
@@ -251,7 +250,7 @@ class LinearNormalizer(DictOfTensorMixin):
     ):
         if isinstance(data, dict):
             for key, value in data.items():
-                self.params_dict[key] =  _fit(
+                self.params_dict[key] = _fit(
                     value, 
                     last_n_dims=last_n_dims,
                     dtype=dtype,
@@ -320,11 +319,11 @@ class LinearNormalizer(DictOfTensorMixin):
         return result
 
 
-    def get_output_stats(self, key='_default'):
+    def get_output_stats(self):
         input_stats = self.get_input_stats()
         if 'min' in input_stats:
             return dict_apply(input_stats, self.normalize)
-        
+
         result = dict()
         for key, group in input_stats.items():
             this_dict = dict()
