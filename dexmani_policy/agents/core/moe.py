@@ -113,7 +113,8 @@ class MoEAgent(UNetDiffusionAgent):
         # 推理时 BaseAgent.predict_action 调用 forward()（无 aux），两条路径不对称，子类不可省略此覆盖。
         cond, aux = self.obs_encoder.encode(self.preprocess(batch['obs']))
         nactions = self.normalizer['action'].normalize(batch['action'])
-        action_loss, loss_dict = self.action_decoder.compute_loss(cond, nactions)
+        # 传递 kwargs 给 action_decoder（如 ema_model 用于 consistency distillation）
+        action_loss, loss_dict = self.action_decoder.compute_loss(cond, nactions, **kwargs)
         total = action_loss + aux['loss']
         loss_dict.update({
             'loss': total,

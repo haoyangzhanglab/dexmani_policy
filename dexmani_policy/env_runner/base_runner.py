@@ -21,6 +21,7 @@ class BaseRunner:
 
         self.env_video_fps = env_video_fps
         self.default_eval_episodes = default_eval_episodes
+        self._dropped_keys_warned = False
 
         
     @staticmethod
@@ -73,8 +74,9 @@ class BaseRunner:
                 dropped_keys.append(k)
         if len(out) == 0:
             raise RuntimeError("Stacked observation dict is empty")
-        if dropped_keys:
+        if dropped_keys and not self._dropped_keys_warned:
             cprint(f"⚠️ Dropped obs keys {dropped_keys} (not in sensor_modalities={self.sensor_modalities})", "yellow")
+            self._dropped_keys_warned = True
         return out
 
 
@@ -95,6 +97,7 @@ class BaseRunner:
 
     def reset(self):
         self.obs_deque.clear()
+        self._dropped_keys_warned = False
 
 
     @torch.no_grad()
@@ -115,7 +118,9 @@ class BaseRunner:
         task_done_step = None  # None 表示未成功完成，区分于成功时的 action_cnt
 
         while not truncated:
-            nobs = self.get_nobs(device=agent.device)
+            # 从 agent 的参数推断设备（nn.Module 没有 .device 属性）
+            device = next(agent.parameters()).device
+            nobs = self.get_nobs(device=device)
             action_chunk = self.get_action_chunk(nobs, agent, denoise_timesteps=denoise_timesteps)
             for i in range(action_chunk.shape[0]):
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
@@ -151,66 +156,88 @@ class BaseRunner:
 
         print("=" * 90)
 
-        seed_idx = 0
-        while len(success_list) < num_episodes and seed_idx < len(eval_seeds):
-            eval_seed = eval_seeds[seed_idx]
-            seed_idx += 1
+        try:
+            seed_idx = 0
+            while len(success_list) < num_episodes and seed_idx < len(eval_seeds):
+                eval_seed = eval_seeds[seed_idx]
+                seed_idx += 1
 
-            try:
-                done, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
-                video = env.get_video()
+                try:
+                    done, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
+                    video = env.get_video()
 
-                status = "success" if done else "fail"
-                done_step_str = task_done_step if task_done_step is not None else "N/A"
-                cprint(f"[progress {len(success_list)+1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}", "cyan")
+                    status = "success" if done else "fail"
+                    done_step_str = task_done_step if task_done_step is not None else "N/A"
+                    cprint(f"[progress {len(success_list)+1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}", "cyan")
 
-                success_list.append(done)
-                if done and task_done_step is not None:
-                    task_done_step_list.append(task_done_step)
-                episode_details.append({
-                    "seed": eval_seed,
-                    "success": done,
-                    "steps": task_done_step,
-                })
-                if video is not None:
-                    episode_video_list.append({
-                        f"episode_{eval_seed}": video
-                    })
-                else:
-                    cprint(f"⚠️ No video for seed {eval_seed}", "yellow")
-            except Exception as e:
-                # dexmani_sim base_env.py:316 raises RuntimeError("Reset Failed for seed {seed}! Unstable objects: ...")
-                # dexmani_sim base_env.py:429/473 raises ValueError("Failed to sample ... positions ...")
-                error_msg = str(e)
-                if "Reset Failed" in error_msg or "Unstable" in error_msg or "Failed to sample" in error_msg:
-                    env_failed_seeds.append(eval_seed)
-                    cprint(f"⚠️ Seed {eval_seed} env init failed, skipping", "yellow")
-                else:
-                    success_list.append(False)
+                    success_list.append(done)
+                    if done and task_done_step is not None:
+                        task_done_step_list.append(task_done_step)
                     episode_details.append({
                         "seed": eval_seed,
-                        "success": False,
-                        "steps": None,
-                        "error": str(e),
+                        "success": done,
+                        "steps": task_done_step,
                     })
-                    cprint(f"❌ Seed {eval_seed} policy failed: {e}", "red")
-        
-        # 统计指标
-        if len(success_list) < num_episodes:
-            cprint(f"⚠️ Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")
+                    if video is not None:
+                        episode_video_list.append({
+                            f"episode_{eval_seed}": video
+                        })
+                    else:
+                        cprint(f"⚠️ No video for seed {eval_seed}", "yellow")
 
-        success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
-        avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
+                except (RuntimeError, ValueError) as e:
+                    # 只捕获环境和策略相关的预期异常
+                    # dexmani_sim base_env.py:316 raises RuntimeError("Reset Failed for seed {seed}! Unstable objects: ...")
+                    # dexmani_sim base_env.py:429/473 raises ValueError("Failed to sample ... positions ...")
+                    error_msg = str(e)
 
-        sr_str = 'N/A' if success_rate is None else f'{success_rate*100.0:.1f}%'
-        avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
-        if len(env_failed_seeds) > 0:
-            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Env failed: {len(env_failed_seeds)} seeds, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
-        else:
-            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
-        print("=" * 90)
+                    # 环境初始化失败（跳过该 seed，不计入失败）
+                    if "Reset Failed" in error_msg or "Unstable" in error_msg or "Failed to sample" in error_msg:
+                        env_failed_seeds.append(eval_seed)
+                        cprint(f"⚠️ Seed {eval_seed} env init failed, skipping", "yellow")
+                    else:
+                        # 策略执行失败（记录为失败 episode）
+                        success_list.append(False)
+                        episode_details.append({
+                            "seed": eval_seed,
+                            "success": False,
+                            "steps": None,
+                            "error": str(e),
+                        })
+                        cprint(f"❌ Seed {eval_seed} policy failed: {e}", "red")
 
-        env.close()
+                except KeyboardInterrupt:
+                    # 用户中断（Ctrl+C），立即停止评估
+                    cprint(f"\n⚠️ Evaluation interrupted by user at seed {eval_seed}", "yellow")
+                    cprint(f"Collected {len(success_list)}/{num_episodes} episodes before interruption", "yellow")
+                    break
+
+                except Exception as e:
+                    # 未预期的严重错误，打印详细信息后重新抛出
+                    cprint(f"\n❌ Unexpected error at seed {eval_seed}: {type(e).__name__}: {e}", "red")
+                    import traceback
+                    traceback.print_exc()
+                    cprint(f"This is an unexpected error. Please report this issue.", "red")
+                    raise  # 重新抛出，让调用者处理
+
+            # 统计指标
+            if len(success_list) < num_episodes:
+                cprint(f"⚠️ Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")
+
+            success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
+            avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
+
+            sr_str = 'N/A' if success_rate is None else f'{success_rate*100.0:.1f}%'
+            avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
+            if len(env_failed_seeds) > 0:
+                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Env failed: {len(env_failed_seeds)} seeds, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
+            else:
+                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
+            print("=" * 90)
+
+        finally:
+            env.close()
+
         return {
             "success_rate": success_rate,
             "avg_steps": avg_steps,

@@ -392,7 +392,7 @@ class ReplayBuffer:
     
     def get_episode_idxs(self):
         import numba
-        numba.jit(nopython=True)
+        @numba.jit(nopython=True)
         def _get_episode_idxs(episode_ends):
             result = np.zeros((episode_ends[-1],), dtype=np.int64)
             for i in range(len(episode_ends)):

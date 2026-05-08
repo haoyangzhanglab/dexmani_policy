@@ -66,7 +66,10 @@ class BaseDataset(torch.utils.data.Dataset):
         self.pad_after = pad_after
 
     def get_validation_dataset(self):
-        """创建验证集，与训练集完全隔离"""
+        """创建验证集，与训练集完全隔离。val_ratio=0 时返回 None。"""
+        if not self.val_mask.any():
+            return None
+
         val_set = copy.deepcopy(self)
 
         # 重新创建 sampler，使用验证集 mask

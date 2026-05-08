@@ -44,13 +44,23 @@ class TaskEmbedding(nn.Module):
 
 class MultiTaskAgent(nn.Module):
     """
-    多任务 Agent 基类
+    多任务 Agent，使用 FiLM 调制注入任务条件
 
-    在 BaseAgent 基础上添加 task conditioning 支持。
-    Task embedding 可以通过以下方式注入：
-        1. 拼接到 obs_encoder 输出的 cond 向量
-        2. 作为额外的 FiLM 条件传入 action_decoder
-        3. 通过 cross-attention 注入（如果 backbone 支持）
+    FiLM (Feature-wise Linear Modulation) 通过 scale 和 shift 参数调制观测特征：
+        modulated_cond = cond * (1 + scale) + shift
+
+    优点：
+        1. 不修改网络输入维度，兼容所有 backbone（UNet1D, DiTX）
+        2. 符合多任务模仿学习社区主流实践（MT-ACT, RoboAgent）
+        3. 比 concat 模式更灵活，任务信息可以非线性调制特征
+
+    Args:
+        base_agent: 基础单任务 agent（DP3Agent, ManiFlowAgent 等）
+        num_tasks: 任务数量
+        task_embedding_dim: 任务嵌入维度
+        task_dropout: 任务嵌入的 dropout 概率
+        obs_cond_dim: 观测条件维度（可选）。如果为 None，将通过前向传播推断。
+                      显式指定可以避免初始化时的推断开销和潜在错误。
     """
 
     def __init__(
@@ -58,20 +68,12 @@ class MultiTaskAgent(nn.Module):
         base_agent: nn.Module,
         num_tasks: int,
         task_embedding_dim: int = 64,
-        task_cond_mode: str = 'concat',
         task_dropout: float = 0.1,
+        obs_cond_dim: Optional[int] = None,
     ):
         super().__init__()
-        # 只支持 concat 模式，film 和 cross_attn 需要修改 action_decoder
-        if task_cond_mode != 'concat':
-            raise ValueError(
-                f"Only 'concat' mode is currently supported, got '{task_cond_mode}'. "
-                f"'film' and 'cross_attn' modes require action_decoder modifications."
-            )
-
         self.base_agent = base_agent
         self.num_tasks = num_tasks
-        self.task_cond_mode = task_cond_mode
 
         # Task embedding
         self.task_embedding = TaskEmbedding(
@@ -80,33 +82,75 @@ class MultiTaskAgent(nn.Module):
             dropout=task_dropout,
         )
 
-        # 继承 base_agent 的属性
-        self.obs_encoder = base_agent.obs_encoder
-        self.action_decoder = base_agent.action_decoder
-        self.normalizer = base_agent.normalizer
+        # 继承 base_agent 的标量属性（非 nn.Module，不会触发重复注册）
         self.horizon = base_agent.horizon
         self.n_obs_steps = base_agent.n_obs_steps
         self.n_action_steps = base_agent.n_action_steps
         self.action_dim = base_agent.action_dim
 
+        # 获取 obs_encoder 输出维度
+        if obs_cond_dim is None:
+            raise ValueError(
+                "obs_cond_dim must be explicitly specified in the config. "
+                "For film mode: obs_cond_dim = n_obs_steps * (pc_out_dim + state_out_dim). "
+                "For cross_attention mode: obs_cond_dim = token_dim (per-token dimension)."
+            )
+
+        self.obs_cond_dim = obs_cond_dim
+
+        # 构建 FiLM generator
+        self.film_generator = nn.Sequential(
+            nn.Linear(task_embedding_dim, task_embedding_dim * 2),
+            nn.ReLU(),
+            nn.Linear(task_embedding_dim * 2, obs_cond_dim * 2),  # scale + shift
+        )
+
+        # 初始化 FiLM generator：scale 初始化为 0，shift 初始化为 0
+        # 这样初始时 FiLM 是恒等变换，不影响预训练的 base_agent
+        nn.init.zeros_(self.film_generator[-1].weight)
+        nn.init.zeros_(self.film_generator[-1].bias)
+
+    @property
+    def normalizer(self):
+        return self.base_agent.normalizer
+
     def load_normalizer_from_dataset(self, normalizer):
         self.base_agent.load_normalizer_from_dataset(normalizer)
-        self.normalizer = self.base_agent.normalizer
 
     def preprocess(self, obs_dict):
         return self.base_agent.preprocess(obs_dict)
 
     def _inject_task_condition(self, cond: torch.Tensor, task_emb: torch.Tensor):
-        """将 task embedding 拼接到 condition 中
+        """使用 FiLM 调制注入任务条件
 
         Args:
-            cond: (B, cond_dim) 观测条件向量
+            cond: 观测条件
+                - UNet: (B, cond_dim)
+                - DiT: (B, num_tokens, token_dim)
             task_emb: (B, task_emb_dim) 任务嵌入向量
 
         Returns:
-            (B, cond_dim + task_emb_dim) 拼接后的条件向量
+            modulated_cond: FiLM 调制后的条件，形状与 cond 相同
         """
-        return torch.cat([cond, task_emb], dim=-1)
+        # 生成 FiLM 参数
+        film_params = self.film_generator(task_emb)  # (B, cond_dim * 2)
+        scale, shift = film_params.chunk(2, dim=-1)  # (B, cond_dim) each
+
+        # 根据 cond 的形状应用 FiLM
+        if cond.dim() == 2:  # UNet: (B, D)
+            assert cond.shape[-1] == self.obs_cond_dim, (
+                f"FiLM dim mismatch: cond has {cond.shape[-1]} but obs_cond_dim={self.obs_cond_dim}"
+            )
+            return cond * (1 + scale) + shift
+        elif cond.dim() == 3:  # DiT: (B, T, D)
+            assert cond.shape[-1] == self.obs_cond_dim, (
+                f"FiLM dim mismatch for cross_attention: cond last dim={cond.shape[-1]} "
+                f"but obs_cond_dim={self.obs_cond_dim}. "
+                f"For cross_attention mode, obs_cond_dim should be per-token dim, not flattened dim."
+            )
+            return cond * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+        else:
+            raise ValueError(f"Unexpected cond shape: {cond.shape}")
 
     def compute_loss(self, batch, **kwargs):
         # 提取 task_id
@@ -115,7 +159,7 @@ class MultiTaskAgent(nn.Module):
             raise ValueError("batch must contain 'task_id' for MultiTaskAgent")
 
         # 编码观测
-        cond = self.obs_encoder(self.preprocess(batch['obs']))
+        cond = self.base_agent.obs_encoder(self.preprocess(batch['obs']))
 
         # 编码任务
         task_emb = self.task_embedding(task_ids)
@@ -124,8 +168,21 @@ class MultiTaskAgent(nn.Module):
         cond_with_task = self._inject_task_condition(cond, task_emb)
 
         # 计算损失
-        nactions = self.normalizer['action'].normalize(batch['action'])
-        return self.action_decoder.compute_loss(cond_with_task, nactions, **kwargs)
+        nactions = self.base_agent.normalizer['action'].normalize(batch['action'])
+
+        # 提取 EMA backbone（兼容 FlowMatch consistency distillation）
+        loss_kwargs = dict(kwargs)
+        ema_model = loss_kwargs.pop('ema_model', None)
+        if ema_model is not None:
+            if hasattr(ema_model, 'base_agent'):
+                ema_backbone = ema_model.base_agent.action_decoder.model
+            elif hasattr(ema_model, 'action_decoder'):
+                ema_backbone = ema_model.action_decoder.model
+            else:
+                ema_backbone = ema_model
+            loss_kwargs['ema_model'] = ema_backbone
+
+        return self.base_agent.action_decoder.compute_loss(cond_with_task, nactions, **loss_kwargs)
 
     @torch.no_grad()
     def predict_action(self, obs_dict, task_id: Optional[int] = None, denoise_timesteps=None):
@@ -146,7 +203,7 @@ class MultiTaskAgent(nn.Module):
             )
 
         # 编码观测
-        cond = self.obs_encoder(self.preprocess(obs_dict))
+        cond = self.base_agent.obs_encoder(self.preprocess(obs_dict))
 
         # 编码任务
         batch_size = cond.shape[0]
@@ -161,8 +218,8 @@ class MultiTaskAgent(nn.Module):
             batch_size, self.horizon, self.action_dim,
             device=cond.device, dtype=cond.dtype,
         )
-        pred = self.action_decoder.predict_action(cond_with_task, template, denoise_timesteps)
-        pred = self.normalizer['action'].unnormalize(pred)
+        pred = self.base_agent.action_decoder.predict_action(cond_with_task, template, denoise_timesteps)
+        pred = self.base_agent.normalizer['action'].unnormalize(pred)
 
         s = self.n_obs_steps - 1
         return {
@@ -171,14 +228,16 @@ class MultiTaskAgent(nn.Module):
         }
 
     def configure_optimizer(self, **kwargs):
-        # 将 task_embedding 参数加入优化器
         base_optimizer = self.base_agent.configure_optimizer(**kwargs)
 
-        # 添加 task_embedding 参数组
-        task_params = list(self.task_embedding.parameters())
-        if task_params:
+        # 添加 task_embedding + film_generator 参数组
+        multi_task_params = (
+            list(self.task_embedding.parameters())
+            + list(self.film_generator.parameters())
+        )
+        if multi_task_params:
             base_optimizer.add_param_group({
-                'params': task_params,
+                'params': multi_task_params,
                 'lr': kwargs.get('lr', 1e-4),
                 'weight_decay': kwargs.get('weight_decay', 1e-6),
             })

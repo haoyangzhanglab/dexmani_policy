@@ -2,12 +2,13 @@
 
 ## 概述
 
-`dexmani_policy/agents` 实现了 4 种模仿学习策略的统一架构：
+`dexmani_policy/agents` 实现了 5 种模仿学习策略的统一架构：
 
 - **DPAgent** - RGB Diffusion Policy
 - **DP3Agent** - Point Cloud Diffusion Policy  
 - **MoEAgent** - Mixture of Experts Diffusion Policy
 - **ManiFlowAgent** - Flow Matching with Consistency Distillation
+- **MultiTaskAgent** - 多任务包装器（可包装任意 base_agent，添加 task embedding 条件注入）
 
 所有 agent 继承自 `BaseAgent`，遵循统一的接口：`compute_loss()` 用于训练，`predict_action()` 用于推理。
 
@@ -190,6 +191,13 @@ context: (B, n_tokens, cond_dim) - 观测 embedding
 #### Proprio Encoder (`agents/obs_encoder/proprio/state_mlp.py`)
 
 简单 MLP，编码 joint state。
+`StateMLP(input_channels, output_channels, hidden_channels=[64])`：`(B*T, input_channels) → Linear → ReLU → Linear → (B*T, output_channels)`
+
+#### Text Encoders（未集成）
+
+- **CLIPTextEncoder**（`text/clip.py`）：冻结 CLIP 文本编码器，用于任务指令编码
+- **T5TextEncoder**（`text/t5.py`）：T5 文本编码器
+- 当前没有任何 Agent 使用文本编码器，预留用于 language-conditioned policy
 
 #### Plugins
 
@@ -215,7 +223,49 @@ def aux_loss(self, probs):
 
 ---
 
-### 5. Common Utilities
+### 5. MultiTask Agent (`agents/core/multi_task.py`)
+
+**MultiTaskAgent** 是一个包装器，可以包装任意 base_agent 并添加基于 FiLM 的任务条件化支持。
+
+**架构**：
+```
+MultiTaskAgent
+├── base_agent (DP3Agent / DPAgent / etc.)
+│   ├── obs_encoder
+│   ├── action_decoder
+│   └── normalizer
+├── task_embedding (TaskEmbedding)
+└── film_generator (Linear → ReLU → Linear → scale + shift)
+```
+
+**工作流程**：
+```
+batch['task_id'] → TaskEmbedding → task_emb (B, emb_dim)
+task_emb → film_generator → (scale, shift), each (B, cond_dim)
+batch['obs'] → obs_encoder → cond (B, cond_dim) or (B, T, cond_dim)
+cond_with_task = cond * (1 + scale) + shift   ← FiLM 调制，维度不变
+→ action_decoder.compute_loss(cond_with_task, nactions)
+```
+
+**FiLM 调制机制**：
+- FiLM (Feature-wise Linear Modulation) 通过 scale 和 shift 参数调制观测特征
+- 不修改网络输入维度，兼容所有 backbone（UNet1D, DiTX）
+- `film_generator` 最后一层零初始化 → 初始时恒等变换，可从预训练 base_agent 热启动
+- 支持 2D `(B, D)` 和 3D `(B, T, D)` 条件格式（3D 时 scale/shift 广播到所有 token）
+
+**关键设计**：
+- `obs_cond_dim`：可在配置中显式指定，避免初始化时的推断开销；也可省略由 `_infer_obs_cond_dim()` 自动推断
+- `predict_action` 需要传入 `task_id` 参数（默认 0）
+- `configure_optimizer` 在 base_agent 优化器基础上添加 task_embedding + film_generator 参数组
+- 训练数据需包含 `task_id` 字段（由 `MultiTaskDataset` 自动添加）
+
+**TaskEmbedding**：
+- `nn.Embedding(num_tasks, embedding_dim)`，初始化 std=0.02
+- 可选 dropout
+
+---
+
+### 6. Common Utilities
 
 #### LinearNormalizer (`common/normalizer.py`)
 
@@ -300,7 +350,7 @@ Flow Matching 假设 `t ∈ [0,1]`，超出范围会导致外推误差。所有 
 ### 死代码（不影响功能）
 
 - `agents/action_decoders/backbone/dit.py` - 整文件未使用（372 行）
-- `agents/action_decoders/backbone/ditx.py:397` - `DiTXDiffusion` 类未使用（70 行）
+- `agents/action_decoders/backbone/ditx.py:398` - `DiTXDiffusion` 类未使用（134 行）
 - `agents/obs_encoder/plugins/token_compressor.py` - 四个类未使用（345 行）
 - `agents/action_decoders/common/sample.py:7` - `logit_normal_density` 函数未使用
 
@@ -309,7 +359,7 @@ Flow Matching 假设 `t ∈ [0,1]`，超出范围会导致外推误差。所有 
 ### 简化实现
 
 - `flowmatch.py:78` - `dt2 = dt1.clone()`（注释说明可独立采样，但当前简化为相同）
-- `ditx.py:392` - `x[:, -self.horizon:]` 冗余切片（为未来 obs+action 拼接预留）
+- `ditx.py:393/530` - `x[:, -self.horizon:]` 冗余切片（为未来 obs+action 拼接预留）
 
 ---
 
@@ -321,6 +371,7 @@ Flow Matching 假设 `t ∈ [0,1]`，超出范围会导致外推误差。所有 
 # 测试各 agent 的前向传播
 python -m dexmani_policy.agents.core.dp3
 python -m dexmani_policy.agents.core.maniflow
+python -m dexmani_policy.agents.core.moe
 
 # 测试 obs encoder
 python -m dexmani_policy.agents.obs_encoder.pointcloud.idp3

@@ -1,163 +1,36 @@
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
+from dexmani_policy.training.trainer import Trainer
 from dexmani_policy.training.common.logging import to_log_scalars
-from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply
 
 
-@dataclass
-class TrainLoopConfig:
-    num_epochs: int
-    log_interval_steps: int
-    val_interval_epochs: int
-    eval_interval_epochs: int
-    sample_interval_epochs: int
-    gradient_accumulate_every: int = 1
-    grad_clip_norm: float = 1.0
+class MultiTaskTrainer(Trainer):
+    """
+    多任务训练器，继承 Trainer 并 override train() 方法。
 
-    def __post_init__(self):
-        if self.gradient_accumulate_every < 1:
-            raise ValueError(f"gradient_accumulate_every must be >= 1, got {self.gradient_accumulate_every}")
-    
-    
-class Trainer:
-    def __init__(
-        self,
-        device,
-        model,
-        ema_model,
-        ema_updater,
-        optimizer,
-        scheduler,
-        train_loader,
-        val_loader,
-        env_runner,
-        workspace: TrainWorkspace,
-        train_loop_cfg: TrainLoopConfig,
-        use_ema_teacher_for_consistency: bool,
-    ):
-        self.device = device
-
-        self.model = model
-        self.ema_model = ema_model
-        self.ema_updater = ema_updater
-
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.env_runner = env_runner
-        self.workspace = workspace
-
-        self.num_epochs = train_loop_cfg.num_epochs
-        self.log_interval_steps = train_loop_cfg.log_interval_steps
-        self.val_interval_epochs = train_loop_cfg.val_interval_epochs
-        self.eval_interval_epochs = train_loop_cfg.eval_interval_epochs
-        self.sample_interval_epochs = train_loop_cfg.sample_interval_epochs
-        self.grad_clip_norm = train_loop_cfg.grad_clip_norm
-        self.enable_env_eval = (self.env_runner is not None) and (self.eval_interval_epochs > 0)
-        self.checkpoint_interval_epochs = self.eval_interval_epochs if self.enable_env_eval else self.val_interval_epochs
-
-        self.use_ema = self.ema_model is not None
-        self.use_ema_teacher_for_consistency = use_ema_teacher_for_consistency and self.use_ema
-
-        self.gradient_accumulate_every = train_loop_cfg.gradient_accumulate_every
-        self._accum_step = 0
-        
-
-    def plan_epoch_end_tasks(self, epoch: int) -> Dict[str, bool]:
-        epoch_idx = epoch + 1
-        is_last_epoch = epoch_idx == self.num_epochs
-
-        should_sample = is_last_epoch or (epoch_idx % self.sample_interval_epochs == 0)
-        should_validate = is_last_epoch or (epoch_idx % self.val_interval_epochs == 0)
-        should_evaluate = self.enable_env_eval and (
-            is_last_epoch or (epoch_idx % self.eval_interval_epochs == 0)
-        )
-        should_save = is_last_epoch or (epoch_idx % self.checkpoint_interval_epochs == 0)
-        should_save_latest = is_last_epoch or (epoch_idx % self.val_interval_epochs == 0)
-
-        return {
-            "sample": should_sample,
-            "validate": should_validate,
-            "evaluate": should_evaluate,
-            "save_checkpoint": should_save,
-            "save_latest": should_save_latest,
-        }
-
-
-    def train_one_step(self, batch: Dict[str, Any]):
-        batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-
-        loss_kwargs = {'ema_model': self.ema_model} if self.use_ema_teacher_for_consistency else {}
-        raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
-
-        scaled_loss = raw_loss / self.gradient_accumulate_every
-        scaled_loss.backward()
-
-        self._accum_step += 1
-        if self._accum_step % self.gradient_accumulate_every == 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad(set_to_none=True)
-
-            if self.use_ema and self.ema_updater is not None:
-                self.ema_updater.step(self.model)
-
-        return batch, log_dict
-
-
-    @torch.no_grad()
-    def validate(self, agent) -> Optional[float]:
-        if self.val_loader is None:
-            return None
-
-        count = 0
-        loss_sum = torch.zeros((), device=self.device)
-
-        for batch in self.val_loader:
-            batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-            # 验证时 agent 已经是 ema_model，不传入 teacher 避免自我一致性检查
-            loss_kwargs = {}
-            loss, _ = agent.compute_loss(batch, **loss_kwargs)
-
-            n = batch['action'].shape[0]
-            loss_sum += loss.detach() * n
-            count += n
-
-        if count == 0:
-            return None
-        return (loss_sum / count).item()
-
+    与 Trainer.train() 的差异：
+        - 每个 epoch 开始时调用 dataset.set_epoch(epoch)，确保多任务采样的随机性跨 epoch 变化
+    """
 
     @torch.no_grad()
     def compute_action_mse_for_one_batch(self, agent, batch: Dict[str, Any]) -> float:
         obs = batch["obs"]
         gt_action = batch["action"]
-        pred_action = agent.predict_action(obs)["pred_action"]
+        task_ids = batch["task_id"]
+
+        pred_action = torch.zeros_like(gt_action)
+        for tid in task_ids.unique():
+            mask = (task_ids == tid)
+            obs_subset = {k: v[mask] if torch.is_tensor(v) else v for k, v in obs.items()}
+            pred = agent.predict_action(obs_subset, task_id=tid.item())["pred_action"]
+            pred_action[mask] = pred
+
         return nn.functional.mse_loss(pred_action, gt_action).item()
-
-
-    @torch.no_grad()
-    def evaluate(self, agent) -> Dict[str, Any]:
-        result = self.env_runner.run(agent)
-        success_rate = result["success_rate"]
-        metrics = {
-            "eval/success_rate": success_rate * 100 if success_rate is not None else None,
-            "eval/avg_steps": result["avg_steps"],
-        }
-        for item in result.get("videos", []):
-            for key, value in item.items():
-                metrics[f"eval/{key}_video"] = value
-        return metrics
-
 
     def train(self, resume_tag: str = "latest"):
         global_step, start_epoch = self.workspace.load_for_resume(
@@ -190,7 +63,9 @@ class Trainer:
         for epoch in epoch_pbar:
             self.model.train()
 
-            # 避免跨 epoch 边界的梯度累积错位
+            # 多任务关键：更新 epoch 以改变任务采样的随机种子
+            self.train_loader.dataset.set_epoch(epoch)
+
             self._accum_step = 0
             self.optimizer.zero_grad(set_to_none=True)
 
@@ -222,12 +97,12 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.use_ema and self.ema_updater is not None:
                     self.ema_updater.step(self.model)
-                
+
             self.model.eval()
-            
+
             epoch_metrics = {}
             epoch_end_tasks = self.plan_epoch_end_tasks(epoch)
-            
+
             if epoch_end_tasks["sample"]:
                 sample_batch = dict_apply(next(iter(self.train_loader)), lambda x: x.to(self.device, non_blocking=True))
                 epoch_metrics["train/action_mse_error"] = self.compute_action_mse_for_one_batch(self.model, sample_batch)

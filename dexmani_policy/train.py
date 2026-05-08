@@ -50,11 +50,14 @@ def build_train_components(cfg) -> TrainComponents:
     normalizer = dataset.get_normalizer()
 
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
-    val_loader = DataLoader(
-        dataset.get_validation_dataset(),
-        worker_init_fn=worker_init_fn,
-        **cfg.val_dataloader,
-    )
+    val_dataset = dataset.get_validation_dataset()
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            worker_init_fn=worker_init_fn,
+            **cfg.val_dataloader,
+        )
 
     model = hydra.utils.instantiate(cfg.agent)
 

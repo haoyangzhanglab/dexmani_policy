@@ -1,319 +1,458 @@
-# dexmani_policy — Embodied Repo Research Note
+# Embodied Repo Research Note - dexmani_policy
 
-> Generated: 2026-04-29. Re-run `/embodied-repo-map` if repo structure changes significantly.
+**生成时间**: 2026-05-08  
+**仓库**: dexmani_policy - 灵巧操作模仿学习策略框架  
+**上次更新**: 基于 embodied-repo-cartographer 子代理完整分析
+
+---
 
 ## TL;DR
 
-灵巧操作模仿学习框架。4 种策略（DP3、DP、MoE-DP3、ManiFlow）× 多模态观测（点云/RGB/Proprio）× 单卡/DDP 训练。核心特色：Hydra 全驱动实例化、ManiFlow 的 Flow Matching + Consistency Distillation 双目标训练、EMA teacher 支持。
+**dexmani_policy** 是一个灵巧操作模仿学习策略框架，支持 5 种策略（DP/DP3/MoE/ManiFlow/MultiTask）× 多模态观测（RGB/点云/proprio）× 单卡/DDP 训练。核心设计：Hydra 配置驱动的模块化架构，统一的 `BaseAgent` 接口，episode 级 train/val 划分的 Zarr replay buffer，EMA 模型用于 consistency distillation 和评估，topk checkpoint 管理。代码量约 70 个 Python 文件，核心训练/策略/数据模块约 2365 行。
+
+**关键特性**:
+- 配置驱动：所有组件通过 `_target_` 实例化，切换策略只需换 config
+- 统一接口：`BaseAgent.compute_loss()` / `predict_action()` / `configure_optimizer()`
+- 双目标训练：ManiFlow 支持 flow matching + consistency distillation（75:25 比例）
+- 多任务支持：FiLM 调制 + 任务感知采样 + shared/per_task normalizer
+- 分布式训练：DDP 封装 + normalizer 同步 + 无 `module.` 前缀 checkpoint
 
 ---
 
 ## Execution Skeleton
 
-### 单卡训练
 ```
-train.py::main(cfg)
-  build_train_components(cfg)
-    hydra.utils.instantiate(cfg.dataset)    → PC/RGB/RGBPCDataset
-    dataset.get_normalizer()                 → LinearNormalizer (joint_state+action → [-1,1])
-    hydra.utils.instantiate(cfg.agent)       → DP3/DP/MoE/ManiFlowAgent
-    model.configure_optimizer()             → AdamW (obs/action 分组不同 lr)
-    get_scheduler()                         → CosineAnnealing (warmup=500 steps)
-    EMAModel(copy.deepcopy(model))
-    SimRunner + TrainWorkspace
-  Trainer.train("latest")
-    workspace.load_for_resume()             → 从 latest.pt 断点续训
-    for epoch in range(start_epoch, num_epochs):
-      for batch in train_loader:
-        model.compute_loss(batch, ema_model)
-        loss.backward() → clip_grad_norm_ → optimizer.step()
-        ema_updater.step(model)
-      [eval_interval] env_runner.run(ema_model)  → success_rate
-      [val_interval]  compute val_loss(ema_model)
-      workspace.save_topk / save_latest
+config (Hydra YAML) 
+  → dataset (Zarr replay buffer → PCDataset/RGBDataset/MultiTaskDataset)
+  → agent (obs_encoder → action_decoder)
+  → trainer (Trainer/MultiTaskTrainer/DDPTrainer)
+  → evaluator (SimRunner/MultiTaskSimRunner)
 ```
 
-### DDP 多卡训练
+**训练数据流**:
 ```
-train_ddp.py → mp.spawn(ddp_worker, nprocs=num_gpus)
-  setup_ddp() → dist.init_process_group("nccl")
-  model = DDP(model, device_ids=[gpu_id])   # EMA 不被 DDP 包装
-  synchronize_states()                       # broadcast main/ema/normalizer from rank-0
-  for epoch:
-    train_sampler.set_epoch(epoch)
-    [训练同单卡，DDP 自动 all-reduce]
-    [rank-0 only] validate / evaluate / checkpoint
-    dist.barrier()
+batch['obs']: (B, T, obs_dim)
+  → normalize
+  → flatten: (B*T, obs_dim)
+  → obs_encoder: (B*T, obs_dim) → (B*T, token_dim)
+  → reshape + concat: (B, n_obs_steps*token_dim) [film] 或 (B, n_obs_steps, token_dim) [cross_attention]
+  → cond
+
+batch['action']: (B, horizon, action_dim)
+  → normalize: (B, horizon, action_dim)
+  → action_decoder.compute_loss(cond, nactions) → loss
 ```
 
-### 评估流程
+**推理数据流**:
 ```
-eval_sim.py → SimEvaluator.run()
-  workspace.load_for_inference(agent, use_ema=True)
-  for denoise_timesteps in [10, 5, 1]:
-    env_runner.run(agent) → eval_one_episode()
-      obs_deque(maxlen=n_obs_steps+1) 滚动队列
-      predict_action(nobs, denoise_timesteps)
-      execute action_chunk[n_action_steps=8 步]
-  save MP4 + metrics.json
+obs_dict: {pc/rgb/joint_state: (1, T, ...)}
+  → preprocess (normalize + flatten)
+  → obs_encoder → cond: (1, cond_dim)
+  → randn template: (1, horizon, action_dim)
+  → action_decoder.predict_action(cond, template, denoise_steps=10)
+  → pred: (1, horizon, action_dim)
+  → unnormalize
+  → control_action = pred[:, n_obs_steps-1:n_obs_steps-1+n_action_steps]
 ```
 
 ---
 
 ## Repository Map
 
-### 关键文件路径
+### 核心模块层级
 
-| 模块 | 路径 |
-|------|------|
-| 单卡入口 | `dexmani_policy/train.py` |
-| DDP 入口 | `dexmani_policy/train_ddp.py` |
-| 评估入口 | `dexmani_policy/eval_sim.py` |
-| 基础 Agent | `agents/core/base.py` |
-| DP3 Agent | `agents/core/dp3.py` |
-| DP Agent | `agents/core/dp.py` |
-| MoE Agent | `agents/core/moe.py` |
-| ManiFlow Agent | `agents/core/maniflow.py` |
-| DDIM 解码器 | `agents/action_decoders/diffusion.py` |
-| Flow 解码器 | `agents/action_decoders/flowmatch.py` |
-| t 采样库 | `agents/action_decoders/common/sample.py` |
-| UNet1D | `agents/action_decoders/backbone/unet1d.py` |
-| DiTX | `agents/action_decoders/backbone/ditx.py` |
-| PC 编码器注册表 | `agents/obs_encoder/pointcloud/registry.py` |
-| RGB 编码器注册表 | `agents/obs_encoder/rgb/registry.py` |
-| StateMLP | `agents/obs_encoder/proprio/state_mlp.py` |
-| MoE 插件 | `agents/obs_encoder/plugins/moe.py` |
-| Token Compressor（未激活）| `agents/obs_encoder/plugins/token_compressor.py` |
-| Dataset 基类 | `datasets/base_dataset.py` |
-| PC Dataset | `datasets/pc_dataset.py` |
-| Replay Buffer | `datasets/common/replay_buffer.py` |
-| 序列采样器 | `datasets/common/sampler.py` |
-| 单卡训练循环 | `training/trainer.py` |
-| DDP 训练循环 | `training/ddp_trainer.py` |
-| EMA | `training/common/ema_model.py` |
-| Checkpoint | `training/common/checkpoint_io.py` |
-| Workspace | `training/common/workspace.py` |
-| 仿真评估器 | `training/sim_evaluator.py` |
-| 环境 Runner 基类 | `env_runner/base_runner.py` |
-| Sim Runner | `env_runner/sim_runner.py` |
-| 归一化器 | `common/normalizer.py` |
+```
+dexmani_policy/
+├── agents/                          # 策略定义
+│   ├── core/                        # Agent 实现
+│   │   ├── base.py                  # BaseAgent / UNetDiffusionAgent / DiTXFlowMatchAgent
+│   │   ├── dp.py                    # RGB + proprio → Diffusion
+│   │   ├── dp3.py                   # 点云 + proprio → Diffusion
+│   │   ├── moe.py                   # 点云 + MoE → Diffusion
+│   │   ├── maniflow.py              # 点云 + proprio → FlowMatch
+│   │   └── multi_task.py            # 包装 base_agent + TaskEmbedding + FiLM
+│   ├── action_decoders/             # 动作生成模型
+│   │   ├── diffusion.py             # DDIM scheduler (100 train / 10 inference steps)
+│   │   ├── flowmatch.py             # Flow matching + Consistency distillation
+│   │   ├── backbone/
+│   │   │   ├── unet1d.py            # ConditionalUnet1D (FiLM / CrossAttention)
+│   │   │   ├── ditx.py              # DiT-X Transformer (AdaLN + CrossAttention)
+│   │   │   └── dit_blocks.py        # DiT building blocks
+│   │   └── common/sample.py         # t 采样策略 (beta/uniform/lognorm/cosmap/discrete)
+│   ├── obs_encoder/                 # 观测编码器
+│   │   ├── pointcloud/              # PointNet / iDP3 / PointNext / PointPN Tokenizer
+│   │   ├── rgb/                     # ResNet / DINO / CLIP / SigLIP + ImageProcessor
+│   │   ├── proprio/                 # StateMLP (joint_state → hidden)
+│   │   ├── text/                    # CLIPTextEncoder / T5TextEncoder (预留)
+│   │   └── plugins/                 # MoE / TokenCompressor
+│   └── common/                      # optim_util / param_counter
+├── datasets/                        # 数据加载
+│   ├── base_dataset.py              # BaseDataset (Zarr replay buffer 封装)
+│   ├── pc_dataset.py                # PCDataset (点云 + proprio)
+│   ├── rgb_dataset.py               # RGBDataset (RGB + proprio)
+│   ├── rgbpc_dataset.py             # RGBPCDataset (RGB + 点云 + proprio)
+│   ├── multi_task_dataset.py        # MultiTaskDataset (多任务混合)
+│   ├── common/
+│   │   ├── replay_buffer.py         # Zarr episode replay buffer
+│   │   └── sampler.py               # SequenceSampler (horizon 窗口采样)
+│   └── augmentation/                # RGB/点云颜色增强 (默认关闭)
+├── training/                        # 训练循环
+│   ├── trainer.py                   # 单卡训练 (梯度累积 + EMA + 验证/评估)
+│   ├── multi_task_trainer.py        # 多任务训练 (set_epoch + task-aware MSE)
+│   ├── ddp_trainer.py               # DDP 训练封装 (normalizer 同步)
+│   ├── sim_evaluator.py             # 仿真评估 + 视频录制
+│   └── common/
+│       ├── workspace.py             # Checkpoint/logging 管理 (topk + wandb)
+│       ├── ema_model.py             # EMA 更新 (power=0.75, max_value=0.9999)
+│       ├── checkpoint_io.py         # Checkpoint 序列化
+│       └── lr_scheduler.py          # Cosine scheduler with warmup
+├── env_runner/                      # 仿真接口
+│   ├── base_runner.py               # BaseRunner 抽象类
+│   ├── sim_runner.py                # SimRunner (单任务)
+│   └── multi_task_sim_runner.py     # MultiTaskSimRunner (多任务)
+├── common/                          # 工具函数
+│   ├── normalizer.py                # LinearNormalizer (limits/gaussian 模式)
+│   └── pytorch_util.py              # dict_apply / optimizer_to
+├── configs/                         # Hydra YAML 配置
+│   ├── dp.yaml                      # RGB + Diffusion
+│   ├── dp3.yaml                     # 点云 + Diffusion
+│   ├── moe_dp3.yaml                 # 点云 + MoE + Diffusion
+│   ├── maniflow.yaml                # 点云 + FlowMatch
+│   ├── maniflow_ddp.yaml            # 点云 + FlowMatch + DDP
+│   ├── multi_task_dp3.yaml          # 多任务 + 点云 + Diffusion
+│   └── dataset/                     # 数据集配置
+│       ├── pc.yaml                  # 单任务点云数据集
+│       └── multi_task_pc.yaml       # 多任务点云数据集
+├── train.py                         # 单卡训练入口
+├── train_multi_task.py              # 多任务训练入口
+├── train_ddp.py                     # DDP 训练入口
+└── eval_sim.py                      # 仿真评估入口
+```
 
 ---
 
 ## Main Entrypoints
 
-| 命令 | 用途 |
-|------|------|
-| `python dexmani_policy/train.py --config-name=dp3` | 单卡训练 DP3 |
-| `python dexmani_policy/train.py --config-name=maniflow` | 单卡训练 ManiFlow |
-| `python dexmani_policy/train_ddp.py --config-name=maniflow_ddp` | DDP 多卡训练 |
-| `bash scripts/train_ddp.sh dp3 pick_apple_messy 4` | Shell 脚本启动 DDP |
-| `python dexmani_policy/eval_sim.py --policy-name dp3 --task-name ... --exp-name ...` | 仿真评估 |
-| `python -m dexmani_policy.agents.core.dp3` | DP3 smoke test |
-| `python -m dexmani_policy.agents.core.maniflow` | ManiFlow smoke test |
+| Purpose | File | Key Functions | Notes |
+|---------|------|---------------|-------|
+| 单卡训练 | `train.py` | `build_train_components()`, `Trainer.train()` | 默认入口，支持 DP/DP3/MoE/ManiFlow |
+| 多任务训练 | `train_multi_task.py` | `build_train_components()`, `MultiTaskTrainer.train()` | 调用 `dataset.set_epoch(epoch)` 改变任务采样 |
+| DDP 训练 | `train_ddp.py` | `mp.spawn(ddp_worker)`, `DDPTrainer.train()` | 需配置 `training.num_gpus > 1` |
+| 仿真评估 | `eval_sim.py` | `SimEvaluator.run()` | 从 `experiments/{policy}/{task}/{exp_name}` 加载 checkpoint |
+| Shell 脚本 | `scripts/*.sh` | - | Bash 包装器，简化命令行调用 |
+
+**训练命令示例**:
+```bash
+# 单卡训练
+python dexmani_policy/train.py --config-name=dp3
+
+# 多任务训练
+python dexmani_policy/train_multi_task.py --config-name=multi_task_dp3
+
+# DDP 训练
+python dexmani_policy/train_ddp.py --config-name=maniflow_ddp training.gpu_ids=[0,1,2,3]
+
+# 仿真评估
+python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy --exp-name 2026-04-01_11-18_233
+```
 
 ---
 
 ## Embodied Module Breakdown
 
-### 1. 策略 Agent 继承体系
+### 1. Agent 架构
 
-```
-nn.Module
-└── BaseAgent                      [agents/core/base.py]
-    ├── UNetDiffusionAgent
-    │   ├── DP3Agent               点云 + DDIM
-    │   ├── DPAgent                RGB + DDIM
-    │   └── MoEAgent               点云 + MoE路由 + DDIM
-    └── DiTXFlowMatchAgent
-        └── ManiFlowAgent          点云 patch token + Flow+Consistency
-```
+**BaseAgent** (`agents/core/base.py:187`):
+- **接口**: `compute_loss(batch)`, `predict_action(obs_dict)`, `configure_optimizer()`
+- **关键设计**: `preprocess()` 将 `(B, T, ...)` 展平为 `(B*T, ...)`，推理时返回 `control_action[:, n_obs_steps-1:n_obs_steps-1+n_action_steps]`
 
-**BaseAgent 核心接口**（`agents/core/base.py`）：
+**UNetDiffusionAgent** (`agents/core/base.py`):
+- **组件**: `obs_encoder` + `ConditionalUnet1D` + `Diffusion`
+- **条件注入**: `film` (全局向量) 或 `cross_attention_film` (序列 token)
+- **子类**: `DPAgent` (RGB), `DP3Agent` (点云), `MoEAgent` (点云+MoE)
 
-| 方法 | 说明 |
-|------|------|
-| `preprocess(obs_dict)` | normalize → 切 n_obs_steps → flatten(B*T, ...) |
-| `compute_loss(batch, **kwargs)` | obs→encoder→cond; action→normalize; decoder.compute_loss |
-| `predict_action(obs_dict, denoise_timesteps)` | cond→decoder.predict_action→unnorm; s=n_obs_steps-1 切片 |
-| `configure_optimizer(lr, wd, obs_lr, ...)` | obs/action 分组 AdamW，支持不同 lr |
+**DiTXFlowMatchAgent** (`agents/core/base.py`):
+- **组件**: `obs_encoder` + `DiTXFlowMatch` + `FlowMatchWithConsistency`
+- **条件注入**: AdaLN (全局) + CrossAttention (序列)
+- **子类**: `ManiFlowAgent` (点云)
 
-### 2. Obs 编码器分类
+**MultiTaskAgent** (`agents/core/multi_task.py:246`):
+- **组件**: `base_agent` + `TaskEmbedding` + `FiLM` generator
+- **FiLM 调制**: `cond * (1 + scale) + shift`，`scale/shift` 由 `task_emb` 生成
+- **关键**: `obs_cond_dim` 必须显式指定（film: `n_obs_steps * (pc_out_dim + state_out_dim)`，cross_attention: `token_dim`）
 
-**点云全局编码器**（→ DP3/MoE，输出 `(B*T, 256)` 全局 token）：
+### 2. 观测编码器
 
-| 名称 | 类 | 文件 | 架构 |
-|------|-----|------|------|
-| `dp3` | `PointNet` | `pointnet.py` | MLP → max-pool |
-| `idp3` | `MultiStagePointNet` | `pointnet.py` | 多阶段局部+全局融合 |
-| `pointnext` | `PointNextEncoder` | `pointnext.py` | SetAbstraction + InvertedResidual + 全局位置编码 |
+**点云编码器** (`agents/obs_encoder/pointcloud/`):
+- **PointNet**: 全局 max pooling，输出 `(B, out_dim)`
+- **iDP3**: PointNet + 3 层 MLP，输出 `(B, out_dim)`
+- **PointNext**: 层级点云处理，输出 `(B, out_dim)`
+- **PointPN Tokenizer**: 点云 tokenizer，输出 `(B, num_tokens, token_dim)`
 
-**点云 Patch Tokenizer**（→ ManiFlow，输出 patch 序列）：
+**RGB 编码器** (`agents/obs_encoder/rgb/`):
+- **ResNet**: 预训练 ResNet18/34/50，冻结/微调可选
+- **DINO**: 预训练 ViT，输出 CLS token 或 patch tokens
+- **CLIP**: 预训练 ViT，输出 CLS token
+- **SigLIP**: 预训练 ViT，输出 CLS token
 
-| 名称 | 类 | out_shape (K, D) |
-|------|-----|-----------------|
-| `pointpn` | `PointPNTokenizer` | `(128, 512)` |
-| `pointnext_tokenizer` | `PointNextPatchTokenizer` | `(96, 128)` + `(1, 128)` global |
+**Proprio 编码器** (`agents/obs_encoder/proprio/state_mlp.py`):
+- **StateMLP**: 2 层 MLP，`joint_state → hidden`
 
-**RGB 骨干**（→ DP，输出 `(B*T, 512)` global token）：
+### 3. 动作解码器
 
-| 名称 | 骨干 | tune_mode |
-|------|------|-----------|
-| `resnet` | ResNet18 | full |
-| `dino` | dinov2-base | freeze/full/lora |
-| `clip` | clip-vit-base-patch32 | freeze/full/lora |
-| `siglip` | siglip-base-patch16-224 | freeze/full/lora |
+**Diffusion** (`agents/action_decoders/diffusion.py:90`):
+- **Scheduler**: DDIM，`num_train_timesteps=100`, `num_inference_steps=10`
+- **Prediction type**: `'sample'` (直接预测 x0) 或 `'epsilon'` (预测噪声)
+- **训练**: `noisy_action = scheduler.add_noise(actions, noise, timestep)` → `model(noisy_action, timestep, cond)` → MSE loss
+- **推理**: DDIM 采样，10 步去噪
 
-**Proprio**：`StateMLP`：`(B*T, 19) → Linear → ReLU → Linear → (B*T, 64)`
+**FlowMatchWithConsistency** (`agents/action_decoders/flowmatch.py:120+`):
+- **Flow matching**: `xt = (1-t)*x0 + t*x1`, 预测 `vt = x1 - x0`
+- **Consistency distillation**: 学生预测 `vt`，教师（EMA）预测 `v_next`，目标 `vt_target = (pred_x1 - xt) / (1-t)`
+- **t 采样**: flow 用 `beta(1, 1.5)`，consistency 用 `discrete`
+- **Batch 分配**: `flow_batch_ratio=0.75`, `consistency_batch_ratio=0.25`
 
-**插件**：
-- `MoE`（`plugins/moe.py`）：`num_experts=8, top_k=2`，输出加权专家求和 + load_balance/entropy aux loss
-- `TokenCompressor`（`plugins/token_compressor.py`）：Perceiver-style，N query → K latent token，**当前未激活**
+**Backbone**:
+- **ConditionalUnet1D**: 1D UNet，支持 FiLM 和 CrossAttention 条件注入
+- **DiTXFlowMatch**: DiT-X Transformer，AdaLN + CrossAttention
 
-### 3. Action 解码器
+### 4. 数据集
 
-| 解码器 | 骨干 | 训练目标 | 推理 |
-|--------|------|---------|------|
-| `Diffusion` | `ConditionalUnet1D` | MSE(pred, x0)，t~Uniform(0,99) | 10步 DDIM |
-| `FlowMatchWithConsistency` | `DiTXFlowMatch` | flow MSE + consistency MSE，t~Beta(1,1.5) | 10步 Euler ODE |
+**BaseDataset** (`datasets/base_dataset.py:100+`):
+- **Zarr replay buffer**: episode 级存储，`{obs/action/episode_ends}`
+- **SequenceSampler**: `horizon` 窗口采样，`pad_before=n_obs_steps-1`, `pad_after=n_action_steps-1`
+- **Train/Val 划分**: episode 级随机划分，`get_val_mask(seed, val_ratio, n_episodes)`
+- **Normalizer**: `get_normalizer()` 从 replay buffer 拟合 `LinearNormalizer`
 
-**FlowMatchWithConsistency 双目标**（`flowmatch.py`）：
-```
-Flow 部分（75% batch）：
-  x_t = (1-t)*x_noise + t*x_data
-  v_target = x_data - x_noise
-  loss_flow = MSE(model(x_t, t, dt=0, cond), v_target)
+**MultiTaskDataset** (`datasets/multi_task_dataset.py:174`):
+- **采样策略**: `balanced` (均匀) / `proportional` (按数据量) / `weighted` (自定义权重)
+- **训练集**: 有放回随机采样，`hash(seed, epoch, idx)` 确定 task 和 local_idx
+- **验证集**: 无放回固定顺序遍历
+- **Normalizer**: `shared` (合并所有任务) / `per_task` (独立拟合)
+- **关键**: `set_epoch(epoch)` 改变采样种子
 
-Consistency 部分（25% batch）：
-  EMA teacher 预测 v(x_{t_next}, t_next, dt)
-  pred_x1 = x_{t_next} + v_teacher * (1-t_next)
-  consistency_v_target = (pred_x1 - x_{t_ct}) / (1-t_ct)
-  loss_consistency = MSE(model(x_{t_ct}, t_ct, dt, cond), consistency_v_target)
+### 5. 训练循环
 
-total_loss = loss_flow + loss_consistency
-```
+**Trainer** (`training/trainer.py:150+`):
+- **梯度累积**: `scaled_loss = raw_loss / gradient_accumulate_every`
+- **EMA 更新**: `ema_updater.step(model)` 在 optimizer.step() 后调用
+- **验证/评估**: 每 `val_every` 步验证，每 `eval_every` 步评估
+- **Checkpoint**: topk by `test_mean_score`，latest symlink 支持断点续训
 
-**UNet1D 条件注入**：`film`（全局向量 FiLM）或 `cross_attention_film`（obs 序列 CrossAttn + FiLM）
+**MultiTaskTrainer** (`training/multi_task_trainer.py:171`):
+- **继承 Trainer**: override `train()` 和 `compute_action_mse_for_one_batch()`
+- **关键差异 1**: 每个 epoch 开始调用 `self.train_loader.dataset.set_epoch(epoch)`
+- **关键差异 2**: `compute_action_mse_for_one_batch()` 按 `task_id` 分组预测
 
-**DiTX 条件注入**：时间步 → AdaLN-Zero（9×D 调制参数，零初始化）；obs token → Cross-Attention；final layer fc2 零初始化
+**DDPTrainer** (`training/ddp_trainer.py:232`):
+- **DDP 包装**: `ddp_model = DDP(model)`, `Trainer(model=ddp_model)`
+- **Normalizer 同步**: `dist.broadcast(normalizer.state_dict())` 从 rank 0 同步
+- **Checkpoint**: 使用 `self.raw_model.state_dict()` 保存（无 `module.` 前缀）
 
-**t 采样模式**（`common/sample.py::SampleLibrary`）：`uniform` / `beta` / `lognorm` / `mode` / `cosmap` / `discrete` / `discrete_pow`
+### 6. 评估
 
-### 4. 数据管道
+**SimRunner** (`env_runner/sim_runner.py`):
+- **依赖**: 外部 `dexmani_sim` 包（通过 `importlib` 动态加载）
+- **评估指标**: `success_rate`, `avg_steps`
+- **视频录制**: 保存为 MP4
 
-```
-Zarr 文件 (episode_ends + data/{key})
-  → ReplayBuffer.copy_from_path()     # 全量加载到 numpy 内存
-  → SequenceSampler.create_indices()  # numba JIT，生成 horizon 窗口索引
-  → Dataset.__getitem__()
-      pad_before=1 / pad_after=7 边界处理（首/末帧重复）
-      augmentation (PCAug / RGBAug)
-  → DataLoader (num_workers=8, pin_memory)
-```
-
-**样本形状**（horizon=16, N=1024 点）：
-- `point_cloud: (16, 1024, 3)`
-- `joint_state: (16, 19)`
-- `action: (16, 19)`
-
-**归一化策略**：
-
-| 数据类型 | 是否归一化 | 方法 |
-|---------|----------|------|
-| `joint_state` | 是 | limits → [-1, 1] |
-| `action` | 是 | limits → [-1, 1] |
-| `point_cloud` | 否 | 原始坐标 (m) |
-| `rgb` | 否 | ImageProcessor 单独处理 |
-
-### 5. Config 系统（Hydra）
-
-| 配置文件 | 策略 | Dataset | Agent |
-|---------|------|---------|-------|
-| `configs/dp3.yaml` | DP3 | `PCDataset` | `DP3Agent` |
-| `configs/dp.yaml` | DP | `RGBDataset` | `DPAgent` |
-| `configs/moe_dp3.yaml` | MoE | `PCDataset` | `MoEAgent` |
-| `configs/maniflow.yaml` | ManiFlow | `PCDataset` | `ManiFlowAgent` |
-| `configs/maniflow_ddp.yaml` | ManiFlow DDP | 继承 maniflow | 继承 maniflow，覆盖 num_gpus=4 |
-
-Hydra 扩展：`OmegaConf.register_new_resolver("eval", eval)` 支持 yaml 内动态计算，如 `${eval:'${n_obs_steps} - 1'}`。
-
-### 6. 关键超参
-
-| 参数 | 默认值 |
-|------|--------|
-| `horizon` | 16 |
-| `n_obs_steps` | 2 |
-| `n_action_steps` | 8 |
-| `action_dim` | 19 |
-| `num_epochs` | 1000 |
-| `lr` | 1e-4 |
-| `lr_warmup_steps` | 500 |
-| `EMA power` | 0.75，max_value=0.9999 |
-| `Diffusion train/infer steps` | 100 / 10 |
-| `FlowMatch denoise_timesteps` | 10 |
-| `flow:consistency ratio` | 0.75:0.25 |
-| `Checkpoint topk` | 3，monitor=success_rate |
-
-### 7. 推理时间对齐
-
-```
-训练: obs[t:t+2] 对应 pred action[t:t+16]
-推理: obs_history = [obs[t-1], obs[t]] → pred[0:16]
-执行: control_action = pred[1:9]  (s = n_obs_steps-1 = 1)
-```
-pred[0] 对应历史时刻 t-1（不执行），pred[1] 对应当前 t。
-
-### 8. EMA 与 Checkpoint
-
-**EMAModel** (`training/common/ema_model.py`)：
-- warmup 公式：`decay = 1 - (1 + step/inv_gamma)^(-power)`（power=0.75）
-- `requires_grad=False` 参数直接 copy；`requires_grad=True` 参数做 EMA 更新；buffers 直接 copy
-- 约 10K optimizer steps 时 decay 达 0.999
-
-**CheckpointStore** (`training/common/checkpoint_io.py`)：
-- 原子写：先写 `.tmp` 再 `replace`
-- `latest.pt`：symlink，支持断点续训
-- `TopKCheckpointTracker`：维护 `topk_manifest.json`，按 score 降序，超出 k 时删除最差
+**MultiTaskSimRunner** (`env_runner/multi_task_sim_runner.py`):
+- **设计**: 为每个 task 创建 `_TaskAwareSimRunner`
+- **评估**: 逐 task 评估后汇总 `success_rate`
 
 ---
 
 ## Reproducibility Checklist
 
-- [x] Hydra config 完整，所有组件通过 `_target_` 实例化
-- [x] EMA checkpoint 支持断点续训（`latest.pt` symlink）
-- [x] episode 级 train/val 划分（val_ratio=0.05）
-- [x] DDP 状态同步（main model、EMA、normalizer 均 broadcast from rank-0）
-- [x] fixed eval seeds（来自 `dexmani_sim/eval_seeds/{task}.txt`）
-- [ ] **dexmani_sim 外部依赖**：不在仓库内，动态 importlib 加载，仿真评估必须安装
-- [ ] **smoke test 需伪造 batch 数据**：`python -m agents.core.dp3` 在无真实数据时需构造 dummy input
-- [ ] ManiFlow val_loss 不含 consistency loss，训练/验证指标不完全可比
+### 高风险 ⚠️
+
+- [ ] **外部依赖 dexmani_sim**: 记录版本号和环境配置
+  - 位置: `env_runner/sim_runner.py` 中 `from dexmani_sim.envs import make_env`
+  - 缓解: 提供 dexmani_sim 版本号、环境配置、成功标准定义
+
+- [ ] **Episode 级 train/val 划分**: 记录 `n_episodes` 和 `val_ratio`
+  - 位置: `datasets/common/sampler.py` 中 `get_val_mask(seed, val_ratio, n_episodes)`
+  - 缓解: 保存 train/val episode 索引到 checkpoint
+
+- [ ] **Normalizer 状态**: 确保 checkpoint 包含 normalizer state
+  - 位置: `common/normalizer.py` 中 `_fit()` 计算归一化参数
+  - 缓解: 已实现（checkpoint 包含 normalizer state）
+
+- [ ] **多任务采样随机性**: 使用 `np.random.default_rng(seed)` 替代 Python `hash()`
+  - 位置: `datasets/multi_task_dataset.py` 中 `item_seed = hash((self.seed, self._epoch, idx))`
+  - 缓解: 替换为 numpy RNG
+
+### 中风险 ⚡
+
+- [ ] **EMA 初始化**: 优先使用 `copy.deepcopy(model)`，记录初始化方式
+  - 位置: `train.py` 中 `try: ema_model = copy.deepcopy(model) except: ...`
+
+- [ ] **点云采样**: 固定点云数量或记录采样算法版本
+  - 位置: `agents/core/dp3.py` 中 `farthest_point_sample(pc, self.num_points)`
+
+- [ ] **Checkpoint 格式**: 保存 RNG 状态
+  - 位置: `training/common/checkpoint_io.py` 中 `TrainCheckpoint` dataclass
+  - 缓解: 添加 `torch.get_rng_state()` 和 `np.random.get_state()`
+
+### 低风险 ✓
+
+- [ ] **数据增强**: 记录增强参数（如 `color_std=0.05`）
+- [ ] **Hydra 配置**: 保存完整的 resolved config
+- [ ] **Wandb 日志**: 使用 online 模式或定期同步
 
 ---
 
 ## Ablation Surface
 
-| 消融维度 | 配置/文件 | 预期效果 |
-|---------|---------|---------|
-| PC 编码器：`dp3` vs `idp3` vs `pointnext` | `dp3.yaml::agent.obs_encoder.pc_encoder_type` | 感受野和局部结构建模能力 |
-| UNet 条件注入：`film` vs `cross_attention_film` | `dp3.yaml::agent.obs_encoder.cond_type` | 序列 obs 的利用效率 |
-| Flow:Consistency 比例：75%:25% → 100%:0% | `flowmatch.py::flow_batch_ratio` | Consistency distillation 的贡献 |
-| ManiFlow t 采样：`beta` vs `uniform` vs `lognorm` | `flowmatch.py::t_sampler_type` | 训练分布偏差对收敛的影响 |
-| EMA 开关 | `training.use_ema` | EMA 对推理稳定性的贡献 |
-| RGB 骨干 freeze vs LoRA vs full | `dp.yaml::agent.obs_encoder.tune_mode` | 预训练特征迁移效果 |
-| DiTX block 数量 | `ditx.yaml::num_layers` | 模型容量 vs 训练速度 |
-| 点云点数：1024 → 512 | `dp3.yaml::agent.obs_encoder.num_points` | 推理速度 vs 几何精度 |
-| action horizon：16 → 8 | `configs/*.yaml::horizon` | 规划 horizon 对鲁棒性影响 |
+### 1. 观测编码器 (Encoder Swap)
+
+**点云编码器**:
+- **配置**: `agent.encoder_type` in `['dp3', 'idp3', 'pointnext']`
+- **文件**: `agents/obs_encoder/pointcloud/registry.py`
+- **影响**: 表征能力、参数量、训练速度
+
+**RGB 编码器**:
+- **配置**: `agent.rgb_backbone` in `['resnet', 'clip', 'dino', 'siglip']`
+- **文件**: `agents/obs_encoder/rgb/registry.py`
+- **影响**: 预训练权重、冻结/微调策略
+
+### 2. 骨干网络 (Backbone Swap)
+
+**UNet1D vs DiT-X**:
+- **配置**: 切换 `dp3.yaml` ↔ `maniflow.yaml`
+- **影响**: 条件注入方式（FiLM vs AdaLN+CrossAttention）、参数量
+
+**条件注入方式**:
+- **配置**: `agent.condition_type` in `['film', 'cross_attention_film']`
+- **影响**: 观测序列建模能力
+
+### 3. 动作解码器 (Decoder Swap)
+
+**Diffusion vs FlowMatch**:
+- **配置**: 切换 `dp3.yaml` ↔ `maniflow.yaml`
+- **影响**: 采样速度、训练稳定性
+
+**Prediction type**:
+- **配置**: `agent.prediction_type` in `['sample', 'epsilon']`
+- **影响**: 训练目标、收敛速度
+
+### 4. t 采样策略
+
+**Flow matching**:
+- **配置**: `agent.t_sample_mode_for_flow` in `['beta', 'uniform', 'lognorm', 'cosmap']`
+- **文件**: `agents/action_decoders/common/sample.py`
+- **影响**: 训练稳定性、不同时间步的学习权重
+
+**Consistency distillation**:
+- **配置**: `agent.t_sample_mode_for_consistency` in `['discrete', 'uniform']`
+- **影响**: consistency 目标的时间步分布
+
+### 5. MoE 配置
+
+**专家数量**: `agent.num_experts` in `[4, 8, 16, 32]`
+**Top-k**: `agent.top_k` in `[1, 2, 4]`
+**辅助损失权重**: `agent.lambda_load`, `agent.beta_entropy`
+
+### 6. 多任务配置
+
+**任务嵌入维度**: `agent.task_embedding_dim` in `[32, 64, 128]`
+**采样策略**: `dataset.sampling_strategy` in `['balanced', 'proportional', 'weighted']`
+**Normalizer 模式**: `dataset.normalizer_mode` in `['shared', 'per_task']`
+
+### 7. 训练超参
+
+**学习率**: `optimizer.lr`, `optimizer.obs_lr` (支持 encoder/decoder 独立学习率)
+**EMA 参数**: `ema.power`, `ema.max_value`
+**梯度累积**: `training.loop.gradient_accumulate_every`
 
 ---
 
 ## Open Questions
 
-1. **ManiFlow consistency dt 设计**（`flowmatch.py:76`）：`dt2 = dt1.clone()`，teacher 和 student 使用同一 dt，与标准 Consistency Models 解耦 t-sequence 做法不同，是否有意为之？
+### 架构设计
 
-2. **Validation loss 可比性**：ManiFlow val_loss 只含 flow 部分，与 train_loss（flow + consistency）不可比，长期监控可能误导 early stopping。当前注释说明是有意设计（防止 teacher=student 退化）。
+1. **MultiTaskAgent FiLM 初始化**: `film_generator` 最后一层初始化为 0，是否足够？是否需要 warmup？
+   - 位置: `agents/core/multi_task.py:110-111`
 
-3. **TokenCompressor 未激活**：`agents/obs_encoder/plugins/token_compressor.py` 已完整实现但未在任何配置中启用，是否计划接入 ManiFlow 的 obs token 压缩？
+2. **MoE 辅助损失权重**: `lambda_load=0.1`, `beta_entropy=0.01` 是否对所有任务都适用？
+   - 位置: `agents/obs_encoder/plugins/moe.py`
 
-4. **文本编码器未激活**：`agents/obs_encoder/text/` 存在 CLIP/T5 编码器但未集成任何 Agent，是否计划做 language-conditioned policy？
+3. **Consistency distillation dt 采样**: 学生和教师使用相同的 `dt`，是否应该独立采样？
+   - 位置: `agents/action_decoders/flowmatch.py:78`
 
-5. **DDP EMA 冗余更新**：非 rank-0 的 EMA 更新在 broadcast 后被覆盖，计算量浪费，可考虑只在 rank-0 更新。
+### 数据流
+
+4. **观测窗口对齐**: `control_action` 从 `pred[:, n_obs_steps-1:]` 开始，是否符合所有环境的时序假设？
+   - 位置: `agents/core/base.py:61-64`
+
+5. **点云坐标系**: `use_coord_only = (pc_dim == 3)` 假设 3 维点云只包含坐标，是否支持法向量？
+   - 位置: `agents/core/dp3.py:27, 33`
+
+### 训练机制
+
+6. **梯度累积 flush**: epoch 结束时累积步数不是整数倍，会 scale 梯度。是否影响稳定性？
+   - 位置: `training/multi_task_trainer.py:88-99`
+
+7. **验证集 EMA**: 验证时使用 `ema_model` 但不传入 teacher，consistency loss 是否为 0？
+   - 位置: `training/trainer.py:128`
+
+### 评估
+
+8. **MultiTaskSimRunner 视频合并**: 合并所有任务的视频但没有标记 task_name，如何区分？
+   - 位置: `env_runner/multi_task_sim_runner.py:71`
+
+9. **Success rate 定义**: 不同任务的成功标准可能不同，如何确保公平比较？
+   - 位置: `env_runner/sim_runner.py` 中 `env.get_success()`
+
+### 配置
+
+10. **Hydra 输出目录**: 同一分钟内多次运行会覆盖，是否需要添加随机后缀？
+    - 位置: `configs/dp3.yaml:148`
+
+---
+
+## Tensor Shapes Reference
+
+### 训练时
+- `batch['obs']['pc']`: `(B, T, N, 3)` → flatten → `(B*T, N, 3)`
+- `batch['obs']['joint_state']`: `(B, T, state_dim)` → flatten → `(B*T, state_dim)`
+- `batch['action']`: `(B, horizon, action_dim)`
+- `cond` (film): `(B, n_obs_steps * (pc_out_dim + state_out_dim))`
+- `cond` (cross_attention): `(B, n_obs_steps, token_dim)`
+
+### 推理时
+- `obs_dict['pc']`: `(1, T, N, 3)`
+- `obs_dict['joint_state']`: `(1, T, state_dim)`
+- `cond`: `(1, cond_dim)`
+- `pred`: `(1, horizon, action_dim)`
+- `control_action`: `pred[:, n_obs_steps-1:n_obs_steps-1+n_action_steps]`
+
+---
+
+## 关键配置依赖
+
+- **条件注入方式**: `agent.condition_type` 决定 `obs_encoder` 输出形状
+  - `film`: `(B, n_obs_steps * token_dim)` 全局向量
+  - `cross_attention_film`: `(B, n_obs_steps, token_dim)` 序列 token
+
+- **MultiTask obs_cond_dim**: 必须显式指定，与 `condition_type` 对应
+  - `film`: `n_obs_steps * (pc_out_dim + state_out_dim)`
+  - `cross_attention`: `token_dim`
+
+- **Normalizer 模式**: `dataset.normalizer_mode` 影响动作空间归一化
+  - `shared`: 合并所有任务的 joint_state/action 拟合
+  - `per_task`: 每个任务独立拟合
+
+---
+
+## 已知限制
+
+1. **外部依赖**: 评估依赖外部 `dexmani_sim` 包，不在本仓库
+2. **多任务采样**: 使用 Python `hash()` 可能在不同版本间不一致
+3. **视频标记**: MultiTaskSimRunner 合并视频时未标记 task_name
+4. **Hydra 输出**: 同一分钟内多次运行会覆盖输出目录
+
+---
+
+**最后更新**: 2026-05-08  
+**审查状态**: 初始地图完成，基于 embodied-repo-cartographer 子代理分析

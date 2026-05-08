@@ -2,74 +2,19 @@
 
 defaults:
   - dataset: multi_task_pc
-  - agent: dp3
   - _self_
 
-# 实验名称
-exp_name: multi_task_dp3
+policy_name: multi_task_dp3
 
-# 数据集配置（引用 dataset/multi_task_pc.yaml）
-dataset:
-  sampling_strategy: balanced  # 各任务等概率采样
-  normalizer_mode: shared      # 共享 normalizer（要求 action space 相同）
+task_name: multi_task
+seed: 42
 
-# Agent 配置：包装为多任务 Agent
-agent:
-  _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
-  num_tasks: 3  # 任务数量
-  task_embedding_dim: 64
-  task_cond_mode: concat  # 只支持 'concat' 模式
-  task_dropout: 0.1
-  base_agent:
-    _target_: dexmani_policy.agents.core.dp3.DP3Agent
-    obs_encoder:
-      _target_: dexmani_policy.agents.obs_encoder.pc_proprio_encoder.PCProprioEncoder
-      pc_encoder:
-        _target_: dexmani_policy.agents.obs_encoder.pointcloud.idp3.iDP3Encoder
-        in_channels: 6
-        out_channels: 512
-        num_sampling_level: 2
-        sampling_ratio: 0.25
-        ball_radius: 0.05
-        max_num_neighbors: 64
-        shared_mlp_specs: [[64, 64, 128], [128, 128, 256]]
-      state_encoder:
-        _target_: dexmani_policy.agents.obs_encoder.proprio.state_mlp.StateMLP
-        in_channels: ${eval:'19'}
-        out_channels: 128
-        hidden_dims: [256, 256]
-        activation: relu
-        use_layernorm: true
-      fusion_hidden_dim: 512
-      fusion_output_dim: 512
-    action_decoder:
-      _target_: dexmani_policy.agents.action_decoders.diffusion.Diffusion
-      model:
-        _target_: dexmani_policy.agents.action_decoders.backbone.unet1d.ConditionalUnet1D
-        input_dim: ${eval:'19'}
-        global_cond_dim: ${eval:'512 + 64'}  # obs_cond + task_emb
-        diffusion_step_embed_dim: 128
-        down_dims: [512, 1024, 2048]
-        kernel_size: 5
-        n_groups: 8
-        cond_predict_scale: true
-      noise_scheduler:
-        _target_: diffusers.DDIMScheduler
-        num_train_timesteps: 100
-        beta_start: 0.0001
-        beta_end: 0.02
-        beta_schedule: squaredcos_cap_v2
-        clip_sample: true
-        set_alpha_to_one: true
-        steps_offset: 0
-        prediction_type: sample
-      denoise_timesteps: 10
-    horizon: 16
-    n_obs_steps: 2
-    n_action_steps: 8
-    action_dim: ${eval:'19'}
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_dim: 19
 
-# DataLoader 配置
+
 dataloader:
   batch_size: 64
   num_workers: 8
@@ -82,11 +27,87 @@ val_dataloader:
   num_workers: 4
   shuffle: false
   pin_memory: true
-  persistent_workers: true
+  persistent_workers: false
 
-# 训练配置
+
+# ------------------------------------------------------------------ #
+# Agent: MultiTaskAgent 包装 DP3Agent
+# 使用 FiLM 调制注入任务条件，兼容所有 backbone
+# base_agent 使用与 dp3.yaml 一致的扁平参数风格
+# ------------------------------------------------------------------ #
+agent:
+  _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
+  num_tasks: 3
+  task_embedding_dim: 64
+  task_dropout: 0.1
+  # 显式指定 obs_cond_dim 以避免初始化时的推断开销
+  # DP3ObsEncoder: pc_out_dim (128) + state_out_dim (64) = 192
+  # 如果 condition_type='film'，则 reshape 为 (B, n_obs_steps * 192) = (B, 384)
+  obs_cond_dim: 384  # n_obs_steps (2) * (pc_out_dim (128) + state_out_dim (64))
+  base_agent:
+    _target_: dexmani_policy.agents.core.dp3.DP3Agent
+    horizon: ${horizon}
+    n_obs_steps: ${n_obs_steps}
+    n_action_steps: ${n_action_steps}
+    action_dim: ${action_dim}
+
+    encoder_type: idp3
+    pc_dim: 3
+    pc_out_dim: 128
+    state_dim: 19
+    num_points: 1024
+
+    diffusion_step_embed_dim: 128
+    down_dims: [256, 512, 1024]
+    kernel_size: 5
+    n_groups: 8
+    condition_type: film
+
+    num_training_steps: 100
+    num_inference_steps: 10
+    prediction_type: sample
+
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+
+
+ema:
+  _target_: dexmani_policy.training.common.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+
+workspace:
+  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+
+  wandb_cfg:
+    _target_: dexmani_policy.training.common.workspace.WandbConfig
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
+    id: null
+    resume: allow
+    mode: offline
+    video_fps: 10
+
+  checkpoint_cfg:
+    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
+    monitor_key: test_mean_score
+    mode: max
+    topk: 3
+
+
 training:
-  seed: 42
+  seed: ${seed}
   device: cuda:0
   use_ema: true
   use_ema_teacher_for_consistency: false
@@ -94,48 +115,45 @@ training:
   lr_warmup_steps: 500
   loop:
     num_epochs: 1000
+    log_interval_steps: 50
+    val_interval_epochs: 25
+    eval_interval_epochs: 250
+    sample_interval_epochs: 5
     gradient_accumulate_every: 1
-    eval_interval_epochs: 50
-    save_interval_epochs: 50
-    log_interval_steps: 10
+    grad_clip_norm: 1.0
 
-# 优化器配置
-optimizer:
-  lr: 1.0e-4
-  weight_decay: 1.0e-6
-  obs_lr: 5.0e-5
-  obs_weight_decay: 1.0e-6
-  betas: [0.9, 0.95]
 
-# EMA 配置
-ema:
-  _target_: dexmani_policy.training.common.ema.EMAModel
-  power: 0.75
-  max_value: 0.9999
+# 多任务评估 runner（按任务分别评估）
+# 启用时取消注释并替换 task_configs 中的 task_name 为实际任务名
+env_runner:
+  _target_: dexmani_policy.env_runner.multi_task_sim_runner.MultiTaskSimRunner
+  n_obs_steps: ${n_obs_steps}
+  env_video_fps: 10
+  default_eval_episodes: 20
+  sensor_modalities: ['joint_state', 'point_cloud']
+  task_configs:
+    - task_name: task_1
+      task_id: 0
+    - task_name: task_2
+      task_id: 1
+    - task_name: task_3
+      task_id: 2
 
-# Workspace 配置
-workspace:
-  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
-  output_dir: ${hydra:runtime.output_dir}
-  wandb_cfg:
-    project: dexmani_policy
-    group: multi_task
-    name: ${exp_name}
-    id: null
-    resume: allow
-    mode: online
-    video_fps: 10
-  checkpoint_cfg:
-    monitor_key: success_rate
-    mode: max
-    topk: 3
 
-# 环境评估配置（可选）
-env_runner: null  # 多任务评估需要自定义 runner
+eval:
+  seed: ${seed}
+  sim:
+    ckpt_tag_or_path: best
+    eval_episodes: 100
+    denoise_timesteps_list: [10]
+    use_ema_for_eval: true
 
-# Hydra 配置
+
 hydra:
-  run:
-    dir: outputs/${exp_name}/${now:%Y-%m-%d_%H-%M}_${now:%f}
   job:
-    chdir: true
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+    subdir: ${hydra.job.num}

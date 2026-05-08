@@ -198,15 +198,16 @@ class ReadOnlyWorkspace:
         if tag_or_path == "latest":
             path = self.checkpoint_dir / "latest.pt"
         elif tag_or_path == "best":
-            topk_file = self.checkpoint_dir / "topk_checkpoints.json"
+            topk_file = self.checkpoint_dir / "topk_manifest.json"
             if not topk_file.exists():
                 raise FileNotFoundError(f"No topk tracker file found: {topk_file}")
             import json
             with open(topk_file) as f:
                 topk_data = json.load(f)
-            if not topk_data:
+            items = topk_data.get("items", [])
+            if not items:
                 raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
-            path = Path(topk_data[0]['path'])
+            path = self.checkpoint_dir / items[0]["path"]
         else:
             path = Path(tag_or_path)
             if not path.is_absolute():

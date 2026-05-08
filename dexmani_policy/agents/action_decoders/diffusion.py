@@ -7,7 +7,7 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 class Diffusion(nn.Module):
     def __init__(
-        self, 
+        self,
         model,
         num_training_steps = 100,
         num_inference_steps = 10,

@@ -4,7 +4,7 @@ import einops
 import torch.nn as nn
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
-from dexmani_policy.agents.common.optim_util import get_default_optim_group
+from dexmani_policy.agents.common.optim_util import get_default_optim_group, get_optim_group_with_no_decay
 
 #################################################################################
 #                               去噪/加噪步数编码                                    
@@ -17,7 +17,8 @@ class SinusoidalPosEmb(nn.Module):
     def forward(self, x):
         device = x.device
         half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
+        # 防御性编程：避免 dim <= 3 时除零（half_dim - 1 = 0）
+        emb = math.log(10000) / max(half_dim - 1, 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
@@ -128,7 +129,7 @@ class ConditionalResidualBlock1D(nn.Module):
         out = self.blocks[0](x)
         if cond is not None:
             if self.use_cross_attention:
-                embed = self.cond_encoder(x.permute(0, 2, 1), cond).permute(0, 2, 1)
+                embed = self.cond_encoder(out.permute(0, 2, 1), cond).permute(0, 2, 1)
             else:
                 embed = self.cond_encoder(cond)
             out = self.apply_film(out, embed)

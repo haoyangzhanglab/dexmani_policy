@@ -69,7 +69,6 @@ def example(zarr_path):
         pad_before=1,
         pad_after=7,
         val_ratio=0.05,
-        enable_color_aug=True,
         augmentation_cfg={'pc': {'color_std': 0.05}},
     )
     print('aug point_cloud:', aug_dataset[0]['obs']['point_cloud'].shape)

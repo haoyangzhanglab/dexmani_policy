@@ -33,6 +33,7 @@ class StateMLP(nn.Module):
         if hidden_channels is None:
             hidden_channels = [64]
 
+        self.in_dim = input_channels
         self._out_dim = output_channels
         self.mlp = create_mlp(
             in_channels=input_channels,

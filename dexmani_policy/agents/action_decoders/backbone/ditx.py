@@ -18,7 +18,8 @@ class SinusoidalPosEmb(nn.Module):
     def forward(self, x):
         device = x.device
         half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
+        # 防御性编程：避免 dim <= 3 时除零（half_dim - 1 = 0）
+        emb = math.log(10000) / max(half_dim - 1, 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)

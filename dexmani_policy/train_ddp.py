@@ -28,15 +28,6 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 def setup_ddp(rank: int, world_size: int):
-    os.environ['MASTER_ADDR'] = os.environ.get('MASTER_ADDR', 'localhost')
-    if 'MASTER_PORT' not in os.environ:
-        import socket
-        sock = socket.socket()
-        sock.bind(('', 0))
-        port = sock.getsockname()[1]
-        sock.close()
-        os.environ['MASTER_PORT'] = str(port)
-
     dist.init_process_group(
         backend='nccl',
         init_method='env://',
@@ -61,6 +52,9 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
     if 'seed' in dataset_cfg:
         dataset_cfg['seed'] = dataset_cfg['seed'] + rank
+    for sub_cfg in dataset_cfg.get('datasets', []):
+        if isinstance(sub_cfg, dict) and 'seed' in sub_cfg:
+            sub_cfg['seed'] = sub_cfg['seed'] + rank
     dataset = hydra.utils.instantiate(dataset_cfg)
     normalizer = dataset.get_normalizer()
 
@@ -84,15 +78,17 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
 
     val_loader = None
     if rank == 0:
-        val_loader = DataLoader(
-            dataset.get_validation_dataset(),
-            batch_size=cfg.val_dataloader.batch_size,
-            num_workers=cfg.val_dataloader.num_workers,
-            pin_memory=cfg.val_dataloader.pin_memory,
-            persistent_workers=cfg.val_dataloader.persistent_workers,
-            shuffle=False,
-            worker_init_fn=worker_init_fn,
-        )
+        val_dataset = dataset.get_validation_dataset()
+        if val_dataset is not None:
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=cfg.val_dataloader.batch_size,
+                num_workers=cfg.val_dataloader.num_workers,
+                pin_memory=cfg.val_dataloader.pin_memory,
+                persistent_workers=cfg.val_dataloader.persistent_workers,
+                shuffle=False,
+                worker_init_fn=worker_init_fn,
+            )
 
     model = hydra.utils.instantiate(cfg.agent)
 
@@ -212,6 +208,15 @@ def main(cfg):
             )
         gpu_ids = list(range(num_gpus))
         print(f"Using default GPUs: {gpu_ids}")
+
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ['MASTER_ADDR'] = 'localhost'
+    if 'MASTER_PORT' not in os.environ:
+        import socket
+        sock = socket.socket()
+        sock.bind(('', 0))
+        os.environ['MASTER_PORT'] = str(sock.getsockname()[1])
+        sock.close()
 
     mp.spawn(
         ddp_worker,
