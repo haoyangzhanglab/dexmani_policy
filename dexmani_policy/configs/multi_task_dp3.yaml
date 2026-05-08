@@ -40,10 +40,8 @@ agent:
   num_tasks: 3
   task_embedding_dim: 64
   task_dropout: 0.1
-  # 显式指定 obs_cond_dim 以避免初始化时的推断开销
-  # DP3ObsEncoder: pc_out_dim (128) + state_out_dim (64) = 192
-  # 如果 condition_type='film'，则 reshape 为 (B, n_obs_steps * 192) = (B, 384)
-  obs_cond_dim: 384  # n_obs_steps (2) * (pc_out_dim (128) + state_out_dim (64))
+  # 自动计算 obs_cond_dim（film 模式下为 n_obs_steps * encoder_out_dim）
+  obs_cond_dim: ${eval:'${n_obs_steps} * (${agent.base_agent.pc_out_dim} + 64)'}  # 2 * (128 + 64) = 384
   base_agent:
     _target_: dexmani_policy.agents.core.dp3.DP3Agent
     horizon: ${horizon}
@@ -55,6 +53,7 @@ agent:
     pc_dim: 3
     pc_out_dim: 128
     state_dim: 19
+    state_out_dim: 64
     num_points: 1024
 
     diffusion_step_embed_dim: 128
@@ -131,6 +130,7 @@ env_runner:
   env_video_fps: 10
   default_eval_episodes: 20
   sensor_modalities: ['joint_state', 'point_cloud']
+  num_tasks: ${agent.num_tasks}
   task_configs:
     - task_name: task_1
       task_id: 0

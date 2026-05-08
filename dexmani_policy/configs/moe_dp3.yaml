@@ -54,12 +54,13 @@ agent:
   pc_dim: 3
   pc_out_dim: 128
   state_dim: 19
+  state_out_dim: 64
   num_points: 1024
 
   num_experts: 8
   top_k: 2
   moe_hidden_dim: 256
-  moe_out_dim: null
+  moe_out_dim: ${eval:'${agent.pc_out_dim} + ${agent.state_out_dim}'}  # 自动计算 MoE 输出维度 = 128 + 64 = 192
   moe_num_layers: 2
   lambda_load: 0.1
   beta_entropy: 0.01

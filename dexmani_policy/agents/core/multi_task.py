@@ -43,24 +43,12 @@ class TaskEmbedding(nn.Module):
 
 
 class MultiTaskAgent(nn.Module):
-    """
-    多任务 Agent，使用 FiLM 调制注入任务条件
+    """多任务 Agent，使用 FiLM 调制注入任务条件
 
-    FiLM (Feature-wise Linear Modulation) 通过 scale 和 shift 参数调制观测特征：
-        modulated_cond = cond * (1 + scale) + shift
+    通过 task_embedding + film_generator 将任务信息注入观测条件。
+    支持包装任意 base_agent（DP3Agent, ManiFlowAgent 等）。
 
-    优点：
-        1. 不修改网络输入维度，兼容所有 backbone（UNet1D, DiTX）
-        2. 符合多任务模仿学习社区主流实践（MT-ACT, RoboAgent）
-        3. 比 concat 模式更灵活，任务信息可以非线性调制特征
-
-    Args:
-        base_agent: 基础单任务 agent（DP3Agent, ManiFlowAgent 等）
-        num_tasks: 任务数量
-        task_embedding_dim: 任务嵌入维度
-        task_dropout: 任务嵌入的 dropout 概率
-        obs_cond_dim: 观测条件维度（可选）。如果为 None，将通过前向传播推断。
-                      显式指定可以避免初始化时的推断开销和潜在错误。
+    FiLM 调制: modulated_cond = cond * (1 + scale) + shift
     """
 
     def __init__(
@@ -75,20 +63,17 @@ class MultiTaskAgent(nn.Module):
         self.base_agent = base_agent
         self.num_tasks = num_tasks
 
-        # Task embedding
         self.task_embedding = TaskEmbedding(
             num_tasks=num_tasks,
             embedding_dim=task_embedding_dim,
             dropout=task_dropout,
         )
 
-        # 继承 base_agent 的标量属性（非 nn.Module，不会触发重复注册）
         self.horizon = base_agent.horizon
         self.n_obs_steps = base_agent.n_obs_steps
         self.n_action_steps = base_agent.n_action_steps
         self.action_dim = base_agent.action_dim
 
-        # 获取 obs_encoder 输出维度
         if obs_cond_dim is None:
             raise ValueError(
                 "obs_cond_dim must be explicitly specified in the config. "
@@ -96,17 +81,32 @@ class MultiTaskAgent(nn.Module):
                 "For cross_attention mode: obs_cond_dim = token_dim (per-token dimension)."
             )
 
+        # 运行时验证：检查 obs_cond_dim 是否与 base_agent.obs_encoder 输出维度匹配
+        if hasattr(base_agent.obs_encoder, 'out_dim'):
+            encoder_out_dim = base_agent.obs_encoder.out_dim
+            condition_type = getattr(base_agent.obs_encoder, 'condition_type', 'film')
+
+            if condition_type == 'film':
+                expected_dim = self.n_obs_steps * encoder_out_dim
+            else:  # cross_attention or other
+                expected_dim = encoder_out_dim
+
+            if obs_cond_dim != expected_dim:
+                raise ValueError(
+                    f"obs_cond_dim mismatch: config={obs_cond_dim}, expected={expected_dim}. "
+                    f"For condition_type='{condition_type}': "
+                    f"encoder_out_dim={encoder_out_dim}, n_obs_steps={self.n_obs_steps}. "
+                    f"Please update obs_cond_dim in config to match base_agent.obs_encoder output."
+                )
+
         self.obs_cond_dim = obs_cond_dim
 
-        # 构建 FiLM generator
         self.film_generator = nn.Sequential(
             nn.Linear(task_embedding_dim, task_embedding_dim * 2),
             nn.ReLU(),
-            nn.Linear(task_embedding_dim * 2, obs_cond_dim * 2),  # scale + shift
+            nn.Linear(task_embedding_dim * 2, obs_cond_dim * 2),
         )
 
-        # 初始化 FiLM generator：scale 初始化为 0，shift 初始化为 0
-        # 这样初始时 FiLM 是恒等变换，不影响预训练的 base_agent
         nn.init.zeros_(self.film_generator[-1].weight)
         nn.init.zeros_(self.film_generator[-1].bias)
 
@@ -120,34 +120,14 @@ class MultiTaskAgent(nn.Module):
     def preprocess(self, obs_dict):
         return self.base_agent.preprocess(obs_dict)
 
-    def _inject_task_condition(self, cond: torch.Tensor, task_emb: torch.Tensor):
-        """使用 FiLM 调制注入任务条件
+    def inject_task_condition(self, cond: torch.Tensor, task_emb: torch.Tensor):
+        """使用 FiLM 调制注入任务条件"""
+        film_params = self.film_generator(task_emb)
+        scale, shift = film_params.chunk(2, dim=-1)
 
-        Args:
-            cond: 观测条件
-                - UNet: (B, cond_dim)
-                - DiT: (B, num_tokens, token_dim)
-            task_emb: (B, task_emb_dim) 任务嵌入向量
-
-        Returns:
-            modulated_cond: FiLM 调制后的条件，形状与 cond 相同
-        """
-        # 生成 FiLM 参数
-        film_params = self.film_generator(task_emb)  # (B, cond_dim * 2)
-        scale, shift = film_params.chunk(2, dim=-1)  # (B, cond_dim) each
-
-        # 根据 cond 的形状应用 FiLM
-        if cond.dim() == 2:  # UNet: (B, D)
-            assert cond.shape[-1] == self.obs_cond_dim, (
-                f"FiLM dim mismatch: cond has {cond.shape[-1]} but obs_cond_dim={self.obs_cond_dim}"
-            )
+        if cond.dim() == 2:
             return cond * (1 + scale) + shift
-        elif cond.dim() == 3:  # DiT: (B, T, D)
-            assert cond.shape[-1] == self.obs_cond_dim, (
-                f"FiLM dim mismatch for cross_attention: cond last dim={cond.shape[-1]} "
-                f"but obs_cond_dim={self.obs_cond_dim}. "
-                f"For cross_attention mode, obs_cond_dim should be per-token dim, not flattened dim."
-            )
+        elif cond.dim() == 3:
             return cond * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
         else:
             raise ValueError(f"Unexpected cond shape: {cond.shape}")
@@ -158,31 +138,43 @@ class MultiTaskAgent(nn.Module):
         if task_ids is None:
             raise ValueError("batch must contain 'task_id' for MultiTaskAgent")
 
-        # 编码观测
-        cond = self.base_agent.obs_encoder(self.preprocess(batch['obs']))
+        # 编码观测（统一接口：优先使用 encode() 获取 aux）
+        obs = self.preprocess(batch['obs'])
+        if hasattr(self.base_agent.obs_encoder, 'encode'):
+            cond, aux = self.base_agent.obs_encoder.encode(obs)
+        else:
+            cond = self.base_agent.obs_encoder(obs)
+            aux = {}
 
         # 编码任务
         task_emb = self.task_embedding(task_ids)
 
         # 注入任务条件
-        cond_with_task = self._inject_task_condition(cond, task_emb)
+        cond_with_task = self.inject_task_condition(cond, task_emb)
 
         # 计算损失
         nactions = self.base_agent.normalizer['action'].normalize(batch['action'])
 
-        # 提取 EMA backbone（兼容 FlowMatch consistency distillation）
+        # 提取 EMA backbone（统一处理，支持 MultiTaskAgent 包装）
         loss_kwargs = dict(kwargs)
         ema_model = loss_kwargs.pop('ema_model', None)
-        if ema_model is not None:
-            if hasattr(ema_model, 'base_agent'):
-                ema_backbone = ema_model.base_agent.action_decoder.model
-            elif hasattr(ema_model, 'action_decoder'):
-                ema_backbone = ema_model.action_decoder.model
-            else:
-                ema_backbone = ema_model
+        ema_backbone = self.base_agent.extract_ema_backbone(ema_model)
+        if ema_backbone is not None:
             loss_kwargs['ema_model'] = ema_backbone
 
-        return self.base_agent.action_decoder.compute_loss(cond_with_task, nactions, **loss_kwargs)
+        action_loss, loss_dict = self.base_agent.action_decoder.compute_loss(cond_with_task, nactions, **loss_kwargs)
+
+        # 合并 aux loss（如 MoE）
+        if aux and 'loss' in aux:
+            total_loss = action_loss + aux['loss']
+            loss_dict['loss'] = total_loss
+            loss_dict['loss_action'] = action_loss
+            for k, v in aux.items():
+                if k != 'loss':
+                    loss_dict[f'aux_{k}'] = v
+            return total_loss, loss_dict
+
+        return action_loss, loss_dict
 
     @torch.no_grad()
     def predict_action(self, obs_dict, task_id: Optional[int] = None, denoise_timesteps=None):
@@ -211,7 +203,7 @@ class MultiTaskAgent(nn.Module):
         task_emb = self.task_embedding(task_ids)
 
         # 注入任务条件
-        cond_with_task = self._inject_task_condition(cond, task_emb)
+        cond_with_task = self.inject_task_condition(cond, task_emb)
 
         # 预测动作
         template = torch.zeros(
