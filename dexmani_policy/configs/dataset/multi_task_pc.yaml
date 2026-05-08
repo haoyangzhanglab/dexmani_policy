@@ -1,33 +1,22 @@
-# 多任务点云数据集配置示例
 _target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
-
-# 随机种子（用于索引映射的可复现性）
 seed: ${seed}
+sampling_strategy: balanced  # 'proportional' | 'balanced' | 'weighted'
+normalizer_mode: shared      # 'shared' | 'per_task'
 
-# 采样策略: 'proportional' | 'balanced' | 'weighted'
-sampling_strategy: balanced
-
-# Normalizer 模式: 'shared' | 'per_task'
-normalizer_mode: shared
-
-# 任务列表（替换为实际任务名，需与下方 datasets 的 zarr_path 对应）
 task_names:
   - task_1
   - task_2
   - task_3
 
-# 任务权重（仅当 sampling_strategy='weighted' 时生效）
-# 如果使用 'balanced' 或 'proportional' 策略，可以删除此字段
+# 仅当 sampling_strategy='weighted' 时生效
 task_weights:
   - 1.0
   - 1.0
-  - 2.0  # task_3 采样概率是其他任务的 2 倍
+  - 2.0
 
-# 各任务的数据集配置
-# 注意: zarr_path 需替换为实际数据路径；augmentation_cfg 仅支持 PCAug 接受的 color_std
 datasets:
   - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
-    zarr_path: robot_data/sim/task_1.zarr  # 替换为实际 zarr 路径
+    zarr_path: robot_data/sim/task_1.zarr
     seed: ${seed}
     horizon: ${horizon}
     pad_before: ${eval:'${n_obs_steps} - 1'}
@@ -37,7 +26,7 @@ datasets:
     sensor_modalities: ['joint_state', 'point_cloud']
 
   - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
-    zarr_path: robot_data/sim/task_2.zarr  # 替换为实际 zarr 路径
+    zarr_path: robot_data/sim/task_2.zarr
     seed: ${seed}
     horizon: ${horizon}
     pad_before: ${eval:'${n_obs_steps} - 1'}
@@ -47,7 +36,7 @@ datasets:
     sensor_modalities: ['joint_state', 'point_cloud']
 
   - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
-    zarr_path: robot_data/sim/task_3.zarr  # 替换为实际 zarr 路径
+    zarr_path: robot_data/sim/task_3.zarr
     seed: ${seed}
     horizon: ${horizon}
     pad_before: ${eval:'${n_obs_steps} - 1'}

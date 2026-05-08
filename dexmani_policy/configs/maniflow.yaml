@@ -10,7 +10,6 @@ n_obs_steps: 2
 n_action_steps: 8
 action_dim: 19
 
-
 dataloader:
   batch_size: 128
   shuffle: true
@@ -35,7 +34,6 @@ dataset:
   val_ratio: 0.05
   max_train_episodes: null
   sensor_modalities: [point_cloud, joint_state]
-  # 启用点云颜色增强：取消注释下方配置
   # augmentation_cfg:
   #   pc:
   #     color_std: 0.05
@@ -47,10 +45,7 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  # ------------------------------------------------------------------ #
-  # encoder_type: pointpn | pointnext_tokenizer
-  # ------------------------------------------------------------------ #
-  encoder_type: pointpn
+  encoder_type: pointpn  # pointpn | pointnext_tokenizer
   pc_dim: 3
   state_dim: 19
   num_points: 1024
@@ -72,7 +67,6 @@ agent:
       patch_radii: [0.04, 0.08]
       patch_neighbors: [16, 32]
 
-  # ------------------------------------------------------------------ #
   n_layers: 12
   hidden_dim: 768
   n_head: 8
@@ -93,14 +87,12 @@ agent:
   dt_sample_mode_for_consistency: uniform
   target_t_sample_mode: relative
 
-
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-3
+  weight_decay: 1.0e-3  # DiT-X backbone 参数量大（~100M），使用更强的 L2 正则化（比 UNet1D 大 1000 倍）
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
   betas: [0.9, 0.95]
-
 
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel

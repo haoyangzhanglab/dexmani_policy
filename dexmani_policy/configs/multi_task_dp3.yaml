@@ -14,7 +14,6 @@ n_obs_steps: 2
 n_action_steps: 8
 action_dim: 19
 
-
 dataloader:
   batch_size: 64
   num_workers: 8
@@ -29,12 +28,7 @@ val_dataloader:
   pin_memory: true
   persistent_workers: false
 
-
-# ------------------------------------------------------------------ #
-# Agent: MultiTaskAgent 包装 DP3Agent
-# 使用 FiLM 调制注入任务条件，兼容所有 backbone
-# base_agent 使用与 dp3.yaml 一致的扁平参数风格
-# ------------------------------------------------------------------ #
+# Agent: MultiTaskAgent 包装 DP3Agent，使用 FiLM 调制注入任务条件
 agent:
   _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
   num_tasks: 3
@@ -66,14 +60,12 @@ agent:
     num_inference_steps: 10
     prediction_type: sample
 
-
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
   betas: [0.95, 0.999]
-
 
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
@@ -82,7 +74,6 @@ ema:
   power: 0.75
   min_value: 0.0
   max_value: 0.9999
-
 
 workspace:
   _target_: dexmani_policy.training.common.workspace.TrainWorkspace
@@ -104,7 +95,6 @@ workspace:
     mode: max
     topk: 3
 
-
 training:
   seed: ${seed}
   device: cuda:0
@@ -121,9 +111,7 @@ training:
     gradient_accumulate_every: 1
     grad_clip_norm: 1.0
 
-
 # 多任务评估 runner（按任务分别评估）
-# 启用时取消注释并替换 task_configs 中的 task_name 为实际任务名
 env_runner:
   _target_: dexmani_policy.env_runner.multi_task_sim_runner.MultiTaskSimRunner
   n_obs_steps: ${n_obs_steps}
@@ -139,7 +127,6 @@ env_runner:
     - task_name: task_3
       task_id: 2
 
-
 eval:
   seed: ${seed}
   sim:
@@ -147,7 +134,6 @@ eval:
     eval_episodes: 100
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
-
 
 hydra:
   job:
