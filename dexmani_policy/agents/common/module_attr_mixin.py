@@ -1,9 +1,10 @@
+import torch
 import torch.nn as nn
 
 class ModuleAttrMixin(nn.Module):
     def __init__(self):
         super().__init__()
-        self._dummy_variable = nn.Parameter()
+        self.dummy = nn.Parameter(torch.empty(()))
 
     @property
     def device(self):

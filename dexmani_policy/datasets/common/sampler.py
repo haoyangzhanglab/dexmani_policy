@@ -3,10 +3,6 @@ import numpy as np
 from typing import Optional
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 
-######################################################################################################
-#   从 ReplayBuffer中按episode安全地切出固定长度的时序片段，并支持训练/验证划分、随机下采样以及边界padding的序列采样
-######################################################################################################
-
 @numba.jit(nopython=True)
 def create_indices(
     episode_ends:np.ndarray, 
@@ -144,17 +140,9 @@ class SequenceSampler:
             else:
                 n_data = buffer_end_idx - buffer_start_idx
                 k_data = min(self.key_first_k[key], n_data)
-                sample = np.full((n_data,) + input_arr.shape[1:], 
+                sample = np.full((n_data,) + input_arr.shape[1:],
                     fill_value=np.nan, dtype=input_arr.dtype)
-                
-                try:
-                    sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to copy replay buffer key '{key}' into a truncated sample: "
-                        f"slice=[{buffer_start_idx}:{buffer_start_idx + k_data}], "
-                        f"sample_shape={sample.shape}, buffer_shape={input_arr.shape}."
-                    ) from e
+                sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
 
             data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):

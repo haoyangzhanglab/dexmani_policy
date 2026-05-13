@@ -8,10 +8,6 @@ from termcolor import cprint
 from functools import cached_property
 from typing import Union, Dict, Optional
 
-######################################################################################################
-#  基于 Zarr/Numpy 的 按时间步组织、按 episode 切分、支持增删读写与分块压缩管理的轨迹/回放缓冲区
-######################################################################################################
-
 def check_chunks_compatible(chunks: tuple, shape: tuple):
     assert len(shape) == len(chunks)
     for c in chunks:
@@ -200,9 +196,9 @@ class ReplayBuffer:
                 keys = src_root['data'].keys()
             for key in keys:
                 value = src_root['data'][key]
-                cks = cls._resolve_array_chunks(
+                cks = cls.resolve_array_chunks(
                     chunks=chunks, key=key, array=value)
-                cpr = cls._resolve_array_compressor(
+                cpr = cls.resolve_array_compressor(
                     compressors=compressors, key=key, array=value)
                 if cks == value.chunks and cpr == value.compressor:
                     # copy without recompression
@@ -268,9 +264,9 @@ class ReplayBuffer:
         # save data, chunk
         data_group = root.create_group('data', overwrite=True)
         for key, value in self.root['data'].items():
-            cks = self._resolve_array_chunks(
+            cks = self.resolve_array_chunks(
                 chunks=chunks, key=key, array=value)
-            cpr = self._resolve_array_compressor(
+            cpr = self.resolve_array_compressor(
                 compressors=compressors, key=key, array=value)
             if isinstance(value, zarr.Array):
                 if cks == value.chunks and cpr == value.compressor:
@@ -315,7 +311,7 @@ class ReplayBuffer:
         return compressor
 
     @classmethod
-    def _resolve_array_compressor(cls, 
+    def resolve_array_compressor(cls, 
             compressors: Union[dict, str, numcodecs.abc.Codec], key, array):
         # allows compressor to be explicitly set to None
         cpr = 'nil'
@@ -332,7 +328,7 @@ class ReplayBuffer:
         return cpr
     
     @classmethod
-    def _resolve_array_chunks(cls,
+    def resolve_array_chunks(cls,
             chunks: Union[dict, tuple], key, array):
         cks = None
         if isinstance(chunks, dict):
@@ -393,7 +389,7 @@ class ReplayBuffer:
     def get_episode_idxs(self):
         import numba
         @numba.jit(nopython=True)
-        def _get_episode_idxs(episode_ends):
+        def get_episode_idxs(episode_ends):
             result = np.zeros((episode_ends[-1],), dtype=np.int64)
             for i in range(len(episode_ends)):
                 start = 0
@@ -403,7 +399,7 @@ class ReplayBuffer:
                 for idx in range(start, end):
                     result[idx] = i
             return result
-        return _get_episode_idxs(self.episode_ends)
+        return get_episode_idxs(self.episode_ends)
         
     
     @property
@@ -481,9 +477,9 @@ class ReplayBuffer:
             # create array
             if key not in self.data:
                 if is_zarr:
-                    cks = self._resolve_array_chunks(
+                    cks = self.resolve_array_chunks(
                         chunks=chunks, key=key, array=value)
-                    cpr = self._resolve_array_compressor(
+                    cpr = self.resolve_array_compressor(
                         compressors=compressors, key=key, array=value)
                     arr = self.data.zeros(name=key, 
                         shape=new_shape, 
@@ -563,11 +559,9 @@ class ReplayBuffer:
         return slice(start_idx, end_idx)
 
     def get_steps_slice(self, start, stop, step=None, copy=False):
-        _slice = slice(start, stop, step)
-
         result = dict()
         for key, value in self.data.items():
-            x = value[_slice]
+            x = value[slice(start, stop, step)]
             if copy and isinstance(value, np.ndarray):
                 x = x.copy()
             result[key] = x

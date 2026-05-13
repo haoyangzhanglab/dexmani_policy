@@ -8,7 +8,7 @@
 - **DP3Agent** - Point Cloud Diffusion Policy  
 - **MoEAgent** - Mixture of Experts Diffusion Policy
 - **ManiFlowAgent** - Flow Matching with Consistency Distillation
-- **MultiTaskAgent** - 多任务包装器（可包装任意 base_agent，添加 task embedding 条件注入）
+- **MultiTaskAgent** - 多任务 Diffusion Policy（RGB + state + task_text → DiT backbone，特征拼接条件注入）
 
 所有 agent 继承自 `BaseAgent`，遵循统一的接口：`compute_loss()` 用于训练，`predict_action()` 用于推理。
 
@@ -50,23 +50,53 @@ randn(B, horizon, action_dim) → action_decoder.predict_action(cond, noise) →
 
 所有策略的基类，定义统一接口。
 
+#### 关键属性
+
+- `cond_dropout_prob`: 训练时对 condition 做随机 dropout 的概率（默认 0.0），增强对不完整观测的鲁棒性
+
 #### 关键方法
+
+**`preprocess(obs_dict)`**
+
+将 `(B, T, ...)` 观测归一化并 flatten 为 `(B*T, ...)`，供 encoder 消费。
+
+```python
+def preprocess(self, obs_dict):
+    obs = self.normalizer.normalize(obs_dict)
+    result = {}
+    for k, v in obs.items():
+        if torch.is_tensor(v):
+            v = v[:, :self.n_obs_steps].flatten(0, 1)  # (B, T, ...) → (B*T, ...)
+        result[k] = v
+    return result
+```
+
+**`_build_cond(obs_dict)`**
+
+统一的 condition 构建入口：preprocess → obs_encoder → cond_dropout。
+
+```python
+def _build_cond(self, obs_dict):
+    obs = self.preprocess(obs_dict)
+    cond, aux = self.obs_encoder(obs)
+    return self._apply_cond_dropout(cond), aux
+```
+
+**`_apply_cond_dropout(cond)`**
+
+训练时以 `cond_dropout_prob` 概率将 condition 置零（仅在 `self.training` 时生效）。
 
 **`configure_optimizer(lr, weight_decay, obs_lr, obs_weight_decay, betas)`**
 
 为 encoder 和 decoder 配置独立的优化器参数组。
 
 ```python
-# decoder 参数组（带 weight_decay 分组）
+obs_lr = obs_lr if obs_lr is not None else lr  # 支持 obs_lr=0.0 冻结 encoder
+obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
 action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
 for g in action_groups:
     g['lr'] = lr
-
-# encoder 参数组
-obs_lr = obs_lr if obs_lr is not None else lr  # 支持 obs_lr=0.0 冻结 encoder
-obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
-obs_params = list(self.obs_encoder.parameters())
-
+obs_params = [p for p in self.obs_encoder.parameters() if p.requires_grad]
 groups = action_groups + [{'params': obs_params, 'weight_decay': obs_wd, 'lr': obs_lr}]
 return torch.optim.AdamW([g for g in groups if g['params']], lr=lr, betas=betas)
 ```
@@ -74,14 +104,15 @@ return torch.optim.AdamW([g for g in groups if g['params']], lr=lr, betas=betas)
 **设计说明**：
 - 全局 `lr` 参数是 PyTorch API 必需的，但所有 param group 都有显式 `lr`，全局 lr 仅作 fallback
 - `obs_lr is not None` 检查支持 `obs_lr=0.0` 冻结 encoder（`obs_lr=0` 会被误判为 False）
+- `obs_params` 过滤 `requires_grad=False` 的参数，避免优化器报错
 
-**`compute_loss(batch)`**
+**`compute_loss(batch, **kwargs)`**
 
-调用 `action_decoder.compute_loss()`，子类可扩展（如 MoEAgent 添加辅助损失）。
+调用 `_build_cond` 构建 condition，然后将 `ema_model` 从 kwargs 中提取并转换为 `ema_model.ema_backbone`，传递给 `action_decoder.compute_loss()`。子类可扩展（如 MoEAgent 通过 `aux` 添加辅助损失，MultiTaskAgent 通过 override `_build_cond` 注入 text embedding）。
 
-**`predict_action(obs_dict, action_template)`**
+**`predict_action(obs_dict, denoise_timesteps=None)`**
 
-调用 `action_decoder.predict_action()`，处理归一化/反归一化。
+调用 `obs_encoder(preprocess(obs_dict))` 构建 condition，然后调用 `predict_action_from_cond`，处理归一化/反归一化。返回 `{'pred_action': (B, horizon, action_dim), 'control_action': (B, n_action_steps, action_dim)}`。
 
 ---
 
@@ -152,6 +183,11 @@ def get_optim_groups(self, weight_decay):
 - 使用 `get_optim_group_with_no_decay` 排除 GroupNorm/LayerNorm 参数的 weight_decay
 - 旧实现 `get_default_optim_group` 会对所有参数应用 weight_decay，导致归一化层被错误正则化
 
+**重要**: 所有 action_decoder backbone 必须实现 `get_optim_groups(weight_decay)` 方法，
+用于 BaseAgent.configure_optimizer() 配置优化器。该方法应返回参数组列表，
+区分需要 weight_decay 的参数（Linear, Conv）和不需要的参数（bias, LayerNorm）。
+参考实现见 `agents/common/optim_util.py` 中的 `get_optim_group_with_no_decay()`。
+
 #### DiTXFlowMatch (`agents/action_decoders/backbone/ditx.py`)
 
 Transformer 骨干，用于 ManiFlow。
@@ -193,11 +229,12 @@ context: (B, n_tokens, cond_dim) - 观测 embedding
 简单 MLP，编码 joint state。
 `StateMLP(input_channels, output_channels, hidden_channels=[64])`：`(B*T, input_channels) → Linear → ReLU → Linear → (B*T, output_channels)`
 
-#### Text Encoders（未集成）
+#### Text Encoders（`agents/obs_encoder/text/`）
 
-- **CLIPTextEncoder**（`text/clip.py`）：冻结 CLIP 文本编码器，用于任务指令编码
-- **T5TextEncoder**（`text/t5.py`）：T5 文本编码器
-- 当前没有任何 Agent 使用文本编码器，预留用于 language-conditioned policy
+- **CLIPTextEncoder**（`text/clip.py`）：冻结 CLIP 文本编码器，用于 MultiTaskAgent 的任务指令编码
+- **T5TextEncoder**（`text/t5.py`）：T5 文本编码器（预留，当前未使用）
+
+MultiTaskAgent 使用 CLIPTextEncoder (frozen) + text_proj (trainable Linear) 将 task_text 映射到 `n_emb` 维度，与 obs_cond 拼接后送入 DiT backbone。
 
 #### Plugins
 
@@ -225,43 +262,44 @@ def aux_loss(self, probs):
 
 ### 5. MultiTask Agent (`agents/core/multi_task.py`)
 
-**MultiTaskAgent** 是一个包装器，可以包装任意 base_agent 并添加基于 FiLM 的任务条件化支持。
+**MultiTaskAgent** 直接继承 `BaseAgent`，使用 RGB + state + task_text → DiT backbone 架构。
 
 **架构**：
 ```
-MultiTaskAgent
-├── base_agent (DP3Agent / DPAgent / etc.)
-│   ├── obs_encoder
-│   ├── action_decoder
-│   └── normalizer
-├── task_embedding (TaskEmbedding)
-└── film_generator (Linear → ReLU → Linear → scale + shift)
+MultiTaskAgent (BaseAgent)
+├── text_encoder (CLIPTextEncoder, frozen)
+├── text_proj (Linear, trainable)
+├── obs_encoder (DPObsEncoder: RGB backbone + StateMLP)
+├── action_decoder (Diffusion + DiT_Diffusion backbone)
+└── task_emb_table (buffer, 可选预计算缓存)
 ```
 
 **工作流程**：
 ```
-batch['task_id'] → TaskEmbedding → task_emb (B, emb_dim)
-task_emb → film_generator → (scale, shift), each (B, cond_dim)
-batch['obs'] → obs_encoder → cond (B, cond_dim) or (B, T, cond_dim)
-cond_with_task = cond * (1 + scale) + shift   ← FiLM 调制，维度不变
-→ action_decoder.compute_loss(cond_with_task, nactions)
+obs_dict['task_text'] → extract_text() 分离文本和数值观测
+obs_numerical → preprocess → obs_encoder → obs_cond (B, obs_cond_dim)
+task_text → get_text_emb() → text_emb (B, n_emb)
+full_cond = torch.cat([obs_cond, text_emb], dim=-1)  ← 特征拼接
+→ action_decoder.compute_loss(full_cond, nactions)
 ```
 
-**FiLM 调制机制**：
-- FiLM (Feature-wise Linear Modulation) 通过 scale 和 shift 参数调制观测特征
-- 不修改网络输入维度，兼容所有 backbone（UNet1D, DiTX）
-- `film_generator` 最后一层零初始化 → 初始时恒等变换，可从预训练 base_agent 热启动
-- 支持 2D `(B, D)` 和 3D `(B, T, D)` 条件格式（3D 时 scale/shift 广播到所有 token）
+**条件注入机制**：
+- 使用**特征拼接**（而非 FiLM 调制），将 text_emb 与 obs_cond 在特征维度拼接
+- 拼接后的 `full_cond_dim = obs_cond_dim + n_emb` 作为 DiT backbone 的 AdaLN-Zero 条件输入
+- `text_proj` 将 CLIP embedding 投影到 `n_emb` 维度（与 DiT 的 `cond_dim` 对齐）
+
+**文本嵌入缓存** (`task_emb_table`)：
+- 构造时传入 `task_texts` 列表 → `init_text_cache()` 预计算所有唯一 task_text 的 CLIP embedding
+- 存入 `register_buffer`，训练时 O(1) 查表，避免重复 CLIP 编码
+- 未缓存的文本退回实时 CLIP 编码（`get_text_emb` 中的 fallback 路径）
+- `text_proj` 始终参与训练（可训练 Linear 层）
 
 **关键设计**：
-- `obs_cond_dim`：可在配置中显式指定，避免初始化时的推断开销；也可省略由 `_infer_obs_cond_dim()` 自动推断
-- `predict_action` 需要传入 `task_id` 参数（默认 0）
-- `configure_optimizer` 在 base_agent 优化器基础上添加 task_embedding + film_generator 参数组
-- 训练数据需包含 `task_id` 字段（由 `MultiTaskDataset` 自动添加）
-
-**TaskEmbedding**：
-- `nn.Embedding(num_tasks, embedding_dim)`，初始化 std=0.02
-- 可选 dropout
+- `extract_text(obs_dict)`: 从 obs_dict 中分离 `task_text`/`task_name` 与数值观测
+- `_build_cond(obs_dict)`: override 基类方法，注入 text embedding 到 condition
+- `predict_action(obs_dict)`: override 基类方法，处理 task_text
+- `configure_optimizer`: 在 base 基础上添加 `text_proj` 参数组
+- 训练数据需包含 `task_text` 字段（由 `MultiTaskDataset` 自动注入）
 
 ---
 
@@ -291,7 +329,7 @@ def _normalize_impl(self, x, forward=True):
 
 #### Timestep Sampling (`agents/action_decoders/common/sample.py`)
 
-`SampleLibrary` 提供多种 timestep 采样策略：
+`TimeSampler` 提供多种 timestep 采样策略：
 
 - `uniform` - 均匀分布 U(0,1)
 - `lognorm` - Logit-Normal 分布（中间时刻密集）
@@ -349,12 +387,12 @@ Flow Matching 假设 `t ∈ [0,1]`，超出范围会导致外推误差。所有 
 
 ### 死代码（不影响功能）
 
-- `agents/action_decoders/backbone/dit.py` - 整文件未使用（372 行）
 - `agents/action_decoders/backbone/ditx.py:398` - `DiTXDiffusion` 类未使用（134 行）
 - `agents/obs_encoder/plugins/token_compressor.py` - 四个类未使用（345 行）
 - `agents/action_decoders/common/sample.py:7` - `logit_normal_density` 函数未使用
 
-**建议**：保留作为实验性功能，或移入 `experimental/` 目录。
+**说明**：
+- `agents/action_decoders/backbone/dit.py` 中的 `DiT_Diffusion` 已被 MultiTaskAgent 使用
 
 ### 简化实现
 

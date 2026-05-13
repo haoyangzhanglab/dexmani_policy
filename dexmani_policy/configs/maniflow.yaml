@@ -33,10 +33,7 @@ dataset:
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.05
   max_train_episodes: null
-  sensor_modalities: [point_cloud, joint_state]
-  # augmentation_cfg:
-  #   pc:
-  #     color_std: 0.05
+  sensor_modalities: ["joint_state", "point_cloud"]
 
 agent:
   _target_: dexmani_policy.agents.core.maniflow.ManiFlowAgent
@@ -50,7 +47,6 @@ agent:
   state_dim: 19
   num_points: 1024
 
-  # 点云编码器配置字典；切换 encoder_type 时对应子块自动生效
   pc_encoder_config:
     pointpn:
       num_stages: 3
@@ -63,7 +59,7 @@ agent:
     pointnext_tokenizer:
       stem_channels: 64
       token_channels: 128
-      num_patches: 96      # num_obs_tokens = (num_patches + 1) * n_obs_steps = 97 * 2 = 194 (仅当 encoder_type: pointnext_tokenizer 时生效)
+      num_patches: 96
       patch_radii: [0.04, 0.08]
       patch_neighbors: [16, 32]
 
@@ -86,10 +82,11 @@ agent:
   t_sample_mode_for_consistency: discrete
   dt_sample_mode_for_consistency: uniform
   target_t_sample_mode: relative
+  cond_dropout_prob: 0.0
 
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-3  # DiT-X backbone 参数量大（~100M），使用更强的 L2 正则化（比 UNet1D 大 1000 倍）
+  weight_decay: 1.0e-3
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
   betas: [0.9, 0.95]
@@ -111,7 +108,7 @@ workspace:
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
-    id: null
+    id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
     video_fps: ${env_runner.env_video_fps}
@@ -135,7 +132,7 @@ training:
     val_interval_epochs: 25
     eval_interval_epochs: 200
     sample_interval_epochs: 5
-    gradient_accumulate_every: 1
+    grad_accum_steps: 1
     grad_clip_norm: 1.0
 
 env_runner:
@@ -154,11 +151,37 @@ eval:
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
 
+# ---- 数据增强（点云）- 需要时取消注释 ----
+# dataset:
+#   augmentation_cfg:
+#     pc:
+#       color:
+#         enabled: true
+#         brightness: 0.2
+#         contrast: 0.2
+#         saturation: 0.3
+#         hue: 0.05
+#         prob: 0.8
+#       spatial:
+#         enabled: true
+#         rot_z: 15.0
+#         trans_xy: 0.10
+#         scale: 1.02
+#         prob: 0.8
+#       dropout:
+#         enabled: false
+#         dropout_ratio: 0.1
+#         prob: 0.5
+#     state:
+#       enabled: false
+#       noise_std: 0.005
+#       prob: 0.5
+
 hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
     subdir: ${hydra.job.num}

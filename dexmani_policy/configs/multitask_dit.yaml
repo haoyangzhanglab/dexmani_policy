@@ -1,12 +1,12 @@
 # @package _global_
 
 defaults:
-  - dataset: multi_task_pc
+  - dataset: multitask_rgb
   - _self_
 
-policy_name: multi_task_dp3
+policy_name: multitask_dit
 
-task_name: multi_task
+task_name: multitask_dit
 seed: 42
 
 horizon: 16
@@ -28,37 +28,32 @@ val_dataloader:
   pin_memory: true
   persistent_workers: false
 
-# Agent: MultiTaskAgent 包装 DP3Agent，使用 FiLM 调制注入任务条件
 agent:
   _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
-  num_tasks: 3
-  task_embedding_dim: 64
-  task_dropout: 0.1
-  # 自动计算 obs_cond_dim（film 模式下为 n_obs_steps * encoder_out_dim）
-  obs_cond_dim: ${eval:'${n_obs_steps} * (${agent.base_agent.pc_out_dim} + 64)'}  # 2 * (128 + 64) = 384
-  base_agent:
-    _target_: dexmani_policy.agents.core.dp3.DP3Agent
-    horizon: ${horizon}
-    n_obs_steps: ${n_obs_steps}
-    n_action_steps: ${n_action_steps}
-    action_dim: ${action_dim}
+  text_encoder_model: openai/clip-vit-base-patch16
+  task_texts: ${dataset.task_texts}
+  rgb_backbone_name: dino
+  rgb_backbone_config:
+    tune_mode: lora
+  state_dim: 19
+  state_out_dim: 64
 
-    encoder_type: idp3
-    pc_dim: 3
-    pc_out_dim: 128
-    state_dim: 19
-    state_out_dim: 64
-    num_points: 1024
+  # backbone (DiT)
+  n_emb: 512
+  num_heads: 8
+  n_layers: 6
+  mlp_ratio: 4.0
+  qkv_bias: true
 
-    diffusion_step_embed_dim: 128
-    down_dims: [256, 512, 1024]
-    kernel_size: 5
-    n_groups: 8
-    condition_type: film
+  # action decoder (Diffusion)
+  num_training_steps: 100
+  num_inference_steps: 10
+  prediction_type: sample
 
-    num_training_steps: 100
-    num_inference_steps: 10
-    prediction_type: sample
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
 
 optimizer:
   lr: 1.0e-4
@@ -84,10 +79,10 @@ workspace:
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
-    id: null
+    id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
-    video_fps: 10
+    video_fps: ${env_runner.env_video_fps}
 
   checkpoint_cfg:
     _target_: dexmani_policy.training.common.workspace.CheckpointConfig
@@ -108,24 +103,22 @@ training:
     val_interval_epochs: 25
     eval_interval_epochs: 250
     sample_interval_epochs: 5
-    gradient_accumulate_every: 1
+    grad_accum_steps: 1
     grad_clip_norm: 1.0
 
-# 多任务评估 runner（按任务分别评估）
 env_runner:
   _target_: dexmani_policy.env_runner.multi_task_sim_runner.MultiTaskSimRunner
   n_obs_steps: ${n_obs_steps}
   env_video_fps: 10
   default_eval_episodes: 20
-  sensor_modalities: ['joint_state', 'point_cloud']
-  num_tasks: ${agent.num_tasks}
+  sensor_modalities: ${dataset.sensor_modalities}
   task_configs:
     - task_name: task_1
-      task_id: 0
+      task_text: "task 1"
     - task_name: task_2
-      task_id: 1
+      task_text: "task 2"
     - task_name: task_3
-      task_id: 2
+      task_text: "task 3"
 
 eval:
   seed: ${seed}

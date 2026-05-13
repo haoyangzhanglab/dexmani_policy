@@ -7,10 +7,6 @@ from timm.models.vision_transformer import Mlp, use_fused_attn
 
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 
-#################################################################################
-#                               自注意力和FILM                                    #
-#################################################################################
-
 def modulate(x, shift, scale):
     # FILM调制，把 γ 设为 (1+scale)，把 β 设为 shift
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -73,10 +69,6 @@ class Attention(nn.Module):
 
         return x
 
-
-#################################################################################
-#                       将扩散过程的时间步编码为向量表示                             #
-#################################################################################
 
 class TimestepEmbedder(nn.Module):
 
@@ -198,12 +190,12 @@ class DiT_Diffusion(nn.Module):
 
     def initialize_weights(self):
         # 初始化transfromer层
-        def _basic_init(module):
+        def init_fn(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
-        self.apply(_basic_init)
+        self.apply(init_fn)
 
         nn.init.normal_(self.pos_embed, mean=0.0, std=0.02)
 
@@ -297,12 +289,12 @@ class DiT_FlowMatch(nn.Module):
 
     def initialize_weights(self):
         # 初始化transfromer层
-        def _basic_init(module):
+        def init_fn(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
-        self.apply(_basic_init)
+        self.apply(init_fn)
 
         nn.init.normal_(self.pos_embed, mean=0.0, std=0.02)
 

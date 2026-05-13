@@ -69,14 +69,14 @@ class TrainWorkspace:
         )
         self.logger = MultiLogger([json_logger, wandb_logger])
 
-        self._install_shutdown_hooks()
+        self.install_shutdown_hooks()
 
 
     def save_hydra_config(self, hydra_config):
         OmegaConf.save(hydra_config, self.output_dir / "config.yaml", resolve=True)
 
 
-    def _resolve_checkpoint_path(self, tag_or_path: str) -> Path:
+    def resolve_checkpoint_path(self, tag_or_path: str) -> Path:
         if tag_or_path == "latest":
             path = self.checkpoint_dir / "latest.pt"
         elif tag_or_path == "best":
@@ -93,10 +93,19 @@ class TrainWorkspace:
         return path
 
 
-    def _load_model_weights(self, checkpoint: TrainCheckpoint, model, ema_model=None):
-        model.load_state_dict(checkpoint.model_state, strict=True)
+    def load_model_weights(self, checkpoint: TrainCheckpoint, model, ema_model=None):
+        from dexmani_policy.common.pytorch_util import fix_state_dict
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        # 自动处理 DDP ↔ 单卡 checkpoint 转换
+        is_current_ddp = isinstance(model, DDP)
+        model_state = fix_state_dict(checkpoint.model_state, is_current_ddp)
+        model.load_state_dict(model_state, strict=True)
+
         if ema_model is not None and checkpoint.ema_model_state is not None:
-            ema_model.load_state_dict(checkpoint.ema_model_state, strict=True)
+            # EMA 模型始终不是 DDP 包装的
+            ema_state = fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False)
+            ema_model.load_state_dict(ema_state, strict=True)
 
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
@@ -123,7 +132,7 @@ class TrainWorkspace:
 
 
     def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
-        path = self._resolve_checkpoint_path(tag_or_path)
+        path = self.resolve_checkpoint_path(tag_or_path)
         print("Loading checkpoint from:", path)
         return self.checkpoint_store.load(path)
 
@@ -134,12 +143,15 @@ class TrainWorkspace:
         tag_or_path: str,
         use_ema: bool = False,
     ):
+        from dexmani_policy.common.pytorch_util import fix_state_dict
         checkpoint = self.load_checkpoint(tag_or_path)
         if use_ema and checkpoint.ema_model_state is not None:
             print("Using EMA weights for inference.")
-            model.load_state_dict(checkpoint.ema_model_state, strict=True)
+            model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
         else:
-            model.load_state_dict(checkpoint.model_state, strict=True)
+            if use_ema and checkpoint.ema_model_state is None:
+                print("WARNING: EMA weights requested but not found in checkpoint. Using model weights.")
+            model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
 
 
     def load_for_resume(
@@ -156,7 +168,7 @@ class TrainWorkspace:
         except FileNotFoundError:
             return 0, 0
 
-        self._load_model_weights(
+        self.load_model_weights(
             checkpoint=checkpoint,
             model=model,
             ema_model=ema_model,
@@ -176,19 +188,19 @@ class TrainWorkspace:
         self.logger.close()
 
 
-    def _install_shutdown_hooks(self):
+    def install_shutdown_hooks(self):
         atexit.register(self.close)
-        def _handle_signal(signum, frame):
+        def handle_signal(signum, frame):
             try:
                 self.close()
-            finally:
-                raise KeyboardInterrupt
-        signal.signal(signal.SIGINT, _handle_signal)
-        signal.signal(signal.SIGTERM, _handle_signal)
+            except Exception:
+                pass
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGINT, handle_signal)
+        signal.signal(signal.SIGTERM, handle_signal)
 
 
 class ReadOnlyWorkspace:
-    """只读 workspace，用于 DDP 非主进程"""
     def __init__(self, output_dir: str):
         self.output_dir = Path(output_dir)
         self.checkpoint_dir = self.output_dir / "checkpoints"
@@ -216,6 +228,17 @@ class ReadOnlyWorkspace:
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
         return self.checkpoint_store.load(path)
+
+    def load_for_inference(self, model, tag_or_path: str, use_ema: bool = False):
+        from dexmani_policy.common.pytorch_util import fix_state_dict
+        checkpoint = self.load_checkpoint(tag_or_path)
+        if use_ema and checkpoint.ema_model_state is not None:
+            print("Using EMA weights for inference.")
+            model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
+        else:
+            if use_ema and checkpoint.ema_model_state is None:
+                print("WARNING: EMA weights requested but not found in checkpoint. Using model weights.")
+            model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
 
     def save_hydra_config(self, hydra_config):
         pass  # 由 rank 0 负责

@@ -48,30 +48,25 @@ class MoEObsEncoder(nn.Module):
         self.condition_type = condition_type
         self.out_dim = self.moe.out_dim
 
-    def _encode_feat(self, obs: dict) -> torch.Tensor:
+    def encode_feat(self, obs: dict) -> torch.Tensor:
         pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
         if pc.shape[1] > self.num_points:
             pc, _ = farthest_point_sample(pc, self.num_points)
         return torch.cat([
             self.pc_encoder(pc)['global_token'],
             self.state_mlp(obs['joint_state']),
-        ], dim=-1)                                      # (B*T, in_dim)
+        ], dim=-1)
 
-    def _reshape(self, feat: torch.Tensor) -> torch.Tensor:
+    def reshape_cond(self, feat: torch.Tensor) -> torch.Tensor:
         B = feat.shape[0] // self.n_obs_steps
-        if self.condition_type == 'film':
+        if self.condition_type in ('film', 'mlp_film'):
             return feat.reshape(B, -1)
         return feat.reshape(B, self.n_obs_steps, -1)
 
-    def encode(self, obs: dict):
-        """训练路径：返回 (cond, aux_dict)"""
-        z = self._encode_feat(obs)
+    def forward(self, obs: dict):
+        z = self.encode_feat(obs)
         feat, aux = self.moe(z, return_aux=True)
-        return self._reshape(feat), aux
-
-    def forward(self, obs: dict) -> torch.Tensor:
-        """推理路径：返回 cond"""
-        return self._reshape(self.moe(self._encode_feat(obs)))
+        return self.reshape_cond(feat), aux
 
 
 class MoEAgent(UNetDiffusionAgent):
@@ -108,23 +103,6 @@ class MoEAgent(UNetDiffusionAgent):
             obs_encoder, condition_type, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
         )
 
-    def compute_loss(self, batch, **kwargs):
-        # 训练时必须走 encode() 而非 forward()，以获取 MoE aux loss。
-        # 推理时 BaseAgent.predict_action 调用 forward()（无 aux），两条路径不对称，子类不可省略此覆盖。
-        cond, aux = self.obs_encoder.encode(self.preprocess(batch['obs']))
-        nactions = self.normalizer['action'].normalize(batch['action'])
-        # 传递 kwargs 给 action_decoder（如 ema_model 用于 consistency distillation）
-        action_loss, loss_dict = self.action_decoder.compute_loss(cond, nactions, **kwargs)
-        total = action_loss + aux['loss']
-        loss_dict.update({
-            'loss': total,
-            'loss_action': action_loss,
-            'loss_moe_aux': aux['loss'],
-            'loss_moe_load_balance': aux['load_balance_loss'],
-            'loss_moe_entropy': aux['entropy_loss'],
-        })
-        return total, loss_dict
-
 
 def example():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -150,7 +128,7 @@ def example():
     print(f'obs joint_state: {obs["joint_state"].shape}')
     print(f'action:          {action.shape}')
 
-    cond, aux = agent.obs_encoder.encode(obs)
+    cond, aux = agent.obs_encoder(obs)
     print(f'cond:            {cond.shape}')
     print(f'aux loss:        {aux["loss"].item():.4f}')
 

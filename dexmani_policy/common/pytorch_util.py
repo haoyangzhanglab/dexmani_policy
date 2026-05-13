@@ -1,9 +1,8 @@
 import torch
+import torch.nn as nn
 import random
 import numpy as np
-import collections
-import torch.nn as nn
-from typing import Dict, Callable, List
+from typing import Dict, Callable, List, Optional
 
 
 def dict_apply(
@@ -35,33 +34,43 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
-    """
-    自动处理 DDP state_dict 的 'module.' 前缀。
-
-    Args:
-        state_dict: 要处理的 state_dict
-        is_current_ddp: 当前模型是否是 DDP 包装的
-
-    Returns:
-        处理后的 state_dict
-    """
-    if not state_dict:
-        return state_dict
-
     # 检查 checkpoint 是否来自 DDP
     first_key = next(iter(state_dict.keys()))
     is_checkpoint_ddp = first_key.startswith('module.')
 
     # checkpoint 是 DDP，当前不是 DDP：移除 'module.' 前缀
     if is_checkpoint_ddp and not is_current_ddp:
-        return {k[7:]: v for k, v in state_dict.items()}
+        return {k.removeprefix("module."): v for k, v in state_dict.items()}
 
     # checkpoint 不是 DDP，当前是 DDP：添加 'module.' 前缀
     elif not is_checkpoint_ddp and is_current_ddp:
         return {f'module.{k}': v for k, v in state_dict.items()}
 
-    # 其他情况：不需要处理
     return state_dict
+
+
+def worker_init_fn(worker_id):
+    np.random.seed(torch.initial_seed() % 2 ** 32)
+
+
+def create_mlp(
+    in_channels: int,
+    hidden_channels: List[int],
+    out_channels: Optional[int] = None,
+    activation: type = nn.ReLU,
+    use_norm: bool = False,
+):
+    layers = []
+    prev = in_channels
+    for h in hidden_channels:
+        layers.extend([nn.Linear(prev, h), activation(inplace=True)])
+        if use_norm:
+            layers.append(nn.LayerNorm(h))
+        prev = h
+    if out_channels is not None:
+        layers.append(nn.Linear(prev, out_channels))
+    return nn.Sequential(*layers)

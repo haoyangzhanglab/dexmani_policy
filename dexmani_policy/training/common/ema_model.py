@@ -2,6 +2,7 @@ import torch
 
 
 class EMAModel:
+    # @crowsonkb: power=2/3 for 1M+ steps (0.9999 at 1M), power=3/4 for <1M steps (0.9999 at 215K)
     def __init__(
         self,
         model,
@@ -11,17 +12,6 @@ class EMAModel:
         min_value=0.0,
         max_value=0.9999
     ):
-        """
-        @crowsonkb's notes on EMA Warmup:
-            If gamma=1 and power=1, implements a simple average. gamma=1, power=2/3 are good values for models you plan
-            to train for a million or more steps (reaches decay factor 0.999 at 31.6K steps, 0.9999 at 1M steps),
-            gamma=1, power=3/4 for models you plan to train for less (reaches decay factor 0.999 at 10K steps, 0.9999
-            at 215.4k steps).
-        Args:
-            inv_gamma (float): Inverse multiplicative factor of EMA warmup. Default: 1.
-            power (float): Exponential factor of EMA warmup. Default: 2/3.
-            min_value (float): The minimum EMA decay rate. Default: 0.
-        """
 
         self.averaged_model = model
         self.averaged_model.eval()

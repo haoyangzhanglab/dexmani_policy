@@ -1,237 +1,216 @@
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Dict
+
+from dexmani_policy.agents.core.base import BaseAgent
+from dexmani_policy.agents.core.dp import DPObsEncoder
+from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
+from dexmani_policy.agents.action_decoders.backbone.dit import DiT_Diffusion
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 
 
-class TaskEmbedding(nn.Module):
-    """
-    任务嵌入模块，将离散的 task_id 映射为连续向量
+class MultiTaskAgent(BaseAgent):
+    """多任务 Agent：RGB + joint_state + 自然语言 task_text → DiT backbone。
 
-    用于多任务学习中的任务条件化。
-    """
+    obs_dict 中需包含 'task_text' key（字符串列表），由 MultiTaskDataset 注入。
 
-    def __init__(
-        self,
-        num_tasks: int,
-        embedding_dim: int,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-        self.num_tasks = num_tasks
-        self.embedding_dim = embedding_dim
-
-        self.embedding = nn.Embedding(num_tasks, embedding_dim)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-        # 初始化
-        nn.init.normal_(self.embedding.weight, std=0.02)
-
-    def forward(self, task_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            task_ids: (B,) 或 (B, 1) 的整数 tensor
-
-        Returns:
-            task_emb: (B, embedding_dim)
-        """
-        if task_ids.dim() == 2:
-            task_ids = task_ids.squeeze(-1)
-
-        task_emb = self.embedding(task_ids)
-        task_emb = self.dropout(task_emb)
-        return task_emb
-
-
-class MultiTaskAgent(nn.Module):
-    """多任务 Agent，使用 FiLM 调制注入任务条件
-
-    通过 task_embedding + film_generator 将任务信息注入观测条件。
-    支持包装任意 base_agent（DP3Agent, ManiFlowAgent 等）。
-
-    FiLM 调制: modulated_cond = cond * (1 + scale) + shift
+    如果提供了 task_texts 列表，会在 __init__ 中预计算所有 CLIP text embedding
+    并存入 buffer，训练/推理时按字符串 key 查表，仅 text_proj（Linear）可训练。
+    未缓存的文本退回实时 CLIP 编码。
     """
 
     def __init__(
         self,
-        base_agent: nn.Module,
-        num_tasks: int,
-        task_embedding_dim: int = 64,
-        task_dropout: float = 0.1,
-        obs_cond_dim: Optional[int] = None,
+        # text encoder
+        text_encoder_model: str = "openai/clip-vit-base-patch16",
+        # obs encoder (RGB + state)
+        rgb_backbone_name: str = "dino",
+        rgb_backbone_config: dict = None,
+        state_dim: int = 19,
+        state_out_dim: int = 64,
+        # backbone (DiT)
+        n_emb: int = 512,
+        num_heads: int = 8,
+        n_layers: int = 6,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        # action decoder (Diffusion)
+        num_training_steps: int = 100,
+        num_inference_steps: int = 10,
+        prediction_type: str = "sample",
+        # common
+        horizon: int = 16,
+        n_obs_steps: int = 2,
+        n_action_steps: int = 8,
+        action_dim: int = 19,
+        cond_dropout_prob: float = 0.0,
+        # text embedding cache (可选)
+        task_texts: list = None,
     ):
-        super().__init__()
-        self.base_agent = base_agent
-        self.num_tasks = num_tasks
+        assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip"), \
+            f"rgb_backbone_name must be one of resnet/clip/dino/siglip, got {rgb_backbone_name}"
 
-        self.task_embedding = TaskEmbedding(
-            num_tasks=num_tasks,
-            embedding_dim=task_embedding_dim,
-            dropout=task_dropout,
+        text_encoder = CLIPTextEncoder(model_name=text_encoder_model)
+        obs_encoder = DPObsEncoder(
+            rgb_backbone_name=rgb_backbone_name,
+            state_dim=state_dim,
+            n_obs_steps=n_obs_steps,
+            condition_type="film",
+            state_out_dim=state_out_dim,
+            rgb_backbone_config=rgb_backbone_config,
         )
 
-        self.horizon = base_agent.horizon
-        self.n_obs_steps = base_agent.n_obs_steps
-        self.n_action_steps = base_agent.n_action_steps
-        self.action_dim = base_agent.action_dim
+        obs_cond_dim = obs_encoder.out_dim * n_obs_steps
+        full_cond_dim = obs_cond_dim + n_emb
 
-        if obs_cond_dim is None:
-            raise ValueError(
-                "obs_cond_dim must be explicitly specified in the config. "
-                "For film mode: obs_cond_dim = n_obs_steps * (pc_out_dim + state_out_dim). "
-                "For cross_attention mode: obs_cond_dim = token_dim (per-token dimension)."
-            )
-
-        # 运行时验证：检查 obs_cond_dim 是否与 base_agent.obs_encoder 输出维度匹配
-        if hasattr(base_agent.obs_encoder, 'out_dim'):
-            encoder_out_dim = base_agent.obs_encoder.out_dim
-            condition_type = getattr(base_agent.obs_encoder, 'condition_type', 'film')
-
-            if condition_type == 'film':
-                expected_dim = self.n_obs_steps * encoder_out_dim
-            else:  # cross_attention or other
-                expected_dim = encoder_out_dim
-
-            if obs_cond_dim != expected_dim:
-                raise ValueError(
-                    f"obs_cond_dim mismatch: config={obs_cond_dim}, expected={expected_dim}. "
-                    f"For condition_type='{condition_type}': "
-                    f"encoder_out_dim={encoder_out_dim}, n_obs_steps={self.n_obs_steps}. "
-                    f"Please update obs_cond_dim in config to match base_agent.obs_encoder output."
-                )
-
-        self.obs_cond_dim = obs_cond_dim
-
-        self.film_generator = nn.Sequential(
-            nn.Linear(task_embedding_dim, task_embedding_dim * 2),
-            nn.ReLU(),
-            nn.Linear(task_embedding_dim * 2, obs_cond_dim * 2),
+        backbone = DiT_Diffusion(
+            horizon=horizon,
+            action_dim=action_dim,
+            cond_dim=full_cond_dim,
+            n_emb=n_emb,
+            num_heads=num_heads,
+            n_layers=n_layers,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=qkv_bias,
+        )
+        action_decoder = Diffusion(
+            backbone,
+            num_training_steps=num_training_steps,
+            num_inference_steps=num_inference_steps,
+            prediction_type=prediction_type,
         )
 
-        nn.init.zeros_(self.film_generator[-1].weight)
-        nn.init.zeros_(self.film_generator[-1].bias)
+        super().__init__(
+            obs_encoder, action_decoder, horizon,
+            n_obs_steps, n_action_steps, action_dim,
+            cond_dropout_prob=cond_dropout_prob,
+        )
 
-    @property
-    def normalizer(self):
-        return self.base_agent.normalizer
+        self.text_encoder = text_encoder
+        self.text_proj = nn.Linear(text_encoder.embed_dim, n_emb)
 
-    def load_normalizer_from_dataset(self, normalizer):
-        self.base_agent.load_normalizer_from_dataset(normalizer)
-
-    def preprocess(self, obs_dict):
-        return self.base_agent.preprocess(obs_dict)
-
-    def inject_task_condition(self, cond: torch.Tensor, task_emb: torch.Tensor):
-        """使用 FiLM 调制注入任务条件"""
-        film_params = self.film_generator(task_emb)
-        scale, shift = film_params.chunk(2, dim=-1)
-
-        if cond.dim() == 2:
-            return cond * (1 + scale) + shift
-        elif cond.dim() == 3:
-            return cond * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+        if task_texts is not None:
+            self.init_text_cache(task_texts)
         else:
-            raise ValueError(f"Unexpected cond shape: {cond.shape}")
+            self.register_buffer("task_emb_table", None)
 
-    def compute_loss(self, batch, **kwargs):
-        # 提取 task_id
-        task_ids = batch.get('task_id')
-        if task_ids is None:
-            raise ValueError("batch must contain 'task_id' for MultiTaskAgent")
+    def init_text_cache(self, task_texts: list):
+        unique = list(dict.fromkeys(task_texts))
+        with torch.no_grad():
+            embs = [self.text_encoder([t]).squeeze() for t in unique]
+        self.register_buffer("task_emb_table", torch.stack(embs))
+        self.task_to_idx = {t: i for i, t in enumerate(unique)}
 
-        # 编码观测（统一接口：优先使用 encode() 获取 aux）
-        obs = self.preprocess(batch['obs'])
-        if hasattr(self.base_agent.obs_encoder, 'encode'):
-            cond, aux = self.base_agent.obs_encoder.encode(obs)
-        else:
-            cond = self.base_agent.obs_encoder(obs)
-            aux = {}
+    def get_text_emb(self, task_texts):
+        if self.task_emb_table is not None:
+            indices = [self.task_to_idx.get(t) for t in task_texts]
+            if all(i is not None for i in indices):
+                idx = torch.tensor(indices, device=self.task_emb_table.device)
+                return self.text_proj(self.task_emb_table[idx].to(dtype=self.text_proj.weight.dtype))
+        emb = self.text_encoder(task_texts).squeeze(1)
+        return self.text_proj(emb.to(dtype=self.text_proj.weight.dtype))
 
-        # 编码任务
-        task_emb = self.task_embedding(task_ids)
+    def extract_text(self, obs_dict: Dict):
+        task_texts = obs_dict.get("task_text")
+        if task_texts is None:
+            raise ValueError("obs_dict must contain 'task_text' key for MultiTaskAgent")
+        obs_numerical = {
+            k: v for k, v in obs_dict.items()
+            if k not in ("task_text", "task_name")
+        }
+        return obs_numerical, task_texts
 
-        # 注入任务条件
-        cond_with_task = self.inject_task_condition(cond, task_emb)
 
-        # 计算损失
-        nactions = self.base_agent.normalizer['action'].normalize(batch['action'])
-
-        # 提取 EMA backbone（统一处理，支持 MultiTaskAgent 包装）
-        loss_kwargs = dict(kwargs)
-        ema_model = loss_kwargs.pop('ema_model', None)
-        ema_backbone = self.base_agent.extract_ema_backbone(ema_model)
-        if ema_backbone is not None:
-            loss_kwargs['ema_model'] = ema_backbone
-
-        action_loss, loss_dict = self.base_agent.action_decoder.compute_loss(cond_with_task, nactions, **loss_kwargs)
-
-        # 合并 aux loss（如 MoE）
-        if aux and 'loss' in aux:
-            total_loss = action_loss + aux['loss']
-            loss_dict['loss'] = total_loss
-            loss_dict['loss_action'] = action_loss
-            for k, v in aux.items():
-                if k != 'loss':
-                    loss_dict[f'aux_{k}'] = v
-            return total_loss, loss_dict
-
-        return action_loss, loss_dict
+    def _build_cond(self, obs_dict):
+        obs_numerical, task_texts = self.extract_text(obs_dict)
+        obs = self.preprocess(obs_numerical)
+        cond, aux = self.obs_encoder(obs)
+        text_emb = self.get_text_emb(task_texts)
+        cond = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
+        return self._apply_cond_dropout(cond), aux
 
     @torch.no_grad()
-    def predict_action(self, obs_dict, task_id: Optional[int] = None, denoise_timesteps=None):
-        """
-        Args:
-            obs_dict: 观测字典
-            task_id: 任务 ID，范围 [0, num_tasks)，默认为 0
-            denoise_timesteps: 去噪步数
-        """
-        if task_id is None:
-            task_id = 0
+    def predict_action(self, obs_dict, denoise_timesteps=None):
+        obs_numerical, task_texts = self.extract_text(obs_dict)
 
-        # 检查 task_id 范围
-        if not (0 <= task_id < self.num_tasks):
-            raise ValueError(
-                f"task_id must be in range [0, {self.num_tasks}), got {task_id}. "
-                f"Available task IDs: {list(range(self.num_tasks))}"
-            )
+        cond, _ = self.obs_encoder(self.preprocess(obs_numerical))
+        text_emb = self.get_text_emb(task_texts)
+        cond = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
 
-        # 编码观测
-        cond = self.base_agent.obs_encoder(self.preprocess(obs_dict))
+        return self.predict_action_from_cond(cond, denoise_timesteps)
 
-        # 编码任务
-        batch_size = cond.shape[0]
-        task_ids = torch.full((batch_size,), task_id, dtype=torch.long, device=cond.device)
-        task_emb = self.task_embedding(task_ids)
+    def configure_optimizer(self, lr, weight_decay, obs_lr=None, obs_weight_decay=None, betas=(0.95, 0.999)):
+        obs_lr = obs_lr if obs_lr is not None else lr
+        obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
 
-        # 注入任务条件
-        cond_with_task = self.inject_task_condition(cond, task_emb)
+        action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
+        for g in action_groups:
+            g["lr"] = lr
 
-        # 预测动作
-        template = torch.zeros(
-            batch_size, self.horizon, self.action_dim,
-            device=cond.device, dtype=cond.dtype,
-        )
-        pred = self.base_agent.action_decoder.predict_action(cond_with_task, template, denoise_timesteps)
-        pred = self.base_agent.normalizer['action'].unnormalize(pred)
+        obs_params = [p for p in self.obs_encoder.parameters() if p.requires_grad]
+        text_proj_params = [p for p in self.text_proj.parameters() if p.requires_grad]
+        groups = action_groups + [
+            {"params": obs_params, "weight_decay": obs_wd, "lr": obs_lr},
+            {"params": text_proj_params, "weight_decay": weight_decay, "lr": lr},
+        ]
 
-        s = self.n_obs_steps - 1
-        return {
-            'pred_action': pred,
-            'control_action': pred[:, s:s + self.n_action_steps],
-        }
+        return torch.optim.AdamW([g for g in groups if g["params"]], lr=lr, betas=betas)
 
-    def configure_optimizer(self, **kwargs):
-        base_optimizer = self.base_agent.configure_optimizer(**kwargs)
 
-        # 添加 task_embedding + film_generator 参数组
-        multi_task_params = (
-            list(self.task_embedding.parameters())
-            + list(self.film_generator.parameters())
-        )
-        if multi_task_params:
-            base_optimizer.add_param_group({
-                'params': multi_task_params,
-                'lr': kwargs.get('lr', 1e-4),
-                'weight_decay': kwargs.get('weight_decay', 1e-6),
-            })
+def example():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    B, T, H, A = 2, 2, 16, 19
 
-        return base_optimizer
+    task_texts = ["pick apple", "place cube"]
+
+    agent = MultiTaskAgent(
+        rgb_backbone_name="resnet",
+        state_dim=A,
+        n_emb=128, num_heads=4, n_layers=2, mlp_ratio=2.0,
+        num_training_steps=10, num_inference_steps=3,
+        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
+    ).to(device)
+
+    obs = {
+        "rgb": torch.rand(B * T, 3, 224, 224, device=device),
+        "joint_state": torch.randn(B * T, A, device=device),
+    }
+    action = torch.randn(B, H, A, device=device)
+
+    cond, _ = agent.obs_encoder(obs)
+    print(f"obs_cond shape: {cond.shape}")
+
+    text_emb = agent.get_text_emb(task_texts)
+    print(f"text_emb shape: {text_emb.shape}")
+    merged = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
+    print(f"merged_cond shape: {merged.shape}")
+
+    from dexmani_policy.common.normalizer import LinearNormalizer
+    normalizer = LinearNormalizer()
+    normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")
+    agent.load_normalizer_from_dataset(normalizer)
+
+    batch = {
+        "obs": {
+            "rgb": obs["rgb"].reshape(B, T, 3, 224, 224),
+            "joint_state": obs["joint_state"].reshape(B, T, A),
+            "task_text": task_texts,
+            "task_name": task_texts,
+        },
+        "action": action,
+    }
+    loss, loss_dict = agent.compute_loss(batch)
+    print(f"loss: {loss.item():.4f}  keys={list(loss_dict.keys())}")
+
+    result = agent.predict_action({
+        "rgb": obs["rgb"].reshape(B, T, 3, 224, 224),
+        "joint_state": obs["joint_state"].reshape(B, T, A),
+        "task_text": task_texts,
+    })
+    print(f"pred_action: {result['pred_action'].shape}")
+    print(f"control_action: {result['control_action'].shape}")
+    print("=== MultiTaskAgent PASSED ===")
+
+
+if __name__ == "__main__":
+    example()

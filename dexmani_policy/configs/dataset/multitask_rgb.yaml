@@ -2,20 +2,25 @@ _target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
 seed: ${seed}
 sampling_strategy: balanced  # 'proportional' | 'balanced' | 'weighted'
 normalizer_mode: shared      # 'shared' | 'per_task'
+sensor_modalities: ['joint_state', 'rgb']
 
 task_names:
   - task_1
   - task_2
   - task_3
 
-# 仅当 sampling_strategy='weighted' 时生效
+task_texts:
+  - "task 1"
+  - "task 2"
+  - "task 3"
+
 task_weights:
   - 1.0
   - 1.0
   - 2.0
 
 datasets:
-  - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
     zarr_path: robot_data/sim/task_1.zarr
     seed: ${seed}
     horizon: ${horizon}
@@ -23,9 +28,9 @@ datasets:
     pad_after: ${eval:'${n_action_steps} - 1'}
     val_ratio: 0.05
     max_train_episodes: null
-    sensor_modalities: ['joint_state', 'point_cloud']
+    sensor_modalities: ['joint_state', 'rgb']
 
-  - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
     zarr_path: robot_data/sim/task_2.zarr
     seed: ${seed}
     horizon: ${horizon}
@@ -33,9 +38,9 @@ datasets:
     pad_after: ${eval:'${n_action_steps} - 1'}
     val_ratio: 0.05
     max_train_episodes: null
-    sensor_modalities: ['joint_state', 'point_cloud']
+    sensor_modalities: ['joint_state', 'rgb']
 
-  - _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
     zarr_path: robot_data/sim/task_3.zarr
     seed: ${seed}
     horizon: ${horizon}
@@ -43,4 +48,4 @@ datasets:
     pad_after: ${eval:'${n_action_steps} - 1'}
     val_ratio: 0.05
     max_train_episodes: null
-    sensor_modalities: ['joint_state', 'point_cloud']
+    sensor_modalities: ['joint_state', 'rgb']

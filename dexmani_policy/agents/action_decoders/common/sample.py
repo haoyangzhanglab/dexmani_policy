@@ -57,7 +57,7 @@ def sample_discrete_pow(batch_size, denoise_timesteps, device="cuda"):
     return t
 
 
-class SampleLibrary:
+class TimeSampler:
 
     def __init__(
         self,
@@ -70,54 +70,24 @@ class SampleLibrary:
         beta_beta=1.5,
     ):
         self.denoise_timesteps = denoise_timesteps
-
         self.lognorm_m = lognorm_m
         self.lognorm_s = lognorm_s
         self.mode_s = mode_s
-
         self.beta_s = beta_s
         self.beta_alpha = beta_alpha
         self.beta_beta = beta_beta
 
     def sample(self, batch_size, mode, device):
-
-        if mode == "uniform":
-            sample = torch.rand((batch_size,), device=device)
-
-        elif mode == "lognorm":
-            sample = sample_logit_normal(
-                batch_size, m=self.lognorm_m, s=self.lognorm_s, device=device
-            )
-
-        elif mode == "mode":
-            sample = sample_mode(batch_size, s=self.mode_s, device=device)
-
-        elif mode == "cosmap":
-            sample = sample_cosmap(batch_size, device=device)
-
-        elif mode == "beta":
-            sample = sample_beta(
-                batch_size,
-                s=self.beta_s,
-                alpha=self.beta_alpha,
-                beta=self.beta_beta,
-                device=device,
-            )
-
-        elif mode == "discrete":
-            # Discrete time grid: {0, 1/K, ..., (K-1)/K}
-            sample = torch.randint(
-                low=0,
-                high=self.denoise_timesteps,
-                size=(batch_size,),
-                device=device,
-            ).float()
-            sample = sample / self.denoise_timesteps
-
-        elif mode == "discrete_pow":
-            sample = sample_discrete_pow(batch_size, self.denoise_timesteps, device=device)
-
-        else:
+        K = self.denoise_timesteps
+        sample = {
+            "uniform":      lambda: torch.rand((batch_size,), device=device),
+            "lognorm":      lambda: sample_logit_normal(batch_size, m=self.lognorm_m, s=self.lognorm_s, device=device),
+            "mode":         lambda: sample_mode(batch_size, s=self.mode_s, device=device),
+            "cosmap":       lambda: sample_cosmap(batch_size, device=device),
+            "beta":         lambda: sample_beta(batch_size, s=self.beta_s, alpha=self.beta_alpha, beta=self.beta_beta, device=device),
+            "discrete":     lambda: torch.randint(0, K, (batch_size,), device=device).float() / K,
+            "discrete_pow": lambda: sample_discrete_pow(batch_size, K, device=device),
+        }.get(mode)
+        if sample is None:
             raise ValueError(f"Unknown sampling mode for t and delta_t in flowmatch: {mode}")
-
-        return sample.reshape(batch_size)
+        return sample().reshape(batch_size)

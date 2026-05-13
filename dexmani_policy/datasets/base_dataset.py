@@ -1,6 +1,5 @@
 import copy
 import torch
-import numpy as np
 
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.normalizer import LinearNormalizer
@@ -9,6 +8,8 @@ from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask
 
 
 class BaseDataset(torch.utils.data.Dataset):
+    DEFAULT_MODALITIES = ['joint_state']
+
     def __init__(
         self,
         zarr_path,
@@ -18,31 +19,23 @@ class BaseDataset(torch.utils.data.Dataset):
         pad_after=0,
         val_ratio=0.0,
         max_train_episodes=None,
-        sensor_modalities=['joint_state'],
+        sensor_modalities=None,
         augmentation_cfg=None,
     ):
         super().__init__()
+
+        if sensor_modalities is None:
+            sensor_modalities = self.DEFAULT_MODALITIES
 
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
             keys=sensor_modalities + ['action'],
         )
 
-        # 验证所有必需字段是否存在
-        required_keys = set(sensor_modalities + ['action'])
-        available_keys = set(self.replay_buffer.keys())
-        missing_keys = required_keys - available_keys
-
-        if missing_keys:
-            raise ValueError(
-                f"Zarr file missing required keys: {sorted(missing_keys)}\n"
-                f"Required: {sorted(required_keys)}\n"
-                f"Available: {sorted(available_keys)}\n"
-                f"Path: {zarr_path}"
-            )
-
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
+        self.augmentors = {}
+        self._build_augmentors()
 
         val_mask = get_val_mask(
             seed=seed,
@@ -66,26 +59,29 @@ class BaseDataset(torch.utils.data.Dataset):
         self.pad_after = pad_after
 
     def get_validation_dataset(self):
-        """创建验证集，与训练集完全隔离。val_ratio=0 时返回 None。"""
         if not self.val_mask.any():
             return None
 
-        val_set = copy.deepcopy(self)
+        val_set = copy.copy(self)
 
-        # 重新创建 sampler，使用验证集 mask
         val_set.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer,  # 共享 replay_buffer 节省内存
+            replay_buffer=self.replay_buffer,
             sequence_length=self.horizon,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=self.val_mask,
         )
-        # 验证集不使用数据增强
         val_set.augmentation_cfg = None
         return val_set
 
     def __len__(self):
         return len(self.sampler)
+
+    def sample_to_data(self, sample):
+        return {
+            'obs': {m: sample[m] for m in self.sensor_modalities},
+            'action': sample['action'],
+        }
 
     def __getitem__(self, idx):
         sample = self.sampler.sample_sequence(idx)
@@ -93,14 +89,19 @@ class BaseDataset(torch.utils.data.Dataset):
         data = self.apply_augmentation(data)
         return dict_apply(data, torch.from_numpy)
 
-    def sample_to_data(self, sample):
-        data = {'obs': {}}
-        for modality in self.sensor_modalities:
-            data['obs'][modality] = sample[modality]
-        data['action'] = sample['action']
-        return data
+    def _build_augmentors(self):
+        pass
 
     def apply_augmentation(self, data):
+        if self.augmentation_cfg is None:
+            return data
+        for modality, augs in self.augmentors.items():
+            if modality not in data['obs'] or augs is None:
+                continue
+            if not isinstance(augs, (list, tuple)):
+                augs = [augs]
+            for aug in augs:
+                data['obs'][modality] = aug(data['obs'][modality])
         return data
 
     def get_normalizer(self, mode='limits', **kwargs):

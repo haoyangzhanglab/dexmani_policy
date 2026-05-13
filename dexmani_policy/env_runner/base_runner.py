@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from termcolor import cprint
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from dexmani_policy.common.pytorch_util import dict_apply
 
@@ -11,24 +11,26 @@ class BaseRunner:
     def __init__(
         self,
         n_obs_steps: int,
-        env_video_fps: int, 
+        env_video_fps: int,
         default_eval_episodes: int,
         sensor_modalities: List[str] | None = None,
+        clear_cache_freq: int = 25,
     ):
         self.n_obs_steps = n_obs_steps
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
-        self.obs_deque = deque(maxlen=n_obs_steps + 1)  # +1 安全余量，避免边界情况 deque 满导致 drop
+        self.obs_deque = deque(maxlen=n_obs_steps)
 
         self.env_video_fps = env_video_fps
         self.default_eval_episodes = default_eval_episodes
-        self._dropped_keys_warned = False
+        self.clear_cache_freq = clear_cache_freq
+        self.dropped_keys_warned = False
 
         
     @staticmethod
-    def _stack_last_n(all_items,  n_steps):
+    def stack_last_n(all_items, n_steps):
         all_list = list(all_items)
         if len(all_list) == 0:
-            raise RuntimeError("Empty input to _stack_last_n()")
+            raise RuntimeError("Empty input to stack_last_n()")
         head = all_list[0]
 
         if isinstance(head, np.ndarray):
@@ -69,18 +71,18 @@ class BaseRunner:
         dropped_keys = []
         for k in keys:
             if k in self.sensor_modalities:
-                out[k] = self._stack_last_n((frame[k] for frame in self.obs_deque), self.n_obs_steps)
+                out[k] = self.stack_last_n((frame[k] for frame in self.obs_deque), self.n_obs_steps)
             else:
                 dropped_keys.append(k)
         if len(out) == 0:
             raise RuntimeError("Stacked observation dict is empty")
-        if dropped_keys and not self._dropped_keys_warned:
+        if dropped_keys and not self.dropped_keys_warned:
             cprint(f"⚠️ Dropped obs keys {dropped_keys} (not in sensor_modalities={self.sensor_modalities})", "yellow")
-            self._dropped_keys_warned = True
+            self.dropped_keys_warned = True
         return out
 
 
-    def get_nobs(self, device) -> Dict[str, Any]:
+    def get_obs_batch(self, device) -> Dict[str, Any]:
         def to_torch(x, *, dtype=None, device=None):
             if isinstance(x, torch.Tensor):
                 return x.to(device=device, dtype=dtype) if dtype is not None else x.to(device=device)
@@ -89,22 +91,21 @@ class BaseRunner:
             return x
     
         stacked_obs = self.get_stacked_obs()
-        nobs = dict_apply(stacked_obs, lambda x: to_torch(x, device=device))
-        nobs = dict_apply(nobs, lambda x: x.unsqueeze(0) if torch.is_tensor(x) else x)
+        obs_batch = dict_apply(stacked_obs, lambda x: to_torch(x, device=device))
+        obs_batch = dict_apply(obs_batch, lambda x: x.unsqueeze(0) if torch.is_tensor(x) else x)
 
-        return nobs
+        return obs_batch
 
 
     def reset(self):
         self.obs_deque.clear()
-        self._dropped_keys_warned = False
+        self.dropped_keys_warned = False
 
 
     @torch.no_grad()
-    def get_action_chunk(self, nobs, agent, denoise_timesteps:int=None) -> np.ndarray:
-        action = agent.predict_action(obs_dict=nobs, denoise_timesteps=denoise_timesteps)
-        action_chunk = action["control_action"].detach().cpu().numpy().squeeze(0)
-        return action_chunk
+    def get_action_chunk(self, obs_batch, agent, denoise_timesteps:int=None) -> np.ndarray:
+        action = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
+        return action["control_action"].detach().cpu().numpy().squeeze(0)
     
 
     def eval_one_episode(self, agent, env, episode_seed, denoise_timesteps:int=None, **kwargs):
@@ -116,12 +117,11 @@ class BaseRunner:
         done = False
         prev_done = False
         task_done_step = None  # None 表示未成功完成，区分于成功时的 action_cnt
+        device = next(agent.parameters()).device
 
         while not truncated:
-            # 从 agent 的参数推断设备（nn.Module 没有 .device 属性）
-            device = next(agent.parameters()).device
-            nobs = self.get_nobs(device=device)
-            action_chunk = self.get_action_chunk(nobs, agent, denoise_timesteps=denoise_timesteps)
+            obs = self.get_obs_batch(device=device)
+            action_chunk = self.get_action_chunk(obs, agent, denoise_timesteps=denoise_timesteps)
             for i in range(action_chunk.shape[0]):
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
                 self.update_obs(obs)
@@ -153,6 +153,7 @@ class BaseRunner:
         episode_video_list = []
         episode_details = []  # per-episode: {seed, success, steps}
         env_failed_seeds = []
+        completed = 0
 
         print("=" * 90)
 
@@ -165,6 +166,12 @@ class BaseRunner:
                 try:
                     done, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
                     video = env.get_video()
+                    completed += 1
+
+                    # 定期清理 GPU 缓存：关闭并重建环境，防止 SAPIEN 渲染器显存累积
+                    if self.clear_cache_freq > 0 and completed % self.clear_cache_freq == 0:
+                        env.close()
+                        env = self.make_env()
 
                     status = "success" if done else "fail"
                     done_step_str = task_done_step if task_done_step is not None else "N/A"
@@ -217,7 +224,7 @@ class BaseRunner:
                     cprint(f"\n❌ Unexpected error at seed {eval_seed}: {type(e).__name__}: {e}", "red")
                     import traceback
                     traceback.print_exc()
-                    cprint(f"This is an unexpected error. Please report this issue.", "red")
+                    cprint("This is an unexpected error. Please report this issue.", "red")
                     raise  # 重新抛出，让调用者处理
 
             # 统计指标

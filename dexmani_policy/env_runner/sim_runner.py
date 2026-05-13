@@ -17,15 +17,19 @@ class SimRunner(BaseRunner):
         default_eval_episodes: int,
         sensor_modalities: List[str] | None = None,
         env_kwargs: Optional[Dict[str, Any]] = None,
+        eval_seeds: Optional[List[int]] = None,
+        clear_cache_freq: int = 25,
     ):
         super().__init__(
             n_obs_steps=n_obs_steps,
             env_video_fps=env_video_fps,
             default_eval_episodes=default_eval_episodes,
-            sensor_modalities=sensor_modalities
+            sensor_modalities=sensor_modalities,
+            clear_cache_freq=clear_cache_freq,
         )
         self.task_name = task_name
         self.env_kwargs = env_kwargs or {}
+        self.eval_seeds = eval_seeds
 
 
     @staticmethod
@@ -34,31 +38,16 @@ class SimRunner(BaseRunner):
 
 
     def make_env(self):
-        full_module_path = f"{ENV_PREFIX}.{self.task_name}"
-        try:
-            env_module = importlib.import_module(full_module_path)
-        except Exception as e:
-            raise ImportError(f"Failed to import module {full_module_path}") from e
-        env_name = self.name_to_pascal_case(self.task_name)
-        try:
-            env_class = getattr(env_module, env_name)
-        except AttributeError as e:
-            raise ImportError(f"Class {env_name} not found in module {full_module_path}") from e
-        env_kwargs = {"render_mode": "rgb_array", **self.env_kwargs}
-        return env_class(**env_kwargs)
+        env_module = importlib.import_module(f"{ENV_PREFIX}.{self.task_name}")
+        env_class = getattr(env_module, self.name_to_pascal_case(self.task_name))
+        return env_class(render_mode="rgb_array", **self.env_kwargs)
 
 
     def get_seed_list(self) -> List[int]:
+        if self.eval_seeds is not None:
+            return self.eval_seeds
         seed_file = DATA_DIR / "eval_seeds" / f"{self.task_name}.txt"
-        if not seed_file.exists():
-            raise FileNotFoundError(f"Seed file not found: {seed_file}")
-
-        try:
-            content = seed_file.read_text().split()
-            seeds = [int(x) for x in content]
-            if not seeds:
-                raise ValueError("Seed file is empty")
-            return seeds
-        except ValueError as e:
-            raise ValueError(f"Invalid seed format in {seed_file}: {e}") from e
+        if seed_file.exists():
+            return [int(x) for x in seed_file.read_text().split()]
+        return list(range(100))
 

@@ -13,24 +13,25 @@ class DPObsEncoder(nn.Module):
         n_obs_steps: int,
         condition_type: str,
         state_out_dim: int = 64,
+        rgb_backbone_config: dict = None,
     ):
         super().__init__()
-        self.backbone, self.image_processor = build_backbone(rgb_backbone_name)
+        self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=rgb_backbone_config)
         self.state_mlp = StateMLP(state_dim, state_out_dim, hidden_channels=[64])
         self.n_obs_steps = n_obs_steps
         self.condition_type = condition_type
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
-    def forward(self, obs: dict) -> torch.Tensor:
+    def forward(self, obs: dict):
         rgb = self.image_processor.process_images(obs['rgb'])['image']
         feat = torch.cat([
             self.backbone(rgb)['global_token'],
             self.state_mlp(obs['joint_state']),
         ], dim=-1)                                      # (B*T, out_dim)
         B = feat.shape[0] // self.n_obs_steps
-        if self.condition_type == 'film':
-            return feat.reshape(B, -1)
-        return feat.reshape(B, self.n_obs_steps, -1)
+        if self.condition_type in ('film', 'mlp_film'):
+            return feat.reshape(B, -1), {}
+        return feat.reshape(B, self.n_obs_steps, -1), {}
 
 
 class DPAgent(UNetDiffusionAgent):
@@ -44,10 +45,12 @@ class DPAgent(UNetDiffusionAgent):
         state_dim: int,
         condition_type: str = 'film',
         state_out_dim: int = 64,
+        rgb_backbone_config: dict = None,
         **kwargs,
     ):
         obs_encoder = DPObsEncoder(
-            rgb_backbone_name, state_dim, n_obs_steps, condition_type, state_out_dim
+            rgb_backbone_name, state_dim, n_obs_steps, condition_type,
+            state_out_dim, rgb_backbone_config=rgb_backbone_config,
         )
         super().__init__(
             obs_encoder, condition_type, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
@@ -76,7 +79,7 @@ def example():
     print(f'obs joint_state: {obs["joint_state"].shape}')
     print(f'action:          {action.shape}')
 
-    cond = agent.obs_encoder(obs)
+    cond, _ = agent.obs_encoder(obs)
     print(f'cond:            {cond.shape}')
 
     from dexmani_policy.common.normalizer import LinearNormalizer

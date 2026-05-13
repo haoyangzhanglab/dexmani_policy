@@ -141,7 +141,6 @@ class CLIP(nn.Module):
             depth_scale=depth_scale,
             min_depth=min_depth,
             max_depth=max_depth,
-            collapse_repeated_camera=True,
         )
 
         patch_geometry = self.geometry_processor.pool_patch_coordinates(

@@ -17,7 +17,6 @@ class SinusoidalPosEmb(nn.Module):
     def forward(self, x):
         device = x.device
         half_dim = self.dim // 2
-        # 防御性编程：避免 dim <= 3 时除零（half_dim - 1 = 0）
         emb = math.log(10000) / max(half_dim - 1, 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = x[:, None] * emb[None, :]
@@ -90,7 +89,8 @@ class ConditionalResidualBlock1D(nn.Module):
                  cond_dim: int,
                  kernel_size: int = 3,
                  n_groups: int = 8,
-                 condition_type: str = 'film'):
+                 condition_type: str = 'film',
+                 cond_predict_scale: bool = True):
         super().__init__()
 
         self.blocks = nn.ModuleList([
@@ -101,29 +101,31 @@ class ConditionalResidualBlock1D(nn.Module):
         self.out_channels = out_channels
         self.condition_type = condition_type
         self.use_cross_attention = (condition_type == 'cross_attention_film')
+        self.cond_predict_scale = cond_predict_scale
         self.residual_conv = (
             nn.Conv1d(in_channels, out_channels, 1)
             if in_channels != out_channels else nn.Identity()
         )
 
-        cond_channels = out_channels * 2
+        cond_channels = out_channels * 2 if cond_predict_scale else out_channels
         if condition_type == 'film':
             self.cond_encoder = nn.Sequential(
                 nn.Mish(),
                 nn.Linear(cond_dim, cond_channels),
-                Rearrange('batch t -> batch t 1'), 
+                Rearrange('batch t -> batch t 1'),
+            )
+        elif condition_type == 'mlp_film':
+            self.cond_encoder = nn.Sequential(
+                nn.Mish(),
+                nn.Linear(cond_dim, cond_dim),
+                nn.Mish(),
+                nn.Linear(cond_dim, cond_channels),
+                Rearrange('batch t -> batch t 1'),
             )
         elif condition_type == 'cross_attention_film':
             self.cond_encoder = CrossAttention(out_channels, cond_dim, cond_channels)
         else:
             raise NotImplementedError(f"Unsupported condition type: {condition_type}")
-
-    def apply_film(self, out, embed):
-        b, _, t = embed.shape
-        embed = embed.reshape(b, 2, self.out_channels, t)
-        scale = embed[:, 0]
-        bias  = embed[:, 1]
-        return scale * out + bias
 
     def forward(self, x, cond=None):
         out = self.blocks[0](x)
@@ -132,9 +134,19 @@ class ConditionalResidualBlock1D(nn.Module):
                 embed = self.cond_encoder(out.permute(0, 2, 1), cond).permute(0, 2, 1)
             else:
                 embed = self.cond_encoder(cond)
-            out = self.apply_film(out, embed)
+            if self.cond_predict_scale:
+                out = self.apply_film(out, embed)
+            else:
+                out = out + embed
         out = self.blocks[1](out)
         return out + self.residual_conv(x)
+
+    def apply_film(self, out, embed):
+        b, _, t = embed.shape
+        embed = embed.reshape(b, 2, self.out_channels, t)
+        scale = embed[:, 0]
+        bias = embed[:, 1]
+        return scale * out + bias
 
 
 #################################################################################
@@ -143,7 +155,7 @@ class ConditionalResidualBlock1D(nn.Module):
 class ConditionalUnet1D(nn.Module):
 
     def __init__(
-            self, 
+            self,
             input_dim,
             context_dim,
             diffusion_step_embed_dim=256,
@@ -151,6 +163,7 @@ class ConditionalUnet1D(nn.Module):
             kernel_size=5,
             n_groups=8,
             condition_type='film',
+            cond_predict_scale=True,
             use_down_condition=True,
             use_mid_condition=True,
             use_up_condition=True,
@@ -158,6 +171,7 @@ class ConditionalUnet1D(nn.Module):
         super().__init__()
 
         self.condition_type = condition_type
+        self.cond_predict_scale = cond_predict_scale
         self.use_down_condition = use_down_condition
         self.use_mid_condition = use_mid_condition
         self.use_up_condition = use_up_condition
@@ -179,12 +193,12 @@ class ConditionalUnet1D(nn.Module):
             ConditionalResidualBlock1D(
                 mid_dim, mid_dim, cond_dim=cond_dim,
                 kernel_size=kernel_size, n_groups=n_groups,
-                condition_type=condition_type
+                condition_type=condition_type, cond_predict_scale=cond_predict_scale
             ),
             ConditionalResidualBlock1D(
                 mid_dim, mid_dim, cond_dim=cond_dim,
                 kernel_size=kernel_size, n_groups=n_groups,
-                condition_type=condition_type
+                condition_type=condition_type, cond_predict_scale=cond_predict_scale
             ),
         ])
 
@@ -193,13 +207,13 @@ class ConditionalUnet1D(nn.Module):
             is_last = ind >= (len(in_out) - 1)
             self.down_modules.append(nn.ModuleList([
                 ConditionalResidualBlock1D(
-                    dim_in, dim_out, cond_dim=cond_dim, 
+                    dim_in, dim_out, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type),
+                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
                 ConditionalResidualBlock1D(
-                    dim_out, dim_out, cond_dim=cond_dim, 
+                    dim_out, dim_out, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type),
+                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
                 Downsample1d(dim_out) if not is_last else nn.Identity()
             ]))
 
@@ -210,11 +224,11 @@ class ConditionalUnet1D(nn.Module):
                 ConditionalResidualBlock1D(
                     dim_out*2, dim_in, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type),
+                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
                 ConditionalResidualBlock1D(
                     dim_in, dim_in, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type),
+                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
                 Upsample1d(dim_in) if not is_last else nn.Identity()
             ]))
         self.up_modules = up_modules
@@ -226,7 +240,7 @@ class ConditionalUnet1D(nn.Module):
         )
 
     
-    def get_optim_groups(self, weight_decay):
+    def get_optim_groups(self, weight_decay: float = 1e-3):
         # return get_default_optim_group(self, weight_decay)
         return get_optim_group_with_no_decay(self, weight_decay=weight_decay)
 

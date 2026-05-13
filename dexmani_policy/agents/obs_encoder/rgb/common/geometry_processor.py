@@ -45,9 +45,7 @@ class GeometryProcessor:
         depth_scale: float = 1000.0,
         min_depth: float = 0.0,
         max_depth: Optional[float] = None,
-        collapse_repeated_camera: bool = True,
     ) -> Dict[str, object]:
-        _ = collapse_repeated_camera
 
         depth = to_depth_tensor(depth)
         flat_depth, leading_shape = flatten_batch(depth, trailing_ndim=3)

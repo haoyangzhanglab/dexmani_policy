@@ -1,8 +1,11 @@
 from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.datasets.augmentation import RGBAug
+from dexmani_policy.datasets.augmentation import RGBAug, StateNoiseAug
 
 
 class RGBDataset(BaseDataset):
+
+    DEFAULT_MODALITIES = ['joint_state', 'rgb']
+
     def __init__(
         self,
         zarr_path,
@@ -12,7 +15,7 @@ class RGBDataset(BaseDataset):
         pad_after=0,
         val_ratio=0.0,
         max_train_episodes=None,
-        sensor_modalities=['joint_state', 'rgb'],
+        sensor_modalities=None,
         augmentation_cfg=None,
     ):
         super().__init__(
@@ -26,14 +29,19 @@ class RGBDataset(BaseDataset):
             sensor_modalities=sensor_modalities,
             augmentation_cfg=augmentation_cfg,
         )
-        rgb_cfg = (augmentation_cfg or {}).get('rgb')
-        self.rgb_aug = RGBAug(**rgb_cfg) if rgb_cfg is not None else None
 
-    def apply_augmentation(self, data):
-        if self.augmentation_cfg is None or self.rgb_aug is None:
-            return data
-        data['obs']['rgb'] = self.rgb_aug(data['obs']['rgb'])
-        return data
+    def _build_augmentors(self):
+        self.augmentors = {}
+        if self.augmentation_cfg is None:
+            return
+
+        rgb_cfg = self.augmentation_cfg.get('rgb')
+        if rgb_cfg is not None and rgb_cfg.get('enabled', True):
+            self.augmentors['rgb'] = [RGBAug(**rgb_cfg)]
+
+        state_cfg = self.augmentation_cfg.get('state')
+        if state_cfg is not None and state_cfg.get('enabled', True):
+            self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
 
 def example(zarr_path):

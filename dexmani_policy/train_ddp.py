@@ -1,13 +1,10 @@
 import os
-import sys
 import pathlib
 
 ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
-sys.path.append(ROOT_DIR)
 os.chdir(ROOT_DIR)
 
 
-import copy
 import hydra
 import torch
 import warnings
@@ -17,11 +14,15 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from dexmani_policy.common.pytorch_util import set_seed, optimizer_to
-from dexmani_policy.datasets.augmentation import worker_init_fn
+from dexmani_policy.common.pytorch_util import set_seed
+from dexmani_policy.common.pytorch_util import worker_init_fn
 from dexmani_policy.training.ddp_trainer import DDPTrainer
-from dexmani_policy.training.common.workspace import TrainWorkspace
-from dexmani_policy.training.common.lr_scheduler import get_scheduler
+from dexmani_policy.train import (
+    validate_config,
+    build_dataset_and_normalizer,
+    build_model_and_ema,
+    build_optimizer_and_scheduler,
+)
 
 warnings.filterwarnings("ignore")
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -48,16 +49,10 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     torch.cuda.set_device(device)
     set_seed(cfg.training.seed + rank)
 
-    # 为多任务数据集设置不同的种子（如果有 seed 参数）
-    dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
-    if 'seed' in dataset_cfg:
-        dataset_cfg['seed'] = dataset_cfg['seed'] + rank
-    for sub_cfg in dataset_cfg.get('datasets', []):
-        if isinstance(sub_cfg, dict) and 'seed' in sub_cfg:
-            sub_cfg['seed'] = sub_cfg['seed'] + rank
-    dataset = hydra.utils.instantiate(dataset_cfg)
-    normalizer = dataset.get_normalizer()
+    # 构建 dataset 和 normalizer（DDP 模式：每个 rank 不同的 seed）
+    dataset, normalizer = build_dataset_and_normalizer(cfg, rank=rank, world_size=world_size)
 
+    # 构建 DDP dataloader（使用 DistributedSampler）
     train_sampler = DistributedSampler(
         dataset,
         num_replicas=world_size,
@@ -76,6 +71,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         worker_init_fn=worker_init_fn,
     )
 
+    # 验证集只在 rank 0 创建
     val_loader = None
     if rank == 0:
         val_dataset = dataset.get_validation_dataset()
@@ -90,49 +86,14 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
                 worker_init_fn=worker_init_fn,
             )
 
-    model = hydra.utils.instantiate(cfg.agent)
+    # 构建 model 和 EMA（复用单卡逻辑）
+    model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
-    # 对于多任务 Agent，验证配置一致性
-    if hasattr(model, 'num_tasks') and hasattr(dataset, 'task_names'):
-        if model.num_tasks != len(dataset.task_names):
-            raise ValueError(
-                f"Configuration mismatch: agent.num_tasks={model.num_tasks} but "
-                f"dataset has {len(dataset.task_names)} tasks {dataset.task_names}. "
-                f"Please update agent.num_tasks in the config file."
-            )
-
-    model.load_normalizer_from_dataset(normalizer)
-    model.to(device)
-
-    ema_model = None
-    ema_updater = None
-    if cfg.training.use_ema:
-        try:
-            ema_model = copy.deepcopy(model)
-        except Exception as e:
-            warnings.warn(f"copy.deepcopy(model) failed ({e}), falling back to fresh instantiation.")
-            ema_model = hydra.utils.instantiate(cfg.agent)
-            ema_model.load_normalizer_from_dataset(normalizer)
-            ema_model.load_state_dict(model.state_dict())
-
-        ema_model.to(device)
-        ema_model.eval()
-        ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
-
-    optimizer = model.configure_optimizer(**cfg.optimizer)
-
-    gradient_accumulate_every = cfg.training.loop.gradient_accumulate_every
+    # 构建 optimizer 和 scheduler（复用单卡逻辑）
     batches_per_epoch = len(train_loader)
-    optimizer_steps_per_epoch = (batches_per_epoch + gradient_accumulate_every - 1) // gradient_accumulate_every
-    total_steps = optimizer_steps_per_epoch * cfg.training.loop.num_epochs
+    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
 
-    scheduler = get_scheduler(
-        optimizer=optimizer,
-        name=cfg.training.lr_scheduler,
-        num_warmup_steps=cfg.training.lr_warmup_steps,
-        num_training_steps=total_steps,
-    )
-
+    # workspace 只在 rank 0 创建完整版本，其他 rank 使用 ReadOnly
     workspace = None
     if rank == 0:
         workspace = hydra.utils.instantiate(cfg.workspace)
@@ -141,6 +102,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         from dexmani_policy.training.common.workspace import ReadOnlyWorkspace
         workspace = ReadOnlyWorkspace(output_dir=cfg.workspace.output_dir)
 
+    # env_runner 只在 rank 0 创建
     env_runner = None
     if rank == 0 and cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
         env_runner = hydra.utils.instantiate(cfg.env_runner)
@@ -170,6 +132,9 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
 
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
+    # 验证配置
+    validate_config(cfg)
+
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. DDP training requires GPU.")
 
@@ -217,6 +182,9 @@ def main(cfg):
         sock.bind(('', 0))
         os.environ['MASTER_PORT'] = str(sock.getsockname()[1])
         sock.close()
+
+    # 子进程无法访问 Hydra runtime resolver，必须在 spawn 前解析所有插值
+    OmegaConf.resolve(cfg)
 
     mp.spawn(
         ddp_worker,

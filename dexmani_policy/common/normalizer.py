@@ -2,14 +2,32 @@ import zarr
 import torch
 import numpy as np
 import torch.nn as nn
+import warnings
 from typing import Union, Dict
 
 from dexmani_policy.common.pytorch_util import dict_apply
 
 
-#################################################################################
-#               将参数以字典的形式存储在nn.Module中，方便加载和保存
-#################################################################################
+def dfs_add(dest, keys, value: torch.Tensor):
+    if len(keys) == 1:
+        dest[keys[0]] = value
+        return
+    if keys[0] not in dest:
+        dest[keys[0]] = nn.ParameterDict()
+    dfs_add(dest[keys[0]], keys[1:], value)
+
+
+def load_param_dict(state_dict, prefix):
+    out_dict = nn.ParameterDict()
+    for key, value in state_dict.items():
+        value: torch.Tensor
+        if key.startswith(prefix):
+            param_keys = key[len(prefix):].split('.')[1:]
+            if param_keys:
+                dfs_add(out_dict, param_keys, value.clone())
+    return out_dict
+
+
 class DictOfTensorMixin(nn.Module):
     def __init__(self, params_dict=None):
         super().__init__()
@@ -22,36 +40,12 @@ class DictOfTensorMixin(nn.Module):
         return next(iter(self.parameters())).device
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        def dfs_add(dest, keys, value: torch.Tensor):
-            if len(keys) == 1:
-                dest[keys[0]] = value
-                return
-
-            if keys[0] not in dest:
-                dest[keys[0]] = nn.ParameterDict()
-            dfs_add(dest[keys[0]], keys[1:], value)
-
-        def load_dict(state_dict, prefix):
-            out_dict = nn.ParameterDict()
-            for key, value in state_dict.items():
-                value: torch.Tensor
-                if key.startswith(prefix):
-                    param_keys = key[len(prefix):].split('.')[1:]
-                    if param_keys:
-                        dfs_add(out_dict, param_keys, value.clone())
-            return out_dict
-
-        self.params_dict = load_dict(state_dict, prefix + 'params_dict')
+        self.params_dict = load_param_dict(state_dict, prefix + 'params_dict')
         self.params_dict.requires_grad_(False)
-        return
 
 
 
-#################################################################################
-#                fit: 根据数据自动拟合线性归一化器的参数
-#                normalize: 根据拟合的参数对数据进行归一化
-#################################################################################
-def _fit(
+def fit_params(
     data: Union[torch.Tensor, np.ndarray, zarr.Array],
     last_n_dims=1,
     dtype=torch.float32,
@@ -90,7 +84,6 @@ def _fit(
             offset = output_min - scale * input_min
             offset[ignore_dim] = (output_max + output_min) / 2 - input_min[ignore_dim]
         else:
-            assert output_max > 0 and output_min < 0
             output_abs = min(abs(output_min), abs(output_max))
             input_abs = torch.maximum(torch.abs(input_min), torch.abs(input_max))
             ignore_dim = input_abs < range_eps
@@ -124,8 +117,7 @@ def _fit(
     return this_params
 
 
-def _normalize(x, params, forward=True):
-    assert 'scale' in params
+def normalize_tensor(x, params, forward=True):
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
     scale = params['scale']
@@ -140,9 +132,6 @@ def _normalize(x, params, forward=True):
     x = x.reshape(src_shape)
     return x
 
-#################################################################################
-#               处理单个张量字段的归一化器
-#################################################################################
 class SingleFieldLinearNormalizer(DictOfTensorMixin):
 
     available_modes = ['limits', 'gaussian']
@@ -159,7 +148,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         range_eps=1e-4,
         fit_offset=True
     ):
-        self.params_dict = _fit(
+        self.params_dict = fit_params(
             data, 
             last_n_dims=last_n_dims,
             dtype=dtype,
@@ -171,7 +160,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         )
     
     @classmethod
-    def create_fit(cls, data: Union[torch.Tensor, np.ndarray, zarr.Array], **kwargs):
+    def createfit_params(cls, data: Union[torch.Tensor, np.ndarray, zarr.Array], **kwargs):
         obj = cls()
         obj.fit(data, **kwargs)
         return obj
@@ -188,10 +177,6 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
                 x = torch.from_numpy(x)
             x = x.flatten()
             return x
-        
-        for x in [offset] + list(input_stats_dict.values()):
-            assert x.shape == scale.shape
-            assert x.dtype == scale.dtype
         
         params_dict = nn.ParameterDict({
             'scale': to_tensor(scale),
@@ -214,10 +199,10 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         return cls.create_manual(scale, offset, input_stats_dict)
 
     def normalize(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
-        return _normalize(x, self.params_dict, forward=True)
+        return normalize_tensor(x, self.params_dict, forward=True)
 
     def unnormalize(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
-        return _normalize(x, self.params_dict, forward=False)
+        return normalize_tensor(x, self.params_dict, forward=False)
 
     def get_input_stats(self):
         return self.params_dict['input_stats']
@@ -229,11 +214,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         return self.normalize(x)
 
 
-#################################################################################
-#               处理以字典形式包含多个张量字段的归一化器
-#################################################################################
 class LinearNormalizer(DictOfTensorMixin):
-
     available_modes = ['limits', 'gaussian']
     
     @torch.no_grad()
@@ -250,7 +231,7 @@ class LinearNormalizer(DictOfTensorMixin):
     ):
         if isinstance(data, dict):
             for key, value in data.items():
-                self.params_dict[key] = _fit(
+                self.params_dict[key] = fit_params(
                     value, 
                     last_n_dims=last_n_dims,
                     dtype=dtype,
@@ -261,7 +242,7 @@ class LinearNormalizer(DictOfTensorMixin):
                     fit_offset=fit_offset,
                 )
         else:
-            self.params_dict['_default'] = _fit(
+            self.params_dict['_default'] = fit_params(
                     data, 
                     last_n_dims=last_n_dims,
                     dtype=dtype,
@@ -281,7 +262,10 @@ class LinearNormalizer(DictOfTensorMixin):
     def __setitem__(self, key: str , value: 'SingleFieldLinearNormalizer'):
         self.params_dict[key] = value.params_dict
 
-    def _normalize_impl(self, x, forward=True):
+    def is_fitted(self):
+        return len(self.params_dict) > 0
+
+    def normalize_impl(self, x, forward=True):
         if isinstance(x, dict):
             result = dict()
             for key, value in x.items():
@@ -289,21 +273,21 @@ class LinearNormalizer(DictOfTensorMixin):
                     result[key] = value
                     continue
                 params = self.params_dict[key]
-                result[key] = _normalize(value, params, forward=forward)
+                result[key] = normalize_tensor(value, params, forward=forward)
             return result
         else:
             if '_default' not in self.params_dict:
                 raise RuntimeError("Not initialized")
             params = self.params_dict['_default']
-            return _normalize(x, params, forward=forward)
+            return normalize_tensor(x, params, forward=forward)
 
 
     def normalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
-        return self._normalize_impl(x, forward=True)
+        return self.normalize_impl(x, forward=True)
 
 
     def unnormalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
-        return self._normalize_impl(x, forward=False)
+        return self.normalize_impl(x, forward=False)
 
 
     def get_input_stats(self) -> Dict:

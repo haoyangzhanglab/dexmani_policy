@@ -61,7 +61,7 @@ class MoE(nn.Module):
         topk_prob = topk_prob / topk_prob.sum(dim=-1, keepdim=True)
         return probs, topk_idx, topk_prob
 
-    def mix(self, z, topk_idx, topk_prob):
+    def aggregate_experts(self, z, topk_idx, topk_prob):
         expert_out = torch.stack([expert(z) for expert in self.experts], dim=1)
         picked = torch.gather(
             expert_out,
@@ -70,8 +70,7 @@ class MoE(nn.Module):
         )
         return (picked * topk_prob.unsqueeze(-1)).sum(dim=1)
 
-    def aux_loss(self, probs):
-        topk_idx = torch.topk(probs, self.top_k, dim=-1)[1]
+    def aux_loss(self, probs, topk_idx):
         dispatch = topk_idx.reshape(-1)
         f_i = torch.bincount(dispatch, minlength=self.num_experts).to(probs.dtype)
         f_i = f_i / dispatch.numel()
@@ -94,17 +93,18 @@ class MoE(nn.Module):
 
     def forward(self, z, override_idx=None, return_aux=False):
         probs, topk_idx, topk_prob = self.route(z)
+        router_topk_idx = topk_idx
 
         if override_idx is not None:
             topk_idx = override_idx[:, None]
             topk_prob = torch.ones(z.shape[0], 1, device=z.device, dtype=z.dtype)
 
-        z_moe = self.mix(z, topk_idx, topk_prob)
+        z_moe = self.aggregate_experts(z, topk_idx, topk_prob)
 
         if not return_aux:
             return z_moe
 
-        aux = self.aux_loss(probs)
+        aux = self.aux_loss(probs, router_topk_idx)
         aux["topk_idx"] = topk_idx
         aux["topk_prob"] = topk_prob
         return z_moe, aux

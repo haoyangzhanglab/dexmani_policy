@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_patch_tokenizer
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import farthest_point_sample
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
 from dexmani_policy.agents.core.base import DiTXFlowMatchAgent
 
@@ -22,28 +23,27 @@ class ManiFlowObsEncoder(nn.Module):
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps
-        self.encoder_type = encoder_type
         patch_seq_len, pc_out_dim = self.pc_encoder.out_shape  # (num_patches, channels)
         self.num_obs_tokens = (patch_seq_len + 1) * n_obs_steps   # (patches + global) * T
         self.obs_token_dim = pc_out_dim + self.state_mlp.out_dim
 
-    def _get_global_token(self, patch_token, patch_center) -> torch.Tensor:
-        if self.encoder_type == 'pointnext_tokenizer':
-            return self.pc_encoder.get_global_token(patch_token, patch_center)  # (B*T, 1, D)
-        return self.pc_encoder.get_global_token(patch_token)                    # (B*T, 1, D)
+    def get_global_token(self, patch_token, patch_center) -> torch.Tensor:
+        return self.pc_encoder.get_global_token(patch_token, patch_center)
 
-    def forward(self, obs: dict) -> torch.Tensor:
+    def forward(self, obs: dict):
         pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
-        patch_token, patch_center = self.pc_encoder(pc)                         # (B*T, K, D), (B*T, K, 3)
-        global_token = self._get_global_token(patch_token, patch_center)        # (B*T, 1, D)
-        pc_feat = torch.cat([global_token, patch_token], dim=1)                 # (B*T, K+1, D)
+        if pc.shape[1] > self.num_points:
+            pc, _ = farthest_point_sample(pc, self.num_points)
+        patch_token, patch_center = self.pc_encoder(pc)
+        global_token = self.get_global_token(patch_token, patch_center)
+        pc_feat = torch.cat([global_token, patch_token], dim=1)
 
-        state_feat = self.state_mlp(obs['joint_state'])                         # (B*T, state_out_dim)
+        state_feat = self.state_mlp(obs['joint_state'])
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
-        feat = torch.cat([pc_feat, state_feat], dim=-1)                         # (B*T, K+1, obs_feat_dim)
+        feat = torch.cat([pc_feat, state_feat], dim=-1)
 
         B = feat.shape[0] // self.n_obs_steps
-        return feat.reshape(B, -1, self.obs_token_dim)                          # (B, T*(K+1), obs_token_dim)
+        return feat.reshape(B, -1, self.obs_token_dim), {}
 
 
 class ManiFlowAgent(DiTXFlowMatchAgent):
@@ -109,7 +109,7 @@ def example():
     print(f'obs joint_state:  {obs["joint_state"].shape}')
     print(f'action:           {action.shape}')
 
-    cond = agent.obs_encoder(obs)
+    cond, _ = agent.obs_encoder(obs)
     print(f'cond (tokens):    {cond.shape}  '
           f'[B, T*(K+1), obs_token_dim] = [{B}, {cond.shape[1]}, {cond.shape[2]}]')
 

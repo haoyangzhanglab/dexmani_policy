@@ -1,10 +1,16 @@
 import torch
 from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.datasets.augmentation import RGBAug, PCAug
+from dexmani_policy.datasets.augmentation import (
+    RGBAug, PCColorJitter, PCSpatialAug, PCDropout, StateNoiseAug, PC_AUG_CLASSES,
+)
 from dexmani_policy.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 
 
 class RGBPCDataset(BaseDataset):
+
+    DEFAULT_MODALITIES = ['joint_state', 'rgb', 'depth', 'point_cloud',
+                          'camera_intrinsic', 'camera_extrinsic']
+
     def __init__(
         self,
         zarr_path,
@@ -14,8 +20,7 @@ class RGBPCDataset(BaseDataset):
         pad_after=0,
         val_ratio=0.0,
         max_train_episodes=None,
-        sensor_modalities=['joint_state', 'rgb', 'depth', 'point_cloud',
-                           'camera_intrinsic', 'camera_extrinsic'],
+        sensor_modalities=None,
         augmentation_cfg=None,
     ):
         super().__init__(
@@ -29,19 +34,29 @@ class RGBPCDataset(BaseDataset):
             sensor_modalities=sensor_modalities,
             augmentation_cfg=augmentation_cfg,
         )
-        rgb_cfg = (augmentation_cfg or {}).get('rgb')
-        pc_cfg = (augmentation_cfg or {}).get('pc')
-        self.rgb_aug = RGBAug(**rgb_cfg) if rgb_cfg is not None else None
-        self.pc_aug = PCAug(**pc_cfg) if pc_cfg else None
 
-    def apply_augmentation(self, data):
+    def _build_augmentors(self):
+        self.augmentors = {}
         if self.augmentation_cfg is None:
-            return data
-        if self.rgb_aug is not None:
-            data['obs']['rgb'] = self.rgb_aug(data['obs']['rgb'])
-        if self.pc_aug is not None:
-            data['obs']['point_cloud'] = self.pc_aug(data['obs']['point_cloud'])
-        return data
+            return
+
+        rgb_cfg = self.augmentation_cfg.get('rgb')
+        if rgb_cfg is not None and rgb_cfg.get('enabled', True):
+            self.augmentors['rgb'] = [RGBAug(**rgb_cfg)]
+
+        pc_cfg = self.augmentation_cfg.get('pc')
+        if pc_cfg is not None:
+            pc_augs = []
+            for name, cls in PC_AUG_CLASSES.items():
+                aug_cfg = pc_cfg.get(name)
+                if aug_cfg is not None and aug_cfg.get('enabled', True):
+                    pc_augs.append(cls(**aug_cfg))
+            if pc_augs:
+                self.augmentors['point_cloud'] = pc_augs
+
+        state_cfg = self.augmentation_cfg.get('state')
+        if state_cfg is not None and state_cfg.get('enabled', True):
+            self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
     def get_normalizer(self, mode='limits', **kwargs):
         data = {

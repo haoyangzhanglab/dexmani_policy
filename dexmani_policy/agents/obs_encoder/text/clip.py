@@ -27,13 +27,14 @@ class CLIPTextEncoder(nn.Module):
 
     @torch.no_grad()
     def forward(self, task_texts: List[str]) -> torch.Tensor:
+        device = next(self.parameters()).device
         task_tokens = self.tokenizer(
             task_texts,
             padding=True,
             truncation=True,
             max_length=self.max_length,
             return_tensors="pt",
-        ).to(self.device)
+        ).to(device)
 
         task_embeds = self.text_backbone(
             input_ids=task_tokens.input_ids,

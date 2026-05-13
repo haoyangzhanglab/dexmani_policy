@@ -48,7 +48,7 @@ PATCH_TOKENIZER_CONFIGS: Dict[str, Dict] = {
 }
 
 
-def _merge_config(default_cfg: Dict, config: Optional[Dict] = None) -> Dict:
+def merge_config(default_cfg: Dict, config: Optional[Dict] = None) -> Dict:
     cfg = dict(default_cfg)
     if config:
         cfg.update(config)
@@ -66,7 +66,7 @@ def build_pc_global_encoder(
             f"Available types: {sorted(GLOBAL_ENCODER_CONFIGS.keys())}"
         )
 
-    cfg = _merge_config(GLOBAL_ENCODER_CONFIGS[encoder_type], config)
+    cfg = merge_config(GLOBAL_ENCODER_CONFIGS[encoder_type], config)
 
     if encoder_type == "dp3":
         return PointNet(
@@ -103,7 +103,7 @@ def build_pc_patch_tokenizer(
             f"Available types: {sorted(PATCH_TOKENIZER_CONFIGS.keys())}"
         )
 
-    cfg = _merge_config(PATCH_TOKENIZER_CONFIGS[tokenizer_type], config)
+    cfg = merge_config(PATCH_TOKENIZER_CONFIGS[tokenizer_type], config)
 
     if tokenizer_type == "pointpn":
         return PointPNTokenizer(

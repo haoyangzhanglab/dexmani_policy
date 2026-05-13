@@ -26,7 +26,7 @@ class T5TextEncoder(nn.Module):
             param.requires_grad = False
 
     @staticmethod
-    def _masked_mean_pool(token_embeds: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def masked_mean_pool(token_embeds: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         mask = attention_mask.unsqueeze(-1).to(token_embeds.dtype)
         pooled = (token_embeds * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
         return pooled
@@ -46,7 +46,7 @@ class T5TextEncoder(nn.Module):
             attention_mask=task_tokens.attention_mask,
         ).last_hidden_state
 
-        task_embeds = self._masked_mean_pool(token_embeds, task_tokens.attention_mask)
+        task_embeds = self.masked_mean_pool(token_embeds, task_tokens.attention_mask)
         return task_embeds.unsqueeze(1)
 
 

@@ -30,8 +30,11 @@ class CheckpointStore:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    def _serialize(self, checkpoint: TrainCheckpoint) -> Dict[str, Any]:
-        return {
+    def save(self, filename: str, checkpoint: TrainCheckpoint) -> Path:
+        path = self.checkpoint_dir / filename
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+        payload = {
             "state": {
                 "epoch": int(checkpoint.epoch),
                 "global_step": int(checkpoint.global_step),
@@ -48,7 +51,12 @@ class CheckpointStore:
             "_saved_at": time.time(),
         }
 
-    def _deserialize(self, payload: Dict[str, Any]) -> TrainCheckpoint:
+        torch.save(payload, tmp_path)
+        tmp_path.replace(path)
+        return path
+
+    def load(self, path: Path) -> TrainCheckpoint:
+        payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         state = payload["state"]
         weights = payload["weights"]
 
@@ -62,17 +70,6 @@ class CheckpointStore:
             optimizer_state=weights["optimizer"],
             scheduler_state=weights["scheduler"],
         )
-
-    def save(self, filename: str, checkpoint: TrainCheckpoint) -> Path:
-        path = self.checkpoint_dir / filename
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        torch.save(self._serialize(checkpoint), tmp_path)
-        tmp_path.replace(path)
-        return path
-
-    def load(self, path: Path) -> TrainCheckpoint:
-        payload = torch.load(Path(path), map_location="cpu", weights_only=False)
-        return self._deserialize(payload)
 
 
 
@@ -92,39 +89,36 @@ class TopKCheckpointTracker:
         self.k = int(k)
 
         self.manifest_path = self.checkpoint_dir / "topk_manifest.json"
-        self._manifest = self._load_manifest()
+        self.manifest = self.load_manifest()
 
-    def _load_manifest(self) -> Dict[str, Any]:
+    def load_manifest(self) -> Dict[str, Any]:
         if not self.manifest_path.exists():
             return {"items": []}
-        try:
-            return json.loads(self.manifest_path.read_text("utf-8"))
-        except Exception:
-            return {"items": []}
+        return json.loads(self.manifest_path.read_text("utf-8"))
 
-    def _save_manifest(self) -> None:
+    def save_manifest(self) -> None:
         tmp_path = self.manifest_path.with_suffix(".tmp")
         tmp_path.write_text(
-            json.dumps(self._manifest, indent=2, ensure_ascii=False),
+            json.dumps(self.manifest, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         tmp_path.replace(self.manifest_path)
 
-    def _fallback_score(self) -> float:
+    def fallback_score(self) -> float:
         return float("-inf" if self.mode == "max" else "inf")
 
-    def _normalize_score(self, value: Any) -> float:
+    def normalize_score(self, value: Any) -> float:
         if value is None:
-            return self._fallback_score()
+            return self.fallback_score()
 
         try:
             score = float(value)
         except (TypeError, ValueError):
-            return self._fallback_score()
+            return self.fallback_score()
 
-        return score if math.isfinite(score) else self._fallback_score()
+        return score if math.isfinite(score) else self.fallback_score()
 
-    def _sort_key(self, item: Dict[str, Any]):
+    def sort_key(self, item: Dict[str, Any]):
         score = item["score"]
         epoch = item["epoch"]
 
@@ -132,42 +126,42 @@ class TopKCheckpointTracker:
             return (-score, -epoch)
         return (score, -epoch)
 
-    def _remove_extra_checkpoints(self, items) -> None:
+    def remove_extra_checkpoints(self, items) -> None:
         for item in items:
             path = self.checkpoint_dir / item["path"]
             if path.exists():
                 try:
                     path.unlink()
-                except Exception:
+                except OSError:
                     pass
 
     def update(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
         if self.k <= 0:
             return self.best_path()
 
-        items = list(self._manifest.get("items", []))
+        items = list(self.manifest.get("items", []))
         items.append(
             {
                 "path": Path(checkpoint_path).name,
-                "score": self._normalize_score(checkpoint.monitor.get(self.monitor_key)),
+                "score": self.normalize_score(checkpoint.monitor.get(self.monitor_key)),
                 "step": int(checkpoint.global_step),
                 "epoch": int(checkpoint.epoch),
             }
         )
 
-        items.sort(key=self._sort_key)
+        items.sort(key=self.sort_key)
 
         if len(items) > self.k:
-            self._remove_extra_checkpoints(items[self.k :])
+            self.remove_extra_checkpoints(items[self.k :])
             items = items[: self.k]
 
-        self._manifest["items"] = items
-        self._save_manifest()
+        self.manifest["items"] = items
+        self.save_manifest()
         return self.best_path()
 
 
     def best_path(self) -> Optional[Path]:
-        items = self._manifest.get("items", [])
+        items = self.manifest.get("items", [])
         if not items:
             return None
         return self.checkpoint_dir / items[0]["path"]

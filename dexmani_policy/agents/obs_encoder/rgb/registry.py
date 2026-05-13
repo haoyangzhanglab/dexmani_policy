@@ -12,26 +12,22 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
         "tune_mode": "full",
         "norm_mode": "group_norm",
         "global_token_type": "avg",
-        "out_dim": 512,
         "weights": None,
     },
     "clip": {
         "model_name": "openai/clip-vit-base-patch32",
         "tune_mode": "freeze",
         "global_token_type": "avg",
-        "out_dim": 512,
     },
     "dino": {
         "model_name": "facebook/dinov2-base",
         "tune_mode": "freeze",
         "global_token_type": "avg",
-        "out_dim": 512,
     },
     "siglip": {
         "model_name": "google/siglip-base-patch16-224",
         "tune_mode": "freeze",
         "global_token_type": "avg",
-        "out_dim": 512,
     },
 }
 

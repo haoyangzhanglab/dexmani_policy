@@ -1,9 +1,14 @@
 from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.datasets.augmentation import PCAug
+from dexmani_policy.datasets.augmentation import (
+    PCColorJitter, PCSpatialAug, PCDropout, StateNoiseAug, PC_AUG_CLASSES,
+)
 from dexmani_policy.common.normalizer import LinearNormalizer
 
 
 class PCDataset(BaseDataset):
+
+    DEFAULT_MODALITIES = ['joint_state', 'point_cloud']
+
     def __init__(
         self,
         zarr_path,
@@ -13,7 +18,7 @@ class PCDataset(BaseDataset):
         pad_after=0,
         val_ratio=0.0,
         max_train_episodes=None,
-        sensor_modalities=['joint_state', 'point_cloud'],
+        sensor_modalities=None,
         augmentation_cfg=None,
     ):
         super().__init__(
@@ -27,14 +32,25 @@ class PCDataset(BaseDataset):
             sensor_modalities=sensor_modalities,
             augmentation_cfg=augmentation_cfg,
         )
-        pc_cfg = (augmentation_cfg or {}).get('pc')
-        self.pc_aug = PCAug(**pc_cfg) if pc_cfg else None
 
-    def apply_augmentation(self, data):
-        if self.augmentation_cfg is None or self.pc_aug is None:
-            return data
-        data['obs']['point_cloud'] = self.pc_aug(data['obs']['point_cloud'])
-        return data
+    def _build_augmentors(self):
+        self.augmentors = {}
+        if self.augmentation_cfg is None:
+            return
+
+        pc_cfg = self.augmentation_cfg.get('pc')
+        if pc_cfg is not None:
+            augs = []
+            for name, cls in PC_AUG_CLASSES.items():
+                aug_cfg = pc_cfg.get(name)
+                if aug_cfg is not None and aug_cfg.get('enabled', True):
+                    augs.append(cls(**aug_cfg))
+            if augs:
+                self.augmentors['point_cloud'] = augs
+
+        state_cfg = self.augmentation_cfg.get('state')
+        if state_cfg is not None and state_cfg.get('enabled', True):
+            self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
     def get_normalizer(self, mode='limits', **kwargs):
         data = {
@@ -69,7 +85,12 @@ def example(zarr_path):
         pad_before=1,
         pad_after=7,
         val_ratio=0.05,
-        augmentation_cfg={'pc': {'color_std': 0.05}},
+        augmentation_cfg={
+            'pc': {
+                'color': {'enabled': True, 'brightness': 0.2, 'prob': 0.8},
+                'spatial': {'enabled': True, 'rot_z': 15.0, 'trans_xy': 0.10, 'prob': 0.8},
+            },
+        },
     )
     print('aug point_cloud:', aug_dataset[0]['obs']['point_cloud'].shape)
 

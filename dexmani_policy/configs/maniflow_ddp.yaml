@@ -2,6 +2,7 @@
 
 defaults:
   - maniflow
+  - _self_
 
 # DDP 训练配置
 # - training.num_gpus: 使用的 GPU 数量
@@ -29,7 +30,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
     subdir: ${hydra.job.num}

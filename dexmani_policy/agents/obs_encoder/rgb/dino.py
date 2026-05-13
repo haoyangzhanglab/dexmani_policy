@@ -139,7 +139,6 @@ class DINO(nn.Module):
             depth_scale=depth_scale,
             min_depth=min_depth,
             max_depth=max_depth,
-            collapse_repeated_camera=True,
         )
 
         patch_geometry = self.geometry_processor.pool_patch_coordinates(
@@ -198,7 +197,6 @@ def example() -> None:
             depths=depths,
             intrinsics=intrinsics,
             camera_to_world=camera_to_world,
-            collapse_repeated_camera=True,
         )
 
         rgb = rgbd_batch["image"].to(device)

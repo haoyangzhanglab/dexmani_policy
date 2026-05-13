@@ -53,7 +53,7 @@ class Diffusion(nn.Module):
         loss = F.mse_loss(pred, target, reduction='none')
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
-        loss_dict = {"loss": loss}
+        loss_dict = {"loss": loss, "loss_action": loss}
 
         return loss, loss_dict
 
@@ -77,9 +77,6 @@ class Diffusion(nn.Module):
     
 
     def predict_action(self, cond, action_template, denoise_timesteps=None):
-        '''
-        sample: zero_data for action seq, in order to get the shape and device
-        '''
         noise = torch.randn_like(action_template, device=action_template.device)
         if denoise_timesteps is None:
             denoise_timesteps = self.num_inference_steps

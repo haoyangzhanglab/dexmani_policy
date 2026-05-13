@@ -29,7 +29,7 @@ class DP3ObsEncoder(nn.Module):
         self.condition_type = condition_type
         self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
-    def forward(self, obs: dict) -> torch.Tensor:
+    def forward(self, obs: dict):
         pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
         if pc.shape[1] > self.num_points:
             pc, _ = farthest_point_sample(pc, self.num_points)
@@ -38,9 +38,9 @@ class DP3ObsEncoder(nn.Module):
             self.state_mlp(obs['joint_state']),
         ], dim=-1)                                      # (B*T, out_dim)
         B = feat.shape[0] // self.n_obs_steps
-        if self.condition_type == 'film':
-            return feat.reshape(B, -1)
-        return feat.reshape(B, self.n_obs_steps, -1)
+        if self.condition_type in ('film', 'mlp_film'):
+            return feat.reshape(B, -1), {}
+        return feat.reshape(B, self.n_obs_steps, -1), {}
 
 
 class DP3Agent(UNetDiffusionAgent):
@@ -91,7 +91,7 @@ def example():
     print(f'obs joint_state: {obs["joint_state"].shape}')
     print(f'action:          {action.shape}')
 
-    cond = agent.obs_encoder(obs)
+    cond, _ = agent.obs_encoder(obs)
     print(f'cond:            {cond.shape}')
 
     from dexmani_policy.common.normalizer import LinearNormalizer

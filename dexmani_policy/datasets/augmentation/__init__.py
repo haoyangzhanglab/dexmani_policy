@@ -1,4 +1,18 @@
-from .rgb_aug import RGBAug
-from .pc_aug import PCAug, worker_init_fn
+from .rgb import RGBAug
+from .pc_color import PCColorJitter
+from .pc_spatial import PCSpatialAug
+from .pc_dropout import PCDropout
+from .state import StateNoiseAug
 
-__all__ = ['RGBAug', 'PCAug', 'worker_init_fn']
+PC_AUG_CLASSES = {
+    'color': PCColorJitter,
+    'spatial': PCSpatialAug,
+    'dropout': PCDropout,
+}
+
+__all__ = [
+    'RGBAug',
+    'PCColorJitter', 'PCSpatialAug', 'PCDropout',
+    'StateNoiseAug',
+    'PC_AUG_CLASSES',
+]

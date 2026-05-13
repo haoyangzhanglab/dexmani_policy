@@ -1,24 +1,8 @@
 import torch
 import torch.nn as nn
-from typing import List, Optional, Type
+from typing import List, Optional
 
-
-def create_mlp(
-    in_channels: int,
-    hidden_channels: List[int],
-    out_channels: int,
-    activation: Type[nn.Module] = nn.ReLU,
-):
-    layers = []
-    prev = in_channels
-
-    for h in hidden_channels:
-        layers.append(nn.Linear(prev, h))
-        layers.append(activation())
-        prev = h
-
-    layers.append(nn.Linear(prev, out_channels))
-    return nn.Sequential(*layers)
+from dexmani_policy.common.pytorch_util import create_mlp
 
 
 class StateMLP(nn.Module):
@@ -27,14 +11,14 @@ class StateMLP(nn.Module):
         input_channels: int,
         output_channels: int,
         hidden_channels: Optional[List[int]] = None,
-        activation: Type[nn.Module] = nn.ReLU,
+        activation: type = nn.ReLU,
     ):
         super().__init__()
         if hidden_channels is None:
             hidden_channels = [64]
 
         self.in_dim = input_channels
-        self._out_dim = output_channels
+        self.out_dim = output_channels
         self.mlp = create_mlp(
             in_channels=input_channels,
             hidden_channels=hidden_channels,
@@ -44,7 +28,3 @@ class StateMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
-
-    @property
-    def out_dim(self) -> int:
-        return self._out_dim

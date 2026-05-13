@@ -226,13 +226,6 @@ class PointNextEncoder(nn.Module):
         )
 
     def forward(self, pointcloud: torch.Tensor) -> Dict[str, torch.Tensor]:
-        if pointcloud.ndim != 3:
-            raise ValueError(f"pointcloud must be [B, N, C], but got shape {tuple(pointcloud.shape)}")
-        if pointcloud.size(-1) < self.input_channels:
-            raise ValueError(
-                f"pointcloud has {pointcloud.size(-1)} channels, but input_channels={self.input_channels}"
-            )
-
         xyz = pointcloud[..., :3]
         point_feature = pointcloud[..., : self.input_channels]
 
@@ -240,10 +233,10 @@ class PointNextEncoder(nn.Module):
             for block in stage:
                 xyz, point_feature = block(xyz, point_feature)
 
-        global_token = self._get_global_token(point_feature, xyz)
+        global_token = self.get_global_token(point_feature, xyz)
         return {"global_token": global_token}
 
-    def _get_global_token(self, final_point_feature: torch.Tensor, final_xyz: torch.Tensor) -> torch.Tensor:
+    def get_global_token(self, final_point_feature: torch.Tensor, final_xyz: torch.Tensor) -> torch.Tensor:
         pooled_point_feature = final_point_feature.max(dim=1).values
         pooled_xyz = final_xyz.mean(dim=1)
         global_token_feature = pooled_point_feature + self.global_position_projection(

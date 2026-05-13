@@ -50,16 +50,9 @@ class SimEvalRecorder:
 
     @staticmethod
     def save_json(data: Dict[str, Any], path: Path):
-        def _default(obj):
-            try:
-                if isinstance(obj, np.generic):
-                    return obj.item()
-            except Exception:
-                pass
-            return str(obj)
-
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=_default)
+            json.dump(data, f, indent=2, ensure_ascii=False,
+                      default=lambda o: o.item() if isinstance(o, np.generic) else str(o))
 
 
 class SimEvaluator:
@@ -93,16 +86,19 @@ class SimEvaluator:
         use_ema_for_eval: bool = True,
         eval_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        cprint(f"Loading checkpoint: {ckpt_tag_or_path} (EMA={use_ema_for_eval})", "cyan")
-        try:
-            self.workspace.load_for_inference(
-                model=self.agent,
-                tag_or_path=ckpt_tag_or_path,
-                use_ema=use_ema_for_eval,
+        if not denoise_timesteps_list:
+            raise ValueError(
+                "denoise_timesteps_list cannot be empty. "
+                "Please provide at least one denoise timestep value."
             )
-            cprint(f"✅ Checkpoint loaded successfully", "green")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load checkpoint: {ckpt_tag_or_path}") from e
+
+        cprint(f"Loading checkpoint: {ckpt_tag_or_path} (EMA={use_ema_for_eval})", "cyan")
+        self.workspace.load_for_inference(
+            model=self.agent,
+            tag_or_path=ckpt_tag_or_path,
+            use_ema=use_ema_for_eval,
+        )
+        cprint("✅ Checkpoint loaded successfully", "green")
 
         self.agent.to(self.device)
         self.agent.eval()
@@ -124,9 +120,6 @@ class SimEvaluator:
             },
             "metrics": {},
         }
-
-        if not denoise_timesteps_list:
-            raise ValueError("denoise_timesteps_list cannot be empty")
 
         for denoise_timesteps in denoise_timesteps_list:
             result = self.env_runner.run(

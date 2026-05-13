@@ -101,9 +101,9 @@ class ImageProcessor:
         if resized_h != orig_h or resized_w != orig_w:
             scale_x = float(resized_w) / float(orig_w)
             scale_y = float(resized_h) / float(orig_h)
-            image_batch = self._resize_tensor(image_batch, size=(resized_h, resized_w), mode=self.interpolation)
+            image_batch = self.resize_tensor(image_batch, size=(resized_h, resized_w), mode=self.interpolation)
             if depth_batch is not None:
-                depth_batch = self._resize_tensor(depth_batch, size=(resized_h, resized_w), mode="nearest")
+                depth_batch = self.resize_tensor(depth_batch, size=(resized_h, resized_w), mode="nearest")
 
         crop_top, crop_left = 0, 0
         processed_h, processed_w = resized_h, resized_w
@@ -131,7 +131,7 @@ class ImageProcessor:
         return image_batch, depth_batch, spatial
 
     @staticmethod
-    def _resize_tensor(
+    def resize_tensor(
         x: torch.Tensor,
         size: Tuple[int, int],
         mode: str,
@@ -165,9 +165,7 @@ class ImageProcessor:
         depths: ArrayLike,
         intrinsics: ArrayLike,
         camera_to_world: Optional[ArrayLike] = None,
-        collapse_repeated_camera: bool = True,
     ) -> Dict[str, object]:
-        _ = collapse_repeated_camera
 
         images = to_rgb_tensor(images)
         depths = to_depth_tensor(depths)

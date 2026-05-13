@@ -226,7 +226,7 @@ class ParametricEncoder(nn.Module):
 class PointPNTokenizer(nn.Module):
     supports_global_token = True
     supports_intermediate_outputs = True
-    requires_fixed_num_points = True
+    requires_fixed_num_points = False
 
     def __init__(
         self,
@@ -288,16 +288,15 @@ class PointPNTokenizer(nn.Module):
         return_global_token: bool = False,
         return_intermediate: bool = False,
     ):
-        if pointcloud.ndim != 3:
-            raise ValueError(f"pointcloud must be [B, N, C], but got shape {tuple(pointcloud.shape)}")
-        if pointcloud.size(1) != self.input_points:
-            raise ValueError(
-                f"pointcloud has {pointcloud.size(1)} points, but input_points={self.input_points}"
-            )
-        if pointcloud.size(-1) < self.input_channels:
-            raise ValueError(
-                f"pointcloud has {pointcloud.size(-1)} channels, but input_channels={self.input_channels}"
-            )
+        num_pts = pointcloud.size(1)
+        if num_pts > self.input_points:
+            pointcloud, _ = farthest_point_sample(pointcloud, self.input_points)
+        elif num_pts < self.input_points:
+            pad_n = self.input_points - num_pts
+            pointcloud = torch.cat([
+                pointcloud,
+                pointcloud[:, -1:].expand(-1, pad_n, -1)
+            ], dim=1)
 
         xyz = pointcloud[..., :3]
         point_feature = pointcloud[..., : self.input_channels].transpose(1, 2).contiguous()
@@ -313,7 +312,7 @@ class PointPNTokenizer(nn.Module):
             outputs.append(intermediate_outputs)
         return tuple(outputs)
 
-    def get_global_token(self, patch_token: torch.Tensor) -> torch.Tensor:
+    def get_global_token(self, patch_token: torch.Tensor, patch_center: torch.Tensor = None) -> torch.Tensor:
         return patch_token.max(dim=1, keepdim=True).values
 
     @property

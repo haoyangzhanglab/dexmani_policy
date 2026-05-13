@@ -2,7 +2,7 @@
 
 **生成时间**: 2026-05-08  
 **仓库**: dexmani_policy - 灵巧操作模仿学习策略框架  
-**上次更新**: 基于 embodied-repo-cartographer 子代理完整分析
+**上次更新**: 2026-05-13 — 基于完整代码审计同步更新
 
 ---
 
@@ -14,7 +14,7 @@
 - 配置驱动：所有组件通过 `_target_` 实例化，切换策略只需换 config
 - 统一接口：`BaseAgent.compute_loss()` / `predict_action()` / `configure_optimizer()`
 - 双目标训练：ManiFlow 支持 flow matching + consistency distillation（75:25 比例）
-- 多任务支持：FiLM 调制 + 任务感知采样 + shared/per_task normalizer
+- 多任务支持：CLIP text encoder (frozen) + text_proj (trainable) 特征拼接 + 任务感知采样 + shared/per_task normalizer
 - 分布式训练：DDP 封装 + normalizer 同步 + 无 `module.` 前缀 checkpoint
 
 ---
@@ -23,9 +23,9 @@
 
 ```
 config (Hydra YAML) 
-  → dataset (Zarr replay buffer → PCDataset/RGBDataset/MultiTaskDataset)
+  → dataset (Zarr replay buffer → PCDataset/RGBDataset/RGBPCDataset/MultiTaskDataset)
   → agent (obs_encoder → action_decoder)
-  → trainer (Trainer/MultiTaskTrainer/DDPTrainer)
+  → trainer (Trainer/DDPTrainer)
   → evaluator (SimRunner/MultiTaskSimRunner)
 ```
 
@@ -70,7 +70,7 @@ dexmani_policy/
 │   │   ├── dp3.py                   # 点云 + proprio → Diffusion
 │   │   ├── moe.py                   # 点云 + MoE → Diffusion
 │   │   ├── maniflow.py              # 点云 + proprio → FlowMatch
-│   │   └── multi_task.py            # 包装 base_agent + TaskEmbedding + FiLM
+│   │   └── multi_task.py            # RGB + state + CLIP text → DiT backbone (特征拼接)
 │   ├── action_decoders/             # 动作生成模型
 │   │   ├── diffusion.py             # DDIM scheduler (100 train / 10 inference steps)
 │   │   ├── flowmatch.py             # Flow matching + Consistency distillation
@@ -83,7 +83,7 @@ dexmani_policy/
 │   │   ├── pointcloud/              # PointNet / iDP3 / PointNext / PointPN Tokenizer
 │   │   ├── rgb/                     # ResNet / DINO / CLIP / SigLIP + ImageProcessor
 │   │   ├── proprio/                 # StateMLP (joint_state → hidden)
-│   │   ├── text/                    # CLIPTextEncoder / T5TextEncoder (预留)
+│   │   ├── text/                    # CLIPTextEncoder (MultiTaskAgent 使用) / T5TextEncoder (预留)
 │   │   └── plugins/                 # MoE / TokenCompressor
 │   └── common/                      # optim_util / param_counter
 ├── datasets/                        # 数据加载
@@ -95,10 +95,9 @@ dexmani_policy/
 │   ├── common/
 │   │   ├── replay_buffer.py         # Zarr episode replay buffer
 │   │   └── sampler.py               # SequenceSampler (horizon 窗口采样)
-│   └── augmentation/                # RGB/点云颜色增强 (默认关闭)
+│   └── augmentation/                # PCColorJitter/PCSpatialAug/PCDropout/RGBAug/StateNoiseAug
 ├── training/                        # 训练循环
-│   ├── trainer.py                   # 单卡训练 (梯度累积 + EMA + 验证/评估)
-│   ├── multi_task_trainer.py        # 多任务训练 (set_epoch + task-aware MSE)
+│   ├── trainer.py                   # 单卡训练 (梯度累积 + EMA + 验证/评估 + on_epoch_start)
 │   ├── ddp_trainer.py               # DDP 训练封装 (normalizer 同步)
 │   ├── sim_evaluator.py             # 仿真评估 + 视频录制
 │   └── common/
@@ -119,10 +118,9 @@ dexmani_policy/
 │   ├── moe_dp3.yaml                 # 点云 + MoE + Diffusion
 │   ├── maniflow.yaml                # 点云 + FlowMatch
 │   ├── maniflow_ddp.yaml            # 点云 + FlowMatch + DDP
-│   ├── multi_task_dp3.yaml          # 多任务 + 点云 + Diffusion
+│   ├── multitask_dit.yaml           # 多任务 + RGB + CLIP text + DiT Diffusion
 │   └── dataset/                     # 数据集配置
-│       ├── pc.yaml                  # 单任务点云数据集
-│       └── multi_task_pc.yaml       # 多任务点云数据集
+│       └── multitask_rgb.yaml       # 多任务 RGB 数据集
 ├── train.py                         # 单卡训练入口
 ├── train_multi_task.py              # 多任务训练入口
 ├── train_ddp.py                     # DDP 训练入口
@@ -136,7 +134,7 @@ dexmani_policy/
 | Purpose | File | Key Functions | Notes |
 |---------|------|---------------|-------|
 | 单卡训练 | `train.py` | `build_train_components()`, `Trainer.train()` | 默认入口，支持 DP/DP3/MoE/ManiFlow |
-| 多任务训练 | `train_multi_task.py` | `build_train_components()`, `MultiTaskTrainer.train()` | 调用 `dataset.set_epoch(epoch)` 改变任务采样 |
+| 多任务训练 | `train_multi_task.py` | `build_train_components()`, `Trainer.train()` | 复用 Trainer，通过 `on_epoch_start()` 自动调用 `set_epoch` |
 | DDP 训练 | `train_ddp.py` | `mp.spawn(ddp_worker)`, `DDPTrainer.train()` | 需配置 `training.num_gpus > 1` |
 | 仿真评估 | `eval_sim.py` | `SimEvaluator.run()` | 从 `experiments/{policy}/{task}/{exp_name}` 加载 checkpoint |
 | Shell 脚本 | `scripts/*.sh` | - | Bash 包装器，简化命令行调用 |
@@ -147,7 +145,7 @@ dexmani_policy/
 python dexmani_policy/train.py --config-name=dp3
 
 # 多任务训练
-python dexmani_policy/train_multi_task.py --config-name=multi_task_dp3
+python dexmani_policy/train_multi_task.py --config-name=multitask_dit
 
 # DDP 训练
 python dexmani_policy/train_ddp.py --config-name=maniflow_ddp training.gpu_ids=[0,1,2,3]
@@ -162,9 +160,11 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 
 ### 1. Agent 架构
 
-**BaseAgent** (`agents/core/base.py:187`):
-- **接口**: `compute_loss(batch)`, `predict_action(obs_dict)`, `configure_optimizer()`
+**BaseAgent** (`agents/core/base.py`):
+- **接口**: `compute_loss(batch, **kwargs)`, `predict_action(obs_dict)`, `configure_optimizer()`
 - **关键设计**: `preprocess()` 将 `(B, T, ...)` 展平为 `(B*T, ...)`，推理时返回 `control_action[:, n_obs_steps-1:n_obs_steps-1+n_action_steps]`
+- **cond_dropout**: `_build_cond()` → `_apply_cond_dropout()`，训练时以 `cond_dropout_prob` 概率将 condition 置零
+- **compute_loss**: kwargs 中的 `ema_model` 自动转换为 `ema_model.ema_backbone` 后传递给 action_decoder
 
 **UNetDiffusionAgent** (`agents/core/base.py`):
 - **组件**: `obs_encoder` + `ConditionalUnet1D` + `Diffusion`
@@ -176,10 +176,11 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 - **条件注入**: AdaLN (全局) + CrossAttention (序列)
 - **子类**: `ManiFlowAgent` (点云)
 
-**MultiTaskAgent** (`agents/core/multi_task.py:246`):
-- **组件**: `base_agent` + `TaskEmbedding` + `FiLM` generator
-- **FiLM 调制**: `cond * (1 + scale) + shift`，`scale/shift` 由 `task_emb` 生成
-- **关键**: `obs_cond_dim` 必须显式指定（film: `n_obs_steps * (pc_out_dim + state_out_dim)`，cross_attention: `token_dim`）
+**MultiTaskAgent** (`agents/core/multi_task.py`):
+- **组件**: `CLIPTextEncoder` (frozen) + `text_proj` (trainable Linear) + `DPObsEncoder` (RGB+state) + `DiT_Diffusion` backbone
+- **条件注入**: `obs_cond` 与 `text_emb` 在特征维度拼接 → `full_cond_dim = obs_cond_dim + n_emb`
+- **文本缓存**: `register_buffer("task_emb_table")` 预计算所有 task_text 的 CLIP embedding，训练时 O(1) 查表
+- **关键**: 直接继承 `BaseAgent`，override `_build_cond()` / `predict_action()` / `configure_optimizer()`
 
 ### 2. 观测编码器
 
@@ -233,18 +234,15 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 
 ### 5. 训练循环
 
-**Trainer** (`training/trainer.py:150+`):
-- **梯度累积**: `scaled_loss = raw_loss / gradient_accumulate_every`
+**Trainer** (`training/trainer.py`):
+- **梯度累积**: `scaled_loss = raw_loss / grad_accum_steps`，`flush_gradient_accumulation()` 处理 epoch 结束时的未完成累积
 - **EMA 更新**: `ema_updater.step(model)` 在 optimizer.step() 后调用
-- **验证/评估**: 每 `val_every` 步验证，每 `eval_every` 步评估
+- **验证/评估**: 每 `val_interval_epochs` 验证，每 `eval_interval_epochs` 评估
+- **on_epoch_start**: 通过 `hasattr` 自动支持 `set_epoch`（多任务）等 epoch 级钩子
+- **validate**: 始终使用训练模型；EMA 仅作为 consistency teacher 通过 kwargs 传入
 - **Checkpoint**: topk by `test_mean_score`，latest symlink 支持断点续训
 
-**MultiTaskTrainer** (`training/multi_task_trainer.py:171`):
-- **继承 Trainer**: override `train()` 和 `compute_action_mse_for_one_batch()`
-- **关键差异 1**: 每个 epoch 开始调用 `self.train_loader.dataset.set_epoch(epoch)`
-- **关键差异 2**: `compute_action_mse_for_one_batch()` 按 `task_id` 分组预测
-
-**DDPTrainer** (`training/ddp_trainer.py:232`):
+**DDPTrainer** (`training/ddp_trainer.py`):
 - **DDP 包装**: `ddp_model = DDP(model)`, `Trainer(model=ddp_model)`
 - **Normalizer 同步**: `dist.broadcast(normalizer.state_dict())` 从 rank 0 同步
 - **Checkpoint**: 使用 `self.raw_model.state_dict()` 保存（无 `module.` 前缀）
@@ -355,9 +353,10 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 
 ### 6. 多任务配置
 
-**任务嵌入维度**: `agent.task_embedding_dim` in `[32, 64, 128]`
+**文本嵌入维度**: `agent.n_emb` in `[256, 512, 768]`
 **采样策略**: `dataset.sampling_strategy` in `['balanced', 'proportional', 'weighted']`
 **Normalizer 模式**: `dataset.normalizer_mode` in `['shared', 'per_task']`
+**RGB backbone**: `agent.rgb_backbone_name` in `['resnet', 'clip', 'dino', 'siglip']`
 
 ### 7. 训练超参
 
@@ -371,8 +370,8 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 
 ### 架构设计
 
-1. **MultiTaskAgent FiLM 初始化**: `film_generator` 最后一层初始化为 0，是否足够？是否需要 warmup？
-   - 位置: `agents/core/multi_task.py:110-111`
+1. **MultiTaskAgent text_proj 初始化**: `text_proj` (Linear) 使用默认 Xavier 初始化，是否需要零初始化以支持从预训练模型热启动？
+   - 位置: `agents/core/multi_task.py:90`
 
 2. **MoE 辅助损失权重**: `lambda_load=0.1`, `beta_entropy=0.01` 是否对所有任务都适用？
    - 位置: `agents/obs_encoder/plugins/moe.py`
@@ -390,11 +389,11 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 
 ### 训练机制
 
-6. **梯度累积 flush**: epoch 结束时累积步数不是整数倍，会 scale 梯度。是否影响稳定性？
-   - 位置: `training/multi_task_trainer.py:88-99`
+6. **梯度累积 flush**: epoch 结束时累积步数不是整数倍，`flush_gradient_accumulation()` 会 scale 梯度。是否影响稳定性？
+   - 位置: `training/trainer.py:92-101`
 
-7. **验证集 EMA**: 验证时使用 `ema_model` 但不传入 teacher，consistency loss 是否为 0？
-   - 位置: `training/trainer.py:128`
+7. **验证集 teacher**: 验证时使用训练模型 + EMA teacher（ManiFlow），loss 中的 consistency 项有梯度吗？
+   - 位置: `training/trainer.py:119-138`
 
 ### 评估
 
@@ -432,12 +431,12 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 ## 关键配置依赖
 
 - **条件注入方式**: `agent.condition_type` 决定 `obs_encoder` 输出形状
-  - `film`: `(B, n_obs_steps * token_dim)` 全局向量
+  - `film` / `mlp_film`: `(B, n_obs_steps * token_dim)` 全局向量
   - `cross_attention_film`: `(B, n_obs_steps, token_dim)` 序列 token
 
-- **MultiTask obs_cond_dim**: 必须显式指定，与 `condition_type` 对应
-  - `film`: `n_obs_steps * (pc_out_dim + state_out_dim)`
-  - `cross_attention`: `token_dim`
+- **MultiTask 条件维度**: `full_cond_dim = obs_cond_dim + n_emb`
+  - `obs_cond_dim = obs_encoder.out_dim * n_obs_steps` (film 模式)
+  - `n_emb` 由 `agent.n_emb` 配置
 
 - **Normalizer 模式**: `dataset.normalizer_mode` 影响动作空间归一化
   - `shared`: 合并所有任务的 joint_state/action 拟合
@@ -448,11 +447,13 @@ python dexmani_policy/eval_sim.py --policy-name dp3 --task-name pick_apple_messy
 ## 已知限制
 
 1. **外部依赖**: 评估依赖外部 `dexmani_sim` 包，不在本仓库
-2. **多任务采样**: 使用 Python `hash()` 可能在不同版本间不一致
-3. **视频标记**: MultiTaskSimRunner 合并视频时未标记 task_name
+2. **多任务采样**: 训练集使用 hash-based 随机采样，可能在不同 Python 版本间不一致
+3. **视频标记**: MultiTaskSimRunner 合并视频时以 `{task_name}/{video_key}` 命名，已可区分 task
 4. **Hydra 输出**: 同一分钟内多次运行会覆盖输出目录
+5. **MultiTask + DDP**: 组合尚未实现
+6. **死代码**: `DiTXDiffusion` (ditx.py)、`token_compressor.py`、`logit_normal_density` 未使用
 
 ---
 
-**最后更新**: 2026-05-08  
-**审查状态**: 初始地图完成，基于 embodied-repo-cartographer 子代理分析
+**最后更新**: 2026-05-13  
+**审查状态**: 基于完整代码审计同步更新

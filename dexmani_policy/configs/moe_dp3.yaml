@@ -33,10 +33,7 @@ dataset:
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.05
   max_train_episodes: null
-  sensor_modalities: ["point_cloud", "joint_state"]
-  # augmentation_cfg:
-  #   pc:
-  #     color_std: 0.05
+  sensor_modalities: ["joint_state", "point_cloud"]
 
 agent:
   _target_: dexmani_policy.agents.core.moe.MoEAgent
@@ -55,7 +52,7 @@ agent:
   num_experts: 8
   top_k: 2
   moe_hidden_dim: 256
-  moe_out_dim: ${eval:'${agent.pc_out_dim} + ${agent.state_out_dim}'}  # 自动计算 MoE 输出维度 = 128 + 64 = 192
+  moe_out_dim: ${eval:'${agent.pc_out_dim} + ${agent.state_out_dim}'}
   moe_num_layers: 2
   lambda_load: 0.1
   beta_entropy: 0.01
@@ -65,10 +62,12 @@ agent:
   kernel_size: 5
   n_groups: 8
   condition_type: film
+  cond_predict_scale: true
 
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
+  cond_dropout_prob: 0.0
 
 optimizer:
   lr: 1.0e-4
@@ -94,7 +93,7 @@ workspace:
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
-    id: null
+    id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
     video_fps: ${env_runner.env_video_fps}
@@ -118,7 +117,7 @@ training:
     val_interval_epochs: 25
     eval_interval_epochs: 250
     sample_interval_epochs: 5
-    gradient_accumulate_every: 1
+    grad_accum_steps: 1
     grad_clip_norm: 1.0
 
 env_runner:
@@ -137,11 +136,37 @@ eval:
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
 
+# ---- 数据增强（点云）- 需要时取消注释 ----
+# dataset:
+#   augmentation_cfg:
+#     pc:
+#       color:
+#         enabled: true
+#         brightness: 0.2
+#         contrast: 0.2
+#         saturation: 0.3
+#         hue: 0.05
+#         prob: 0.8
+#       spatial:
+#         enabled: true
+#         rot_z: 15.0
+#         trans_xy: 0.10
+#         scale: 1.02
+#         prob: 0.8
+#       dropout:
+#         enabled: false
+#         dropout_ratio: 0.1
+#         prob: 0.5
+#     state:
+#       enabled: false
+#       noise_std: 0.005
+#       prob: 0.5
+
 hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d}_${now:%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
     subdir: ${hydra.job.num}

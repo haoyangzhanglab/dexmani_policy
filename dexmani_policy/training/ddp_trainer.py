@@ -9,7 +9,6 @@ from typing import Optional, Dict, Any
 
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 from dexmani_policy.training.common.workspace import TrainWorkspace
-from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 from dexmani_policy.common.pytorch_util import dict_apply, optimizer_to, fix_state_dict
 
 
@@ -54,6 +53,7 @@ class DDPTrainer:
             train_loop_cfg=train_loop_cfg,
             use_ema_teacher_for_consistency=use_ema_teacher_for_consistency,
         )
+        self.trainer.is_main_process = (rank == 0)
 
         self.train_sampler = train_loader.sampler
         if not isinstance(self.train_sampler, DistributedSampler):
@@ -61,24 +61,23 @@ class DDPTrainer:
 
 
     def synchronize_states(self):
-        """同步 normalizer 状态到所有进程"""
-        if hasattr(self.raw_model, 'normalizer'):
-            normalizer = self.raw_model.normalizer
-            if not isinstance(normalizer, nn.Module):
-                raise TypeError(
-                    f"Normalizer must be nn.Module for DDP, got {type(normalizer).__name__}. "
-                    "This ensures consistent normalization across all ranks."
-                )
+        """同步 normalizer：rank 0 broadcast state_dict 到所有进程
 
-            norm_state = normalizer.state_dict()
-            for key in norm_state:
-                if isinstance(norm_state[key], torch.Tensor):
-                    dist.broadcast(norm_state[key], src=0)
-            if self.rank != 0:
-                normalizer.load_state_dict(norm_state)
+        注意：
+            - 只同步 normalizer，不同步 optimizer/scheduler
+            - optimizer/scheduler 在各 rank 独立创建，状态由 DDP 梯度同步保证一致
+            - EMA 模型不需要同步（不参与梯度计算，由训练模型更新驱动）
+        """
+        norm_state = self.raw_model.normalizer.state_dict()
+        for key in norm_state:
+            if isinstance(norm_state[key], torch.Tensor):
+                dist.broadcast(norm_state[key], src=0)
+        if self.rank != 0:
+            self.raw_model.normalizer.load_state_dict(norm_state)
 
 
     def train(self, resume_tag: str = "latest"):
+        torch.set_float32_matmul_precision('high')
         try:
             checkpoint = self.trainer.workspace.load_checkpoint(resume_tag)
 
@@ -124,13 +123,17 @@ class DDPTrainer:
         for epoch in epoch_pbar:
             self.train_sampler.set_epoch(epoch)
 
+            self.trainer.on_epoch_start(epoch)
+
             self.trainer.model.train()
 
             # 避免跨 epoch 边界的梯度累积错位
-            self.trainer._accum_step = 0
+            self.trainer.accum_step = 0
             self.trainer.optimizer.zero_grad(set_to_none=True)
 
+            last_batch = None
             for batch in self.trainer.train_loader:
+                last_batch = batch
                 _, log_dict = self.trainer.train_one_step(batch)
                 global_step += 1
 
@@ -148,99 +151,16 @@ class DDPTrainer:
                     self.trainer.workspace.log(step_metrics, step=global_step)
 
             # flush 未完成的梯度累积，避免浪费计算
-            if self.trainer._accum_step % self.trainer.gradient_accumulate_every != 0:
-                remainder = self.trainer._accum_step % self.trainer.gradient_accumulate_every
-                scale = self.trainer.gradient_accumulate_every / remainder
-                for p in self.trainer.model.parameters():
-                    if p.grad is not None:
-                        p.grad.mul_(scale)
-                torch.nn.utils.clip_grad_norm_(self.trainer.model.parameters(), max_norm=self.trainer.grad_clip_norm)
-                self.trainer.optimizer.step()
-                self.trainer.scheduler.step()
-                self.trainer.optimizer.zero_grad(set_to_none=True)
-                if self.trainer.use_ema and self.trainer.ema_updater is not None:
-                    self.trainer.ema_updater.step(self.trainer.model)
+            self.trainer.flush_gradient_accumulation()
 
             self.trainer.model.eval()
 
             if self.is_main:
-                try:
-                    epoch_metrics = {}
-                    epoch_end_tasks = self.trainer.plan_epoch_end_tasks(epoch)
-
-                    if epoch_end_tasks["sample"]:
-                        sample_batch = dict_apply(
-                            next(iter(self.trainer.train_loader)),
-                            lambda x: x.to(self.trainer.device, non_blocking=True)
-                        )
-                        epoch_metrics["train/action_mse_error"] = self.trainer.compute_action_mse_for_one_batch(
-                            self.raw_model, sample_batch
-                        )
-
-                    if epoch_end_tasks["validate"]:
-                        val_agent = self.trainer.ema_model if self.trainer.use_ema else self.raw_model
-                        val_loss = self.trainer.validate(val_agent)
-                        if val_loss is not None:
-                            epoch_metrics["val/loss"] = val_loss
-
-                    if epoch_end_tasks["evaluate"]:
-                        eval_model = self.trainer.ema_model if self.trainer.use_ema else self.raw_model
-                        epoch_metrics.update(self.trainer.evaluate(eval_model))
-
-                    self.trainer.workspace.log(epoch_metrics, step=global_step)
-
-                    if epoch_end_tasks["save_checkpoint"]:
-                        if self.trainer.enable_env_eval:
-                            test_mean_score = epoch_metrics.get("eval/success_rate")
-                        elif "val/loss" in epoch_metrics:
-                            test_mean_score = -epoch_metrics["val/loss"]
-                        else:
-                            test_mean_score = None
-
-                        monitor = {}
-                        if test_mean_score is not None:
-                            monitor["test_mean_score"] = test_mean_score
-
-                        checkpoint = TrainCheckpoint(
-                            epoch=epoch,
-                            global_step=global_step,
-                            model_state=self.raw_model.state_dict(),
-                            ema_model_state=self.trainer.ema_model.state_dict() if self.trainer.use_ema else None,
-                            ema_updater_state=self.trainer.ema_updater.state_dict() if self.trainer.use_ema and self.trainer.ema_updater else None,
-                            optimizer_state=self.trainer.optimizer.state_dict(),
-                            scheduler_state=self.trainer.scheduler.state_dict(),
-                            monitor=monitor,
-                        )
-
-                        if test_mean_score is None:
-                            tag = f"epoch={epoch:04d}-step={global_step:08d}"
-                        else:
-                            tag = f"epoch={epoch:04d}-step={global_step:08d}-score={test_mean_score:.4f}"
-
-                        checkpoint_path = self.trainer.workspace.save_checkpoint(tag, checkpoint)
-                        self.trainer.workspace.save_latest(checkpoint_path)
-
-                        if test_mean_score is not None:
-                            self.trainer.workspace.save_topk(checkpoint_path, checkpoint)
-
-                    elif epoch_end_tasks["save_latest"]:
-                        checkpoint = TrainCheckpoint(
-                            epoch=epoch,
-                            global_step=global_step,
-                            model_state=self.raw_model.state_dict(),
-                            ema_model_state=self.trainer.ema_model.state_dict() if self.trainer.use_ema else None,
-                            ema_updater_state=self.trainer.ema_updater.state_dict() if self.trainer.use_ema and self.trainer.ema_updater else None,
-                            optimizer_state=self.trainer.optimizer.state_dict(),
-                            scheduler_state=self.trainer.scheduler.state_dict(),
-                            monitor={},
-                        )
-                        tag = f"epoch={epoch:04d}-step={global_step:08d}"
-                        checkpoint_path = self.trainer.workspace.save_checkpoint(tag, checkpoint)
-                        self.trainer.workspace.save_latest(checkpoint_path)
-
-                except Exception as e:
-                    import traceback
-                    print(f"[Rank 0] Epoch {epoch} end tasks failed: {e}")
-                    traceback.print_exc()
+                self.trainer.finish_epoch(
+                    epoch, global_step,
+                    last_batch=last_batch,
+                    eval_model=(self.trainer.ema_model if self.trainer.use_ema else self.raw_model),
+                    checkpoint_model=self.raw_model,
+                )
 
             dist.barrier()
