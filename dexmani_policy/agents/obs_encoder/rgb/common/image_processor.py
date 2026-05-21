@@ -50,7 +50,10 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
 
 
 class ImageProcessor:
-    """Unified image-space preprocessing for RGB and RGB-D observations."""
+    """Unified image-space preprocessing for RGB observations.
+
+    Note: RGB-D support is planned but not yet implemented.
+    """
 
     def __init__(
         self,

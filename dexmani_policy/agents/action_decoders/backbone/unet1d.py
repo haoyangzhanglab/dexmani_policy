@@ -6,9 +6,6 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from dexmani_policy.agents.common.optim_util import get_default_optim_group, get_optim_group_with_no_decay
 
-#################################################################################
-#                               去噪/加噪步数编码                                    
-#################################################################################
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -24,9 +21,6 @@ class SinusoidalPosEmb(nn.Module):
         return emb
 
 
-#################################################################################
-#                               特征调制                                    
-#################################################################################
 class CrossAttention(nn.Module):
 
     def __init__(self, in_dim, cond_dim, out_dim):
@@ -49,9 +43,6 @@ class CrossAttention(nn.Module):
         return attn_output
 
 
-#################################################################################
-#                               一维卷积组件                                    
-#################################################################################
 class Downsample1d(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -149,9 +140,6 @@ class ConditionalResidualBlock1D(nn.Module):
         return scale * out + bias
 
 
-#################################################################################
-#                               UNet1D骨干网络                                    
-#################################################################################
 class ConditionalUnet1D(nn.Module):
 
     def __init__(
@@ -257,7 +245,6 @@ class ConditionalUnet1D(nn.Module):
         t_embed = self.diffusion_step_encoder(timestep)
         
         if 'cross_attention' in self.condition_type:
-            # 判断 context是否满足shape: (batch, n_obs, cond_dim)
             assert len(context.shape) == 3, f"Expected context shape (batch, n_obs, cond_dim) when use cross-attn, but got {context.shape}"
             t_embed = t_embed.unsqueeze(1).expand(-1, context.shape[1], -1)
         cond = torch.cat([t_embed, context], axis=-1)

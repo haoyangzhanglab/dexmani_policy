@@ -7,7 +7,6 @@ from dexmani_policy.env_runner.sim_runner import SimRunner
 
 
 class TaskTextSimRunner(SimRunner):
-    """为特定 task_text 定制的 SimRunner，在 predict_action 时将 task_text 注入 obs dict"""
 
     def __init__(self, task_text: str, **kwargs):
         super().__init__(**kwargs)
@@ -20,12 +19,6 @@ class TaskTextSimRunner(SimRunner):
 
 
 class MultiTaskSimRunner:
-    """
-    多任务仿真评估 Runner，按任务分别评估并汇总结果。
-
-    为每个 task 创建独立的 TaskTextSimRunner 实例，分别运行评估，
-    最终汇总各 task 的 success_rate 取平均作为总指标。
-    """
 
     def __init__(
         self,
@@ -44,7 +37,11 @@ class MultiTaskSimRunner:
 
         for cfg in task_configs:
             task_name = cfg["task_name"]
-            task_text = cfg.get("task_text", task_name)
+            task_text = cfg.get("task_text")
+            if task_text is None:
+                task_text = task_name
+                cprint(f"⚠️ task_text not set for {task_name}, falling back to task_name='{task_name}'. "
+                       f"Ensure this matches dataset.task_texts to avoid train/eval text embedding mismatch.", "yellow")
             env_kwargs = cfg.get("env_kwargs")
 
             self.runners[task_name] = TaskTextSimRunner(
@@ -65,7 +62,7 @@ class MultiTaskSimRunner:
             sr = result["success_rate"]
             if sr is not None:
                 sr_str = f"{sr*100:.1f}%"
-                cprint(f"  {task_name}: success_rate={sr_str}, avg_steps={result['avg_steps']}", "yellow")
+                cprint(f"  {task_name}: success_rate={sr_str}, avg_steps (success only)={result['avg_steps']}", "yellow")
             else:
                 error_type = result.get("error_type", "Unknown")
                 cprint(f"  {task_name}: FAILED - {error_type}", "red")
@@ -76,7 +73,7 @@ class MultiTaskSimRunner:
         total_sr_str = f"{avg_success_rate*100:.1f}%" if avg_success_rate is not None else "N/A"
         success_count = len(rates)
         total_count = len(self.runners)
-        cprint(f"  Overall ({success_count}/{total_count} tasks): success_rate={total_sr_str}, avg_steps={avg_steps}", "yellow")
+        cprint(f"  Overall ({success_count}/{total_count} tasks): success_rate={total_sr_str}, avg_steps (success only)={avg_steps}", "yellow")
         cprint(f"{'='*90}", "yellow")
 
     def run(
@@ -96,8 +93,11 @@ class MultiTaskSimRunner:
                 per_task[task_name] = result
                 for v in result.get("videos", []):
                     for k, arr in v.items():
-                        all_videos.append({f"{task_name}/{k}": arr})
-            except Exception as e:
+                        all_videos.append({f"{task_name}_{k}": arr})
+            except KeyboardInterrupt:
+                cprint(f"\n⚠️ Evaluation interrupted by user during task {task_name}", "yellow")
+                raise
+            except (RuntimeError, ValueError, AttributeError) as e:
                 cprint(f"Task {task_name} failed: {type(e).__name__}: {e}", "red")
                 failed_tasks.append(task_name)
                 per_task[task_name] = {
@@ -108,6 +108,12 @@ class MultiTaskSimRunner:
                     "error": str(e),
                     "error_type": type(e).__name__,
                 }
+            except Exception as e:
+                cprint(f"\n❌ Unexpected error in task {task_name}: {type(e).__name__}: {e}", "red")
+                import traceback
+                traceback.print_exc()
+                cprint("This is an unexpected error. Please report this issue.", "red")
+                raise
 
         rates = [r["success_rate"] for r in per_task.values() if r["success_rate"] is not None]
         steps = [r["avg_steps"] for r in per_task.values() if r["avg_steps"] is not None]
@@ -117,10 +123,15 @@ class MultiTaskSimRunner:
 
         self.print_summary(per_task, avg_success_rate, avg_steps, rates, failed_tasks)
 
-        return {
+        results = {
             "success_rate": avg_success_rate,
             "avg_steps": avg_steps,
             "videos": all_videos,
             "per_task": per_task,
             "failed_tasks": failed_tasks,
         }
+        for task_name, task_result in per_task.items():
+            if task_result["success_rate"] is not None:
+                results[f"per_task/{task_name}/success_rate"] = task_result["success_rate"]
+                results[f"per_task/{task_name}/avg_steps"] = task_result["avg_steps"]
+        return results

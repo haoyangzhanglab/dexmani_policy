@@ -5,7 +5,6 @@ from transformers import AutoTokenizer, CLIPTextModelWithProjection
 
 
 class CLIPTextEncoder(nn.Module):
-    """Frozen CLIP text encoder for robot task instructions."""
 
     def __init__(
         self,

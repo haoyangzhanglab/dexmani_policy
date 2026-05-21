@@ -7,7 +7,6 @@ os.chdir(ROOT_DIR)
 
 import hydra
 import torch
-import warnings
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from omegaconf import OmegaConf
@@ -16,6 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.common.pytorch_util import worker_init_fn
+from dexmani_policy.common.resolver import register_resolvers
 from dexmani_policy.training.ddp_trainer import DDPTrainer
 from dexmani_policy.train import (
     validate_config,
@@ -24,8 +24,7 @@ from dexmani_policy.train import (
     build_optimizer_and_scheduler,
 )
 
-warnings.filterwarnings("ignore")
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+register_resolvers()
 
 
 def setup_ddp(rank: int, world_size: int):
@@ -47,9 +46,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     actual_gpu_id = gpu_ids[rank] if gpu_ids else rank
     device = torch.device(f'cuda:{actual_gpu_id}')
     torch.cuda.set_device(device)
-    set_seed(cfg.training.seed + rank)
 
-    # 构建 dataset 和 normalizer（DDP 模式：每个 rank 不同的 seed）
+    # DDP 要求所有 rank 的模型初始参数一致，此处用相同 seed
+    set_seed(cfg.training.seed)
+
+    # 构建 dataset 和 normalizer（DDP 模式）
     dataset, normalizer = build_dataset_and_normalizer(cfg, rank=rank, world_size=world_size)
 
     # 构建 DDP dataloader（使用 DistributedSampler）
@@ -78,29 +79,30 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         if val_dataset is not None:
             val_loader = DataLoader(
                 val_dataset,
-                batch_size=cfg.val_dataloader.batch_size,
-                num_workers=cfg.val_dataloader.num_workers,
-                pin_memory=cfg.val_dataloader.pin_memory,
-                persistent_workers=cfg.val_dataloader.persistent_workers,
-                shuffle=False,
                 worker_init_fn=worker_init_fn,
+                **cfg.val_dataloader,
             )
 
     # 构建 model 和 EMA（复用单卡逻辑）
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
+    # 模型初始化完成后，各 rank 使用不同 seed 以增加数据增强多样性
+    set_seed(cfg.training.seed + rank)
+
     # 构建 optimizer 和 scheduler（复用单卡逻辑）
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
 
-    # workspace 只在 rank 0 创建完整版本，其他 rank 使用 ReadOnly
-    workspace = None
+    # workspace 只在 rank 0 创建完整版本，其他 rank 只需 CheckpointStore 读 checkpoint
+    checkpoint_dir = pathlib.Path(cfg.workspace.output_dir) / "checkpoints"
     if rank == 0:
         workspace = hydra.utils.instantiate(cfg.workspace)
         workspace.save_hydra_config(cfg)
+        checkpoint_store = workspace.checkpoint_store
     else:
-        from dexmani_policy.training.common.workspace import ReadOnlyWorkspace
-        workspace = ReadOnlyWorkspace(output_dir=cfg.workspace.output_dir)
+        from dexmani_policy.training.common.checkpoint_io import CheckpointStore
+        workspace = None
+        checkpoint_store = CheckpointStore(checkpoint_dir)
 
     # env_runner 只在 rank 0 创建
     env_runner = None
@@ -120,14 +122,16 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         val_loader=val_loader,
         env_runner=env_runner,
         workspace=workspace,
+        checkpoint_store=checkpoint_store,
         train_loop_cfg=cfg.training.loop,
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         actual_gpu_id=actual_gpu_id,
     )
 
-    ddp_trainer.train(resume_tag="latest")
-
-    cleanup_ddp()
+    try:
+        ddp_trainer.train(resume_tag="latest")
+    finally:
+        cleanup_ddp()
 
 
 @hydra.main(version_base=None, config_path="configs")
@@ -176,15 +180,16 @@ def main(cfg):
 
     if 'MASTER_ADDR' not in os.environ:
         os.environ['MASTER_ADDR'] = 'localhost'
+
+    # 子进程无法访问 Hydra runtime resolver，必须在 spawn 前解析所有插值
+    OmegaConf.resolve(cfg)
+
     if 'MASTER_PORT' not in os.environ:
         import socket
         sock = socket.socket()
         sock.bind(('', 0))
         os.environ['MASTER_PORT'] = str(sock.getsockname()[1])
         sock.close()
-
-    # 子进程无法访问 Hydra runtime resolver，必须在 spawn 前解析所有插值
-    OmegaConf.resolve(cfg)
 
     mp.spawn(
         ddp_worker,

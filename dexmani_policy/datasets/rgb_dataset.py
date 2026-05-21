@@ -36,11 +36,11 @@ class RGBDataset(BaseDataset):
             return
 
         rgb_cfg = self.augmentation_cfg.get('rgb')
-        if rgb_cfg is not None and rgb_cfg.get('enabled', True):
+        if rgb_cfg is not None:
             self.augmentors['rgb'] = [RGBAug(**rgb_cfg)]
 
         state_cfg = self.augmentation_cfg.get('state')
-        if state_cfg is not None and state_cfg.get('enabled', True):
+        if state_cfg is not None:
             self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
 

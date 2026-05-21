@@ -35,7 +35,8 @@ class BaseDataset(torch.utils.data.Dataset):
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
         self.augmentors = {}
-        self._build_augmentors()
+        if augmentation_cfg is not None:
+            self._build_augmentors()
 
         val_mask = get_val_mask(
             seed=seed,
@@ -71,7 +72,9 @@ class BaseDataset(torch.utils.data.Dataset):
             pad_after=self.pad_after,
             episode_mask=self.val_mask,
         )
+        # 验证集禁用数据增强：置 None 阻断 apply_augmentation，清空 augmentors 断开共享引用
         val_set.augmentation_cfg = None
+        val_set.augmentors = {}
         return val_set
 
     def __len__(self):
@@ -98,8 +101,6 @@ class BaseDataset(torch.utils.data.Dataset):
         for modality, augs in self.augmentors.items():
             if modality not in data['obs'] or augs is None:
                 continue
-            if not isinstance(augs, (list, tuple)):
-                augs = [augs]
             for aug in augs:
                 data['obs'][modality] = aug(data['obs'][modality])
         return data

@@ -38,7 +38,7 @@ class BaseRunner:
             start_idx = -min(n_steps, len(all_list))
             result[start_idx:] = np.asarray(all_list[start_idx:])
             if n_steps > len(all_list):
-                # 重复最早帧填充，与训练数据集的 pad 策略一致 (sampler.py:165)
+                # 重复最早帧填充（与训练时 episode 起始的 pad 行为语义一致：都是重复最早可用帧）
                 result[:start_idx] = result[start_idx]
             return result
 
@@ -48,7 +48,6 @@ class BaseRunner:
             start_idx = -min(n_steps, len(all_list))
             result[start_idx:] = torch.stack(list(all_list[start_idx:]), dim=0)
             if n_steps > len(all_list):
-                # 重复最早帧填充，与训练数据集的 pad 策略一致 (sampler.py:165)
                 result[:start_idx] = result[start_idx]
             return result
 
@@ -127,7 +126,7 @@ class BaseRunner:
                 self.update_obs(obs)
 
                 if done and not prev_done:
-                    task_done_step = env.action_cnt
+                    task_done_step = getattr(env, 'action_cnt', None)
                 prev_done = done
 
                 # dexmani_sim 不实现 done auto-reset，done 后继续 step 仅产生多余动作，不会 crash。
@@ -192,10 +191,11 @@ class BaseRunner:
                     else:
                         cprint(f"⚠️ No video for seed {eval_seed}", "yellow")
 
-                except (RuntimeError, ValueError) as e:
+                except (RuntimeError, ValueError, AttributeError) as e:
                     # 只捕获环境和策略相关的预期异常
                     # dexmani_sim base_env.py:316 raises RuntimeError("Reset Failed for seed {seed}! Unstable objects: ...")
                     # dexmani_sim base_env.py:429/473 raises ValueError("Failed to sample ... positions ...")
+                    # AttributeError: 动态导入的 env 可能缺失某些可选属性（如 action_cnt）
                     error_msg = str(e)
 
                     # 环境初始化失败（跳过该 seed，不计入失败）
@@ -237,9 +237,9 @@ class BaseRunner:
             sr_str = 'N/A' if success_rate is None else f'{success_rate*100.0:.1f}%'
             avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
             if len(env_failed_seeds) > 0:
-                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Env failed: {len(env_failed_seeds)} seeds, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
+                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Env failed: {len(env_failed_seeds)} seeds, Success rate: {sr_str}, Avg steps (success only): {avg_steps_str}", "yellow")
             else:
-                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps: {avg_steps_str}", "yellow")
+                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps (success only): {avg_steps_str}", "yellow")
             print("=" * 90)
 
         finally:

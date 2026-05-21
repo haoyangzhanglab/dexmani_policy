@@ -19,7 +19,7 @@ dataloader:
   num_workers: 8
   shuffle: true
   pin_memory: true
-  persistent_workers: true
+  persistent_workers: false
 
 val_dataloader:
   batch_size: 64
@@ -34,7 +34,7 @@ agent:
   task_texts: ${dataset.task_texts}
   rgb_backbone_name: dino
   rgb_backbone_config:
-    tune_mode: lora
+    tune_mode: lora  # freeze | full | lora
   state_dim: 19
   state_out_dim: 64
 
@@ -111,18 +111,19 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   env_video_fps: 10
   default_eval_episodes: 20
-  sensor_modalities: ${dataset.sensor_modalities}
+  sensor_modalities: ${dataset.datasets[0].sensor_modalities}
   task_configs:
     - task_name: task_1
-      task_text: "task 1"
+      task_text: ${dataset.task_texts[0]}
     - task_name: task_2
-      task_text: "task 2"
+      task_text: ${dataset.task_texts[1]}
     - task_name: task_3
-      task_text: "task 3"
+      task_text: ${dataset.task_texts[2]}
 
+# ---- offline eval (eval_sim.py)
 eval:
-  seed: ${seed}
-  sim:
+  seed: 0
+  offline:
     ckpt_tag_or_path: best
     eval_episodes: 100
     denoise_timesteps_list: [10]

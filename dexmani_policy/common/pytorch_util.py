@@ -15,7 +15,7 @@ def dict_apply(
         if isinstance(value, dict):
             result[key] = dict_apply(value, func)
         elif isinstance(value, list):
-            result[key] = [func(item) if hasattr(item, 'to') else item for item in value]
+            result[key] = [func(item) if isinstance(item, torch.Tensor) else item for item in value]
         else:
             result[key] = func(value)
     return result
@@ -29,6 +29,38 @@ def optimizer_to(optimizer, device):
     return optimizer
 
 
+def replace_submodules(
+    root_module: nn.Module,
+    predicate: Callable[[nn.Module], bool],
+    func: Callable[[nn.Module], nn.Module],
+) -> nn.Module:
+    if predicate(root_module):
+        return func(root_module)
+
+    target_list = [k.split('.') for k, m
+        in root_module.named_modules(remove_duplicate=True)
+        if predicate(m)]
+    for *parent, k in target_list:
+        parent_module = root_module
+        if len(parent) > 0:
+            parent_module = root_module.get_submodule('.'.join(parent))
+        if isinstance(parent_module, nn.Sequential):
+            src_module = parent_module[int(k)]
+        else:
+            src_module = getattr(parent_module, k)
+        tgt_module = func(src_module)
+        if isinstance(parent_module, nn.Sequential):
+            parent_module[int(k)] = tgt_module
+        else:
+            setattr(parent_module, k, tgt_module)
+    # verify all targets were replaced
+    remaining = [k.split('.') for k, m
+        in root_module.named_modules(remove_duplicate=True)
+        if predicate(m)]
+    assert len(remaining) == 0
+    return root_module
+
+
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -38,15 +70,12 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = True
 
 def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
-    # 检查 checkpoint 是否来自 DDP
     first_key = next(iter(state_dict.keys()))
     is_checkpoint_ddp = first_key.startswith('module.')
 
-    # checkpoint 是 DDP，当前不是 DDP：移除 'module.' 前缀
     if is_checkpoint_ddp and not is_current_ddp:
         return {k.removeprefix("module."): v for k, v in state_dict.items()}
 
-    # checkpoint 不是 DDP，当前是 DDP：添加 'module.' 前缀
     elif not is_checkpoint_ddp and is_current_ddp:
         return {f'module.{k}': v for k, v in state_dict.items()}
 
@@ -54,7 +83,9 @@ def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
 
 
 def worker_init_fn(worker_id):
-    np.random.seed(torch.initial_seed() % 2 ** 32)
+    seed = torch.initial_seed() % 2 ** 32
+    random.seed(seed)
+    np.random.seed(seed)
 
 
 def create_mlp(

@@ -37,6 +37,9 @@ class WandbConfig:
 
 
 class TrainWorkspace:
+    _instances: set = set()
+    _hooks_installed: bool = False
+
     def __init__(
         self,
         output_dir: str,
@@ -69,6 +72,8 @@ class TrainWorkspace:
         )
         self.logger = MultiLogger([json_logger, wandb_logger])
 
+        self._closed = False
+        self.__class__._instances.add(self)
         self.install_shutdown_hooks()
 
 
@@ -77,35 +82,7 @@ class TrainWorkspace:
 
 
     def resolve_checkpoint_path(self, tag_or_path: str) -> Path:
-        if tag_or_path == "latest":
-            path = self.checkpoint_dir / "latest.pt"
-        elif tag_or_path == "best":
-            path = self.topk_tracker.best_path()
-            if path is None:
-                raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}.")
-        else:
-            path = Path(tag_or_path)
-            if not path.is_absolute():
-                path = self.checkpoint_dir / path
-
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        return path
-
-
-    def load_model_weights(self, checkpoint: TrainCheckpoint, model, ema_model=None):
-        from dexmani_policy.common.pytorch_util import fix_state_dict
-        from torch.nn.parallel import DistributedDataParallel as DDP
-
-        # 自动处理 DDP ↔ 单卡 checkpoint 转换
-        is_current_ddp = isinstance(model, DDP)
-        model_state = fix_state_dict(checkpoint.model_state, is_current_ddp)
-        model.load_state_dict(model_state, strict=True)
-
-        if ema_model is not None and checkpoint.ema_model_state is not None:
-            # EMA 模型始终不是 DDP 包装的
-            ema_state = fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False)
-            ema_model.load_state_dict(ema_state, strict=True)
+        return self.checkpoint_store.resolve_path(tag_or_path, best_fn=self.topk_tracker.best_path)
 
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
@@ -168,11 +145,15 @@ class TrainWorkspace:
         except FileNotFoundError:
             return 0, 0
 
-        self.load_model_weights(
-            checkpoint=checkpoint,
-            model=model,
-            ema_model=ema_model,
-        )
+        from dexmani_policy.common.pytorch_util import fix_state_dict
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        is_current_ddp = isinstance(model, DDP)
+        model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True)
+
+        if ema_model is not None and checkpoint.ema_model_state is not None:
+            ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
+
         optimizer.load_state_dict(checkpoint.optimizer_state)
         scheduler.load_state_dict(checkpoint.scheduler_state)
 
@@ -185,75 +166,28 @@ class TrainWorkspace:
 
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._instances.discard(self)
         self.logger.close()
 
+    @classmethod
+    def _close_all(cls):
+        for inst in list(cls._instances):
+            inst.close()
+
+    @classmethod
+    def _handle_signal(cls, signum, frame):
+        cls._close_all()
+        raise KeyboardInterrupt
 
     def install_shutdown_hooks(self):
+        # atexit: per-instance 注册无副作用，close() 已幂等
         atexit.register(self.close)
-        def handle_signal(signum, frame):
-            try:
-                self.close()
-            except Exception:
-                pass
-            raise KeyboardInterrupt
-        signal.signal(signal.SIGINT, handle_signal)
-        signal.signal(signal.SIGTERM, handle_signal)
+        # signal: 使用类方法统一处理，仅安装一次
+        if not self.__class__._hooks_installed:
+            self.__class__._hooks_installed = True
+            signal.signal(signal.SIGINT, self.__class__._handle_signal)
+            signal.signal(signal.SIGTERM, self.__class__._handle_signal)
 
-
-class ReadOnlyWorkspace:
-    def __init__(self, output_dir: str):
-        self.output_dir = Path(output_dir)
-        self.checkpoint_dir = self.output_dir / "checkpoints"
-        self.checkpoint_store = CheckpointStore(self.checkpoint_dir)
-
-    def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
-        if tag_or_path == "latest":
-            path = self.checkpoint_dir / "latest.pt"
-        elif tag_or_path == "best":
-            topk_file = self.checkpoint_dir / "topk_manifest.json"
-            if not topk_file.exists():
-                raise FileNotFoundError(f"No topk tracker file found: {topk_file}")
-            import json
-            with open(topk_file) as f:
-                topk_data = json.load(f)
-            items = topk_data.get("items", [])
-            if not items:
-                raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
-            path = self.checkpoint_dir / items[0]["path"]
-        else:
-            path = Path(tag_or_path)
-            if not path.is_absolute():
-                path = self.checkpoint_dir / path
-
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        return self.checkpoint_store.load(path)
-
-    def load_for_inference(self, model, tag_or_path: str, use_ema: bool = False):
-        from dexmani_policy.common.pytorch_util import fix_state_dict
-        checkpoint = self.load_checkpoint(tag_or_path)
-        if use_ema and checkpoint.ema_model_state is not None:
-            print("Using EMA weights for inference.")
-            model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
-        else:
-            if use_ema and checkpoint.ema_model_state is None:
-                print("WARNING: EMA weights requested but not found in checkpoint. Using model weights.")
-            model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
-
-    def save_hydra_config(self, hydra_config):
-        pass  # 由 rank 0 负责
-
-    def log(self, data: Dict[str, Any], step: Optional[int] = None):
-        pass
-
-    def save_checkpoint(self, tag: str, checkpoint: TrainCheckpoint) -> Path:
-        return Path("dummy")
-
-    def save_latest(self, checkpoint_path: Path) -> Path:
-        return Path("dummy")
-
-    def save_topk(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
-        return None
-
-    def close(self):
-        pass

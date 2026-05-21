@@ -43,13 +43,13 @@ class PCDataset(BaseDataset):
             augs = []
             for name, cls in PC_AUG_CLASSES.items():
                 aug_cfg = pc_cfg.get(name)
-                if aug_cfg is not None and aug_cfg.get('enabled', True):
+                if aug_cfg is not None:
                     augs.append(cls(**aug_cfg))
             if augs:
                 self.augmentors['point_cloud'] = augs
 
         state_cfg = self.augmentation_cfg.get('state')
-        if state_cfg is not None and state_cfg.get('enabled', True):
+        if state_cfg is not None:
             self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
     def get_normalizer(self, mode='limits', **kwargs):
@@ -87,8 +87,8 @@ def example(zarr_path):
         val_ratio=0.05,
         augmentation_cfg={
             'pc': {
-                'color': {'enabled': True, 'brightness': 0.2, 'prob': 0.8},
-                'spatial': {'enabled': True, 'rot_z': 15.0, 'trans_xy': 0.10, 'prob': 0.8},
+                'color': {'brightness': 0.2, 'prob': 0.8},
+                'spatial': {'rot_z': 15.0, 'trans_xy': 0.10, 'prob': 0.8},
             },
         },
     )

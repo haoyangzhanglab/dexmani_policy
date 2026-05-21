@@ -7,7 +7,7 @@ from termcolor import cprint
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
-from dexmani_policy.training.common.workspace import TrainWorkspace
+from dexmani_policy.training.common.checkpoint_io import CheckpointStore
 
 
 class SimEvalRecorder:
@@ -61,13 +61,14 @@ class SimEvaluator:
         device,
         agent,
         env_runner,
-        workspace: TrainWorkspace,
+        checkpoint_store: CheckpointStore,
+        eval_root_dir: Path,
     ):
         self.device = device
         self.agent = agent
         self.env_runner = env_runner
-        self.workspace = workspace
-        self.eval_root_dir = self.workspace.output_dir / "eval"
+        self.checkpoint_store = checkpoint_store
+        self.eval_root_dir = eval_root_dir
         self.eval_root_dir.mkdir(parents=True, exist_ok=True)
 
     def create_eval_run_dir(self) -> Path:
@@ -76,6 +77,37 @@ class SimEvaluator:
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
+
+    def _load_for_inference(self, tag_or_path: str, use_ema: bool):
+        from dexmani_policy.common.pytorch_util import fix_state_dict
+        path = self.checkpoint_store.resolve_path(tag_or_path)
+        checkpoint = self.checkpoint_store.load(path)
+
+        train_params = checkpoint.train_params
+        if train_params is not None:
+            for key in ('n_obs_steps', 'n_action_steps', 'action_dim', 'horizon'):
+                expected = train_params.get(key)
+                actual = getattr(self.agent, key, None)
+                if expected is not None and actual is not None and expected != actual:
+                    raise ValueError(
+                        f"Checkpoint train_params.{key}={expected} does not match "
+                        f"agent.{key}={actual}. The config.yaml used for eval may be "
+                        f"from a different training run than this checkpoint."
+                    )
+
+        if use_ema and checkpoint.ema_model_state is not None:
+            print("Using EMA weights for inference.")
+            self.agent.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
+        else:
+            if use_ema and checkpoint.ema_model_state is None:
+                print("WARNING: EMA weights requested but not found in checkpoint. Using model weights.")
+            self.agent.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
+
+        if not self.agent.normalizer.is_fitted(required_keys=['action']):
+            raise RuntimeError(
+                "Normalizer is missing required key 'action' after loading checkpoint. "
+                "The checkpoint may be corrupted or saved without normalizer params."
+            )
 
     @torch.no_grad()
     def run(
@@ -93,11 +125,7 @@ class SimEvaluator:
             )
 
         cprint(f"Loading checkpoint: {ckpt_tag_or_path} (EMA={use_ema_for_eval})", "cyan")
-        self.workspace.load_for_inference(
-            model=self.agent,
-            tag_or_path=ckpt_tag_or_path,
-            use_ema=use_ema_for_eval,
-        )
+        self._load_for_inference(ckpt_tag_or_path, use_ema_for_eval)
         cprint("✅ Checkpoint loaded successfully", "green")
 
         self.agent.to(self.device)

@@ -50,9 +50,6 @@ class AdaLNZero(nn.Module):
     
 
 class CrossAttention(nn.Module):
-    """
-    A cross-attention layer with flash attention.
-    """
     fused_attn: Final[bool]
     def __init__(
             self,
@@ -60,8 +57,8 @@ class CrossAttention(nn.Module):
             num_heads: int = 8,
             qkv_bias: bool = False,
             qk_norm: bool = False,
-            attn_drop: float = 0,       # 注意力权重的dropout
-            proj_drop: float = 0,       # 输出投影的dropout
+            attn_drop: float = 0,
+            proj_drop: float = 0,
             norm_layer: nn.Module = nn.LayerNorm,
     ):
         super().__init__()
@@ -88,7 +85,6 @@ class CrossAttention(nn.Module):
         k, v = kv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
-        # Prepare attn mask (B, L) to mask the conditioion
         if mask is not None:
             mask = mask.reshape(B, 1, 1, L)
             mask = mask.expand(-1, -1, N, -1)
@@ -152,11 +148,10 @@ class DiTXBlock(nn.Module):
         approx_gelu = lambda: nn.GELU(approximate="tanh") 
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0.0)
 
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)  # For self-attention
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)  # For cross-attention
-        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)  # For MLP
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
-        # AdaLN modulation
         modulation_size = 9 * hidden_size
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
@@ -164,14 +159,6 @@ class DiTXBlock(nn.Module):
         )
         
     def forward(self, x, time_c, context_c, attn_mask=None):
-        """
-        x: 动作token, 形状为(B, horizon, hidden_size)
-        time_c: 时间步条件，形状为(B, hidden_size), 用于生成AdaLN-Zero的调制参数
-        context_c: 多模态输入token, 形状为(B, num, hidden_size)，用于交叉注意力
-        attn_mask: 动作token自注意力的掩码, 形状为(B, horizon, horizon)
-        自适应层归一化是在每个子层(自注意力、交叉注意力、MLP)之前进行的, context_c的层归一化可以在交叉注意力中实现, 也可以在Ditx Transformer中实现
-        """
-
         modulation = self.adaLN_modulation(time_c)
 
         chunks = modulation.chunk(9, dim=-1)
@@ -179,18 +166,14 @@ class DiTXBlock(nn.Module):
         shift_cross, scale_cross, gate_cross = chunks[3], chunks[4], chunks[5]
         shift_mlp, scale_mlp, gate_mlp = chunks[6], chunks[7], chunks[8]
 
-        # Self-Attention with adaLN-zero conditioning
         normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
         self_attn_output, _ = self.self_attn(normed_x, normed_x, normed_x, attn_mask=attn_mask)
         x = x + gate_msa.unsqueeze(1) * self_attn_output
 
-        # Cross-Attention with adaLN conditioning
-        normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)  
+        normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)
         cross_attn_output = self.cross_attn(normed_x_cross, context_c, mask=None)
         x = x + gate_cross.unsqueeze(1) * cross_attn_output
-       
 
-        # MLP with adaLN conditioning
         normed_x_mlp = modulate(self.norm3(x), shift_mlp, scale_mlp)
         mlp_output = self.mlp(normed_x_mlp)
         x = x + gate_mlp.unsqueeze(1) * mlp_output  
@@ -202,7 +185,6 @@ class FinalLayer(nn.Module):
     def __init__(self, hidden_size, out_channels):
         super().__init__()
 
-        # 将DitX的输出维度映射到动作空间维度
         self.norm_final = RmsNorm(hidden_size, eps=1e-6)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.ffn_final = Mlp(
@@ -219,9 +201,6 @@ class FinalLayer(nn.Module):
         return x
 
 
-#################################################################################
-#                           Ditx Transformer                          
-#################################################################################
 class DiTXFlowMatch(nn.Module):
     def __init__(
         self,
@@ -308,6 +287,9 @@ class DiTXFlowMatch(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
+        if self.pre_norm_modality:
+            self.context_norm.initialize_weights()
+
         nn.init.normal_(self.input_embedder.weight, std=0.02)
         nn.init.constant_(self.input_embedder.bias, 0) if self.input_embedder.bias is not None else None
         nn.init.normal_(self.input_pos_embed, std=0.02)
@@ -372,11 +354,8 @@ class DiTXFlowMatch(nn.Module):
         
         x = self.final_layer(x)
 
-        # action token 与 context token 分离（cross-attention），输入始终是 (B, horizon, D)，切片等价于 x 本身。
-        # 若未来将 obs token 与 action token 拼接输入，此处取最后 horizon 步才有实际意义。
         x = x[:, -self.horizon:]
         return x
-
 
 
 class DiTXDiffusion(nn.Module):
@@ -456,6 +435,9 @@ class DiTXDiffusion(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
+        if self.pre_norm_modality:
+            self.context_norm.initialize_weights()
+
         nn.init.normal_(self.input_embedder.weight, std=0.02)
         nn.init.constant_(self.input_embedder.bias, 0) if self.input_embedder.bias is not None else None
         nn.init.normal_(self.input_pos_embed, std=0.02)
@@ -506,6 +488,5 @@ class DiTXDiffusion(nn.Module):
         
         x = self.final_layer(x)
 
-        # 同 DiTXFlowMatch：当前 action/context 分离，切片为预留接口。
         x = x[:, -self.horizon:]
         return x

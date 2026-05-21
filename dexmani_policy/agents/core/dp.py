@@ -30,7 +30,9 @@ class DPObsEncoder(nn.Module):
         ], dim=-1)                                      # (B*T, out_dim)
         B = feat.shape[0] // self.n_obs_steps
         if self.condition_type in ('film', 'mlp_film'):
+            # film/mlp_film: (B*T, out_dim) → (B, out_dim*T)  flattened condition
             return feat.reshape(B, -1), {}
+        # cross_attention_film: (B*T, out_dim) → (B, T, out_dim)  tokenized condition
         return feat.reshape(B, self.n_obs_steps, -1), {}
 
 

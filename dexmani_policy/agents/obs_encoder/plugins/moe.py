@@ -70,8 +70,8 @@ class MoE(nn.Module):
         )
         return (picked * topk_prob.unsqueeze(-1)).sum(dim=1)
 
-    def aux_loss(self, probs, topk_idx):
-        dispatch = topk_idx.reshape(-1)
+    def aux_loss(self, probs):
+        dispatch = probs.argmax(dim=-1)
         f_i = torch.bincount(dispatch, minlength=self.num_experts).to(probs.dtype)
         f_i = f_i / dispatch.numel()
 
@@ -93,7 +93,6 @@ class MoE(nn.Module):
 
     def forward(self, z, override_idx=None, return_aux=False):
         probs, topk_idx, topk_prob = self.route(z)
-        router_topk_idx = topk_idx
 
         if override_idx is not None:
             topk_idx = override_idx[:, None]
@@ -104,7 +103,7 @@ class MoE(nn.Module):
         if not return_aux:
             return z_moe
 
-        aux = self.aux_loss(probs, router_topk_idx)
+        aux = self.aux_loss(probs)
         aux["topk_idx"] = topk_idx
         aux["topk_prob"] = topk_prob
         return z_moe, aux

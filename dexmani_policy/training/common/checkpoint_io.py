@@ -22,6 +22,7 @@ class TrainCheckpoint:
     scheduler_state: Dict[str, Any]
 
     monitor: Dict[str, Any]
+    train_params: Optional[Dict[str, Any]] = None
 
 
 
@@ -39,6 +40,7 @@ class CheckpointStore:
                 "epoch": int(checkpoint.epoch),
                 "global_step": int(checkpoint.global_step),
                 "monitor": checkpoint.monitor,
+                "train_params": checkpoint.train_params,
             },
             "weights": {
                 "model": checkpoint.model_state,
@@ -57,6 +59,14 @@ class CheckpointStore:
 
     def load(self, path: Path) -> TrainCheckpoint:
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+
+        fmt = payload.get("_format")
+        if fmt != "simple.v1":
+            raise RuntimeError(
+                f"Unsupported checkpoint format: {fmt!r} (expected 'simple.v1'). "
+                f"The checkpoint was saved by a different version of the training code."
+            )
+
         state = payload["state"]
         weights = payload["weights"]
 
@@ -64,12 +74,37 @@ class CheckpointStore:
             epoch=int(state["epoch"]),
             global_step=int(state["global_step"]),
             monitor=state.get("monitor", {}),
+            train_params=state.get("train_params"),
             model_state=weights["model"],
             ema_model_state=weights.get("ema_model"),
             ema_updater_state=weights.get("ema_updater"),
             optimizer_state=weights["optimizer"],
             scheduler_state=weights["scheduler"],
         )
+
+    def resolve_path(self, tag_or_path: str, best_fn=None):
+        if tag_or_path == "latest":
+            path = self.checkpoint_dir / "latest.pt"
+        elif tag_or_path == "best":
+            if best_fn is not None:
+                path = best_fn()
+            else:
+                manifest_path = self.checkpoint_dir / "topk_manifest.json"
+                if not manifest_path.exists():
+                    raise FileNotFoundError(f"No topk tracker file found: {manifest_path}")
+                items = json.loads(manifest_path.read_text("utf-8")).get("items", [])
+                if not items:
+                    raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
+                path = self.checkpoint_dir / items[0]["path"]
+            if path is None:
+                raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}.")
+        else:
+            path = Path(tag_or_path)
+            if not path.is_absolute():
+                path = self.checkpoint_dir / path
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+        return path
 
 
 

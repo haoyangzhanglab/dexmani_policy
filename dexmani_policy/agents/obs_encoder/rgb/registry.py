@@ -9,7 +9,7 @@ BackboneName = Literal["resnet", "clip", "dino", "siglip"]
 RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     "resnet": {
         "model_name": "resnet18",
-        "tune_mode": "full",
+        "tune_mode": "freeze",
         "norm_mode": "group_norm",
         "global_token_type": "avg",
         "weights": None,

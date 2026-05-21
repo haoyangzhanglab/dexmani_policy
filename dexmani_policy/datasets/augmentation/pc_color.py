@@ -14,8 +14,8 @@ class PCColorJitter(Aug):
     """
 
     def __init__(self, brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
-                 enabled=True, prob=1.0):
-        super().__init__(enabled=enabled, prob=prob)
+                 prob=1.0):
+        super().__init__(prob=prob)
         self.brightness = self.make_range(brightness, center=1.0)
         self.contrast = self.make_range(contrast, center=1.0)
         self.saturation = self.make_range(saturation, center=1.0)
@@ -37,7 +37,7 @@ class PCColorJitter(Aug):
             return x
 
         pc = x.copy()
-        rgb = pc[..., 3:6]  # (T, N, 3)
+        rgb = pc[..., -3:]  # (T, N, 3) — last 3 channels per docstring contract
         orig_shape = rgb.shape
         rgb = rgb.reshape(-1, 3)
 
@@ -47,7 +47,7 @@ class PCColorJitter(Aug):
         rgb = self.apply_hue(rgb)
         rgb = np.clip(rgb, 0.0, 1.0)
 
-        pc[..., 3:6] = rgb.reshape(orig_shape)
+        pc[..., -3:] = rgb.reshape(orig_shape)
         return pc
 
     # --- per-pixel ops on (P, 3) ---

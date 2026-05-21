@@ -178,7 +178,7 @@ class ReplayBuffer:
             for key in keys:
                 arr = src_root['data'][key]
                 arr_data = arr[:]
-                if key == 'action' and arr_data.dtype != np.float32:
+                if arr_data.dtype != np.float32 and np.issubdtype(arr_data.dtype, np.floating):
                     data[key] = arr_data.astype(np.float32)
                 else:
                     data[key] = arr_data
@@ -221,18 +221,15 @@ class ReplayBuffer:
         return buffer
     
     @classmethod
-    def copy_from_path(cls, zarr_path, backend=None, store=None, keys=None, 
-            chunks: Dict[str,tuple]=dict(), 
-            compressors: Union[dict, str, numcodecs.abc.Codec]=dict(), 
+    def copy_from_path(cls, zarr_path, store=None, keys=None,
+            chunks: Dict[str,tuple]=dict(),
+            compressors: Union[dict, str, numcodecs.abc.Codec]=dict(),
             if_exists='replace',
             **kwargs):
         """
         Copy a on-disk zarr to in-memory compressed.
         Recommended
         """
-        if backend == 'numpy':
-            print('backend argument is deprecated!')
-            store = None
         group = zarr.open(os.path.expanduser(zarr_path), 'r')
         return cls.copy_from_store(src_store=group.store, store=store, 
             keys=keys, chunks=chunks, compressors=compressors, 

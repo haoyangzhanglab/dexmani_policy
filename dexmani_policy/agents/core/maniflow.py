@@ -40,9 +40,10 @@ class ManiFlowObsEncoder(nn.Module):
 
         state_feat = self.state_mlp(obs['joint_state'])
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
-        feat = torch.cat([pc_feat, state_feat], dim=-1)
+        feat = torch.cat([pc_feat, state_feat], dim=-1)  # (B*T, K+1, obs_token_dim)
 
         B = feat.shape[0] // self.n_obs_steps
+        # DiTX uses token-based condition: (B*T, K+1, D) → (B, T*(K+1), D)
         return feat.reshape(B, -1, self.obs_token_dim), {}
 
 
@@ -61,7 +62,6 @@ class ManiFlowAgent(DiTXFlowMatchAgent):
         pc_encoder_config: dict = None,
         **kwargs,
     ):
-        pc_encoder_config = (pc_encoder_config or {}).get(encoder_type, {})
         obs_encoder = ManiFlowObsEncoder(
             encoder_type, pc_dim, state_dim, num_points,
             n_obs_steps, state_out_dim, pc_encoder_config,
@@ -85,14 +85,14 @@ def example():
     agent = ManiFlowAgent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
         encoder_type='pointpn', pc_dim=3, state_dim=A, num_points=N,
-        pc_encoder_config={'pointpn': {
+        pc_encoder_config={
             'num_stages': 2,
             'embed_channels': 32,
             'stage_num_neighbors': [16, 16],
             'stage_lga_blocks': [1, 1],
             'stage_channel_expansion': [2, 2],
             'point_cloud_type': 'scan',
-        }},
+        },
         n_layers=2, hidden_dim=128, n_head=4, mlp_ratio=2.0,
         p_drop_attn=0.0, timestep_embed_dim=64, target_t_embed_dim=64,
         denoise_timesteps=3,
@@ -128,7 +128,7 @@ def example():
     # compute_loss 需要 EMA teacher，smoke test 直接用 agent 自身充当
     import copy
     ema_agent = copy.deepcopy(agent)
-    loss, loss_dict = agent.compute_loss(batch, ema_model=ema_agent)
+    loss, loss_dict = agent.compute_loss(batch, ema_backbone=ema_agent.action_decoder.model)
     print(f'loss:             {loss.item():.4f}  keys={list(loss_dict.keys())}')
 
     result = agent.predict_action({

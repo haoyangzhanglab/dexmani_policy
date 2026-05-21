@@ -35,6 +35,27 @@ dataset:
   max_train_episodes: null
   sensor_modalities: ["joint_state", "point_cloud"]
 
+  # ---- data augmentation (add under dataset, uncomment to enable) ----
+  # augmentation_cfg:
+  #   pc:
+  #     color:
+  #       brightness: 0.2
+  #       contrast: 0.2
+  #       saturation: 0.3
+  #       hue: 0.05
+  #       prob: 0.8
+  #     spatial:
+  #       rot_z: 15.0
+  #       trans_xy: 0.10
+  #       scale: 1.02
+  #       prob: 0.8
+  #     dropout:
+  #       dropout_ratio: 0.1
+  #       prob: 0.5
+  #   state:
+  #     noise_std: 0.005
+  #     prob: 0.5
+
 agent:
   _target_: dexmani_policy.agents.core.maniflow.ManiFlowAgent
   horizon: ${horizon}
@@ -48,20 +69,12 @@ agent:
   num_points: 1024
 
   pc_encoder_config:
-    pointpn:
-      num_stages: 3
-      embed_channels: 64
-      stage_num_neighbors: [24, 24, 16]
-      stage_lga_blocks: [2, 2, 1]
-      stage_channel_expansion: [2, 2, 2]
-      point_cloud_type: scan
-
-    pointnext_tokenizer:
-      stem_channels: 64
-      token_channels: 128
-      num_patches: 96
-      patch_radii: [0.04, 0.08]
-      patch_neighbors: [16, 32]
+    num_stages: 3
+    embed_channels: 64
+    stage_num_neighbors: [24, 24, 16]
+    stage_lga_blocks: [2, 2, 1]
+    stage_channel_expansion: [2, 2, 2]
+    point_cloud_type: scan
 
   n_layers: 12
   hidden_dim: 768
@@ -77,12 +90,12 @@ agent:
 
   denoise_timesteps: 10
   flow_batch_ratio: 0.75
-  consistency_batch_ratio: 0.25
   t_sample_mode_for_flow: beta
   t_sample_mode_for_consistency: discrete
   dt_sample_mode_for_consistency: uniform
-  target_t_sample_mode: relative
-  cond_dropout_prob: 0.0
+  target_t_sample_mode: relative  # 需配合 use_ema_teacher_for_consistency=true，consistency 训练提供 target_t 泛化；纯 flow 模式下 target_t 恒为 0，推理时 dt>0 存在分布偏移
+  modality_dropout_probs:
+    joint_state: 0.2
 
 optimizer:
   lr: 1.0e-4
@@ -143,39 +156,14 @@ env_runner:
   default_eval_episodes: 20
   sensor_modalities: ${dataset.sensor_modalities}
 
+# ---- offline eval (eval_sim.py)
 eval:
-  seed: ${seed}
-  sim:
+  seed: 0
+  offline:
     ckpt_tag_or_path: best
     eval_episodes: 100
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
-
-# ---- 数据增强（点云）- 需要时取消注释 ----
-# dataset:
-#   augmentation_cfg:
-#     pc:
-#       color:
-#         enabled: true
-#         brightness: 0.2
-#         contrast: 0.2
-#         saturation: 0.3
-#         hue: 0.05
-#         prob: 0.8
-#       spatial:
-#         enabled: true
-#         rot_z: 15.0
-#         trans_xy: 0.10
-#         scale: 1.02
-#         prob: 0.8
-#       dropout:
-#         enabled: false
-#         dropout_ratio: 0.1
-#         prob: 0.5
-#     state:
-#       enabled: false
-#       noise_std: 0.005
-#       prob: 0.5
 
 hydra:
   job:

@@ -6,15 +6,13 @@ os.chdir(ROOT_DIR)
 
 
 import hydra
-import warnings
-from omegaconf import OmegaConf
 
 from dexmani_policy.common.pytorch_util import set_seed
+from dexmani_policy.common.resolver import register_resolvers
 from dexmani_policy.train import build_train_components, validate_config
 from dexmani_policy.training.trainer import Trainer
 
-warnings.filterwarnings("ignore")
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+register_resolvers()
 
 
 @hydra.main(version_base=None, config_path="configs")

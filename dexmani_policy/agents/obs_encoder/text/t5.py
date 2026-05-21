@@ -5,7 +5,6 @@ from transformers import AutoTokenizer, T5EncoderModel
 
 
 class T5TextEncoder(nn.Module):
-    """Frozen T5 text encoder for robot task instructions."""
 
     def __init__(
         self,
@@ -33,13 +32,14 @@ class T5TextEncoder(nn.Module):
 
     @torch.no_grad()
     def forward(self, task_texts: List[str]) -> torch.Tensor:
+        device = next(self.parameters()).device
         task_tokens = self.tokenizer(
             task_texts,
             padding=True,
             truncation=True,
             max_length=self.max_length,
             return_tensors="pt",
-        ).to(self.device)
+        ).to(device)
 
         token_embeds = self.text_backbone(
             input_ids=task_tokens.input_ids,

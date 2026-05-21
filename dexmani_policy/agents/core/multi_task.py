@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-from typing import Dict
-
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.core.dp import DPObsEncoder
 from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
@@ -43,7 +41,7 @@ class MultiTaskAgent(BaseAgent):
         n_obs_steps: int = 2,
         n_action_steps: int = 8,
         action_dim: int = 19,
-        cond_dropout_prob: float = 0.0,
+        modality_dropout_probs: dict = None,
         # text embedding cache (可选)
         task_texts: list = None,
     ):
@@ -83,10 +81,11 @@ class MultiTaskAgent(BaseAgent):
         super().__init__(
             obs_encoder, action_decoder, horizon,
             n_obs_steps, n_action_steps, action_dim,
-            cond_dropout_prob=cond_dropout_prob,
+            modality_dropout_probs=modality_dropout_probs,
         )
 
         self.text_encoder = text_encoder
+        self.text_encoder.requires_grad_(False)
         self.text_proj = nn.Linear(text_encoder.embed_dim, n_emb)
 
         if task_texts is not None:
@@ -110,51 +109,21 @@ class MultiTaskAgent(BaseAgent):
         emb = self.text_encoder(task_texts).squeeze(1)
         return self.text_proj(emb.to(dtype=self.text_proj.weight.dtype))
 
-    def extract_text(self, obs_dict: Dict):
-        task_texts = obs_dict.get("task_text")
-        if task_texts is None:
-            raise ValueError("obs_dict must contain 'task_text' key for MultiTaskAgent")
-        obs_numerical = {
-            k: v for k, v in obs_dict.items()
-            if k not in ("task_text", "task_name")
-        }
-        return obs_numerical, task_texts
-
-
     def _build_cond(self, obs_dict):
-        obs_numerical, task_texts = self.extract_text(obs_dict)
+        task_texts = obs_dict["task_text"]
+        obs_numerical = {k: v for k, v in obs_dict.items() if k not in ("task_text", "task_name")}
         obs = self.preprocess(obs_numerical)
         cond, aux = self.obs_encoder(obs)
         text_emb = self.get_text_emb(task_texts)
         cond = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
-        return self._apply_cond_dropout(cond), aux
+        return cond, aux
 
-    @torch.no_grad()
-    def predict_action(self, obs_dict, denoise_timesteps=None):
-        obs_numerical, task_texts = self.extract_text(obs_dict)
-
-        cond, _ = self.obs_encoder(self.preprocess(obs_numerical))
-        text_emb = self.get_text_emb(task_texts)
-        cond = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
-
-        return self.predict_action_from_cond(cond, denoise_timesteps)
-
-    def configure_optimizer(self, lr, weight_decay, obs_lr=None, obs_weight_decay=None, betas=(0.95, 0.999)):
-        obs_lr = obs_lr if obs_lr is not None else lr
-        obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
-
-        action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
-        for g in action_groups:
-            g["lr"] = lr
-
-        obs_params = [p for p in self.obs_encoder.parameters() if p.requires_grad]
-        text_proj_params = [p for p in self.text_proj.parameters() if p.requires_grad]
-        groups = action_groups + [
-            {"params": obs_params, "weight_decay": obs_wd, "lr": obs_lr},
-            {"params": text_proj_params, "weight_decay": weight_decay, "lr": lr},
-        ]
-
-        return torch.optim.AdamW([g for g in groups if g["params"]], lr=lr, betas=betas)
+    def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
+        groups = super().get_optim_param_groups(lr, obs_lr, weight_decay, obs_wd)
+        groups.append({"params": [self.text_proj.weight], "weight_decay": weight_decay, "lr": lr})
+        if self.text_proj.bias is not None:
+            groups.append({"params": [self.text_proj.bias], "weight_decay": 0.0, "lr": lr})
+        return groups
 
 
 def example():

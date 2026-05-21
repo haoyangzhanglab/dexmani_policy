@@ -44,11 +44,10 @@ class EMAModel:
         ema_buffers = dict(self.averaged_model.named_buffers())
 
         for name, param in new_model.named_parameters():
-            # 兼容 DDP：strip module. 前缀
-            clean_name = name[7:] if name.startswith('module.') else name
-            ema_param = ema_params.get(clean_name)
+            ema_param = ema_params.get(name)
             if ema_param is None:
-                raise KeyError(f"EMA model missing parameter '{clean_name}' (original: '{name}'). Model structure may have changed since EMA was initialized.")
+                raise RuntimeError(f"EMA model missing parameter '{name}'")
+
             if not param.requires_grad:
                 ema_param.copy_(param.to(dtype=ema_param.dtype).data)
             else:
@@ -57,9 +56,9 @@ class EMAModel:
                 )
 
         for name, buf in new_model.named_buffers():
-            clean_name = name[7:] if name.startswith('module.') else name
-            if clean_name in ema_buffers:
-                ema_buffers[clean_name].copy_(buf.to(dtype=ema_buffers[clean_name].dtype).data)
+            ema_buf = ema_buffers.get(name)
+            if ema_buf is not None:
+                ema_buf.copy_(buf.to(dtype=ema_buf.dtype).data)
 
         self.optimization_step += 1
 

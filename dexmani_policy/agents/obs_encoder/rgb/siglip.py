@@ -108,6 +108,8 @@ class SigLIP(nn.Module):
         flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
         outputs = self.backbone(pixel_values=flat_rgb, return_dict=True)
 
+        # SigLIP last_hidden_state contains only patch tokens (no CLS token).
+        # Unlike CLIP/DINO which slice away prefix tokens, we keep all positions.
         patch_tokens = self.proj(outputs.last_hidden_state)
         global_token = self.get_global_token(outputs, patch_tokens)
 

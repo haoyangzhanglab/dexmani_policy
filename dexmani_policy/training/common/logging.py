@@ -15,7 +15,6 @@ def is_video_key(key: Any) -> bool:
     return "video" in str(key).lower()
 
 
-# 在Trainer中调用，将原始日志数据转换为纯标量形式，供Logger记录与终端打印
 def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
     out: Dict[str, float] = {}
     tensor_keys = []
@@ -27,9 +26,18 @@ def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
                 tensor_keys.append(key)
                 tensor_vals.append(value.detach())
             elif value.dim() == 1:
-                cpu_vec = value.detach().float().cpu().tolist()
-                for i, val in enumerate(cpu_vec):
-                    out[f"{key}/expert_{i}"] = float(val)
+                if value.shape[0] <= 50:
+                    cpu_vec = value.detach().float().cpu().tolist()
+                    for i, val in enumerate(cpu_vec):
+                        out[f"{key}/{i}"] = float(val)
+                else:
+                    v = value.detach().float()
+                    out[f"{key}/mean"] = v.mean().item()
+                    out[f"{key}/std"] = v.std().item()
+            else:
+                v = value.detach().float()
+                out[f"{key}/mean"] = v.mean().item()
+                out[f"{key}/std"] = v.std().item()
             continue
         try:
             out[key] = float(value)
@@ -45,11 +53,9 @@ def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
 
 
 class Logger:
-    # 写入一条日志记录。
     def log(self, data: Dict[str, Any], step: Optional[int] = None, **kwargs):
         raise NotImplementedError
 
-    # 关闭日志后端并释放资源。
     def close(self):
         raise NotImplementedError
 

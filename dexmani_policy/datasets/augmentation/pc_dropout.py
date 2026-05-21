@@ -8,8 +8,8 @@ class PCDropout(Aug):
     Dropped points are replaced with zeros. Same dropout mask across all T frames.
     """
 
-    def __init__(self, dropout_ratio=0.1, enabled=True, prob=1.0):
-        super().__init__(enabled=enabled, prob=prob)
+    def __init__(self, dropout_ratio=0.1, prob=1.0):
+        super().__init__(prob=prob)
         self.dropout_ratio = dropout_ratio
 
     def _augment(self, x):

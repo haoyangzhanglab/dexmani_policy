@@ -35,6 +35,27 @@ dataset:
   max_train_episodes: null
   sensor_modalities: ["joint_state", "point_cloud"]
 
+  # ---- data augmentation (add under dataset, uncomment to enable) ----
+  # augmentation_cfg:
+  #   pc:
+  #     color:
+  #       brightness: 0.2
+  #       contrast: 0.2
+  #       saturation: 0.3
+  #       hue: 0.05
+  #       prob: 0.8
+  #     spatial:
+  #       rot_z: 15.0
+  #       trans_xy: 0.10
+  #       scale: 1.02
+  #       prob: 0.8
+  #     dropout:
+  #       dropout_ratio: 0.1
+  #       prob: 0.5
+  #   state:
+  #     noise_std: 0.005
+  #     prob: 0.5
+
 agent:
   _target_: dexmani_policy.agents.core.dp3.DP3Agent
   horizon: ${horizon}
@@ -42,7 +63,7 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: idp3
+  encoder_type: idp3  # idp3 | pointnext | dp3
   pc_dim: 3
   pc_out_dim: 128
   state_dim: 19
@@ -58,7 +79,6 @@ agent:
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
-  cond_dropout_prob: 0.0
 
 optimizer:
   lr: 1.0e-4
@@ -111,7 +131,7 @@ training:
     grad_accum_steps: 1
     grad_clip_norm: 1.0
 
-env_runner: 
+env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
@@ -119,39 +139,14 @@ env_runner:
   default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
 
+# ---- offline eval (eval_sim.py)
 eval:
-  seed: ${seed}
-  sim:
+  seed: 0
+  offline:
     ckpt_tag_or_path: best
     eval_episodes: 100
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
-
-# ---- 数据增强（点云）- 需要时取消注释 ----
-# dataset:
-#   augmentation_cfg:
-#     pc:
-#       color:
-#         enabled: true
-#         brightness: 0.2
-#         contrast: 0.2
-#         saturation: 0.3
-#         hue: 0.05
-#         prob: 0.8
-#       spatial:
-#         enabled: true
-#         rot_z: 15.0
-#         trans_xy: 0.10
-#         scale: 1.02
-#         prob: 0.8
-#       dropout:
-#         enabled: false
-#         dropout_ratio: 0.1
-#         prob: 0.5
-#     state:
-#       enabled: false
-#       noise_std: 0.005
-#       prob: 0.5
 
 hydra:
   job:

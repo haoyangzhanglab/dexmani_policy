@@ -57,16 +57,15 @@ class MoEObsEncoder(nn.Module):
             self.state_mlp(obs['joint_state']),
         ], dim=-1)
 
-    def reshape_cond(self, feat: torch.Tensor) -> torch.Tensor:
+    def forward(self, obs: dict, return_aux=True, override_idx=None):
+        z = self.encode_feat(obs)
+        if override_idx is not None:
+            override_idx = override_idx.repeat_interleave(self.n_obs_steps)
+        feat, aux = self.moe(z, return_aux=return_aux, override_idx=override_idx)
         B = feat.shape[0] // self.n_obs_steps
         if self.condition_type in ('film', 'mlp_film'):
-            return feat.reshape(B, -1)
-        return feat.reshape(B, self.n_obs_steps, -1)
-
-    def forward(self, obs: dict):
-        z = self.encode_feat(obs)
-        feat, aux = self.moe(z, return_aux=True)
-        return self.reshape_cond(feat), aux
+            return feat.reshape(B, -1), aux
+        return feat.reshape(B, self.n_obs_steps, -1), aux
 
 
 class MoEAgent(UNetDiffusionAgent):
@@ -102,6 +101,16 @@ class MoEAgent(UNetDiffusionAgent):
         super().__init__(
             obs_encoder, condition_type, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
         )
+
+    def _build_cond(self, obs_dict, override_idx=None):
+        obs = self.preprocess(obs_dict)
+        cond, aux = self.obs_encoder(obs, override_idx=override_idx)
+        return cond, aux
+
+    @torch.no_grad()
+    def predict_action(self, obs_dict, denoise_timesteps=None, override_idx=None):
+        cond, _ = self._build_cond(obs_dict, override_idx=override_idx)
+        return self.predict_action_from_cond(cond, denoise_timesteps)
 
 
 def example():
@@ -153,6 +162,15 @@ def example():
     })
     print(f'pred_action:     {result["pred_action"].shape}')
     print(f'control_action:  {result["control_action"].shape}')
+
+    # test override_idx
+    override = torch.tensor([0, 1], dtype=torch.long, device=device)
+    result_ov = agent.predict_action({
+        'point_cloud': obs['point_cloud'].reshape(B, T, N, 3),
+        'joint_state': obs['joint_state'].reshape(B, T, A),
+    }, override_idx=override)
+    print(f'override pred:   {result_ov["pred_action"].shape}')
+    print(f'override ctrl:   {result_ov["control_action"].shape}')
     print('=== PASSED ===')
 
 

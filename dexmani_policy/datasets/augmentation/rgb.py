@@ -12,8 +12,8 @@ class RGBAug(Aug):
     """
 
     def __init__(self, brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05,
-                 enabled=True, prob=1.0):
-        super().__init__(enabled=enabled, prob=prob)
+                 prob=1.0):
+        super().__init__(prob=prob)
         # Use ColorJitter to normalise param ranges, then read back the list form
         cj = ColorJitter(brightness=brightness, contrast=contrast,
                          saturation=saturation, hue=hue)

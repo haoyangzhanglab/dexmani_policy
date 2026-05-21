@@ -41,7 +41,7 @@ class RGBPCDataset(BaseDataset):
             return
 
         rgb_cfg = self.augmentation_cfg.get('rgb')
-        if rgb_cfg is not None and rgb_cfg.get('enabled', True):
+        if rgb_cfg is not None:
             self.augmentors['rgb'] = [RGBAug(**rgb_cfg)]
 
         pc_cfg = self.augmentation_cfg.get('pc')
@@ -49,13 +49,13 @@ class RGBPCDataset(BaseDataset):
             pc_augs = []
             for name, cls in PC_AUG_CLASSES.items():
                 aug_cfg = pc_cfg.get(name)
-                if aug_cfg is not None and aug_cfg.get('enabled', True):
+                if aug_cfg is not None:
                     pc_augs.append(cls(**aug_cfg))
             if pc_augs:
                 self.augmentors['point_cloud'] = pc_augs
 
         state_cfg = self.augmentation_cfg.get('state')
-        if state_cfg is not None and state_cfg.get('enabled', True):
+        if state_cfg is not None:
             self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
     def get_normalizer(self, mode='limits', **kwargs):

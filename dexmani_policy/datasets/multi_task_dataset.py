@@ -1,3 +1,6 @@
+import hashlib
+import warnings
+import multiprocessing as mp
 import numpy as np
 import torch
 from typing import List, Optional
@@ -48,6 +51,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self.total_length = sum(self.task_lengths)
 
         self._epoch = 0
+        self._epoch_val = mp.Value('i', 0)  # shared memory for persistent_workers visibility
         self.deterministic = deterministic
 
         if sampling_strategy == 'proportional':
@@ -60,7 +64,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             self.sample_probs = np.array(task_weights) / total
 
         if sampling_strategy != 'weighted' and task_weights is not None:
-            import warnings
             warnings.warn(
                 f"task_weights={task_weights} is ignored because "
                 f"sampling_strategy='{sampling_strategy}'. "
@@ -87,27 +90,54 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode='limits')
-
-        from dexmani_policy.common.normalizer import SingleFieldLinearNormalizer
-        normalizer['camera_intrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
-        normalizer['camera_extrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
-
         return normalizer
 
     def generate_fixed_indices(self):
+        if self.sampling_strategy == 'proportional':
+            indices = []
+            for task_idx, task_length in enumerate(self.task_lengths):
+                for local_idx in range(task_length):
+                    indices.append((task_idx, local_idx))
+            rng = np.random.default_rng(
+                seed=int(hashlib.md5(f"{self.seed}_deterministic_fixed".encode()).hexdigest(), 16) % (2**32)
+            )
+            rng.shuffle(indices)
+            return indices
+
+        # balanced / weighted: 按 sample_probs 生成固定索引
+        # 使用固定 seed（不含 _epoch），保证每次遍历顺序一致
+        rng = np.random.default_rng(
+            seed=int(hashlib.md5(f"{self.seed}_deterministic_fixed".encode()).hexdigest(), 16) % (2**32)
+        )
+        target_counts = self.compute_target_counts()
+
         indices = []
-        for task_idx, task_length in enumerate(self.task_lengths):
-            for local_idx in range(task_length):
-                indices.append((task_idx, local_idx))
+        for task_idx in range(self.num_tasks):
+            n_samples = target_counts[task_idx]
+            if n_samples == 0:
+                continue
+            local_indices = self.sample_task_indices(task_idx, n_samples, rng)
+            indices.extend((task_idx, int(idx)) for idx in local_indices)
+
+        rng.shuffle(indices)
         return indices
 
     def compute_target_counts(self):
         target_counts = np.round(self.sample_probs * self.total_length).astype(int)
         diff = self.total_length - target_counts.sum()
         if diff != 0:
-            rng = np.random.default_rng(seed=hash((self.seed, self._epoch, 'diff')) % (2**32))
-            idx = rng.choice(self.num_tasks, p=self.sample_probs)
-            target_counts[idx] += diff
+            rng = np.random.default_rng(seed=int(hashlib.md5(f"{self.seed}_{self._epoch}_diff".encode()).hexdigest(), 16) % (2**32))
+            if diff > 0:
+                idx = rng.choice(self.num_tasks, p=self.sample_probs)
+                target_counts[idx] += diff
+            else:
+                while diff < 0:
+                    valid = np.where(target_counts > 0)[0]
+                    if len(valid) == 0:
+                        break
+                    idx = valid[rng.choice(len(valid))]
+                    target_counts[idx] -= 1
+                    diff += 1
         return target_counts
 
     def sample_task_indices(self, task_idx, n_samples, rng):
@@ -125,7 +155,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         return np.concatenate(local_indices)
 
     def generate_epoch_indices(self):
-        epoch_rng = np.random.default_rng(seed=hash((self.seed, self._epoch)) % (2**32))
+        epoch_rng = np.random.default_rng(seed=int(hashlib.md5(f"{self.seed}_{self._epoch}".encode()).hexdigest(), 16) % (2**32))
         target_counts = self.compute_target_counts()
 
         indices = []
@@ -144,6 +174,9 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         return self.total_length
 
     def __getitem__(self, idx):
+        # sync epoch from shared memory (visible to persistent_workers)
+        self._epoch = self._epoch_val.value
+
         if self.deterministic:
             task_idx, local_idx = self.fixed_indices[idx]
         else:
@@ -162,6 +195,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
     def set_epoch(self, epoch: int):
         self._epoch = epoch
+        self._epoch_val.value = epoch
 
     def get_normalizer(self, task_name: Optional[str] = None):
         if self.normalizer_mode == 'shared':
@@ -182,10 +216,16 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             return None
         val_ds, val_names, val_texts = zip(*valid_triples)
 
+        if self.task_weights is not None:
+            val_weights = [self.task_weights[self.task_names.index(name)] for name in val_names]
+        else:
+            val_weights = None
+
         return MultiTaskDataset(
             datasets=list(val_ds),
             task_names=list(val_names),
-            sampling_strategy='proportional',
+            sampling_strategy=self.sampling_strategy,
+            task_weights=val_weights,
             normalizer_mode=self.normalizer_mode,
             seed=self.seed,
             deterministic=True,

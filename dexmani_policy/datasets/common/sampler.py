@@ -10,7 +10,7 @@ def create_indices(
     episode_mask: np.ndarray,
     pad_before: int=0, 
     pad_after: int=0,
-    debug:bool=True,
+    debug:bool=False,
 ) -> np.ndarray:
     
     assert episode_mask.shape == episode_ends.shape
@@ -109,6 +109,27 @@ class SequenceSampler:
             raise ValueError(
                 f"All episodes are masked out. Cannot create dataset. "
                 f"episode_mask.sum()=0, n_episodes={len(episode_ends)}"
+            )
+
+        min_required_length = sequence_length - pad_before - pad_after
+        for i in range(len(episode_ends)):
+            if not episode_mask[i]:
+                continue
+            start_idx = 0 if i == 0 else episode_ends[i - 1]
+            episode_length = episode_ends[i] - start_idx
+            if episode_length < min_required_length:
+                episode_mask[i] = False
+                import warnings
+                warnings.warn(
+                    f"Skipping episode {i}: length={episode_length} < "
+                    f"min_required={min_required_length} "
+                    f"(sequence_length={sequence_length} - pad_before={pad_before} - pad_after={pad_after})"
+                )
+
+        if not np.any(episode_mask):
+            raise ValueError(
+                f"All episodes filtered out. "
+                f"min_required_length={min_required_length}, n_episodes={len(episode_ends)}"
             )
 
         indices = create_indices(episode_ends,

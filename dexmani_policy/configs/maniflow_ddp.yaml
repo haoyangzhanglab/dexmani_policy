@@ -15,7 +15,7 @@ policy_name: maniflow_ddp
 
 training:
   num_gpus: 4
-  gpu_ids: [0, 1, 2, 3]  # 指定使用哪几张GPU，null表示使用前num_gpus张卡
+  gpu_ids: null  # 指定使用哪几张GPU，null表示使用前num_gpus张卡
   device: cuda:0
 
 dataloader:

@@ -15,8 +15,8 @@ class PCSpatialAug(Aug):
     """
 
     def __init__(self, rot_z=15.0, trans_xy=0.10, scale=1.02,
-                 enabled=True, prob=1.0):
-        super().__init__(enabled=enabled, prob=prob)
+                 prob=1.0):
+        super().__init__(prob=prob)
         self.rot_z = float(rot_z)
         self.trans_xy = float(trans_xy)
         self.scale = float(scale)
@@ -29,7 +29,7 @@ class PCSpatialAug(Aug):
         angle = np.deg2rad(np.random.uniform(-self.rot_z, self.rot_z))
         dx = np.random.uniform(-self.trans_xy, self.trans_xy)
         dy = np.random.uniform(-self.trans_xy, self.trans_xy)
-        s = np.random.uniform(1.0 / max(self.scale, 1.001), self.scale)
+        s = np.random.uniform(min(1.0 / self.scale, self.scale), max(1.0 / self.scale, self.scale))
 
         cos_a, sin_a = np.cos(angle), np.sin(angle)
         T, N, _ = xyz.shape
@@ -40,4 +40,11 @@ class PCSpatialAug(Aug):
         pc[..., 0] = rx * s + dx
         pc[..., 1] = ry * s + dy
         pc[..., 2] = xyz[..., 2] * s
+
+        # rotate normals (channels 3:6) if present — same rotation, no translation/scale
+        if pc.shape[-1] >= 6:
+            nxyz = x[..., 3:6]
+            pc[..., 3] = nxyz[..., 0] * cos_a - nxyz[..., 1] * sin_a
+            pc[..., 4] = nxyz[..., 0] * sin_a + nxyz[..., 1] * cos_a
+
         return pc

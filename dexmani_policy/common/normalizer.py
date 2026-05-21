@@ -37,11 +37,26 @@ class DictOfTensorMixin(nn.Module):
 
     @property
     def device(self):
-        return next(iter(self.parameters())).device
+        try:
+            return next(iter(self.parameters())).device
+        except StopIteration:
+            raise RuntimeError("Normalizer has no parameters; call fit() first")
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        old_keys = set(self.params_dict.state_dict().keys())
         self.params_dict = load_param_dict(state_dict, prefix + 'params_dict')
         self.params_dict.requires_grad_(False)
+
+        if len(old_keys) > 0:
+            state_prefix = prefix + 'params_dict.'
+            state_keys = {
+                k[len(state_prefix):] for k in state_dict
+                if k.startswith(state_prefix)
+            }
+            for k in sorted(old_keys - state_keys):
+                missing_keys.append(state_prefix + k)
+            for k in sorted(state_keys - old_keys):
+                unexpected_keys.append(state_prefix + k)
 
 
 
@@ -52,8 +67,9 @@ def fit_params(
     mode='limits',
     output_max=1.,
     output_min=-1.,
-    range_eps=1e-4,
+    range_eps=2e-2,
     fit_offset=True,
+    label=None,
 ):
     assert mode in ['limits', 'gaussian'] and last_n_dims >= 0 and output_max > output_min
 
@@ -82,7 +98,7 @@ def fit_params(
             input_range[ignore_dim] = output_max - output_min
             scale = (output_max - output_min) / input_range
             offset = output_min - scale * input_min
-            offset[ignore_dim] = (output_max + output_min) / 2 - input_min[ignore_dim]
+            offset[ignore_dim] = -input_mean[ignore_dim]  # zero-center without scaling
         else:
             output_abs = min(abs(output_min), abs(output_max))
             input_abs = torch.maximum(torch.abs(input_min), torch.abs(input_max))
@@ -101,7 +117,16 @@ def fit_params(
             offset = - input_mean * scale
         else:
             offset = torch.zeros_like(input_mean)
-    
+
+    n_ignored = ignore_dim.sum().item()
+    if n_ignored > 0:
+        prefix = f"[Normalizer] {label}: " if label else "[Normalizer]: "
+        print(
+            f"{prefix}{n_ignored}/{ignore_dim.shape[0]} dims ignored "
+            f"(range_eps={range_eps}, mode={mode}). "
+            f"Ignored indices: {ignore_dim.nonzero(as_tuple=True)[0].tolist()}"
+        )
+
     this_params = nn.ParameterDict({
         'scale': scale,
         'offset': offset,
@@ -145,7 +170,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         mode='limits',
         output_max=1.,
         output_min=-1.,
-        range_eps=1e-4,
+        range_eps=2e-2,
         fit_offset=True
     ):
         self.params_dict = fit_params(
@@ -160,7 +185,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         )
     
     @classmethod
-    def createfit_params(cls, data: Union[torch.Tensor, np.ndarray, zarr.Array], **kwargs):
+    def create_fit_params(cls, data: Union[torch.Tensor, np.ndarray, zarr.Array], **kwargs):
         obj = cls()
         obj.fit(data, **kwargs)
         return obj
@@ -226,13 +251,13 @@ class LinearNormalizer(DictOfTensorMixin):
         mode='limits',
         output_max=1.,
         output_min=-1.,
-        range_eps=1e-4,
+        range_eps=2e-2,
         fit_offset=True,
     ):
         if isinstance(data, dict):
             for key, value in data.items():
                 self.params_dict[key] = fit_params(
-                    value, 
+                    value,
                     last_n_dims=last_n_dims,
                     dtype=dtype,
                     mode=mode,
@@ -240,6 +265,7 @@ class LinearNormalizer(DictOfTensorMixin):
                     output_min=output_min,
                     range_eps=range_eps,
                     fit_offset=fit_offset,
+                    label=key,
                 )
         else:
             self.params_dict['_default'] = fit_params(
@@ -262,10 +288,14 @@ class LinearNormalizer(DictOfTensorMixin):
     def __setitem__(self, key: str , value: 'SingleFieldLinearNormalizer'):
         self.params_dict[key] = value.params_dict
 
-    def is_fitted(self):
-        return len(self.params_dict) > 0
+    def is_fitted(self, required_keys=None):
+        if len(self.params_dict) == 0:
+            return False
+        if required_keys is not None:
+            return all(k in self.params_dict for k in required_keys)
+        return True
 
-    def normalize_impl(self, x, forward=True):
+    def _normalize_impl(self, x, forward=True):
         if isinstance(x, dict):
             result = dict()
             for key, value in x.items():
@@ -283,11 +313,11 @@ class LinearNormalizer(DictOfTensorMixin):
 
 
     def normalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
-        return self.normalize_impl(x, forward=True)
+        return self._normalize_impl(x, forward=True)
 
 
     def unnormalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
-        return self.normalize_impl(x, forward=False)
+        return self._normalize_impl(x, forward=False)
 
 
     def get_input_stats(self) -> Dict:

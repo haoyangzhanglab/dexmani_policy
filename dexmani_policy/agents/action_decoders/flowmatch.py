@@ -11,7 +11,6 @@ class FlowMatchWithConsistency(nn.Module):
         model,
         denoise_timesteps: int = 10,
         flow_batch_ratio: float = 0.75,
-        consistency_batch_ratio: float = 0.25,
         t_sample_mode_for_flow: str = "beta",
         t_sample_mode_for_consistency: str = "discrete",
         dt_sample_mode_for_consistency: str = "uniform",
@@ -23,7 +22,6 @@ class FlowMatchWithConsistency(nn.Module):
         self.model = model
         self.denoise_timesteps = denoise_timesteps
         self.flow_batch_ratio = flow_batch_ratio
-        self.consistency_batch_ratio = consistency_batch_ratio
 
         self.t_sample_mode_for_flow = t_sample_mode_for_flow
         self.t_sample_mode_for_consistency = t_sample_mode_for_consistency
@@ -33,8 +31,8 @@ class FlowMatchWithConsistency(nn.Module):
         self.sampler = TimeSampler(denoise_timesteps=denoise_timesteps)
     
 
-    def linear_interpolate(self, noise, target, timestep, epsilon=0.0):
-        noise_coeff = 1.0 - (1.0 - epsilon) * timestep
+    def linear_interpolate(self, noise, target, timestep):
+        noise_coeff = 1.0 - timestep
         interpolated_data_point = noise_coeff * noise + timestep * target
         return interpolated_data_point
     
@@ -53,7 +51,7 @@ class FlowMatchWithConsistency(nn.Module):
 
         x0_flow = torch.randn_like(actions, device=actions.device)
         x1_flow = actions
-        xt_flow = self.linear_interpolate(x0_flow, x1_flow, t_flow, epsilon=0.0)
+        xt_flow = self.linear_interpolate(x0_flow, x1_flow, t_flow)
         vt_flow_target = x1_flow - x0_flow
 
         flow_target_dict = {
@@ -66,6 +64,11 @@ class FlowMatchWithConsistency(nn.Module):
     
 
     def get_consistency_velocity(self, actions, cond, ema_model):
+        # target_t 作为 mode indicator：
+        #   target_t=0 (flow): 预测瞬时速度 v = x1-x0
+        #   target_t>0 (consistency): 预测到 x1 的有效速度
+        # 对于 rectified flow 的直线路径，两者等价 (= x1-x0)。
+        # consistency training 在速度场不完美时提供自校正信号。
         B = actions.shape[0]
 
         t_ct = self.sampler.sample(B, self.t_sample_mode_for_consistency, device=actions.device)
@@ -85,8 +88,8 @@ class FlowMatchWithConsistency(nn.Module):
 
         x0_ct = torch.randn_like(actions, device=actions.device)
         x1_ct = actions
-        xt_ct = self.linear_interpolate(x0_ct, x1_ct, t_ct, epsilon=0.0)
-        xt_next = self.linear_interpolate(x0_ct, x1_ct, t_next, epsilon=0.0)
+        xt_ct = self.linear_interpolate(x0_ct, x1_ct, t_ct)
+        xt_next = self.linear_interpolate(x0_ct, x1_ct, t_next)
 
         with torch.no_grad():
             v_avg_to_next_target = ema_model(
@@ -109,10 +112,45 @@ class FlowMatchWithConsistency(nn.Module):
 
 
 
-    def compute_loss(self, cond, actions, **kwargs):
-        ema_model = kwargs.get("ema_model", None)
+    def compute_loss(self, cond, actions, ema_backbone=None, **kwargs):
+        ema_model = ema_backbone
 
         B = actions.shape[0]
+
+        # 无 EMA teacher 时全量样本用于 flow loss，避免无效的数据拆分浪费
+        if ema_model is None:
+            flow_targets = self.get_flow_velocity(actions)
+            pred_vt_flow = self.model(
+                x = flow_targets["xt"],
+                timestep = flow_targets["t"].squeeze(),
+                target_t = flow_targets["target_t"].squeeze(),
+                context = cond,
+            )
+            loss_flow = F.mse_loss(pred_vt_flow, flow_targets["vt_target"], reduction='none')
+            loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()
+            loss_dict = {
+                "loss": loss_flow,
+                "loss_action": loss_flow,
+                "loss_flow": loss_flow,
+                "loss_consistency": torch.zeros_like(loss_flow),
+                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_vt_flow ** 2)),
+                "has_consistency": 0,
+            }
+            return loss_flow, loss_dict
+
+        # 检查 batch size 是否足够进行 consistency 训练
+        if B < 2:
+            import warnings
+            warnings.warn(
+                f"FlowMatch: batch_size={B} < 2, consistency training disabled for this batch "
+                f"(only flow loss will be computed). This is expected when grad_accum_steps > batch_size. "
+                f"If this warning appears frequently during training, consider increasing "
+                f"dataloader.batch_size or reducing training.loop.grad_accum_steps to ensure "
+                f"batch_size >= 2 for better target_t generalization.",
+                UserWarning,
+                stacklevel=2
+            )
+
         flow_batchsize = max(1, min(B - 1, int(B * self.flow_batch_ratio)))
         consistency_batchsize = B - flow_batchsize
 
@@ -123,11 +161,19 @@ class FlowMatchWithConsistency(nn.Module):
             target_t = flow_targets["target_t"].squeeze(),
             context = cond[:flow_batchsize],
         )
-        vt_flow_target = flow_targets["vt_target"]
-        loss_flow = F.mse_loss(pred_vt_flow, vt_flow_target, reduction='none')
+        loss_flow = F.mse_loss(pred_vt_flow, flow_targets["vt_target"], reduction='none')
         loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()
 
-        if ema_model is None or consistency_batchsize == 0:
+        if consistency_batchsize == 0:
+            import warnings
+            warnings.warn(
+                f"FlowMatch: consistency_batchsize=0 (flow_batch_ratio={self.flow_batch_ratio}, "
+                f"batch_size={B}), consistency training disabled for this batch. "
+                f"This is expected if batch_size is small. "
+                f"Consider reducing flow_batch_ratio or increasing batch_size.",
+                UserWarning,
+                stacklevel=2,
+            )
             loss_dict = {
                 "loss": loss_flow,
                 "loss_action": loss_flow,
@@ -168,6 +214,12 @@ class FlowMatchWithConsistency(nn.Module):
 
     @torch.no_grad()
     def sample_ode(self, x0, N, cond):
+        """Euler 积分采样。
+
+        relative 模式下 target_t=dt（>0），依赖 consistency 训练提供 target_t 泛化。
+        若不启用 consistency（use_ema_teacher_for_consistency=False），模型仅在
+        target_t=0 下训练，推理时的 target_t>0 会导致条件分布偏移。
+        """
         B = x0.shape[0]
         x = x0.clone()
 
