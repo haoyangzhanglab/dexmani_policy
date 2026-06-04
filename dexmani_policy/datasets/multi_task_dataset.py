@@ -19,6 +19,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         deterministic: bool = False,
         task_texts: Optional[List[str]] = None,
         augmentation_cfg=None,
+        action_mode: str = 'absolute_joint',
     ):
         assert len(datasets) == len(task_names)
         assert sampling_strategy in ['proportional', 'balanced', 'weighted']
@@ -33,6 +34,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
         self.datasets = datasets
         self.task_names = task_names
+        self.action_mode = action_mode
 
         if augmentation_cfg is not None:
             for dataset in self.datasets:
@@ -84,12 +86,22 @@ class MultiTaskDataset(torch.utils.data.Dataset):
     def compute_shared_normalizer(self):
         all_joint_states = [d.replay_buffer['joint_state'] for d in self.datasets]
         all_actions = [d.replay_buffer['action'] for d in self.datasets]
-        data = {
-            'joint_state': np.concatenate(all_joint_states, axis=0),
-            'action': np.concatenate(all_actions, axis=0),
-        }
+        joint_state = np.concatenate(all_joint_states, axis=0)
+        action = np.concatenate(all_actions, axis=0)
+
         normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode='limits')
+        if self.action_mode == 'eef_hand':
+            ee_dim = getattr(self, 'ee_dim', 9)
+            assert action.shape[1] >= ee_dim, \
+                f"eef_hand mode requires action dim >= {ee_dim} (ee_dim), " \
+                f"but combined zarr action has shape {action.shape}. " \
+                f"Check that all sub-datasets were collected with action_space='ee'."
+            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode='limits')
+            from dexmani_policy.common.normalizer import build_mixed_action_normalizer
+            normalizer['action'] = build_mixed_action_normalizer(action, ee_dim=ee_dim)
+        else:
+            normalizer.fit(data={'joint_state': joint_state, 'action': action},
+                           last_n_dims=1, mode='limits')
         return normalizer
 
     def generate_fixed_indices(self):
@@ -197,7 +209,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self._epoch = epoch
         self._epoch_val.value = epoch
 
-    def get_normalizer(self, task_name: Optional[str] = None):
+    def get_normalizer(self, task_name: Optional[str] = None, **kwargs):
         if self.normalizer_mode == 'shared':
             return self.normalizer
         else:

@@ -2,7 +2,6 @@ from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.datasets.augmentation import (
     PCColorJitter, PCSpatialAug, PCDropout, StateNoiseAug, PC_AUG_CLASSES,
 )
-from dexmani_policy.common.normalizer import LinearNormalizer
 
 
 class PCDataset(BaseDataset):
@@ -53,13 +52,7 @@ class PCDataset(BaseDataset):
             self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
     def get_normalizer(self, mode='limits', **kwargs):
-        data = {
-            'joint_state': self.replay_buffer['joint_state'],
-            'action': self.replay_buffer['action'],
-        }
-        normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
-        return normalizer
+        return super().get_normalizer(mode=mode, **kwargs)
 
 
 def example(zarr_path):

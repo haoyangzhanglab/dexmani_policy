@@ -31,6 +31,28 @@ def run_eval(exp_dir: Path, overrides: list[str]):
     if overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
 
+    # backward compat: 历史 checkpoint 缺少 action_mode/ee_dim/hand_dim
+    if not hasattr(cfg, 'action_mode'):
+        cfg.action_mode = 'absolute_joint'
+    if not hasattr(cfg, 'ee_dim'):
+        cfg.ee_dim = 9
+    if not hasattr(cfg, 'hand_dim'):
+        cfg.hand_dim = 12
+
+    # 校验 action_mode 与 control_mode 一致性（防 CLI override 误配）
+    env_kwargs = cfg.get('env_runner', {}).get('env_kwargs', {})
+    if isinstance(env_kwargs, dict):
+        actual_control = env_kwargs.get('control_mode', 'joint')
+    else:
+        actual_control = 'joint'
+    expected_control = 'ee' if cfg.action_mode == 'eef_hand' else 'joint'
+    if actual_control != expected_control:
+        raise ValueError(
+            f"action_mode='{cfg.action_mode}' requires control_mode='{expected_control}', "
+            f"but env_runner.env_kwargs.control_mode='{actual_control}'. "
+            f"Check CLI overrides for env_runner.env_kwargs.control_mode."
+        )
+
     if not hasattr(cfg, 'eval') or not hasattr(cfg.eval, "offline"):
         raise KeyError(
             "Config is missing 'eval.offline' section. "
@@ -49,6 +71,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
 
     device = torch.device(cfg.training.device)
     agent = hydra.utils.instantiate(cfg.agent)
+    agent.action_mode = cfg.action_mode
     env_runner = hydra.utils.instantiate(cfg.env_runner)
     eval_root_dir = exp_dir / "eval"
     checkpoint_store = CheckpointStore(exp_dir / "checkpoints")

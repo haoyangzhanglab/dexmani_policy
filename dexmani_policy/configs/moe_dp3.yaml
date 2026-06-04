@@ -8,7 +8,11 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_dim: 19
+
+action_mode: absolute_joint  # absolute_joint | eef_hand
+ee_dim: 9
+hand_dim: 12
+action_dim: ${eval:'${ee_dim} + ${hand_dim} if ${eq:${action_mode},eef_hand} else 19'}
 
 dataloader:
   batch_size: 256
@@ -147,6 +151,8 @@ env_runner:
   env_video_fps: 10
   default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
+  env_kwargs:
+    control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
 
 # ---- offline eval (eval_sim.py)
 eval:

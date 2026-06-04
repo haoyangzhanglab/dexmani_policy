@@ -3,7 +3,7 @@ from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.datasets.augmentation import (
     RGBAug, PCColorJitter, PCSpatialAug, PCDropout, StateNoiseAug, PC_AUG_CLASSES,
 )
-from dexmani_policy.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
+from dexmani_policy.common.normalizer import SingleFieldLinearNormalizer
 
 
 class RGBPCDataset(BaseDataset):
@@ -59,12 +59,7 @@ class RGBPCDataset(BaseDataset):
             self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
     def get_normalizer(self, mode='limits', **kwargs):
-        data = {
-            'joint_state': self.replay_buffer['joint_state'],
-            'action': self.replay_buffer['action'],
-        }
-        normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        normalizer = super().get_normalizer(mode=mode, **kwargs)
         normalizer['camera_intrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         normalizer['camera_extrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         return normalizer

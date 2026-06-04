@@ -105,13 +105,23 @@ class BaseDataset(torch.utils.data.Dataset):
                 data['obs'][modality] = aug(data['obs'][modality])
         return data
 
-    def get_normalizer(self, mode='limits', **kwargs):
-        data = {
-            'joint_state': self.replay_buffer['joint_state'],
-            'action': self.replay_buffer['action'],
-        }
+    def get_normalizer(self, mode='limits', action_mode='absolute_joint', **kwargs):
+        joint_state = self.replay_buffer['joint_state']
+        action = self.replay_buffer['action']
         normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+
+        if action_mode == 'eef_hand':
+            ee_dim = kwargs.get('ee_dim', 9)
+            assert action.shape[1] >= ee_dim, \
+                f"eef_hand mode requires action dim >= {ee_dim} (ee_dim), " \
+                f"but zarr action has shape {action.shape}. " \
+                f"Check that the dataset was collected with action_space='ee'."
+            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode=mode, **kwargs)
+            from dexmani_policy.common.normalizer import build_mixed_action_normalizer
+            normalizer['action'] = build_mixed_action_normalizer(action, ee_dim=ee_dim)
+        else:
+            normalizer.fit(data={'joint_state': joint_state, 'action': action},
+                           last_n_dims=1, mode=mode, **kwargs)
         return normalizer
 
 

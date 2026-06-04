@@ -85,7 +85,7 @@ class SimEvaluator:
 
         train_params = checkpoint.train_params
         if train_params is not None:
-            for key in ('n_obs_steps', 'n_action_steps', 'action_dim', 'horizon'):
+            for key in ('n_obs_steps', 'n_action_steps', 'action_dim', 'horizon', 'action_mode'):
                 expected = train_params.get(key)
                 actual = getattr(self.agent, key, None)
                 if expected is not None and actual is not None and expected != actual:

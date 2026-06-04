@@ -12,7 +12,11 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_dim: 19
+
+action_mode: absolute_joint  # absolute_joint | eef_hand
+ee_dim: 9
+hand_dim: 12
+action_dim: ${eval:'${ee_dim} + ${hand_dim} if ${eq:${action_mode},eef_hand} else 19'}
 
 dataloader:
   batch_size: 64
@@ -115,10 +119,16 @@ env_runner:
   task_configs:
     - task_name: task_1
       task_text: ${dataset.task_texts[0]}
+      env_kwargs:
+        control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
     - task_name: task_2
       task_text: ${dataset.task_texts[1]}
+      env_kwargs:
+        control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
     - task_name: task_3
       task_text: ${dataset.task_texts[2]}
+      env_kwargs:
+        control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
 
 # ---- offline eval (eval_sim.py)
 eval:

@@ -2,6 +2,7 @@ _target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
 seed: ${seed}
 sampling_strategy: balanced  # 'proportional' | 'balanced' | 'weighted'
 normalizer_mode: shared      # 'shared' | 'per_task'
+action_mode: ${action_mode}
 
 task_names:
   - task_1

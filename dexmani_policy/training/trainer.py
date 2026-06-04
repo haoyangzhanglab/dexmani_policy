@@ -277,6 +277,7 @@ class Trainer:
                     'n_action_steps': self.model.n_action_steps,
                     'action_dim': self.model.action_dim,
                     'horizon': self.model.horizon,
+                    'action_mode': getattr(self.model, 'action_mode', 'absolute_joint'),
                 },
             )
 

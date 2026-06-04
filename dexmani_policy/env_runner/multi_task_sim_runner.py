@@ -43,6 +43,8 @@ class MultiTaskSimRunner:
                 cprint(f"⚠️ task_text not set for {task_name}, falling back to task_name='{task_name}'. "
                        f"Ensure this matches dataset.task_texts to avoid train/eval text embedding mismatch.", "yellow")
             env_kwargs = cfg.get("env_kwargs")
+            if env_kwargs is None:
+                cprint(f"⚠️  task '{task_name}' has no env_kwargs set — control_mode defaults to 'joint'", "yellow")
 
             self.runners[task_name] = TaskTextSimRunner(
                 task_text=task_text,

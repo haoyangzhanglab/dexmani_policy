@@ -345,3 +345,35 @@ class LinearNormalizer(DictOfTensorMixin):
                 this_dict[name] = self.normalize({key:value})[key]
             result[key] = this_dict
         return result
+
+
+def build_mixed_action_normalizer(action_data, ee_dim=9):
+    """构造 eef_hand 混合动作归一化器: xyz(3)+rot6d(ee_dim-3)+hand(剩余).
+
+    xyz 和 hand → limits [-1, 1] (min-max); rot6d → identity (scale=1, offset=0).
+    """
+    tmp = LinearNormalizer()
+    tmp.fit(data={
+        'xyz':  action_data[:, :3],
+        'hand': action_data[:, ee_dim:],
+    }, last_n_dims=1, mode='limits')
+
+    xyz_scale  = tmp['xyz'].params_dict['scale']
+    xyz_offset = tmp['xyz'].params_dict['offset']
+    xyz_stats  = tmp['xyz'].params_dict['input_stats']
+    hand_scale  = tmp['hand'].params_dict['scale']
+    hand_offset = tmp['hand'].params_dict['offset']
+    hand_stats  = tmp['hand'].params_dict['input_stats']
+
+    rot6d_dim = ee_dim - 3
+    scale  = torch.cat([xyz_scale, torch.ones(rot6d_dim), hand_scale])
+    offset = torch.cat([xyz_offset, torch.zeros(rot6d_dim), hand_offset])
+    stats = {}
+    for k, fill in [('min', -1.), ('max', 1.), ('mean', 0.), ('std', 1.)]:
+        stats[k] = torch.cat([
+            xyz_stats[k],
+            torch.full((rot6d_dim,), fill, dtype=torch.float32),
+            hand_stats[k],
+        ])
+
+    return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stats)

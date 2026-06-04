@@ -29,7 +29,11 @@ def build_dataset_and_normalizer(cfg, rank=None, world_size=None):
         # 单卡模式：直接实例化
         dataset = hydra.utils.instantiate(cfg.dataset)
 
-    normalizer = dataset.get_normalizer()
+    normalizer = dataset.get_normalizer(
+        action_mode=cfg.get('action_mode', 'absolute_joint'),
+        ee_dim=cfg.get('ee_dim', 9),
+        hand_dim=cfg.get('hand_dim', 12),
+    )
     if hasattr(dataset, 'normalizer_mode') and dataset.normalizer_mode == 'per_task':
         raise NotImplementedError(
             "normalizer_mode='per_task' requires per-task normalizer loading, "
@@ -42,6 +46,7 @@ def build_dataset_and_normalizer(cfg, rank=None, world_size=None):
 def build_model_and_ema(cfg, device, normalizer):
     model = hydra.utils.instantiate(cfg.agent)
     model.load_normalizer_from_dataset(normalizer)
+    model.action_mode = cfg.get('action_mode', 'absolute_joint')
     model.to(device)
 
     ema_model = None
@@ -50,6 +55,7 @@ def build_model_and_ema(cfg, device, normalizer):
         ema_model = hydra.utils.instantiate(cfg.agent)
         ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.load_state_dict(model.state_dict())
+        ema_model.action_mode = model.action_mode
         ema_model.to(device)
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
@@ -234,6 +240,21 @@ def validate_config(cfg):
             "persistent_workers=True is incompatible with MultiTaskDataset's "
             "epoch-dependent sampling. Set persistent_workers=False."
         )
+
+    # 校验混合动作空间
+    if cfg.get('action_mode', 'absolute_joint') == 'eef_hand':
+        ee_dim = cfg.get('ee_dim', 9)
+        hand_dim = cfg.get('hand_dim', 12)
+        if cfg.action_dim != ee_dim + hand_dim:
+            raise ValueError(
+                f"eef_hand mode: action_dim ({cfg.action_dim}) "
+                f"!= ee_dim ({ee_dim}) + hand_dim ({hand_dim})"
+            )
+        env_kwargs = cfg.get('env_runner', {}).get('env_kwargs', {})
+        if env_kwargs.get('control_mode') != 'ee':
+            raise ValueError(
+                "eef_hand mode requires env_runner.env_kwargs.control_mode='ee'"
+            )
 
     from termcolor import cprint
     cprint("✓ Config validation passed", "green")
