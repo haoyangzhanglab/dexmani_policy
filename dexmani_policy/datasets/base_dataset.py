@@ -1,12 +1,29 @@
 import copy
-import torch
-import torchvision.transforms.functional as TVF
 from typing import Optional, Tuple
 
-from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
+import torch
+import torchvision.transforms.functional as TVF
+
 from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_action_normalizer
+from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
+from dexmani_policy.datasets.augmentation import (
+    ImageAug,
+    PointColorJitter,
+    PointDropout,
+    PointSpatialAug,
+    StateNoiseAug,
+)
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask, downsample_mask
+
+# (yaml_section, augmentor_class, yaml_key, output_modality)
+AUGMENTOR_REGISTRY = [
+    ('pc',    PointColorJitter, 'color',    'point_cloud'),
+    ('pc',    PointSpatialAug,  'spatial',  'point_cloud'),
+    ('pc',    PointDropout,     'dropout',  'point_cloud'),
+    ('state', StateNoiseAug,    'noise',    'joint_state'),
+    ('rgb',   ImageAug,         'color',    'rgb'),
+]
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -160,7 +177,18 @@ class BaseDataset(torch.utils.data.Dataset):
         return dict_apply(data, ensure_tensor)
 
     def _build_augmentors(self):
-        pass
+        """Build augmentors from ``augmentation_cfg`` using AUGMENTOR_REGISTRY.
+
+        Subclasses that need different augmentors (e.g. RGB-only) can override
+        this method, but the registry covers all standard cases.
+        """
+        self.augmentors = {}
+        if self.augmentation_cfg is None:
+            return
+        for section, cls, key, modality in self.AUGMENTOR_REGISTRY:
+            config = (self.augmentation_cfg.get(section) or {}).get(key)
+            if config:
+                self.augmentors.setdefault(modality, []).append(cls(**config))
 
     def apply_augmentation(self, data):
         if self.augmentation_cfg is None:
@@ -196,7 +224,7 @@ def example(zarr_path):
         val_ratio=0.05,
         sensor_modalities=['joint_state'],
     )
-    normalizer = dataset.get_normalizer()
+    dataset.get_normalizer()
     sample = dataset[0]
     print('joint_state:', sample['obs']['joint_state'].shape)
     print('action     :', sample['action'].shape)

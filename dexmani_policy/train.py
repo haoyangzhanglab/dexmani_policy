@@ -4,29 +4,27 @@ import pathlib
 ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
 os.chdir(ROOT_DIR)
 
-
 import hydra
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.common.pytorch_util import worker_init_fn
+from termcolor import cprint
+
+from dexmani_policy.agents.common.param_counter import print_param_count
+from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn
 from dexmani_policy.common.resolver import register_resolvers
-from dexmani_policy.training.trainer import Trainer
-from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.lr_scheduler import get_scheduler
+from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()
 
 
 def build_dataset_and_normalizer(cfg, rank=None, world_size=None):
     if rank is not None:
-        # DDP 模式：DistributedSampler 负责数据分片，dataset 层面使用相同 seed
         dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
         dataset = hydra.utils.instantiate(dataset_cfg)
     else:
-        # 单卡模式：直接实例化
         dataset = hydra.utils.instantiate(cfg.dataset)
 
     normalizer = dataset.get_normalizer()
@@ -40,8 +38,6 @@ def build_dataset_and_normalizer(cfg, rank=None, world_size=None):
 
 
 def build_model_and_ema(cfg, device, normalizer):
-    from dexmani_policy.agents.common.param_counter import print_param_count
-
     model = hydra.utils.instantiate(cfg.agent)
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.get('action_key', 'action')
@@ -125,7 +121,6 @@ def validate_config(cfg):
 
     _validate_augmentation_consistency(cfg)
 
-    from termcolor import cprint
     cprint("Config validation passed", "green")
 
 
@@ -135,10 +130,8 @@ def build_train_components(cfg):
 
     device = torch.device(cfg.training.device)
 
-    # 构建 dataset 和 normalizer
     dataset, normalizer = build_dataset_and_normalizer(cfg)
 
-    # 构建 dataloader
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
     val_dataset = dataset.get_validation_dataset()
     val_loader = None
@@ -149,14 +142,11 @@ def build_train_components(cfg):
             **cfg.val_dataloader,
         )
 
-    # 构建 model 和 EMA
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
-    # 构建 optimizer 和 scheduler
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
 
-    # 构建 workspace 和 env_runner
     workspace = hydra.utils.instantiate(cfg.workspace)
 
     env_runner = None

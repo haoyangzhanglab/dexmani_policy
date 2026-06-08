@@ -40,26 +40,7 @@ dataset:
   max_train_episodes: null
   sensor_modalities: ["joint_state", "point_cloud"]
 
-  # ---- data augmentation (add under dataset, uncomment to enable) ----
-  # augmentation_cfg:
-  #   pc:
-  #     color:
-  #       brightness: 0.2
-  #       contrast: 0.2
-  #       saturation: 0.3
-  #       hue: 0.05
-  #       prob: 0.8
-  #     spatial:
-  #       rot_z: 15.0
-  #       trans_xy: 0.10
-  #       scale: 1.02
-  #       prob: 0.8
-  #     dropout:
-  #       dropout_ratio: 0.1
-  #       prob: 0.5
-  #   state:
-  #     noise_std: 0.005
-  #     prob: 0.5
+  # augmentation_cfg: see configs/augmentation_example.yaml
 
 agent:
   _target_: dexmani_policy.agents.core.dp3.DP3Agent

@@ -1,19 +1,19 @@
+import argparse
 import os
 from pathlib import Path
 
-ROOT_DIR = str(Path(__file__).parent.parent)
-os.chdir(ROOT_DIR)
-
-
 import hydra
 import torch
-import argparse
 from omegaconf import OmegaConf
+from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.common.resolver import register_resolvers
-from dexmani_policy.training.sim_evaluator import SimEvaluator
 from dexmani_policy.training.common.checkpoint_io import CheckpointStore
+from dexmani_policy.training.sim_evaluator import SimEvaluator
+
+ROOT_DIR = str(Path(__file__).parent.parent)
+os.chdir(ROOT_DIR)
 
 register_resolvers()
 
@@ -82,7 +82,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
         "eval": OmegaConf.to_container(cfg.eval, resolve=True),
     }
 
-    summary = evaluator.run(
+    evaluator.run(
         eval_episodes=int(cfg.eval.offline.eval_episodes),
         denoise_timesteps_list=list(cfg.eval.offline.denoise_timesteps_list),
         ckpt_tag_or_path=cfg.eval.offline.ckpt_tag_or_path,
@@ -90,7 +90,6 @@ def run_eval(exp_dir: Path, overrides: list[str]):
         eval_config=eval_config,
     )
 
-    from termcolor import cprint
     cprint(f"Evaluation completed, results saved to {evaluator.eval_root_dir}", "green")
 
 

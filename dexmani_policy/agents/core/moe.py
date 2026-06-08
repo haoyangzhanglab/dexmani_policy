@@ -37,7 +37,7 @@ class MoEObsEncoder(nn.Module):
         self.pc_encoder = build_pc_global_encoder(
             encoder_type, pc_dim, config={'output_channels': pc_out_dim}
         )
-        self.state_mlp = StateMLP(state_dim, state_out_dim, hidden_channels=[64])
+        self.state_mlp = StateMLP(state_dim, state_out_dim)
         in_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
         # Align with official MoE-DP: Linear projection before MoE so the
         # encoder output can be mapped to a fixed embedding dimension
@@ -216,7 +216,6 @@ def example():
     print(f'pred_action:     {result["pred_action"].shape}')
     print(f'control_action:  {result["control_action"].shape}')
 
-    # test override_idx
     override = torch.tensor([0, 1], dtype=torch.long, device=device)
     result_ov = agent.predict_action({
         'point_cloud': obs['point_cloud'].reshape(B, T, N, 3),
@@ -225,7 +224,6 @@ def example():
     print(f'override pred:   {result_ov["pred_action"].shape}')
     print(f'override ctrl:   {result_ov["control_action"].shape}')
 
-    # test boost mechanism
     print('\n--- Boost test ---')
     agent_boost = MoEAgent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
@@ -257,7 +255,6 @@ def example():
     assert moe.current_num_experts == 8 and moe.current_top_k == 2, \
         "Should cap at base values"
 
-    # test enhanced gate
     print('\n--- Enhanced gate test ---')
     agent_gate = MoEAgent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
@@ -273,7 +270,6 @@ def example():
         f"Enhanced gate should be nn.Sequential, got {type(gate_router)}"
     print(f'gate type: {type(gate_router).__name__} (len={len(gate_router)})')
 
-    # forward through enhanced gate
     feat, aux_gate = agent_gate.obs_encoder(obs)
     print(f'enhanced gate cond: {feat.shape}, aux loss: {aux_gate["loss"].item():.4f}')
     print('=== PASSED ===')

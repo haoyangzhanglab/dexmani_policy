@@ -232,7 +232,6 @@ class FlowMatchWithConsistency(nn.Module):
         traj = []
         traj.append(x.clone())
 
-        # Euler integration: x_{t+dt} = x_t + v_t * dt
         for i in range(N):
             ti = torch.ones((B,), device=x0.device) * t[i]
             if self.target_t_sample_mode == "relative":
@@ -296,26 +295,21 @@ class FlowMatch(nn.Module):
     def compute_loss(self, cond, actions, **kwargs):
         B = actions.shape[0]
 
-        # 1. 采样噪声和 timestep
         x0 = torch.randn_like(actions, device=actions.device)
         x1 = actions
         t = self.sampler.sample(B, self.t_sample_mode, device=actions.device)
         t = t.view(-1, 1, 1)
 
-        # 2. 直线插值: x_t = (1-t)*x0 + t*x1
         xt = (1.0 - t) * x0 + t * x1
 
-        # 3. 目标速度: v = x1 - x0 (rectified flow)
         target_v = x1 - x0
 
-        # 4. 预测速度
         pred_v = self.model(
             x=xt,
             timestep=t.squeeze(),
             context=cond,
         )
 
-        # 5. MSE loss
         loss = F.mse_loss(pred_v, target_v)
         loss_dict = {
             "loss": loss,
@@ -332,11 +326,9 @@ class FlowMatch(nn.Module):
         if denoise_timesteps is None:
             denoise_timesteps = self.num_inference_steps
 
-        # 从噪声开始
         x = torch.randn_like(action_template, device=device)
         dt = 1.0 / denoise_timesteps
 
-        # Euler 积分: x_{t+dt} = x_t + v_θ(x_t, t) * dt
         for i in range(denoise_timesteps):
             ti = torch.full((B,), i * dt, device=device, dtype=x.dtype)
             v = self.model(x=x, timestep=ti, context=cond)

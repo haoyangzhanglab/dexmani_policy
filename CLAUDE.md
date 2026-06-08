@@ -17,7 +17,7 @@ bash scripts/train.sh dp3 'training.loop.num_epochs=10'  # Hydra override
 bash scripts/train_ddp.sh maniflow_ddp
 
 # 多任务训练
-bash scripts/train_multi_task.sh multitask_dit
+bash scripts/train.sh multitask_dit
 
 # 冒烟测试（构建链完整性）
 python dexmani_policy/smoke_test.py dp3
@@ -43,7 +43,6 @@ Hydra config (configs/*.yaml) → Dataset (Zarr → ReplayBuffer → SequenceSam
 |---|---|---|
 | `train.py` | 单卡 | `@hydra.main`，`build_train_components()` 完整装配 |
 | `train_ddp.py` | 多卡 DDP | `mp.spawn(ddp_worker, nprocs=N)`，复用单卡构建函数 |
-| `train_multi_task.py` | 多任务 | 复用 `build_train_components()`，`MultiTaskDataset` + `MultiTaskAgent` |
 | `eval_sim.py` | 独立评测 | Hydra-free CLI，`CheckpointStore` 直接加载 checkpoint；`hasattr(cfg, 'eval')` 前置保护兼容历史 config |
 
 ### Agent 变体
@@ -117,7 +116,7 @@ Cond:   (B, out_dim×2)      # UNet/DP/DP3/MoE; ManiFlow: (B, N_tokens, token_di
 
 ```
 dexmani_policy/
-  train.py, train_ddp.py, train_multi_task.py, eval_sim.py, smoke_test.py
+  train.py, train_ddp.py, eval_sim.py, smoke_test.py
   configs/               # Hydra YAML（5 策略 + dataset preset）
   agents/core/           # BaseAgent → DP/DP3/ManiFlow/MoE/MultiTask
   agents/action_decoders/ # Diffusion, FlowMatchWithConsistency, backbone/(unet1d, dit, ditx)
@@ -176,7 +175,7 @@ dexmani_policy/
 
 ### 已知硬编码（不可从配置修改，审查时注意）
 - DDIM `beta_start=0.0001, beta_end=0.02, beta_schedule='squaredcos_cap_v2'` — `diffusion.py:19-28`
-- StateMLP `hidden_channels=[64]` — 所有 agent 统一
+- StateMLP `hidden_channels=[64]` — `state_mlp.py` 默认值，所有 agent 统一
 - FlowMatch consistency weight = 1.0 — `flowmatch.py:198`
 - `torch.optim.AdamW` — `base.py:137`
 - UNet `use_{down,mid,up}_condition=True` — `base.py:178-181`

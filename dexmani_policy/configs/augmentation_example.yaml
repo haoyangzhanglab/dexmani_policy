@@ -1,0 +1,27 @@
+# Data augmentation reference — copy the relevant sections into your agent config.
+#
+# Usage in YAML:
+#   dataset:
+#     augmentation_cfg:
+#       pc:     # point cloud augmentations
+#         color:   {brightness: 0.2, contrast: 0.2, saturation: 0.3, hue: 0.05, prob: 0.8}
+#         spatial: {rot_z: 15.0, trans_xy: 0.10, scale: 1.02, prob: 0.8}
+#         dropout: {dropout_ratio: 0.1, prob: 0.5}
+#       state:  # proprioceptive augmentation
+#         noise:   {noise_std: 0.005, prob: 0.5}
+#       rgb:    # image augmentation (requires rgb_preprocess_size in dataset)
+#         color:   {brightness: 0.6, contrast: 0.3, saturation: 0.3, hue: 0.08, prob: 1.0}
+#
+# Or via CLI override:
+#   bash scripts/train.sh dp3 'dataset.augmentation_cfg.pc.color.prob=0.8'
+
+# ---- pc (point cloud) ----
+#   color:   PointColorJitter — HSV jitter on RGB channels (last 3 dims). Requires pc_dim >= 6.
+#   spatial: PointSpatialAug  — Z-rotation + XY translation + uniform scale.
+#   dropout: PointDropout     — Random point dropout (simulates occlusion).
+#
+# ---- state ----
+#   noise:   StateNoiseAug — Gaussian noise on joint_state.
+#
+# ---- rgb (image) ----
+#   color:   ImageAug — ColorJitter + grayscale + blur + noise (torch, on GPU).

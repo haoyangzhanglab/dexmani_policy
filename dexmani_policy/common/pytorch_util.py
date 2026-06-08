@@ -36,37 +36,6 @@ def optimizer_to(optimizer, device):
     return optimizer
 
 
-def replace_submodules(
-    root_module: nn.Module,
-    predicate: Callable[[nn.Module], bool],
-    func: Callable[[nn.Module], nn.Module],
-) -> nn.Module:
-    if predicate(root_module):
-        return func(root_module)
-
-    target_list = [k.split('.') for k, m
-        in root_module.named_modules(remove_duplicate=True)
-        if predicate(m)]
-    for *parent, k in target_list:
-        parent_module = root_module
-        if len(parent) > 0:
-            parent_module = root_module.get_submodule('.'.join(parent))
-        if isinstance(parent_module, nn.Sequential):
-            src_module = parent_module[int(k)]
-        else:
-            src_module = getattr(parent_module, k)
-        tgt_module = func(src_module)
-        if isinstance(parent_module, nn.Sequential):
-            parent_module[int(k)] = tgt_module
-        else:
-            setattr(parent_module, k, tgt_module)
-    # verify all targets were replaced
-    remaining = [k.split('.') for k, m
-        in root_module.named_modules(remove_duplicate=True)
-        if predicate(m)]
-    assert len(remaining) == 0
-    return root_module
-
 
 def set_seed(seed: int):
     random.seed(seed)

@@ -1,27 +1,29 @@
 import os
 import pathlib
+import socket
 
 ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
 os.chdir(ROOT_DIR)
-
 
 import hydra
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, optimizer_to, fix_state_dict
 from dexmani_policy.common.resolver import register_resolvers
-from dexmani_policy.training.trainer import Trainer
-from dexmani_policy.training.common.checkpoint_io import CheckpointStore
 from dexmani_policy.train import (
-    validate_config,
     build_dataset_and_normalizer,
     build_model_and_ema,
+    validate_config,
 )
+from dexmani_policy.training.common.checkpoint_io import CheckpointStore
+from dexmani_policy.training.common.lr_scheduler import get_scheduler
+from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()
 
@@ -49,10 +51,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     # DDP 要求所有 rank 的模型初始参数一致，此处用相同 seed
     set_seed(cfg.training.seed)
 
-    # 构建 dataset 和 normalizer（DDP 模式）
     dataset, normalizer = build_dataset_and_normalizer(cfg, rank=rank, world_size=world_size)
 
-    # 构建 DDP dataloader（使用 DistributedSampler）
     train_sampler = DistributedSampler(
         dataset,
         num_replicas=world_size,
@@ -72,7 +72,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         worker_init_fn=worker_init_fn,
     )
 
-    # 验证集只在 rank 0 创建
     val_loader = None
     if rank == 0:
         val_dataset = dataset.get_validation_dataset()
@@ -83,17 +82,14 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
                 **cfg.val_dataloader,
             )
 
-    # 构建 model 和 EMA（复用单卡逻辑）
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
     # 模型初始化完成后，各 rank 使用不同 seed 以增加数据增强多样性
     set_seed(cfg.training.seed + rank)
 
-    # 构建 optimizer（scheduler 延后到 checkpoint 加载后，以便用 last_epoch 简洁恢复）
     batches_per_epoch = len(train_loader)
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
-    # workspace 只在 rank 0 创建
     if rank == 0:
         workspace = hydra.utils.instantiate(cfg.workspace)
         workspace.save_hydra_config(cfg)
@@ -103,17 +99,14 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         workspace = None
         checkpoint_store = CheckpointStore(checkpoint_dir)
 
-    # env_runner 只在 rank 0 创建
     env_runner = None
     if rank == 0 and cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
         env_runner = hydra.utils.instantiate(cfg.env_runner)
 
-    # DDP 包装模型
-    from torch.nn.parallel import DistributedDataParallel as DDP
     ddp_model = DDP(model, device_ids=[actual_gpu_id], output_device=actual_gpu_id,
                     find_unused_parameters=False)
 
-    # 加载 checkpoint（在构建 scheduler 之前，获取 global_step 用于 last_epoch）
+    # 加载 checkpoint（在 scheduler 前获取 global_step 用于 last_epoch）
     try:
         ckpt_path = checkpoint_store.resolve_path("latest")
         checkpoint = checkpoint_store.load(ckpt_path)
@@ -125,10 +118,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     except FileNotFoundError:
         resume_state = (0, 0)
 
-    # 构建 scheduler（last_epoch 从 checkpoint 恢复，无需 load_state_dict）
-    from dexmani_policy.training.common.lr_scheduler import get_scheduler as _get_scheduler
     total_steps = batches_per_epoch * cfg.training.loop.num_epochs
-    scheduler = _get_scheduler(
+    scheduler = get_scheduler(
         optimizer=optimizer,
         name=cfg.training.lr_scheduler,
         num_warmup_steps=cfg.training.lr_warmup_steps,
@@ -160,7 +151,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     if trainer.use_ema:
         ema_model.to(device)
 
-    # 广播 normalizer 保证所有 rank 一致
     norm_state = model.normalizer.state_dict()
     for key in sorted(norm_state):
         if isinstance(norm_state[key], torch.Tensor):
@@ -177,7 +167,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
 
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
-    # 验证配置
     validate_config(cfg)
 
     if not torch.cuda.is_available():
@@ -226,7 +215,6 @@ def main(cfg):
     OmegaConf.resolve(cfg)
 
     if 'MASTER_PORT' not in os.environ:
-        import socket
         sock = socket.socket()
         sock.bind(('', 0))
         os.environ['MASTER_PORT'] = str(sock.getsockname()[1])

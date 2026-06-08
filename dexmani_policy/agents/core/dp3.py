@@ -21,7 +21,7 @@ class DP3ObsEncoder(nn.Module):
         self.pc_encoder = build_pc_global_encoder(
             encoder_type, pc_dim, config={'output_channels': pc_out_dim}
         )
-        self.state_mlp = StateMLP(state_dim, state_out_dim, hidden_channels=[64])
+        self.state_mlp = StateMLP(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps

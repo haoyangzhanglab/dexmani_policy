@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
-from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
+
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
+from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
+from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
 
 
 class DPObsEncoder(nn.Module):
@@ -16,7 +17,7 @@ class DPObsEncoder(nn.Module):
     ):
         super().__init__()
         self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=rgb_backbone_config)
-        self.state_mlp = StateMLP(state_dim, state_out_dim, hidden_channels=[64])
+        self.state_mlp = StateMLP(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 

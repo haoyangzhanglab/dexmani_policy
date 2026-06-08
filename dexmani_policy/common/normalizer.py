@@ -2,7 +2,6 @@ import zarr
 import torch
 import numpy as np
 import torch.nn as nn
-import warnings
 from typing import Union, Dict
 
 from dexmani_policy.common.pytorch_util import dict_apply

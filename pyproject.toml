@@ -1,0 +1,8 @@
+[tool.ruff]
+# Entry points set ROOT_DIR before imports — intentional, not fixable.
+[tool.ruff.lint.per-file-ignores]
+"train.py" = ["E402"]
+"train_ddp.py" = ["E402"]
+"smoke_test.py" = ["E402"]
+# __init__.py re-exports form the public API — ruff can't trace usage through the package.
+"**/__init__.py" = ["F401"]

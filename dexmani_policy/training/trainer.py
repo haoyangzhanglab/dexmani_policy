@@ -1,14 +1,16 @@
 import time
+import traceback
 import torch
-import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
+from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply, fix_state_dict
 from dexmani_policy.training.common.logging import to_log_scalars
 from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
-from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply
 
 
 @dataclass
@@ -80,18 +82,6 @@ class Trainer:
     def raw_model(self):
         return self.model.module if hasattr(self.model, 'module') else self.model
 
-    def plan_epoch_end_tasks(self, epoch: int) -> Dict[str, bool]:
-        epoch_idx = epoch + 1
-        is_last = epoch_idx == self.num_epochs
-
-        return {
-            "sample": is_last or (self.sample_interval_epochs > 0 and epoch_idx % self.sample_interval_epochs == 0),
-            "validate": is_last or (self.val_interval_epochs > 0 and epoch_idx % self.val_interval_epochs == 0),
-            "evaluate": self.enable_env_eval and (is_last or epoch_idx % self.eval_interval_epochs == 0),
-            "save_checkpoint": is_last or (self.checkpoint_interval_epochs > 0 and epoch_idx % self.checkpoint_interval_epochs == 0),
-            "save_latest": is_last or (self.val_interval_epochs > 0 and epoch_idx % self.val_interval_epochs == 0),
-        }
-
     def apply_gradient_step(self):
         if self.max_grad_norm > 0:
             torch.nn.utils.clip_grad_norm_(
@@ -103,6 +93,24 @@ class Trainer:
 
         if self.use_ema and self.ema_updater is not None:
             self.ema_updater.step(self.raw_model)
+
+    def load_for_resume(self, tag_or_path: str = "latest"):
+        """Restore model/EMA/optimizer/scheduler from a checkpoint. Returns (global_step, start_epoch)."""
+        try:
+            checkpoint = self.workspace.load_checkpoint(tag_or_path)
+        except FileNotFoundError:
+            return 0, 0
+
+        is_current_ddp = isinstance(self.raw_model, DDP)
+        self.raw_model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True)
+
+        if self.use_ema and checkpoint.ema_model_state is not None:
+            self.ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
+
+        self.optimizer.load_state_dict(checkpoint.optimizer_state)
+        self.scheduler.load_state_dict(checkpoint.scheduler_state)
+
+        return checkpoint.global_step, checkpoint.epoch + 1
 
     def _save_nan_debug(self, raw_loss):
         if self.workspace is None:
@@ -135,7 +143,6 @@ class Trainer:
             raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         if self.distributed:
-            import torch.distributed as dist
             nan_flag = torch.tensor(
                 [0 if torch.isfinite(raw_loss) else 1],
                 dtype=torch.int, device=self.device,
@@ -180,7 +187,6 @@ class Trainer:
             return None
 
         if self.distributed:
-            import torch.distributed as dist
             stats = torch.tensor([loss_sum.item(), float(count)], device=self.device)
             dist.all_reduce(stats, op=dist.ReduceOp.SUM)
             return (stats[0] / stats[1]).item()
@@ -207,94 +213,105 @@ class Trainer:
         return metrics
 
 
+    def _should_run(self, epoch, interval):
+        """Return True if task should run at this epoch: last epoch or interval-aligned."""
+        is_last = epoch + 1 == self.num_epochs
+        return is_last or (interval > 0 and (epoch + 1) % interval == 0)
+
+    def _sample_and_log(self, epoch, eval_model, last_batch):
+        sample_batch = self.train_sampling_batch
+        if sample_batch is None:
+            sample_batch = dict_apply(last_batch, lambda x: x.to(self.device, non_blocking=True))
+        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
+            return {"sample/action_mse_error": eval_model.compute_action_mse(sample_batch)}
+        return {}
+
+    def _validate_and_log(self, epoch):
+        if self.val_loader is None:
+            return {}
+        if self.use_ema_teacher_for_consistency:
+            model_for_val = self.model
+            ema_backbone = self.ema_model.action_decoder.model
+        else:
+            model_for_val = self.ema_model if (self.use_ema and not self.enable_env_eval) else self.model
+            ema_backbone = None
+        val_loss = self.validate(model_for_val, ema_backbone=ema_backbone)
+        return {"val/loss": val_loss} if val_loss is not None else {}
+
+    def _evaluate_and_log(self, eval_model):
+        return self.evaluate(eval_model) if self.env_runner is not None else {}
+
+    def _save_epoch_checkpoint(self, epoch, global_step, checkpoint_model, test_mean_score):
+        """Build and save a checkpoint, update topk tracker, and refresh latest symlink."""
+        monitor = {"test_mean_score": test_mean_score} if test_mean_score is not None else {}
+        checkpoint = TrainCheckpoint(
+            epoch=epoch,
+            global_step=global_step,
+            model_state=checkpoint_model.state_dict(),
+            ema_model_state=self.ema_model.state_dict() if self.use_ema else None,
+            optimizer_state=self.optimizer.state_dict(),
+            scheduler_state=self.scheduler.state_dict(),
+            monitor=monitor,
+            train_params={
+                'n_obs_steps': self.model.n_obs_steps,
+                'n_action_steps': self.model.n_action_steps,
+                'action_dim': self.model.action_dim,
+                'horizon': self.model.horizon,
+                'action_key': getattr(self.model, 'action_key', 'action'),
+            },
+        )
+        tag = f"epoch={epoch:04d}-step={global_step:08d}"
+        if test_mean_score is not None:
+            tag += f"-score={test_mean_score:.4f}"
+        checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
+
+        if test_mean_score is not None:
+            self.workspace.save_topk(checkpoint_path, checkpoint)
+
+        latest_target = checkpoint_path
+        if test_mean_score is not None:
+            best = self.workspace.topk_tracker.best_path()
+            if best is not None:
+                latest_target = best
+        self.workspace.save_latest(latest_target)
+
     def finish_epoch(self, epoch, global_step, last_batch=None, eval_model=None, checkpoint_model=None):
-        if eval_model is None:
-            eval_model = self.ema_model if self.use_ema else self.raw_model
-        if checkpoint_model is None:
-            checkpoint_model = self.raw_model
-        if last_batch is None:
-            last_batch = next(iter(self.train_loader))
+        eval_model = eval_model or (self.ema_model if self.use_ema else self.raw_model)
+        checkpoint_model = checkpoint_model or self.raw_model
+        last_batch = last_batch or next(iter(self.train_loader))
 
         epoch_metrics = {}
-        epoch_end_tasks = self.plan_epoch_end_tasks(epoch)
 
-        if epoch_end_tasks["sample"]:
-            sample_batch = self.train_sampling_batch
-            if sample_batch is None:
-                sample_batch = dict_apply(last_batch, lambda x: x.to(self.device, non_blocking=True))
-            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
-                epoch_metrics["sample/action_mse_error"] = eval_model.compute_action_mse(sample_batch)
+        if self._should_run(epoch, self.sample_interval_epochs):
+            epoch_metrics.update(self._sample_and_log(epoch, eval_model, last_batch))
 
-        if epoch_end_tasks["validate"]:
-            if self.use_ema_teacher_for_consistency:
-                # FlowMatch: consistency loss requires student (training model) != teacher (EMA)
-                model_for_val = self.model
-                ema_backbone = self.ema_model.action_decoder.model
-            else:
-                # DP/DP3: use EMA for val when no env eval, otherwise monitor training model
-                model_for_val = self.ema_model if (self.use_ema and not self.enable_env_eval) else self.model
-                ema_backbone = None
-            val_loss = self.validate(model_for_val, ema_backbone=ema_backbone)
-            if val_loss is not None:
-                epoch_metrics["val/loss"] = val_loss
+        if self._should_run(epoch, self.val_interval_epochs):
+            epoch_metrics.update(self._validate_and_log(epoch))
 
-        if epoch_end_tasks["evaluate"]:
-            epoch_metrics.update(self.evaluate(eval_model))
+        should_eval = self._should_run(epoch, self.eval_interval_epochs)
+        if should_eval:
+            epoch_metrics.update(self._evaluate_and_log(eval_model))
 
         if self.workspace is not None:
             self.workspace.log(epoch_metrics, step=global_step)
 
-        if self.workspace is not None and (epoch_end_tasks["save_checkpoint"] or epoch_end_tasks["save_latest"]):
-            test_mean_score = None
-            if epoch_end_tasks["save_checkpoint"]:
-                if self.enable_env_eval:
-                    test_mean_score = epoch_metrics.get("eval/success_rate")
-                elif "val/loss" in epoch_metrics:
-                    test_mean_score = -epoch_metrics["val/loss"]
+        should_save = self._should_run(epoch, self.checkpoint_interval_epochs)
+        should_save_latest = self._should_run(epoch, self.val_interval_epochs)
 
-            # save_latest without save_checkpoint: only update symlink, no new .pt file
-            if not epoch_end_tasks["save_checkpoint"]:
+        if self.workspace is not None and (should_save or should_save_latest):
+            test_mean_score = None
+            if should_save:
+                test_mean_score = (
+                    epoch_metrics.get("eval/success_rate") if self.enable_env_eval
+                    else -epoch_metrics["val/loss"] if "val/loss" in epoch_metrics
+                    else None
+                )
+            if not should_save:
                 existing = sorted(self.workspace.checkpoint_dir.glob("epoch=*.pt"))
                 if existing:
                     self.workspace.save_latest(existing[-1])
                 return
-
-            monitor = {}
-            if test_mean_score is not None:
-                monitor["test_mean_score"] = test_mean_score
-
-            checkpoint = TrainCheckpoint(
-                epoch=epoch,
-                global_step=global_step,
-                model_state=checkpoint_model.state_dict(),
-                ema_model_state=self.ema_model.state_dict() if self.use_ema else None,
-                optimizer_state=self.optimizer.state_dict(),
-                scheduler_state=self.scheduler.state_dict(),
-                monitor=monitor,
-                train_params={
-                    'n_obs_steps': self.model.n_obs_steps,
-                    'n_action_steps': self.model.n_action_steps,
-                    'action_dim': self.model.action_dim,
-                    'horizon': self.model.horizon,
-                    'action_key': getattr(self.model, 'action_key', 'action'),
-                },
-            )
-
-            tag = f"epoch={epoch:04d}-step={global_step:08d}" if test_mean_score is None \
-                  else f"epoch={epoch:04d}-step={global_step:08d}-score={test_mean_score:.4f}"
-            checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
-
-            if test_mean_score is not None:
-                self.workspace.save_topk(checkpoint_path, checkpoint)
-
-            latest_target = checkpoint_path
-            if test_mean_score is not None:
-                best = self.workspace.topk_tracker.best_path()
-                if best is not None:
-                    latest_target = best
-            self.workspace.save_latest(latest_target)
-            if test_mean_score is None and epoch_end_tasks["save_checkpoint"]:
-                print(f"Skipping topk update at epoch {epoch} (no monitor metric available)")
+            self._save_epoch_checkpoint(epoch, global_step, checkpoint_model, test_mean_score)
 
     def on_epoch_start(self, epoch: int):
         if hasattr(self.train_loader.dataset, 'set_epoch'):
@@ -311,13 +328,7 @@ class Trainer:
             if start_epoch > 0:
                 print(f"Resuming training from epoch {start_epoch}, step {global_step}")
         else:
-            global_step, start_epoch = self.workspace.load_for_resume(
-                model=self.raw_model,
-                ema_model=self.ema_model,
-                optimizer=self.optimizer,
-                scheduler=self.scheduler,
-                tag_or_path=resume_tag,
-            )
+            global_step, start_epoch = self.load_for_resume(resume_tag)
             if start_epoch > 0:
                 print(f"Resuming training from epoch {start_epoch}, step {global_step}")
 
@@ -375,14 +386,12 @@ class Trainer:
                     self.finish_epoch(epoch, global_step, last_batch=last_batch)
                 except Exception as e:
                     if self.distributed:
-                        import traceback
                         traceback.print_exc()
                         finish_error = e
                     else:
                         raise
 
             if self.distributed:
-                import torch.distributed as dist
                 error_flag = torch.tensor(
                     [1 if finish_error is not None else 0],
                     dtype=torch.int, device=self.device,
@@ -394,11 +403,4 @@ class Trainer:
                         "Training aborted due to error in finish_epoch on rank 0"
                     ) from finish_error
 
-        # Wait for any in-flight async checkpoint save to finish before exit.
-        # Without this join, the daemon thread may be killed during interpreter
-        # shutdown, leaving .tmp files un-renamed (SIGABRT).
-        if self.workspace is not None:
-            store = self.workspace.checkpoint_store
-            if store._save_thread is not None and store._save_thread.is_alive():
-                store._save_thread.join()
 

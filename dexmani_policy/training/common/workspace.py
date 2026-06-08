@@ -3,7 +3,7 @@ import atexit
 from pathlib import Path
 from omegaconf import OmegaConf
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from dexmani_policy.training.common.logging import (
     JsonlLogger,
@@ -110,51 +110,6 @@ class TrainWorkspace:
         return self.checkpoint_store.load(path)
 
 
-    def load_for_inference(
-        self,
-        model,
-        tag_or_path: str,
-        use_ema: bool = False,
-    ):
-        from dexmani_policy.common.pytorch_util import fix_state_dict
-        checkpoint = self.load_checkpoint(tag_or_path)
-        if use_ema and checkpoint.ema_model_state is not None:
-            print("Using EMA weights for inference.")
-            model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
-        else:
-            if use_ema and checkpoint.ema_model_state is None:
-                print("WARNING: EMA weights requested but not found in checkpoint. Using model weights.")
-            model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
-
-
-    def load_for_resume(
-        self,
-        model,
-        ema_model,
-        optimizer,
-        scheduler,
-        tag_or_path: str,
-    ) -> Tuple[int, int]:
-        try:
-            checkpoint = self.load_checkpoint(tag_or_path)
-        except FileNotFoundError:
-            return 0, 0
-
-        from dexmani_policy.common.pytorch_util import fix_state_dict
-        from torch.nn.parallel import DistributedDataParallel as DDP
-
-        is_current_ddp = isinstance(model, DDP)
-        model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True)
-
-        if ema_model is not None and checkpoint.ema_model_state is not None:
-            ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
-
-        optimizer.load_state_dict(checkpoint.optimizer_state)
-        scheduler.load_state_dict(checkpoint.scheduler_state)
-
-        next_step = checkpoint.global_step
-        next_epoch = checkpoint.epoch + 1
-        return next_step, next_epoch
 
 
     def close(self):

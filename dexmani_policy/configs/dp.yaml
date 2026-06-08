@@ -46,7 +46,7 @@ dataset:
   # ---- RGB 颜色增强 (CPU resize + crop 后执行, 224×224 float32 tensor) ----
   # 参数参考 DexUMI 经验: 大亮度扰动应对光照变化, Grayscale/Blur 防过拟合
   rgb_aug:
-    _target_: dexmani_policy.datasets.augmentation.rgb.RGBAug
+    _target_: dexmani_policy.datasets.augmentation.ImageAug
     brightness: 0.6
     contrast: 0.3
     saturation: 0.3

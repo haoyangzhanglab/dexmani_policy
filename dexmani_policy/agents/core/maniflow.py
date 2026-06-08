@@ -19,7 +19,7 @@ class ManiFlowObsEncoder(nn.Module):
     ):
         super().__init__()
         self.pc_encoder = build_pc_patch_tokenizer(encoder_type, pc_dim, pc_encoder_config)
-        self.state_mlp = StateMLP(state_dim, state_out_dim, hidden_channels=[64])
+        self.state_mlp = StateMLP(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps
@@ -35,7 +35,7 @@ class ManiFlowObsEncoder(nn.Module):
         if pc.shape[1] > self.num_points:
             pc, _ = farthest_point_sample(pc, self.num_points)
         pc_outputs = self.pc_encoder(pc, return_global_token=True)
-        patch_token, patch_center, global_token = pc_outputs[0], pc_outputs[1], pc_outputs[2]
+        patch_token, _, global_token = pc_outputs[0], pc_outputs[1], pc_outputs[2]
         pc_feat = torch.cat([global_token, patch_token], dim=1)
 
         state_feat = self.state_mlp(obs['joint_state'])

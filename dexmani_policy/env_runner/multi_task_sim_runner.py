@@ -59,7 +59,7 @@ class MultiTaskSimRunner:
 
     def print_summary(self, per_task, avg_success_rate, avg_steps, rates, failed_tasks):
         cprint("\n" + "="*90, "yellow")
-        cprint(f"[Multi-Task Summary]", "yellow")
+        cprint("[Multi-Task Summary]", "yellow")
         for task_name, result in per_task.items():
             sr = result["success_rate"]
             if sr is not None:

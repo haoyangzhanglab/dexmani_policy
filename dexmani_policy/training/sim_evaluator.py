@@ -1,11 +1,12 @@
 import json
-import torch
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import imageio
 import numpy as np
-from pathlib import Path
+import torch
 from termcolor import cprint
-from datetime import datetime
-from typing import Dict, List, Any, Optional
 
 from dexmani_policy.training.common.checkpoint_io import CheckpointStore
 

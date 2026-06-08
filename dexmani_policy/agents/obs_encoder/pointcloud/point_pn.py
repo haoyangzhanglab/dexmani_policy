@@ -10,9 +10,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
 )
 
 
-# ---------------------------------------------------------------------------
-#  Normalisation (GroupNorm – no BatchNorm, small-batch safe)
-# ---------------------------------------------------------------------------
 class PointGroupNorm(nn.Module):
     def __init__(self, num_channels: int, max_groups: int = 8):
         super().__init__()
@@ -25,9 +22,6 @@ class PointGroupNorm(nn.Module):
         return self.norm(x)
 
 
-# ---------------------------------------------------------------------------
-#  Raw-point embedding
-# ---------------------------------------------------------------------------
 class RawPointEmbedding(nn.Module):
     def __init__(self, input_channels: int, output_channels: int, max_groups: int = 8):
         super().__init__()
@@ -39,9 +33,6 @@ class RawPointEmbedding(nn.Module):
         return self.act(self.norm(self.proj(point_feature)))
 
 
-# ---------------------------------------------------------------------------
-#  Residual block  (Conv2d  +  GroupNorm  +  GELU  +  LayerScale  +  DropPath)
-# ---------------------------------------------------------------------------
 class DropPath(nn.Module):
     """Stochastic depth (DINOv2 style)."""
     def __init__(self, drop_prob: float = 0.0):
@@ -94,9 +85,6 @@ class ResidualBlock(nn.Module):
         return self.act(x + residual)
 
 
-# ---------------------------------------------------------------------------
-#  Learned positional encoding  (MLP on  xyz + distance  →  out_dim)
-# ---------------------------------------------------------------------------
 class LearnedPosE(nn.Module):
     """Learned relative-position encoding (replaces sin/cos PE).
 
@@ -122,9 +110,6 @@ class LearnedPosE(nn.Module):
         return out.reshape(B, G, K, -1).permute(0, 3, 1, 2)      # (B, out_dim, G, K)
 
 
-# ---------------------------------------------------------------------------
-#  Linear1Layer  – channel projection before PE  (restored from official Point-PN)
-# ---------------------------------------------------------------------------
 class Linear1Layer(nn.Module):
     """Conv1d that maps  concat(neighbor, center)  →  out_dim  channels."""
     def __init__(self, in_channels: int, out_channels: int, max_groups: int = 8):
@@ -140,9 +125,6 @@ class Linear1Layer(nn.Module):
         return self.net(x)
 
 
-# ---------------------------------------------------------------------------
-#  FPS + ball-query  (adaptive-density neighbourhood, replaces FPS + kNN)
-# ---------------------------------------------------------------------------
 class FPSBallQuery(nn.Module):
     def __init__(self, num_centers: int, radius: float, max_neighbors: int):
         super().__init__()
@@ -161,9 +143,6 @@ class FPSBallQuery(nn.Module):
         return center_xyz, center_feature, neighbor_xyz, neighbor_feature
 
 
-# ---------------------------------------------------------------------------
-#  Local Geometry Aggregation  (with learned PE + Weigh gating + Linear1Layer)
-# ---------------------------------------------------------------------------
 class LocalGeometryAggregation(nn.Module):
     def __init__(self, output_channels: int, radius: float, block_num: int,
                  point_cloud_type: str, residual_expansion: float = 0.5,
@@ -222,9 +201,6 @@ class LocalGeometryAggregation(nn.Module):
         return self.residual_blocks(group_feat)
 
 
-# ---------------------------------------------------------------------------
-#  Pooling  (max + mean  –  official Point-PN semantic, plus GroupNorm+GELU)
-# ---------------------------------------------------------------------------
 class Pooling(nn.Module):
     def __init__(self, out_dim: int, max_groups: int = 8):
         super().__init__()
@@ -237,9 +213,6 @@ class Pooling(nn.Module):
         return self.act(self.norm(lc_x))
 
 
-# ---------------------------------------------------------------------------
-#  Parametric (hierarchical) Encoder
-# ---------------------------------------------------------------------------
 class ParametricEncoder(nn.Module):
     def __init__(self, input_channels: int, input_points: int, num_stages: int,
                  embed_channels: int, stage_radii,
@@ -307,9 +280,6 @@ class ParametricEncoder(nn.Module):
         return xyz, point_feature, intermediate_outputs
 
 
-# ---------------------------------------------------------------------------
-#  PointPNTokenizer  (public interface – backward compatible)
-# ---------------------------------------------------------------------------
 class PointPNTokenizer(nn.Module):
     supports_global_token = True
     supports_intermediate_outputs = True
@@ -407,9 +377,6 @@ class PointPNTokenizer(nn.Module):
         return num_patches
 
 
-# ---------------------------------------------------------------------------
-#  Smoke test
-# ---------------------------------------------------------------------------
 def example() -> None:
     batch_size, num_points = 2, 1024
 

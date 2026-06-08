@@ -1,24 +1,11 @@
 import re
 import time
-import copy
 import torch
-import threading
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional
 
 MonitorMode = Literal["max", "min"]
-
-
-def _copy_to_cpu(x):
-    if isinstance(x, torch.Tensor):
-        return x.detach().cpu()
-    elif isinstance(x, dict):
-        return {k: _copy_to_cpu(v) for k, v in x.items()}
-    elif isinstance(x, list):
-        return [_copy_to_cpu(v) for v in x]
-    else:
-        return copy.deepcopy(x)
 
 
 @dataclass
@@ -41,21 +28,10 @@ class CheckpointStore:
     def __init__(self, checkpoint_dir: Path):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self._save_thread: Optional[threading.Thread] = None
 
-    def _save_payload(self, payload: Dict[str, Any], tmp_path: Path, final_path: Path):
-        torch.save(payload, tmp_path)
-        tmp_path.replace(final_path)
-        torch.cuda.empty_cache()
-
-    def save(self, filename: str, checkpoint: TrainCheckpoint,
-             use_thread: bool = True) -> Path:
+    def save(self, filename: str, checkpoint: TrainCheckpoint) -> Path:
         path = self.checkpoint_dir / filename
         tmp_path = path.with_suffix(path.suffix + ".tmp")
-
-        # Wait for previous async save to finish before starting a new one
-        if self._save_thread is not None and self._save_thread.is_alive():
-            self._save_thread.join()
 
         payload = {
             "state": {
@@ -65,25 +41,18 @@ class CheckpointStore:
                 "train_params": checkpoint.train_params,
             },
             "weights": {
-                "model": _copy_to_cpu(checkpoint.model_state) if use_thread else checkpoint.model_state,
-                "ema_model": _copy_to_cpu(checkpoint.ema_model_state) if use_thread and checkpoint.ema_model_state is not None else checkpoint.ema_model_state,
-                "optimizer": _copy_to_cpu(checkpoint.optimizer_state) if use_thread else checkpoint.optimizer_state,
-                "scheduler": _copy_to_cpu(checkpoint.scheduler_state) if use_thread else checkpoint.scheduler_state,
+                "model": checkpoint.model_state,
+                "ema_model": checkpoint.ema_model_state,
+                "optimizer": checkpoint.optimizer_state,
+                "scheduler": checkpoint.scheduler_state,
             },
             "_format": "simple.v1",
             "_saved_at": time.time(),
         }
 
-        if use_thread:
-            self._save_thread = threading.Thread(
-                target=self._save_payload,
-                args=(payload, tmp_path, path),
-                daemon=True,
-            )
-            self._save_thread.start()
-        else:
-            self._save_payload(payload, tmp_path, path)
-
+        torch.save(payload, tmp_path)
+        tmp_path.replace(path)
+        torch.cuda.empty_cache()
         return path
 
     def load(self, path: Path) -> TrainCheckpoint:

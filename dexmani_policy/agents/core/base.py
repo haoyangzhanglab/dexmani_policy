@@ -1,12 +1,15 @@
+import warnings
+from typing import Any, Dict
+
 import torch
 import torch.nn as nn
-from typing import Dict, Any
-from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
+
+from dexmani_policy.agents.action_decoders.backbone.ditx import DiTXFlowMatch
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.action_decoders.backbone.ditx import DiTXFlowMatch
 from dexmani_policy.agents.action_decoders.flowmatch import FlowMatchWithConsistency
+from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.common.normalizer import LinearNormalizer
 
 
 class BaseAgent(nn.Module):
@@ -48,7 +51,6 @@ class BaseAgent(nn.Module):
         if self.training:
             for k, p in self.modality_dropout_probs.items():
                 if p > 0 and k not in self.normalizer.params_dict and k not in self._dropout_warned_keys:
-                    import warnings
                     warnings.warn(
                         f"modality_dropout for '{k}' (prob={p}) has no effect: "
                         f"'{k}' is not in normalizer.params_dict. "
@@ -120,7 +122,6 @@ class BaseAgent(nn.Module):
 
         missing_ids = model_param_ids - optim_param_ids
         if missing_ids:
-            import warnings
             missing_params = [p for p in self.parameters() if id(p) in missing_ids]
             param_info = []
             for p in missing_params:
@@ -129,8 +130,8 @@ class BaseAgent(nn.Module):
             warnings.warn(
                 f"The following {len(missing_ids)} trainable parameter(s) are NOT "
                 f"tracked by the optimizer:\n" + "\n".join(param_info) +
-                f"\nThis usually means get_optim_param_groups() is missing a module. "
-                f"These parameters will not be updated during training.",
+                "\nThis usually means get_optim_param_groups() is missing a module. "
+                "These parameters will not be updated during training.",
                 UserWarning,
             )
 

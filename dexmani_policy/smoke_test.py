@@ -1,15 +1,14 @@
 import os
-import sys
 import pathlib
+import sys
 
 ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
 os.chdir(ROOT_DIR)
-sys.path.insert(0, ROOT_DIR)
 
 import torch
-from omegaconf import OmegaConf
-from hydra.core.global_hydra import GlobalHydra
 from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, dict_apply
@@ -42,7 +41,6 @@ def smoke_test(config_name: str):
 
     set_seed(cfg.training.seed)
 
-    # 1. Dataset + Normalizer
     print("[1/5] Building dataset & normalizer ...")
     dataset, normalizer = build_dataset_and_normalizer(cfg)
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
@@ -52,24 +50,20 @@ def smoke_test(config_name: str):
     val_dataset = dataset.get_validation_dataset()
     if val_dataset is not None:
         print(f"      val dataset size: {len(val_dataset)}")
-        # MultiTaskDataset weighted 策略回归测试
         if hasattr(dataset, 'sampling_strategy') and dataset.sampling_strategy == 'weighted':
             assert hasattr(val_dataset, 'task_weights') and val_dataset.task_weights is not None, \
                 "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
             print(f"      ✓ weighted strategy validation set OK (task_weights={val_dataset.task_weights})")
     else:
-        print(f"      no validation set (val_ratio=0)")
+        print("      no validation set (val_ratio=0)")
 
-    # 2. Model + EMA
     print("[2/5] Building model & EMA ...")
     device = torch.device(cfg.training.device)
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
-    # 3. Optimizer + Scheduler
     print("[3/5] Building optimizer & scheduler ...")
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, len(train_loader))
 
-    # 4. Forward + backward
     print("[4/5] Running forward + backward ...")
     batch = next(iter(train_loader))
     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
@@ -84,7 +78,6 @@ def smoke_test(config_name: str):
     assert torch.isfinite(raw_loss), f"Non-finite loss: {raw_loss.item()}"
     print(f"      loss: {raw_loss.item():.4f}  keys: {list(loss_dict.keys())}")
 
-    # 5. Predict action (inference)
     print("[5/5] Running predict_action ...")
     model.eval()
     with torch.no_grad():
