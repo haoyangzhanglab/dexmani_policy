@@ -1,42 +1,70 @@
-import numpy as np
-from PIL import Image
-import torchvision.transforms.functional as F
-from torchvision.transforms import ColorJitter
-from .base import Aug
+import torch
+import torchvision.transforms.v2 as v2
 
 
-class RGBAug(Aug):
-    """ColorJitter for RGB images with temporal consistency.
+class RGBAug:
+    """Color + noise + blur augmentation for pre-resized float32 CHW tensors.
 
-    Reference: Diffusion Policy (RSS 2023) — same jitter params across all T frames.
+    Designed to run AFTER resize in ``__getitem__`` so the augmentation
+    operates on small 224×224 tensors with no dtype / layout roundtrip.
+
+    Each sub-augmentation is independently probabilistic: set its prob
+    < 1.0 to apply it only on a fraction of samples.  Set its strength
+    param to 0 to disable it entirely.
     """
 
-    def __init__(self, brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05,
-                 prob=1.0):
-        super().__init__(prob=prob)
-        # Use ColorJitter to normalise param ranges, then read back the list form
-        cj = ColorJitter(brightness=brightness, contrast=contrast,
-                         saturation=saturation, hue=hue)
-        self.b_range = cj.brightness
-        self.c_range = cj.contrast
-        self.s_range = cj.saturation
-        self.h_range = cj.hue
+    def __init__(
+        self,
+        # ColorJitter — 参考 DexUMI 的激进参数 (brightness=0.64 应对光照变化)
+        brightness=0.6,
+        contrast=0.3,
+        saturation=0.3,
+        hue=0.08,
+        # Grayscale (逼模型依赖形状而非颜色)
+        grayscale_prob=0.2,
+        # GaussianNoise  (0 = disabled)
+        noise_std=0.0,
+        noise_prob=1.0,
+        # GaussianBlur (模拟运动模糊/失焦, DexUMI: kernel=3, p=0.2)
+        blur_kernel=3,
+        blur_sigma=(0.1, 2.0),
+        blur_prob=0.2,
+        # Global: 每帧都做增强  (DexUMI: p=1.0)
+        prob=1.0,
+    ):
+        self.prob = prob
 
-    def _augment(self, x):
-        # Sample one set of params, apply to all T frames (temporal consistency)
-        params = ColorJitter.get_params(self.b_range, self.c_range, self.s_range, self.h_range)
-        return np.stack([self.apply_transform(params, Image.fromarray(f)) for f in x])
+        self.color_jitter = v2.ColorJitter(
+            brightness=brightness, contrast=contrast,
+            saturation=saturation, hue=hue,
+        )
+        self.grayscale = v2.RandomGrayscale(p=grayscale_prob) if grayscale_prob > 0 else None
 
-    @staticmethod
-    def apply_transform(params, img):
-        fn_idx, b, c, s, h = params
-        for fn_id in fn_idx.tolist():
-            if fn_id == 0:
-                img = F.adjust_brightness(img, b)
-            elif fn_id == 1:
-                img = F.adjust_contrast(img, c)
-            elif fn_id == 2:
-                img = F.adjust_saturation(img, s)
-            elif fn_id == 3:
-                img = F.adjust_hue(img, h)
-        return np.array(img)
+        self.noise_std = noise_std
+        self.noise_prob = noise_prob
+        self.noise = v2.GaussianNoise(mean=0.0, sigma=noise_std) if noise_std > 0 else None
+
+        self.blur_kernel = blur_kernel
+        self.blur_sigma = blur_sigma
+        self.blur_prob = blur_prob
+        self.blur = v2.GaussianBlur(
+            kernel_size=blur_kernel, sigma=blur_sigma
+        ) if blur_kernel > 0 else None
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (T, 3, H, W) float32 [0, 1] → same shape."""
+        if self.prob < 1.0 and torch.rand(1).item() > self.prob:
+            return x
+
+        x = self.color_jitter(x)
+
+        if self.grayscale is not None:
+            x = self.grayscale(x)
+
+        if self.noise is not None and torch.rand(1).item() <= self.noise_prob:
+            x = self.noise(x)
+
+        if self.blur is not None and torch.rand(1).item() <= self.blur_prob:
+            x = self.blur(x)
+
+        return x.clamp_(0, 1)

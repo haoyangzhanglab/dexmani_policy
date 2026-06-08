@@ -5,12 +5,11 @@ from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 
 @numba.jit(nopython=True)
 def create_indices(
-    episode_ends:np.ndarray, 
-    sequence_length:int, 
+    episode_ends:np.ndarray,
+    sequence_length:int,
     episode_mask: np.ndarray,
-    pad_before: int=0, 
+    pad_before: int=0,
     pad_after: int=0,
-    debug:bool=False,
 ) -> np.ndarray:
     
     assert episode_mask.shape == episode_ends.shape
@@ -46,9 +45,9 @@ def create_indices(
             end_offset = (idx+sequence_length+start_idx) - buffer_end_idx
             sample_start_idx = 0 + start_offset
             sample_end_idx = sequence_length - end_offset
-            if debug:
-                assert(start_offset >= 0) and (end_offset >= 0)
-                assert (sample_end_idx - sample_start_idx) == (buffer_end_idx - buffer_start_idx)
+            assert start_offset >= 0
+            assert end_offset >= 0
+            assert (sample_end_idx - sample_start_idx) == (buffer_end_idx - buffer_start_idx)
             indices.append([buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx])
             
     indices = np.array(indices)
@@ -86,21 +85,17 @@ def downsample_mask(mask, max_n, seed=0):
 
 class SequenceSampler:
     def __init__(
-        self, 
-        replay_buffer: ReplayBuffer, 
+        self,
+        replay_buffer: ReplayBuffer,
         sequence_length:int,
         pad_before:int=0,
         pad_after:int=0,
-        keys=None,
-        key_first_k=dict(),
         episode_mask: Optional[np.ndarray]=None,
     ):
         super().__init__()
 
         assert(sequence_length >= 1)
-        if keys is None:
-            keys = list(replay_buffer.keys())
-        
+
         episode_ends = replay_buffer.episode_ends[:]
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
@@ -139,9 +134,8 @@ class SequenceSampler:
             episode_mask=episode_mask
             )
 
-        self.keys = list(keys)
-        self.indices = indices 
-        self.key_first_k = key_first_k
+        self.keys = list(replay_buffer.keys())
+        self.indices = indices
         self.replay_buffer = replay_buffer
         self.sequence_length = sequence_length
         
@@ -156,15 +150,7 @@ class SequenceSampler:
         
         for key in self.keys:
             input_arr = self.replay_buffer[key]
-            if key not in self.key_first_k:
-                sample = input_arr[buffer_start_idx:buffer_end_idx]
-            else:
-                n_data = buffer_end_idx - buffer_start_idx
-                k_data = min(self.key_first_k[key], n_data)
-                sample = np.full((n_data,) + input_arr.shape[1:],
-                    fill_value=np.nan, dtype=input_arr.dtype)
-                sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
-
+            sample = input_arr[buffer_start_idx:buffer_end_idx]
             data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
                 data = np.zeros(

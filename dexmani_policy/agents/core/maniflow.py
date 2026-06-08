@@ -34,8 +34,8 @@ class ManiFlowObsEncoder(nn.Module):
         pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
         if pc.shape[1] > self.num_points:
             pc, _ = farthest_point_sample(pc, self.num_points)
-        patch_token, patch_center = self.pc_encoder(pc)
-        global_token = self.get_global_token(patch_token, patch_center)
+        pc_outputs = self.pc_encoder(pc, return_global_token=True)
+        patch_token, patch_center, global_token = pc_outputs[0], pc_outputs[1], pc_outputs[2]
         pc_feat = torch.cat([global_token, patch_token], dim=1)
 
         state_feat = self.state_mlp(obs['joint_state'])

@@ -74,7 +74,7 @@ class ResNet(nn.Module):
         self,
         model_name: str = "resnet18",
         tune_mode: TuneMode = "freeze",
-        norm_mode: NormMode = "frozen_bn",
+        norm_mode: NormMode = "group_norm",
         global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
         weights=None,

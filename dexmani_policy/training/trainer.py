@@ -18,8 +18,6 @@ class TrainLoopConfig:
     val_interval_epochs: int
     eval_interval_epochs: int
     sample_interval_epochs: int
-    grad_accum_steps: int = 1
-    grad_clip_norm: float = 1.0
 
 
 class Trainer:
@@ -37,7 +35,11 @@ class Trainer:
         workspace: Optional[TrainWorkspace],
         train_loop_cfg: TrainLoopConfig,
         use_ema_teacher_for_consistency: bool,
+        max_grad_norm: float = 1.0,
+        use_bfloat16: bool = False,
         is_main_process: bool = True,
+        distributed: bool = False,
+        train_sampler = None,
     ):
         self.device = device
 
@@ -58,19 +60,25 @@ class Trainer:
         self.val_interval_epochs = train_loop_cfg.val_interval_epochs
         self.eval_interval_epochs = train_loop_cfg.eval_interval_epochs
         self.sample_interval_epochs = train_loop_cfg.sample_interval_epochs
-        self.grad_clip_norm = train_loop_cfg.grad_clip_norm
         self.enable_env_eval = (self.env_runner is not None) and (self.eval_interval_epochs > 0)
         self.checkpoint_interval_epochs = self.eval_interval_epochs if self.enable_env_eval else self.val_interval_epochs
+        self.max_grad_norm = max_grad_norm
 
         self.use_ema = self.ema_model is not None
         self.use_ema_teacher_for_consistency = use_ema_teacher_for_consistency and self.use_ema
 
-        self.grad_accum_steps = train_loop_cfg.grad_accum_steps
-        self.accum_step = 0
+        self.use_bfloat16 = use_bfloat16
+
         self.is_main_process = is_main_process
+        self.distributed = distributed
+        self.train_sampler = train_sampler
         self.train_sampling_batch = None
         self.current_epoch = -1
         self.global_step = 0
+
+    @property
+    def raw_model(self):
+        return self.model.module if hasattr(self.model, 'module') else self.model
 
     def plan_epoch_end_tasks(self, epoch: int) -> Dict[str, bool]:
         epoch_idx = epoch + 1
@@ -85,31 +93,16 @@ class Trainer:
         }
 
     def apply_gradient_step(self):
-        total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
-        if not torch.isfinite(total_norm):
-            self.optimizer.zero_grad(set_to_none=True)
-            raise RuntimeError(
-                f"Non-finite gradient norm at epoch={self.current_epoch}, step={self.global_step}: "
-                f"total_norm={total_norm}"
+        if self.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.raw_model.parameters(), max_norm=self.max_grad_norm
             )
         self.optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
 
         if self.use_ema and self.ema_updater is not None:
-            model = self.model.module if hasattr(self.model, 'module') else self.model
-            self.ema_updater.step(model)
-
-    def flush_gradient_accumulation(self):
-        if self.accum_step % self.grad_accum_steps == 0:
-            return
-
-        scale = self.grad_accum_steps / (self.accum_step % self.grad_accum_steps)
-        for p in self.model.parameters():
-            if p.grad is not None:
-                p.grad.mul_(scale)
-
-        self.apply_gradient_step()
+            self.ema_updater.step(self.raw_model)
 
     def _save_nan_debug(self, raw_loss):
         if self.workspace is None:
@@ -117,21 +110,14 @@ class Trainer:
         output_dir = self.workspace.output_dir
         if output_dir is None:
             return
-
         ckpt_dir = output_dir / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-
         ts = time.strftime("%Y%m%d_%H%M%S")
         filename = f"nan_debug_epoch={self.current_epoch:04d}_step={self.global_step:08d}_{ts}.pt"
-
         payload = {
-            "state": {
-                "epoch": int(self.current_epoch),
-                "global_step": int(self.global_step),
-                "nan_loss": float(raw_loss),
-            },
+            "state": {"epoch": int(self.current_epoch), "global_step": int(self.global_step), "nan_loss": float(raw_loss)},
             "weights": {
-                "model": self.model.module.state_dict() if hasattr(self.model, 'module') else self.model.state_dict(),
+                "model": self.raw_model.state_dict(),
                 "ema_model": self.ema_model.state_dict() if self.use_ema else None,
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
@@ -140,16 +126,26 @@ class Trainer:
             "_saved_at": time.time(),
         }
         torch.save(payload, ckpt_dir / filename)
-
         return ckpt_dir / filename
 
     def train_one_step(self, batch: Dict[str, Any]):
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-
         loss_kwargs = {'ema_backbone': self.ema_model.action_decoder.model} if self.use_ema_teacher_for_consistency else {}
-        raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
+        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
+            raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
-        if not torch.isfinite(raw_loss):
+        if self.distributed:
+            import torch.distributed as dist
+            nan_flag = torch.tensor(
+                [0 if torch.isfinite(raw_loss) else 1],
+                dtype=torch.int, device=self.device,
+            )
+            dist.all_reduce(nan_flag, op=dist.ReduceOp.MAX)
+            is_nan = bool(nan_flag.item())
+        else:
+            is_nan = not torch.isfinite(raw_loss)
+
+        if is_nan:
             debug_path = self._save_nan_debug(raw_loss)
             self.optimizer.zero_grad(set_to_none=True)
             raise RuntimeError(
@@ -157,13 +153,8 @@ class Trainer:
                 f"raw_loss={raw_loss.item()}. Debug checkpoint saved to {debug_path}"
             )
 
-        scaled_loss = raw_loss / self.grad_accum_steps
-        scaled_loss.backward()
-
-        self.accum_step += 1
-        if self.accum_step % self.grad_accum_steps == 0:
-            self.apply_gradient_step()
-
+        raw_loss.backward()
+        self.apply_gradient_step()
         return batch, log_dict
 
 
@@ -178,7 +169,8 @@ class Trainer:
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
             loss_kwargs = {'ema_backbone': ema_backbone} if ema_backbone is not None else {}
-            loss, log_dict = agent.compute_loss(batch, **loss_kwargs)
+            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
+                loss, log_dict = agent.compute_loss(batch, **loss_kwargs)
 
             n = batch['action'].shape[0]
             loss_sum += loss.detach() * n
@@ -186,6 +178,13 @@ class Trainer:
 
         if count == 0:
             return None
+
+        if self.distributed:
+            import torch.distributed as dist
+            stats = torch.tensor([loss_sum.item(), float(count)], device=self.device)
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            return (stats[0] / stats[1]).item()
+
         return (loss_sum / count).item()
 
 
@@ -210,9 +209,9 @@ class Trainer:
 
     def finish_epoch(self, epoch, global_step, last_batch=None, eval_model=None, checkpoint_model=None):
         if eval_model is None:
-            eval_model = self.ema_model if self.use_ema else self.model
+            eval_model = self.ema_model if self.use_ema else self.raw_model
         if checkpoint_model is None:
-            checkpoint_model = self.model
+            checkpoint_model = self.raw_model
         if last_batch is None:
             last_batch = next(iter(self.train_loader))
 
@@ -223,7 +222,8 @@ class Trainer:
             sample_batch = self.train_sampling_batch
             if sample_batch is None:
                 sample_batch = dict_apply(last_batch, lambda x: x.to(self.device, non_blocking=True))
-            epoch_metrics["sample/action_mse_error"] = eval_model.compute_action_mse(sample_batch)
+            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
+                epoch_metrics["sample/action_mse_error"] = eval_model.compute_action_mse(sample_batch)
 
         if epoch_end_tasks["validate"]:
             if self.use_ema_teacher_for_consistency:
@@ -268,7 +268,6 @@ class Trainer:
                 global_step=global_step,
                 model_state=checkpoint_model.state_dict(),
                 ema_model_state=self.ema_model.state_dict() if self.use_ema else None,
-                ema_updater_state=self.ema_updater.state_dict() if self.use_ema and self.ema_updater else None,
                 optimizer_state=self.optimizer.state_dict(),
                 scheduler_state=self.scheduler.state_dict(),
                 monitor=monitor,
@@ -277,7 +276,7 @@ class Trainer:
                     'n_action_steps': self.model.n_action_steps,
                     'action_dim': self.model.action_dim,
                     'horizon': self.model.horizon,
-                    'action_mode': getattr(self.model, 'action_mode', 'absolute_joint'),
+                    'action_key': getattr(self.model, 'action_key', 'action'),
                 },
             )
 
@@ -289,8 +288,10 @@ class Trainer:
                 self.workspace.save_topk(checkpoint_path, checkpoint)
 
             latest_target = checkpoint_path
-            if test_mean_score is not None and not latest_target.exists():
-                latest_target = self.workspace.topk_tracker.best_path()
+            if test_mean_score is not None:
+                best = self.workspace.topk_tracker.best_path()
+                if best is not None:
+                    latest_target = best
             self.workspace.save_latest(latest_target)
             if test_mean_score is None and epoch_end_tasks["save_checkpoint"]:
                 print(f"Skipping topk update at epoch {epoch} (no monitor metric available)")
@@ -302,19 +303,23 @@ class Trainer:
             self.model.set_epoch(epoch)
         self.train_sampling_batch = None
 
-    def train(self, resume_tag: str = "latest"):
+    def train(self, resume_tag: str = "latest", resume_state=None):
         torch.set_float32_matmul_precision('high')
-        global_step, start_epoch = self.workspace.load_for_resume(
-            model=self.model,
-            ema_model=self.ema_model,
-            ema_updater=self.ema_updater,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            tag_or_path=resume_tag,
-        )
 
-        if start_epoch > 0:
-            print(f"Resuming training from epoch {start_epoch}, step {global_step}")
+        if resume_state is not None:
+            global_step, start_epoch = resume_state
+            if start_epoch > 0:
+                print(f"Resuming training from epoch {start_epoch}, step {global_step}")
+        else:
+            global_step, start_epoch = self.workspace.load_for_resume(
+                model=self.raw_model,
+                ema_model=self.ema_model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                tag_or_path=resume_tag,
+            )
+            if start_epoch > 0:
+                print(f"Resuming training from epoch {start_epoch}, step {global_step}")
 
         self.model.to(self.device)
         if self.use_ema:
@@ -324,18 +329,19 @@ class Trainer:
         optimizer_to(self.optimizer, self.device)
         self.optimizer.zero_grad(set_to_none=True)
 
-        epoch_pbar = tqdm(
-            range(start_epoch, self.num_epochs),
-            desc="Epoch",
-            position=0,
-            mininterval=1.0,
-        )
+        epoch_iter = range(start_epoch, self.num_epochs)
+        if self.is_main_process:
+            epoch_pbar = tqdm(epoch_iter, desc="Epoch", position=0, mininterval=1.0)
+        else:
+            epoch_pbar = epoch_iter
 
         for epoch in epoch_pbar:
+            if self.train_sampler is not None:
+                self.train_sampler.set_epoch(epoch)
+
             self.model.train()
             self.on_epoch_start(epoch)
 
-            self.accum_step = 0
             self.optimizer.zero_grad(set_to_none=True)
 
             last_batch = None
@@ -354,16 +360,45 @@ class Trainer:
                     for key, value in to_log_scalars(log_dict).items():
                         step_metrics[f"train/{key}"] = value
 
-                    epoch_pbar.set_postfix(
-                        global_step=global_step,
-                        loss=step_metrics.get("train/loss", None),
-                    )
+                    if hasattr(epoch_pbar, 'set_postfix'):
+                        epoch_pbar.set_postfix(
+                            global_step=global_step,
+                            loss=step_metrics.get("train/loss", None),
+                        )
                     self.workspace.log(step_metrics, step=global_step)
-
-            self.flush_gradient_accumulation()
 
             self.model.eval()
 
+            finish_error = None
             if self.is_main_process:
-                self.finish_epoch(epoch, global_step, last_batch=last_batch)
+                try:
+                    self.finish_epoch(epoch, global_step, last_batch=last_batch)
+                except Exception as e:
+                    if self.distributed:
+                        import traceback
+                        traceback.print_exc()
+                        finish_error = e
+                    else:
+                        raise
+
+            if self.distributed:
+                import torch.distributed as dist
+                error_flag = torch.tensor(
+                    [1 if finish_error is not None else 0],
+                    dtype=torch.int, device=self.device,
+                )
+                dist.broadcast(error_flag, src=0)
+                dist.barrier()
+                if error_flag.item():
+                    raise RuntimeError(
+                        "Training aborted due to error in finish_epoch on rank 0"
+                    ) from finish_error
+
+        # Wait for any in-flight async checkpoint save to finish before exit.
+        # Without this join, the daemon thread may be killed during interpreter
+        # shutdown, leaving .tmp files un-renamed (SIGABRT).
+        if self.workspace is not None:
+            store = self.workspace.checkpoint_store
+            if store._save_thread is not None and store._save_thread.is_alive():
+                store._save_thread.join()
 

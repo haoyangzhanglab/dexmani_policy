@@ -2,9 +2,8 @@ import math
 import torch
 import einops
 import torch.nn as nn
-import torch.nn.functional as F
 from einops.layers.torch import Rearrange
-from dexmani_policy.agents.common.optim_util import get_default_optim_group, get_optim_group_with_no_decay
+from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
@@ -21,26 +20,6 @@ class SinusoidalPosEmb(nn.Module):
         return emb
 
 
-class CrossAttention(nn.Module):
-
-    def __init__(self, in_dim, cond_dim, out_dim):
-        super().__init__()
-        self.query_proj = nn.Linear(in_dim, out_dim)
-        self.key_proj = nn.Linear(cond_dim, out_dim)
-        self.value_proj = nn.Linear(cond_dim, out_dim)
-        self.scale = out_dim ** -0.5
-
-    def forward(self, x, cond):
-
-        query = self.query_proj(x)
-        key = self.key_proj(cond)
-        value = self.value_proj(cond)
-
-        attn_weights = torch.matmul(query, key.transpose(-2, -1)) * self.scale
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_output = torch.matmul(attn_weights, value)
-        
-        return attn_output
 
 
 class Downsample1d(nn.Module):
@@ -80,7 +59,6 @@ class ConditionalResidualBlock1D(nn.Module):
                  cond_dim: int,
                  kernel_size: int = 3,
                  n_groups: int = 8,
-                 condition_type: str = 'film',
                  cond_predict_scale: bool = True):
         super().__init__()
 
@@ -90,8 +68,6 @@ class ConditionalResidualBlock1D(nn.Module):
         ])
 
         self.out_channels = out_channels
-        self.condition_type = condition_type
-        self.use_cross_attention = (condition_type == 'cross_attention_film')
         self.cond_predict_scale = cond_predict_scale
         self.residual_conv = (
             nn.Conv1d(in_channels, out_channels, 1)
@@ -99,36 +75,19 @@ class ConditionalResidualBlock1D(nn.Module):
         )
 
         cond_channels = out_channels * 2 if cond_predict_scale else out_channels
-        if condition_type == 'film':
-            self.cond_encoder = nn.Sequential(
-                nn.Mish(),
-                nn.Linear(cond_dim, cond_channels),
-                Rearrange('batch t -> batch t 1'),
-            )
-        elif condition_type == 'mlp_film':
-            self.cond_encoder = nn.Sequential(
-                nn.Mish(),
-                nn.Linear(cond_dim, cond_dim),
-                nn.Mish(),
-                nn.Linear(cond_dim, cond_channels),
-                Rearrange('batch t -> batch t 1'),
-            )
-        elif condition_type == 'cross_attention_film':
-            self.cond_encoder = CrossAttention(out_channels, cond_dim, cond_channels)
-        else:
-            raise NotImplementedError(f"Unsupported condition type: {condition_type}")
+        self.cond_encoder = nn.Sequential(
+            nn.Mish(),
+            nn.Linear(cond_dim, cond_channels),
+            Rearrange('batch t -> batch t 1'),
+        )
 
-    def forward(self, x, cond=None):
+    def forward(self, x, cond):
         out = self.blocks[0](x)
-        if cond is not None:
-            if self.use_cross_attention:
-                embed = self.cond_encoder(out.permute(0, 2, 1), cond).permute(0, 2, 1)
-            else:
-                embed = self.cond_encoder(cond)
-            if self.cond_predict_scale:
-                out = self.apply_film(out, embed)
-            else:
-                out = out + embed
+        embed = self.cond_encoder(cond)
+        if self.cond_predict_scale:
+            out = self.apply_film(out, embed)
+        else:
+            out = out + embed
         out = self.blocks[1](out)
         return out + self.residual_conv(x)
 
@@ -150,20 +109,12 @@ class ConditionalUnet1D(nn.Module):
             down_dims=[256,512,1024],
             kernel_size=5,
             n_groups=8,
-            condition_type='film',
             cond_predict_scale=True,
-            use_down_condition=True,
-            use_mid_condition=True,
-            use_up_condition=True,
             ):
         super().__init__()
 
-        self.condition_type = condition_type
         self.cond_predict_scale = cond_predict_scale
-        self.use_down_condition = use_down_condition
-        self.use_mid_condition = use_mid_condition
-        self.use_up_condition = use_up_condition
-        
+
         dsed = diffusion_step_embed_dim
         self.diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
@@ -172,7 +123,7 @@ class ConditionalUnet1D(nn.Module):
             nn.Linear(dsed * 4, dsed),
         )
         cond_dim = dsed + context_dim
-        
+
         all_dims = [input_dim] + list(down_dims)
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
@@ -181,12 +132,12 @@ class ConditionalUnet1D(nn.Module):
             ConditionalResidualBlock1D(
                 mid_dim, mid_dim, cond_dim=cond_dim,
                 kernel_size=kernel_size, n_groups=n_groups,
-                condition_type=condition_type, cond_predict_scale=cond_predict_scale
+                cond_predict_scale=cond_predict_scale
             ),
             ConditionalResidualBlock1D(
                 mid_dim, mid_dim, cond_dim=cond_dim,
                 kernel_size=kernel_size, n_groups=n_groups,
-                condition_type=condition_type, cond_predict_scale=cond_predict_scale
+                cond_predict_scale=cond_predict_scale
             ),
         ])
 
@@ -197,11 +148,11 @@ class ConditionalUnet1D(nn.Module):
                 ConditionalResidualBlock1D(
                     dim_in, dim_out, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
+                    cond_predict_scale=cond_predict_scale),
                 ConditionalResidualBlock1D(
                     dim_out, dim_out, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
+                    cond_predict_scale=cond_predict_scale),
                 Downsample1d(dim_out) if not is_last else nn.Identity()
             ]))
 
@@ -212,15 +163,15 @@ class ConditionalUnet1D(nn.Module):
                 ConditionalResidualBlock1D(
                     dim_out*2, dim_in, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
+                    cond_predict_scale=cond_predict_scale),
                 ConditionalResidualBlock1D(
                     dim_in, dim_in, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups,
-                    condition_type=condition_type, cond_predict_scale=cond_predict_scale),
+                    cond_predict_scale=cond_predict_scale),
                 Upsample1d(dim_in) if not is_last else nn.Identity()
             ]))
         self.up_modules = up_modules
-        
+
         start_dim = down_dims[0]
         self.final_conv = nn.Sequential(
             Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
@@ -229,7 +180,6 @@ class ConditionalUnet1D(nn.Module):
 
     
     def get_optim_groups(self, weight_decay: float = 1e-3):
-        # return get_default_optim_group(self, weight_decay)
         return get_optim_group_with_no_decay(self, weight_decay=weight_decay)
 
 
@@ -243,37 +193,23 @@ class ConditionalUnet1D(nn.Module):
             timestep = timestep[None].to(x.device)
         timestep = timestep.expand(x.shape[0])
         t_embed = self.diffusion_step_encoder(timestep)
-        
-        if 'cross_attention' in self.condition_type:
-            assert len(context.shape) == 3, f"Expected context shape (batch, n_obs, cond_dim) when use cross-attn, but got {context.shape}"
-            t_embed = t_embed.unsqueeze(1).expand(-1, context.shape[1], -1)
+
         cond = torch.cat([t_embed, context], axis=-1)
-        
+
         h = []
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
-            if self.use_down_condition:
-                x = resnet(x, cond)
-                x = resnet2(x, cond)
-            else:
-                x = resnet(x)
-                x = resnet2(x)
+            x = resnet(x, cond)
+            x = resnet2(x, cond)
             h.append(x)
             x = downsample(x)
 
         for mid_module in self.mid_modules:
-            if self.use_mid_condition:
-                x = mid_module(x, cond)
-            else:
-                x = mid_module(x)
+            x = mid_module(x, cond)
 
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
             x = torch.cat((x, h.pop()), dim=1)
-            if self.use_up_condition:
-                x = resnet(x, cond)
-                x = resnet2(x, cond)
-            else:
-                x = resnet(x)
-                x = resnet2(x)
+            x = resnet(x, cond)
+            x = resnet2(x, cond)
             x = upsample(x)
 
         x = self.final_conv(x)

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from einops import reduce
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
@@ -27,6 +26,8 @@ class Diffusion(nn.Module):
             prediction_type=prediction_type,
         )
         self.num_inference_steps = num_inference_steps
+        self._prediction_type = prediction_type
+        self._cached_alphas_device = None
 
 
     def compute_loss(self, cond, actions, **kwargs):
@@ -42,45 +43,40 @@ class Diffusion(nn.Module):
             context=cond,
         )
 
-        pred_type = self.noise_scheduler.config.prediction_type 
+        pred_type = self.noise_scheduler.config.prediction_type
         if pred_type == 'epsilon':
             target = noise
         elif pred_type == 'sample':
             target = actions
+        elif pred_type == 'v_prediction':
+            # v_t = sqrt(alpha_cumprod) * noise - sqrt(1-alpha_cumprod) * x_0
+            # See: https://arxiv.org/abs/2202.00512 (Progressive Distillation)
+            if self._cached_alphas_device != actions.device:
+                self._cached_alphas = self.noise_scheduler.alphas_cumprod.to(device=actions.device)
+                self._cached_alphas_device = actions.device
+            alpha_t = self._cached_alphas[timestep].sqrt()
+            sigma_t = (1 - self._cached_alphas[timestep]).sqrt()
+            target = alpha_t.view(-1, 1, 1) * noise - sigma_t.view(-1, 1, 1) * actions
         else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")      
+            raise ValueError(f"Unsupported prediction type {pred_type}")
 
-        loss = F.mse_loss(pred, target, reduction='none')
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        loss = loss.mean()
-        loss_dict = {"loss": loss, "loss_action": loss}
+        loss = F.mse_loss(pred, target)
+        loss_dict = {"loss_action": loss, "loss": loss}
 
         return loss, loss_dict
 
 
     @torch.no_grad()
-    def conditional_sample(self, x0, N, cond):
-
-        traj = []
-        traj.append(x0.clone())
-        self.noise_scheduler.set_timesteps(N, device=x0.device)
-
-        for t in self.noise_scheduler.timesteps:
-            output = self.model(
-                x = traj[-1],
-                timestep = t,
-                context = cond,
-            )
-            traj.append(self.noise_scheduler.step(output, t, traj[-1]).prev_sample)
-        
-        return traj
-    
-
     def predict_action(self, cond, action_template, denoise_timesteps=None):
-        noise = torch.randn_like(action_template, device=action_template.device)
+        sample = torch.randn_like(action_template, device=action_template.device)
         if denoise_timesteps is None:
             denoise_timesteps = self.num_inference_steps
-        traj = self.conditional_sample(noise, denoise_timesteps, cond)
-        return traj[-1]
+
+        self.noise_scheduler.set_timesteps(denoise_timesteps, device=sample.device)
+        for t in self.noise_scheduler.timesteps:
+            output = self.model(x=sample, timestep=t, context=cond)
+            sample = self.noise_scheduler.step(output, t, sample).prev_sample
+
+        return sample
 
 

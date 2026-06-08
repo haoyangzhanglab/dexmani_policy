@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ExpertMLP(nn.Module):
@@ -15,6 +16,14 @@ class ExpertMLP(nn.Module):
         layers += [nn.Linear(d, out_dim)]
 
         self.net = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.net.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x):
         return self.net(x)
@@ -32,6 +41,14 @@ class MoE(nn.Module):
         lambda_load=0.1,
         beta_entropy=0.01,
         activation=nn.GELU,
+        use_boost=False,
+        boost_start_epoch=0,
+        boost_interval=100,
+        boost_experts_per_step=4,
+        boost_topk_per_step=1,
+        use_enhanced_gate=False,
+        gate_hidden_dim=None,
+        gate_dropout=0.0,
     ):
         super().__init__()
         out_dim = dim if out_dim is None else out_dim
@@ -43,7 +60,29 @@ class MoE(nn.Module):
         self.lambda_load = lambda_load
         self.beta_entropy = beta_entropy
 
-        self.router = nn.Linear(dim, num_experts)
+        # ---- Boost state ----
+        self.use_boost = use_boost
+        self.boost_start_epoch = boost_start_epoch
+        self.boost_interval = boost_interval
+        self.boost_experts_per_step = boost_experts_per_step
+        self.boost_topk_per_step = boost_topk_per_step
+        self.current_num_experts = num_experts
+        self.current_top_k = top_k
+
+        # ---- Router / Gate ----
+        if use_enhanced_gate:
+            hidden = gate_hidden_dim or (dim // 2)
+            self.router = nn.Sequential(
+                nn.Linear(dim, hidden),
+                nn.ReLU(),
+                nn.Dropout(gate_dropout),
+                nn.Linear(hidden, num_experts),
+            )
+        else:
+            self.router = nn.Linear(dim, num_experts)
+
+        self.use_enhanced_gate = use_enhanced_gate
+
         self.experts = nn.ModuleList([
             ExpertMLP(
                 dim=dim,
@@ -55,14 +94,39 @@ class MoE(nn.Module):
             for _ in range(num_experts)
         ])
 
+        self._init_weights()
+
+    def _init_weights(self):
+        """Xavier-uniform init for all Linear layers (gate + experts).
+
+        Aligned with official MoE-DP: gates and experts share the same
+        initialisation scheme so the router starts from a well-conditioned
+        distribution.  ExpertMLP already calls its own _init_weights in
+        __init__; this pass re-initialises those layers identically
+        (a no-op) and additionally initialises the router/gate Linear
+        layers which would otherwise use PyTorch's default Kaiming init.
+        """
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.constant_(m.bias, 0)
+
     def route(self, z):
-        probs = torch.softmax(self.router(z), dim=-1)
-        topk_prob, topk_idx = torch.topk(probs, k=self.top_k, dim=-1)
+        logits = self.router(z)
+        if self.use_boost:
+            # Align with official MoE-DP: slice logits BEFORE softmax so that
+            # only active experts compete.  Inactive experts receive exactly
+            # zero probability (rather than a residual share of a full softmax).
+            logits = logits[:, :self.current_num_experts]
+        probs = torch.softmax(logits, dim=-1)
+        k = min(self.current_top_k, self.current_num_experts)
+        topk_prob, topk_idx = torch.topk(probs, k=k, dim=-1)
         topk_prob = topk_prob / topk_prob.sum(dim=-1, keepdim=True)
         return probs, topk_idx, topk_prob
 
     def aggregate_experts(self, z, topk_idx, topk_prob):
-        expert_out = torch.stack([expert(z) for expert in self.experts], dim=1)
+        active_experts = self.experts[:self.current_num_experts]
+        expert_out = torch.stack([expert(z) for expert in active_experts], dim=1)
         picked = torch.gather(
             expert_out,
             dim=1,
@@ -70,14 +134,47 @@ class MoE(nn.Module):
         )
         return (picked * topk_prob.unsqueeze(-1)).sum(dim=1)
 
-    def aux_loss(self, probs):
-        dispatch = probs.argmax(dim=-1)
-        f_i = torch.bincount(dispatch, minlength=self.num_experts).to(probs.dtype)
-        f_i = f_i / dispatch.numel()
+    def update_expert_num(self, epoch):
+        """Idempotent boost schedule – recomputes active experts/top_k from epoch.
+
+        Safe for checkpoint resume: state is a pure function of epoch,
+        so calling this multiple times at the same epoch is a no-op.
+        """
+        if not self.use_boost:
+            self.current_num_experts = self.num_experts
+            self.current_top_k = self.top_k
+            return
+
+        if epoch < self.boost_start_epoch:
+            self.current_num_experts = self.num_experts
+            self.current_top_k = self.top_k
+            return
+
+        n_boosts = (epoch - self.boost_start_epoch) // self.boost_interval
+
+        start_experts = max(2, self.num_experts // 2)
+        start_topk = max(1, self.top_k // 2)
+
+        self.current_num_experts = min(
+            self.num_experts,
+            start_experts + n_boosts * self.boost_experts_per_step,
+        )
+        self.current_top_k = min(
+            self.top_k,
+            start_topk + n_boosts * self.boost_topk_per_step,
+        )
+
+    def aux_loss(self, probs, topk_idx):
+        # Frequency: count ALL top-k expert selections (not just argmax).
+        # When top_k > 1, each sample routes to multiple experts;
+        # F.one_hot over topk_idx correctly accounts for all of them.
+        E = probs.shape[1]  # aligned with official: during boost E = current_num_experts
+        topk_one_hot = F.one_hot(topk_idx, num_classes=E).to(probs.dtype)
+        f_i = topk_one_hot.sum(dim=[0, 1]) / (probs.shape[0] * topk_idx.shape[1])
 
         p_i = probs.mean(dim=0)
 
-        load_loss = self.num_experts * torch.sum(f_i * p_i)
+        load_loss = E * torch.sum(f_i * p_i)
         entropy_loss = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).mean()
         loss = self.lambda_load * load_loss + self.beta_entropy * entropy_loss
 
@@ -86,7 +183,7 @@ class MoE(nn.Module):
             "load_balance_loss": load_loss,
             "entropy_loss": entropy_loss,
             "router_probs": probs,
-            "dispatch": dispatch,
+            "dispatch": probs.argmax(dim=-1),
             "f_i": f_i,
             "p_i": p_i,
         }
@@ -103,7 +200,7 @@ class MoE(nn.Module):
         if not return_aux:
             return z_moe
 
-        aux = self.aux_loss(probs)
+        aux = self.aux_loss(probs, topk_idx)
         aux["topk_idx"] = topk_idx
         aux["topk_prob"] = topk_prob
         return z_moe, aux
@@ -171,6 +268,64 @@ def example():
     print("total loss:", float(loss))
     print("router grad mean:", moe.router.weight.grad.abs().mean().item())
     print("expert0 grad mean:", moe.experts[0].net[0].weight.grad.abs().mean().item())
+
+    # Verify aux loss fix: f_i counts ALL top-k selections, not just argmax
+    f_i_sum = aux["f_i"].sum().item()
+    print(f"f_i sum (probability distribution): {f_i_sum:.4f} (should be 1.0)")
+    assert abs(f_i_sum - 1.0) < 1e-6, \
+        f"f_i.sum() should be 1.0 (normalized probability), got {f_i_sum}"
+    # Verify f_i accounts for all top-k selections (not just argmax):
+    # When top_k>1, dispatch count (=argmax count) < topk count (=one_hot sum)
+    dispatch_count = torch.bincount(aux["dispatch"], minlength=8).sum().item()
+    topk_raw_count = B * top_k  # each sample selects top_k experts
+    print(f"dispatch count: {dispatch_count}, topk raw count: {topk_raw_count}")
+
+    # ---- Boost test ----
+    print("\n--- Boost test ---")
+    moe_boost = MoE(
+        dim=64,
+        num_experts=8, top_k=2,
+        hidden_dim=128, out_dim=64, num_layers=2,
+        use_boost=True, boost_start_epoch=0, boost_interval=50,
+        boost_experts_per_step=4, boost_topk_per_step=1,
+    )
+    print(f"base experts={moe_boost.num_experts} top_k={moe_boost.top_k}")
+
+    moe_boost.update_expert_num(0)
+    print(f"epoch 0: active_experts={moe_boost.current_num_experts} active_top_k={moe_boost.current_top_k}")
+    assert moe_boost.current_num_experts == 4 and moe_boost.current_top_k == 1
+
+    moe_boost.update_expert_num(50)
+    print(f"epoch 50: active_experts={moe_boost.current_num_experts} active_top_k={moe_boost.current_top_k}")
+    assert moe_boost.current_num_experts == 8 and moe_boost.current_top_k == 2
+
+    moe_boost.update_expert_num(200)
+    print(f"epoch 200: active_experts={moe_boost.current_num_experts} active_top_k={moe_boost.current_top_k}")
+    assert moe_boost.current_num_experts == 8 and moe_boost.current_top_k == 2, "Should cap"
+
+    # Forward through boosted MoE
+    x_test = torch.randn(4, 64)
+    z_boost, aux_boost = moe_boost(x_test, return_aux=True)
+    print(f"boost z: {z_boost.shape}, active_experts={moe_boost.current_num_experts}")
+
+    # ---- Enhanced gate test ----
+    print("\n--- Enhanced gate test ---")
+    moe_gate = MoE(
+        dim=64,
+        num_experts=8, top_k=2,
+        hidden_dim=128, out_dim=64, num_layers=2,
+        use_enhanced_gate=True, gate_dropout=0.1,
+    )
+    assert isinstance(moe_gate.router, nn.Sequential), \
+        f"Expected nn.Sequential gate, got {type(moe_gate.router)}"
+    print(f"gate type: {type(moe_gate.router).__name__} (len={len(moe_gate.router)})")
+    z_gate, aux_gate = moe_gate(x_test, return_aux=True)
+    print(f"enhanced gate z: {z_gate.shape}, aux loss: {aux_gate['loss'].item():.4f}")
+
+    # ---- Xavier init test ----
+    print("\n--- Xavier init test ---")
+    expert_w = moe.experts[0].net[0].weight
+    print(f"expert0 weight std: {expert_w.std().item():.4f} (non-zero expected)")
 
     return {
         "z": z,

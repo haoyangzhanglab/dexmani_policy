@@ -13,24 +13,26 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 
-action_mode: absolute_joint  # absolute_joint | eef_hand
-ee_dim: 9
-hand_dim: 12
-action_dim: ${eval:'${ee_dim} + ${hand_dim} if ${eq:${action_mode},eef_hand} else 19'}
+action_key: action  # action | action_ee
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 dataloader:
   batch_size: 64
   num_workers: 8
   shuffle: true
   pin_memory: true
-  persistent_workers: false
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false  # DDP 建议开启，防最后 batch 大小不均导致 all_reduce 失败
 
 val_dataloader:
   batch_size: 64
   num_workers: 4
   shuffle: false
   pin_memory: true
-  persistent_workers: false
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
 
 agent:
   _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
@@ -49,15 +51,26 @@ agent:
   mlp_ratio: 4.0
   qkv_bias: true
 
+  # action decoder
+  action_decoder_type: diffusion  # diffusion | flowmatch
+
   # action decoder (Diffusion)
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
 
+  # action decoder (FlowMatch)
+  flow_num_inference_steps: 10
+  flow_t_sample_mode: beta  # uniform | beta | lognorm | mode | cosmap
+  flow_beta_alpha: 1.0
+  flow_beta_beta: 1.5
+
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
+  modality_dropout_probs:
+    joint_state: 0.0
 
 optimizer:
   lr: 1.0e-4
@@ -101,14 +114,15 @@ training:
   use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  use_bfloat16: false  # BF16 mixed precision (Ampere+ GPUs, ~2x speedup)
   loop:
     num_epochs: 1000
     log_interval_steps: 50
     val_interval_epochs: 25
     eval_interval_epochs: 250
     sample_interval_epochs: 5
-    grad_accum_steps: 1
-    grad_clip_norm: 1.0
+
 
 env_runner:
   _target_: dexmani_policy.env_runner.multi_task_sim_runner.MultiTaskSimRunner
@@ -120,15 +134,15 @@ env_runner:
     - task_name: task_1
       task_text: ${dataset.task_texts[0]}
       env_kwargs:
-        control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
+        control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
     - task_name: task_2
       task_text: ${dataset.task_texts[1]}
       env_kwargs:
-        control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
+        control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
     - task_name: task_3
       task_text: ${dataset.task_texts[2]}
       env_kwargs:
-        control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
+        control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
 # ---- offline eval (eval_sim.py)
 eval:

@@ -151,7 +151,6 @@ class BaseRunner:
         task_done_step_list = []
         episode_video_list = []
         episode_details = []  # per-episode: {seed, success, steps}
-        env_failed_seeds = []
         completed = 0
 
         print("=" * 90)
@@ -167,7 +166,6 @@ class BaseRunner:
                     video = env.get_video()
                     completed += 1
 
-                    # 定期清理 GPU 缓存：关闭并重建环境，防止 SAPIEN 渲染器显存累积
                     if self.clear_cache_freq > 0 and completed % self.clear_cache_freq == 0:
                         env.close()
                         env = self.make_env()
@@ -188,58 +186,26 @@ class BaseRunner:
                         episode_video_list.append({
                             f"episode_{eval_seed}": video
                         })
-                    else:
-                        cprint(f"⚠️ No video for seed {eval_seed}", "yellow")
-
-                except (RuntimeError, ValueError, AttributeError) as e:
-                    # 只捕获环境和策略相关的预期异常
-                    # dexmani_sim base_env.py:316 raises RuntimeError("Reset Failed for seed {seed}! Unstable objects: ...")
-                    # dexmani_sim base_env.py:429/473 raises ValueError("Failed to sample ... positions ...")
-                    # AttributeError: 动态导入的 env 可能缺失某些可选属性（如 action_cnt）
-                    error_msg = str(e)
-
-                    # 环境初始化失败（跳过该 seed，不计入失败）
-                    if "Reset Failed" in error_msg or "Unstable" in error_msg or "Failed to sample" in error_msg:
-                        env_failed_seeds.append(eval_seed)
-                        cprint(f"⚠️ Seed {eval_seed} env init failed, skipping", "yellow")
-                    else:
-                        # 策略执行失败（记录为失败 episode）
-                        success_list.append(False)
-                        episode_details.append({
-                            "seed": eval_seed,
-                            "success": False,
-                            "steps": None,
-                            "error": str(e),
-                        })
-                        cprint(f"❌ Seed {eval_seed} policy failed: {e}", "red")
-
-                except KeyboardInterrupt:
-                    # 用户中断（Ctrl+C），立即停止评估
-                    cprint(f"\n⚠️ Evaluation interrupted by user at seed {eval_seed}", "yellow")
-                    cprint(f"Collected {len(success_list)}/{num_episodes} episodes before interruption", "yellow")
-                    break
 
                 except Exception as e:
-                    # 未预期的严重错误，打印详细信息后重新抛出
-                    cprint(f"\n❌ Unexpected error at seed {eval_seed}: {type(e).__name__}: {e}", "red")
-                    import traceback
-                    traceback.print_exc()
-                    cprint("This is an unexpected error. Please report this issue.", "red")
-                    raise  # 重新抛出，让调用者处理
+                    cprint(f"Seed {eval_seed} failed: {e}", "red")
+                    success_list.append(False)
+                    episode_details.append({
+                        "seed": eval_seed,
+                        "success": False,
+                        "steps": None,
+                        "error": str(e),
+                    })
 
-            # 统计指标
             if len(success_list) < num_episodes:
-                cprint(f"⚠️ Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")
+                cprint(f"Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")
 
             success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
             avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
 
             sr_str = 'N/A' if success_rate is None else f'{success_rate*100.0:.1f}%'
             avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
-            if len(env_failed_seeds) > 0:
-                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Env failed: {len(env_failed_seeds)} seeds, Success rate: {sr_str}, Avg steps (success only): {avg_steps_str}", "yellow")
-            else:
-                cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps (success only): {avg_steps_str}", "yellow")
+            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps (success only): {avg_steps_str}", "yellow")
             print("=" * 90)
 
         finally:

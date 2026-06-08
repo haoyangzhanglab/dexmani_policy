@@ -16,7 +16,6 @@ class MoEObsEncoder(nn.Module):
         state_dim: int,
         num_points: int,
         n_obs_steps: int,
-        condition_type: str,
         state_out_dim: int = 64,
         num_experts: int = 16,
         top_k: int = 2,
@@ -25,6 +24,14 @@ class MoEObsEncoder(nn.Module):
         moe_num_layers: int = 2,
         lambda_load: float = 0.1,
         beta_entropy: float = 0.01,
+        use_boost: bool = False,
+        boost_start_epoch: int = 0,
+        boost_interval: int = 100,
+        boost_experts_per_step: int = 4,
+        boost_topk_per_step: int = 1,
+        use_enhanced_gate: bool = False,
+        gate_hidden_dim: int = None,
+        gate_dropout: float = 0.0,
     ):
         super().__init__()
         self.pc_encoder = build_pc_global_encoder(
@@ -32,20 +39,32 @@ class MoEObsEncoder(nn.Module):
         )
         self.state_mlp = StateMLP(state_dim, state_out_dim, hidden_channels=[64])
         in_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+        # Align with official MoE-DP: Linear projection before MoE so the
+        # encoder output can be mapped to a fixed embedding dimension
+        # (analogous to cond_obs_emb in the official code).
+        proj_dim = moe_out_dim if moe_out_dim is not None else in_dim
+        self.obs_proj = nn.Linear(in_dim, proj_dim)
         self.moe = MoE(
-            dim=in_dim,
+            dim=proj_dim,
             num_experts=num_experts,
             top_k=top_k,
             hidden_dim=moe_hidden_dim,
-            out_dim=moe_out_dim if moe_out_dim is not None else in_dim,
+            out_dim=moe_out_dim if moe_out_dim is not None else proj_dim,
             num_layers=moe_num_layers,
             lambda_load=lambda_load,
             beta_entropy=beta_entropy,
+            use_boost=use_boost,
+            boost_start_epoch=boost_start_epoch,
+            boost_interval=boost_interval,
+            boost_experts_per_step=boost_experts_per_step,
+            boost_topk_per_step=boost_topk_per_step,
+            use_enhanced_gate=use_enhanced_gate,
+            gate_hidden_dim=gate_hidden_dim,
+            gate_dropout=gate_dropout,
         )
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps
-        self.condition_type = condition_type
         self.out_dim = self.moe.out_dim
 
     def encode_feat(self, obs: dict) -> torch.Tensor:
@@ -59,13 +78,12 @@ class MoEObsEncoder(nn.Module):
 
     def forward(self, obs: dict, return_aux=True, override_idx=None):
         z = self.encode_feat(obs)
+        z = self.obs_proj(z)
         if override_idx is not None:
             override_idx = override_idx.repeat_interleave(self.n_obs_steps)
         feat, aux = self.moe(z, return_aux=return_aux, override_idx=override_idx)
         B = feat.shape[0] // self.n_obs_steps
-        if self.condition_type in ('film', 'mlp_film'):
-            return feat.reshape(B, -1), aux
-        return feat.reshape(B, self.n_obs_steps, -1), aux
+        return feat.reshape(B, -1), aux
 
 
 class MoEAgent(UNetDiffusionAgent):
@@ -80,7 +98,6 @@ class MoEAgent(UNetDiffusionAgent):
         pc_out_dim: int,
         state_dim: int,
         num_points: int,
-        condition_type: str = 'film',
         state_out_dim: int = 64,
         num_experts: int = 16,
         top_k: int = 2,
@@ -89,23 +106,59 @@ class MoEAgent(UNetDiffusionAgent):
         moe_num_layers: int = 2,
         lambda_load: float = 0.1,
         beta_entropy: float = 0.01,
+        use_boost: bool = False,
+        boost_start_epoch: int = 0,
+        boost_interval: int = 100,
+        boost_experts_per_step: int = 4,
+        boost_topk_per_step: int = 1,
+        use_enhanced_gate: bool = False,
+        gate_hidden_dim: int = None,
+        gate_dropout: float = 0.0,
         **kwargs,
     ):
         obs_encoder = MoEObsEncoder(
             encoder_type, pc_dim, pc_out_dim, state_dim, num_points,
-            n_obs_steps, condition_type, state_out_dim,
+            n_obs_steps, state_out_dim,
             num_experts=num_experts, top_k=top_k, moe_hidden_dim=moe_hidden_dim,
             moe_out_dim=moe_out_dim, moe_num_layers=moe_num_layers,
             lambda_load=lambda_load, beta_entropy=beta_entropy,
+            use_boost=use_boost,
+            boost_start_epoch=boost_start_epoch,
+            boost_interval=boost_interval,
+            boost_experts_per_step=boost_experts_per_step,
+            boost_topk_per_step=boost_topk_per_step,
+            use_enhanced_gate=use_enhanced_gate,
+            gate_hidden_dim=gate_hidden_dim,
+            gate_dropout=gate_dropout,
         )
         super().__init__(
-            obs_encoder, condition_type, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
+            obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
         )
+
+    def set_epoch(self, epoch: int):
+        """Trainer hook – triggers boost expert/top_k schedule at epoch start."""
+        if hasattr(self.obs_encoder, 'moe'):
+            self.obs_encoder.moe.update_expert_num(epoch)
 
     def _build_cond(self, obs_dict, override_idx=None):
         obs = self.preprocess(obs_dict)
         cond, aux = self.obs_encoder(obs, override_idx=override_idx)
         return cond, aux
+
+    def compute_loss(self, batch, **kwargs):
+        cond, aux = self._build_cond(batch['obs'])
+        nactions = self.normalizer['action'].normalize(batch['action'])
+        action_loss, loss_dict = self.action_decoder.compute_loss(cond, nactions, **kwargs)
+        total_loss = action_loss + aux['loss']
+        loss_dict['loss'] = total_loss
+        loss_dict['loss_action'] = action_loss
+        for k, v in aux.items():
+            if k == 'loss':
+                continue
+            if torch.is_tensor(v) and v.numel() > 1:
+                continue  # non-scalar aux (e.g. router_probs, dispatch, f_i, p_i) — skip logging
+            loss_dict[f'aux_{k}'] = v
+        return total_loss, loss_dict
 
     @torch.no_grad()
     def predict_action(self, obs_dict, denoise_timesteps=None, override_idx=None):
@@ -120,7 +173,7 @@ def example():
     agent = MoEAgent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
         encoder_type='idp3', pc_dim=3, pc_out_dim=64, state_dim=A,
-        num_points=N, condition_type='film',
+        num_points=N,
         num_experts=4, top_k=2, moe_hidden_dim=64, moe_num_layers=1,
         down_dims=[64, 128], diffusion_step_embed_dim=64,
         num_training_steps=10, num_inference_steps=3,
@@ -171,6 +224,58 @@ def example():
     }, override_idx=override)
     print(f'override pred:   {result_ov["pred_action"].shape}')
     print(f'override ctrl:   {result_ov["control_action"].shape}')
+
+    # test boost mechanism
+    print('\n--- Boost test ---')
+    agent_boost = MoEAgent(
+        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
+        encoder_type='idp3', pc_dim=3, pc_out_dim=64, state_dim=A,
+        num_points=N,
+        num_experts=8, top_k=2, moe_hidden_dim=64, moe_num_layers=1,
+        use_boost=True, boost_start_epoch=0, boost_interval=50,
+        boost_experts_per_step=4, boost_topk_per_step=1,
+        down_dims=[64, 128], diffusion_step_embed_dim=64,
+        num_training_steps=10, num_inference_steps=3,
+    ).to(device)
+
+    moe = agent_boost.obs_encoder.moe
+    assert moe.use_boost
+    print(f'base experts={moe.num_experts} top_k={moe.top_k}')
+
+    agent_boost.set_epoch(0)
+    print(f'epoch 0: active_experts={moe.current_num_experts} active_top_k={moe.current_top_k}')
+    assert moe.current_num_experts == 4 and moe.current_top_k == 1, \
+        f"Expected 4 experts, top_k=1 at epoch 0, got {moe.current_num_experts}, {moe.current_top_k}"
+
+    agent_boost.set_epoch(50)
+    print(f'epoch 50: active_experts={moe.current_num_experts} active_top_k={moe.current_top_k}')
+    assert moe.current_num_experts == 8 and moe.current_top_k == 2, \
+        f"Expected 8 experts, top_k=2 at epoch 50, got {moe.current_num_experts}, {moe.current_top_k}"
+
+    agent_boost.set_epoch(200)
+    print(f'epoch 200: active_experts={moe.current_num_experts} active_top_k={moe.current_top_k}')
+    assert moe.current_num_experts == 8 and moe.current_top_k == 2, \
+        "Should cap at base values"
+
+    # test enhanced gate
+    print('\n--- Enhanced gate test ---')
+    agent_gate = MoEAgent(
+        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
+        encoder_type='idp3', pc_dim=3, pc_out_dim=64, state_dim=A,
+        num_points=N,
+        num_experts=4, top_k=2, moe_hidden_dim=64, moe_num_layers=1,
+        use_enhanced_gate=True, gate_dropout=0.1,
+        down_dims=[64, 128], diffusion_step_embed_dim=64,
+        num_training_steps=10, num_inference_steps=3,
+    ).to(device)
+    gate_router = agent_gate.obs_encoder.moe.router
+    assert isinstance(gate_router, nn.Sequential), \
+        f"Enhanced gate should be nn.Sequential, got {type(gate_router)}"
+    print(f'gate type: {type(gate_router).__name__} (len={len(gate_router)})')
+
+    # forward through enhanced gate
+    feat, aux_gate = agent_gate.obs_encoder(obs)
+    print(f'enhanced gate cond: {feat.shape}, aux loss: {aux_gate["loss"].item():.4f}')
     print('=== PASSED ===')
 
 

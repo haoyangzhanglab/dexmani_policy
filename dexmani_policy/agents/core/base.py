@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.agents.common.param_counter import print_param_count
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
@@ -31,7 +30,6 @@ class BaseAgent(nn.Module):
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = LinearNormalizer()
         self._dropout_warned_keys = set()
-        print_param_count(self)
 
     def load_normalizer_from_dataset(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
@@ -67,25 +65,12 @@ class BaseAgent(nn.Module):
         return cond, aux
 
     def compute_loss(self, batch, **kwargs):
-        cond, aux = self._build_cond(batch['obs'])
-
+        cond, _ = self._build_cond(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
+        return self.compute_loss_from_cond(cond, nactions, **kwargs)
 
-        return self.compute_loss_from_cond(cond, nactions, aux=aux, **kwargs)
-
-    def compute_loss_from_cond(self, cond, nactions, aux=None, **kwargs):
-        action_loss, loss_dict = self.action_decoder.compute_loss(cond, nactions, **kwargs)
-
-        if aux and 'loss' in aux:
-            total_loss = action_loss + aux['loss']
-            loss_dict['loss'] = total_loss
-            loss_dict['loss_action'] = action_loss
-            for k, v in aux.items():
-                if k != 'loss':
-                    loss_dict[f'aux_{k}'] = v
-            return total_loss, loss_dict
-
-        return action_loss, loss_dict
+    def compute_loss_from_cond(self, cond, nactions, **kwargs):
+        return self.action_decoder.compute_loss(cond, nactions, **kwargs)
 
     @torch.no_grad()
     def predict_action(self, obs_dict: Dict, denoise_timesteps=None) -> Dict:
@@ -125,6 +110,30 @@ class BaseAgent(nn.Module):
             g['lr'] = obs_lr
         return action_groups + obs_groups
 
+    def _check_params_in_optimizer(self, optimizer: torch.optim.Optimizer):
+        """Verify all trainable parameters are covered by the optimizer."""
+        model_param_ids = {id(p) for p in self.parameters() if p.requires_grad}
+        optim_param_ids = set()
+        for group in optimizer.param_groups:
+            for p in group['params']:
+                optim_param_ids.add(id(p))
+
+        missing_ids = model_param_ids - optim_param_ids
+        if missing_ids:
+            import warnings
+            missing_params = [p for p in self.parameters() if id(p) in missing_ids]
+            param_info = []
+            for p in missing_params:
+                name = next((n for n, pp in self.named_parameters() if pp is p), '?')
+                param_info.append(f"  {name}: shape={tuple(p.shape)}, device={p.device}")
+            warnings.warn(
+                f"The following {len(missing_ids)} trainable parameter(s) are NOT "
+                f"tracked by the optimizer:\n" + "\n".join(param_info) +
+                f"\nThis usually means get_optim_param_groups() is missing a module. "
+                f"These parameters will not be updated during training.",
+                UserWarning,
+            )
+
     def configure_optimizer(
         self, lr, weight_decay,
         obs_lr=None, obs_weight_decay=None,
@@ -133,16 +142,18 @@ class BaseAgent(nn.Module):
         obs_lr = obs_lr if obs_lr is not None else lr
         obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
         groups = self.get_optim_param_groups(lr, obs_lr, weight_decay, obs_wd)
-        return torch.optim.AdamW(
-            [g for g in groups if g['params']], lr=lr, betas=betas
+        optimizer = torch.optim.AdamW(
+            [g for g in groups if g['params']], lr=lr, betas=betas,
+            fused=torch.cuda.is_available(),
         )
+        self._check_params_in_optimizer(optimizer)
+        return optimizer
 
 
 class UNetDiffusionAgent(BaseAgent):
     def __init__(
         self,
         obs_encoder: nn.Module,
-        condition_type: str,
         horizon: int,
         n_obs_steps: int,
         n_action_steps: int,
@@ -157,32 +168,18 @@ class UNetDiffusionAgent(BaseAgent):
         modality_dropout_probs: dict = None,
         cond_predict_scale: bool = True,
     ):
-        if condition_type not in ('film', 'mlp_film', 'cross_attention_film'):
-            raise ValueError(
-                f"Unsupported condition_type: {condition_type}. "
-                f"Supported: film, mlp_film, cross_attention_film"
-            )
-        if condition_type in ('film', 'mlp_film'):
-            context_dim = obs_encoder.out_dim * n_obs_steps
-        else:
-            context_dim = obs_encoder.out_dim
         backbone = ConditionalUnet1D(
             input_dim=action_dim,
-            context_dim=context_dim,
+            context_dim=obs_encoder.out_dim * n_obs_steps,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=list(down_dims),
             kernel_size=kernel_size,
             n_groups=n_groups,
-            condition_type=condition_type,
             cond_predict_scale=cond_predict_scale,
-            use_down_condition=True,
-            use_mid_condition=True,
-            use_up_condition=True,
         )
         action_decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type)
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
                          modality_dropout_probs=modality_dropout_probs)
-        self.condition_type = condition_type
 
 
 class DiTXFlowMatchAgent(BaseAgent):
@@ -212,6 +209,7 @@ class DiTXFlowMatchAgent(BaseAgent):
         dt_sample_mode_for_consistency: str = 'uniform',
         target_t_sample_mode: str = 'relative',
         modality_dropout_probs: dict = None,
+        use_compile: bool = False,
     ):
         backbone = DiTXFlowMatch(
             horizon=horizon,
@@ -241,5 +239,7 @@ class DiTXFlowMatchAgent(BaseAgent):
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
                          modality_dropout_probs=modality_dropout_probs)
+        if use_compile:
+            self.action_decoder.model = torch.compile(self.action_decoder.model)
 
 

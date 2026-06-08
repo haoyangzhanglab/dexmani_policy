@@ -17,34 +17,34 @@ from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
 )
 
 
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
+
 IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
     "dino": {
-        "resize_shortest_edge": 256,
-        "center_crop_size": 224,
-        "image_mean": (0.485, 0.456, 0.406),
-        "image_std": (0.229, 0.224, 0.225),
-        "interpolation": "bicubic",
+        "image_size": (224, 224),
+        "image_mean": _IMAGENET_MEAN,
+        "image_std": _IMAGENET_STD,
+        "interpolation": "bilinear",
     },
     "resnet": {
-        "resize_shortest_edge": 256,
-        "center_crop_size": 224,
-        "image_mean": (0.485, 0.456, 0.406),
-        "image_std": (0.229, 0.224, 0.225),
+        "image_size": (224, 224),
+        "image_mean": _IMAGENET_MEAN,
+        "image_std": _IMAGENET_STD,
         "interpolation": "bilinear",
     },
     "clip": {
-        "resize_shortest_edge": 224,
-        "center_crop_size": 224,
+        "image_size": (224, 224),
         "image_mean": (0.48145466, 0.45782750, 0.40821073),
         "image_std": (0.26862954, 0.26130258, 0.27577711),
-        "interpolation": "bicubic",
+        "interpolation": "bilinear",
     },
     "siglip": {
         "image_size": (224, 224),
         "center_crop_size": None,
         "image_mean": (0.5, 0.5, 0.5),
         "image_std": (0.5, 0.5, 0.5),
-        "interpolation": "bicubic",
+        "interpolation": "bilinear",
     },
 }
 
@@ -91,42 +91,52 @@ class ImageProcessor:
             raise ValueError("depth_batch should have shape [N, 1, H, W].")
 
         orig_h, orig_w = image_batch.shape[-2:]
-        resized_h, resized_w = orig_h, orig_w
         scale_x, scale_y = 1.0, 1.0
+        crop_top, crop_left = 0, 0
 
-        if self.resize_shortest_edge is not None:
+        # Direct resize to target (community standard: ACT, RoboTwin, DexUMI, original DP).
+        if self.image_size is not None:
+            target_h, target_w = self.image_size
+            # If image is already at the target size, skip the resize entirely.
+            if (orig_h, orig_w) != (target_h, target_w):
+                scale_x = float(target_w) / float(orig_w)
+                scale_y = float(target_h) / float(orig_h)
+                image_batch = self.resize_tensor(image_batch, size=(target_h, target_w), mode=self.interpolation)
+                if depth_batch is not None:
+                    depth_batch = self.resize_tensor(depth_batch, size=(target_h, target_w), mode="nearest")
+            processed_h, processed_w = target_h, target_w
+
+        # resize_shortest_edge + center_crop (legacy path; kept for compatibility).
+        elif self.resize_shortest_edge is not None:
             scale = float(self.resize_shortest_edge) / float(min(orig_h, orig_w))
             resized_h = int(round(orig_h * scale))
             resized_w = int(round(orig_w * scale))
-        elif self.image_size is not None:
-            resized_h, resized_w = self.image_size
 
-        if resized_h != orig_h or resized_w != orig_w:
-            scale_x = float(resized_w) / float(orig_w)
-            scale_y = float(resized_h) / float(orig_h)
-            image_batch = self.resize_tensor(image_batch, size=(resized_h, resized_w), mode=self.interpolation)
-            if depth_batch is not None:
-                depth_batch = self.resize_tensor(depth_batch, size=(resized_h, resized_w), mode="nearest")
+            if resized_h != orig_h or resized_w != orig_w:
+                scale_x = float(resized_w) / float(orig_w)
+                scale_y = float(resized_h) / float(orig_h)
+                image_batch = self.resize_tensor(image_batch, size=(resized_h, resized_w), mode=self.interpolation)
+                if depth_batch is not None:
+                    depth_batch = self.resize_tensor(depth_batch, size=(resized_h, resized_w), mode="nearest")
 
-        crop_top, crop_left = 0, 0
-        processed_h, processed_w = resized_h, resized_w
+            processed_h, processed_w = resized_h, resized_w
 
-        if self.center_crop_size is not None:
-            crop_h, crop_w = self.center_crop_size
-            if crop_h > resized_h or crop_w > resized_w:
-                raise ValueError(f"Crop size {(crop_h, crop_w)} is larger than image size {(resized_h, resized_w)}.")
-
-            crop_top = int(round((resized_h - crop_h) / 2.0))
-            crop_left = int(round((resized_w - crop_w) / 2.0))
-            processed_h, processed_w = crop_h, crop_w
-
-            image_batch = image_batch[..., crop_top:crop_top + crop_h, crop_left:crop_left + crop_w].contiguous()
-            if depth_batch is not None:
-                depth_batch = depth_batch[..., crop_top:crop_top + crop_h, crop_left:crop_left + crop_w].contiguous()
+            if self.center_crop_size is not None:
+                crop_h, crop_w = self.center_crop_size
+                if crop_h > resized_h or crop_w > resized_w:
+                    raise ValueError(f"Crop size {(crop_h, crop_w)} is larger than image size {(resized_h, resized_w)}.")
+                crop_top = int(round((resized_h - crop_h) / 2.0))
+                crop_left = int(round((resized_w - crop_w) / 2.0))
+                processed_h, processed_w = crop_h, crop_w
+                image_batch = image_batch[..., crop_top:crop_top + crop_h, crop_left:crop_left + crop_w].contiguous()
+                if depth_batch is not None:
+                    depth_batch = depth_batch[..., crop_top:crop_top + crop_h, crop_left:crop_left + crop_w].contiguous()
+        else:
+            processed_h, processed_w = orig_h, orig_w
 
         spatial = make_spatial_transform_meta(
             orig_hw=(orig_h, orig_w),
-            resized_hw=(resized_h, resized_w),
+            resized_hw=(processed_h, processed_w) if (scale_x, scale_y) != (1.0, 1.0) else (orig_h, orig_w),
             processed_hw=(processed_h, processed_w),
             resize_scale_xy=(scale_x, scale_y),
             crop_top_left=(crop_top, crop_left),
@@ -143,7 +153,7 @@ class ImageProcessor:
             raise ValueError(f"Unsupported interpolation mode: {mode}")
         if mode == "nearest":
             return F.interpolate(x, size=size, mode=mode)
-        return F.interpolate(x, size=size, mode=mode, align_corners=False, antialias=True)
+        return F.interpolate(x, size=size, mode=mode, align_corners=False)
 
     def normalize(self, image_batch: torch.Tensor) -> torch.Tensor:
         mean = self.image_mean.to(device=image_batch.device, dtype=image_batch.dtype).view(1, 3, 1, 1)

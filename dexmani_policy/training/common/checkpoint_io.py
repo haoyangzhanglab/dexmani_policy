@@ -1,12 +1,24 @@
-import json
-import math
+import re
 import time
+import copy
 import torch
+import threading
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional
 
 MonitorMode = Literal["max", "min"]
+
+
+def _copy_to_cpu(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu()
+    elif isinstance(x, dict):
+        return {k: _copy_to_cpu(v) for k, v in x.items()}
+    elif isinstance(x, list):
+        return [_copy_to_cpu(v) for v in x]
+    else:
+        return copy.deepcopy(x)
 
 
 @dataclass
@@ -16,7 +28,6 @@ class TrainCheckpoint:
 
     model_state: Dict[str, Any]
     ema_model_state: Optional[Dict[str, Any]]
-    ema_updater_state: Optional[Dict[str, Any]]
 
     optimizer_state: Dict[str, Any]
     scheduler_state: Dict[str, Any]
@@ -30,10 +41,21 @@ class CheckpointStore:
     def __init__(self, checkpoint_dir: Path):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self._save_thread: Optional[threading.Thread] = None
 
-    def save(self, filename: str, checkpoint: TrainCheckpoint) -> Path:
+    def _save_payload(self, payload: Dict[str, Any], tmp_path: Path, final_path: Path):
+        torch.save(payload, tmp_path)
+        tmp_path.replace(final_path)
+        torch.cuda.empty_cache()
+
+    def save(self, filename: str, checkpoint: TrainCheckpoint,
+             use_thread: bool = True) -> Path:
         path = self.checkpoint_dir / filename
         tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+        # Wait for previous async save to finish before starting a new one
+        if self._save_thread is not None and self._save_thread.is_alive():
+            self._save_thread.join()
 
         payload = {
             "state": {
@@ -43,18 +65,25 @@ class CheckpointStore:
                 "train_params": checkpoint.train_params,
             },
             "weights": {
-                "model": checkpoint.model_state,
-                "ema_model": checkpoint.ema_model_state,
-                "ema_updater": checkpoint.ema_updater_state,
-                "optimizer": checkpoint.optimizer_state,
-                "scheduler": checkpoint.scheduler_state,
+                "model": _copy_to_cpu(checkpoint.model_state) if use_thread else checkpoint.model_state,
+                "ema_model": _copy_to_cpu(checkpoint.ema_model_state) if use_thread and checkpoint.ema_model_state is not None else checkpoint.ema_model_state,
+                "optimizer": _copy_to_cpu(checkpoint.optimizer_state) if use_thread else checkpoint.optimizer_state,
+                "scheduler": _copy_to_cpu(checkpoint.scheduler_state) if use_thread else checkpoint.scheduler_state,
             },
             "_format": "simple.v1",
             "_saved_at": time.time(),
         }
 
-        torch.save(payload, tmp_path)
-        tmp_path.replace(path)
+        if use_thread:
+            self._save_thread = threading.Thread(
+                target=self._save_payload,
+                args=(payload, tmp_path, path),
+                daemon=True,
+            )
+            self._save_thread.start()
+        else:
+            self._save_payload(payload, tmp_path, path)
+
         return path
 
     def load(self, path: Path) -> TrainCheckpoint:
@@ -77,7 +106,6 @@ class CheckpointStore:
             train_params=state.get("train_params"),
             model_state=weights["model"],
             ema_model_state=weights.get("ema_model"),
-            ema_updater_state=weights.get("ema_updater"),
             optimizer_state=weights["optimizer"],
             scheduler_state=weights["scheduler"],
         )
@@ -89,13 +117,11 @@ class CheckpointStore:
             if best_fn is not None:
                 path = best_fn()
             else:
-                manifest_path = self.checkpoint_dir / "topk_manifest.json"
-                if not manifest_path.exists():
-                    raise FileNotFoundError(f"No topk tracker file found: {manifest_path}")
-                items = json.loads(manifest_path.read_text("utf-8")).get("items", [])
-                if not items:
-                    raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
-                path = self.checkpoint_dir / items[0]["path"]
+                ckpts = list(self.checkpoint_dir.glob("epoch=*.pt"))
+                if not ckpts:
+                    raise FileNotFoundError(f"No checkpoint found in {self.checkpoint_dir}")
+                ckpts.sort(key=lambda p: self._parse_ckpt_score(p), reverse=True)
+                path = ckpts[0]
             if path is None:
                 raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}.")
         else:
@@ -105,6 +131,11 @@ class CheckpointStore:
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
         return path
+
+    @staticmethod
+    def _parse_ckpt_score(path: Path) -> float:
+        m = re.search(r'-score=([\d.eE+-]+)\.pt$', path.name)
+        return float(m.group(1)) if m else float("-inf")
 
 
 
@@ -118,85 +149,35 @@ class TopKCheckpointTracker:
     ):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
         self.monitor_key = monitor_key
         self.mode = mode
         self.k = int(k)
 
-        self.manifest_path = self.checkpoint_dir / "topk_manifest.json"
-        self.manifest = self.load_manifest()
+    def _list_ckpts(self):
+        return list(self.checkpoint_dir.glob("epoch=*.pt"))
 
-    def load_manifest(self) -> Dict[str, Any]:
-        if not self.manifest_path.exists():
-            return {"items": []}
-        return json.loads(self.manifest_path.read_text("utf-8"))
-
-    def save_manifest(self) -> None:
-        tmp_path = self.manifest_path.with_suffix(".tmp")
-        tmp_path.write_text(
-            json.dumps(self.manifest, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp_path.replace(self.manifest_path)
-
-    def fallback_score(self) -> float:
+    def _parse_score(self, path: Path) -> float:
+        m = re.search(r'-score=([\d.eE+-]+)\.pt$', path.name)
+        if m:
+            return float(m.group(1))
         return float("-inf" if self.mode == "max" else "inf")
 
-    def normalize_score(self, value: Any) -> float:
-        if value is None:
-            return self.fallback_score()
-
-        try:
-            score = float(value)
-        except (TypeError, ValueError):
-            return self.fallback_score()
-
-        return score if math.isfinite(score) else self.fallback_score()
-
-    def sort_key(self, item: Dict[str, Any]):
-        score = item["score"]
-        epoch = item["epoch"]
-
-        if self.mode == "max":
-            return (-score, -epoch)
-        return (score, -epoch)
-
-    def remove_extra_checkpoints(self, items) -> None:
-        for item in items:
-            path = self.checkpoint_dir / item["path"]
-            if path.exists():
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+    def _sorted_ckpts(self):
+        reverse = (self.mode == "max")
+        return sorted(self._list_ckpts(), key=self._parse_score, reverse=reverse)
 
     def update(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
         if self.k <= 0:
             return self.best_path()
 
-        items = list(self.manifest.get("items", []))
-        items.append(
-            {
-                "path": Path(checkpoint_path).name,
-                "score": self.normalize_score(checkpoint.monitor.get(self.monitor_key)),
-                "step": int(checkpoint.global_step),
-                "epoch": int(checkpoint.epoch),
-            }
-        )
-
-        items.sort(key=self.sort_key)
-
-        if len(items) > self.k:
-            self.remove_extra_checkpoints(items[self.k :])
-            items = items[: self.k]
-
-        self.manifest["items"] = items
-        self.save_manifest()
+        ckpts = self._sorted_ckpts()
+        for p in ckpts[self.k:]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
         return self.best_path()
 
-
     def best_path(self) -> Optional[Path]:
-        items = self.manifest.get("items", [])
-        if not items:
-            return None
-        return self.checkpoint_dir / items[0]["path"]
+        ckpts = self._sorted_ckpts()
+        return ckpts[0] if ckpts else None

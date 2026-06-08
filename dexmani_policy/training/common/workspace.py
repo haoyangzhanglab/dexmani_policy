@@ -1,5 +1,4 @@
 import os
-import signal
 import atexit
 from pathlib import Path
 from omegaconf import OmegaConf
@@ -7,9 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from dexmani_policy.training.common.logging import (
-    JsonlLogger, 
-    WandbLogger, 
-    MultiLogger
+    JsonlLogger,
+    WandbLogger,
 )
 from dexmani_policy.training.common.checkpoint_io import (
     TrainCheckpoint,
@@ -37,9 +35,6 @@ class WandbConfig:
 
 
 class TrainWorkspace:
-    _instances: set = set()
-    _hooks_installed: bool = False
-
     def __init__(
         self,
         output_dir: str,
@@ -59,8 +54,8 @@ class TrainWorkspace:
             k=checkpoint_cfg.topk,
         )
 
-        json_logger = JsonlLogger(output_dir=self.output_dir)
-        wandb_logger = WandbLogger(
+        self.json_logger = JsonlLogger(output_dir=self.output_dir)
+        self.wandb_logger = WandbLogger(
             output_dir=self.output_dir,
             project=wandb_cfg.project,
             name=wandb_cfg.name,
@@ -70,15 +65,15 @@ class TrainWorkspace:
             mode=wandb_cfg.mode,
             video_fps=wandb_cfg.video_fps
         )
-        self.logger = MultiLogger([json_logger, wandb_logger])
 
         self._closed = False
-        self.__class__._instances.add(self)
-        self.install_shutdown_hooks()
+        atexit.register(self.close)
 
 
     def save_hydra_config(self, hydra_config):
         OmegaConf.save(hydra_config, self.output_dir / "config.yaml", resolve=True)
+        cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
+        self.wandb_logger.log_config(cfg_dict, self.output_dir)
 
 
     def resolve_checkpoint_path(self, tag_or_path: str) -> Path:
@@ -86,7 +81,8 @@ class TrainWorkspace:
 
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
-        self.logger.log(data, step=step)
+        self.json_logger.log(data, step=step)
+        self.wandb_logger.log(data, step=step)
 
 
     def save_checkpoint(self, tag: str, checkpoint: TrainCheckpoint) -> Path:
@@ -135,7 +131,6 @@ class TrainWorkspace:
         self,
         model,
         ema_model,
-        ema_updater,
         optimizer,
         scheduler,
         tag_or_path: str,
@@ -157,9 +152,6 @@ class TrainWorkspace:
         optimizer.load_state_dict(checkpoint.optimizer_state)
         scheduler.load_state_dict(checkpoint.scheduler_state)
 
-        if ema_updater is not None and checkpoint.ema_updater_state is not None:
-            ema_updater.load_state_dict(checkpoint.ema_updater_state)
-
         next_step = checkpoint.global_step
         next_epoch = checkpoint.epoch + 1
         return next_step, next_epoch
@@ -169,25 +161,6 @@ class TrainWorkspace:
         if self._closed:
             return
         self._closed = True
-        self._instances.discard(self)
-        self.logger.close()
-
-    @classmethod
-    def _close_all(cls):
-        for inst in list(cls._instances):
-            inst.close()
-
-    @classmethod
-    def _handle_signal(cls, signum, frame):
-        cls._close_all()
-        raise KeyboardInterrupt
-
-    def install_shutdown_hooks(self):
-        # atexit: per-instance 注册无副作用，close() 已幂等
-        atexit.register(self.close)
-        # signal: 使用类方法统一处理，仅安装一次
-        if not self.__class__._hooks_installed:
-            self.__class__._hooks_installed = True
-            signal.signal(signal.SIGINT, self.__class__._handle_signal)
-            signal.signal(signal.SIGTERM, self.__class__._handle_signal)
+        self.json_logger.close()
+        self.wandb_logger.close()
 

@@ -2,7 +2,14 @@ import torch
 import torch.nn as nn
 import random
 import numpy as np
-from typing import Dict, Callable, List, Optional
+from typing import Dict, Callable, List, Optional, Union
+
+
+def ensure_tensor(x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+    """Convert numpy array to tensor; pass through torch.Tensor unchanged."""
+    if isinstance(x, torch.Tensor):
+        return x
+    return torch.from_numpy(x)
 
 
 def dict_apply(

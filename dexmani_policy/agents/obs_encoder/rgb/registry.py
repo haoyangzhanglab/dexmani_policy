@@ -1,8 +1,9 @@
 import warnings
 import torchvision
 import torch.nn as nn
-from typing import Dict, Literal, Optional, Tuple, Type
+from typing import Dict, Literal, Optional, Tuple
 from .common.image_processor import ImageProcessor
+from .common.utils import get_interpolation, to_hw
 
 BackboneName = Literal["resnet", "clip", "dino", "siglip"]
 
@@ -32,22 +33,6 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
 }
 
 
-def get_backbone_cls(name: BackboneName) -> Type[nn.Module]:
-    if name == "resnet":
-        from .resnet import ResNet
-        return ResNet
-    if name == "clip":
-        from .clip import CLIP
-        return CLIP
-    if name == "dino":
-        from .dino import DINO
-        return DINO
-    if name == "siglip":
-        from .siglip import SigLIP
-        return SigLIP
-    raise ValueError(f"Unsupported backbone name: {name}")
-
-
 def resolve_resnet_weights(cfg: Dict) -> Dict:
     model_name = str(cfg["model_name"])
     weights_value = cfg.pop("weights")
@@ -63,7 +48,7 @@ def build_backbone(
     name: BackboneName,
     config: Optional[Dict] = None,
 ) -> Tuple[nn.Module, ImageProcessor]:
-    
+
     if name not in RGB_BACKBONE_CONFIGS:
         raise ValueError(f"Unsupported backbone name: {name}")
 
@@ -72,11 +57,27 @@ def build_backbone(
     if config:
         cfg.update(config)
 
-    backbone_cls = get_backbone_cls(name)
-    if name == "resnet":
-        cfg = resolve_resnet_weights(cfg)
+    # Pop ImageProcessor-level overrides before passing to backbone constructor.
+    # The backbone classes (ResNet, DINO, CLIP, SigLIP) don't accept these params.
+    image_size = cfg.pop("image_size", None)
+    center_crop_size = cfg.pop("center_crop_size", None)
+    interpolation = cfg.pop("interpolation", None)
 
-    backbone = backbone_cls(**cfg)
+    if name == "resnet":
+        from .resnet import ResNet
+        cfg = resolve_resnet_weights(cfg)
+        backbone = ResNet(**cfg)
+    elif name == "clip":
+        from .clip import CLIP
+        backbone = CLIP(**cfg)
+    elif name == "dino":
+        from .dino import DINO
+        backbone = DINO(**cfg)
+    elif name == "siglip":
+        from .siglip import SigLIP
+        backbone = SigLIP(**cfg)
+    else:
+        raise ValueError(f"Unsupported backbone name: {name}")
 
     if str(cfg.get("model_name")) != str(base_cfg.get("model_name")):
         warnings.warn(
@@ -86,4 +87,16 @@ def build_backbone(
         )
 
     image_processor = ImageProcessor.from_preset(name)
+
+    # Override preset defaults with user-specified image processing params.
+    # This lets the config align the processor's target size with the dataset's
+    # CPU-side preprocess output (e.g., rgb_random_crop_size), avoiding a
+    # second redundant resize on GPU.
+    if image_size is not None:
+        image_processor.image_size = to_hw(image_size)
+    if center_crop_size is not None:
+        image_processor.center_crop_size = to_hw(center_crop_size)
+    if interpolation is not None:
+        image_processor.interpolation = get_interpolation(interpolation)
+
     return backbone, image_processor

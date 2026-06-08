@@ -4,7 +4,7 @@ import multiprocessing as mp
 import numpy as np
 import torch
 from typing import List, Optional
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_action_normalizer
 
 
 class MultiTaskDataset(torch.utils.data.Dataset):
@@ -19,7 +19,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         deterministic: bool = False,
         task_texts: Optional[List[str]] = None,
         augmentation_cfg=None,
-        action_mode: str = 'absolute_joint',
+        action_key: str = 'action',
     ):
         assert len(datasets) == len(task_names)
         assert sampling_strategy in ['proportional', 'balanced', 'weighted']
@@ -34,7 +34,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
         self.datasets = datasets
         self.task_names = task_names
-        self.action_mode = action_mode
+        self.action_key = action_key
 
         if augmentation_cfg is not None:
             for dataset in self.datasets:
@@ -85,20 +85,14 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
     def compute_shared_normalizer(self):
         all_joint_states = [d.replay_buffer['joint_state'] for d in self.datasets]
-        all_actions = [d.replay_buffer['action'] for d in self.datasets]
+        all_actions = [d.replay_buffer[d.action_key] for d in self.datasets]
         joint_state = np.concatenate(all_joint_states, axis=0)
         action = np.concatenate(all_actions, axis=0)
 
         normalizer = LinearNormalizer()
-        if self.action_mode == 'eef_hand':
-            ee_dim = getattr(self, 'ee_dim', 9)
-            assert action.shape[1] >= ee_dim, \
-                f"eef_hand mode requires action dim >= {ee_dim} (ee_dim), " \
-                f"but combined zarr action has shape {action.shape}. " \
-                f"Check that all sub-datasets were collected with action_space='ee'."
+        if self.action_key == 'action_ee':
             normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode='limits')
-            from dexmani_policy.common.normalizer import build_mixed_action_normalizer
-            normalizer['action'] = build_mixed_action_normalizer(action, ee_dim=ee_dim)
+            normalizer['action'] = build_mixed_action_normalizer(action)
         else:
             normalizer.fit(data={'joint_state': joint_state, 'action': action},
                            last_n_dims=1, mode='limits')
@@ -242,4 +236,5 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             seed=self.seed,
             deterministic=True,
             task_texts=list(val_texts),
+            action_key=self.action_key,
         )

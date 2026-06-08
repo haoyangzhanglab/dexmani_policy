@@ -5,6 +5,7 @@ from dexmani_policy.agents.core.dp import DPObsEncoder
 from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
 from dexmani_policy.agents.action_decoders.backbone.dit import DiT_Diffusion
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+from dexmani_policy.agents.action_decoders.flowmatch import FlowMatch
 
 
 class MultiTaskAgent(BaseAgent):
@@ -32,10 +33,18 @@ class MultiTaskAgent(BaseAgent):
         n_layers: int = 6,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
+        # action decoder type
+        action_decoder_type: str = "diffusion",  # "diffusion" | "flowmatch"
         # action decoder (Diffusion)
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
+        # action decoder (FlowMatch)
+        flow_num_inference_steps: int = 10,
+        flow_t_sample_mode: str = "beta",
+        flow_beta_s: float = 0.999,
+        flow_beta_alpha: float = 1.0,
+        flow_beta_beta: float = 1.5,
         # common
         horizon: int = 16,
         n_obs_steps: int = 2,
@@ -47,13 +56,14 @@ class MultiTaskAgent(BaseAgent):
     ):
         assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip"), \
             f"rgb_backbone_name must be one of resnet/clip/dino/siglip, got {rgb_backbone_name}"
+        assert action_decoder_type in ("diffusion", "flowmatch"), \
+            f"action_decoder_type must be 'diffusion' or 'flowmatch', got {action_decoder_type}"
 
         text_encoder = CLIPTextEncoder(model_name=text_encoder_model)
         obs_encoder = DPObsEncoder(
             rgb_backbone_name=rgb_backbone_name,
             state_dim=state_dim,
             n_obs_steps=n_obs_steps,
-            condition_type="film",
             state_out_dim=state_out_dim,
             rgb_backbone_config=rgb_backbone_config,
         )
@@ -71,12 +81,23 @@ class MultiTaskAgent(BaseAgent):
             mlp_ratio=mlp_ratio,
             qkv_bias=qkv_bias,
         )
-        action_decoder = Diffusion(
-            backbone,
-            num_training_steps=num_training_steps,
-            num_inference_steps=num_inference_steps,
-            prediction_type=prediction_type,
-        )
+
+        if action_decoder_type == "diffusion":
+            action_decoder: nn.Module = Diffusion(
+                backbone,
+                num_training_steps=num_training_steps,
+                num_inference_steps=num_inference_steps,
+                prediction_type=prediction_type,
+            )
+        elif action_decoder_type == "flowmatch":
+            action_decoder = FlowMatch(
+                backbone,
+                num_inference_steps=flow_num_inference_steps,
+                t_sample_mode=flow_t_sample_mode,
+                beta_s=flow_beta_s,
+                beta_alpha=flow_beta_alpha,
+                beta_beta=flow_beta_beta,
+            )
 
         super().__init__(
             obs_encoder, action_decoder, horizon,

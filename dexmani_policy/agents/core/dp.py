@@ -11,7 +11,6 @@ class DPObsEncoder(nn.Module):
         rgb_backbone_name: str,
         state_dim: int,
         n_obs_steps: int,
-        condition_type: str,
         state_out_dim: int = 64,
         rgb_backbone_config: dict = None,
     ):
@@ -19,7 +18,6 @@ class DPObsEncoder(nn.Module):
         self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=rgb_backbone_config)
         self.state_mlp = StateMLP(state_dim, state_out_dim, hidden_channels=[64])
         self.n_obs_steps = n_obs_steps
-        self.condition_type = condition_type
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
@@ -29,11 +27,7 @@ class DPObsEncoder(nn.Module):
             self.state_mlp(obs['joint_state']),
         ], dim=-1)                                      # (B*T, out_dim)
         B = feat.shape[0] // self.n_obs_steps
-        if self.condition_type in ('film', 'mlp_film'):
-            # film/mlp_film: (B*T, out_dim) → (B, out_dim*T)  flattened condition
-            return feat.reshape(B, -1), {}
-        # cross_attention_film: (B*T, out_dim) → (B, T, out_dim)  tokenized condition
-        return feat.reshape(B, self.n_obs_steps, -1), {}
+        return feat.reshape(B, -1), {}
 
 
 class DPAgent(UNetDiffusionAgent):
@@ -45,17 +39,16 @@ class DPAgent(UNetDiffusionAgent):
         action_dim: int,
         rgb_backbone_name: str,
         state_dim: int,
-        condition_type: str = 'film',
         state_out_dim: int = 64,
         rgb_backbone_config: dict = None,
         **kwargs,
     ):
         obs_encoder = DPObsEncoder(
-            rgb_backbone_name, state_dim, n_obs_steps, condition_type,
+            rgb_backbone_name, state_dim, n_obs_steps,
             state_out_dim, rgb_backbone_config=rgb_backbone_config,
         )
         super().__init__(
-            obs_encoder, condition_type, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
+            obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
         )
 
 
@@ -65,7 +58,7 @@ def example():
 
     agent = DPAgent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
-        rgb_backbone_name='resnet', state_dim=A, condition_type='film',
+        rgb_backbone_name='resnet', state_dim=A,
         down_dims=[64, 128], diffusion_step_embed_dim=64,
         num_training_steps=10, num_inference_steps=3,
     ).to(device)

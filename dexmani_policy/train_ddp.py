@@ -13,15 +13,14 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.common.pytorch_util import worker_init_fn
+from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, optimizer_to, fix_state_dict
 from dexmani_policy.common.resolver import register_resolvers
-from dexmani_policy.training.ddp_trainer import DDPTrainer
+from dexmani_policy.training.trainer import Trainer
+from dexmani_policy.training.common.checkpoint_io import CheckpointStore
 from dexmani_policy.train import (
     validate_config,
     build_dataset_and_normalizer,
     build_model_and_ema,
-    build_optimizer_and_scheduler,
 )
 
 register_resolvers()
@@ -69,6 +68,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         num_workers=cfg.dataloader.num_workers,
         pin_memory=cfg.dataloader.pin_memory,
         persistent_workers=cfg.dataloader.persistent_workers,
+        drop_last=cfg.dataloader.get('drop_last', False),
         worker_init_fn=worker_init_fn,
     )
 
@@ -89,18 +89,17 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     # 模型初始化完成后，各 rank 使用不同 seed 以增加数据增强多样性
     set_seed(cfg.training.seed + rank)
 
-    # 构建 optimizer 和 scheduler（复用单卡逻辑）
+    # 构建 optimizer（scheduler 延后到 checkpoint 加载后，以便用 last_epoch 简洁恢复）
     batches_per_epoch = len(train_loader)
-    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
+    optimizer = model.configure_optimizer(**cfg.optimizer)
 
-    # workspace 只在 rank 0 创建完整版本，其他 rank 只需 CheckpointStore 读 checkpoint
-    checkpoint_dir = pathlib.Path(cfg.workspace.output_dir) / "checkpoints"
+    # workspace 只在 rank 0 创建
     if rank == 0:
         workspace = hydra.utils.instantiate(cfg.workspace)
         workspace.save_hydra_config(cfg)
         checkpoint_store = workspace.checkpoint_store
     else:
-        from dexmani_policy.training.common.checkpoint_io import CheckpointStore
+        checkpoint_dir = pathlib.Path(cfg.workspace.output_dir) / "checkpoints"
         workspace = None
         checkpoint_store = CheckpointStore(checkpoint_dir)
 
@@ -109,11 +108,37 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     if rank == 0 and cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
         env_runner = hydra.utils.instantiate(cfg.env_runner)
 
-    ddp_trainer = DDPTrainer(
-        rank=rank,
-        world_size=world_size,
+    # DDP 包装模型
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    ddp_model = DDP(model, device_ids=[actual_gpu_id], output_device=actual_gpu_id,
+                    find_unused_parameters=False)
+
+    # 加载 checkpoint（在构建 scheduler 之前，获取 global_step 用于 last_epoch）
+    try:
+        ckpt_path = checkpoint_store.resolve_path("latest")
+        checkpoint = checkpoint_store.load(ckpt_path)
+        model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
+        if ema_model is not None and checkpoint.ema_model_state is not None:
+            ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
+        optimizer.load_state_dict(checkpoint.optimizer_state)
+        resume_state = (checkpoint.global_step, checkpoint.epoch + 1)
+    except FileNotFoundError:
+        resume_state = (0, 0)
+
+    # 构建 scheduler（last_epoch 从 checkpoint 恢复，无需 load_state_dict）
+    from dexmani_policy.training.common.lr_scheduler import get_scheduler as _get_scheduler
+    total_steps = batches_per_epoch * cfg.training.loop.num_epochs
+    scheduler = _get_scheduler(
+        optimizer=optimizer,
+        name=cfg.training.lr_scheduler,
+        num_warmup_steps=cfg.training.lr_warmup_steps,
+        num_training_steps=total_steps,
+        last_epoch=resume_state[0] - 1,
+    )
+
+    trainer = Trainer(
         device=device,
-        model=model,
+        model=ddp_model,
         ema_model=ema_model,
         ema_updater=ema_updater,
         optimizer=optimizer,
@@ -122,14 +147,30 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         val_loader=val_loader,
         env_runner=env_runner,
         workspace=workspace,
-        checkpoint_store=checkpoint_store,
         train_loop_cfg=cfg.training.loop,
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
-        actual_gpu_id=actual_gpu_id,
+        max_grad_norm=cfg.training.get('max_grad_norm', 1.0),
+        use_bfloat16=cfg.training.get('use_bfloat16', False),
+        is_main_process=(rank == 0),
+        distributed=True,
+        train_sampler=train_sampler,
     )
 
+    optimizer_to(optimizer, device)
+    if trainer.use_ema:
+        ema_model.to(device)
+
+    # 广播 normalizer 保证所有 rank 一致
+    norm_state = model.normalizer.state_dict()
+    for key in sorted(norm_state):
+        if isinstance(norm_state[key], torch.Tensor):
+            dist.broadcast(norm_state[key], src=0)
+    if rank != 0:
+        model.normalizer.load_state_dict(norm_state)
+    dist.barrier()
+
     try:
-        ddp_trainer.train(resume_tag="latest")
+        trainer.train(resume_state=resume_state)
     finally:
         cleanup_ddp()
 

@@ -2,7 +2,7 @@ _target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
 seed: ${seed}
 sampling_strategy: balanced  # 'proportional' | 'balanced' | 'weighted'
 normalizer_mode: shared      # 'shared' | 'per_task'
-action_mode: ${action_mode}
+action_key: ${action_key}
 
 task_names:
   - task_1
@@ -23,7 +23,8 @@ task_texts:
 
 datasets:
   - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
-    zarr_path: robot_data/sim/task_1.zarr
+    action_key: ${action_key}
+    zarr_path: robot_data/task_1.zarr
     seed: ${seed}
     horizon: ${horizon}
     pad_before: ${eval:'${n_obs_steps} - 1'}
@@ -33,7 +34,8 @@ datasets:
     sensor_modalities: ['joint_state', 'rgb']
 
   - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
-    zarr_path: robot_data/sim/task_2.zarr
+    action_key: ${action_key}
+    zarr_path: robot_data/task_2.zarr
     seed: ${seed}
     horizon: ${horizon}
     pad_before: ${eval:'${n_obs_steps} - 1'}
@@ -43,7 +45,8 @@ datasets:
     sensor_modalities: ['joint_state', 'rgb']
 
   - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
-    zarr_path: robot_data/sim/task_3.zarr
+    action_key: ${action_key}
+    zarr_path: robot_data/task_3.zarr
     seed: ${seed}
     horizon: ${horizon}
     pad_before: ${eval:'${n_obs_steps} - 1'}

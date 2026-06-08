@@ -22,6 +22,12 @@ class RGBPCDataset(BaseDataset):
         max_train_episodes=None,
         sensor_modalities=None,
         augmentation_cfg=None,
+        action_key='action',
+        obs_horizon=None,
+        rgb_preprocess_size=None,
+        rgb_random_crop_size=None,
+        rgb_color_aug=None,
+        rgb_keep_uint8=False,
     ):
         super().__init__(
             zarr_path=zarr_path,
@@ -33,6 +39,12 @@ class RGBPCDataset(BaseDataset):
             max_train_episodes=max_train_episodes,
             sensor_modalities=sensor_modalities,
             augmentation_cfg=augmentation_cfg,
+            action_key=action_key,
+            obs_horizon=obs_horizon,
+            rgb_preprocess_size=rgb_preprocess_size,
+            rgb_random_crop_size=rgb_random_crop_size,
+            rgb_color_aug=rgb_color_aug,
+            rgb_keep_uint8=rgb_keep_uint8,
         )
 
     def _build_augmentors(self):
@@ -58,8 +70,8 @@ class RGBPCDataset(BaseDataset):
         if state_cfg is not None:
             self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
-    def get_normalizer(self, mode='limits', **kwargs):
-        normalizer = super().get_normalizer(mode=mode, **kwargs)
+    def get_normalizer(self, mode='limits'):
+        normalizer = super().get_normalizer(mode=mode)
         normalizer['camera_intrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         normalizer['camera_extrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         return normalizer

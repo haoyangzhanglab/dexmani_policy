@@ -1,7 +1,7 @@
 policy_name: dp
 
 task_name: pick_apple_messy
-zarr_path: robot_data/sim/${task_name}.zarr
+zarr_path: robot_data/${task_name}.zarr
 
 seed: 42
 
@@ -9,10 +9,8 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 
-action_mode: absolute_joint  # absolute_joint | eef_hand
-ee_dim: 9
-hand_dim: 12
-action_dim: ${eval:'${ee_dim} + ${hand_dim} if ${eq:${action_mode},eef_hand} else 19'}
+action_key: action  # action | action_ee
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 dataloader:
   batch_size: 256
@@ -20,16 +18,19 @@ dataloader:
   num_workers: 8
   pin_memory: true
   persistent_workers: true
+  drop_last: false  # DDP 建议开启，防最后 batch 大小不均导致 all_reduce 失败
 
 val_dataloader:
-  batch_size: 256
+  batch_size: 128
   shuffle: false
   num_workers: 4
   pin_memory: true
   persistent_workers: false
+  drop_last: false
 
 dataset:
   _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
+  action_key: ${action_key}
   zarr_path: ${zarr_path}
   seed: ${training.seed}
   horizon: ${horizon}
@@ -38,18 +39,26 @@ dataset:
   val_ratio: 0.05
   max_train_episodes: null
   sensor_modalities: ["joint_state", "rgb"]
+  obs_horizon: ${n_obs_steps}
+  rgb_preprocess_size: [240, 240]
+  rgb_random_crop_size: [224, 224]
 
-  # ---- data augmentation (add under dataset, uncomment to enable) ----
-  # augmentation_cfg:
-  #   rgb:
-  #     brightness: 0.3
-  #     contrast: 0.3
-  #     saturation: 0.3
-  #     hue: 0.05
-  #     prob: 0.8
-  #   state:
-  #     noise_std: 0.005
-  #     prob: 0.5
+  # ---- RGB 颜色增强 (CPU resize + crop 后执行, 224×224 float32 tensor) ----
+  # 参数参考 DexUMI 经验: 大亮度扰动应对光照变化, Grayscale/Blur 防过拟合
+  rgb_aug:
+    _target_: dexmani_policy.datasets.augmentation.rgb.RGBAug
+    brightness: 0.6
+    contrast: 0.3
+    saturation: 0.3
+    hue: 0.08
+    grayscale_prob: 0.2
+    prob: 1.0
+
+  # state 增强 (可选, 高斯噪声)
+  augmentation_cfg:
+    # state:
+    #   noise_std: 0.005
+    #   prob: 0.5
 
 agent:
   _target_: dexmani_policy.agents.core.dp.DPAgent
@@ -57,20 +66,74 @@ agent:
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
+  modality_dropout_probs:
+    joint_state: 0.0
 
-  rgb_backbone_name: dino
+  # ---- backbone 选择 ----
+  # 当前: ResNet-18 from scratch
+  rgb_backbone_name: resnet
+  rgb_backbone_config:
+    model_name: resnet18
+    weights: null
+    tune_mode: full
+    norm_mode: group_norm
+    # image_size 需与 dataset.rgb_random_crop_size (or rgb_preprocess_size) 一致，
+    # 避免 GPU 侧第二次 resize。设为 null 则使用 ImageProcessor preset 默认值。
+    image_size: [224, 224]
+
+  # ================================================================
+  # 备选 backbone
+  # ================================================================
+  #
+  # ViT backbone (dino/clip/siglip) 共用参数:
+  #   tune_mode: freeze (冻结) | lora (LoRA微调,需peft) | full (全量微调)
+  #   global_token_type: avg (推荐, patch均值) | cls
+  #
+  # -------- DINOv2 (dim 768) --------
+  # 模型: facebook/dinov2-small (22M) / facebook/dinov2-base (86M)
+  # rgb_backbone_name: dino
+  # rgb_backbone_config:
+  #   model_name: facebook/dinov2-small
+  #   tune_mode: freeze
+  #   global_token_type: avg
+  #
+  # -------- CLIP (dim 768) --------
+  # 模型: openai/clip-vit-base-patch32 (88M)
+  # rgb_backbone_name: clip
+  # rgb_backbone_config:
+  #   model_name: openai/clip-vit-base-patch32
+  #   tune_mode: freeze
+  #   global_token_type: avg
+  #
+  # -------- SigLIP (dim 768) --------
+  # 模型: google/siglip-base-patch16-224 (94M)
+  # rgb_backbone_name: siglip
+  # rgb_backbone_config:
+  #   model_name: google/siglip-base-patch16-224
+  #   tune_mode: freeze
+  #   global_token_type: avg
+  #
+  # -------- ResNet-18 from scratch (dim 512) --------
+  # 无预训练, GroupNorm, 需同步设 optimizer.obs_lr 为非零.
+  # rgb_backbone_name: resnet
+  # rgb_backbone_config:
+  #   model_name: resnet18
+  #   weights: null
+  #   tune_mode: full
+  #   norm_mode: group_norm
+
   state_dim: 19
 
   diffusion_step_embed_dim: 128
   down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
-  condition_type: film
+
   cond_predict_scale: true
 
   num_training_steps: 100
   num_inference_steps: 10
-  prediction_type: sample
+  prediction_type: epsilon
 
 optimizer:
   lr: 1.0e-4
@@ -114,14 +177,15 @@ training:
   use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  use_bfloat16: false  # BF16 mixed precision (Ampere+ GPUs, ~2x speedup)
   loop:
     num_epochs: 1000
     log_interval_steps: 50
     val_interval_epochs: 25
     eval_interval_epochs: 250
     sample_interval_epochs: 5
-    grad_accum_steps: 1
-    grad_clip_norm: 1.0
+
 
 env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
@@ -131,7 +195,7 @@ env_runner:
   default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
-    control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
+    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
 # ---- offline eval (eval_sim.py)
 eval:

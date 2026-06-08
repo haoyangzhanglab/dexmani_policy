@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.nn as nn
 from transformers import AutoModel
@@ -12,6 +13,8 @@ from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
     reshape_patch_tokens_to_map,
 )
 
+logger = logging.getLogger(__name__)
+
 TuneMode = Literal["freeze", "lora", "full"]
 GlobalTokenType = Literal["cls", "avg", "pooler"]
 
@@ -21,7 +24,7 @@ class DINO(nn.Module):
         self,
         model_name: str = "facebook/dinov2-base",
         tune_mode: TuneMode = "freeze",
-        global_token_type: GlobalTokenType = "cls",
+        global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
     ):
         super().__init__()
@@ -41,6 +44,11 @@ class DINO(nn.Module):
         self.num_register_tokens = int(getattr(self.backbone.config, "num_register_tokens", 0))
         self.num_prefix_tokens = 1 + self.num_register_tokens
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
+
+        logger.info(
+            "DINO backbone %s: hidden_dim=%d num_register_tokens=%d num_prefix_tokens=%d",
+            model_name, self.hidden_dim, self.num_register_tokens, self.num_prefix_tokens,
+        )
 
         self.proj = nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
         self.geometry_processor = GeometryProcessor()

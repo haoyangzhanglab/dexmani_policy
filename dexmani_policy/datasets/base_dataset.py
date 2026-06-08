@@ -1,8 +1,10 @@
 import copy
 import torch
+import torchvision.transforms.functional as TVF
+from typing import Optional, Tuple
 
-from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
+from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_action_normalizer
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask, downsample_mask
 
@@ -21,15 +23,29 @@ class BaseDataset(torch.utils.data.Dataset):
         max_train_episodes=None,
         sensor_modalities=None,
         augmentation_cfg=None,
+        action_key='action',
+        obs_horizon: Optional[int] = None,
+        rgb_preprocess_size: Optional[Tuple[int, int]] = None,
+        rgb_random_crop_size: Optional[Tuple[int, int]] = None,
+        rgb_color_aug=None,
+        rgb_keep_uint8: bool = False,
     ):
         super().__init__()
 
         if sensor_modalities is None:
             sensor_modalities = self.DEFAULT_MODALITIES
 
+        self.action_key = action_key
+        self.obs_horizon = obs_horizon
+        self.rgb_preprocess_size = rgb_preprocess_size
+        self.rgb_random_crop_size = rgb_random_crop_size
+        self.rgb_color_aug = rgb_color_aug
+        self.rgb_keep_uint8 = rgb_keep_uint8
+        self._is_val = False  # 验证集标记 — get_validation_dataset() 会覆盖
+
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
-            keys=sensor_modalities + ['action'],
+            keys=sensor_modalities + [action_key],
         )
 
         self.sensor_modalities = sensor_modalities
@@ -72,9 +88,10 @@ class BaseDataset(torch.utils.data.Dataset):
             pad_after=self.pad_after,
             episode_mask=self.val_mask,
         )
-        # 验证集禁用数据增强：置 None 阻断 apply_augmentation，清空 augmentors 断开共享引用
+        # 验证集禁用随机性：关闭 augmentation，随机裁剪切回 center_crop
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
+        val_set._is_val = True
         return val_set
 
     def __len__(self):
@@ -82,15 +99,65 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def sample_to_data(self, sample):
         return {
-            'obs': {m: sample[m] for m in self.sensor_modalities},
-            'action': sample['action'],
+            'obs': {
+                m: sample[m][:self.obs_horizon] if self.obs_horizon else sample[m]
+                for m in self.sensor_modalities
+            },
+            'action': sample[self.action_key],
         }
+
+    def _preprocess_rgb_cpu(self, rgb_np):
+        """rgb_np: (T, H, W, 3) uint8 numpy → (T, 3, H_dst, W_dst) tensor.
+        /255 + resize + optional random crop + optional color aug.
+        ImageNet normalization is left on GPU.
+
+        Two paths:
+        - uint8 fast path: when ``rgb_keep_uint8=True`` and no color aug,
+          resize/crop keep uint8 output → 4x less DataLoader→GPU transfer.
+        - float32 path (default): current behavior, required for color augmentation.
+        """
+        rgb = torch.from_numpy(rgb_np)                 # (T, H, W, 3) uint8
+        rgb = rgb.permute(0, 3, 1, 2).contiguous()     # (T, 3, H, W)
+
+        # --- uint8 fast path: skip float32 conversion, resize/crop in uint8 ---
+        if self.rgb_keep_uint8 and self.rgb_color_aug is None:
+            rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
+            if self.rgb_random_crop_size is not None:
+                if self._is_val:
+                    rgb = TVF.center_crop(rgb, list(self.rgb_random_crop_size))
+                else:
+                    rgb = TVF.crop(rgb,
+                        top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
+                        left=torch.randint(0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)).item(),
+                        height=self.rgb_random_crop_size[0],
+                        width=self.rgb_random_crop_size[1])
+            return rgb.contiguous()                      # uint8
+
+        # --- float32 path: current behavior (needed for color augmentation) ---
+        rgb = rgb.float().div_(255.0)                    # (T, 3, H, W) float32 [0,1]
+        rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
+        if self.rgb_random_crop_size is not None:
+            if self._is_val:
+                rgb = TVF.center_crop(rgb, list(self.rgb_random_crop_size))
+            else:
+                rgb = TVF.crop(rgb,
+                    top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
+                    left=torch.randint(0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)).item(),
+                    height=self.rgb_random_crop_size[0],
+                    width=self.rgb_random_crop_size[1])
+        if self.rgb_color_aug is not None:
+            rgb = self.rgb_color_aug(rgb)                # (T, 3, H_dst, W_dst) float32 [0,1]
+        return rgb.clamp_(0, 1).contiguous()
 
     def __getitem__(self, idx):
         sample = self.sampler.sample_sequence(idx)
         data = self.sample_to_data(sample)
         data = self.apply_augmentation(data)
-        return dict_apply(data, torch.from_numpy)
+
+        if self.rgb_preprocess_size is not None and 'rgb' in data['obs']:
+            data['obs']['rgb'] = self._preprocess_rgb_cpu(data['obs']['rgb'])
+
+        return dict_apply(data, ensure_tensor)
 
     def _build_augmentors(self):
         pass
@@ -105,23 +172,17 @@ class BaseDataset(torch.utils.data.Dataset):
                 data['obs'][modality] = aug(data['obs'][modality])
         return data
 
-    def get_normalizer(self, mode='limits', action_mode='absolute_joint', **kwargs):
+    def get_normalizer(self, mode='limits'):
         joint_state = self.replay_buffer['joint_state']
-        action = self.replay_buffer['action']
+        action = self.replay_buffer[self.action_key]
         normalizer = LinearNormalizer()
 
-        if action_mode == 'eef_hand':
-            ee_dim = kwargs.get('ee_dim', 9)
-            assert action.shape[1] >= ee_dim, \
-                f"eef_hand mode requires action dim >= {ee_dim} (ee_dim), " \
-                f"but zarr action has shape {action.shape}. " \
-                f"Check that the dataset was collected with action_space='ee'."
-            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode=mode, **kwargs)
-            from dexmani_policy.common.normalizer import build_mixed_action_normalizer
-            normalizer['action'] = build_mixed_action_normalizer(action, ee_dim=ee_dim)
+        if self.action_key == 'action_ee':
+            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode=mode)
+            normalizer['action'] = build_mixed_action_normalizer(action)
         else:
             normalizer.fit(data={'joint_state': joint_state, 'action': action},
-                           last_n_dims=1, mode=mode, **kwargs)
+                           last_n_dims=1, mode=mode)
         return normalizer
 
 

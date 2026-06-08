@@ -19,6 +19,7 @@ class PCDataset(BaseDataset):
         max_train_episodes=None,
         sensor_modalities=None,
         augmentation_cfg=None,
+        action_key='action',
     ):
         super().__init__(
             zarr_path=zarr_path,
@@ -30,6 +31,7 @@ class PCDataset(BaseDataset):
             max_train_episodes=max_train_episodes,
             sensor_modalities=sensor_modalities,
             augmentation_cfg=augmentation_cfg,
+            action_key=action_key,
         )
 
     def _build_augmentors(self):
@@ -51,8 +53,8 @@ class PCDataset(BaseDataset):
         if state_cfg is not None:
             self.augmentors['joint_state'] = [StateNoiseAug(**state_cfg)]
 
-    def get_normalizer(self, mode='limits', **kwargs):
-        return super().get_normalizer(mode=mode, **kwargs)
+    def get_normalizer(self, mode='limits'):
+        return super().get_normalizer(mode=mode)
 
 
 def example(zarr_path):

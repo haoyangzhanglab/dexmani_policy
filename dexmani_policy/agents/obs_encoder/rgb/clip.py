@@ -1,6 +1,7 @@
+import logging
 import torch
 import torch.nn as nn
-from transformers import CLIPVisionModelWithProjection
+from transformers import CLIPVisionModel
 from typing import Dict, Literal, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
@@ -11,6 +12,8 @@ from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
     get_patch_grid_size,
     reshape_patch_tokens_to_map,
 )
+
+logger = logging.getLogger(__name__)
 
 TuneMode = Literal["freeze", "lora", "full"]
 GlobalTokenType = Literal["cls", "avg", "pooler"]
@@ -29,18 +32,15 @@ class CLIP(nn.Module):
         self.model_name = model_name
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
-        self.backbone = CLIPVisionModelWithProjection.from_pretrained(model_name)
+        self.backbone = CLIPVisionModel.from_pretrained(model_name)
 
         if not hasattr(self.backbone.config, "patch_size"):
             raise ValueError(f"{model_name} does not look like a ViT-style CLIP model.")
         if not hasattr(self.backbone.config, "hidden_size"):
             raise ValueError(f"{model_name} is missing hidden_size in backbone config.")
-        if not hasattr(self.backbone.config, "projection_dim"):
-            raise ValueError(f"{model_name} is missing projection_dim in backbone config.")
 
         self.patch_size = int(self.backbone.config.patch_size)
         self.hidden_dim = int(self.backbone.config.hidden_size)
-        self.model_dim = int(self.backbone.config.projection_dim)
         self.num_prefix_tokens = 1
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
 
@@ -66,7 +66,7 @@ class CLIP(nn.Module):
 
             self.backbone.requires_grad_(False)
 
-            target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2", "visual_projection"]
+            target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
             lora_config = LoraConfig(
                 r=16,
                 lora_alpha=32,
@@ -92,17 +92,13 @@ class CLIP(nn.Module):
             return self.proj(outputs.last_hidden_state[:, 0])
 
         if self.global_token_type == "pooler":
-            image_embeds = getattr(outputs, "image_embeds", None)
-            if image_embeds is None:
-                raise ValueError(f"{self.model_name} does not provide image_embeds for pooler output.")
-
-            if self.out_dim != self.model_dim:
+            pooler_output = getattr(outputs, "pooler_output", None)
+            if pooler_output is None:
                 raise ValueError(
-                    "For CLIP global_token_type='pooler', out_dim must equal backbone projection_dim. "
-                    "Otherwise the pooled token would go through a randomly initialized extra projection. "
-                    "Use global_token_type='avg' or set out_dim to CLIP projection_dim."
+                    f"{self.model_name} does not provide pooler_output. "
+                    "Use global_token_type='avg' or 'cls'."
                 )
-            return image_embeds
+            return self.proj(pooler_output)
 
         raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
 

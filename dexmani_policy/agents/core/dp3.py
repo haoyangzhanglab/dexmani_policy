@@ -15,7 +15,6 @@ class DP3ObsEncoder(nn.Module):
         state_dim: int,
         num_points: int,
         n_obs_steps: int,
-        condition_type: str,
         state_out_dim: int = 64,
     ):
         super().__init__()
@@ -26,7 +25,6 @@ class DP3ObsEncoder(nn.Module):
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps
-        self.condition_type = condition_type
         self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
@@ -38,11 +36,7 @@ class DP3ObsEncoder(nn.Module):
             self.state_mlp(obs['joint_state']),
         ], dim=-1)                                      # (B*T, out_dim)
         B = feat.shape[0] // self.n_obs_steps
-        if self.condition_type in ('film', 'mlp_film'):
-            # film/mlp_film: (B*T, out_dim) → (B, out_dim*T)  flattened condition
-            return feat.reshape(B, -1), {}
-        # cross_attention_film: (B*T, out_dim) → (B, T, out_dim)  tokenized condition
-        return feat.reshape(B, self.n_obs_steps, -1), {}
+        return feat.reshape(B, -1), {}
 
 
 class DP3Agent(UNetDiffusionAgent):
@@ -57,16 +51,15 @@ class DP3Agent(UNetDiffusionAgent):
         pc_out_dim: int,
         state_dim: int,
         num_points: int,
-        condition_type: str = 'film',
         state_out_dim: int = 64,
         **kwargs,
     ):
         obs_encoder = DP3ObsEncoder(
             encoder_type, pc_dim, pc_out_dim, state_dim,
-            num_points, n_obs_steps, condition_type, state_out_dim,
+            num_points, n_obs_steps, state_out_dim,
         )
         super().__init__(
-            obs_encoder, condition_type, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
+            obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
         )
 
 
@@ -77,7 +70,7 @@ def example():
     agent = DP3Agent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
         encoder_type='idp3', pc_dim=3, pc_out_dim=64, state_dim=A,
-        num_points=N, condition_type='film',
+        num_points=N,
         down_dims=[64, 128], diffusion_step_embed_dim=64,
         num_training_steps=10, num_inference_steps=3,
     ).to(device)

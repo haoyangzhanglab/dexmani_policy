@@ -1,12 +1,10 @@
 import os
-import sys
 import json
 import torch
 import atexit
 import numpy as np
 from pathlib import Path
-from omegaconf import OmegaConf
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 os.environ.setdefault("WANDB_SILENT", "true")
 
@@ -17,51 +15,21 @@ def is_video_key(key: Any) -> bool:
 
 def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
     out: Dict[str, float] = {}
-    tensor_keys = []
-    tensor_vals = []
-
     for key, value in (metrics or {}).items():
         if torch.is_tensor(value):
             if value.numel() == 1:
-                tensor_keys.append(key)
-                tensor_vals.append(value.detach())
-            elif value.dim() == 1:
-                if value.shape[0] <= 50:
-                    cpu_vec = value.detach().float().cpu().tolist()
-                    for i, val in enumerate(cpu_vec):
-                        out[f"{key}/{i}"] = float(val)
-                else:
-                    v = value.detach().float()
-                    out[f"{key}/mean"] = v.mean().item()
-                    out[f"{key}/std"] = v.std().item()
-            else:
-                v = value.detach().float()
-                out[f"{key}/mean"] = v.mean().item()
-                out[f"{key}/std"] = v.std().item()
-            continue
-        try:
-            out[key] = float(value)
-        except (TypeError, ValueError):
-            pass
-
-    if tensor_vals:
-        cpu_vals = torch.stack(tensor_vals).float().cpu().tolist()
-        for key, value in zip(tensor_keys, cpu_vals):
-            out[key] = float(value)
-
+                out[key] = value.item()
+        else:
+            try:
+                out[key] = float(value)
+            except (TypeError, ValueError):
+                pass
     return out
 
 
-class Logger:
-    def log(self, data: Dict[str, Any], step: Optional[int] = None, **kwargs):
-        raise NotImplementedError
-
-    def close(self):
-        raise NotImplementedError
 
 
-
-class JsonlLogger(Logger):
+class JsonlLogger:
     def __init__(self, output_dir: Path, filename: str = "metrics.jsonl"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -89,7 +57,7 @@ class JsonlLogger(Logger):
 
 
 
-class WandbLogger(Logger):
+class WandbLogger:
     def __init__(
         self,
         output_dir: Path,
@@ -140,6 +108,12 @@ class WandbLogger(Logger):
             return
         self.run.log(self.format_payload(data), step=step, **kwargs)
 
+    def log_config(self, cfg_dict: Dict[str, Any], output_dir: str):
+        if self.run is None:
+            return
+        self.run.config.update(cfg_dict)
+        self.run.config.update({"output_dir": str(output_dir)})
+
 
     def close(self):
         if self.run is None:
@@ -152,22 +126,3 @@ class WandbLogger(Logger):
             self.run = None
 
 
-
-class MultiLogger(Logger):
-    def __init__(self, loggers: Iterable[Logger]):
-        self.loggers = list(loggers)
-
-    # 将同一份日志分发到多个 logger。
-    def log(self, data: Dict[str, Any], step: Optional[int] = None, **kwargs):
-        for logger in self.loggers:
-            try:
-                logger.log(data, step=step, **kwargs)
-            except Exception as e:
-                print(f"[MultiLogger] {logger.__class__.__name__}.log failed: {e}", file=sys.stderr)
-
-    def close(self):
-        for logger in self.loggers:
-            try:
-                logger.close()
-            except Exception as e:
-                print(f"[MultiLogger] {logger.__class__.__name__}.close failed: {e}", file=sys.stderr)

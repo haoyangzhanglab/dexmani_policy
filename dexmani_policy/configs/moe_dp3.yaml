@@ -1,7 +1,7 @@
 policy_name: moe_dp3
 
 task_name: pick_apple_messy
-zarr_path: robot_data/sim/${task_name}.zarr
+zarr_path: robot_data/${task_name}.zarr
 
 seed: 42
 
@@ -9,10 +9,8 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 
-action_mode: absolute_joint  # absolute_joint | eef_hand
-ee_dim: 9
-hand_dim: 12
-action_dim: ${eval:'${ee_dim} + ${hand_dim} if ${eq:${action_mode},eef_hand} else 19'}
+action_key: action  # action | action_ee
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 dataloader:
   batch_size: 256
@@ -20,6 +18,7 @@ dataloader:
   num_workers: 8
   pin_memory: true
   persistent_workers: true
+  drop_last: false  # DDP 建议开启，防最后 batch 大小不均导致 all_reduce 失败
 
 val_dataloader:
   batch_size: 256
@@ -27,9 +26,11 @@ val_dataloader:
   num_workers: 4
   pin_memory: true
   persistent_workers: false
+  drop_last: false
 
 dataset:
   _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  action_key: ${action_key}
   zarr_path: ${zarr_path}
   seed: ${training.seed}
   horizon: ${horizon}
@@ -66,6 +67,8 @@ agent:
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
+  modality_dropout_probs:
+    joint_state: 0.0
 
   encoder_type: idp3  # idp3 | pointnext | dp3
   pc_dim: 3
@@ -82,11 +85,23 @@ agent:
   lambda_load: 0.1
   beta_entropy: 0.01
 
+  # ---- Boost (progressive expert activation) ----
+  use_boost: false
+  boost_start_epoch: 0
+  boost_interval: 100
+  boost_experts_per_step: 4
+  boost_topk_per_step: 1
+
+  # ---- Enhanced gate ----
+  use_enhanced_gate: false
+  gate_hidden_dim: null
+  gate_dropout: 0.0
+
   diffusion_step_embed_dim: 128
   down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
-  condition_type: film
+
   cond_predict_scale: true
 
   num_training_steps: 100
@@ -135,14 +150,15 @@ training:
   use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  use_bfloat16: false  # BF16 mixed precision (Ampere+ GPUs, ~2x speedup)
   loop:
     num_epochs: 1000
     log_interval_steps: 50
     val_interval_epochs: 25
     eval_interval_epochs: 250
     sample_interval_epochs: 5
-    grad_accum_steps: 1
-    grad_clip_norm: 1.0
+
 
 env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
@@ -152,7 +168,7 @@ env_runner:
   default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
-    control_mode: ${eval:'"ee" if ${eq:${action_mode},eef_hand} else "joint"'}
+    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
 # ---- offline eval (eval_sim.py)
 eval:

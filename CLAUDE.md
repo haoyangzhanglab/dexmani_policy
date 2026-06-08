@@ -78,7 +78,7 @@ cond + action → action_decoder.compute_loss()
   [FlowMatch]:  拆分 flow/consistency → 速度 MSE(v_pred, x1-x0) + consistency teacher
   [MoE]:        + aux_loss (load_balancing + entropy)
 
-loss.backward() → grad_accum → clip_grad → optimizer.step → scheduler.step → EMA
+loss.backward() → optimizer.step → scheduler.step → EMA
 ```
 
 ### 推理 (Agent.predict_action)
@@ -136,7 +136,7 @@ dexmani_policy/
 - Hydra + OmegaConf，`${eval:'...'}` 插值在 `common/resolver.py` 注册
 - CLI override 任意字段；配置校验基于字段存在性判断，不依赖 `_target_` 字符串匹配
 - `eval.seed: 0` 固定，保证同一 checkpoint 多次评测可复现
-- Normalizer: `mode='limits'`，train+val 全量拟合 → [-1,1]；`range_eps=2e-2`，低方差维度 zero-center 不缩放（scale=1.0, offset=-mean）
+- Normalizer: `mode='limits'`，train+val 全量拟合 → [-1,1]；`range_eps=1e-4`（与官方 diffusion_policy 一致），低方差维度 zero-center 不缩放（scale=1.0, offset=-mean）
 - 数据增强默认禁用，通过 `prob` 控制执行概率；`pc_dim` 必须与 Zarr 点云通道数一致
 - SequenceSampler：短于 8 帧的 episode 自动 warn + skip（不 crash）；边界 padding 复制首尾帧
 - 配置全链路可追踪，所有 YAML key 均可追溯到代码消费点，**无 dead config**
@@ -153,7 +153,6 @@ dexmani_policy/
 | 验证 | `self.model`（固定，非 EMA） | `self.ema_model` | flow + consistency |
 | 推理 | EMA（如果 `use_ema`） | N/A | N/A |
 
-- 梯度累积: loss 除以 `grad_accum_steps` 后 backward；DDP 下 `(1/(K*world_size)) * Σ_i Σ_rank` 语义等价于单卡大 batch
 - NaN 检测（三层防护）: ① loss NaN → `zero_grad` + raise；② grad NaN → `zero_grad` + raise；③ DDP `dist.all_reduce(nan_flag, MAX)` in `backward()` 前，防集群死锁
 - MoE aux loss 全程生效；`get_optim_param_groups()` 中 obs encoder 使用 `get_optim_group_with_no_decay` 按模块类型分拆 decay/no-decay，bias/Norm 不受 weight decay
 
