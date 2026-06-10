@@ -32,6 +32,9 @@ class ManiFlowObsEncoder(nn.Module):
 
     def forward(self, obs: dict):
         pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
+        # PointPN 内部用 pytorch3d（ball_query / FPS），仅支持 fp32。
+        if pc.dtype != torch.float32:
+            pc = pc.float()
         if pc.shape[1] > self.num_points:
             pc, _ = farthest_point_sample(pc, self.num_points)
         pc_outputs = self.pc_encoder(pc, return_global_token=True)
@@ -86,16 +89,16 @@ def example():
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
         encoder_type='pointpn', pc_dim=3, state_dim=A, num_points=N,
         pc_encoder_config={
-            'num_stages': 2,
+            'num_stages': 3,
             'embed_channels': 32,
-            'stage_num_neighbors': [16, 16],
-            'stage_lga_blocks': [1, 1],
-            'stage_channel_expansion': [2, 2],
+            'stage_num_neighbors': [16, 16, 14],
+            'stage_lga_blocks': [1, 1, 1],
+            'stage_channel_expansion': [2, 2, 2],
             'point_cloud_type': 'scan',
         },
         n_layers=2, hidden_dim=128, n_head=4, mlp_ratio=2.0,
         p_drop_attn=0.0, timestep_embed_dim=64, target_t_embed_dim=64,
-        denoise_timesteps=3,
+        denoise_timesteps=5,
     ).to(device)
 
     obs = {

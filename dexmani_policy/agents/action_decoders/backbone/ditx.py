@@ -113,6 +113,71 @@ class CrossAttention(nn.Module):
             x = self.proj_drop(x)
         return x
 
+class SelfAttention(nn.Module):
+    """Self-attention with ``F.scaled_dot_product_attention`` → Flash Attention.
+
+    Replaces ``nn.MultiheadAttention`` in ``DiTXBlock`` so the self-attention
+    path benefits from the SDPA backend (Flash / Memory-Efficient) rather than
+    the stock matmul-softmax-matmul path.
+    """
+
+    fused_attn: Final[bool]
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        norm_layer: nn.Module = nn.LayerNorm,
+    ):
+        super().__init__()
+        assert dim % num_heads == 0, "dim should be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.fused_attn = use_fused_attn()
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
+        B, N, C = x.shape
+        qkv = (
+            self.qkv(x)
+            .reshape(B, N, 3, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            if attn_mask is not None:
+                attn = attn + attn_mask
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
 class DiTXBlock(nn.Module):
     def __init__(
             self, 
@@ -128,11 +193,12 @@ class DiTXBlock(nn.Module):
         
         self.hidden_size = hidden_size
 
-        self.self_attn = nn.MultiheadAttention(
-            hidden_size, 
-            num_heads, 
-            batch_first=True, 
-            dropout=p_drop_attn,
+        self.self_attn = SelfAttention(
+            dim=hidden_size,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            attn_drop=p_drop_attn,
         )
         
         self.cross_attn = CrossAttention(
@@ -170,7 +236,7 @@ class DiTXBlock(nn.Module):
         shift_mlp, scale_mlp, gate_mlp = chunks[6], chunks[7], chunks[8]
 
         normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        self_attn_output, _ = self.self_attn(normed_x, normed_x, normed_x, attn_mask=attn_mask)
+        self_attn_output = self.self_attn(normed_x, attn_mask=attn_mask)
         x = x + gate_msa.unsqueeze(1) * self_attn_output
 
         normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)
@@ -275,12 +341,12 @@ class DiTXFlowMatch(nn.Module):
     def initialize_weights(self):
 
         for block in self.ditx_blocks:
-            nn.init.xavier_uniform_(block.self_attn.in_proj_weight)
-            if block.self_attn.in_proj_bias is not None:
-                nn.init.zeros_(block.self_attn.in_proj_bias)
-            nn.init.xavier_uniform_(block.self_attn.out_proj.weight)
-            if block.self_attn.out_proj.bias is not None:
-                nn.init.zeros_(block.self_attn.out_proj.bias) 
+            nn.init.xavier_uniform_(block.self_attn.qkv.weight)
+            if block.self_attn.qkv.bias is not None:
+                nn.init.zeros_(block.self_attn.qkv.bias)
+            nn.init.xavier_uniform_(block.self_attn.proj.weight)
+            if block.self_attn.proj.bias is not None:
+                nn.init.zeros_(block.self_attn.proj.bias)
 
         def init_fn(module):
             if isinstance(module, nn.Linear):
@@ -423,12 +489,12 @@ class DiTXDiffusion(nn.Module):
     def initialize_weights(self):
 
         for block in self.ditx_blocks:
-            nn.init.xavier_uniform_(block.self_attn.in_proj_weight)
-            if block.self_attn.in_proj_bias is not None:
-                nn.init.zeros_(block.self_attn.in_proj_bias)
-            nn.init.xavier_uniform_(block.self_attn.out_proj.weight)
-            if block.self_attn.out_proj.bias is not None:
-                nn.init.zeros_(block.self_attn.out_proj.bias) 
+            nn.init.xavier_uniform_(block.self_attn.qkv.weight)
+            if block.self_attn.qkv.bias is not None:
+                nn.init.zeros_(block.self_attn.qkv.bias)
+            nn.init.xavier_uniform_(block.self_attn.proj.weight)
+            if block.self_attn.proj.bias is not None:
+                nn.init.zeros_(block.self_attn.proj.bias)
 
         def init_fn(module):
             if isinstance(module, nn.Linear):

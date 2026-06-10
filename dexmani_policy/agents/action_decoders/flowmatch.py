@@ -178,9 +178,9 @@ class FlowMatchWithConsistency(nn.Module):
         # 沿 batch 维拼接 flow 和 consistency 的 student 输入，合并为一次 forward，
         # 保证 torch.compile 始终看到固定 batch size，避免 stride guard 崩溃。
         x_merged = torch.cat([flow_targets["xt"], consistency_targets["xt"]], dim=0)
-        t_merged = torch.cat([flow_targets["t"].squeeze(), consistency_targets["t"].squeeze()], dim=0)
-        target_t_merged = torch.cat([flow_targets["target_t"].squeeze(),
-                                      consistency_targets["target_t"].squeeze()], dim=0)
+        t_merged = torch.cat([flow_targets["t"].reshape(-1), consistency_targets["t"].reshape(-1)], dim=0)
+        target_t_merged = torch.cat([flow_targets["target_t"].reshape(-1),
+                                      consistency_targets["target_t"].reshape(-1)], dim=0)
 
         pred_merged = self.model(
             x=x_merged,

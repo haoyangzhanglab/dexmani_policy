@@ -121,6 +121,20 @@ def validate_config(cfg):
 
     _validate_augmentation_consistency(cfg)
 
+    # 校验 action_key 与 control_mode 一致性（防 CLI override 误配）
+    env_kwargs = cfg.get('env_runner', {}).get('env_kwargs', {})
+    if isinstance(env_kwargs, dict):
+        actual_control = env_kwargs.get('control_mode', 'joint')
+    else:
+        actual_control = 'joint'
+    expected_control = 'ee' if cfg.action_key == 'action_ee' else 'joint'
+    if actual_control != expected_control:
+        raise ValueError(
+            f"action_key='{cfg.action_key}' requires control_mode='{expected_control}', "
+            f"but env_runner.env_kwargs.control_mode='{actual_control}'. "
+            f"Check CLI overrides for env_runner.env_kwargs.control_mode."
+        )
+
     cprint("Config validation passed", "green")
 
 
@@ -191,6 +205,7 @@ def main(cfg):
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         max_grad_norm=cfg.training.get('max_grad_norm', 1.0),
         use_bfloat16=cfg.training.get('use_bfloat16', False),
+        use_compile=cfg.training.get('use_compile', False),
     )
     trainer.train(resume_tag="latest")
 

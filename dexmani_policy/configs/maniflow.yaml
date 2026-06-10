@@ -13,17 +13,17 @@ action_key: action  # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 dataloader:
-  batch_size: 64
+  batch_size: 192
   shuffle: true
   num_workers: 8
   pin_memory: true
   persistent_workers: true
-  drop_last: false  # DDP 建议开启，防最后 batch 大小不均导致 all_reduce 失败
+  drop_last: false
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 128
   shuffle: false
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   persistent_workers: false
   drop_last: false
@@ -40,8 +40,6 @@ dataset:
   max_train_episodes: null
   sensor_modalities: ["joint_state", "point_cloud"]
 
-  # augmentation_cfg: see configs/augmentation_example.yaml
-
 agent:
   _target_: dexmani_policy.agents.core.maniflow.ManiFlowAgent
   horizon: ${horizon}
@@ -49,18 +47,17 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: pointpn  # pointpn | pointnext_tokenizer
+  encoder_type: pointnext_tokenizer  # pointnext_tokenizer | pointpn
   pc_dim: 3
   state_dim: 19
-  num_points: 1024
+  num_points: 1024  # FPS pre-downsample target
 
   pc_encoder_config:
-    embed_channels: 48
-    stage_radii: [0.04, 0.08, 0.16]
-    stage_num_neighbors: [16, 16, 14]
-    stage_lga_blocks: [1, 1, 1]
-    stage_channel_expansion: [2, 2, 2]
-    point_cloud_type: scan
+    stem_channels: 64
+    token_channels: 256
+    num_patches: 96
+    patch_radii: [0.04, 0.08]
+    patch_neighbors: [16, 32]
 
   n_layers: 12
   hidden_dim: 768
@@ -70,7 +67,6 @@ agent:
   qkv_bias: true
   qk_norm: true
   pre_norm_modality: false
-  use_compile: false
 
   timestep_embed_dim: 128
   target_t_embed_dim: 128
@@ -80,7 +76,7 @@ agent:
   t_sample_mode_for_flow: beta
   t_sample_mode_for_consistency: discrete
   dt_sample_mode_for_consistency: uniform
-  target_t_sample_mode: relative  # 需配合 use_ema_teacher_for_consistency=true，consistency 训练提供 target_t 泛化；纯 flow 模式下 target_t 恒为 0，推理时 dt>0 存在分布偏移
+  target_t_sample_mode: relative
   modality_dropout_probs:
     joint_state: 0.2
 
@@ -122,12 +118,20 @@ workspace:
 training:
   seed: ${seed}
   device: cuda:0
+
+  # ── 加速 ──
+  use_bfloat16: true
+  use_compile: false
+
+  # ── EMA ──
   use_ema: true
   use_ema_teacher_for_consistency: true
+
+  # ── 优化器调度 ──
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
-  use_bfloat16: true
+
   loop:
     num_epochs: 1000
     log_interval_steps: 50
@@ -140,13 +144,12 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  env_video_fps: 10
+  env_video_fps: 15
   default_eval_episodes: 20
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
-# ---- offline eval (eval_sim.py)
 eval:
   seed: 0
   offline:

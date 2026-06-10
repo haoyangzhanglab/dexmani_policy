@@ -135,67 +135,82 @@ class PointColorJitter(Aug):
         return rgb
 
 
-class PointSpatialAug(Aug):
-    """Z-axis rotation + XY translation + uniform scale. Same transform across all T frames.
-
-    Reference: RISE (IROS 2024). Input ``(T,N,C) float32``, XYZ in ``[...,:3]``.
-    """
-
-    def __init__(self, rot_z=15.0, trans_xy=0.10, scale=1.02, prob=1.0):
-        super().__init__(prob=prob)
-        self.rot_z = float(rot_z)
-        self.trans_xy = float(trans_xy)
-        self.scale = float(scale)
-
-    def _augment(self, x):
-        pc = x.copy()
-        xyz = pc[..., :3]
-
-        angle = np.deg2rad(np.random.uniform(-self.rot_z, self.rot_z))
-        dx = np.random.uniform(-self.trans_xy, self.trans_xy)
-        dy = np.random.uniform(-self.trans_xy, self.trans_xy)
-        s = np.random.uniform(min(1.0 / self.scale, self.scale),
-                              max(1.0 / self.scale, self.scale))
-
-        cos_a, sin_a = np.cos(angle), np.sin(angle)
-
-        rx = xyz[..., 0] * cos_a - xyz[..., 1] * sin_a
-        ry = xyz[..., 0] * sin_a + xyz[..., 1] * cos_a
-        pc[..., 0] = rx * s + dx
-        pc[..., 1] = ry * s + dy
-        pc[..., 2] = xyz[..., 2] * s
-
-        # rotate normals (channels 3:6) if present — same rot, no translation/scale
-        if pc.shape[-1] >= 6:
-            nxyz = x[..., 3:6]
-            pc[..., 3] = nxyz[..., 0] * cos_a - nxyz[..., 1] * sin_a
-            pc[..., 4] = nxyz[..., 0] * sin_a + nxyz[..., 1] * cos_a
-
-        return pc
-
-
 class PointDropout(Aug):
-    """Random point dropout — simulates occlusion in dexterous manipulation.
-    Dropped points are zeroed. Same mask across all T frames.
+    """Random point dropout with replacement — simulates sparse or partial scans.
+
+    Dropped points are replaced by randomly sampling from the *kept* points,
+    creating natural duplicate density variations that are harder for the
+    encoder to exploit than zero-filling or single-anchor replacement (R3D, 2026).
+
+    Each T frame gets an independent dropout mask.
     """
 
-    def __init__(self, dropout_ratio=0.1, prob=1.0):
+    def __init__(self, dropout_ratio=0.3, prob=1.0):
         super().__init__(prob=prob)
         self.dropout_ratio = dropout_ratio
 
     def _augment(self, x):
-        k = int(x.shape[1] * self.dropout_ratio)
-        if k == 0:
-            return x
-        drop_idx = np.random.choice(x.shape[1], size=k, replace=False)
+        # x: (T, N, C)
+        T, N = x.shape[:2]
+        n_drop = max(1, int(N * self.dropout_ratio))
+        n_keep = N - n_drop
+
         pc = x.copy()
-        pc[:, drop_idx] = 0.0
+        for t in range(T):
+            all_idx = np.arange(N)
+            drop_idx = np.random.choice(all_idx, size=n_drop, replace=False)
+
+            keep_idx = np.setdiff1d(all_idx, drop_idx)
+            fill_idx = np.random.choice(keep_idx, size=n_drop, replace=True)
+
+            pc[t, drop_idx] = pc[t, fill_idx]
         return pc
 
 
+class PointCoordNoiseAug(Aug):
+    """Clipped Gaussian noise on a random subset of point XYZ coordinates.
+
+    Unlike ``StateNoiseAug`` which perturbs proprioceptive state, this adds
+    per-point geometric noise to simulate real sensor measurement error.
+    Noise is applied only to a random subset of points each call, preventing
+    the model from memorising exact point positions (R3D, 2026).
+
+    The noise is clipped to ±clip_range (default 2σ) to guard against extreme
+    outliers that would push normalised coordinates outside [-1, 1].
+    """
+
+    def __init__(self, noise_std=0.002, ratio=0.3, clip_range=None, prob=1.0):
+        super().__init__(prob=prob)
+        self.noise_std = float(noise_std)
+        self.ratio = float(ratio)
+        self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
+
+    def _augment(self, x):
+        # x: (T, N, C) — noise only on the first 3 channels (XYZ)
+        if self.noise_std <= 0 or self.ratio <= 0:
+            return x
+
+        T, N = x.shape[:2]
+        n_noisy = max(1, int(N * self.ratio))
+
+        # Per-frame random subset — different points each frame
+        pc = x.copy()
+        for t in range(T):
+            idx = np.random.choice(N, size=n_noisy, replace=False)
+            noise = np.random.normal(0, self.noise_std, (n_noisy, 3))
+            noise = np.clip(noise, -self.clip_range, self.clip_range)
+            pc[t, idx, :3] += noise.astype(pc.dtype)
+        return pc
+
 
 class StateNoiseAug(Aug):
-    """Small Gaussian noise on proprioceptive state."""
+    """Small Gaussian noise on proprioceptive state.
+
+    NOTE: This is data augmentation — it generates plausible sensor readings
+    by adding noise. It is NOT the same as modality dropout (``modality_dropout_probs``
+    in agent config), which zeros out the entire modality to force multi-modal
+    robustness. See ``configs/augmentation_example.yaml`` for the full distinction.
+    """
 
     def __init__(self, noise_std=0.005, prob=1.0):
         super().__init__(prob=prob)
@@ -257,4 +272,4 @@ class ImageAug:
         if self.blur is not None and torch.rand(1, device=x.device).item() <= self.blur_prob:
             x = self.blur(x)
 
-        return x.clamp_(0, 1)
+        return x.clamp(0, 1)

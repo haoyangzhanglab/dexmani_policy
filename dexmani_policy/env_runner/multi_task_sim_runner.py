@@ -115,7 +115,15 @@ class MultiTaskSimRunner:
                 import traceback
                 traceback.print_exc()
                 cprint("This is an unexpected error. Please report this issue.", "red")
-                raise
+                failed_tasks.append(task_name)
+                per_task[task_name] = {
+                    "success_rate": None,
+                    "avg_steps": None,
+                    "videos": [],
+                    "episode_details": [],
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                }
 
         rates = [r["success_rate"] for r in per_task.values() if r["success_rate"] is not None]
         steps = [r["avg_steps"] for r in per_task.values() if r["avg_steps"] is not None]

@@ -9,8 +9,8 @@ from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
 from dexmani_policy.datasets.augmentation import (
     ImageAug,
     PointColorJitter,
+    PointCoordNoiseAug,
     PointDropout,
-    PointSpatialAug,
     StateNoiseAug,
 )
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
@@ -18,8 +18,8 @@ from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask
 
 # (yaml_section, augmentor_class, yaml_key, output_modality)
 AUGMENTOR_REGISTRY = [
+    ('pc',    PointCoordNoiseAug, 'coord_noise', 'point_cloud'),
     ('pc',    PointColorJitter, 'color',    'point_cloud'),
-    ('pc',    PointSpatialAug,  'spatial',  'point_cloud'),
     ('pc',    PointDropout,     'dropout',  'point_cloud'),
     ('state', StateNoiseAug,    'noise',    'joint_state'),
     ('rgb',   ImageAug,         'color',    'rgb'),
@@ -162,9 +162,9 @@ class BaseDataset(torch.utils.data.Dataset):
                     left=torch.randint(0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)).item(),
                     height=self.rgb_random_crop_size[0],
                     width=self.rgb_random_crop_size[1])
-        if self.rgb_color_aug is not None:
+        if self.rgb_color_aug is not None and not self._is_val:
             rgb = self.rgb_color_aug(rgb)                # (T, 3, H_dst, W_dst) float32 [0,1]
-        return rgb.clamp_(0, 1).contiguous()
+        return rgb.clamp(0, 1).contiguous()
 
     def __getitem__(self, idx):
         sample = self.sampler.sample_sequence(idx)

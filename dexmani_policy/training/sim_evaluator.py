@@ -160,7 +160,7 @@ class SimEvaluator:
                         })
 
                         if video_array is not None:
-                            video_path = case_dir / f"eval_episode_{eval_seed}.mp4"
+                            video_path = case_dir / f"eval_episode_{eval_seed}_{status}.mp4"
                             imageio.mimsave(
                                 str(video_path),
                                 video_array.astype(np.uint8),
@@ -199,4 +199,24 @@ class SimEvaluator:
             summary["metrics"][f"denoise_timesteps{denoise_timesteps}"] = case_metrics
 
         _save_json(summary, eval_run_dir / "eval_metrics.json")
+
+        # --- print final summary table ---
+        cprint("=" * 60, "cyan")
+        cprint("  Evaluation Summary", "cyan", attrs=["bold"])
+        cprint("=" * 60, "cyan")
+        cprint(f"  Checkpoint : {ckpt_tag_or_path} (EMA={use_ema_for_eval})", "cyan")
+        cprint(f"  Episodes   : {eval_episodes}", "cyan")
+        for denoise_timesteps in denoise_timesteps_list:
+            case_key = f"denoise_timesteps{denoise_timesteps}"
+            case = summary["metrics"].get(case_key, {})
+            sr = case.get("success_rate")
+            avg = case.get("avg_steps")
+            sr_str = f"{sr*100:.1f}%" if sr is not None else "N/A"
+            avg_str = f"{avg}" if avg is not None else "N/A"
+            cprint(f"  --- denoise_timesteps={denoise_timesteps} ---", "cyan")
+            cprint(f"  Success Rate : {sr_str}", "green" if (sr or 0) >= 0.5 else "red")
+            cprint(f"  Avg Steps    : {avg_str}", "cyan")
+        cprint(f"  Results saved to: {eval_run_dir}", "cyan")
+        cprint("=" * 60, "cyan")
+
         return summary

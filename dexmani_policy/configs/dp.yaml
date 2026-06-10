@@ -13,17 +13,17 @@ action_key: action  # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 dataloader:
-  batch_size: 256
+  batch_size: 192
   shuffle: true
   num_workers: 8
   pin_memory: true
   persistent_workers: true
-  drop_last: false  # DDP 建议开启，防最后 batch 大小不均导致 all_reduce 失败
+  drop_last: false
 
 val_dataloader:
-  batch_size: 128
+  batch_size: 192
   shuffle: false
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   persistent_workers: false
   drop_last: false
@@ -43,22 +43,14 @@ dataset:
   rgb_preprocess_size: [240, 240]
   rgb_random_crop_size: [224, 224]
 
-  # ---- RGB 颜色增强 (CPU resize + crop 后执行, 224×224 float32 tensor) ----
-  # 参数参考 DexUMI 经验: 大亮度扰动应对光照变化, Grayscale/Blur 防过拟合
   rgb_aug:
     _target_: dexmani_policy.datasets.augmentation.ImageAug
-    brightness: 0.6
-    contrast: 0.3
-    saturation: 0.3
-    hue: 0.08
-    grayscale_prob: 0.2
-    prob: 1.0
-
-  # state 增强 (可选, 高斯噪声)
-  augmentation_cfg:
-    # state:
-    #   noise_std: 0.005
-    #   prob: 0.5
+    brightness: 0.3
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.05
+    grayscale_prob: 0.1
+    prob: 0.25
 
 agent:
   _target_: dexmani_policy.agents.core.dp.DPAgent
@@ -66,61 +58,24 @@ agent:
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
+
   modality_dropout_probs:
     joint_state: 0.0
 
-  # ---- backbone 选择 ----
-  # 当前: ResNet-18 from scratch
   rgb_backbone_name: resnet
   rgb_backbone_config:
     model_name: resnet18
     weights: null
     tune_mode: full
     norm_mode: group_norm
-    # image_size 需与 dataset.rgb_random_crop_size (or rgb_preprocess_size) 一致，
-    # 避免 GPU 侧第二次 resize。设为 null 则使用 ImageProcessor preset 默认值。
-    image_size: [224, 224]
+    image_size: ${dataset.rgb_random_crop_size}
 
-  # ================================================================
-  # 备选 backbone
-  # ================================================================
-  #
-  # ViT backbone (dino/clip/siglip) 共用参数:
-  #   tune_mode: freeze (冻结) | lora (LoRA微调,需peft) | full (全量微调)
-  #   global_token_type: avg (推荐, patch均值) | cls
-  #
-  # -------- DINOv2 (dim 768) --------
-  # 模型: facebook/dinov2-small (22M) / facebook/dinov2-base (86M)
   # rgb_backbone_name: dino
   # rgb_backbone_config:
-  #   model_name: facebook/dinov2-small
-  #   tune_mode: freeze
+  #   model_name: facebook/dinov2-base
+  #   tune_mode: freeze  #lora
   #   global_token_type: avg
-  #
-  # -------- CLIP (dim 768) --------
-  # 模型: openai/clip-vit-base-patch32 (88M)
-  # rgb_backbone_name: clip
-  # rgb_backbone_config:
-  #   model_name: openai/clip-vit-base-patch32
-  #   tune_mode: freeze
-  #   global_token_type: avg
-  #
-  # -------- SigLIP (dim 768) --------
-  # 模型: google/siglip-base-patch16-224 (94M)
-  # rgb_backbone_name: siglip
-  # rgb_backbone_config:
-  #   model_name: google/siglip-base-patch16-224
-  #   tune_mode: freeze
-  #   global_token_type: avg
-  #
-  # -------- ResNet-18 from scratch (dim 512) --------
-  # 无预训练, GroupNorm, 需同步设 optimizer.obs_lr 为非零.
-  # rgb_backbone_name: resnet
-  # rgb_backbone_config:
-  #   model_name: resnet18
-  #   weights: null
-  #   tune_mode: full
-  #   norm_mode: group_norm
+  #   image_size: ${dataset.rgb_random_crop_size}
 
   state_dim: 19
 
@@ -133,12 +88,13 @@ agent:
 
   num_training_steps: 100
   num_inference_steps: 10
-  prediction_type: epsilon
+  prediction_type: sample
 
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
-  obs_lr: 1.0e-4
+  obs_lr: 1.0e-4  # full
+  # obs_lr: 5.0e-5  # LoRA
   obs_weight_decay: 1.0e-6
   betas: [0.95, 0.999]
 
@@ -173,17 +129,25 @@ workspace:
 training:
   seed: ${seed}
   device: cuda:0
+
+  # ── 加速 ──
+  use_bfloat16: false
+  use_compile: true
+
+  # ── EMA ──
   use_ema: true
   use_ema_teacher_for_consistency: false
+
+  # ── 优化器调度 ──
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
-  use_bfloat16: false  # BF16 mixed precision (Ampere+ GPUs, ~2x speedup)
+
   loop:
     num_epochs: 1000
     log_interval_steps: 50
     val_interval_epochs: 25
-    eval_interval_epochs: 250
+    eval_interval_epochs: 100
     sample_interval_epochs: 5
 
 
@@ -191,13 +155,12 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  env_video_fps: 10
-  default_eval_episodes: 25
+  env_video_fps: 15
+  default_eval_episodes: 20
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
-# ---- offline eval (eval_sim.py)
 eval:
   seed: 0
   offline:

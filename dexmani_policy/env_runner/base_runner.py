@@ -23,9 +23,7 @@ class BaseRunner:
         self.env_video_fps = env_video_fps
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
-        self.dropped_keys_warned = False
 
-        
     @staticmethod
     def stack_last_n(all_items, n_steps):
         all_list = list(all_items)
@@ -75,9 +73,6 @@ class BaseRunner:
                 dropped_keys.append(k)
         if len(out) == 0:
             raise RuntimeError("Stacked observation dict is empty")
-        if dropped_keys and not self.dropped_keys_warned:
-            cprint(f"⚠️ Dropped obs keys {dropped_keys} (not in sensor_modalities={self.sensor_modalities})", "yellow")
-            self.dropped_keys_warned = True
         return out
 
 
@@ -98,7 +93,6 @@ class BaseRunner:
 
     def reset(self):
         self.obs_deque.clear()
-        self.dropped_keys_warned = False
 
 
     @torch.no_grad()

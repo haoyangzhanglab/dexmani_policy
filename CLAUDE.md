@@ -137,11 +137,12 @@ dexmani_policy/
 - `eval.seed: 0` 固定，保证同一 checkpoint 多次评测可复现
 - Normalizer: `mode='limits'`，train+val 全量拟合 → [-1,1]；`range_eps=1e-4`（与官方 diffusion_policy 一致），低方差维度 zero-center 不缩放（scale=1.0, offset=-mean）
 - 数据增强默认禁用，通过 `prob` 控制执行概率；`pc_dim` 必须与 Zarr 点云通道数一致
+- 数据增强（`augmentation_cfg`）与 modality dropout（`modality_dropout_probs`）职责不同：增强生成合理的观测变体（加噪、旋转、颜色抖动），在 Dataset 层 normalize 前执行；modality dropout 是模型正则化，故意将整个模态置零来防止过拟合，在 Agent 层 normalize 后执行。详见 `configs/augmentation_example.yaml`
 - SequenceSampler：短于 8 帧的 episode 自动 warn + skip（不 crash）；边界 padding 复制首尾帧
 - 配置全链路可追踪，所有 YAML key 均可追溯到代码消费点，**无 dead config**
 
 ### 训练
-- `modality_dropout_probs`: per-modality 独立 dropout，仅对已归一化模态生效（`k in normalizer.params_dict`），truncate 前执行，同一样本两时序步共享 dropout 状态
+- `modality_dropout_probs`: **模型正则化**（非数据增强）。per-modality 独立 dropout，仅对已归一化模态生效（`k in normalizer.params_dict`），truncate 前执行，同一样本两时序步共享 dropout 状态。语义为"该模态完全不可用"，与数据增强的"生成合理变体"不同
 - FlowMatch `target_t` 语义：`target_t=0` → 预测瞬时速度 `v = x1-x0`（rectified flow 直线路径的解析导数）；`target_t>0` → 预测向 x1 的速度。直线路径下两者目标一致
 - FlowMatch consistency training：Teacher EMA 估计 `pred_x1_ct` → 推导 target velocity → 学生 MSE 匹配。t_next=1.0 时 target 退化为精确的 `x1-x0`（约 45% 样本）。Teacher 在 `no_grad()` + `eval()` 下运行
 - `use_ema_teacher_for_consistency=true` 仅 ManiFlow 需要：推理时 `target_t=dt>0` 依赖 consistency 训练泛化

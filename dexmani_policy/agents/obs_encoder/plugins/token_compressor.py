@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def gather_tokens(x, idx):
@@ -22,38 +23,85 @@ class Mlp(nn.Module):
 
 
 class SelfAttn(nn.Module):
+    """Self-attention with ``F.scaled_dot_product_attention`` → Flash Attention."""
+
     def __init__(self, dim, num_heads, dropout=0.0):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(
-            dim,
-            num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
+        self.dropout = dropout
 
     def forward(self, x):
+        B, N, C = x.shape
         h = self.norm(x)
-        h, _ = self.attn(h, h, h, need_weights=False)
+        qkv = (
+            self.qkv(h)
+            .reshape(B, N, 3, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        q, k, v = qkv.unbind(0)
+        h = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        h = h.permute(0, 2, 1, 3).reshape(B, N, C)
+        h = self.proj(h)
         return x + h
 
 
 class CrossAttn(nn.Module):
+    """Cross-attention with ``F.scaled_dot_product_attention`` → Flash Attention.
+
+    ``kv_mask`` follows the ``nn.MultiheadAttention.key_padding_mask`` convention:
+    ``(B, S)`` bool where ``True`` = ignore this KV token.
+    """
+
     def __init__(self, dim, num_heads, dropout=0.0):
         super().__init__()
         self.norm_q = nn.LayerNorm(dim)
         self.norm_kv = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(
-            dim,
-            num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.q_proj = nn.Linear(dim, dim)
+        self.kv_proj = nn.Linear(dim, dim * 2)
+        self.proj = nn.Linear(dim, dim)
+        self.dropout = dropout
 
     def forward(self, q, kv, kv_mask=None):
+        B, Nq, C = q.shape
+        _, Nkv, _ = kv.shape
+
         qn = self.norm_q(q)
         kvn = self.norm_kv(kv)
-        h, _ = self.attn(qn, kvn, kvn, key_padding_mask=kv_mask, need_weights=False)
+
+        q_proj = (
+            self.q_proj(qn)
+            .reshape(B, Nq, self.num_heads, self.head_dim)
+            .permute(0, 2, 1, 3)
+        )
+        kv_proj = (
+            self.kv_proj(kvn)
+            .reshape(B, Nkv, 2, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        k, v = kv_proj.unbind(0)
+
+        attn_mask = None
+        if kv_mask is not None:
+            # key_padding_mask (B, S) bool → SDPA additive mask (B, 1, 1, S)
+            attn_mask = torch.zeros(B, 1, 1, Nkv, dtype=q_proj.dtype, device=q_proj.device)
+            attn_mask = attn_mask.masked_fill(kv_mask[:, None, None, :], float("-inf"))
+
+        h = F.scaled_dot_product_attention(
+            q_proj, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        h = h.permute(0, 2, 1, 3).reshape(B, Nq, C)
+        h = self.proj(h)
         return q + h
 
 

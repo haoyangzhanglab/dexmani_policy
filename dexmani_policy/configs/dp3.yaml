@@ -18,7 +18,7 @@ dataloader:
   num_workers: 8
   pin_memory: true
   persistent_workers: true
-  drop_last: false  # DDP 建议开启，防最后 batch 大小不均导致 all_reduce 失败
+  drop_last: false
 
 val_dataloader:
   batch_size: 256
@@ -40,7 +40,14 @@ dataset:
   max_train_episodes: null
   sensor_modalities: ["joint_state", "point_cloud"]
 
-  # augmentation_cfg: see configs/augmentation_example.yaml
+  # ── 点云随机增强（取消注释以开启）──────────────────────────────
+  # augmentation_cfg:
+  #   pc:
+  #     coord_noise: {noise_std: 0.002, ratio: 0.3, prob: 0.8}   # XYZ 子集高斯噪声
+  #     dropout:     {dropout_ratio: 0.3, prob: 0.5}              # 丢点并用保留点随机填充
+  #     # color:    {brightness: 0.125, contrast: 0.5, saturation: 0.5, prob: 0.8}  # 需要 pc_dim>=6
+  #   state:
+  #     noise:       {noise_std: 0.005, prob: 0.5}                # 关节状态噪声
 
 agent:
   _target_: dexmani_policy.agents.core.dp3.DP3Agent
@@ -106,12 +113,20 @@ workspace:
 training:
   seed: ${seed}
   device: cuda:0
+
+  # ── 加速 ──
+  use_bfloat16: false
+  use_compile: false
+
+  # ── EMA ──
   use_ema: true
   use_ema_teacher_for_consistency: false
+
+  # ── 优化器调度 ──
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
-  use_bfloat16: false  # BF16 mixed precision (Ampere+ GPUs, ~2x speedup)
+
   loop:
     num_epochs: 1000
     log_interval_steps: 50
@@ -124,13 +139,12 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  env_video_fps: 10
+  env_video_fps: 15
   default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
-# ---- offline eval (eval_sim.py)
 eval:
   seed: 0
   offline:

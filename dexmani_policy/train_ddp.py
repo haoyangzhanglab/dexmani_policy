@@ -103,10 +103,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     if rank == 0 and cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
         env_runner = hydra.utils.instantiate(cfg.env_runner)
 
-    ddp_model = DDP(model, device_ids=[actual_gpu_id], output_device=actual_gpu_id,
-                    find_unused_parameters=False)
-
-    # 加载 checkpoint（在 scheduler 前获取 global_step 用于 last_epoch）
+    # 加载 checkpoint — 必须在 torch.compile 之前，避免用随机权重编译后再
+    # 因 load_state_dict 触发 guard 失效重编译。
     try:
         ckpt_path = checkpoint_store.resolve_path("latest")
         checkpoint = checkpoint_store.load(ckpt_path)
@@ -117,6 +115,15 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         resume_state = (checkpoint.global_step, checkpoint.epoch + 1)
     except FileNotFoundError:
         resume_state = (0, 0)
+
+    # torch.compile 必须在 DDP 包装前、checkpoint 加载后
+    if cfg.training.get('use_compile', False):
+        model = torch.compile(model)
+        if ema_model is not None:
+            ema_model = torch.compile(ema_model)
+
+    ddp_model = DDP(model, device_ids=[actual_gpu_id], output_device=actual_gpu_id,
+                    find_unused_parameters=False)
 
     total_steps = batches_per_epoch * cfg.training.loop.num_epochs
     scheduler = get_scheduler(
@@ -142,6 +149,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         max_grad_norm=cfg.training.get('max_grad_norm', 1.0),
         use_bfloat16=cfg.training.get('use_bfloat16', False),
+        use_compile=False,  # already applied before DDP wrapping above
         is_main_process=(rank == 0),
         distributed=True,
         train_sampler=train_sampler,

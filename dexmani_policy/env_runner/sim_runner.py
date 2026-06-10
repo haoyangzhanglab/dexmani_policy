@@ -40,7 +40,7 @@ class SimRunner(BaseRunner):
     def make_env(self):
         env_module = importlib.import_module(f"{ENV_PREFIX}.{self.task_name}")
         env_class = getattr(env_module, self.name_to_pascal_case(self.task_name))
-        return env_class(render_mode="rgb_array", **self.env_kwargs)
+        return env_class(render_mode="rgb_array", record_video=True, **self.env_kwargs)
 
 
     def get_seed_list(self) -> List[int]:

@@ -23,7 +23,7 @@ dataloader:
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
-  drop_last: false  # DDP 建议开启，防最后 batch 大小不均导致 all_reduce 失败
+  drop_last: false
 
 val_dataloader:
   batch_size: 64
@@ -44,24 +44,23 @@ agent:
   state_dim: 19
   state_out_dim: 64
 
-  # backbone (DiT)
+  # DiT backbone
   n_emb: 512
   num_heads: 8
   n_layers: 6
   mlp_ratio: 4.0
   qkv_bias: true
 
-  # action decoder
   action_decoder_type: diffusion  # diffusion | flowmatch
 
-  # action decoder (Diffusion)
+  # Diffusion
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
 
-  # action decoder (FlowMatch)
+  # FlowMatch（action_decoder_type=flowmatch 时生效）
   flow_num_inference_steps: 10
-  flow_t_sample_mode: beta  # uniform | beta | lognorm | mode | cosmap
+  flow_t_sample_mode: beta
   flow_beta_alpha: 1.0
   flow_beta_beta: 1.5
 
@@ -110,12 +109,20 @@ workspace:
 training:
   seed: ${seed}
   device: cuda:0
+
+  # ── 加速 ──
+  use_bfloat16: false
+  use_compile: false
+
+  # ── EMA ──
   use_ema: true
   use_ema_teacher_for_consistency: false
+
+  # ── 优化器调度 ──
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
-  use_bfloat16: false  # BF16 mixed precision (Ampere+ GPUs, ~2x speedup)
+
   loop:
     num_epochs: 1000
     log_interval_steps: 50
@@ -127,7 +134,7 @@ training:
 env_runner:
   _target_: dexmani_policy.env_runner.multi_task_sim_runner.MultiTaskSimRunner
   n_obs_steps: ${n_obs_steps}
-  env_video_fps: 10
+  env_video_fps: 15
   default_eval_episodes: 20
   sensor_modalities: ${dataset.datasets[0].sensor_modalities}
   task_configs:
@@ -144,7 +151,6 @@ env_runner:
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
-# ---- offline eval (eval_sim.py)
 eval:
   seed: 0
   offline:

@@ -39,6 +39,7 @@ class Trainer:
         use_ema_teacher_for_consistency: bool,
         max_grad_norm: float = 1.0,
         use_bfloat16: bool = False,
+        use_compile: bool = False,
         is_main_process: bool = True,
         distributed: bool = False,
         train_sampler = None,
@@ -70,6 +71,7 @@ class Trainer:
         self.use_ema_teacher_for_consistency = use_ema_teacher_for_consistency and self.use_ema
 
         self.use_bfloat16 = use_bfloat16
+        self.use_compile = use_compile
 
         self.is_main_process = is_main_process
         self.distributed = distributed
@@ -80,7 +82,14 @@ class Trainer:
 
     @property
     def raw_model(self):
-        return self.model.module if hasattr(self.model, 'module') else self.model
+        model = self.model
+        # Unwrap DDP wrapper
+        if hasattr(model, 'module'):
+            model = model.module
+        # Unwrap torch.compile wrapper (OptimizedModule)
+        if hasattr(model, '_orig_mod'):
+            model = model._orig_mod
+        return model
 
     def apply_gradient_step(self):
         if self.max_grad_norm > 0:
@@ -241,14 +250,25 @@ class Trainer:
     def _evaluate_and_log(self, eval_model):
         return self.evaluate(eval_model) if self.env_runner is not None else {}
 
+    @staticmethod
+    def _unwrap_state_dict(model, prefix='_orig_mod.'):
+        """Return state_dict with ``_orig_mod.`` (torch.compile) prefix stripped if present."""
+        sd = model.state_dict()
+        first_key = next(iter(sd.keys()))
+        if first_key.startswith(prefix):
+            sd = {k.removeprefix(prefix): v for k, v in sd.items()}
+        return sd
+
     def _save_epoch_checkpoint(self, epoch, global_step, checkpoint_model, test_mean_score):
         """Build and save a checkpoint, update topk tracker, and refresh latest symlink."""
         monitor = {"test_mean_score": test_mean_score} if test_mean_score is not None else {}
+        # checkpoint_model is already self.raw_model (unwrapped), but EMA may still
+        # be wrapped by torch.compile – unwrap before serialising to keep keys clean.
         checkpoint = TrainCheckpoint(
             epoch=epoch,
             global_step=global_step,
             model_state=checkpoint_model.state_dict(),
-            ema_model_state=self.ema_model.state_dict() if self.use_ema else None,
+            ema_model_state=self._unwrap_state_dict(self.ema_model) if self.use_ema else None,
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             monitor=monitor,
@@ -336,6 +356,20 @@ class Trainer:
         if self.use_ema:
             self.ema_model.to(self.device)
             self.ema_model.eval()
+
+        if self.use_compile:
+            if hasattr(self.model, 'compile_backbone'):
+                # Only compile the DiTX backbone; the encoder uses pytorch3d ops
+                # (FPS/BallQuery) that are incompatible with torch.compile.
+                # Both the main model and the EMA model get compiled so that
+                # EMAModel.step()'s zip(modules(), modules()) stays aligned.
+                self.model.compile_backbone(mode='reduce-overhead')
+                if self.ema_model is not None:
+                    self.ema_model.compile_backbone(mode='reduce-overhead')
+            else:
+                self.model = torch.compile(self.model)
+                if self.use_ema:
+                    self.ema_model = torch.compile(self.ema_model)
 
         optimizer_to(self.optimizer, self.device)
         self.optimizer.zero_grad(set_to_none=True)

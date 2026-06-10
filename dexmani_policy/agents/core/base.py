@@ -210,7 +210,6 @@ class DiTXFlowMatchAgent(BaseAgent):
         dt_sample_mode_for_consistency: str = 'uniform',
         target_t_sample_mode: str = 'relative',
         modality_dropout_probs: dict = None,
-        use_compile: bool = False,
     ):
         backbone = DiTXFlowMatch(
             horizon=horizon,
@@ -240,7 +239,16 @@ class DiTXFlowMatchAgent(BaseAgent):
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
                          modality_dropout_probs=modality_dropout_probs)
-        if use_compile:
-            self.action_decoder.model = torch.compile(self.action_decoder.model)
+
+    def compile_backbone(self, **compile_kwargs):
+        """torch.compile only the DiTX backbone, skipping the encoder (pytorch3d ops
+        are incompatible with torch.compile)."""
+        self.action_decoder.model = torch.compile(
+            self.action_decoder.model, **compile_kwargs
+        )
+
+    def get_compiled_backbone(self):
+        """Return the (possibly compiled) backbone for EMA consistency teacher."""
+        return self.action_decoder.model
 
 

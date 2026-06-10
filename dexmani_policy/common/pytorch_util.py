@@ -47,6 +47,13 @@ def set_seed(seed: int):
 
 def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
     first_key = next(iter(state_dict.keys()))
+
+    # Strip _orig_mod. prefix (from torch.compile / OptimizedModule).
+    # This can coexist with module. (DDP), producing _orig_mod.module.xxx.
+    if first_key.startswith('_orig_mod.'):
+        state_dict = {k.removeprefix('_orig_mod.'): v for k, v in state_dict.items()}
+        first_key = next(iter(state_dict.keys()))
+
     is_checkpoint_ddp = first_key.startswith('module.')
 
     if is_checkpoint_ddp and not is_current_ddp:

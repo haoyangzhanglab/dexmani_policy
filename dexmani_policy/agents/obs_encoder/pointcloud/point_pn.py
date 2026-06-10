@@ -193,8 +193,8 @@ class LocalGeometryAggregation(nn.Module):
         relative_xyz_perm = relative_xyz.permute(0, 3, 1, 2).contiguous()  # (B, 3, G, K)
         pe = self.pos_enc(relative_xyz_perm)  # (B, out_dim, G, K)
 
-        # ---- Weigh gating (official Point-PN: add + multiply, in-place) ----
-        group_feat.add_(pe).mul_(pe)          # (B, out_dim, G, K)
+        # ---- Weigh gating (Point-PN: add + multiply, fused to avoid in-place) ----
+        group_feat = (group_feat + pe) * pe   # (B, out_dim, G, K)
         del pe
 
         # ---- residual blocks ----
@@ -343,9 +343,12 @@ class PointPNTokenizer(nn.Module):
                 pointcloud,
                 pointcloud[:, -1:].expand(-1, pad_n, -1)], dim=1)
 
-        xyz = pointcloud[..., :3]
+        feat_dtype = pointcloud.dtype
+        xyz = pointcloud[..., :3].float()                                   # always fp32 for pytorch3d
         point_feature = pointcloud[..., :self.input_channels].transpose(1, 2).contiguous()
         final_xyz, final_point_feature, intermediate_outputs = self.encoder(xyz, point_feature)
+        if final_point_feature.dtype != feat_dtype:
+            final_point_feature = final_point_feature.to(feat_dtype)
 
         patch_token = final_point_feature.permute(0, 2, 1).contiguous()
         patch_center = final_xyz
