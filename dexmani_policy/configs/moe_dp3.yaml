@@ -56,6 +56,13 @@ agent:
   state_out_dim: 64
   num_points: 1024
 
+  # ── 点云数据增强（FPS 随机化，参考 R3D-Policy）──
+  fps_random_config:
+    use_random: true          # false → 完全确定性 FPS
+    random_start: true        # 随机起始点
+    random_noise_scale: 0.0   # FPS 距离噪声标准差（0=不加噪）
+    shuffle_output: true      # 随机打乱输出顺序
+
   num_experts: 8
   top_k: 2
   moe_hidden_dim: 256

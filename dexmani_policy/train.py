@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from termcolor import cprint
 
 from dexmani_policy.agents.common.param_counter import print_param_count
+from dexmani_policy.common.config_validation import validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn
 from dexmani_policy.common.resolver import register_resolvers
 from dexmani_policy.training.common.lr_scheduler import get_scheduler
@@ -121,19 +122,7 @@ def validate_config(cfg):
 
     _validate_augmentation_consistency(cfg)
 
-    # 校验 action_key 与 control_mode 一致性（防 CLI override 误配）
-    env_kwargs = cfg.get('env_runner', {}).get('env_kwargs', {})
-    if isinstance(env_kwargs, dict):
-        actual_control = env_kwargs.get('control_mode', 'joint')
-    else:
-        actual_control = 'joint'
-    expected_control = 'ee' if cfg.action_key == 'action_ee' else 'joint'
-    if actual_control != expected_control:
-        raise ValueError(
-            f"action_key='{cfg.action_key}' requires control_mode='{expected_control}', "
-            f"but env_runner.env_kwargs.control_mode='{actual_control}'. "
-            f"Check CLI overrides for env_runner.env_kwargs.control_mode."
-        )
+    validate_action_key_consistency(cfg)
 
     cprint("Config validation passed", "green")
 

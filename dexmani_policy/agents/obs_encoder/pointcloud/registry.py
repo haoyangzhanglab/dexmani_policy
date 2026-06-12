@@ -68,6 +68,7 @@ def build_pc_global_encoder(
         )
 
     cfg = merge_config(GLOBAL_ENCODER_CONFIGS[encoder_type], config)
+    fps_random_config = cfg.pop("fps_random_config", None)
 
     if encoder_type == "dp3":
         return PointNet(
@@ -90,6 +91,7 @@ def build_pc_global_encoder(
             stage_channels=cfg["stage_channels"],
             radii=cfg["radii"],
             num_neighbors=cfg["num_neighbors"],
+            fps_random_config=fps_random_config,
         )
 
 
@@ -105,6 +107,7 @@ def build_pc_patch_tokenizer(
         )
 
     cfg = merge_config(PATCH_TOKENIZER_CONFIGS[tokenizer_type], config)
+    fps_random_config = cfg.pop("fps_random_config", None)
 
     if tokenizer_type == "pointpn":
         return PointPNTokenizer(
@@ -117,6 +120,7 @@ def build_pc_patch_tokenizer(
             stage_lga_blocks=cfg["stage_lga_blocks"],
             stage_channel_expansion=cfg["stage_channel_expansion"],
             point_cloud_type=cfg["point_cloud_type"],
+            fps_random_config=fps_random_config,
         )
 
     if tokenizer_type == "pointnext_tokenizer":
@@ -127,4 +131,5 @@ def build_pc_patch_tokenizer(
             num_patches=cfg["num_patches"],
             patch_radii=cfg["patch_radii"],
             patch_neighbors=cfg["patch_neighbors"],
+            fps_random_config=fps_random_config,
         )

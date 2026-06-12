@@ -65,17 +65,10 @@ agent:
   rgb_backbone_name: resnet
   rgb_backbone_config:
     model_name: resnet18
-    weights: null
+    weights: IMAGENET1K_V1
     tune_mode: full
     norm_mode: group_norm
     image_size: ${dataset.rgb_random_crop_size}
-
-  # rgb_backbone_name: dino
-  # rgb_backbone_config:
-  #   model_name: facebook/dinov2-base
-  #   tune_mode: freeze  #lora
-  #   global_token_type: avg
-  #   image_size: ${dataset.rgb_random_crop_size}
 
   state_dim: 19
 
@@ -93,8 +86,7 @@ agent:
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
-  obs_lr: 1.0e-4  # full
-  # obs_lr: 5.0e-5  # LoRA
+  obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
   betas: [0.95, 0.999]
 

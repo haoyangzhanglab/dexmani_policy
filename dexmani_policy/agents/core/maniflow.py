@@ -16,13 +16,17 @@ class ManiFlowObsEncoder(nn.Module):
         n_obs_steps: int,
         state_out_dim: int = 64,
         pc_encoder_config: dict = None,
+        fps_random_config: dict = None,
     ):
         super().__init__()
+        pc_encoder_config = dict(pc_encoder_config or {})
+        pc_encoder_config.setdefault("fps_random_config", fps_random_config)
         self.pc_encoder = build_pc_patch_tokenizer(encoder_type, pc_dim, pc_encoder_config)
         self.state_mlp = StateMLP(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps
+        self.fps_random_config = fps_random_config or {}
         patch_seq_len, pc_out_dim = self.pc_encoder.out_shape  # (num_patches, channels)
         self.num_obs_tokens = (patch_seq_len + 1) * n_obs_steps   # (patches + global) * T
         self.obs_token_dim = pc_out_dim + self.state_mlp.out_dim
@@ -36,7 +40,8 @@ class ManiFlowObsEncoder(nn.Module):
         if pc.dtype != torch.float32:
             pc = pc.float()
         if pc.shape[1] > self.num_points:
-            pc, _ = farthest_point_sample(pc, self.num_points)
+            pc, _ = farthest_point_sample(pc, self.num_points,
+                                           **self.fps_random_config)
         pc_outputs = self.pc_encoder(pc, return_global_token=True)
         patch_token, _, global_token = pc_outputs[0], pc_outputs[1], pc_outputs[2]
         pc_feat = torch.cat([global_token, patch_token], dim=1)
@@ -63,11 +68,13 @@ class ManiFlowAgent(DiTXFlowMatchAgent):
         num_points: int,
         state_out_dim: int = 64,
         pc_encoder_config: dict = None,
+        fps_random_config: dict = None,
         **kwargs,
     ):
         obs_encoder = ManiFlowObsEncoder(
             encoder_type, pc_dim, state_dim, num_points,
             n_obs_steps, state_out_dim, pc_encoder_config,
+            fps_random_config=fps_random_config,
         )
         super().__init__(
             obs_encoder,

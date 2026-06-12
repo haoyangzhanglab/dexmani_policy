@@ -7,27 +7,12 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings impo
     SinusoidalPosEmb3D,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
+    PointMLP,
     farthest_point_sample,
     index_points,
+    normalize_relative_xyz,
     query_ball_point,
 )
-
-
-def normalize_relative_xyz(relative_xyz: torch.Tensor, radius: float, eps: float = 1e-6) -> torch.Tensor:
-    return relative_xyz / max(radius, eps)
-
-
-class PointMLP(nn.Module):
-    def __init__(self, input_channels: int, output_channels: int, use_activation: bool = True):
-        super().__init__()
-        self.linear = nn.Linear(input_channels, output_channels)
-        self.norm = nn.LayerNorm(output_channels)
-        self.activation = nn.GELU() if use_activation else nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear(x)
-        x = self.norm(x)
-        return self.activation(x)
 
 
 class LocalPatchEncoder(nn.Module):
@@ -67,12 +52,14 @@ class MultiScalePatchTokenizer(nn.Module):
         num_patches: int,
         patch_radii: Tuple[float, ...],
         patch_neighbors: Tuple[int, ...],
+        fps_random_config: dict | None = None,
     ):
         super().__init__()
         if len(patch_radii) != len(patch_neighbors):
             raise ValueError("patch_radii and patch_neighbors must have the same length")
 
         self.num_patches = num_patches
+        self.fps_random_config = fps_random_config or {}
         self.scale_encoders = nn.ModuleList(
             [
                 LocalPatchEncoder(stem_channels, token_channels, radius, neighbors)
@@ -86,7 +73,8 @@ class MultiScalePatchTokenizer(nn.Module):
         )
 
     def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
-        patch_center, patch_center_idx = farthest_point_sample(xyz, self.num_patches)
+        patch_center, patch_center_idx = farthest_point_sample(
+            xyz, self.num_patches, **self.fps_random_config)
         patch_center_feature = index_points(point_feature, patch_center_idx)
 
         multi_scale_patch_feature_list = [
@@ -112,6 +100,7 @@ class PointNextPatchTokenizer(nn.Module):
         num_patches: int = 64,
         patch_radii: Tuple[float, ...] = (0.04, 0.08),
         patch_neighbors: Tuple[int, ...] = (16, 32),
+        fps_random_config: dict | None = None,
     ):
         super().__init__()
         if input_channels < 3:
@@ -131,6 +120,7 @@ class PointNextPatchTokenizer(nn.Module):
             num_patches=num_patches,
             patch_radii=patch_radii,
             patch_neighbors=patch_neighbors,
+            fps_random_config=fps_random_config,
         )
         self.global_position_embedding = SinusoidalPosEmb3D(96)
         self.global_position_projection = nn.Sequential(

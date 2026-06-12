@@ -8,6 +8,21 @@ from dexmani_policy.common.pytorch_util import dict_apply
 
 
 class BaseRunner:
+    """Abstract environment runner for agent evaluation.
+
+    Manages the evaluation loop for a single task:
+
+    - Maintains an observation deque and stacks the last ``n_obs_steps``
+      frames for the agent's observation window.
+    - Runs ``num_episodes`` trials, each starting from ``env.reset()`` and
+      stepping until termination or ``max_steps``.
+    - Collects video frames and success/failure outcomes per episode.
+    - Handles evaluation errors per-episode (continues to next episode on
+      failure rather than aborting the entire run).
+
+    Subclasses override ``run()`` to adapt to specific environment types
+    (single-task sim, multi-task sim, real robot, etc.).
+    """
     def __init__(
         self,
         n_obs_steps: int,
@@ -107,8 +122,7 @@ class BaseRunner:
         self.update_obs(obs)
 
         truncated = False
-        done = False
-        prev_done = False
+        prev_success = False
         task_done_step = None  # None 表示未成功完成，区分于成功时的 action_cnt
         device = next(agent.parameters()).device
 
@@ -119,16 +133,15 @@ class BaseRunner:
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
                 self.update_obs(obs)
 
-                if done and not prev_done:
+                episode_success = info.get("success", done)
+                if episode_success and not prev_success:
                     task_done_step = getattr(env, 'action_cnt', None)
-                prev_done = done
+                prev_success = episode_success
 
-                # dexmani_sim 不实现 done auto-reset，done 后继续 step 仅产生多余动作，不会 crash。
-                # 与实机 teleoperation 行为一致：无自动终止信号，走满固定步数。
                 if truncated:
                     break
 
-        return done, task_done_step
+        return prev_success, task_done_step
     
 
     def run(self, agent, denoise_timesteps:int=None, eval_episodes:int=None):

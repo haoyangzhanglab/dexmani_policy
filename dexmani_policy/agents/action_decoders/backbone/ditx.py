@@ -6,6 +6,9 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from timm.models.vision_transformer import Mlp, use_fused_attn, RmsNorm
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
+
+WEIGHT_INIT_STD = 0.02
+"""Standard deviation for normal weight initialization across all DiTX modules."""
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -274,6 +277,21 @@ class FinalLayer(nn.Module):
 
 
 class DiTXFlowMatch(nn.Module):
+    """DiT-X backbone for Flow Matching (ManiFlow).
+
+    Extends the DiT architecture with cross-attention blocks where observation
+    tokens attend to action tokens, and dual timestep embeddings for flow
+    matching (timestep + target_t fused via linear layer).
+
+    Key differences from ``DiT_Diffusion``:
+        - Action tokens attend to observation tokens via ``CrossAttention``.
+        - Dual ``SinusoidalPosEmb`` encoders for (timestep, target_t) fused
+          into a single conditioning vector.
+        - ``AdaLNZero`` modulation in ``DiTXBlock`` for stable training
+          initialization.
+        - Optional token compression (``TokenCompressor``) to reduce
+          observation token count.
+    """
     def __init__(
         self,
         horizon: int,
@@ -362,27 +380,27 @@ class DiTXFlowMatch(nn.Module):
         if self.pre_norm_modality:
             self.context_norm.initialize_weights()
 
-        nn.init.normal_(self.input_embedder.weight, std=0.02)
+        nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.input_embedder.bias, 0) if self.input_embedder.bias is not None else None
-        nn.init.normal_(self.input_pos_embed, std=0.02)
+        nn.init.normal_(self.input_pos_embed, std=WEIGHT_INIT_STD)
 
-        nn.init.normal_(self.context_embedder.weight, std=0.02)
+        nn.init.normal_(self.context_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.context_embedder.bias, 0) if self.context_embedder.bias is not None else None
-        nn.init.normal_(self.context_pos_embed, std=0.02)
+        nn.init.normal_(self.context_pos_embed, std=WEIGHT_INIT_STD)
 
         for layer in self.timestep_embedder:
             if isinstance(layer, nn.Linear):
-                nn.init.normal_(layer.weight, std=0.02)
+                nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
                 if layer.bias is not None:
                     nn.init.constant_(layer.bias, 0)
 
         for layer in self.target_t_embedder:
             if isinstance(layer, nn.Linear):
-                nn.init.normal_(layer.weight, std=0.02)
+                nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
                 if layer.bias is not None:
                     nn.init.constant_(layer.bias, 0)
 
-        nn.init.normal_(self.timestep_and_target_t_fusion.weight, std=0.02)
+        nn.init.normal_(self.timestep_and_target_t_fusion.weight, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.timestep_and_target_t_fusion.bias, 0)
 
         nn.init.constant_(self.final_layer.ffn_final.fc2.weight, 0)
@@ -431,6 +449,15 @@ class DiTXFlowMatch(nn.Module):
 
 
 class DiTXDiffusion(nn.Module):
+    """DiT-X backbone for Diffusion (MultiTask).
+
+    Same cross-attention architecture as ``DiTXFlowMatch`` but adapted for
+    the diffusion paradigm: single timestep embedding (no target_t),
+    prediction head matches the diffusion target (epsilon/sample/v_prediction).
+
+    Uses the same ``DiTXBlock`` (self-attention + cross-attention + MLP)
+    and ``FinalLayer`` building blocks.
+    """
     def __init__(
         self,
         horizon: int,
@@ -510,19 +537,19 @@ class DiTXDiffusion(nn.Module):
         if self.pre_norm_modality:
             self.context_norm.initialize_weights()
 
-        nn.init.normal_(self.input_embedder.weight, std=0.02)
+        nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.input_embedder.bias, 0) if self.input_embedder.bias is not None else None
-        nn.init.normal_(self.input_pos_embed, std=0.02)
+        nn.init.normal_(self.input_pos_embed, std=WEIGHT_INIT_STD)
 
-        nn.init.normal_(self.context_embedder.weight, std=0.02)
+        nn.init.normal_(self.context_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.context_embedder.bias, 0) if self.context_embedder.bias is not None else None
-        nn.init.normal_(self.context_pos_embed, std=0.02)
+        nn.init.normal_(self.context_pos_embed, std=WEIGHT_INIT_STD)
 
 
 
         for layer in self.timestep_embedder:
             if isinstance(layer, nn.Linear):
-                nn.init.normal_(layer.weight, std=0.02)
+                nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
                 if layer.bias is not None:
                     nn.init.constant_(layer.bias, 0)
 

@@ -9,6 +9,11 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
     resolve_stage_values,
 )
 
+_MIN_CHANNELS = 32
+"""Minimum channels in ResidualBlock hidden layer."""
+_MIN_HIDDEN = 16
+"""Minimum hidden dimension in LocalGeometryAggregation."""
+
 
 class PointGroupNorm(nn.Module):
     def __init__(self, num_channels: int, max_groups: int = 8):
@@ -52,7 +57,7 @@ class ResidualBlock(nn.Module):
     def __init__(self, channels: int, expansion: float = 0.5,
                  max_groups: int = 8, drop_path: float = 0.0):
         super().__init__()
-        hidden = max(int(channels * expansion), 32)
+        hidden = max(int(channels * expansion), _MIN_CHANNELS)
 
         groups1 = self._best_groups(hidden, max_groups)
         self.net1 = nn.Conv2d(channels, hidden, kernel_size=1, bias=False)
@@ -92,7 +97,7 @@ class LearnedPosE(nn.Module):
     """
     def __init__(self, out_dim: int, hidden_ratio: float = 0.25):
         super().__init__()
-        hidden = max(int(out_dim * hidden_ratio), 16)
+        hidden = max(int(out_dim * hidden_ratio), _MIN_HIDDEN)
         self.mlp = nn.Sequential(
             nn.Linear(4, hidden),           # x, y, z, distance
             nn.LayerNorm(hidden),
@@ -126,14 +131,17 @@ class Linear1Layer(nn.Module):
 
 
 class FPSBallQuery(nn.Module):
-    def __init__(self, num_centers: int, radius: float, max_neighbors: int):
+    def __init__(self, num_centers: int, radius: float, max_neighbors: int,
+                 fps_random_config: dict | None = None):
         super().__init__()
         self.num_centers = num_centers
         self.radius = radius
         self.max_neighbors = max_neighbors
+        self.fps_random_config = fps_random_config or {}
 
     def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
-        _, fps_idx = farthest_point_sample(xyz, self.num_centers)
+        _, fps_idx = farthest_point_sample(xyz, self.num_centers,
+                                           **self.fps_random_config)
         center_xyz = index_points(xyz, fps_idx)
         center_feature = index_points(point_feature, fps_idx)
 
@@ -219,8 +227,10 @@ class ParametricEncoder(nn.Module):
                  stage_num_neighbors, stage_lga_blocks,
                  stage_channel_expansion, point_cloud_type: str,
                  residual_expansion: float = 0.5, max_groups: int = 8,
-                 drop_path: float = 0.0):
+                 drop_path: float = 0.0,
+                 fps_random_config: dict | None = None):
         super().__init__()
+        self.fps_random_config = fps_random_config or {}
         self.raw_point_embedding = RawPointEmbedding(input_channels, embed_channels,
                                                      max_groups=max_groups)
         self.fps_ballquery_stages = nn.ModuleList()
@@ -246,7 +256,8 @@ class ParametricEncoder(nn.Module):
             self.fps_ballquery_stages.append(
                 FPSBallQuery(num_centers=num_centers,
                              radius=stage_radii[stage_index],
-                             max_neighbors=stage_num_neighbors[stage_index]))
+                             max_neighbors=stage_num_neighbors[stage_index],
+                             fps_random_config=self.fps_random_config))
             self.lga_stages.append(
                 LocalGeometryAggregation(
                     output_channels=current_channels,
@@ -294,7 +305,8 @@ class PointPNTokenizer(nn.Module):
                  point_cloud_type: str = "scan",
                  residual_expansion: float = 0.5,
                  max_groups: int = 8,
-                 drop_path: float = 0.0):
+                 drop_path: float = 0.0,
+                 fps_random_config: dict | None = None):
         super().__init__()
         if input_channels < 3:
             raise ValueError("input_channels must be at least 3 because xyz is required")
@@ -312,6 +324,7 @@ class PointPNTokenizer(nn.Module):
         self.input_channels = input_channels
         self.input_points = input_points
         self.num_stages = num_stages
+        self.fps_random_config = fps_random_config or {}
         self.num_patches = self._compute_num_patches(input_points, num_stages)
         self.output_channels = embed_channels
         for expansion in stage_channel_expansion:
@@ -329,14 +342,16 @@ class PointPNTokenizer(nn.Module):
             point_cloud_type=point_cloud_type,
             residual_expansion=residual_expansion,
             max_groups=max_groups,
-            drop_path=drop_path)
+            drop_path=drop_path,
+            fps_random_config=self.fps_random_config)
 
     def forward(self, pointcloud: torch.Tensor,
                 return_global_token: bool = False,
                 return_intermediate: bool = False):
         num_pts = pointcloud.size(1)
         if num_pts > self.input_points:
-            pointcloud, _ = farthest_point_sample(pointcloud, self.input_points)
+            pointcloud, _ = farthest_point_sample(pointcloud, self.input_points,
+                                                  **self.fps_random_config)
         elif num_pts < self.input_points:
             pad_n = self.input_points - num_pts
             pointcloud = torch.cat([

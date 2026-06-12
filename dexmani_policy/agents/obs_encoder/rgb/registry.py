@@ -5,7 +5,7 @@ from typing import Dict, Literal, Optional, Tuple
 from .common.image_processor import ImageProcessor
 from .common.utils import get_interpolation, to_hw
 
-BackboneName = Literal["resnet", "clip", "dino", "siglip"]
+BackboneName = Literal["resnet", "clip", "dino", "siglip", "r3m"]
 
 RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     "resnet": {
@@ -27,6 +27,11 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     },
     "siglip": {
         "model_name": "google/siglip-base-patch16-224",
+        "tune_mode": "freeze",
+        "global_token_type": "avg",
+    },
+    "r3m": {
+        "model_name": "resnet18",
         "tune_mode": "freeze",
         "global_token_type": "avg",
     },
@@ -76,6 +81,9 @@ def build_backbone(
     elif name == "siglip":
         from .siglip import SigLIP
         backbone = SigLIP(**cfg)
+    elif name == "r3m":
+        from .r3m import R3M
+        backbone = R3M(**cfg)
     else:
         raise ValueError(f"Unsupported backbone name: {name}")
 

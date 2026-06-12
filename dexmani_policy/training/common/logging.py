@@ -50,7 +50,7 @@ class JsonlLogger:
             return
         try:
             self.file.close()
-        except Exception:
+        except OSError:
             pass
         finally:
             self.file = None
@@ -120,7 +120,7 @@ class WandbLogger:
             return
         try:
             self.run.finish()
-        except Exception:
+        except OSError:
             pass
         finally:
             self.run = None

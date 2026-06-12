@@ -46,6 +46,12 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
         "image_std": (0.5, 0.5, 0.5),
         "interpolation": "bilinear",
     },
+    "r3m": {
+        "image_size": (224, 224),
+        "image_mean": (0.0, 0.0, 0.0),
+        "image_std": (1.0, 1.0, 1.0),
+        "interpolation": "bilinear",
+    },
 }
 
 

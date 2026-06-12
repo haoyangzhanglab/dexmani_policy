@@ -23,6 +23,23 @@ class TrainLoopConfig:
 
 
 class Trainer:
+    """Main training loop with EMA, validation, evaluation, and checkpointing.
+
+    Orchestrates the full training lifecycle across ``num_epochs``:
+
+    - **Training**: ``train_one_step()`` with mixed precision (bfloat16 AMP),
+      gradient clipping, and three-layer NaN protection (loss NaN → skip,
+      grad NaN → skip, DDP all_reduce sentinel).
+    - **Validation**: Run validation loss every ``val_interval_epochs``.
+    - **Evaluation**: Run sim evaluation every ``eval_interval_epochs`` via
+      ``env_runner`` (if configured).
+    - **Checkpointing**: Save at epoch end; top-K tracking by
+      ``test_mean_score``; latest symlink for resume.
+    - **EMA**: Exponential moving average of model weights, updated each step.
+
+    Supports single-GPU and DDP (via ``distributed=True``). In DDP, only rank
+    0 performs logging, checkpointing, and evaluation.
+    """
     def __init__(
         self,
         device,
@@ -148,7 +165,7 @@ class Trainer:
     def train_one_step(self, batch: Dict[str, Any]):
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = {'ema_backbone': self.ema_model.action_decoder.model} if self.use_ema_teacher_for_consistency else {}
-        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
+        with torch.amp.autocast(device_type=str(self.device).split(':')[0], dtype=torch.bfloat16, enabled=self.use_bfloat16):
             raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         if self.distributed:
@@ -185,7 +202,7 @@ class Trainer:
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
             loss_kwargs = {'ema_backbone': ema_backbone} if ema_backbone is not None else {}
-            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
+            with torch.amp.autocast(device_type=str(self.device).split(':')[0], dtype=torch.bfloat16, enabled=self.use_bfloat16):
                 loss, log_dict = agent.compute_loss(batch, **loss_kwargs)
 
             n = batch['action'].shape[0]
@@ -231,9 +248,8 @@ class Trainer:
         sample_batch = self.train_sampling_batch
         if sample_batch is None:
             sample_batch = dict_apply(last_batch, lambda x: x.to(self.device, non_blocking=True))
-        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_bfloat16):
+        with torch.amp.autocast(device_type=str(self.device).split(':')[0], dtype=torch.bfloat16, enabled=self.use_bfloat16):
             return {"sample/action_mse_error": eval_model.compute_action_mse(sample_batch)}
-        return {}
 
     def _validate_and_log(self, epoch):
         if self.val_loader is None:

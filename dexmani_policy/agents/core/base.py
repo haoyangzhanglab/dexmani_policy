@@ -68,11 +68,11 @@ class BaseAgent(nn.Module):
 
     def compute_loss(self, batch, **kwargs):
         cond, _ = self._build_cond(batch['obs'])
-        nactions = self.normalizer['action'].normalize(batch['action'])
-        return self.compute_loss_from_cond(cond, nactions, **kwargs)
+        normed_actions = self.normalizer['action'].normalize(batch['action'])
+        return self.compute_loss_from_cond(cond, normed_actions, **kwargs)
 
-    def compute_loss_from_cond(self, cond, nactions, **kwargs):
-        return self.action_decoder.compute_loss(cond, nactions, **kwargs)
+    def compute_loss_from_cond(self, cond, normed_actions, **kwargs):
+        return self.action_decoder.compute_loss(cond, normed_actions, **kwargs)
 
     @torch.no_grad()
     def predict_action(self, obs_dict: Dict, denoise_timesteps=None) -> Dict:

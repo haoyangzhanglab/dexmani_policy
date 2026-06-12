@@ -7,7 +7,7 @@ from typing import Union, Dict
 from dexmani_policy.common.pytorch_util import dict_apply
 
 
-def dfs_add(dest, keys, value: torch.Tensor):
+def dfs_add(dest: dict, keys: list[str], value: torch.Tensor):
     if len(keys) == 1:
         dest[keys[0]] = value
         return
@@ -16,7 +16,7 @@ def dfs_add(dest, keys, value: torch.Tensor):
     dfs_add(dest[keys[0]], keys[1:], value)
 
 
-def load_param_dict(state_dict, prefix):
+def load_param_dict(state_dict: dict, prefix: str) -> nn.ParameterDict:
     out_dict = nn.ParameterDict()
     for key, value in state_dict.items():
         value: torch.Tensor
@@ -157,6 +157,21 @@ def normalize_tensor(x, params, forward=True):
     return x
 
 class SingleFieldLinearNormalizer(DictOfTensorMixin):
+    """Linear normalizer for a single data field (joint_state or action).
+
+    Fits scale/offset parameters from data and applies affine transformation
+    to map data into ``[output_min, output_max]`` (default ``[-1, 1]``).
+
+    Supports two modes:
+
+    - ``"limits"``: min-max normalization. Low-variance dimensions
+      (range < ``range_eps``) are zero-centered without scaling to avoid
+      amplifying noise.
+    - ``"gaussian"``: z-score normalization (mean=0, std=1).
+
+    Implements ``DictOfTensorMixin`` for easy serialization with
+    ``torch.save``/``torch.load``.
+    """
 
     available_modes = ['limits', 'gaussian']
     

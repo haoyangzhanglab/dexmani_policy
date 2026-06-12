@@ -2,6 +2,9 @@ import numpy as np
 import torch
 import torchvision.transforms.v2 as v2
 
+_BT601_LUMA = (0.299, 0.587, 0.114)
+"""BT.601 luma coefficients for RGB-to-grayscale conversion."""
+
 
 
 class Aug:
@@ -78,7 +81,7 @@ class PointColorJitter(Aug):
         if self.saturation[0] == self.saturation[1]:
             return rgb
         factor = np.random.uniform(*self.saturation)
-        gray = np.dot(rgb, [0.299, 0.587, 0.114])[:, None]
+        gray = np.dot(rgb, _BT601_LUMA)[:, None]
         return rgb * factor + gray * (1.0 - factor)
 
     def _apply_hue(self, rgb):

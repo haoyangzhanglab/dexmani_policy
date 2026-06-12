@@ -54,8 +54,8 @@ class MultiTaskAgent(BaseAgent):
         # text embedding cache (可选)
         task_texts: list = None,
     ):
-        assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip"), \
-            f"rgb_backbone_name must be one of resnet/clip/dino/siglip, got {rgb_backbone_name}"
+        assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip", "r3m"), \
+            f"rgb_backbone_name must be one of resnet/clip/dino/siglip/r3m, got {rgb_backbone_name}"
         assert action_decoder_type in ("diffusion", "flowmatch"), \
             f"action_decoder_type must be 'diffusion' or 'flowmatch', got {action_decoder_type}"
 

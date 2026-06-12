@@ -1,6 +1,7 @@
+from typing import Optional, Union
+
 from diffusers.optimization import (
-    Union, SchedulerType, Optional,
-    Optimizer, TYPE_TO_SCHEDULER_FUNCTION
+    Optimizer, SchedulerType, TYPE_TO_SCHEDULER_FUNCTION,
 )
 import torch.optim.lr_scheduler as _lrs
 

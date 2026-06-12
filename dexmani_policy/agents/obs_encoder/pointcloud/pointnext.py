@@ -7,28 +7,13 @@ from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings impo
     SinusoidalPosEmb3D,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
+    PointMLP,
     group,
+    normalize_relative_xyz,
     resolve_stage_values,
     sample_and_group,
     sample_and_group_all,
 )
-
-
-def normalize_relative_xyz(relative_xyz: torch.Tensor, radius: float, eps: float = 1e-6) -> torch.Tensor:
-    return relative_xyz / max(radius, eps)
-
-
-class PointMLP(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
-        super().__init__()
-        self.linear = nn.Linear(in_channels, out_channels)
-        self.norm = nn.LayerNorm(out_channels)
-        self.activation = nn.GELU() if use_activation else nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear(x)
-        x = self.norm(x)
-        return self.activation(x)
 
 
 class SetAbstraction(nn.Module):
@@ -44,6 +29,7 @@ class SetAbstraction(nn.Module):
         is_head: bool = False,
         global_aggr: bool = False,
         position_encoding_channels: int = 16,
+        fps_random_config: dict | None = None,
     ):
         super().__init__()
         self.stride = stride
@@ -52,6 +38,7 @@ class SetAbstraction(nn.Module):
         self.is_head = is_head
         self.global_aggr = global_aggr
         self.use_residual = use_residual and (not is_head) and (not global_aggr)
+        self.fps_random_config = fps_random_config or {}
         self.relative_position_encoding = None if is_head else RelativePositionalEncoding3D(position_encoding_channels)
 
         if is_head:
@@ -98,6 +85,7 @@ class SetAbstraction(nn.Module):
                 self.num_neighbors,
                 xyz,
                 point_feature,
+                fps_random_config=self.fps_random_config,
             )
 
         relative_xyz = neighbor_feature[..., :3]
@@ -178,6 +166,7 @@ class PointNextEncoder(nn.Module):
         sa_layers: int = 2,
         expansion: int = 2,
         use_residual: bool = True,
+        fps_random_config: dict | None = None,
     ):
         super().__init__()
         if input_channels < 3:
@@ -207,6 +196,7 @@ class PointNextEncoder(nn.Module):
                     layers=1 if stage_index == 0 and stride == 1 else sa_layers,
                     use_residual=use_residual,
                     is_head=stage_index == 0 and stride == 1,
+                    fps_random_config=fps_random_config,
                 )
             ]
             for _ in range(1, depth):

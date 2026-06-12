@@ -18,6 +18,18 @@ def _save_json(data: Dict[str, Any], path: Path):
 
 
 class SimEvaluator:
+    """Offline simulation evaluator for checkpoint assessment.
+
+    Loads a trained agent from a checkpoint and runs it in the simulation
+    environment. Supports:
+
+    - Arbitrary checkpoint tags or direct paths via ``CheckpointStore``.
+    - EMA vs non-EMA model selection.
+    - Per-task success rate tracking and incremental JSONL logging.
+    - Summary printing with task-level and average success rates.
+
+    Evaluation seeds are fixed (``eval.seed: 0``) for reproducibility.
+    """
     def __init__(
         self,
         device,

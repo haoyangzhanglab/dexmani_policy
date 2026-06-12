@@ -2,10 +2,11 @@ import logging
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionModel
-from typing import Dict, Literal, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
+from dexmani_policy.agents.obs_encoder.rgb.common.types import GlobalTokenType, TuneMode
 from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
     flatten_batch,
     restore_batch,
@@ -14,9 +15,6 @@ from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-TuneMode = Literal["freeze", "lora", "full"]
-GlobalTokenType = Literal["cls", "avg", "pooler"]
 
 
 class CLIP(nn.Module):

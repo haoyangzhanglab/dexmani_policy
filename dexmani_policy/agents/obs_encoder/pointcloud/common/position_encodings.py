@@ -2,6 +2,9 @@ import math
 import torch
 import torch.nn as nn
 
+POS_ENCODING_BASE = 10000.0
+"""Standard base frequency for sinusoidal positional encoding."""
+
 
 class SinusoidalPosEmb3D(nn.Module):
     """Standard sinusoidal positional encoding for continuous 3D coordinates."""
@@ -13,7 +16,7 @@ class SinusoidalPosEmb3D(nn.Module):
         self.dim = dim
 
         half_axis_dim = dim // 6
-        exponent = math.log(10000.0) / max(half_axis_dim - 1, 1)
+        exponent = math.log(POS_ENCODING_BASE) / max(half_axis_dim - 1, 1)
         inv_freq = torch.exp(-exponent * torch.arange(half_axis_dim, dtype=torch.float32))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -58,7 +61,7 @@ class RotaryPositionEncoding(nn.Module):
         self.feature_dim = feature_dim
 
         inv_freq = torch.exp(
-            -math.log(10000.0) * torch.arange(0, feature_dim, 2, dtype=torch.float32) / feature_dim
+            -math.log(POS_ENCODING_BASE) * torch.arange(0, feature_dim, 2, dtype=torch.float32) / feature_dim
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -96,7 +99,7 @@ class RotaryPositionEncoding3D(nn.Module):
             )
 
         inv_freq = torch.exp(
-            -math.log(10000.0) * torch.arange(0, axis_dim, 2, dtype=torch.float32) / axis_dim
+            -math.log(POS_ENCODING_BASE) * torch.arange(0, axis_dim, 2, dtype=torch.float32) / axis_dim
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 

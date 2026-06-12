@@ -1,10 +1,12 @@
 import torch
+import torch.nn as nn
 import pytorch3d.ops as torch3d_ops
 
 
 def farthest_point_sample(
     pointcloud: torch.Tensor,
     num_samples: int = 1024,
+    use_random: bool = True,
     random_start: bool = True,
     shuffle_output: bool = True,
     random_noise_scale: float = 0.0,
@@ -14,11 +16,13 @@ def farthest_point_sample(
     Standard FPS is deterministic: given the same point cloud, it always selects
     the same subset in the same order.  This can cause the policy to overfit to
     the deterministic sampling pattern.  Randomizing the start point and output
-    order acts as a cheap, effective regulariser (R3D, 2026).
+    order acts as a cheap, effective regulariser (R3D-Policy, 2026).
 
     Args:
         pointcloud:          (B, N, C>=3) – xyz must be the first three channels.
         num_samples:         number of points to keep.
+        use_random:          master switch – when ``False``, FPS is fully
+                             deterministic regardless of the flags below.
         random_start:        pick a random start point instead of the default
                              (farthest point from the centroid).
         shuffle_output:      randomly permute the output order after sampling.
@@ -35,7 +39,6 @@ def farthest_point_sample(
     xyz = pointcloud[..., :3]  # (B, N, 3)
     B, N, _ = xyz.shape
 
-    use_random = random_start or shuffle_output or random_noise_scale > 0.0
     if not use_random:
         # Fast path — original deterministic FPS.
         sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
@@ -50,13 +53,15 @@ def farthest_point_sample(
     # ── FPS with randomisation (adapted from R3D-Policy) ──
     if random_start:
         start_indices = torch.randint(0, N, (B,), device=pointcloud.device)
-        # Swap the randomly-chosen start point to position 0 for each batch item.
         modified_xyz = xyz.clone()
-        for b in range(B):
-            si = start_indices[b]
-            modified_xyz[b, [0, si]] = modified_xyz[b, [si, 0]]
+        # Vectorized swap: put randomly-chosen start point at position 0.
+        arange_b = torch.arange(B, device=pointcloud.device)
+        val_0 = modified_xyz[:, 0].clone()
+        modified_xyz[:, 0] = modified_xyz[arange_b, start_indices]
+        modified_xyz[arange_b, start_indices] = val_0
     else:
         modified_xyz = xyz
+        start_indices = None  # type: ignore
 
     # Optional coordinate noise (used only for FPS distance computation).
     if random_noise_scale > 0:
@@ -64,30 +69,41 @@ def farthest_point_sample(
     else:
         noisy_xyz = modified_xyz
 
-    _, sample_idx = torch3d_ops.sample_farthest_points(
+    sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
         points=noisy_xyz, K=num_samples,
     )
 
     # Map back indices when random-start was used.
     if random_start:
-        for b in range(B):
-            si = start_indices[b]
-            mask_0 = sample_idx[b] == 0
-            mask_si = sample_idx[b] == si
-            sample_idx[b][mask_0] = si
-            sample_idx[b][mask_si] = 0
+        # Vectorized: swap index 0 ↔ start_indices[b] in each row of sample_idx.
+        mask_0 = sample_idx == 0                                 # (B, K)
+        si_expanded = start_indices.unsqueeze(1)                  # (B, 1)
+        mask_si = sample_idx == si_expanded                       # (B, K)
+        sample_idx[mask_0] = si_expanded.expand(B, num_samples)[mask_0]
+        sample_idx[mask_si] = 0
 
+    # ── Shuffle ──
+    shuffle_perm = None
     if shuffle_output:
-        for b in range(B):
-            perm = torch.randperm(num_samples, device=pointcloud.device)
-            sample_idx[b] = sample_idx[b][perm]
+        # Vectorized: generate a random permutation per batch item.
+        shuffle_perm = torch.rand(B, num_samples, device=pointcloud.device).argsort(dim=1)
+        sample_idx = torch.gather(sample_idx, 1, shuffle_perm)
 
-    # Gather points using the (possibly remapped & shuffled) indices.
+    # ── Build output ──
+    # Fast path: pc_dim=3 + no coordinate noise → pytorch3d already returned
+    # valid XYZ.  Only need to match the shuffle (if any), no full gather.
+    if random_noise_scale == 0.0 and pointcloud.size(-1) == 3:
+        if shuffle_perm is not None:
+            sampled_xyz = sampled_xyz.gather(
+                1, shuffle_perm.unsqueeze(-1).expand(-1, -1, 3),
+            )
+        return sampled_xyz.contiguous(), sample_idx
+
+    # Gather full channels using the (possibly remapped & shuffled) indices.
     sampled_points = torch.gather(
         pointcloud, 1,
         sample_idx.unsqueeze(-1).long().expand(-1, -1, pointcloud.shape[-1]),
     )
-
     return sampled_points.contiguous(), sample_idx
 
 
@@ -181,9 +197,11 @@ def sample_and_group(
     xyz: torch.Tensor,
     features: torch.Tensor | None,
     returnfps: bool = False,
+    fps_random_config: dict | None = None,
 ):
+    fps_kwargs = fps_random_config or {}
     num_centers = max(1, int(sample_ratio * xyz.size(1)))
-    center_xyz, fps_idx = farthest_point_sample(xyz, num_centers)
+    center_xyz, fps_idx = farthest_point_sample(xyz, num_centers, **fps_kwargs)
     center_features = None if features is None else index_points(features, fps_idx)
 
     neighbor_idx = query_ball_point(radius, num_neighbors, xyz, center_xyz)
@@ -218,3 +236,27 @@ def resolve_stage_values(value, num_stages: int, name: str):
     if len(value) != num_stages:
         raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
     return tuple(value)
+
+
+def normalize_relative_xyz(
+    relative_xyz: torch.Tensor,
+    radius: float,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Normalize relative coordinates by ball query radius."""
+    return relative_xyz / max(radius, eps)
+
+
+class PointMLP(nn.Module):
+    """Linear + LayerNorm + GELU block used in point cloud encoders."""
+
+    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
+        super().__init__()
+        self.linear = nn.Linear(in_channels, out_channels)
+        self.norm = nn.LayerNorm(out_channels)
+        self.activation = nn.GELU() if use_activation else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear(x)
+        x = self.norm(x)
+        return self.activation(x)

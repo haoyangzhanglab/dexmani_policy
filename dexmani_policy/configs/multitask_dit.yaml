@@ -38,9 +38,10 @@ agent:
   _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
   text_encoder_model: openai/clip-vit-base-patch16
   task_texts: ${dataset.task_texts}
-  rgb_backbone_name: dino
+  rgb_backbone_name: r3m
   rgb_backbone_config:
-    tune_mode: lora  # freeze | full | lora
+    model_name: resnet18   # resnet18 | resnet34 | resnet50
+    tune_mode: full        # freeze | full
   state_dim: 19
   state_out_dim: 64
 

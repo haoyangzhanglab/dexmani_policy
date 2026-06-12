@@ -6,17 +6,39 @@ from dexmani_policy.agents.action_decoders.common.sample import TimeSampler
 
 
 class FlowMatchWithConsistency(nn.Module):
+    """Flow Matching decoder with optional consistency training.
+
+    Combines two complementary training objectives:
+
+    **Flow Matching**: predicts the velocity field v = x1 - x0 along rectified
+    flow straight-line paths x_t = (1-t)*x0 + t*x1. Uses the first
+    ``flow_batch_ratio`` fraction of each batch.
+
+    **Consistency Training** (when EMA teacher is available): the EMA teacher
+    estimates pred_x1 at t_next, the target velocity is derived as
+    (pred_x1 - x_t) / (1-t), and the student matches it via MSE. At t_next=1.0
+    (≈45% of samples) the teacher target degenerates to the exact x1-x0.
+
+    The two sub-batches are merged into one forward pass to keep
+    ``torch.compile`` happy with a fixed batch size.
+
+    Parameters:
+        model: Backbone (DiTXFlowMatch) that predicts velocity given (x, t, target_t, context).
+        denoise_timesteps: Number of Euler integration steps at inference.
+        flow_batch_ratio: Fraction of batch used for flow loss (remainder for consistency).
+        target_t_sample_mode: ``"relative"`` — model receives dt as target_t;
+            ``"absolute"`` — model receives t+dt as target_t.
+    """
     def __init__(
         self,
-        model,
+        model: nn.Module,
         denoise_timesteps: int = 10,
         flow_batch_ratio: float = 0.75,
         t_sample_mode_for_flow: str = "beta",
         t_sample_mode_for_consistency: str = "discrete",
         dt_sample_mode_for_consistency: str = "uniform",
         target_t_sample_mode: str = "relative",
-
-    ):
+    ) -> None:
         super().__init__()
 
         self.model = model
@@ -31,13 +53,15 @@ class FlowMatchWithConsistency(nn.Module):
         self.sampler = TimeSampler(denoise_timesteps=denoise_timesteps)
     
 
-    def linear_interpolate(self, noise, target, timestep):
+    def linear_interpolate(
+        self, noise: torch.Tensor, target: torch.Tensor, timestep: torch.Tensor
+    ) -> torch.Tensor:
         noise_coeff = 1.0 - timestep
         interpolated_data_point = noise_coeff * noise + timestep * target
         return interpolated_data_point
     
 
-    def get_flow_velocity(self, actions):
+    def get_flow_velocity(self, actions: torch.Tensor) -> dict[str, torch.Tensor]:
         B = actions.shape[0]
 
         t_flow = self.sampler.sample(B, self.t_sample_mode_for_flow, device=actions.device)
@@ -63,7 +87,9 @@ class FlowMatchWithConsistency(nn.Module):
         return flow_target_dict
     
 
-    def get_consistency_velocity(self, actions, cond, ema_model):
+    def get_consistency_velocity(
+        self, actions: torch.Tensor, cond: torch.Tensor, ema_model: nn.Module
+    ) -> dict[str, torch.Tensor]:
         # target_t 作为 mode indicator：
         #   target_t=0 (flow): 预测瞬时速度 v = x1-x0
         #   target_t>0 (consistency): 预测到 x1 的有效速度
@@ -112,7 +138,13 @@ class FlowMatchWithConsistency(nn.Module):
 
 
 
-    def compute_loss(self, cond, actions, ema_backbone=None, **kwargs):
+    def compute_loss(
+        self,
+        cond: torch.Tensor,
+        actions: torch.Tensor,
+        ema_backbone: nn.Module | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         ema_model = ema_backbone
 
         B = actions.shape[0]
@@ -216,7 +248,12 @@ class FlowMatchWithConsistency(nn.Module):
 
 
     @torch.no_grad()
-    def sample_ode(self, x0, N, cond):
+    def sample_ode(
+        self,
+        x0: torch.Tensor,
+        N: int,
+        cond: torch.Tensor,
+    ) -> list[torch.Tensor]:
         """Euler 积分采样。
 
         relative 模式下 target_t=dt（>0），依赖 consistency 训练提供 target_t 泛化。
@@ -249,9 +286,14 @@ class FlowMatchWithConsistency(nn.Module):
             traj.append(x.clone())
         
         return traj
-    
 
-    def predict_action(self, cond, action_template, denoise_timesteps=None):
+
+    def predict_action(
+        self,
+        cond: torch.Tensor,
+        action_template: torch.Tensor,
+        denoise_timesteps: int | None = None,
+    ) -> torch.Tensor:
         noise = torch.randn_like(action_template, device=action_template.device)
 
         if denoise_timesteps is None:

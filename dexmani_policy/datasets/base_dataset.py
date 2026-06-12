@@ -31,22 +31,22 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        zarr_path,
-        seed=42,
-        horizon=1,
-        pad_before=0,
-        pad_after=0,
-        val_ratio=0.0,
-        max_train_episodes=None,
-        sensor_modalities=None,
-        augmentation_cfg=None,
-        action_key='action',
+        zarr_path: str,
+        seed: int = 42,
+        horizon: int = 1,
+        pad_before: int = 0,
+        pad_after: int = 0,
+        val_ratio: float = 0.0,
+        max_train_episodes: int | None = None,
+        sensor_modalities: list[str] | None = None,
+        augmentation_cfg: dict | None = None,
+        action_key: str = 'action',
         obs_horizon: Optional[int] = None,
         rgb_preprocess_size: Optional[Tuple[int, int]] = None,
         rgb_random_crop_size: Optional[Tuple[int, int]] = None,
-        rgb_color_aug=None,
+        rgb_color_aug: dict | None = None,
         rgb_keep_uint8: bool = False,
-    ):
+    ) -> None:
         super().__init__()
 
         if sensor_modalities is None:

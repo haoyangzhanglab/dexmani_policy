@@ -32,10 +32,14 @@ class MoEObsEncoder(nn.Module):
         use_enhanced_gate: bool = False,
         gate_hidden_dim: int = None,
         gate_dropout: float = 0.0,
+        fps_random_config: dict = None,
     ):
         super().__init__()
         self.pc_encoder = build_pc_global_encoder(
-            encoder_type, pc_dim, config={'output_channels': pc_out_dim}
+            encoder_type, pc_dim, config={
+                'output_channels': pc_out_dim,
+                'fps_random_config': fps_random_config,
+            }
         )
         self.state_mlp = StateMLP(state_dim, state_out_dim)
         in_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
@@ -65,12 +69,14 @@ class MoEObsEncoder(nn.Module):
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps
+        self.fps_random_config = fps_random_config or {}
         self.out_dim = self.moe.out_dim
 
     def encode_feat(self, obs: dict) -> torch.Tensor:
         pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
         if pc.shape[1] > self.num_points:
-            pc, _ = farthest_point_sample(pc, self.num_points)
+            pc, _ = farthest_point_sample(pc, self.num_points,
+                                           **self.fps_random_config)
         return torch.cat([
             self.pc_encoder(pc)['global_token'],
             self.state_mlp(obs['joint_state']),
@@ -114,6 +120,7 @@ class MoEAgent(UNetDiffusionAgent):
         use_enhanced_gate: bool = False,
         gate_hidden_dim: int = None,
         gate_dropout: float = 0.0,
+        fps_random_config: dict = None,
         **kwargs,
     ):
         obs_encoder = MoEObsEncoder(
@@ -130,6 +137,7 @@ class MoEAgent(UNetDiffusionAgent):
             use_enhanced_gate=use_enhanced_gate,
             gate_hidden_dim=gate_hidden_dim,
             gate_dropout=gate_dropout,
+            fps_random_config=fps_random_config,
         )
         super().__init__(
             obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs

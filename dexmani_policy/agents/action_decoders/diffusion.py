@@ -5,13 +5,31 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 
 class Diffusion(nn.Module):
+    """Denoising diffusion probabilistic model for action prediction.
+
+    Wraps a backbone (UNet or DiT) with a DDIM noise scheduler for training
+    and inference. Supports three prediction types controlled by
+    ``prediction_type``:
+
+    - ``"sample"``: model predicts the clean action directly (x0-prediction)
+    - ``"epsilon"``: model predicts the noise added to the action
+    - ``"v_prediction"``: model predicts v = sqrt(alpha)*noise - sqrt(1-alpha)*action
+      (velocity prediction, see https://arxiv.org/abs/2202.00512)
+
+    Training: adds noise to actions, model predicts target, MSE loss.
+    Inference: DDIM iterative denoising from random noise (default 10 steps).
+
+    The noise scheduler uses a fixed configuration (squaredcos_cap_v2 beta
+    schedule, beta_start=0.0001, beta_end=0.02) that is intentionally
+    non-configurable — see CLAUDE.md "已知硬编码" for rationale.
+    """
     def __init__(
         self,
-        model,
-        num_training_steps = 100,
-        num_inference_steps = 10,
-        prediction_type = "sample",
-    ):
+        model: nn.Module,
+        num_training_steps: int = 100,
+        num_inference_steps: int = 10,
+        prediction_type: str = "sample",
+    ) -> None:
         super().__init__()
 
         self.model = model
@@ -30,7 +48,9 @@ class Diffusion(nn.Module):
         self._cached_alphas_device = None
 
 
-    def compute_loss(self, cond, actions, **kwargs):
+    def compute_loss(
+        self, cond: torch.Tensor, actions: torch.Tensor, **kwargs
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B = actions.shape[0]
 
         noise = torch.randn_like(actions, device=actions.device)
@@ -67,7 +87,12 @@ class Diffusion(nn.Module):
 
 
     @torch.no_grad()
-    def predict_action(self, cond, action_template, denoise_timesteps=None):
+    def predict_action(
+        self,
+        cond: torch.Tensor,
+        action_template: torch.Tensor,
+        denoise_timesteps: int | None = None,
+    ) -> torch.Tensor:
         sample = torch.randn_like(action_template, device=action_template.device)
         if denoise_timesteps is None:
             denoise_timesteps = self.num_inference_steps

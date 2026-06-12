@@ -6,6 +6,8 @@ from dexmani_sim import DATA_DIR
 from dexmani_policy.env_runner.base_runner import BaseRunner
 
 ENV_PREFIX = "dexmani_sim.envs"
+DEFAULT_EVAL_SEED_COUNT = 100
+"""Default number of evaluation seeds when no seed file is available."""
 
 
 class SimRunner(BaseRunner):
@@ -49,5 +51,5 @@ class SimRunner(BaseRunner):
         seed_file = DATA_DIR / "eval_seeds" / f"{self.task_name}.txt"
         if seed_file.exists():
             return [int(x) for x in seed_file.read_text().split()]
-        return list(range(100))
+        return list(range(DEFAULT_EVAL_SEED_COUNT))
 

@@ -1,19 +1,16 @@
 import torch
 import torch.nn as nn
 import torchvision
-from typing import Dict, Literal, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
+from dexmani_policy.agents.obs_encoder.rgb.common.types import GlobalTokenType, NormMode, TuneMode
 from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
     flatten_batch,
     restore_batch,
     reshape_patch_tokens_to_map,
 )
-
-TuneMode = Literal["freeze", "full"]
-NormMode = Literal["frozen_bn", "group_norm"]
-GlobalTokenType = Literal["avg"]
 
 
 class FrozenBatchNorm2d(nn.Module):

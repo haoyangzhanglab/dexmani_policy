@@ -7,6 +7,9 @@ from timm.models.vision_transformer import Mlp, use_fused_attn
 
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 
+WEIGHT_INIT_STD = 0.02
+"""Standard deviation for normal weight initialization across DiT modules."""
+
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
@@ -81,8 +84,13 @@ class TimestepEmbedder(nn.Module):
         )
         self.frequency_embedding_size = frequency_embedding_size
 
+    POS_ENCODING_BASE = 10000.0
+    """Base frequency for sinusoidal position/timestep encoding."""
+
     @staticmethod
-    def timestep_embedding(t, dim, max_period=10000):
+    def timestep_embedding(t, dim, max_period=None):
+        if max_period is None:
+            max_period = TimestepEmbedder.POS_ENCODING_BASE
         half = dim // 2
         freqs = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
@@ -148,6 +156,20 @@ class FinalLayer(nn.Module):
     
 
 class DiT_Diffusion(nn.Module):
+    """DiT backbone for diffusion-based action prediction (DP3, MoE).
+
+    Encodes actions and observation context through separate MLP embedders,
+    applies a stack of self-attention DiT blocks with AdaLN (Adaptive Layer
+    Normalization) modulation conditioned on the diffusion timestep, and
+    projects back to action dimension.
+
+    Architecture:
+        - Action embedder: ``Linear(action_dim, n_emb)`` + positional embedding
+        - Context embedder: ``Linear(cond_dim, n_emb)`` (flattened obs)
+        - Timestep embedder: ``SinusoidalPosEmb`` + 2-layer MLP + SiLU
+        - N_layers ``DiTBlock`` (self-attention + MLP with AdaLN)
+        - ``FinalLayer`` (AdaLN → LayerNorm → Linear → action_dim)
+    """
 
     def __init__(
             self,
@@ -187,17 +209,17 @@ class DiT_Diffusion(nn.Module):
                     nn.init.constant_(module.bias, 0)
         self.apply(init_fn)
 
-        nn.init.normal_(self.pos_embed, mean=0.0, std=0.02)
+        nn.init.normal_(self.pos_embed, mean=0.0, std=WEIGHT_INIT_STD)
 
         w = self.x_embedder.weight.data         
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.bias, 0)
 
-        nn.init.normal_(self.cond_embedder.weight.data, mean=0.0, std=0.02)
+        nn.init.normal_(self.cond_embedder.weight.data, mean=0.0, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.cond_embedder.bias, 0)
 
-        nn.init.normal_(self.time_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.time_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.time_embedder.mlp[0].weight, std=WEIGHT_INIT_STD)
+        nn.init.normal_(self.time_embedder.mlp[2].weight, std=WEIGHT_INIT_STD)
 
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
@@ -282,22 +304,22 @@ class DiT_FlowMatch(nn.Module):
                     nn.init.constant_(module.bias, 0)
         self.apply(init_fn)
 
-        nn.init.normal_(self.pos_embed, mean=0.0, std=0.02)
+        nn.init.normal_(self.pos_embed, mean=0.0, std=WEIGHT_INIT_STD)
 
         w = self.x_embedder.weight.data         
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.bias, 0)
 
-        nn.init.normal_(self.cond_embedder.weight.data, mean=0.0, std=0.02)
+        nn.init.normal_(self.cond_embedder.weight.data, mean=0.0, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.cond_embedder.bias, 0)
 
-        nn.init.normal_(self.time_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.time_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.time_embedder.mlp[0].weight, std=WEIGHT_INIT_STD)
+        nn.init.normal_(self.time_embedder.mlp[2].weight, std=WEIGHT_INIT_STD)
 
-        nn.init.normal_(self.target_t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.target_t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.target_t_embedder.mlp[0].weight, std=WEIGHT_INIT_STD)
+        nn.init.normal_(self.target_t_embedder.mlp[2].weight, std=WEIGHT_INIT_STD)
 
-        nn.init.normal_(self.timestep_and_target_t_fusion.weight, std=0.02)
+        nn.init.normal_(self.timestep_and_target_t_fusion.weight, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.timestep_and_target_t_fusion.bias, 0)
 
         for block in self.blocks:

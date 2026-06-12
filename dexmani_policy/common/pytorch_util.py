@@ -13,7 +13,7 @@ def ensure_tensor(x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
 
 
 def dict_apply(
-    x: Dict[str, torch.Tensor], 
+    x: Dict[str, torch.Tensor],
     func: Callable[[torch.Tensor], torch.Tensor]
 ) -> Dict[str, torch.Tensor]:
         
@@ -28,7 +28,8 @@ def dict_apply(
     return result
 
 
-def optimizer_to(optimizer, device):
+def optimizer_to(optimizer: torch.optim.Optimizer, device: torch.device | str) -> torch.optim.Optimizer:
+    """Move all tensor state in an optimizer to the given device."""
     for state in optimizer.state.values():
         for k, v in state.items():
             if isinstance(v, torch.Tensor):

@@ -152,7 +152,7 @@ experiments/
 
 | 约定 | 详情 |
 |---|---|
-| **Normalizer** | `mode='limits'`，全量数据拟合 → [-1,1]；`range_eps=2e-2`，极低方差维度仅零中心化不缩放；仅拟合 `joint_state` + `action`，点云/RGB 直通 |
+| **Normalizer** | `mode='limits'`，全量数据拟合 → [-1,1]；`range_eps=1e-4`，极低方差维度仅零中心化不缩放；仅拟合 `joint_state` + `action`，点云/RGB 直通 |
 | **增强** | 默认禁用；`pc_dim` 须与 Zarr 点云通道数一致；`PCSpatialAug` 对 XYZ+法向施加同步旋转 |
 | **FlowMatch** | EMA teacher 提供 consistency target；推理 `target_t=dt>0` 依赖 consistency 训练泛化；`flow_batch_ratio=0.75` |
 | **MoE** | 16 experts, top-k=2；aux loss (load_balancing + entropy) 全程生效；全专家计算确保 DDP 兼容 |

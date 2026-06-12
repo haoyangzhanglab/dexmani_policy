@@ -1,19 +1,17 @@
 import torch
 import torch.nn as nn
 from transformers import SiglipVisionModel
-from typing import Dict, Literal, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
+from dexmani_policy.agents.obs_encoder.rgb.common.types import GlobalTokenType, TuneMode
 from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
     flatten_batch,
     restore_batch,
     get_patch_grid_size,
     reshape_patch_tokens_to_map,
 )
-
-TuneMode = Literal["freeze", "lora", "full"]
-GlobalTokenType = Literal["cls", "avg", "pooler"]
 
 
 class SigLIP(nn.Module):

@@ -5,6 +5,9 @@ import torch.nn as nn
 from einops.layers.torch import Rearrange
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 
+POS_ENCODING_BASE = 10000.0
+"""Standard base frequency for sinusoidal positional encoding."""
+
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -13,7 +16,7 @@ class SinusoidalPosEmb(nn.Module):
     def forward(self, x):
         device = x.device
         half_dim = self.dim // 2
-        emb = math.log(10000) / max(half_dim - 1, 1)
+        emb = math.log(POS_ENCODING_BASE) / max(half_dim - 1, 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
@@ -100,6 +103,25 @@ class ConditionalResidualBlock1D(nn.Module):
 
 
 class ConditionalUnet1D(nn.Module):
+    """1D U-Net with FiLM conditioning for diffusion-based action prediction.
+
+    A convolutional encoder-decoder backbone that injects conditioning through
+    FiLM (Feature-wise Linear Modulation) at each residual block. The
+    conditioning signal is formed by concatenating the diffusion-step embedding
+    (sinusoidal encoding + MLP) with the observation context.
+
+    Architecture:
+        - Down-sampling path: ``Conv1dBlock`` → ``ConditionalResidualBlock1D``
+          at each resolution, with optional FiLM scale prediction
+          (``cond_predict_scale``).
+        - Mid-block: single ``ConditionalResidualBlock1D`` at the bottleneck.
+        - Up-sampling path: ``Upsample1d`` → ``ConditionalResidualBlock1D``
+          at each resolution, with skip connections from the down path.
+        - Final: ``Conv1d`` to ``input_dim``.
+
+    The ``down_dims`` list controls the channel dimensions at each resolution
+    level. Default: ``[256, 512, 1024]``.
+    """
 
     def __init__(
             self,
