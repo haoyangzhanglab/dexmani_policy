@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
-from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import farthest_point_sample
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 
@@ -33,10 +33,8 @@ class DP3ObsEncoder(nn.Module):
         self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
-        pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
-        if pc.shape[1] > self.num_points:
-            pc, _ = farthest_point_sample(pc, self.num_points,
-                                           **self.fps_random_config)
+        pc = preprocess_point_cloud(obs['point_cloud'], self.num_points,
+                                     self.use_coord_only, self.fps_random_config)
         feat = torch.cat([
             self.pc_encoder(pc)['global_token'],
             self.state_mlp(obs['joint_state']),

@@ -53,9 +53,6 @@ class EMAModel:
             for param, ema_param in zip(
                 module.parameters(recurse=False), ema_module.parameters(recurse=False)
             ):
-                if isinstance(param, dict):
-                    raise RuntimeError("Dict parameter not supported")
-
                 if isinstance(module, _BatchNorm):
                     # BatchNorm running stats are already moving averages;
                     # copy the affine params directly to stay consistent.

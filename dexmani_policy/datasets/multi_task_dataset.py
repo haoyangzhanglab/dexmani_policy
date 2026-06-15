@@ -4,7 +4,7 @@ import multiprocessing as mp
 import numpy as np
 import torch
 from typing import List, Optional
-from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_action_normalizer
+from dexmani_policy.common.normalizer import LinearNormalizer
 
 
 class MultiTaskDataset(torch.utils.data.Dataset):
@@ -88,35 +88,17 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         all_actions = [d.replay_buffer[d.action_key] for d in self.datasets]
         joint_state = np.concatenate(all_joint_states, axis=0)
         action = np.concatenate(all_actions, axis=0)
+        return LinearNormalizer.fit_obs_action(joint_state, action, self.action_key, 'limits')
 
-        normalizer = LinearNormalizer()
-        if self.action_key == 'action_ee':
-            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode='limits')
-            normalizer['action'] = build_mixed_action_normalizer(action)
-        else:
-            normalizer.fit(data={'joint_state': joint_state, 'action': action},
-                           last_n_dims=1, mode='limits')
-        return normalizer
+    def _make_rng(self, *seed_parts: str):
+        """Derive a reproducible ``np.random.Generator`` from seed components."""
+        raw = "_".join(str(p) for p in seed_parts)
+        seed = int(hashlib.md5(raw.encode()).hexdigest(), 16) % (2**32)
+        return np.random.default_rng(seed)
 
-    def generate_fixed_indices(self):
-        if self.sampling_strategy == 'proportional':
-            indices = []
-            for task_idx, task_length in enumerate(self.task_lengths):
-                for local_idx in range(task_length):
-                    indices.append((task_idx, local_idx))
-            rng = np.random.default_rng(
-                seed=int(hashlib.md5(f"{self.seed}_deterministic_fixed".encode()).hexdigest(), 16) % (2**32)
-            )
-            rng.shuffle(indices)
-            return indices
-
-        # balanced / weighted: 按 sample_probs 生成固定索引
-        # 使用固定 seed（不含 _epoch），保证每次遍历顺序一致
-        rng = np.random.default_rng(
-            seed=int(hashlib.md5(f"{self.seed}_deterministic_fixed".encode()).hexdigest(), 16) % (2**32)
-        )
-        target_counts = self.compute_target_counts()
-
+    def _build_balanced_indices(self, rng):
+        """Core index construction shared by fixed and epoch-based generation."""
+        target_counts = self.compute_target_counts(rng=rng)
         indices = []
         for task_idx in range(self.num_tasks):
             n_samples = target_counts[task_idx]
@@ -124,15 +106,28 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                 continue
             local_indices = self.sample_task_indices(task_idx, n_samples, rng)
             indices.extend((task_idx, int(idx)) for idx in local_indices)
-
         rng.shuffle(indices)
         return indices
 
-    def compute_target_counts(self):
+    def generate_fixed_indices(self):
+        if self.sampling_strategy == 'proportional':
+            indices = []
+            for task_idx, task_length in enumerate(self.task_lengths):
+                for local_idx in range(task_length):
+                    indices.append((task_idx, local_idx))
+            rng = self._make_rng(self.seed, "fixed")
+            rng.shuffle(indices)
+            return indices
+
+        rng = self._make_rng(self.seed, "fixed")
+        return self._build_balanced_indices(rng)
+
+    def compute_target_counts(self, rng=None):
         target_counts = np.round(self.sample_probs * self.total_length).astype(int)
         diff = self.total_length - target_counts.sum()
         if diff != 0:
-            rng = np.random.default_rng(seed=int(hashlib.md5(f"{self.seed}_{self._epoch}_diff".encode()).hexdigest(), 16) % (2**32))
+            if rng is None:
+                rng = self._make_rng(self.seed, self._epoch, "diff")
             if diff > 0:
                 idx = rng.choice(self.num_tasks, p=self.sample_probs)
                 target_counts[idx] += diff
@@ -161,20 +156,8 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         return np.concatenate(local_indices)
 
     def generate_epoch_indices(self):
-        epoch_rng = np.random.default_rng(seed=int(hashlib.md5(f"{self.seed}_{self._epoch}".encode()).hexdigest(), 16) % (2**32))
-        target_counts = self.compute_target_counts()
-
-        indices = []
-        for task_idx in range(self.num_tasks):
-            n_samples = target_counts[task_idx]
-            if n_samples == 0:
-                continue
-
-            local_indices = self.sample_task_indices(task_idx, n_samples, epoch_rng)
-            indices.extend((task_idx, int(idx)) for idx in local_indices)
-
-        epoch_rng.shuffle(indices)
-        return indices
+        rng = self._make_rng(self.seed, self._epoch)
+        return self._build_balanced_indices(rng)
 
     def __len__(self):
         return self.total_length

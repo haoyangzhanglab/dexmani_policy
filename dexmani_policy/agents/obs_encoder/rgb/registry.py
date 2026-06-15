@@ -21,7 +21,7 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
         "global_token_type": "avg",
     },
     "dino": {
-        "model_name": "facebook/dinov2-base",
+        "model_name": "facebook/dinov2-base",  # shorthand: small | base
         "tune_mode": "freeze",
         "global_token_type": "avg",
     },
@@ -33,6 +33,7 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     "r3m": {
         "model_name": "resnet18",
         "tune_mode": "freeze",
+        "norm_mode": "group_norm",
         "global_token_type": "avg",
     },
 }

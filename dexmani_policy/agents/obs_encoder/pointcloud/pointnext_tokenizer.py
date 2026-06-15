@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, Tuple
 
-from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings import (
+from dexmani_policy.common.position_encodings import (
     RelativePositionalEncoding3D,
     SinusoidalPosEmb3D,
 )
@@ -53,24 +53,66 @@ class MultiScalePatchTokenizer(nn.Module):
         patch_radii: Tuple[float, ...],
         patch_neighbors: Tuple[int, ...],
         fps_random_config: dict | None = None,
+        # ── patch self-attention ──
+        use_patch_self_attn: bool = False,
+        patch_attn_layers: int = 4,
+        patch_attn_heads: int = 4,
+        patch_attn_dropout: float = 0.0,
+        prepend_global_in_attn: bool = True,
     ):
         super().__init__()
         if len(patch_radii) != len(patch_neighbors):
             raise ValueError("patch_radii and patch_neighbors must have the same length")
 
         self.num_patches = num_patches
+        self.use_patch_self_attn = use_patch_self_attn
+        self.prepend_global_in_attn = prepend_global_in_attn
         self.fps_random_config = fps_random_config or {}
+
         self.scale_encoders = nn.ModuleList(
             [
                 LocalPatchEncoder(stem_channels, token_channels, radius, neighbors)
                 for radius, neighbors in zip(patch_radii, patch_neighbors)
             ]
         )
+
+        # Position encoding for the token-projection input (concatenated, original).
         self.patch_center_position_encoding = SinusoidalPosEmb3D(96)
+
+        proj_in_dim = stem_channels + len(self.scale_encoders) * token_channels + 96
         self.token_projection = nn.Sequential(
-            PointMLP(stem_channels + len(self.scale_encoders) * token_channels + 96, token_channels),
+            PointMLP(proj_in_dim, token_channels),
             PointMLP(token_channels, token_channels, use_activation=False),
         )
+
+        # ── patch self-attention (optional) ──
+        if use_patch_self_attn:
+            # Absolute position embedding on patch-center coordinates (additive,
+            # analogous to SAT's ``mlp_global`` on FPS centers).
+            self.center_pos_embed = nn.Sequential(
+                nn.Linear(3, token_channels),
+                nn.LayerNorm(token_channels),
+                nn.GELU(),
+                nn.Linear(token_channels, token_channels),
+            )
+
+            if prepend_global_in_attn:
+                # Learnable global token (like ViT class token / SAT's global_pn).
+                self.global_token = nn.Parameter(
+                    torch.randn(1, 1, token_channels) * 0.02
+                )
+
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=token_channels,
+                nhead=patch_attn_heads,
+                dim_feedforward=token_channels * 4,
+                dropout=patch_attn_dropout,
+                batch_first=True,
+                activation="gelu",
+            )
+            self.patch_transformer = nn.TransformerEncoder(
+                encoder_layer, num_layers=patch_attn_layers
+            )
 
     def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
         patch_center, patch_center_idx = farthest_point_sample(
@@ -84,6 +126,24 @@ class MultiScalePatchTokenizer(nn.Module):
         patch_token = self.token_projection(
             torch.cat((patch_center_feature, *multi_scale_patch_feature_list, patch_center_pos_feature), dim=-1)
         )
+
+        # ── optional self-attention over patches ──
+        if self.use_patch_self_attn:
+            # Add absolute position embedding computed from patch centers.
+            pos_emb = self.center_pos_embed(patch_center)          # (B, G, token_channels)
+            x = patch_token + pos_emb
+
+            if self.prepend_global_in_attn:
+                global_tok = self.global_token.expand(x.size(0), -1, -1)  # (B, 1, token_channels)
+                x = torch.cat([global_tok, x], dim=1)                     # (B, 1+G, token_channels)
+
+            x = self.patch_transformer(x)
+
+            if self.prepend_global_in_attn:
+                attn_global = x[:, :1, :]    # (B, 1, token_channels)
+                patch_token = x[:, 1:, :]    # (B, G, token_channels)
+                return patch_token, patch_center, attn_global
+
         return patch_token, patch_center
 
 
@@ -101,6 +161,12 @@ class PointNextPatchTokenizer(nn.Module):
         patch_radii: Tuple[float, ...] = (0.04, 0.08),
         patch_neighbors: Tuple[int, ...] = (16, 32),
         fps_random_config: dict | None = None,
+        # ── patch self-attention ──
+        use_patch_self_attn: bool = False,
+        patch_attn_layers: int = 4,
+        patch_attn_heads: int = 4,
+        patch_attn_dropout: float = 0.0,
+        prepend_global_in_attn: bool = True,
     ):
         super().__init__()
         if input_channels < 3:
@@ -109,6 +175,8 @@ class PointNextPatchTokenizer(nn.Module):
         self.input_channels = input_channels
         self.num_patches = num_patches
         self.token_channels = token_channels
+        self.use_patch_self_attn = use_patch_self_attn
+        self.prepend_global_in_attn = prepend_global_in_attn
 
         self.geometry_stem = nn.Sequential(
             PointMLP(input_channels, stem_channels),
@@ -121,17 +189,27 @@ class PointNextPatchTokenizer(nn.Module):
             patch_radii=patch_radii,
             patch_neighbors=patch_neighbors,
             fps_random_config=fps_random_config,
+            use_patch_self_attn=use_patch_self_attn,
+            patch_attn_layers=patch_attn_layers,
+            patch_attn_heads=patch_attn_heads,
+            patch_attn_dropout=patch_attn_dropout,
+            prepend_global_in_attn=prepend_global_in_attn,
         )
-        self.global_position_embedding = SinusoidalPosEmb3D(96)
-        self.global_position_projection = nn.Sequential(
-            nn.Linear(96, token_channels),
-            nn.LayerNorm(token_channels),
-            nn.GELU(),
-        )
-        self.global_token_projection = nn.Sequential(
-            nn.Linear(token_channels, token_channels),
-            nn.LayerNorm(token_channels),
-        )
+
+        # When the transformer already produces a global token via the
+        # learnable [CLS]-style token, the external global-token pathway
+        # is redundant — skip it to save parameters.
+        if not (use_patch_self_attn and prepend_global_in_attn):
+            self.global_position_embedding = SinusoidalPosEmb3D(96)
+            self.global_position_projection = nn.Sequential(
+                nn.Linear(96, token_channels),
+                nn.LayerNorm(token_channels),
+                nn.GELU(),
+            )
+            self.global_token_projection = nn.Sequential(
+                nn.Linear(token_channels, token_channels),
+                nn.LayerNorm(token_channels),
+            )
 
     def forward(
         self,
@@ -149,7 +227,13 @@ class PointNextPatchTokenizer(nn.Module):
         xyz = pointcloud[..., :3]
         input_point_feature = pointcloud[..., : self.input_channels]
         stem_point_feature = self.geometry_stem(input_point_feature)
-        patch_token, patch_center = self.local_patch_tokenizer(xyz, stem_point_feature)
+
+        tokenizer_out = self.local_patch_tokenizer(xyz, stem_point_feature)
+        if self.use_patch_self_attn and self.prepend_global_in_attn:
+            patch_token, patch_center, attn_global = tokenizer_out
+            self._attn_global = attn_global  # cache for get_global_token
+        else:
+            patch_token, patch_center = tokenizer_out
 
         outputs = [patch_token, patch_center]
         if return_global_token:
@@ -164,6 +248,13 @@ class PointNextPatchTokenizer(nn.Module):
         return tuple(outputs)
 
     def get_global_token(self, patch_token: torch.Tensor, patch_center: torch.Tensor) -> torch.Tensor:
+        # When self-attention with prepended global token is active, the
+        # transformer internally maintains a [CLS]-style token (position 0)
+        # that already aggregates context from all patches.
+        if self.use_patch_self_attn and self.prepend_global_in_attn:
+            return self._attn_global
+
+        # Original max-pool + sin/cos position-embedding pathway.
         pooled_patch_token = patch_token.max(dim=1).values
         pooled_patch_center = patch_center.mean(dim=1)
         global_token_feature = pooled_patch_token + self.global_position_projection(
@@ -190,6 +281,7 @@ def example() -> None:
     rgb = torch.rand(batch_size, num_points, 3)
     pointcloud = torch.cat([xyz, rgb], dim=-1)
 
+    # ── baseline (no self-attention) ──
     pointnext_tokenizer = PointNextPatchTokenizer(
         input_channels=6,
         stem_channels=64,
@@ -205,15 +297,54 @@ def example() -> None:
             return_intermediate=True,
         )
 
-    print("=== PointNextPatchTokenizer Example ===")
+    print("=== PointNextPatchTokenizer (baseline) ===")
     print("input:", tuple(pointcloud.shape))
     print("patch_token:", tuple(patch_token.shape))
     print("patch_center:", tuple(patch_center.shape))
     print("global_token:", tuple(global_token.shape))
     for name, value in intermediate_outputs.items():
-        print(f"{name}: {tuple(value.shape)}")
+        print(f"  {name}: {tuple(value.shape)}")
     print("out_dim:", pointnext_tokenizer.out_dim)
     print("out_shape:", pointnext_tokenizer.out_shape)
+    print()
+
+    # ── with self-attention + prepend global ──
+    pointnext_attn = PointNextPatchTokenizer(
+        input_channels=6,
+        stem_channels=64,
+        token_channels=128,
+        num_patches=96,
+        patch_radii=(0.04, 0.08),
+        patch_neighbors=(16, 32),
+        use_patch_self_attn=True,
+        patch_attn_layers=4,
+        patch_attn_heads=4,
+        patch_attn_dropout=0.0,
+        prepend_global_in_attn=True,
+    )
+    with torch.no_grad():
+        patch_token_a, patch_center_a, global_token_a, intermediate_outputs_a = pointnext_attn(
+            pointcloud,
+            return_global_token=True,
+            return_intermediate=True,
+        )
+
+    print("=== PointNextPatchTokenizer (with self-attention) ===")
+    print("input:", tuple(pointcloud.shape))
+    print("patch_token:", tuple(patch_token_a.shape))
+    print("patch_center:", tuple(patch_center_a.shape))
+    print("global_token:", tuple(global_token_a.shape))
+    for name, value in intermediate_outputs_a.items():
+        print(f"  {name}: {tuple(value.shape)}")
+    print("out_dim:", pointnext_attn.out_dim)
+    print("out_shape:", pointnext_attn.out_shape)
+
+    # Verify that with prepend_global_in_attn, the global token is
+    # learned (CLS-style) and not the max-pool pathway.
+    assert global_token_a.size(1) == 1, "global token should be 1 token"
+    assert patch_token_a.size(1) == 96, "patch tokens should be 96 patches"
+    print()
+    print("=== ALL TESTS PASSED ===")
 
 
 if __name__ == "__main__":

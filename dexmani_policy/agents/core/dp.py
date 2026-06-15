@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torchvision.transforms import v2
 
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
@@ -16,13 +17,20 @@ class DPObsEncoder(nn.Module):
         rgb_backbone_config: dict = None,
     ):
         super().__init__()
-        self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=rgb_backbone_config)
+        cfg = dict(rgb_backbone_config or {})
+        self.crop_ratio = cfg.pop('crop_ratio', None)
+        self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=cfg)
         self.state_mlp = StateMLP(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
-        rgb = self.image_processor.process_images(obs['rgb'])['image']
+        rgb = obs['rgb']  # (B*T, 3, H, W) float32 [0,1]
+        if self.training and self.crop_ratio is not None:
+            h, w = rgb.shape[-2:]
+            crop_size = int(min(h, w) * self.crop_ratio)
+            rgb = v2.RandomCrop(size=crop_size)(rgb)
+        rgb = self.image_processor.process_images(rgb)['image']
         feat = torch.cat([
             self.backbone(rgb)['global_token'],
             self.state_mlp(obs['joint_state']),

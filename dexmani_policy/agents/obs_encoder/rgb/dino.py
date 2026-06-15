@@ -16,6 +16,24 @@ from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
 
 logger = logging.getLogger(__name__)
 
+_DINO_VARIANTS = {
+    "small": "facebook/dinov2-small",
+    "base": "facebook/dinov2-base",
+}
+
+
+def _resolve_dino_model_name(name: str) -> str:
+    """Expand short variant names to full HuggingFace model IDs.
+
+    Short names like ``"small"`` / ``"base"`` are expanded to the
+    corresponding ``facebook/dinov2-*`` ID.  Full HF IDs pass through
+    unchanged, preserving backward compatibility.
+    """
+    resolved = _DINO_VARIANTS.get(name, name)
+    if resolved != name:
+        logger.info("DINO variant shorthand '%s' resolved to '%s'", name, resolved)
+    return resolved
+
 
 class DINO(nn.Module):
     def __init__(
@@ -27,10 +45,11 @@ class DINO(nn.Module):
     ):
         super().__init__()
 
+        model_name = _resolve_dino_model_name(model_name)
         self.model_name = model_name
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
-        self.backbone = AutoModel.from_pretrained(model_name)
+        self.backbone = AutoModel.from_pretrained(model_name, torch_dtype=torch.bfloat16)
 
         if not hasattr(self.backbone.config, "patch_size"):
             raise ValueError(f"{model_name} does not look like a ViT-style DINO model.")
@@ -85,9 +104,11 @@ class DINO(nn.Module):
             )
             self.backbone = get_peft_model(self.backbone, lora_config)
 
+            # Match LoRA dtype to backbone dtype (bfloat16).
+            backbone_dtype = next(self.backbone.parameters()).dtype
             for name, param in self.backbone.named_parameters():
                 if "lora_" in name:
-                    param.data = param.data.float()
+                    param.data = param.data.to(dtype=backbone_dtype)
             return
 
         raise ValueError(f"Unsupported tune_mode: {tune_mode}")

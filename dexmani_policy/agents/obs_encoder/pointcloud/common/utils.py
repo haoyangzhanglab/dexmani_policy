@@ -107,6 +107,25 @@ def farthest_point_sample(
     return sampled_points.contiguous(), sample_idx
 
 
+def preprocess_point_cloud(
+    pc: torch.Tensor,
+    num_points: int,
+    use_coord_only: bool,
+    fps_random_config: dict | None = None,
+) -> torch.Tensor:
+    """Slice channels, cast to fp32, and apply farthest-point sampling.
+
+    Shared by ``DP3ObsEncoder``, ``MoEObsEncoder``, ``ManiflowObsEncoder``.
+    """
+    if use_coord_only:
+        pc = pc[..., :3]
+    if pc.dtype != torch.float32:
+        pc = pc.float()
+    if pc.shape[1] > num_points:
+        pc, _ = farthest_point_sample(pc, num_points, **(fps_random_config or {}))
+    return pc
+
+
 def square_distance(source_xyz: torch.Tensor, target_xyz: torch.Tensor) -> torch.Tensor:
     if source_xyz.ndim != 3 or target_xyz.ndim != 3:
         raise ValueError(

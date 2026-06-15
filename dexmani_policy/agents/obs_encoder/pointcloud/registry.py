@@ -6,7 +6,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud import (
     PointNet,
     PointNextEncoder,
     PointNextPatchTokenizer,
-    PointPNTokenizer,
 )
 
 
@@ -29,22 +28,18 @@ GLOBAL_ENCODER_CONFIGS: Dict[str, Dict] = {
 
 
 PATCH_TOKENIZER_CONFIGS: Dict[str, Dict] = {
-    "pointpn": {
-        "input_points": 1024,
-        "num_stages": 3,
-        "embed_channels": 64,
-        "stage_radii": (0.04, 0.08, 0.16),
-        "stage_num_neighbors": (24, 24, 16),
-        "stage_lga_blocks": (1, 1, 1),
-        "stage_channel_expansion": (2, 2, 2),
-        "point_cloud_type": "scan",
-    },
     "pointnext_tokenizer": {
         "stem_channels": 64,
         "token_channels": 128,
         "num_patches": 96,
         "patch_radii": (0.04, 0.08),
         "patch_neighbors": (16, 32),
+        # ── patch self-attention (disabled by default) ──
+        "use_patch_self_attn": False,
+        "patch_attn_layers": 4,
+        "patch_attn_heads": 4,
+        "patch_attn_dropout": 0.0,
+        "prepend_global_in_attn": True,
     },
 }
 
@@ -109,20 +104,6 @@ def build_pc_patch_tokenizer(
     cfg = merge_config(PATCH_TOKENIZER_CONFIGS[tokenizer_type], config)
     fps_random_config = cfg.pop("fps_random_config", None)
 
-    if tokenizer_type == "pointpn":
-        return PointPNTokenizer(
-            input_channels=pc_dim,
-            input_points=cfg["input_points"],
-            num_stages=cfg["num_stages"],
-            embed_channels=cfg["embed_channels"],
-            stage_radii=cfg["stage_radii"],
-            stage_num_neighbors=cfg["stage_num_neighbors"],
-            stage_lga_blocks=cfg["stage_lga_blocks"],
-            stage_channel_expansion=cfg["stage_channel_expansion"],
-            point_cloud_type=cfg["point_cloud_type"],
-            fps_random_config=fps_random_config,
-        )
-
     if tokenizer_type == "pointnext_tokenizer":
         return PointNextPatchTokenizer(
             input_channels=pc_dim,
@@ -132,4 +113,9 @@ def build_pc_patch_tokenizer(
             patch_radii=cfg["patch_radii"],
             patch_neighbors=cfg["patch_neighbors"],
             fps_random_config=fps_random_config,
+            use_patch_self_attn=cfg["use_patch_self_attn"],
+            patch_attn_layers=cfg["patch_attn_layers"],
+            patch_attn_heads=cfg["patch_attn_heads"],
+            patch_attn_dropout=cfg["patch_attn_dropout"],
+            prepend_global_in_attn=cfg["prepend_global_in_attn"],
         )

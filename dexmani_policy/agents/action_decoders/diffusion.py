@@ -21,7 +21,7 @@ class Diffusion(nn.Module):
 
     The noise scheduler uses a fixed configuration (squaredcos_cap_v2 beta
     schedule, beta_start=0.0001, beta_end=0.02) that is intentionally
-    non-configurable — see CLAUDE.md "已知硬编码" for rationale.
+    non-configurable — see CLAUDE.md "Known Hard-coded Values" for rationale.
     """
     def __init__(
         self,

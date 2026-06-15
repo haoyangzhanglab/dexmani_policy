@@ -1,33 +1,42 @@
+# DP — Diffusion Policy with RGB observation
+# Encoder:  DINOv2-small + LoRA (384d, 1.3M trainable params)
+# Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
+# Modality: RGB + joint_state → action
+
 policy_name: dp
 
+# ── Task ──
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 
+# ── Core ──
 seed: 42
-
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-
-action_key: action  # action | action_ee
+action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
+# ── Dataloader ──
 dataloader:
-  batch_size: 192
+  batch_size: 128
   shuffle: true
   num_workers: 8
   pin_memory: true
   persistent_workers: true
+  prefetch_factor: 2
   drop_last: false
 
 val_dataloader:
-  batch_size: 192
+  batch_size: 128
   shuffle: false
   num_workers: 8
   pin_memory: true
   persistent_workers: false
+  prefetch_factor: 2
   drop_last: false
 
+# ── Dataset ──
 dataset:
   _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
   action_key: ${action_key}
@@ -43,6 +52,9 @@ dataset:
   rgb_preprocess_size: [240, 240]
   rgb_random_crop_size: [224, 224]
 
+  # GPU preprocessing: no CPU resize/crop — encoder handles spatial transforms on GPU
+  # Conservative RGB augmentation — 25% trigger rate, mild magnitudes.
+  # Reference: DexUMI uses brightness=0.6 for challenging lighting; we stay lower.
   rgb_aug:
     _target_: dexmani_policy.datasets.augmentation.ImageAug
     brightness: 0.3
@@ -50,8 +62,16 @@ dataset:
     saturation: 0.2
     hue: 0.05
     grayscale_prob: 0.1
+    noise_std: 0.0                # explicit disable — noise hurts manipulation
+    blur_prob: 0.0                # explicit disable — preserves fine gripper details
     prob: 0.25
 
+  # Joint-state augmentation — mild Gaussian noise, 50% trigger rate.
+  augmentation_cfg:
+    state:
+      noise:       {noise_std: 0.005, prob: 0.5}
+
+# ── Agent ──
 agent:
   _target_: dexmani_policy.agents.core.dp.DPAgent
   horizon: ${horizon}
@@ -59,37 +79,54 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
+  # Vision backbone (choose one)
+  rgb_backbone_name: dino
+  rgb_backbone_config:
+    model_name: small               # facebook/dinov2-small, 384d
+    tune_mode: lora
+    global_token_type: avg
+    image_size: [224, 224]
+    crop_ratio: 0.95
+  # rgb_backbone_name: resnet
+  # rgb_backbone_config:
+  #   model_name: resnet18
+  #   weights: null               # null=scratch: GN replaces BN (RoboTwin DP: "EMA destroys performance with BN")
+  #   tune_mode: full
+  #   norm_mode: group_norm
+  #   image_size: [224, 224]
+  # rgb_backbone_name: r3m
+  # rgb_backbone_config:
+  #   model_name: resnet18          # 512d | resnet34(512d) | resnet50(2048d)
+  #   tune_mode: full
+  #   norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
+  #   global_token_type: avg
+  #   image_size: [224, 224]
+
+  state_dim: 19
   modality_dropout_probs:
     joint_state: 0.0
 
-  rgb_backbone_name: resnet
-  rgb_backbone_config:
-    model_name: resnet18
-    weights: IMAGENET1K_V1
-    tune_mode: full
-    norm_mode: group_norm
-    image_size: ${dataset.rgb_random_crop_size}
-
-  state_dim: 19
-
+  # UNet backbone
   diffusion_step_embed_dim: 128
   down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
-
   cond_predict_scale: true
 
+  # Diffusion
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
 
+# ── Optimizer ──
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
-  obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6
   betas: [0.95, 0.999]
+  obs_lr: 2.5e-4                      # LoRA fine-tuning needs higher LR
+  obs_weight_decay: 1.0e-6
 
+# ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
   update_after_step: 0
@@ -98,6 +135,26 @@ ema:
   min_value: 0.0
   max_value: 0.9999
 
+# ── Training ──
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: true
+  use_compile: true
+  use_ema: true
+  use_ema_teacher_for_consistency: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    num_epochs: 1000
+    log_interval_steps: 50
+    val_interval_epochs: 25
+    eval_interval_epochs: 100
+    sample_interval_epochs: 5
+    gradient_accumulation_steps: 1
+
+# ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.common.workspace.TrainWorkspace
   output_dir: ${hydra:runtime.output_dir}
@@ -118,41 +175,18 @@ workspace:
     mode: max
     topk: 3
 
-training:
-  seed: ${seed}
-  device: cuda:0
-
-  # ── 加速 ──
-  use_bfloat16: false
-  use_compile: true
-
-  # ── EMA ──
-  use_ema: true
-  use_ema_teacher_for_consistency: false
-
-  # ── 优化器调度 ──
-  lr_scheduler: cosine
-  lr_warmup_steps: 500
-  max_grad_norm: 1.0
-
-  loop:
-    num_epochs: 1000
-    log_interval_steps: 50
-    val_interval_epochs: 25
-    eval_interval_epochs: 100
-    sample_interval_epochs: 5
-
-
+# ── Env Runner ──
 env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
   env_video_fps: 15
-  default_eval_episodes: 20
+  default_eval_episodes: 20        # RGB-based policies: 20; PC-based (dp3/r3d/moe): 25
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
+# ── Eval ──
 eval:
   seed: 0
   offline:
@@ -161,6 +195,7 @@ eval:
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
 
+# ── Hydra ──
 hydra:
   job:
     override_dirname: ${policy_name}_${task_name}

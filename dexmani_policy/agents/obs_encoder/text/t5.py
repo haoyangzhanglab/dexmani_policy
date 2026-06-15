@@ -4,6 +4,7 @@ from typing import List, Optional
 from transformers import AutoTokenizer, T5EncoderModel
 
 
+# NOTE: reserve code — not currently used by any agent.
 class T5TextEncoder(nn.Module):
 
     def __init__(

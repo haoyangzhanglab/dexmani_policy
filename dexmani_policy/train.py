@@ -1,8 +1,7 @@
 import os
 import pathlib
 
-ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
-os.chdir(ROOT_DIR)
+os.chdir(str(pathlib.Path(__file__).parent.parent))
 
 import hydra
 import torch
@@ -12,9 +11,8 @@ from torch.utils.data import DataLoader
 from termcolor import cprint
 
 from dexmani_policy.agents.common.param_counter import print_param_count
-from dexmani_policy.common.config_validation import validate_action_key_consistency
+from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn
-from dexmani_policy.common.resolver import register_resolvers
 from dexmani_policy.training.common.lr_scheduler import get_scheduler
 from dexmani_policy.training.trainer import Trainer
 
@@ -59,12 +57,11 @@ def build_model_and_ema(cfg, device, normalizer):
     return model, ema_model, ema_updater
 
 
-def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
-    optimizer = model.configure_optimizer(**cfg.optimizer)
-
-    total_steps = batches_per_epoch * cfg.training.loop.num_epochs
-
-    scheduler = get_scheduler(
+def build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch=-1):
+    accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
+    steps_per_epoch = -(-batches_per_epoch // accum_steps)
+    total_steps = steps_per_epoch * cfg.training.loop.num_epochs
+    return get_scheduler(
         optimizer=optimizer,
         name=cfg.training.lr_scheduler,
         num_warmup_steps=cfg.training.lr_warmup_steps,
@@ -72,6 +69,10 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
         last_epoch=last_epoch,
     )
 
+
+def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
+    optimizer = model.configure_optimizer(**cfg.optimizer)
+    scheduler = build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch)
     return optimizer, scheduler
 
 
@@ -175,7 +176,6 @@ def main(cfg):
     validate_config(cfg)
 
     set_seed(cfg.training.seed)
-    torch.set_float32_matmul_precision('high')
     components = build_train_components(cfg)
     components['workspace'].save_hydra_config(cfg)
 

@@ -84,6 +84,10 @@ def get_optim_group_with_no_decay(
                 no_decay.add(fpn)
             elif pn.endswith("weight") and isinstance(m, whitelist):
                 decay.add(fpn)
+            else:
+                # Raw nn.Parameter (e.g. learnable tokens, class embeddings)
+                # — default to no weight decay.
+                no_decay.add(fpn)
 
     inter = decay & no_decay
     if inter:
@@ -113,3 +117,23 @@ def get_optim_group_with_no_decay(
     assert len(all_params) == len(set(map(id, all_params))), "Some parameters appear in more than one group"
 
     return optim_group
+
+
+class OptimGroupMixin:
+    """Mixin that provides ``get_optim_groups()`` by reading class-level config.
+
+    Subclasses declare which parameter names to exclude from weight decay and
+    which module types to add to the blacklist.  The actual implementation is
+    delegated to :func:`get_optim_group_with_no_decay`.
+    """
+
+    _optim_no_decay_names: tuple[str, ...] = ()
+    _optim_extra_blacklist: tuple[type, ...] = ()
+
+    def get_optim_groups(self, weight_decay: float = 1e-3):
+        return get_optim_group_with_no_decay(
+            self,
+            weight_decay=weight_decay,
+            no_decay_names=list(self._optim_no_decay_names) or None,
+            extra_blacklist=self._optim_extra_blacklist or None,
+        )

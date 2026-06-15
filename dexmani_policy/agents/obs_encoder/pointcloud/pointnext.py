@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Dict
 
-from dexmani_policy.agents.obs_encoder.pointcloud.common.position_encodings import (
+from dexmani_policy.common.position_encodings import (
     RelativePositionalEncoding3D,
     SinusoidalPosEmb3D,
 )

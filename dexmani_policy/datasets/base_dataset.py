@@ -185,7 +185,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.augmentors = {}
         if self.augmentation_cfg is None:
             return
-        for section, cls, key, modality in self.AUGMENTOR_REGISTRY:
+        for section, cls, key, modality in AUGMENTOR_REGISTRY:
             config = (self.augmentation_cfg.get(section) or {}).get(key)
             if config:
                 self.augmentors.setdefault(modality, []).append(cls(**config))

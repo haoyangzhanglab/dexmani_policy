@@ -1,9 +1,10 @@
-# DP3 — 3D Diffusion Policy with point cloud observation
-# Encoder:  iDP3 / PointNeXT point cloud encoder (128d)
-# Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
+# R3D — 3D Diffusion Policy with Uni3D encoder
+# Encoder:  Uni3D (ViT-tiny, 256d, pre-trained) with color point cloud
+# Decoder:  OneWayTransformer (cross-attention) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
+# Note:     pc_dim=6 (color), use_compile=false (ViT memory)
 
-policy_name: dp3
+policy_name: r3d
 
 # ── Task ──
 task_name: pick_apple_messy
@@ -18,8 +19,10 @@ action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 # ── Dataloader ──
+# NOTE: R3D encoder is memory-intensive (ViT activations).
+# Single-GPU: batch_size=16-32. DDP across 4+ GPUs can use 256.
 dataloader:
-  batch_size: 256
+  batch_size: 32
   shuffle: true
   num_workers: 8
   pin_memory: true
@@ -28,9 +31,9 @@ dataloader:
   drop_last: false
 
 val_dataloader:
-  batch_size: 256
+  batch_size: 8
   shuffle: false
-  num_workers: 4
+  num_workers: 2
   pin_memory: true
   persistent_workers: false
   prefetch_factor: 2
@@ -50,6 +53,7 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
+  # R3D data augmentation (paper Section 3.2)
   # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
   augmentation_cfg:
     pc:
@@ -61,17 +65,29 @@ dataset:
 
 # ── Agent ──
 agent:
-  _target_: dexmani_policy.agents.core.dp3.DP3Agent
+  _target_: dexmani_policy.agents.core.r3d.R3DAgent
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: idp3                 # idp3 | pointnext | dp3
+  # Uni3D encoder
   pc_dim: 6
-  pc_out_dim: 128
-  state_dim: 19
   num_points: 1024
+  state_dim: ${action_dim}
+  state_out_dim: 64
+
+  pc_encoder_config:
+    pc_model: eva02_tiny_patch14_224
+    embed_dim: 256
+    num_group: 512
+    group_size: 32
+    pc_in_channels: 6
+    patch_dropout: 0.0
+    drop_path_rate: 0.0
+    feature_mode: pointsam
+    use_pretrained_weights: true
+    pretrained_weights_path: data/pretrained/uni3d
 
   fps_random_config:
     use_random: true
@@ -79,19 +95,21 @@ agent:
     random_noise_scale: 0.0
     shuffle_output: true
 
-  # Diffusion backbone
-  diffusion_step_embed_dim: 128
-  down_dims: [256, 512, 1024]
-  kernel_size: 5
-  n_groups: 8
-  cond_predict_scale: true
-
-  num_training_steps: 100
-  num_inference_steps: 10
-  prediction_type: sample
+  # OneWayTransformer backbone
+  timestep_embed_dim: 128
+  embedding_dim: 256
+  depth: 4
+  num_heads: 8
+  mlp_dim: 2048
+  attention_downsample_rate: 2
 
   modality_dropout_probs:
     joint_state: 0.2
+
+  # Diffusion
+  num_training_steps: 100
+  num_inference_steps: 10
+  prediction_type: sample
 
 # ── Optimizer ──
 optimizer:
@@ -115,7 +133,7 @@ training:
   seed: ${seed}
   device: cuda:0
   use_bfloat16: true
-  use_compile: true
+  use_compile: false               # ViT activations + torch.compile cause OOM
   use_ema: true
   use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
@@ -156,7 +174,7 @@ env_runner:
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
   env_video_fps: 15
-  default_eval_episodes: 25        # PC-based policies: 25; RGB-based: 20
+  default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}

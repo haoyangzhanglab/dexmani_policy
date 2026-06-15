@@ -10,18 +10,18 @@
 
 ```bash
 # 单卡训练
-bash scripts/train.sh dp3                # dp / dp3 / maniflow / moe_dp3
+bash scripts/train.sh dp3                # dp / dp3 / maniflow / moe_dp3 / r3d
 bash scripts/train.sh dp3 'training.loop.num_epochs=10'  # Hydra override
 
 # 多卡 DDP
-bash scripts/train_ddp.sh maniflow_ddp
+bash scripts/train_ddp.sh maniflow_ddp    # dp_ddp / maniflow_ddp / multitask_dit_ddp / r3d_ddp
 
 # 多任务训练
 bash scripts/train.sh multitask_dit
 
 # 冒烟测试（构建链完整性）
 python dexmani_policy/smoke_test.py dp3
-python dexmani_policy/smoke_test.py dp3 maniflow moe_dp3
+python dexmani_policy/smoke_test.py dp3 maniflow moe_dp3 r3d
 
 # 仿真评测
 bash scripts/eval_sim.sh dp3 pick_apple_messy <exp_dir>
@@ -49,11 +49,14 @@ Hydra config (configs/*.yaml) → Dataset (Zarr → ReplayBuffer → SequenceSam
 
 | Agent | 输入 | Encoder | Backbone | Decoder | 配置 |
 |---|---|---|---|---|---|
-| `DPAgent` | RGB+state | DINO/CLIP+StateMLP | `ConditionalUnet1D` (FiLM) | `Diffusion` | `dp.yaml` |
+| `DPAgent` | RGB+state | DINO/CLIP/SigLIP+StateMLP | `ConditionalUnet1D` (FiLM) | `Diffusion` | `dp.yaml` |
 | `DP3Agent` | PC+state | iDP3/PointNeXT+StateMLP | `ConditionalUnet1D` (FiLM) | `Diffusion` | `dp3.yaml` |
-| `ManiFlowAgent` | PC+state | PointPN+StateMLP | `DiTXFlowMatch` (cross-attn) | `FlowMatchWithConsistency` | `maniflow.yaml` |
+| `ManiFlowAgent` | PC+state | PointNeXT+StateMLP | `DiTXFlowMatch` (cross-attn) | `FlowMatchWithConsistency` | `maniflow.yaml` |
 | `MoEAgent` | PC+state | DP3 encoder+MoE gating | `ConditionalUnet1D` | `Diffusion` | `moe_dp3.yaml` |
-| `MultiTaskAgent` | RGB+state+text | DINO+CLIP Text+StateMLP | `DiT_Diffusion` (self-attn+AdaLN) | `Diffusion` | `multitask_dit.yaml` |
+| `MultiTaskAgent` | RGB+state+text | DINO/CLIP/SigLIP+CLIP Text+StateMLP | `DiT_Diffusion` (self-attn+AdaLN) | `Diffusion` | `multitask_dit.yaml` |
+| `R3DAgent` | PC+state | Uni3D (ViT-tiny)+StateMLP | `OneWayTransformer` (cross-attn) | `Diffusion` | `r3d.yaml` |
+
+> **视觉 backbone 加载约定**: DINO/CLIP/SigLIP 均以 `torch_dtype=torch.bfloat16` 加载（参数显存减半）；CLIP/SigLIP 额外启用 `attn_implementation="flash_attention_2"`（DINOv2 默认 SDPA 无需变更）。LoRA 参数自动对齐 backbone dtype。
 
 ## 关键数据流
 
@@ -117,7 +120,7 @@ Cond:   (B, out_dim×2)      # UNet/DP/DP3/MoE; ManiFlow: (B, N_tokens, token_di
 ```
 dexmani_policy/
   train.py, train_ddp.py, eval_sim.py, smoke_test.py
-  configs/               # Hydra YAML（5 策略 + dataset preset）
+  configs/               # Hydra YAML（6 策略 + dataset preset）
   agents/core/           # BaseAgent → DP/DP3/ManiFlow/MoE/MultiTask
   agents/action_decoders/ # Diffusion, FlowMatchWithConsistency, backbone/(unet1d, dit, ditx)
   agents/obs_encoder/    # pointcloud, rgb, text, plugins/(moe, token_compressor)
@@ -137,7 +140,7 @@ dexmani_policy/
 - `eval.seed: 0` 固定，保证同一 checkpoint 多次评测可复现
 - Normalizer: `mode='limits'`，train+val 全量拟合 → [-1,1]；`range_eps=1e-4`（与官方 diffusion_policy 一致），低方差维度 zero-center 不缩放（scale=1.0, offset=-mean）
 - 数据增强默认禁用，通过 `prob` 控制执行概率；`pc_dim` 必须与 Zarr 点云通道数一致
-- 数据增强（`augmentation_cfg`）与 modality dropout（`modality_dropout_probs`）职责不同：增强生成合理的观测变体（加噪、旋转、颜色抖动），在 Dataset 层 normalize 前执行；modality dropout 是模型正则化，故意将整个模态置零来防止过拟合，在 Agent 层 normalize 后执行。详见 `configs/augmentation_example.yaml`
+- 数据增强（`augmentation_cfg`）与 modality dropout（`modality_dropout_probs`）职责不同：增强生成合理的观测变体（加噪、旋转、颜色抖动），在 Dataset 层 normalize 前执行；modality dropout 是模型正则化，故意将整个模态置零来防止过拟合，在 Agent 层 normalize 后执行
 - SequenceSampler：短于 8 帧的 episode 自动 warn + skip（不 crash）；边界 padding 复制首尾帧
 - 配置全链路可追踪，所有 YAML key 均可追溯到代码消费点，**无 dead config**
 
@@ -180,6 +183,7 @@ dexmani_policy/
 - FlowMatch consistency weight = 1.0 — `flowmatch.py:198`
 - `torch.optim.AdamW` — `base.py:137`
 - UNet `use_{down,mid,up}_condition=True` — `base.py:178-181`
+- DINO/CLIP/SigLIP vision backbone 以 bfloat16 加载，CLIP/SigLIP 启用 Flash Attention 2 — `dino.py:52`, `clip.py:33-35`, `siglip.py:30-32`
 
 ## 文档索引
 

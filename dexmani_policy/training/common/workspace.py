@@ -49,7 +49,6 @@ class TrainWorkspace:
 
         self.topk_tracker = TopKCheckpointTracker(
             checkpoint_dir=self.checkpoint_dir,
-            monitor_key=checkpoint_cfg.monitor_key,
             mode=checkpoint_cfg.mode,
             k=checkpoint_cfg.topk,
         )
@@ -101,7 +100,7 @@ class TrainWorkspace:
 
 
     def save_topk(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
-        return self.topk_tracker.update(checkpoint_path, checkpoint)
+        return self.topk_tracker.update(checkpoint_path)
 
 
     def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:

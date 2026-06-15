@@ -212,7 +212,7 @@ class StateNoiseAug(Aug):
     NOTE: This is data augmentation — it generates plausible sensor readings
     by adding noise. It is NOT the same as modality dropout (``modality_dropout_probs``
     in agent config), which zeros out the entire modality to force multi-modal
-    robustness. See ``configs/augmentation_example.yaml`` for the full distinction.
+    robustness.
     """
 
     def __init__(self, noise_std=0.005, prob=1.0):

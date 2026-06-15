@@ -4,7 +4,7 @@ from termcolor import cprint
 from collections import deque
 from typing import Any, Dict, List
 
-from dexmani_policy.common.pytorch_util import dict_apply
+from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 
 
 class BaseRunner:
@@ -51,7 +51,7 @@ class BaseRunner:
             start_idx = -min(n_steps, len(all_list))
             result[start_idx:] = np.asarray(all_list[start_idx:])
             if n_steps > len(all_list):
-                # 重复最早帧填充（与训练时 episode 起始的 pad 行为语义一致：都是重复最早可用帧）
+                # Pad with the earliest available frame (same semantics as training-time episode-start padding)
                 result[:start_idx] = result[start_idx]
             return result
 
@@ -121,27 +121,30 @@ class BaseRunner:
         self.reset()
         self.update_obs(obs)
 
+        done = False
         truncated = False
-        prev_success = False
-        task_done_step = None  # None 表示未成功完成，区分于成功时的 action_cnt
+        episode_success = False
+        task_done_step = None  # None = not yet succeeded (distinct from action_cnt=0)
         device = next(agent.parameters()).device
 
-        while not truncated:
-            obs = self.get_obs_batch(device=device)
-            action_chunk = self.get_action_chunk(obs, agent, denoise_timesteps=denoise_timesteps)
+        while not (done or truncated):
+            obs_batch = self.get_obs_batch(device=device)
+            action_chunk = self.get_action_chunk(obs_batch, agent, denoise_timesteps=denoise_timesteps)
             for i in range(action_chunk.shape[0]):
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
                 self.update_obs(obs)
 
-                episode_success = info.get("success", done)
-                if episode_success and not prev_success:
+                # Record first success step using the raw success_condition (no hold delay)
+                if info.get("success_condition") and task_done_step is None:
                     task_done_step = getattr(env, 'action_cnt', None)
-                prev_success = episode_success
 
-                if truncated:
+                if info.get("success", False):
+                    episode_success = True
+
+                if done or truncated:
                     break
 
-        return prev_success, task_done_step
+        return episode_success, task_done_step
     
 
     def run(self, agent, denoise_timesteps:int=None, eval_episodes:int=None):
@@ -158,7 +161,7 @@ class BaseRunner:
         task_done_step_list = []
         episode_video_list = []
         episode_details = []  # per-episode: {seed, success, steps}
-        completed = 0
+        attempted = 0
 
         print("=" * 90)
 
@@ -167,26 +170,26 @@ class BaseRunner:
             while len(success_list) < num_episodes and seed_idx < len(eval_seeds):
                 eval_seed = eval_seeds[seed_idx]
                 seed_idx += 1
+                attempted += 1
 
                 try:
-                    done, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
+                    episode_success, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
                     video = env.get_video()
-                    completed += 1
 
-                    if self.clear_cache_freq > 0 and completed % self.clear_cache_freq == 0:
+                    if self.clear_cache_freq > 0 and attempted % self.clear_cache_freq == 0:
                         env.close()
                         env = self.make_env()
 
-                    status = "success" if done else "fail"
+                    status = "success" if episode_success else "fail"
                     done_step_str = task_done_step if task_done_step is not None else "N/A"
                     cprint(f"[progress {len(success_list)+1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}", "cyan")
 
-                    success_list.append(done)
-                    if done and task_done_step is not None:
+                    success_list.append(episode_success)
+                    if episode_success and task_done_step is not None:
                         task_done_step_list.append(task_done_step)
                     episode_details.append({
                         "seed": eval_seed,
-                        "success": done,
+                        "success": episode_success,
                         "steps": task_done_step,
                     })
                     if video is not None:
@@ -196,6 +199,11 @@ class BaseRunner:
 
                 except Exception as e:
                     cprint(f"Seed {eval_seed} failed: {e}", "red")
+                    # Try to capture pre-crash video frames for diagnostics
+                    try:
+                        crash_video = env.get_video()
+                    except Exception:
+                        crash_video = None
                     success_list.append(False)
                     episode_details.append({
                         "seed": eval_seed,
@@ -203,6 +211,10 @@ class BaseRunner:
                         "steps": None,
                         "error": str(e),
                     })
+                    if crash_video is not None:
+                        episode_video_list.append({
+                            f"episode_{eval_seed}_crash": crash_video
+                        })
 
             if len(success_list) < num_episodes:
                 cprint(f"Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")
@@ -210,7 +222,7 @@ class BaseRunner:
             success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
             avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
 
-            sr_str = 'N/A' if success_rate is None else f'{success_rate*100.0:.1f}%'
+            sr_str = format_success_rate(success_rate)
             avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
             cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps (success only): {avg_steps_str}", "yellow")
             print("=" * 90)

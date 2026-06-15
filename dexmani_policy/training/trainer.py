@@ -1,3 +1,4 @@
+import contextlib
 import time
 import traceback
 import torch
@@ -7,8 +8,7 @@ from tqdm import tqdm
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
-from dexmani_policy.common.pytorch_util import optimizer_to, dict_apply, fix_state_dict
-from dexmani_policy.training.common.logging import to_log_scalars
+from dexmani_policy.common.pytorch_util import compile_models, optimizer_to, dict_apply, fix_state_dict, to_log_scalars
 from dexmani_policy.training.common.workspace import TrainWorkspace
 from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
 
@@ -20,6 +20,7 @@ class TrainLoopConfig:
     val_interval_epochs: int
     eval_interval_epochs: int
     sample_interval_epochs: int
+    gradient_accumulation_steps: int = 1
 
 
 class Trainer:
@@ -90,6 +91,10 @@ class Trainer:
         self.use_bfloat16 = use_bfloat16
         self.use_compile = use_compile
 
+        self.gradient_accumulation_steps = max(1, int(train_loop_cfg.gradient_accumulation_steps))
+        # Pre-compute AMP device_type string to avoid repeated str.split on every step
+        self.amp_device_type = str(self.device).split(':')[0]
+
         self.is_main_process = is_main_process
         self.distributed = distributed
         self.train_sampler = train_sampler
@@ -101,7 +106,7 @@ class Trainer:
     def raw_model(self):
         model = self.model
         # Unwrap DDP wrapper
-        if hasattr(model, 'module'):
+        if isinstance(model, DDP):
             model = model.module
         # Unwrap torch.compile wrapper (OptimizedModule)
         if hasattr(model, '_orig_mod'):
@@ -162,10 +167,23 @@ class Trainer:
         torch.save(payload, ckpt_dir / filename)
         return ckpt_dir / filename
 
-    def train_one_step(self, batch: Dict[str, Any]):
+    def train_one_step(self, batch: Dict[str, Any], *, is_accumulation_boundary: bool = True):
+        """Forward + backward on one micro-batch.
+
+        When ``gradient_accumulation_steps > 1`` the loss is scaled by
+        ``1 / gradient_accumulation_steps`` and ``optimizer.step()`` /
+        ``scheduler.step()`` / EMA are deferred until the accumulation
+        boundary (``is_accumulation_boundary=True``).
+
+        Parameters:
+            batch: Data dict from the DataLoader.
+            is_accumulation_boundary: If ``True``, apply gradient step after
+                backward.  Set to ``False`` for intermediate micro-batches
+                when accumulating gradients.
+        """
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = {'ema_backbone': self.ema_model.action_decoder.model} if self.use_ema_teacher_for_consistency else {}
-        with torch.amp.autocast(device_type=str(self.device).split(':')[0], dtype=torch.bfloat16, enabled=self.use_bfloat16):
+        with torch.amp.autocast(device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16):
             raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         if self.distributed:
@@ -186,8 +204,13 @@ class Trainer:
                 f"raw_loss={raw_loss.item()}. Debug checkpoint saved to {debug_path}"
             )
 
-        raw_loss.backward()
-        self.apply_gradient_step()
+        # Scale loss so that the *sum* of micro-batch gradients equals the
+        # gradient of the full batch (loss averaged across micro-batches).
+        (raw_loss / self.gradient_accumulation_steps).backward()
+
+        if is_accumulation_boundary:
+            self.apply_gradient_step()
+
         return batch, log_dict
 
 
@@ -202,7 +225,7 @@ class Trainer:
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
             loss_kwargs = {'ema_backbone': ema_backbone} if ema_backbone is not None else {}
-            with torch.amp.autocast(device_type=str(self.device).split(':')[0], dtype=torch.bfloat16, enabled=self.use_bfloat16):
+            with torch.amp.autocast(device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16):
                 loss, log_dict = agent.compute_loss(batch, **loss_kwargs)
 
             n = batch['action'].shape[0]
@@ -231,11 +254,12 @@ class Trainer:
         for item in result.get("videos", []):
             for key, value in item.items():
                 metrics[f"eval/{key}_video"] = value
-        for key, value in result.items():
-            if key.startswith("per_task/") and isinstance(value, (int, float)):
-                if key.endswith("success_rate"):
-                    value = value * 100
-                metrics[f"eval/{key}"] = value
+        per_task = result.get("per_task", {})
+        for task_name, task_result in per_task.items():
+            sr = task_result.get("success_rate")
+            if sr is not None:
+                metrics[f"eval/per_task/{task_name}/success_rate"] = sr * 100
+                metrics[f"eval/per_task/{task_name}/avg_steps"] = task_result.get("avg_steps")
         return metrics
 
 
@@ -248,7 +272,7 @@ class Trainer:
         sample_batch = self.train_sampling_batch
         if sample_batch is None:
             sample_batch = dict_apply(last_batch, lambda x: x.to(self.device, non_blocking=True))
-        with torch.amp.autocast(device_type=str(self.device).split(':')[0], dtype=torch.bfloat16, enabled=self.use_bfloat16):
+        with torch.amp.autocast(device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16):
             return {"sample/action_mse_error": eval_model.compute_action_mse(sample_batch)}
 
     def _validate_and_log(self, epoch):
@@ -266,15 +290,6 @@ class Trainer:
     def _evaluate_and_log(self, eval_model):
         return self.evaluate(eval_model) if self.env_runner is not None else {}
 
-    @staticmethod
-    def _unwrap_state_dict(model, prefix='_orig_mod.'):
-        """Return state_dict with ``_orig_mod.`` (torch.compile) prefix stripped if present."""
-        sd = model.state_dict()
-        first_key = next(iter(sd.keys()))
-        if first_key.startswith(prefix):
-            sd = {k.removeprefix(prefix): v for k, v in sd.items()}
-        return sd
-
     def _save_epoch_checkpoint(self, epoch, global_step, checkpoint_model, test_mean_score):
         """Build and save a checkpoint, update topk tracker, and refresh latest symlink."""
         monitor = {"test_mean_score": test_mean_score} if test_mean_score is not None else {}
@@ -284,7 +299,7 @@ class Trainer:
             epoch=epoch,
             global_step=global_step,
             model_state=checkpoint_model.state_dict(),
-            ema_model_state=self._unwrap_state_dict(self.ema_model) if self.use_ema else None,
+            ema_model_state=fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False) if self.use_ema else None,
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             monitor=monitor,
@@ -335,19 +350,19 @@ class Trainer:
         should_save_latest = self._should_run(epoch, self.val_interval_epochs)
 
         if self.workspace is not None and (should_save or should_save_latest):
-            test_mean_score = None
             if should_save:
                 test_mean_score = (
                     epoch_metrics.get("eval/success_rate") if self.enable_env_eval
                     else -epoch_metrics["val/loss"] if "val/loss" in epoch_metrics
                     else None
                 )
-            if not should_save:
+                self._save_epoch_checkpoint(epoch, global_step, checkpoint_model, test_mean_score)
+            else:
+                # should_save_latest only: refresh the latest symlink to point
+                # at the most recent existing checkpoint (no new save).
                 existing = sorted(self.workspace.checkpoint_dir.glob("epoch=*.pt"))
                 if existing:
                     self.workspace.save_latest(existing[-1])
-                return
-            self._save_epoch_checkpoint(epoch, global_step, checkpoint_model, test_mean_score)
 
     def on_epoch_start(self, epoch: int):
         if hasattr(self.train_loader.dataset, 'set_epoch'):
@@ -374,21 +389,9 @@ class Trainer:
             self.ema_model.eval()
 
         if self.use_compile:
-            if hasattr(self.model, 'compile_backbone'):
-                # Only compile the DiTX backbone; the encoder uses pytorch3d ops
-                # (FPS/BallQuery) that are incompatible with torch.compile.
-                # Both the main model and the EMA model get compiled so that
-                # EMAModel.step()'s zip(modules(), modules()) stays aligned.
-                self.model.compile_backbone(mode='reduce-overhead')
-                if self.ema_model is not None:
-                    self.ema_model.compile_backbone(mode='reduce-overhead')
-            else:
-                self.model = torch.compile(self.model)
-                if self.use_ema:
-                    self.ema_model = torch.compile(self.ema_model)
+            compile_models(self.model, self.ema_model)
 
         optimizer_to(self.optimizer, self.device)
-        self.optimizer.zero_grad(set_to_none=True)
 
         epoch_iter = range(start_epoch, self.num_epochs)
         if self.is_main_process:
@@ -406,27 +409,40 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             last_batch = None
-            for batch in self.train_loader:
+            for micro_step, batch in enumerate(self.train_loader):
                 if self.train_sampling_batch is None:
                     self.train_sampling_batch = dict_apply(
                         batch, lambda x: x.to(self.device, non_blocking=True))
                 last_batch = batch
                 self.current_epoch = epoch
-                self.global_step = global_step
-                _, log_dict = self.train_one_step(batch)
-                global_step += 1
 
-                if self.is_main_process and (global_step % self.log_interval_steps) == 0:
-                    step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
-                    for key, value in to_log_scalars(log_dict).items():
-                        step_metrics[f"train/{key}"] = value
+                is_boundary = (micro_step + 1) % self.gradient_accumulation_steps == 0
 
-                    if hasattr(epoch_pbar, 'set_postfix'):
-                        epoch_pbar.set_postfix(
-                            global_step=global_step,
-                            loss=step_metrics.get("train/loss", None),
-                        )
-                    self.workspace.log(step_metrics, step=global_step)
+                # DDP: suppress gradient all-reduce for non-boundary micro-batches
+                # so that gradients accumulate locally, then sync once on the boundary.
+                if self.distributed and not is_boundary:
+                    sync_ctx = self.model.no_sync()
+                else:
+                    sync_ctx = contextlib.nullcontext()
+
+                with sync_ctx:
+                    _, log_dict = self.train_one_step(batch, is_accumulation_boundary=is_boundary)
+
+                if is_boundary:
+                    global_step += 1
+                    self.global_step = global_step
+
+                    if self.is_main_process and (global_step % self.log_interval_steps) == 0:
+                        step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
+                        for key, value in to_log_scalars(log_dict).items():
+                            step_metrics[f"train/{key}"] = value
+
+                        if hasattr(epoch_pbar, 'set_postfix'):
+                            epoch_pbar.set_postfix(
+                                global_step=global_step,
+                                loss=step_metrics.get("train/loss", None),
+                            )
+                        self.workspace.log(step_metrics, step=global_step)
 
             self.model.eval()
 
@@ -447,7 +463,6 @@ class Trainer:
                     dtype=torch.int, device=self.device,
                 )
                 dist.broadcast(error_flag, src=0)
-                dist.barrier()
                 if error_flag.item():
                     raise RuntimeError(
                         "Training aborted due to error in finish_epoch on rank 0"

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from termcolor import cprint
 
+from dexmani_policy.common.pytorch_util import format_success_rate
 from dexmani_policy.training.common.checkpoint_io import CheckpointStore
 
 
@@ -105,7 +106,7 @@ class SimEvaluator:
         self.agent.eval()
 
         eval_run_dir = self.create_eval_run_dir()
-        video_fps = int(self.env_runner.env_video_fps)
+        video_fps = int(getattr(self.env_runner, 'env_video_fps', 15))
 
         if eval_config is not None:
             _save_json(eval_config, eval_run_dir / "eval_config.json")
@@ -120,93 +121,39 @@ class SimEvaluator:
             "metrics": {},
         }
 
+        is_multi_task = hasattr(self.env_runner, 'runners')
+
         for denoise_timesteps in denoise_timesteps_list:
             case_dir = eval_run_dir / f"denoise_timesteps{denoise_timesteps}"
             case_dir.mkdir(parents=True, exist_ok=True)
 
-            # Run episodes one-by-one and save results incrementally,
-            # so partial results survive even if evaluation crashes mid-run.
-            env = self.env_runner.make_env()
-            eval_seeds = self.env_runner.get_seed_list()
-            num_episodes = min(eval_episodes, len(eval_seeds))
-            if eval_episodes > len(eval_seeds):
-                cprint(
-                    f"⚠️ eval_episodes ({eval_episodes}) > available seeds "
-                    f"({len(eval_seeds)}), limiting to {num_episodes}", "yellow")
+            result = self.env_runner.run(
+                self.agent,
+                denoise_timesteps=denoise_timesteps,
+                eval_episodes=eval_episodes,
+            )
 
-            success_list: List[bool] = []
-            task_done_step_list: List[int] = []
-            episode_details: List[Dict[str, Any]] = []
-            video_count = 0
-
-            try:
-                for episode_idx in range(num_episodes):
-                    eval_seed = eval_seeds[episode_idx]
-                    try:
-                        done, task_done_step = self.env_runner.eval_one_episode(
-                            self.agent, env, eval_seed,
-                            denoise_timesteps=denoise_timesteps,
-                        )
-                        video_array = env.get_video()
-                        video_count += 1
-
-                        if (self.env_runner.clear_cache_freq > 0
-                                and video_count % self.env_runner.clear_cache_freq == 0):
-                            env.close()
-                            env = self.env_runner.make_env()
-
-                        status = "success" if done else "fail"
-                        done_step_str = task_done_step if task_done_step is not None else "N/A"
-                        cprint(
-                            f"[progress {episode_idx + 1}/{num_episodes}] "
-                            f"env seed: {eval_seed}, status: {status}, "
-                            f"done step: {done_step_str}", "cyan")
-
-                        success_list.append(done)
-                        if done and task_done_step is not None:
-                            task_done_step_list.append(task_done_step)
-                        episode_details.append({
-                            "seed": eval_seed,
-                            "success": done,
-                            "steps": task_done_step,
-                        })
-
-                        if video_array is not None:
-                            video_path = case_dir / f"eval_episode_{eval_seed}_{status}.mp4"
-                            imageio.mimsave(
-                                str(video_path),
-                                video_array.astype(np.uint8),
-                                fps=video_fps,
-                            )
-
-                    except Exception as e:
-                        cprint(f"Seed {eval_seed} failed: {e}", "red")
-                        success_list.append(False)
-                        episode_details.append({
-                            "seed": eval_seed,
-                            "success": False,
-                            "steps": None,
-                            "error": str(e),
-                        })
-
-                    # --- incremental save after every episode ---
-                    _save_json({
-                        "success_rate": float(np.mean(success_list)) if success_list else None,
-                        "avg_steps": int(round(np.mean(task_done_step_list))) if task_done_step_list else None,
-                        "episode_details": episode_details,
-                        "completed": len(success_list),
-                        "total": num_episodes,
-                    }, case_dir / "metrics.json")
-
-            finally:
-                env.close()
+            for item in result.get("videos", []):
+                for key, video_array in item.items():
+                    video_path = case_dir / f"{key}.mp4"
+                    imageio.mimsave(
+                        str(video_path),
+                        video_array.astype(np.uint8),
+                        fps=video_fps,
+                    )
 
             case_metrics: Dict[str, Any] = {
-                "success_rate": float(np.mean(success_list)) if success_list else None,
-                "avg_steps": int(round(np.mean(task_done_step_list))) if task_done_step_list else None,
+                "success_rate": result["success_rate"],
+                "avg_steps": result["avg_steps"],
             }
-            if episode_details:
-                case_metrics["episode_details"] = episode_details
+            if is_multi_task:
+                per_task = result.get("per_task", {})
+                if per_task:
+                    case_metrics["per_task"] = per_task
+            else:
+                episode_details = result.get("episode_details", [])
+                if episode_details:
+                    case_metrics["episode_details"] = episode_details
             _save_json(case_metrics, case_dir / "metrics.json")
             summary["metrics"][f"denoise_timesteps{denoise_timesteps}"] = case_metrics
 
@@ -217,17 +164,24 @@ class SimEvaluator:
         cprint("  Evaluation Summary", "cyan", attrs=["bold"])
         cprint("=" * 60, "cyan")
         cprint(f"  Checkpoint : {ckpt_tag_or_path} (EMA={use_ema_for_eval})", "cyan")
-        cprint(f"  Episodes   : {eval_episodes}", "cyan")
+        cprint(f"  Episodes   : {eval_episodes}" + (" (per task)" if is_multi_task else ""), "cyan")
         for denoise_timesteps in denoise_timesteps_list:
             case_key = f"denoise_timesteps{denoise_timesteps}"
             case = summary["metrics"].get(case_key, {})
             sr = case.get("success_rate")
             avg = case.get("avg_steps")
-            sr_str = f"{sr*100:.1f}%" if sr is not None else "N/A"
+            sr_str = format_success_rate(sr)
             avg_str = f"{avg}" if avg is not None else "N/A"
             cprint(f"  --- denoise_timesteps={denoise_timesteps} ---", "cyan")
             cprint(f"  Success Rate : {sr_str}", "green" if (sr or 0) >= 0.5 else "red")
             cprint(f"  Avg Steps    : {avg_str}", "cyan")
+
+            per_task = case.get("per_task", {})
+            for task_name, task_result in per_task.items():
+                task_sr = task_result.get("success_rate")
+                task_sr_str = format_success_rate(task_sr)
+                cprint(f"    {task_name}: {task_sr_str}", "cyan")
+
         cprint(f"  Results saved to: {eval_run_dir}", "cyan")
         cprint("=" * 60, "cyan")
 

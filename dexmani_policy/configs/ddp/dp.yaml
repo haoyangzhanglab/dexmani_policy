@@ -1,0 +1,30 @@
+# @package _global_
+# DP — DDP multi-GPU training overlay
+# Usage: bash scripts/train_ddp.sh ddp/dp
+
+defaults:
+  - /dp
+  - _self_
+
+policy_name: ddp/dp
+
+training:
+  num_gpus: 4
+  gpu_ids: null
+
+dataloader:
+  batch_size: 48
+  num_workers: 4
+
+val_dataloader:
+  batch_size: 48
+  num_workers: 4
+
+hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+    subdir: ${hydra.job.num}

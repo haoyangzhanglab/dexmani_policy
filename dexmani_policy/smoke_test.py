@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, dict_apply
-from dexmani_policy.common.resolver import register_resolvers
+from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.train import build_dataset_and_normalizer, build_model_and_ema, build_optimizer_and_scheduler
 
 register_resolvers()
@@ -26,7 +26,7 @@ def load_config(config_name: str):
     config_dir = os.path.join(ROOT_DIR, "dexmani_policy", "configs")
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         cfg = compose(config_name=config_name)
-        # compose 无 Hydra runtime，手动绕过 ${hydra:runtime.output_dir}
+        # compose has no Hydra runtime — manually bypass ${hydra:runtime.output_dir}
         cfg.workspace.output_dir = "/tmp/smoke_test_output"
         OmegaConf.resolve(cfg)
     return cfg
@@ -69,7 +69,7 @@ def smoke_test(config_name: str):
     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
     use_ema_teacher = cfg.training.use_ema_teacher_for_consistency
-    # loss_kwargs 构造与 trainer.py:108 逻辑一致，有意重复以保证 smoke test 独立可运行
+    # loss_kwargs logic intentionally mirrors trainer.py; duplicated so smoke test stays self-contained
     loss_kwargs = {"ema_backbone": ema_model.action_decoder.model} if use_ema_teacher and ema_model else {}
     model.train()
     raw_loss, loss_dict = model.compute_loss(batch, **loss_kwargs)

@@ -1,21 +1,23 @@
-# @package _global_
-
-defaults:
-  - dataset: multitask_rgb
-  - _self_
+# MultiTask DiT — Multi-task policy with text-conditioned DiT backbone
+# Encoder:  CLIP ViT-B/16 text encoder (frozen) + R3M ResNet-18 vision backbone
+# Decoder:  DiT Diffusion (self-attention + AdaLN conditioning)
+# Modality: RGB + joint_state + task_text → action
+# Tasks:    pick_bottle, open_box
 
 policy_name: multitask_dit
 
-task_name: multitask_dit
+# ── Tasks ──
+task_name: pick_bottle+open_box
 seed: 42
 
+# ── Core ──
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-
-action_key: action  # action | action_ee
+action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
+# ── Dataloader ──
 dataloader:
   batch_size: 64
   num_workers: 8
@@ -30,36 +32,125 @@ val_dataloader:
   num_workers: 4
   shuffle: false
   pin_memory: true
-  persistent_workers: true
+  persistent_workers: false
   prefetch_factor: 2
   drop_last: false
 
+# ── Dataset ──
+dataset:
+  _target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
+  seed: ${training.seed}
+  sampling_strategy: balanced          # proportional | balanced | weighted
+  normalizer_mode: shared              # shared | per_task
+  action_key: ${action_key}
+
+  # Joint-state augmentation — mild Gaussian noise, 50% trigger rate.
+  augmentation_cfg:
+    state:
+      noise:       {noise_std: 0.005, prob: 0.5}
+
+  task_names:
+    - pick_bottle
+    - open_box
+
+  task_texts:
+    - "pick up the bottle"
+    - "open the box"
+
+  datasets:
+    - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
+      action_key: ${action_key}
+      zarr_path: robot_data/pick_bottle.zarr
+      seed: ${seed}
+      horizon: ${horizon}
+      pad_before: ${eval:'${n_obs_steps} - 1'}
+      pad_after: ${eval:'${n_action_steps} - 1'}
+      val_ratio: 0.05
+      max_train_episodes: null
+      sensor_modalities: ['joint_state', 'rgb']
+      obs_horizon: ${n_obs_steps}
+      rgb_preprocess_size: [240, 240]
+      rgb_random_crop_size: [224, 224]
+      rgb_aug:
+        _target_: dexmani_policy.datasets.augmentation.ImageAug
+        brightness: 0.3
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.05
+        grayscale_prob: 0.1
+        noise_std: 0.0
+        blur_prob: 0.0
+        prob: 0.25
+
+    - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
+      action_key: ${action_key}
+      zarr_path: robot_data/open_box.zarr
+      seed: ${seed}
+      horizon: ${horizon}
+      pad_before: ${eval:'${n_obs_steps} - 1'}
+      pad_after: ${eval:'${n_action_steps} - 1'}
+      val_ratio: 0.05
+      max_train_episodes: null
+      sensor_modalities: ['joint_state', 'rgb']
+      obs_horizon: ${n_obs_steps}
+      rgb_preprocess_size: [240, 240]
+      rgb_random_crop_size: [224, 224]
+      rgb_aug:
+        _target_: dexmani_policy.datasets.augmentation.ImageAug
+        brightness: 0.3
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.05
+        grayscale_prob: 0.1
+        noise_std: 0.0
+        blur_prob: 0.0
+        prob: 0.25
+
+# ── Agent ──
 agent:
   _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
   text_encoder_model: openai/clip-vit-base-patch16
   task_texts: ${dataset.task_texts}
   rgb_backbone_name: r3m
   rgb_backbone_config:
-    model_name: resnet18   # resnet18 | resnet34 | resnet50
-    tune_mode: full        # freeze | full
+    model_name: resnet18          # resnet18(512d) | resnet34(512d) | resnet50(2048d)
+    tune_mode: full               # freeze | full
+    norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
+    image_size: [224, 224]
+    crop_ratio: 0.95
+  # rgb_backbone_name: resnet
+  # rgb_backbone_config:
+  #   model_name: resnet18
+  #   weights: null               # null=scratch: GN replaces BN (RoboTwin DP: "EMA destroys performance with BN")
+  #   tune_mode: full
+  #   norm_mode: group_norm
+  #   image_size: [224, 224]
+  #   crop_ratio: 0.95
+  # rgb_backbone_name: dino
+  # rgb_backbone_config:
+  #   model_name: small          # facebook/dinov2-small, 384d
+  #   tune_mode: lora
+  #   global_token_type: avg
+  #   image_size: [224, 224]
+  #   crop_ratio: 0.95
   state_dim: 19
   state_out_dim: 64
 
   # DiT backbone
   n_emb: 512
   num_heads: 8
-  n_layers: 6
+  n_layers: 8
   mlp_ratio: 4.0
   qkv_bias: true
 
-  action_decoder_type: diffusion  # diffusion | flowmatch
+  action_decoder_type: diffusion     # diffusion | flowmatch
 
   # Diffusion
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
 
-  # FlowMatch（action_decoder_type=flowmatch 时生效）
+  # FlowMatch (only active when action_decoder_type=flowmatch)
   flow_num_inference_steps: 10
   flow_t_sample_mode: beta
   flow_beta_alpha: 1.0
@@ -75,9 +166,9 @@ agent:
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
-  betas: [0.95, 0.999]
 
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
@@ -107,29 +198,24 @@ workspace:
     mode: max
     topk: 3
 
+# ── Training ──
 training:
   seed: ${seed}
   device: cuda:0
-
-  # ── 加速 ──
-  use_bfloat16: false
-  use_compile: false
-
-  # ── EMA ──
+  use_bfloat16: true
+  use_compile: true
   use_ema: true
   use_ema_teacher_for_consistency: false
-
-  # ── 优化器调度 ──
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
-
   loop:
     num_epochs: 1000
     log_interval_steps: 50
     val_interval_epochs: 25
     eval_interval_epochs: 250
     sample_interval_epochs: 5
+    gradient_accumulation_steps: 1
 
 
 env_runner:
@@ -137,18 +223,14 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   env_video_fps: 15
   default_eval_episodes: 20
-  sensor_modalities: ${dataset.datasets[0].sensor_modalities}
+  sensor_modalities: ['joint_state', 'rgb']
   task_configs:
-    - task_name: task_1
+    - task_name: pick_bottle
       task_text: ${dataset.task_texts[0]}
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
-    - task_name: task_2
+    - task_name: open_box
       task_text: ${dataset.task_texts[1]}
-      env_kwargs:
-        control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
-    - task_name: task_3
-      task_text: ${dataset.task_texts[2]}
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 

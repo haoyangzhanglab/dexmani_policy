@@ -1,23 +1,31 @@
+# ManiFlow — Flow Matching with rectified flow + consistency training
+# Encoder:  PointNeXT tokenizer (256d tokens, SAT-style patch self-attention)
+# Decoder:  DiTX (cross-attention conditioning) + Euler ODE integration
+# Modality: point_cloud + joint_state → action
+# Key:      use_ema_teacher_for_consistency=true, target_t=0 for rectified flow
+
 policy_name: maniflow
 
+# ── Task ──
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 
+# ── Core ──
 seed: 42
-
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-
-action_key: action  # action | action_ee
+action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
+# ── Dataloader ──
 dataloader:
   batch_size: 128
   shuffle: true
   num_workers: 8
   pin_memory: true
   persistent_workers: true
+  prefetch_factor: 2
   drop_last: false
 
 val_dataloader:
@@ -26,8 +34,10 @@ val_dataloader:
   num_workers: 8
   pin_memory: true
   persistent_workers: false
+  prefetch_factor: 2
   drop_last: false
 
+# ── Dataset ──
 dataset:
   _target_: dexmani_policy.datasets.pc_dataset.PCDataset
   action_key: ${action_key}
@@ -39,7 +49,18 @@ dataset:
   val_ratio: 0.05
   max_train_episodes: null
   sensor_modalities: ["joint_state", "point_cloud"]
+  obs_horizon: ${n_obs_steps}
 
+  # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
+  augmentation_cfg:
+    pc:
+      coord_noise: {noise_std: 0.002, ratio: 0.3, prob: 0.5}
+      dropout:     {dropout_ratio: 0.1, prob: 0.3}
+      color:       {brightness: 0.3, contrast: 0.4, saturation: 0.5, hue: 0.08, prob: 0.2}
+    state:
+      noise:       {noise_std: 0.005, prob: 0.5}
+
+# ── Agent ──
 agent:
   _target_: dexmani_policy.agents.core.maniflow.ManiFlowAgent
   horizon: ${horizon}
@@ -47,25 +68,32 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: pointnext_tokenizer  # pointnext_tokenizer | pointpn
-  pc_dim: 3
+  encoder_type: pointnext_tokenizer
+  pc_dim: 6
   state_dim: 19
-  num_points: 1024  # FPS pre-downsample target
+  num_points: 1024
 
-  # ── 点云数据增强（FPS 随机化，参考 R3D-Policy）──
   fps_random_config:
-    use_random: true          # false → 完全确定性 FPS
-    random_start: true        # 随机起始点
-    random_noise_scale: 0.0   # FPS 距离噪声标准差（0=不加噪）
-    shuffle_output: true      # 随机打乱输出顺序
+    use_random: true
+    random_start: true
+    random_noise_scale: 0.0
+    shuffle_output: true
 
+  # PointNeXT encoder
   pc_encoder_config:
     stem_channels: 48
     token_channels: 256
     num_patches: 96
     patch_radii: [0.05, 0.10]
     patch_neighbors: [20, 48]
+    # Patch self-attention (SAT-style inter-patch communication)
+    use_patch_self_attn: true
+    patch_attn_layers: 4
+    patch_attn_heads: 4
+    patch_attn_dropout: 0.1
+    prepend_global_in_attn: true
 
+  # DiTX backbone
   n_layers: 12
   hidden_dim: 768
   n_head: 8
@@ -78,22 +106,26 @@ agent:
   timestep_embed_dim: 128
   target_t_embed_dim: 128
 
+  # Flow matching
   denoise_timesteps: 10
   flow_batch_ratio: 0.75
   t_sample_mode_for_flow: beta
   t_sample_mode_for_consistency: discrete
   dt_sample_mode_for_consistency: uniform
   target_t_sample_mode: relative
-  modality_dropout_probs:
-    joint_state: 0.2
 
+  modality_dropout_probs:
+    joint_state: 0.2                # 20% state dropout — forces reliance on point cloud
+
+# ── Optimizer ──
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-3
+  weight_decay: 1.0e-3            # DiT backbone: high wd is standard for transformers (vs 1e-6 for UNet)
+  betas: [0.9, 0.95]              # lower β1 = shorter gradient EMA, common for flow matching
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6
-  betas: [0.9, 0.95]
+  obs_weight_decay: 1.0e-6        # PointNeXT encoder: lighter regularization than DiT backbone
 
+# ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
   update_after_step: 0
@@ -102,6 +134,26 @@ ema:
   min_value: 0.0
   max_value: 0.9999
 
+# ── Training ──
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: true
+  use_compile: true
+  use_ema: true
+  use_ema_teacher_for_consistency: true   # required: inference uses target_t=dt>0
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    num_epochs: 1000
+    log_interval_steps: 50
+    val_interval_epochs: 25
+    eval_interval_epochs: 200
+    sample_interval_epochs: 5
+    gradient_accumulation_steps: 1
+
+# ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.common.workspace.TrainWorkspace
   output_dir: ${hydra:runtime.output_dir}
@@ -122,41 +174,18 @@ workspace:
     mode: max
     topk: 3
 
-training:
-  seed: ${seed}
-  device: cuda:0
-
-  # ── 加速 ──
-  use_bfloat16: true
-  use_compile: false
-
-  # ── EMA ──
-  use_ema: true
-  use_ema_teacher_for_consistency: true
-
-  # ── 优化器调度 ──
-  lr_scheduler: cosine
-  lr_warmup_steps: 500
-  max_grad_norm: 1.0
-
-  loop:
-    num_epochs: 1000
-    log_interval_steps: 50
-    val_interval_epochs: 25
-    eval_interval_epochs: 200
-    sample_interval_epochs: 5
-
-
+# ── Env Runner ──
 env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
   env_video_fps: 15
-  default_eval_episodes: 20
+  default_eval_episodes: 25        # PC-based policies: 25; RGB-based: 20
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
+# ── Eval ──
 eval:
   seed: 0
   offline:
@@ -165,6 +194,7 @@ eval:
     denoise_timesteps_list: [10]
     use_ema_for_eval: true
 
+# ── Hydra ──
 hydra:
   job:
     override_dirname: ${policy_name}_${task_name}

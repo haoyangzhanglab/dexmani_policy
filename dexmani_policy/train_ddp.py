@@ -185,7 +185,7 @@ def main(cfg):
     if num_gpus is None:
         raise ValueError(
             "train_ddp.py requires 'training.num_gpus' to be set in config. "
-            "Please use a DDP config file (e.g., maniflow_ddp.yaml) or add 'training.num_gpus' to your config."
+            "Please use a DDP config (e.g., ddp/maniflow) or add 'training.num_gpus' to your config."
         )
 
     if num_gpus <= 1:

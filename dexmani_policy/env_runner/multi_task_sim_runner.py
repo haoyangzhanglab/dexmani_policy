@@ -3,6 +3,7 @@ import numpy as np
 from typing import List, Optional, Dict, Any
 from termcolor import cprint
 
+from dexmani_policy.common.pytorch_util import format_success_rate
 from dexmani_policy.env_runner.sim_runner import SimRunner
 
 
@@ -63,7 +64,7 @@ class MultiTaskSimRunner:
         for task_name, result in per_task.items():
             sr = result["success_rate"]
             if sr is not None:
-                sr_str = f"{sr*100:.1f}%"
+                sr_str = format_success_rate(sr)
                 cprint(f"  {task_name}: success_rate={sr_str}, avg_steps (success only)={result['avg_steps']}", "yellow")
             else:
                 error_type = result.get("error_type", "Unknown")
@@ -72,7 +73,7 @@ class MultiTaskSimRunner:
         if failed_tasks:
             cprint(f"  Failed tasks: {failed_tasks}", "red")
 
-        total_sr_str = f"{avg_success_rate*100:.1f}%" if avg_success_rate is not None else "N/A"
+        total_sr_str = format_success_rate(avg_success_rate)
         success_count = len(rates)
         total_count = len(self.runners)
         cprint(f"  Overall ({success_count}/{total_count} tasks): success_rate={total_sr_str}, avg_steps (success only)={avg_steps}", "yellow")
@@ -140,8 +141,4 @@ class MultiTaskSimRunner:
             "per_task": per_task,
             "failed_tasks": failed_tasks,
         }
-        for task_name, task_result in per_task.items():
-            if task_result["success_rate"] is not None:
-                results[f"per_task/{task_name}/success_rate"] = task_result["success_rate"]
-                results[f"per_task/{task_name}/avg_steps"] = task_result["avg_steps"]
         return results

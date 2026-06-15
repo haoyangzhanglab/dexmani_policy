@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import SiglipVisionModel
+from transformers import SiglipVisionConfig, SiglipVisionModel
 from typing import Dict, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
@@ -27,7 +27,9 @@ class SigLIP(nn.Module):
         self.model_name = model_name
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
-        self.backbone = SiglipVisionModel.from_pretrained(model_name)
+        config = SiglipVisionConfig.from_pretrained(model_name)
+        config._attn_implementation = "flash_attention_2"
+        self.backbone = SiglipVisionModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
 
         if not hasattr(self.backbone.config, "patch_size"):
             raise ValueError(f"{model_name} does not look like a ViT-style SigLIP model.")
@@ -71,9 +73,11 @@ class SigLIP(nn.Module):
             )
             self.backbone = get_peft_model(self.backbone, lora_config)
 
+            # Match LoRA dtype to backbone dtype (bfloat16).
+            backbone_dtype = next(self.backbone.parameters()).dtype
             for name, param in self.backbone.named_parameters():
                 if "lora_" in name:
-                    param.data = param.data.float()
+                    param.data = param.data.to(dtype=backbone_dtype)
             return
 
         raise ValueError(f"Unsupported tune_mode: {tune_mode}")

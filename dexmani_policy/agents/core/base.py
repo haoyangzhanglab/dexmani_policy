@@ -69,9 +69,6 @@ class BaseAgent(nn.Module):
     def compute_loss(self, batch, **kwargs):
         cond, _ = self._build_cond(batch['obs'])
         normed_actions = self.normalizer['action'].normalize(batch['action'])
-        return self.compute_loss_from_cond(cond, normed_actions, **kwargs)
-
-    def compute_loss_from_cond(self, cond, normed_actions, **kwargs):
         return self.action_decoder.compute_loss(cond, normed_actions, **kwargs)
 
     @torch.no_grad()
@@ -89,9 +86,9 @@ class BaseAgent(nn.Module):
         pred = self.normalizer['action'].unnormalize(pred)
         start = self.n_obs_steps - 1
         return {
-            # predict_action 返回契约（env_runner 依赖这两个 key）：
-            #   pred_action:     (B, horizon, action_dim)  完整预测序列
-            #   control_action:  (B, n_action_steps, action_dim)  实际执行的 T+1 步动作
+            # predict_action return contract (env_runner depends on these two keys):
+            #   pred_action:     (B, horizon, action_dim)  full predicted trajectory
+            #   control_action:  (B, n_action_steps, action_dim)  T+1 step action to execute
             'pred_action': pred,
             'control_action': pred[:, start:start + self.n_action_steps],
         }
@@ -102,6 +99,11 @@ class BaseAgent(nn.Module):
         gt_action = batch["action"]
         pred_action = self.predict_action(obs)["pred_action"]
         return torch.nn.functional.mse_loss(pred_action, gt_action).item()
+
+    def compile_backbone(self, **compile_kwargs):
+        self.action_decoder.model = torch.compile(
+            self.action_decoder.model, **compile_kwargs
+        )
 
     def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
         action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
@@ -182,7 +184,6 @@ class UNetDiffusionAgent(BaseAgent):
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
                          modality_dropout_probs=modality_dropout_probs)
 
-
 class DiTXFlowMatchAgent(BaseAgent):
     def __init__(
         self,
@@ -239,16 +240,5 @@ class DiTXFlowMatchAgent(BaseAgent):
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
                          modality_dropout_probs=modality_dropout_probs)
-
-    def compile_backbone(self, **compile_kwargs):
-        """torch.compile only the DiTX backbone, skipping the encoder (pytorch3d ops
-        are incompatible with torch.compile)."""
-        self.action_decoder.model = torch.compile(
-            self.action_decoder.model, **compile_kwargs
-        )
-
-    def get_compiled_backbone(self):
-        """Return the (possibly compiled) backbone for EMA consistency teacher."""
-        return self.action_decoder.model
 
 

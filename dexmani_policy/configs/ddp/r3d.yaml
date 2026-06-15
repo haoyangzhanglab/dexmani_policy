@@ -1,24 +1,24 @@
 # @package _global_
+# R3D — DDP multi-GPU training overlay
+# Usage: bash scripts/train_ddp.sh ddp/r3d
 
 defaults:
-  - maniflow
+  - /r3d
   - _self_
 
-# DDP 训练: batch_size 为每卡值，总 batch = batch_size × num_gpus
-
-policy_name: maniflow_ddp
+policy_name: ddp/r3d
 
 training:
   num_gpus: 4
   gpu_ids: null
 
 dataloader:
-  batch_size: 32
-  num_workers: 4
+  batch_size: 16
+  num_workers: 4               # per-GPU cap for DDP (parent r3d has 8)
 
 val_dataloader:
-  batch_size: 32
-  num_workers: 4
+  batch_size: 16
+  num_workers: 2               # per-GPU cap for DDP
 
 hydra:
   job:

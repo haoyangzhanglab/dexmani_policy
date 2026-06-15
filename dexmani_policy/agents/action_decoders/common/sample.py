@@ -80,17 +80,22 @@ class TimeSampler:
         self.beta_alpha = beta_alpha
         self.beta_beta = beta_beta
 
+        # Pre-built dispatch table: mode name → (batch_size, device) → tensor.
+        # Built once in __init__ to avoid dict + 7 lambda allocations on every
+        # forward pass (called twice per compute_loss: flow + consistency).
+        K = denoise_timesteps
+        self._samplers = {
+            "uniform":      lambda B, dev: torch.rand((B,), device=dev),
+            "lognorm":      lambda B, dev: sample_logit_normal(B, m=lognorm_m, s=lognorm_s, device=dev),
+            "mode":         lambda B, dev: sample_mode(B, s=mode_s, device=dev),
+            "cosmap":       lambda B, dev: sample_cosmap(B, device=dev),
+            "beta":         lambda B, dev: sample_beta(B, s=beta_s, alpha=beta_alpha, beta=beta_beta, device=dev),
+            "discrete":     lambda B, dev: torch.randint(0, K, (B,), device=dev).float() / K,
+            "discrete_pow": lambda B, dev: sample_discrete_pow(B, K, device=dev),
+        }
+
     def sample(self, batch_size: int, mode: str, device: str) -> torch.Tensor:
-        K = self.denoise_timesteps
-        sample = {
-            "uniform":      lambda: torch.rand((batch_size,), device=device),
-            "lognorm":      lambda: sample_logit_normal(batch_size, m=self.lognorm_m, s=self.lognorm_s, device=device),
-            "mode":         lambda: sample_mode(batch_size, s=self.mode_s, device=device),
-            "cosmap":       lambda: sample_cosmap(batch_size, device=device),
-            "beta":         lambda: sample_beta(batch_size, s=self.beta_s, alpha=self.beta_alpha, beta=self.beta_beta, device=device),
-            "discrete":     lambda: torch.randint(0, K, (batch_size,), device=device).float() / K,
-            "discrete_pow": lambda: sample_discrete_pow(batch_size, K, device=device),
-        }.get(mode)
-        if sample is None:
+        sampler = self._samplers.get(mode)
+        if sampler is None:
             raise ValueError(f"Unknown sampling mode for t and delta_t in flowmatch: {mode}")
-        return sample().reshape(batch_size)
+        return sampler(batch_size, device).reshape(batch_size)

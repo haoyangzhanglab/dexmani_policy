@@ -7,9 +7,8 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config_validation import validate_action_key_consistency
+from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.common.resolver import register_resolvers
 from dexmani_policy.training.common.checkpoint_io import CheckpointStore
 from dexmani_policy.training.sim_evaluator import SimEvaluator
 
@@ -32,7 +31,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
     if overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
 
-    # backward compat: 历史 checkpoint 使用 action_mode → action_key
+    # backward compat: historical checkpoints used action_mode → action_key
     if not hasattr(cfg, 'action_key'):
         if hasattr(cfg, 'action_mode'):
             cfg.action_key = 'action_ee' if cfg.action_mode == 'eef_hand' else 'action'

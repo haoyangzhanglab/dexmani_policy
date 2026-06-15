@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_patch_tokenizer
-from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import farthest_point_sample
+from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
 from dexmani_policy.agents.core.base import DiTXFlowMatchAgent
 
@@ -35,13 +35,8 @@ class ManiFlowObsEncoder(nn.Module):
         return self.pc_encoder.get_global_token(patch_token, patch_center)
 
     def forward(self, obs: dict):
-        pc = obs['point_cloud'][..., :3] if self.use_coord_only else obs['point_cloud']
-        # PointPN 内部用 pytorch3d（ball_query / FPS），仅支持 fp32。
-        if pc.dtype != torch.float32:
-            pc = pc.float()
-        if pc.shape[1] > self.num_points:
-            pc, _ = farthest_point_sample(pc, self.num_points,
-                                           **self.fps_random_config)
+        pc = preprocess_point_cloud(obs['point_cloud'], self.num_points,
+                                     self.use_coord_only, self.fps_random_config)
         pc_outputs = self.pc_encoder(pc, return_global_token=True)
         patch_token, _, global_token = pc_outputs[0], pc_outputs[1], pc_outputs[2]
         pc_feat = torch.cat([global_token, patch_token], dim=1)
@@ -94,14 +89,13 @@ def example():
 
     agent = ManiFlowAgent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
-        encoder_type='pointpn', pc_dim=3, state_dim=A, num_points=N,
+        encoder_type='pointnext_tokenizer', pc_dim=3, state_dim=A, num_points=N,
         pc_encoder_config={
-            'num_stages': 3,
-            'embed_channels': 32,
-            'stage_num_neighbors': [16, 16, 14],
-            'stage_lga_blocks': [1, 1, 1],
-            'stage_channel_expansion': [2, 2, 2],
-            'point_cloud_type': 'scan',
+            'stem_channels': 48,
+            'token_channels': 128,
+            'num_patches': 96,
+            'patch_radii': (0.05, 0.10),
+            'patch_neighbors': (20, 48),
         },
         n_layers=2, hidden_dim=128, n_head=4, mlp_ratio=2.0,
         p_drop_attn=0.0, timestep_embed_dim=64, target_t_embed_dim=64,

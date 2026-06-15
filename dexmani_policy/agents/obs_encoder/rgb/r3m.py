@@ -8,10 +8,15 @@ from typing import Dict, Literal, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
+from dexmani_policy.agents.obs_encoder.rgb.common.types import NormMode
 from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
     flatten_batch,
     restore_batch,
     reshape_patch_tokens_to_map,
+)
+from dexmani_policy.agents.obs_encoder.rgb.resnet import (
+    FrozenBatchNorm2d,
+    replace_batch_norm_with_group_norm,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,6 +130,7 @@ class R3M(nn.Module):
         self,
         model_name: str = "resnet18",
         tune_mode: TuneMode = "freeze",
+        norm_mode: NormMode = "group_norm",
         global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
     ):
@@ -138,12 +144,14 @@ class R3M(nn.Module):
 
         self.model_name = model_name
         self.tune_mode = tune_mode
+        self.norm_mode = norm_mode
         self.global_token_type = global_token_type
         self.output_stride = 32
 
         # ── Build a standard ResNet and load R3M weights ──
         resnet_fn = getattr(torchvision.models, model_name)
-        backbone = resnet_fn(weights=None)
+        norm_layer = FrozenBatchNorm2d if norm_mode == "frozen_bn" else nn.BatchNorm2d
+        backbone = resnet_fn(weights=None, norm_layer=norm_layer)
         backbone.fc = nn.Identity()
 
         convnet_state = _load_r3m_convnet_state_dict(model_name)
@@ -155,6 +163,9 @@ class R3M(nn.Module):
             raise RuntimeError(
                 f"Unexpected keys in R3M {model_name} state dict: {unexpected}"
             )
+
+        if norm_mode == "group_norm":
+            backbone = replace_batch_norm_with_group_norm(backbone)
 
         self.hidden_dim = _R3M_HIDDEN_DIM[model_name]
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)

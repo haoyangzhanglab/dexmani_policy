@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import random
 import numpy as np
-from typing import Dict, Callable, List, Optional, Union
+from typing import Any, Dict, Callable, List, Optional, Union
 
 
 def ensure_tensor(x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
@@ -36,6 +36,38 @@ def optimizer_to(optimizer: torch.optim.Optimizer, device: torch.device | str) -
                 state[k] = v.to(device=device)
     return optimizer
 
+
+def format_success_rate(rate: float | None) -> str:
+    return 'N/A' if rate is None else f'{rate*100:.1f}%'
+
+
+def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for key, value in (metrics or {}).items():
+        if torch.is_tensor(value):
+            if value.numel() == 1:
+                out[key] = value.item()
+        else:
+            try:
+                out[key] = float(value)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def compile_models(model, ema_model=None, **compile_kwargs):
+    """torch.compile the backbone of *model* and optionally *ema_model*.
+
+    The shared ``compile_backbone()`` protocol is defined in
+    :class:`~dexmani_policy.agents.core.base.BaseAgent`.
+
+    Keyword arguments are forwarded to :func:`torch.compile`; defaults to
+    ``mode='reduce-overhead'``.
+    """
+    compile_kwargs.setdefault('mode', 'reduce-overhead')
+    model.compile_backbone(**compile_kwargs)
+    if ema_model is not None:
+        ema_model.compile_backbone(**compile_kwargs)
 
 
 def set_seed(seed: int):

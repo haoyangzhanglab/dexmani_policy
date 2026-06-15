@@ -173,8 +173,6 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     ``torch.save``/``torch.load``.
     """
 
-    available_modes = ['limits', 'gaussian']
-    
     @torch.no_grad()
     def fit(
         self,
@@ -249,8 +247,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
 
 
 class LinearNormalizer(DictOfTensorMixin):
-    available_modes = ['limits', 'gaussian']
-    
+
     @torch.no_grad()
     def fit(
         self,
@@ -290,7 +287,23 @@ class LinearNormalizer(DictOfTensorMixin):
                 range_eps=range_eps,
                 fit_offset=fit_offset,
             )
-    
+
+    @classmethod
+    def fit_obs_action(cls, joint_state, action, action_key, mode='limits'):
+        """Factory: fit a ``LinearNormalizer`` from joint_state and action arrays.
+
+        Handles the ``action_ee`` special case where the normalizer is fitted on
+        joint_state only and the action normalizer is built from fixed ranges.
+        """
+        normalizer = cls()
+        if action_key == 'action_ee':
+            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode=mode)
+            normalizer['action'] = build_mixed_action_normalizer(action)
+        else:
+            normalizer.fit(data={'joint_state': joint_state, 'action': action},
+                           last_n_dims=1, mode=mode)
+        return normalizer
+
     def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self.normalize(x)
     
@@ -338,10 +351,12 @@ class LinearNormalizer(DictOfTensorMixin):
 
 
 def build_mixed_action_normalizer(action_data, ee_dim=9):
-    """构造 eef_hand 混合动作归一化器: xyz(3)+rot6d(ee_dim-3)+hand(剩余).
+    """Build a mixed normalizer for eef_hand actions: xyz(3) + rot6d(ee_dim-3) + hand(rest).
 
-    xyz 和 hand → limits [-1, 1] (min-max); rot6d → identity (scale=1, offset=0).
+    xyz and hand → limits [-1, 1] (min-max); rot6d → identity (scale=1, offset=0).
     """
+    assert action_data.shape[1] > ee_dim, \
+        f"action_ee dim ({action_data.shape[1]}) must be > ee_dim ({ee_dim})"
     tmp = LinearNormalizer()
     tmp.fit(data={
         'xyz':  action_data[:, :3],
