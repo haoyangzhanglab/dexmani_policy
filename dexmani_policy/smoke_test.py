@@ -15,7 +15,12 @@ from torch.utils.data import DataLoader
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, dict_apply, fix_state_dict
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
-from dexmani_policy.train import build_dataset_and_normalizer, build_model_and_ema, build_optimizer_and_scheduler
+from dexmani_policy.training.lr_scheduler import compute_num_training_steps
+from dexmani_policy.training.build_utils import (
+    build_dataset_and_normalizer,
+    build_model_and_ema,
+    build_optimizer_and_scheduler,
+)
 
 register_resolvers()
 
@@ -43,7 +48,7 @@ def smoke_test(config_name: str):
 
     set_seed(cfg.training.seed)
 
-    print("[1/5] Building dataset & normalizer ...")
+    print("[1/6] Building dataset & normalizer ...")
     dataset, normalizer = build_dataset_and_normalizer(cfg)
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
     print(f"      dataset size: {len(dataset)}, batches/epoch: {len(train_loader)}")
@@ -59,14 +64,14 @@ def smoke_test(config_name: str):
     else:
         print("      no validation set (val_ratio=0)")
 
-    print("[2/5] Building model & EMA ...")
+    print("[2/6] Building model & EMA ...")
     device = torch.device(cfg.training.device)
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
-    print("[3/5] Building optimizer & scheduler ...")
+    print("[3/6] Building optimizer & scheduler ...")
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, len(train_loader))
 
-    print("[4/5] Running forward + backward ...")
+    print("[4/6] Running forward + backward ...")
     batch = next(iter(train_loader))
     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
@@ -80,7 +85,7 @@ def smoke_test(config_name: str):
     assert torch.isfinite(raw_loss), f"Non-finite loss: {raw_loss.item()}"
     print(f"      loss: {raw_loss.item():.4f}  keys: {list(loss_dict.keys())}")
 
-    print("[5/5] Running predict_action ...")
+    print("[5/6] Running predict_action ...")
     model.eval()
     with torch.no_grad():
         obs_sample = {k: v[:1] for k, v in batch["obs"].items()}
@@ -108,8 +113,7 @@ def smoke_test(config_name: str):
         print(f"      ✓ enhanced gate: z={z_gate.shape}, aux_loss={aux_gate['loss'].item():.4f}")
 
     print("[6/6] Checkpoint save → load roundtrip ...")
-    accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
-    num_training_steps = -(-len(train_loader) // accum_steps) * cfg.training.loop.num_epochs
+    num_training_steps = compute_num_training_steps(cfg, len(train_loader))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_dir = pathlib.Path(tmpdir)

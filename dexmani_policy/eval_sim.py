@@ -7,7 +7,7 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency
+from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency, normalize_action_key
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.training.sim_evaluator import SimEvaluator
@@ -31,20 +31,8 @@ def run_eval(exp_dir: Path, overrides: list[str]):
     if overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
 
-    # backward compat: historical checkpoints used action_mode → action_key
-    if not hasattr(cfg, 'action_key'):
-        if hasattr(cfg, 'action_mode'):
-            import warnings
-            warnings.warn(
-                f"Config uses deprecated 'action_mode' field. "
-                f"Please update to 'action_key: action_ee' (for eef_hand) "
-                f"or 'action_key: action' (for joint space).",
-                FutureWarning,
-            )
-            cfg.action_key = 'action_ee' if cfg.action_mode == 'eef_hand' else 'action'
-        else:
-            cfg.action_key = 'action'
-
+    # Backward compat: legacy configs use action_mode → action_key
+    normalize_action_key(cfg)
     validate_action_key_consistency(cfg)
 
     if not hasattr(cfg, 'eval') or not hasattr(cfg.eval, "offline"):
@@ -54,12 +42,18 @@ def run_eval(exp_dir: Path, overrides: list[str]):
             "denoise_timesteps_list, use_ema_for_eval."
         )
 
-    assert cfg.n_obs_steps >= 1 and cfg.n_action_steps >= 1, \
-        f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} must be >= 1"
-    assert cfg.n_obs_steps - 1 + cfg.n_action_steps <= cfg.horizon, \
-        f"n_obs_steps-1+n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) " \
-        f"exceeds horizon ({cfg.horizon}). The control_action slice " \
-        f"pred[:, {cfg.n_obs_steps - 1}:{cfg.n_obs_steps - 1 + cfg.n_action_steps}] would be out of bounds."
+    if not (cfg.n_obs_steps >= 1 and cfg.n_action_steps >= 1):
+        raise ValueError(
+            f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} "
+            f"must be >= 1"
+        )
+    if cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon:
+        raise ValueError(
+            f"n_obs_steps-1+n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) "
+            f"exceeds horizon ({cfg.horizon}). The control_action slice "
+            f"pred[:, {cfg.n_obs_steps - 1}:{cfg.n_obs_steps - 1 + cfg.n_action_steps}] "
+            f"would be out of bounds."
+        )
 
     set_seed(cfg.eval.seed)
 

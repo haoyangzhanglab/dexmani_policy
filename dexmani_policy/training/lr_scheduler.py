@@ -6,6 +6,15 @@ from diffusers.optimization import (
 import torch.optim.lr_scheduler as _lrs
 
 
+def compute_num_training_steps(cfg, batches_per_epoch: int) -> int:
+    """Compute total optimizer steps after gradient accumulation.
+
+    Formula: ``ceil(batches_per_epoch / accum_steps) * num_epochs``.
+    """
+    accum_steps = max(1, int(cfg.training.loop.get("gradient_accumulation_steps", 1)))
+    return -(-batches_per_epoch // accum_steps) * cfg.training.loop.num_epochs
+
+
 def get_scheduler(
     optimizer: Optimizer,
     name: Union[str, SchedulerType],
@@ -28,9 +37,9 @@ def get_scheduler(
 
     if name in ("cosine_annealing",):
         raise ValueError(
-            f"cosine_annealing is deprecated and has been removed. "
-            f"Use lr_scheduler='cosine' instead (diffusers CosineWithWarmup, "
-            f"supports warmup)."
+            "cosine_annealing is deprecated and has been removed. "
+            "Use lr_scheduler='cosine' instead (diffusers CosineWithWarmup, "
+            "supports warmup)."
         )
 
     # --- diffusers standard schedulers ---

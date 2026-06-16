@@ -1,34 +1,123 @@
 #!/bin/bash
-
+# Sync offline W&B runs to the cloud.
+#
+# Usage:
+#   bash scripts/wandb_sync.sh <run_dir>            # sync a single run
+#   bash scripts/wandb_sync.sh --all [root_dir]     # sync all offline runs
+#   bash scripts/wandb_sync.sh --dry-run --all      # list runs without syncing
+#
+# Examples:
+#   bash scripts/wandb_sync.sh ./wandb/offline-run-20260401_111839-m6zq0mtq
+#   bash scripts/wandb_sync.sh --all
+#   bash scripts/wandb_sync.sh --all experiments
+#   bash scripts/wandb_sync.sh --dry-run --all
+#
 set -euo pipefail
 
-if ! command -v wandb &> /dev/null; then
-    echo "错误: wandb 命令未找到，请先安装 wandb (pip install wandb)" >&2
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+DRY_RUN=false
+
+show_help() {
+    cat <<EOF
+Usage: bash scripts/wandb_sync.sh [flags] <run_dir|--all>
+
+Flags:
+  --all [root]    Sync all offline runs under root/ (default: experiments/).
+  --dry-run       List what would be synced without uploading.
+  --help, -h      Show this message.
+
+Examples:
+  bash scripts/wandb_sync.sh wandb/offline-run-20260401_111839-m6zq0mtq
+  bash scripts/wandb_sync.sh --all
+  bash scripts/wandb_sync.sh --dry-run --all
+EOF
+    exit 0
+}
+
+# Parse flags
+SYNC_TARGET=""
+SEARCH_ROOT="experiments"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)       DRY_RUN=true ;;
+        --all)
+            SYNC_TARGET="--all"
+            SEARCH_ROOT="${2:-experiments}"
+            [[ "$SEARCH_ROOT" != "--all" ]] || SEARCH_ROOT="experiments"
+            ;;
+        --help|-h)       show_help ;;
+        -*)
+            echo "Unknown flag: $1 (use --help for usage)" >&2
+            exit 1
+            ;;
+        *)
+            SYNC_TARGET="$1"
+            ;;
+    esac
+    shift
+done
+
+if [[ -z "$SYNC_TARGET" ]]; then
+    echo "Error: no target specified. Use <run_dir> or --all." >&2
+    echo "Usage: bash scripts/wandb_sync.sh --help" >&2
     exit 1
 fi
 
-if ! wandb status &> /dev/null; then
-    echo "提示: wandb 未登录，请先运行 'wandb login'" >&2
-fi
-
-if [ $# -eq 0 ]; then
-    echo "用法: bash scripts/wandb_sync.sh <run_dir|--all> [experiments_root]"
-    echo "示例: bash scripts/wandb_sync.sh ./wandb/offline-run-20260401_111839-m6zq0mtq"
-    echo "      bash scripts/wandb_sync.sh --all"
-    echo "      bash scripts/wandb_sync.sh --all experiments"
+# Check wandb CLI availability
+if ! command -v wandb &>/dev/null; then
+    echo "Error: 'wandb' CLI not found. Install with: pip install wandb" >&2
     exit 1
 fi
 
-if [ "$1" = "--all" ]; then
-    ROOT="${2:-experiments}"
-    if [ ! -d "$ROOT" ]; then
-        echo "错误: 目录未找到: $ROOT" >&2
-        exit 1
-    fi
-    find "$ROOT" -path "*/wandb/offline-run-*" -type d 2>/dev/null | while read -r run_dir; do
+# sync_one: sync (or dry-run print) a single run directory
+sync_one() {
+    local run_dir="$1"
+    if $DRY_RUN; then
+        local run_id
+        run_id=$(basename "$run_dir" | sed 's/^offline-run-//')
+        local size
+        size=$(du -sh "$run_dir" 2>/dev/null | cut -f1)
+        echo "  [dry-run] $run_dir  (id=$run_id, $size)"
+    else
         echo "Syncing: $run_dir"
         wandb sync "$run_dir"
-    done
+    fi
+}
+
+if [[ "$SYNC_TARGET" == "--all" ]]; then
+    if [[ ! -d "$SEARCH_ROOT" ]]; then
+        echo "Error: directory not found: $SEARCH_ROOT" >&2
+        exit 1
+    fi
+
+    echo "Searching for offline W&B runs under: $SEARCH_ROOT"
+    if $DRY_RUN; then
+        echo "[dry-run mode — no data will be uploaded]"
+    fi
+    echo ""
+
+    count=0
+    while IFS= read -r -d '' run_dir; do
+        sync_one "$run_dir"
+        ((count++)) || true
+    done < <(find "$SEARCH_ROOT" -path "*/wandb/offline-run-*" -type d -print0 2>/dev/null || true)
+
+    if [[ $count -eq 0 ]]; then
+        echo "No offline W&B runs found under $SEARCH_ROOT."
+    else
+        echo ""
+        echo "Found $count offline run(s)."
+        if $DRY_RUN; then
+            echo "Remove --dry-run to sync."
+        fi
+    fi
 else
-    wandb sync "$1"
+    if [[ ! -d "$SYNC_TARGET" ]]; then
+        echo "Error: run directory not found: $SYNC_TARGET" >&2
+        exit 1
+    fi
+    sync_one "$SYNC_TARGET"
 fi

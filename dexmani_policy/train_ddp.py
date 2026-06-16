@@ -14,15 +14,16 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, optimizer_to, fix_state_dict, compile_models
+from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, fix_state_dict, compile_models
 from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.train import (
+from dexmani_policy.common.checkpoint_io import CheckpointStore
+from dexmani_policy.training.lr_scheduler import compute_num_training_steps
+from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     validate_config,
+    build_scheduler,
 )
-from dexmani_policy.common.checkpoint_io import CheckpointStore
-from dexmani_policy.training.lr_scheduler import get_scheduler
 from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()
@@ -37,10 +38,6 @@ def setup_ddp(rank: int, world_size: int):
     )
 
 
-def cleanup_ddp():
-    dist.destroy_process_group()
-
-
 def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     setup_ddp(rank, world_size)
 
@@ -48,10 +45,10 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     device = torch.device(f'cuda:{actual_gpu_id}')
     torch.cuda.set_device(device)
 
-    # DDP 要求所有 rank 的模型初始参数一致，此处用相同 seed
+    # DDP requires identical initial parameters across all ranks — use same seed
     set_seed(cfg.training.seed)
 
-    dataset, normalizer = build_dataset_and_normalizer(cfg, rank=rank, world_size=world_size)
+    dataset, normalizer = build_dataset_and_normalizer(cfg)
 
     train_sampler = DistributedSampler(
         dataset,
@@ -85,7 +82,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
 
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
-    # 模型初始化完成后，各 rank 使用不同 seed 以增加数据增强多样性
+    # After model init, use different seeds per rank for augmentation diversity
     set_seed(cfg.training.seed + rank)
 
     batches_per_epoch = len(train_loader)
@@ -104,8 +101,10 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     if rank == 0 and cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
         env_runner = hydra.utils.instantiate(cfg.env_runner)
 
-    # 加载 checkpoint — 必须在 torch.compile 之前，避免用随机权重编译后再
-    # 因 load_state_dict 触发 guard 失效重编译。
+    # Load checkpoint — must happen before torch.compile to avoid
+    # recompilation on load_state_dict-triggered guard failures.
+    resume_global_step = 0
+    resume_start_epoch = 0
     try:
         ckpt_path = checkpoint_store.resolve_path("latest")
         checkpoint = checkpoint_store.load(ckpt_path)
@@ -113,13 +112,13 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         if ema_model is not None and checkpoint.ema_model_state is not None:
             ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
         optimizer.load_state_dict(checkpoint.optimizer_state)
-        resume_state = (checkpoint.global_step, checkpoint.epoch + 1)
+        resume_global_step = checkpoint.global_step
+        resume_start_epoch = checkpoint.epoch + 1
     except FileNotFoundError:
         checkpoint = None
-        resume_state = (0, 0)
 
-    # torch.compile 必须在 DDP 包装前、checkpoint 加载后
-    # 使用 compile_models() 统一单卡/DDP 行为：仅编译 backbone，mode='reduce-overhead'
+    # torch.compile must happen before DDP wrapping and after checkpoint load.
+    # Use compile_models() for unified single-GPU/DDP behavior: backbone only, mode='reduce-overhead'.
     if cfg.training.get('use_compile', False):
         compile_models(model, ema_model)
 
@@ -127,11 +126,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
                     find_unused_parameters=False, gradient_as_bucket_view=True,
                     static_graph=True)
 
-    accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
-    steps_per_epoch = -(-batches_per_epoch // accum_steps)
-    total_steps = steps_per_epoch * cfg.training.loop.num_epochs
+    total_steps = compute_num_training_steps(cfg, batches_per_epoch)
 
-    # Validate num_training_steps on resume: warn if config changed
+    # Warn if num_training_steps changed since the checkpoint was saved.
+    # Duplicates trainer.py:load_for_resume logic — necessary because DDP
+    # bypasses load_for_resume (passes resume_state directly to train()).
     if checkpoint is not None:
         saved_steps = checkpoint.train_params.get('num_training_steps') if checkpoint.train_params else None
         if saved_steps is not None and saved_steps != total_steps:
@@ -145,12 +144,10 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
                 f"Consider matching the original dataloader configuration to avoid LR drift.",
                 UserWarning,
             )
-    scheduler = get_scheduler(
-        optimizer=optimizer,
-        name=cfg.training.lr_scheduler,
-        num_warmup_steps=cfg.training.lr_warmup_steps,
-        num_training_steps=total_steps,
-        last_epoch=resume_state[0] - 1 if checkpoint is None else -1,
+
+    scheduler = build_scheduler(
+        cfg, optimizer, batches_per_epoch,
+        last_epoch=resume_global_step - 1 if checkpoint is None else -1,
     )
     # Restore full scheduler state (aligned with single-GPU load_for_resume).
     # When resuming, load_state_dict overrides the initial state set by
@@ -181,10 +178,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         num_training_steps=total_steps,
     )
 
-    optimizer_to(optimizer, device)
-    if trainer.use_ema:
-        ema_model.to(device)
-
+    # Broadcast normalizer state from rank 0 to all ranks
     norm_state = model.normalizer.state_dict()
     for key in sorted(norm_state):
         if isinstance(norm_state[key], torch.Tensor):
@@ -193,10 +187,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         model.normalizer.load_state_dict(norm_state)
     dist.barrier()
 
+    resume_state = (resume_global_step, resume_start_epoch)
     try:
         trainer.train(resume_state=resume_state)
     finally:
-        cleanup_ddp()
+        dist.destroy_process_group()
 
 
 @hydra.main(version_base=None, config_path="configs")
@@ -245,7 +240,8 @@ def main(cfg):
     if 'MASTER_ADDR' not in os.environ:
         os.environ['MASTER_ADDR'] = 'localhost'
 
-    # 子进程无法访问 Hydra runtime resolver，必须在 spawn 前解析所有插值
+    # Child processes cannot access Hydra runtime resolvers — resolve all
+    # interpolations before mp.spawn.
     OmegaConf.resolve(cfg)
 
     if 'MASTER_PORT' not in os.environ:
