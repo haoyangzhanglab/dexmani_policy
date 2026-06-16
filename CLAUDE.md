@@ -138,7 +138,7 @@ dexmani_policy/
 - Hydra + OmegaConf，`${eval:'...'}` 插值在 `common/resolver.py` 注册
 - CLI override 任意字段；配置校验基于字段存在性判断，不依赖 `_target_` 字符串匹配
 - `eval.seed: 0` 固定，保证同一 checkpoint 多次评测可复现
-- Normalizer: `mode='limits'`，train+val 全量拟合 → [-1,1]；`range_eps=1e-4`（与官方 diffusion_policy 一致），低方差维度 zero-center 不缩放（scale=1.0, offset=-mean）
+- Normalizer: `mode='limits'`，**全量 replay buffer 拟合**（含验证集，非 bug，是跨项目统一惯例）→ [-1,1]；`range_eps=1e-4`（与官方 diffusion_policy 一致），低方差维度 zero-center 不缩放（scale=1.0, offset=-mean）。全量拟合的理由：① `limits` 模式下验证集几乎不改变 min/max；② 保证推理时对新采集数据的覆盖；③ 与 ManiFlow_Policy、R3D-Policy、SAT、RoboTwin、DexJoco 等全部兄弟项目一致
 - 数据增强默认禁用，通过 `prob` 控制执行概率；`pc_dim` 必须与 Zarr 点云通道数一致
 - 数据增强（`augmentation_cfg`）与 modality dropout（`modality_dropout_probs`）职责不同：增强生成合理的观测变体（加噪、旋转、颜色抖动），在 Dataset 层 normalize 前执行；modality dropout 是模型正则化，故意将整个模态置零来防止过拟合，在 Agent 层 normalize 后执行
 - SequenceSampler：短于 8 帧的 episode 自动 warn + skip（不 crash）；边界 padding 复制首尾帧
@@ -184,6 +184,12 @@ dexmani_policy/
 - `torch.optim.AdamW` — `base.py:137`
 - UNet `use_{down,mid,up}_condition=True` — `base.py:178-181`
 - DINO/CLIP/SigLIP vision backbone 以 bfloat16 加载，CLIP/SigLIP 启用 Flash Attention 2 — `dino.py:52`, `clip.py:33-35`, `siglip.py:30-32`
+
+### 已知设计模式（审查时易被误报为问题，勿修复）
+- **Normalizer 全量拟合**: `get_normalizer()` 使用全部 replay buffer（含验证集），不按 `train_mask` 过滤。这是生态系统统一惯例（ManiFlow_Policy / R3D-Policy / SAT / RoboTwin / DexJoco 均如此），非数据泄露 bug。`limits` 模式下验证集不影响 min/max 边界，且全量统计量利于推理泛化。
+- **checkpoint 频率 = eval 频率**: `checkpoint_interval_epochs = eval_interval_epochs`（当 env eval 启用时）。设计意图：只在评估成功的 epoch 保存 checkpoint，避免保存无评估的中间状态。
+- **FlowMatch `target_t` 训练/推理偏移**: 无 EMA teacher 时训练用 `target_t=0`，推理用 `target_t=dt>0`。ManiFlow 通过 `use_ema_teacher_for_consistency=true` 已缓解（consistency 路径提供 `target_t>0` 训练信号）。
+- **DDP 只覆盖 4 种策略**: `dp`/`maniflow`/`multitask_dit`/`r3d`。`dp3` 和 `moe_dp3` 当前仅单卡训练，无需 DDP 配置。
 
 ## 文档索引
 
