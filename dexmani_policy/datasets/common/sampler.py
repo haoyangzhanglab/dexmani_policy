@@ -153,7 +153,7 @@ class SequenceSampler:
             sample = input_arr[buffer_start_idx:buffer_end_idx]
             data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
-                data = np.zeros(
+                data = np.empty(
                     shape=(self.sequence_length,) + input_arr.shape[1:],
                     dtype=input_arr.dtype)
                 if sample_start_idx > 0:

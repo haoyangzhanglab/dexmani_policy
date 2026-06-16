@@ -79,12 +79,6 @@ class ReplayBuffer:
     def n_episodes(self):
         return len(self.episode_ends)
 
-    @property
-    def episode_lengths(self):
-        ends = self.episode_ends[:]
-        ends = np.insert(ends, 0, 0)
-        return np.diff(ends)
-
     def keys(self):
         return self.data.keys()
 

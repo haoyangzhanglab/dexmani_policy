@@ -32,6 +32,8 @@ class R3DObsEncoder(nn.Module):
         super().__init__()
         pc_encoder_config = dict(pc_encoder_config or {})
         pc_encoder_config.setdefault("pc_in_channels", 6)
+        if fps_random_config:
+            pc_encoder_config.setdefault("fps_random_config", fps_random_config)
 
         self.pc_encoder = Uni3DPointcloudEncoder(**pc_encoder_config)
         self.state_mlp = StateMLP(state_dim, state_out_dim)

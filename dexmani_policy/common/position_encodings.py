@@ -27,6 +27,27 @@ class SinusoidalPosEmb(nn.Module):
         return emb
 
 
+class TimestepMLP(nn.Module):
+    """Sinusoidal timestep embedding followed by a 2-layer MLP with Mish activation.
+
+    Canonical pattern used by UNet1D, DiTX, and OneWayTransformer::
+
+        SinusoidalPosEmb(dim) -> Linear(dim, dim*4) -> Mish -> Linear(dim*4, out_dim)
+    """
+
+    def __init__(self, pos_emb_dim: int, output_dim: int, expansion: int = 4):
+        super().__init__()
+        self.net = nn.Sequential(
+            SinusoidalPosEmb(pos_emb_dim),
+            nn.Linear(pos_emb_dim, pos_emb_dim * expansion),
+            nn.Mish(),
+            nn.Linear(pos_emb_dim * expansion, output_dim),
+        )
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        return self.net(t)
+
+
 # ---------------------------------------------------------------------------
 # 3D sinusoidal / relative positional encodings (point-cloud coordinates)
 # ---------------------------------------------------------------------------

@@ -1,8 +1,9 @@
 import torch
+import imageio
 import numpy as np
+from pathlib import Path
 from termcolor import cprint
-from collections import deque
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 
@@ -33,59 +34,78 @@ class BaseRunner:
     ):
         self.n_obs_steps = n_obs_steps
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
-        self.obs_deque = deque(maxlen=n_obs_steps)
+
+        # Circular buffer: pre-allocated per-modality storage to avoid per-step
+        # np.zeros allocations in the hot path.
+        self._obs_buffer: Dict[str, np.ndarray] = {}
+        self._obs_cursor = 0   # next write position in ring buffer
+        self._obs_count = 0    # number of frames stored (0 .. n_obs_steps)
+        self._obs_str_buffer: Dict[str, list] = {}  # for string modalities
 
         self.env_video_fps = env_video_fps
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
 
-    @staticmethod
-    def stack_last_n(all_items, n_steps):
-        all_list = list(all_items)
-        if len(all_list) == 0:
-            raise RuntimeError("Empty input to stack_last_n()")
-        head = all_list[0]
-
-        if isinstance(head, np.ndarray):
-            result = np.zeros((n_steps,) + all_list[-1].shape, dtype=all_list[-1].dtype)
-            start_idx = -min(n_steps, len(all_list))
-            result[start_idx:] = np.asarray(all_list[start_idx:])
-            if n_steps > len(all_list):
-                # Pad with the earliest available frame (same semantics as training-time episode-start padding)
-                result[:start_idx] = result[start_idx]
-            return result
-
-        if isinstance(head, torch.Tensor):
-            shape = (n_steps,) + tuple(all_list[-1].shape)
-            result = torch.zeros(shape, dtype=all_list[-1].dtype, device=all_list[-1].device)
-            start_idx = -min(n_steps, len(all_list))
-            result[start_idx:] = torch.stack(list(all_list[start_idx:]), dim=0)
-            if n_steps > len(all_list):
-                result[:start_idx] = result[start_idx]
-            return result
-
-        if isinstance(head, str):
-            last = all_list[-1]
-            return [last] * n_steps
-
-        raise RuntimeError(f"Unsupported observation field type: {type(head)}")    
-
-
     def update_obs(self, observation: Dict[str, Any]):
-        self.obs_deque.append(observation)
+        """Write one observation frame into the circular buffer.
+
+        On the first call the buffer is allocated lazily from the frame shapes.
+        """
+        pos = self._obs_cursor % self.n_obs_steps
+        for k, v in observation.items():
+            if k not in self.sensor_modalities:
+                continue
+            if isinstance(v, np.ndarray):
+                if k not in self._obs_buffer:
+                    self._obs_buffer[k] = np.zeros(
+                        (self.n_obs_steps,) + v.shape, dtype=v.dtype)
+                self._obs_buffer[k][pos] = v
+            elif isinstance(v, torch.Tensor):
+                if k not in self._obs_buffer:
+                    self._obs_buffer[k] = torch.zeros(
+                        (self.n_obs_steps,) + tuple(v.shape),
+                        dtype=v.dtype, device=v.device)
+                self._obs_buffer[k][pos] = v
+            elif isinstance(v, str):
+                if k not in self._obs_str_buffer:
+                    self._obs_str_buffer[k] = []
+                buf = self._obs_str_buffer[k]
+                buf.append(v)
+                if len(buf) > self.n_obs_steps:
+                    buf.pop(0)
+        self._obs_cursor += 1
+        self._obs_count = min(self._obs_count + 1, self.n_obs_steps)
     
 
     def get_stacked_obs(self) -> Dict[str, Any]:
-        if len(self.obs_deque) == 0:
-            raise RuntimeError("No observation in deque")
-        keys = list(self.obs_deque[-1].keys())
+        """Return a time-ordered stack of the last n_obs_steps frames.
+
+        Uses pre-allocated circular buffer -- zero per-call allocation in the
+        common case (count >= n_obs_steps).
+        """
+        if self._obs_count == 0:
+            raise RuntimeError("No observation in buffer")
         out: Dict[str, Any] = {}
-        dropped_keys = []
-        for k in keys:
-            if k in self.sensor_modalities:
-                out[k] = self.stack_last_n((frame[k] for frame in self.obs_deque), self.n_obs_steps)
+        for k, buf in self._obs_buffer.items():
+            if self._obs_count < self.n_obs_steps:
+                # Episode start: only _obs_count frames available.
+                # Pad the beginning with the first frame.
+                result = np.empty_like(buf) if isinstance(buf, np.ndarray) else \
+                         torch.empty_like(buf)
+                pad_len = self.n_obs_steps - self._obs_count
+                result[:pad_len] = buf[0]
+                result[pad_len:] = buf[:self._obs_count]
+                out[k] = result
             else:
-                dropped_keys.append(k)
+                # Normal case: return chronologically-ordered slice.
+                start = self._obs_cursor % self.n_obs_steps
+                idx = (start + np.arange(self.n_obs_steps)) % self.n_obs_steps
+                if isinstance(buf, np.ndarray):
+                    out[k] = buf[idx]
+                else:
+                    out[k] = buf[torch.as_tensor(idx, device=buf.device)]
+        for k, buf in self._obs_str_buffer.items():
+            out[k] = [buf[-1]] * self.n_obs_steps if buf else []
         if len(out) == 0:
             raise RuntimeError("Stacked observation dict is empty")
         return out
@@ -107,7 +127,10 @@ class BaseRunner:
 
 
     def reset(self):
-        self.obs_deque.clear()
+        self._obs_buffer.clear()
+        self._obs_str_buffer.clear()
+        self._obs_cursor = 0
+        self._obs_count = 0
 
 
     @torch.no_grad()
@@ -147,7 +170,8 @@ class BaseRunner:
         return episode_success, task_done_step
     
 
-    def run(self, agent, denoise_timesteps:int=None, eval_episodes:int=None):
+    def run(self, agent, denoise_timesteps:int=None, eval_episodes:int=None,
+            video_save_dir: Optional[Path] = None):
         env = self.make_env()
         eval_seeds = self.get_seed_list()
         eval_episodes = eval_episodes if eval_episodes is not None else self.default_eval_episodes
@@ -193,9 +217,12 @@ class BaseRunner:
                         "steps": task_done_step,
                     })
                     if video is not None:
-                        episode_video_list.append({
-                            f"episode_{eval_seed}": video
-                        })
+                        if video_save_dir is not None:
+                            video_path = video_save_dir / f"episode_{eval_seed}.mp4"
+                            imageio.mimsave(str(video_path), video.astype(np.uint8), fps=self.env_video_fps)
+                            episode_video_list.append({f"episode_{eval_seed}": str(video_path)})
+                        else:
+                            episode_video_list.append({f"episode_{eval_seed}": video})
 
                 except Exception as e:
                     cprint(f"Seed {eval_seed} failed: {e}", "red")
@@ -212,9 +239,12 @@ class BaseRunner:
                         "error": str(e),
                     })
                     if crash_video is not None:
-                        episode_video_list.append({
-                            f"episode_{eval_seed}_crash": crash_video
-                        })
+                        if video_save_dir is not None:
+                            video_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
+                            imageio.mimsave(str(video_path), crash_video.astype(np.uint8), fps=self.env_video_fps)
+                            episode_video_list.append({f"episode_{eval_seed}_crash": str(video_path)})
+                        else:
+                            episode_video_list.append({f"episode_{eval_seed}_crash": crash_video})
 
             if len(success_list) < num_episodes:
                 cprint(f"Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")

@@ -33,6 +33,7 @@ class DictOfTensorMixin(nn.Module):
         if params_dict is None:
             params_dict = nn.ParameterDict()
         self.params_dict = params_dict
+        self._field_views: dict = {}
 
     @property
     def device(self):
@@ -308,10 +309,12 @@ class LinearNormalizer(DictOfTensorMixin):
         return self.normalize(x)
     
     def __getitem__(self, key: str):
-        obj = SingleFieldLinearNormalizer(self.params_dict[key])
-        if hasattr(self, 'input_stats') and key in self.input_stats:
-            obj.input_stats = self.input_stats[key]
-        return obj
+        if key not in self._field_views:
+            obj = SingleFieldLinearNormalizer(self.params_dict[key])
+            if hasattr(self, 'input_stats') and key in self.input_stats:
+                obj.input_stats = self.input_stats[key]
+            self._field_views[key] = obj
+        return self._field_views[key]
 
     def __setitem__(self, key: str , value: 'SingleFieldLinearNormalizer'):
         self.params_dict[key] = value.params_dict

@@ -8,10 +8,16 @@ and added to key positional encoding after projection, exactly matching R3D.
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Type
 
 from dexmani_policy.agents.common.optim_util import OptimGroupMixin
-from dexmani_policy.common.position_encodings import SinusoidalPosEmb
+from dexmani_policy.common.position_encodings import SinusoidalPosEmb, TimestepMLP
+
+
+def _is_fused_attn_available() -> bool:
+    """Return True if SDPA (Flash / Memory-Efficient Attention) is usable."""
+    return torch.cuda.is_available()
 
 
 class MLPBlock(nn.Module):
@@ -28,9 +34,10 @@ class MLPBlock(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention with optional internal dimension downscaling."""
+    """Multi-head attention with SDPA (Flash/Mem-Efficient) + manual fallback."""
 
-    def __init__(self, embedding_dim: int, num_heads: int, downsample_rate: int = 1):
+    def __init__(self, embedding_dim: int, num_heads: int, downsample_rate: int = 1,
+                 attn_drop: float = 0.0):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.internal_dim = embedding_dim // downsample_rate
@@ -42,6 +49,9 @@ class Attention(nn.Module):
         self.k_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
+
+        self.fused_attn = _is_fused_attn_available()
+        self.attn_drop = attn_drop
 
     def _separate_heads(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
@@ -58,12 +68,18 @@ class Attention(nn.Module):
         k = self._separate_heads(self.k_proj(k))
         v = self._separate_heads(self.v_proj(v))
 
-        _, _, _, c_per_head = q.shape
-        attn = q @ k.permute(0, 1, 3, 2)
-        attn = attn / math.sqrt(c_per_head)
+        if self.fused_attn:
+            out = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.attn_drop if self.training else 0.0,
+            )
+        else:
+            _, _, _, c_per_head = q.shape
+            attn = q @ k.permute(0, 1, 3, 2)
+            attn = attn / math.sqrt(c_per_head)
+            attn = torch.softmax(attn, dim=-1)
+            out = attn @ v
 
-        attn = torch.softmax(attn, dim=-1)
-        out = attn @ v
         out = self._recombine_heads(out)
         return self.out_proj(out)
 
@@ -158,12 +174,8 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         self.pc_pe_dim = pc_pe_dim
         self._obs_feat_dim = obs_token_dim - pc_pe_dim
 
-        self.timestep_encoder = nn.Sequential(
-            SinusoidalPosEmb(timestep_embed_dim),
-            nn.Linear(timestep_embed_dim, timestep_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(timestep_embed_dim * 4, timestep_embed_dim),
-        )
+        self.timestep_encoder = TimestepMLP(
+            pos_emb_dim=timestep_embed_dim, output_dim=timestep_embed_dim)
 
         self.action_proj = nn.Linear(action_dim, embedding_dim)
         self.output_proj = nn.Linear(embedding_dim, action_dim)

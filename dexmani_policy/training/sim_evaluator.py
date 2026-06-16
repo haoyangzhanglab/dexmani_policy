@@ -131,14 +131,19 @@ class SimEvaluator:
                 self.agent,
                 denoise_timesteps=denoise_timesteps,
                 eval_episodes=eval_episodes,
+                video_save_dir=case_dir,
             )
 
+            # Videos are already saved to disk by the runner when video_save_dir is set.
+            # Only handle the legacy path (raw arrays) if someone passes video_save_dir=None.
             for item in result.get("videos", []):
-                for key, video_array in item.items():
+                for key, video_array_or_path in item.items():
+                    if isinstance(video_array_or_path, (str, Path)):
+                        continue  # already saved to disk
                     video_path = case_dir / f"{key}.mp4"
                     imageio.mimsave(
                         str(video_path),
-                        video_array.astype(np.uint8),
+                        video_array_or_path.astype(np.uint8),
                         fps=video_fps,
                     )
 

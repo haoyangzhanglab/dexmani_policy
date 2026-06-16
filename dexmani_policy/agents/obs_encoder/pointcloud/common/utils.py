@@ -24,7 +24,7 @@ def farthest_point_sample(
         use_random:          master switch – when ``False``, FPS is fully
                              deterministic regardless of the flags below.
         random_start:        pick a random start point instead of the default
-                             (farthest point from the centroid).
+                             (first point, index 0).
         shuffle_output:      randomly permute the output order after sampling.
         random_noise_scale:  std of Gaussian noise added to xyz *during FPS only*
                              (0 = no noise).  The output points are unaffected.

@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, optimizer_to, fix_state_dict
-from dexmani_policy.common.resolver import register_resolvers
+from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.train import (
     build_dataset_and_normalizer,
     build_model_and_ema,
@@ -125,7 +125,9 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     ddp_model = DDP(model, device_ids=[actual_gpu_id], output_device=actual_gpu_id,
                     find_unused_parameters=False)
 
-    total_steps = batches_per_epoch * cfg.training.loop.num_epochs
+    accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
+    steps_per_epoch = -(-batches_per_epoch // accum_steps)
+    total_steps = steps_per_epoch * cfg.training.loop.num_epochs
     scheduler = get_scheduler(
         optimizer=optimizer,
         name=cfg.training.lr_scheduler,

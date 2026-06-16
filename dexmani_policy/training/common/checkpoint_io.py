@@ -135,7 +135,7 @@ class TopKCheckpointTracker:
         reverse = (self.mode == "max")
         return sorted(self._list_ckpts(), key=self._parse_score, reverse=reverse)
 
-    def update(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
+    def update(self, checkpoint_path: Path, checkpoint: Optional[TrainCheckpoint] = None) -> Optional[Path]:
         if self.k <= 0:
             return self.best_path()
 

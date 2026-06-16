@@ -84,19 +84,27 @@ class MultiTaskSimRunner:
         agent,
         denoise_timesteps: int = None,
         eval_episodes: int = None,
+        video_save_dir = None,
     ) -> Dict[str, Any]:
+        import imageio
         per_task: Dict[str, Any] = {}
         all_videos = []
         failed_tasks = []
 
         for task_name, runner in self.runners.items():
             cprint(f"\n{'='*40} Evaluating task: {task_name} (text={runner.task_text}) {'='*40}", "cyan")
+            # Each task gets its own sub-directory for videos
+            task_video_dir = None
+            if video_save_dir is not None:
+                task_video_dir = video_save_dir / task_name
+                task_video_dir.mkdir(parents=True, exist_ok=True)
             try:
-                result = runner.run(agent, denoise_timesteps=denoise_timesteps, eval_episodes=eval_episodes)
+                result = runner.run(agent, denoise_timesteps=denoise_timesteps,
+                                    eval_episodes=eval_episodes, video_save_dir=task_video_dir)
                 per_task[task_name] = result
                 for v in result.get("videos", []):
-                    for k, arr in v.items():
-                        all_videos.append({f"{task_name}_{k}": arr})
+                    for k, arr_or_path in v.items():
+                        all_videos.append({f"{task_name}_{k}": arr_or_path})
             except KeyboardInterrupt:
                 cprint(f"\n⚠️ Evaluation interrupted by user during task {task_name}", "yellow")
                 raise

@@ -253,7 +253,7 @@ class FlowMatchWithConsistency(nn.Module):
         x0: torch.Tensor,
         N: int,
         cond: torch.Tensor,
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor:
         """Euler 积分采样。
 
         relative 模式下 target_t=dt（>0），依赖 consistency 训练提供 target_t 泛化。
@@ -261,13 +261,10 @@ class FlowMatchWithConsistency(nn.Module):
         target_t=0 下训练，推理时的 target_t>0 会导致条件分布偏移。
         """
         B = x0.shape[0]
-        x = x0.clone()
+        x = x0
 
         dt = 1.0 / N
         t = torch.arange(0, N, device=x0.device, dtype=x0.dtype) / N
-
-        traj = []
-        traj.append(x.clone())
 
         for i in range(N):
             ti = torch.ones((B,), device=x0.device) * t[i]
@@ -283,9 +280,8 @@ class FlowMatchWithConsistency(nn.Module):
                 context = cond,
             )
             x = x + vti_pred * dt
-            traj.append(x.clone())
-        
-        return traj
+
+        return x
 
 
     def predict_action(
@@ -300,7 +296,7 @@ class FlowMatchWithConsistency(nn.Module):
             denoise_timesteps = self.denoise_timesteps
 
         ode_traj = self.sample_ode(x0=noise, N=denoise_timesteps, cond=cond)
-        return ode_traj[-1]
+        return ode_traj
 
 
 class FlowMatch(nn.Module):

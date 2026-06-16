@@ -6,23 +6,10 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from timm.models.vision_transformer import Mlp, use_fused_attn, RmsNorm
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.common.position_encodings import SinusoidalPosEmb, TimestepMLP
 
 WEIGHT_INIT_STD = 0.02
 """Standard deviation for normal weight initialization across all DiTX modules."""
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        # 防御性编程：避免 dim <= 3 时除零（half_dim - 1 = 0）
-        emb = math.log(10000) / max(half_dim - 1, 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
@@ -326,18 +313,10 @@ class DiTXFlowMatch(nn.Module):
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
         
-        self.timestep_embedder = nn.Sequential(
-            SinusoidalPosEmb(timestep_embed_dim),
-            nn.Linear(timestep_embed_dim, timestep_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(timestep_embed_dim * 4, hidden_dim),
-        )
-        self.target_t_embedder = nn.Sequential(
-            SinusoidalPosEmb(target_t_embed_dim),
-            nn.Linear(target_t_embed_dim, target_t_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(target_t_embed_dim * 4, hidden_dim),
-        )
+        self.timestep_embedder = TimestepMLP(
+            pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
+        self.target_t_embedder = TimestepMLP(
+            pos_emb_dim=target_t_embed_dim, output_dim=hidden_dim)
 
         self.timestep_and_target_t_fusion = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
 
@@ -388,13 +367,13 @@ class DiTXFlowMatch(nn.Module):
         nn.init.constant_(self.context_embedder.bias, 0) if self.context_embedder.bias is not None else None
         nn.init.normal_(self.context_pos_embed, std=WEIGHT_INIT_STD)
 
-        for layer in self.timestep_embedder:
+        for layer in self.timestep_embedder.net:
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
                 if layer.bias is not None:
                     nn.init.constant_(layer.bias, 0)
 
-        for layer in self.target_t_embedder:
+        for layer in self.target_t_embedder.net:
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
                 if layer.bias is not None:
@@ -491,12 +470,8 @@ class DiTXDiffusion(nn.Module):
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
         
-        self.timestep_embedder = nn.Sequential(
-            SinusoidalPosEmb(timestep_embed_dim),
-            nn.Linear(timestep_embed_dim, timestep_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(timestep_embed_dim * 4, hidden_dim),
-        )
+        self.timestep_embedder = TimestepMLP(
+            pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
 
         self.ditx_blocks = nn.ModuleList([
             DiTXBlock(
@@ -547,7 +522,7 @@ class DiTXDiffusion(nn.Module):
 
 
 
-        for layer in self.timestep_embedder:
+        for layer in self.timestep_embedder.net:
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
                 if layer.bias is not None:

@@ -38,7 +38,8 @@ def example(zarr_path):
         augmentation_cfg={
             'pc': {
                 'color': {'brightness': 0.2, 'prob': 0.8},
-                'spatial': {'rot_z': 15.0, 'trans_xy': 0.10, 'prob': 0.8},
+                'coord_noise': {'noise_std': 0.002, 'ratio': 0.3, 'prob': 0.5},
+                'dropout': {'dropout_ratio': 0.1, 'prob': 0.3},
             },
         },
     )
