@@ -61,6 +61,7 @@ class Trainer:
         is_main_process: bool = True,
         distributed: bool = False,
         train_sampler = None,
+        num_training_steps: Optional[int] = None,
     ):
         self.device = device
 
@@ -101,6 +102,7 @@ class Trainer:
         self.train_sampling_batch = None
         self.current_epoch = -1
         self.global_step = 0
+        self.num_training_steps = num_training_steps
 
     @property
     def raw_model(self):
@@ -145,6 +147,23 @@ class Trainer:
 
         self.optimizer.load_state_dict(checkpoint.optimizer_state)
         self.scheduler.load_state_dict(checkpoint.scheduler_state)
+
+        # Validate num_training_steps consistency on resume: a mismatch means the
+        # dataloader config changed between runs (e.g. batch_size, num_workers),
+        # which silently shifts the LR schedule curve even after load_state_dict.
+        saved_steps = checkpoint.train_params.get('num_training_steps') if checkpoint.train_params else None
+        current_steps = self.num_training_steps
+        if saved_steps is not None and current_steps is not None and saved_steps != current_steps:
+            import warnings
+            warnings.warn(
+                f"Resume: num_training_steps mismatch — saved={saved_steps}, current={current_steps}. "
+                f"The LR schedule was originally configured for {saved_steps} total steps; "
+                f"the current config would produce {current_steps}. "
+                f"The scheduler state_dict has been restored from the checkpoint, but the "
+                f"underlying schedule curve may be distorted. "
+                f"Consider matching the original dataloader configuration to avoid LR drift.",
+                UserWarning,
+            )
 
         return checkpoint.global_step, checkpoint.epoch + 1
 
@@ -343,6 +362,7 @@ class Trainer:
                 'action_dim': self.model.action_dim,
                 'horizon': self.model.horizon,
                 'action_key': getattr(self.model, 'action_key', 'action'),
+                'num_training_steps': self.num_training_steps,
             },
         )
         tag = f"epoch={epoch:04d}-step={global_step:08d}"

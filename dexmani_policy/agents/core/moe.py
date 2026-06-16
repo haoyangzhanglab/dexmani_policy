@@ -155,16 +155,28 @@ class MoEAgent(UNetDiffusionAgent):
         cond, aux = self._build_cond(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
         action_loss, loss_dict = self.action_decoder.compute_loss(cond, nactions, **kwargs)
-        total_loss = action_loss + aux['loss']
-        loss_dict['loss'] = total_loss
-        loss_dict['loss_action'] = action_loss
-        for k, v in aux.items():
-            if k == 'loss':
-                continue
-            if torch.is_tensor(v) and v.numel() > 1:
-                continue  # non-scalar aux (e.g. router_probs, dispatch, f_i, p_i) — skip logging
-            loss_dict[f'aux_{k}'] = v
-        return total_loss, loss_dict
+        aux_loss = aux.get('loss')
+        if aux_loss is not None:
+            total_loss = action_loss + aux_loss
+            loss_dict['loss'] = total_loss
+            loss_dict['loss_action'] = action_loss
+            for k, v in aux.items():
+                if k == 'loss':
+                    continue
+                if torch.is_tensor(v) and v.numel() > 1:
+                    continue  # non-scalar aux (e.g. router_probs, dispatch, f_i, p_i) — skip logging
+                loss_dict[f'aux_{k}'] = v
+            return total_loss, loss_dict
+        # Graceful fallback: aux loss missing (should not happen during normal MoE
+        # training where return_aux=True and the MoE encoder always produces aux loss)
+        import warnings
+        warnings.warn(
+            "MoEAgent.compute_loss: aux['loss'] is missing. "
+            "Falling back to action_loss only. "
+            "Check that obs_encoder was called with return_aux=True.",
+            UserWarning,
+        )
+        return action_loss, loss_dict
 
     @torch.no_grad()
     def predict_action(self, obs_dict, denoise_timesteps=None, override_idx=None):

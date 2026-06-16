@@ -129,6 +129,21 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
     steps_per_epoch = -(-batches_per_epoch // accum_steps)
     total_steps = steps_per_epoch * cfg.training.loop.num_epochs
+
+    # Validate num_training_steps on resume: warn if config changed
+    if checkpoint is not None:
+        saved_steps = checkpoint.train_params.get('num_training_steps') if checkpoint.train_params else None
+        if saved_steps is not None and saved_steps != total_steps:
+            import warnings
+            warnings.warn(
+                f"DDP Resume: num_training_steps mismatch — saved={saved_steps}, current={total_steps}. "
+                f"The LR schedule was originally configured for {saved_steps} total steps; "
+                f"the current config would produce {total_steps}. "
+                f"The scheduler state_dict will be restored from the checkpoint, but the "
+                f"underlying schedule curve may be distorted. "
+                f"Consider matching the original dataloader configuration to avoid LR drift.",
+                UserWarning,
+            )
     scheduler = get_scheduler(
         optimizer=optimizer,
         name=cfg.training.lr_scheduler,
@@ -162,6 +177,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         is_main_process=(rank == 0),
         distributed=True,
         train_sampler=train_sampler,
+        num_training_steps=total_steps,
     )
 
     optimizer_to(optimizer, device)

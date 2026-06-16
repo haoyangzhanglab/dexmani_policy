@@ -107,9 +107,9 @@ class MoE(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0)
-        # Enhanced gate has extra Linear layers inside gate_mlp
+        # Enhanced gate: router is nn.Sequential with extra Linear layers
         if self.use_enhanced_gate:
-            for m in self.gate_mlp.modules():
+            for m in self.router.modules():
                 if isinstance(m, nn.Linear):
                     nn.init.xavier_uniform_(m.weight)
                     nn.init.constant_(m.bias, 0)

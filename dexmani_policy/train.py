@@ -150,6 +150,8 @@ def build_train_components(cfg):
 
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
+    accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
+    num_training_steps = -(-batches_per_epoch // accum_steps) * cfg.training.loop.num_epochs
 
     workspace = hydra.utils.instantiate(cfg.workspace)
 
@@ -168,6 +170,7 @@ def build_train_components(cfg):
         'val_loader': val_loader,
         'workspace': workspace,
         'env_runner': env_runner,
+        'num_training_steps': num_training_steps,
     }
 
 
@@ -195,6 +198,7 @@ def main(cfg):
         max_grad_norm=cfg.training.get('max_grad_norm', 1.0),
         use_bfloat16=cfg.training.get('use_bfloat16', False),
         use_compile=cfg.training.get('use_compile', False),
+        num_training_steps=components['num_training_steps'],
     )
     trainer.train(resume_tag="latest")
 

@@ -1,6 +1,7 @@
 import os
 import pathlib
 import sys
+import tempfile
 
 ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
 os.chdir(ROOT_DIR)
@@ -11,8 +12,9 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, dict_apply
+from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, dict_apply, fix_state_dict
 from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.training.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.train import build_dataset_and_normalizer, build_model_and_ema, build_optimizer_and_scheduler
 
 register_resolvers()
@@ -88,6 +90,72 @@ def smoke_test(config_name: str):
         assert ctrl_shape == (1, cfg.n_action_steps, cfg.action_dim), \
             f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {cfg.action_dim})"
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
+
+    print("[6/6] Checkpoint save → load roundtrip ...")
+    accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
+    num_training_steps = -(-len(train_loader) // accum_steps) * cfg.training.loop.num_epochs
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_dir = pathlib.Path(tmpdir)
+        store = CheckpointStore(ckpt_dir)
+
+        # Capture pre-save state dicts (unwrap from compile if needed)
+        model_sd = {k: v.clone() for k, v in model.state_dict().items()}
+        ema_sd = {k: v.clone() for k, v in ema_model.state_dict().items()} if ema_model is not None else None
+        opt_sd = optimizer.state_dict()
+        sched_sd = scheduler.state_dict()
+
+        # Build and save a checkpoint
+        ckpt = TrainCheckpoint(
+            epoch=0,
+            global_step=1,
+            model_state=model_sd,
+            ema_model_state=fix_state_dict(ema_sd, is_current_ddp=False) if ema_sd is not None else None,
+            optimizer_state=opt_sd,
+            scheduler_state=sched_sd,
+            monitor={"test_mean_score": 0.85},
+            train_params={
+                'n_obs_steps': model.n_obs_steps,
+                'n_action_steps': model.n_action_steps,
+                'action_dim': model.action_dim,
+                'horizon': model.horizon,
+                'action_key': getattr(model, 'action_key', 'action'),
+                'num_training_steps': num_training_steps,
+            },
+        )
+        ckpt_path = store.save("epoch=0000-step=00000001-score=0.8500.pt", ckpt)
+        print(f"      saved checkpoint: {ckpt_path.name}")
+
+        # Reload
+        loaded = store.load(ckpt_path)
+        assert loaded.epoch == 0
+        assert loaded.global_step == 1
+        assert loaded.monitor.get("test_mean_score") == 0.85
+        assert loaded.train_params.get('num_training_steps') == num_training_steps
+
+        # Verify model state dict roundtrip (loaded is on CPU, move to model device)
+        loaded_model_sd = fix_state_dict(loaded.model_state, is_current_ddp=False)
+        loaded_model_sd = {k: v.to(device) for k, v in loaded_model_sd.items()}
+        for key in model_sd:
+            if not torch.equal(model_sd[key], loaded_model_sd[key]):
+                raise AssertionError(f"Model state dict mismatch for key '{key}' after roundtrip")
+        print("      ✓ model state dict roundtrip OK")
+
+        # Verify EMA state dict roundtrip
+        if ema_sd is not None and loaded.ema_model_state is not None:
+            loaded_ema_sd = fix_state_dict(loaded.ema_model_state, is_current_ddp=False)
+            loaded_ema_sd = {k: v.to(device) for k, v in loaded_ema_sd.items()}
+            for key in ema_sd:
+                if not torch.equal(ema_sd[key], loaded_ema_sd[key]):
+                    raise AssertionError(f"EMA state dict mismatch for key '{key}' after roundtrip")
+            print("      ✓ EMA state dict roundtrip OK")
+
+        # Verify train_params roundtrip
+        tp = loaded.train_params
+        assert tp.get('n_obs_steps') == model.n_obs_steps
+        assert tp.get('n_action_steps') == model.n_action_steps
+        assert tp.get('action_dim') == model.action_dim
+        print("      ✓ train_params roundtrip OK")
 
     print(f"\n✓ {config_name} smoke test PASSED\n")
     return True

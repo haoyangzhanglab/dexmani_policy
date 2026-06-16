@@ -150,7 +150,7 @@ training:
     num_epochs: 1000
     log_interval_steps: 50
     val_interval_epochs: 25
-    eval_interval_epochs: 100
+    eval_interval_epochs: 250  # uniform across all policies; final epoch always evaluated
     sample_interval_epochs: 5
     gradient_accumulation_steps: 1
 
