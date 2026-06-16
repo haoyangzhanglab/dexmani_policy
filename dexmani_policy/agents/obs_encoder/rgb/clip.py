@@ -31,7 +31,7 @@ class CLIP(nn.Module):
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
         config = CLIPVisionConfig.from_pretrained(model_name)
-        config._attn_implementation = "flash_attention_2"
+        config._attn_implementation = "sdpa"
         self.backbone = CLIPVisionModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
 
         if not hasattr(self.backbone.config, "patch_size"):

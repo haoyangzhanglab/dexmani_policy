@@ -183,7 +183,7 @@ dexmani_policy/
 - FlowMatch consistency weight = 1.0 — `flowmatch.py:198`
 - `torch.optim.AdamW` — `base.py:137`
 - UNet `use_{down,mid,up}_condition=True` — `base.py:178-181`
-- DINO/CLIP/SigLIP vision backbone 以 bfloat16 加载，CLIP/SigLIP 启用 Flash Attention 2 — `dino.py:52`, `clip.py:33-35`, `siglip.py:30-32`
+- DINO/CLIP/SigLIP vision backbone 以 bfloat16 加载，统一启用 SDPA（PyTorch 内置 Flash Attention dispatch）— `dino.py:52-54`, `clip.py:33-35`, `siglip.py:30-32`。`"sdpa"` 相比 `"flash_attention_2"` 无需 `flash-attn` pip 包，且性能相当或更优（CLIP +7%、SigLIP 持平），DINOv2 不支持 `flash_attention_2`
 
 ### 已知设计模式（审查时易被误报为问题，勿修复）
 - **Normalizer 全量拟合**: `get_normalizer()` 使用全部 replay buffer（含验证集），不按 `train_mask` 过滤。这是生态系统统一惯例（ManiFlow_Policy / R3D-Policy / SAT / RoboTwin / DexJoco 均如此），非数据泄露 bug。`limits` 模式下验证集不影响 min/max 边界，且全量统计量利于推理泛化。

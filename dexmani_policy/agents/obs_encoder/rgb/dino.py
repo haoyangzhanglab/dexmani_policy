@@ -1,7 +1,7 @@
 import logging
 import torch
 import torch.nn as nn
-from transformers import AutoModel
+from transformers import AutoConfig, AutoModel
 from typing import Dict, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
@@ -49,7 +49,9 @@ class DINO(nn.Module):
         self.model_name = model_name
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
-        self.backbone = AutoModel.from_pretrained(model_name, torch_dtype=torch.bfloat16)
+        config = AutoConfig.from_pretrained(model_name)
+        config._attn_implementation = "sdpa"
+        self.backbone = AutoModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
 
         if not hasattr(self.backbone.config, "patch_size"):
             raise ValueError(f"{model_name} does not look like a ViT-style DINO model.")
