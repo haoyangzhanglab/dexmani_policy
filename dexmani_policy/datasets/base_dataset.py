@@ -14,8 +14,8 @@ from dexmani_policy.datasets.augmentation import (
     PointDropout,
     StateNoiseAug,
 )
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask, downsample_mask
+from dexmani_policy.datasets.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.sampler import SequenceSampler, get_val_mask, downsample_mask
 
 # (yaml_section, augmentor_class, yaml_key, output_modality)
 # Note: RGB augmentation is intentionally NOT registered here.  It is applied

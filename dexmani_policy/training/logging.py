@@ -1,6 +1,5 @@
 import os
 import json
-import torch
 import atexit
 import numpy as np
 from pathlib import Path
@@ -11,20 +10,6 @@ os.environ.setdefault("WANDB_SILENT", "true")
 
 def is_video_key(key: Any) -> bool:
     return "video" in str(key).lower()
-
-
-def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    for key, value in (metrics or {}).items():
-        if torch.is_tensor(value):
-            if value.numel() == 1:
-                out[key] = value.item()
-        else:
-            try:
-                out[key] = float(value)
-            except (TypeError, ValueError):
-                pass
-    return out
 
 
 

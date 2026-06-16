@@ -4,10 +4,10 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 from typing import Dict, Optional, Sequence
 
-from dexmani_policy.agents.obs_encoder.rgb.common.image_processor import ImageProcessor
-from dexmani_policy.agents.obs_encoder.rgb.common.geometry_processor import GeometryProcessor
-from dexmani_policy.agents.obs_encoder.rgb.common.types import GlobalTokenType, TuneMode
-from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
+from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
+from dexmani_policy.agents.obs_encoder.rgb.geometry_processor import GeometryProcessor
+from dexmani_policy.agents.obs_encoder.rgb.types import GlobalTokenType, TuneMode
+from dexmani_policy.agents.obs_encoder.rgb.utils import (
     flatten_batch,
     restore_batch,
     get_patch_grid_size,

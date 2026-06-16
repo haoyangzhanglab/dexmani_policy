@@ -21,8 +21,8 @@ from dexmani_policy.train import (
     build_model_and_ema,
     validate_config,
 )
-from dexmani_policy.training.common.checkpoint_io import CheckpointStore
-from dexmani_policy.training.common.lr_scheduler import get_scheduler
+from dexmani_policy.common.checkpoint_io import CheckpointStore
+from dexmani_policy.training.lr_scheduler import get_scheduler
 from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()

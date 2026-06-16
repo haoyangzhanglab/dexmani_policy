@@ -3,8 +3,8 @@ import torch
 import einops
 import torch.nn as nn
 from einops.layers.torch import Rearrange
-from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
-from dexmani_policy.common.position_encodings import SinusoidalPosEmb, TimestepMLP
+from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.agents.position_encodings import SinusoidalPosEmb, TimestepMLP
 
 
 

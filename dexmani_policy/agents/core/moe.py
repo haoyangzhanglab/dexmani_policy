@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
-from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import preprocess_point_cloud
+from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.plugins.moe import MoE
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.core.base import UNetDiffusionAgent

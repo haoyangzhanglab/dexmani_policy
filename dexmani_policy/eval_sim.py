@@ -9,7 +9,7 @@ from termcolor import cprint
 
 from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.training.common.checkpoint_io import CheckpointStore
+from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.training.sim_evaluator import SimEvaluator
 
 ROOT_DIR = str(Path(__file__).parent.parent)

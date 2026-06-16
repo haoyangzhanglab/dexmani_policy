@@ -8,7 +8,7 @@ from dexmani_policy.agents.action_decoders.backbone.ditx import DiTXFlowMatch
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.action_decoders.flowmatch import FlowMatchWithConsistency
-from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.common.normalizer import LinearNormalizer
 
 

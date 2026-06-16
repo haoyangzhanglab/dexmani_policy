@@ -5,11 +5,11 @@ from omegaconf import OmegaConf
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from dexmani_policy.training.common.logging import (
+from dexmani_policy.training.logging import (
     JsonlLogger,
     WandbLogger,
 )
-from dexmani_policy.training.common.checkpoint_io import (
+from dexmani_policy.common.checkpoint_io import (
     TrainCheckpoint,
     CheckpointStore,
     TopKCheckpointTracker,

@@ -2,8 +2,8 @@ import warnings
 import torchvision
 import torch.nn as nn
 from typing import Dict, Literal, Optional, Tuple
-from .common.image_processor import ImageProcessor
-from .common.utils import get_interpolation, to_hw
+from .image_processor import ImageProcessor
+from .utils import get_interpolation, to_hw
 
 BackboneName = Literal["resnet", "clip", "dino", "siglip", "r3m"]
 

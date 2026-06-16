@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, dict_apply, fix_state_dict
 from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.training.common.checkpoint_io import CheckpointStore, TrainCheckpoint
+from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.train import build_dataset_and_normalizer, build_model_and_ema, build_optimizer_and_scheduler
 
 register_resolvers()

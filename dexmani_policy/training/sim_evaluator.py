@@ -9,7 +9,7 @@ import torch
 from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import format_success_rate
-from dexmani_policy.training.common.checkpoint_io import CheckpointStore
+from dexmani_policy.common.checkpoint_io import CheckpointStore
 
 
 def _save_json(data: Dict[str, Any], path: Path):

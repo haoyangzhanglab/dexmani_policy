@@ -106,7 +106,7 @@ optimizer:
 # ⚠️ Synced across all policy configs — update all when changing.
 # ── EMA ──
 ema:
-  _target_: dexmani_policy.training.common.ema_model.EMAModel
+  _target_: dexmani_policy.training.ema_model.EMAModel
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -135,11 +135,11 @@ training:
 # ⚠️ Synced across all policy configs — update all when changing.
 # ── Workspace ──
 workspace:
-  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
+  _target_: dexmani_policy.training.workspace.TrainWorkspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:
-    _target_: dexmani_policy.training.common.workspace.WandbConfig
+    _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
@@ -149,7 +149,7 @@ workspace:
     video_fps: ${env_runner.env_video_fps}
 
   checkpoint_cfg:
-    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
+    _target_: dexmani_policy.training.workspace.CheckpointConfig
     monitor_key: test_mean_score
     mode: max
     topk: 3

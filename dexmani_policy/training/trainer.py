@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 from dexmani_policy.common.pytorch_util import compile_models, optimizer_to, dict_apply, fix_state_dict, to_log_scalars
-from dexmani_policy.training.common.workspace import TrainWorkspace
-from dexmani_policy.training.common.checkpoint_io import TrainCheckpoint
+from dexmani_policy.training.workspace import TrainWorkspace
+from dexmani_policy.common.checkpoint_io import TrainCheckpoint
 
 
 @dataclass

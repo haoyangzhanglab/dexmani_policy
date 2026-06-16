@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 
-from dexmani_policy.agents.obs_encoder.rgb.common.utils import (
+from dexmani_policy.agents.obs_encoder.rgb.utils import (
     ArrayLike,
     flatten_batch,
     flatten_matrix_batch,

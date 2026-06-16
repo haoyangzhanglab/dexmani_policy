@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 from typing import Dict, Tuple
 
-from dexmani_policy.common.position_encodings import (
+from dexmani_policy.agents.position_encodings import (
     RelativePositionalEncoding3D,
     SinusoidalPosEmb3D,
 )
-from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import (
+from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     PointMLP,
     farthest_point_sample,
     index_points,

@@ -10,10 +10,9 @@ from torch.utils.data import DataLoader
 
 from termcolor import cprint
 
-from dexmani_policy.agents.common.param_counter import print_param_count
 from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency
-from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn
-from dexmani_policy.training.common.lr_scheduler import get_scheduler
+from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, print_param_count
+from dexmani_policy.training.lr_scheduler import get_scheduler
 from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()

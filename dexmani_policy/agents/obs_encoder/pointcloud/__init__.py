@@ -1,4 +1,4 @@
-from .common.utils import farthest_point_sample
+from .ops import farthest_point_sample
 from .pointnet import PointNet, MultiStagePointNet
 from .pointnext import PointNextEncoder
 from .pointnext_tokenizer import PointNextPatchTokenizer

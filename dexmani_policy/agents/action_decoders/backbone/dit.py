@@ -5,13 +5,15 @@ from torch.jit import Final
 import torch.nn.functional as F
 from timm.models.vision_transformer import Mlp, use_fused_attn
 
-from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
-from dexmani_policy.common.position_encodings import POS_ENCODING_BASE
+from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.agents.position_encodings import POS_ENCODING_BASE
 
 WEIGHT_INIT_STD = 0.02
 """Standard deviation for normal weight initialization across DiT modules."""
 
+
 def modulate(x, shift, scale):
+    """AdaLN modulation: ``x * (1 + scale) + shift``."""
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 

@@ -5,14 +5,12 @@ from torch.jit import Final
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from timm.models.vision_transformer import Mlp, use_fused_attn, RmsNorm
-from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
-from dexmani_policy.common.position_encodings import SinusoidalPosEmb, TimestepMLP
+from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.agents.position_encodings import SinusoidalPosEmb, TimestepMLP
+from .dit import modulate
 
 WEIGHT_INIT_STD = 0.02
 """Standard deviation for normal weight initialization across all DiTX modules."""
-def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
 class AdaLNZero(nn.Module):
     def __init__(self, dim, cond_dim):
         super().__init__()

@@ -10,52 +10,9 @@ import os
 import logging
 from math import pi as _pi
 
-from pytorch3d.ops import sample_farthest_points
+from .ops import farthest_point_sample
 
 logger = logging.getLogger(__name__)
-
-
-def fps(data, number, use_random=True, random_start=True,
-        random_noise_scale=0, shuffle_output=True):
-    """FPS with optional randomization (random start, noise, shuffle)."""
-    xyz = data[:, :, :3]
-    B, N, _ = xyz.shape
-
-    if not use_random:
-        _, fps_idx = sample_farthest_points(xyz, K=number)
-    else:
-        if random_start:
-            start_indices = torch.randint(0, N, (B,), device=data.device)
-            modified_xyz = xyz.clone()
-            for b in range(B):
-                modified_xyz[b, [0, start_indices[b]]] = modified_xyz[b, [start_indices[b], 0]]
-        else:
-            modified_xyz = xyz
-
-        if random_noise_scale > 0:
-            noise = torch.randn_like(modified_xyz) * random_noise_scale
-            noisy_xyz = modified_xyz + noise
-        else:
-            noisy_xyz = modified_xyz
-
-        _, fps_idx = sample_farthest_points(noisy_xyz, K=number)
-
-        if random_start:
-            for b in range(B):
-                start_idx = start_indices[b]
-                mask_0 = fps_idx[b] == 0
-                mask_start = fps_idx[b] == start_idx
-                fps_idx[b][mask_0] = start_idx
-                fps_idx[b][mask_start] = 0
-
-        if shuffle_output:
-            for b in range(B):
-                perm = torch.randperm(number, device=data.device)
-                fps_idx[b] = fps_idx[b][perm]
-
-    fps_data = torch.gather(
-        data, 1, fps_idx.unsqueeze(-1).long().expand(-1, -1, data.shape[-1]))
-    return fps_data
 
 
 def knn_points(query, key, k, sorted=False):
@@ -95,7 +52,7 @@ class KNNGrouper(nn.Module):
     def forward(self, xyz, features, use_fps=True):
         B, N, _ = xyz.shape
         with torch.no_grad():
-            centers = fps(xyz, self.num_groups, **self.fps_random_config)
+            centers, _ = farthest_point_sample(xyz, num_samples=self.num_groups, **self.fps_random_config)
             _, knn_idx = knn_points(centers, xyz, self.group_size)
 
         batch_offset = torch.arange(B, device=xyz.device) * N

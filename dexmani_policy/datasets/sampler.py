@@ -1,7 +1,7 @@
 import numba
 import numpy as np
 from typing import Optional
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 
 @numba.jit(nopython=True)
 def create_indices(
