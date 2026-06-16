@@ -1,6 +1,6 @@
 import torch
 
-from dexmani_policy.common.normalizer import SingleFieldLinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from dexmani_policy.datasets.base_dataset import BaseDataset
 
 
@@ -13,7 +13,12 @@ class RGBPCDataset(BaseDataset):
         super().__init__(**kwargs)
 
     def get_normalizer(self, mode='limits'):
-        normalizer = super().get_normalizer(mode=mode)
+        normalizer = LinearNormalizer()
+        normalizer.fit(data={
+            'joint_state': self.replay_buffer['joint_state'],
+            'action': self.replay_buffer[self.action_key],
+            'point_cloud': self.replay_buffer['point_cloud'],
+        }, last_n_dims=1, mode=mode)
         normalizer['camera_intrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         normalizer['camera_extrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         return normalizer

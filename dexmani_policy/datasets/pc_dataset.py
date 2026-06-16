@@ -1,3 +1,4 @@
+from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.base_dataset import BaseDataset
 
 
@@ -9,7 +10,13 @@ class PCDataset(BaseDataset):
         super().__init__(**kwargs)
 
     def get_normalizer(self, mode='limits'):
-        return super().get_normalizer(mode=mode)
+        normalizer = LinearNormalizer()
+        normalizer.fit(data={
+            'joint_state': self.replay_buffer['joint_state'],
+            'action': self.replay_buffer[self.action_key],
+            'point_cloud': self.replay_buffer['point_cloud'],
+        }, last_n_dims=1, mode=mode)
+        return normalizer
 
 
 def example(zarr_path):

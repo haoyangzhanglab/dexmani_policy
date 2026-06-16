@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from typing import Type
 
 from dexmani_policy.agents.optim_util import OptimGroupMixin
-from dexmani_policy.agents.position_encodings import SinusoidalPosEmb, TimestepMLP
+from dexmani_policy.agents.position_encodings import TimestepMLP
 
 
 def _is_fused_attn_available() -> bool:

@@ -39,6 +39,13 @@ class BaseAgent(nn.Module):
 
     def preprocess(self, obs_dict: Dict) -> Dict:
         obs = self.normalizer.normalize(obs_dict)
+        # Clamp normalized point cloud coordinates to guard against float32
+        # precision drift (±1e-7) that would trigger ValueError in
+        # Uni3DPointcloudEncoder.PositionEmbeddingRandom (requires [-1, 1]).
+        # Mirrors the defensive clamp in R3D-Policy (dp3.py:204, 316).
+        if 'point_cloud' in obs:
+            obs['point_cloud'] = torch.clamp(
+                obs['point_cloud'], min=-1 - 1e-6, max=1 + 1e-6)
         result = {}
         for k, v in obs.items():
             if torch.is_tensor(v):

@@ -1,7 +1,6 @@
 """R3D Agent: Uni3D + OneWayTransformer + Diffusion."""
 
 import torch
-import torch.nn as nn
 
 from dexmani_policy.agents.obs_encoder.pointcloud.r3d_obs_encoder import R3DObsEncoder
 from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import OneWayTransformerBackbone

@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 from torch.jit import Final
@@ -6,8 +5,8 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from timm.models.vision_transformer import Mlp, use_fused_attn, RmsNorm
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
-from dexmani_policy.agents.position_encodings import SinusoidalPosEmb, TimestepMLP
-from .dit import modulate
+from dexmani_policy.agents.position_encodings import TimestepMLP
+from .dit import Attention, modulate
 
 WEIGHT_INIT_STD = 0.02
 """Standard deviation for normal weight initialization across all DiTX modules."""
@@ -101,71 +100,6 @@ class CrossAttention(nn.Module):
             x = self.proj_drop(x)
         return x
 
-class SelfAttention(nn.Module):
-    """Self-attention with ``F.scaled_dot_product_attention`` → Flash Attention.
-
-    Replaces ``nn.MultiheadAttention`` in ``DiTXBlock`` so the self-attention
-    path benefits from the SDPA backend (Flash / Memory-Efficient) rather than
-    the stock matmul-softmax-matmul path.
-    """
-
-    fused_attn: Final[bool]
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        qkv_bias: bool = False,
-        qk_norm: bool = False,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-        norm_layer: nn.Module = nn.LayerNorm,
-    ):
-        super().__init__()
-        assert dim % num_heads == 0, "dim should be divisible by num_heads"
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
-        self.fused_attn = use_fused_attn()
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
-        B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = qkv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
-
-        if self.fused_attn:
-            x = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attn_mask,
-                dropout_p=self.attn_drop.p if self.training else 0.0,
-            )
-        else:
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
-            if attn_mask is not None:
-                attn = attn + attn_mask
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = attn @ v
-
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-
 class DiTXBlock(nn.Module):
     def __init__(
             self, 
@@ -181,7 +115,7 @@ class DiTXBlock(nn.Module):
         
         self.hidden_size = hidden_size
 
-        self.self_attn = SelfAttention(
+        self.self_attn = Attention(
             dim=hidden_size,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
