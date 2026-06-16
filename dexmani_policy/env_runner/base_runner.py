@@ -140,6 +140,19 @@ class BaseRunner:
     
 
     def eval_one_episode(self, agent, env, episode_seed, denoise_timesteps:int=None, **kwargs):
+        """Run a single evaluation episode.
+
+        Environment contract (required for accurate ``avg_steps`` metrics):
+            - ``info["success_condition"]`` (bool): set on the **first** step
+              where the task goal is met (raw signal, no hold delay).
+            - ``env.action_cnt`` (int): current step counter on the env.
+            - ``info["success"]`` (bool): set when the episode is considered
+              successful (may include a hold/grace delay after
+              ``success_condition``).
+
+        If ``success_condition`` or ``action_cnt`` is missing, ``task_done_step``
+        will be ``None`` and ``avg_steps`` will be reported as ``N/A``.
+        """
         obs, info = env.reset(seed=episode_seed, options=kwargs.get("options", None))
         self.reset()
         self.update_obs(obs)
@@ -274,6 +287,8 @@ class BaseRunner:
             "avg_steps_all": avg_steps_all,
             "videos": episode_video_list,
             "episode_details": episode_details,
+            "episodes_collected": len(success_list),
+            "episodes_requested": num_episodes,
         }
     
 

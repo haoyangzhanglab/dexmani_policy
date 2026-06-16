@@ -62,10 +62,10 @@ class SimRunner(BaseRunner):
         if seed_file.exists():
             return [int(x) for x in seed_file.read_text().split()]
         default_seeds = list(range(DEFAULT_EVAL_SEED_COUNT))
-        if len(default_seeds) < self.eval_episodes:
+        if len(default_seeds) < self.default_eval_episodes:
             import warnings
             warnings.warn(
-                f"eval_episodes={self.eval_episodes} exceeds default seed count "
+                f"eval_episodes={self.default_eval_episodes} exceeds default seed count "
                 f"({DEFAULT_EVAL_SEED_COUNT}). Only {DEFAULT_EVAL_SEED_COUNT} "
                 f"episodes will be evaluated unless eval_seeds is provided or "
                 f"a seed file exists at {seed_file}.",

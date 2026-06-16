@@ -189,6 +189,15 @@ class Trainer:
             "_saved_at": time.time(),
         }
         torch.save(payload, ckpt_dir / filename)
+
+        # Keep only the last 5 NaN debug checkpoints to avoid unbounded disk usage.
+        nan_ckpts = sorted(ckpt_dir.glob("nan_debug_epoch=*.pt"))
+        for p in nan_ckpts[:-5]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
         return ckpt_dir / filename
 
     def train_one_step(self, batch: Dict[str, Any], *, is_accumulation_boundary: bool = True):
@@ -291,7 +300,15 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, agent) -> Dict[str, Any]:
-        result = self.env_runner.run(agent)
+        try:
+            result = self.env_runner.run(agent)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[WARNING] Evaluation failed at epoch={self.current_epoch}, "
+                  f"step={self.global_step}: {type(e).__name__}: {e}. "
+                  f"Training will continue; set eval_interval_epochs=0 to disable evaluation.")
+            return {"eval/error": str(e)}
         success_rate = result["success_rate"]
         metrics = {
             "eval/success_rate": success_rate * 100 if success_rate is not None else None,

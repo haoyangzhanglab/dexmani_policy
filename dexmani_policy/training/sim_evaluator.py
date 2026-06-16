@@ -47,9 +47,9 @@ class SimEvaluator:
         self.eval_root_dir.mkdir(parents=True, exist_ok=True)
 
     def create_eval_run_dir(self) -> Path:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         run_dir = self.eval_root_dir / f"{timestamp}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(parents=True, exist_ok=False)
         return run_dir
 
     def _load_for_inference(self, tag_or_path: str, use_ema: bool):
