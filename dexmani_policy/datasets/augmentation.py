@@ -10,27 +10,20 @@ _BT601_LUMA = (0.299, 0.587, 0.114)
 class Aug:
     """Prob-gated augmentation base.
 
-    ``__call__`` handles the probability gate and makes a single defensive
-    copy.  Subclasses implement ``_augment(x)`` which **must** modify *x*
-    in-place — the caller already guarantees that *x* is a detached copy
-    when ``_augment`` runs.
+    Subclasses implement ``_augment(x)`` which **must** modify *x*
+    in-place — the caller guarantees that *x* is a detached copy
+    when ``_augment`` runs (via ``apply_augmentation`` in the dataset).
 
-    When chaining multiple augmentors through ``apply_augmentation``, the
-    first trigger makes one copy and subsequent triggers reuse it,
-    avoiding the redundant ``.copy()`` per-augmentor pattern.
+    Prob-gating and defensive copying are handled by
+    :meth:`~dexmani_policy.datasets.base_dataset.BaseDataset.apply_augmentation`,
+    which iterates over augmentors, decides per-augmentor whether to trigger,
+    and makes a single ``.copy()`` before the first trigger.
     """
 
     __slots__ = ('prob',)
 
     def __init__(self, prob=1.0):
         self.prob = prob
-
-    def __call__(self, x):
-        if np.random.random() > self.prob:
-            return x
-        x = x.copy()
-        self._augment(x)
-        return x
 
     def _augment(self, x):
         """Modify *x* **in-place**.  Caller guarantees *x* is a detached copy."""
@@ -180,7 +173,9 @@ class PointDropout(Aug):
     def _augment(self, x):
         # x: (T, N, C) — guaranteed to be a detached copy
         T, N = x.shape[:2]
-        n_drop = max(1, int(N * self.dropout_ratio))
+        if N <= 1:
+            return  # can't dropout from a point cloud with ≤ 1 point
+        n_drop = max(1, min(int(N * self.dropout_ratio), N - 1))
 
         # Boolean mask instead of np.setdiff1d (O(N) vs O(N log N)).
         all_idx = np.arange(N)
@@ -234,8 +229,46 @@ class PointCoordNoiseAug(Aug):
             x[t, idx, :3] += noise.astype(dtype)
 
 
+class PointColorNoiseAug(Aug):
+    """Per-channel independent Gaussian noise on point cloud RGB.
+
+    Models camera sensor noise (per-pixel, per-channel), complementary to
+    ``PointColorJitter`` which models scene lighting changes (global HSV
+    transform).  Both are applied in R3D-Policy (2026) as independent
+    augmentation stages.
+
+    Noise is clipped to ``±clip_range`` (default 2σ) and the result is
+    clamped to [0, 1] to keep RGB values valid.
+
+    Modifies the last 3 channels **in-place** on a pre-copied input.
+    Requires C >= 6 (xyz + rgb); silently returns for coord-only point clouds.
+    """
+
+    __slots__ = ('noise_std', 'clip_range')
+
+    def __init__(self, noise_std=0.01, clip_range=None, prob=1.0):
+        super().__init__(prob=prob)
+        self.noise_std = float(noise_std)
+        self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
+
+    def _augment(self, x):
+        if x.shape[-1] < 6 or self.noise_std <= 0:
+            return
+        rgb = x[..., -3:]
+        noise = np.random.normal(0, self.noise_std, rgb.shape)
+        noise = np.clip(noise, -self.clip_range, self.clip_range)
+        rgb += noise.astype(x.dtype)
+        np.clip(rgb, 0.0, 1.0, out=rgb)
+
+
 class StateNoiseAug(Aug):
-    """Small Gaussian noise on proprioceptive state.
+    """Clipped Gaussian noise on proprioceptive state.
+
+    Noise is clipped to ``±clip_range`` (default 2σ) to guard against extreme
+    outliers that would push normalised state outside [-1, 1].
+
+    Reference: R3D-Policy (2026) ``add_noise()`` — all modalities
+    (xyz/rgb/agent_pos) use ``clip_range = 2 * noise_std``.
 
     NOTE: This is data augmentation — it generates plausible sensor readings
     by adding noise. It is NOT the same as modality dropout (``modality_dropout_probs``
@@ -245,14 +278,17 @@ class StateNoiseAug(Aug):
     Modifies the array **in-place** on a pre-copied input.
     """
 
-    __slots__ = ('noise_std',)
+    __slots__ = ('noise_std', 'clip_range')
 
-    def __init__(self, noise_std=0.005, prob=1.0):
+    def __init__(self, noise_std=0.005, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
-        self.noise_std = noise_std
+        self.noise_std = float(noise_std)
+        self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
 
     def _augment(self, x):
-        x += np.random.normal(0, self.noise_std, x.shape).astype(x.dtype)
+        noise = np.random.normal(0, self.noise_std, x.shape)
+        noise = np.clip(noise, -self.clip_range, self.clip_range)
+        x += noise.astype(x.dtype)
 
 
 
@@ -304,22 +340,27 @@ class ImageAug:
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """x: (T, 3, H, W) float32 [0, 1] → same shape."""
-        # Single rand() call fuses prob gate + noise + blur decisions into
-        # one CUDA kernel launch (3 → 1 vs the old per-transform calls).
-        # Layout: [p_gate, p_noise, p_blur]
-        rand_vals = torch.rand(3, device=x.device)
-        if self.prob < 1.0 and rand_vals[0].item() > self.prob:
+        # Fuse prob gate + noise + blur decisions. When prob=1.0 the prob gate
+        # is skipped and only noise/blur decisions are generated (save 1 RNG value).
+        need_prob = self.prob < 1.0
+        n_rand = 3 if need_prob else 2
+        rand_vals = torch.rand(n_rand, device=x.device)
+
+        if need_prob and rand_vals[0].item() > self.prob:
             return x
+
+        noise_idx = 1 if need_prob else 0
+        blur_idx = 2 if need_prob else 1
 
         x = self.color_jitter(x)
 
         if self.grayscale is not None:
             x = self.grayscale(x)
 
-        if self._has_noise and rand_vals[1].item() <= self.noise_prob:
+        if self._has_noise and rand_vals[noise_idx].item() <= self.noise_prob:
             x = self.noise(x)
 
-        if self._has_blur and rand_vals[2].item() <= self.blur_prob:
+        if self._has_blur and rand_vals[blur_idx].item() <= self.blur_prob:
             x = self.blur(x)
 
         return x.clamp(0, 1)

@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, optimizer_to, fix_state_dict
+from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, optimizer_to, fix_state_dict, compile_models
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.train import (
     build_dataset_and_normalizer,
@@ -68,6 +68,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         num_workers=cfg.dataloader.num_workers,
         pin_memory=cfg.dataloader.pin_memory,
         persistent_workers=cfg.dataloader.persistent_workers,
+        prefetch_factor=cfg.dataloader.get('prefetch_factor', 2),
         drop_last=cfg.dataloader.get('drop_last', False),
         worker_init_fn=worker_init_fn,
     )
@@ -118,13 +119,13 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         resume_state = (0, 0)
 
     # torch.compile 必须在 DDP 包装前、checkpoint 加载后
+    # 使用 compile_models() 统一单卡/DDP 行为：仅编译 backbone，mode='reduce-overhead'
     if cfg.training.get('use_compile', False):
-        model = torch.compile(model)
-        if ema_model is not None:
-            ema_model = torch.compile(ema_model)
+        compile_models(model, ema_model)
 
     ddp_model = DDP(model, device_ids=[actual_gpu_id], output_device=actual_gpu_id,
-                    find_unused_parameters=False)
+                    find_unused_parameters=False, gradient_as_bucket_view=True,
+                    static_graph=True)
 
     accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
     steps_per_epoch = -(-batches_per_epoch // accum_steps)

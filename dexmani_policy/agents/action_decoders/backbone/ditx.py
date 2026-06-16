@@ -396,7 +396,7 @@ class DiTXFlowMatch(nn.Module):
 
 
     def forward(self, x, timestep, target_t, context):
-        x = self.input_embedder(x) + self.input_pos_embed
+        x = self.input_embedder(x) + self.input_pos_embed.to(dtype=x.dtype)
 
         if not torch.is_tensor(timestep):
             timestep = torch.tensor([timestep], dtype=torch.float32, device=x.device)
@@ -414,7 +414,7 @@ class DiTXFlowMatch(nn.Module):
 
         time_c = self.timestep_and_target_t_fusion(torch.cat([timestep_embed, target_t_embed], dim=-1))
 
-        context_c = self.context_embedder(context) + self.context_pos_embed[:, :context.shape[1]]
+        context_c = self.context_embedder(context) + self.context_pos_embed[:, :context.shape[1]].to(dtype=context.dtype)
         if self.pre_norm_modality:
             context_c = self.context_norm(context_c, time_c)
         
@@ -542,7 +542,7 @@ class DiTXDiffusion(nn.Module):
 
 
     def forward(self, x, timestep, context):
-        x = self.input_embedder(x) + self.input_pos_embed
+        x = self.input_embedder(x) + self.input_pos_embed.to(dtype=x.dtype)
 
         if not torch.is_tensor(timestep):
             timestep = torch.tensor([timestep], dtype=torch.long, device=x.device)
@@ -553,7 +553,7 @@ class DiTXDiffusion(nn.Module):
 
         time_c = timestep_embed
 
-        context_c = self.context_embedder(context) + self.context_pos_embed[:, :context.shape[1]]
+        context_c = self.context_embedder(context) + self.context_pos_embed[:, :context.shape[1]].to(dtype=context.dtype)
         if self.pre_norm_modality:
             context_c = self.context_norm(context_c, time_c)
         

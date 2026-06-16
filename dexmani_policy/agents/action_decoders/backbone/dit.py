@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from timm.models.vision_transformer import Mlp, use_fused_attn
 
 from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.common.position_encodings import POS_ENCODING_BASE
 
 WEIGHT_INIT_STD = 0.02
 """Standard deviation for normal weight initialization across DiT modules."""
@@ -84,8 +85,8 @@ class TimestepEmbedder(nn.Module):
         )
         self.frequency_embedding_size = frequency_embedding_size
 
-    POS_ENCODING_BASE = 10000.0
-    """Base frequency for sinusoidal position/timestep encoding."""
+    POS_ENCODING_BASE = POS_ENCODING_BASE
+    """Base frequency for sinusoidal position/timestep encoding (imported)."""
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=None):

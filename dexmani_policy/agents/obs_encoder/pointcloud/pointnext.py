@@ -45,7 +45,7 @@ class SetAbstraction(nn.Module):
             mlp_channels = [input_channels] + [output_channels] * layers
         else:
             group_input_channels = input_channels + 3 + position_encoding_channels
-            hidden_channels = output_channels if stride == 1 else max(output_channels // 2, 1)
+            hidden_channels = output_channels if stride == 1 else max(output_channels // 2, 8)
             mlp_channels = [group_input_channels] + [hidden_channels] * (layers - 1) + [output_channels]
 
         blocks = []

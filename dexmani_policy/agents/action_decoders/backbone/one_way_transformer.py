@@ -174,6 +174,18 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         self.pc_pe_dim = pc_pe_dim
         self._obs_feat_dim = obs_token_dim - pc_pe_dim
 
+        # Shape contract: pc_pe_dim must equal embedding_dim for key_pe addition
+        # (temporal_pe + pc_pe at line 229); num_obs_tokens must be divisible by
+        # n_obs_steps for the K = N // T token grouping.
+        assert pc_pe_dim == embedding_dim, (
+            f"OneWayTransformerBackbone: pc_pe_dim ({pc_pe_dim}) must equal "
+            f"embedding_dim ({embedding_dim}) for key_pe addition."
+        )
+        assert num_obs_tokens % n_obs_steps == 0, (
+            f"OneWayTransformerBackbone: num_obs_tokens ({num_obs_tokens}) must be "
+            f"divisible by n_obs_steps ({n_obs_steps})."
+        )
+
         self.timestep_encoder = TimestepMLP(
             pos_emb_dim=timestep_embed_dim, output_dim=timestep_embed_dim)
 
@@ -206,6 +218,16 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         N = context.shape[1]
         T = self.n_obs_steps
         K = N // T
+
+        # Defensive: catch token misalignment early with a clear message.
+        assert K * T == N, (
+            f"OneWayTransformerBackbone: context tokens N={N} not divisible by "
+            f"n_obs_steps T={T} (K={K})."
+        )
+        assert context.shape[-1] == self._obs_feat_dim + self.pc_pe_dim, (
+            f"OneWayTransformerBackbone: context last dim {context.shape[-1]} != "
+            f"_obs_feat_dim ({self._obs_feat_dim}) + pc_pe_dim ({self.pc_pe_dim})."
+        )
 
         obs_feat = context[..., :self._obs_feat_dim]
         pc_pe    = context[..., self._obs_feat_dim:]

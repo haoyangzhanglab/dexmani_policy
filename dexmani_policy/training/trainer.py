@@ -125,6 +125,23 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(
                 self.raw_model.parameters(), max_norm=self.max_grad_norm
             )
+
+        # Layer 2 NaN protection: detect gradient NaN/Inf before optimizer.step().
+        # Loss NaN (layer 1) is caught in train_one_step(), but a gradient NaN
+        # could slip through clip_grad_norm_ and silently corrupt optimizer state.
+        # This fills the documented gap — see CLAUDE.md "NaN 检测（三层防护）".
+        grad_nan_params = []
+        for name, param in self.raw_model.named_parameters():
+            if param.grad is not None and not torch.isfinite(param.grad).all():
+                grad_nan_params.append(name)
+        if grad_nan_params:
+            self.optimizer.zero_grad(set_to_none=True)
+            raise RuntimeError(
+                f"Non-finite gradient at epoch={self.current_epoch}, step={self.global_step} "
+                f"in {len(grad_nan_params)} parameter(s): {grad_nan_params[:5]}"
+                f"{'...' if len(grad_nan_params) > 5 else ''}"
+            )
+
         self.optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
@@ -188,7 +205,12 @@ class Trainer:
             "_format": "simple.v1",
             "_saved_at": time.time(),
         }
-        torch.save(payload, ckpt_dir / filename)
+        # Atomic write pattern: save to .tmp then os.replace() so a crash
+        # mid-save never produces a corrupted .pt file.
+        tmp_path = ckpt_dir / (filename + ".tmp")
+        final_path = ckpt_dir / filename
+        torch.save(payload, tmp_path)
+        tmp_path.replace(final_path)
 
         # Keep only the last 5 NaN debug checkpoints to avoid unbounded disk usage.
         nan_ckpts = sorted(ckpt_dir.glob("nan_debug_epoch=*.pt"))

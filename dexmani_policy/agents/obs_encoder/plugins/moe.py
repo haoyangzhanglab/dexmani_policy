@@ -116,6 +116,11 @@ class MoE(nn.Module):
 
     def route(self, z):
         logits = self.router(z)
+        # Overflow guard: clamp logits to prevent exp(logits) → inf → NaN in
+        # softmax.  exp(±50) is well within float32 range; typical logits from
+        # Xavier init are ±0.1–2.0, so this clamp is invisible during normal
+        # training — it only activates under pathological weight drift.
+        logits = torch.clamp(logits, min=-50, max=50)
         if self.use_boost:
             # Align with official MoE-DP: slice logits BEFORE softmax so that
             # only active experts compete.  Inactive experts receive exactly

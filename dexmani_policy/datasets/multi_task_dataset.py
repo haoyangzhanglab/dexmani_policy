@@ -25,6 +25,13 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         assert sampling_strategy in ['proportional', 'balanced', 'weighted']
         assert normalizer_mode in ['shared', 'per_task']
 
+        if len(set(task_names)) != len(task_names):
+            raise ValueError(
+                f"Duplicate task names detected: {task_names}. "
+                f"Task names must be unique — duplicates cause silent data misalignment "
+                f"in get_validation_dataset() when task_weights are used."
+            )
+
         for i, dataset in enumerate(datasets):
             if len(dataset) == 0:
                 raise ValueError(
@@ -53,7 +60,10 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self.total_length = sum(self.task_lengths)
 
         self._epoch = 0
-        self._epoch_val = mp.Value('i', 0)  # shared memory for persistent_workers visibility
+        # Manager-backed Value works with both fork and spawn start methods,
+        # unlike mp.Value which requires fork for cross-process visibility.
+        self._manager = mp.Manager()
+        self._epoch_val = self._manager.Value('i', 0)
         self.deterministic = deterministic
 
         if sampling_strategy == 'proportional':
@@ -89,6 +99,14 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         joint_state = np.concatenate(all_joint_states, axis=0)
         action = np.concatenate(all_actions, axis=0)
         return LinearNormalizer.fit_obs_action(joint_state, action, self.action_key, 'limits')
+
+    def __del__(self):
+        """Best-effort shutdown of the Manager server process on garbage collection."""
+        try:
+            if hasattr(self, '_manager'):
+                self._manager.shutdown()
+        except Exception:
+            pass
 
     def _make_rng(self, *seed_parts: str):
         """Derive a reproducible ``np.random.Generator`` from seed components."""

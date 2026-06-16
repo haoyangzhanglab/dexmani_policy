@@ -87,13 +87,17 @@ def _validate_augmentation_consistency(cfg):
         return
 
     pc_color = aug_cfg.get('pc', {}).get('color')
+    pc_color_noise = aug_cfg.get('pc', {}).get('color_noise')
+    missing_rgb = (
+        f"PC color augmentation requires agent.pc_dim >= 6, got {pc_dim}. "
+        f"The encoder only reads the first {pc_dim} channels (XYZ), "
+        f"while the augmentation modifies channels 3:6 (RGB). "
+        f"Either set agent.pc_dim=6 or remove the augmentation key."
+    )
     if pc_color is not None:
-        assert pc_dim >= 6, (
-            f"PC color augmentation requires agent.pc_dim >= 6, got {pc_dim}. "
-            f"The encoder only reads the first {pc_dim} channels (XYZ), "
-            f"while color augmentation modifies channels 3:6 (RGB). "
-            f"Either set agent.pc_dim=6 or remove augmentation_cfg.pc.color"
-        )
+        assert pc_dim >= 6, missing_rgb
+    if pc_color_noise is not None:
+        assert pc_dim >= 6, f"PC color_noise augmentation: {missing_rgb}"
 
 
 def validate_config(cfg):

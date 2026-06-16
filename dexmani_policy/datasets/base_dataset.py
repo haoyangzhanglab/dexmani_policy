@@ -9,6 +9,7 @@ from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_actio
 from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
 from dexmani_policy.datasets.augmentation import (
     PointColorJitter,
+    PointColorNoiseAug,
     PointCoordNoiseAug,
     PointDropout,
     StateNoiseAug,
@@ -24,9 +25,10 @@ from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask
 # an AttributeError on ``x.device`` access.
 AUGMENTOR_REGISTRY = [
     ('pc',    PointCoordNoiseAug, 'coord_noise', 'point_cloud'),
-    ('pc',    PointColorJitter, 'color',    'point_cloud'),
-    ('pc',    PointDropout,     'dropout',  'point_cloud'),
-    ('state', StateNoiseAug,    'noise',    'joint_state'),
+    ('pc',    PointColorJitter,   'color',       'point_cloud'),
+    ('pc',    PointColorNoiseAug, 'color_noise', 'point_cloud'),
+    ('pc',    PointDropout,       'dropout',     'point_cloud'),
+    ('state', StateNoiseAug,      'noise',       'joint_state'),
 ]
 
 
