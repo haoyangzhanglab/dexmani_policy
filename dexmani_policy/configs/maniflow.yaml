@@ -51,12 +51,14 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
+  # ⚠️ PC augmentation defaults — synced across all PC-based policy configs.
   # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, ratio: 0.3, prob: 0.5}
       dropout:     {dropout_ratio: 0.1, prob: 0.3}
       color:       {brightness: 0.3, contrast: 0.4, saturation: 0.5, hue: 0.08, prob: 0.2}
+      color_noise: {noise_std: 0.01, prob: 0.2}
     state:
       noise:       {noise_std: 0.005, prob: 0.5}
 
@@ -125,6 +127,7 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6        # PointNeXT encoder: lighter regularization than DiT backbone
 
+# ⚠️ Synced across all policy configs — update all when changing.
 # ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
@@ -153,6 +156,7 @@ training:
     sample_interval_epochs: 5
     gradient_accumulation_steps: 1
 
+# ⚠️ Synced across all policy configs — update all when changing.
 # ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.common.workspace.TrainWorkspace
@@ -185,6 +189,7 @@ env_runner:
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
+# ⚠️ Synced across all policy configs — update all when changing.
 # ── Eval ──
 eval:
   seed: 0

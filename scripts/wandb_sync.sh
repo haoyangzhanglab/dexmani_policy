@@ -7,6 +7,10 @@ if ! command -v wandb &> /dev/null; then
     exit 1
 fi
 
+if ! wandb status &> /dev/null; then
+    echo "提示: wandb 未登录，请先运行 'wandb login'" >&2
+fi
+
 if [ $# -eq 0 ]; then
     echo "用法: bash scripts/wandb_sync.sh <run_dir|--all> [experiments_root]"
     echo "示例: bash scripts/wandb_sync.sh ./wandb/offline-run-20260401_111839-m6zq0mtq"

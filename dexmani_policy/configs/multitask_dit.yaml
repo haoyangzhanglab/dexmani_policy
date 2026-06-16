@@ -170,6 +170,7 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
+# ⚠️ Synced across all policy configs — update all when changing.
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
   update_after_step: 0
@@ -177,26 +178,6 @@ ema:
   power: 0.75
   min_value: 0.0
   max_value: 0.9999
-
-workspace:
-  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
-  output_dir: ${hydra:runtime.output_dir}
-
-  wandb_cfg:
-    _target_: dexmani_policy.training.common.workspace.WandbConfig
-    project: dexmani_policy
-    group: ${policy_name}
-    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
-    id: ${policy_name}_${task_name}_${training.seed}
-    resume: allow
-    mode: offline
-    video_fps: ${env_runner.env_video_fps}
-
-  checkpoint_cfg:
-    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
-    monitor_key: test_mean_score
-    mode: max
-    topk: 3
 
 # ── Training ──
 training:
@@ -217,6 +198,26 @@ training:
     sample_interval_epochs: 5
     gradient_accumulation_steps: 1
 
+# ⚠️ Synced across all policy configs — update all when changing.
+workspace:
+  _target_: dexmani_policy.training.common.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+
+  wandb_cfg:
+    _target_: dexmani_policy.training.common.workspace.WandbConfig
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
+    id: ${policy_name}_${task_name}_${training.seed}
+    resume: allow
+    mode: offline
+    video_fps: ${env_runner.env_video_fps}
+
+  checkpoint_cfg:
+    _target_: dexmani_policy.training.common.workspace.CheckpointConfig
+    monitor_key: test_mean_score
+    mode: max
+    topk: 3
 
 env_runner:
   _target_: dexmani_policy.env_runner.multi_task_sim_runner.MultiTaskSimRunner
@@ -234,6 +235,7 @@ env_runner:
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
+# ⚠️ Synced across all policy configs — update all when changing.
 eval:
   seed: 0
   offline:

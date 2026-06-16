@@ -61,7 +61,15 @@ is_active() {
 
 # 从 config.yaml 读出 num_epochs；读不到返回空
 get_num_epochs() {
-    grep -oP '^\s+num_epochs:\s*\K\d+' "$1/config.yaml" 2>/dev/null || true
+    python -c "
+import sys
+try:
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.load(sys.argv[1])
+    print(cfg.training.loop.num_epochs)
+except Exception:
+    pass
+" "$1/config.yaml" 2>/dev/null || true
 }
 
 # 从 checkpoint 文件名提取最大 epoch；无 checkpoint 返回 -1

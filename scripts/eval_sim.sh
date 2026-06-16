@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-if [ $# -lt 3 ]; then
+if [ $# -lt 3 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "用法: bash scripts/eval_sim.sh <policy_name> <task_name> <exp_name> [overrides...]"
     echo "示例: bash scripts/eval_sim.sh dp3 pick_apple_messy 2026-04-01_11-18_233"
     echo "      bash scripts/eval_sim.sh dp3 pick_apple_messy 2026-04-01_11-18_233 eval.offline.denoise_timesteps_list=[5,10,20]"

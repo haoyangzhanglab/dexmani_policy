@@ -126,6 +126,7 @@ optimizer:
   obs_lr: 2.5e-4                      # LoRA fine-tuning needs higher LR
   obs_weight_decay: 1.0e-6
 
+# ⚠️ Synced across all policy configs — update all when changing.
 # ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema_model.EMAModel
@@ -154,6 +155,7 @@ training:
     sample_interval_epochs: 5
     gradient_accumulation_steps: 1
 
+# ⚠️ Synced across all policy configs — update all when changing.
 # ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.common.workspace.TrainWorkspace
@@ -186,6 +188,7 @@ env_runner:
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
+# ⚠️ Synced across all policy configs — update all when changing.
 # ── Eval ──
 eval:
   seed: 0
