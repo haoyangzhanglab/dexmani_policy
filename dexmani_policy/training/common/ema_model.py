@@ -54,8 +54,14 @@ class EMAModel:
                 module.parameters(recurse=False), ema_module.parameters(recurse=False)
             ):
                 if isinstance(module, _BatchNorm):
-                    # BatchNorm running stats are already moving averages;
-                    # copy the affine params directly to stay consistent.
+                    # BatchNorm affine params (weight/bias) are copied directly
+                    # rather than EMA-averaged.  The running_mean / running_var
+                    # inside the EMA model are *not* updated during training
+                    # (the EMA model stays in eval mode), so they will diverge
+                    # from the main model's running stats over time.  This is
+                    # acceptable for the current codebase because the action
+                    # decoder backbones (UNet1D / DiT / DiTX / OneWayTransformer)
+                    # do not use BatchNorm.
                     ema_param.copy_(param.to(dtype=ema_param.dtype).data)
                 elif not param.requires_grad:
                     ema_param.copy_(param.to(dtype=ema_param.dtype).data)

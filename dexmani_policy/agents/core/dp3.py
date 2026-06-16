@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
+from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 
 
@@ -25,7 +25,7 @@ class DP3ObsEncoder(nn.Module):
                 'fps_random_config': fps_random_config,
             }
         )
-        self.state_mlp = StateMLP(state_dim, state_out_dim)
+        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps

@@ -102,6 +102,7 @@ def worker_init_fn(worker_id):
     seed = torch.initial_seed() % 2 ** 32
     random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def create_mlp(

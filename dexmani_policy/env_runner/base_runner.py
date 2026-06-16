@@ -198,6 +198,7 @@ class BaseRunner:
 
                 try:
                     episode_success, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
+                    total_steps = getattr(env, 'action_cnt', None)
                     video = env.get_video()
 
                     if self.clear_cache_freq > 0 and attempted % self.clear_cache_freq == 0:
@@ -215,6 +216,7 @@ class BaseRunner:
                         "seed": eval_seed,
                         "success": episode_success,
                         "steps": task_done_step,
+                        "total_steps": total_steps,
                     })
                     if video is not None:
                         if video_save_dir is not None:
@@ -252,9 +254,15 @@ class BaseRunner:
             success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
             avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
 
+            # avg_steps_all includes all episodes (failures → full episode length)
+            all_steps = [d["total_steps"] for d in episode_details if d.get("total_steps") is not None]
+            avg_steps_all = int(round(np.mean(all_steps))) if all_steps else None
+
             sr_str = format_success_rate(success_rate)
             avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
-            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, Avg steps (success only): {avg_steps_str}", "yellow")
+            avg_all_str = 'N/A' if avg_steps_all is None else str(avg_steps_all)
+            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, "
+                   f"Avg steps (success): {avg_steps_str}, Avg steps (all): {avg_all_str}", "yellow")
             print("=" * 90)
 
         finally:
@@ -263,6 +271,7 @@ class BaseRunner:
         return {
             "success_rate": success_rate,
             "avg_steps": avg_steps,
+            "avg_steps_all": avg_steps_all,
             "videos": episode_video_list,
             "episode_details": episode_details,
         }

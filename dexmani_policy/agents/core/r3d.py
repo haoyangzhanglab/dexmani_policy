@@ -7,7 +7,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.r3d_obs_encoder import R3DObsE
 from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import OneWayTransformerBackbone
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.core.base import BaseAgent
-from dexmani_policy.agents.common.optim_util import get_optim_group_with_no_decay
 
 
 class R3DAgent(BaseAgent):
@@ -88,18 +87,10 @@ class R3DAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
-        action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
-        for g in action_groups:
-            g['lr'] = lr
 
-        obs_groups = get_optim_group_with_no_decay(
-            self.obs_encoder, weight_decay=obs_wd,
-        )
-        for g in obs_groups:
-            g['lr'] = obs_lr
-
-        return action_groups + obs_groups
+    # get_optim_param_groups is inherited from BaseAgent — identical logic.
+    # R3D uses the standard action-decoder + obs-encoder split with
+    # separate weight-decay policies, same as all other agents.
 
 
 # =============================================================================

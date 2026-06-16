@@ -104,11 +104,16 @@ class Trainer:
 
     @property
     def raw_model(self):
+        """Return the unwrapped base model (no DDP, no torch.compile).
+
+        NOTE: ``isinstance(self.raw_model, DDP)`` will always be False
+        because this property already unwraps DDP.  When a DDP‑wrapped
+        model is in use, check ``self.distributed`` or the original
+        ``self.model`` attribute instead.
+        """
         model = self.model
-        # Unwrap DDP wrapper
         if isinstance(model, DDP):
             model = model.module
-        # Unwrap torch.compile wrapper (OptimizedModule)
         if hasattr(model, '_orig_mod'):
             model = model._orig_mod
         return model
@@ -215,12 +220,18 @@ class Trainer:
 
 
     @torch.no_grad()
-    def validate(self, agent, ema_backbone=None) -> Optional[float]:
+    def validate(self, agent, ema_backbone=None):
+        """Return dict with at least ``"loss"``; ``"loss_flow"`` and
+        ``"loss_consistency"`` are included when the action decoder reports
+        them (e.g. FlowMatchWithConsistency)."""
         if self.val_loader is None:
             return None
 
         count = 0
         loss_sum = torch.zeros((), device=self.device)
+        flow_sum = torch.zeros((), device=self.device)
+        cons_sum = torch.zeros((), device=self.device)
+        has_components = False
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
@@ -230,17 +241,33 @@ class Trainer:
 
             n = batch['action'].shape[0]
             loss_sum += loss.detach() * n
+            if 'loss_flow' in log_dict:
+                flow_sum += log_dict['loss_flow'].detach() * n
+                cons_sum += log_dict['loss_consistency'].detach() * n
+                has_components = True
             count += n
 
         if count == 0:
             return None
 
         if self.distributed:
-            stats = torch.tensor([loss_sum.item(), float(count)], device=self.device)
+            stats = torch.tensor(
+                [loss_sum.item(), flow_sum.item(), cons_sum.item(), float(count)],
+                device=self.device,
+            )
             dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-            return (stats[0] / stats[1]).item()
+            c = stats[3].item()
+            result = {"loss": (stats[0] / c).item()}
+            if has_components:
+                result["loss_flow"] = (stats[1] / c).item()
+                result["loss_consistency"] = (stats[2] / c).item()
+            return result
 
-        return (loss_sum / count).item()
+        result = {"loss": (loss_sum / count).item()}
+        if has_components:
+            result["loss_flow"] = (flow_sum / count).item()
+            result["loss_consistency"] = (cons_sum / count).item()
+        return result
 
 
     @torch.no_grad()
@@ -250,6 +277,7 @@ class Trainer:
         metrics = {
             "eval/success_rate": success_rate * 100 if success_rate is not None else None,
             "eval/avg_steps": result["avg_steps"],
+            "eval/avg_steps_all": result.get("avg_steps_all"),
         }
         for item in result.get("videos", []):
             for key, value in item.items():
@@ -284,8 +312,14 @@ class Trainer:
         else:
             model_for_val = self.ema_model if (self.use_ema and not self.enable_env_eval) else self.model
             ema_backbone = None
-        val_loss = self.validate(model_for_val, ema_backbone=ema_backbone)
-        return {"val/loss": val_loss} if val_loss is not None else {}
+        result = self.validate(model_for_val, ema_backbone=ema_backbone)
+        if result is None:
+            return {}
+        metrics = {"val/loss": result["loss"]}
+        if "loss_flow" in result:
+            metrics["val/loss_flow"] = result["loss_flow"]
+            metrics["val/loss_consistency"] = result["loss_consistency"]
+        return metrics
 
     def _evaluate_and_log(self, eval_model):
         return self.evaluate(eval_model) if self.env_runner is not None else {}

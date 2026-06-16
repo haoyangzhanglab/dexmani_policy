@@ -3,7 +3,7 @@ import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
 from dexmani_policy.agents.obs_encoder.pointcloud.common.utils import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.plugins.moe import MoE
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
+from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 
 
@@ -41,7 +41,7 @@ class MoEObsEncoder(nn.Module):
                 'fps_random_config': fps_random_config,
             }
         )
-        self.state_mlp = StateMLP(state_dim, state_out_dim)
+        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         in_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
         # Align with official MoE-DP: Linear projection before MoE so the
         # encoder output can be mapped to a fixed embedding dimension

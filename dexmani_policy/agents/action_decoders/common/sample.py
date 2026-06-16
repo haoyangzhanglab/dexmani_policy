@@ -44,7 +44,7 @@ def sample_beta(
 def sample_discrete_pow(
     batch_size: int, denoise_timesteps: int, device: str = "cuda"
 ) -> torch.Tensor:
-    log2_sections = int(math.log2(denoise_timesteps)) + 1
+    log2_sections = math.floor(math.log2(denoise_timesteps)) + 1
     dt_base = torch.repeat_interleave(
         torch.arange(log2_sections - 1, -1, -1, dtype=torch.long, device=device),
         batch_size // log2_sections,

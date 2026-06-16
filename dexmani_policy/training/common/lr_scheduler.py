@@ -27,20 +27,10 @@ def get_scheduler(
         )
 
     if name in ("cosine_annealing",):
-        if num_training_steps is None:
-            raise ValueError(f"{name} requires num_training_steps")
-        if num_warmup_steps:
-            import warnings
-            warnings.warn(
-                f"cosine_annealing does not support warmup. "
-                f"lr_warmup_steps={num_warmup_steps} will be ignored. "
-                f"Use lr_scheduler='cosine' instead for warmup support.",
-                UserWarning,
-            )
-        return _lrs.CosineAnnealingLR(
-            optimizer,
-            T_max=num_training_steps,
-            eta_min=kwargs.get("eta_min", 0),
+        raise ValueError(
+            f"cosine_annealing is deprecated and has been removed. "
+            f"Use lr_scheduler='cosine' instead (diffusers CosineWithWarmup, "
+            f"supports warmup)."
         )
 
     # --- diffusers standard schedulers ---

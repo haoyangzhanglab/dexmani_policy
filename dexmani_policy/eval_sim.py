@@ -34,6 +34,13 @@ def run_eval(exp_dir: Path, overrides: list[str]):
     # backward compat: historical checkpoints used action_mode → action_key
     if not hasattr(cfg, 'action_key'):
         if hasattr(cfg, 'action_mode'):
+            import warnings
+            warnings.warn(
+                f"Config uses deprecated 'action_mode' field. "
+                f"Please update to 'action_key: action_ee' (for eef_hand) "
+                f"or 'action_key: action' (for joint space).",
+                FutureWarning,
+            )
             cfg.action_key = 'action_ee' if cfg.action_mode == 'eef_hand' else 'action'
         else:
             cfg.action_key = 'action'

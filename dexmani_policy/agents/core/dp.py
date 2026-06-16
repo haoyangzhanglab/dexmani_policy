@@ -3,7 +3,7 @@ import torch.nn as nn
 from torchvision.transforms import v2
 
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
+from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
 
 
@@ -20,7 +20,7 @@ class DPObsEncoder(nn.Module):
         cfg = dict(rgb_backbone_config or {})
         self.crop_ratio = cfg.pop('crop_ratio', None)
         self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=cfg)
-        self.state_mlp = StateMLP(state_dim, state_out_dim)
+        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 

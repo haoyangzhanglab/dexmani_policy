@@ -114,6 +114,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         optimizer.load_state_dict(checkpoint.optimizer_state)
         resume_state = (checkpoint.global_step, checkpoint.epoch + 1)
     except FileNotFoundError:
+        checkpoint = None
         resume_state = (0, 0)
 
     # torch.compile 必须在 DDP 包装前、checkpoint 加载后
@@ -133,8 +134,14 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         name=cfg.training.lr_scheduler,
         num_warmup_steps=cfg.training.lr_warmup_steps,
         num_training_steps=total_steps,
-        last_epoch=resume_state[0] - 1,
+        last_epoch=resume_state[0] - 1 if checkpoint is None else -1,
     )
+    # Restore full scheduler state (aligned with single-GPU load_for_resume).
+    # When resuming, load_state_dict overrides the initial state set by
+    # last_epoch, so last_epoch=-1 above is intentional — it avoids a
+    # misleading intermediate state before the checkpoint state is applied.
+    if checkpoint is not None:
+        scheduler.load_state_dict(checkpoint.scheduler_state)
 
     trainer = Trainer(
         device=device,
@@ -225,6 +232,11 @@ def main(cfg):
     OmegaConf.resolve(cfg)
 
     if 'MASTER_PORT' not in os.environ:
+        # Auto-assign a free port.  There is a theoretical TOCTOU race
+        # between close() and mp.spawn() — another process could bind the
+        # same port.  In practice this window is microseconds and shared
+        # training machines are the only scenario where it matters.
+        # If you hit an address-in-use error, set MASTER_PORT explicitly.
         sock = socket.socket()
         sock.bind(('', 0))
         os.environ['MASTER_PORT'] = str(sock.getsockname()[1])

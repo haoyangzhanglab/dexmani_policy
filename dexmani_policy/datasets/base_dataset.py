@@ -1,13 +1,13 @@
 import copy
 from typing import Optional, Tuple
 
+import numpy as np
 import torch
 import torchvision.transforms.functional as TVF
 
 from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_action_normalizer
 from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
 from dexmani_policy.datasets.augmentation import (
-    ImageAug,
     PointColorJitter,
     PointCoordNoiseAug,
     PointDropout,
@@ -17,12 +17,16 @@ from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler, get_val_mask, downsample_mask
 
 # (yaml_section, augmentor_class, yaml_key, output_modality)
+# Note: RGB augmentation is intentionally NOT registered here.  It is applied
+# separately in _preprocess_rgb_cpu via the rgb_color_aug torchvision transform
+# (on torch.Tensor), not via numpy-based apply_augmentation.  Adding an 'rgb'
+# entry here would pass np.ndarray to a torch.Tensor-based augmentor and cause
+# an AttributeError on ``x.device`` access.
 AUGMENTOR_REGISTRY = [
     ('pc',    PointCoordNoiseAug, 'coord_noise', 'point_cloud'),
     ('pc',    PointColorJitter, 'color',    'point_cloud'),
     ('pc',    PointDropout,     'dropout',  'point_cloud'),
     ('state', StateNoiseAug,    'noise',    'joint_state'),
-    ('rgb',   ImageAug,         'color',    'rgb'),
 ]
 
 
@@ -130,14 +134,14 @@ class BaseDataset(torch.utils.data.Dataset):
 
         Two paths:
         - uint8 fast path: when ``rgb_keep_uint8=True`` and no color aug,
-          resize/crop keep uint8 output → 4x less DataLoader→GPU transfer.
-        - float32 path (default): current behavior, required for color augmentation.
+          resize/crop keep uint8 output → 4× less DataLoader→GPU transfer.
+        - float32 path (default): for color augmentation.
         """
         rgb = torch.from_numpy(rgb_np)                 # (T, H, W, 3) uint8
-        rgb = rgb.permute(0, 3, 1, 2).contiguous()     # (T, 3, H, W)
 
         # --- uint8 fast path: skip float32 conversion, resize/crop in uint8 ---
         if self.rgb_keep_uint8 and self.rgb_color_aug is None:
+            rgb = rgb.permute(0, 3, 1, 2).contiguous()  # (T, 3, H, W) uint8
             rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
             if self.rgb_random_crop_size is not None:
                 if self._is_val:
@@ -151,6 +155,10 @@ class BaseDataset(torch.utils.data.Dataset):
             return rgb.contiguous()                      # uint8
 
         # --- float32 path: current behavior (needed for color augmentation) ---
+        # Two-step contiguous+float is faster than a single float() on a strided
+        # permute view (contiguous uint8 memcpy + fast float conversion beats
+        # strided element-by-element float conversion).
+        rgb = rgb.permute(0, 3, 1, 2).contiguous()     # (T, 3, H, W) uint8
         rgb = rgb.float().div_(255.0)                    # (T, 3, H, W) float32 [0,1]
         rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
         if self.rgb_random_crop_size is not None:
@@ -164,7 +172,9 @@ class BaseDataset(torch.utils.data.Dataset):
                     width=self.rgb_random_crop_size[1])
         if self.rgb_color_aug is not None and not self._is_val:
             rgb = self.rgb_color_aug(rgb)                # (T, 3, H_dst, W_dst) float32 [0,1]
-        return rgb.clamp(0, 1).contiguous()
+        # clamp_ is in-place (resize/crop/aug already own their output);
+        # the result is already contiguous from the prior op, skip extra copy.
+        return rgb.clamp_(0, 1)
 
     def __getitem__(self, idx):
         sample = self.sampler.sample_sequence(idx)
@@ -191,13 +201,28 @@ class BaseDataset(torch.utils.data.Dataset):
                 self.augmentors.setdefault(modality, []).append(cls(**config))
 
     def apply_augmentation(self, data):
+        """Apply configured augmentors to the sample dict.
+
+        When multiple augmentors target the same modality (e.g. coord_noise +
+        dropout + color jitter on point_cloud), only the first one that triggers
+        makes a defensive ``.copy()`` — subsequent triggers modify the same copy
+        in-place.  This saves 1-2 redundant full-array copies per augmented
+        sample compared to the old per-augmentor copy pattern.
+        """
         if self.augmentation_cfg is None:
             return data
         for modality, augs in self.augmentors.items():
             if modality not in data['obs'] or augs is None:
                 continue
+            x = data['obs'][modality]
+            copied = False
             for aug in augs:
-                data['obs'][modality] = aug(data['obs'][modality])
+                if np.random.random() <= aug.prob:
+                    if not copied:
+                        x = x.copy()
+                        copied = True
+                    aug._augment(x)
+            data['obs'][modality] = x
         return data
 
     def get_normalizer(self, mode='limits'):

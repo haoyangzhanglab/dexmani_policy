@@ -67,9 +67,27 @@ class BaseAgent(nn.Module):
         return cond, aux
 
     def compute_loss(self, batch, **kwargs):
-        cond, _ = self._build_cond(batch['obs'])
+        cond, aux = self._build_cond(batch['obs'])
         normed_actions = self.normalizer['action'].normalize(batch['action'])
-        return self.action_decoder.compute_loss(cond, normed_actions, **kwargs)
+        action_loss, loss_dict = self.action_decoder.compute_loss(
+            cond, normed_actions, **kwargs)
+
+        # Merge auxiliary losses from the observation encoder (e.g. MoE
+        # load-balance + entropy).  Encoders that don't produce side-losses
+        # return aux = {} → no-op for DP / DP3 / ManiFlow / R3D / MultiTask.
+        aux_loss = aux.get('loss')
+        if aux_loss is not None:
+            loss_dict['loss'] = action_loss + aux_loss
+            loss_dict['loss_action'] = loss_dict.get('loss_action', action_loss)
+            for k, v in aux.items():
+                if k == 'loss':
+                    continue
+                # Log scalar aux values; skip multi-element tensors
+                # (e.g. router_probs / dispatch) that can't be logged.
+                if not torch.is_tensor(v) or v.numel() <= 1:
+                    loss_dict[f'aux_{k}'] = v
+            return action_loss + aux_loss, loss_dict
+        return action_loss, loss_dict
 
     @torch.no_grad()
     def predict_action(self, obs_dict: Dict, denoise_timesteps=None) -> Dict:

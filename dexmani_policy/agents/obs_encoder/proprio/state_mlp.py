@@ -28,3 +28,20 @@ class StateMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
+
+
+def create_state_mlp(
+    state_dim: int,
+    state_out_dim: int = 64,
+    **kwargs,
+) -> StateMLP:
+    """Create the standard StateMLP used by all observation encoders.
+
+    Every encoder (DP, DP3, MoE, ManiFlow, MultiTask, R3D) embeds the
+    robot's joint state through this MLP before concatenating it with
+    vision / point-cloud features.  This factory centralises the
+    project-wide default so that a change to the state-encoding
+    architecture (e.g. adding LayerNorm, dropout, or changing the
+    hidden size) only needs to be made in one place.
+    """
+    return StateMLP(input_channels=state_dim, output_channels=state_out_dim, **kwargs)

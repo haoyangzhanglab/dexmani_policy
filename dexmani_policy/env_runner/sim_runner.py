@@ -41,7 +41,17 @@ class SimRunner(BaseRunner):
 
     def make_env(self):
         env_module = importlib.import_module(f"{ENV_PREFIX}.{self.task_name}")
-        env_class = getattr(env_module, self.name_to_pascal_case(self.task_name))
+        class_name = self.name_to_pascal_case(self.task_name)
+        env_class = getattr(env_module, class_name, None)
+        if env_class is None:
+            available = [name for name in dir(env_module) if not name.startswith('_')]
+            raise AttributeError(
+                f"Environment class '{class_name}' not found in {ENV_PREFIX}.{self.task_name}. "
+                f"Task name '{self.task_name}' maps to PascalCase '{class_name}'. "
+                f"Available names in module: {available}. "
+                f"If the class name doesn't follow the snake_case→PascalCase convention, "
+                f"add an explicit mapping to name_to_pascal_case."
+            )
         return env_class(render_mode="rgb_array", record_video=True, **self.env_kwargs)
 
 
@@ -51,5 +61,15 @@ class SimRunner(BaseRunner):
         seed_file = DATA_DIR / "eval_seeds" / f"{self.task_name}.txt"
         if seed_file.exists():
             return [int(x) for x in seed_file.read_text().split()]
-        return list(range(DEFAULT_EVAL_SEED_COUNT))
+        default_seeds = list(range(DEFAULT_EVAL_SEED_COUNT))
+        if len(default_seeds) < self.eval_episodes:
+            import warnings
+            warnings.warn(
+                f"eval_episodes={self.eval_episodes} exceeds default seed count "
+                f"({DEFAULT_EVAL_SEED_COUNT}). Only {DEFAULT_EVAL_SEED_COUNT} "
+                f"episodes will be evaluated unless eval_seeds is provided or "
+                f"a seed file exists at {seed_file}.",
+                UserWarning,
+            )
+        return default_seeds
 

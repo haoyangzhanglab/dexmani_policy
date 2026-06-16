@@ -121,11 +121,20 @@ class TopKCheckpointTracker:
         self.monitor_key = monitor_key
         self.mode = mode
         self.k = int(k)
+        # Cache: path → score populated from checkpoint.monitor during update().
+        # Falls back to filename regex when entry is not in cache (e.g. during
+        # eval-time "best" resolution where no checkpoint object is available).
+        self._score_cache: dict[Path, float] = {}
 
     def _list_ckpts(self):
         return list(self.checkpoint_dir.glob("epoch=*.pt"))
 
     def _parse_score(self, path: Path) -> float:
+        # Use cached score from checkpoint.monitor if available.
+        if path in self._score_cache:
+            return self._score_cache[path]
+        # Fall back to filename regex for backward compatibility
+        # and eval-time "best" resolution.
         m = re.search(r'-score=([\d.eE+-]+)\.pt$', path.name)
         if m:
             return float(m.group(1))
@@ -136,6 +145,12 @@ class TopKCheckpointTracker:
         return sorted(self._list_ckpts(), key=self._parse_score, reverse=reverse)
 
     def update(self, checkpoint_path: Path, checkpoint: Optional[TrainCheckpoint] = None) -> Optional[Path]:
+        # Populate score cache from the authoritative source: checkpoint.monitor.
+        if checkpoint is not None and self.monitor_key in checkpoint.monitor:
+            score = checkpoint.monitor[self.monitor_key]
+            if score is not None:
+                self._score_cache[checkpoint_path] = float(score)
+
         if self.k <= 0:
             return self.best_path()
 
@@ -145,6 +160,7 @@ class TopKCheckpointTracker:
                 p.unlink()
             except OSError:
                 pass
+            self._score_cache.pop(p, None)  # purge deleted entries
         return self.best_path()
 
     def best_path(self) -> Optional[Path]:

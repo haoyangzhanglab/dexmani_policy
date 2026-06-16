@@ -46,6 +46,7 @@ class Diffusion(nn.Module):
         self.num_inference_steps = num_inference_steps
         self._prediction_type = prediction_type
         self._cached_alphas_device = None
+        self._cached_alphas_dtype = None
 
 
     def compute_loss(
@@ -71,9 +72,11 @@ class Diffusion(nn.Module):
         elif pred_type == 'v_prediction':
             # v_t = sqrt(alpha_cumprod) * noise - sqrt(1-alpha_cumprod) * x_0
             # See: https://arxiv.org/abs/2202.00512 (Progressive Distillation)
-            if self._cached_alphas_device != actions.device:
-                self._cached_alphas = self.noise_scheduler.alphas_cumprod.to(device=actions.device)
+            if self._cached_alphas_device != actions.device or self._cached_alphas_dtype != actions.dtype:
+                self._cached_alphas = self.noise_scheduler.alphas_cumprod.to(
+                    device=actions.device, dtype=actions.dtype)
                 self._cached_alphas_device = actions.device
+                self._cached_alphas_dtype = actions.dtype
             alpha_t = self._cached_alphas[timestep].sqrt()
             sigma_t = (1 - self._cached_alphas[timestep]).sqrt()
             target = alpha_t.view(-1, 1, 1) * noise - sigma_t.view(-1, 1, 1) * actions

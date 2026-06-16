@@ -97,19 +97,22 @@ class MoE(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Xavier-uniform init for all Linear layers (gate + experts).
+        """Xavier-uniform init for router/gate Linear layers.
 
-        Aligned with official MoE-DP: gates and experts share the same
-        initialisation scheme so the router starts from a well-conditioned
-        distribution.  ExpertMLP already calls its own _init_weights in
-        __init__; this pass re-initialises those layers identically
-        (a no-op) and additionally initialises the router/gate Linear
-        layers which would otherwise use PyTorch's default Kaiming init.
+        ExpertMLP already calls its own _init_weights in __init__;
+        this pass only initialises the router/gate Linear layers which
+        would otherwise use PyTorch's default Kaiming init.
         """
-        for m in self.modules():
+        for m in [self.router]:
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0)
+        # Enhanced gate has extra Linear layers inside gate_mlp
+        if self.use_enhanced_gate:
+            for m in self.gate_mlp.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    nn.init.constant_(m.bias, 0)
 
     def route(self, z):
         logits = self.router(z)

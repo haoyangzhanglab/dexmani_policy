@@ -8,7 +8,19 @@ _BT601_LUMA = (0.299, 0.587, 0.114)
 
 
 class Aug:
-    """Prob-gated augmentation base. Subclasses implement ``_augment(x)``."""
+    """Prob-gated augmentation base.
+
+    ``__call__`` handles the probability gate and makes a single defensive
+    copy.  Subclasses implement ``_augment(x)`` which **must** modify *x*
+    in-place — the caller already guarantees that *x* is a detached copy
+    when ``_augment`` runs.
+
+    When chaining multiple augmentors through ``apply_augmentation``, the
+    first trigger makes one copy and subsequent triggers reuse it,
+    avoiding the redundant ``.copy()`` per-augmentor pattern.
+    """
+
+    __slots__ = ('prob',)
 
     def __init__(self, prob=1.0):
         self.prob = prob
@@ -16,9 +28,12 @@ class Aug:
     def __call__(self, x):
         if np.random.random() > self.prob:
             return x
-        return self._augment(x)
+        x = x.copy()
+        self._augment(x)
+        return x
 
     def _augment(self, x):
+        """Modify *x* **in-place**.  Caller guarantees *x* is a detached copy."""
         raise NotImplementedError
 
 
@@ -27,7 +42,10 @@ class PointColorJitter(Aug):
     """HSV color jitter for point cloud RGB channels (last 3 dims).
 
     Reference: ManiFlow (CoRL 2025). Input ``(T,N,C) float32, C>=6``.
+    Modifies the RGB channels **in-place** on a pre-copied array.
     """
+
+    __slots__ = ('brightness', 'contrast', 'saturation', 'hue')
 
     def __init__(self, brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
                  prob=1.0):
@@ -48,51 +66,55 @@ class PointColorJitter(Aug):
             return [max(0.0, center - value), center + value]
         return [value[0], value[1]]
 
+    # ---------- in-place augment ----------
     def _augment(self, x):
         if x.shape[-1] < 6:
-            return x
+            return
 
-        pc = x.copy()
-        rgb = pc[..., -3:]
-        orig_shape = rgb.shape
-        rgb = rgb.reshape(-1, 3)
+        # Only touch the RGB channels — (T,N,C) → flat (−1,3) for batch HSV.
+        rgb = x[..., -3:].reshape(-1, 3)
 
-        rgb = self._apply_brightness(rgb)
-        rgb = self._apply_contrast(rgb)
-        rgb = self._apply_saturation(rgb)
-        rgb = self._apply_hue(rgb)
-        rgb = np.clip(rgb, 0.0, 1.0)
+        self._apply_brightness_ip(rgb)
+        self._apply_contrast_ip(rgb)
+        self._apply_saturation_ip(rgb)
+        self._apply_hue_ip(rgb)
+        np.clip(rgb, 0.0, 1.0, out=rgb)
 
-        pc[..., -3:] = rgb.reshape(orig_shape)
-        return pc
-
-    def _apply_brightness(self, rgb):
+    # ---------- in-place colour helpers ----------
+    def _apply_brightness_ip(self, rgb):
         if self.brightness[0] == self.brightness[1]:
-            return rgb
-        return rgb * np.random.uniform(*self.brightness)
+            return
+        rgb *= np.random.uniform(*self.brightness)
 
-    def _apply_contrast(self, rgb):
+    def _apply_contrast_ip(self, rgb):
         if self.contrast[0] == self.contrast[1]:
-            return rgb
+            return
         factor = np.random.uniform(*self.contrast)
-        return (rgb - 0.5) * factor + 0.5
+        rgb -= 0.5
+        rgb *= factor
+        rgb += 0.5
 
-    def _apply_saturation(self, rgb):
+    def _apply_saturation_ip(self, rgb):
         if self.saturation[0] == self.saturation[1]:
-            return rgb
+            return
         factor = np.random.uniform(*self.saturation)
-        gray = np.dot(rgb, _BT601_LUMA)[:, None]
-        return rgb * factor + gray * (1.0 - factor)
+        # gray is (N,) — no [:, None] needed since we add channel-wise
+        gray = np.dot(rgb, _BT601_LUMA)  # (N,)
+        inv_factor = 1.0 - factor
+        rgb *= factor
+        rgb[:, 0] += gray * inv_factor
+        rgb[:, 1] += gray * inv_factor
+        rgb[:, 2] += gray * inv_factor
 
-    def _apply_hue(self, rgb):
+    def _apply_hue_ip(self, rgb):
         if self.hue[0] == self.hue[1]:
-            return rgb
+            return
         shift = np.random.uniform(*self.hue)
         if abs(shift) < 1e-6:
-            return rgb
+            return
         hsv = self._rgb_to_hsv(rgb)
         hsv[:, 0] = (hsv[:, 0] + shift) % 1.0
-        return self._hsv_to_rgb(hsv)
+        rgb[...] = self._hsv_to_rgb(hsv)
 
     @staticmethod
     def _rgb_to_hsv(rgb):
@@ -145,29 +167,32 @@ class PointDropout(Aug):
     creating natural duplicate density variations that are harder for the
     encoder to exploit than zero-filling or single-anchor replacement (R3D, 2026).
 
-    Each T frame gets an independent dropout mask.
+    Each T frame gets an independent dropout mask.  Modifies the array
+    **in-place** on a pre-copied input.
     """
+
+    __slots__ = ('dropout_ratio',)
 
     def __init__(self, dropout_ratio=0.3, prob=1.0):
         super().__init__(prob=prob)
         self.dropout_ratio = dropout_ratio
 
     def _augment(self, x):
-        # x: (T, N, C)
+        # x: (T, N, C) — guaranteed to be a detached copy
         T, N = x.shape[:2]
         n_drop = max(1, int(N * self.dropout_ratio))
-        n_keep = N - n_drop
 
-        pc = x.copy()
+        # Boolean mask instead of np.setdiff1d (O(N) vs O(N log N)).
+        all_idx = np.arange(N)
         for t in range(T):
-            all_idx = np.arange(N)
             drop_idx = np.random.choice(all_idx, size=n_drop, replace=False)
 
-            keep_idx = np.setdiff1d(all_idx, drop_idx)
-            fill_idx = np.random.choice(keep_idx, size=n_drop, replace=True)
+            keep_mask = np.ones(N, dtype=bool)
+            keep_mask[drop_idx] = False
+            keep_idx = all_idx[keep_mask]       # O(N) — no sort
 
-            pc[t, drop_idx] = pc[t, fill_idx]
-        return pc
+            fill_idx = np.random.choice(keep_idx, size=n_drop, replace=True)
+            x[t, drop_idx] = x[t, fill_idx]
 
 
 class PointCoordNoiseAug(Aug):
@@ -180,7 +205,11 @@ class PointCoordNoiseAug(Aug):
 
     The noise is clipped to ±clip_range (default 2σ) to guard against extreme
     outliers that would push normalised coordinates outside [-1, 1].
+
+    Modifies the first 3 channels **in-place** on a pre-copied input.
     """
+
+    __slots__ = ('noise_std', 'ratio', 'clip_range')
 
     def __init__(self, noise_std=0.002, ratio=0.3, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
@@ -191,19 +220,18 @@ class PointCoordNoiseAug(Aug):
     def _augment(self, x):
         # x: (T, N, C) — noise only on the first 3 channels (XYZ)
         if self.noise_std <= 0 or self.ratio <= 0:
-            return x
+            return
 
         T, N = x.shape[:2]
         n_noisy = max(1, int(N * self.ratio))
 
         # Per-frame random subset — different points each frame
-        pc = x.copy()
+        dtype = x.dtype
         for t in range(T):
             idx = np.random.choice(N, size=n_noisy, replace=False)
             noise = np.random.normal(0, self.noise_std, (n_noisy, 3))
             noise = np.clip(noise, -self.clip_range, self.clip_range)
-            pc[t, idx, :3] += noise.astype(pc.dtype)
-        return pc
+            x[t, idx, :3] += noise.astype(dtype)
 
 
 class StateNoiseAug(Aug):
@@ -213,14 +241,18 @@ class StateNoiseAug(Aug):
     by adding noise. It is NOT the same as modality dropout (``modality_dropout_probs``
     in agent config), which zeros out the entire modality to force multi-modal
     robustness.
+
+    Modifies the array **in-place** on a pre-copied input.
     """
+
+    __slots__ = ('noise_std',)
 
     def __init__(self, noise_std=0.005, prob=1.0):
         super().__init__(prob=prob)
         self.noise_std = noise_std
 
     def _augment(self, x):
-        return x + np.random.normal(0, self.noise_std, x.shape).astype(x.dtype)
+        x += np.random.normal(0, self.noise_std, x.shape).astype(x.dtype)
 
 
 
@@ -229,7 +261,14 @@ class ImageAug:
 
     Reference: DexUMI (brightness=0.6 for challenging lighting).
     Each sub-augmentation is independently probabilistic.
+
+    Performance note: all probabilistic gates are decided from a single
+    ``torch.rand`` call instead of one per sub-transform, reducing CUDA
+    kernel launches.
     """
+
+    __slots__ = ('prob', 'color_jitter', 'grayscale', 'noise', 'noise_prob',
+                 'blur', 'blur_prob', '_has_noise', '_has_blur')
 
     def __init__(
         self,
@@ -259,9 +298,17 @@ class ImageAug:
         self.blur = v2.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma) if blur_kernel > 0 else None
         self.blur_prob = blur_prob
 
+        # Pre-compute fast-path flags (avoids repeated None checks in __call__).
+        self._has_noise = self.noise is not None
+        self._has_blur = self.blur is not None
+
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """x: (T, 3, H, W) float32 [0, 1] → same shape."""
-        if self.prob < 1.0 and torch.rand(1, device=x.device).item() > self.prob:
+        # Single rand() call fuses prob gate + noise + blur decisions into
+        # one CUDA kernel launch (3 → 1 vs the old per-transform calls).
+        # Layout: [p_gate, p_noise, p_blur]
+        rand_vals = torch.rand(3, device=x.device)
+        if self.prob < 1.0 and rand_vals[0].item() > self.prob:
             return x
 
         x = self.color_jitter(x)
@@ -269,10 +316,10 @@ class ImageAug:
         if self.grayscale is not None:
             x = self.grayscale(x)
 
-        if self.noise is not None and torch.rand(1, device=x.device).item() <= self.noise_prob:
+        if self._has_noise and rand_vals[1].item() <= self.noise_prob:
             x = self.noise(x)
 
-        if self.blur is not None and torch.rand(1, device=x.device).item() <= self.blur_prob:
+        if self._has_blur and rand_vals[2].item() <= self.blur_prob:
             x = self.blur(x)
 
         return x.clamp(0, 1)

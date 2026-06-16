@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DPointcloudEncoder
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import StateMLP
+from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
 class R3DObsEncoder(nn.Module):
@@ -36,7 +36,7 @@ class R3DObsEncoder(nn.Module):
             pc_encoder_config.setdefault("fps_random_config", fps_random_config)
 
         self.pc_encoder = Uni3DPointcloudEncoder(**pc_encoder_config)
-        self.state_mlp = StateMLP(state_dim, state_out_dim)
+        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
 
         K = pc_encoder_config.get("num_group", 512)
