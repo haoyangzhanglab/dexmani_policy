@@ -1,6 +1,10 @@
 # @package _global_
 # MultiTask DiT — DDP multi-GPU training overlay
 # Usage: bash scripts/train_ddp.sh ddp/multitask_dit
+#
+# Effective batch size: per_gpu_batch × num_gpus × gradient_accumulation_steps
+#   train: 16 × 4 × 1 = 64  (matches single-GPU 64)
+#   val:   16 × 4 × 1 = 64  (matches single-GPU 64)
 
 defaults:
   - /multitask_dit

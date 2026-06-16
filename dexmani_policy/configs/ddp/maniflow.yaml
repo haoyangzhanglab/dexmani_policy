@@ -1,6 +1,10 @@
 # @package _global_
 # ManiFlow — DDP multi-GPU training overlay
 # Usage: bash scripts/train_ddp.sh ddp/maniflow
+#
+# Effective batch size: per_gpu_batch × num_gpus × gradient_accumulation_steps
+#   train: 32 × 4 × 1 = 128  (matches single-GPU 128)
+#   val:   32 × 4 × 1 = 128  (matches single-GPU 128)
 
 defaults:
   - /maniflow

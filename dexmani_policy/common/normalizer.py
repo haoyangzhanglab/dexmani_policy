@@ -145,8 +145,13 @@ def fit_params(
 def normalize_tensor(x, params, forward=True):
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
-    scale = params['scale'].to(device=x.device)
-    offset = params['offset'].to(device=x.device)
+    scale = params['scale']
+    offset = params['offset']
+    # Avoid redundant .to(device) when scale/offset are already on x's device
+    if scale.device != x.device:
+        scale = scale.to(device=x.device)
+    if offset.device != x.device:
+        offset = offset.to(device=x.device)
     x = x.to(dtype=scale.dtype)
     src_shape = x.shape
     x = x.reshape(-1, scale.shape[0])

@@ -91,6 +91,22 @@ def smoke_test(config_name: str):
             f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {cfg.action_dim})"
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
 
+    # 5.1 MoE enhanced gate smoke check (exercises the use_enhanced_gate=True path
+    # that is also covered by the __main__ tests in plugins/moe.py and core/moe.py)
+    if 'num_experts' in cfg.agent and cfg.agent.get('use_enhanced_gate', False) is False:
+        print("[5.1/6] MoE enhanced gate smoke check ...")
+        from dexmani_policy.agents.obs_encoder.plugins.moe import MoE
+        moe_gate = MoE(
+            dim=64, num_experts=4, top_k=2,
+            hidden_dim=64, out_dim=64, num_layers=1,
+            use_enhanced_gate=True, gate_dropout=0.1,
+        ).to(device)
+        x_gate = torch.randn(8, 64, device=device)
+        z_gate, aux_gate = moe_gate(x_gate, return_aux=True)
+        assert torch.isfinite(z_gate).all(), "Enhanced gate output non-finite"
+        assert torch.isfinite(aux_gate['loss']), "Enhanced gate aux loss non-finite"
+        print(f"      ✓ enhanced gate: z={z_gate.shape}, aux_loss={aux_gate['loss'].item():.4f}")
+
     print("[6/6] Checkpoint save → load roundtrip ...")
     accum_steps = max(1, int(cfg.training.loop.get('gradient_accumulation_steps', 1)))
     num_training_steps = -(-len(train_loader) // accum_steps) * cfg.training.loop.num_epochs

@@ -1,6 +1,10 @@
 # @package _global_
 # DP — DDP multi-GPU training overlay
 # Usage: bash scripts/train_ddp.sh ddp/dp
+#
+# Effective batch size: per_gpu_batch × num_gpus × gradient_accumulation_steps
+#   train: 48 × 4 × 1 = 192  (vs single-GPU 128)
+#   val:   48 × 4 × 1 = 192  (vs single-GPU 128)
 
 defaults:
   - /dp

@@ -107,6 +107,7 @@ class SequenceSampler:
             )
 
         min_required_length = sequence_length - pad_before - pad_after
+        total_masked = int(episode_mask.sum())
         for i in range(len(episode_ends)):
             if not episode_mask[i]:
                 continue
@@ -114,12 +115,15 @@ class SequenceSampler:
             episode_length = episode_ends[i] - start_idx
             if episode_length < min_required_length:
                 episode_mask[i] = False
-                import warnings
-                warnings.warn(
-                    f"Skipping episode {i}: length={episode_length} < "
-                    f"min_required={min_required_length} "
-                    f"(sequence_length={sequence_length} - pad_before={pad_before} - pad_after={pad_after})"
-                )
+
+        n_skipped = total_masked - int(episode_mask.sum())
+        if n_skipped > 0:
+            print(
+                f"SequenceSampler: skipped {n_skipped}/{total_masked} episodes "
+                f"({100 * n_skipped / total_masked:.1f}%) — too short "
+                f"(min required={min_required_length} frames, "
+                f"sequence={sequence_length} - pad_before={pad_before} - pad_after={pad_after})"
+            )
 
         if not np.any(episode_mask):
             raise ValueError(

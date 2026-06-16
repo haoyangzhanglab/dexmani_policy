@@ -1,6 +1,10 @@
 # @package _global_
 # R3D — DDP multi-GPU training overlay
 # Usage: bash scripts/train_ddp.sh ddp/r3d
+#
+# Effective batch size: per_gpu_batch × num_gpus × gradient_accumulation_steps
+#   train: 16 × 4 × 1 = 64  (vs single-GPU 32; DDP 2× larger to match DP3 effective batch)
+#   val:   16 × 4 × 1 = 64  (vs single-GPU 8)
 
 defaults:
   - /r3d
