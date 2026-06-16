@@ -126,7 +126,9 @@ class FlowMatchWithConsistency(nn.Module):
             )
         
         pred_x1_ct = xt_next + v_avg_to_next_target * (1.0 - t_next)
-        vt_target_ct = (pred_x1_ct - xt_ct) / (1.0 - t_ct).clamp(min=1e-5)
+        # Clamp aligned with discrete sampling worst case (1/denoise_timesteps);
+        # floor of 1e-3 protects continuous sampling modes (uniform/lognorm).
+        vt_target_ct = (pred_x1_ct - xt_ct) / (1.0 - t_ct).clamp(min=max(1.0 / self.denoise_timesteps, 1e-3))
 
         consistency_target_dict = {
             "xt": xt_ct,
