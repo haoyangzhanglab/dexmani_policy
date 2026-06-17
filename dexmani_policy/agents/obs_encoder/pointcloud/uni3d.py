@@ -239,17 +239,43 @@ class Uni3DPointcloudEncoder(nn.Module):
             logger.info("[Uni3DPointcloudEncoder] Random initialization (training from scratch)")
 
     def _load_pretrained_weights(self, pretrained_weights_path):
-        """Selectively load pretrained weights from safetensors (strict=False)."""
+        """Selectively load pretrained weights from safetensors (strict=False).
+
+        If the local file is missing, attempts to auto-download from HuggingFace Hub
+        (eddie-cui/r3d-weights). This makes manual download optional — the first run
+        will pull the weights automatically if the network is available.
+        """
         if pretrained_weights_path is None:
             logger.warning("[Uni3DPointcloudEncoder] pretrained_weights_path is None, skipping")
             return
 
+        # Resolve relative paths against project root (this file is at
+        # dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py, so 5 levels up).
+        if not os.path.isabs(pretrained_weights_path):
+            _project_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+            pretrained_weights_path = os.path.join(_project_root, pretrained_weights_path)
+
         safetensors_path = os.path.join(pretrained_weights_path, "model.safetensors")
         if not os.path.exists(safetensors_path):
-            logger.warning(
-                "[Uni3DPointcloudEncoder] Pretrained weights not found: %s", safetensors_path
+            logger.info(
+                "[Uni3DPointcloudEncoder] Local weights not found, downloading from HuggingFace Hub..."
             )
-            return
+            try:
+                from huggingface_hub import hf_hub_download
+                os.makedirs(pretrained_weights_path, exist_ok=True)
+                hf_hub_download(
+                    "eddie-cui/r3d-weights",
+                    "model.safetensors",
+                    local_dir=pretrained_weights_path,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Uni3DPointcloudEncoder] Auto-download failed (%s). "
+                    "Run 'bash scripts/download_pretrained.sh' to download manually.", e
+                )
+                return
 
         from safetensors.torch import load_file
         checkpoint = load_file(safetensors_path)

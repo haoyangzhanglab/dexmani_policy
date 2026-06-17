@@ -2,8 +2,8 @@ bin
 logs
 wandb
 outputs
-data
-data_local
+data/*
+!data/README.md
 .vscode
 _wandb
 
