@@ -2,7 +2,7 @@
 # Encoder:  Uni3D (ViT-tiny, 256d, pre-trained) with color point cloud
 # Decoder:  OneWayTransformer (cross-attention) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
-# Note:     pc_dim=6 (color), use_compile=false (ViT memory)
+# Note:     pc_dim=6 (color), use_compile=true (OneWayTransformer backbone only)
 
 policy_name: r3d
 
@@ -19,10 +19,11 @@ action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 # ── Dataloader ──
-# NOTE: R3D encoder is memory-intensive (ViT activations).
-# Single-GPU: batch_size=16-32. DDP across 4+ GPUs can use 256.
+# NOTE: R3D ViT encoder is memory-intensive (512 patch tokens × N samples).
+# Single-GPU: batch_size=48 tested on 24 GB (15.7 GB peak).
+# DDP across 4+ GPUs can use larger batches.
 dataloader:
-  batch_size: 32
+  batch_size: 48
   shuffle: true
   num_workers: 8
   pin_memory: true
@@ -136,7 +137,7 @@ training:
   seed: ${seed}
   device: cuda:0
   use_bfloat16: true
-  use_compile: false               # ViT activations + torch.compile cause OOM
+  use_compile: true                # compile_backbone() compiles OneWayTransformer only, not ViT
   use_ema: true
   use_ema_teacher_for_consistency: false
   lr_scheduler: cosine

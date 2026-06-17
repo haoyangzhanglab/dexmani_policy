@@ -144,3 +144,4 @@ experiments/
 
 .codex
 .ruff_cache/
+benchmark_results/
