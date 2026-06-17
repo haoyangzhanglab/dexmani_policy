@@ -38,7 +38,6 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     },
 }
 
-
 def resolve_resnet_weights(cfg: Dict) -> Dict:
     model_name = str(cfg["model_name"])
     weights_value = cfg.pop("weights")
@@ -48,7 +47,6 @@ def resolve_resnet_weights(cfg: Dict) -> Dict:
     else:
         cfg["weights"] = weights_value
     return cfg
-
 
 def build_backbone(
     name: BackboneName,

@@ -3,7 +3,6 @@ import torch
 import numpy as np
 from torch.distributions import Beta
 
-
 def logit_normal_density(t: np.ndarray, m: float = 0.0, s: float = 1.0) -> np.ndarray:
     t = np.clip(t, 1e-10, 1 - 1e-10)
     logit_t = np.log(t / (1 - t))
@@ -40,7 +39,6 @@ def sample_beta(
     t = s * raw_samples
     return t
 
-
 def sample_discrete_pow(
     batch_size: int, denoise_timesteps: int, device: str = "cuda"
 ) -> torch.Tensor:
@@ -58,7 +56,6 @@ def sample_discrete_pow(
     t = torch.floor(t).long()
     t = t.float() / dt_sections.float()
     return t
-
 
 class TimeSampler:
 

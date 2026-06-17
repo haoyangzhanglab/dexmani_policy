@@ -36,7 +36,6 @@ _R3M_HIDDEN_DIM = {"resnet18": 512, "resnet34": 512, "resnet50": 2048}
 _R3M_IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _R3M_IMAGENET_STD = (0.229, 0.224, 0.225)
 
-
 def _download_r3m_checkpoint(model_name: str) -> str:
     """Download the R3M checkpoint to ``~/.r3m/`` if not already cached.
 
@@ -70,7 +69,6 @@ def _download_r3m_checkpoint(model_name: str) -> str:
     gdown.download(_R3M_URLS[model_name], ckpt_path, quiet=False)
     return ckpt_path
 
-
 def _load_r3m_convnet_state_dict(model_name: str) -> Dict[str, torch.Tensor]:
     """Load R3M checkpoint and extract the ResNet convnet state dict.
 
@@ -102,7 +100,6 @@ def _load_r3m_convnet_state_dict(model_name: str) -> Dict[str, torch.Tensor]:
         )
 
     return convnet_state
-
 
 class R3M(nn.Module):
     """R3M visual backbone — ResNet with Ego4D-pretrained weights.
@@ -316,7 +313,6 @@ class R3M(nn.Module):
         )
         return restore_batch(feature_map, leading_shape)
 
-
 # ------------------------------------------------------------------
 # Smoke test
 # ------------------------------------------------------------------
@@ -355,7 +351,6 @@ def example() -> None:
         print("R3M example failed.")
         print(error)
         raise
-
 
 if __name__ == "__main__":
     example()

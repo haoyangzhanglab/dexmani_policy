@@ -6,7 +6,6 @@ from termcolor import cprint
 from dexmani_policy.common.pytorch_util import format_success_rate
 from dexmani_policy.env_runner.sim_runner import SimRunner
 
-
 class TaskTextSimRunner(SimRunner):
 
     def __init__(self, task_text: str, **kwargs):
@@ -17,7 +16,6 @@ class TaskTextSimRunner(SimRunner):
     def get_action_chunk(self, obs_batch, agent, denoise_timesteps: int = None) -> np.ndarray:
         obs_batch["task_text"] = [self.task_text]
         return super().get_action_chunk(obs_batch, agent, denoise_timesteps)
-
 
 class MultiTaskSimRunner:
 

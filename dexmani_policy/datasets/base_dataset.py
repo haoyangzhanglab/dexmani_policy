@@ -31,7 +31,6 @@ AUGMENTOR_REGISTRY = [
     ('state', StateNoiseAug,      'noise',       'joint_state'),
 ]
 
-
 class BaseDataset(torch.utils.data.Dataset):
     DEFAULT_MODALITIES = ['joint_state']
 
@@ -64,7 +63,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
         self.rgb_keep_uint8 = rgb_keep_uint8
-        self._is_val = False  # 验证集标记 — get_validation_dataset() 会覆盖
+        self._is_val = False  # validation set flag — overridden by get_validation_dataset()
 
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
@@ -111,7 +110,7 @@ class BaseDataset(torch.utils.data.Dataset):
             pad_after=self.pad_after,
             episode_mask=self.val_mask,
         )
-        # 验证集禁用随机性：关闭 augmentation，随机裁剪切回 center_crop
+        # Validation set disables randomness: no augmentation, random crop → center crop
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
         val_set._is_val = True
@@ -240,7 +239,6 @@ class BaseDataset(torch.utils.data.Dataset):
                            last_n_dims=1, mode=mode)
         return normalizer
 
-
 def example(zarr_path):
     dataset = BaseDataset(
         zarr_path=zarr_path,
@@ -257,7 +255,6 @@ def example(zarr_path):
     print('action     :', sample['action'].shape)
     val_set = dataset.get_validation_dataset()
     print(f'train size: {len(dataset)}  val size: {len(val_set)}')
-
 
 if __name__ == '__main__':
     example('robot_data/sim/pick_apple_messy.zarr')

@@ -17,7 +17,6 @@ os.chdir(ROOT_DIR)
 
 register_resolvers()
 
-
 def run_eval(exp_dir: Path, overrides: list[str]):
     exp_dir = exp_dir.expanduser().resolve()
     if not exp_dir.is_dir():
@@ -81,7 +80,6 @@ def run_eval(exp_dir: Path, overrides: list[str]):
 
     cprint(f"Evaluation completed, results saved to {evaluator.eval_root_dir}", "green")
 
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy-name", type=str, required=True)
@@ -92,7 +90,6 @@ def main() -> None:
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
     run_eval(exp_dir, args.overrides)
-
 
 if __name__ == "__main__":
     main()

@@ -4,16 +4,16 @@ FPS → k-NN patches → PointNet-style PatchEncoder (LayerNorm) →
 ViT self-attention (timm) → dense per-patch tokens + Fourier spatial pc_pe.
 """
 
-import torch
-import torch.nn as nn
 import os
 import logging
 from math import pi as _pi
 
+import torch
+import torch.nn as nn
+
 from .ops import farthest_point_sample
 
 logger = logging.getLogger(__name__)
-
 
 def knn_points(query, key, k, sorted=False):
     """k-nearest neighbors via pairwise distance → (dist, indices)."""
@@ -23,7 +23,6 @@ def knn_points(query, key, k, sorted=False):
     else:
         knn_dist, knn_ind = torch.topk(distance, k, dim=2, largest=False, sorted=sorted)
     return knn_dist, knn_ind
-
 
 def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
     """Randomly drop up to max_dropout_ratio of points, replacing with first point."""
@@ -35,7 +34,6 @@ def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
         if len(drop_idx) > 0:
             result[b, drop_idx, :] = batch_pc[b, 0, :].unsqueeze(0)
     return result
-
 
 class KNNGrouper(nn.Module):
     """FPS → K centers, k-NN → K groups of relative xyz + features."""
@@ -71,7 +69,6 @@ class KNNGrouper(nn.Module):
         group_feats = torch.cat([nbr_xyz, nbr_feats], dim=-1)
         return dict(features=group_feats, centers=centers, knn_idx=knn_idx)
 
-
 class PatchEncoder(nn.Module):
     """PointNet-style patch encoder: conv1 → max pool → cat → conv2 → max pool."""
 
@@ -98,7 +95,6 @@ class PatchEncoder(nn.Module):
         x = self.conv2(x)
         return torch.max(x, dim=-2).values
 
-
 class PatchEmbed(nn.Module):
     """KNNGrouper + PatchEncoder: group points into patches and encode."""
 
@@ -116,7 +112,6 @@ class PatchEmbed(nn.Module):
         patches = self.grouper(coords, features)
         patches["embeddings"] = self.patch_encoder(patches["features"])
         return patches
-
 
 class PatchDropout(nn.Module):
     """Randomly drop patch tokens during training."""
@@ -147,7 +142,6 @@ class PatchDropout(nn.Module):
             x = torch.cat((cls_tokens, x), dim=1)
         return x
 
-
 class PositionEmbeddingRandom(nn.Module):
     """Fourier feature encoding of 3D coordinates (adapted from SAM)."""
 
@@ -173,7 +167,6 @@ class PositionEmbeddingRandom(nn.Module):
                 f"Bounds: ({coords.min().item():.4f}, {coords.max().item():.4f})"
             )
         return self._pe_encoding(coords)
-
 
 class Uni3DPointcloudEncoder(nn.Module):
     """Patch-based ViT point cloud encoder (LayerNorm throughout).

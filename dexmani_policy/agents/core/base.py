@@ -11,7 +11,6 @@ from dexmani_policy.agents.action_decoders.flowmatch import FlowMatchWithConsist
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.common.normalizer import LinearNormalizer
 
-
 class BaseAgent(nn.Module):
     def __init__(
         self,
@@ -67,7 +66,6 @@ class BaseAgent(nn.Module):
                     self._dropout_warned_keys.add(k)
         return result
 
-
     def _build_cond(self, obs_dict):
         obs = self.preprocess(obs_dict)
         cond, aux = self.obs_encoder(obs)
@@ -80,8 +78,7 @@ class BaseAgent(nn.Module):
             cond, normed_actions, **kwargs)
 
         # Merge auxiliary losses from the observation encoder (e.g. MoE
-        # load-balance + entropy).  Encoders that don't produce side-losses
-        # return aux = {} → no-op for DP / DP3 / ManiFlow / R3D / MultiTask.
+        # load-balance + entropy).
         aux_loss = aux.get('loss')
         if aux_loss is not None:
             loss_dict['loss'] = action_loss + aux_loss
@@ -111,9 +108,6 @@ class BaseAgent(nn.Module):
         pred = self.normalizer['action'].unnormalize(pred)
         start = self.n_obs_steps - 1
         return {
-            # predict_action return contract (env_runner depends on these two keys):
-            #   pred_action:     (B, horizon, action_dim)  full predicted trajectory
-            #   control_action:  (B, n_action_steps, action_dim)  T+1 step action to execute
             'pred_action': pred,
             'control_action': pred[:, start:start + self.n_action_steps],
         }
@@ -176,7 +170,6 @@ class BaseAgent(nn.Module):
         )
         self._check_params_in_optimizer(optimizer)
         return optimizer
-
 
 class UNetDiffusionAgent(BaseAgent):
     def __init__(
@@ -265,5 +258,4 @@ class DiTXFlowMatchAgent(BaseAgent):
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
                          modality_dropout_probs=modality_dropout_probs)
-
 

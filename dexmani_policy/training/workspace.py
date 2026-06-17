@@ -15,13 +15,11 @@ from dexmani_policy.common.checkpoint_io import (
     TopKCheckpointTracker,
 )
 
-
 @dataclass
 class CheckpointConfig:
     monitor_key: str
     mode: str
     topk: int
-
 
 @dataclass
 class WandbConfig:
@@ -32,7 +30,6 @@ class WandbConfig:
     resume: str
     mode: str
     video_fps: int
-
 
 class TrainWorkspace:
     def __init__(
@@ -69,26 +66,21 @@ class TrainWorkspace:
         self._closed = False
         atexit.register(self.close)
 
-
     def save_hydra_config(self, hydra_config):
         OmegaConf.save(hydra_config, self.output_dir / "config.yaml", resolve=True)
         cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
         self.wandb_logger.log_config(cfg_dict, self.output_dir)
 
-
     def resolve_checkpoint_path(self, tag_or_path: str) -> Path:
         return self.checkpoint_store.resolve_path(tag_or_path, best_fn=self.topk_tracker.best_path)
-
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
         self.json_logger.log(data, step=step)
         self.wandb_logger.log(data, step=step)
 
-
     def save_checkpoint(self, tag: str, checkpoint: TrainCheckpoint) -> Path:
         filename = tag if str(tag).endswith(".pt") else f"{tag}.pt"
         return self.checkpoint_store.save(filename, checkpoint)
-
 
     def save_latest(self, checkpoint_path: Path) -> Path:
         latest_path = self.checkpoint_dir / "latest.pt"
@@ -99,18 +91,13 @@ class TrainWorkspace:
         os.replace(tmp_path, latest_path)
         return latest_path
 
-
     def save_topk(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
         return self.topk_tracker.update(checkpoint_path, checkpoint)
-
 
     def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
         path = self.resolve_checkpoint_path(tag_or_path)
         print("Loading checkpoint from:", path)
         return self.checkpoint_store.load(path)
-
-
-
 
     def close(self):
         if self._closed:

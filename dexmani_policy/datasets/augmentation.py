@@ -5,8 +5,6 @@ import torchvision.transforms.v2 as v2
 _BT601_LUMA = (0.299, 0.587, 0.114)
 """BT.601 luma coefficients for RGB-to-grayscale conversion."""
 
-
-
 class Aug:
     """Prob-gated augmentation base.
 
@@ -28,8 +26,6 @@ class Aug:
     def _augment(self, x):
         """Modify *x* **in-place**.  Caller guarantees *x* is a detached copy."""
         raise NotImplementedError
-
-
 
 class PointColorJitter(Aug):
     """HSV color jitter for point cloud RGB channels (last 3 dims).
@@ -152,7 +148,6 @@ class PointColorJitter(Aug):
             rgb[mask, 2] = b_src[mask]
         return rgb
 
-
 class PointDropout(Aug):
     """Random point dropout with replacement — simulates sparse or partial scans.
 
@@ -188,7 +183,6 @@ class PointDropout(Aug):
 
             fill_idx = np.random.choice(keep_idx, size=n_drop, replace=True)
             x[t, drop_idx] = x[t, fill_idx]
-
 
 class PointCoordNoiseAug(Aug):
     """Clipped Gaussian noise on a random subset of point XYZ coordinates.
@@ -228,7 +222,6 @@ class PointCoordNoiseAug(Aug):
             noise = np.clip(noise, -self.clip_range, self.clip_range)
             x[t, idx, :3] += noise.astype(dtype)
 
-
 class PointColorNoiseAug(Aug):
     """Per-channel independent Gaussian noise on point cloud RGB.
 
@@ -260,7 +253,6 @@ class PointColorNoiseAug(Aug):
         rgb += noise.astype(x.dtype)
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
-
 class StateNoiseAug(Aug):
     """Clipped Gaussian noise on proprioceptive state.
 
@@ -289,8 +281,6 @@ class StateNoiseAug(Aug):
         noise = np.random.normal(0, self.noise_std, x.shape)
         noise = np.clip(noise, -self.clip_range, self.clip_range)
         x += noise.astype(x.dtype)
-
-
 
 class ImageAug:
     """Color + blur + noise for pre-resized float32 CHW tensors (no numpy roundtrip).

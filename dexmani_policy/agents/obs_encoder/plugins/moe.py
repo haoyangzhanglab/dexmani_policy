@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class ExpertMLP(nn.Module):
     def __init__(self, dim, hidden_dim, out_dim=None, num_layers=2, activation=nn.GELU):
         super().__init__()
@@ -27,7 +26,6 @@ class ExpertMLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-
 
 class MoE(nn.Module):
     def __init__(
@@ -213,7 +211,6 @@ class MoE(nn.Module):
         aux["topk_prob"] = topk_prob
         return z_moe, aux
 
-
 def example():
     torch.manual_seed(0)
 
@@ -341,7 +338,6 @@ def example():
         "z_override": z_override,
         "aux_override": aux_override,
     }
-
 
 if __name__ == "__main__":
     example()

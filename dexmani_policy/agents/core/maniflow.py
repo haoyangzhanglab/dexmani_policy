@@ -5,7 +5,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cl
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.core.base import DiTXFlowMatchAgent
 
-
 class ManiFlowObsEncoder(nn.Module):
     def __init__(
         self,
@@ -49,7 +48,6 @@ class ManiFlowObsEncoder(nn.Module):
         # DiTX uses token-based condition: (B*T, K+1, D) → (B, T*(K+1), D)
         return feat.reshape(B, -1, self.obs_token_dim), {}
 
-
 class ManiFlowAgent(DiTXFlowMatchAgent):
     def __init__(
         self,
@@ -81,7 +79,6 @@ class ManiFlowAgent(DiTXFlowMatchAgent):
             action_dim=action_dim,
             **kwargs,
         )
-
 
 def example():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -129,7 +126,7 @@ def example():
         },
         'action': action,
     }
-    # compute_loss 需要 EMA teacher，smoke test 直接用 agent 自身充当
+    # compute_loss requires an EMA teacher; smoke test uses the agent itself as a stand-in
     import copy
     ema_agent = copy.deepcopy(agent)
     loss, loss_dict = agent.compute_loss(batch, ema_backbone=ema_agent.action_decoder.model)
@@ -142,7 +139,6 @@ def example():
     print(f'pred_action:      {result["pred_action"].shape}')
     print(f'control_action:   {result["control_action"].shape}')
     print('=== PASSED ===')
-
 
 if __name__ == '__main__':
     example()

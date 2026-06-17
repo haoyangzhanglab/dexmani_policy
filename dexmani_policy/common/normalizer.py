@@ -6,7 +6,6 @@ from typing import Union, Dict
 
 from dexmani_policy.common.pytorch_util import dict_apply
 
-
 def dfs_add(dest: dict, keys: list[str], value: torch.Tensor):
     if len(keys) == 1:
         dest[keys[0]] = value
@@ -14,7 +13,6 @@ def dfs_add(dest: dict, keys: list[str], value: torch.Tensor):
     if keys[0] not in dest:
         dest[keys[0]] = nn.ParameterDict()
     dfs_add(dest[keys[0]], keys[1:], value)
-
 
 def load_param_dict(state_dict: dict, prefix: str) -> nn.ParameterDict:
     out_dict = nn.ParameterDict()
@@ -25,7 +23,6 @@ def load_param_dict(state_dict: dict, prefix: str) -> nn.ParameterDict:
             if param_keys:
                 dfs_add(out_dict, param_keys, value.clone())
     return out_dict
-
 
 class DictOfTensorMixin(nn.Module):
     def __init__(self, params_dict=None):
@@ -58,8 +55,6 @@ class DictOfTensorMixin(nn.Module):
             for k in sorted(state_keys - old_keys):
                 unexpected_keys.append(state_prefix + k)
 
-
-
 def fit_params(
     data: Union[torch.Tensor, np.ndarray, zarr.Array],
     last_n_dims=1,
@@ -89,7 +84,6 @@ def fit_params(
     input_max, _ = data.max(axis=0)
     input_mean = data.mean(axis=0)
     input_std = data.std(axis=0)
-
 
     if mode == 'limits':
         if fit_offset:
@@ -140,7 +134,6 @@ def fit_params(
         'std': input_std,
     }
     return this_params, input_stats
-
 
 def normalize_tensor(x, params, forward=True):
     if isinstance(x, np.ndarray):
@@ -201,13 +194,13 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
             range_eps=range_eps,
             fit_offset=fit_offset
         )
-    
+
     @classmethod
     def create_fit_params(cls, data: Union[torch.Tensor, np.ndarray, zarr.Array], **kwargs):
         obj = cls()
         obj.fit(data, **kwargs)
         return obj
-    
+
     @classmethod
     def create_manual(
         cls,
@@ -250,7 +243,6 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
 
     def __call__(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self.normalize(x)
-
 
 class LinearNormalizer(DictOfTensorMixin):
 
@@ -312,7 +304,7 @@ class LinearNormalizer(DictOfTensorMixin):
 
     def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self.normalize(x)
-    
+
     def __getitem__(self, key: str):
         if key not in self._field_views:
             obj = SingleFieldLinearNormalizer(self.params_dict[key])
@@ -347,16 +339,11 @@ class LinearNormalizer(DictOfTensorMixin):
             params = self.params_dict['_default']
             return normalize_tensor(x, params, forward=forward)
 
-
     def normalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self._normalize_impl(x, forward=True)
 
-
     def unnormalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self._normalize_impl(x, forward=False)
-
-
-
 
 def build_mixed_action_normalizer(action_data, ee_dim=9):
     """Build a mixed normalizer for eef_hand actions: xyz(3) + rot6d(ee_dim-3) + hand(rest).

@@ -16,7 +16,6 @@ from dexmani_policy.agents.obs_encoder.rgb.utils import (
     update_intrinsics_after_spatial_ops,
 )
 
-
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -53,7 +52,6 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
         "interpolation": "bilinear",
     },
 }
-
 
 class ImageProcessor:
     """Unified image-space preprocessing for RGB observations.
@@ -241,7 +239,6 @@ class ImageProcessor:
             "spatial": spatial,
         }
 
-
 def example() -> None:
     processor = ImageProcessor.from_preset("dino")
 
@@ -265,7 +262,6 @@ def example() -> None:
     print("process_rgbd K       :", tuple(rgbd_out["intrinsics"].shape))
     if rgbd_out["camera_to_world"] is not None:
         print("process_rgbd Tcw     :", tuple(rgbd_out["camera_to_world"].shape))
-
 
 if __name__ == "__main__":
     example()

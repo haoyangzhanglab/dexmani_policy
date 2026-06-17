@@ -21,7 +21,6 @@ __all__ = [
     "compute_num_training_steps",
 ]
 
-
 # ---------------------------------------------------------------------------
 # Dataset & Normalizer
 # ---------------------------------------------------------------------------
@@ -43,7 +42,6 @@ def build_dataset_and_normalizer(cfg):
             "Use normalizer_mode='shared' or call get_normalizer(task_name=...) manually."
         )
     return dataset, normalizer
-
 
 # ---------------------------------------------------------------------------
 # Model & EMA
@@ -70,7 +68,6 @@ def build_model_and_ema(cfg, device, normalizer):
 
     return model, ema_model, ema_updater
 
-
 # ---------------------------------------------------------------------------
 # Optimizer & Scheduler
 # ---------------------------------------------------------------------------
@@ -86,13 +83,11 @@ def build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch=-1):
         last_epoch=last_epoch,
     )
 
-
 def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
     """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
     optimizer = model.configure_optimizer(**cfg.optimizer)
     scheduler = build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch)
     return optimizer, scheduler
-
 
 # ---------------------------------------------------------------------------
 # Config Validation
@@ -107,7 +102,6 @@ def _validate_moe_config(cfg):
     top_k = agent_cfg.get('top_k', 0)
     assert top_k <= num_experts, \
         f"top_k ({top_k}) must be <= num_experts ({num_experts})"
-
 
 def _validate_augmentation_consistency(cfg):
     """Warn/error when PC color augmentation is configured but pc_dim < 6."""
@@ -132,7 +126,6 @@ def _validate_augmentation_consistency(cfg):
         assert pc_dim >= 6, missing_rgb
     if pc_color_noise is not None:
         assert pc_dim >= 6, f"PC color_noise augmentation: {missing_rgb}"
-
 
 def validate_config(cfg):
     """Validate common training config constraints.

@@ -11,7 +11,6 @@ from dexmani_policy.agents.obs_encoder.rgb.utils import (
     to_depth_tensor,
 )
 
-
 class GeometryProcessor:
     """Depth back-projection and patch-level geometry pooling."""
     def __init__(self):
@@ -175,7 +174,6 @@ class GeometryProcessor:
             "patch_hw": (kernel_h, kernel_w),
         }
 
-
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     geometry = GeometryProcessor()
@@ -210,7 +208,6 @@ def example() -> None:
     print("valid_mask       :", tuple(dense["valid_mask"].shape))
     print("patch_coords     :", tuple(pooled["patch_coords"].shape))
     print("patch_valid_mask :", tuple(pooled["patch_valid_mask"].shape))
-
 
 if __name__ == "__main__":
     example()

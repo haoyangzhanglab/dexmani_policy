@@ -3,11 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 def gather_tokens(x, idx):
     idx = idx.unsqueeze(-1).expand(-1, -1, x.size(-1))
     return torch.gather(x, 1, idx)
-
 
 class Mlp(nn.Module):
     def __init__(self, dim, mlp_ratio=4.0):
@@ -20,7 +18,6 @@ class Mlp(nn.Module):
 
     def forward(self, x):
         return x + self.fc2(self.act(self.fc1(self.norm(x))))
-
 
 class SelfAttn(nn.Module):
     """Self-attention with ``F.scaled_dot_product_attention`` → Flash Attention."""
@@ -50,7 +47,6 @@ class SelfAttn(nn.Module):
         h = h.permute(0, 2, 1, 3).reshape(B, N, C)
         h = self.proj(h)
         return x + h
-
 
 class CrossAttn(nn.Module):
     """Cross-attention with ``F.scaled_dot_product_attention`` → Flash Attention.
@@ -104,7 +100,6 @@ class CrossAttn(nn.Module):
         h = self.proj(h)
         return q + h
 
-
 class LatentBlock(nn.Module):
     def __init__(self, dim, num_heads, self_attn=False, mlp_ratio=4.0, dropout=0.0):
         super().__init__()
@@ -119,11 +114,9 @@ class LatentBlock(nn.Module):
         latents = self.mlp(latents)
         return latents
 
-
 class IdentityReducer(nn.Module):
     def forward(self, tokens, cond=None, token_mask=None):
         return tokens, token_mask, {}
-
 
 class TopKReducer(nn.Module):
     def __init__(self, dim, keep_tokens=None, keep_ratio=None, cond_dim=None):
@@ -160,7 +153,6 @@ class TopKReducer(nn.Module):
             "keep_idx": keep_idx,
         }
         return kept_tokens, kept_mask, aux
-
 
 class TokenCompressor(nn.Module):
     def __init__(
@@ -231,11 +223,9 @@ class TokenCompressor(nn.Module):
         }
         return latents, aux
 
-
 class IdentityModulator(nn.Module):
     def forward(self, tokens, queries, cond):
         return tokens, queries, None, {}
-
 
 class QueryFiLM(nn.Module):
     def __init__(self, dim, cond_dim, pass_cond_to_reducer=True):
@@ -252,7 +242,6 @@ class QueryFiLM(nn.Module):
             "beta": beta,
         }
         return tokens, queries, reducer_cond, aux
-
 
 class ModulatedTokenCompressor(nn.Module):
     def __init__(self, compressor, modulator=None):
@@ -294,7 +283,6 @@ class ModulatedTokenCompressor(nn.Module):
             "modulator": mod_aux,
         }
         return latents, aux
-
 
 if __name__ == "__main__":
     torch.manual_seed(0)

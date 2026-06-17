@@ -7,7 +7,6 @@ from typing import Any, Dict, Literal, Optional
 
 MonitorMode = Literal["max", "min"]
 
-
 @dataclass
 class TrainCheckpoint:
     epoch: int
@@ -21,8 +20,6 @@ class TrainCheckpoint:
 
     monitor: Dict[str, Any]
     train_params: Optional[Dict[str, Any]] = None
-
-
 
 class CheckpointStore:
     def __init__(self, checkpoint_dir: Path):
@@ -105,8 +102,6 @@ class CheckpointStore:
     def _parse_ckpt_score(path: Path) -> float:
         m = re.search(r'-score=([\d.eE+-]+)\.pt$', path.name)
         return float(m.group(1)) if m else float("-inf")
-
-
 
 class TopKCheckpointTracker:
     def __init__(

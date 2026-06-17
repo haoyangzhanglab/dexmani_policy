@@ -11,12 +11,10 @@ from termcolor import cprint
 from dexmani_policy.common.pytorch_util import format_success_rate
 from dexmani_policy.common.checkpoint_io import CheckpointStore
 
-
 def _save_json(data: Dict[str, Any], path: Path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False,
                   default=lambda o: o.item() if isinstance(o, np.generic) else str(o))
-
 
 class SimEvaluator:
     """Offline simulation evaluator for checkpoint assessment.

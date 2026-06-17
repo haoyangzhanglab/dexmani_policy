@@ -1,9 +1,9 @@
-import torch
-import torch.nn as nn
 import random
-import numpy as np
 from typing import Any, Dict, Callable, List, Optional, Union
 
+import numpy as np
+import torch
+import torch.nn as nn
 
 def ensure_tensor(x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
     """Convert numpy array to tensor; pass through torch.Tensor unchanged."""
@@ -11,12 +11,11 @@ def ensure_tensor(x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         return x
     return torch.from_numpy(x)
 
-
 def dict_apply(
     x: Dict[str, torch.Tensor],
     func: Callable[[torch.Tensor], torch.Tensor]
 ) -> Dict[str, torch.Tensor]:
-        
+
     result = dict()
     for key, value in x.items():
         if isinstance(value, dict):
@@ -27,7 +26,6 @@ def dict_apply(
             result[key] = func(value)
     return result
 
-
 def optimizer_to(optimizer: torch.optim.Optimizer, device: torch.device | str) -> torch.optim.Optimizer:
     """Move all tensor state in an optimizer to the given device."""
     for state in optimizer.state.values():
@@ -36,10 +34,8 @@ def optimizer_to(optimizer: torch.optim.Optimizer, device: torch.device | str) -
                 state[k] = v.to(device=device)
     return optimizer
 
-
 def format_success_rate(rate: float | None) -> str:
     return 'N/A' if rate is None else f'{rate*100:.1f}%'
-
 
 def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
     out: Dict[str, float] = {}
@@ -54,7 +50,6 @@ def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
                 pass
     return out
 
-
 def compile_models(model, ema_model=None, **compile_kwargs):
     """torch.compile the backbone of *model* and optionally *ema_model*.
 
@@ -68,7 +63,6 @@ def compile_models(model, ema_model=None, **compile_kwargs):
     model.compile_backbone(**compile_kwargs)
     if ema_model is not None:
         ema_model.compile_backbone(**compile_kwargs)
-
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -97,13 +91,11 @@ def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
 
     return state_dict
 
-
 def worker_init_fn(worker_id):
     seed = torch.initial_seed() % 2 ** 32
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
 
 def create_mlp(
     in_channels: int,
@@ -123,13 +115,11 @@ def create_mlp(
         layers.append(nn.Linear(prev, out_channels))
     return nn.Sequential(*layers)
 
-
 def count_params(module) -> tuple[int, int]:
     """Return (total, trainable) parameter counts for *module*."""
     total = sum(p.numel() for p in module.parameters())
     trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
     return total, trainable
-
 
 def print_param_count(agent) -> None:
     """Pretty-print parameter counts grouped by immediate children."""

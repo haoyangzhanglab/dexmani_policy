@@ -1,8 +1,9 @@
 import math
+
 import torch
 import torch.nn as nn
-from torch.jit import Final
 import torch.nn.functional as F
+from torch.jit import Final
 from timm.models.vision_transformer import Mlp, use_fused_attn
 
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
@@ -11,11 +12,9 @@ from dexmani_policy.agents.position_encodings import POS_ENCODING_BASE
 WEIGHT_INIT_STD = 0.02
 """Standard deviation for normal weight initialization across DiT modules."""
 
-
 def modulate(x, shift, scale):
     """AdaLN modulation: ``x * (1 + scale) + shift``."""
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
 
 class Attention(nn.Module):
 
@@ -31,7 +30,7 @@ class Attention(nn.Module):
             proj_drop: float = 0.,
             norm_layer: nn.Module = nn.LayerNorm,
     ) -> None:
-        
+
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
@@ -46,7 +45,6 @@ class Attention(nn.Module):
 
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-
 
     def forward(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
         B, N, C = x.shape
@@ -73,7 +71,6 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
 
         return x
-
 
 class TimestepEmbedder(nn.Module):
 
@@ -108,8 +105,6 @@ class TimestepEmbedder(nn.Module):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
         return t_emb
-    
-
 
 class DiTBlock(nn.Module):
 
@@ -138,7 +133,6 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
-
 class FinalLayer(nn.Module):
 
     def __init__(self, hidden_size, output_dim):
@@ -156,7 +150,6 @@ class FinalLayer(nn.Module):
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
-    
 
 class DiT_Diffusion(nn.Module):
     """DiT backbone for diffusion-based action prediction (DP3, MoE).
@@ -176,14 +169,14 @@ class DiT_Diffusion(nn.Module):
 
     def __init__(
             self,
-            horizon:int, 
-            action_dim:int,
-            cond_dim:int,
-            n_emb:int=512,
-            num_heads:int=8,
-            n_layers:int=12,
-            mlp_ratio:float=4.0,
-            qkv_bias:bool=True,
+            horizon: int,
+            action_dim: int,
+            cond_dim: int,
+            n_emb: int = 512,
+            num_heads: int = 8,
+            n_layers: int = 12,
+            mlp_ratio: float = 4.0,
+            qkv_bias: bool = True,
     ):
         super().__init__()
 
@@ -203,7 +196,6 @@ class DiT_Diffusion(nn.Module):
 
         self.initialize_weights()
 
-
     def initialize_weights(self):
         def init_fn(module):
             if isinstance(module, nn.Linear):
@@ -214,7 +206,7 @@ class DiT_Diffusion(nn.Module):
 
         nn.init.normal_(self.pos_embed, mean=0.0, std=WEIGHT_INIT_STD)
 
-        w = self.x_embedder.weight.data         
+        w = self.x_embedder.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.bias, 0)
 
@@ -232,8 +224,7 @@ class DiT_Diffusion(nn.Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
-    
-    
+
     def get_optim_groups(self, weight_decay: float = 1e-3):
         return get_optim_group_with_no_decay(
             self,
@@ -263,20 +254,18 @@ class DiT_Diffusion(nn.Module):
 
         return x
 
-
-
 class DiT_FlowMatch(nn.Module):
 
     def __init__(
             self,
-            horizon:int, 
-            action_dim:int,
-            cond_dim:int,
-            n_emb:int=512,
-            num_heads:int=8,
-            n_layers:int=12,
-            mlp_ratio:float=4.0,
-            qkv_bias:bool=True,
+            horizon: int,
+            action_dim: int,
+            cond_dim: int,
+            n_emb: int = 512,
+            num_heads: int = 8,
+            n_layers: int = 12,
+            mlp_ratio: float = 4.0,
+            qkv_bias: bool = True,
     ):
         super().__init__()
 
@@ -288,7 +277,7 @@ class DiT_FlowMatch(nn.Module):
         self.cond_embedder = nn.Linear(cond_dim, n_emb)
         self.time_embedder = TimestepEmbedder(n_emb)
         self.target_t_embedder = TimestepEmbedder(n_emb)
-        self.timestep_and_target_t_fusion = nn.Linear(2*n_emb, n_emb)
+        self.timestep_and_target_t_fusion = nn.Linear(2 * n_emb, n_emb)
         self.pos_embed = nn.Parameter(torch.zeros(1, horizon, n_emb))
 
         self.blocks = nn.ModuleList([
@@ -297,7 +286,6 @@ class DiT_FlowMatch(nn.Module):
         self.final_layer = FinalLayer(hidden_size=n_emb, output_dim=action_dim)
 
         self.initialize_weights()
-
 
     def initialize_weights(self):
         def init_fn(module):
@@ -309,7 +297,7 @@ class DiT_FlowMatch(nn.Module):
 
         nn.init.normal_(self.pos_embed, mean=0.0, std=WEIGHT_INIT_STD)
 
-        w = self.x_embedder.weight.data         
+        w = self.x_embedder.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.bias, 0)
 
@@ -333,8 +321,7 @@ class DiT_FlowMatch(nn.Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
-    
-    
+
     def get_optim_groups(self, weight_decay: float = 1e-3):
         return get_optim_group_with_no_decay(
             self,
@@ -360,7 +347,7 @@ class DiT_FlowMatch(nn.Module):
         target_t_emb = self.target_t_embedder(target_t)
 
         time_c = torch.cat([t_emb, target_t_emb], dim=-1)
-        time_c = self.timestep_and_target_t_fusion(time_c)        
+        time_c = self.timestep_and_target_t_fusion(time_c)
 
         context = context.reshape(context.shape[0], -1)
         cond = self.cond_embedder(context)

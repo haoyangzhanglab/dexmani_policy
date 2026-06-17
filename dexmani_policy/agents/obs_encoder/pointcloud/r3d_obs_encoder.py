@@ -11,7 +11,6 @@ import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DPointcloudEncoder
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
-
 class R3DObsEncoder(nn.Module):
     """Uni3D point cloud encoder + StateMLP.
 

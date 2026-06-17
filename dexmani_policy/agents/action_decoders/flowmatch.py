@@ -1,9 +1,11 @@
+import warnings
+
 import torch
 import torch.nn as nn
-from einops import reduce
 import torch.nn.functional as F
-from dexmani_policy.agents.action_decoders.sample import TimeSampler
+from einops import reduce
 
+from dexmani_policy.agents.action_decoders.sample import TimeSampler
 
 class FlowMatchWithConsistency(nn.Module):
     """Flow Matching decoder with optional consistency training.
@@ -49,9 +51,8 @@ class FlowMatchWithConsistency(nn.Module):
         self.t_sample_mode_for_consistency = t_sample_mode_for_consistency
         self.dt_sample_mode_for_consistency = dt_sample_mode_for_consistency
         self.target_t_sample_mode = target_t_sample_mode    # relative: input DiT-X with (t, dt); absolute: input (t, t+dt)
-    
+
         self.sampler = TimeSampler(denoise_timesteps=denoise_timesteps)
-    
 
     def linear_interpolate(
         self, noise: torch.Tensor, target: torch.Tensor, timestep: torch.Tensor
@@ -59,7 +60,6 @@ class FlowMatchWithConsistency(nn.Module):
         noise_coeff = 1.0 - timestep
         interpolated_data_point = noise_coeff * noise + timestep * target
         return interpolated_data_point
-    
 
     def get_flow_velocity(self, actions: torch.Tensor) -> dict[str, torch.Tensor]:
         B = actions.shape[0]
@@ -85,16 +85,16 @@ class FlowMatchWithConsistency(nn.Module):
             "vt_target": vt_flow_target,
         }
         return flow_target_dict
-    
 
     def get_consistency_velocity(
         self, actions: torch.Tensor, cond: torch.Tensor, ema_model: nn.Module
     ) -> dict[str, torch.Tensor]:
-        # target_t 作为 mode indicator：
-        #   target_t=0 (flow): 预测瞬时速度 v = x1-x0
-        #   target_t>0 (consistency): 预测到 x1 的有效速度
-        # 对于 rectified flow 的直线路径，两者等价 (= x1-x0)。
-        # consistency training 在速度场不完美时提供自校正信号。
+        # target_t acts as a mode indicator:
+        #   target_t=0 (flow): predicts instantaneous velocity v = x1-x0
+        #   target_t>0 (consistency): predicts effective velocity toward x1
+        # For rectified flow straight-line paths, both are equivalent (= x1-x0).
+        # Consistency training provides a self-correction signal when the
+        # learned velocity field is imperfect.
         B = actions.shape[0]
 
         t_ct = self.sampler.sample(B, self.t_sample_mode_for_consistency, device=actions.device)
@@ -122,9 +122,9 @@ class FlowMatchWithConsistency(nn.Module):
                 x = xt_next,
                 timestep = t_next.squeeze(),
                 target_t = target_t_next,
-                context = cond, 
+                context = cond,
             )
-        
+
         pred_x1_ct = xt_next + v_avg_to_next_target * (1.0 - t_next)
         # Clamp aligned with discrete sampling worst case (1/denoise_timesteps);
         # floor of 1e-3 protects continuous sampling modes (uniform/lognorm).
@@ -138,8 +138,6 @@ class FlowMatchWithConsistency(nn.Module):
         }
         return consistency_target_dict
 
-
-
     def compute_loss(
         self,
         cond: torch.Tensor,
@@ -151,7 +149,8 @@ class FlowMatchWithConsistency(nn.Module):
 
         B = actions.shape[0]
 
-        # 无 EMA teacher 时全量样本用于 flow loss，避免无效的数据拆分浪费
+        # Without EMA teacher, use the entire batch for flow loss — no need to
+        # split off a consistency sub-batch that cannot be used.
         if ema_model is None:
             flow_targets = self.get_flow_velocity(actions)
             pred_vt_flow = self.model(
@@ -172,9 +171,8 @@ class FlowMatchWithConsistency(nn.Module):
             }
             return loss_flow, loss_dict
 
-        # 检查 batch size 是否足够进行 consistency 训练
+        # Check that batch size is large enough for consistency training
         if B < 2:
-            import warnings
             warnings.warn(
                 f"FlowMatch: batch_size={B} < 2, consistency training disabled for this batch "
                 f"(only flow loss will be computed). "
@@ -189,7 +187,7 @@ class FlowMatchWithConsistency(nn.Module):
 
         flow_targets = self.get_flow_velocity(actions[:flow_batchsize])
 
-        # consistency_batchsize == 0: 降级为纯 flow loss
+        # consistency_batchsize == 0: fall back to pure flow loss
         if consistency_batchsize == 0:
             pred_vt_flow = self.model(
                 x=flow_targets["xt"],
@@ -209,8 +207,9 @@ class FlowMatchWithConsistency(nn.Module):
 
         consistency_targets = self.get_consistency_velocity(actions[flow_batchsize:], cond[flow_batchsize:], ema_model)
 
-        # 沿 batch 维拼接 flow 和 consistency 的 student 输入，合并为一次 forward，
-        # 保证 torch.compile 始终看到固定 batch size，避免 stride guard 崩溃。
+        # Concatenate flow and consistency student inputs along the batch dimension
+        # into a single forward pass, so torch.compile always sees a fixed batch
+        # size and avoids stride guard recompilation.
         x_merged = torch.cat([flow_targets["xt"], consistency_targets["xt"]], dim=0)
         t_merged = torch.cat([flow_targets["t"].reshape(-1), consistency_targets["t"].reshape(-1)], dim=0)
         target_t_merged = torch.cat([flow_targets["target_t"].reshape(-1),
@@ -248,7 +247,6 @@ class FlowMatchWithConsistency(nn.Module):
         }
         return loss, loss_dict
 
-
     @torch.no_grad()
     def sample_ode(
         self,
@@ -256,11 +254,13 @@ class FlowMatchWithConsistency(nn.Module):
         N: int,
         cond: torch.Tensor,
     ) -> torch.Tensor:
-        """Euler 积分采样。
+        """Euler integration sampling.
 
-        relative 模式下 target_t=dt（>0），依赖 consistency 训练提供 target_t 泛化。
-        若不启用 consistency（use_ema_teacher_for_consistency=False），模型仅在
-        target_t=0 下训练，推理时的 target_t>0 会导致条件分布偏移。
+        In relative mode target_t=dt (>0), relies on consistency training for
+        target_t generalization.  Without consistency training
+        (use_ema_teacher_for_consistency=False), the model is only trained with
+        target_t=0, so inference-time target_t>0 causes a conditional distribution
+        shift.
         """
         B = x0.shape[0]
         x = x0
@@ -285,7 +285,6 @@ class FlowMatchWithConsistency(nn.Module):
 
         return x
 
-
     def predict_action(
         self,
         cond: torch.Tensor,
@@ -300,15 +299,16 @@ class FlowMatchWithConsistency(nn.Module):
         ode_traj = self.sample_ode(x0=noise, N=denoise_timesteps, cond=cond)
         return ode_traj
 
-
 class FlowMatch(nn.Module):
-    """纯 Flow Matching decoder（无 consistency training）。
+    """Pure Flow Matching decoder (no consistency training).
 
-    使用与 Diffusion 相同的 backbone（DiT_Diffusion），仅预测目标从 noise/sample
-    变为 velocity field v = x1 - x0。
+    Uses the same backbone as Diffusion (DiT_Diffusion); the only change is that
+    the prediction target shifts from noise/sample to the velocity field
+    v = x1 - x0.
 
-    训练: 沿直线路径 x_t = t*x1 + (1-t)*x0 预测速度场，MSE loss。
-    推理: Euler ODE 积分 x_{t+dt} = x_t + v_θ(x_t, t) * dt。
+    Training: predict the velocity field along straight-line paths
+    x_t = t*x1 + (1-t)*x0, MSE loss.
+    Inference: Euler ODE integration x_{t+dt} = x_t + v_θ(x_t, t) * dt.
     """
 
     def __init__(

@@ -6,7 +6,6 @@ import torch
 from typing import List, Optional
 from dexmani_policy.common.normalizer import LinearNormalizer
 
-
 class MultiTaskDataset(torch.utils.data.Dataset):
     def __init__(
         self,

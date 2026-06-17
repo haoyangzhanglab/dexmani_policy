@@ -9,7 +9,6 @@ ENV_PREFIX = "dexmani_sim.envs"
 DEFAULT_EVAL_SEED_COUNT = 100
 """Default number of evaluation seeds when no seed file is available."""
 
-
 class SimRunner(BaseRunner):
     def __init__(
         self,
@@ -33,11 +32,9 @@ class SimRunner(BaseRunner):
         self.env_kwargs = env_kwargs or {}
         self.eval_seeds = eval_seeds
 
-
     @staticmethod
     def name_to_pascal_case(name: str) -> str:
         return ''.join(part.capitalize() for part in re.split(r'[_\s-]+', name) if part)
-
 
     def make_env(self):
         env_module = importlib.import_module(f"{ENV_PREFIX}.{self.task_name}")
@@ -53,7 +50,6 @@ class SimRunner(BaseRunner):
                 f"add an explicit mapping to name_to_pascal_case."
             )
         return env_class(render_mode="rgb_array", record_video=True, **self.env_kwargs)
-
 
     def get_seed_list(self) -> List[int]:
         if self.eval_seeds is not None:

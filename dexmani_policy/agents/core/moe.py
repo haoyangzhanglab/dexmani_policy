@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
@@ -5,7 +7,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cl
 from dexmani_policy.agents.obs_encoder.plugins.moe import MoE
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
-
 
 class MoEObsEncoder(nn.Module):
     def __init__(
@@ -89,7 +90,6 @@ class MoEObsEncoder(nn.Module):
         B = feat.shape[0] // self.n_obs_steps
         return feat.reshape(B, -1), aux
 
-
 class MoEAgent(UNetDiffusionAgent):
     def __init__(
         self,
@@ -169,7 +169,6 @@ class MoEAgent(UNetDiffusionAgent):
             return total_loss, loss_dict
         # Graceful fallback: aux loss missing (should not happen during normal MoE
         # training where return_aux=True and the MoE encoder always produces aux loss)
-        import warnings
         warnings.warn(
             "MoEAgent.compute_loss: aux['loss'] is missing. "
             "Falling back to action_loss only. "
@@ -182,7 +181,6 @@ class MoEAgent(UNetDiffusionAgent):
     def predict_action(self, obs_dict, denoise_timesteps=None, override_idx=None):
         cond, _ = self._build_cond(obs_dict, override_idx=override_idx)
         return self.predict_action_from_cond(cond, denoise_timesteps)
-
 
 def example():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -291,7 +289,6 @@ def example():
     feat, aux_gate = agent_gate.obs_encoder(obs)
     print(f'enhanced gate cond: {feat.shape}, aux loss: {aux_gate["loss"].item():.4f}')
     print('=== PASSED ===')
-
 
 if __name__ == '__main__':
     example()

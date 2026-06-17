@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-
 class Diffusion(nn.Module):
     """Denoising diffusion probabilistic model for action prediction.
 
@@ -47,7 +46,6 @@ class Diffusion(nn.Module):
         self._prediction_type = prediction_type
         self._cached_alphas_device = None
 
-
     def compute_loss(
         self, cond: torch.Tensor, actions: torch.Tensor, **kwargs
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -89,7 +87,6 @@ class Diffusion(nn.Module):
 
         return loss, loss_dict
 
-
     @torch.no_grad()
     def predict_action(
         self,
@@ -107,5 +104,4 @@ class Diffusion(nn.Module):
             sample = self.noise_scheduler.step(output, t, sample).prev_sample
 
         return sample
-
 

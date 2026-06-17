@@ -1,7 +1,6 @@
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.base_dataset import BaseDataset
 
-
 class PCDataset(BaseDataset):
 
     DEFAULT_MODALITIES = ['joint_state', 'point_cloud']
@@ -17,7 +16,6 @@ class PCDataset(BaseDataset):
             'point_cloud': self.replay_buffer['point_cloud'],
         }, last_n_dims=1, mode=mode)
         return normalizer
-
 
 def example(zarr_path):
     dataset = PCDataset(
@@ -51,7 +49,6 @@ def example(zarr_path):
         },
     )
     print('aug point_cloud:', aug_dataset[0]['obs']['point_cloud'].shape)
-
 
 if __name__ == '__main__':
     example('robot_data/sim/pick_apple_messy.zarr')

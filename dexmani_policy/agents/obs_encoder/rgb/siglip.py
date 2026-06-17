@@ -13,7 +13,6 @@ from dexmani_policy.agents.obs_encoder.rgb.utils import (
     reshape_patch_tokens_to_map,
 )
 
-
 class SigLIP(nn.Module):
     def __init__(
         self,
@@ -165,7 +164,6 @@ class SigLIP(nn.Module):
         feature_map = reshape_patch_tokens_to_map(flat_patch_tokens, patch_grid_size)
         return restore_batch(feature_map, leading_shape)
 
-
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_name = "google/siglip-base-patch16-224"
@@ -227,7 +225,6 @@ def example() -> None:
     except Exception as error:
         print("siglip example failed.")
         print(error)
-
 
 if __name__ == "__main__":
     example()

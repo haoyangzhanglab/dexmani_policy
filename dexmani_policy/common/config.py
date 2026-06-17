@@ -3,13 +3,11 @@
 import warnings
 from omegaconf import OmegaConf
 
-
 def register_resolvers():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         OmegaConf.register_new_resolver("eval", lambda expr: eval(expr, {"__builtins__": {}}, {}), replace=True)
         OmegaConf.register_new_resolver("eq", lambda a, b: a == b, replace=True)
-
 
 def normalize_action_key(cfg) -> None:
     """Ensure cfg has ``action_key``, filling from legacy ``action_mode`` if needed.
@@ -21,7 +19,6 @@ def normalize_action_key(cfg) -> None:
     if hasattr(cfg, 'action_key'):
         return
     if hasattr(cfg, 'action_mode'):
-        import warnings
         warnings.warn(
             "Config uses deprecated 'action_mode' field. "
             "Please update to 'action_key: action_ee' (for eef_hand) "
@@ -31,7 +28,6 @@ def normalize_action_key(cfg) -> None:
         cfg.action_key = 'action_ee' if cfg.action_mode == 'eef_hand' else 'action'
     else:
         cfg.action_key = 'action'
-
 
 def validate_action_key_consistency(cfg) -> None:
     """Validate that ``action_key`` matches ``env_runner.env_kwargs.control_mode``.

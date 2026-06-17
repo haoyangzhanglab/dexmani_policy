@@ -14,7 +14,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     query_ball_point,
 )
 
-
 class LocalPatchEncoder(nn.Module):
     def __init__(
         self,
@@ -42,7 +41,6 @@ class LocalPatchEncoder(nn.Module):
         relative_pos_feature = self.relative_position_encoding(normalized_relative_xyz)
         group_input = torch.cat((neighbor_feature, normalized_relative_xyz, relative_pos_feature), dim=-1)
         return self.point_mlp(group_input).max(dim=2).values
-
 
 class MultiScalePatchTokenizer(nn.Module):
     def __init__(
@@ -145,7 +143,6 @@ class MultiScalePatchTokenizer(nn.Module):
                 return patch_token, patch_center, attn_global
 
         return patch_token, patch_center
-
 
 class PointNextPatchTokenizer(nn.Module):
     supports_global_token = True
@@ -270,7 +267,6 @@ class PointNextPatchTokenizer(nn.Module):
     def out_shape(self) -> tuple[int, int]:
         return (self.num_patches, self.token_channels)
 
-
 def example() -> None:
     batch_size, num_points = 2, 1024
 
@@ -345,7 +341,6 @@ def example() -> None:
     assert patch_token_a.size(1) == 96, "patch tokens should be 96 patches"
     print()
     print("=== ALL TESTS PASSED ===")
-
 
 if __name__ == "__main__":
     example()

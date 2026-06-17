@@ -3,7 +3,6 @@ import torch.nn as nn
 from typing import List, Optional
 from transformers import AutoTokenizer, T5EncoderModel
 
-
 # NOTE: reserve code — not currently used by any agent.
 class T5TextEncoder(nn.Module):
 
@@ -49,7 +48,6 @@ class T5TextEncoder(nn.Module):
 
         task_embeds = self.masked_mean_pool(token_embeds, task_tokens.attention_mask)
         return task_embeds.unsqueeze(1)
-
 
 if __name__ == "__main__":
     encoder = T5TextEncoder()

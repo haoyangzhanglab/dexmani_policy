@@ -7,12 +7,8 @@ from typing import Any, Dict, Optional
 
 os.environ.setdefault("WANDB_SILENT", "true")
 
-
 def is_video_key(key: Any) -> bool:
     return "video" in str(key).lower()
-
-
-
 
 class JsonlLogger:
     def __init__(self, output_dir: Path, filename: str = "metrics.jsonl"):
@@ -21,14 +17,12 @@ class JsonlLogger:
         self.file = open(self.output_dir / filename, "a", buffering=1, encoding="utf-8")
         atexit.register(self.close)
 
-
     def log(self, data: Dict[str, Any], step: Optional[int] = None, **kwargs):
         record = {"step": int(step) if step is not None else None}
         for key, value in (data or {}).items():
             if not is_video_key(key):
                 record[key] = value
         self.file.write(json.dumps(record, ensure_ascii=False) + "\n")
-
 
     def close(self):
         if self.file is None:
@@ -39,8 +33,6 @@ class JsonlLogger:
             pass
         finally:
             self.file = None
-
-
 
 class WandbLogger:
     def __init__(
@@ -72,7 +64,6 @@ class WandbLogger:
 
         atexit.register(self.close)
 
-
     def format_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(data or {})
         for key, value in list(payload.items()):
@@ -87,7 +78,6 @@ class WandbLogger:
             )
         return payload
 
-
     def log(self, data: Dict[str, Any], step: Optional[int] = None, **kwargs):
         if self.run is None:
             return
@@ -99,7 +89,6 @@ class WandbLogger:
         self.run.config.update(cfg_dict)
         self.run.config.update({"output_dir": str(output_dir)})
 
-
     def close(self):
         if self.run is None:
             return
@@ -109,5 +98,4 @@ class WandbLogger:
             pass
         finally:
             self.run = None
-
 

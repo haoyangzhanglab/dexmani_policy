@@ -7,15 +7,16 @@ from dexmani_policy.agents.action_decoders.backbone.dit import DiT_Diffusion
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.action_decoders.flowmatch import FlowMatch
 
-
 class MultiTaskAgent(BaseAgent):
-    """多任务 Agent：RGB + joint_state + 自然语言 task_text → DiT backbone。
+    """Multi-task agent: RGB + joint_state + natural language task_text → DiT backbone.
 
-    obs_dict 中需包含 'task_text' key（字符串列表），由 MultiTaskDataset 注入。
+    ``obs_dict`` must contain a ``task_text`` key (list of strings), injected by
+    ``MultiTaskDataset``.
 
-    如果提供了 task_texts 列表，会在 __init__ 中预计算所有 CLIP text embedding
-    并存入 buffer，训练/推理时按字符串 key 查表，仅 text_proj（Linear）可训练。
-    未缓存的文本退回实时 CLIP 编码。
+    When a ``task_texts`` list is provided, all CLIP text embeddings are
+    pre-computed in ``__init__`` and stored in a buffer.  Training/inference
+    looks up embeddings by string key; only ``text_proj`` (Linear) is trainable.
+    Uncached texts fall back to real-time CLIP encoding.
     """
 
     def __init__(
@@ -51,7 +52,7 @@ class MultiTaskAgent(BaseAgent):
         n_action_steps: int = 8,
         action_dim: int = 19,
         modality_dropout_probs: dict = None,
-        # text embedding cache (可选)
+        # text embedding cache (optional)
         task_texts: list = None,
     ):
         assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip", "r3m"), \
@@ -146,7 +147,6 @@ class MultiTaskAgent(BaseAgent):
             groups.append({"params": [self.text_proj.bias], "weight_decay": 0.0, "lr": lr})
         return groups
 
-
 def example():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     B, T, H, A = 2, 2, 16, 19
@@ -200,7 +200,6 @@ def example():
     print(f"pred_action: {result['pred_action'].shape}")
     print(f"control_action: {result['control_action'].shape}")
     print("=== MultiTaskAgent PASSED ===")
-
 
 if __name__ == "__main__":
     example()

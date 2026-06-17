@@ -3,7 +3,6 @@ import torch
 from dexmani_policy.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from dexmani_policy.datasets.base_dataset import BaseDataset
 
-
 class RGBPCDataset(BaseDataset):
 
     DEFAULT_MODALITIES = ['joint_state', 'rgb', 'depth', 'point_cloud',
@@ -22,7 +21,6 @@ class RGBPCDataset(BaseDataset):
         normalizer['camera_intrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         normalizer['camera_extrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         return normalizer
-
 
 def example(zarr_path):
     dataset = RGBPCDataset(
@@ -44,7 +42,6 @@ def example(zarr_path):
     print('camera_extrinsic:', obs_n['camera_extrinsic'].shape)
     print('action          :', action_n.shape)
     print(f'train size: {len(dataset)}  val size: {len(dataset.get_validation_dataset())}')
-
 
 if __name__ == '__main__':
     example('robot_data/sim/pick_apple_messy.zarr')

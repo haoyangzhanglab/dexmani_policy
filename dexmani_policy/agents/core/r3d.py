@@ -7,7 +7,6 @@ from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import O
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.core.base import BaseAgent
 
-
 class R3DAgent(BaseAgent):
     """R3D policy agent.
 
@@ -86,15 +85,7 @@ class R3DAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-
-    # get_optim_param_groups is inherited from BaseAgent — identical logic.
-    # R3D uses the standard action-decoder + obs-encoder split with
-    # separate weight-decay policies, same as all other agents.
-
-
-# =============================================================================
 # Smoke test
-# =============================================================================
 
 def example():
     """Self-contained smoke test for R3DAgent.
@@ -176,7 +167,6 @@ def example():
     assert result["control_action"].shape == (B, 8, A), \
         f'Bad control_action shape: {result["control_action"].shape}'
     print('=== PASSED ===')
-
 
 if __name__ == '__main__':
     example()

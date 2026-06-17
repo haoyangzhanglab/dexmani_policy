@@ -11,7 +11,7 @@ def create_indices(
     pad_before: int=0,
     pad_after: int=0,
 ) -> np.ndarray:
-    
+
     assert episode_mask.shape == episode_ends.shape
     pad_before = min(max(pad_before, 0), sequence_length-1)
     pad_after = min(max(pad_after, 0), sequence_length-1)
@@ -26,7 +26,7 @@ def create_indices(
             start_idx = episode_ends[i-1]
         end_idx = episode_ends[i]
         episode_length = end_idx - start_idx
-        
+
         min_start = -pad_before
         max_start = episode_length - sequence_length + pad_after
 
@@ -49,10 +49,9 @@ def create_indices(
             assert end_offset >= 0
             assert (sample_end_idx - sample_start_idx) == (buffer_end_idx - buffer_start_idx)
             indices.append([buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx])
-            
+
     indices = np.array(indices)
     return indices
-
 
 def get_val_mask(n_episodes, val_ratio, seed=0):
     val_mask = np.zeros(n_episodes, dtype=bool)
@@ -64,7 +63,6 @@ def get_val_mask(n_episodes, val_ratio, seed=0):
     val_idxs = rng.choice(n_episodes, size=n_val, replace=False)
     val_mask[val_idxs] = True
     return val_mask
-
 
 def downsample_mask(mask, max_n, seed=0):
     train_mask = mask
@@ -80,8 +78,6 @@ def downsample_mask(mask, max_n, seed=0):
         assert np.sum(train_mask) == n_train
 
     return train_mask
-
-
 
 class SequenceSampler:
     def __init__(
@@ -142,16 +138,14 @@ class SequenceSampler:
         self.indices = indices
         self.replay_buffer = replay_buffer
         self.sequence_length = sequence_length
-        
-            
+
     def __len__(self):
         return len(self.indices)
-
 
     def sample_sequence(self, idx):
         result = dict()
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
-        
+
         for key in self.keys:
             input_arr = self.replay_buffer[key]
             sample = input_arr[buffer_start_idx:buffer_end_idx]

@@ -14,11 +14,9 @@ from typing import Type
 from dexmani_policy.agents.optim_util import OptimGroupMixin
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
-
 def _is_fused_attn_available() -> bool:
     """Return True if SDPA (Flash / Memory-Efficient Attention) is usable."""
     return torch.cuda.is_available()
-
 
 class MLPBlock(nn.Module):
     """Linear -> GELU -> Linear."""
@@ -31,7 +29,6 @@ class MLPBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.lin2(self.act(self.lin1(x)))
-
 
 class Attention(nn.Module):
     """Multi-head attention with SDPA (Flash/Mem-Efficient) + manual fallback."""
@@ -83,7 +80,6 @@ class Attention(nn.Module):
         out = self._recombine_heads(out)
         return self.out_proj(out)
 
-
 class OneWayAttentionBlock(nn.Module):
     """Self-Attn → Cross-Attn → MLP, with residual + LayerNorm (adapted from SAM)."""
 
@@ -116,7 +112,6 @@ class OneWayAttentionBlock(nn.Module):
         queries = self.norm3(queries)
         return queries, keys
 
-
 class OneWayTransformer(nn.Module):
     """Stack of OneWayAttentionBlock layers."""
 
@@ -148,7 +143,6 @@ class OneWayTransformer(nn.Module):
             )
 
         return queries
-
 
 class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
     """R3D action decoder: OneWayTransformer with timestep + temporal PE + pc_pe routing.

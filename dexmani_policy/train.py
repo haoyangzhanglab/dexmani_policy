@@ -23,7 +23,6 @@ from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()
 
-
 @dataclass
 class TrainingComponents:
     """Assembled training pipeline components (single-GPU).
@@ -41,7 +40,6 @@ class TrainingComponents:
     workspace: Any
     env_runner: Optional[Any]
     num_training_steps: int
-
 
 def build_train_components(cfg):
     """Assemble all training components for single-GPU training."""
@@ -88,7 +86,6 @@ def build_train_components(cfg):
         num_training_steps=num_training_steps,
     )
 
-
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     validate_config(cfg)
@@ -116,7 +113,6 @@ def main(cfg):
         num_training_steps=comp.num_training_steps,
     )
     trainer.train(resume_tag="latest")
-
 
 if __name__ == "__main__":
     main()

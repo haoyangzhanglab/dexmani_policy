@@ -12,7 +12,6 @@ from dexmani_policy.agents.obs_encoder.rgb.utils import (
     reshape_patch_tokens_to_map,
 )
 
-
 class FrozenBatchNorm2d(nn.Module):
     def __init__(self, num_features: int):
         super().__init__()
@@ -53,7 +52,6 @@ class FrozenBatchNorm2d(nn.Module):
         bias = bias - running_mean * scale
         return x * scale + bias
 
-
 def replace_batch_norm_with_group_norm(module: nn.Module) -> nn.Module:
     for name, child in module.named_children():
         if isinstance(child, nn.BatchNorm2d):
@@ -64,7 +62,6 @@ def replace_batch_norm_with_group_norm(module: nn.Module) -> nn.Module:
         else:
             replace_batch_norm_with_group_norm(child)
     return module
-
 
 class ResNet(nn.Module):
     def __init__(
@@ -259,7 +256,6 @@ def example() -> None:
     except Exception as error:
         print("resnet example failed.")
         print(error)
-
 
 if __name__ == "__main__":
     example()

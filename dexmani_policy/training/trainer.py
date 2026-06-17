@@ -12,7 +12,6 @@ from dexmani_policy.common.pytorch_util import compile_models, optimizer_to, dic
 from dexmani_policy.training.workspace import TrainWorkspace
 from dexmani_policy.common.checkpoint_io import TrainCheckpoint
 
-
 @dataclass
 class TrainLoopConfig:
     num_epochs: int
@@ -21,7 +20,6 @@ class TrainLoopConfig:
     eval_interval_epochs: int
     sample_interval_epochs: int
     gradient_accumulation_steps: int = 1
-
 
 class Trainer:
     """Main training loop with EMA, validation, evaluation, and checkpointing.
@@ -268,7 +266,6 @@ class Trainer:
 
         return batch, log_dict
 
-
     @torch.no_grad()
     def validate(self, agent, ema_backbone=None):
         """Return dict with at least ``"loss"``; ``"loss_flow"`` and
@@ -319,7 +316,6 @@ class Trainer:
             result["loss_consistency"] = (cons_sum / count).item()
         return result
 
-
     @torch.no_grad()
     def evaluate(self, agent) -> Dict[str, Any]:
         try:
@@ -347,7 +343,6 @@ class Trainer:
                 metrics[f"eval/per_task/{task_name}/success_rate"] = sr * 100
                 metrics[f"eval/per_task/{task_name}/avg_steps"] = task_result.get("avg_steps")
         return metrics
-
 
     def _should_run(self, epoch, interval):
         """Return True if task should run at this epoch: last epoch or interval-aligned."""
@@ -560,5 +555,4 @@ class Trainer:
                     raise RuntimeError(
                         "Training aborted due to error in finish_epoch on rank 0"
                     ) from finish_error
-
 

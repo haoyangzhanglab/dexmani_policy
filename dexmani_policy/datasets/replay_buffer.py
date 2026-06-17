@@ -5,7 +5,6 @@ from termcolor import cprint
 from functools import cached_property
 from typing import Optional
 
-
 class ReplayBuffer:
     def __init__(self, root):
         if 'data' not in root or 'meta' not in root:

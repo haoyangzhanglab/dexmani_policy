@@ -21,7 +21,6 @@ _DINO_VARIANTS = {
     "base": "facebook/dinov2-base",
 }
 
-
 def _resolve_dino_model_name(name: str) -> str:
     """Expand short variant names to full HuggingFace model IDs.
 
@@ -33,7 +32,6 @@ def _resolve_dino_model_name(name: str) -> str:
     if resolved != name:
         logger.info("DINO variant shorthand '%s' resolved to '%s'", name, resolved)
     return resolved
-
 
 class DINO(nn.Module):
     def __init__(
@@ -258,7 +256,6 @@ def example() -> None:
     except Exception as error:
         print("dino example failed.")
         print(error)
-
 
 if __name__ == "__main__":
     example()

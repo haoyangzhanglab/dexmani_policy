@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 
-
 class BaseRunner:
     """Abstract environment runner for agent evaluation.
 
@@ -75,7 +74,6 @@ class BaseRunner:
                     buf.pop(0)
         self._obs_cursor += 1
         self._obs_count = min(self._obs_count + 1, self.n_obs_steps)
-    
 
     def get_stacked_obs(self) -> Dict[str, Any]:
         """Return a time-ordered stack of the last n_obs_steps frames.
@@ -110,7 +108,6 @@ class BaseRunner:
             raise RuntimeError("Stacked observation dict is empty")
         return out
 
-
     def get_obs_batch(self, device) -> Dict[str, Any]:
         def to_torch(x, *, dtype=None, device=None):
             if isinstance(x, torch.Tensor):
@@ -118,13 +115,12 @@ class BaseRunner:
             if isinstance(x, np.ndarray):
                 return torch.as_tensor(x, device=device, dtype=dtype)
             return x
-    
+
         stacked_obs = self.get_stacked_obs()
         obs_batch = dict_apply(stacked_obs, lambda x: to_torch(x, device=device))
         obs_batch = dict_apply(obs_batch, lambda x: x.unsqueeze(0) if torch.is_tensor(x) else x)
 
         return obs_batch
-
 
     def reset(self):
         self._obs_buffer.clear()
@@ -132,12 +128,10 @@ class BaseRunner:
         self._obs_cursor = 0
         self._obs_count = 0
 
-
     @torch.no_grad()
     def get_action_chunk(self, obs_batch, agent, denoise_timesteps:int=None) -> np.ndarray:
         action = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
         return action["control_action"].detach().cpu().numpy().squeeze(0)
-    
 
     def eval_one_episode(self, agent, env, episode_seed, denoise_timesteps:int=None, **kwargs):
         """Run a single evaluation episode.
@@ -181,7 +175,6 @@ class BaseRunner:
                     break
 
         return episode_success, task_done_step
-    
 
     def run(self, agent, denoise_timesteps:int=None, eval_episodes:int=None,
             video_save_dir: Optional[Path] = None):
@@ -290,11 +283,9 @@ class BaseRunner:
             "episodes_collected": len(success_list),
             "episodes_requested": num_episodes,
         }
-    
 
     def make_env(self):
         raise NotImplementedError
-
 
     def get_seed_list(self) -> List[int]:
         raise NotImplementedError

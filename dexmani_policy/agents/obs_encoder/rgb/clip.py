@@ -16,7 +16,6 @@ from dexmani_policy.agents.obs_encoder.rgb.utils import (
 
 logger = logging.getLogger(__name__)
 
-
 class CLIP(nn.Module):
     def __init__(
         self,
@@ -229,7 +228,6 @@ def example() -> None:
     except Exception as error:
         print("clip example failed.")
         print(error)
-
 
 if __name__ == "__main__":
     example()

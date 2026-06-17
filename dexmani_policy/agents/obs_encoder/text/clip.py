@@ -3,7 +3,6 @@ import torch.nn as nn
 from typing import List, Optional
 from transformers import AutoTokenizer, CLIPTextModelWithProjection
 
-
 class CLIPTextEncoder(nn.Module):
 
     def __init__(
@@ -40,7 +39,6 @@ class CLIPTextEncoder(nn.Module):
             attention_mask=task_tokens.attention_mask,
         ).text_embeds
         return task_embeds.unsqueeze(1)
-
 
 if __name__ == "__main__":
     encoder = CLIPTextEncoder()

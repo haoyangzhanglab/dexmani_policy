@@ -5,7 +5,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cl
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 
-
 class DP3ObsEncoder(nn.Module):
     def __init__(
         self,
@@ -38,10 +37,9 @@ class DP3ObsEncoder(nn.Module):
         feat = torch.cat([
             self.pc_encoder(pc)['global_token'],
             self.state_mlp(obs['joint_state']),
-        ], dim=-1)                                      # (B*T, out_dim)
+        ], dim=-1)
         B = feat.shape[0] // self.n_obs_steps
         return feat.reshape(B, -1), {}
-
 
 class DP3Agent(UNetDiffusionAgent):
     def __init__(
@@ -67,7 +65,6 @@ class DP3Agent(UNetDiffusionAgent):
         super().__init__(
             obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
         )
-
 
 def example():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -117,7 +114,6 @@ def example():
     print(f'pred_action:     {result["pred_action"].shape}')
     print(f'control_action:  {result["control_action"].shape}')
     print('=== PASSED ===')
-
 
 if __name__ == '__main__':
     example()

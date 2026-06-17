@@ -5,9 +5,6 @@ from einops.layers.torch import Rearrange
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
-
-
-
 class Downsample1d(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -36,7 +33,6 @@ class Conv1dBlock(nn.Module):
 
     def forward(self, x):
         return self.block(x)
-
 
 class ConditionalResidualBlock1D(nn.Module):
     def __init__(self,
@@ -83,7 +79,6 @@ class ConditionalResidualBlock1D(nn.Module):
         scale = embed[:, 0]
         bias = embed[:, 1]
         return scale * out + bias
-
 
 class ConditionalUnet1D(nn.Module):
     """1D U-Net with FiLM conditioning for diffusion-based action prediction.
@@ -179,10 +174,8 @@ class ConditionalUnet1D(nn.Module):
             nn.Conv1d(start_dim, input_dim, 1),
         )
 
-    
     def get_optim_groups(self, weight_decay: float = 1e-3):
         return get_optim_group_with_no_decay(self, weight_decay=weight_decay)
-
 
     def forward(self, x, timestep, context):
 

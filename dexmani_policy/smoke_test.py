@@ -24,7 +24,6 @@ from dexmani_policy.training.build_utils import (
 
 register_resolvers()
 
-
 def load_config(config_name: str):
     try:
         GlobalHydra.instance().clear()
@@ -37,7 +36,6 @@ def load_config(config_name: str):
         cfg.workspace.output_dir = "/tmp/smoke_test_output"
         OmegaConf.resolve(cfg)
     return cfg
-
 
 def smoke_test(config_name: str):
     print(f"\n{'='*60}")
@@ -179,7 +177,6 @@ def smoke_test(config_name: str):
 
     print(f"\n✓ {config_name} smoke test PASSED\n")
     return True
-
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

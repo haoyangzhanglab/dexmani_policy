@@ -7,7 +7,6 @@ from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
 from dexmani_policy.agents.obs_encoder.rgb import ResNet, R3M
 
-
 class DPObsEncoder(nn.Module):
     def __init__(
         self,
@@ -33,19 +32,19 @@ class DPObsEncoder(nn.Module):
             rgb = v2.RandomCrop(size=crop_size)(rgb)
         rgb = self.image_processor.process_images(rgb)['image']
 
-        # channels_last: 对 CNN backbone（ResNet/R3M）转换为 NHWC 布局以利用
-        # cuDNN implicit NHWC 卷积 kernel，forward 加速 ~15-22%。ViT backbone
-        # （DINO/CLIP/SigLIP）使用 attention 非卷积，跳过以避免无意义 stride 修改。
+        # channels_last: for CNN backbones (ResNet/R3M), convert to NHWC layout
+        # to leverage cuDNN implicit NHWC convolution kernels, yielding ~15-22%
+        # forward speedup.  ViT backbones (DINO/CLIP/SigLIP) use attention rather
+        # than convolution — skip to avoid pointless stride changes.
         if isinstance(self.backbone, (ResNet, R3M)):
             rgb = rgb.to(memory_format=torch.channels_last)
 
         feat = torch.cat([
             self.backbone(rgb)['global_token'],
             self.state_mlp(obs['joint_state']),
-        ], dim=-1)                                      # (B*T, out_dim)
+        ], dim=-1)
         B = feat.shape[0] // self.n_obs_steps
         return feat.reshape(B, -1), {}
-
 
 class DPAgent(UNetDiffusionAgent):
     def __init__(
@@ -67,7 +66,6 @@ class DPAgent(UNetDiffusionAgent):
         super().__init__(
             obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
         )
-
 
 def example():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -116,7 +114,6 @@ def example():
     print(f'pred_action:     {result["pred_action"].shape}')
     print(f'control_action:  {result["control_action"].shape}')
     print('=== PASSED ===')
-
 
 if __name__ == '__main__':
     example()

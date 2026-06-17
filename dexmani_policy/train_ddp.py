@@ -28,7 +28,6 @@ from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()
 
-
 def setup_ddp(rank: int, world_size: int):
     dist.init_process_group(
         backend='nccl',
@@ -36,7 +35,6 @@ def setup_ddp(rank: int, world_size: int):
         world_size=world_size,
         rank=rank
     )
-
 
 def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     setup_ddp(rank, world_size)
@@ -193,7 +191,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     finally:
         dist.destroy_process_group()
 
-
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     validate_config(cfg)
@@ -261,7 +258,6 @@ def main(cfg):
         nprocs=num_gpus,
         join=True
     )
-
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)

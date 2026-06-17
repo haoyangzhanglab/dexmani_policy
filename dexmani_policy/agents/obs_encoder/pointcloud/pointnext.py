@@ -15,7 +15,6 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     sample_and_group_all,
 )
 
-
 class SetAbstraction(nn.Module):
     def __init__(
         self,
@@ -104,7 +103,6 @@ class SetAbstraction(nn.Module):
 
         return center_xyz, center_feature_out
 
-
 class LocalAggregation(nn.Module):
     def __init__(
         self,
@@ -135,7 +133,6 @@ class LocalAggregation(nn.Module):
         )
         return self.point_mlp(group_input).max(dim=2).values
 
-
 class InvertedResidualPointBlock(nn.Module):
     def __init__(self, channels: int, radius: float, num_neighbors: int, expansion: int = 2):
         super().__init__()
@@ -151,7 +148,6 @@ class InvertedResidualPointBlock(nn.Module):
         point_feature = self.local_aggregation(xyz, point_feature)
         point_feature = self.channel_mlp(point_feature)
         return xyz, self.activation(point_feature + residual_feature)
-
 
 class PointNextEncoder(nn.Module):
     def __init__(
@@ -242,7 +238,6 @@ class PointNextEncoder(nn.Module):
     def out_shape(self) -> tuple[int, int]:
         return (1, self.output_channels)
 
-
 def example() -> None:
     batch_size, num_points = 2, 1024
 
@@ -271,7 +266,6 @@ def example() -> None:
     print("global_token:", tuple(out["global_token"].shape))
     print("out_dim:", pointnext.out_dim)
     print("out_shape:", pointnext.out_shape)
-
 
 if __name__ == "__main__":
     example()

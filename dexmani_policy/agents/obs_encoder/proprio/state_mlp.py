@@ -4,7 +4,6 @@ from typing import List, Optional
 
 from dexmani_policy.common.pytorch_util import create_mlp
 
-
 class StateMLP(nn.Module):
     def __init__(
         self,
@@ -28,7 +27,6 @@ class StateMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
-
 
 def create_state_mlp(
     state_dim: int,

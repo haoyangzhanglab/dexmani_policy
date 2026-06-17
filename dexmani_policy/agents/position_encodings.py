@@ -7,7 +7,6 @@ import torch.nn as nn
 POS_ENCODING_BASE = 10000.0
 """Standard base frequency for sinusoidal positional encoding."""
 
-
 # ---------------------------------------------------------------------------
 # 1D sinusoidal positional encoding (timestep / sequence position)
 # ---------------------------------------------------------------------------
@@ -25,7 +24,6 @@ class SinusoidalPosEmb(nn.Module):
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
-
 
 class TimestepMLP(nn.Module):
     """Sinusoidal timestep embedding followed by a 2-layer MLP with Mish activation.
@@ -46,7 +44,6 @@ class TimestepMLP(nn.Module):
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         return self.net(t)
-
 
 # ---------------------------------------------------------------------------
 # 3D sinusoidal / relative positional encodings (point-cloud coordinates)
@@ -73,7 +70,6 @@ class SinusoidalPosEmb3D(nn.Module):
         angles = xyz.unsqueeze(-1) * self.inv_freq
         pos_emb = torch.cat((angles.sin(), angles.cos()), dim=-1)
         return pos_emb.flatten(start_dim=-2)
-
 
 class RelativePositionalEncoding3D(nn.Module):
     """Learned relative positional encoding for local point neighborhoods."""

@@ -1,6 +1,5 @@
 from dexmani_policy.datasets.base_dataset import BaseDataset
 
-
 class RGBDataset(BaseDataset):
 
     DEFAULT_MODALITIES = ['joint_state', 'rgb']
@@ -8,7 +7,6 @@ class RGBDataset(BaseDataset):
     def __init__(self, rgb_aug=None, rgb_keep_uint8=False, **kwargs):
         super().__init__(rgb_keep_uint8=rgb_keep_uint8, **kwargs)
         self.rgb_color_aug = rgb_aug
-
 
 def example(zarr_path):
     dataset = RGBDataset(
@@ -24,7 +22,6 @@ def example(zarr_path):
     print('joint_state:', sample['obs']['joint_state'].shape)
     print('action     :', sample['action'].shape)
     print(f'train size: {len(dataset)}  val size: {len(dataset.get_validation_dataset())}')
-
 
 if __name__ == '__main__':
     example('robot_data/sim/pick_apple_messy.zarr')

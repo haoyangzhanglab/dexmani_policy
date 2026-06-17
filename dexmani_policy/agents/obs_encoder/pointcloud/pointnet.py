@@ -4,7 +4,6 @@ from typing import Dict
 
 from dexmani_policy.common.pytorch_util import create_mlp
 
-
 class PointNet(nn.Module):
     def __init__(
         self,
@@ -45,7 +44,6 @@ class PointNet(nn.Module):
     @property
     def out_shape(self) -> tuple[int, int]:
         return (1, self.output_channels)
-
 
 class MultiStagePointNet(nn.Module):
     def __init__(
@@ -109,7 +107,6 @@ class MultiStagePointNet(nn.Module):
     def out_shape(self) -> tuple[int, int]:
         return (1, self.output_channels)
 
-
 def example() -> None:
     batch_size, num_points = 2, 1024
 
@@ -137,7 +134,6 @@ def example() -> None:
     print("global_token:", tuple(out["global_token"].shape))
     print("out_dim:", multistage_pointnet.out_dim)
     print("out_shape:", multistage_pointnet.out_shape)
-
 
 if __name__ == "__main__":
     example()
