@@ -14,12 +14,12 @@ class SimRunner(BaseRunner):
         self,
         task_name: str,
         n_obs_steps: int,
-        env_video_fps: int,
         default_eval_episodes: int,
         sensor_modalities: List[str] | None = None,
         env_kwargs: Optional[Dict[str, Any]] = None,
         eval_seeds: Optional[List[int]] = None,
         clear_cache_freq: int = 25,
+        env_video_fps: int | None = None,
     ):
         super().__init__(
             n_obs_steps=n_obs_steps,

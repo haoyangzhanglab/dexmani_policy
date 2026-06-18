@@ -23,10 +23,10 @@ class MultiTaskSimRunner:
         self,
         task_configs: List[Dict[str, Any]],
         n_obs_steps: int,
-        env_video_fps: int,
         default_eval_episodes: int,
         sensor_modalities: Optional[List[str]] = None,
         clear_cache_freq: int = 25,
+        env_video_fps: int | None = None,
     ):
         if not task_configs:
             raise ValueError("task_configs cannot be empty")

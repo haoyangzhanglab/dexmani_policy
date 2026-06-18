@@ -44,7 +44,7 @@ class WandbLogger:
         id: str,
         resume: str,
         mode: str,
-        video_fps: int,
+        video_fps: int = 15,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)

@@ -29,7 +29,7 @@ class WandbConfig:
     id: str
     resume: str
     mode: str
-    video_fps: int
+    video_fps: int = 15
 
 class TrainWorkspace:
     def __init__(

@@ -26,10 +26,10 @@ class BaseRunner:
     def __init__(
         self,
         n_obs_steps: int,
-        env_video_fps: int,
         default_eval_episodes: int,
         sensor_modalities: List[str] | None = None,
         clear_cache_freq: int = 25,
+        env_video_fps: int | None = None,
     ):
         self.n_obs_steps = n_obs_steps
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
@@ -41,7 +41,7 @@ class BaseRunner:
         self._obs_count = 0    # number of frames stored (0 .. n_obs_steps)
         self._obs_str_buffer: Dict[str, list] = {}  # for string modalities
 
-        self.env_video_fps = env_video_fps
+        self.env_video_fps = env_video_fps  # may be None → auto-detect from env
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
 
@@ -179,6 +179,8 @@ class BaseRunner:
     def run(self, agent, denoise_timesteps:int=None, eval_episodes:int=None,
             video_save_dir: Optional[Path] = None):
         env = self.make_env()
+        if self.env_video_fps is None:
+            self.env_video_fps = getattr(env, 'video_fps', 15)
         eval_seeds = self.get_seed_list()
         eval_episodes = eval_episodes if eval_episodes is not None else self.default_eval_episodes
 

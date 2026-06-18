@@ -168,7 +168,7 @@ workspace:
     id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
-    video_fps: ${env_runner.env_video_fps}
+    video_fps: 15  # decoupled from env_runner; default matches frame_skip(16)/time_step(1/240)
 
   checkpoint_cfg:
     _target_: dexmani_policy.training.workspace.CheckpointConfig
@@ -181,7 +181,6 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  env_video_fps: 15
   default_eval_episodes: 25        # PC-based policies: 25; RGB-based: 20
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
