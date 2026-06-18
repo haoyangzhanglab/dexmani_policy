@@ -230,10 +230,16 @@ env_runner:
       task_text: ${dataset.task_texts[0]}
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
+        # ── Domain randomization (convenience switches) ──
+        texture_random: false
+        instance_random: false
     - task_name: open_box
       task_text: ${dataset.task_texts[1]}
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
+        # ── Domain randomization (convenience switches) ──
+        texture_random: false
+        instance_random: false
 
 # ⚠️ Synced across all policy configs — update all when changing.
 eval:

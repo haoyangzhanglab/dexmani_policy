@@ -36,6 +36,35 @@ class SimRunner(BaseRunner):
     def name_to_pascal_case(name: str) -> str:
         return ''.join(part.capitalize() for part in re.split(r'[_\s-]+', name) if part)
 
+    @staticmethod
+    def _expand_env_kwargs(env_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Expand high-level randomization switches into individual DexMani_Sim kwargs.
+
+        ``texture_random`` enables scene textures, per-episode skybox, light
+        randomization, object texture perturbation, and camera pose perturbation.
+        It does NOT enable ``crazy_light`` (per-step color flashing).
+
+        ``instance_random`` enables model_id + object_scale randomization.
+
+        Explicit individual kwargs take precedence over the high-level switches
+        (via ``setdefault``), so you can e.g. set ``texture_random: true`` but
+        override ``randomize_camera_pose: false``.
+        """
+        expanded = dict(env_kwargs)
+
+        if expanded.pop('texture_random', False):
+            expanded.setdefault('use_texture_randomization', True)
+            expanded.setdefault('per_episode_skybox', True)
+            expanded.setdefault('randomize_light', True)
+            expanded.setdefault('randomize_object_texture', True)
+            expanded.setdefault('randomize_camera_pose', True)
+
+        if expanded.pop('instance_random', False):
+            expanded.setdefault('randomize_model_id', True)
+            expanded.setdefault('randomize_object_scale', True)
+
+        return expanded
+
     def make_env(self):
         env_module = importlib.import_module(f"{ENV_PREFIX}.{self.task_name}")
         class_name = self.name_to_pascal_case(self.task_name)
@@ -49,7 +78,8 @@ class SimRunner(BaseRunner):
                 f"If the class name doesn't follow the snake_case→PascalCase convention, "
                 f"add an explicit mapping to name_to_pascal_case."
             )
-        return env_class(render_mode="rgb_array", record_video=True, **self.env_kwargs)
+        env_kwargs = self._expand_env_kwargs(self.env_kwargs)
+        return env_class(render_mode="rgb_array", record_video=True, **env_kwargs)
 
     def get_seed_list(self) -> List[int]:
         if self.eval_seeds is not None:
