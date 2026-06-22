@@ -1,17 +1,15 @@
 import os
-import pathlib
 from dataclasses import dataclass
 from typing import Any, Optional
-
-ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
-os.chdir(ROOT_DIR)
 
 import hydra
 import torch
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn
+from dexmani_policy.common.pytorch_util import set_project_root, set_seed, worker_init_fn
+
+ROOT_DIR = set_project_root()
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
@@ -42,7 +40,6 @@ class TrainingComponents:
     num_training_steps: int
 
 def build_train_components(cfg):
-    """Assemble all training components for single-GPU training."""
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. This training script requires GPU.")
 

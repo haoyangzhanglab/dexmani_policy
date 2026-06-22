@@ -88,7 +88,7 @@ class SimEvaluator:
         denoise_timesteps_list: List[int],
         ckpt_tag_or_path: str = "latest",
         use_ema_for_eval: bool = True,
-        eval_config: Optional[Dict[str, Any]] = None,
+        eval_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if not denoise_timesteps_list:
             raise ValueError(
@@ -106,8 +106,8 @@ class SimEvaluator:
         eval_run_dir = self.create_eval_run_dir()
         video_fps = int(getattr(self.env_runner, 'env_video_fps', 15))
 
-        if eval_config is not None:
-            _save_json(eval_config, eval_run_dir / "eval_config.json")
+        if eval_metadata is not None:
+            _save_json(eval_metadata, eval_run_dir / "eval_config.json")
 
         summary = {
             "meta": {

@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 
 POS_ENCODING_BASE = 10000.0
-"""Standard base frequency for sinusoidal positional encoding."""
 
 # ---------------------------------------------------------------------------
 # 1D sinusoidal positional encoding (timestep / sequence position)

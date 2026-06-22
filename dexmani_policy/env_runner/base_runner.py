@@ -133,7 +133,7 @@ class BaseRunner:
         action = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
         return action["control_action"].detach().cpu().numpy().squeeze(0)
 
-    def eval_one_episode(self, agent, env, episode_seed, denoise_timesteps:int=None, **kwargs):
+    def run_one_episode(self, agent, env, episode_seed, denoise_timesteps:int=None, **kwargs):
         """Run a single evaluation episode.
 
         Environment contract (required for accurate ``avg_steps`` metrics):
@@ -205,7 +205,7 @@ class BaseRunner:
                 attempted += 1
 
                 try:
-                    episode_success, task_done_step = self.eval_one_episode(agent, env, eval_seed, denoise_timesteps)
+                    episode_success, task_done_step = self.run_one_episode(agent, env, eval_seed, denoise_timesteps)
                     total_steps = getattr(env, 'action_cnt', None)
                     video = env.get_video()
 

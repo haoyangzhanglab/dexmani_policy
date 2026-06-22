@@ -103,7 +103,6 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
-# ⚠️ Synced across all policy configs — update all when changing.
 # ── EMA ──
 ema:
   _target_: dexmani_policy.training.ema_model.EMAModel
@@ -132,7 +131,6 @@ training:
     sample_interval_epochs: 5
     gradient_accumulation_steps: 1
 
-# ⚠️ Synced across all policy configs — update all when changing.
 # ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.workspace.TrainWorkspace
@@ -170,8 +168,10 @@ env_runner:
     texture_random: false
     # instance_random: when true, enables model_id + object_scale randomization.
     instance_random: false
+    # table_random: when true, enables table height randomization
+    #   (randomize_table_height with range [-0.05, 0.05]).
+    table_random: false
 
-# ⚠️ Synced across all policy configs — update all when changing.
 # ── Eval ──
 eval:
   seed: 0

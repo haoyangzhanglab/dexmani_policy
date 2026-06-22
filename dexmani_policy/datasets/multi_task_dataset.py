@@ -88,11 +88,11 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             self.current_epoch = -1
 
         if normalizer_mode == 'shared':
-            self.normalizer = self.compute_shared_normalizer()
+            self.normalizer = self._compute_shared_normalizer()
         else:
             self.normalizers = {name: d.get_normalizer() for name, d in zip(task_names, datasets)}
 
-    def compute_shared_normalizer(self):
+    def _compute_shared_normalizer(self):
         all_joint_states = [d.replay_buffer['joint_state'] for d in self.datasets]
         all_actions = [d.replay_buffer[d.action_key] for d in self.datasets]
         joint_state = np.concatenate(all_joint_states, axis=0)
@@ -100,10 +100,8 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         return LinearNormalizer.fit_obs_action(joint_state, action, self.action_key, 'limits')
 
     def __del__(self):
-        """Best-effort shutdown of the Manager server process on garbage collection."""
         try:
-            if hasattr(self, '_manager'):
-                self._manager.shutdown()
+            self._manager.shutdown()
         except Exception:
             pass
 
@@ -113,7 +111,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         seed = int(hashlib.md5(raw.encode()).hexdigest(), 16) % (2**32)
         return np.random.default_rng(seed)
 
-    def _build_balanced_indices(self, rng):
+    def _build_stratified_indices(self, rng):
         """Core index construction shared by fixed and epoch-based generation."""
         target_counts = self.compute_target_counts(rng=rng)
         indices = []
@@ -137,7 +135,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             return indices
 
         rng = self._make_rng(self.seed, "fixed")
-        return self._build_balanced_indices(rng)
+        return self._build_stratified_indices(rng)
 
     def compute_target_counts(self, rng=None):
         target_counts = np.round(self.sample_probs * self.total_length).astype(int)
@@ -174,7 +172,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
     def generate_epoch_indices(self):
         rng = self._make_rng(self.seed, self._epoch)
-        return self._build_balanced_indices(rng)
+        return self._build_stratified_indices(rng)
 
     def __len__(self):
         return self.total_length

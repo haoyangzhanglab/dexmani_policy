@@ -294,7 +294,7 @@ class ImageAug:
     """
 
     __slots__ = ('prob', 'color_jitter', 'grayscale', 'noise', 'noise_prob',
-                 'blur', 'blur_prob', '_has_noise', '_has_blur')
+                 'blur', 'blur_prob')
 
     def __init__(
         self,
@@ -324,10 +324,6 @@ class ImageAug:
         self.blur = v2.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma) if blur_kernel > 0 else None
         self.blur_prob = blur_prob
 
-        # Pre-compute fast-path flags (avoids repeated None checks in __call__).
-        self._has_noise = self.noise is not None
-        self._has_blur = self.blur is not None
-
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """x: (T, 3, H, W) float32 [0, 1] → same shape."""
         # Fuse prob gate + noise + blur decisions. When prob=1.0 the prob gate
@@ -347,10 +343,10 @@ class ImageAug:
         if self.grayscale is not None:
             x = self.grayscale(x)
 
-        if self._has_noise and rand_vals[noise_idx].item() <= self.noise_prob:
+        if self.noise is not None and rand_vals[noise_idx].item() <= self.noise_prob:
             x = self.noise(x)
 
-        if self._has_blur and rand_vals[blur_idx].item() <= self.blur_prob:
+        if self.blur is not None and rand_vals[blur_idx].item() <= self.blur_prob:
             x = self.blur(x)
 
         return x.clamp(0, 1)

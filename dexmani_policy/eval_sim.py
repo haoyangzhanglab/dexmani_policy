@@ -8,12 +8,11 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency, normalize_action_key
-from dexmani_policy.common.pytorch_util import set_seed
+from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.training.sim_evaluator import SimEvaluator
 
-ROOT_DIR = str(Path(__file__).parent.parent)
-os.chdir(ROOT_DIR)
+ROOT_DIR = set_project_root()
 
 register_resolvers()
 
@@ -65,7 +64,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
 
     evaluator = SimEvaluator(device, agent, env_runner, checkpoint_store, eval_root_dir)
 
-    eval_config = {
+    eval_metadata = {
         "experiment_dir": str(exp_dir),
         "eval": OmegaConf.to_container(cfg.eval, resolve=True),
     }
@@ -75,7 +74,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
         denoise_timesteps_list=list(cfg.eval.offline.denoise_timesteps_list),
         ckpt_tag_or_path=cfg.eval.offline.ckpt_tag_or_path,
         use_ema_for_eval=bool(cfg.eval.offline.use_ema_for_eval),
-        eval_config=eval_config,
+        eval_metadata=eval_metadata,
     )
 
     cprint(f"Evaluation completed, results saved to {evaluator.eval_root_dir}", "green")

@@ -306,14 +306,14 @@ class Uni3DPointcloudEncoder(nn.Module):
     def num_tokens(self):
         return self.num_group
 
-    def forward(self, pcd, eval=False):
+    def forward(self, pcd, inference_mode=False):
         if pcd.shape[-1] == 3:
             colors = torch.zeros_like(pcd)
             pcd = torch.cat([pcd, colors], dim=-1)
         elif pcd.shape[-1] > 6:
             pcd = pcd[..., :6]
 
-        if not eval:
+        if not inference_mode:
             pcd = random_point_dropout(pcd, max_dropout_ratio=0.8)
 
         pts = pcd[..., :3].contiguous()
@@ -334,7 +334,7 @@ class Uni3DPointcloudEncoder(nn.Module):
 
         x = patch_embed + pos_embed
 
-        if not eval:
+        if not inference_mode:
             x = self.patch_dropout(x)
             x = self.transformer.pos_drop(x)
 

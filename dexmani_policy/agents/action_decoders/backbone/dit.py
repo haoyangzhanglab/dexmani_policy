@@ -10,7 +10,7 @@ from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import POS_ENCODING_BASE
 
 WEIGHT_INIT_STD = 0.02
-"""Standard deviation for normal weight initialization across DiT modules."""
+_approx_gelu = lambda: nn.GELU(approximate="tanh")
 
 def modulate(x, shift, scale):
     """AdaLN modulation: ``x * (1 + scale) + shift``."""
@@ -85,7 +85,6 @@ class TimestepEmbedder(nn.Module):
         self.frequency_embedding_size = frequency_embedding_size
 
     POS_ENCODING_BASE = POS_ENCODING_BASE
-    """Base frequency for sinusoidal position/timestep encoding (imported)."""
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=None):
@@ -117,10 +116,7 @@ class DiTBlock(nn.Module):
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
 
-        def approx_gelu():
-            return nn.GELU(approximate="tanh")
-
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=_approx_gelu, drop=0)
 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),

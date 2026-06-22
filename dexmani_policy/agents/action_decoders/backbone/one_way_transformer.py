@@ -14,8 +14,7 @@ from typing import Type
 from dexmani_policy.agents.optim_util import OptimGroupMixin
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
-def _is_fused_attn_available() -> bool:
-    """Return True if SDPA (Flash / Memory-Efficient Attention) is usable."""
+def _is_cuda_available() -> bool:
     return torch.cuda.is_available()
 
 class MLPBlock(nn.Module):
@@ -47,7 +46,7 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
 
-        self.fused_attn = _is_fused_attn_available()
+        self.fused_attn = _is_cuda_available()
         self.attn_drop = attn_drop
 
     def _separate_heads(self, x: torch.Tensor) -> torch.Tensor:

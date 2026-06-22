@@ -203,3 +203,4 @@ dexmani_policy/
 | `docs/06-仿真评测.md` | SimEvaluator、env_runner、dexmani_sim 环境 |
 | `docs/07-多卡训练.md` | mp.spawn、DistributedSampler、rank 隔离、checkpoint 兼容 |
 | `docs/08-审查约定.md` | 已知设计模式与架构决策（9 章 34 条），防止审查误报 |
+| `docs/09-域随机化机制.md` | `texture_random`/`instance_random` 便捷开关、`randomize_table_height` 完整链路与 Gap |

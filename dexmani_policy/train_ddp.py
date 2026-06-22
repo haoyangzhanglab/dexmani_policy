@@ -1,9 +1,6 @@
 import os
-import pathlib
 import socket
-
-ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
-os.chdir(ROOT_DIR)
+import warnings
 
 import hydra
 import torch
@@ -14,7 +11,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, fix_state_dict, compile_models
+from dexmani_policy.common.pytorch_util import set_project_root, set_seed, worker_init_fn, fix_state_dict, compile_models
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.training.lr_scheduler import compute_num_training_steps
@@ -27,6 +24,7 @@ from dexmani_policy.training.build_utils import (
 from dexmani_policy.training.trainer import Trainer
 
 register_resolvers()
+set_project_root()
 
 def setup_ddp(rank: int, world_size: int):
     dist.init_process_group(
@@ -132,7 +130,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     if checkpoint is not None:
         saved_steps = checkpoint.train_params.get('num_training_steps') if checkpoint.train_params else None
         if saved_steps is not None and saved_steps != total_steps:
-            import warnings
             warnings.warn(
                 f"DDP Resume: num_training_steps mismatch — saved={saved_steps}, current={total_steps}. "
                 f"The LR schedule was originally configured for {saved_steps} total steps; "
@@ -178,12 +175,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
 
     # Broadcast normalizer state from rank 0 to all ranks
     norm_state = model.normalizer.state_dict()
-    for key in sorted(norm_state):
+    for key in norm_state:
         if isinstance(norm_state[key], torch.Tensor):
             dist.broadcast(norm_state[key], src=0)
     if rank != 0:
         model.normalizer.load_state_dict(norm_state)
-    dist.barrier()
 
     resume_state = (resume_global_step, resume_start_epoch)
     try:

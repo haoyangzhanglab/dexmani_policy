@@ -4,9 +4,8 @@ class RGBDataset(BaseDataset):
 
     DEFAULT_MODALITIES = ['joint_state', 'rgb']
 
-    def __init__(self, rgb_aug=None, rgb_keep_uint8=False, **kwargs):
-        super().__init__(rgb_keep_uint8=rgb_keep_uint8, **kwargs)
-        self.rgb_color_aug = rgb_aug
+    def __init__(self, rgb_color_aug=None, **kwargs):
+        super().__init__(rgb_color_aug=rgb_color_aug, **kwargs)
 
 def example(zarr_path):
     dataset = RGBDataset(

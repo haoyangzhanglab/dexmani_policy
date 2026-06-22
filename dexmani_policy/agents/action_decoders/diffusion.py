@@ -53,10 +53,9 @@ class Diffusion(nn.Module):
 
         noise = torch.randn_like(actions, device=actions.device)
         timestep = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device).long()
-        noisy_action = self.noise_scheduler.add_noise(actions, noise, timestep)
 
         pred = self.model(
-            x=noisy_action,
+            x=self.noise_scheduler.add_noise(actions, noise, timestep),
             timestep=timestep,
             context=cond,
         )

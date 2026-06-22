@@ -49,18 +49,16 @@ def farthest_point_sample(
         )
         return sampled_points.contiguous(), sample_idx
 
-    # FPS with randomisation (adapted from R3D-Policy)
+    start_indices = None
     if random_start:
         start_indices = torch.randint(0, N, (B,), device=pointcloud.device)
         modified_xyz = xyz.clone()
-        # Vectorized swap: put randomly-chosen start point at position 0.
         arange_b = torch.arange(B, device=pointcloud.device)
         val_0 = modified_xyz[:, 0].clone()
         modified_xyz[:, 0] = modified_xyz[arange_b, start_indices]
         modified_xyz[arange_b, start_indices] = val_0
     else:
         modified_xyz = xyz
-        start_indices = None  # type: ignore
 
     # Optional coordinate noise (used only for FPS distance computation).
     if random_noise_scale > 0:

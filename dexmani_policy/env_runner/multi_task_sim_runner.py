@@ -1,3 +1,5 @@
+import traceback
+
 import torch
 import numpy as np
 from typing import List, Optional, Dict, Any
@@ -119,7 +121,6 @@ class MultiTaskSimRunner:
                 }
             except Exception as e:
                 cprint(f"\n❌ Unexpected error in task {task_name}: {type(e).__name__}: {e}", "red")
-                import traceback
                 traceback.print_exc()
                 cprint("This is an unexpected error. Please report this issue.", "red")
                 failed_tasks.append(task_name)

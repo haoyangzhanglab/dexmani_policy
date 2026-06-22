@@ -63,6 +63,9 @@ class SimRunner(BaseRunner):
             expanded.setdefault('randomize_model_id', True)
             expanded.setdefault('randomize_object_scale', True)
 
+        if expanded.pop('table_random', False):
+            expanded.setdefault('randomize_table_height', True)
+
         return expanded
 
     def make_env(self):

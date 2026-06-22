@@ -12,7 +12,7 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.pytorch_util import set_seed, worker_init_fn, dict_apply, fix_state_dict
+from dexmani_policy.common.pytorch_util import set_project_root, set_seed, worker_init_fn, dict_apply, fix_state_dict
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.training.lr_scheduler import compute_num_training_steps

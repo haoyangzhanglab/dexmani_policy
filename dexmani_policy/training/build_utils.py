@@ -1,9 +1,4 @@
-"""Shared build functions for training/eval entry points.
-
-Follows the OpenAI ``script_util.py`` pattern: both training and evaluation
-scripts import component builders from this single module, ensuring identical
-assembly regardless of entry point (single-GPU, DDP, eval, or smoke test).
-"""
+"""Shared build functions for training/eval entry points."""
 
 import hydra
 from termcolor import cprint
