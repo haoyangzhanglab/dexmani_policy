@@ -188,11 +188,11 @@ env_runner:
     #   light randomization + object texture + camera pose perturbation.
     #   Does NOT enable crazy_light (per-step color flashing).
     texture_random: false
-    # instance_random: when true, enables model_id + object_scale randomization.
-    instance_random: false
+    # instance_random: when true, enables model_id randomization.
+    instance_random: true
     # table_random: when true, enables table height randomization
     #   (randomize_table_height with range [-0.05, 0.05]).
-    table_random: false
+    table_random: true
 
 # ── Eval ──
 eval:

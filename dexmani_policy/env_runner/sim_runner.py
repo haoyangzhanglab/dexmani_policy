@@ -44,7 +44,7 @@ class SimRunner(BaseRunner):
         randomization, object texture perturbation, and camera pose perturbation.
         It does NOT enable ``crazy_light`` (per-step color flashing).
 
-        ``instance_random`` enables model_id + object_scale randomization.
+        ``instance_random`` enables model_id randomization.
 
         Explicit individual kwargs take precedence over the high-level switches
         (via ``setdefault``), so you can e.g. set ``texture_random: true`` but
@@ -61,7 +61,6 @@ class SimRunner(BaseRunner):
 
         if expanded.pop('instance_random', False):
             expanded.setdefault('randomize_model_id', True)
-            expanded.setdefault('randomize_object_scale', True)
 
         if expanded.pop('table_random', False):
             expanded.setdefault('randomize_table_height', True)

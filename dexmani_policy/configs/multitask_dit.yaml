@@ -231,20 +231,22 @@ env_runner:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
         # ── Domain randomization (convenience switches) ──
         texture_random: false
-        instance_random: false
+        # instance_random: when true, enables model_id randomization.
+        instance_random: true
         # table_random: when true, enables table height randomization
         #   (randomize_table_height with range [-0.05, 0.05]).
-        table_random: false
+        table_random: true
     - task_name: open_box
       task_text: ${dataset.task_texts[1]}
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
         # ── Domain randomization (convenience switches) ──
         texture_random: false
-        instance_random: false
+        # instance_random: when true, enables model_id randomization.
+        instance_random: true
         # table_random: when true, enables table height randomization
         #   (randomize_table_height with range [-0.05, 0.05]).
-        table_random: false
+        table_random: true
 
 
 eval:
