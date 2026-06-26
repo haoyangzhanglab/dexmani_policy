@@ -127,7 +127,7 @@ def smoke_test(config_name: str):
         ckpt = TrainCheckpoint(
             epoch=0,
             global_step=1,
-            model_state=model_sd,
+            model_state=fix_state_dict(model_sd, is_current_ddp=False),
             ema_model_state=fix_state_dict(ema_sd, is_current_ddp=False) if ema_sd is not None else None,
             optimizer_state=opt_sd,
             scheduler_state=sched_sd,

@@ -66,12 +66,12 @@ dataset:
       pad_before: ${eval:'${n_obs_steps} - 1'}
       pad_after: ${eval:'${n_action_steps} - 1'}
       val_ratio: 0.05
-      max_train_episodes: null
+      max_train_episodes: 80
       sensor_modalities: ['joint_state', 'rgb']
       obs_horizon: ${n_obs_steps}
       rgb_preprocess_size: [240, 240]
       rgb_random_crop_size: [224, 224]
-      rgb_aug:
+      rgb_color_aug:
         _target_: dexmani_policy.datasets.augmentation.ImageAug
         brightness: 0.3
         contrast: 0.2
@@ -90,12 +90,12 @@ dataset:
       pad_before: ${eval:'${n_obs_steps} - 1'}
       pad_after: ${eval:'${n_action_steps} - 1'}
       val_ratio: 0.05
-      max_train_episodes: null
+      max_train_episodes: 80
       sensor_modalities: ['joint_state', 'rgb']
       obs_horizon: ${n_obs_steps}
       rgb_preprocess_size: [240, 240]
       rgb_random_crop_size: [224, 224]
-      rgb_aug:
+      rgb_color_aug:
         _target_: dexmani_policy.datasets.augmentation.ImageAug
         brightness: 0.3
         contrast: 0.2

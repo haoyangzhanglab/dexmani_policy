@@ -1,9 +1,12 @@
-# MoE-DP3 — 3D Diffusion Policy with Mixture of Experts
-# Encoder:  iDP3 point cloud encoder (128d) + 8-expert MoE gating (top-2)
+# MoE-DP — Diffusion Policy with Mixture of Experts (RGB-based)
+# Encoder:  RGB backbone (R3M-resnet18, 512d) + 16-expert MoE gating (top-2)
 # Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
-# Modality: point_cloud(6d, xyz+rgb) + joint_state → action
+# Modality: RGB + joint_state → action
+#
+# Architecture follows official MoE-DP:
+#   obs_encoder → cond_obs_emb(Linear) → MoE → global_cond → ConditionalUnet1D
 
-policy_name: moe_dp3
+policy_name: moe_dp
 
 # ── Task ──
 task_name: pick_apple_messy
@@ -17,28 +20,26 @@ n_action_steps: 8
 action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
-# ── Dataloader ──
+# ── Dataloader (aligned with official: drop_last=True, no prefetch) ──
 dataloader:
-  batch_size: 256
+  batch_size: 128
   shuffle: true
   num_workers: 8
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
-  drop_last: false
+  drop_last: true
 
 val_dataloader:
-  batch_size: 256
+  batch_size: 128
   shuffle: false
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   persistent_workers: false
-  prefetch_factor: 2
-  drop_last: false
+  drop_last: true
 
 # ── Dataset ──
 dataset:
-  _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
   seed: ${training.seed}
@@ -46,18 +47,25 @@ dataset:
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.05
-  max_train_episodes: null
-  sensor_modalities: ["joint_state", "point_cloud"]
+  max_train_episodes: 80
+  sensor_modalities: ["joint_state", "rgb"]
   obs_horizon: ${n_obs_steps}
+  rgb_preprocess_size: [240, 240]
+  rgb_random_crop_size: [224, 224]
 
-  # ⚠️ PC augmentation defaults — synced across all PC-based policy configs.
-  # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
+  # Conservative RGB augmentation — 25% trigger rate, mild magnitudes
+  rgb_color_aug:
+    _target_: dexmani_policy.datasets.augmentation.ImageAug
+    brightness: 0.3
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.05
+    grayscale_prob: 0.1
+    noise_std: 0.0
+    blur_prob: 0.0
+    prob: 0.25
+
   augmentation_cfg:
-    pc:
-      coord_noise: {noise_std: 0.002, ratio: 0.3, prob: 0.5}
-      dropout:     {dropout_ratio: 0.1, prob: 0.3}
-      color:       {brightness: 0.3, contrast: 0.4, saturation: 0.5, hue: 0.08, prob: 0.2}
-      color_noise: {noise_std: 0.01, prob: 0.2}
     state:
       noise:       {noise_std: 0.005, prob: 0.5}
 
@@ -69,27 +77,32 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: idp3                 # idp3 | pointnext | dp3
-  pc_dim: 6
-  pc_out_dim: 128
+  # RGB backbone — default R3M-resnet18 (512d), full finetuning
+  rgb_backbone_name: r3m
+  rgb_backbone_config:
+    model_name: resnet18               # 512d | resnet34(512d) | resnet50(2048d)
+    tune_mode: full
+    norm_mode: group_norm              # R3M BN→GN, EMA-safe
+    global_token_type: avg
+    image_size: [224, 224]
+
   state_dim: 19
   state_out_dim: 64
-  num_points: 1024
 
-  fps_random_config:
-    use_random: true
-    random_start: true
-    random_noise_scale: 0.0
-    shuffle_output: true
-
-  # MoE gating
-  num_experts: 8
+  # ── MoE Gating (aligned with official MoE-DP) ──
+  # Official pattern: CNN(64d) → cond_obs_emb → Linear(64→256) EXPAND → MoE(256→256) → UNet(cond=512).
+  # We replicate it: R3M+state(576d) → obs_proj → Linear(576→256) COMPRESS → MoE(256→256) → UNet(cond=512).
+  # The fixed 256-d embedding is the key design parameter — it keeps the MoE compact and the
+  # UNet conditioning manageable, preventing rapid overfitting that starves the gate of gradient signal.
+  num_experts: 16
   top_k: 2
-  moe_hidden_dim: 256
-  moe_out_dim: ${eval:'${agent.pc_out_dim} + ${agent.state_out_dim}'}
+  moe_out_dim: 256                     # official n_emb=256 — fixed MoE workspace
+  moe_hidden_ratio: 4                  # 4×256=1024, matches official hidden_dim
   moe_num_layers: 2
-  lambda_load: 0.1
-  beta_entropy: 0.01
+  lambda_load: 1.0
+  beta_entropy: 0.1
+  aux_loss_weight: 0.1
+  activation: relu                     # official uses ReLU (not GELU)
 
   # Boost (progressive expert activation)
   use_boost: false
@@ -98,31 +111,31 @@ agent:
   boost_experts_per_step: 4
   boost_topk_per_step: 1
 
-  # Enhanced gate
-  use_enhanced_gate: false
-  gate_hidden_dim: null
-  gate_dropout: 0.0
+  # Enhanced gate (matched to official: Linear→ReLU→Dropout→Linear)
+  use_enhanced_gate: true
+  gate_hidden_dim: 256                  # official gate_dim=256
+  gate_dropout: 0.1                     # official p_drop_attn=0.1
 
   # Diffusion backbone
   diffusion_step_embed_dim: 128
-  down_dims: [256, 512, 1024]
+  down_dims: [512, 1024, 2048]          # official: [512, 1024, 2048]
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: true
 
   num_training_steps: 100
-  num_inference_steps: 10
-  prediction_type: sample
+  num_inference_steps: 100              # official: full 100-step DDPM inference
+  prediction_type: epsilon
 
   modality_dropout_probs:
-    joint_state: 0.2
+    joint_state: 0.0
 
-# ── Optimizer ──
+# ── Optimizer (aligned with official: single LR for all params) ──
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
   betas: [0.95, 0.999]
-  obs_lr: 1.0e-4
+  obs_lr: 1.0e-4                        # unified LR (official uses single AdamW)
   obs_weight_decay: 1.0e-6
 
 # ── EMA ──
@@ -138,18 +151,18 @@ ema:
 training:
   seed: ${seed}
   device: cuda:0
-  use_bfloat16: true
-  use_compile: true
+  use_bfloat16: false                    # official float32; MoE gate softmax needs precision
+  use_compile: false                     # CUDA Graphs add memory overhead
   use_ema: true
   use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  max_grad_norm: 1.0
+  max_grad_norm: 0                      # disabled (official does not clip gradients)
   loop:
-    num_epochs: 1000
+    num_epochs: 500                     # official: 50000 // n_demo = 500
     log_interval_steps: 50
     val_interval_epochs: 25
-    eval_interval_epochs: 250
+    eval_interval_epochs: 200
     sample_interval_epochs: 5
     gradient_accumulation_steps: 1
 
@@ -179,19 +192,13 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 25        # PC-based policies: 25; RGB-based: 20
+  default_eval_episodes: 20            # RGB-based policies: 20; PC-based: 25
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
     # ── Domain randomization (convenience switches) ──
-    # texture_random: when true, enables scene texture + per-episode skybox +
-    #   light randomization + object texture + camera pose perturbation.
-    #   Does NOT enable crazy_light (per-step color flashing).
     texture_random: false
-    # instance_random: when true, enables model_id randomization.
     instance_random: true
-    # table_random: when true, enables table height randomization
-    #   (randomize_table_height with range [-0.05, 0.05]).
     table_random: true
 
 # ── Eval ──
@@ -200,7 +207,7 @@ eval:
   offline:
     ckpt_tag_or_path: best
     eval_episodes: 100
-    denoise_timesteps_list: [10]
+    denoise_timesteps_list: [10, 100]
     use_ema_for_eval: true
 
 # ── Hydra ──

@@ -11,7 +11,7 @@
 #   bash scripts/train.sh multitask_dit
 #
 # Available configs (top-level, non-ddp):
-#   dp  dp3  maniflow  moe_dp3  multitask_dit  r3d
+#   dp  dp3  maniflow  moe_dp  moe_dp3  multitask_dit  r3d
 #
 set -euo pipefail
 

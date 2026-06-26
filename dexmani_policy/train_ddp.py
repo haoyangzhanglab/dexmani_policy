@@ -21,7 +21,7 @@ from dexmani_policy.training.build_utils import (
     validate_config,
     build_scheduler,
 )
-from dexmani_policy.training.trainer import Trainer
+from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
 set_project_root()
@@ -162,7 +162,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         val_loader=val_loader,
         env_runner=env_runner,
         workspace=workspace,
-        train_loop_cfg=cfg.training.loop,
+        train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         max_grad_norm=cfg.training.get('max_grad_norm', 1.0),
         use_bfloat16=cfg.training.get('use_bfloat16', False),

@@ -20,6 +20,8 @@ class TrainLoopConfig:
     eval_interval_epochs: int
     sample_interval_epochs: int
     gradient_accumulation_steps: int = 1
+    max_train_steps: int | None = None
+    max_val_steps: int | None = None
 
 class Trainer:
     """Main training loop with EMA, validation, evaluation, and checkpointing.
@@ -80,6 +82,8 @@ class Trainer:
         self.val_interval_epochs = train_loop_cfg.val_interval_epochs
         self.eval_interval_epochs = train_loop_cfg.eval_interval_epochs
         self.sample_interval_epochs = train_loop_cfg.sample_interval_epochs
+        self.max_train_steps = train_loop_cfg.max_train_steps
+        self.max_val_steps = train_loop_cfg.max_val_steps
         self.enable_env_eval = (self.env_runner is not None) and (self.eval_interval_epochs > 0)
         self.checkpoint_interval_epochs = self.eval_interval_epochs if self.enable_env_eval else self.val_interval_epochs
         self.max_grad_norm = max_grad_norm
@@ -195,8 +199,8 @@ class Trainer:
         payload = {
             "state": {"epoch": int(self.current_epoch), "global_step": int(self.global_step), "nan_loss": float(raw_loss)},
             "weights": {
-                "model": self.raw_model.state_dict(),
-                "ema_model": self.ema_model.state_dict() if self.use_ema else None,
+                "model": fix_state_dict(self.raw_model.state_dict(), is_current_ddp=False),
+                "ema_model": fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False) if self.use_ema else None,
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
             },
@@ -294,6 +298,9 @@ class Trainer:
                 has_components = True
             count += n
 
+            if self.max_val_steps is not None and count >= self.max_val_steps:
+                break
+
         if count == 0:
             return None
 
@@ -380,12 +387,12 @@ class Trainer:
     def _save_epoch_checkpoint(self, epoch, global_step, checkpoint_model, test_mean_score):
         """Build and save a checkpoint, update topk tracker, and refresh latest symlink."""
         monitor = {"test_mean_score": test_mean_score} if test_mean_score is not None else {}
-        # checkpoint_model is already self.raw_model (unwrapped), but EMA may still
-        # be wrapped by torch.compile – unwrap before serialising to keep keys clean.
+        # Both model_state and ema_model_state go through fix_state_dict to strip
+        # _orig_mod. prefixes that torch.compile injects on submodules.
         checkpoint = TrainCheckpoint(
             epoch=epoch,
             global_step=global_step,
-            model_state=checkpoint_model.state_dict(),
+            model_state=fix_state_dict(checkpoint_model.state_dict(), is_current_ddp=False),
             ema_model_state=fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False) if self.use_ema else None,
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
@@ -531,6 +538,9 @@ class Trainer:
                                 loss=step_metrics.get("train/loss", None),
                             )
                         self.workspace.log(step_metrics, step=global_step)
+
+                if self.max_train_steps is not None and (micro_step + 1) >= self.max_train_steps:
+                    break
 
             self.model.eval()
 

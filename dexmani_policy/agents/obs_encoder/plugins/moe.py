@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ExpertMLP(nn.Module):
-    def __init__(self, dim, hidden_dim, out_dim=None, num_layers=2, activation=nn.GELU):
+    def __init__(self, dim, hidden_dim, out_dim=None, num_layers=2,
+                 activation=nn.GELU):
         super().__init__()
         out_dim = dim if out_dim is None else out_dim
 
@@ -38,6 +39,7 @@ class MoE(nn.Module):
         num_layers=2,
         lambda_load=0.1,
         beta_entropy=0.01,
+        aux_loss_weight=1.0,
         activation=nn.GELU,
         use_boost=False,
         boost_start_epoch=0,
@@ -57,6 +59,7 @@ class MoE(nn.Module):
         self.top_k = top_k
         self.lambda_load = lambda_load
         self.beta_entropy = beta_entropy
+        self.aux_loss_weight = aux_loss_weight
 
         # ---- Boost state ----
         self.use_boost = use_boost
@@ -182,12 +185,15 @@ class MoE(nn.Module):
 
         load_loss = E * torch.sum(f_i * p_i)
         entropy_loss = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).mean()
-        loss = self.lambda_load * load_loss + self.beta_entropy * entropy_loss
+        loss = self.aux_loss_weight * (self.lambda_load * load_loss + self.beta_entropy * entropy_loss)
 
         return {
             "loss": loss,
             "load_balance_loss": load_loss,
             "entropy_loss": entropy_loss,
+            "lambda_load": self.lambda_load,
+            "beta_entropy": self.beta_entropy,
+            "aux_loss_weight": self.aux_loss_weight,
             "router_probs": probs,
             "dispatch": probs.argmax(dim=-1),
             "f_i": f_i,

@@ -2,29 +2,42 @@ import warnings
 
 import torch
 import torch.nn as nn
+from torchvision.transforms import v2
+
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.plugins.moe import MoE
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
+from dexmani_policy.agents.obs_encoder.rgb import ResNet, R3M
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 
 class MoEObsEncoder(nn.Module):
     def __init__(
         self,
-        encoder_type: str,
-        pc_dim: int,
-        pc_out_dim: int,
-        state_dim: int,
-        num_points: int,
-        n_obs_steps: int,
+        # PC params (optional — when rgb_backbone_name is not provided)
+        encoder_type: str = None,
+        pc_dim: int = None,
+        pc_out_dim: int = None,
+        num_points: int = None,
+        fps_random_config: dict = None,
+        # RGB params (optional — exclusive with PC params)
+        rgb_backbone_name: str = None,
+        rgb_backbone_config: dict = None,
+        # Common params
+        state_dim: int = None,
+        n_obs_steps: int = 2,
         state_out_dim: int = 64,
+        # MoE params
         num_experts: int = 16,
         top_k: int = 2,
-        moe_hidden_dim: int = 256,
+        moe_hidden_dim: int = None,
+        moe_hidden_ratio: float = None,
         moe_out_dim: int = None,
         moe_num_layers: int = 2,
         lambda_load: float = 0.1,
         beta_entropy: float = 0.01,
+        aux_loss_weight: float = 1.0,
         use_boost: bool = False,
         boost_start_epoch: int = 0,
         boost_interval: int = 100,
@@ -33,22 +46,54 @@ class MoEObsEncoder(nn.Module):
         use_enhanced_gate: bool = False,
         gate_hidden_dim: int = None,
         gate_dropout: float = 0.0,
-        fps_random_config: dict = None,
+        activation: str = "gelu",
     ):
         super().__init__()
-        self.pc_encoder = build_pc_global_encoder(
-            encoder_type, pc_dim, config={
-                'output_channels': pc_out_dim,
-                'fps_random_config': fps_random_config,
-            }
-        )
+        self.use_rgb = rgb_backbone_name is not None
+
+        if self.use_rgb:
+            # ── RGB backbone (mirrors DPObsEncoder) ──
+            cfg = dict(rgb_backbone_config or {})
+            self.crop_ratio = cfg.pop('crop_ratio', None)
+            self.backbone, self.image_processor = build_backbone(
+                rgb_backbone_name, config=cfg)
+            backbone_out_dim = self.backbone.out_dim
+        else:
+            # ── PC backbone (existing logic) ──
+            if encoder_type is None:
+                raise ValueError(
+                    "MoEObsEncoder: either rgb_backbone_name or encoder_type "
+                    "must be provided.")
+            self.pc_encoder = build_pc_global_encoder(
+                encoder_type, pc_dim, config={
+                    'output_channels': pc_out_dim,
+                    'fps_random_config': fps_random_config or {},
+                }
+            )
+            self.num_points = num_points
+            self.use_coord_only = (pc_dim == 3)
+            self.fps_random_config = fps_random_config or {}
+            backbone_out_dim = self.pc_encoder.out_dim
+
+        # ── Common: state MLP + projection + MoE ──
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
-        in_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+        in_dim = backbone_out_dim + self.state_mlp.out_dim
         # Align with official MoE-DP: Linear projection before MoE so the
         # encoder output can be mapped to a fixed embedding dimension
         # (analogous to cond_obs_emb in the official code).
         proj_dim = moe_out_dim if moe_out_dim is not None else in_dim
+        # Derive hidden_dim from ratio (like Transformer MLP ratio) when not
+        # explicitly set.  Keeps configs DRY: change the backbone and
+        # hidden_dim scales automatically.
+        if moe_hidden_dim is None:
+            if moe_hidden_ratio is not None:
+                moe_hidden_dim = int(proj_dim * moe_hidden_ratio)
+            else:
+                moe_hidden_dim = 256  # legacy default
         self.obs_proj = nn.Linear(in_dim, proj_dim)
+
+        _activation = {'gelu': nn.GELU, 'relu': nn.ReLU, 'silu': nn.SiLU}.get(
+            activation, nn.GELU)
         self.moe = MoE(
             dim=proj_dim,
             num_experts=num_experts,
@@ -58,6 +103,7 @@ class MoEObsEncoder(nn.Module):
             num_layers=moe_num_layers,
             lambda_load=lambda_load,
             beta_entropy=beta_entropy,
+            aux_loss_weight=aux_loss_weight,
             use_boost=use_boost,
             boost_start_epoch=boost_start_epoch,
             boost_interval=boost_interval,
@@ -66,20 +112,40 @@ class MoEObsEncoder(nn.Module):
             use_enhanced_gate=use_enhanced_gate,
             gate_hidden_dim=gate_hidden_dim,
             gate_dropout=gate_dropout,
+            activation=_activation,
         )
-        self.num_points = num_points
-        self.use_coord_only = (pc_dim == 3)
         self.n_obs_steps = n_obs_steps
-        self.fps_random_config = fps_random_config or {}
         self.out_dim = self.moe.out_dim
 
     def encode_feat(self, obs: dict) -> torch.Tensor:
-        pc = preprocess_point_cloud(obs['point_cloud'], self.num_points,
-                                     self.use_coord_only, self.fps_random_config)
-        return torch.cat([
-            self.pc_encoder(pc)['global_token'],
-            self.state_mlp(obs['joint_state']),
-        ], dim=-1)
+        if self.use_rgb:
+            # ── RGB path (mirrors DPObsEncoder.forward) ──
+            rgb = obs['rgb']  # (B*T, 3, H, W) float32 [0,1]
+            if self.training and self.crop_ratio is not None:
+                h, w = rgb.shape[-2:]
+                crop_size = int(min(h, w) * self.crop_ratio)
+                rgb = v2.RandomCrop(size=crop_size)(rgb)
+            rgb = self.image_processor.process_images(rgb)['image']
+
+            # channels_last: for CNN backbones (ResNet/R3M), convert to NHWC
+            # layout to leverage cuDNN implicit NHWC convolution kernels.
+            # ViT backbones (DINO/CLIP/SigLIP) use attention — skip.
+            if isinstance(self.backbone, (ResNet, R3M)):
+                rgb = rgb.to(memory_format=torch.channels_last)
+
+            return torch.cat([
+                self.backbone(rgb)['global_token'],
+                self.state_mlp(obs['joint_state']),
+            ], dim=-1)
+        else:
+            # ── PC path (existing logic) ──
+            pc = preprocess_point_cloud(
+                obs['point_cloud'], self.num_points,
+                self.use_coord_only, self.fps_random_config)
+            return torch.cat([
+                self.pc_encoder(pc)['global_token'],
+                self.state_mlp(obs['joint_state']),
+            ], dim=-1)
 
     def forward(self, obs: dict, return_aux=True, override_idx=None):
         z = self.encode_feat(obs)
@@ -97,19 +163,28 @@ class MoEAgent(UNetDiffusionAgent):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        encoder_type: str,
-        pc_dim: int,
-        pc_out_dim: int,
         state_dim: int,
-        num_points: int,
+        # PC params (optional — used when rgb_backbone_name is None)
+        encoder_type: str = None,
+        pc_dim: int = None,
+        pc_out_dim: int = None,
+        num_points: int = None,
+        fps_random_config: dict = None,
+        # RGB params (optional — exclusive with PC params)
+        rgb_backbone_name: str = None,
+        rgb_backbone_config: dict = None,
+        # Common
         state_out_dim: int = 64,
+        # MoE params
         num_experts: int = 16,
         top_k: int = 2,
-        moe_hidden_dim: int = 256,
+        moe_hidden_dim: int = None,
+        moe_hidden_ratio: float = None,
         moe_out_dim: int = None,
         moe_num_layers: int = 2,
         lambda_load: float = 0.1,
         beta_entropy: float = 0.01,
+        aux_loss_weight: float = 1.0,
         use_boost: bool = False,
         boost_start_epoch: int = 0,
         boost_interval: int = 100,
@@ -118,15 +193,29 @@ class MoEAgent(UNetDiffusionAgent):
         use_enhanced_gate: bool = False,
         gate_hidden_dim: int = None,
         gate_dropout: float = 0.0,
-        fps_random_config: dict = None,
+        activation: str = "gelu",
         **kwargs,
     ):
         obs_encoder = MoEObsEncoder(
-            encoder_type, pc_dim, pc_out_dim, state_dim, num_points,
-            n_obs_steps, state_out_dim,
-            num_experts=num_experts, top_k=top_k, moe_hidden_dim=moe_hidden_dim,
-            moe_out_dim=moe_out_dim, moe_num_layers=moe_num_layers,
-            lambda_load=lambda_load, beta_entropy=beta_entropy,
+            encoder_type=encoder_type,
+            pc_dim=pc_dim,
+            pc_out_dim=pc_out_dim,
+            state_dim=state_dim,
+            num_points=num_points,
+            n_obs_steps=n_obs_steps,
+            fps_random_config=fps_random_config,
+            rgb_backbone_name=rgb_backbone_name,
+            rgb_backbone_config=rgb_backbone_config,
+            state_out_dim=state_out_dim,
+            num_experts=num_experts,
+            top_k=top_k,
+            moe_hidden_dim=moe_hidden_dim,
+            moe_hidden_ratio=moe_hidden_ratio,
+            moe_out_dim=moe_out_dim,
+            moe_num_layers=moe_num_layers,
+            lambda_load=lambda_load,
+            beta_entropy=beta_entropy,
+            aux_loss_weight=aux_loss_weight,
             use_boost=use_boost,
             boost_start_epoch=boost_start_epoch,
             boost_interval=boost_interval,
@@ -135,7 +224,7 @@ class MoEAgent(UNetDiffusionAgent):
             use_enhanced_gate=use_enhanced_gate,
             gate_hidden_dim=gate_hidden_dim,
             gate_dropout=gate_dropout,
-            fps_random_config=fps_random_config,
+            activation=activation,
         )
         super().__init__(
             obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
@@ -186,6 +275,8 @@ def example():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     B, T, H, A, N = 2, 2, 16, 19, 256
 
+    # ── PC smoke test (backward compatible) ──
+    print('=== MoEAgent PC smoke test ===')
     agent = MoEAgent(
         horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
         encoder_type='idp3', pc_dim=3, pc_out_dim=64, state_dim=A,
@@ -201,7 +292,6 @@ def example():
     }
     action = torch.randn(B, H, A, device=device)
 
-    print('=== MoEAgent smoke test ===')
     print(f'obs point_cloud: {obs["point_cloud"].shape}')
     print(f'obs joint_state: {obs["joint_state"].shape}')
     print(f'action:          {action.shape}')
@@ -288,7 +378,56 @@ def example():
 
     feat, aux_gate = agent_gate.obs_encoder(obs)
     print(f'enhanced gate cond: {feat.shape}, aux loss: {aux_gate["loss"].item():.4f}')
-    print('=== PASSED ===')
+    print('=== PC PASSED ===')
+
+    # ── RGB smoke test ──
+    print('\n=== MoEAgent RGB smoke test ===')
+    agent_rgb = MoEAgent(
+        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
+        rgb_backbone_name='resnet',
+        rgb_backbone_config={'model_name': 'resnet18', 'tune_mode': 'full',
+                             'norm_mode': 'group_norm'},
+        state_dim=A,
+        num_experts=4, top_k=2, moe_hidden_dim=64, moe_num_layers=1,
+        down_dims=[64, 128], diffusion_step_embed_dim=64,
+        num_training_steps=10, num_inference_steps=3,
+    ).to(device)
+
+    obs_rgb = {
+        'rgb': torch.rand(B * T, 3, 224, 224, device=device),
+        'joint_state': torch.randn(B * T, A, device=device),
+    }
+    action_rgb = torch.randn(B, H, A, device=device)
+
+    print(f'obs rgb:         {obs_rgb["rgb"].shape}')
+    print(f'obs joint_state: {obs_rgb["joint_state"].shape}')
+    print(f'action:          {action_rgb.shape}')
+
+    cond_rgb, aux_rgb = agent_rgb.obs_encoder(obs_rgb)
+    print(f'cond:            {cond_rgb.shape}')
+    print(f'aux loss:        {aux_rgb["loss"].item():.4f}')
+
+    normalizer_rgb = LinearNormalizer()
+    normalizer_rgb.fit({'action': action_rgb, 'joint_state': obs_rgb['joint_state'].reshape(B, T, A)}, mode='limits')
+    agent_rgb.load_normalizer_from_dataset(normalizer_rgb)
+
+    batch_rgb = {
+        'obs': {
+            'rgb': obs_rgb['rgb'].reshape(B, T, 3, 224, 224),
+            'joint_state': obs_rgb['joint_state'].reshape(B, T, A),
+        },
+        'action': action_rgb,
+    }
+    loss_rgb, loss_dict_rgb = agent_rgb.compute_loss(batch_rgb)
+    print(f'loss:            {loss_rgb.item():.4f}  keys={list(loss_dict_rgb.keys())}')
+
+    result_rgb = agent_rgb.predict_action({
+        'rgb': obs_rgb['rgb'].reshape(B, T, 3, 224, 224),
+        'joint_state': obs_rgb['joint_state'].reshape(B, T, A),
+    })
+    print(f'pred_action:     {result_rgb["pred_action"].shape}')
+    print(f'control_action:  {result_rgb["control_action"].shape}')
+    print('=== RGB PASSED ===')
 
 if __name__ == '__main__':
     example()

@@ -104,7 +104,6 @@ class SimEvaluator:
         self.agent.eval()
 
         eval_run_dir = self.create_eval_run_dir()
-        video_fps = int(getattr(self.env_runner, 'env_video_fps', 15))
 
         if eval_metadata is not None:
             _save_json(eval_metadata, eval_run_dir / "eval_config.json")
@@ -131,6 +130,10 @@ class SimEvaluator:
                 eval_episodes=eval_episodes,
                 video_save_dir=case_dir,
             )
+
+            # env_video_fps is auto-detected during run() above; read it here
+            # so it reflects the actual environment setting.
+            video_fps = int(self.env_runner.env_video_fps or 15)
 
             # Videos are already saved to disk by the runner when video_save_dir is set.
             # Only handle the legacy path (raw arrays) if someone passes video_save_dir=None.

@@ -19,7 +19,7 @@ action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 # ── Dataloader ──
 dataloader:
-  batch_size: 256
+  batch_size: 128
   shuffle: true
   num_workers: 8
   pin_memory: true
@@ -28,7 +28,7 @@ dataloader:
   drop_last: false
 
 val_dataloader:
-  batch_size: 256
+  batch_size: 128
   shuffle: false
   num_workers: 4
   pin_memory: true
@@ -46,7 +46,7 @@ dataset:
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.05
-  max_train_episodes: null
+  max_train_episodes: 80
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
@@ -93,7 +93,7 @@ agent:
   prediction_type: sample
 
   modality_dropout_probs:
-    joint_state: 0.2
+    joint_state: 0.0
 
 # ── Optimizer ──
 optimizer:

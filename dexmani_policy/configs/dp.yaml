@@ -19,22 +19,22 @@ action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 # ── Dataloader ──
 dataloader:
-  batch_size: 128
+  batch_size: 64
   shuffle: true
   num_workers: 8
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
-  drop_last: false
+  drop_last: true
 
 val_dataloader:
-  batch_size: 128
+  batch_size: 64
   shuffle: false
   num_workers: 8
   pin_memory: true
   persistent_workers: false
   prefetch_factor: 2
-  drop_last: false
+  drop_last: true
 
 # ── Dataset ──
 dataset:
@@ -45,8 +45,8 @@ dataset:
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
-  val_ratio: 0.05
-  max_train_episodes: null
+  val_ratio: 0.1
+  max_train_episodes: 80
   sensor_modalities: ["joint_state", "rgb"]
   obs_horizon: ${n_obs_steps}
   rgb_preprocess_size: [240, 240]
@@ -55,7 +55,7 @@ dataset:
   # GPU preprocessing: no CPU resize/crop — encoder handles spatial transforms on GPU
   # Conservative RGB augmentation — 25% trigger rate, mild magnitudes.
   # Reference: DexUMI uses brightness=0.6 for challenging lighting; we stay lower.
-  rgb_aug:
+  rgb_color_aug:
     _target_: dexmani_policy.datasets.augmentation.ImageAug
     brightness: 0.3
     contrast: 0.2
@@ -79,14 +79,15 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  # Vision backbone (choose one)
-  rgb_backbone_name: dino
-  rgb_backbone_config:
-    model_name: small               # facebook/dinov2-small, 384d
-    tune_mode: lora
-    global_token_type: avg
-    image_size: [224, 224]
-    crop_ratio: 0.95
+
+  # rgb_backbone_name: dino
+  # rgb_backbone_config:
+  #   model_name: small               # facebook/dinov2-small, 384d
+  #   tune_mode: lora
+  #   global_token_type: avg
+  #   image_size: [224, 224]
+  #   crop_ratio: 0.95
+
   # rgb_backbone_name: resnet
   # rgb_backbone_config:
   #   model_name: resnet18
@@ -94,13 +95,14 @@ agent:
   #   tune_mode: full
   #   norm_mode: group_norm
   #   image_size: [224, 224]
-  # rgb_backbone_name: r3m
-  # rgb_backbone_config:
-  #   model_name: resnet18          # 512d | resnet34(512d) | resnet50(2048d)
-  #   tune_mode: full
-  #   norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
-  #   global_token_type: avg
-  #   image_size: [224, 224]
+
+  rgb_backbone_name: r3m
+  rgb_backbone_config:
+    model_name: resnet18          # 512d | resnet34(512d) | resnet50(2048d)
+    tune_mode: full
+    norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
+    global_token_type: avg
+    image_size: [224, 224]
 
   state_dim: 19
   modality_dropout_probs:
@@ -123,7 +125,7 @@ optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
   betas: [0.95, 0.999]
-  obs_lr: 2.5e-4                      # LoRA fine-tuning needs higher LR
+  obs_lr: 1.0e-4                      # LoRA fine-tuning needs higher LR
   obs_weight_decay: 1.0e-6
 
 # ── EMA ──
@@ -147,11 +149,11 @@ training:
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   loop:
-    num_epochs: 1000
+    num_epochs: 600
     log_interval_steps: 50
     val_interval_epochs: 25
-    eval_interval_epochs: 250  # uniform across all policies; final epoch always evaluated
-    sample_interval_epochs: 5
+    eval_interval_epochs: 150
+    sample_interval_epochs: 10
     gradient_accumulation_steps: 1
 
 # ── Workspace ──

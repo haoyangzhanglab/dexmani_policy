@@ -32,9 +32,9 @@ dataloader:
   drop_last: false
 
 val_dataloader:
-  batch_size: 8
+  batch_size: 32
   shuffle: false
-  num_workers: 2
+  num_workers: 4
   pin_memory: true
   persistent_workers: false
   prefetch_factor: 2
@@ -50,7 +50,7 @@ dataset:
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.05
-  max_train_episodes: null
+  max_train_episodes: 80
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
@@ -107,7 +107,7 @@ agent:
   attention_downsample_rate: 2
 
   modality_dropout_probs:
-    joint_state: 0.2
+    joint_state: 0.0
 
   # Diffusion
   num_training_steps: 100
@@ -143,10 +143,10 @@ training:
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   loop:
-    num_epochs: 1000
+    num_epochs: 300
     log_interval_steps: 50
     val_interval_epochs: 25
-    eval_interval_epochs: 250
+    eval_interval_epochs: 50
     sample_interval_epochs: 5
     gradient_accumulation_steps: 1
 

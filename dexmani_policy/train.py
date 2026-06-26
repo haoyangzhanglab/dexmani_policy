@@ -17,7 +17,8 @@ from dexmani_policy.training.build_utils import (
     validate_config,
     compute_num_training_steps,
 )
-from dexmani_policy.training.trainer import Trainer
+from omegaconf import OmegaConf
+from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
 
@@ -102,7 +103,7 @@ def main(cfg):
         val_loader=comp.val_loader,
         env_runner=comp.env_runner,
         workspace=comp.workspace,
-        train_loop_cfg=cfg.training.loop,
+        train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         max_grad_norm=cfg.training.get('max_grad_norm', 1.0),
         use_bfloat16=cfg.training.get('use_bfloat16', False),

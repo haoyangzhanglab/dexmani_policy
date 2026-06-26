@@ -58,7 +58,7 @@ class R3DObsEncoder(nn.Module):
         if pc.dtype != torch.float32:
             pc = pc.float()
 
-        patch_tokens, pc_pe = self.pc_encoder(pc, eval=not self.training)
+        patch_tokens, pc_pe = self.pc_encoder(pc, inference_mode=not self.training)
 
         state_emb = self.state_mlp(state)
         state_emb = state_emb.unsqueeze(1).expand(

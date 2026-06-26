@@ -47,7 +47,7 @@ dataset:
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.05
-  max_train_episodes: null
+  max_train_episodes: 80
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
@@ -117,7 +117,7 @@ agent:
   target_t_sample_mode: relative
 
   modality_dropout_probs:
-    joint_state: 0.2                # 20% state dropout — forces reliance on point cloud
+    joint_state: 0.0                # 20% state dropout — forces reliance on point cloud
 
 # ── Optimizer ──
 optimizer:
