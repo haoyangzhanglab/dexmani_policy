@@ -182,19 +182,12 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 20        # RGB-based policies: 20; PC-based (dp3/r3d/moe): 25
+  default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
-    # ── Domain randomization (convenience switches) ──
-    # texture_random: when true, enables scene texture + per-episode skybox +
-    #   light randomization + object texture + camera pose perturbation.
-    #   Does NOT enable crazy_light (per-step color flashing).
     texture_random: false
-    # instance_random: when true, enables model_id randomization.
     instance_random: true
-    # table_random: when true, enables table height randomization
-    #   (randomize_table_height with range [-0.05, 0.05]).
     table_random: true
 
 # ── Eval ──

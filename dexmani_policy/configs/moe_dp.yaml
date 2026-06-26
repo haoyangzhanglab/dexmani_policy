@@ -46,7 +46,7 @@ dataset:
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
-  val_ratio: 0.05
+  val_ratio: 0.1
   max_train_episodes: 80
   sensor_modalities: ["joint_state", "rgb"]
   obs_horizon: ${n_obs_steps}
@@ -118,14 +118,14 @@ agent:
 
   # Diffusion backbone
   diffusion_step_embed_dim: 128
-  down_dims: [512, 1024, 2048]          # official: [512, 1024, 2048]
+  down_dims: [256, 512, 1024]         
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: true
 
   num_training_steps: 100
   num_inference_steps: 100              # official: full 100-step DDPM inference
-  prediction_type: epsilon
+  prediction_type: sample
 
   modality_dropout_probs:
     joint_state: 0.0
@@ -157,13 +157,13 @@ training:
   use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  max_grad_norm: 0                      # disabled (official does not clip gradients)
+  max_grad_norm: 1.0                      # disabled (official does not clip gradients)
   loop:
-    num_epochs: 500                     # official: 50000 // n_demo = 500
+    num_epochs: 600                     # official: 50000 // n_demo = 500
     log_interval_steps: 50
     val_interval_epochs: 25
-    eval_interval_epochs: 200
-    sample_interval_epochs: 5
+    eval_interval_epochs: 150
+    sample_interval_epochs: 10
     gradient_accumulation_steps: 1
 
 # ── Workspace ──
@@ -192,7 +192,7 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 20            # RGB-based policies: 20; PC-based: 25
+  default_eval_episodes: 25           
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
@@ -207,7 +207,7 @@ eval:
   offline:
     ckpt_tag_or_path: best
     eval_episodes: 100
-    denoise_timesteps_list: [10, 100]
+    denoise_timesteps_list: [10]
     use_ema_for_eval: true
 
 # ── Hydra ──
