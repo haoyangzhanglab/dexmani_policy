@@ -1,4 +1,6 @@
-from dexmani_policy.common.normalizer import LinearNormalizer
+import numpy as np
+
+from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_action_normalizer
 from dexmani_policy.datasets.base_dataset import BaseDataset
 
 class PCDataset(BaseDataset):
@@ -10,11 +12,31 @@ class PCDataset(BaseDataset):
 
     def get_normalizer(self, mode='limits'):
         normalizer = LinearNormalizer()
-        normalizer.fit(data={
-            'joint_state': self.replay_buffer['joint_state'],
-            'action': self.replay_buffer[self.action_key],
-            'point_cloud': self.replay_buffer['point_cloud'],
-        }, last_n_dims=1, mode=mode)
+
+        if self.use_aux_ee:
+            # EE aux loss: wrist pose = action_ee[..., :9] = pos(3) + rot6d(6)
+            parts = [self.replay_buffer['action']]
+            parts.append(self.replay_buffer['action_ee'][..., :9])
+            action = np.concatenate(parts, axis=-1)
+            normalizer.fit(data={
+                'joint_state': self.replay_buffer['joint_state'],
+                'action': action,
+                'point_cloud': self.replay_buffer['point_cloud'],
+            }, last_n_dims=1, mode=mode)
+        elif self.action_key == 'action_ee':
+            # EE-space action: use mixed normalizer (rot6d identity-norm, xyz/hand limits)
+            normalizer.fit(data={
+                'joint_state': self.replay_buffer['joint_state'],
+                'point_cloud': self.replay_buffer['point_cloud'],
+            }, last_n_dims=1, mode=mode)
+            normalizer['action'] = build_mixed_action_normalizer(
+                self.replay_buffer['action_ee'])
+        else:
+            normalizer.fit(data={
+                'joint_state': self.replay_buffer['joint_state'],
+                'action': self.replay_buffer[self.action_key],
+                'point_cloud': self.replay_buffer['point_cloud'],
+            }, last_n_dims=1, mode=mode)
         return normalizer
 
 def example(zarr_path):
@@ -43,8 +65,7 @@ def example(zarr_path):
         augmentation_cfg={
             'pc': {
                 'color': {'brightness': 0.2, 'prob': 0.8},
-                'coord_noise': {'noise_std': 0.002, 'ratio': 0.3, 'prob': 0.5},
-                'dropout': {'dropout_ratio': 0.1, 'prob': 0.3},
+                'coord_noise': {'noise_std': 0.002, 'prob': 0.5},
             },
         },
     )

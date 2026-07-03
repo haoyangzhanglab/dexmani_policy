@@ -3,6 +3,11 @@
 # Decoder:  OneWayTransformer (cross-attention) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
 # Note:     pc_dim=6 (color), use_compile=true (OneWayTransformer backbone only)
+#
+# Auxiliary loss: use_aux_ee predicts wrist pose (pos3+rot6d6=9dim) from
+# action_ee[:9] alongside the primary joint action.  Matches official
+# R3D-Policy use_target_ee design.
+# Control always uses joint-only (19-dim) at inference.
 
 policy_name: r3d
 
@@ -16,7 +21,10 @@ horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 action_key: action                    # action | action_ee
-action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
+use_aux_ee: false                     # wrist pose auxiliary loss (requires action_key='action')
+joint_dim: 19                         # joint action dims
+ee_dim: 9                             # wrist pose dims: pos(3) + rot6d(6), from action_ee[:9]
+action_dim: ${eval:'${joint_dim} + ${ee_dim} if ${use_aux_ee} else (21 if ${eq:${action_key},action_ee} else ${joint_dim})'}
 
 # ── Dataloader ──
 # NOTE: R3D ViT encoder is memory-intensive (512 patch tokens × N samples).
@@ -44,6 +52,7 @@ val_dataloader:
 dataset:
   _target_: dexmani_policy.datasets.pc_dataset.PCDataset
   action_key: ${action_key}
+  use_aux_ee: ${use_aux_ee}
   zarr_path: ${zarr_path}
   seed: ${training.seed}
   horizon: ${horizon}
@@ -54,17 +63,18 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # ⚠️ PC augmentation defaults — synced across all PC-based policy configs.
-  # R3D data augmentation (paper Section 3.2)
+  # Data augmentation aligned to official R3D-Policy (r3d_maniskill.yaml).
+  # - XYZ noise: all points, always (prob=1.0), std=0.002, clip=2σ.
+  # - Color jitter: additive brightness + multiplicative contrast/saturation/hue, always.
+  # - RGB noise: disabled (official uses pc_rgb_noise_std=0).
+  # - Dataset-level point dropout: removed (official only does encoder-level random_point_dropout).
   # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
   augmentation_cfg:
     pc:
-      coord_noise: {noise_std: 0.002, ratio: 0.3, prob: 0.5}
-      dropout:     {dropout_ratio: 0.1, prob: 0.3}
-      color:       {brightness: 0.3, contrast: 0.4, saturation: 0.5, hue: 0.08, prob: 0.2}
-      color_noise: {noise_std: 0.01, prob: 0.2}
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
     state:
-      noise:       {noise_std: 0.005, prob: 0.5}
+      noise:       {noise_std: 0.0002, prob: 1.0}
 
 # ── Agent ──
 agent:
@@ -73,11 +83,15 @@ agent:
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
+  use_aux_ee: ${use_aux_ee}
+  joint_dim: ${joint_dim}
+  ee_dim: ${ee_dim}
+  aux_loss_weight: 1.0              # auxiliary loss weight (matches official R3D-Policy)
 
   # Uni3D encoder
   pc_dim: 6
   num_points: 1024
-  state_dim: ${action_dim}
+  state_dim: 19                      # joint_state from zarr is always 19-dim
   state_out_dim: 64
 
   pc_encoder_config:
@@ -87,7 +101,7 @@ agent:
     group_size: 32
     pc_in_channels: 6
     patch_dropout: 0.0
-    drop_path_rate: 0.0
+    drop_path_rate: 0.2
     feature_mode: pointsam
     use_pretrained_weights: true
     pretrained_weights_path: data/pretrained/uni3d

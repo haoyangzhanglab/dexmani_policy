@@ -50,16 +50,14 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # ⚠️ PC augmentation defaults — synced across all PC-based policy configs.
+  # Data augmentation aligned to official R3D-Policy.
   # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
   augmentation_cfg:
     pc:
-      coord_noise: {noise_std: 0.002, ratio: 0.3, prob: 0.5}
-      dropout:     {dropout_ratio: 0.1, prob: 0.3}
-      color:       {brightness: 0.3, contrast: 0.4, saturation: 0.5, hue: 0.08, prob: 0.2}
-      color_noise: {noise_std: 0.01, prob: 0.2}
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
     state:
-      noise:       {noise_std: 0.005, prob: 0.5}
+      noise:       {noise_std: 0.0002, prob: 1.0}
 
 # ── Agent ──
 agent:

@@ -1,7 +1,7 @@
 """Hydra config resolvers and validation shared by train / eval entry points."""
 
 import warnings
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 
 def register_resolvers():
     with warnings.catch_warnings():
@@ -37,7 +37,7 @@ def validate_action_key_consistency(cfg) -> None:
     prevents silent misconfiguration from CLI overrides.
     """
     env_kwargs = cfg.get('env_runner', {}).get('env_kwargs', {})
-    if isinstance(env_kwargs, dict):
+    if isinstance(env_kwargs, (dict, DictConfig)):
         actual_control = env_kwargs.get('control_mode', 'joint')
     else:
         actual_control = 'joint'

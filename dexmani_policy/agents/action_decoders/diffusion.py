@@ -28,10 +28,12 @@ class Diffusion(nn.Module):
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
+        aux_loss_weight: float = 0.1,
     ) -> None:
         super().__init__()
 
         self.model = model
+        self.aux_loss_weight = aux_loss_weight
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_training_steps,
             beta_start=0.0001,
@@ -47,7 +49,9 @@ class Diffusion(nn.Module):
         self._cached_alphas_device = None
 
     def compute_loss(
-        self, cond: torch.Tensor, actions: torch.Tensor, **kwargs
+        self, cond: torch.Tensor, actions: torch.Tensor,
+        dim_groups: dict[str, tuple[int, int]] | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B = actions.shape[0]
 
@@ -81,9 +85,30 @@ class Diffusion(nn.Module):
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
 
-        loss = F.mse_loss(pred, target)
-        loss_dict = {"loss_action": loss, "loss": loss}
+        if dim_groups is not None:
+            # Per-dimension-group MSE losses — each group uses the per-element
+            # MSE (F.mse_loss default mean over B×H×D elements), matching the
+            # official R3D-Policy behaviour (dp3.py:415-437).
+            # Auxiliary groups (all except 'joint') are down-weighted by
+            # ``aux_loss_weight`` (default 0.1).  Set to 1.0 for exact
+            # R3D-Policy parity.
+            group_losses = []
+            loss_dict = {}
+            for name, (start, end) in dim_groups.items():
+                g_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
+                # Log the raw per-element MSE for monitoring — comparable
+                # across experiments regardless of aux_loss_weight.
+                loss_dict[f'loss_{name}'] = g_loss.detach()
+                if name != 'joint':
+                    g_loss = g_loss * self.aux_loss_weight
+                group_losses.append(g_loss)
+            loss = sum(group_losses)
+            loss_dict['loss_action'] = loss.detach()
+        else:
+            loss = F.mse_loss(pred, target)
+            loss_dict = {"loss_action": loss.detach()}
 
+        loss_dict["loss"] = loss.detach()
         return loss, loss_dict
 
     @torch.no_grad()

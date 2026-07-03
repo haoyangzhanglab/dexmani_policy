@@ -173,6 +173,8 @@ class DiT_Diffusion(nn.Module):
             n_layers: int = 12,
             mlp_ratio: float = 4.0,
             qkv_bias: bool = True,
+            attn_drop: float = 0.1,
+            proj_drop: float = 0.1,
     ):
         super().__init__()
 
@@ -186,7 +188,9 @@ class DiT_Diffusion(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, horizon, n_emb))
 
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size=n_emb, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias) for _ in range(n_layers)
+            DiTBlock(hidden_size=n_emb, num_heads=num_heads, mlp_ratio=mlp_ratio,
+                     qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=proj_drop)
+            for _ in range(n_layers)
         ])
         self.final_layer = FinalLayer(hidden_size=n_emb, output_dim=action_dim)
 

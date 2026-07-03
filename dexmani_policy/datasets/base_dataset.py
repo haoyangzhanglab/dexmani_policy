@@ -46,6 +46,7 @@ class BaseDataset(torch.utils.data.Dataset):
         sensor_modalities: list[str] | None = None,
         augmentation_cfg: dict | None = None,
         action_key: str = 'action',
+        use_aux_ee: bool = False,
         obs_horizon: Optional[int] = None,
         rgb_preprocess_size: Optional[Tuple[int, int]] = None,
         rgb_random_crop_size: Optional[Tuple[int, int]] = None,
@@ -58,6 +59,7 @@ class BaseDataset(torch.utils.data.Dataset):
             sensor_modalities = self.DEFAULT_MODALITIES
 
         self.action_key = action_key
+        self.use_aux_ee = use_aux_ee
         self.obs_horizon = obs_horizon
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size
@@ -65,9 +67,14 @@ class BaseDataset(torch.utils.data.Dataset):
         self.rgb_keep_uint8 = rgb_keep_uint8
         self._is_val = False  # validation set flag — overridden by get_validation_dataset()
 
+        # When EE auxiliary loss is enabled, load action_ee for wrist pose (pos3+rot6d6).
+        load_keys = sensor_modalities + [action_key]
+        if use_aux_ee:
+            load_keys = load_keys + ['action_ee']
+
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
-            keys=sensor_modalities + [action_key],
+            keys=load_keys,
         )
 
         self.sensor_modalities = sensor_modalities
@@ -120,12 +127,18 @@ class BaseDataset(torch.utils.data.Dataset):
         return len(self.sampler)
 
     def sample_to_data(self, sample):
+        # Build action by concatenating enabled auxiliary modalities.
+        # EE aux loss: wrist pose = action_ee[..., :9] = pos(3) + rot6d(6).
+        parts = [sample[self.action_key]]
+        if self.use_aux_ee:
+            parts.append(sample['action_ee'][..., :9])
+        action = np.concatenate(parts, axis=-1) if len(parts) > 1 else parts[0]
         return {
             'obs': {
                 m: sample[m][:self.obs_horizon] if self.obs_horizon else sample[m]
                 for m in self.sensor_modalities
             },
-            'action': sample[self.action_key],
+            'action': action,
         }
 
     def _preprocess_rgb_cpu(self, rgb_np):

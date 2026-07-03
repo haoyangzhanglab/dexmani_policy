@@ -1,7 +1,6 @@
 """Shared build functions for training/eval entry points."""
 
 import hydra
-from termcolor import cprint
 
 from dexmani_policy.common.config import normalize_action_key, validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import print_param_count
@@ -122,6 +121,26 @@ def _validate_augmentation_consistency(cfg):
     if pc_color_noise is not None:
         assert pc_dim >= 6, f"PC color_noise augmentation: {missing_rgb}"
 
+def _validate_aux_config(cfg):
+    """Validate use_aux_ee consistency.
+
+    When enabled, action_dim = joint_dim + ee_dim = 19 + 9 = 28
+    (wrist pose: pos3 + rot6d6 from action_ee[:9]).
+    """
+    use_aux_ee = cfg.get('use_aux_ee', False)
+
+    if use_aux_ee:
+        if cfg.get('action_key', 'action') != 'action':
+            raise ValueError(
+                f"use_aux_ee=true requires action_key='action' (joint primary), "
+                f"got action_key='{cfg.action_key}'. "
+                f"The EE wrist action is auxiliary — change action_key to 'action'."
+            )
+        if cfg.get('joint_dim') is None or cfg.get('ee_dim') is None:
+            raise ValueError(
+                "use_aux_ee=true requires joint_dim and ee_dim in config."
+            )
+
 def validate_config(cfg):
     """Validate common training config constraints.
 
@@ -148,6 +167,7 @@ def validate_config(cfg):
 
     _validate_moe_config(cfg)
     _validate_augmentation_consistency(cfg)
+    _validate_aux_config(cfg)
     validate_action_key_consistency(cfg)
 
-    cprint("Config validation passed", "green")
+    print("Config validation passed")

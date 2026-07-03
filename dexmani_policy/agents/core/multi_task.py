@@ -34,6 +34,8 @@ class MultiTaskAgent(BaseAgent):
         n_layers: int = 6,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
+        attn_drop: float = 0.1,
+        proj_drop: float = 0.1,
         # action decoder type
         action_decoder_type: str = "diffusion",  # "diffusion" | "flowmatch"
         # action decoder (Diffusion)
@@ -81,6 +83,8 @@ class MultiTaskAgent(BaseAgent):
             n_layers=n_layers,
             mlp_ratio=mlp_ratio,
             qkv_bias=qkv_bias,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
         )
 
         if action_decoder_type == "diffusion":

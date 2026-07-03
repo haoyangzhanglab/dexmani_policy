@@ -138,7 +138,7 @@ dexmani_policy/
 - Hydra + OmegaConf，`${eval:'...'}` 插值在 `common/resolver.py` 注册
 - CLI override 任意字段；配置校验基于字段存在性判断，不依赖 `_target_` 字符串匹配
 - `eval.seed: 0` 固定，保证同一 checkpoint 多次评测可复现
-- Normalizer: `mode='limits'`，**全量 replay buffer 拟合**（含验证集，非 bug，是跨项目统一惯例）→ [-1,1]；`range_eps=1e-4`（与官方 diffusion_policy 一致），低方差维度 zero-center 不缩放（scale=1.0, offset=-mean）。全量拟合的理由：① `limits` 模式下验证集几乎不改变 min/max；② 保证推理时对新采集数据的覆盖；③ 与 ManiFlow_Policy、R3D-Policy、SAT、RoboTwin、DexJoco 等全部兄弟项目一致
+- Normalizer: `mode='limits'`，**全量 replay buffer 拟合**（含验证集，非 bug，是跨项目统一惯例）→ [-1,1]；`range_eps=1e-4`（与官方 diffusion_policy 一致），低方差维度 zero-center 不缩放（scale=1.0, offset=-mean，与官方 R3D-Policy 的 offset=-input_min 有微小偏差但数值差异 < 5e-5）。全量拟合的理由：① `limits` 模式下验证集几乎不改变 min/max；② 保证推理时对新采集数据的覆盖；③ 与 ManiFlow_Policy、SAT、RoboTwin、DexJoco 等兄弟项目一致
 - 数据增强默认禁用，通过 `prob` 控制执行概率；`pc_dim` 必须与 Zarr 点云通道数一致
 - 数据增强（`augmentation_cfg`）与 modality dropout（`modality_dropout_probs`）职责不同：增强生成合理的观测变体（加噪、旋转、颜色抖动），在 Dataset 层 normalize 前执行；modality dropout 是模型正则化，故意将整个模态置零来防止过拟合，在 Agent 层 normalize 后执行
 - SequenceSampler：短于 8 帧的 episode 自动 warn + skip（不 crash）；边界 padding 复制首尾帧

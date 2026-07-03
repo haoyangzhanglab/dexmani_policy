@@ -69,7 +69,7 @@ dataset:
   # Joint-state augmentation — mild Gaussian noise, 50% trigger rate.
   augmentation_cfg:
     state:
-      noise:       {noise_std: 0.005, prob: 0.5}
+      noise:       {noise_std: 0.0002, prob: 1.0}
 
 # ── Agent ──
 agent:
@@ -80,13 +80,13 @@ agent:
   action_dim: ${action_dim}
 
 
-  # rgb_backbone_name: dino
-  # rgb_backbone_config:
-  #   model_name: small               # facebook/dinov2-small, 384d
-  #   tune_mode: lora
-  #   global_token_type: avg
-  #   image_size: [224, 224]
-  #   crop_ratio: 0.95
+  rgb_backbone_name: dino
+  rgb_backbone_config:
+    model_name: small               # facebook/dinov2-small, 384d
+    tune_mode: lora
+    global_token_type: avg
+    image_size: [224, 224]
+    crop_ratio: 0.95
 
   # rgb_backbone_name: resnet
   # rgb_backbone_config:
@@ -96,13 +96,13 @@ agent:
   #   norm_mode: group_norm
   #   image_size: [224, 224]
 
-  rgb_backbone_name: r3m
-  rgb_backbone_config:
-    model_name: resnet18          # 512d | resnet34(512d) | resnet50(2048d)
-    tune_mode: full
-    norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
-    global_token_type: avg
-    image_size: [224, 224]
+  # rgb_backbone_name: r3m
+  # rgb_backbone_config:
+  #   model_name: resnet18          # 512d | resnet34(512d) | resnet50(2048d)
+  #   tune_mode: full
+  #   norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
+  #   global_token_type: avg
+  #   image_size: [224, 224]
 
   state_dim: 19
   modality_dropout_probs:

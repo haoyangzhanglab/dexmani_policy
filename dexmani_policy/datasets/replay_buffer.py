@@ -1,9 +1,11 @@
 import os
 import zarr
+import logging
 import numpy as np
-from termcolor import cprint
 from functools import cached_property
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 class ReplayBuffer:
     def __init__(self, root):
@@ -49,11 +51,12 @@ class ReplayBuffer:
 
         buffer = cls(root={'meta': meta, 'data': data})
         for key, value in buffer.items():
-            cprint(
-                f'Replay Buffer: {key}, shape {value.shape}, dtype {value.dtype}, '
-                f'range {value.min():.2f}~{value.max():.2f}', 'green'
+            logger.info(
+                '%-12s  shape=%-12s  dtype=%-8s  range %7.2f ~ %7.2f',
+                key, str(value.shape), str(value.dtype),
+                float(value.min()), float(value.max()),
             )
-        cprint("--------------------------", 'green')
+        logger.info('-' * 55)
         return buffer
 
     @cached_property

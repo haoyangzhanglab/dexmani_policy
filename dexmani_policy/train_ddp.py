@@ -1,4 +1,6 @@
 import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import socket
 import warnings
 

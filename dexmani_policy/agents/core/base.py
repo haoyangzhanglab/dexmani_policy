@@ -71,11 +71,19 @@ class BaseAgent(nn.Module):
         cond, aux = self.obs_encoder(obs)
         return cond, aux
 
+    def _get_dim_groups(self):
+        """Override in subclasses to return per-head dimension slices.
+
+        Returns ``None`` (standard single-loss) or a dict ``{name: (start, end)}``
+        mapping loss component names to dimension ranges.
+        """
+        return None
+
     def compute_loss(self, batch, **kwargs):
         cond, aux = self._build_cond(batch['obs'])
         normed_actions = self.normalizer['action'].normalize(batch['action'])
         action_loss, loss_dict = self.action_decoder.compute_loss(
-            cond, normed_actions, **kwargs)
+            cond, normed_actions, dim_groups=self._get_dim_groups(), **kwargs)
 
         # Merge auxiliary losses from the observation encoder (e.g. MoE
         # load-balance + entropy).
@@ -98,6 +106,15 @@ class BaseAgent(nn.Module):
         cond, _ = self._build_cond(obs_dict)
         return self.predict_action_from_cond(cond, denoise_timesteps)
 
+    @property
+    def control_action_dim(self):
+        """Number of action dimensions to use for control.
+
+        Override in subclasses (e.g. R3DAgent) to return only the primary
+        (joint) dims when auxiliary heads are present.
+        """
+        return self.action_dim
+
     @torch.no_grad()
     def predict_action_from_cond(self, cond, denoise_timesteps=None):
         template = torch.zeros(
@@ -107,9 +124,12 @@ class BaseAgent(nn.Module):
         pred = self.action_decoder.predict_action(cond, template, denoise_timesteps)
         pred = self.normalizer['action'].unnormalize(pred)
         start = self.n_obs_steps - 1
+        control_action = pred[:, start:start + self.n_action_steps]
+        if self.control_action_dim != self.action_dim:
+            control_action = control_action[..., :self.control_action_dim]
         return {
             'pred_action': pred,
-            'control_action': pred[:, start:start + self.n_action_steps],
+            'control_action': control_action,
         }
 
     @torch.no_grad()

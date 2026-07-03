@@ -1,4 +1,6 @@
 import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 from dataclasses import dataclass
 from typing import Any, Optional
 

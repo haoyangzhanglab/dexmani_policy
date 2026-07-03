@@ -10,12 +10,13 @@ from dexmani_policy.agents.core.base import BaseAgent
 class R3DAgent(BaseAgent):
     """R3D policy agent.
 
-    Constructs R3DObsEncoder + OneWayTransformerBackbone + Diffusion,
-    then delegates to BaseAgent for training/inference logic.
+    Constructs R3DObsEncoder + OneWayTransformerBackbone + Diffusion.
 
-    No method overrides needed — the standard BaseAgent.compute_loss /
-    predict_action / predict_action_from_cond flow works unchanged because
-    pc_pe is packed into the context tensor as extra feature channels.
+    When ``use_aux_ee`` is enabled, predicts wrist pose (pos3+rot6d6=9dim)
+    as an auxiliary target alongside the primary joint action (19dim),
+    matching the official R3D-Policy ``use_target_ee`` design.
+    Overrides ``_get_dim_groups`` to compute separate joint/EE loss
+    components and ``control_action_dim`` to return joint-only at inference.
     """
 
     def __init__(
@@ -42,7 +43,17 @@ class R3DAgent(BaseAgent):
         num_inference_steps: int = 10,
         prediction_type: str = 'sample',
         modality_dropout_probs: dict = None,
+        # EE auxiliary loss — wrist pose (pos3 + rot6d6 = 9dim)
+        use_aux_ee: bool = False,
+        joint_dim: int = 19,
+        ee_dim: int = 9,
+        # Auxiliary loss weight (applied to non-joint dim groups)
+        aux_loss_weight: float = 0.1,
     ):
+        self.use_aux_ee = use_aux_ee
+        self.joint_dim = joint_dim
+        self.ee_dim = ee_dim
+
         obs_encoder = R3DObsEncoder(
             pc_dim=pc_dim,
             num_points=num_points,
@@ -66,6 +77,9 @@ class R3DAgent(BaseAgent):
             num_heads=num_heads,
             mlp_dim=mlp_dim,
             attention_downsample_rate=attention_downsample_rate,
+            use_aux_ee=use_aux_ee,
+            joint_dim=joint_dim,
+            ee_dim=ee_dim if use_aux_ee else None,
         )
 
         action_decoder = Diffusion(
@@ -73,6 +87,7 @@ class R3DAgent(BaseAgent):
             num_training_steps=num_training_steps,
             num_inference_steps=num_inference_steps,
             prediction_type=prediction_type,
+            aux_loss_weight=aux_loss_weight,
         )
 
         super().__init__(
@@ -85,23 +100,41 @@ class R3DAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
+    # ------------------------------------------------------------------
+    # Per-head loss groups (overrides BaseAgent._get_dim_groups)
+    # ------------------------------------------------------------------
+
+    def _get_dim_groups(self):
+        if not self.use_aux_ee:
+            return None
+        return {
+            'joint': (0, self.joint_dim),
+            'ee': (self.joint_dim, self.joint_dim + self.ee_dim),
+        }
+
+    @property
+    def control_action_dim(self):
+        return self.joint_dim if self.use_aux_ee else self.action_dim
+
 # Smoke test
 
-def example():
-    """Self-contained smoke test for R3DAgent.
-
-    Verifies: construction, forward pass, loss computation, predict_action.
-    """
+def _run_smoke(use_aux_ee=False):
+    """Run smoke test for R3DAgent with optional auxiliary loss."""
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    B, T, H, A, N = 2, 2, 16, 19, 256  # small N for speed
+    B, T, H, joint_A = 2, 2, 16, 19
+    ee_A = 9  # wrist pose: pos3 + rot6d6
+    N = 256  # small N for speed
+
+    action_dim = joint_A + ee_A if use_aux_ee else joint_A
+    tag = 'aux_ee' if use_aux_ee else 'standard'
 
     agent = R3DAgent(
-        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
-        pc_dim=6, num_points=N, state_dim=A,
+        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=action_dim,
+        pc_dim=6, num_points=N, state_dim=19,
         pc_encoder_config={
             'pc_model': 'eva02_tiny_patch14_224',
-            'embed_dim': 128,         # smaller for smoke test
-            'num_group': 64,          # smaller for smoke test
+            'embed_dim': 128,
+            'num_group': 64,
             'group_size': 32,
             'pc_in_channels': 6,
             'use_pretrained_weights': False,
@@ -113,33 +146,33 @@ def example():
         num_training_steps=10,
         num_inference_steps=3,
         prediction_type='sample',
+        use_aux_ee=use_aux_ee,
+        joint_dim=joint_A,
+        ee_dim=ee_A,
     ).to(device)
 
     # Create sample data
     pc_data = (torch.rand(B * T, N, 6, device=device) * 2 - 1).float()
-    state_data = torch.randn(B * T, A, device=device)
-    action = torch.randn(B, H, A, device=device)
+    state_data = torch.randn(B * T, 19, device=device)
+    action = torch.randn(B, H, action_dim, device=device)
 
-    print('=== R3DAgent smoke test ===')
+    print(f'=== R3DAgent smoke test {tag} ===')
+    print(f'  action_dim:   {action_dim}')
     print(f'  obs pc:       {pc_data.shape}')
     print(f'  obs state:    {state_data.shape}')
     print(f'  action:       {action.shape}')
 
     # Test encoder
-    obs_flat = {
-        'point_cloud': pc_data,
-        'joint_state': state_data,
-    }
+    obs_flat = {'point_cloud': pc_data, 'joint_state': state_data}
     cond, aux = agent.obs_encoder(obs_flat)
     print(f'  cond (enc):   {cond.shape}  [B, T*K, D+D_s+D]')
-    print(f'  aux:          {aux}')
 
     # Fit normalizer
     from dexmani_policy.common.normalizer import LinearNormalizer
     normalizer = LinearNormalizer()
     normalizer.fit({
         'action': action,
-        'joint_state': state_data.reshape(B, T, A),
+        'joint_state': state_data.reshape(B, T, 19),
     }, mode='limits')
     agent.load_normalizer_from_dataset(normalizer)
 
@@ -147,26 +180,34 @@ def example():
     batch = {
         'obs': {
             'point_cloud': pc_data.reshape(B, T, N, 6),
-            'joint_state': state_data.reshape(B, T, A),
+            'joint_state': state_data.reshape(B, T, 19),
         },
         'action': action,
     }
     agent.train()
     loss, loss_dict = agent.compute_loss(batch)
     print(f'  loss:         {loss.item():.4f}  keys={list(loss_dict.keys())}')
+    if use_aux_ee:
+        assert 'loss_joint' in loss_dict, f'Missing loss_joint in {loss_dict.keys()}'
+        assert 'loss_ee' in loss_dict, f'Missing loss_ee in {loss_dict.keys()}'
 
     # Test predict_action
     agent.eval()
     with torch.no_grad():
         result = agent.predict_action({
             'point_cloud': pc_data.reshape(B, T, N, 6),
-            'joint_state': state_data.reshape(B, T, A),
+            'joint_state': state_data.reshape(B, T, 19),
         })
     print(f'  pred_action:     {result["pred_action"].shape}')
     print(f'  control_action:  {result["control_action"].shape}')
-    assert result["control_action"].shape == (B, 8, A), \
-        f'Bad control_action shape: {result["control_action"].shape}'
+    assert result["control_action"].shape == (B, 8, joint_A), \
+        f'Bad control_action shape: {result["control_action"].shape}, expected (B, 8, {joint_A})'
     print('=== PASSED ===')
+
+def example():
+    """Self-contained smoke test for R3DAgent — 2 paths."""
+    _run_smoke()                # standard (joint only)
+    _run_smoke(use_aux_ee=True) # aux_ee (joint + wrist pose)
 
 if __name__ == '__main__':
     example()

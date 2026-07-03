@@ -47,7 +47,7 @@ dataset:
   # Joint-state augmentation — mild Gaussian noise, 50% trigger rate.
   augmentation_cfg:
     state:
-      noise:       {noise_std: 0.005, prob: 0.5}
+      noise:       {noise_std: 0.0002, prob: 1.0}
 
   task_names:
     - pick_bottle
@@ -111,19 +111,19 @@ agent:
   _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
   text_encoder_model: openai/clip-vit-base-patch16
   task_texts: ${dataset.task_texts}
-  rgb_backbone_name: r3m
+  rgb_backbone_name: resnet
   rgb_backbone_config:
-    model_name: resnet18          # resnet18(512d) | resnet34(512d) | resnet50(2048d)
-    tune_mode: full               # freeze | full
-    norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
+    model_name: resnet18
+    weights: null               # null=scratch: GN replaces BN (RoboTwin DP: "EMA destroys performance with BN")
+    tune_mode: full
+    norm_mode: group_norm
     image_size: [224, 224]
     crop_ratio: 0.95
-  # rgb_backbone_name: resnet
+  # rgb_backbone_name: r3m
   # rgb_backbone_config:
-  #   model_name: resnet18
-  #   weights: null               # null=scratch: GN replaces BN (RoboTwin DP: "EMA destroys performance with BN")
-  #   tune_mode: full
-  #   norm_mode: group_norm
+  #   model_name: resnet18          # resnet18(512d) | resnet34(512d) | resnet50(2048d)
+  #   tune_mode: full               # freeze | full
+  #   norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
   #   image_size: [224, 224]
   #   crop_ratio: 0.95
   # rgb_backbone_name: dino
@@ -142,6 +142,8 @@ agent:
   n_layers: 8
   mlp_ratio: 4.0
   qkv_bias: true
+  attn_drop: 0.1
+  proj_drop: 0.1
 
   action_decoder_type: diffusion     # diffusion | flowmatch
 

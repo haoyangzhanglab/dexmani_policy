@@ -30,16 +30,20 @@ class Aug:
 class PointColorJitter(Aug):
     """HSV color jitter for point cloud RGB channels (last 3 dims).
 
-    Reference: ManiFlow (CoRL 2025). Input ``(T,N,C) float32, C>=6``.
-    Modifies the RGB channels **in-place** on a pre-copied array.
+    Brightness is **additive** (R3D-Policy, 2026): ``rgb += delta`` where
+    delta ∈ [-brightness, +brightness].  Contrast, saturation, and hue follow
+    the standard multiplicative formulation used by both R3D and ManiFlow.
+
+    Input ``(T,N,C) float32, C>=6``.  Modifies the RGB channels **in-place**
+    on a pre-copied array.
     """
 
     __slots__ = ('brightness', 'contrast', 'saturation', 'hue')
 
-    def __init__(self, brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
+    def __init__(self, brightness=0.125, contrast=0.5, saturation=0.5, hue=0.08,
                  prob=1.0):
         super().__init__(prob=prob)
-        self.brightness = self._make_range(brightness, center=1.0)
+        self.brightness = self._make_range(brightness, center=0.0, symmetric=True)
         self.contrast   = self._make_range(contrast,   center=1.0)
         self.saturation = self._make_range(saturation, center=1.0)
         self.hue        = self._make_range(hue,        center=0.0, symmetric=True)
@@ -73,7 +77,8 @@ class PointColorJitter(Aug):
     def _apply_brightness_ip(self, rgb):
         if self.brightness[0] == self.brightness[1]:
             return
-        rgb *= np.random.uniform(*self.brightness)
+        delta = np.random.uniform(*self.brightness)
+        rgb += delta
 
     def _apply_contrast_ip(self, rgb):
         if self.contrast[0] == self.contrast[1]:
@@ -185,12 +190,12 @@ class PointDropout(Aug):
             x[t, drop_idx] = x[t, fill_idx]
 
 class PointCoordNoiseAug(Aug):
-    """Clipped Gaussian noise on a random subset of point XYZ coordinates.
+    """Clipped Gaussian noise on ALL point XYZ coordinates (R3D-Policy, 2026).
 
     Unlike ``StateNoiseAug`` which perturbs proprioceptive state, this adds
     per-point geometric noise to simulate real sensor measurement error.
-    Noise is applied only to a random subset of points each call, preventing
-    the model from memorising exact point positions (R3D, 2026).
+    Noise is applied to **all** points (not a subset), matching the official
+    R3D ``add_noise()`` behaviour.
 
     The noise is clipped to ±clip_range (default 2σ) to guard against extreme
     outliers that would push normalised coordinates outside [-1, 1].
@@ -198,29 +203,24 @@ class PointCoordNoiseAug(Aug):
     Modifies the first 3 channels **in-place** on a pre-copied input.
     """
 
-    __slots__ = ('noise_std', 'ratio', 'clip_range')
+    __slots__ = ('noise_std', 'clip_range')
 
-    def __init__(self, noise_std=0.002, ratio=0.3, clip_range=None, prob=1.0):
+    def __init__(self, noise_std=0.002, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
         self.noise_std = float(noise_std)
-        self.ratio = float(ratio)
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
 
     def _augment(self, x):
-        # x: (T, N, C) — noise only on the first 3 channels (XYZ)
-        if self.noise_std <= 0 or self.ratio <= 0:
+        # x: (T, N, C) — noise on ALL points' first 3 channels
+        if self.noise_std <= 0:
             return
 
         T, N = x.shape[:2]
-        n_noisy = max(1, int(N * self.ratio))
-
-        # Per-frame random subset — different points each frame
         dtype = x.dtype
         for t in range(T):
-            idx = np.random.choice(N, size=n_noisy, replace=False)
-            noise = np.random.normal(0, self.noise_std, (n_noisy, 3))
+            noise = np.random.normal(0, self.noise_std, (N, 3))
             noise = np.clip(noise, -self.clip_range, self.clip_range)
-            x[t, idx, :3] += noise.astype(dtype)
+            x[t, :, :3] += noise.astype(dtype)
 
 class PointColorNoiseAug(Aug):
     """Per-channel independent Gaussian noise on point cloud RGB.
@@ -272,7 +272,7 @@ class StateNoiseAug(Aug):
 
     __slots__ = ('noise_std', 'clip_range')
 
-    def __init__(self, noise_std=0.005, clip_range=None, prob=1.0):
+    def __init__(self, noise_std=0.0002, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
         self.noise_std = float(noise_std)
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std

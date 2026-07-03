@@ -3,8 +3,11 @@ import torch
 import numpy as np
 import torch.nn as nn
 from typing import Union, Dict
+import logging
 
 from dexmani_policy.common.pytorch_util import dict_apply
+
+logger = logging.getLogger(__name__)
 
 def dfs_add(dest: dict, keys: list[str], value: torch.Tensor):
     if len(keys) == 1:
@@ -114,11 +117,12 @@ def fit_params(
 
     n_ignored = ignore_dim.sum().item()
     if n_ignored > 0:
-        prefix = f"[Normalizer] {label}: " if label else "[Normalizer]: "
-        print(
-            f"{prefix}{n_ignored}/{ignore_dim.shape[0]} dims ignored "
-            f"(range_eps={range_eps}, mode={mode}). "
-            f"Ignored indices: {ignore_dim.nonzero(as_tuple=True)[0].tolist()}"
+        prefix = f"{label}: " if label else ""
+        idx_list = ignore_dim.nonzero(as_tuple=True)[0].tolist()
+        logger.info(
+            "%s%d/%d dims near-constant (range < %.0e, %s) — kept with identity scale. "
+            "Indices: %s",
+            prefix, n_ignored, ignore_dim.shape[0], range_eps, mode, idx_list,
         )
 
     this_params = nn.ParameterDict()

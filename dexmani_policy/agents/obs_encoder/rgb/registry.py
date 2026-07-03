@@ -86,9 +86,15 @@ def build_backbone(
     else:
         raise ValueError(f"Unsupported backbone name: {name}")
 
-    if str(cfg.get("model_name")) != str(base_cfg.get("model_name")):
+    # Only warn when the resolved backbone model genuinely differs from the preset
+    # default (e.g. DINO 'base' → 'vit_base_...').  Shorthand aliases ('small' →
+    # 'facebook/dinov2-small') are resolved by the backbone constructor and won't
+    # trigger a false-alarm mismatch here.
+    resolved_name = getattr(backbone, "model_name", cfg.get("model_name"))
+    if str(resolved_name) != str(base_cfg.get("model_name")):
         warnings.warn(
-            f"build_backbone(name='{name}') is using model_name='{cfg.get('model_name')}', "
+            f"build_backbone(name='{name}') resolved to model_name='{resolved_name}' "
+            f"(preset default is '{base_cfg.get('model_name')}'), "
             f"but ImageProcessor is still selected by preset name='{name}'. "
             "Please make sure the processor matches the checkpoint's resize / crop / normalization."
         )

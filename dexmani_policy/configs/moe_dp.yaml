@@ -67,7 +67,7 @@ dataset:
 
   augmentation_cfg:
     state:
-      noise:       {noise_std: 0.005, prob: 0.5}
+      noise:       {noise_std: 0.0002, prob: 1.0}
 
 # ── Agent ──
 agent:
