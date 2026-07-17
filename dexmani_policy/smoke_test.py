@@ -37,12 +37,51 @@ def load_config(config_name: str):
         OmegaConf.resolve(cfg)
     return cfg
 
+def _prepare_dqrise_codebook(cfg) -> str | None:
+    """Create a dummy sorted_hand_poses.npz for DQ-RISE smoke test.
+
+    DQRISEAgent requires a pre-extracted codebook file.  For smoke testing
+    we synthesise one from random hand poses — just enough to validate the
+    build chain without requiring a real trained VQ-VAE.
+    """
+    if cfg.policy_name != 'dqrise':
+        return None
+
+    import numpy as np
+    hand_dim = cfg.action_dim - cfg.tcp_dim
+    num_groups = 2
+    codebook_size = 4
+    total = codebook_size ** num_groups
+    dummy_poses = np.random.randn(total, hand_dim).astype(np.float32)
+
+    # Per-group dummy poses: (codebook_size, hand_dim) per group
+    save_data = dict(
+        sorted_hand_poses=dummy_poses,
+        hand_dim=hand_dim,
+        num_groups=num_groups,
+        codebook_size=codebook_size,
+        layer_weights=np.ones(num_groups, dtype=np.float32) / num_groups,
+    )
+    for g in range(num_groups):
+        save_data[f'_group_sorted_poses_g{g}'] = np.random.randn(codebook_size, hand_dim).astype(np.float32)
+
+    tmp_path = os.path.join(tempfile.gettempdir(), 'smoke_test_dqrise_codebook.npz')
+    np.savez(tmp_path, **save_data)
+    return tmp_path
+
+
 def smoke_test(config_name: str):
     print(f"\n{'='*60}")
     print(f"Smoke test: {config_name}")
     print(f"{'='*60}")
 
     cfg = load_config(config_name)
+
+    # ── DQ-RISE: inject temporary codebook path ───────────────────────
+    codebook_tmp = _prepare_dqrise_codebook(cfg)
+    if codebook_tmp is not None:
+        cfg.agent.codebook_path = codebook_tmp
+        print(f"      [dqrise] dummy codebook → {codebook_tmp}")
 
     set_seed(cfg.training.seed)
 
@@ -138,6 +177,7 @@ def smoke_test(config_name: str):
                 'action_dim': model.action_dim,
                 'horizon': model.horizon,
                 'action_key': getattr(model, 'action_key', 'action'),
+                'tcp_dim': getattr(model, 'tcp_dim', None),
                 'num_training_steps': num_training_steps,
             },
         )

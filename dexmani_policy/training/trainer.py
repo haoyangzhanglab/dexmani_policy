@@ -403,6 +403,7 @@ class Trainer:
                 'action_dim': self.model.action_dim,
                 'horizon': self.model.horizon,
                 'action_key': getattr(self.model, 'action_key', 'action'),
+                'tcp_dim': getattr(self.model, 'tcp_dim', None),
                 'num_training_steps': self.num_training_steps,
             },
         )

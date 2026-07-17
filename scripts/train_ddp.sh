@@ -7,10 +7,10 @@
 # Examples:
 #   bash scripts/train_ddp.sh ddp/maniflow
 #   bash scripts/train_ddp.sh ddp/dp 'training.loop.num_epochs=100'
-#   bash scripts/train_ddp.sh ddp/multitask_dit 'training.seed=123'
+#   bash scripts/train_ddp.sh ddp/dqrise 'training.seed=123'
 #
 # Available DDP configs:
-#   ddp/dp  ddp/maniflow  ddp/multitask_dit  ddp/r3d
+#   ddp/dp  ddp/dqrise  ddp/maniflow  ddp/multitask_dit  ddp/r3d
 #
 set -euo pipefail
 

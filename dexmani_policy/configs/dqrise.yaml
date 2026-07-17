@@ -1,0 +1,249 @@
+# DQ-RISE — VQ-VAE Hand Quantisation + Joint Diffusion
+# Encoder:  iDP3 / PointNeXT point cloud encoder (same as DP3)
+# Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
+#           ↓ output dim reduced: tcp_dim + 1 (VQ index) instead of full action
+# Hand:     VQ-VAE codebook lookup (discrete hand poses, PCA-sorted)
+
+# Modality: point_cloud(6d, xyz+rgb) + joint_state → [arm(7) + vq_index(1)]
+
+policy_name: dqrise
+
+# ── Task ──
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+
+# ── Core ──
+seed: 42
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_key: action_ee                    # action | action_ee
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
+
+# DQ-RISE specific: action-space decomposition
+# tcp_dim auto-derived: 9 for action_ee (21d), 7 for action (19d)
+tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
+# hand_dim = action_dim - tcp_dim     # (auto-derived in agent)
+
+# VQ codebook path (output of extract_codebook.py / PCA re-indexing, stage 2).
+# VQ-VAE pretraining config: see the vq_vae section at the bottom of this file.
+codebook_path: robot_data/sorted_hand_poses_${task_name}.npz
+
+# ── Dataloader ──
+dataloader:
+  batch_size: 128
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
+
+val_dataloader:
+  batch_size: 128
+  shuffle: false
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 2
+  drop_last: false
+
+# ── Dataset ──
+dataset:
+  _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  action_key: ${action_key}
+  zarr_path: ${zarr_path}
+  seed: ${training.seed}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  val_ratio: 0.05
+  max_train_episodes: 80
+  sensor_modalities: ["joint_state", "point_cloud"]
+  obs_horizon: ${n_obs_steps}
+
+  augmentation_cfg:
+    pc:
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
+    state:
+      noise:       {noise_std: 0.0002, prob: 1.0}
+
+# ── Agent ──
+agent:
+  _target_: dexmani_policy.agents.core.dqrise.DQRISEAgent
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+  tcp_dim: ${tcp_dim}
+  codebook_path: ${codebook_path}
+
+  # Codebook config (must match VQ-VAE pretraining params)
+  codebook_num_groups: 2
+  codebook_size: 4
+
+  # Point cloud encoder (identical to dp3)
+  encoder_type: idp3                 # idp3 | pointnext | dp3
+  pc_dim: 6
+  pc_out_dim: 128
+  state_dim: 19
+  num_points: 1024
+
+  fps_random_config:
+    use_random: true
+    random_start: true
+    random_noise_scale: 0.0
+    shuffle_output: true
+
+  # Diffusion backbone (UNet, same as dp3)
+  diffusion_step_embed_dim: 128
+  down_dims: [256, 512]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+
+  num_training_steps: 100
+  num_inference_steps: 20
+  prediction_type: epsilon
+
+  modality_dropout_probs:
+    joint_state: 0.0
+
+# ── Optimizer ──
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  obs_lr: 3.0e-4
+  obs_weight_decay: 1.0e-6
+
+# ── EMA ──
+ema:
+  _target_: dexmani_policy.training.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+# ── Training ──
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: true
+  use_compile: true
+  use_ema: true
+  use_ema_teacher_for_consistency: false   # DQ-RISE uses Diffusion (not FlowMatch)
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  max_grad_norm: 1.0
+  loop:
+    num_epochs: 1000
+    log_interval_steps: 50
+    val_interval_epochs: 25
+    eval_interval_epochs: 250
+    sample_interval_epochs: 5
+    gradient_accumulation_steps: 1
+
+# ── Workspace ──
+workspace:
+  _target_: dexmani_policy.training.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+
+  wandb_cfg:
+    _target_: dexmani_policy.training.workspace.WandbConfig
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
+    id: ${policy_name}_${task_name}_${training.seed}
+    resume: allow
+    mode: offline
+    video_fps: 15
+
+  checkpoint_cfg:
+    _target_: dexmani_policy.training.workspace.CheckpointConfig
+    monitor_key: test_mean_score
+    mode: max
+    topk: 3
+
+# ── Env Runner ──
+env_runner:
+  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
+  task_name: ${task_name}
+  n_obs_steps: ${n_obs_steps}
+  default_eval_episodes: 25
+  sensor_modalities: ${dataset.sensor_modalities}
+  env_kwargs:
+    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
+    texture_random: false
+    instance_random: true
+    table_random: true
+
+# ── Eval ──
+eval:
+  seed: 0
+  offline:
+    ckpt_tag_or_path: best
+    eval_episodes: 100
+    denoise_timesteps_list:
+      - ${agent.num_inference_steps}
+    use_ema_for_eval: true
+
+# ═══════════════════════════════════════════════════════════════════════════
+# VQ-VAE Hand Pretraining (Stage 1 — train before DQ-RISE diffusion)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   bash scripts/train_vq_hand.sh  # reads this section from dqrise.yaml
+#
+# All fields overridable via CLI:
+#   bash scripts/train_vq_hand.sh --num_epochs 2000 --lr 1e-4
+#
+vq_vae:
+  # ── Data ──
+  action_key: action_ee
+  tcp_dim: 9
+  hand_dim: 12
+
+  # ── Model ──
+  latent_dim: 256
+  hidden_dim: 512
+  num_groups: 2               # residual VQ layers → total = codebook_size ^ num_groups
+  codebook_size: 4            # 4² = 16 discrete hand poses
+  num_layers: 2               # encoder/decoder MLP depth (1=underfit, 5=overfit→code collapse; 2-3 sweet spot for 12-DOF)
+  act_scale: 1.0              # data already in [-1,1]
+  vq_decay: 0.8
+  threshold_ema_dead_code: 2         # dead-code replacement enabled (0=disabled)
+  kmeans_init: true               # k-means codebook initialisation (reduces collapse risk)
+  kmeans_iters: 10
+
+  # Per-finger L1 loss weights: thumb+index+middle=1.0, ring+pinky=0.5.
+  # 12-DOF mapping: [thumb×3, index×3, middle×2, ring×2, pinky×2]
+  loss_weight: [1.0, 1.0, 1.0,  1.0, 1.0, 1.0,  1.0, 1.0,  0.5, 0.5,  0.5, 0.5]
+
+  # ── Training ──
+  num_epochs: 1500
+  batch_size: 256
+  lr: 3.0e-4
+  betas: [0.95, 0.999]
+  weight_decay: 1.0e-6
+  enc_loss_weight: 3.0         # L1 reconstruction multiplier
+  vq_loss_weight: 5.0          # VQ commitment multiplier
+  max_grad_norm: 1.0
+  warmup_steps: 150
+  save_epochs: 100
+  codebook_report_epochs: 200
+  seed: 42
+  num_workers: 4
+  device: cuda
+
+# ── Hydra ──
+hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+    subdir: ${hydra.job.num}

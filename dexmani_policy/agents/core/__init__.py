@@ -4,3 +4,4 @@ from .moe import MoEAgent
 from .maniflow import ManiFlowAgent
 from .multi_task import MultiTaskAgent
 from .r3d import R3DAgent
+from .dqrise import DQRISEAgent

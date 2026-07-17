@@ -143,5 +143,6 @@ robot_data/
 experiments/
 
 .codex
+.claude
 .ruff_cache/
 benchmark_results/
