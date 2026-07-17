@@ -251,6 +251,11 @@ class EuclideanCodebook(nn.Module):
             x = rearrange(x, '... -> 1 ...')
 
         flatten, ps = pack_one(x, 'h * d')
+        if freeze_codebook and not bool(self.initted.item()):
+            raise RuntimeError(
+                'Cannot use an uninitialised codebook with freeze_codebook=True. '
+                'Run at least one training initialisation pass or load a checkpoint.'
+            )
         self.init_embed_(flatten)
 
         embed = self.embed if self.learnable_codebook else self.embed.detach()
@@ -409,9 +414,11 @@ class VectorQuantize(nn.Module):
 
         embed_ind = rearrange(embed_ind, '1 b n -> b n')   # (B, N)
 
-        # commitment loss
+        # Commitment target is available in both train and eval modes so
+        # validation reports a real commitment metric.  Straight-through is
+        # only needed while training.
+        commit_quantize = quantize.detach()
         if self.training:
-            commit_quantize = quantize.detach()
             quantize = x + (quantize - x).detach()          # straight-through
 
         # project out
@@ -423,7 +430,7 @@ class VectorQuantize(nn.Module):
             embed_ind = rearrange(embed_ind, 'b 1 -> b')
 
         # loss
-        loss = torch.tensor([0.], device=x.device, requires_grad=self.training)
+        loss = x.new_zeros((1,))
 
         if return_loss:
             ce_loss = F.cross_entropy(
@@ -433,7 +440,9 @@ class VectorQuantize(nn.Module):
             )
             return quantize, ce_loss
 
-        if self.training and self.commitment_weight > 0:
+        if self.commitment_weight > 0:
+            # In eval mode callers normally wrap the forward pass in
+            # torch.no_grad(), so this remains a metric-only computation.
             commit_loss = F.mse_loss(commit_quantize, x)
             loss = loss + commit_loss * self.commitment_weight
 

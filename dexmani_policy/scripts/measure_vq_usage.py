@@ -1,80 +1,165 @@
-#!/usr/bin/env python3
-"""Measure vq_idx_used kill-gate metric for a VQ-VAE checkpoint on hand data.
+"""Measure dataset-level VQ diagnostics for the exact runtime codebook."""
 
-vq_idx_used = number of the 16 PCA-sorted codebook combos that the training
-hand data actually maps to (via L2 nearest-neighbor). Kill-gate: >= 12/16.
-Also reports recon_mse for the reconstruction-fidelity check.
-"""
+from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
-_root = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(_root))
 
 import numpy as np
 import torch
-from dexmani_policy.agents.vq_hand import VqVaeHand, CodebookManager
+
+_root = Path(__file__).resolve().parent.parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from dexmani_policy.agents.vq_hand import CodebookManager, VqVaeHand
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
-from dexmani_policy.common.normalizer import LinearNormalizer
 
 
-def measure(checkpoint_path, zarr_path, action_key='action_ee', tcp_dim=9):
-    ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-    args = ckpt.get('args', {})
-    if hasattr(args, 'hand_dim'):
-        args = vars(args)
-    hand_dim = args.get('hand_dim', 12)
-    num_groups = args.get('num_groups', 2)
-    codebook_size = args.get('codebook_size', 4)
-    num_layers = args.get('num_layers', 2)
+def _args_dict(checkpoint: dict) -> dict:
+    args = checkpoint.get("args", {})
+    return vars(args) if hasattr(args, "__dict__") else dict(args)
 
-    vqvae = VqVaeHand(
-        hand_dim=hand_dim, loss_weight=[1.0] * hand_dim,
-        num_groups=num_groups, codebook_size=codebook_size, num_layers=num_layers,
-    )
-    vqvae.load_state_dict(ckpt['model_state_dict'])
-    vqvae.eval()
 
-    # Load + normalise hand data (same as train_vq_hand.py)
+def _normalizer_from_checkpoint(checkpoint: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    state = checkpoint.get("normalizer_state_dict")
+    if state is not None:
+        return (
+            state["params_dict.hand.scale"].float(),
+            state["params_dict.hand.offset"].float(),
+        )
+    params = checkpoint.get("normalizer_params")
+    if params is not None:
+        return params["hand"]["scale"].float(), params["hand"]["offset"].float()
+    raise ValueError("Checkpoint has no hand normalizer")
+
+
+def _normalize(data: np.ndarray, scale: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
+    tensor = torch.from_numpy(np.asarray(data, dtype=np.float32))
+    return tensor * scale.cpu() + offset.cpu()
+
+
+def measure(
+    checkpoint_path: str,
+    zarr_path: str,
+    *,
+    codebook_path: str | None = None,
+    action_key: str | None = None,
+    tcp_dim: int | None = None,
+    sample_size: int = 5000,
+    seed: int = 0,
+) -> dict:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    args = _args_dict(checkpoint)
+    action_key = action_key or args.get("action_key", "action_ee")
+    tcp_dim = int(tcp_dim if tcp_dim is not None else args.get("tcp_dim", 9))
+
+    model = VqVaeHand.from_checkpoint(checkpoint, map_location="cpu").eval()
     buffer = ReplayBuffer.copy_from_path(zarr_path, keys=[action_key])
-    hand = buffer[action_key][:, tcp_dim:]
-    norm = LinearNormalizer()
-    norm.fit(data={'hand': hand}, mode='limits', range_eps=1e-4)
-    hand_n = norm['hand'].normalize(hand).numpy().astype(np.float32)
+    actions = np.asarray(buffer[action_key])
+    hand = actions[:, tcp_dim:]
+    if hand.shape[1] != model.hand_dim:
+        raise ValueError(
+            f"Data hand_dim={hand.shape[1]} does not match checkpoint {model.hand_dim}"
+        )
 
-    # Build codebook (PCA-sorted 16 combos)
-    mgr = CodebookManager.extract_from_vqvae(vqvae)
-    mgr.reindex_by_pca(vqvae)
+    scale, offset = _normalizer_from_checkpoint(checkpoint)
+    hand_norm = _normalize(hand, scale, offset)
 
-    # Map every hand pose → nearest of 16 sorted codes (L2 in raw space)
-    hand_t = torch.from_numpy(hand_n)
-    idx = mgr.hand_pose_to_continuous_index(hand_t)          # (N, 1) in [-1,1]
-    num_codes = mgr.get_num_codes()
-    discrete = ((idx.squeeze(-1) + 1.0) / 2.0 * (num_codes - 1)).round().long()
-    counts = torch.bincount(discrete, minlength=num_codes)
-    used = int((counts > 0).sum())
-    used_1pct = int((counts.float() / counts.sum() > 0.01).sum())
+    manager = CodebookManager(
+        hand_dim=model.hand_dim,
+        num_groups=model.num_groups,
+        codebook_size=model.codebook_size,
+    )
+    if codebook_path:
+        manager.load(codebook_path)
+        if manager.has_hand_normalizer:
+            torch.testing.assert_close(manager.hand_normalizer_scale, scale)
+            torch.testing.assert_close(manager.hand_normalizer_offset, offset)
+    else:
+        manager = CodebookManager.extract_from_vqvae(model)
+        manager.set_hand_normalizer(scale, offset)
+        manager.reindex_by_pca(model)
 
-    # recon_mse (scaled space, unweighted) over a sample
+    # Nearest decoded-prototype usage: this is the label distribution actually
+    # consumed by DQ-RISE policy training.
+    continuous = manager.hand_pose_to_continuous_index(hand_norm)
+    count = manager.get_num_codes()
+    nearest_ids = torch.floor(
+        ((continuous.squeeze(-1) + 1.0) * 0.5 * (count - 1)).clamp(0, count - 1)
+        + 0.5
+    ).long()
+    nearest_counts = torch.bincount(nearest_ids, minlength=count)
+    nearest_prob = nearest_counts.float() / nearest_counts.sum().clamp_min(1)
+
+    # Encoder tuple usage is a different diagnostic and is reported separately.
+    tuple_indices = []
+    batch_size = 4096
     with torch.no_grad():
-        sub = hand_t[torch.randperm(len(hand_t))[:5000]]
-        enc_loss, vq_loss, _, recon_mse = vqvae(sub)
-
-    return dict(
-        used=used, used_1pct=used_1pct, num_codes=num_codes,
-        recon_mse=float(recon_mse), counts=counts.tolist(),
+        for start in range(0, len(hand_norm), batch_size):
+            tuple_indices.append(model.encode_to_index(hand_norm[start : start + batch_size]))
+    tuple_indices = torch.cat(tuple_indices, dim=0)
+    multipliers = torch.tensor(
+        [model.codebook_size ** power for power in reversed(range(model.num_groups))],
+        dtype=torch.long,
     )
+    tuple_ids = (tuple_indices.long() * multipliers).sum(dim=-1)
+    tuple_counts = torch.bincount(tuple_ids, minlength=count)
+
+    generator = torch.Generator().manual_seed(seed)
+    subset_size = min(sample_size, len(hand_norm))
+    subset = hand_norm[torch.randperm(len(hand_norm), generator=generator)[:subset_size]]
+    with torch.no_grad():
+        enc, vq, _, mse = model(subset)
+
+    prototypes_norm = manager._from_raw(manager.sorted_hand_poses.cpu())
+    diff = hand_norm[:, None, :] - prototypes_norm[None, :, :]
+    nearest_l2 = diff.square().sum(-1).min(-1).values.sqrt()
+
+    probability_nonzero = nearest_prob[nearest_prob > 0]
+    entropy = -(probability_nonzero * probability_nonzero.log()).sum()
+    normalized_entropy = entropy / np.log(max(count, 2))
+
+    return {
+        "num_codes": count,
+        "nn_prototype_used": int((nearest_counts > 0).sum()),
+        "nn_prototype_used_1pct": int((nearest_prob > 0.01).sum()),
+        "nn_normalized_entropy": float(normalized_entropy),
+        "nn_counts": nearest_counts.tolist(),
+        "encoder_tuple_used": int((tuple_counts > 0).sum()),
+        "encoder_tuple_counts": tuple_counts.tolist(),
+        "recon_weighted_l1": float(enc),
+        "commitment_mse": float(vq),
+        "recon_mse": float(mse),
+        "nn_l2_mean": float(nearest_l2.mean()),
+        "nn_l2_p95": float(torch.quantile(nearest_l2, 0.95)),
+        "nn_l2_p99": float(torch.quantile(nearest_l2, 0.99)),
+    }
 
 
-if __name__ == '__main__':
-    ap = argparse.ArgumentParser(
-        description='Measure vq_idx_used kill-gate metric for a VQ-VAE checkpoint',
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--zarr", required=True)
+    parser.add_argument(
+        "--codebook",
+        default=None,
+        help="Exact .npz used by the policy. Strongly recommended.",
     )
-    ap.add_argument('--checkpoint', required=True, help='Path to VQ-VAE checkpoint (.pt)')
-    ap.add_argument('--zarr', default='robot_data/pour.zarr',
-                    help='Path to Zarr dataset (default: robot_data/pour.zarr)')
-    args = ap.parse_args()
-    r = measure(args.checkpoint, args.zarr)
-    print(f"vq_idx_used = {r['used']}/{r['num_codes']}  (>1%: {r['used_1pct']})")
-    print(f"recon_mse   = {r['recon_mse']:.5f}")
-    print(f"histogram   = {r['counts']}")
+    parser.add_argument("--action_key", default=None)
+    parser.add_argument("--tcp_dim", type=int, default=None)
+    args = parser.parse_args()
+    result = measure(
+        args.checkpoint,
+        args.zarr,
+        codebook_path=args.codebook,
+        action_key=args.action_key,
+        tcp_dim=args.tcp_dim,
+    )
+    for key, value in result.items():
+        print(f"{key}: {value}")
+
+
+if __name__ == "__main__":
+    main()

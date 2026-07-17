@@ -163,8 +163,10 @@ workspace:
 
   checkpoint_cfg:
     _target_: dexmani_policy.training.workspace.CheckpointConfig
-    monitor_key: test_mean_score
-    mode: max
+    # Select checkpoints only with an offline validation metric. Confirm that
+    # the training loop writes `val_loss` into checkpoint.monitor.
+    monitor_key: val_loss
+    mode: min
     topk: 3
 
 # ── Env Runner ──
@@ -211,7 +213,10 @@ vq_vae:
   hidden_dim: 512
   num_groups: 2               # residual VQ layers → total = codebook_size ^ num_groups
   codebook_size: 4            # 4² = 16 discrete hand poses
-  num_layers: 2               # encoder/decoder MLP depth (1=underfit, 5=overfit→code collapse; 2-3 sweet spot for 12-DOF)
+  # Exact number of hidden Linear layers.  The legacy implementation
+  # accidentally created num_layers+1 layers; 3 preserves the historical
+  # architecture previously labelled num_layers=2.
+  num_layers: 3
   act_scale: 1.0              # data already in [-1,1]
   vq_decay: 0.8
   threshold_ema_dead_code: 2         # dead-code replacement enabled (0=disabled)
@@ -232,6 +237,10 @@ vq_vae:
   vq_loss_weight: 5.0          # VQ commitment multiplier
   max_grad_norm: 1.0
   warmup_steps: 150
+  # Must match the policy dataset split so VQ and policy use the same hand
+  # normalizer and demonstration subset.
+  val_ratio: 0.05
+  max_train_episodes: 80
   save_epochs: 100
   codebook_report_epochs: 200
   seed: 42

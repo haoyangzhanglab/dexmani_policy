@@ -142,7 +142,7 @@ dmypy.json
 robot_data/
 experiments/
 
-.codex
-.claude
+.codex/
+.claude/
 .ruff_cache/
-benchmark_results/
+.vscode/

@@ -91,7 +91,10 @@ class ResidualVQ(nn.Module):
         all_codes = codebooks.gather(2, gather_indices)                    # (Q, B, 1, D)
         return all_codes.squeeze(2)                                        # (Q, B, D)
 
-    def forward(self, x, indices=None, sample_codebook_temp=None):
+    def forward(
+        self, x, indices=None, sample_codebook_temp=None,
+        freeze_codebook: bool = False,
+    ):
         """
         Args:
             x:        (B, N, dim)  input to quantize
@@ -125,6 +128,7 @@ class ResidualVQ(nn.Module):
                 residual,
                 indices=layer_indices,
                 sample_codebook_temp=sample_codebook_temp,
+                freeze_codebook=freeze_codebook,
             )
 
             # Residual: subtract the *detached* quantized to isolate next layer's job
@@ -194,7 +198,10 @@ class GroupedResidualVQ(nn.Module):
         )
         return torch.stack(codes)
 
-    def forward(self, x, indices=None, sample_codebook_temp=None):
+    def forward(
+        self, x, indices=None, sample_codebook_temp=None,
+        freeze_codebook: bool = False,
+    ):
         shape, split_dim = x.shape, -1
         x_chunks = x.chunk(self.groups, dim=split_dim)
 
@@ -205,8 +212,12 @@ class GroupedResidualVQ(nn.Module):
             indices_chunks = [None] * self.groups
 
         out = tuple(
-            rvq(chunk, indices=chunk_indices,
-                sample_codebook_temp=sample_codebook_temp)
+            rvq(
+                chunk,
+                indices=chunk_indices,
+                sample_codebook_temp=sample_codebook_temp,
+                freeze_codebook=freeze_codebook,
+            )
             for rvq, chunk, chunk_indices in
             zip(self.rvqs, x_chunks, indices_chunks)
         )
