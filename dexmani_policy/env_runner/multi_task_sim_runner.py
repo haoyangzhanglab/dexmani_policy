@@ -29,6 +29,7 @@ class MultiTaskSimRunner:
         sensor_modalities: Optional[List[str]] = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
+        temporal_ensemble_coeff: float | None = None,
     ):
         if not task_configs:
             raise ValueError("task_configs cannot be empty")
@@ -56,6 +57,7 @@ class MultiTaskSimRunner:
                 sensor_modalities=sensor_modalities,
                 env_kwargs=env_kwargs,
                 clear_cache_freq=clear_cache_freq,
+                temporal_ensemble_coeff=temporal_ensemble_coeff,
             )
 
     def print_summary(self, per_task, avg_success_rate, avg_steps, rates, failed_tasks):

@@ -6,6 +6,7 @@ from termcolor import cprint
 from typing import Any, Dict, List, Optional
 
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
+from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
 
 class BaseRunner:
     """Abstract environment runner for agent evaluation.
@@ -30,6 +31,7 @@ class BaseRunner:
         sensor_modalities: List[str] | None = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
+        temporal_ensemble_coeff: float | None = None,
     ):
         self.n_obs_steps = n_obs_steps
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
@@ -44,6 +46,15 @@ class BaseRunner:
         self.env_video_fps = env_video_fps  # may be None → auto-detect from env
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
+
+        # ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705).
+        # When coeff is set (e.g. 0.01), consecutive overlapping chunks are
+        # blended via exponential weighting for smoother action transitions.
+        self._blender: ChunkOverlapBlender | None = None
+        if temporal_ensemble_coeff is not None:
+            self._blender = ChunkOverlapBlender(
+                temporal_ensemble_coeff=temporal_ensemble_coeff,
+            )
 
     def update_obs(self, observation: Dict[str, Any]):
         """Write one observation frame into the circular buffer.
@@ -127,11 +138,19 @@ class BaseRunner:
         self._obs_str_buffer.clear()
         self._obs_cursor = 0
         self._obs_count = 0
+        if self._blender is not None:
+            self._blender.reset()
 
     @torch.no_grad()
     def get_action_chunk(self, obs_batch, agent, denoise_timesteps:int=None) -> np.ndarray:
-        action = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
-        return action["control_action"].detach().cpu().numpy().squeeze(0)
+        result = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
+
+        if self._blender is not None:
+            full_pred = result["pred_action"]  # (B, horizon, A)
+            blended = self._blender.update(full_pred, n_action_steps=agent.n_action_steps)
+            return blended.detach().cpu().numpy().squeeze(0)
+
+        return result["control_action"].detach().cpu().numpy().squeeze(0)
 
     def run_one_episode(self, agent, env, episode_seed, denoise_timesteps:int=None, **kwargs):
         """Run a single evaluation episode.

@@ -20,6 +20,7 @@ class SimRunner(BaseRunner):
         eval_seeds: Optional[List[int]] = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
+        temporal_ensemble_coeff: float | None = None,
     ):
         super().__init__(
             n_obs_steps=n_obs_steps,
@@ -27,6 +28,7 @@ class SimRunner(BaseRunner):
             default_eval_episodes=default_eval_episodes,
             sensor_modalities=sensor_modalities,
             clear_cache_freq=clear_cache_freq,
+            temporal_ensemble_coeff=temporal_ensemble_coeff,
         )
         self.task_name = task_name
         self.env_kwargs = env_kwargs or {}

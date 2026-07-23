@@ -125,11 +125,15 @@ class BaseAgent(nn.Module):
         pred = self.normalizer['action'].unnormalize(pred)
         start = self.n_obs_steps - 1
         control_action = pred[:, start:start + self.n_action_steps]
+        # Unexecuted tail for temporal ensembling (ACT, Zhao et al. 2023).
+        tail = pred[:, start + self.n_action_steps:]
         if self.control_action_dim != self.action_dim:
             control_action = control_action[..., :self.control_action_dim]
+            tail = tail[..., :self.control_action_dim]
         return {
             'pred_action': pred,
             'control_action': control_action,
+            'tail': tail,
         }
 
     @torch.no_grad()

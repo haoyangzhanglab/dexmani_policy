@@ -144,6 +144,20 @@ class CodebookManager(nn.Module):
             error_msgs,
         )
 
+        # Keep plain-Python metadata in sync with the loaded buffers (mirrors
+        # what the .npz load() path does at lines 455-456).  Without this,
+        # self.num_groups / self.codebook_size / self.hand_min / self.hand_max
+        # would stay at their constructor defaults even after a checkpoint
+        # written by a different configuration is loaded.
+        if self.is_loaded:
+            n_poses = self.sorted_hand_poses.shape[0]
+            self.hand_dim = self.sorted_hand_poses.shape[1]
+            # For the DQ-RISE 2-group coding, the only supported decomposition
+            # is codebook_size ** num_groups = n_poses with num_groups = 2.
+            self.num_groups = 2
+            self.codebook_size = int(round(n_poses ** (1.0 / self.num_groups)))
+            self.total_combinations = n_poses
+
         # Backward compatibility: old policy checkpoints did not include the
         # codebook.  Loading is still safe when an external codebook was already
         # supplied during agent construction.
@@ -333,6 +347,17 @@ class CodebookManager(nn.Module):
         self.artifact_metadata["export_diagnostics"] = dict(
             self.last_export_diagnostics
         )
+
+        if pca.explained_variance_ratio_[0] < 0.3:
+            warnings.warn(
+                f"PCA explained_variance_ratio is low "
+                f"({pca.explained_variance_ratio_[0]:.4f}). "
+                "Hand pose prototypes may lack a clear 1-D ordering. "
+                "Consider improving VQ-VAE training quality — low PC1 ratio "
+                "often correlates with low vq_idx_used and downstream "
+                "success-rate collapse.",
+                RuntimeWarning,
+            )
 
         if outside_fraction > 0:
             warnings.warn(

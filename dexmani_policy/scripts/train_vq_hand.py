@@ -150,12 +150,13 @@ def train(args: argparse.Namespace) -> None:
         len(val_indices),
     )
 
-    # Fit only on selected policy-training episodes.  Policy dataset code in
-    # this bundle uses the identical episode mask and therefore identical hand
-    # scale/offset.
+    # Fit on the full hand dataset so that min/max match the policy dataset
+    # normalizer (pc_dataset.py uses all episodes).  This guarantees the VQ-VAE
+    # and policy coordinate spaces agree, avoiding _validate_codebook_normalizer()
+    # failures at DQ-RISE training start.
     normalizer = LinearNormalizer()
     normalizer.fit(
-        data={"hand": hand_data[train_indices]},
+        data={"hand": hand_data},
         mode="limits",
         range_eps=1e-4,
     )

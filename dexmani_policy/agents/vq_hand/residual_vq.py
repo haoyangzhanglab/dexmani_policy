@@ -1,13 +1,12 @@
 """
-ResidualVQ + GroupedResidualVQ — residual vector quantization.
+ResidualVQ — residual vector quantization.
 
 Follows Algorithm 1 from https://arxiv.org/pdf/2107.03312.pdf
 
 Ported from DQ-RISE.  Simplifications vs. original:
-  - Removed: accept_image_fmap, shared_codebook, quantize_dropout
-    (not needed for single-step, small-codebook use case)
-  - Kept: layer_weights with softmax combination, CE loss path for training,
-    GroupedResidualVQ (splits feature dim into independent VQ groups)
+  - Removed: accept_image_fmap, shared_codebook, quantize_dropout,
+    GroupedResidualVQ (unused in both upstream and this project)
+  - Kept: layer_weights with softmax combination, CE loss path for training
 """
 
 import torch
@@ -158,80 +157,3 @@ class ResidualVQ(nn.Module):
         return quantized_out, all_indices, all_losses
 
 
-# ===========================================================================
-# GroupedResidualVQ — splits feature dim into independent ResidualVQ groups
-# ===========================================================================
-
-class GroupedResidualVQ(nn.Module):
-    """Grouped Residual Vector Quantization.
-
-    Splits the feature dimension into ``groups`` independent chunks, each
-    quantized by its own :class:`ResidualVQ` stack.  Outputs are concatenated
-    back along the feature axis.
-
-    Ported from DQ-RISE ``policy/vqvae_rise/vector_quantize_pytorch/residual_vq.py``
-    """
-
-    def __init__(self, *, dim: int, groups: int = 1, **kwargs):
-        super().__init__()
-        self.dim = dim
-        self.groups = groups
-        if dim % groups != 0:
-            raise ValueError(
-                f'dim ({dim}) must be divisible by groups ({groups})'
-            )
-        dim_per_group = dim // groups
-
-        self.rvqs = nn.ModuleList([
-            ResidualVQ(dim=dim_per_group, **kwargs)
-            for _ in range(groups)
-        ])
-
-    @property
-    def codebooks(self):
-        return torch.stack(tuple(rvq.codebooks for rvq in self.rvqs))
-
-    def get_codes_from_indices(self, indices):
-        codes = tuple(
-            rvq.get_codes_from_indices(chunk_indices)
-            for rvq, chunk_indices in zip(self.rvqs, indices)
-        )
-        return torch.stack(codes)
-
-    def forward(
-        self, x, indices=None, sample_codebook_temp=None,
-        freeze_codebook: bool = False,
-    ):
-        shape, split_dim = x.shape, -1
-        x_chunks = x.chunk(self.groups, dim=split_dim)
-
-        indices_chunks = (indices,) if indices is not None else ((),)
-        if len(indices_chunks) > 0 and len(indices_chunks[0]) > 0:
-            indices_chunks = indices.chunk(self.groups, dim=-1)
-        else:
-            indices_chunks = [None] * self.groups
-
-        out = tuple(
-            rvq(
-                chunk,
-                indices=chunk_indices,
-                sample_codebook_temp=sample_codebook_temp,
-                freeze_codebook=freeze_codebook,
-            )
-            for rvq, chunk, chunk_indices in
-            zip(self.rvqs, x_chunks, indices_chunks)
-        )
-        out = tuple(zip(*out))
-
-        # If CE loss path: quantized + sum of losses
-        if indices is not None:
-            quantized, ce_losses = out
-            return torch.cat(quantized, dim=split_dim), sum(ce_losses)
-
-        # Normal path: quantized + all_indices + all_losses
-        quantized, all_indices, commit_losses = out
-        quantized = torch.cat(quantized, dim=split_dim)
-        all_indices = torch.stack(all_indices)       # (groups, B, N, num_quantizers)
-        commit_losses = torch.stack(commit_losses)   # (groups, 1, num_quantizers)
-
-        return quantized, all_indices, commit_losses

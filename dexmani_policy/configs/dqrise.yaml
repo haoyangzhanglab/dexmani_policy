@@ -176,6 +176,11 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
+  # ── ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705) ──
+  # Blend overlapping action-chunk predictions via exponential weighting
+  # to smooth transitions between consecutive inference calls.  Enabled
+  # when set to a float (recommended: 0.01).  Set to null to disable.
+  # temporal_ensemble_coeff: 0.01
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
     texture_random: false

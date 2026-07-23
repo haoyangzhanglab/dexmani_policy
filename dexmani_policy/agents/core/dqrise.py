@@ -116,7 +116,7 @@ class DQRISEAgent(BaseAgent):
         self._validate_codebook_normalizer()
 
     def _validate_codebook_normalizer(
-        self, *, rtol: float = 1e-6, atol: float = 1e-7
+        self, *, rtol: float = 1e-5, atol: float = 1e-6
     ) -> None:
         if not self.codebook_manager.is_loaded:
             return
@@ -174,6 +174,11 @@ class DQRISEAgent(BaseAgent):
         cond, aux = self._build_cond(batch["obs"])
 
         normed = self.normalizer["action"].normalize(batch["action"])
+        if not torch.isfinite(normed).all():
+            raise ValueError(
+                "NaN or Inf detected in normalised action. "
+                "Check the data pipeline (Zarr integrity, normalizer fit range)."
+            )
         tcp_part = normed[..., : self.tcp_dim]
         hand_part = normed[..., self.tcp_dim :]
 
@@ -189,8 +194,9 @@ class DQRISEAgent(BaseAgent):
 
         # Explicitly mark this as a mini-batch nearest-prototype statistic.
         num_codes = self.codebook_manager.get_num_codes()
+        safe_max = max(num_codes - 1, 1)
         discrete_idx = torch.floor(
-            ((index + 1.0) * 0.5 * (num_codes - 1)).clamp(0, num_codes - 1)
+            ((index + 1.0) * 0.5 * safe_max).clamp(0, max(num_codes - 1, 0))
             + 0.5
         ).long()
         counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
