@@ -14,12 +14,13 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed, worker_init_fn, dict_apply, fix_state_dict
 from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
+from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint, build_train_params
 from dexmani_policy.training.lr_scheduler import compute_num_training_steps
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
+    inject_faas_into_agent,
 )
 
 register_resolvers()
@@ -48,7 +49,10 @@ def _prepare_dqrise_codebook(cfg) -> str | None:
         return None
 
     import numpy as np
-    hand_dim = cfg.action_dim - cfg.tcp_dim
+    # In FAAS mode, action_dim - tcp_dim = 32 (FAAS hand), but the codebook
+    # needs the *native* hand dim (12).  Use the explicit hand_dim field when
+    # available (dp3_faas.yaml sets hand_dim: 12).
+    hand_dim = cfg.get('hand_dim', cfg.action_dim - cfg.tcp_dim)
     num_groups = 2
     codebook_size = 4
     total = codebook_size ** num_groups
@@ -129,9 +133,39 @@ def smoke_test(config_name: str):
         result = model.predict_action(obs_sample)
         pred_shape = tuple(result["pred_action"].shape)
         ctrl_shape = tuple(result["control_action"].shape)
-        assert ctrl_shape == (1, cfg.n_action_steps, cfg.action_dim), \
-            f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {cfg.action_dim})"
+        # In FAAS mode, action_dim=39 but control_action is native 19D
+        # (inverse_transform in predict_action_from_cond already converted).
+        expected_ctrl_dim = model.control_action_dim
+        assert ctrl_shape == (1, cfg.n_action_steps, expected_ctrl_dim), \
+            f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {expected_ctrl_dim})"
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
+
+    # 5.0 FAAS roundtrip test — verifies native↔FAAS mapping correctness
+    if cfg.get('use_faas', False):
+        print("[5.0/6] FAAS roundtrip test ...")
+        from dexmani_policy.common.faas_mapper import FAASHandMapper
+        mapper = FAASHandMapper()
+        # Action roundtrip: native → FAAS → native
+        native_action = torch.randn(4, 16, cfg.tcp_dim + 12)
+        faas_action = mapper.transform_action(native_action, cfg.tcp_dim)
+        rt_action = mapper.inverse_transform_action(faas_action, cfg.tcp_dim)
+        err_action = (native_action - rt_action).abs().max().item()
+        assert torch.allclose(native_action, rt_action, rtol=1e-6), (
+            f"FAAS action roundtrip error: {err_action:.2e}")
+        # Joint state roundtrip: arm untouched (7D fixed), hand 12D↔32D
+        native_js = torch.randn(4, 19)
+        faas_js = mapper.transform_joint_state(native_js)
+        assert torch.equal(faas_js[..., :7], native_js[..., :7]), \
+            "FAAS transform_joint_state modified arm portion!"
+        rt_hand = mapper.faas_to_native(faas_js[..., 7:])
+        err_js = (native_js[..., 7:] - rt_hand).abs().max().item()
+        assert torch.allclose(native_js[..., 7:], rt_hand, rtol=1e-6), (
+            f"FAAS joint_state roundtrip error: {err_js:.2e}")
+        # Model predict_action outputs native dims in FAAS mode
+        assert result['control_action'].shape[-1] == cfg.tcp_dim + 12, (
+            f"FAAS control_action dim {result['control_action'].shape[-1]} "
+            f"!= native {cfg.tcp_dim + 12}")
+        print(f"      ✓ FAAS roundtrip: action_err={err_action:.1e}, js_hand_err={err_js:.1e}")
 
     # 5.1 MoE enhanced gate smoke check (exercises the use_enhanced_gate=True path
     # that is also covered by the __main__ tests in plugins/moe.py and core/moe.py)
@@ -171,15 +205,7 @@ def smoke_test(config_name: str):
             optimizer_state=opt_sd,
             scheduler_state=sched_sd,
             monitor={"test_mean_score": 0.85},
-            train_params={
-                'n_obs_steps': model.n_obs_steps,
-                'n_action_steps': model.n_action_steps,
-                'action_dim': model.action_dim,
-                'horizon': model.horizon,
-                'action_key': getattr(model, 'action_key', 'action'),
-                'tcp_dim': getattr(model, 'tcp_dim', None),
-                'num_training_steps': num_training_steps,
-            },
+            train_params=build_train_params(model, num_training_steps),
         )
         ckpt_path = store.save("epoch=0000-step=00000001-score=0.8500.pt", ckpt)
         print(f"      saved checkpoint: {ckpt_path.name}")
@@ -191,7 +217,6 @@ def smoke_test(config_name: str):
         assert loaded.monitor.get("test_mean_score") == 0.85
         assert loaded.train_params.get('num_training_steps') == num_training_steps
 
-        # Verify model state dict roundtrip (loaded is on CPU, move to model device)
         loaded_model_sd = fix_state_dict(loaded.model_state, is_current_ddp=False)
         loaded_model_sd = {k: v.to(device) for k, v in loaded_model_sd.items()}
         for key in model_sd:
@@ -199,7 +224,6 @@ def smoke_test(config_name: str):
                 raise AssertionError(f"Model state dict mismatch for key '{key}' after roundtrip")
         print("      ✓ model state dict roundtrip OK")
 
-        # Verify EMA state dict roundtrip
         if ema_sd is not None and loaded.ema_model_state is not None:
             loaded_ema_sd = fix_state_dict(loaded.ema_model_state, is_current_ddp=False)
             loaded_ema_sd = {k: v.to(device) for k, v in loaded_ema_sd.items()}
@@ -208,7 +232,6 @@ def smoke_test(config_name: str):
                     raise AssertionError(f"EMA state dict mismatch for key '{key}' after roundtrip")
             print("      ✓ EMA state dict roundtrip OK")
 
-        # Verify train_params roundtrip
         tp = loaded.train_params
         assert tp.get('n_obs_steps') == model.n_obs_steps
         assert tp.get('n_action_steps') == model.n_action_steps

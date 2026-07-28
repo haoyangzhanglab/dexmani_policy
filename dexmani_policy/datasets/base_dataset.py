@@ -47,6 +47,7 @@ class BaseDataset(torch.utils.data.Dataset):
         augmentation_cfg: dict | None = None,
         action_key: str = 'action',
         use_aux_ee: bool = False,
+        tcp_dim: int | None = None,
         obs_horizon: Optional[int] = None,
         rgb_preprocess_size: Optional[Tuple[int, int]] = None,
         rgb_random_crop_size: Optional[Tuple[int, int]] = None,
@@ -60,6 +61,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
         self.action_key = action_key
         self.use_aux_ee = use_aux_ee
+        self.tcp_dim = tcp_dim
         self.obs_horizon = obs_horizon
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size
@@ -141,6 +143,36 @@ class BaseDataset(torch.utils.data.Dataset):
             'action': action,
         }
 
+    def _apply_faas_mapping(self, data: dict) -> dict:
+        """Convert native action and joint_state to FAAS space.
+
+        Operates on **torch.Tensor** (called after ``ensure_tensor`` in
+        ``__getitem__``), so ``native_to_faas`` works directly.
+
+        .. note::
+           ``joint_state`` lives inside ``data['obs']``, not at the top level.
+           Its arm portion is **always 7D** (arm joint angles), independent of
+           ``action_key``.  The action's arm portion uses ``self.tcp_dim``
+           (7 for joint mode, 9 for action_ee).
+        """
+        # Action: [arm(tcp_dim) | hand(12)] → [arm(tcp_dim) | FAAS_hand(32)]
+        arm_action = data['action'][..., :self.tcp_dim]
+        hand_action = data['action'][..., self.tcp_dim:]
+        data['action'] = torch.cat(
+            [arm_action, self.faas_mapper.native_to_faas(hand_action)], dim=-1,
+        )
+
+        # Joint state in data['obs'] — arm is always 7D joint angles
+        if 'joint_state' in data.get('obs', {}):
+            js = data['obs']['joint_state']
+            arm_state = js[..., :7]   # STATE_ARM_DIM = 7 (fixed)
+            hand_state = js[..., 7:]
+            data['obs']['joint_state'] = torch.cat(
+                [arm_state, self.faas_mapper.native_to_faas(hand_state)], dim=-1,
+            )
+
+        return data
+
     def _preprocess_rgb_cpu(self, rgb_np):
         """rgb_np: (T, H, W, 3) uint8 numpy → (T, 3, H_dst, W_dst) tensor.
         /255 + resize + optional random crop + optional color aug.
@@ -198,7 +230,14 @@ class BaseDataset(torch.utils.data.Dataset):
         if self.rgb_preprocess_size is not None and 'rgb' in data['obs']:
             data['obs']['rgb'] = self._preprocess_rgb_cpu(data['obs']['rgb'])
 
-        return dict_apply(data, ensure_tensor)
+        data = dict_apply(data, ensure_tensor)
+
+        # FAAS conversion runs on torch.Tensor, AFTER augmentation (which
+        # operates in native joint space) and AFTER numpy→torch conversion.
+        if getattr(self, 'use_faas', False):
+            data = self._apply_faas_mapping(data)
+
+        return data
 
     def _build_augmentors(self):
         """Build augmentors from ``augmentation_cfg`` using AUGMENTOR_REGISTRY.
@@ -226,7 +265,7 @@ class BaseDataset(torch.utils.data.Dataset):
         if self.augmentation_cfg is None:
             return data
         for modality, augs in self.augmentors.items():
-            if modality not in data['obs'] or augs is None:
+            if modality not in data['obs']:
                 continue
             x = data['obs'][modality]
             copied = False
@@ -239,9 +278,38 @@ class BaseDataset(torch.utils.data.Dataset):
             data['obs'][modality] = x
         return data
 
+    def _get_faas_normalizer_data(self):
+        """Return ``(joint_state, action)`` for normalizer fitting.
+
+        When FAAS is enabled the replay-buffer data is converted to FAAS
+        space so the normalizer fits on the same distribution that
+        ``__getitem__`` produces.  Subclasses that override
+        ``get_normalizer`` should call this helper instead of accessing
+        ``self.replay_buffer`` directly.
+        """
+        joint_state = self.replay_buffer['joint_state']  # numpy (N, 19)
+        action = self.replay_buffer[self.action_key]      # numpy (N, 19|21)
+
+        if not getattr(self, 'use_faas', False):
+            return joint_state, action
+
+        # Joint state: arm is always 7D arm joint angles
+        js_t = torch.from_numpy(joint_state).float()
+        joint_state = torch.cat([
+            js_t[..., :7],
+            self.faas_mapper.native_to_faas(js_t[..., 7:]),
+        ], dim=-1).numpy()
+        # Action: arm portion uses tcp_dim (7 or 9)
+        a_t = torch.from_numpy(action).float()
+        action = torch.cat([
+            a_t[..., :self.tcp_dim],
+            self.faas_mapper.native_to_faas(a_t[..., self.tcp_dim:]),
+        ], dim=-1).numpy()
+
+        return joint_state, action
+
     def get_normalizer(self, mode='limits'):
-        joint_state = self.replay_buffer['joint_state']
-        action = self.replay_buffer[self.action_key]
+        joint_state, action = self._get_faas_normalizer_data()
         normalizer = LinearNormalizer()
 
         if self.action_key == 'action_ee':

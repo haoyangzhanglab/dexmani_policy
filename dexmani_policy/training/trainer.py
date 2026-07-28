@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 
 from dexmani_policy.common.pytorch_util import compile_models, optimizer_to, dict_apply, fix_state_dict, to_log_scalars
 from dexmani_policy.training.workspace import TrainWorkspace
-from dexmani_policy.common.checkpoint_io import TrainCheckpoint
+from dexmani_policy.common.checkpoint_io import TrainCheckpoint, build_train_params
 
 @dataclass
 class TrainLoopConfig:
@@ -131,7 +131,7 @@ class Trainer:
         # Layer 2 NaN protection: detect gradient NaN/Inf before optimizer.step().
         # Loss NaN (layer 1) is caught in train_one_step(), but a gradient NaN
         # could slip through clip_grad_norm_ and silently corrupt optimizer state.
-        # This fills the documented gap — see CLAUDE.md "NaN 检测（三层防护）".
+        # This fills the documented gap — see CLAUDE.md "NaN 三层防护".
         grad_nan_params = []
         for name, param in self.raw_model.named_parameters():
             if param.grad is not None and not torch.isfinite(param.grad).all():
@@ -310,11 +310,11 @@ class Trainer:
                 device=self.device,
             )
             dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-            c = stats[3].item()
-            result = {"loss": (stats[0] / c).item()}
+            global_count = stats[3].item()
+            result = {"loss": (stats[0] / global_count).item()}
             if has_components:
-                result["loss_flow"] = (stats[1] / c).item()
-                result["loss_consistency"] = (stats[2] / c).item()
+                result["loss_flow"] = (stats[1] / global_count).item()
+                result["loss_consistency"] = (stats[2] / global_count).item()
             return result
 
         result = {"loss": (loss_sum / count).item()}
@@ -327,6 +327,8 @@ class Trainer:
     def evaluate(self, agent) -> Dict[str, Any]:
         try:
             result = self.env_runner.run(agent)
+        except torch.cuda.OutOfMemoryError:
+            raise  # OOM is fatal — training cannot continue, do not swallow
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -397,15 +399,7 @@ class Trainer:
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             monitor=monitor,
-            train_params={
-                'n_obs_steps': self.model.n_obs_steps,
-                'n_action_steps': self.model.n_action_steps,
-                'action_dim': self.model.action_dim,
-                'horizon': self.model.horizon,
-                'action_key': getattr(self.model, 'action_key', 'action'),
-                'tcp_dim': getattr(self.model, 'tcp_dim', None),
-                'num_training_steps': self.num_training_steps,
-            },
+            train_params=build_train_params(self.raw_model, self.num_training_steps),
         )
         tag = f"epoch={epoch:04d}-step={global_step:08d}"
         if test_mean_score is not None:

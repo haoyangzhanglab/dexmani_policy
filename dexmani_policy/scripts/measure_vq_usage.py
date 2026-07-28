@@ -13,7 +13,7 @@ _root = Path(__file__).resolve().parent.parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from dexmani_policy.agents.vq_hand import CodebookManager, VqVaeHand
+from dexmani_policy.agents.vq_hand import CodebookManager, VQVAEHand
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 
 
@@ -55,7 +55,7 @@ def measure(
     action_key = action_key or args.get("action_key", "action_ee")
     tcp_dim = int(tcp_dim if tcp_dim is not None else args.get("tcp_dim", 9))
 
-    model = VqVaeHand.from_checkpoint(checkpoint, map_location="cpu").eval()
+    model = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu").eval()
     buffer = ReplayBuffer.copy_from_path(zarr_path, keys=[action_key])
     actions = np.asarray(buffer[action_key])
     hand = actions[:, tcp_dim:]
@@ -85,7 +85,7 @@ def measure(
     # Nearest decoded-prototype usage: this is the label distribution actually
     # consumed by DQ-RISE policy training.
     continuous = manager.hand_pose_to_continuous_index(hand_norm)
-    count = manager.get_num_codes()
+    count = manager.num_codes
     nearest_ids = torch.floor(
         ((continuous.squeeze(-1) + 1.0) * 0.5 * (count - 1)).clamp(0, count - 1)
         + 0.5

@@ -919,7 +919,7 @@ dexmani_policy/
 ├── agents/
 │   ├── core/dqrise.py                  # DQRISEAgent (BaseAgent子类)
 │   └── vq_hand/
-│       ├── vqvae.py                    # VqVaeHand (重构版，from_checkpoint支持)
+│       ├── vqvae.py                    # VQVAEHand (重构版，from_checkpoint支持)
 │       ├── codebook_manager.py         # CodebookManager (nn.Module, 自包含)
 │       ├── residual_vq.py              # ResidualVQ (与官方同源)
 │       └── vector_quantize.py          # VectorQuantize (与官方同源)
@@ -1157,9 +1157,9 @@ class CodebookManager(nn.Module):
     _validate_codebook_normalizer()    # 确保 VQ 和 policy 坐标系一致
 ```
 
-### 13.3 VqVaeHand vs 官方 VqVae
+### 13.3 VQVAEHand vs 官方 VqVae
 
-| 方面 | 官方 VqVae | 本项目 VqVaeHand |
+| 方面 | 官方 VqVae | 本项目 VQVAEHand |
 |------|-----------|-----------------|
 | `from_checkpoint` 支持 | ❌ | ✅ 从state_dict推断架构 |
 | 内置优化器 | ✅ | ❌ (外部管理) |

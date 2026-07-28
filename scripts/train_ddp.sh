@@ -10,7 +10,7 @@
 #   bash scripts/train_ddp.sh ddp/dqrise 'training.seed=123'
 #
 # Available DDP configs:
-#   ddp/dp  ddp/dqrise  ddp/maniflow  ddp/multitask_dit  ddp/r3d
+#   ddp/dp  ddp/dqrise  ddp/maniflow  ddp/multitask_dit  ddp/r3d  ddp/dp3_faas
 #
 set -euo pipefail
 

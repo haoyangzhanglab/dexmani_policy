@@ -12,29 +12,31 @@ class PCDataset(BaseDataset):
 
     def get_normalizer(self, mode='limits'):
         normalizer = LinearNormalizer()
+        joint_state, action = self._get_faas_normalizer_data()
 
         if self.use_aux_ee:
             # EE aux loss: wrist pose = action_ee[..., :9] = pos(3) + rot6d(6)
+            # Note: use_aux_ee + use_faas is mutually exclusive (validated in
+            # _validate_faas_config), so action here is always native-dim.
             parts = [self.replay_buffer['action']]
             parts.append(self.replay_buffer['action_ee'][..., :9])
             action = np.concatenate(parts, axis=-1)
             normalizer.fit(data={
-                'joint_state': self.replay_buffer['joint_state'],
+                'joint_state': joint_state,
                 'action': action,
                 'point_cloud': self.replay_buffer['point_cloud'],
             }, last_n_dims=1, mode=mode)
         elif self.action_key == 'action_ee':
-            # EE-space action: use mixed normalizer (rot6d identity-norm, xyz/hand limits)
+            # EE-space action: use mixed normalizer (rot6d identity-norm)
             normalizer.fit(data={
-                'joint_state': self.replay_buffer['joint_state'],
+                'joint_state': joint_state,
                 'point_cloud': self.replay_buffer['point_cloud'],
             }, last_n_dims=1, mode=mode)
-            normalizer['action'] = build_mixed_action_normalizer(
-                self.replay_buffer['action_ee'])
+            normalizer['action'] = build_mixed_action_normalizer(action)
         else:
             normalizer.fit(data={
-                'joint_state': self.replay_buffer['joint_state'],
-                'action': self.replay_buffer[self.action_key],
+                'joint_state': joint_state,
+                'action': action,
                 'point_cloud': self.replay_buffer['point_cloud'],
             }, last_n_dims=1, mode=mode)
         return normalizer

@@ -26,7 +26,7 @@ horizon=16   n_obs_steps=2   n_action_steps=8   action_dim=19
 | **DP3** | PointCloud(1024,3) + joint_state | PointNeXT + StateMLP | ConditionalUnet1D (FiLM) | DDIM Diffusion | `dp3.yaml` |
 | **ManiFlow** | PointCloud(1024,3) + joint_state | PointNeXT + StateMLP | DiTXFlowMatch (cross-attn) | Euler ODE + Consistency | `maniflow.yaml` |
 | **MoE DP3** | 同 DP3 | DP3 encoder + 16-expert MoE router | ConditionalUnet1D | DDIM Diffusion | `moe_dp3.yaml` |
-| **MultiTask** | RGB + joint_state + language | DINO + CLIP Text + StateMLP | DiT_Diffusion (AdaLN-Zero) | DDIM Diffusion | `multitask_dit.yaml` |
+| **MultiTask** | RGB + joint_state + language | DINO + CLIP Text + StateMLP | DiTDiffusion (AdaLN-Zero) | DDIM Diffusion | `multitask_dit.yaml` |
 
 关键差异：
 - **DP vs DP3**：RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒，适合灵巧操作中手-物交互场景。

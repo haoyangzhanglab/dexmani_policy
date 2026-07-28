@@ -3,7 +3,7 @@ import torch.nn as nn
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.core.dp import DPObsEncoder
 from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
-from dexmani_policy.agents.action_decoders.backbone.dit import DiT_Diffusion
+from dexmani_policy.agents.action_decoders.backbone.dit import DiTDiffusion
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.action_decoders.flowmatch import FlowMatch
 
@@ -74,7 +74,7 @@ class MultiTaskAgent(BaseAgent):
         obs_cond_dim = obs_encoder.out_dim * n_obs_steps
         full_cond_dim = obs_cond_dim + n_emb
 
-        backbone = DiT_Diffusion(
+        backbone = DiTDiffusion(
             horizon=horizon,
             action_dim=action_dim,
             cond_dim=full_cond_dim,

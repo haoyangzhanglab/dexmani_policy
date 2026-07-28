@@ -25,7 +25,7 @@ class EncoderMLP(nn.Module):
     ``num_layers=1`` now means exactly ``input -> hidden -> output``.  The
     previous implementation accidentally created ``num_layers + 1`` hidden
     layers.  Existing checkpoints remain loadable through
-    :meth:`VqVaeHand.from_checkpoint`, which infers the actual depth from the
+    :meth:`VQVAEHand.from_checkpoint`, which infers the actual depth from the
     state dict rather than trusting legacy configuration metadata.
     """
 
@@ -53,7 +53,7 @@ class EncoderMLP(nn.Module):
         return self.head(self.trunk(x))
 
 
-class VqVaeHand(nn.Module):
+class VQVAEHand(nn.Module):
     """Residual VQ-VAE for a single hand pose."""
 
     def __init__(
@@ -184,7 +184,7 @@ class VqVaeHand(nn.Module):
         *,
         map_location: str | torch.device = "cpu",
         strict: bool = True,
-    ) -> "VqVaeHand":
+    ) -> "VQVAEHand":
         """Construct from either a complete training checkpoint or state dict.
 
         Architecture dimensions are inferred from tensor shapes.  This loads

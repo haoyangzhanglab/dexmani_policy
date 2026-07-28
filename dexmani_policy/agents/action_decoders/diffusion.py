@@ -20,7 +20,7 @@ class Diffusion(nn.Module):
 
     The noise scheduler uses a fixed configuration (squaredcos_cap_v2 beta
     schedule, beta_start=0.0001, beta_end=0.02) that is intentionally
-    non-configurable — see CLAUDE.md "Known Hard-coded Values" for rationale.
+    non-configurable — see CLAUDE.md "已知硬编码与设计约定".
     """
     def __init__(
         self,
@@ -88,7 +88,7 @@ class Diffusion(nn.Module):
         if dim_groups is not None:
             # Per-dimension-group MSE losses — each group uses the per-element
             # MSE (F.mse_loss default mean over B×H×D elements), matching the
-            # official R3D-Policy behaviour (dp3.py:415-437).
+            # R3D-Policy dim_groups convention.
             # Auxiliary groups (all except 'joint') are down-weighted by
             # ``aux_loss_weight`` (default 0.1).  Set to 1.0 for exact
             # R3D-Policy parity.

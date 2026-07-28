@@ -1,19 +1,13 @@
 import torch
 import torch.nn as nn
 from transformers import SiglipVisionConfig, SiglipVisionModel
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional
 
+from dexmani_policy.agents.obs_encoder.rgb.base import ViTEncoder
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
-from dexmani_policy.agents.obs_encoder.rgb.geometry_processor import GeometryProcessor
 from dexmani_policy.agents.obs_encoder.rgb.types import GlobalTokenType, TuneMode
-from dexmani_policy.agents.obs_encoder.rgb.utils import (
-    flatten_batch,
-    restore_batch,
-    get_patch_grid_size,
-    reshape_patch_tokens_to_map,
-)
 
-class SigLIP(nn.Module):
+class SigLIP(ViTEncoder):
     def __init__(
         self,
         model_name: str = "google/siglip-base-patch16-224",
@@ -37,49 +31,19 @@ class SigLIP(nn.Module):
 
         self.patch_size = int(self.backbone.config.patch_size)
         self.hidden_dim = int(self.backbone.config.hidden_size)
+        self.num_prefix_tokens = 0  # SigLIP has no CLS token in last_hidden_state
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
 
         self.proj = nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
-        self.geometry_processor = GeometryProcessor()
-
         self.set_tune_mode(tune_mode)
 
-    def set_tune_mode(self, tune_mode: TuneMode) -> None:
-        self.tune_mode = tune_mode
+    def _extract_patch_tokens(self, outputs) -> torch.Tensor:
+        # SigLIP last_hidden_state contains only patch tokens (no CLS token).
+        # Unlike CLIP/DINO which slice away prefix tokens, we keep all positions.
+        return outputs.last_hidden_state
 
-        if tune_mode == "freeze":
-            self.backbone.requires_grad_(False)
-            self.backbone.eval()
-            return
-
-        if tune_mode == "full":
-            self.backbone.requires_grad_(True)
-            return
-
-        if tune_mode == "lora":
-            from peft import LoraConfig, get_peft_model
-
-            self.backbone.requires_grad_(False)
-
-            target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=32,
-                lora_dropout=0.05,
-                target_modules=target_modules,
-                bias="none",
-                use_rslora=True,
-            )
-            self.backbone = get_peft_model(self.backbone, lora_config)
-
-            # Match LoRA dtype to backbone dtype (bfloat16).
-            backbone_dtype = next(self.backbone.parameters()).dtype
-            for name, param in self.backbone.named_parameters():
-                if "lora_" in name:
-                    param.data = param.data.to(dtype=backbone_dtype)
-            return
-
-        raise ValueError(f"Unsupported tune_mode: {tune_mode}")
+    def _get_lora_target_modules(self) -> list[str]:
+        return ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
 
     def get_global_token(self, outputs, patch_tokens: torch.Tensor) -> torch.Tensor:
         if self.global_token_type == "avg":
@@ -98,71 +62,6 @@ class SigLIP(nn.Module):
             )
 
         raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
-
-    def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
-        if rgb.ndim < 4 or rgb.shape[-3] != 3:
-            raise ValueError(f"rgb should have shape [..., 3, H, W], got {tuple(rgb.shape)}")
-
-        if self.tune_mode == "freeze":
-            self.backbone.eval()
-
-        flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
-        outputs = self.backbone(pixel_values=flat_rgb, return_dict=True)
-
-        # SigLIP last_hidden_state contains only patch tokens (no CLS token).
-        # Unlike CLIP/DINO which slice away prefix tokens, we keep all positions.
-        patch_tokens = self.proj(outputs.last_hidden_state)
-        global_token = self.get_global_token(outputs, patch_tokens)
-
-        return {
-            "patch_tokens": restore_batch(patch_tokens, leading_shape),
-            "global_token": restore_batch(global_token, leading_shape),
-        }
-
-    def backproject(
-        self,
-        depth: torch.Tensor,
-        intrinsics: torch.Tensor,
-        camera_to_world: Optional[torch.Tensor] = None,
-        depth_scale: float = 1000.0,
-        min_depth: float = 0.0,
-        max_depth: Optional[float] = None,
-    ) -> Dict[str, object]:
-        dense_geometry = self.geometry_processor.backproject_depth(
-            depth=depth,
-            intrinsics=intrinsics,
-            camera_to_world=camera_to_world,
-            depth_scale=depth_scale,
-            min_depth=min_depth,
-            max_depth=max_depth,
-        )
-
-        patch_geometry = self.geometry_processor.pool_patch_coordinates(
-            coords=dense_geometry["coords"],
-            valid_mask=dense_geometry["valid_mask"],
-            patch_size=self.patch_size,
-        )
-
-        patch_coords = patch_geometry["patch_coords"]
-        return {
-            "patch_coords": patch_coords,
-            "patch_valid_mask": patch_geometry["patch_valid_mask"],
-            "geometry_meta": {
-                "coord_frame": dense_geometry["coord_frame"],
-                "depth_scale": dense_geometry["depth_scale"],
-                "min_depth": dense_geometry["min_depth"],
-                "max_depth": dense_geometry["max_depth"],
-                "patch_grid_size": patch_geometry["patch_grid_size"],
-                "patch_hw": patch_geometry["patch_hw"],
-                "leading_shape": tuple(patch_coords.shape[:-2]),
-            },
-        }
-
-    def patch_tokens_to_featmap(self, patch_tokens: torch.Tensor, image_hw: Sequence[int]) -> torch.Tensor:
-        patch_grid_size = get_patch_grid_size((int(image_hw[0]), int(image_hw[1])), self.patch_size)
-        flat_patch_tokens, leading_shape = flatten_batch(patch_tokens, trailing_ndim=2)
-        feature_map = reshape_patch_tokens_to_map(flat_patch_tokens, patch_grid_size)
-        return restore_batch(feature_map, leading_shape)
 
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"

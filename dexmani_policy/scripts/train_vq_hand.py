@@ -28,7 +28,7 @@ _project_root = _script_dir.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from dexmani_policy.agents.vq_hand import VqVaeHand
+from dexmani_policy.agents.vq_hand import VQVAEHand
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import downsample_mask, get_val_mask
@@ -202,7 +202,7 @@ def train(args: argparse.Namespace) -> None:
     if len(train_loader) == 0:
         raise ValueError("Training DataLoader has zero batches")
 
-    vqvae = VqVaeHand(
+    vqvae = VQVAEHand(
         hand_dim=args.hand_dim,
         latent_dim=args.latent_dim,
         hidden_dim=args.hidden_dim,

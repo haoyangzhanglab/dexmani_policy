@@ -12,8 +12,13 @@ __all__ = [
     "build_scheduler",
     "build_optimizer_and_scheduler",
     "validate_config",
+    "inject_faas_into_agent",
     "compute_num_training_steps",
 ]
+
+# joint_state arm is ALWAYS 7D arm joint angles, independent of action_key.
+# This is separate from tcp_dim (7 for joint mode, 9 for action_ee mode).
+STATE_ARM_DIM = 7
 
 # ---------------------------------------------------------------------------
 # Dataset & Normalizer
@@ -28,6 +33,14 @@ def build_dataset_and_normalizer(cfg):
     """
     dataset = hydra.utils.instantiate(cfg.dataset)
 
+    # FAAS: inject attributes BEFORE get_normalizer() so the normalizer is
+    # fitted on FAAS-converted replay buffer data.
+    if cfg.get('use_faas', False):
+        from dexmani_policy.common.faas_mapper import FAASHandMapper
+        dataset.use_faas = True
+        dataset.faas_mapper = FAASHandMapper()
+        dataset.tcp_dim = cfg.tcp_dim
+
     normalizer = dataset.get_normalizer()
     if hasattr(dataset, 'normalizer_mode') and dataset.normalizer_mode == 'per_task':
         raise NotImplementedError(
@@ -38,12 +51,33 @@ def build_dataset_and_normalizer(cfg):
     return dataset, normalizer
 
 # ---------------------------------------------------------------------------
+# FAAS Injection (shared across train / eval / smoke-test entry points)
+# ---------------------------------------------------------------------------
+
+def inject_faas_into_agent(agent, cfg):
+    """Post-construction FAAS attribute injection for any entry point.
+
+    Called by ``build_model_and_ema`` (training), ``eval_sim.py`` (eval),
+    and ``smoke_test.py`` (smoke).  Must be called before the agent is used
+    for inference so that ``predict_action`` / ``compute_action_mse`` can
+    detect ``use_faas`` and apply the correct conversions.
+    """
+    agent.use_faas = cfg.get('use_faas', False)
+    if not agent.use_faas:
+        return
+    from dexmani_policy.common.faas_mapper import FAASHandMapper
+    agent.tcp_dim = cfg.tcp_dim
+    agent.hand_dim = cfg.get('hand_dim', cfg.get('faas_hand_dim', 32))
+    agent.faas_mapper = FAASHandMapper()
+
+# ---------------------------------------------------------------------------
 # Model & EMA
 # ---------------------------------------------------------------------------
 
 def build_model_and_ema(cfg, device, normalizer):
     """Instantiate the agent model and, if configured, its EMA twin."""
     model = hydra.utils.instantiate(cfg.agent)
+    inject_faas_into_agent(model, cfg)
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.get('action_key', 'action')
     model.to(device)
@@ -53,6 +87,7 @@ def build_model_and_ema(cfg, device, normalizer):
     ema_updater = None
     if cfg.training.use_ema:
         ema_model = hydra.utils.instantiate(cfg.agent)
+        inject_faas_into_agent(ema_model, cfg)
         ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.action_key = model.action_key
         ema_model.to(device)
@@ -79,6 +114,15 @@ def build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch=-1):
 
 def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
     """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
+    # Guard: tail batches are silently dropped when gradient_accumulation_steps
+    # does not divide the dataloader.  Warn if this is ever configured.
+    grad_accum = cfg.get('training', {}).get('loop', {}).get('gradient_accumulation_steps', 1)
+    if grad_accum > 1 and batches_per_epoch % grad_accum != 0:
+        print(
+            f"[WARNING] gradient_accumulation_steps ({grad_accum}) does not divide "
+            f"batches_per_epoch ({batches_per_epoch}). {batches_per_epoch % grad_accum} "
+            f"tail batch(es) will be silently discarded at epoch end."
+        )
     optimizer = model.configure_optimizer(**cfg.optimizer)
     scheduler = build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch)
     return optimizer, scheduler
@@ -141,6 +185,78 @@ def _validate_aux_config(cfg):
                 "use_aux_ee=true requires joint_dim and ee_dim in config."
             )
 
+def _validate_faas_config(cfg):
+    """Validate FAAS-specific config constraints.
+
+    Preconditions checked:
+    - ``use_aux_ee`` is mutually exclusive with ``use_faas``
+    - ``tcp_dim`` exists and is 7 or 9
+    - ``action_dim == tcp_dim + hand_dim``
+    - ``state_dim == STATE_ARM_DIM + hand_dim`` (joint_state arm always 7D)
+    - Normalizer mode is ``limits`` (gaussian is numerically unstable on
+      zero-padded FAAS dimensions)
+    - MultiTaskDataset + use_faas is blocked (not yet supported)
+    """
+    if not cfg.get('use_faas', False):
+        return
+
+    # Mutual exclusion
+    if cfg.get('use_aux_ee', False):
+        raise ValueError(
+            "use_faas=true is incompatible with use_aux_ee=true. "
+            "FAAS uses its own hand space and does not support EE auxiliary loss."
+        )
+
+    # tcp_dim
+    tcp_dim = cfg.get('tcp_dim')
+    if tcp_dim is None:
+        raise ValueError("use_faas=true requires tcp_dim in config.")
+    if tcp_dim not in (7, 9):
+        raise ValueError(f"tcp_dim must be 7 (joint) or 9 (action_ee), got {tcp_dim}.")
+
+    # Dimension consistency
+    # NOTE: cfg.hand_dim is the *native* hand dim (12), used for smoke test
+    # DQ-RISE compat.  cfg.faas_hand_dim is the FAAS hand dim (32).
+    # For validation we use faas_hand_dim as the canonical field.
+    faas_hand_dim = cfg.get('faas_hand_dim', 32)
+    expected_action_dim = tcp_dim + faas_hand_dim
+    actual_action_dim = cfg.get('action_dim')
+    if actual_action_dim != expected_action_dim:
+        raise ValueError(
+            f"action_dim={actual_action_dim}, expected {tcp_dim}+{faas_hand_dim}={expected_action_dim}. "
+            f"Check your dimension overrides."
+        )
+
+    # state_dim: joint_state arm is always 7D, not tcp_dim
+    expected_state_dim = STATE_ARM_DIM + faas_hand_dim
+    # state_dim may be inside agent: due to Hydra deep merge
+    agent_cfg = cfg.get('agent', cfg)
+    actual_state_dim = agent_cfg.get('state_dim', cfg.get('state_dim'))
+    if actual_state_dim != expected_state_dim:
+        raise ValueError(
+            f"state_dim={actual_state_dim}, expected {STATE_ARM_DIM}+{faas_hand_dim}={expected_state_dim}. "
+            f"Note: joint_state arm is always 7D (STATE_ARM_DIM), not tcp_dim ({tcp_dim})."
+        )
+
+    # Normalizer mode must be limits
+    # (gaussian mode produces unstable scale values on zero-padded FAAS dims)
+    normalizer_mode = cfg.get('normalizer_mode', 'limits')
+    if normalizer_mode != 'limits':
+        raise ValueError(
+            f"use_faas=true requires normalizer_mode='limits', got '{normalizer_mode}'. "
+            f"Gaussian normalizer is numerically unstable on zero-padded FAAS dimensions."
+        )
+
+    # MultiTaskDataset guard (not yet supported)
+    dataset_target = cfg.get('dataset', {}).get('_target_', '')
+    if 'MultiTaskDataset' in dataset_target:
+        raise NotImplementedError(
+            "use_faas=true with MultiTaskDataset is not yet supported. "
+            "Use single-task datasets only."
+        )
+
+    print("FAAS config validation passed")
+
 def validate_config(cfg):
     """Validate common training config constraints.
 
@@ -168,6 +284,7 @@ def validate_config(cfg):
     _validate_moe_config(cfg)
     _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)
+    _validate_faas_config(cfg)
     validate_action_key_consistency(cfg)
 
     print("Config validation passed")

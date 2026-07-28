@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import reduce
 
-from dexmani_policy.agents.action_decoders.sample import TimeSampler
+from dexmani_policy.agents.action_decoders.time_sampler import TimeSampler
 
 class FlowMatchWithConsistency(nn.Module):
     """Flow Matching decoder with optional consistency training.
@@ -86,6 +86,27 @@ class FlowMatchWithConsistency(nn.Module):
         }
         return flow_target_dict
 
+    def _compute_flow_only_loss(
+        self, flow_targets: dict[str, torch.Tensor], context: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        pred_vt_flow = self.model(
+            x=flow_targets["xt"],
+            timestep=flow_targets["t"].squeeze(),
+            target_t=flow_targets["target_t"].squeeze(),
+            context=context,
+        )
+        loss_flow = F.mse_loss(pred_vt_flow, flow_targets["vt_target"], reduction='none')
+        loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()
+        loss_dict = {
+            "loss": loss_flow,
+            "loss_action": loss_flow,
+            "loss_flow": loss_flow,
+            "loss_consistency": torch.zeros_like(loss_flow),
+            "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_vt_flow ** 2)),
+            "has_consistency": 0,
+        }
+        return loss_flow, loss_dict
+
     def get_consistency_velocity(
         self, actions: torch.Tensor, cond: torch.Tensor, ema_model: nn.Module
     ) -> dict[str, torch.Tensor]:
@@ -101,16 +122,15 @@ class FlowMatchWithConsistency(nn.Module):
         t_ct = t_ct.view(-1, 1, 1)
 
         dt1 = self.sampler.sample(B, self.dt_sample_mode_for_consistency, device=actions.device)
-        dt2 = dt1.clone()
 
         t_next = t_ct.squeeze() + dt1
         t_next = torch.clamp(t_next, max=1.0)
         t_next = t_next.view(-1, 1, 1)
 
         if self.target_t_sample_mode == "relative":
-            target_t_next = dt2
+            target_t_next = dt1
         elif self.target_t_sample_mode == "absolute":
-            target_t_next = torch.clamp(t_next.squeeze() + dt2, max=1.0)
+            target_t_next = torch.clamp(t_next.squeeze() + dt1, max=1.0)
 
         x0_ct = torch.randn_like(actions, device=actions.device)
         x1_ct = actions
@@ -133,7 +153,7 @@ class FlowMatchWithConsistency(nn.Module):
         consistency_target_dict = {
             "xt": xt_ct,
             "t": t_ct,
-            "target_t": dt2 if self.target_t_sample_mode == "relative" else target_t_next.squeeze(),
+            "target_t": dt1 if self.target_t_sample_mode == "relative" else target_t_next.squeeze(),
             "vt_target": vt_target_ct,
         }
         return consistency_target_dict
@@ -153,23 +173,7 @@ class FlowMatchWithConsistency(nn.Module):
         # split off a consistency sub-batch that cannot be used.
         if ema_model is None:
             flow_targets = self.get_flow_velocity(actions)
-            pred_vt_flow = self.model(
-                x = flow_targets["xt"],
-                timestep = flow_targets["t"].squeeze(),
-                target_t = flow_targets["target_t"].squeeze(),
-                context = cond,
-            )
-            loss_flow = F.mse_loss(pred_vt_flow, flow_targets["vt_target"], reduction='none')
-            loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()
-            loss_dict = {
-                "loss": loss_flow,
-                "loss_action": loss_flow,
-                "loss_flow": loss_flow,
-                "loss_consistency": torch.zeros_like(loss_flow),
-                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_vt_flow ** 2)),
-                "has_consistency": 0,
-            }
-            return loss_flow, loss_dict
+            return self._compute_flow_only_loss(flow_targets, cond)
 
         # Check that batch size is large enough for consistency training
         if B < 2:
@@ -189,21 +193,7 @@ class FlowMatchWithConsistency(nn.Module):
 
         # consistency_batchsize == 0: fall back to pure flow loss
         if consistency_batchsize == 0:
-            pred_vt_flow = self.model(
-                x=flow_targets["xt"],
-                timestep=flow_targets["t"].squeeze(),
-                target_t=flow_targets["target_t"].squeeze(),
-                context=cond[:flow_batchsize],
-            )
-            loss_flow = F.mse_loss(pred_vt_flow, flow_targets["vt_target"], reduction='none')
-            loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean').mean()
-            loss_dict = {
-                "loss": loss_flow, "loss_action": loss_flow,
-                "loss_flow": loss_flow, "loss_consistency": torch.zeros_like(loss_flow),
-                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_vt_flow ** 2)),
-                "has_consistency": 0,
-            }
-            return loss_flow, loss_dict
+            return self._compute_flow_only_loss(flow_targets, cond[:flow_batchsize])
 
         consistency_targets = self.get_consistency_velocity(actions[flow_batchsize:], cond[flow_batchsize:], ema_model)
 
@@ -302,7 +292,7 @@ class FlowMatchWithConsistency(nn.Module):
 class FlowMatch(nn.Module):
     """Pure Flow Matching decoder (no consistency training).
 
-    Uses the same backbone as Diffusion (DiT_Diffusion); the only change is that
+    Uses the same backbone as Diffusion (DiTDiffusion); the only change is that
     the prediction target shifts from noise/sample to the velocity field
     v = x1 - x0.
 

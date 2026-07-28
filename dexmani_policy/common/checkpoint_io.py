@@ -27,6 +27,27 @@ class TrainCheckpoint:
     train_params: Optional[Dict[str, Any]] = None
 
 
+def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
+    """Build the ``train_params`` metadata dict embedded in every checkpoint.
+
+    This is the **single source of truth** for which agent attributes are
+    serialised alongside the weights.  Both the trainer (save path) and
+    the smoke test (roundtrip path) call this function so that the set of
+    keys stays consistent.
+    """
+    return {
+        'n_obs_steps': model.n_obs_steps,
+        'n_action_steps': model.n_action_steps,
+        'action_dim': model.action_dim,
+        'horizon': model.horizon,
+        'action_key': getattr(model, 'action_key', 'action'),
+        'tcp_dim': getattr(model, 'tcp_dim', None),
+        'use_faas': getattr(model, 'use_faas', False),
+        'control_action_dim': model.control_action_dim,
+        'num_training_steps': num_training_steps,
+    }
+
+
 class CheckpointStore:
     def __init__(self, checkpoint_dir: Path):
         self.checkpoint_dir = Path(checkpoint_dir)

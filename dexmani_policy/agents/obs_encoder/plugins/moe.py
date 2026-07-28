@@ -123,9 +123,9 @@ class MoE(nn.Module):
         # training — it only activates under pathological weight drift.
         logits = torch.clamp(logits, min=-50, max=50)
         if self.use_boost:
-            # Align with official MoE-DP: slice logits BEFORE softmax so that
-            # only active experts compete.  Inactive experts receive exactly
-            # zero probability (rather than a residual share of a full softmax).
+            # Slice logits BEFORE softmax so that only active experts
+            # compete.  Inactive experts receive exactly zero probability
+            # (rather than a residual share of a full softmax).
             logits = logits[:, :self.current_num_experts]
         probs = torch.softmax(logits, dim=-1)
         k = min(self.current_top_k, self.current_num_experts)
@@ -177,7 +177,7 @@ class MoE(nn.Module):
         # Frequency: count ALL top-k expert selections (not just argmax).
         # When top_k > 1, each sample routes to multiple experts;
         # F.one_hot over topk_idx correctly accounts for all of them.
-        E = probs.shape[1]  # aligned with official: during boost E = current_num_experts
+        E = probs.shape[1]  # during boost: E = current_num_experts, not total
         topk_one_hot = F.one_hot(topk_idx, num_classes=E).to(probs.dtype)
         f_i = topk_one_hot.sum(dim=[0, 1]) / (probs.shape[0] * topk_idx.shape[1])
 

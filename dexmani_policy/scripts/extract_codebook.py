@@ -15,7 +15,7 @@ _project_root = _script_dir.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from dexmani_policy.agents.vq_hand import CodebookManager, VqVaeHand
+from dexmani_policy.agents.vq_hand import CodebookManager, VQVAEHand
 
 
 def sha256_file(path: str | Path) -> str:
@@ -51,7 +51,7 @@ def extract_codebook(
 ) -> CodebookManager:
     checkpoint_path = str(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    vqvae = VqVaeHand.from_checkpoint(checkpoint, map_location="cpu")
+    vqvae = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu")
     vqvae = vqvae.to(device).eval()
 
     manager = CodebookManager.extract_from_vqvae(vqvae)

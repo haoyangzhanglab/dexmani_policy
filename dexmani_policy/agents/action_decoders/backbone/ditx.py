@@ -193,7 +193,7 @@ class DiTXFlowMatch(nn.Module):
     tokens attend to action tokens, and dual timestep embeddings for flow
     matching (timestep + target_t fused via linear layer).
 
-    Key differences from ``DiT_Diffusion``:
+    Key differences from ``DiTDiffusion``:
         - Action tokens attend to observation tokens via ``CrossAttention``.
         - Dual ``SinusoidalPosEmb`` encoders for (timestep, target_t) fused
           into a single conditioning vector.

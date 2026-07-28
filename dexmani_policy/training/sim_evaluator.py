@@ -67,6 +67,19 @@ class SimEvaluator:
                         f"from a different training run than this checkpoint."
                     )
 
+            # FAAS consistency: prevent loading a FAAS checkpoint with a
+            # non-FAAS config (or vice versa).  The dimension checks above
+            # would also catch the mismatch (action_dim 39 vs 19), but this
+            # gives a clearer error message.
+            ckpt_use_faas = train_params.get('use_faas', False)
+            agent_use_faas = getattr(self.agent, 'use_faas', False)
+            if ckpt_use_faas != agent_use_faas:
+                raise ValueError(
+                    f"Checkpoint use_faas={ckpt_use_faas} but agent "
+                    f"use_faas={agent_use_faas}. Use a matching config "
+                    f"(dp3_faas for FAAS checkpoints, dp3 for native)."
+                )
+
         if use_ema and checkpoint.ema_model_state is not None:
             print("Using EMA weights for inference.")
             self.agent.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
@@ -118,7 +131,7 @@ class SimEvaluator:
             "metrics": {},
         }
 
-        is_multi_task = hasattr(self.env_runner, 'runners')
+        is_multi_task = self.env_runner.is_multi_task
 
         for denoise_timesteps in denoise_timesteps_list:
             case_dir = eval_run_dir / f"denoise_timesteps{denoise_timesteps}"
@@ -165,7 +178,6 @@ class SimEvaluator:
 
         _save_json(summary, eval_run_dir / "eval_metrics.json")
 
-        # --- print final summary table ---
         cprint("=" * 60, "cyan")
         cprint("  Evaluation Summary", "cyan", attrs=["bold"])
         cprint("=" * 60, "cyan")

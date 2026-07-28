@@ -22,7 +22,9 @@ def load_param_dict(state_dict: dict, prefix: str) -> nn.ParameterDict:
     for key, value in state_dict.items():
         value: torch.Tensor
         if key.startswith(prefix):
-            param_keys = key[len(prefix):].split('.')[1:]
+            suffix = key[len(prefix):]
+            assert suffix.startswith('.'), f"prefix '{prefix}' missing trailing dot in key '{key}'"
+            param_keys = suffix.split('.')[1:]
             if param_keys:
                 dfs_add(out_dict, param_keys, value.clone())
     return out_dict
@@ -46,7 +48,12 @@ class DictOfTensorMixin(nn.Module):
         old_keys = set(self.params_dict.state_dict().keys())
         self.params_dict = load_param_dict(state_dict, prefix + 'params_dict')
         self.params_dict.requires_grad_(False)
+        self._field_views.clear()
 
+        # Only report missing/unexpected keys on reload (not first load from empty).
+        # On first load old_keys is empty and ALL state-dict keys would appear
+        # as "unexpected", which would break strict=True callers like
+        # load_normalizer_from_dataset.
         if len(old_keys) > 0:
             state_prefix = prefix + 'params_dict.'
             state_keys = {

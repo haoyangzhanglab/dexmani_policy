@@ -6,8 +6,8 @@ def farthest_point_sample(
     pointcloud: torch.Tensor,
     num_samples: int = 1024,
     use_random: bool = True,
-    random_start: bool = True,
-    shuffle_output: bool = True,
+    use_random_start: bool = True,
+    use_shuffle_output: bool = True,
     random_noise_scale: float = 0.0,
 ):
     """Farthest point sampling with optional randomness for data augmentation.
@@ -22,9 +22,9 @@ def farthest_point_sample(
         num_samples:         number of points to keep.
         use_random:          master switch – when ``False``, FPS is fully
                              deterministic regardless of the flags below.
-        random_start:        pick a random start point instead of the default
+        use_random_start:    pick a random start point instead of the default
                              (first point, index 0).
-        shuffle_output:      randomly permute the output order after sampling.
+        use_shuffle_output:  randomly permute the output order after sampling.
         random_noise_scale:  std of Gaussian noise added to xyz *during FPS only*
                              (0 = no noise).  The output points are unaffected.
     Returns:
@@ -50,7 +50,7 @@ def farthest_point_sample(
         return sampled_points.contiguous(), sample_idx
 
     start_indices = None
-    if random_start:
+    if use_random_start:
         start_indices = torch.randint(0, N, (B,), device=pointcloud.device)
         modified_xyz = xyz.clone()
         arange_b = torch.arange(B, device=pointcloud.device)
@@ -71,7 +71,7 @@ def farthest_point_sample(
     )
 
     # Map back indices when random-start was used.
-    if random_start:
+    if use_random_start:
         # Vectorized: swap index 0 ↔ start_indices[b] in each row of sample_idx.
         mask_0 = sample_idx == 0                                 # (B, K)
         si_expanded = start_indices.unsqueeze(1)                  # (B, 1)
@@ -81,7 +81,7 @@ def farthest_point_sample(
 
     # Shuffle
     shuffle_perm = None
-    if shuffle_output:
+    if use_shuffle_output:
         # Vectorized: generate a random permutation per batch item.
         shuffle_perm = torch.rand(B, num_samples, device=pointcloud.device).argsort(dim=1)
         sample_idx = torch.gather(sample_idx, 1, shuffle_perm)

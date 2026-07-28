@@ -78,9 +78,8 @@ class MoEObsEncoder(nn.Module):
         # ── Common: state MLP + projection + MoE ──
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         in_dim = backbone_out_dim + self.state_mlp.out_dim
-        # Align with official MoE-DP: Linear projection before MoE so the
-        # encoder output can be mapped to a fixed embedding dimension
-        # (analogous to cond_obs_emb in the official code).
+        # Linear projection before MoE so the encoder output can be mapped
+        # to a fixed embedding dimension (cond_obs_emb).
         proj_dim = moe_out_dim if moe_out_dim is not None else in_dim
         # Derive hidden_dim from ratio (like Transformer MLP ratio) when not
         # explicitly set.  Keeps configs DRY: change the backbone and
@@ -89,7 +88,7 @@ class MoEObsEncoder(nn.Module):
             if moe_hidden_ratio is not None:
                 moe_hidden_dim = int(proj_dim * moe_hidden_ratio)
             else:
-                moe_hidden_dim = 256  # legacy default
+                moe_hidden_dim = 256  # fallback when moe_hidden_dim not configurable
         self.obs_proj = nn.Linear(in_dim, proj_dim)
 
         _activation = {'gelu': nn.GELU, 'relu': nn.ReLU, 'silu': nn.SiLU}.get(
@@ -241,33 +240,35 @@ class MoEAgent(UNetDiffusionAgent):
         return cond, aux
 
     def compute_loss(self, batch, **kwargs):
+        self._validate_batch(batch)
         cond, aux = self._build_cond(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
         action_loss, loss_dict = self.action_decoder.compute_loss(cond, nactions, **kwargs)
-        aux_loss = aux.get('loss')
-        if aux_loss is not None:
-            total_loss = action_loss + aux_loss
-            loss_dict['loss'] = total_loss
-            loss_dict['loss_action'] = action_loss
-            for k, v in aux.items():
-                if k == 'loss':
-                    continue
-                if torch.is_tensor(v) and v.numel() > 1:
-                    continue  # non-scalar aux (e.g. router_probs, dispatch, f_i, p_i) — skip logging
-                loss_dict[f'aux_{k}'] = v
-            return total_loss, loss_dict
-        # Graceful fallback: aux loss missing (should not happen during normal MoE
-        # training where return_aux=True and the MoE encoder always produces aux loss)
-        warnings.warn(
-            "MoEAgent.compute_loss: aux['loss'] is missing. "
-            "Falling back to action_loss only. "
-            "Check that obs_encoder was called with return_aux=True.",
-            UserWarning,
-        )
-        return action_loss, loss_dict
+        return self._merge_aux_loss(action_loss, loss_dict, aux)
+
+    def _merge_aux_loss(self, action_loss, loss_dict, aux):
+        # MoE aux loss is mandatory for correct training; warn if missing.
+        if aux.get('loss') is None:
+            warnings.warn(
+                "MoEAgent.compute_loss: aux['loss'] is missing. "
+                "Falling back to action_loss only. "
+                "Check that obs_encoder was called with return_aux=True.",
+                UserWarning,
+            )
+        return super()._merge_aux_loss(action_loss, loss_dict, aux)
 
     @torch.no_grad()
     def predict_action(self, obs_dict, denoise_timesteps=None, override_idx=None):
+        self._validate_obs_dict(obs_dict)
+        # FAAS: MoEAgent overrides predict_action and therefore does not
+        # inherit the FAAS guard from BaseAgent.  If use_faas is ever
+        # enabled for MoE, the override must be updated first.
+        if getattr(self, 'use_faas', False):
+            raise NotImplementedError(
+                "MoEAgent.predict_action does not support FAAS mode. "
+                "The FAAS guard in BaseAgent.predict_action is bypassed "
+                "by this override."
+            )
         cond, _ = self._build_cond(obs_dict, override_idx=override_idx)
         return self.predict_action_from_cond(cond, denoise_timesteps)
 

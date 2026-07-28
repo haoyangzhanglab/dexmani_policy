@@ -33,6 +33,7 @@ class BaseRunner:
         env_video_fps: int | None = None,
         temporal_ensemble_coeff: float | None = None,
     ):
+        self.is_multi_task = False
         self.n_obs_steps = n_obs_steps
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
 

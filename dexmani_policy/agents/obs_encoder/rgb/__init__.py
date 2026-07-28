@@ -1,3 +1,4 @@
+from .base import ViTEncoder
 from .clip import CLIP
 from .dino import DINO
 from .r3m import R3M

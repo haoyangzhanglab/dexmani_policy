@@ -170,6 +170,7 @@ class DQRISEAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def compute_loss(self, batch: Dict[str, Any], **kwargs):
+        self._validate_batch(batch)
         self._require_codebook()
         cond, aux = self._build_cond(batch["obs"])
 
@@ -193,7 +194,7 @@ class DQRISEAgent(BaseAgent):
         )
 
         # Explicitly mark this as a mini-batch nearest-prototype statistic.
-        num_codes = self.codebook_manager.get_num_codes()
+        num_codes = self.codebook_manager.num_codes
         safe_max = max(num_codes - 1, 1)
         discrete_idx = torch.floor(
             ((index + 1.0) * 0.5 * safe_max).clamp(0, max(num_codes - 1, 0))
@@ -207,13 +208,7 @@ class DQRISEAgent(BaseAgent):
             (probabilities > 0.01).sum().item()
         )
 
-        aux_loss = aux.get("loss")
-        if aux_loss is not None:
-            total = action_loss + aux_loss
-            loss_dict["loss"] = total
-            loss_dict["loss_action"] = loss_dict.get("loss_action", action_loss)
-            return total, loss_dict
-        return action_loss, loss_dict
+        return self._merge_aux_loss(action_loss, loss_dict, aux)
 
     # ------------------------------------------------------------------
     # Inference
@@ -221,6 +216,7 @@ class DQRISEAgent(BaseAgent):
 
     @torch.no_grad()
     def predict_action(self, obs_dict: Dict, denoise_timesteps=None) -> Dict:
+        self._validate_obs_dict(obs_dict)
         self._require_codebook()
         cond, _ = self._build_cond(obs_dict)
         return self.predict_action_from_cond(cond, denoise_timesteps)
@@ -268,7 +264,7 @@ class DQRISEAgent(BaseAgent):
             f"DQRISEAgent(action_dim={self.action_dim}, tcp_dim={self.tcp_dim}, "
             f"hand_dim={self.hand_dim}, "
             f"diffusion_action_dim={self.diffusion_action_dim}, "
-            f"codes={self.codebook_manager.get_num_codes()}, "
+            f"codes={self.codebook_manager.num_codes}, "
             f"codebook_loaded={self.codebook_manager.is_loaded})"
         )
 

@@ -572,7 +572,8 @@ class CodebookManager(nn.Module):
     # Runtime mappings
     # ------------------------------------------------------------------
 
-    def get_num_codes(self) -> int:
+    @property
+    def num_codes(self) -> int:
         return int(self.sorted_hand_poses.shape[0]) if self.is_loaded else self.total_combinations
 
     @staticmethod
@@ -584,7 +585,7 @@ class CodebookManager(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.is_loaded:
             raise RuntimeError("No runtime codebook loaded.")
-        num_codes = self.get_num_codes()
+        num_codes = self.num_codes
         clipped = continuous_index.clamp(-1.0, 1.0)
         scaled = (clipped + 1.0) * 0.5 * (num_codes - 1)
         discrete_idx = (
@@ -612,7 +613,7 @@ class CodebookManager(nn.Module):
         prototypes = self.sorted_hand_poses.to(flat.device)
         dist2 = ((flat_raw[:, None, :] - prototypes[None, :, :]) ** 2).sum(-1)
         discrete = dist2.argmin(dim=-1).float()
-        num_codes = self.get_num_codes()
+        num_codes = self.num_codes
         continuous = discrete / max(num_codes - 1, 1) * 2.0 - 1.0
         return continuous.reshape(*lead_shape, 1)
 
@@ -648,6 +649,6 @@ class CodebookManager(nn.Module):
         return (
             f"CodebookManager(hand_dim={self.hand_dim}, groups={self.num_groups}, "
             f"codebook_size={self.codebook_size}, loaded={self.is_loaded}, "
-            f"num_codes={self.get_num_codes()}, "
+            f"num_codes={self.num_codes}, "
             f"has_normalizer={self.has_hand_normalizer})"
         )

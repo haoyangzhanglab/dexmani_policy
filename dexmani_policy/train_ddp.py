@@ -1,3 +1,4 @@
+import datetime
 import os
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -30,11 +31,26 @@ register_resolvers()
 set_project_root()
 
 def setup_ddp(rank: int, world_size: int):
+    """Initialise the NCCL process group with a 30-minute timeout.
+
+    Without an explicit timeout, the default is effectively unbounded — a
+    hung or crashed rank causes all other ranks to hang indefinitely on
+    the next collective (all_reduce, broadcast, barrier).  Thirty minutes
+    is long enough to survive transient NCCL stalls under heavy I/O but
+    short enough to avoid wasting cluster time on a truly dead rank.
+
+    The timeout covers **every** collective in this process group:
+    ``dist.all_reduce`` in the NaN sentinel (trainer.py:251),
+    ``dist.broadcast`` in normalizer sync (train_ddp.py:183) and the
+    ``finish_epoch`` error relay (trainer.py:556), and the implicit
+    barrier inside DDP backward.
+    """
     dist.init_process_group(
         backend='nccl',
         init_method='env://',
         world_size=world_size,
-        rank=rank
+        rank=rank,
+        timeout=datetime.timedelta(minutes=30),
     )
 
 def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
@@ -188,6 +204,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     try:
         trainer.train(resume_state=resume_state)
     finally:
+        # Safe even after a collective timeout — destroy_process_group()
+        # performs only local cleanup (no communication).
         dist.destroy_process_group()
 
 @hydra.main(version_base=None, config_path="configs")

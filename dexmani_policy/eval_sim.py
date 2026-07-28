@@ -10,6 +10,7 @@ from termcolor import cprint
 from dexmani_policy.common.config import register_resolvers, validate_action_key_consistency, normalize_action_key
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.common.checkpoint_io import CheckpointStore
+from dexmani_policy.training.build_utils import inject_faas_into_agent
 from dexmani_policy.training.sim_evaluator import SimEvaluator
 
 ROOT_DIR = set_project_root()
@@ -58,6 +59,9 @@ def run_eval(exp_dir: Path, overrides: list[str]):
     device = torch.device(cfg.training.device)
     agent = hydra.utils.instantiate(cfg.agent)
     agent.action_key = cfg.action_key
+    # FAAS: inject use_faas / tcp_dim / faas_mapper so that predict_action
+    # can convert env-native obs to FAAS and FAAS predictions back to native.
+    inject_faas_into_agent(agent, cfg)
     env_runner = hydra.utils.instantiate(cfg.env_runner)
     eval_root_dir = exp_dir / "eval"
     checkpoint_store = CheckpointStore(exp_dir / "checkpoints")

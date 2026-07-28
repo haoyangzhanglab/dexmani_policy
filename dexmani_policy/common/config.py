@@ -48,3 +48,14 @@ def validate_action_key_consistency(cfg) -> None:
             f"but env_runner.env_kwargs.control_mode='{actual_control}'. "
             f"Check CLI overrides for env_runner.env_kwargs.control_mode."
         )
+
+    # Guard against CLI overrides that desync dataset.action_key from the
+    # top-level action_key (e.g. --dataset.action_key=action while
+    # --action_key=action_ee, which would cause a dimension mismatch).
+    ds_action_key = cfg.get('dataset', {}).get('action_key')
+    if ds_action_key is not None and ds_action_key != cfg.action_key:
+        raise ValueError(
+            f"dataset.action_key='{ds_action_key}' != action_key='{cfg.action_key}'. "
+            f"They must be the same. Check CLI overrides for dataset.action_key "
+            f"and/or action_key."
+        )

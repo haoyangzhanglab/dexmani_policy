@@ -1,0 +1,58 @@
+# @package _global_
+# DP3 + FAAS (Function-Actuator-Aligned Space) unified hand action space.
+#
+# Inherits all training hyperparameters, encoder config, UNet backbone,
+# and env settings from dp3.yaml.  Only overrides action-space dimensions
+# and enables the FAAS conversion pipeline.
+#
+# FAAS maps XHand's 12 native joints to a 32-dim functional alignment
+# space where each index represents a specific joint role (e.g. index [1]
+# = thumb CMC flexion across ALL hand types).  The model trains in FAAS
+# space and converts back to native at the I/O boundary.
+#
+# Usage:
+#   bash scripts/train.sh dp3_faas
+#   bash scripts/train.sh dp3_faas 'training.loop.num_epochs=400'
+#   bash scripts/train.sh dp3_faas 'action_key=action_ee'
+
+defaults:
+  - /dp3
+  - _self_
+
+policy_name: dp3_faas
+
+# ── FAAS ──
+use_faas: true
+faas_hand_dim: 32
+
+# ── Dimension Overrides ──
+# tcp_dim: action arm portion (7 for joint, 9 for action_ee).
+# NOTE: dp3.yaml does not define tcp_dim; we define it here because
+# build_utils and the FAAS pipeline read it from the top-level config.
+tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
+
+# action_dim = arm(tcp_dim) + FAAS_hand(32) = 39 (joint) / 41 (action_ee).
+# Overrides the global value from dp3.yaml; auto-propagates into
+# agent.action_dim via ${action_dim} reference at dp3.yaml:68.
+action_dim: ${eval:'${tcp_dim} + 32'}
+
+# hand_dim: native XHand joint count (12).  Explicitly defined here so
+# that smoke_test._prepare_dqrise_codebook can distinguish native hand
+# dim from the FAAS-dim hand (action_dim - tcp_dim would give 32, not 12).
+hand_dim: 12
+
+# ── Dataset ──
+# tcp_dim is passed to the dataset so _apply_faas_mapping can split
+# the action's arm and hand portions correctly.
+dataset:
+  tcp_dim: ${tcp_dim}
+
+# ── Agent ──
+# state_dim is hardcoded as a literal inside agent: in dp3.yaml:73 —
+# must override inside agent: to take effect.  Deep merge preserves all
+# other agent fields (_target_, encoder_type, down_dims, etc.).
+#
+# joint_state arm is ALWAYS 7D arm joint angles (STATE_ARM_DIM),
+# independent of action_key.  state_dim = 7 + faas_hand_dim = 39.
+agent:
+  state_dim: ${eval:'7 + ${faas_hand_dim}'}

@@ -13,9 +13,10 @@ class RGBPCDataset(BaseDataset):
 
     def get_normalizer(self, mode='limits'):
         normalizer = LinearNormalizer()
+        joint_state, action = self._get_faas_normalizer_data()
         normalizer.fit(data={
-            'joint_state': self.replay_buffer['joint_state'],
-            'action': self.replay_buffer[self.action_key],
+            'joint_state': joint_state,
+            'action': action,
             'point_cloud': self.replay_buffer['point_cloud'],
         }, last_n_dims=1, mode=mode)
         normalizer['camera_intrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)

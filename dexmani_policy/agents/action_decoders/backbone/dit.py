@@ -147,7 +147,7 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
-class DiT_Diffusion(nn.Module):
+class DiTDiffusion(nn.Module):
     """DiT backbone for diffusion-based action prediction (DP3, MoE).
 
     Encodes actions and observation context through separate MLP embedders,
@@ -247,112 +247,6 @@ class DiT_Diffusion(nn.Module):
         cond_emb = self.cond_embedder(context)
 
         c = t_emb + cond_emb
-
-        for block in self.blocks:
-            x = block(x, c, attn_mask=None)
-        x = self.final_layer(x, c)
-
-        return x
-
-class DiT_FlowMatch(nn.Module):
-
-    def __init__(
-            self,
-            horizon: int,
-            action_dim: int,
-            cond_dim: int,
-            n_emb: int = 512,
-            num_heads: int = 8,
-            n_layers: int = 12,
-            mlp_ratio: float = 4.0,
-            qkv_bias: bool = True,
-    ):
-        super().__init__()
-
-        self.horizon = horizon
-        self.cond_dim = cond_dim
-        self.action_dim = action_dim
-
-        self.x_embedder = nn.Linear(action_dim, n_emb)
-        self.cond_embedder = nn.Linear(cond_dim, n_emb)
-        self.time_embedder = TimestepEmbedder(n_emb)
-        self.target_t_embedder = TimestepEmbedder(n_emb)
-        self.timestep_and_target_t_fusion = nn.Linear(2 * n_emb, n_emb)
-        self.pos_embed = nn.Parameter(torch.zeros(1, horizon, n_emb))
-
-        self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size=n_emb, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias) for _ in range(n_layers)
-        ])
-        self.final_layer = FinalLayer(hidden_size=n_emb, output_dim=action_dim)
-
-        self.initialize_weights()
-
-    def initialize_weights(self):
-        def init_fn(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-        self.apply(init_fn)
-
-        nn.init.normal_(self.pos_embed, mean=0.0, std=WEIGHT_INIT_STD)
-
-        w = self.x_embedder.weight.data
-        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-        nn.init.constant_(self.x_embedder.bias, 0)
-
-        nn.init.normal_(self.cond_embedder.weight.data, mean=0.0, std=WEIGHT_INIT_STD)
-        nn.init.constant_(self.cond_embedder.bias, 0)
-
-        nn.init.normal_(self.time_embedder.mlp[0].weight, std=WEIGHT_INIT_STD)
-        nn.init.normal_(self.time_embedder.mlp[2].weight, std=WEIGHT_INIT_STD)
-
-        nn.init.normal_(self.target_t_embedder.mlp[0].weight, std=WEIGHT_INIT_STD)
-        nn.init.normal_(self.target_t_embedder.mlp[2].weight, std=WEIGHT_INIT_STD)
-
-        nn.init.normal_(self.timestep_and_target_t_fusion.weight, std=WEIGHT_INIT_STD)
-        nn.init.constant_(self.timestep_and_target_t_fusion.bias, 0)
-
-        for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
-
-    def get_optim_groups(self, weight_decay: float = 1e-3):
-        return get_optim_group_with_no_decay(
-            self,
-            weight_decay=weight_decay,
-            no_decay_names=["pos_embed"],
-        )
-
-    def forward(self, x, timestep, target_t, context):
-        x = self.x_embedder(x) + self.pos_embed.to(device=x.device, dtype=x.dtype)
-
-        if not torch.is_tensor(timestep):
-            timestep = torch.tensor([timestep], dtype=torch.float32, device=x.device)
-        elif torch.is_tensor(timestep) and len(timestep.shape) == 0:
-            timestep = timestep[None].to(x.device)
-        timestep = timestep.expand(x.shape[0])
-        t_emb = self.time_embedder(timestep)
-
-        if not torch.is_tensor(target_t):
-            target_t = torch.tensor([target_t], dtype=torch.float32, device=x.device)
-        elif torch.is_tensor(target_t) and len(target_t.shape) == 0:
-            target_t = target_t[None].to(x.device)
-        target_t = target_t.expand(x.shape[0])
-        target_t_emb = self.target_t_embedder(target_t)
-
-        time_c = torch.cat([t_emb, target_t_emb], dim=-1)
-        time_c = self.timestep_and_target_t_fusion(time_c)
-
-        context = context.reshape(context.shape[0], -1)
-        cond = self.cond_embedder(context)
-
-        c = time_c + cond
 
         for block in self.blocks:
             x = block(x, c, attn_mask=None)

@@ -34,6 +34,7 @@ class MultiTaskSimRunner:
         if not task_configs:
             raise ValueError("task_configs cannot be empty")
 
+        self.is_multi_task = True
         self.env_video_fps = env_video_fps
         self.runners: Dict[str, TaskTextSimRunner] = {}
 
