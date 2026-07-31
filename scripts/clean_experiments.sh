@@ -2,8 +2,8 @@
 # Clean up incomplete and toy experiments under experiments/.
 #
 # Three categories of interest:
-#   A. Incomplete — checkpoint exists but epoch < num_epochs-1, or no checkpoint at all
-#   B. Toy        — num_epochs < TOY_MIN_EPOCHS (test/smoke runs), regardless of completion
+#   A. Incomplete — checkpoint exists but steps < total_train_steps, or no checkpoint at all
+#   B. Toy        — total_train_steps < TOY_MIN_STEPS (test/smoke runs), regardless of completion
 #
 # Usage:
 #   bash scripts/clean_experiments.sh                 # dry-run
@@ -23,7 +23,7 @@ YES_ALL=false
 OLDER_THAN=0
 INCLUDE_ACTIVE=false
 SKIP_ACTIVE_MINUTES=60
-TOY_MIN_EPOCHS=200
+TOY_MIN_STEPS=16000
 
 show_help() {
     cat <<EOF
@@ -81,27 +81,37 @@ is_active() {
     [[ $age_minutes -lt $SKIP_ACTIVE_MINUTES ]]
 }
 
-# Read num_epochs from config.yaml; empty string on failure.
-get_num_epochs() {
+# Read total_train_steps from config.yaml; fall back to num_epochs (old format).
+# Empty string on failure.
+get_total_train_steps() {
     python -c "
 import sys
 try:
     from omegaconf import OmegaConf
     cfg = OmegaConf.load(sys.argv[1])
-    print(cfg.training.loop.num_epochs)
+    loop = cfg.training.loop
+    # Try new format first, fallback to old
+    steps = loop.get('total_train_steps', None)
+    if steps is None and 'num_epochs' in loop:
+        # Old config: approximate steps from epochs (assume ~80 steps/epoch)
+        steps = loop.num_epochs * 80
+    if steps is not None:
+        print(int(steps))
 except Exception:
     pass
 " "$1/config.yaml" 2>/dev/null || true
 }
 
-# Scan checkpoint filenames for the maximum completed epoch.
+# Scan checkpoint filenames for the maximum completed step.
+# Looks for both old (epoch=*step=*) and new (epoch=*step=*milestone=*) patterns.
 # Returns -1 if no checkpoints found.
-get_max_epoch() {
-    local ckpt_dir="$1" max=-1 epoch pt_file
+get_max_step() {
+    local ckpt_dir="$1" max=-1 step pt_file base
     for pt_file in "$ckpt_dir"/epoch=*.pt; do
         [[ -f "$pt_file" ]] || continue
-        epoch=$(basename "$pt_file" | grep -oP 'epoch=\K\d+')
-        [[ -n "$epoch" ]] && { epoch=$((10#$epoch)); [[ $epoch -gt $max ]] && max=$epoch; }
+        base=$(basename "$pt_file")
+        step=$(echo "$base" | grep -oP 'step=\K\d+')
+        [[ -n "$step" ]] && { step=$((10#$step)); [[ $step -gt $max ]] && max=$step; }
     done
     echo "$max"
 }
@@ -133,30 +143,30 @@ while IFS= read -r -d '' checkpoints_dir; do
         continue
     fi
 
-    num_epochs=$(get_num_epochs "$exp_dir")
-    max_epoch=$(get_max_epoch "$checkpoints_dir")
+    total_steps=$(get_total_train_steps "$exp_dir")
+    max_step=$(get_max_step "$checkpoints_dir")
     size=$(du -sb "$exp_dir" 2>/dev/null | cut -f1)
 
     # --- classify ---
-    if [[ -n "$num_epochs" ]] && [[ $num_epochs -lt $TOY_MIN_EPOCHS ]]; then
+    if [[ -n "$total_steps" ]] && [[ $total_steps -lt $TOY_MIN_STEPS ]]; then
         # Class B: toy experiment
-        if [[ $max_epoch -ge 0 ]]; then
-            info="num_epochs=$num_epochs, completed $((max_epoch + 1))/$num_epochs epochs (last ckpt: epoch=$max_epoch)"
+        if [[ $max_step -ge 0 ]]; then
+            info="total_train_steps=$total_steps, completed step $max_step/$total_steps"
         else
-            info="num_epochs=$num_epochs, no checkpoints"
+            info="total_train_steps=$total_steps, no checkpoints"
         fi
         TOY+=("$exp_dir")
         TOY_INFO["$exp_dir"]="$info"
         TOTAL_TOY_SIZE=$((TOTAL_TOY_SIZE + size))
-    elif [[ $max_epoch -lt 0 ]]; then
+    elif [[ $max_step -lt 0 ]]; then
         # Class A: no checkpoints
         INCOMPLETE+=("$exp_dir")
         INCOMPLETE_REASON["$exp_dir"]="no checkpoints (training crashed before first checkpoint)"
         TOTAL_INCOMPLETE_SIZE=$((TOTAL_INCOMPLETE_SIZE + size))
-    elif [[ -n "$num_epochs" ]] && [[ $max_epoch -lt $((num_epochs - 1)) ]]; then
+    elif [[ -n "$total_steps" ]] && [[ $max_step -lt $((total_steps - 1)) ]]; then
         # Class A: did not finish
         INCOMPLETE+=("$exp_dir")
-        INCOMPLETE_REASON["$exp_dir"]="only $((max_epoch + 1))/$num_epochs epochs completed (last ckpt: epoch=$max_epoch)"
+        INCOMPLETE_REASON["$exp_dir"]="only step $max_step/$total_steps completed"
         TOTAL_INCOMPLETE_SIZE=$((TOTAL_INCOMPLETE_SIZE + size))
     fi
 done < <(find "$EXP_DIR" -type d -name checkpoints -print0)

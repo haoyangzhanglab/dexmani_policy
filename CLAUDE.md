@@ -16,7 +16,7 @@ export DATA_DIR=/path/to/data          # 需设，否则 dataset 路径报错
 ```bash
 # === 单卡 ===
 bash scripts/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas
-bash scripts/train.sh dp3 'training.loop.num_epochs=10'
+bash scripts/train.sh dp3 'training.loop.total_train_steps=500'
 
 # === 多卡 DDP ===
 bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas
@@ -24,6 +24,7 @@ bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multita
 
 > 实际存在的单卡配置 (8): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d`
 > 实际存在的 DDP 配置 (6): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d`
+> 所有策略默认 `total_train_steps: 80000`
 
 ## 评测命令
 
@@ -114,8 +115,8 @@ BaseAgent
 | **ManiFlow** | PC+state | PointNeXT(patch)+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | `maniflow.yaml` | Token化条件, EMA教师, weight_decay=1e-3 |
 | **MoE** | RGB+state | R3M+StateMLP+MoE门控 | UNet1D(FiLM) | Diffusion(DDPM 100步) | `moe_dp.yaml` | 16专家top-2, 无bfloat16/compile |
 | **MultiTask** | RGB+state+text | DPObsEncoder+CLIP Text | DiT(self-attn+AdaLN) | Diffusion/FlowMatch | `multitask_dit.yaml` | 预缓存text, 均衡采样 |
-| **R3D** | PC+state | Uni3D(ViT+Fourier PE)+StateMLP | OneWayTransformer(cross-attn) | Diffusion(DDIM 10步) | `r3d.yaml` | 级联mask, 分组loss, 最短(300ep) |
-| **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon, 20步) | `dqrise.yaml` | VQ码本16种手势, 3x学习率, val_loss选checkpoint |
+| **R3D** | PC+state | Uni3D(ViT+Fourier PE)+StateMLP | OneWayTransformer(cross-attn) | Diffusion(DDIM 10步) | `r3d.yaml` | 级联mask, 分组loss |
+| **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon, 20步) | `dqrise.yaml` | VQ码本16种手势, 3x学习率 |
 | **DP3(FAAS)** | PC+state | 同DP3 | 同DP3 | 同DP3 | `dp3_faas.yaml` | 32D FAAS空间, 零agent代码变更 |
 
 ### 各 Agent 关键差异
@@ -123,7 +124,7 @@ BaseAgent
 - **DP/DINO/CLIP/SigLIP** → 以 `bfloat16` + SDPA 加载，支持 LoRA
 - **MoE** → 唯一禁用 `bfloat16` 和 `compile` 的配置（MoE gate softmax 需 float32，CUDA Graphs 内存开销）
 - **R3D** → `dim_groups` 分组 loss（关节+EE分量独立MSE），cascading self-attn mask（关节token不能attend EE token）
-- **DQRISE** → UNet 输入只有 `tcp_dim+1` 维（10D），非标准 `action_dim`；checkpoint 按 `val_loss` 而非 `test_mean_score` 选择
+- **DQRISE** → UNet 输入只有 `tcp_dim+1` 维（10D），非标准 `action_dim`
 - **ManiFlow** → 唯一用 `betas=[0.9,0.95]` + `weight_decay=1e-3` 的配置（Transformer/FlowMatching 标准）
 - **MultiTask** → CLIP text encoder 冻结，仅 `text_proj` 可训练；`MultiTaskSimRunner` 编排 per-task 评测
 - **DP/DP3/ManiFlow/MoE/MultiTask/R3D** → 全部通过 config + `inject_faas_into_agent()` 兼容 FAAS，零 agent 代码变更
@@ -196,7 +197,8 @@ Zarr (robot_data/<task>.zarr)
 ### Train Loop
 
 ```python
-for epoch in range(start_epoch, num_epochs):
+global_step = resume_step
+while global_step < config.total_train_steps:
     model.train()
     on_epoch_start(epoch)          # MoE boost, dataset epoch sync
     optimizer.zero_grad()
@@ -205,8 +207,11 @@ for epoch in range(start_epoch, num_epochs):
             train_one_step(batch, is_accumulation_boundary)
         if boundary:
             optimizer.step(); scheduler.step(); zero_grad(); EMA; log
+            global_step += 1
+            check_milestone(epoch, global_step)  # 20/40/60/80/100%
+        if global_step >= config.total_train_steps: break
     model.eval()
-    finish_epoch(epoch)            # val → eval → checkpoint
+    epoch += 1
 ```
 
 ### train_one_step
@@ -224,13 +229,12 @@ for epoch in range(start_epoch, num_epochs):
 3. `optimizer.step()` → `scheduler.step()` → `zero_grad(set_to_none=True)`
 4. EMA 更新
 
-### NaN 三层防护
+### NaN 两层防护
 
 | 层 | 位置 | 检测内容 | 响应 |
 |----|------|---------|------|
 | 1 | `train_one_step` | `raw_loss` NaN | DDP 广播 → 保存 NaN debug checkpoint → raise |
 | 2 | `apply_gradient_step` | 梯度 NaN | `zero_grad` → raise（含参数名） |
-| 3 | `finish_epoch` (DDP) | rank 0 eval 异常 | `dist.broadcast(error_flag)` → 所有 rank 一起 raise |
 
 > NaN debug checkpoint: 原子 `.tmp→os.replace()`，最多保留 5 个
 
@@ -257,11 +261,12 @@ for epoch in range(start_epoch, num_epochs):
 ### Checkpoint 系统
 
 - `TrainCheckpoint` dataclass：epoch, global_step, model/ema/opt/sched state, monitor, train_params
-- 保存：原子 `.tmp→os.replace()`，文件名 `epoch=XXXX-step=YYYY-score=Z.ZZZZ.pt`
-- `train_params`：n_obs_steps, n_action_steps, action_dim, horizon, action_key, tcp_dim, use_faas, control_action_dim
-- TopK: `scores.json` 持久化，3 级分数解析（内存缓存→文件名正则→文件读取），自动淘汰
-- Latest: 原子 symlink `.tmp.pt→os.replace()`
-- Checkpoint 选择键: DQRISE 用 `val_loss`(min)，其他用 `test_mean_score`(max)
+- **里程碑保存**: 在 20%/40%/60%/80%/100% 进度各保存一个 checkpoint
+- 文件名: `epoch=XXXX-step=YYYY-milestone=XXpct.pt`（无 score）
+- 保存: 原子 `.tmp→os.replace()`
+- `train_params`：n_obs_steps, n_action_steps, action_dim, horizon, action_key, tcp_dim, use_faas, control_action_dim, num_training_steps
+- Latest: 原子 symlink `.tmp.pt→os.replace()`，指向最新里程碑 checkpoint
+- Resume: 从 `latest.pt` symlink 加载，`_init_milestone_state()` 通过 `global_step` 推导已通过的里程碑
 
 ### DDP 要点
 
@@ -289,7 +294,7 @@ for epoch in range(start_epoch, num_epochs):
 - `_load_for_inference(ckpt_tag)`: 加载 checkpoint → 恢复 normalizer → 校验 `n_obs_steps`/`n_action_steps`/`action_dim`/`horizon`/`action_key`
 - FAAS 一致性: 拒绝 FAAS checkpoint 与非 FAAS config 混用（反之亦然）
 - `run()`: 遍历 `denoise_timesteps_list`，每步数独立子目录 + 汇总
-- 多任务检测: `hasattr(self.env_runner, 'runners')`（duck-typing）
+- 多任务检测: `self.env_runner.is_multi_task`（属性检测）
 
 ### Env Runner 层级
 
@@ -340,12 +345,10 @@ configs/ddp/
 | weight_decay | 1e-6 | 1e-6 | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
 | betas | [.95,.999] | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
 | warmup | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 |
-| epochs | 600 | 1000 | 1000 | 600 | 1000 | **300** | 1000 | 1000 |
-| eval interval | 150 | 250 | 250 | 150 | 250 | **50** | 250 | 250 |
+| total_train_steps | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 |
 | bfloat16 | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ |
 | compile | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ |
 | val_ratio | 0.10 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 |
-| checkpoint key | score | score | score | score | score | score | **val_loss** | score |
 
 ### DDP 批次大小（每卡 × 4）
 
@@ -484,7 +487,7 @@ dexmani_policy/
 ### 设计约定（审查时易误报为 bug，勿修）
 
 - **Normalizer 全量拟合**: `get_normalizer()` 使用全部 replay buffer（含验证集），不按 `train_mask` 过滤。生态统一惯例（ManiFlow_Policy/R3D-Policy/SAT/RoboTwin 均如此）。`limits` 模式下验证集不影响 min/max
-- **checkpoint 频率 = eval 频率**: 有 env eval 时 `checkpoint_interval_epochs == eval_interval_epochs`。设计意图：只在评估成功的 epoch 保存
+- **里程碑 checkpoint**: 按 20%/40%/60%/80%/100% 进度保存，共 5 个；`latest.pt` symlink 指向最新里程碑
 - **FlowMatch `target_t` 训练/推理偏移**: 训练用 `target_t=0`，推理用 `target_t=dt>0`。ManiFlow 通过 EMA teacher consistency 路径缓解
 - **`tcp_dim` 命名**: 在 `action`(joint)模式下=7(臂关节角)，在 `action_ee` 模式下=9(TCP位姿)。历史命名遗留，勿据此推断语义
 - **DDP 覆盖不全**: 仅 6 种策略有 DDP 配置。`dp3`(非FAAS)和`moe_dp` 仅单卡

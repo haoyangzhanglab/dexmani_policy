@@ -51,48 +51,9 @@ class SimEvaluator:
         return run_dir
 
     def _load_for_inference(self, tag_or_path: str, use_ema: bool):
-        from dexmani_policy.common.pytorch_util import fix_state_dict
+        from dexmani_policy.training.eval_utils import load_ckpt_for_inference
         path = self.checkpoint_store.resolve_path(tag_or_path)
-        checkpoint = self.checkpoint_store.load(path)
-
-        train_params = checkpoint.train_params
-        if train_params is not None:
-            for key in ('n_obs_steps', 'n_action_steps', 'action_dim', 'horizon', 'action_key'):
-                expected = train_params.get(key)
-                actual = getattr(self.agent, key, None)
-                if expected is not None and actual is not None and expected != actual:
-                    raise ValueError(
-                        f"Checkpoint train_params.{key}={expected} does not match "
-                        f"agent.{key}={actual}. The config.yaml used for eval may be "
-                        f"from a different training run than this checkpoint."
-                    )
-
-            # FAAS consistency: prevent loading a FAAS checkpoint with a
-            # non-FAAS config (or vice versa).  The dimension checks above
-            # would also catch the mismatch (action_dim 39 vs 19), but this
-            # gives a clearer error message.
-            ckpt_use_faas = train_params.get('use_faas', False)
-            agent_use_faas = getattr(self.agent, 'use_faas', False)
-            if ckpt_use_faas != agent_use_faas:
-                raise ValueError(
-                    f"Checkpoint use_faas={ckpt_use_faas} but agent "
-                    f"use_faas={agent_use_faas}. Use a matching config "
-                    f"(dp3_faas for FAAS checkpoints, dp3 for native)."
-                )
-
-        if use_ema and checkpoint.ema_model_state is not None:
-            print("Using EMA weights for inference.")
-            self.agent.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
-        else:
-            if use_ema and checkpoint.ema_model_state is None:
-                print("WARNING: EMA weights requested but not found in checkpoint. Using model weights.")
-            self.agent.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
-
-        if not self.agent.normalizer.is_fitted(required_keys=['action']):
-            raise RuntimeError(
-                "Normalizer is missing required key 'action' after loading checkpoint. "
-                "The checkpoint may be corrupted or saved without normalizer params."
-            )
+        load_ckpt_for_inference(self.agent, self.checkpoint_store, path, use_ema)
 
     @torch.no_grad()
     def run(

@@ -51,14 +51,7 @@ def build_train_components(cfg):
     dataset, normalizer = build_dataset_and_normalizer(cfg)
 
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
-    val_dataset = dataset.get_validation_dataset()
     val_loader = None
-    if val_dataset is not None:
-        val_loader = DataLoader(
-            val_dataset,
-            worker_init_fn=worker_init_fn,
-            **cfg.val_dataloader,
-        )
 
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
@@ -67,10 +60,7 @@ def build_train_components(cfg):
     num_training_steps = compute_num_training_steps(cfg, batches_per_epoch)
 
     workspace = hydra.utils.instantiate(cfg.workspace)
-
     env_runner = None
-    if cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
-        env_runner = hydra.utils.instantiate(cfg.env_runner)
 
     return TrainingComponents(
         device=device,
@@ -102,8 +92,6 @@ def main(cfg):
         optimizer=comp.optimizer,
         scheduler=comp.scheduler,
         train_loader=comp.train_loader,
-        val_loader=comp.val_loader,
-        env_runner=comp.env_runner,
         workspace=comp.workspace,
         train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,

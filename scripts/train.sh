@@ -6,7 +6,7 @@
 #
 # Examples:
 #   bash scripts/train.sh dp3
-#   bash scripts/train.sh dp3 'training.loop.num_epochs=10'
+#   bash scripts/train.sh dp3 'training.loop.total_train_steps=10'
 #   bash scripts/train.sh maniflow 'training.seed=42'
 #   bash scripts/train.sh multitask_dit
 #
@@ -24,7 +24,7 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Examples:"
     echo "  bash scripts/train.sh dp3"
     echo "  bash scripts/train.sh multitask_dit"
-    echo "  bash scripts/train.sh dp3 'training.loop.num_epochs=10'"
+    echo "  bash scripts/train.sh dp3 'training.loop.total_train_steps=10'"
     echo ""
     echo "Config file is dexmani_policy/configs/<config_name>.yaml"
     exit 1

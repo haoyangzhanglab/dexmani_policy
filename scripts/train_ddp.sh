@@ -6,7 +6,7 @@
 #
 # Examples:
 #   bash scripts/train_ddp.sh ddp/maniflow
-#   bash scripts/train_ddp.sh ddp/dp 'training.loop.num_epochs=100'
+#   bash scripts/train_ddp.sh ddp/dp 'training.loop.total_train_steps=100'
 #   bash scripts/train_ddp.sh ddp/dqrise 'training.seed=123'
 #
 # Available DDP configs:
@@ -22,7 +22,7 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo ""
     echo "Examples:"
     echo "  bash scripts/train_ddp.sh ddp/maniflow"
-    echo "  bash scripts/train_ddp.sh ddp/dp 'training.loop.num_epochs=100'"
+    echo "  bash scripts/train_ddp.sh ddp/dp 'training.loop.total_train_steps=100'"
     echo ""
     echo "Config file is dexmani_policy/configs/<config_name>.yaml"
     exit 1

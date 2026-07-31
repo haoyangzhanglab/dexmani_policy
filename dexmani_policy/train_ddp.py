@@ -40,9 +40,8 @@ def setup_ddp(rank: int, world_size: int):
     short enough to avoid wasting cluster time on a truly dead rank.
 
     The timeout covers **every** collective in this process group:
-    ``dist.all_reduce`` in the NaN sentinel (trainer.py:251),
-    ``dist.broadcast`` in normalizer sync (train_ddp.py:183) and the
-    ``finish_epoch`` error relay (trainer.py:556), and the implicit
+    ``dist.all_reduce`` in the NaN sentinel,
+    ``dist.broadcast`` in normalizer sync, and the implicit
     barrier inside DDP backward.
     """
     dist.init_process_group(
@@ -86,14 +85,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     )
 
     val_loader = None
-    if rank == 0:
-        val_dataset = dataset.get_validation_dataset()
-        if val_dataset is not None:
-            val_loader = DataLoader(
-                val_dataset,
-                worker_init_fn=worker_init_fn,
-                **cfg.val_dataloader,
-            )
 
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
@@ -113,8 +104,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         checkpoint_store = CheckpointStore(checkpoint_dir)
 
     env_runner = None
-    if rank == 0 and cfg.training.loop.eval_interval_epochs > 0 and cfg.get("env_runner") is not None:
-        env_runner = hydra.utils.instantiate(cfg.env_runner)
 
     # Load checkpoint — must happen before torch.compile to avoid
     # recompilation on load_state_dict-triggered guard failures.
@@ -178,8 +167,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         optimizer=optimizer,
         scheduler=scheduler,
         train_loader=train_loader,
-        val_loader=val_loader,
-        env_runner=env_runner,
         workspace=workspace,
         train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,

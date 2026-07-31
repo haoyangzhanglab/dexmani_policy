@@ -6,12 +6,12 @@ from diffusers.optimization import (
 import torch.optim.lr_scheduler as _lrs
 
 def compute_num_training_steps(cfg, batches_per_epoch: int) -> int:
-    """Compute total optimizer steps after gradient accumulation.
+    """Return total training steps directly from config.
 
-    Formula: ``ceil(batches_per_epoch / accum_steps) * num_epochs``.
+    The ``batches_per_epoch`` parameter is retained for backward compatibility
+    with the call signature but is no longer used for calculation.
     """
-    accum_steps = max(1, int(cfg.training.loop.get("gradient_accumulation_steps", 1)))
-    return -(-batches_per_epoch // accum_steps) * cfg.training.loop.num_epochs
+    return cfg.training.loop.total_train_steps
 
 def get_scheduler(
     optimizer: Optimizer,

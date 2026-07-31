@@ -159,11 +159,8 @@ training:
   lr_warmup_steps: 500
   max_grad_norm: 1.0                      # gradient clipping at 1.0
   loop:
-    num_epochs: 600                     # official: 50000 // n_demo = 500
+    total_train_steps: 80000
     log_interval_steps: 50
-    val_interval_epochs: 25
-    eval_interval_epochs: 150
-    sample_interval_epochs: 10
     gradient_accumulation_steps: 1
 
 # ── Workspace ──
@@ -192,7 +189,7 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 25           
+  default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
   # ── ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705) ──
   # Blend overlapping action-chunk predictions via exponential weighting
@@ -209,6 +206,12 @@ env_runner:
 # ── Eval ──
 eval:
   seed: 0
+  select_best:
+    initial_episodes: 25
+    batch_size: 5
+    max_episodes: 100
+    denoise_steps: 10
+    use_ema: true
   offline:
     ckpt_tag_or_path: best
     eval_episodes: 100

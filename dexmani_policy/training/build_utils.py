@@ -13,6 +13,7 @@ __all__ = [
     "build_optimizer_and_scheduler",
     "validate_config",
     "inject_faas_into_agent",
+    "inject_dexlatent_into_agent",
     "compute_num_training_steps",
 ]
 
@@ -40,6 +41,16 @@ def build_dataset_and_normalizer(cfg):
         dataset.use_faas = True
         dataset.faas_mapper = FAASHandMapper()
         dataset.tcp_dim = cfg.tcp_dim
+
+    # DexLatent: wrap the dataset BEFORE get_normalizer() so the normalizer
+    # is fitted on latent-space data.
+    if cfg.get('use_dexlatent', False):
+        from dexmani_policy.common.dexlatent_autoencoder import DexLatentHandVAE
+        from dexmani_policy.datasets.dexlatent_dataset import DexLatentPCDataset
+        vae = DexLatentHandVAE.load_pretrained(cfg.dexlatent_autoencoder_path)
+        dataset = DexLatentPCDataset(
+            source_dataset=dataset, vae=vae, tcp_dim=cfg.tcp_dim,
+        )
 
     normalizer = dataset.get_normalizer()
     if hasattr(dataset, 'normalizer_mode') and dataset.normalizer_mode == 'per_task':
@@ -71,6 +82,42 @@ def inject_faas_into_agent(agent, cfg):
     agent.faas_mapper = FAASHandMapper()
 
 # ---------------------------------------------------------------------------
+# DexLatent Injection (shared across train / eval / smoke-test entry points)
+# ---------------------------------------------------------------------------
+
+def inject_dexlatent_into_agent(agent, cfg, normalizer=None):
+    """Post-construction DexLatent attribute injection for any entry point.
+
+    Called by ``build_model_and_ema`` (training) and eval entry points.
+    Must be called before the agent is used for inference so that
+    ``predict_action`` / ``compute_action_mse`` can detect ``use_dexlatent``
+    and apply the correct conversions.
+
+    Parameters
+    ----------
+    normalizer :
+        The latent-space normalizer returned by ``get_normalizer()``.
+        If it carries a ``_native`` attribute (the pre-VAE 19D normalizer),
+        that is stored on the agent for inference-time denormalisation.
+    """
+    agent.use_dexlatent = cfg.get('use_dexlatent', False)
+    if not agent.use_dexlatent:
+        return
+    from dexmani_policy.common.dexlatent_autoencoder import DexLatentHandVAE
+    agent.tcp_dim = cfg.tcp_dim
+    agent.hand_dim = cfg.get('hand_dim', cfg.get('dexlatent_hand_dim', 12))
+    agent.latent_dim = cfg.get('dexlatent_hand_dim', 32)
+    agent.dexlatent_vae = DexLatentHandVAE.load_pretrained(cfg.dexlatent_autoencoder_path)
+
+    # Native (19D → [-1,1]) normalizer for pre-VAE normalisation.
+    # Training: injected from normalizer._native as a plain state dict
+    # (NOT as nn.Module — that would leak into model.state_dict() and
+    # break strict checkpoint loading at eval time).
+    # Eval: restored from checkpoint train_params by load_ckpt_for_inference.
+    if normalizer is not None and hasattr(normalizer, '_native'):
+        agent._native_norm_state = normalizer._native.state_dict()
+
+# ---------------------------------------------------------------------------
 # Model & EMA
 # ---------------------------------------------------------------------------
 
@@ -78,6 +125,7 @@ def build_model_and_ema(cfg, device, normalizer):
     """Instantiate the agent model and, if configured, its EMA twin."""
     model = hydra.utils.instantiate(cfg.agent)
     inject_faas_into_agent(model, cfg)
+    inject_dexlatent_into_agent(model, cfg, normalizer)
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.get('action_key', 'action')
     model.to(device)
@@ -88,6 +136,7 @@ def build_model_and_ema(cfg, device, normalizer):
     if cfg.training.use_ema:
         ema_model = hydra.utils.instantiate(cfg.agent)
         inject_faas_into_agent(ema_model, cfg)
+        inject_dexlatent_into_agent(ema_model, cfg, normalizer)
         ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.action_key = model.action_key
         ema_model.to(device)
@@ -257,6 +306,92 @@ def _validate_faas_config(cfg):
 
     print("FAAS config validation passed")
 
+def _validate_dexlatent_config(cfg):
+    """Validate DexLatent-specific config constraints.
+
+    Preconditions checked:
+    - ``use_dexlatent`` is mutually exclusive with ``use_faas``
+    - ``use_dexlatent`` is mutually exclusive with ``use_aux_ee``
+    - ``tcp_dim`` exists and is 7 or 9
+    - ``action_dim == tcp_dim + dexlatent_hand_dim``
+    - ``state_dim == STATE_ARM_DIM + dexlatent_hand_dim``
+    - Normalizer mode is ``limits``
+    - ``dexlatent_autoencoder_path`` exists
+    - ``hand_dim`` is 12 (XHand only for initial release)
+    """
+    if not cfg.get('use_dexlatent', False):
+        return
+
+    # Mutual exclusion with FAAS
+    if cfg.get('use_faas', False):
+        raise ValueError(
+            "use_dexlatent=true is incompatible with use_faas=true. "
+            "Both map 12D→32D but for different purposes. Choose one."
+        )
+
+    # Mutual exclusion with aux_ee
+    if cfg.get('use_aux_ee', False):
+        raise ValueError(
+            "use_dexlatent=true is incompatible with use_aux_ee=true."
+        )
+
+    # tcp_dim
+    tcp_dim = cfg.get('tcp_dim')
+    if tcp_dim is None:
+        raise ValueError("use_dexlatent=true requires tcp_dim in config.")
+    if tcp_dim not in (7, 9):
+        raise ValueError(f"tcp_dim must be 7 (joint) or 9 (action_ee), got {tcp_dim}.")
+
+    # Dimension consistency
+    latent_dim = cfg.get('dexlatent_hand_dim', 32)
+    expected_action_dim = tcp_dim + latent_dim
+    actual_action_dim = cfg.get('action_dim')
+    if actual_action_dim != expected_action_dim:
+        raise ValueError(
+            f"action_dim={actual_action_dim}, expected {tcp_dim}+{latent_dim}={expected_action_dim}."
+        )
+
+    # state_dim: joint_state arm is always 7D, not tcp_dim
+    expected_state_dim = STATE_ARM_DIM + latent_dim
+    agent_cfg = cfg.get('agent', cfg)
+    actual_state_dim = agent_cfg.get('state_dim', cfg.get('state_dim'))
+    if actual_state_dim != expected_state_dim:
+        raise ValueError(
+            f"state_dim={actual_state_dim}, expected {STATE_ARM_DIM}+{latent_dim}={expected_state_dim}. "
+            f"Note: joint_state arm is always 7D (STATE_ARM_DIM), not tcp_dim ({tcp_dim})."
+        )
+
+    # Normalizer mode must be limits
+    normalizer_mode = cfg.get('normalizer_mode', 'limits')
+    if normalizer_mode != 'limits':
+        raise ValueError(
+            f"use_dexlatent=true requires normalizer_mode='limits', got '{normalizer_mode}'."
+        )
+
+    # Autoencoder path must exist
+    import os
+    ckpt_path = cfg.get('dexlatent_autoencoder_path', '')
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(
+            f"dexlatent_autoencoder_path not found: {ckpt_path}"
+        )
+
+    # hand_dim must be 12 for initial release (XHand only)
+    hand_dim = cfg.get('hand_dim', 12)
+    if hand_dim != 12:
+        raise ValueError(
+            f"For initial release, hand_dim must be 12 (XHand), got {hand_dim}."
+        )
+
+    # MultiTaskDataset guard
+    dataset_target = cfg.get('dataset', {}).get('_target_', '')
+    if 'MultiTaskDataset' in dataset_target:
+        raise NotImplementedError(
+            "use_dexlatent=true with MultiTaskDataset is not yet supported."
+        )
+
+    print("DexLatent config validation passed")
+
 def validate_config(cfg):
     """Validate common training config constraints.
 
@@ -285,6 +420,7 @@ def validate_config(cfg):
     _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)
     _validate_faas_config(cfg)
+    _validate_dexlatent_config(cfg)
     validate_action_key_consistency(cfg)
 
     print("Config validation passed")

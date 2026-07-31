@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Simulation evaluation launcher for dexmani_policy.
 #
 # Usage:
@@ -16,6 +16,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
+
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate policy
 
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: bash scripts/eval_sim.sh <policy_name> <task_name> <exp_name> [overrides...]"

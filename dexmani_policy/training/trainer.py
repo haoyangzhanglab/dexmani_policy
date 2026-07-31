@@ -14,32 +14,28 @@ from dexmani_policy.common.checkpoint_io import TrainCheckpoint, build_train_par
 
 @dataclass
 class TrainLoopConfig:
-    num_epochs: int
-    log_interval_steps: int
-    val_interval_epochs: int
-    eval_interval_epochs: int
-    sample_interval_epochs: int
+    total_train_steps: int = 80000
+    log_interval_steps: int = 50
     gradient_accumulation_steps: int = 1
-    max_train_steps: int | None = None
-    max_val_steps: int | None = None
+    max_val_steps: int | None = None  # kept for utility validate() method
+
+MILESTONE_RATIOS: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8, 1.0)
 
 class Trainer:
-    """Main training loop with EMA, validation, evaluation, and checkpointing.
+    """Step-driven training loop with milestone checkpointing.
 
-    Orchestrates the full training lifecycle across ``num_epochs``:
+    Trains for exactly ``total_train_steps`` optimizer steps (not epochs).
+    No online validation or simulation evaluation — just training + milestone
+    checkpoint saves at 20/40/60/80/100% progress.
 
     - **Training**: ``train_one_step()`` with mixed precision (bfloat16 AMP),
-      gradient clipping, and three-layer NaN protection (loss NaN → skip,
-      grad NaN → skip, DDP all_reduce sentinel).
-    - **Validation**: Run validation loss every ``val_interval_epochs``.
-    - **Evaluation**: Run sim evaluation every ``eval_interval_epochs`` via
-      ``env_runner`` (if configured).
-    - **Checkpointing**: Save at epoch end; top-K tracking by
-      ``test_mean_score``; latest symlink for resume.
+      gradient clipping, and two-layer NaN protection (loss NaN, grad NaN).
+    - **Checkpointing**: Milestone saves (5 total) at progress thresholds;
+      ``latest.pt`` symlink tracks the most recent milestone for resume.
     - **EMA**: Exponential moving average of model weights, updated each step.
 
     Supports single-GPU and DDP (via ``distributed=True``). In DDP, only rank
-    0 performs logging, checkpointing, and evaluation.
+    0 performs logging and checkpointing.
     """
     def __init__(
         self,
@@ -50,8 +46,6 @@ class Trainer:
         optimizer,
         scheduler,
         train_loader,
-        val_loader,
-        env_runner,
         workspace: Optional[TrainWorkspace],
         train_loop_cfg: TrainLoopConfig,
         use_ema_teacher_for_consistency: bool,
@@ -62,6 +56,8 @@ class Trainer:
         distributed: bool = False,
         train_sampler = None,
         num_training_steps: Optional[int] = None,
+        val_loader = None,
+        env_runner = None,
     ):
         self.device = device
 
@@ -77,15 +73,9 @@ class Trainer:
         self.env_runner = env_runner
         self.workspace = workspace
 
-        self.num_epochs = train_loop_cfg.num_epochs
+        self.total_train_steps = train_loop_cfg.total_train_steps
         self.log_interval_steps = train_loop_cfg.log_interval_steps
-        self.val_interval_epochs = train_loop_cfg.val_interval_epochs
-        self.eval_interval_epochs = train_loop_cfg.eval_interval_epochs
-        self.sample_interval_epochs = train_loop_cfg.sample_interval_epochs
-        self.max_train_steps = train_loop_cfg.max_train_steps
         self.max_val_steps = train_loop_cfg.max_val_steps
-        self.enable_env_eval = (self.env_runner is not None) and (self.eval_interval_epochs > 0)
-        self.checkpoint_interval_epochs = self.eval_interval_epochs if self.enable_env_eval else self.val_interval_epochs
         self.max_grad_norm = max_grad_norm
 
         self.use_ema = self.ema_model is not None
@@ -101,7 +91,6 @@ class Trainer:
         self.is_main_process = is_main_process
         self.distributed = distributed
         self.train_sampler = train_sampler
-        self.train_sampling_batch = None
         self.current_epoch = -1
         self.global_step = 0
         self.num_training_steps = num_training_steps
@@ -333,8 +322,7 @@ class Trainer:
             import traceback
             traceback.print_exc()
             print(f"[WARNING] Evaluation failed at epoch={self.current_epoch}, "
-                  f"step={self.global_step}: {type(e).__name__}: {e}. "
-                  f"Training will continue; set eval_interval_epochs=0 to disable evaluation.")
+                  f"step={self.global_step}: {type(e).__name__}: {e}.")
             return {"eval/error": str(e)}
         success_rate = result["success_rate"]
         metrics = {
@@ -353,44 +341,23 @@ class Trainer:
                 metrics[f"eval/per_task/{task_name}/avg_steps"] = task_result.get("avg_steps")
         return metrics
 
-    def _should_run(self, epoch, interval):
-        """Return True if task should run at this epoch: last epoch or interval-aligned."""
-        is_last = epoch + 1 == self.num_epochs
-        return is_last or (interval > 0 and (epoch + 1) % interval == 0)
+    def _init_milestone_state(self) -> set[float]:
+        """Derive passed milestones from ``self.global_step`` — the single source of truth.
 
-    def _sample_and_log(self, epoch, eval_model, last_batch):
-        sample_batch = self.train_sampling_batch
-        if sample_batch is None:
-            sample_batch = dict_apply(last_batch, lambda x: x.to(self.device, non_blocking=True))
-        with torch.amp.autocast(device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16):
-            return {"sample/action_mse_error": eval_model.compute_action_mse(sample_batch)}
+        A milestone is considered passed if its target step has been reached.
+        This is more robust than filesystem scanning: manual file deletions won't
+        cause re-saving at incorrect steps, and resumed training at exactly the
+        final step correctly skips all milestones.
+        """
+        return {ratio for ratio in MILESTONE_RATIOS
+                if self.global_step >= int(self.total_train_steps * ratio)}
 
-    def _validate_and_log(self, epoch):
-        if self.val_loader is None:
-            return {}
-        if self.use_ema_teacher_for_consistency:
-            model_for_val = self.model
-            ema_backbone = self.ema_model.action_decoder.model
-        else:
-            model_for_val = self.ema_model if (self.use_ema and not self.enable_env_eval) else self.model
-            ema_backbone = None
-        result = self.validate(model_for_val, ema_backbone=ema_backbone)
-        if result is None:
-            return {}
-        metrics = {"val/loss": result["loss"]}
-        if "loss_flow" in result:
-            metrics["val/loss_flow"] = result["loss_flow"]
-            metrics["val/loss_consistency"] = result["loss_consistency"]
-        return metrics
+    def _save_milestone_checkpoint(self, epoch: int, global_step: int, ratio: float):
+        """Save a milestone checkpoint and point ``latest.pt`` at it.
 
-    def _evaluate_and_log(self, eval_model):
-        return self.evaluate(eval_model) if self.env_runner is not None else {}
-
-    def _save_epoch_checkpoint(self, epoch, global_step, checkpoint_model, test_mean_score):
-        """Build and save a checkpoint, update topk tracker, and refresh latest symlink."""
-        monitor = {"test_mean_score": test_mean_score} if test_mean_score is not None else {}
-        # Both model_state and ema_model_state go through fix_state_dict to strip
-        # _orig_mod. prefixes that torch.compile injects on submodules.
+        No score, no TopK tracking — we only care about progress milestones.
+        """
+        checkpoint_model = self.raw_model
         checkpoint = TrainCheckpoint(
             epoch=epoch,
             global_step=global_step,
@@ -398,80 +365,49 @@ class Trainer:
             ema_model_state=fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False) if self.use_ema else None,
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
-            monitor=monitor,
+            monitor={},
             train_params=build_train_params(self.raw_model, self.num_training_steps),
         )
-        tag = f"epoch={epoch:04d}-step={global_step:08d}"
-        if test_mean_score is not None:
-            tag += f"-score={test_mean_score:.4f}"
+        pct = int(ratio * 100)
+        tag = f"epoch={epoch:04d}-step={global_step:08d}-milestone={pct:02d}pct"
         checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
+        self.workspace.save_latest(checkpoint_path)
 
-        if test_mean_score is not None:
-            self.workspace.save_topk(checkpoint_path, checkpoint)
+    def _check_milestone(self, epoch: int, global_step: int):
+        """Check and save the first un-passed milestone whose threshold is met.
 
-        latest_target = checkpoint_path
-        if test_mean_score is not None:
-            best = self.workspace.topk_tracker.best_path()
-            if best is not None:
-                latest_target = best
-        self.workspace.save_latest(latest_target)
-
-    def finish_epoch(self, epoch, global_step, last_batch=None, eval_model=None, checkpoint_model=None):
-        eval_model = eval_model or (self.ema_model if self.use_ema else self.raw_model)
-        checkpoint_model = checkpoint_model or self.raw_model
-        last_batch = last_batch or next(iter(self.train_loader))
-
-        epoch_metrics = {}
-
-        if self._should_run(epoch, self.sample_interval_epochs):
-            epoch_metrics.update(self._sample_and_log(epoch, eval_model, last_batch))
-
-        if self._should_run(epoch, self.val_interval_epochs):
-            epoch_metrics.update(self._validate_and_log(epoch))
-
-        should_eval = self._should_run(epoch, self.eval_interval_epochs)
-        if should_eval:
-            epoch_metrics.update(self._evaluate_and_log(eval_model))
-
-        if self.workspace is not None:
-            self.workspace.log(epoch_metrics, step=global_step)
-
-        should_save = self._should_run(epoch, self.checkpoint_interval_epochs)
-        should_save_latest = self._should_run(epoch, self.val_interval_epochs)
-
-        if self.workspace is not None and (should_save or should_save_latest):
-            if should_save:
-                test_mean_score = (
-                    epoch_metrics.get("eval/success_rate") if self.enable_env_eval
-                    else -epoch_metrics["val/loss"] if "val/loss" in epoch_metrics
-                    else None
-                )
-                self._save_epoch_checkpoint(epoch, global_step, checkpoint_model, test_mean_score)
-            else:
-                # should_save_latest only: refresh the latest symlink to point
-                # at the most recent existing checkpoint (no new save).
-                existing = sorted(self.workspace.checkpoint_dir.glob("epoch=*.pt"))
-                if existing:
-                    self.workspace.save_latest(existing[-1])
+        Called after each accumulation-boundary step.  Because
+        ``MILESTONE_RATIOS`` are spaced 20 percentage points apart and
+        ``total_train_steps`` is typically much larger, at most one milestone
+        is crossed per step under normal operation.
+        """
+        if self.workspace is None or not self.is_main_process:
+            return
+        for ratio in MILESTONE_RATIOS:
+            if ratio in self._passed_milestones:
+                continue
+            if global_step / self.total_train_steps >= ratio:
+                self._save_milestone_checkpoint(epoch, global_step, ratio)
+                self._passed_milestones.add(ratio)
+                break
 
     def on_epoch_start(self, epoch: int):
         if hasattr(self.train_loader.dataset, 'set_epoch'):
             self.train_loader.dataset.set_epoch(epoch)
         if hasattr(self.model, 'set_epoch'):
             self.model.set_epoch(epoch)
-        self.train_sampling_batch = None
 
     def train(self, resume_tag: str = "latest", resume_state=None):
         torch.set_float32_matmul_precision('high')
 
         if resume_state is not None:
             global_step, start_epoch = resume_state
-            if start_epoch > 0:
-                print(f"Resuming training from epoch {start_epoch}, step {global_step}")
         else:
             global_step, start_epoch = self.load_for_resume(resume_tag)
-            if start_epoch > 0:
-                print(f"Resuming training from epoch {start_epoch}, step {global_step}")
+
+        self.global_step = global_step
+        if start_epoch > 0:
+            print(f"Resuming training from epoch {start_epoch}, step {global_step}")
 
         self.model.to(self.device)
         if self.use_ema:
@@ -483,13 +419,17 @@ class Trainer:
 
         optimizer_to(self.optimizer, self.device)
 
-        epoch_iter = range(start_epoch, self.num_epochs)
-        if self.is_main_process:
-            epoch_pbar = tqdm(epoch_iter, desc="Epoch", position=0, mininterval=1.0)
-        else:
-            epoch_pbar = epoch_iter
+        # Initialize milestone tracking AFTER global_step is established.
+        self._passed_milestones = self._init_milestone_state()
 
-        for epoch in epoch_pbar:
+        epoch = start_epoch
+        if self.is_main_process:
+            step_pbar = tqdm(
+                initial=global_step, total=self.total_train_steps,
+                desc="Steps", position=0, mininterval=1.0,
+            )
+
+        while global_step < self.total_train_steps:
             if self.train_sampler is not None:
                 self.train_sampler.set_epoch(epoch)
 
@@ -498,12 +438,7 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            last_batch = None
             for micro_step, batch in enumerate(self.train_loader):
-                if self.train_sampling_batch is None:
-                    self.train_sampling_batch = dict_apply(
-                        batch, lambda x: x.to(self.device, non_blocking=True))
-                last_batch = batch
                 self.current_epoch = epoch
 
                 is_boundary = (micro_step + 1) % self.gradient_accumulation_steps == 0
@@ -527,37 +462,22 @@ class Trainer:
                         for key, value in to_log_scalars(log_dict).items():
                             step_metrics[f"train/{key}"] = value
 
-                        if hasattr(epoch_pbar, 'set_postfix'):
-                            epoch_pbar.set_postfix(
-                                global_step=global_step,
+                        if hasattr(step_pbar, 'set_postfix'):
+                            step_pbar.set_postfix(
+                                step=global_step,
                                 loss=step_metrics.get("train/loss", None),
                             )
-                        self.workspace.log(step_metrics, step=global_step)
+                        if self.workspace is not None:
+                            self.workspace.log(step_metrics, step=global_step)
 
-                if self.max_train_steps is not None and (micro_step + 1) >= self.max_train_steps:
+                    # Check for milestone checkpoint.
+                    self._check_milestone(epoch, global_step)
+
+                if global_step >= self.total_train_steps:
                     break
 
             self.model.eval()
+            epoch += 1
 
-            finish_error = None
-            if self.is_main_process:
-                try:
-                    self.finish_epoch(epoch, global_step, last_batch=last_batch)
-                except Exception as e:
-                    if self.distributed:
-                        traceback.print_exc()
-                        finish_error = e
-                    else:
-                        raise
-
-            if self.distributed:
-                error_flag = torch.tensor(
-                    [1 if finish_error is not None else 0],
-                    dtype=torch.int, device=self.device,
-                )
-                dist.broadcast(error_flag, src=0)
-                if error_flag.item():
-                    raise RuntimeError(
-                        "Training aborted due to error in finish_epoch on rank 0"
-                    ) from finish_error
-
+        if self.is_main_process and hasattr(step_pbar, 'close'):
+            step_pbar.close()

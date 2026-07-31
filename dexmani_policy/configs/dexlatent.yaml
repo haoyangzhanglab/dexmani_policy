@@ -1,0 +1,48 @@
+# @package _global_
+# DexLatent — UNet Diffusion Policy in cross-hand latent space.
+#
+# Inherits all training hyperparameters, encoder config, UNet backbone,
+# and env settings from dp3.yaml.  Only overrides action-space dimensions
+# and enables the DexLatent conversion pipeline.
+#
+# DexLatent maps XHand's 12 native hand joints to a 32-dim cross-hand
+# latent space via a frozen pretrained autoencoder (XL-VLA, CVPR 2026).
+# The model trains in 39D latent space (7 arm + 32 hand latent) and
+# decodes back to native 19D at the I/O boundary.
+#
+# Usage:
+#   bash scripts/train.sh dexlatent
+#   bash scripts/train.sh dexlatent 'training.loop.total_train_steps=500'
+#   bash scripts/train.sh dexlatent 'action_key=action_ee'
+
+defaults:
+  - /dp3
+  - _self_
+
+policy_name: dexlatent
+
+# ── DexLatent ──
+use_dexlatent: true
+dexlatent_hand_dim: 32
+dexlatent_autoencoder_path: pretrained_models/dexlatent_autoencoders.pt
+
+# ── Dimension Overrides ──
+# tcp_dim: action arm portion (7 for joint, 9 for action_ee).
+tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
+
+# action_dim = arm(tcp_dim) + latent_hand(32) = 39 (joint) / 41 (action_ee).
+action_dim: ${eval:'${tcp_dim} + 32'}
+
+# hand_dim: native XHand joint count (12).
+hand_dim: 12
+
+# ── Dataset ──
+# tcp_dim is passed to the dataset for arm/hand split in encode_action.
+dataset:
+  tcp_dim: ${tcp_dim}
+
+# ── Agent ──
+# Override agent class and state_dim (joint_state arm is always 7D).
+agent:
+  _target_: dexmani_policy.agents.core.dexlatent.DexLatentAgent
+  state_dim: ${eval:'7 + ${dexlatent_hand_dim}'}
