@@ -15,15 +15,15 @@ export DATA_DIR=/path/to/data          # 需设，否则 dataset 路径报错
 
 ```bash
 # === 单卡 ===
-bash scripts/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas
+bash scripts/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / dexlatent
 bash scripts/train.sh dp3 'training.loop.total_train_steps=500'
 
 # === 多卡 DDP ===
-bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas
+bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas / ddp/dexlatent
 ```
 
-> 实际存在的单卡配置 (8): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d`
-> 实际存在的 DDP 配置 (6): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d`
+> 实际存在的单卡配置 (9): `dp, dp3, dp3_faas, dexlatent, dqrise, maniflow, moe_dp, multitask_dit, r3d`
+> 实际存在的 DDP 配置 (7): `ddp/dp, ddp/dexlatent, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d`
 > 所有策略默认 `total_train_steps: 80000`
 
 ## 评测命令
@@ -78,8 +78,10 @@ Hydra config (configs/*.yaml)
 | `action_ee` | 末端执行器 | **21** | 9 (pos3+rot6d) | 12 (XHand) |
 | `action` + FAAS | 关节+FAAS | **39** | 7 | 32 (FAAS) |
 | `action_ee` + FAAS | EE+FAAS | **41** | 9 | 32 (FAAS) |
+| `action` + DexLatent | 关节+潜空间 | **39** | 7 | 32 (latent) |
+| `action_ee` + DexLatent | EE+潜空间 | **41** | 9 | 32 (latent) |
 
-`joint_state` 始终 19D（或 FAAS 下 39D），与 `action_key` 无关。
+`joint_state` 始终 19D（或 FAAS/DexLatent 下 39D），与 `action_key` 无关。
 
 ### 入口点
 
@@ -88,7 +90,7 @@ Hydra config (configs/*.yaml)
 | `train.py` | 单卡 | `@hydra.main`，`build_train_components()` |
 | `train_ddp.py` | 多卡 DDP | `mp.spawn(ddp_worker, nprocs=N)`，compile 在 DDP 包装前 |
 | `eval_sim.py` | 独立评测 | Hydra-free CLI，从实验目录加载 `config.yaml`；`hasattr(cfg, 'eval')` 兼容历史 config |
-| `smoke_test.py` | 构建验证 | Hydra `compose` API，6 阶段 + FAAS roundtrip + MoE 子检查 |
+| `smoke_test.py` | 构建验证 | Hydra `compose` API，6 阶段 + FAAS/DexLatent roundtrip + MoE 子检查 |
 | `scripts/train_vq_hand.py` | VQ-VAE 预训练 | DQ-RISE Stage 1 |
 
 ---
@@ -100,6 +102,7 @@ Hydra config (configs/*.yaml)
 ```
 BaseAgent
   ├── UNetDiffusionAgent        ← DP, DP3, MoE (共享 UNet+Diffusion 构建)
+  │     └── DexLatentAgent      ← DP3 + 潜空间训练/解码
   ├── DiTXFlowMatchAgent        ← ManiFlow (DiTX+FlowMatchWithConsistency)
   ├── MultiTaskAgent            ← 直接继承 BaseAgent
   ├── R3DAgent                  ← 直接继承 BaseAgent (OneWayTransformer)
@@ -118,6 +121,7 @@ BaseAgent
 | **R3D** | PC+state | Uni3D(ViT+Fourier PE)+StateMLP | OneWayTransformer(cross-attn) | Diffusion(DDIM 10步) | `r3d.yaml` | 级联mask, 分组loss |
 | **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon, 20步) | `dqrise.yaml` | VQ码本16种手势, 3x学习率 |
 | **DP3(FAAS)** | PC+state | 同DP3 | 同DP3 | 同DP3 | `dp3_faas.yaml` | 32D FAAS空间, 零agent代码变更 |
+| **DexLatent** | PC+state | iDP3+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | `dexlatent.yaml` | 两级归一化(URDF+数据驱动), 39D潜空间训练, VAE解码回19D |
 
 ### 各 Agent 关键差异
 
@@ -127,6 +131,7 @@ BaseAgent
 - **DQRISE** → UNet 输入只有 `tcp_dim+1` 维（10D），非标准 `action_dim`
 - **ManiFlow** → 唯一用 `betas=[0.9,0.95]` + `weight_decay=1e-3` 的配置（Transformer/FlowMatching 标准）
 - **MultiTask** → CLIP text encoder 冻结，仅 `text_proj` 可训练；`MultiTaskSimRunner` 编排 per-task 评测
+- **DexLatent** → 唯一使用**两级归一化**（URDF native normalizer + 数据驱动 latent normalizer）+ 唯一在推理时做 VAE decode（latent→native）的 Agent
 - **DP/DP3/ManiFlow/MoE/MultiTask/R3D** → 全部通过 config + `inject_faas_into_agent()` 兼容 FAAS，零 agent 代码变更
 
 ### Action Decoder 类型
@@ -264,7 +269,7 @@ while global_step < config.total_train_steps:
 - **里程碑保存**: 在 20%/40%/60%/80%/100% 进度各保存一个 checkpoint
 - 文件名: `epoch=XXXX-step=YYYY-milestone=XXpct.pt`（无 score）
 - 保存: 原子 `.tmp→os.replace()`
-- `train_params`：n_obs_steps, n_action_steps, action_dim, horizon, action_key, tcp_dim, use_faas, control_action_dim, num_training_steps
+- `train_params`：n_obs_steps, n_action_steps, action_dim, horizon, action_key, tcp_dim, use_faas, use_dexlatent, hand_dim, latent_dim, control_action_dim, num_training_steps
 - Latest: 原子 symlink `.tmp.pt→os.replace()`，指向最新里程碑 checkpoint
 - Resume: 从 `latest.pt` symlink 加载，`_init_milestone_state()` 通过 `global_step` 推导已通过的里程碑
 
@@ -276,7 +281,7 @@ while global_step < config.total_train_steps:
 - `find_unused_parameters=False`, `static_graph=True`
 - Normalizer 从 rank 0 broadcast
 - `OmegaConf.resolve(cfg)` 在 `mp.spawn` 前（子进程无 Hydra 运行时）
-- 仅覆盖 6 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/r3d（dp3/moe_dp 仅单卡）
+- 仅覆盖 7 种策略: dp/dexlatent/dp3_faas/dqrise/maniflow/multitask_dit/r3d（dp3/moe_dp 仅单卡）
 - **DDP 超时**: `dist.init_process_group(timeout=30min)` — 覆盖所有集体操作（all_reduce/broadcast/barrier），防止死 rank 导致整个集群无限挂起
 
 ### EMA
@@ -325,36 +330,37 @@ MultiTaskSimRunner (独立编排器, 持有 dict[str, TaskTextSimRunner])
 
 ```
 configs/
-  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml
+  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  dexlatent.yaml
 configs/ddp/
-  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml
+  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  dexlatent.yaml
 ```
 
 `dp3_faas.yaml` 通过 Hydra `defaults: [- /dp3, - _self_]` 继承 dp3 全部超参，仅覆盖维度字段。
 
 ### 关键参数速查
 
-| 参数 | dp | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | dp3_faas |
-|------|----|-----|----------|--------|---------------|-----|--------|----------|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** |
-| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** |
-| backbone dims | [256,512,1024] | 同 | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] |
-| diff train/infer | 100/10 | 100/10 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 |
-| prediction_type | sample | sample | velocity | sample | sample | sample | **epsilon** | sample |
-| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 |
-| weight_decay | 1e-6 | 1e-6 | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
-| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| warmup | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 |
-| total_train_steps | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 |
-| bfloat16 | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ |
-| compile | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ |
-| val_ratio | 0.10 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 |
+| 参数 | dp | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | dp3_faas | dexlatent |
+|------|----|-----|----------|--------|---------------|-----|--------|----------|-----------|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** | **39/41** |
+| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** | **39** |
+| backbone dims | [256,512,1024] | 同 | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] | [256,512,1024] |
+| diff train/infer | 100/10 | 100/10 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | 100/10 |
+| prediction_type | sample | sample | velocity | sample | sample | sample | **epsilon** | sample | sample |
+| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 | 1e-4 |
+| weight_decay | 1e-6 | 1e-6 | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
+| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| warmup | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 | 500 |
+| total_train_steps | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 |
+| bfloat16 | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ |
+| compile | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ |
+| val_ratio | 0.10 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
 
 ### DDP 批次大小（每卡 × 4）
 
 | DDP | batch×4=总 | 单卡 |
 |-----|-----------|------|
 | ddp/dp | 48×4=**192** | 64 |
+| ddp/dexlatent | 32×4=128 | 128 |
 | ddp/dqrise | 32×4=128 | 128 |
 | ddp/maniflow | 32×4=128 | 128 |
 | ddp/multitask_dit | 16×4=64 | 64 |
@@ -416,7 +422,128 @@ joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
 
 ---
 
-## DQ-RISE
+## DexLatent 集成
+
+### 是什么
+
+DexLatent 来自 **XL-VLA (CVPR 2026 Highlight)**，通过冻结的预训练 Autoencoder 将 XHand 12 个原生关节映射到 **32 维跨手潜空间**。模型在 39 维潜空间（7 arm + 32 latent）中训练扩散策略，在 I/O 边界通过 VAE 完成编解码。
+
+与 FAAS 的关键区别：FAAS 是固定散点/聚集映射（手工设计），DexLatent 是**学习到的** MLP 编解码器（数据驱动）。
+
+### 使用
+
+```bash
+bash scripts/train.sh dexlatent                                    # joint mode (39D)
+bash scripts/train.sh dexlatent 'action_key=action_ee'             # EE mode (41D)
+bash scripts/train_ddp.sh ddp/dexlatent                            # DDP 多卡
+```
+
+### 维度
+
+```
+                  Native          Latent
+                  ──────          ──────
+action (joint):   19 =  7+12     39 =  7+32
+action (ee):      21 =  9+12     41 =  9+32
+joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
+```
+
+### 两级归一化（核心设计）
+
+不同于 FAAS 的单级 normalizer，DexLatent 使用**两级归一化**：
+
+| 级 | Normalizer | 来源 | 输入 | 输出 |
+|----|-----------|------|------|------|
+| 1 (pre-VAE) | `native_normalizer` | **URDF 关节限位** | 19D 弧度 | [-1, 1] |
+| 2 (pre-Diffusion) | `latent_normalizer` | **数据驱动** (`mode='limits'`) | 39D 潜向量 | [-1, 1] |
+
+**为什么必须用 URDF 限位而不是数据驱动？** VAE 训练时输入经过了 `angles_to_normalized()`（即 `[joint_lower, joint_upper] → [-1, 1]`，基于 URDF `<limit>` 标签）。如果用数据驱动 normalizer，VAE 会收到分布外输入 → 成功率 0%。
+
+### 数据流
+
+```
+训练:
+  BaseDataset (19D native 弧度)
+    → DexLatentPCDataset.__getitem__()
+       → native_normalizer (URDF limits) → [-1, 1]
+       → VAE.encode(hand) → 39D latent
+    → get_normalizer() → 两级拟合: native归一化 → VAE编码 → 拟合latent normalizer
+    → DexLatentAgent → Diffusion loss in 39D latent space
+
+推理:
+  Obs (19D native 弧度)
+    → native_normalizer → [-1, 1]              (pre-VAE)
+    → VAE.encode(hand) → 39D latent joint_state
+    → latent_normalizer → [-1, 1]               (pre-Diffusion)
+    → Diffusion denoising → [-1, 1]
+    → latent_normalizer.unnormalize → 39D latent (post-Diffusion)
+    → VAE.decode(hand) → 19D [-1, 1]            (post-VAE)
+    → native_normalizer.unnormalize → 19D 弧度
+    → env.step()
+```
+
+### 关键模块
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| `DexLatentHandVAE` | `common/dexlatent_autoencoder.py` | 冻结 MLP 编解码器，12D↔32D，Encoder: 12→64→128→64→32, Decoder: 32→64→128→64→12+Tanh |
+| `DexLatentAgent` | `agents/core/dexlatent.py` | 继承 DP3Agent，39D 潜空间训练 + 推理时 VAE decode |
+| `DexLatentPCDataset` | `datasets/dexlatent_dataset.py` | 包装 BaseDataset，`__getitem__` 中 native→latent 转换 |
+| `inject_dexlatent_into_agent` | `training/build_utils.py` | train/eval/smoke-test 共享后注入 |
+| `_validate_dexlatent_config` | `training/build_utils.py` | 7 项校验（与 FAAS/aux_ee 互斥、维度一致性、normalizer mode、autoencoder 路径等） |
+
+### 转换边界（仅 I/O）
+
+| 层 | 位置 | 操作 |
+|----|------|------|
+| Dataset | `dexlatent_dataset.py.__getitem__()` | native→URDF归一化→latent |
+| 推理输入 | `dexlatent.py.predict_action()` | native→URDF归一化→VAE encode（幂等：仅 19D→39D 时转换） |
+| 推理输出 | `dexlatent.py.predict_action_from_cond()` | latent normalizer unnormalize→VAE decode→native normalizer unnormalize |
+| 训练指标 | `dexlatent.py.compute_action_mse()` | GT 经 VAE decode + native denormalize 后比较 |
+| Checkpoint | `checkpoint_io.py.build_train_params()` | 保存 `native_normalizer_state`（纯 dict，非 nn.Module） |
+
+### Autoencoder 架构
+
+```
+DexLatentHandVAE (匹配 DexLatent HandAutoencoder 完全一致):
+  Encoder: Linear(12,64)→LayerNorm→ReLU→Linear(64,128)→LN→ReLU
+           →Linear(128,64)→LN→ReLU→Linear(64,32)
+  Decoder: Linear(32,64)→LN→ReLU→Linear(64,128)→LN→ReLU
+           →Linear(128,64)→LN→ReLU→Linear(64,12)→Tanh
+
+所有参数冻结 (requires_grad=False)，纯 I/O 转换模块。
+```
+
+### `native_normalizer` 的持久化策略
+
+`native_normalizer` 以**纯 dict**（`_native_norm_state`）形式存储在 agent 上，**不**作为 `nn.Module`。原因：
+- 作为 `nn.Module` 会出现在 `model.state_dict()` 中 → 评测时 `strict=True` 加载失败
+- 训练时从 `normalizer._native` 注入；评测时从 checkpoint `train_params['native_normalizer_state']` 恢复
+- `DexLatentAgent.native_normalizer` property 懒加载重建 `LinearNormalizer` 实例
+
+### 兼容性
+
+- **直接兼容**: 继承 DP3 的全部功能（iDP3 编码器、UNet1D backbone、Diffusion decoder）
+- **与 FAAS 互斥**: `_validate_dexlatent_config()` 强制 `use_dexlatent` 与 `use_faas` / `use_aux_ee` 不能同时启用
+- **不兼容**: DQRISE（VQ-VAE codebook 12D→32D 需重跑三阶段管道）、MultiTaskDataset（尚未支持）
+
+### 辅助脚本
+
+| 脚本 | 阶段 | 内容 |
+|------|------|------|
+| `scripts/extract_dexlatent_weights.py` | Phase 0 | 从原始 DexLatent checkpoint 提取 per-hand VAE 权重 → `pretrained_models/dexlatent_autoencoders.pt`（699 行） |
+| `scripts/test_dexlatent_autoencoder.py` | Phase 1 | VAE 独立烟雾测试：编解码形状、Tanh 边界、参数冻结、往返精度（319 行） |
+
+### 冒烟测试覆盖
+
+`smoke_test.py` 在 `use_dexlatent=True` 时执行：
+- Action 往返：native→latent→native，arm 精确通过，hand VAE 重建误差 < 1.0
+- Joint state 往返：19D→39D 编码正确
+- `control_action` 输出原生维度（19D）
+- VAE 权重 key 存在于 model state dict
+- Checkpoint 元数据：`use_dexlatent`, `hand_dim`, `latent_dim`
+
+---
 
 ### 三阶段管道
 
@@ -450,21 +577,21 @@ dexmani_policy/
   train_ddp.py              # 多卡 DDP 入口
   eval_sim.py               # 独立评测入口（Hydra-free）
   smoke_test.py             # 构建链冒烟测试
-  configs/                  # 8 个 Hydra YAML
-  configs/ddp/              # 6 个 DDP overlay
+  configs/                  # 9 个 Hydra YAML
+  configs/ddp/              # 7 个 DDP overlay
   agents/
-    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 7 agent variants
+    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 8 agent variants
     action_decoders/        # Diffusion, FlowMatch, FlowMatchWithConsistency, TimeSampler
       backbone/             # UNet1D (ConditionalUnet1D), DiT, DiTX (DiTXFlowMatch), OneWayTransformer
     obs_encoder/            # pointcloud/, rgb/, text/, state_mlp.py, plugins/(moe, token_compressor)
     vq_hand/                # DQ-RISE 专用: VQVAEHand, CodebookManager, ResidualVQ, VectorQuantize
     optim_util.py           # OptimGroupMixin, get_optim_group_with_no_decay
     position_encodings.py   # SinusoidalPosEmb, TimestepMLP, RelativePositionalEncoding3D
-  datasets/                 # BaseDataset, PCDataset, RGBPCDataset, common/(ReplayBuffer, Sampler)
-  training/                 # Trainer, build_utils, SimEvaluator, workspace, ema, logging, lr_scheduler
+  datasets/                 # BaseDataset, PCDataset, RGBPCDataset, DexLatentPCDataset, common/(ReplayBuffer, Sampler)
+  training/                 # Trainer, build_utils, SimEvaluator, workspace, ema, logging, lr_scheduler, eval_utils
   env_runner/               # BaseRunner, SimRunner, MultiTaskSimRunner
-  common/                   # LinearNormalizer, faas_mapper, checkpoint_io, pytorch_util, config
-  scripts/                  # extract_codebook.py, train_vq_hand.py, measure_vq_usage.py
+  common/                   # LinearNormalizer, DexLatentHandVAE, faas_mapper, checkpoint_io, pytorch_util, config
+  scripts/                  # extract_codebook.py, extract_dexlatent_weights.py, test_dexlatent_autoencoder.py, train_vq_hand.py, measure_vq_usage.py
 ```
 
 ---
@@ -496,6 +623,10 @@ dexmani_policy/
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维拼接（非 `torch.cat`）
 - **EMAModel BatchNorm**: affine 参数直接复制（不 EMA 平均）；frozen 参数也直接复制
 - **DQRISEAgent 独立 UNet**: 直接继承 `BaseAgent`，自建 UNet+Diffusion（因 `diffusion_action_dim = tcp_dim+1 ≠ action_dim`）
+- **DexLatent 两级归一化**: native normalizer 使用 URDF 关节限位（非数据驱动），因为 VAE 训练时的输入分布由 URDF 限位定义。如果用数据驱动 normalizer，VAE 收分布外输入 → 成功率 0%
+- **DexLatent `native_normalizer` 存为纯 dict**: `_native_norm_state` 不继承 `nn.Module`，避免污染 `model.state_dict()` 导致评测时 `strict=True` 加载失败
+- **DexLatent `control_action_dim`**: 返回原生 19D（`tcp_dim + hand_dim`），不是潜空间 39D。推理时在 `predict_action_from_cond` 中已做完 VAE decode
+- **DexLatent 与 FAAS/aux_ee 互斥**: `_validate_dexlatent_config()` 强制互斥，两者都将 12D 映射到 32D 但用途不同
 
 ### 已实现但未启用的功能
 
