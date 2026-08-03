@@ -21,7 +21,6 @@ from dexmani_policy.training.build_utils import (
     build_model_and_ema,
     build_optimizer_and_scheduler,
     inject_faas_into_agent,
-    inject_dexlatent_into_agent,
 )
 
 register_resolvers()
@@ -168,50 +167,6 @@ def smoke_test(config_name: str):
             f"!= native {cfg.tcp_dim + 12}")
         print(f"      ✓ FAAS roundtrip: action_err={err_action:.1e}, js_hand_err={err_js:.1e}")
 
-    # 5.0b DexLatent roundtrip test — verifies native↔latent mapping correctness
-    if cfg.get('use_dexlatent', False):
-        print("[5.0b/6] DexLatent roundtrip test ...")
-        from dexmani_policy.common.dexlatent_autoencoder import DexLatentHandVAE
-        vae = DexLatentHandVAE.load_pretrained(cfg.dexlatent_autoencoder_path)
-
-        # Action roundtrip: native (19D) → latent (39D) → native
-        # Use uniform(-1,1) — the VAE's training distribution
-        native_action = torch.empty(4, 16, cfg.tcp_dim + cfg.hand_dim).uniform_(-1.0, 1.0)
-        latent_action = vae.transform_action(native_action, cfg.tcp_dim)
-        rt_action = vae.inverse_transform_action(latent_action, cfg.tcp_dim)
-        # Arm pass-through should be exact
-        arm_err = (native_action[..., :cfg.tcp_dim] - rt_action[..., :cfg.tcp_dim]).abs().max().item()
-        assert arm_err < 1e-6, f"DexLatent arm pass-through error: {arm_err:.2e}"
-        # Hand portion has VAE reconstruction error (expected: ~0.5 for max abs)
-        hand_err = (native_action[..., cfg.tcp_dim:] - rt_action[..., cfg.tcp_dim:]).abs().max().item()
-        hand_mse = torch.nn.functional.mse_loss(
-            native_action[..., cfg.tcp_dim:], rt_action[..., cfg.tcp_dim:]).item()
-        assert hand_err < 1.0, f"DexLatent hand max_err too large: {hand_err:.2f}"
-        print(f"      ✓ DexLatent roundtrip: arm_err={arm_err:.1e}, hand max_err={hand_err:.2f}, MSE={hand_mse:.4f}")
-
-        # Joint state roundtrip: arm untouched (7D fixed), hand 12D↔32D
-        native_js = torch.empty(4, 19).uniform_(-1.0, 1.0)
-        latent_js = vae.transform_joint_state(native_js)
-        assert torch.equal(latent_js[..., :7], native_js[..., :7]), \
-            "DexLatent transform_joint_state modified arm portion!"
-        rt_js_hand = vae.decode(latent_js[..., 7:])
-        assert rt_js_hand.shape[-1] == cfg.hand_dim, \
-            f"Decoded hand dim {rt_js_hand.shape[-1]} != {cfg.hand_dim}"
-        print(f"      ✓ DexLatent joint_state: latent={latent_js.shape}, hand recon ok")
-
-        # Model predict_action outputs native dims in DexLatent mode
-        expected_native_dim = cfg.tcp_dim + cfg.hand_dim
-        assert result['control_action'].shape[-1] == expected_native_dim, (
-            f"DexLatent control_action dim {result['control_action'].shape[-1]} "
-            f"!= native {expected_native_dim}"
-        )
-        print(f"      ✓ DexLatent control_action dim={result['control_action'].shape[-1]} (native)")
-
-        # Verify VAE is part of model state dict
-        vae_keys = [k for k in model.state_dict().keys() if 'dexlatent_vae' in k]
-        assert len(vae_keys) > 0, "DexLatent VAE not in model state dict!"
-        print(f"      ✓ DexLatent VAE in checkpoint: {len(vae_keys)} keys")
-
     # 5.1 MoE enhanced gate smoke check (exercises the use_enhanced_gate=True path
     # that is also covered by the __main__ tests in plugins/moe.py and core/moe.py)
     if 'num_experts' in cfg.agent and cfg.agent.get('use_enhanced_gate', False) is False:
@@ -281,13 +236,7 @@ def smoke_test(config_name: str):
         assert tp.get('n_obs_steps') == model.n_obs_steps
         assert tp.get('n_action_steps') == model.n_action_steps
         assert tp.get('action_dim') == model.action_dim
-        if cfg.get('use_dexlatent', False):
-            assert tp.get('use_dexlatent') is True, "use_dexlatent not saved in train_params"
-            assert tp.get('hand_dim') == cfg.hand_dim, f"hand_dim mismatch: {tp.get('hand_dim')} != {cfg.hand_dim}"
-            assert tp.get('latent_dim') == cfg.dexlatent_hand_dim, f"latent_dim mismatch"
-            print("      ✓ train_params roundtrip OK (incl. DexLatent fields)")
-        else:
-            print("      ✓ train_params roundtrip OK")
+        print("      ✓ train_params roundtrip OK")
 
     print(f"\n✓ {config_name} smoke test PASSED\n")
     return True

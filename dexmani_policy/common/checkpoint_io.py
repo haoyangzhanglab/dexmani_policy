@@ -43,19 +43,10 @@ def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
         'action_key': getattr(model, 'action_key', 'action'),
         'tcp_dim': getattr(model, 'tcp_dim', None),
         'use_faas': getattr(model, 'use_faas', False),
-        'use_dexlatent': getattr(model, 'use_dexlatent', False),
         'hand_dim': getattr(model, 'hand_dim', None),
-        'latent_dim': getattr(model, 'latent_dim', None),
         'control_action_dim': model.control_action_dim,
         'num_training_steps': num_training_steps,
     }
-
-    # DexLatent: persist the native (19D) normaliser state dict so eval
-    # can restore it without re-fitting on the replay buffer.
-    # Stored as a plain dict (not nn.Module) to avoid polluting model.state_dict().
-    native_norm_state = getattr(model, '_native_norm_state', None)
-    if native_norm_state is not None:
-        params['native_normalizer_state'] = native_norm_state
 
     return params
 

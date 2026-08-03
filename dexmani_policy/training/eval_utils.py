@@ -22,7 +22,7 @@ from dexmani_policy.common.config import (
     validate_action_key_consistency,
 )
 from dexmani_policy.common.pytorch_util import fix_state_dict
-from dexmani_policy.training.build_utils import inject_faas_into_agent, inject_dexlatent_into_agent
+from dexmani_policy.training.build_utils import inject_faas_into_agent
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +71,6 @@ def build_eval_components(
     agent = hydra.utils.instantiate(cfg.agent)
     agent.action_key = cfg.action_key
     inject_faas_into_agent(agent, cfg)
-    # normalizer=None: native_normalizer restored later from checkpoint train_params
-    inject_dexlatent_into_agent(agent, cfg, normalizer=None)
 
     env_runner = hydra.utils.instantiate(cfg.env_runner)
 
@@ -122,14 +120,6 @@ def load_ckpt_for_inference(
                 f"use_faas={agent_use_faas}. Use a matching config."
             )
 
-        ckpt_use_dexlatent = train_params.get("use_dexlatent", False)
-        agent_use_dexlatent = getattr(agent, "use_dexlatent", False)
-        if ckpt_use_dexlatent != agent_use_dexlatent:
-            raise ValueError(
-                f"Checkpoint use_dexlatent={ckpt_use_dexlatent} but agent "
-                f"use_dexlatent={agent_use_dexlatent}. Use a matching config."
-            )
-
     raw_state = (
         checkpoint.ema_model_state
         if (use_ema and checkpoint.ema_model_state is not None)
@@ -142,14 +132,6 @@ def load_ckpt_for_inference(
             "yellow",
         )
 
-    # DexLatent: strip legacy native_normalizer keys from the checkpoint
-    # state dict.  Older checkpoints stored it as an nn.Module whose keys
-    # do not exist in the current agent (which stores it as a plain dict).
-    raw_state = {
-        k: v for k, v in raw_state.items()
-        if not k.startswith("native_normalizer.")
-    }
-
     agent.load_state_dict(
         fix_state_dict(raw_state, is_current_ddp=False),
         strict=True,
@@ -159,14 +141,6 @@ def load_ckpt_for_inference(
         raise RuntimeError(
             "Normalizer is missing required key 'action' after loading checkpoint."
         )
-
-    # DexLatent: restore the native (19D) normaliser state dict from
-    # train_params.  Stored as a plain dict (not nn.Module) so it does
-    # not pollute model.state_dict() and break strict checkpoint loading.
-    native_norm_state = train_params.get("native_normalizer_state") if train_params else None
-    if native_norm_state and getattr(agent, "use_dexlatent", False):
-        agent._native_norm_state = native_norm_state
-
 
 # ---------------------------------------------------------------------------
 # 4. best_ckpt.json reading (was duplicated between eval_sim.py and
