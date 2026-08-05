@@ -2,7 +2,7 @@
 
 灵巧手操作模仿学习框架。Hydra 配置驱动，Zarr replay buffer，Diffusion/FlowMatch 动作解码，`dexmani_sim` 仿真评测。
 
-> **速查**: [训练](#训练命令) · [Agent对比](#agent-变体) · [配置速查](#配置速查) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
+> **速查**: [训练](#训练命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [配置速查](#配置速查) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
 
 ## 环境
 
@@ -15,14 +15,14 @@ export DATA_DIR=/path/to/data          # 需设，否则 dataset 路径报错
 
 ```bash
 # === 单卡 ===
-bash scripts/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas
+bash scripts/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat
 bash scripts/train.sh dp3 'training.loop.total_train_steps=500'
 
 # === 多卡 DDP ===
 bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas
 ```
 
-> 实际存在的单卡配置 (8): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d`
+> 实际存在的单卡配置 (9): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d, sat`
 > 实际存在的 DDP 配置 (6): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d`
 > 所有策略默认 `total_train_steps: 80000`
 
@@ -37,7 +37,7 @@ bash scripts/eval_sim.sh dp3 pick_apple_messy <exp_dir>
 
 ```bash
 python dexmani_policy/smoke_test.py dp3
-python dexmani_policy/smoke_test.py dp3 maniflow moe_dp r3d dqrise
+python dexmani_policy/smoke_test.py dp3 maniflow moe_dp r3d dqrise sat
 ```
 
 ## VQ-VAE 预训练（DQ-RISE Stage 1）
@@ -101,6 +101,7 @@ Hydra config (configs/*.yaml)
 BaseAgent
   ├── UNetDiffusionAgent        ← DP, DP3, MoE (共享 UNet+Diffusion 构建)
   ├── DiTXFlowMatchAgent        ← ManiFlow (DiTX+FlowMatchWithConsistency)
+  ├── SATAgent                  ← 直接继承 BaseAgent (SATBackbone+SATFlowMatch)
   ├── MultiTaskAgent            ← 直接继承 BaseAgent
   ├── R3DAgent                  ← 直接继承 BaseAgent (OneWayTransformer)
   └── DQRISEAgent               ← 直接继承 BaseAgent (自建 UNet+Diffusion，action_dim 缩减)
@@ -118,6 +119,7 @@ BaseAgent
 | **R3D** | PC+state | Uni3D(ViT+Fourier PE)+StateMLP | OneWayTransformer(cross-attn) | Diffusion(DDIM 10步) | `r3d.yaml` | 级联mask, 分组loss |
 | **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon, 20步) | `dqrise.yaml` | VQ码本16种手势, 3x学习率 |
 | **DP3(FAAS)** | PC+state | 同DP3 | 同DP3 | 同DP3 | `dp3_faas.yaml` | 32D FAAS空间, 零agent代码变更 |
+| **SAT** | PC+state | PointNeXT(patch)+StateMLP | SATBackbone(MultiModalAttn+EJC) | FlowMatch(Gaussian init, Euler) | `sat.yaml` | 结构中心(B,Da,T), EJC 3-field sum, per-sample shuffle, 论文对齐 |
 
 ### 各 Agent 关键差异
 
@@ -127,15 +129,48 @@ BaseAgent
 - **DQRISE** → UNet 输入只有 `tcp_dim+1` 维（10D），非标准 `action_dim`
 - **ManiFlow** → 唯一用 `betas=[0.9,0.95]` + `weight_decay=1e-3` 的配置（Transformer/FlowMatching 标准）
 - **MultiTask** → CLIP text encoder 冻结，仅 `text_proj` 可训练；`MultiTaskSimRunner` 编排 per-task 评测
+- **SAT** → 结构中心动作表示 `(B, Da, T)` 代替 `(B, T, Da)`；EJC (Embodied Joint Codebook) 3-field sum 提供 per-joint identity；MultiModalAttention 单次拼接注意力 (obs-as-KV-prefix)；per-sample shuffle 训练时随机排列关节 token；Obs 时间融合在特征维（token 数不随 `n_obs_steps` 增长）；`compile mode='default'`（CUDA graph 不兼容 shuffle 动态索引）；8 层 DiT-B 规模，hidden_dim=768
 - **DP/DP3/ManiFlow/MoE/MultiTask/R3D** → 全部通过 config + `inject_faas_into_agent()` 兼容 FAAS，零 agent 代码变更
 
+### SAT (Structural Action Transformer) — 论文对齐状态
+
+SAT (CVPR 2026) 是本项目最新的 agent 变体，已通过完整论文对齐审计（2026-08-04）。当前实现与论文在全部 10 个关键设计点上一致：
+
+| 论文设计 | 实现位置 | 对齐 |
+|----------|---------|:---:|
+| 结构中心表示 `(B, Da, T)` | `sat.py:246` (train), `sat.py:287` (infer) | ✅ |
+| EJC 3-field SUM `E_emb+E_func+E_axis` | `sat.py:90` (`EmbodiedJointCodebook.forward`) | ✅ |
+| Action token = traj + EJC (ADD) | `sat.py:453` (`x = x + ejc`) | ✅ |
+| Per-sample shuffle + unshuffle | `sat.py:440-476` | ✅ |
+| Flow Matching (Gaussian init + Euler) | `sat_flowmatch.py:41,82-85` | ✅ |
+| Obs 特征维时间融合 | `sat.py:108-110` | ✅ |
+| MultiModalAttention (obs-as-KV-prefix) | `sat.py:146-181` | ✅ |
+| AdaLN 调制 (block + final layer) | `sat.py:250-252,539-543` | ✅ |
+| AdaLN-Zero obs pre-norm | `sat.py:497-520` (`_AdaLNZeroObs`) | ✅ |
+| 8 层 DiT-B (hidden_dim=768) | `sat.yaml:94-95` | ✅ |
+
+**关键文件**:
+- `agents/core/sat.py` — `SATObsEncoder` + `SATAgent` (直接继承 BaseAgent)
+- `agents/action_decoders/backbone/sat.py` — `EmbodiedJointCodebook`, `MultiModalAttention`, `SATBlock`, `SATBackbone`, `_FinalLayer`, `_AdaLNZeroObs`
+- `agents/action_decoders/sat_flowmatch.py` — `SATFlowMatch` (继承 `FlowMatch`，转发 shuffle)
+- `configs/sat.yaml` — 训练配置
+
+**已知微差异**（不影响论文忠实度）:
+- `x_embedder`: 使用 2 层 MLP (`Linear→Mish→Linear`) 代替单 Linear — 论文简化描述，2 层 ≥ 单层
+- Obs token 仅经过 attention 更新（不经 MLP）— 合理 prefix 设计，论文未要求 identical processing
+- `compile mode='default'`: per-sample shuffle 的动态索引不兼容 CUDA graph (`reduce-overhead`)
+
+**pour 任务已知结果**: 71.0% (100ep) — +12.0pp vs 旧 SAT (59.0%), +5.0pp vs DiTX-Control (66.0%)
+
 ### Action Decoder 类型
+
 
 | Decoder | 预测目标 | 推理 | 关键参数 |
 |---------|---------|------|---------|
 | `Diffusion` | `epsilon`(noise) / `sample`(x0) / `v_prediction`(velocity) | DDIM 迭代 | `prediction_type`, `num_inference_steps` |
 | `FlowMatch` | 瞬时速度 `v=x1-x0` | Euler ODE | 仅 MultiTask 用 |
 | `FlowMatchWithConsistency` | 速度 + consistency(EMA教师) | Euler ODE | `flow_batch_ratio`, 4种时采样模式 |
+| `SATFlowMatch` | 瞬时速度 `v=x1-x0` (Gaussian init) | Euler ODE | 继承 `FlowMatch`，转发 `shuffle` 到 backbone |
 
 ---
 
@@ -276,7 +311,7 @@ while global_step < config.total_train_steps:
 - `find_unused_parameters=False`, `static_graph=True`
 - Normalizer 从 rank 0 broadcast
 - `OmegaConf.resolve(cfg)` 在 `mp.spawn` 前（子进程无 Hydra 运行时）
-- 仅覆盖 6 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/r3d（dp3/moe_dp 仅单卡）
+- 仅覆盖 6 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/r3d（dp3/moe_dp/sat 仅单卡）
 - **DDP 超时**: `dist.init_process_group(timeout=30min)` — 覆盖所有集体操作（all_reduce/broadcast/barrier），防止死 rank 导致整个集群无限挂起
 
 ### EMA
@@ -325,7 +360,7 @@ MultiTaskSimRunner (独立编排器, 持有 dict[str, TaskTextSimRunner])
 
 ```
 configs/
-  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml
+  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml
 configs/ddp/
   dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml
 ```
@@ -334,21 +369,21 @@ configs/ddp/
 
 ### 关键参数速查
 
-| 参数 | dp | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | dp3_faas |
-|------|----|-----|----------|--------|---------------|-----|--------|----------|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** |
-| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** |
-| backbone dims | [256,512,1024] | 同 | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] |
-| diff train/infer | 100/10 | 100/10 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 |
-| prediction_type | sample | sample | velocity | sample | sample | sample | **epsilon** | sample |
-| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 |
-| weight_decay | 1e-6 | 1e-6 | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
-| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| warmup | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 |
-| total_train_steps | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 |
-| bfloat16 | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ |
-| compile | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ |
-| val_ratio | 0.10 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 |
+| 参数 | dp | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | dp3_faas | sat |
+|------|----|-----|----------|--------|---------------|-----|--------|----------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** | 19/21 |
+| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** | 19 |
+| backbone dims | [256,512,1024] | 同 | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] | **8L×768d** |
+| diff train/infer | 100/10 | 100/10 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | -/10 |
+| prediction_type | sample | sample | velocity | sample | sample | sample | **epsilon** | sample | velocity (FM) |
+| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 | 1e-4 |
+| weight_decay | 1e-6 | 1e-6 | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
+| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| warmup | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 | 500 |
+| total_train_steps | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 |
+| bfloat16 | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ |
+| compile | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ (mode=default) |
+| val_ratio | 0.10 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
 
 ### DDP 批次大小（每卡 × 4）
 
@@ -410,7 +445,7 @@ joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
 
 ### 兼容性
 
-- **直接兼容**: DP, DP3, ManiFlow, MoE, MultiTask, R3D（仅 config 差异）
+- **直接兼容**: DP, DP3, ManiFlow, MoE, MultiTask, R3D, SAT（仅 config 差异）
 - **不兼容**: DQRISE（VQ-VAE codebook 12D→32D 需重跑三阶段管道）
 - **互斥**: `use_aux_ee` 和 `use_faas` 不能同时启用
 
@@ -450,12 +485,12 @@ dexmani_policy/
   train_ddp.py              # 多卡 DDP 入口
   eval_sim.py               # 独立评测入口（Hydra-free）
   smoke_test.py             # 构建链冒烟测试
-  configs/                  # 8 个 Hydra YAML
+  configs/                  # 9 个 Hydra YAML
   configs/ddp/              # 6 个 DDP overlay
   agents/
-    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 7 agent variants
-    action_decoders/        # Diffusion, FlowMatch, FlowMatchWithConsistency, TimeSampler
-      backbone/             # UNet1D (ConditionalUnet1D), DiT, DiTX (DiTXFlowMatch), OneWayTransformer
+    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 8 agent variants
+    action_decoders/        # Diffusion, FlowMatch, FlowMatchWithConsistency, SATFlowMatch, TimeSampler
+      backbone/             # UNet1D (ConditionalUnet1D), DiT, DiTX (DiTXFlowMatch), OneWayTransformer, SATBackbone
     obs_encoder/            # pointcloud/, rgb/, text/, state_mlp.py, plugins/(moe, token_compressor)
     vq_hand/                # DQ-RISE 专用: VQVAEHand, CodebookManager, ResidualVQ, VectorQuantize
     optim_util.py           # OptimGroupMixin, get_optim_group_with_no_decay

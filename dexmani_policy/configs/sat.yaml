@@ -1,0 +1,211 @@
+# SAT — Structural Action Transformer (CVPR 2026)
+# Encoder:  PointNeXT tokenizer (256d tokens, SAT-style patch self-attention)
+# Decoder:  SAT backbone (MultiModalAttention, obs-as-KV-prefix) + Flow Matching
+# Modality: point_cloud + joint_state → action
+# Key:      structural-centric action representation (Da as sequence, T as feature)
+
+policy_name: sat
+
+# ── Task ──
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+
+# ── Core ──
+seed: 42
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_key: action                    # action | action_ee
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
+
+# ── Dataloader ──
+dataloader:
+  batch_size: 128
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
+
+val_dataloader:
+  batch_size: 128
+  shuffle: false
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 2
+  drop_last: false
+
+# ── Dataset ──
+dataset:
+  _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  action_key: ${action_key}
+  zarr_path: ${zarr_path}
+  seed: ${training.seed}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  val_ratio: 0.05
+  max_train_episodes: 80
+  sensor_modalities: ["joint_state", "point_cloud"]
+  obs_horizon: ${n_obs_steps}
+
+  augmentation_cfg:
+    pc:
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
+    state:
+      noise:       {noise_std: 0.0002, prob: 1.0}
+
+# ── Agent ──
+agent:
+  _target_: dexmani_policy.agents.core.sat.SATAgent
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+
+  # Obs encoder (same as ManiFlow)
+  encoder_type: pointnext_tokenizer
+  pc_dim: 6
+  state_dim: 19
+  num_points: 1024
+
+  fps_random_config:
+    use_random: true
+    use_random_start: true
+    random_noise_scale: 0.0
+    use_shuffle_output: true
+
+  pc_encoder_config:
+    stem_channels: 48
+    token_channels: 256
+    num_patches: 96
+    patch_radii: [0.05, 0.10]
+    patch_neighbors: [20, 48]
+    use_patch_self_attn: true
+    patch_attn_layers: 4
+    patch_attn_heads: 4
+    patch_attn_dropout: 0.1
+    prepend_global_in_attn: true
+
+  # SAT backbone (structural-centric DiT)
+  n_layers: 8               # paper: 8 layers (vs 12 for DiTX)
+  hidden_dim: 768
+  n_head: 8
+  mlp_ratio: 4.0
+  p_drop_attn: 0.1
+  qkv_bias: true
+  qk_norm: true
+
+  # EJC (Embodied Joint Codebook)
+  ejc_num_embodiments: 1
+  # ejc_num_functions defaults to action_dim (auto-tracked by EmbodiedJointCodebook)
+  ejc_num_axes: 1
+  ejc_embodiment_dim: 8
+  ejc_function_dim: 32
+  ejc_axis_dim: 8
+
+  # Structural token config
+  shuffle_action_tokens: true
+
+  # Flow matching (standard CFM, no consistency training)
+  denoise_timesteps: 10
+  t_sample_mode_for_flow: beta
+
+  modality_dropout_probs:
+    joint_state: 0.0
+
+# ── Optimizer ──
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+
+# ── EMA ──
+ema:
+  _target_: dexmani_policy.training.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+# ── Training ──
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: true
+  use_compile: true              # SATAgent overrides to mode='default' (no cudagraphs)
+  use_ema: true
+  use_ema_teacher_for_consistency: false   # SAT uses standard CFM only
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    total_train_steps: 80000
+    log_interval_steps: 50
+    gradient_accumulation_steps: 1
+
+# ── Workspace ──
+workspace:
+  _target_: dexmani_policy.training.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+
+  wandb_cfg:
+    _target_: dexmani_policy.training.workspace.WandbConfig
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
+    id: ${policy_name}_${task_name}_${training.seed}
+    resume: allow
+    mode: offline
+    video_fps: 15
+
+  checkpoint_cfg:
+    _target_: dexmani_policy.training.workspace.CheckpointConfig
+    monitor_key: test_mean_score
+    mode: max
+    topk: 3
+
+# ── Env Runner ──
+env_runner:
+  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
+  task_name: ${task_name}
+  n_obs_steps: ${n_obs_steps}
+  default_eval_episodes: 25
+  sensor_modalities: ${dataset.sensor_modalities}
+  temporal_ensemble_coeff: 0.01
+  env_kwargs:
+    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
+    texture_random: false
+    instance_random: true
+    table_random: true
+
+# ── Eval ──
+eval:
+  seed: 0
+  select_best:
+    initial_episodes: 25
+    batch_size: 5
+    max_episodes: 100
+    denoise_steps: 10
+    use_ema: true
+  offline:
+    ckpt_tag_or_path: best
+    eval_episodes: 100
+    denoise_timesteps_list: [10]
+    use_ema_for_eval: true
+
+# ── Hydra ──
+hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+    subdir: ${hydra.job.num}
