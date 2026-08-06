@@ -1,0 +1,495 @@
+# DexMani_Policy 服务器训练部署方案（v4 重构版）
+
+> **更新日期**: 2026-08-06 | **服务器**: 192.168.88.230 (8×H200) | **设计原则**: 清晰分离 × 高效同步 × 易于维护
+
+---
+
+## 设计原则
+
+| # | 原则 | 实现 |
+|---|------|------|
+| 1 | **数据/代码分离** | `robot_data` + `experiments` → NFS 数据盘；源码 → home overlay |
+| 2 | **三向同步** | 代码上传（频繁）、数据上传（增量）、实验下载（保护本地评测产物） |
+| 3 | **稳定高速** | rsync 默认 size+mtime 去重，源码 `-z` 压缩，数据免压缩 |
+| 4 | **清晰可靠** | 每个脚本单一职责，`--dry-run` 预览，pre-flight checks 快速失败 |
+
+---
+
+## 服务器硬件速查
+
+| 资源 | 规格 |
+|------|------|
+| CPU | 2× Intel Xeon Platinum 8558 (Emerald Rapids), 96C/192T |
+| GPU | **8× NVIDIA H200 SXM**, 141 GB × 8 = 1.125 TB 总显存, NVSwitch 全互联 |
+| RAM | 2.0 TiB DDR5 |
+| 系统盘 | Docker overlay (`/`): 11 TB (1.6 TB 可用) |
+| 数据盘 (NFS) | `192.168.88.10:/data_ssd`: 35 TB (20 TB 可用) |
+| NAS (NFS) | `192.168.88.17:/nasPublic`: 96 TB (59 TB 可用) |
+| 网络 | 千兆 LAN，实测上传 ~25 MB/s / 下载 ~32 MB/s |
+| OS | Ubuntu 22.04.5 LTS (Docker 容器) |
+| CUDA | Driver 565.57.01 / CUDA 12.7 / toolkit 12.1 |
+
+> **Docker 注意**: `/home/` 在 overlay FS 上，容器重建可能丢失。大数据（robot_data、experiments、pretrained weights）**必须**放 `/data_ssd/ZHY/`（NFS 持久化）。代码和 conda 环境放 `/home/` 即可（Git 备份，重建成本低）。
+
+---
+
+## 目录布局
+
+### 设计逻辑
+
+```
+本地机器                                服务器
+────────                                ──────
+dexmani_policy/                         ~/ZHY/dexmani_policy/         ← sync_code.sh (源码)
+├── dexmani_policy/                     ├── dexmani_policy/           ← rsync -avz --delete
+├── scripts/                            ├── scripts/
+├── configs/                            ├── configs/
+├── docs/                               ├── docs/
+├── pyproject.toml                      ├── pyproject.toml
+├── data/  (53 MB, Uni3D 权重)          ├── data → /data_ssd/ZHY/data/    ← symlink
+├── robot_data/  (8.5 GB, .zarr)        ├── robot_data → /data_ssd/...    ← symlink
+└── experiments/  (本地评测产物)         └── experiments → /data_ssd/...   ← symlink
+                                         
+                                        /data_ssd/ZHY/                ← sync_data.sh (数据集+权重)
+                                        ├── data/                     ← rsync -av (免压缩, 不删)
+                                        ├── robot_data/               ← rsync -av (增量, 免重复上传)
+                                        └── experiments/              ← sync_down.sh (下拉)
+                                            └── <policy>/<task>/<ts>/
+```
+
+### 目录职责
+
+| 目录 | 存储位置 | 大小 | 同步方向 | 频率 |
+|------|---------|------|---------|------|
+| 源码 (`dexmani_policy/`, `scripts/`, `configs/`, ...) | `~/ZHY/dexmani_policy/` (home) | ~60 MB | 本地→服务器 | **频繁**（每次改代码） |
+| 预训练权重 (`data/`) | `/data_ssd/ZHY/data/` (NFS) | ~53 MB | 本地→服务器 | 极少（权重不变） |
+| 数据集 (`robot_data/`) | `/data_ssd/ZHY/robot_data/` (NFS) | ~8.5 GB | 本地→服务器 | 偶尔（新增任务） |
+| 实验输出 (`experiments/`) | `/data_ssd/ZHY/experiments/` (NFS) | ~GB 级 | 服务器→本地 | 训练后 |
+
+> **关键**: 服务器上 `~/ZHY/dexmani_policy/` 下的 `data`、`robot_data`、`experiments` 是 **symlink**，指向 `/data_ssd/ZHY/` 下的实际目录。这样代码中 `robot_data/pour.zarr` 等相对路径无需任何修改即可工作。
+
+---
+
+## Phase 0: SSH 配置
+
+**状态**: SSH 密钥已配置 ✅
+
+在本地 `~/.ssh/config` 添加便捷别名：
+
+```
+Host dexserver
+    HostName 192.168.88.230
+    Port 51822
+    User zjurobot
+    ServerAliveInterval 60
+    ServerAliveCountMax 5
+```
+
+之后所有脚本中 `dexserver` 等价于 `ssh zjurobot@192.168.88.230 -p 51822`。
+
+> 可通过环境变量 `DEX_SERVER` 覆盖服务器别名：`DEX_SERVER=myhost bash scripts/remote/sync_code.sh`
+
+---
+
+## Phase 1: 服务器初始化（一次性）
+
+### 1.1 创建目录结构
+
+```bash
+# 代码目录（home，个人 workspace）
+ssh dexserver 'mkdir -p ~/ZHY/dexmani_policy'
+
+# 数据目录（/data_ssd NFS，持久化）
+# 首次需 sudo 创建（zjurobot 在 sudo 组）
+ssh -t dexserver 'sudo mkdir -p /data_ssd/ZHY && sudo chown zjurobot:zjurobot /data_ssd/ZHY'
+ssh dexserver 'mkdir -p /data_ssd/ZHY/{robot_data,experiments,data}'
+```
+
+### 1.2 补装缺失的包
+
+```bash
+# dex_policy 环境（已确认存在，Python 3.10.19, torch 2.4.1+cu124）
+# 缺少 zarr 和 dexmani_policy 本身
+ssh dexserver '~/.conda/envs/dex_policy/bin/pip install zarr'
+# 等代码首次上传后再执行:
+# ssh dexserver 'cd ~/ZHY/dexmani_policy && ~/.conda/envs/dex_policy/bin/pip install -e .'
+```
+
+### 1.3 首次上传
+
+```bash
+# 1. 上传代码
+bash scripts/remote/sync_code.sh
+
+# 2. 安装包
+ssh dexserver 'cd ~/ZHY/dexmani_policy && ~/.conda/envs/dex_policy/bin/pip install -e .'
+
+# 3. 创建 symlink（代码透明访问大数据）
+ssh dexserver 'cd ~/ZHY/dexmani_policy && \
+    ln -sfn /data_ssd/ZHY/data data && \
+    ln -sfn /data_ssd/ZHY/robot_data robot_data && \
+    ln -sfn /data_ssd/ZHY/experiments experiments'
+
+# 4. 上传数据（8.5 GB，约 6 分钟，后续增量秒级）
+bash scripts/remote/sync_data.sh
+```
+
+### 1.4 验证链路
+
+```bash
+# 冒烟测试
+ssh dexserver 'cd ~/ZHY/dexmani_policy && ~/.conda/envs/dex_policy/bin/python dexmani_policy/smoke_test.py dp3'
+
+# 短训练（10 步，前台观察）
+bash scripts/remote/train_remote.sh --fg dp3 pour 'training.loop.total_train_steps=10'
+```
+
+---
+
+## 同步架构（核心设计）
+
+### 三向同步全景
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         sync_code.sh                            │
+│  本地源码 ──── rsync -avz --delete ────→ ~/ZHY/dexmani_policy/  │
+│  频率: 高（每次改代码）  耗时: ~2-3秒   方向: 本地→服务器       │
+├─────────────────────────────────────────────────────────────────┤
+│                         sync_data.sh                            │
+│  本地 robot_data/ + data/ ── rsync -av ──→ /data_ssd/ZHY/      │
+│  频率: 低（新增数据时）  耗时: 增量秒级  方向: 本地→服务器       │
+├─────────────────────────────────────────────────────────────────┤
+│                        sync_down.sh                             │
+│  /data_ssd/ZHY/experiments/ ── rsync -av ──→ 本地 experiments/  │
+│  频率: 中（训练后评测前） 耗时: 增量秒级  方向: 服务器→本地      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 为什么这样设计
+
+| 决策 | 理由 |
+|------|------|
+| 源码用 `-z` 压缩 | .py/.yaml/.sh 文本压缩比 3-4x，千兆网下省时间 |
+| 数据不用 `-z` | .zarr 和 .safetensors 已内置压缩，再压缩浪费 CPU |
+| 源码用 `--delete` | 本地删文件 → 服务器也删，保持一致 |
+| 数据不用 `--delete` | 安全：本地误删不影响服务器数据 |
+| rsync 默认 size+mtime 比较 | 文件未变 → 秒级跳过；文件变了 → 只传差异 |
+| `data/` 放 NFS 不随源码同步 | 53 MB 权重文件极少变动，与 60 MB 源码分开传输 |
+
+### 实验下载的本地保护机制（两趟 rsync）
+
+`sync_down.sh` 不依赖文件/目录名来判断哪些是本地评测产物，而是用**两趟 rsync**，基于文件**是否存在**来决策：
+
+**Pass 1 — `rsync --ignore-existing`**（只拉新文件）
+- 本地**没有**的文件 → 下载（新的 checkpoint、新的实验 run）
+- 本地**已有**的文件 → **跳过**（不论它叫什么名字、放在哪个目录）
+
+**Pass 2 — `rsync --existing`（精确更新可变文件，仅更新已有文件）**
+- `metrics.jsonl` — 训练中持续增长
+- `checkpoints/latest.pt` — symlink 目标随训练推进变化
+- `checkpoints/scores.json` — top-k tracker 更新
+
+> **为什么这样更健壮**：
+> - 本地评测产物（`eval_dexsim/`、`demo_videos/`、`best_ckpt.json` 或未来任何新目录）只要存在于本地，就会被 Pass 1 的 `--ignore-existing` 自动跳过。**不需要预先知道它们的名字**。
+> - Checkpoint `.pt` 文件是 immutable 的（写一次不改），`--ignore-existing` 完美处理：新的会下载，已有的跳过。
+> - 如果未来评测代码改了输出路径，sync 脚本不需要同步修改。
+
+---
+
+## 脚本参考
+
+### `sync_code.sh` — 上传源码
+
+```bash
+bash scripts/remote/sync_code.sh              # 同步代码（增量，2-3秒）
+bash scripts/remote/sync_code.sh --dry-run    # 预览变更
+```
+
+**传输内容**: `dexmani_policy/`, `scripts/`, `configs/`, `docs/`, `pyproject.toml`, `setup.py`, `requirements*.txt` 等所有非数据源码。
+
+**排除**: `.git/`, `__pycache__/`, `data/`, `robot_data/`, `experiments/`, `wandb/`, `outputs/`, `logs/` 等生成/数据目录。
+
+**rsync flags**: `-avz --delete --partial` — 压缩传输 + 删远端残留 + 断点续传。
+
+---
+
+### `sync_data.sh` — 上传数据
+
+```bash
+bash scripts/remote/sync_data.sh              # 上传全部数据（robot_data + data）
+bash scripts/remote/sync_data.sh robot_data   # 仅上传数据集
+bash scripts/remote/sync_data.sh data         # 仅上传预训练权重
+bash scripts/remote/sync_data.sh --dry-run    # 预览
+```
+
+**传输内容**: `robot_data/` → `/data_ssd/ZHY/robot_data/`, `data/` → `/data_ssd/ZHY/data/`。
+
+**关键行为**:
+- 文件未变（同 size + mtime）→ **秒级跳过**
+- 文件新增或变更 → 仅传差异
+- 不含 `--delete`：服务器数据安全优先
+
+> **首次上传 8.5 GB 约 6 分钟**。后续增量上传仅传输新增/变更的文件，通常秒级完成。
+
+---
+
+### `sync_down.sh` — 下载实验
+
+```bash
+bash scripts/remote/sync_down.sh                          # 全部实验
+bash scripts/remote/sync_down.sh dp3/pour                 # 特定 policy/task
+bash scripts/remote/sync_down.sh dp3/pour/2026-08-03_12   # 特定 run
+bash scripts/remote/sync_down.sh --dry-run                # 预览
+bash scripts/remote/sync_down.sh --list                   # 列出服务器上的实验
+bash scripts/remote/sync_down.sh --with-wandb             # 含 wandb 离线数据
+```
+
+**关键行为**:
+- 仅传输新增/变更的文件（rsync 默认 size+mtime 比较）
+- **排除本地评测产物**（见上表），不会被覆盖
+- 5 个 milestone checkpoint .pt 文件（各 ~1.5-2GB）只在首次下载时传输；后续仅 `latest.pt` symlink 和 `metrics.jsonl` 等小文件更新
+- 不含 `--delete`：本地删了实验不会被远端删
+
+---
+
+### `train_remote.sh` — 一键训练
+
+```bash
+bash scripts/remote/train_remote.sh <config> <task> [hydra_overrides...]
+bash scripts/remote/train_remote.sh --fg <config> <task> [...]     # 前台
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 <config> <task> [...]  # 指定 GPU
+bash scripts/remote/train_remote.sh --sync-data <config> <task>    # 含数据同步
+bash scripts/remote/train_remote.sh --dry-run <config> <task>      # 预览
+```
+
+**Pre-flight checks（任一失败则退出）**:
+
+| 步骤 | 检查内容 | 失败提示 |
+|------|---------|---------|
+| 1 | 服务器可达 | "Check VPN/network" |
+| 2 | 代码同步 (`sync_code.sh`) | rsync 错误 |
+| 3 | `{task}.zarr` 存在于服务器 | "Run sync_data.sh" |
+| 4 | GPU 占用情况（打印，不阻塞） | — |
+| 5 | `/data_ssd` 磁盘剩余空间 | — |
+
+**示例**:
+
+```bash
+# 单卡训练（默认 tmux 后台）
+bash scripts/remote/train_remote.sh dp3 pour
+
+# DDP 4 卡
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
+
+# 带 Hydra 覆盖
+bash scripts/remote/train_remote.sh sat pour 'training.seed=123' 'training.loop.total_train_steps=50000'
+
+# 前台调试（看完整输出，Ctrl+C 可中断）
+bash scripts/remote/train_remote.sh --fg dp3 pour 'training.loop.total_train_steps=10'
+
+# 首次在新服务器上训练（含数据上传）
+bash scripts/remote/train_remote.sh --sync-data dp3 pour
+```
+
+---
+
+### `tail_log.sh` — 查看训练日志
+
+```bash
+bash scripts/remote/tail_log.sh dp3 pour                    # 自动找最新 run
+bash scripts/remote/tail_log.sh dp3 pour 2026-08-03_12-34   # 指定 run
+```
+
+自动尝试服务器 → 本地 fallback。Ctrl+C 退出。
+
+---
+
+### `stop_remote.sh` — 停止训练
+
+```bash
+bash scripts/remote/stop_remote.sh dp3_pour          # 停止特定 session
+bash scripts/remote/stop_remote.sh --all             # 停止全部
+bash scripts/remote/stop_remote.sh --list            # 查看活跃 session
+```
+
+---
+
+## 日常工作流
+
+### 典型训练周期
+
+```bash
+# 1. 改完代码 → 同步到服务器（2-3秒）
+bash scripts/remote/sync_code.sh
+
+# 2. 启动训练（自动再同步一次代码 + pre-flight checks）
+bash scripts/remote/train_remote.sh dp3 pour
+
+# 3. 监控进度
+bash scripts/remote/tail_log.sh dp3 pour                    # Ctrl+C 退出
+
+# 4. 训练完成 → 拉取实验结果
+bash scripts/remote/sync_down.sh dp3/pour                   # 只拉这个 task
+# 或
+bash scripts/remote/sync_down.sh --list                     # 先看有哪些实验
+bash scripts/remote/sync_down.sh dp3/pour/2026-08-03_12-34  # 拉特定 run
+
+# 5. 本地评测
+bash scripts/eval/select_best_ckpt.sh dp3 pour experiments/dp3/pour/2026-08-03_12-34
+bash scripts/eval/eval_best_ckpt.sh dp3 pour experiments/dp3/pour/2026-08-03_12-34
+
+# 6. 可选: 录制 demo 视频
+bash scripts/eval/record_demo.sh dp3 pour experiments/dp3/pour/2026-08-03_12-34
+```
+
+### 改代码 + 训多个策略
+
+```bash
+# 改代码后，训练 3 个策略
+bash scripts/remote/sync_code.sh
+
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
+bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/dp3_faas pour
+bash scripts/remote/train_remote.sh --gpus 0 sat pour          # 单卡
+
+# 拉全部 pour 实验结果
+bash scripts/remote/sync_down.sh maniflow/pour
+bash scripts/remote/sync_down.sh dp3_faas/pour
+bash scripts/remote/sync_down.sh sat/pour
+```
+
+### 数据上传（新增任务后）
+
+```bash
+# 新加了数据集到本地 robot_data/，只上传新增的
+bash scripts/remote/sync_data.sh robot_data --dry-run    # 先看会传什么
+bash scripts/remote/sync_data.sh robot_data              # 实际传输
+```
+
+---
+
+## GPU 多租户并行
+
+8 张 H200 通过 `CUDA_VISIBLE_DEVICES` 分区，`train_remote.sh --gpus` 已集成：
+
+```bash
+# 两个 4 卡 DDP 并行
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
+bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/dp3_faas pour
+
+# 8 个单卡 seed sweep
+for i in 0 1 2 3 4 5 6 7; do
+    bash scripts/remote/train_remote.sh --gpus $i dp3 pour "training.seed=$i" &
+done
+
+# 检查 GPU 占用
+ssh dexserver 'nvidia-smi --query-gpu=index,memory.used,name --format=csv,noheader'
+```
+
+---
+
+## Wandb
+
+```bash
+# 在线模式（需服务器能访问 wandb.ai）
+bash scripts/remote/train_remote.sh dp3 pour 'workspace.wandb_cfg.mode=online'
+
+# 离线模式（默认），事后同步
+bash scripts/remote/sync_down.sh --with-wandb dp3/pour       # 拉 wandb 数据
+bash scripts/utils/wandb_sync.sh                            # 本地同步到云端
+```
+
+---
+
+## 传输速率基准
+
+> 实测环境: zhy-MS-7E06 ↔ 192.168.88.230，千兆局域网，scp 单文件，2026-08-06。
+
+| 方向 | 文件大小 | 耗时 | 速率 |
+|------|------|------|------|
+| ⬆️ 上传 | 100 MB | 3.6s | **27.6 MB/s** (221 Mbps) |
+| ⬆️ 上传 | 1 GB | 40.4s | **25.4 MB/s** (203 Mbps) |
+| ⬇️ 下载 | 100 MB | 3.2s | **31.3 MB/s** (250 Mbps) |
+| ⬇️ 下载 | 1 GB | 31.2s | **32.9 MB/s** (263 Mbps) |
+
+**实际场景预估**（基于 25 MB/s 保守值）:
+
+| 操作 | 数据量 | 耗时 |
+|------|--------|------|
+| 同步源码 | ~60 MB | ~2-3 秒 |
+| 同步 robot_data（首次） | ~8.5 GB | ~6 分钟 |
+| 同步 robot_data（增量，无变化） | 0 | <1 秒 |
+| 下载 1 个实验（5 个 checkpoint .pt） | ~7-10 GB | ~5-7 分钟 |
+| 下载 1 个实验（增量，无新 checkpoint） | ~500 KB (metrics+logs) | <1 秒 |
+
+---
+
+## 运维速查
+
+```bash
+# GPU 状态
+ssh dexserver 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw --format=csv,noheader'
+
+# 磁盘空间
+ssh dexserver 'df -h /data_ssd /home'
+
+# tmux 会话
+ssh dexserver 'tmux list-sessions 2>/dev/null || echo "no sessions"'
+# 或
+bash scripts/remote/stop_remote.sh --list
+
+# 训练进程
+ssh dexserver 'ps aux | grep train'
+
+# conda 环境
+ssh dexserver 'ls ~/.conda/envs/'
+
+# 服务器上的实验列表
+bash scripts/remote/sync_down.sh --list
+```
+
+---
+
+## 脚本清单
+
+```
+scripts/
+├── training/
+│   ├── train.sh            # 本地单卡训练（原有）
+│   ├── train_ddp.sh        # 本地 DDP 训练（原有）
+│   └── train_vq_hand.sh    # VQ-VAE 预训练（原有）
+├── remote/
+│   ├── sync_code.sh        # 上传源码（频繁，2-3秒）
+│   ├── sync_data.sh        # 上传数据（增量，秒级跳过）
+│   ├── sync_down.sh        # 下载实验（保护本地评测产物）
+│   ├── train_remote.sh     # 一键训练（pre-flight checks + tmux）
+│   ├── tail_log.sh         # 实时日志流
+│   └── stop_remote.sh      # 停止训练
+├── eval/
+│   ├── select_best_ckpt.sh # 最优 checkpoint 筛选（原有）
+│   ├── eval_best_ckpt.sh   # 离线评测（原有）
+│   ├── eval_pipeline.sh    # 评测管道（原有）
+│   └── record_demo.sh      # Demo 录制（原有）
+└── utils/
+    ├── clean_experiments.sh # 清理实验（原有）
+    ├── download_pretrained.sh # 下载预训练权重（原有）
+    └── wandb_sync.sh        # Wandb 离线同步（原有）
+```
+
+> 原有 `train.sh`、`train_ddp.sh`、`eval_best_ckpt.sh` 等脚本保持不变，仅新增了 6 个远程部署脚本。
+
+---
+
+## v4 更新记录（2026-08-06，架构重构）
+
+| 变更 | v3 | v4 |
+|------|-----|-----|
+| 同步架构 | 1 个 `sync_up.sh` 同时处理代码+数据 | **3 个独立脚本**：`sync_code.sh`（源码）、`sync_data.sh`（数据）、`sync_down.sh`（实验） |
+| 代码同步 | 混在 sync_up 中 | **独立 `sync_code.sh`**，`-z` 压缩 + `--delete`，轻量高频 |
+| 数据上传 | 混在 sync_up 中 | **独立 `sync_data.sh`**，免压缩 + 免 `--delete`，增量安全 |
+| 实验下载 | `sync_down.sh` 简单 rsync | **重写**：自动排除本地评测产物（`eval_dexsim/`, `demo_videos/`, `best_ckpt.json` ...），保护本地文件不被覆盖 |
+| `data/` 目录 | 随源码同步 | **数据盘独立存储**，symlink 透明访问 |
+| `train_remote.sh` | 调用 `sync_up.sh` | 调用 `sync_code.sh`，新增 `--sync-data` flag |
+| 目录初始化 | 手动 `mkdir` | **结构化 Phase 1 流程**，含 symlink 创建 |
+| 可视化 | 无 | **同步架构全景图** + 职责表 |

@@ -2,26 +2,26 @@
 # Sync offline W&B runs to the cloud.
 #
 # Usage:
-#   bash scripts/wandb_sync.sh <run_dir>            # sync a single run
-#   bash scripts/wandb_sync.sh --all [root_dir]     # sync all offline runs
-#   bash scripts/wandb_sync.sh --dry-run --all      # list runs without syncing
+#   bash scripts/utils/wandb_sync.sh <run_dir>            # sync a single run
+#   bash scripts/utils/wandb_sync.sh --all [root_dir]     # sync all offline runs
+#   bash scripts/utils/wandb_sync.sh --dry-run --all      # list runs without syncing
 #
 # Examples:
-#   bash scripts/wandb_sync.sh ./wandb/offline-run-20260401_111839-m6zq0mtq
-#   bash scripts/wandb_sync.sh --all
-#   bash scripts/wandb_sync.sh --all experiments
-#   bash scripts/wandb_sync.sh --dry-run --all
+#   bash scripts/utils/wandb_sync.sh ./wandb/offline-run-20260401_111839-m6zq0mtq
+#   bash scripts/utils/wandb_sync.sh --all
+#   bash scripts/utils/wandb_sync.sh --all experiments
+#   bash scripts/utils/wandb_sync.sh --dry-run --all
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 DRY_RUN=false
 
 show_help() {
     cat <<EOF
-Usage: bash scripts/wandb_sync.sh [flags] <run_dir|--all>
+Usage: bash scripts/utils/wandb_sync.sh [flags] <run_dir|--all>
 
 Flags:
   --all [root]    Sync all offline runs under root/ (default: experiments/).
@@ -29,9 +29,9 @@ Flags:
   --help, -h      Show this message.
 
 Examples:
-  bash scripts/wandb_sync.sh wandb/offline-run-20260401_111839-m6zq0mtq
-  bash scripts/wandb_sync.sh --all
-  bash scripts/wandb_sync.sh --dry-run --all
+  bash scripts/utils/wandb_sync.sh wandb/offline-run-20260401_111839-m6zq0mtq
+  bash scripts/utils/wandb_sync.sh --all
+  bash scripts/utils/wandb_sync.sh --dry-run --all
 EOF
     exit 0
 }
@@ -62,7 +62,7 @@ done
 
 if [[ -z "$SYNC_TARGET" ]]; then
     echo "Error: no target specified. Use <run_dir> or --all." >&2
-    echo "Usage: bash scripts/wandb_sync.sh --help" >&2
+    echo "Usage: bash scripts/utils/wandb_sync.sh --help" >&2
     exit 1
 fi
 

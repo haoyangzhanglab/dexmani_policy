@@ -24,10 +24,10 @@ Usage
 .. code-block:: bash
 
     # After select_best_ckpt.sh:
-    bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42
+    bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42
 
     # Specific checkpoint:
-    bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 \\
+    bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 \\
         --ckpt-tag 20pct --episodes 50
 """
 

@@ -7,15 +7,15 @@
 #   3. Record 5 high-resolution demo videos from the best checkpoint.
 #
 # Usage:
-#   bash scripts/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]
+#   bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]
 #
 # Examples:
-#   bash scripts/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56
-#   bash scripts/eval_pipeline.sh maniflow_8l_abl pour 2026-08-04_22-19_42 --no-videos
+#   bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56
+#   bash scripts/eval/eval_pipeline.sh maniflow_8l_abl pour 2026-08-04_22-19_42 --no-videos
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # Activate conda environment
@@ -24,7 +24,7 @@ conda activate policy
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: bash scripts/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]"
+    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]"
     echo ""
     echo "One-shot evaluation pipeline: select best ckpt → eval on 100 seeds → 5 demo videos."
     echo ""
@@ -39,8 +39,8 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "                Step 3 (record_demo) always records videos."
     echo ""
     echo "Examples:"
-    echo "  bash scripts/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56"
-    echo "  bash scripts/eval_pipeline.sh maniflow_8l_abl pour 2026-08-04_22-19_42 --no-videos"
+    echo "  bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56"
+    echo "  bash scripts/eval/eval_pipeline.sh maniflow_8l_abl pour 2026-08-04_22-19_42 --no-videos"
     exit 1
 fi
 

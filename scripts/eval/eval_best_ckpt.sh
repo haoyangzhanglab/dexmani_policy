@@ -5,16 +5,16 @@
 # Output is the success rate (matching RoboTwin _result.txt format).
 #
 # Usage:
-#   bash scripts/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]
+#   bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]
 #
 # Examples:
-#   bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42
-#   bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 20pct
-#   bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --episodes 50
+#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42
+#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 20pct
+#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --episodes 50
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # Activate conda environment
@@ -22,7 +22,7 @@ eval "$(conda shell.bash hook)"
 conda activate policy
 
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: bash scripts/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]"
+    echo "Usage: bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
     echo "Positional args:"
     echo "  policy_name   policy config name (e.g. dp3, maniflow)"
@@ -38,9 +38,9 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  --no-ema             Use raw weights instead of EMA"
     echo ""
     echo "Examples:"
-    echo "  bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42"
-    echo "  bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 40pct"
-    echo "  bash scripts/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --episodes 50"
+    echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42"
+    echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 40pct"
+    echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --episodes 50"
     exit 1
 fi
 

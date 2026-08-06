@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TARGET_DIR="$PROJECT_DIR/data/pretrained/uni3d"
 
 if [ -f "$TARGET_DIR/model.safetensors" ]; then

@@ -1,0 +1,164 @@
+#!/bin/bash
+# ============================================================================
+# train_remote.sh — One-click remote training with pre-flight checks
+# ============================================================================
+# Usage:
+#   bash scripts/remote/train_remote.sh <config> <task> [hydra_overrides...]
+#   bash scripts/remote/train_remote.sh --fg <config> <task> [...]
+#   bash scripts/remote/train_remote.sh --gpus 0,1,2,3 <config> <task> [...]
+#   bash scripts/remote/train_remote.sh --sync-data <config> <task> [...]    # incl. data upload
+#
+# Examples:
+#   bash scripts/remote/train_remote.sh dp3 pour
+#   bash scripts/remote/train_remote.sh ddp/maniflow pour
+#   bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
+#   bash scripts/remote/train_remote.sh --fg dp3 pour 'training.seed=123'
+#   bash scripts/remote/train_remote.sh --sync-data dp3 pour  # first run on new server
+#   bash scripts/remote/train_remote.sh --dry-run dp3 pour    # preview only
+#
+# Pre-flight checks (fail-fast):
+#   1. Server reachable
+#   2. Code synced (sync_code.sh)
+#   3. robot_data exists for this task
+#   4. GPU memory available
+#   5. Disk space on /data_ssd
+# ============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# ---- Config ----
+SERVER="${DEX_SERVER:-dexserver}"
+SERVER_PROJ="~/ZHY/dexmani_policy"
+SERVER_DATA="/data_ssd/ZHY"
+CONDA_PYTHON="~/.conda/envs/dex_policy/bin/python"
+# ---- End Config ----
+
+FOREGROUND=false
+DRY_RUN=false
+GPU_IDS=""
+SYNC_DATA=false
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fg)          FOREGROUND=true; shift ;;
+        --dry-run|-n)  DRY_RUN=true; shift ;;
+        --sync-data)   SYNC_DATA=true; shift ;;
+        --gpus)
+            GPU_IDS="$2"
+            shift 2
+            ;;
+        *) break ;;
+    esac
+done
+
+# Validate positional args
+CONFIG="${1:?Error: specify config name (e.g., dp3, ddp/maniflow)}"
+TASK="${2:?Error: specify task name (e.g., pour)}"
+shift 2
+HYDRA_OVERRIDES="task_name=$TASK"
+for override in "$@"; do
+    HYDRA_OVERRIDES="$HYDRA_OVERRIDES $override"
+done
+
+# ---- Build remote command ----
+if [[ "$CONFIG" == ddp/* ]]; then
+    ENTRY="dexmani_policy/train_ddp.py"
+else
+    ENTRY="dexmani_policy/train.py"
+fi
+REMOTE_CMD="cd $SERVER_PROJ && $CONDA_PYTHON $ENTRY --config-name=$CONFIG $HYDRA_OVERRIDES"
+if [[ -n "$GPU_IDS" ]]; then
+    REMOTE_CMD="CUDA_VISIBLE_DEVICES=$GPU_IDS $REMOTE_CMD"
+fi
+
+SESSION="${CONFIG//\//_}_${TASK}"
+
+# ---- Dry-run mode ----
+if $DRY_RUN; then
+    echo "=== DRY RUN ==="
+    echo "Config:    $CONFIG"
+    echo "Task:      $TASK"
+    echo "Session:   $SESSION"
+    echo "Overrides: $HYDRA_OVERRIDES"
+    echo "GPU:       ${GPU_IDS:-auto}"
+    echo "Command:   $REMOTE_CMD"
+    echo ""
+    bash "$SCRIPT_DIR/sync_code.sh" --dry-run
+    exit 0
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# Pre-flight checks
+# ═══════════════════════════════════════════════════════════════════
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  train_remote: $CONFIG / $TASK"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+
+# 1. Server reachable
+echo -n "[1/5] Server reachable ... "
+if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$SERVER" "echo ok" &>/dev/null; then
+    echo "FAIL"
+    echo "ERROR: Cannot reach '$SERVER'. Check VPN/network and SSH config." >&2
+    exit 1
+fi
+echo "OK"
+
+# 2. Code sync
+echo -n "[2/5] Syncing code ... "
+bash "$SCRIPT_DIR/sync_code.sh" || { echo "FAIL"; exit 1; }
+echo "OK"
+
+# 2b. Data sync (optional, first-time)
+if $SYNC_DATA; then
+    echo -n "[2b] Syncing data (first-time) ... "
+    bash "$SCRIPT_DIR/sync_data.sh" || { echo "FAIL"; exit 1; }
+    echo "OK"
+fi
+
+# 3. robot_data exists
+echo -n "[3/5] Dataset $TASK.zarr ... "
+if ! ssh "$SERVER" "test -d $SERVER_DATA/robot_data/${TASK}.zarr"; then
+    echo "MISSING"
+    echo "ERROR: ${TASK}.zarr not found on server." >&2
+    echo "  Run: bash scripts/remote/sync_data.sh robot_data" >&2
+    exit 1
+fi
+echo "OK"
+
+# 4. GPU check
+echo "[4/5] GPU status:"
+ssh "$SERVER" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader" 2>/dev/null || echo "  (could not query GPUs)"
+
+# 5. Disk space
+echo -n "[5/5] Disk space /data_ssd ... "
+ssh "$SERVER" "df -h /data_ssd | tail -1 | awk '{print \$4 \" available of \" \$2}'" 2>/dev/null || echo "  (could not query disk)"
+
+echo ""
+echo "=== Pre-flight OK ==="
+echo ""
+
+# ═══════════════════════════════════════════════════════════════════
+# Launch
+# ═══════════════════════════════════════════════════════════════════
+if $FOREGROUND; then
+    echo "Launching in foreground (Ctrl+C to stop)..."
+    ssh -t "$SERVER" "$REMOTE_CMD"
+else
+    # Kill existing session with same name, then create new one
+    ssh "$SERVER" "tmux kill-session -t '$SESSION' 2>/dev/null; true"
+    ssh "$SERVER" "tmux new-session -d -s '$SESSION' '$REMOTE_CMD; echo \"\"; echo \"Training finished. Press Enter to close.\"; read'"
+
+    echo "╔══════════════════════════════════════════╗"
+    echo "║  Training started (tmux: $SESSION)"
+    echo "╠══════════════════════════════════════════╣"
+    echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION'"
+    echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"
+    echo "║  Stop:    bash scripts/remote/stop_remote.sh $SESSION"
+    echo "╚══════════════════════════════════════════╝"
+fi

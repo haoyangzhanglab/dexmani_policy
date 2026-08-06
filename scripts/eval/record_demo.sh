@@ -5,16 +5,16 @@
 # frames, ideal for presentations and demo reels.
 #
 # Usage:
-#   bash scripts/record_demo.sh <policy_name> <task_name> <exp_name> [args...]
+#   bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]
 #
 # Examples:
-#   bash scripts/record_demo.sh dp3 pour 2026-08-01_12-34-56
-#   bash scripts/record_demo.sh sat pour 2026-08-01_12-34-56 --ckpt-tag 100pct --episodes 10
-#   bash scripts/record_demo.sh maniflow pour 2026-08-01_12-34-56 --resolution 3840 2160
+#   bash scripts/eval/record_demo.sh dp3 pour 2026-08-01_12-34-56
+#   bash scripts/eval/record_demo.sh sat pour 2026-08-01_12-34-56 --ckpt-tag 100pct --episodes 10
+#   bash scripts/eval/record_demo.sh maniflow pour 2026-08-01_12-34-56 --resolution 3840 2160
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # Activate conda environment
@@ -22,7 +22,7 @@ eval "$(conda shell.bash hook)"
 conda activate policy
 
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: bash scripts/record_demo.sh <policy_name> <task_name> <exp_name> [args...]"
+    echo "Usage: bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
     echo "Positional args:"
     echo "  policy_name   policy config name (e.g. dp3, sat, maniflow)"
@@ -40,10 +40,10 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  --ema / --no-ema     Use EMA weights (default: from config)"
     echo ""
     echo "Examples:"
-    echo "  bash scripts/record_demo.sh dp3 pour 2026-08-01_12-34-56"
-    echo "  bash scripts/record_demo.sh sat pour 2026-08-01_12-34-56 --episodes 10"
-    echo "  bash scripts/record_demo.sh maniflow pour 2026-08-01_12-34-56 --resolution 3840 2160"
-    echo "  bash scripts/record_demo.sh dp3 pour 2026-08-01_12-34-56 --seeds 5 12 33 78"
+    echo "  bash scripts/eval/record_demo.sh dp3 pour 2026-08-01_12-34-56"
+    echo "  bash scripts/eval/record_demo.sh sat pour 2026-08-01_12-34-56 --episodes 10"
+    echo "  bash scripts/eval/record_demo.sh maniflow pour 2026-08-01_12-34-56 --resolution 3840 2160"
+    echo "  bash scripts/eval/record_demo.sh dp3 pour 2026-08-01_12-34-56 --seeds 5 12 33 78"
     exit 1
 fi
 

@@ -1,5 +1,6 @@
 from .ops import farthest_point_sample
 from .pointnet import MultiStagePointNet, PointNet
+from .pointnet_dense import PointNetDense
 from .pointnext import PointNextEncoder
 from .pointnext_tokenizer import PointNextPatchTokenizer
 from .r3d_obs_encoder import R3DObsEncoder

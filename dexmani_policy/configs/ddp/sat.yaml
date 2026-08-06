@@ -1,6 +1,6 @@
 # @package _global_
 # SAT — DDP multi-GPU training overlay
-# Usage: bash scripts/train_ddp.sh ddp/sat
+# Usage: bash scripts/training/train_ddp.sh ddp/sat
 #
 # Effective batch size: per_gpu_batch × num_gpus × gradient_accumulation_steps
 #   train: 32 × 4 × 1 = 128  (matches single-GPU 128)

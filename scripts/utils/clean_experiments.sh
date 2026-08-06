@@ -6,16 +6,16 @@
 #   B. Toy        — total_train_steps < TOY_MIN_STEPS (test/smoke runs), regardless of completion
 #
 # Usage:
-#   bash scripts/clean_experiments.sh                 # dry-run
-#   bash scripts/clean_experiments.sh --force         # delete class A; confirm each class B
-#   bash scripts/clean_experiments.sh --force --yes   # delete everything without prompts
-#   bash scripts/clean_experiments.sh --force --older-than 7
-#   bash scripts/clean_experiments.sh --force --include-active
-#   bash scripts/clean_experiments.sh --help
+#   bash scripts/utils/clean_experiments.sh                 # dry-run
+#   bash scripts/utils/clean_experiments.sh --force         # delete class A; confirm each class B
+#   bash scripts/utils/clean_experiments.sh --force --yes   # delete everything without prompts
+#   bash scripts/utils/clean_experiments.sh --force --older-than 7
+#   bash scripts/utils/clean_experiments.sh --force --include-active
+#   bash scripts/utils/clean_experiments.sh --help
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 EXP_DIR="$ROOT_DIR/experiments"
 
 FORCE=false
@@ -27,7 +27,7 @@ TOY_MIN_STEPS=16000
 
 show_help() {
     cat <<EOF
-Usage: bash scripts/clean_experiments.sh [flags]
+Usage: bash scripts/utils/clean_experiments.sh [flags]
 
 Flags:
   --force               Actually delete (default is dry-run).
@@ -39,10 +39,10 @@ Flags:
   --help, -h            Show this message.
 
 Examples:
-  bash scripts/clean_experiments.sh
-  bash scripts/clean_experiments.sh --force
-  bash scripts/clean_experiments.sh --force --yes
-  bash scripts/clean_experiments.sh --force --older-than 7
+  bash scripts/utils/clean_experiments.sh
+  bash scripts/utils/clean_experiments.sh --force
+  bash scripts/utils/clean_experiments.sh --force --yes
+  bash scripts/utils/clean_experiments.sh --force --older-than 7
 EOF
     exit 0
 }

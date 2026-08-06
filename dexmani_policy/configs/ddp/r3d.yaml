@@ -1,6 +1,6 @@
 # @package _global_
 # R3D — DDP multi-GPU training overlay
-# Usage: bash scripts/train_ddp.sh ddp/r3d
+# Usage: bash scripts/training/train_ddp.sh ddp/r3d
 
 defaults:
   - /r3d

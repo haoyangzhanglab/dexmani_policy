@@ -11,9 +11,9 @@
 # space and converts back to native at the I/O boundary.
 #
 # Usage:
-#   bash scripts/train.sh dp3_faas
-#   bash scripts/train.sh dp3_faas 'training.loop.num_epochs=400'
-#   bash scripts/train.sh dp3_faas 'action_key=action_ee'
+#   bash scripts/training/train.sh dp3_faas
+#   bash scripts/training/train.sh dp3_faas 'training.loop.num_epochs=400'
+#   bash scripts/training/train.sh dp3_faas 'action_key=action_ee'
 
 defaults:
   - /dp3

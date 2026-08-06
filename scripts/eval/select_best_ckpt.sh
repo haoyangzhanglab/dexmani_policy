@@ -5,13 +5,13 @@
 # elimination evaluation to identify the single best checkpoint.
 #
 # Usage:
-#   bash scripts/select_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]
+#   bash scripts/eval/select_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]
 #
 # Examples:
-#   bash scripts/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35
-#   bash scripts/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \
+#   bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35
+#   bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \
 #       --initial-episodes 25 --max-episodes 50
-#   bash scripts/select_best_ckpt.sh maniflow pick_apple_messy 2026-07-29_01-53_35 \
+#   bash scripts/eval/select_best_ckpt.sh maniflow pick_apple_messy 2026-07-29_01-53_35 \
 #       --link-best
 #
 # Extra args are forwarded directly to select_best_ckpt.py.
@@ -19,7 +19,7 @@
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # Activate conda environment
@@ -27,7 +27,7 @@ eval "$(conda shell.bash hook)"
 conda activate policy
 
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: bash scripts/select_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]"
+    echo "Usage: bash scripts/eval/select_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
     echo "Positional args:"
     echo "  policy_name   policy config name (e.g. dp3, maniflow)"
@@ -46,8 +46,8 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  --link-best            Symlink best ckpt as checkpoints/best.pt"
     echo ""
     echo "Examples:"
-    echo "  bash scripts/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35"
-    echo "  bash scripts/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\"
+    echo "  bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35"
+    echo "  bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\"
     echo "      --initial-episodes 25 --max-episodes 50"
     exit 1
 fi

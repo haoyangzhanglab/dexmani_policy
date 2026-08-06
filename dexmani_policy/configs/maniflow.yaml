@@ -1,5 +1,5 @@
 # ManiFlow — Flow Matching with rectified flow + consistency training
-# Encoder:  PointNeXT tokenizer (256d tokens, SAT-style patch self-attention)
+# Encoder:  PointNetDense (per-point features, 256 points, 128d)
 # Decoder:  DiTX (cross-attention conditioning) + Euler ODE integration
 # Modality: point_cloud + joint_state → action
 # Key:      use_ema_teacher_for_consistency=true, target_t=0 for rectified flow
@@ -68,10 +68,10 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: pointnext_tokenizer
-  pc_dim: 6
+  encoder_type: pointnet_dense
+  pc_dim: 3                       # xyz-only (matching official ManiFlow)
   state_dim: 19
-  num_points: 1024
+  num_points: 256                 # per-point token count per frame
 
   fps_random_config:
     use_random: true
@@ -79,19 +79,11 @@ agent:
     random_noise_scale: 0.0
     use_shuffle_output: true
 
-  # PointNeXT encoder
+  # PointNetDense encoder — per-point MLP, no pooling
   pc_encoder_config:
-    stem_channels: 48
-    token_channels: 256
-    num_patches: 96
-    patch_radii: [0.05, 0.10]
-    patch_neighbors: [20, 48]
-    # Patch self-attention (SAT-style inter-patch communication)
-    use_patch_self_attn: true
-    patch_attn_layers: 4
-    patch_attn_heads: 4
-    patch_attn_dropout: 0.1
-    prepend_global_in_attn: true
+    out_channels: 128
+    num_points: 256
+    hidden_dims: [64, 128, 256]
 
   # DiTX backbone
   n_layers: 12
@@ -99,8 +91,8 @@ agent:
   n_head: 8
   mlp_ratio: 4.0
   p_drop_attn: 0.1
-  qkv_bias: true
-  qk_norm: true
+  qkv_bias: false
+  qk_norm: false
   pre_norm_modality: false
 
   timestep_embed_dim: 128
@@ -123,7 +115,7 @@ optimizer:
   weight_decay: 1.0e-3            # DiT backbone: high wd is standard for transformers (vs 1e-6 for UNet)
   betas: [0.9, 0.95]              # lower β1 = shorter gradient EMA, common for flow matching
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6        # PointNeXT encoder: lighter regularization than DiT backbone
+  obs_weight_decay: 1.0e-6        # PC encoder: lighter regularization than DiT backbone
 
 # ── EMA ──
 ema:
@@ -146,7 +138,7 @@ training:
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   loop:
-    total_train_steps: 80000
+    total_train_steps: 100000
     log_interval_steps: 50
     gradient_accumulation_steps: 1
 

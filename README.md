@@ -67,11 +67,11 @@ Zarr 格式，包含 `joint_state` (N,19)、`action` (N,19)、`point_cloud` (N,1
 ### 训练
 
 ```bash
-bash scripts/train.sh dp3                                  # 单卡
-bash scripts/train.sh dp3 'training.loop.num_epochs=100'   # Hydra override
-bash scripts/train_ddp.sh maniflow_ddp                     # 多卡 DDP
-bash scripts/train_ddp.sh maniflow_ddp 'training.num_gpus=2'
-bash scripts/train_multi_task.sh multitask_dit             # 多任务
+bash scripts/training/train.sh dp3                                  # 单卡
+bash scripts/training/train.sh dp3 'training.loop.num_epochs=100'   # Hydra override
+bash scripts/training/train_ddp.sh ddp/maniflow                     # 多卡 DDP
+bash scripts/training/train_ddp.sh ddp/maniflow 'training.num_gpus=2'
+bash scripts/training/train.sh multitask_dit                        # 多任务
 ```
 
 ### 冒烟测试
@@ -84,17 +84,17 @@ python dexmani_policy/smoke_test.py dp3 maniflow moe_dp3   # 批量
 ### 仿真评测
 
 ```bash
-bash scripts/eval_sim.sh dp3 pick_apple_messy <exp_dir>
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir>
 # 指定 checkpoint 和 denoise 步数
-bash scripts/eval_sim.sh dp3 pick_apple_messy <exp_dir> \
-    'eval.offline.ckpt_tag_or_path=best' \
-    'eval.offline.denoise_timesteps_list=[5,10,20]'
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir> \
+    --ckpt-tag best \
+    --denoise-steps 10
 ```
 
 ### 日志
 
 ```bash
-bash scripts/wandb_sync.sh <exp_dir>   # 同步 Wandb 离线日志
+bash scripts/utils/wandb_sync.sh <exp_dir>   # 同步 Wandb 离线日志
 ```
 
 ---

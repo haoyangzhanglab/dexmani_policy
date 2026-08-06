@@ -211,7 +211,7 @@ def resolve_best_checkpoint(exp_dir: Path, checkpoint_store: CheckpointStore) ->
     raise FileNotFoundError(
         f"Cannot resolve 'best' checkpoint in {exp_dir}.\n"
         f"  Tried: best_ckpt.json, best.pt symlink, latest.pt symlink.\n"
-        f"  Run 'bash scripts/select_best_ckpt.sh ...' first to generate best_ckpt.json."
+        f"  Run 'bash scripts/eval/select_best_ckpt.sh ...' first to generate best_ckpt.json."
     )
 
 

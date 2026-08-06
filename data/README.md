@@ -15,7 +15,7 @@ data/
 
 - **来源**: [eddie-cui/r3d-weights](https://huggingface.co/eddie-cui/r3d-weights) @ HuggingFace Hub
 - **用途**: R3D Agent 的点云编码器初始化（`r3d.yaml` 中 `use_pretrained_weights: true`）
-- **下载**: 运行 `bash scripts/download_pretrained.sh`
+- **下载**: 运行 `bash scripts/utils/download_pretrained.sh`
 - **配置路径**: `pretrained_weights_path: data/pretrained/uni3d`
 
 ### 其他预训练模型

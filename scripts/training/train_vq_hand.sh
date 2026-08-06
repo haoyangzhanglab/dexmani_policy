@@ -2,20 +2,20 @@
 # VQ-VAE hand-pose pretraining launcher.
 #
 # Usage:
-#   bash scripts/train_vq_hand.sh [task_name] [cli_overrides...]
+#   bash scripts/training/train_vq_hand.sh [task_name] [cli_overrides...]
 #
 # Examples:
-#   bash scripts/train_vq_hand.sh                           # default: pick_apple_messy
-#   bash scripts/train_vq_hand.sh pour                      # task=pour
-#   bash scripts/train_vq_hand.sh pick_apple_messy --num_epochs 2000 --lr 1e-4
-#   TASK_NAME=pour bash scripts/train_vq_hand.sh             # env-var override
-#   ZARR_PATH=/custom/data.zarr bash scripts/train_vq_hand.sh
+#   bash scripts/training/train_vq_hand.sh                           # default: pick_apple_messy
+#   bash scripts/training/train_vq_hand.sh pour                      # task=pour
+#   bash scripts/training/train_vq_hand.sh pick_apple_messy --num_epochs 2000 --lr 1e-4
+#   TASK_NAME=pour bash scripts/training/train_vq_hand.sh             # env-var override
+#   ZARR_PATH=/custom/data.zarr bash scripts/training/train_vq_hand.sh
 #
 # See the vq_vae section in configs/dqrise.yaml for all configurable fields.
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # ── Task name (first positional arg, before any --flags) ─────────────────────

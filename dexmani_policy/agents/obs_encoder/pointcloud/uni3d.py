@@ -297,7 +297,7 @@ class Uni3DPointcloudEncoder(nn.Module):
             except Exception as e:
                 logger.warning(
                     "[Uni3DPointcloudEncoder] Auto-download failed (%s). "
-                    "Run 'bash scripts/download_pretrained.sh' to download manually.",
+                    "Run 'bash scripts/utils/download_pretrained.sh' to download manually.",
                     e,
                 )
                 return

@@ -39,7 +39,7 @@ Usage
     python dexmani_policy/select_best_ckpt.py \\
         --policy-name dp3 --task-name pour --exp-name 2026-07-29_01-53_35
 
-    bash scripts/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\
+    bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\
         --initial-episodes 25 --max-episodes 50
 """
 

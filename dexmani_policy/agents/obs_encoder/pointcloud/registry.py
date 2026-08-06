@@ -5,6 +5,7 @@ import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud import (
     MultiStagePointNet,
     PointNet,
+    PointNetDense,
     PointNextEncoder,
     PointNextPatchTokenizer,
 )
@@ -39,6 +40,11 @@ PATCH_TOKENIZER_CONFIGS: Dict[str, Dict] = {
         "patch_attn_heads": 4,
         "patch_attn_dropout": 0.0,
         "prepend_global_in_attn": True,
+    },
+    "pointnet_dense": {
+        "out_channels": 128,
+        "num_points": 256,
+        "hidden_dims": (64, 128, 256),
     },
 }
 
@@ -117,4 +123,12 @@ def build_pc_patch_tokenizer(
             patch_attn_heads=cfg["patch_attn_heads"],
             patch_attn_dropout=cfg["patch_attn_dropout"],
             prepend_global_in_attn=cfg["prepend_global_in_attn"],
+        )
+
+    if tokenizer_type == "pointnet_dense":
+        return PointNetDense(
+            input_channels=pc_dim,
+            out_channels=cfg["out_channels"],
+            num_points=cfg["num_points"],
+            hidden_dims=cfg["hidden_dims"],
         )

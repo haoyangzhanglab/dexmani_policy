@@ -32,11 +32,11 @@ ruff check dexmani_policy/    # 检查（CI 通过标准）
 
 ```bash
 # === 单卡 ===
-bash scripts/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat
-bash scripts/train.sh dp3 'training.loop.total_train_steps=500'
+bash scripts/training/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat
+bash scripts/training/train.sh dp3 'training.loop.total_train_steps=500'
 
 # === 多卡 DDP ===
-bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas
+bash scripts/training/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas
 ```
 
 > 实际存在的单卡配置 (9): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d, sat`
@@ -47,15 +47,15 @@ bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multita
 
 ```bash
 # 1. 先选出最佳 checkpoint（自适应淘汰赛）
-bash scripts/select_best_ckpt.sh dp3 pour <exp_dir>
+bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_dir>
 
 # 2. 在全部 eval seed 上评测最终成功率
-bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir>
-bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir> --ckpt-tag 40pct --episodes 50
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir>
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir> --ckpt-tag 40pct --episodes 50
 
 # 视频录制（默认: 录制全部 episode 到带时间戳的子目录）
-bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir>                        # 录制全部（默认）
-bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir> --no-videos            # 禁用录制
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir>                        # 录制全部（默认）
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir> --no-videos            # 禁用录制
 # <exp_dir> = experiments/<policy>/<task>/<timestamp>
 ```
 
@@ -63,25 +63,25 @@ bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir> --no-videos            # 禁�
 
 ```bash
 # 串联 select → eval → demo（默认参数，一步到位）
-bash scripts/eval_pipeline.sh dp3 pour <exp_dir>
-bash scripts/eval_pipeline.sh dp3 pour <exp_dir> --no-videos              # 跳过 eval 视频
+bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir>
+bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir> --no-videos              # 跳过 eval 视频
 ```
 
 ## Demo 视频录制（高分 viewer 捕捉）
 
 ```bash
 # 从最佳 checkpoint 录制 5 个 episode 的高清 demo 视频 (1920×1080)
-bash scripts/record_demo.sh dp3 pour <exp_dir>
+bash scripts/eval/record_demo.sh dp3 pour <exp_dir>
 
 # 指定 checkpoint、更多 episode、自定义分辨率
-bash scripts/record_demo.sh sat pour <exp_dir> --ckpt-tag 100pct --episodes 10
-bash scripts/record_demo.sh maniflow pour <exp_dir> --resolution 3840 2160
+bash scripts/eval/record_demo.sh sat pour <exp_dir> --ckpt-tag 100pct --episodes 10
+bash scripts/eval/record_demo.sh maniflow pour <exp_dir> --resolution 3840 2160
 
 # 录制特定 seed（常用于复现 eval 中的成功/失败案例）
-bash scripts/record_demo.sh dp3 pour <exp_dir> --seeds 5 12 33 78
+bash scripts/eval/record_demo.sh dp3 pour <exp_dir> --seeds 5 12 33 78
 
 # 使用原始权重（非 EMA）、自定义输出目录
-bash scripts/record_demo.sh dp3 pour <exp_dir> --no-ema --output-dir ~/Videos/demos
+bash scripts/eval/record_demo.sh dp3 pour <exp_dir> --no-ema --output-dir ~/Videos/demos
 ```
 
 > 需要显示器（X11/Wayland）。viewer 窗口会在录制期间打开。视频默认保存到 `experiments/<policy>/<task>/<exp>/demo_videos/<timestamp>/`。
@@ -98,7 +98,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow moe_dp r3d dqrise sat
 ## VQ-VAE 预训练（DQ-RISE Stage 1）
 
 ```bash
-bash scripts/train_vq_hand.sh pour '--num_epochs 1500'
+bash scripts/training/train_vq_hand.sh pour '--num_epochs 1500'
 ```
 
 ---
@@ -514,9 +514,9 @@ FAAS (Function-Actuator-Aligned Space) 来自 UniDex (CVPR 2026)，将 XHand 12 
 ### 使用
 
 ```bash
-bash scripts/train.sh dp3_faas                                    # joint mode (39D)
-bash scripts/train.sh dp3_faas 'action_key=action_ee'             # EE mode (41D)
-bash scripts/train_ddp.sh ddp/dp3_faas                            # DDP 多卡
+bash scripts/training/train.sh dp3_faas                                    # joint mode (39D)
+bash scripts/training/train.sh dp3_faas 'action_key=action_ee'             # EE mode (41D)
+bash scripts/training/train_ddp.sh ddp/dp3_faas                            # DDP 多卡
 ```
 
 ### 维度
