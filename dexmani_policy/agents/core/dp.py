@@ -4,8 +4,9 @@ from torchvision.transforms import v2
 
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+from dexmani_policy.agents.obs_encoder.rgb import R3M, ResNet
 from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
-from dexmani_policy.agents.obs_encoder.rgb import ResNet, R3M
+
 
 class DPObsEncoder(nn.Module):
     def __init__(
@@ -18,19 +19,19 @@ class DPObsEncoder(nn.Module):
     ):
         super().__init__()
         cfg = dict(rgb_backbone_config or {})
-        self.crop_ratio = cfg.pop('crop_ratio', None)
+        self.crop_ratio = cfg.pop("crop_ratio", None)
         self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=cfg)
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
-        rgb = obs['rgb']  # (B*T, 3, H, W) float32 [0,1]
+        rgb = obs["rgb"]  # (B*T, 3, H, W) float32 [0,1]
         if self.training and self.crop_ratio is not None:
             h, w = rgb.shape[-2:]
             crop_size = int(min(h, w) * self.crop_ratio)
             rgb = v2.RandomCrop(size=crop_size)(rgb)
-        rgb = self.image_processor.process_images(rgb)['image']
+        rgb = self.image_processor.process_images(rgb)["image"]
 
         # channels_last: for CNN backbones (ResNet/R3M), convert to NHWC layout
         # to leverage cuDNN implicit NHWC convolution kernels, yielding ~15-22%
@@ -39,12 +40,16 @@ class DPObsEncoder(nn.Module):
         if isinstance(self.backbone, (ResNet, R3M)):
             rgb = rgb.to(memory_format=torch.channels_last)
 
-        feat = torch.cat([
-            self.backbone(rgb)['global_token'],
-            self.state_mlp(obs['joint_state']),
-        ], dim=-1)
+        feat = torch.cat(
+            [
+                self.backbone(rgb)["global_token"],
+                self.state_mlp(obs["joint_state"]),
+            ],
+            dim=-1,
+        )
         B = feat.shape[0] // self.n_obs_steps
         return feat.reshape(B, -1), {}
+
 
 class DPAgent(UNetDiffusionAgent):
     def __init__(
@@ -60,60 +65,72 @@ class DPAgent(UNetDiffusionAgent):
         **kwargs,
     ):
         obs_encoder = DPObsEncoder(
-            rgb_backbone_name, state_dim, n_obs_steps,
-            state_out_dim, rgb_backbone_config=rgb_backbone_config,
+            rgb_backbone_name,
+            state_dim,
+            n_obs_steps,
+            state_out_dim,
+            rgb_backbone_config=rgb_backbone_config,
         )
-        super().__init__(
-            obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
-        )
+        super().__init__(obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs)
+
 
 def example():
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     B, T, H, A = 2, 2, 16, 19
 
     agent = DPAgent(
-        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
-        rgb_backbone_name='resnet', state_dim=A,
-        down_dims=[64, 128], diffusion_step_embed_dim=64,
-        num_training_steps=10, num_inference_steps=3,
+        horizon=H,
+        n_obs_steps=T,
+        n_action_steps=8,
+        action_dim=A,
+        rgb_backbone_name="resnet",
+        state_dim=A,
+        down_dims=[64, 128],
+        diffusion_step_embed_dim=64,
+        num_training_steps=10,
+        num_inference_steps=3,
     ).to(device)
 
     obs = {
-        'rgb': torch.rand(B * T, 3, 224, 224, device=device),
-        'joint_state': torch.randn(B * T, A, device=device),
+        "rgb": torch.rand(B * T, 3, 224, 224, device=device),
+        "joint_state": torch.randn(B * T, A, device=device),
     }
     action = torch.randn(B, H, A, device=device)
 
-    print('=== DPAgent smoke test ===')
-    print(f'obs rgb:         {obs["rgb"].shape}')
-    print(f'obs joint_state: {obs["joint_state"].shape}')
-    print(f'action:          {action.shape}')
+    print("=== DPAgent smoke test ===")
+    print(f"obs rgb:         {obs['rgb'].shape}")
+    print(f"obs joint_state: {obs['joint_state'].shape}")
+    print(f"action:          {action.shape}")
 
     cond, _ = agent.obs_encoder(obs)
-    print(f'cond:            {cond.shape}')
+    print(f"cond:            {cond.shape}")
 
     from dexmani_policy.common.normalizer import LinearNormalizer
+
     normalizer = LinearNormalizer()
-    normalizer.fit({'action': action, 'joint_state': obs['joint_state'].reshape(B, T, A)}, mode='limits')
+    normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")
     agent.load_normalizer_from_dataset(normalizer)
 
     batch = {
-        'obs': {
-            'rgb': obs['rgb'].reshape(B, T, 3, 224, 224),
-            'joint_state': obs['joint_state'].reshape(B, T, A),
+        "obs": {
+            "rgb": obs["rgb"].reshape(B, T, 3, 224, 224),
+            "joint_state": obs["joint_state"].reshape(B, T, A),
         },
-        'action': action,
+        "action": action,
     }
     loss, loss_dict = agent.compute_loss(batch)
-    print(f'loss:            {loss.item():.4f}  keys={list(loss_dict.keys())}')
+    print(f"loss:            {loss.item():.4f}  keys={list(loss_dict.keys())}")
 
-    result = agent.predict_action({
-        'rgb': obs['rgb'].reshape(B, T, 3, 224, 224),
-        'joint_state': obs['joint_state'].reshape(B, T, A),
-    })
-    print(f'pred_action:     {result["pred_action"].shape}')
-    print(f'control_action:  {result["control_action"].shape}')
-    print('=== PASSED ===')
+    result = agent.predict_action(
+        {
+            "rgb": obs["rgb"].reshape(B, T, 3, 224, 224),
+            "joint_state": obs["joint_state"].reshape(B, T, A),
+        }
+    )
+    print(f"pred_action:     {result['pred_action'].shape}")
+    print(f"control_action:  {result['control_action'].shape}")
+    print("=== PASSED ===")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     example()

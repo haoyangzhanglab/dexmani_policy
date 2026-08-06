@@ -1,11 +1,10 @@
-import torch
-import torch.nn as nn
+from __future__ import annotations
+
 from typing import Dict
 
-from dexmani_policy.agents.position_encodings import (
-    RelativePositionalEncoding3D,
-    SinusoidalPosEmb3D,
-)
+import torch
+import torch.nn as nn
+
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     PointMLP,
     group,
@@ -14,6 +13,11 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     sample_and_group,
     sample_and_group_all,
 )
+from dexmani_policy.agents.position_encodings import (
+    RelativePositionalEncoding3D,
+    SinusoidalPosEmb3D,
+)
+
 
 class SetAbstraction(nn.Module):
     def __init__(
@@ -38,7 +42,9 @@ class SetAbstraction(nn.Module):
         self.global_aggr = global_aggr
         self.use_residual = use_residual and (not is_head) and (not global_aggr)
         self.fps_random_config = fps_random_config or {}
-        self.relative_position_encoding = None if is_head else RelativePositionalEncoding3D(position_encoding_channels)
+        self.relative_position_encoding = (
+            None if is_head else RelativePositionalEncoding3D(position_encoding_channels)
+        )
 
         if is_head:
             mlp_channels = [input_channels] + [output_channels] * layers
@@ -103,6 +109,7 @@ class SetAbstraction(nn.Module):
 
         return center_xyz, center_feature_out
 
+
 class LocalAggregation(nn.Module):
     def __init__(
         self,
@@ -133,6 +140,7 @@ class LocalAggregation(nn.Module):
         )
         return self.point_mlp(group_input).max(dim=2).values
 
+
 class InvertedResidualPointBlock(nn.Module):
     def __init__(self, channels: int, radius: float, num_neighbors: int, expansion: int = 2):
         super().__init__()
@@ -148,6 +156,7 @@ class InvertedResidualPointBlock(nn.Module):
         point_feature = self.local_aggregation(xyz, point_feature)
         point_feature = self.channel_mlp(point_feature)
         return xyz, self.activation(point_feature + residual_feature)
+
 
 class PointNextEncoder(nn.Module):
     def __init__(
@@ -238,6 +247,7 @@ class PointNextEncoder(nn.Module):
     def out_shape(self) -> tuple[int, int]:
         return (1, self.output_channels)
 
+
 def example() -> None:
     batch_size, num_points = 2, 1024
 
@@ -266,6 +276,7 @@ def example() -> None:
     print("global_token:", tuple(out["global_token"].shape))
     print("out_dim:", pointnext.out_dim)
     print("out_shape:", pointnext.out_shape)
+
 
 if __name__ == "__main__":
     example()

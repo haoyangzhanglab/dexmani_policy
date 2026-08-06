@@ -3,25 +3,36 @@ import torch
 from dexmani_policy.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from dexmani_policy.datasets.base_dataset import BaseDataset
 
-class RGBPCDataset(BaseDataset):
 
-    DEFAULT_MODALITIES = ['joint_state', 'rgb', 'depth', 'point_cloud',
-                          'camera_intrinsic', 'camera_extrinsic']
+class RGBPCDataset(BaseDataset):
+    DEFAULT_MODALITIES = [
+        "joint_state",
+        "rgb",
+        "depth",
+        "point_cloud",
+        "camera_intrinsic",
+        "camera_extrinsic",
+    ]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def get_normalizer(self, mode='limits'):
+    def get_normalizer(self, mode="limits"):
         normalizer = LinearNormalizer()
         joint_state, action = self._get_faas_normalizer_data()
-        normalizer.fit(data={
-            'joint_state': joint_state,
-            'action': action,
-            'point_cloud': self.replay_buffer['point_cloud'],
-        }, last_n_dims=1, mode=mode)
-        normalizer['camera_intrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
-        normalizer['camera_extrinsic'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
+        normalizer.fit(
+            data={
+                "joint_state": joint_state,
+                "action": action,
+                "point_cloud": self.replay_buffer["point_cloud"],
+            },
+            last_n_dims=1,
+            mode=mode,
+        )
+        normalizer["camera_intrinsic"] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
+        normalizer["camera_extrinsic"] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
         return normalizer
+
 
 def example(zarr_path):
     dataset = RGBPCDataset(
@@ -34,15 +45,16 @@ def example(zarr_path):
     )
     normalizer = dataset.get_normalizer()
     sample = dataset[0]
-    obs_n = normalizer.normalize(sample['obs'])
-    action_n = normalizer['action'].normalize(sample['action'])
-    print('rgb             :', sample['obs']['rgb'].shape, sample['obs']['rgb'].dtype)
-    print('depth           :', sample['obs']['depth'].shape, sample['obs']['depth'].dtype)
-    print('point_cloud     :', sample['obs']['point_cloud'].shape)
-    print('camera_intrinsic:', obs_n['camera_intrinsic'].shape)
-    print('camera_extrinsic:', obs_n['camera_extrinsic'].shape)
-    print('action          :', action_n.shape)
-    print(f'train size: {len(dataset)}  val size: {len(dataset.get_validation_dataset())}')
+    obs_n = normalizer.normalize(sample["obs"])
+    action_n = normalizer["action"].normalize(sample["action"])
+    print("rgb             :", sample["obs"]["rgb"].shape, sample["obs"]["rgb"].dtype)
+    print("depth           :", sample["obs"]["depth"].shape, sample["obs"]["depth"].dtype)
+    print("point_cloud     :", sample["obs"]["point_cloud"].shape)
+    print("camera_intrinsic:", obs_n["camera_intrinsic"].shape)
+    print("camera_extrinsic:", obs_n["camera_extrinsic"].shape)
+    print("action          :", action_n.shape)
+    print(f"train size: {len(dataset)}  val size: {len(dataset.get_validation_dataset())}")
 
-if __name__ == '__main__':
-    example('robot_data/sim/pick_apple_messy.zarr')
+
+if __name__ == "__main__":
+    example("robot_data/sim/pick_apple_messy.zarr")

@@ -2,13 +2,30 @@
 
 灵巧手操作模仿学习框架。Hydra 配置驱动，Zarr replay buffer，Diffusion/FlowMatch 动作解码，`dexmani_sim` 仿真评测。
 
-> **速查**: [训练](#训练命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [配置速查](#配置速查) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
+> **速查**: [训练](#训练命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [配置速查](#配置速查) · [代码风格](#代码风格) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
 
 ## 环境
 
 ```bash
 conda activate policy
 export DATA_DIR=/path/to/data          # 需设，否则 dataset 路径报错
+```
+
+## 代码风格
+
+参照 LeRobot 标准，通过 `ruff` 统一管理。配置在 `pyproject.toml` → `[tool.ruff]`。
+
+| 规则 | 值 |
+|------|-----|
+| 行宽 | 110 |
+| 引号 | 双引号 (`"`) |
+| 缩进 | 空格 |
+| 导入排序 | `ruff isort`: stdlib → third-party → `dexmani_policy` → local |
+| Python 目标 | 3.10 |
+
+```bash
+ruff format dexmani_policy/   # 格式化
+ruff check dexmani_policy/    # 检查（CI 通过标准）
 ```
 
 ## 训练命令
@@ -89,7 +106,7 @@ Hydra config (configs/*.yaml)
 | `train_ddp.py` | 多卡 DDP | `mp.spawn(ddp_worker, nprocs=N)`，compile 在 DDP 包装前 |
 | `eval_sim.py` | 独立评测 | Hydra-free CLI，从实验目录加载 `config.yaml`；`hasattr(cfg, 'eval')` 兼容历史 config |
 | `smoke_test.py` | 构建验证 | Hydra `compose` API，6 阶段 + FAAS roundtrip + MoE 子检查 |
-| `scripts/train_vq_hand.py` | VQ-VAE 预训练 | DQ-RISE Stage 1 |
+| `tools/train_vq_hand.py` | VQ-VAE 预训练 | DQ-RISE Stage 1 |
 
 ---
 
@@ -457,8 +474,8 @@ joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
 
 | 阶段 | 脚本 | 内容 |
 |------|------|------|
-| 1 | `scripts/train_vq_hand.py` | VQ-VAE 预训练：EncoderMLP→ResidualVQ(2组×4码字=16种手势)→DecoderMLP |
-| 2 | `scripts/extract_codebook.py` | 码本提取+PCA排序（使连续VQ索引平滑插值） |
+| 1 | `tools/train_vq_hand.py` | VQ-VAE 预训练：EncoderMLP→ResidualVQ(2组×4码字=16种手势)→DecoderMLP |
+| 2 | `tools/extract_codebook.py` | 码本提取+PCA排序（使连续VQ索引平滑插值） |
 | 3 | `train.py dqrise` | 联合扩散训练：UNet输入从21D压缩到tcp_dim+1(10D)，epsilon预测 |
 
 ### CodebookManager (`agents/vq_hand/codebook_manager.py`)
@@ -499,7 +516,7 @@ dexmani_policy/
   training/                 # Trainer, build_utils, SimEvaluator, workspace, ema, logging, lr_scheduler, eval_utils
   env_runner/               # BaseRunner, SimRunner, MultiTaskSimRunner
   common/                   # LinearNormalizer, faas_mapper, checkpoint_io, pytorch_util, config
-  scripts/                  # extract_codebook.py, train_vq_hand.py, measure_vq_usage.py
+  tools/                    # extract_codebook.py, train_vq_hand.py, measure_vq_usage.py
 ```
 
 ---

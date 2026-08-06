@@ -1,11 +1,10 @@
-import torch
-import torch.nn as nn
+from __future__ import annotations
+
 from typing import Dict, Tuple
 
-from dexmani_policy.agents.position_encodings import (
-    RelativePositionalEncoding3D,
-    SinusoidalPosEmb3D,
-)
+import torch
+import torch.nn as nn
+
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     PointMLP,
     farthest_point_sample,
@@ -13,6 +12,11 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     normalize_relative_xyz,
     query_ball_point,
 )
+from dexmani_policy.agents.position_encodings import (
+    RelativePositionalEncoding3D,
+    SinusoidalPosEmb3D,
+)
+
 
 class LocalPatchEncoder(nn.Module):
     def __init__(
@@ -32,7 +36,9 @@ class LocalPatchEncoder(nn.Module):
             PointMLP(token_channels, token_channels, use_activation=False),
         )
 
-    def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor, patch_center: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, xyz: torch.Tensor, point_feature: torch.Tensor, patch_center: torch.Tensor
+    ) -> torch.Tensor:
         neighbor_idx = query_ball_point(self.radius, self.num_neighbors, xyz, patch_center)
         neighbor_xyz = index_points(xyz, neighbor_idx)
         neighbor_feature = index_points(point_feature, neighbor_idx)
@@ -41,6 +47,7 @@ class LocalPatchEncoder(nn.Module):
         relative_pos_feature = self.relative_position_encoding(normalized_relative_xyz)
         group_input = torch.cat((neighbor_feature, normalized_relative_xyz, relative_pos_feature), dim=-1)
         return self.point_mlp(group_input).max(dim=2).values
+
 
 class MultiScalePatchTokenizer(nn.Module):
     def __init__(
@@ -96,9 +103,7 @@ class MultiScalePatchTokenizer(nn.Module):
 
             if prepend_global_in_attn:
                 # Learnable global token (like ViT class token / SAT's global_pn).
-                self.global_token = nn.Parameter(
-                    torch.randn(1, 1, token_channels) * 0.02
-                )
+                self.global_token = nn.Parameter(torch.randn(1, 1, token_channels) * 0.02)
 
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=token_channels,
@@ -108,13 +113,12 @@ class MultiScalePatchTokenizer(nn.Module):
                 batch_first=True,
                 activation="gelu",
             )
-            self.patch_transformer = nn.TransformerEncoder(
-                encoder_layer, num_layers=patch_attn_layers
-            )
+            self.patch_transformer = nn.TransformerEncoder(encoder_layer, num_layers=patch_attn_layers)
 
     def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
         patch_center, patch_center_idx = farthest_point_sample(
-            xyz, self.num_patches, **self.fps_random_config)
+            xyz, self.num_patches, **self.fps_random_config
+        )
         patch_center_feature = index_points(point_feature, patch_center_idx)
 
         multi_scale_patch_feature_list = [
@@ -122,27 +126,30 @@ class MultiScalePatchTokenizer(nn.Module):
         ]
         patch_center_pos_feature = self.patch_center_position_encoding(patch_center)
         patch_token = self.token_projection(
-            torch.cat((patch_center_feature, *multi_scale_patch_feature_list, patch_center_pos_feature), dim=-1)
+            torch.cat(
+                (patch_center_feature, *multi_scale_patch_feature_list, patch_center_pos_feature), dim=-1
+            )
         )
 
         # ── optional self-attention over patches ──
         if self.use_patch_self_attn:
             # Add absolute position embedding computed from patch centers.
-            pos_emb = self.center_pos_embed(patch_center)          # (B, G, token_channels)
+            pos_emb = self.center_pos_embed(patch_center)  # (B, G, token_channels)
             x = patch_token + pos_emb
 
             if self.prepend_global_in_attn:
                 global_tok = self.global_token.expand(x.size(0), -1, -1)  # (B, 1, token_channels)
-                x = torch.cat([global_tok, x], dim=1)                     # (B, 1+G, token_channels)
+                x = torch.cat([global_tok, x], dim=1)  # (B, 1+G, token_channels)
 
             x = self.patch_transformer(x)
 
             if self.prepend_global_in_attn:
-                attn_global = x[:, :1, :]    # (B, 1, token_channels)
-                patch_token = x[:, 1:, :]    # (B, G, token_channels)
+                attn_global = x[:, :1, :]  # (B, 1, token_channels)
+                patch_token = x[:, 1:, :]  # (B, G, token_channels)
                 return patch_token, patch_center, attn_global
 
         return patch_token, patch_center
+
 
 class PointNextPatchTokenizer(nn.Module):
     supports_global_token = True
@@ -267,6 +274,7 @@ class PointNextPatchTokenizer(nn.Module):
     def out_shape(self) -> tuple[int, int]:
         return (self.num_patches, self.token_channels)
 
+
 def example() -> None:
     batch_size, num_points = 2, 1024
 
@@ -341,6 +349,7 @@ def example() -> None:
     assert patch_token_a.size(1) == 96, "patch tokens should be 96 patches"
     print()
     print("=== ALL TESTS PASSED ===")
+
 
 if __name__ == "__main__":
     example()

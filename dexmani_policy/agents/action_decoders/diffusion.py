@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+
 
 class Diffusion(nn.Module):
     """Denoising diffusion probabilistic model for action prediction.
@@ -22,6 +25,7 @@ class Diffusion(nn.Module):
     schedule, beta_start=0.0001, beta_end=0.02) that is intentionally
     non-configurable — see CLAUDE.md "已知硬编码与设计约定".
     """
+
     def __init__(
         self,
         model: nn.Module,
@@ -49,14 +53,18 @@ class Diffusion(nn.Module):
         self._cached_alphas_device = None
 
     def compute_loss(
-        self, cond: torch.Tensor, actions: torch.Tensor,
+        self,
+        cond: torch.Tensor,
+        actions: torch.Tensor,
         dim_groups: dict[str, tuple[int, int]] | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B = actions.shape[0]
 
         noise = torch.randn_like(actions, device=actions.device)
-        timestep = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device).long()
+        timestep = torch.randint(
+            0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device
+        ).long()
 
         pred = self.model(
             x=self.noise_scheduler.add_noise(actions, noise, timestep),
@@ -65,18 +73,19 @@ class Diffusion(nn.Module):
         )
 
         pred_type = self.noise_scheduler.config.prediction_type
-        if pred_type == 'epsilon':
+        if pred_type == "epsilon":
             target = noise
-        elif pred_type == 'sample':
+        elif pred_type == "sample":
             target = actions
-        elif pred_type == 'v_prediction':
+        elif pred_type == "v_prediction":
             # v_t = sqrt(alpha_cumprod) * noise - sqrt(1-alpha_cumprod) * x_0
             # See: https://arxiv.org/abs/2202.00512 (Progressive Distillation)
             # Cache alphas in float32 to avoid bfloat16 precision loss (~0.1%);
             # the final target is cast to actions.dtype for AMP compatibility.
             if self._cached_alphas_device != actions.device:
                 self._cached_alphas = self.noise_scheduler.alphas_cumprod.to(
-                    device=actions.device, dtype=torch.float32)
+                    device=actions.device, dtype=torch.float32
+                )
                 self._cached_alphas_device = actions.device
             alpha_t = self._cached_alphas[timestep].sqrt()
             sigma_t = (1 - self._cached_alphas[timestep]).sqrt()
@@ -98,12 +107,12 @@ class Diffusion(nn.Module):
                 g_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
                 # Log the raw per-element MSE for monitoring — comparable
                 # across experiments regardless of aux_loss_weight.
-                loss_dict[f'loss_{name}'] = g_loss.detach()
-                if name != 'joint':
+                loss_dict[f"loss_{name}"] = g_loss.detach()
+                if name != "joint":
                     g_loss = g_loss * self.aux_loss_weight
                 group_losses.append(g_loss)
             loss = sum(group_losses)
-            loss_dict['loss_action'] = loss.detach()
+            loss_dict["loss_action"] = loss.detach()
         else:
             loss = F.mse_loss(pred, target)
             loss_dict = {"loss_action": loss.detach()}
@@ -128,4 +137,3 @@ class Diffusion(nn.Module):
             sample = self.noise_scheduler.step(output, t, sample).prev_sample
 
         return sample
-

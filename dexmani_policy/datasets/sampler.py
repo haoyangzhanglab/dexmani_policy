@@ -1,29 +1,32 @@
+from typing import Optional
+
 import numba
 import numpy as np
-from typing import Optional
+
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
+
 
 @numba.jit(nopython=True)
 def create_indices(
-    episode_ends:np.ndarray,
-    sequence_length:int,
+    episode_ends: np.ndarray,
+    sequence_length: int,
     episode_mask: np.ndarray,
-    pad_before: int=0,
-    pad_after: int=0,
+    pad_before: int = 0,
+    pad_after: int = 0,
 ) -> np.ndarray:
 
     assert episode_mask.shape == episode_ends.shape
-    pad_before = min(max(pad_before, 0), sequence_length-1)
-    pad_after = min(max(pad_after, 0), sequence_length-1)
+    pad_before = min(max(pad_before, 0), sequence_length - 1)
+    pad_after = min(max(pad_after, 0), sequence_length - 1)
 
-    indices = list()
+    indices = []
     for i in range(len(episode_ends)):
         if not episode_mask[i]:
             continue
 
         start_idx = 0
         if i > 0:
-            start_idx = episode_ends[i-1]
+            start_idx = episode_ends[i - 1]
         end_idx = episode_ends[i]
         episode_length = end_idx - start_idx
 
@@ -38,11 +41,11 @@ def create_indices(
                 f"(sequence_length={sequence_length} - pad_before={pad_before} - pad_after={pad_after})"
             )
 
-        for idx in range(min_start, max_start+1):
+        for idx in range(min_start, max_start + 1):
             buffer_start_idx = max(idx, 0) + start_idx
-            buffer_end_idx = min(idx+sequence_length, episode_length) + start_idx
-            start_offset = buffer_start_idx - (idx+start_idx)
-            end_offset = (idx+sequence_length+start_idx) - buffer_end_idx
+            buffer_end_idx = min(idx + sequence_length, episode_length) + start_idx
+            start_offset = buffer_start_idx - (idx + start_idx)
+            end_offset = (idx + sequence_length + start_idx) - buffer_end_idx
             sample_start_idx = 0 + start_offset
             sample_end_idx = sequence_length - end_offset
             assert start_offset >= 0
@@ -53,16 +56,18 @@ def create_indices(
     indices = np.array(indices)
     return indices
 
+
 def get_val_mask(n_episodes, val_ratio, seed=0):
     val_mask = np.zeros(n_episodes, dtype=bool)
     if val_ratio <= 0:
         return val_mask
 
-    n_val = min(max(1, round(n_episodes * val_ratio)), n_episodes-1)
+    n_val = min(max(1, round(n_episodes * val_ratio)), n_episodes - 1)
     rng = np.random.default_rng(seed=seed)
     val_idxs = rng.choice(n_episodes, size=n_val, replace=False)
     val_mask[val_idxs] = True
     return val_mask
+
 
 def downsample_mask(mask, max_n, seed=0):
     train_mask = mask
@@ -79,18 +84,19 @@ def downsample_mask(mask, max_n, seed=0):
 
     return train_mask
 
+
 class SequenceSampler:
     def __init__(
         self,
         replay_buffer: ReplayBuffer,
-        sequence_length:int,
-        pad_before:int=0,
-        pad_after:int=0,
-        episode_mask: Optional[np.ndarray]=None,
+        sequence_length: int,
+        pad_before: int = 0,
+        pad_after: int = 0,
+        episode_mask: Optional[np.ndarray] = None,
     ):
         super().__init__()
 
-        assert(sequence_length >= 1)
+        assert sequence_length >= 1
 
         episode_ends = replay_buffer.episode_ends[:]
         if episode_mask is None:
@@ -127,12 +133,13 @@ class SequenceSampler:
                 f"min_required_length={min_required_length}, n_episodes={len(episode_ends)}"
             )
 
-        indices = create_indices(episode_ends,
+        indices = create_indices(
+            episode_ends,
             sequence_length=sequence_length,
             pad_before=pad_before,
             pad_after=pad_after,
-            episode_mask=episode_mask
-            )
+            episode_mask=episode_mask,
+        )
 
         self.keys = list(replay_buffer.keys())
         self.indices = indices
@@ -143,7 +150,7 @@ class SequenceSampler:
         return len(self.indices)
 
     def sample_sequence(self, idx):
-        result = dict()
+        result = {}
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
 
         for key in self.keys:
@@ -151,9 +158,7 @@ class SequenceSampler:
             sample = input_arr[buffer_start_idx:buffer_end_idx]
             data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
-                data = np.empty(
-                    shape=(self.sequence_length,) + input_arr.shape[1:],
-                    dtype=input_arr.dtype)
+                data = np.empty(shape=(self.sequence_length,) + input_arr.shape[1:], dtype=input_arr.dtype)
                 if sample_start_idx > 0:
                     data[:sample_start_idx] = sample[0]
                 if sample_end_idx < self.sequence_length:

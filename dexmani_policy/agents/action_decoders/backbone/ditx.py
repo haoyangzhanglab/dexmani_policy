@@ -1,15 +1,18 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.jit import Final
 from einops.layers.torch import Rearrange
-from timm.models.vision_transformer import Mlp, use_fused_attn, RmsNorm
+from timm.models.vision_transformer import Mlp, RmsNorm, use_fused_attn
+from torch.jit import Final
 
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
-from .dit import Attention, modulate, _approx_gelu
+
+from .dit import Attention, _approx_gelu, modulate
 
 WEIGHT_INIT_STD = 0.02
+
+
 class AdaLNZero(nn.Module):
     def __init__(self, dim, cond_dim):
         super().__init__()
@@ -17,17 +20,13 @@ class AdaLNZero(nn.Module):
         self.dim = dim
         self.norm = nn.LayerNorm(dim, elementwise_affine=False)
         self.cond_linear = nn.Linear(cond_dim, dim * 2)
-        self.cond_modulation = nn.Sequential(
-            Rearrange('b d -> b 1 d'),
-            nn.SiLU(),
-            self.cond_linear
-        )
+        self.cond_modulation = nn.Sequential(Rearrange("b d -> b 1 d"), nn.SiLU(), self.cond_linear)
         self.initialize_weights()
 
     def initialize_weights(self):
         nn.init.zeros_(self.cond_linear.weight)
-        nn.init.constant_(self.cond_linear.bias[:self.dim], 1.)
-        nn.init.zeros_(self.cond_linear.bias[self.dim:])
+        nn.init.constant_(self.cond_linear.bias[: self.dim], 1.0)
+        nn.init.zeros_(self.cond_linear.bias[self.dim :])
 
     def forward(self, x, cond):
         x = self.norm(x)
@@ -35,24 +34,26 @@ class AdaLNZero(nn.Module):
         x = x * gamma + beta
         return x
 
+
 class CrossAttention(nn.Module):
     fused_attn: Final[bool]
+
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            qkv_bias: bool = False,
-            qk_norm: bool = False,
-            attn_drop: float = 0,
-            proj_drop: float = 0,
-            norm_layer: nn.Module = nn.LayerNorm,
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0,
+        proj_drop: float = 0,
+        norm_layer: nn.Module = nn.LayerNorm,
     ):
         super().__init__()
 
-        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        assert dim % num_heads == 0, "dim should be divisible by num_heads"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.fused_attn = use_fused_attn()
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
@@ -77,17 +78,13 @@ class CrossAttention(nn.Module):
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
-                query=q,
-                key=k,
-                value=v,
-                dropout_p=self.attn_drop.p if self.training else 0.,
-                attn_mask=mask
+                query=q, key=k, value=v, dropout_p=self.attn_drop.p if self.training else 0.0, attn_mask=mask
             )
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
             if mask is not None:
-                attn = attn.masked_fill_(mask.logical_not(), float('-inf'))
+                attn = attn.masked_fill_(mask.logical_not(), float("-inf"))
             attn = attn.softmax(dim=-1)
             if self.attn_drop.p > 0:
                 attn = self.attn_drop(attn)
@@ -99,16 +96,17 @@ class CrossAttention(nn.Module):
             x = self.proj_drop(x)
         return x
 
+
 class DiTXBlock(nn.Module):
     def __init__(
-            self,
-            hidden_size,
-            num_heads,
-            mlp_ratio=4.0,
-            p_drop_attn=0.,
-            qkv_bias=False,
-            qk_norm=False,
-            **block_kwargs
+        self,
+        hidden_size,
+        num_heads,
+        mlp_ratio=4.0,
+        p_drop_attn=0.0,
+        qkv_bias=False,
+        qk_norm=False,
+        **block_kwargs,
     ):
         super().__init__()
 
@@ -128,22 +126,21 @@ class DiTXBlock(nn.Module):
             qkv_bias=qkv_bias,
             qk_norm=qk_norm,
             norm_layer=nn.LayerNorm,
-            **block_kwargs
+            **block_kwargs,
         )
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
 
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=_approx_gelu, drop=0.0)
+        self.mlp = Mlp(
+            in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=_approx_gelu, drop=0.0
+        )
 
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         modulation_size = 9 * hidden_size
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, modulation_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, modulation_size, bias=True))
 
     def forward(self, x, time_c, context_c, attn_mask=None):
         modulation = self.adaLN_modulation(time_c)
@@ -167,6 +164,7 @@ class DiTXBlock(nn.Module):
 
         return x
 
+
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size, out_channels):
         super().__init__()
@@ -186,6 +184,7 @@ class FinalLayer(nn.Module):
         x = self.ffn_final(x)
         return x
 
+
 class DiTXFlowMatch(nn.Module):
     """DiT-X backbone for Flow Matching (ManiFlow).
 
@@ -202,6 +201,7 @@ class DiTXFlowMatch(nn.Module):
         - Optional token compression (``TokenCompressor``) to reduce
           observation token count.
     """
+
     def __init__(
         self,
         horizon: int,
@@ -236,23 +236,24 @@ class DiTXFlowMatch(nn.Module):
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
 
-        self.timestep_embedder = TimestepMLP(
-            pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
-        self.target_t_embedder = TimestepMLP(
-            pos_emb_dim=target_t_embed_dim, output_dim=hidden_dim)
+        self.timestep_embedder = TimestepMLP(pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
+        self.target_t_embedder = TimestepMLP(pos_emb_dim=target_t_embed_dim, output_dim=hidden_dim)
 
         self.timestep_and_target_t_fusion = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
 
-        self.ditx_blocks = nn.ModuleList([
-            DiTXBlock(
-                hidden_size=hidden_dim,
-                num_heads=n_head,
-                mlp_ratio=mlp_ratio,
-                p_drop_attn=p_drop_attn,
-                qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
-            ) for _ in range(n_layers)
-        ])
+        self.ditx_blocks = nn.ModuleList(
+            [
+                DiTXBlock(
+                    hidden_size=hidden_dim,
+                    num_heads=n_head,
+                    mlp_ratio=mlp_ratio,
+                    p_drop_attn=p_drop_attn,
+                    qkv_bias=qkv_bias,
+                    qk_norm=qk_norm,
+                )
+                for _ in range(n_layers)
+            ]
+        )
         self.final_layer = FinalLayer(hidden_dim, action_dim)
 
         self.initialize_weights()
@@ -272,6 +273,7 @@ class DiTXFlowMatch(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(init_fn)
 
         for block in self.ditx_blocks:
@@ -334,7 +336,9 @@ class DiTXFlowMatch(nn.Module):
 
         time_c = self.timestep_and_target_t_fusion(torch.cat([timestep_embed, target_t_embed], dim=-1))
 
-        context_c = self.context_embedder(context) + self.context_pos_embed[:, :context.shape[1]].to(dtype=context.dtype)
+        context_c = self.context_embedder(context) + self.context_pos_embed[:, : context.shape[1]].to(
+            dtype=context.dtype
+        )
         if self.pre_norm_modality:
             context_c = self.context_norm(context_c, time_c)
 
@@ -343,8 +347,9 @@ class DiTXFlowMatch(nn.Module):
 
         x = self.final_layer(x)
 
-        x = x[:, -self.horizon:]
+        x = x[:, -self.horizon :]
         return x
+
 
 class DiTXDiffusion(nn.Module):
     """DiT-X backbone for Diffusion (MultiTask).
@@ -356,6 +361,7 @@ class DiTXDiffusion(nn.Module):
     Uses the same ``DiTXBlock`` (self-attention + cross-attention + MLP)
     and ``FinalLayer`` building blocks.
     """
+
     def __init__(
         self,
         horizon: int,
@@ -389,19 +395,21 @@ class DiTXDiffusion(nn.Module):
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
 
-        self.timestep_embedder = TimestepMLP(
-            pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
+        self.timestep_embedder = TimestepMLP(pos_emb_dim=timestep_embed_dim, output_dim=hidden_dim)
 
-        self.ditx_blocks = nn.ModuleList([
-            DiTXBlock(
-                hidden_size=hidden_dim,
-                num_heads=n_head,
-                mlp_ratio=mlp_ratio,
-                p_drop_attn=p_drop_attn,
-                qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
-            ) for _ in range(n_layers)
-        ])
+        self.ditx_blocks = nn.ModuleList(
+            [
+                DiTXBlock(
+                    hidden_size=hidden_dim,
+                    num_heads=n_head,
+                    mlp_ratio=mlp_ratio,
+                    p_drop_attn=p_drop_attn,
+                    qkv_bias=qkv_bias,
+                    qk_norm=qk_norm,
+                )
+                for _ in range(n_layers)
+            ]
+        )
         self.final_layer = FinalLayer(hidden_dim, action_dim)
 
         self.initialize_weights()
@@ -421,6 +429,7 @@ class DiTXDiffusion(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(init_fn)
 
         for block in self.ditx_blocks:
@@ -467,7 +476,9 @@ class DiTXDiffusion(nn.Module):
 
         time_c = timestep_embed
 
-        context_c = self.context_embedder(context) + self.context_pos_embed[:, :context.shape[1]].to(dtype=context.dtype)
+        context_c = self.context_embedder(context) + self.context_pos_embed[:, : context.shape[1]].to(
+            dtype=context.dtype
+        )
         if self.pre_norm_modality:
             context_c = self.context_norm(context_c, time_c)
 
@@ -476,5 +487,5 @@ class DiTXDiffusion(nn.Module):
 
         x = self.final_layer(x)
 
-        x = x[:, -self.horizon:]
+        x = x[:, -self.horizon :]
         return x

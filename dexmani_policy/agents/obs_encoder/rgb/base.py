@@ -6,16 +6,17 @@ Subclasses only supply model-specific config/backbone loading,
 ``get_global_token()``, and LoRA target module names.
 """
 
+from typing import Dict, Optional, Sequence
+
 import torch
 import torch.nn as nn
-from typing import Dict, Optional, Sequence
 
 from dexmani_policy.agents.obs_encoder.rgb.geometry_processor import GeometryProcessor
 from dexmani_policy.agents.obs_encoder.rgb.utils import (
     flatten_batch,
-    restore_batch,
     get_patch_grid_size,
     reshape_patch_tokens_to_map,
+    restore_batch,
 )
 
 
@@ -45,7 +46,7 @@ class ViTEncoder(nn.Module):
         SigLIP overrides this because its ``last_hidden_state`` does not
         include a CLS token (``num_prefix_tokens`` = 0).
         """
-        return outputs.last_hidden_state[:, self.num_prefix_tokens:]
+        return outputs.last_hidden_state[:, self.num_prefix_tokens :]
 
     def _get_lora_target_modules(self) -> list[str]:
         """Return the LoRA target module names for this backbone variant."""

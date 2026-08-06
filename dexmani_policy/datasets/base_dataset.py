@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 from typing import Optional, Tuple
 
@@ -15,7 +17,7 @@ from dexmani_policy.datasets.augmentation import (
     StateNoiseAug,
 )
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.sampler import SequenceSampler, get_val_mask, downsample_mask
+from dexmani_policy.datasets.sampler import SequenceSampler, downsample_mask, get_val_mask
 
 # (yaml_section, augmentor_class, yaml_key, output_modality)
 # Note: RGB augmentation is intentionally NOT registered here.  It is applied
@@ -24,15 +26,16 @@ from dexmani_policy.datasets.sampler import SequenceSampler, get_val_mask, downs
 # entry here would pass np.ndarray to a torch.Tensor-based augmentor and cause
 # an AttributeError on ``x.device`` access.
 AUGMENTOR_REGISTRY = [
-    ('pc',    PointCoordNoiseAug, 'coord_noise', 'point_cloud'),
-    ('pc',    PointColorJitter,   'color',       'point_cloud'),
-    ('pc',    PointColorNoiseAug, 'color_noise', 'point_cloud'),
-    ('pc',    PointDropout,       'dropout',     'point_cloud'),
-    ('state', StateNoiseAug,      'noise',       'joint_state'),
+    ("pc", PointCoordNoiseAug, "coord_noise", "point_cloud"),
+    ("pc", PointColorJitter, "color", "point_cloud"),
+    ("pc", PointColorNoiseAug, "color_noise", "point_cloud"),
+    ("pc", PointDropout, "dropout", "point_cloud"),
+    ("state", StateNoiseAug, "noise", "joint_state"),
 ]
 
+
 class BaseDataset(torch.utils.data.Dataset):
-    DEFAULT_MODALITIES = ['joint_state']
+    DEFAULT_MODALITIES = ["joint_state"]
 
     def __init__(
         self,
@@ -45,7 +48,7 @@ class BaseDataset(torch.utils.data.Dataset):
         max_train_episodes: int | None = None,
         sensor_modalities: list[str] | None = None,
         augmentation_cfg: dict | None = None,
-        action_key: str = 'action',
+        action_key: str = "action",
         use_aux_ee: bool = False,
         tcp_dim: int | None = None,
         obs_horizon: Optional[int] = None,
@@ -72,7 +75,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # When EE auxiliary loss is enabled, load action_ee for wrist pose (pos3+rot6d6).
         load_keys = sensor_modalities + [action_key]
         if use_aux_ee:
-            load_keys = load_keys + ['action_ee']
+            load_keys = load_keys + ["action_ee"]
 
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
@@ -133,14 +136,14 @@ class BaseDataset(torch.utils.data.Dataset):
         # EE aux loss: wrist pose = action_ee[..., :9] = pos(3) + rot6d(6).
         parts = [sample[self.action_key]]
         if self.use_aux_ee:
-            parts.append(sample['action_ee'][..., :9])
+            parts.append(sample["action_ee"][..., :9])
         action = np.concatenate(parts, axis=-1) if len(parts) > 1 else parts[0]
         return {
-            'obs': {
-                m: sample[m][:self.obs_horizon] if self.obs_horizon else sample[m]
+            "obs": {
+                m: sample[m][: self.obs_horizon] if self.obs_horizon else sample[m]
                 for m in self.sensor_modalities
             },
-            'action': action,
+            "action": action,
         }
 
     def _apply_faas_mapping(self, data: dict) -> dict:
@@ -156,19 +159,21 @@ class BaseDataset(torch.utils.data.Dataset):
            (7 for joint mode, 9 for action_ee).
         """
         # Action: [arm(tcp_dim) | hand(12)] → [arm(tcp_dim) | FAAS_hand(32)]
-        arm_action = data['action'][..., :self.tcp_dim]
-        hand_action = data['action'][..., self.tcp_dim:]
-        data['action'] = torch.cat(
-            [arm_action, self.faas_mapper.native_to_faas(hand_action)], dim=-1,
+        arm_action = data["action"][..., : self.tcp_dim]
+        hand_action = data["action"][..., self.tcp_dim :]
+        data["action"] = torch.cat(
+            [arm_action, self.faas_mapper.native_to_faas(hand_action)],
+            dim=-1,
         )
 
         # Joint state in data['obs'] — arm is always 7D joint angles
-        if 'joint_state' in data.get('obs', {}):
-            js = data['obs']['joint_state']
-            arm_state = js[..., :7]   # STATE_ARM_DIM = 7 (fixed)
+        if "joint_state" in data.get("obs", {}):
+            js = data["obs"]["joint_state"]
+            arm_state = js[..., :7]  # STATE_ARM_DIM = 7 (fixed)
             hand_state = js[..., 7:]
-            data['obs']['joint_state'] = torch.cat(
-                [arm_state, self.faas_mapper.native_to_faas(hand_state)], dim=-1,
+            data["obs"]["joint_state"] = torch.cat(
+                [arm_state, self.faas_mapper.native_to_faas(hand_state)],
+                dim=-1,
             )
 
         return data
@@ -183,7 +188,7 @@ class BaseDataset(torch.utils.data.Dataset):
           resize/crop keep uint8 output → 4× less DataLoader→GPU transfer.
         - float32 path (default): for color augmentation.
         """
-        rgb = torch.from_numpy(rgb_np)                 # (T, H, W, 3) uint8
+        rgb = torch.from_numpy(rgb_np)  # (T, H, W, 3) uint8
 
         # --- uint8 fast path: skip float32 conversion, resize/crop in uint8 ---
         if self.rgb_keep_uint8 and self.rgb_color_aug is None:
@@ -193,31 +198,35 @@ class BaseDataset(torch.utils.data.Dataset):
                 if self._is_val:
                     rgb = TVF.center_crop(rgb, list(self.rgb_random_crop_size))
                 else:
-                    rgb = TVF.crop(rgb,
+                    rgb = TVF.crop(
+                        rgb,
                         top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
                         left=torch.randint(0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)).item(),
                         height=self.rgb_random_crop_size[0],
-                        width=self.rgb_random_crop_size[1])
-            return rgb.contiguous()                      # uint8
+                        width=self.rgb_random_crop_size[1],
+                    )
+            return rgb.contiguous()  # uint8
 
         # --- float32 path: current behavior (needed for color augmentation) ---
         # Two-step contiguous+float is faster than a single float() on a strided
         # permute view (contiguous uint8 memcpy + fast float conversion beats
         # strided element-by-element float conversion).
-        rgb = rgb.permute(0, 3, 1, 2).contiguous()     # (T, 3, H, W) uint8
-        rgb = rgb.float().div_(255.0)                    # (T, 3, H, W) float32 [0,1]
+        rgb = rgb.permute(0, 3, 1, 2).contiguous()  # (T, 3, H, W) uint8
+        rgb = rgb.float().div_(255.0)  # (T, 3, H, W) float32 [0,1]
         rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
         if self.rgb_random_crop_size is not None:
             if self._is_val:
                 rgb = TVF.center_crop(rgb, list(self.rgb_random_crop_size))
             else:
-                rgb = TVF.crop(rgb,
+                rgb = TVF.crop(
+                    rgb,
                     top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
                     left=torch.randint(0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)).item(),
                     height=self.rgb_random_crop_size[0],
-                    width=self.rgb_random_crop_size[1])
+                    width=self.rgb_random_crop_size[1],
+                )
         if self.rgb_color_aug is not None and not self._is_val:
-            rgb = self.rgb_color_aug(rgb)                # (T, 3, H_dst, W_dst) float32 [0,1]
+            rgb = self.rgb_color_aug(rgb)  # (T, 3, H_dst, W_dst) float32 [0,1]
         # clamp_ is in-place (resize/crop/aug already own their output);
         # the result is already contiguous from the prior op, skip extra copy.
         return rgb.clamp_(0, 1)
@@ -227,14 +236,14 @@ class BaseDataset(torch.utils.data.Dataset):
         data = self.sample_to_data(sample)
         data = self.apply_augmentation(data)
 
-        if self.rgb_preprocess_size is not None and 'rgb' in data['obs']:
-            data['obs']['rgb'] = self._preprocess_rgb_cpu(data['obs']['rgb'])
+        if self.rgb_preprocess_size is not None and "rgb" in data["obs"]:
+            data["obs"]["rgb"] = self._preprocess_rgb_cpu(data["obs"]["rgb"])
 
         data = dict_apply(data, ensure_tensor)
 
         # FAAS conversion runs on torch.Tensor, AFTER augmentation (which
         # operates in native joint space) and AFTER numpy→torch conversion.
-        if getattr(self, 'use_faas', False):
+        if getattr(self, "use_faas", False):
             data = self._apply_faas_mapping(data)
 
         return data
@@ -265,9 +274,9 @@ class BaseDataset(torch.utils.data.Dataset):
         if self.augmentation_cfg is None:
             return data
         for modality, augs in self.augmentors.items():
-            if modality not in data['obs']:
+            if modality not in data["obs"]:
                 continue
-            x = data['obs'][modality]
+            x = data["obs"][modality]
             copied = False
             for aug in augs:
                 if np.random.random() <= aug.prob:
@@ -275,7 +284,7 @@ class BaseDataset(torch.utils.data.Dataset):
                         x = x.copy()
                         copied = True
                     aug._augment(x)
-            data['obs'][modality] = x
+            data["obs"][modality] = x
         return data
 
     def _get_faas_normalizer_data(self):
@@ -287,38 +296,44 @@ class BaseDataset(torch.utils.data.Dataset):
         ``get_normalizer`` should call this helper instead of accessing
         ``self.replay_buffer`` directly.
         """
-        joint_state = self.replay_buffer['joint_state']  # numpy (N, 19)
-        action = self.replay_buffer[self.action_key]      # numpy (N, 19|21)
+        joint_state = self.replay_buffer["joint_state"]  # numpy (N, 19)
+        action = self.replay_buffer[self.action_key]  # numpy (N, 19|21)
 
-        if not getattr(self, 'use_faas', False):
+        if not getattr(self, "use_faas", False):
             return joint_state, action
 
         # Joint state: arm is always 7D arm joint angles
         js_t = torch.from_numpy(joint_state).float()
-        joint_state = torch.cat([
-            js_t[..., :7],
-            self.faas_mapper.native_to_faas(js_t[..., 7:]),
-        ], dim=-1).numpy()
+        joint_state = torch.cat(
+            [
+                js_t[..., :7],
+                self.faas_mapper.native_to_faas(js_t[..., 7:]),
+            ],
+            dim=-1,
+        ).numpy()
         # Action: arm portion uses tcp_dim (7 or 9)
         a_t = torch.from_numpy(action).float()
-        action = torch.cat([
-            a_t[..., :self.tcp_dim],
-            self.faas_mapper.native_to_faas(a_t[..., self.tcp_dim:]),
-        ], dim=-1).numpy()
+        action = torch.cat(
+            [
+                a_t[..., : self.tcp_dim],
+                self.faas_mapper.native_to_faas(a_t[..., self.tcp_dim :]),
+            ],
+            dim=-1,
+        ).numpy()
 
         return joint_state, action
 
-    def get_normalizer(self, mode='limits'):
+    def get_normalizer(self, mode="limits"):
         joint_state, action = self._get_faas_normalizer_data()
         normalizer = LinearNormalizer()
 
-        if self.action_key == 'action_ee':
-            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode=mode)
-            normalizer['action'] = build_mixed_action_normalizer(action)
+        if self.action_key == "action_ee":
+            normalizer.fit(data={"joint_state": joint_state}, last_n_dims=1, mode=mode)
+            normalizer["action"] = build_mixed_action_normalizer(action)
         else:
-            normalizer.fit(data={'joint_state': joint_state, 'action': action},
-                           last_n_dims=1, mode=mode)
+            normalizer.fit(data={"joint_state": joint_state, "action": action}, last_n_dims=1, mode=mode)
         return normalizer
+
 
 def example(zarr_path):
     dataset = BaseDataset(
@@ -328,14 +343,15 @@ def example(zarr_path):
         pad_before=1,
         pad_after=7,
         val_ratio=0.05,
-        sensor_modalities=['joint_state'],
+        sensor_modalities=["joint_state"],
     )
     dataset.get_normalizer()
     sample = dataset[0]
-    print('joint_state:', sample['obs']['joint_state'].shape)
-    print('action     :', sample['action'].shape)
+    print("joint_state:", sample["obs"]["joint_state"].shape)
+    print("action     :", sample["action"].shape)
     val_set = dataset.get_validation_dataset()
-    print(f'train size: {len(dataset)}  val size: {len(val_set)}')
+    print(f"train size: {len(dataset)}  val size: {len(val_set)}")
 
-if __name__ == '__main__':
-    example('robot_data/sim/pick_apple_messy.zarr')
+
+if __name__ == "__main__":
+    example("robot_data/sim/pick_apple_messy.zarr")

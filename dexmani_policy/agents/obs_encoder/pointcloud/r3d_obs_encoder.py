@@ -11,6 +11,7 @@ import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DPointcloudEncoder
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
+
 class R3DObsEncoder(nn.Module):
     """Uni3D point cloud encoder + StateMLP.
 
@@ -61,9 +62,7 @@ class R3DObsEncoder(nn.Module):
         patch_tokens, pc_pe = self.pc_encoder(pc, inference_mode=not self.training)
 
         state_emb = self.state_mlp(state)
-        state_emb = state_emb.unsqueeze(1).expand(
-            -1, patch_tokens.shape[1], -1
-        )
+        state_emb = state_emb.unsqueeze(1).expand(-1, patch_tokens.shape[1], -1)
 
         obs_feat = torch.cat([patch_tokens, state_emb], dim=-1)
         tokens = torch.cat([obs_feat, pc_pe], dim=-1)

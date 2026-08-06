@@ -3,39 +3,43 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.jit import Final
 from timm.models.vision_transformer import Mlp, use_fused_attn
+from torch.jit import Final
 
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import POS_ENCODING_BASE
 
 WEIGHT_INIT_STD = 0.02
-_approx_gelu = lambda: nn.GELU(approximate="tanh")
+
+
+def _approx_gelu():
+    return nn.GELU(approximate="tanh")
+
 
 def modulate(x, shift, scale):
     """AdaLN modulation: ``x * (1 + scale) + shift``."""
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
-class Attention(nn.Module):
 
+class Attention(nn.Module):
     fused_attn: Final[bool]
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            qkv_bias: bool = False,
-            qk_norm: bool = False,
-            attn_drop: float = 0.,
-            proj_drop: float = 0.,
-            norm_layer: nn.Module = nn.LayerNorm,
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        norm_layer: nn.Module = nn.LayerNorm,
     ) -> None:
 
         super().__init__()
-        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        assert dim % num_heads == 0, "dim should be divisible by num_heads"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.fused_attn = use_fused_attn()
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -54,8 +58,11 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask,
-                dropout_p=self.attn_drop.p if self.training else 0.,
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_drop.p if self.training else 0.0,
             )
         else:
             q = q * self.scale
@@ -72,8 +79,8 @@ class Attention(nn.Module):
 
         return x
 
-class TimestepEmbedder(nn.Module):
 
+class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
 
@@ -105,8 +112,8 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq)
         return t_emb
 
-class DiTBlock(nn.Module):
 
+class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, qkv_bias=True, **block_kwargs):
         super().__init__()
 
@@ -116,36 +123,37 @@ class DiTBlock(nn.Module):
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
 
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=_approx_gelu, drop=0)
-
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        self.mlp = Mlp(
+            in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=_approx_gelu, drop=0
         )
 
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True))
+
     def forward(self, x, c, attn_mask=None):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), attn_mask=attn_mask)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(
+            6, dim=1
+        )
+        x = x + gate_msa.unsqueeze(1) * self.attn(
+            modulate(self.norm1(x), shift_msa, scale_msa), attn_mask=attn_mask
+        )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
-class FinalLayer(nn.Module):
 
+class FinalLayer(nn.Module):
     def __init__(self, hidden_size, output_dim):
         super().__init__()
 
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, output_dim, bias=True)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
 
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
+
 
 class DiTDiffusion(nn.Module):
     """DiT backbone for diffusion-based action prediction (DP3, MoE).
@@ -164,17 +172,17 @@ class DiTDiffusion(nn.Module):
     """
 
     def __init__(
-            self,
-            horizon: int,
-            action_dim: int,
-            cond_dim: int,
-            n_emb: int = 512,
-            num_heads: int = 8,
-            n_layers: int = 12,
-            mlp_ratio: float = 4.0,
-            qkv_bias: bool = True,
-            attn_drop: float = 0.1,
-            proj_drop: float = 0.1,
+        self,
+        horizon: int,
+        action_dim: int,
+        cond_dim: int,
+        n_emb: int = 512,
+        num_heads: int = 8,
+        n_layers: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        attn_drop: float = 0.1,
+        proj_drop: float = 0.1,
     ):
         super().__init__()
 
@@ -187,11 +195,19 @@ class DiTDiffusion(nn.Module):
         self.cond_embedder = nn.Linear(cond_dim, n_emb)
         self.pos_embed = nn.Parameter(torch.zeros(1, horizon, n_emb))
 
-        self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size=n_emb, num_heads=num_heads, mlp_ratio=mlp_ratio,
-                     qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=proj_drop)
-            for _ in range(n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                DiTBlock(
+                    hidden_size=n_emb,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    attn_drop=attn_drop,
+                    proj_drop=proj_drop,
+                )
+                for _ in range(n_layers)
+            ]
+        )
         self.final_layer = FinalLayer(hidden_size=n_emb, output_dim=action_dim)
 
         self.initialize_weights()
@@ -202,6 +218,7 @@ class DiTDiffusion(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(init_fn)
 
         nn.init.normal_(self.pos_embed, mean=0.0, std=WEIGHT_INIT_STD)

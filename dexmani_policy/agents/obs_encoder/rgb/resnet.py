@@ -1,16 +1,18 @@
+from typing import Dict, Optional, Sequence
+
 import torch
 import torch.nn as nn
 import torchvision
-from typing import Dict, Optional, Sequence
 
-from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.geometry_processor import GeometryProcessor
+from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.types import GlobalTokenType, NormMode, TuneMode
 from dexmani_policy.agents.obs_encoder.rgb.utils import (
     flatten_batch,
-    restore_batch,
     reshape_patch_tokens_to_map,
+    restore_batch,
 )
+
 
 class FrozenBatchNorm2d(nn.Module):
     def __init__(self, num_features: int):
@@ -52,6 +54,7 @@ class FrozenBatchNorm2d(nn.Module):
         bias = bias - running_mean * scale
         return x * scale + bias
 
+
 def replace_batch_norm_with_group_norm(module: nn.Module) -> nn.Module:
     for name, child in module.named_children():
         if isinstance(child, nn.BatchNorm2d):
@@ -62,6 +65,7 @@ def replace_batch_norm_with_group_norm(module: nn.Module) -> nn.Module:
         else:
             replace_batch_norm_with_group_norm(child)
     return module
+
 
 class ResNet(nn.Module):
     def __init__(
@@ -94,10 +98,14 @@ class ResNet(nn.Module):
         self.hidden_dim = int(backbone.fc.in_features)
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
 
-        self.proj = nn.Identity() if self.out_dim == self.hidden_dim else nn.Conv2d(
-            self.hidden_dim,
-            self.out_dim,
-            kernel_size=1,
+        self.proj = (
+            nn.Identity()
+            if self.out_dim == self.hidden_dim
+            else nn.Conv2d(
+                self.hidden_dim,
+                self.out_dim,
+                kernel_size=1,
+            )
         )
         self.geometry_processor = GeometryProcessor()
 
@@ -189,6 +197,7 @@ class ResNet(nn.Module):
         feature_map = reshape_patch_tokens_to_map(flat_patch_tokens, (feature_h, feature_w))
         return restore_batch(feature_map, leading_shape)
 
+
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_name = "resnet18"
@@ -207,7 +216,9 @@ def example() -> None:
     )
 
     intrinsics = intrinsics.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
-    camera_to_world = camera_to_world.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
+    camera_to_world = (
+        camera_to_world.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
+    )
 
     try:
         encoder = ResNet(
@@ -229,7 +240,9 @@ def example() -> None:
         rgb = rgbd_batch["image"].to(device)
         depth = rgbd_batch["depth"].to(device)
         intrinsics = rgbd_batch["intrinsics"].to(device)
-        camera_to_world = None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
+        camera_to_world = (
+            None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
+        )
 
         with torch.no_grad():
             vision_out = encoder(rgb)
@@ -256,6 +269,7 @@ def example() -> None:
     except Exception as error:
         print("resnet example failed.")
         print(error)
+
 
 if __name__ == "__main__":
     example()

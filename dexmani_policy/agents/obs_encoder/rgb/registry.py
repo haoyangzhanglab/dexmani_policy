@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import warnings
-import torchvision
-import torch.nn as nn
 from typing import Dict, Literal, Optional, Tuple
+
+import torch.nn as nn
+import torchvision
+
 from .image_processor import ImageProcessor
 from .utils import get_interpolation, to_hw
 
@@ -38,6 +42,7 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     },
 }
 
+
 def resolve_resnet_weights(cfg: Dict) -> Dict:
     model_name = str(cfg["model_name"])
     weights_value = cfg.pop("weights")
@@ -47,6 +52,7 @@ def resolve_resnet_weights(cfg: Dict) -> Dict:
     else:
         cfg["weights"] = weights_value
     return cfg
+
 
 def build_backbone(
     name: BackboneName,
@@ -69,19 +75,24 @@ def build_backbone(
 
     if name == "resnet":
         from .resnet import ResNet
+
         cfg = resolve_resnet_weights(cfg)
         backbone = ResNet(**cfg)
     elif name == "clip":
         from .clip import CLIP
+
         backbone = CLIP(**cfg)
     elif name == "dino":
         from .dino import DINO
+
         backbone = DINO(**cfg)
     elif name == "siglip":
         from .siglip import SigLIP
+
         backbone = SigLIP(**cfg)
     elif name == "r3m":
         from .r3m import R3M
+
         backbone = R3M(**cfg)
     else:
         raise ValueError(f"Unsupported backbone name: {name}")

@@ -46,9 +46,7 @@ class DQRISEAgent(BaseAgent):
         modality_dropout_probs: dict | None = None,
     ) -> None:
         if tcp_dim <= 0 or tcp_dim >= action_dim:
-            raise ValueError(
-                f"Expected 0 < tcp_dim < action_dim, got {tcp_dim}, {action_dim}"
-            )
+            raise ValueError(f"Expected 0 < tcp_dim < action_dim, got {tcp_dim}, {action_dim}")
 
         hand_dim = action_dim - tcp_dim
         diffusion_action_dim = tcp_dim + 1
@@ -115,9 +113,7 @@ class DQRISEAgent(BaseAgent):
         super().load_normalizer_from_dataset(normalizer)
         self._validate_codebook_normalizer()
 
-    def _validate_codebook_normalizer(
-        self, *, rtol: float = 1e-5, atol: float = 1e-6
-    ) -> None:
+    def _validate_codebook_normalizer(self, *, rtol: float = 1e-5, atol: float = 1e-6) -> None:
         if not self.codebook_manager.is_loaded:
             return
         if "action" not in self.normalizer.params_dict:
@@ -140,12 +136,8 @@ class DQRISEAgent(BaseAgent):
         code_offset = self.codebook_manager.hand_normalizer_offset.detach().cpu()
 
         try:
-            torch.testing.assert_close(
-                policy_scale, code_scale, rtol=rtol, atol=atol
-            )
-            torch.testing.assert_close(
-                policy_offset, code_offset, rtol=rtol, atol=atol
-            )
+            torch.testing.assert_close(policy_scale, code_scale, rtol=rtol, atol=atol)
+            torch.testing.assert_close(policy_offset, code_offset, rtol=rtol, atol=atol)
         except AssertionError as exc:
             raise ValueError(
                 "The policy action normalizer and VQ codebook hand normalizer "
@@ -189,24 +181,19 @@ class DQRISEAgent(BaseAgent):
         index = index.reshape(batch_size, horizon, 1).to(tcp_part.dtype)
 
         joint_action = torch.cat([tcp_part, index], dim=-1)
-        action_loss, loss_dict = self.action_decoder.compute_loss(
-            cond, joint_action, **kwargs
-        )
+        action_loss, loss_dict = self.action_decoder.compute_loss(cond, joint_action, **kwargs)
 
         # Explicitly mark this as a mini-batch nearest-prototype statistic.
         num_codes = self.codebook_manager.num_codes
         safe_max = max(num_codes - 1, 1)
         discrete_idx = torch.floor(
-            ((index + 1.0) * 0.5 * safe_max).clamp(0, max(num_codes - 1, 0))
-            + 0.5
+            ((index + 1.0) * 0.5 * safe_max).clamp(0, max(num_codes - 1, 0)) + 0.5
         ).long()
         counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
         probabilities = counts / counts.sum().clamp_min(1.0)
         entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
         loss_dict["batch_nn_code_entropy"] = entropy.detach().item()
-        loss_dict["batch_nn_code_used_1pct"] = int(
-            (probabilities > 0.01).sum().item()
-        )
+        loss_dict["batch_nn_code_used_1pct"] = int((probabilities > 0.01).sum().item())
 
         return self._merge_aux_loss(action_loss, loss_dict, aux)
 
@@ -232,20 +219,12 @@ class DQRISEAgent(BaseAgent):
             device=cond.device,
             dtype=cond.dtype,
         )
-        reduced_action = self.action_decoder.predict_action(
-            cond, template, denoise_timesteps
-        )
+        reduced_action = self.action_decoder.predict_action(cond, template, denoise_timesteps)
 
         tcp_pred = reduced_action[..., : self.tcp_dim]
         idx_pred = reduced_action[..., -1]
-        hand_flat, discrete_idx = (
-            self.codebook_manager.continuous_index_to_hand_pose(
-                idx_pred.reshape(-1)
-            )
-        )
-        hand_pred = hand_flat.reshape(
-            batch_size, self.horizon, self.hand_dim
-        ).to(tcp_pred.dtype)
+        hand_flat, discrete_idx = self.codebook_manager.continuous_index_to_hand_pose(idx_pred.reshape(-1))
+        hand_pred = hand_flat.reshape(batch_size, self.horizon, self.hand_dim).to(tcp_pred.dtype)
 
         normalized_full_action = torch.cat([tcp_pred, hand_pred], dim=-1)
         pred = self.normalizer["action"].unnormalize(normalized_full_action)
@@ -272,10 +251,11 @@ class DQRISEAgent(BaseAgent):
 def example() -> None:
     """Minimal construction example; project dependencies are still required."""
     import tempfile
+
     import numpy as np
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    batch_size, obs_steps, horizon, action_dim, points = 2, 2, 16, 19, 256
+    _batch_size, obs_steps, horizon, action_dim, points = 2, 2, 16, 19, 256
     hand_dim = action_dim - 7
     codebook = np.random.uniform(0, 65535, (16, hand_dim)).astype(np.float32)
 

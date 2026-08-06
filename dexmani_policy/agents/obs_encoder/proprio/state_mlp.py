@@ -1,8 +1,10 @@
-import torch
-import torch.nn as nn
 from typing import List, Optional
 
+import torch
+import torch.nn as nn
+
 from dexmani_policy.common.pytorch_util import create_mlp
+
 
 class StateMLP(nn.Module):
     def __init__(
@@ -27,6 +29,7 @@ class StateMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
+
 
 def create_state_mlp(
     state_dim: int,

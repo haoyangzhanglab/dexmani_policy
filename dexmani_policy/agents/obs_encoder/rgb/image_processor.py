@@ -1,6 +1,7 @@
+from typing import Dict, Optional, Sequence, Tuple, Union
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, Optional, Sequence, Tuple, Union
 
 from dexmani_policy.agents.obs_encoder.rgb.utils import (
     ArrayLike,
@@ -52,6 +53,7 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
         "interpolation": "bilinear",
     },
 }
+
 
 class ImageProcessor:
     """Unified image-space preprocessing for RGB observations.
@@ -105,7 +107,9 @@ class ImageProcessor:
             if (orig_h, orig_w) != (target_h, target_w):
                 scale_x = float(target_w) / float(orig_w)
                 scale_y = float(target_h) / float(orig_h)
-                image_batch = self.resize_tensor(image_batch, size=(target_h, target_w), mode=self.interpolation)
+                image_batch = self.resize_tensor(
+                    image_batch, size=(target_h, target_w), mode=self.interpolation
+                )
                 if depth_batch is not None:
                     depth_batch = self.resize_tensor(depth_batch, size=(target_h, target_w), mode="nearest")
             processed_h, processed_w = target_h, target_w
@@ -119,7 +123,9 @@ class ImageProcessor:
             if resized_h != orig_h or resized_w != orig_w:
                 scale_x = float(resized_w) / float(orig_w)
                 scale_y = float(resized_h) / float(orig_h)
-                image_batch = self.resize_tensor(image_batch, size=(resized_h, resized_w), mode=self.interpolation)
+                image_batch = self.resize_tensor(
+                    image_batch, size=(resized_h, resized_w), mode=self.interpolation
+                )
                 if depth_batch is not None:
                     depth_batch = self.resize_tensor(depth_batch, size=(resized_h, resized_w), mode="nearest")
 
@@ -128,13 +134,19 @@ class ImageProcessor:
             if self.center_crop_size is not None:
                 crop_h, crop_w = self.center_crop_size
                 if crop_h > resized_h or crop_w > resized_w:
-                    raise ValueError(f"Crop size {(crop_h, crop_w)} is larger than image size {(resized_h, resized_w)}.")
+                    raise ValueError(
+                        f"Crop size {(crop_h, crop_w)} is larger than image size {(resized_h, resized_w)}."
+                    )
                 crop_top = int(round((resized_h - crop_h) / 2.0))
                 crop_left = int(round((resized_w - crop_w) / 2.0))
                 processed_h, processed_w = crop_h, crop_w
-                image_batch = image_batch[..., crop_top:crop_top + crop_h, crop_left:crop_left + crop_w].contiguous()
+                image_batch = image_batch[
+                    ..., crop_top : crop_top + crop_h, crop_left : crop_left + crop_w
+                ].contiguous()
                 if depth_batch is not None:
-                    depth_batch = depth_batch[..., crop_top:crop_top + crop_h, crop_left:crop_left + crop_w].contiguous()
+                    depth_batch = depth_batch[
+                        ..., crop_top : crop_top + crop_h, crop_left : crop_left + crop_w
+                    ].contiguous()
         else:
             processed_h, processed_w = orig_h, orig_w
 
@@ -190,7 +202,9 @@ class ImageProcessor:
         flat_images, leading_shape = flatten_batch(images, trailing_ndim=3)
         flat_depths, depth_leading_shape = flatten_batch(depths, trailing_ndim=3)
         if leading_shape != depth_leading_shape:
-            raise ValueError(f"images leading shape {leading_shape} != depths leading shape {depth_leading_shape}")
+            raise ValueError(
+                f"images leading shape {leading_shape} != depths leading shape {depth_leading_shape}"
+            )
 
         flat_intrinsics = flatten_matrix_batch(
             matrix=intrinsics,
@@ -239,6 +253,7 @@ class ImageProcessor:
             "spatial": spatial,
         }
 
+
 def example() -> None:
     processor = ImageProcessor.from_preset("dino")
 
@@ -262,6 +277,7 @@ def example() -> None:
     print("process_rgbd K       :", tuple(rgbd_out["intrinsics"].shape))
     if rgbd_out["camera_to_world"] is not None:
         print("process_rgbd Tcw     :", tuple(rgbd_out["camera_to_world"].shape))
+
 
 if __name__ == "__main__":
     example()

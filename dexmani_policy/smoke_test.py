@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import pathlib
 import sys
@@ -12,18 +14,23 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.pytorch_util import set_project_root, set_seed, worker_init_fn, dict_apply, fix_state_dict
-from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint, build_train_params
-from dexmani_policy.training.lr_scheduler import compute_num_training_steps
+from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.common.pytorch_util import (
+    dict_apply,
+    fix_state_dict,
+    set_seed,
+    worker_init_fn,
+)
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
-    inject_faas_into_agent,
 )
+from dexmani_policy.training.lr_scheduler import compute_num_training_steps
 
 register_resolvers()
+
 
 def load_config(config_name: str):
     try:
@@ -38,6 +45,7 @@ def load_config(config_name: str):
         OmegaConf.resolve(cfg)
     return cfg
 
+
 def _prepare_dqrise_codebook(cfg) -> str | None:
     """Create a dummy sorted_hand_poses.npz for DQ-RISE smoke test.
 
@@ -45,39 +53,40 @@ def _prepare_dqrise_codebook(cfg) -> str | None:
     we synthesise one from random hand poses — just enough to validate the
     build chain without requiring a real trained VQ-VAE.
     """
-    if cfg.policy_name != 'dqrise':
+    if cfg.policy_name != "dqrise":
         return None
 
     import numpy as np
+
     # In FAAS mode, action_dim - tcp_dim = 32 (FAAS hand), but the codebook
     # needs the *native* hand dim (12).  Use the explicit hand_dim field when
     # available (dp3_faas.yaml sets hand_dim: 12).
-    hand_dim = cfg.get('hand_dim', cfg.action_dim - cfg.tcp_dim)
+    hand_dim = cfg.get("hand_dim", cfg.action_dim - cfg.tcp_dim)
     num_groups = 2
     codebook_size = 4
-    total = codebook_size ** num_groups
+    total = codebook_size**num_groups
     dummy_poses = np.random.randn(total, hand_dim).astype(np.float32)
 
     # Per-group dummy poses: (codebook_size, hand_dim) per group
-    save_data = dict(
-        sorted_hand_poses=dummy_poses,
-        hand_dim=hand_dim,
-        num_groups=num_groups,
-        codebook_size=codebook_size,
-        layer_weights=np.ones(num_groups, dtype=np.float32) / num_groups,
-    )
+    save_data = {
+        "sorted_hand_poses": dummy_poses,
+        "hand_dim": hand_dim,
+        "num_groups": num_groups,
+        "codebook_size": codebook_size,
+        "layer_weights": np.ones(num_groups, dtype=np.float32) / num_groups,
+    }
     for g in range(num_groups):
-        save_data[f'_group_sorted_poses_g{g}'] = np.random.randn(codebook_size, hand_dim).astype(np.float32)
+        save_data[f"_group_sorted_poses_g{g}"] = np.random.randn(codebook_size, hand_dim).astype(np.float32)
 
-    tmp_path = os.path.join(tempfile.gettempdir(), 'smoke_test_dqrise_codebook.npz')
+    tmp_path = os.path.join(tempfile.gettempdir(), "smoke_test_dqrise_codebook.npz")
     np.savez(tmp_path, **save_data)
     return tmp_path
 
 
 def smoke_test(config_name: str):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Smoke test: {config_name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     cfg = load_config(config_name)
 
@@ -98,9 +107,10 @@ def smoke_test(config_name: str):
     val_dataset = dataset.get_validation_dataset()
     if val_dataset is not None:
         print(f"      val dataset size: {len(val_dataset)}")
-        if hasattr(dataset, 'sampling_strategy') and dataset.sampling_strategy == 'weighted':
-            assert hasattr(val_dataset, 'task_weights') and val_dataset.task_weights is not None, \
+        if hasattr(dataset, "sampling_strategy") and dataset.sampling_strategy == "weighted":
+            assert hasattr(val_dataset, "task_weights") and val_dataset.task_weights is not None, (
                 "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
+            )
             print(f"      ✓ weighted strategy validation set OK (task_weights={val_dataset.task_weights})")
     else:
         print("      no validation set (val_ratio=0)")
@@ -136,14 +146,16 @@ def smoke_test(config_name: str):
         # In FAAS mode, action_dim=39 but control_action is native 19D
         # (inverse_transform in predict_action_from_cond already converted).
         expected_ctrl_dim = model.control_action_dim
-        assert ctrl_shape == (1, cfg.n_action_steps, expected_ctrl_dim), \
+        assert ctrl_shape == (1, cfg.n_action_steps, expected_ctrl_dim), (
             f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {expected_ctrl_dim})"
+        )
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
 
     # 5.0 FAAS roundtrip test — verifies native↔FAAS mapping correctness
-    if cfg.get('use_faas', False):
+    if cfg.get("use_faas", False):
         print("[5.0/6] FAAS roundtrip test ...")
         from dexmani_policy.common.faas_mapper import FAASHandMapper
+
         mapper = FAASHandMapper()
         # Action roundtrip: native → FAAS → native
         native_action = torch.randn(4, 16, cfg.tcp_dim + 12)
@@ -151,36 +163,45 @@ def smoke_test(config_name: str):
         rt_action = mapper.inverse_transform_action(faas_action, cfg.tcp_dim)
         err_action = (native_action - rt_action).abs().max().item()
         assert torch.allclose(native_action, rt_action, rtol=1e-6), (
-            f"FAAS action roundtrip error: {err_action:.2e}")
+            f"FAAS action roundtrip error: {err_action:.2e}"
+        )
         # Joint state roundtrip: arm untouched (7D fixed), hand 12D↔32D
         native_js = torch.randn(4, 19)
         faas_js = mapper.transform_joint_state(native_js)
-        assert torch.equal(faas_js[..., :7], native_js[..., :7]), \
+        assert torch.equal(faas_js[..., :7], native_js[..., :7]), (
             "FAAS transform_joint_state modified arm portion!"
+        )
         rt_hand = mapper.faas_to_native(faas_js[..., 7:])
         err_js = (native_js[..., 7:] - rt_hand).abs().max().item()
         assert torch.allclose(native_js[..., 7:], rt_hand, rtol=1e-6), (
-            f"FAAS joint_state roundtrip error: {err_js:.2e}")
+            f"FAAS joint_state roundtrip error: {err_js:.2e}"
+        )
         # Model predict_action outputs native dims in FAAS mode
-        assert result['control_action'].shape[-1] == cfg.tcp_dim + 12, (
-            f"FAAS control_action dim {result['control_action'].shape[-1]} "
-            f"!= native {cfg.tcp_dim + 12}")
+        assert result["control_action"].shape[-1] == cfg.tcp_dim + 12, (
+            f"FAAS control_action dim {result['control_action'].shape[-1]} != native {cfg.tcp_dim + 12}"
+        )
         print(f"      ✓ FAAS roundtrip: action_err={err_action:.1e}, js_hand_err={err_js:.1e}")
 
     # 5.1 MoE enhanced gate smoke check (exercises the use_enhanced_gate=True path
     # that is also covered by the __main__ tests in plugins/moe.py and core/moe.py)
-    if 'num_experts' in cfg.agent and cfg.agent.get('use_enhanced_gate', False) is False:
+    if "num_experts" in cfg.agent and cfg.agent.get("use_enhanced_gate", False) is False:
         print("[5.1/6] MoE enhanced gate smoke check ...")
         from dexmani_policy.agents.obs_encoder.plugins.moe import MoE
+
         moe_gate = MoE(
-            dim=64, num_experts=4, top_k=2,
-            hidden_dim=64, out_dim=64, num_layers=1,
-            use_enhanced_gate=True, gate_dropout=0.1,
+            dim=64,
+            num_experts=4,
+            top_k=2,
+            hidden_dim=64,
+            out_dim=64,
+            num_layers=1,
+            use_enhanced_gate=True,
+            gate_dropout=0.1,
         ).to(device)
         x_gate = torch.randn(8, 64, device=device)
         z_gate, aux_gate = moe_gate(x_gate, return_aux=True)
         assert torch.isfinite(z_gate).all(), "Enhanced gate output non-finite"
-        assert torch.isfinite(aux_gate['loss']), "Enhanced gate aux loss non-finite"
+        assert torch.isfinite(aux_gate["loss"]), "Enhanced gate aux loss non-finite"
         print(f"      ✓ enhanced gate: z={z_gate.shape}, aux_loss={aux_gate['loss'].item():.4f}")
 
     print("[6/6] Checkpoint save → load roundtrip ...")
@@ -215,7 +236,7 @@ def smoke_test(config_name: str):
         assert loaded.epoch == 0
         assert loaded.global_step == 1
         assert loaded.monitor.get("test_mean_score") == 0.85
-        assert loaded.train_params.get('num_training_steps') == num_training_steps
+        assert loaded.train_params.get("num_training_steps") == num_training_steps
 
         loaded_model_sd = fix_state_dict(loaded.model_state, is_current_ddp=False)
         loaded_model_sd = {k: v.to(device) for k, v in loaded_model_sd.items()}
@@ -233,13 +254,14 @@ def smoke_test(config_name: str):
             print("      ✓ EMA state dict roundtrip OK")
 
         tp = loaded.train_params
-        assert tp.get('n_obs_steps') == model.n_obs_steps
-        assert tp.get('n_action_steps') == model.n_action_steps
-        assert tp.get('action_dim') == model.action_dim
+        assert tp.get("n_obs_steps") == model.n_obs_steps
+        assert tp.get("n_action_steps") == model.n_action_steps
+        assert tp.get("action_dim") == model.action_dim
         print("      ✓ train_params roundtrip OK")
 
     print(f"\n✓ {config_name} smoke test PASSED\n")
     return True
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -254,5 +276,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"\n✗ {name} smoke test FAILED: {e}\n")
             import traceback
+
             traceback.print_exc()
             sys.exit(1)

@@ -19,6 +19,7 @@ ROOT_DIR = set_project_root()
 
 register_resolvers()
 
+
 def run_eval(exp_dir: Path, overrides: list[str]):
     exp_dir = exp_dir.expanduser().resolve()
     if not exp_dir.is_dir():
@@ -37,7 +38,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
     # Stash exp_dir so build_eval_components can infer checkpoint paths
     cfg._exp_dir = str(exp_dir)
 
-    if not hasattr(cfg, 'eval') or not hasattr(cfg.eval, "offline"):
+    if not hasattr(cfg, "eval") or not hasattr(cfg.eval, "offline"):
         raise KeyError(
             "Config is missing 'eval.offline' section. "
             "Please add eval.offline with keys: ckpt_tag_or_path, eval_episodes, "
@@ -55,7 +56,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
     device = torch.device(cfg.training.device)
     agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
     # Explicit seed control for reproducibility (I1 fix)
-    all_seeds = env_runner.get_seed_list()
+    env_runner.get_seed_list()
     eval_root_dir = exp_dir / "eval"
 
     evaluator = SimEvaluator(device, agent, env_runner, checkpoint_store, eval_root_dir)
@@ -94,6 +95,7 @@ def run_eval(exp_dir: Path, overrides: list[str]):
 
     cprint(f"Evaluation completed, results saved to {evaluator.eval_root_dir}", "green")
 
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy-name", type=str, required=True)
@@ -104,6 +106,7 @@ def main() -> None:
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
     run_eval(exp_dir, args.overrides)
+
 
 if __name__ == "__main__":
     main()

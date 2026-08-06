@@ -1,5 +1,6 @@
-import torch.nn as nn
 from typing import Dict, Optional
+
+import torch.nn as nn
 
 from dexmani_policy.agents.obs_encoder.pointcloud import (
     MultiStagePointNet,
@@ -41,11 +42,13 @@ PATCH_TOKENIZER_CONFIGS: Dict[str, Dict] = {
     },
 }
 
+
 def merge_config(default_cfg: Dict, config: Optional[Dict] = None) -> Dict:
     cfg = dict(default_cfg)
     if config:
         cfg.update(config)
     return cfg
+
 
 def build_pc_global_encoder(
     encoder_type: str,
@@ -84,6 +87,7 @@ def build_pc_global_encoder(
             num_neighbors=cfg["num_neighbors"],
             fps_random_config=fps_random_config,
         )
+
 
 def build_pc_patch_tokenizer(
     tokenizer_type: str,

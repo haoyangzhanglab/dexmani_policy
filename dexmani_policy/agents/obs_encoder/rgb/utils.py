@@ -1,9 +1,11 @@
-import torch
-import numpy as np
 from typing import Dict, Optional, Tuple, Union
+
+import numpy as np
+import torch
 
 HW = Tuple[int, int]
 ArrayLike = Union[np.ndarray, torch.Tensor]
+
 
 def to_tensor(x: ArrayLike) -> torch.Tensor:
     if isinstance(x, np.ndarray):
@@ -11,6 +13,7 @@ def to_tensor(x: ArrayLike) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         return x
     raise TypeError(f"Unsupported input type: {type(x)}")
+
 
 def to_hw(size: Union[int, Tuple[int, int], None]) -> Optional[HW]:
     if size is None:
@@ -21,11 +24,13 @@ def to_hw(size: Union[int, Tuple[int, int], None]) -> Optional[HW]:
         raise ValueError("size should be an int or a tuple (H, W).")
     return int(size[0]), int(size[1])
 
+
 def get_interpolation(name: str) -> str:
     name = name.lower()
     if name in {"bilinear", "bicubic", "nearest"}:
         return name
     raise ValueError(f"Unsupported interpolation: {name}")
+
 
 def to_rgb_tensor(images: ArrayLike) -> torch.Tensor:
     images = to_tensor(images)
@@ -50,6 +55,7 @@ def to_rgb_tensor(images: ArrayLike) -> torch.Tensor:
 
     return images.contiguous()
 
+
 def to_depth_tensor(depths: ArrayLike) -> torch.Tensor:
     depths = to_tensor(depths)
     if depths.ndim < 2:
@@ -61,11 +67,13 @@ def to_depth_tensor(depths: ArrayLike) -> torch.Tensor:
         depths = depths.unsqueeze(depths.ndim - 2)
     return depths.to(torch.float32).contiguous()
 
+
 def flatten_batch(x: torch.Tensor, trailing_ndim: int) -> Tuple[torch.Tensor, Tuple[int, ...]]:
     if x.ndim < trailing_ndim:
         raise ValueError(f"Expected tensor with at least {trailing_ndim} dims, got {tuple(x.shape)}")
     leading_shape = tuple(x.shape[:-trailing_ndim])
     return x.reshape(-1, *x.shape[-trailing_ndim:]), leading_shape
+
 
 def restore_batch(x: torch.Tensor, leading_shape: Tuple[int, ...]) -> torch.Tensor:
     if len(leading_shape) == 0:
@@ -73,6 +81,7 @@ def restore_batch(x: torch.Tensor, leading_shape: Tuple[int, ...]) -> torch.Tens
             raise ValueError(f"Expected flattened batch size 1 for unbatched restore, got {tuple(x.shape)}")
         return x.reshape(*x.shape[1:])
     return x.reshape(*leading_shape, *x.shape[1:])
+
 
 def make_spatial_transform_meta(
     orig_hw: HW,
@@ -88,6 +97,7 @@ def make_spatial_transform_meta(
         "resize_scale_xy": resize_scale_xy,
         "crop_top_left": crop_top_left,
     }
+
 
 def broadcast_matrix(
     matrix: ArrayLike,
@@ -125,6 +135,7 @@ def broadcast_matrix(
         matrix = matrix.expand(*leading_shape, *mat_shape)
     return matrix.contiguous()
 
+
 def flatten_matrix_batch(
     matrix: ArrayLike,
     mat_shape: Tuple[int, int],
@@ -143,14 +154,18 @@ def flatten_matrix_batch(
         return matrix.reshape(1, *mat_shape)
     return matrix.reshape(-1, *mat_shape)
 
+
 def restore_matrix_batch(matrix_batch: torch.Tensor, leading_shape: Tuple[int, ...]) -> torch.Tensor:
     if matrix_batch.ndim == 2:
         return matrix_batch
     if len(leading_shape) == 0:
         if matrix_batch.shape[0] != 1:
-            raise ValueError(f"Expected flattened batch size 1 for unbatched restore, got {tuple(matrix_batch.shape)}")
+            raise ValueError(
+                f"Expected flattened batch size 1 for unbatched restore, got {tuple(matrix_batch.shape)}"
+            )
         return matrix_batch.reshape(*matrix_batch.shape[-2:])
     return matrix_batch.reshape(*leading_shape, *matrix_batch.shape[-2:])
+
 
 def update_intrinsics_after_spatial_ops(
     intrinsics: torch.Tensor,
@@ -166,6 +181,7 @@ def update_intrinsics_after_spatial_ops(
     intrinsics[:, 1, 2] = intrinsics[:, 1, 2] * scale_y - float(crop_top)
     return intrinsics
 
+
 def get_patch_grid_size(image_hw: HW, patch_size: int) -> HW:
     image_h, image_w = image_hw
     if patch_size <= 0:
@@ -173,6 +189,7 @@ def get_patch_grid_size(image_hw: HW, patch_size: int) -> HW:
     if image_h % patch_size != 0 or image_w % patch_size != 0:
         raise ValueError(f"Input size {(image_h, image_w)} must be divisible by patch size {patch_size}.")
     return image_h // patch_size, image_w // patch_size
+
 
 def resolve_patch_grid_size(
     image_hw: HW,
@@ -188,6 +205,7 @@ def resolve_patch_grid_size(
             raise ValueError(f"patch_grid_size should be positive, got {grid}.")
         return grid
     return get_patch_grid_size(image_hw=image_hw, patch_size=int(patch_size))
+
 
 def reshape_patch_tokens_to_map(patch_tokens: torch.Tensor, patch_grid_size: HW) -> torch.Tensor:
     batch_size, token_num, channel_dim = patch_tokens.shape

@@ -1,11 +1,12 @@
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
-from typing import List, Optional
 from transformers import AutoTokenizer, T5EncoderModel
+
 
 # NOTE: reserved code — not currently used by any agent.
 class T5TextEncoder(nn.Module):
-
     def __init__(
         self,
         model_name: str = "google-t5/t5-small",
@@ -48,6 +49,7 @@ class T5TextEncoder(nn.Module):
 
         task_embeds = self.masked_mean_pool(token_embeds, task_tokens.attention_mask)
         return task_embeds.unsqueeze(1)
+
 
 if __name__ == "__main__":
     encoder = T5TextEncoder()

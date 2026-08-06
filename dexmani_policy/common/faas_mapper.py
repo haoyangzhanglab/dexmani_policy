@@ -28,8 +28,8 @@ class FAASHandMapper(nn.Module):
 
     Mapping formula (matching UniDex ``_apply_scale_shift``)::
 
-        faas_value = native_value * scale + offset        (forward)
-        native_value = (faas_value - offset) / scale      (inverse)
+        faas_value = native_value * scale + offset(forward)
+        native_value = (faas_value - offset) / scale(inverse)
 
     For XHand all offsets are 0.0 and all scales are ±1, so the
     general inverse formula is numerically identical to the
@@ -38,20 +38,20 @@ class FAASHandMapper(nn.Module):
     """
 
     # ── FAAS space constants ──
-    MAPPED_JOINT_DIM: int = 32   # single-hand FAAS dimension
-    JOINT_DIM_IN_USE: int = 27   # actively used slots (across all 8 hands)
-    NATIVE_HAND_DIM: int = 12    # XHand native hand joint count
+    MAPPED_JOINT_DIM: int = 32  # single-hand FAAS dimension
+    JOINT_DIM_IN_USE: int = 27  # actively used slots (across all 8 hands)
+    NATIVE_HAND_DIM: int = 12  # XHand native hand joint count
 
     # ── XHand -> FAAS mapping tables (from UniDex hand_utils.json) ──
 
     # native XHand index -> FAAS index (ordered per DexMani joint convention)
     _NATIVE_TO_FAAS_INDICES: tuple = (
-        1,   # thumb_bend_joint       -> FAAS Thumb CMC Flexion
-        2,   # thumb_rota_joint1      -> FAAS Thumb MCP Pitch
-        3,   # thumb_rota_joint2      -> FAAS Thumb Intermediate
-        6,   # index_bend_joint       -> FAAS Index Spread
-        7,   # index_joint1           -> FAAS Index Proximal (MCP)
-        8,   # index_joint2           -> FAAS Index Intermediate (PIP)
+        1,  # thumb_bend_joint       -> FAAS Thumb CMC Flexion
+        2,  # thumb_rota_joint1      -> FAAS Thumb MCP Pitch
+        3,  # thumb_rota_joint2      -> FAAS Thumb Intermediate
+        6,  # index_bend_joint       -> FAAS Index Spread
+        7,  # index_joint1           -> FAAS Index Proximal (MCP)
+        8,  # index_joint2           -> FAAS Index Intermediate (PIP)
         12,  # mid_joint1             -> FAAS Middle Proximal (MCP)
         13,  # mid_joint2             -> FAAS Middle Intermediate (PIP)
         17,  # ring_joint1            -> FAAS Ring Proximal (MCP)
@@ -63,11 +63,18 @@ class FAASHandMapper(nn.Module):
     # Sign corrections: index_bend_joint rotates opposite direction in FAAS
     # (DexMani URDF axis = (-1, 0, 0); FAAS convention is opposite).
     _NATIVE_TO_FAAS_SCALES: tuple = (
-        1.0, 1.0, 1.0,   # thumb
-        -1.0, 1.0, 1.0,  # index (bend=-1)
-        1.0, 1.0,         # middle
-        1.0, 1.0,         # ring
-        1.0, 1.0,         # pinky
+        1.0,
+        1.0,
+        1.0,  # thumb
+        -1.0,
+        1.0,
+        1.0,  # index (bend=-1)
+        1.0,
+        1.0,  # middle
+        1.0,
+        1.0,  # ring
+        1.0,
+        1.0,  # pinky
     )
 
     # Per-joint offsets (all zero for XHand; non-zero for hands like Inspire).
@@ -80,9 +87,9 @@ class FAASHandMapper(nn.Module):
         idx = torch.tensor(self._NATIVE_TO_FAAS_INDICES, dtype=torch.long)
         scales = torch.tensor(self._NATIVE_TO_FAAS_SCALES, dtype=torch.float32)
         offsets = torch.tensor(self._NATIVE_TO_FAAS_OFFSETS, dtype=torch.float32)
-        self.register_buffer('_faas_indices', idx, persistent=True)
-        self.register_buffer('_scales', scales, persistent=True)
-        self.register_buffer('_offsets', offsets, persistent=True)
+        self.register_buffer("_faas_indices", idx, persistent=True)
+        self.register_buffer("_scales", scales, persistent=True)
+        self.register_buffer("_offsets", offsets, persistent=True)
 
     # ── Core hand-only conversions ──────────────────────────────────
 
@@ -102,8 +109,7 @@ class FAASHandMapper(nn.Module):
             ``(..., 32)`` in FAAS order.
         """
         assert native_hand.shape[-1] == self.NATIVE_HAND_DIM, (
-            f"Expected last dim {self.NATIVE_HAND_DIM}, "
-            f"got {native_hand.shape[-1]}"
+            f"Expected last dim {self.NATIVE_HAND_DIM}, got {native_hand.shape[-1]}"
         )
         shape = native_hand.shape[:-1]
         transformed = native_hand * self._scales + self._offsets
@@ -130,8 +136,7 @@ class FAASHandMapper(nn.Module):
             ``(..., 12)`` in DexMani XHand joint order.
         """
         assert faas_hand.shape[-1] == self.MAPPED_JOINT_DIM, (
-            f"Expected last dim {self.MAPPED_JOINT_DIM}, "
-            f"got {faas_hand.shape[-1]}"
+            f"Expected last dim {self.MAPPED_JOINT_DIM}, got {faas_hand.shape[-1]}"
         )
         native = faas_hand[..., self._faas_indices]
         return (native - self._offsets) / self._scales
@@ -139,7 +144,9 @@ class FAASHandMapper(nn.Module):
     # ── Full-action convenience helpers ─────────────────────────────
 
     def transform_action(
-        self, action: torch.Tensor, arm_dim: int,
+        self,
+        action: torch.Tensor,
+        arm_dim: int,
     ) -> torch.Tensor:
         """Convert full action from native to FAAS (hand portion only).
 
@@ -155,7 +162,9 @@ class FAASHandMapper(nn.Module):
         return torch.cat([arm, self.native_to_faas(hand)], dim=-1)
 
     def inverse_transform_action(
-        self, action: torch.Tensor, arm_dim: int,
+        self,
+        action: torch.Tensor,
+        arm_dim: int,
     ) -> torch.Tensor:
         """Convert full action from FAAS to native (hand portion only).
 
@@ -171,7 +180,8 @@ class FAASHandMapper(nn.Module):
         return torch.cat([arm, self.faas_to_native(hand)], dim=-1)
 
     def transform_joint_state(
-        self, joint_state: torch.Tensor,
+        self,
+        joint_state: torch.Tensor,
     ) -> torch.Tensor:
         """Convert joint_state from native (19D) to FAAS (39D).
 

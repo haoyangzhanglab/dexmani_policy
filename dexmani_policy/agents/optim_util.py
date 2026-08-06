@@ -1,15 +1,15 @@
-import torch.nn as nn
 from typing import List, Optional, Tuple
 
-def get_default_optim_group(
-    module: nn.Module,
-    weight_decay: float
-):
-    module_params ={
-            'params': [p for p in module.parameters() if p.requires_grad],
-            'weight_decay': weight_decay
+import torch.nn as nn
+
+
+def get_default_optim_group(module: nn.Module, weight_decay: float):
+    module_params = {
+        "params": [p for p in module.parameters() if p.requires_grad],
+        "weight_decay": weight_decay,
     }
     return [module_params]
+
 
 def get_optim_group_with_no_decay(
     module: nn.Module,
@@ -115,6 +115,7 @@ def get_optim_group_with_no_decay(
     assert len(all_params) == len(set(map(id, all_params))), "Some parameters appear in more than one group"
 
     return optim_group
+
 
 class OptimGroupMixin:
     """Mixin that provides ``get_optim_groups()`` by reading class-level config.

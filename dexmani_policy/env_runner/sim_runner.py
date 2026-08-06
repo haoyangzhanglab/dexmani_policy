@@ -1,13 +1,17 @@
-import re
+from __future__ import annotations
+
 import importlib
-from typing import List, Optional, Dict, Any
+import re
+from typing import Any, Dict, List, Optional
 
 from dexmani_sim import DATA_DIR
+
 from dexmani_policy.env_runner.base_runner import BaseRunner
 
 ENV_PREFIX = "dexmani_sim.envs"
 DEFAULT_EVAL_SEED_COUNT = 100
 """Default number of evaluation seeds when no seed file is available."""
+
 
 class SimRunner(BaseRunner):
     def __init__(
@@ -36,7 +40,7 @@ class SimRunner(BaseRunner):
 
     @staticmethod
     def name_to_pascal_case(name: str) -> str:
-        return ''.join(part.capitalize() for part in re.split(r'[_\s-]+', name) if part)
+        return "".join(part.capitalize() for part in re.split(r"[_\s-]+", name) if part)
 
     @staticmethod
     def _expand_env_kwargs(env_kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,18 +58,18 @@ class SimRunner(BaseRunner):
         """
         expanded = dict(env_kwargs)
 
-        if expanded.pop('texture_random', False):
-            expanded.setdefault('use_texture_randomization', True)
-            expanded.setdefault('per_episode_skybox', True)
-            expanded.setdefault('randomize_light', True)
-            expanded.setdefault('randomize_object_texture', True)
-            expanded.setdefault('randomize_camera_pose', True)
+        if expanded.pop("texture_random", False):
+            expanded.setdefault("use_texture_randomization", True)
+            expanded.setdefault("per_episode_skybox", True)
+            expanded.setdefault("randomize_light", True)
+            expanded.setdefault("randomize_object_texture", True)
+            expanded.setdefault("randomize_camera_pose", True)
 
-        if expanded.pop('instance_random', False):
-            expanded.setdefault('randomize_model_id', True)
+        if expanded.pop("instance_random", False):
+            expanded.setdefault("randomize_model_id", True)
 
-        if expanded.pop('table_random', False):
-            expanded.setdefault('randomize_table_height', True)
+        if expanded.pop("table_random", False):
+            expanded.setdefault("randomize_table_height", True)
 
         return expanded
 
@@ -74,7 +78,7 @@ class SimRunner(BaseRunner):
         class_name = self.name_to_pascal_case(self.task_name)
         env_class = getattr(env_module, class_name, None)
         if env_class is None:
-            available = [name for name in dir(env_module) if not name.startswith('_')]
+            available = [name for name in dir(env_module) if not name.startswith("_")]
             raise AttributeError(
                 f"Environment class '{class_name}' not found in {ENV_PREFIX}.{self.task_name}. "
                 f"Task name '{self.task_name}' maps to PascalCase '{class_name}'. "
@@ -94,6 +98,7 @@ class SimRunner(BaseRunner):
         default_seeds = list(range(DEFAULT_EVAL_SEED_COUNT))
         if len(default_seeds) < self.default_eval_episodes:
             import warnings
+
             warnings.warn(
                 f"eval_episodes={self.default_eval_episodes} exceeds default seed count "
                 f"({DEFAULT_EVAL_SEED_COUNT}). Only {DEFAULT_EVAL_SEED_COUNT} "
@@ -102,4 +107,3 @@ class SimRunner(BaseRunner):
                 UserWarning,
             )
         return default_seeds
-

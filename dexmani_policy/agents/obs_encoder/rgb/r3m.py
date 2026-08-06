@@ -1,22 +1,23 @@
-import os
 import logging
+import os
+from typing import Dict, Literal, Optional, Sequence
+
 import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as T
-from typing import Dict, Literal, Optional, Sequence
 
-from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.geometry_processor import GeometryProcessor
-from dexmani_policy.agents.obs_encoder.rgb.types import NormMode
-from dexmani_policy.agents.obs_encoder.rgb.utils import (
-    flatten_batch,
-    restore_batch,
-    reshape_patch_tokens_to_map,
-)
+from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.resnet import (
     FrozenBatchNorm2d,
     replace_batch_norm_with_group_norm,
+)
+from dexmani_policy.agents.obs_encoder.rgb.types import NormMode
+from dexmani_policy.agents.obs_encoder.rgb.utils import (
+    flatten_batch,
+    reshape_patch_tokens_to_map,
+    restore_batch,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,16 +37,14 @@ _R3M_HIDDEN_DIM = {"resnet18": 512, "resnet34": 512, "resnet50": 2048}
 _R3M_IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _R3M_IMAGENET_STD = (0.229, 0.224, 0.225)
 
+
 def _download_r3m_checkpoint(model_name: str) -> str:
     """Download the R3M checkpoint to ``~/.r3m/`` if not already cached.
 
     Returns the path to the downloaded checkpoint file.
     """
     if model_name not in _R3M_URLS:
-        raise ValueError(
-            f"Unsupported R3M model: {model_name}. "
-            f"Choose from: {sorted(_R3M_URLS.keys())}"
-        )
+        raise ValueError(f"Unsupported R3M model: {model_name}. Choose from: {sorted(_R3M_URLS.keys())}")
 
     home = os.path.join(os.path.expanduser("~"), ".r3m")
     size = model_name.replace("resnet", "")
@@ -60,14 +59,12 @@ def _download_r3m_checkpoint(model_name: str) -> str:
     try:
         import gdown
     except ImportError:
-        raise ImportError(
-            "gdown is required to download R3M weights. "
-            "Install it with: pip install gdown"
-        )
+        raise ImportError("gdown is required to download R3M weights. Install it with: pip install gdown")
 
     logger.info("Downloading R3M %s weights to %s ...", model_name, ckpt_path)
     gdown.download(_R3M_URLS[model_name], ckpt_path, quiet=False)
     return ckpt_path
+
 
 def _load_r3m_convnet_state_dict(model_name: str) -> Dict[str, torch.Tensor]:
     """Load R3M checkpoint and extract the ResNet convnet state dict.
@@ -87,19 +84,15 @@ def _load_r3m_convnet_state_dict(model_name: str) -> Dict[str, torch.Tensor]:
 
     r3m_state = full_state["r3m"]
     prefix = "module.convnet."
-    convnet_state = {
-        k[len(prefix):]: v
-        for k, v in r3m_state.items()
-        if k.startswith(prefix)
-    }
+    convnet_state = {k[len(prefix) :]: v for k, v in r3m_state.items() if k.startswith(prefix)}
 
     if not convnet_state:
         raise RuntimeError(
-            f"No convnet keys found in R3M checkpoint {ckpt_path}. "
-            f"Expected keys with prefix '{prefix}'."
+            f"No convnet keys found in R3M checkpoint {ckpt_path}. Expected keys with prefix '{prefix}'."
         )
 
     return convnet_state
+
 
 class R3M(nn.Module):
     """R3M visual backbone — ResNet with Ego4D-pretrained weights.
@@ -135,8 +128,7 @@ class R3M(nn.Module):
 
         if model_name not in _R3M_HIDDEN_DIM:
             raise ValueError(
-                f"Unsupported R3M model_name: {model_name}. "
-                f"Choose from: {sorted(_R3M_HIDDEN_DIM.keys())}"
+                f"Unsupported R3M model_name: {model_name}. Choose from: {sorted(_R3M_HIDDEN_DIM.keys())}"
             )
 
         self.model_name = model_name
@@ -154,12 +146,11 @@ class R3M(nn.Module):
         convnet_state = _load_r3m_convnet_state_dict(model_name)
         missing, unexpected = backbone.load_state_dict(convnet_state, strict=False)
         if missing:
-            logger.warning("R3M %s: %d missing keys (expected fc.*): %s",
-                           model_name, len(missing), missing[:5])
-        if unexpected:
-            raise RuntimeError(
-                f"Unexpected keys in R3M {model_name} state dict: {unexpected}"
+            logger.warning(
+                "R3M %s: %d missing keys (expected fc.*): %s", model_name, len(missing), missing[:5]
             )
+        if unexpected:
+            raise RuntimeError(f"Unexpected keys in R3M {model_name} state dict: {unexpected}")
 
         if norm_mode == "group_norm":
             backbone = replace_batch_norm_with_group_norm(backbone)
@@ -232,9 +223,7 @@ class R3M(nn.Module):
         dict with keys ``"patch_tokens"`` and ``"global_token"``.
         """
         if rgb.ndim < 4 or rgb.shape[-3] != 3:
-            raise ValueError(
-                f"rgb should have shape [..., 3, H, W], got {tuple(rgb.shape)}"
-            )
+            raise ValueError(f"rgb should have shape [..., 3, H, W], got {tuple(rgb.shape)}")
 
         if self.tune_mode == "freeze":
             self.backbone.eval()
@@ -299,23 +288,19 @@ class R3M(nn.Module):
             },
         }
 
-    def patch_tokens_to_featmap(
-        self, patch_tokens: torch.Tensor, image_hw: Sequence[int]
-    ) -> torch.Tensor:
+    def patch_tokens_to_featmap(self, patch_tokens: torch.Tensor, image_hw: Sequence[int]) -> torch.Tensor:
         feature_h = (int(image_hw[0]) + self.output_stride - 1) // self.output_stride
         feature_w = (int(image_hw[1]) + self.output_stride - 1) // self.output_stride
 
-        flat_patch_tokens, leading_shape = flatten_batch(
-            patch_tokens, trailing_ndim=2
-        )
-        feature_map = reshape_patch_tokens_to_map(
-            flat_patch_tokens, (feature_h, feature_w)
-        )
+        flat_patch_tokens, leading_shape = flatten_batch(patch_tokens, trailing_ndim=2)
+        feature_map = reshape_patch_tokens_to_map(flat_patch_tokens, (feature_h, feature_w))
         return restore_batch(feature_map, leading_shape)
+
 
 # ------------------------------------------------------------------
 # Smoke test
 # ------------------------------------------------------------------
+
 
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -351,6 +336,7 @@ def example() -> None:
         print("R3M example failed.")
         print(error)
         raise
+
 
 if __name__ == "__main__":
     example()

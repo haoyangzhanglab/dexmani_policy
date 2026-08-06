@@ -1,15 +1,17 @@
-import traceback
+from __future__ import annotations
 
-import torch
+import traceback
+from typing import Any, Dict, List, Optional
+
 import numpy as np
-from typing import List, Optional, Dict, Any
+import torch
 from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import format_success_rate
 from dexmani_policy.env_runner.sim_runner import SimRunner
 
-class TaskTextSimRunner(SimRunner):
 
+class TaskTextSimRunner(SimRunner):
     def __init__(self, task_text: str, **kwargs):
         super().__init__(**kwargs)
         self.task_text = task_text
@@ -19,8 +21,8 @@ class TaskTextSimRunner(SimRunner):
         obs_batch["task_text"] = [self.task_text]
         return super().get_action_chunk(obs_batch, agent, denoise_timesteps)
 
-class MultiTaskSimRunner:
 
+class MultiTaskSimRunner:
     def __init__(
         self,
         task_configs: List[Dict[str, Any]],
@@ -43,11 +45,17 @@ class MultiTaskSimRunner:
             task_text = cfg.get("task_text")
             if task_text is None:
                 task_text = task_name
-                cprint(f"⚠️ task_text not set for {task_name}, falling back to task_name='{task_name}'. "
-                       f"Ensure this matches dataset.task_texts to avoid train/eval text embedding mismatch.", "yellow")
+                cprint(
+                    f"⚠️ task_text not set for {task_name}, falling back to task_name='{task_name}'. "
+                    f"Ensure this matches dataset.task_texts to avoid train/eval text embedding mismatch.",
+                    "yellow",
+                )
             env_kwargs = cfg.get("env_kwargs")
             if env_kwargs is None:
-                cprint(f"⚠️  task '{task_name}' has no env_kwargs set — control_mode defaults to 'joint'", "yellow")
+                cprint(
+                    f"⚠️  task '{task_name}' has no env_kwargs set — control_mode defaults to 'joint'",
+                    "yellow",
+                )
 
             self.runners[task_name] = TaskTextSimRunner(
                 task_text=task_text,
@@ -62,13 +70,16 @@ class MultiTaskSimRunner:
             )
 
     def print_summary(self, per_task, avg_success_rate, avg_steps, rates, failed_tasks):
-        cprint("\n" + "="*90, "yellow")
+        cprint("\n" + "=" * 90, "yellow")
         cprint("[Multi-Task Summary]", "yellow")
         for task_name, result in per_task.items():
             sr = result["success_rate"]
             if sr is not None:
                 sr_str = format_success_rate(sr)
-                cprint(f"  {task_name}: success_rate={sr_str}, avg_steps (success only)={result['avg_steps']}", "yellow")
+                cprint(
+                    f"  {task_name}: success_rate={sr_str}, avg_steps (success only)={result['avg_steps']}",
+                    "yellow",
+                )
             else:
                 error_type = result.get("error_type", "Unknown")
                 cprint(f"  {task_name}: FAILED - {error_type}", "red")
@@ -79,17 +90,20 @@ class MultiTaskSimRunner:
         total_sr_str = format_success_rate(avg_success_rate)
         success_count = len(rates)
         total_count = len(self.runners)
-        cprint(f"  Overall ({success_count}/{total_count} tasks): success_rate={total_sr_str}, avg_steps (success only)={avg_steps}", "yellow")
-        cprint(f"{'='*90}", "yellow")
+        cprint(
+            f"  Overall ({success_count}/{total_count} tasks): success_rate={total_sr_str}, avg_steps (success only)={avg_steps}",
+            "yellow",
+        )
+        cprint(f"{'=' * 90}", "yellow")
 
     def run(
         self,
         agent,
         denoise_timesteps: int = None,
         eval_episodes: int = None,
-        video_save_dir = None,
+        video_save_dir=None,
     ) -> Dict[str, Any]:
-        import imageio
+
         per_task: Dict[str, Any] = {}
         all_videos = []
         failed_tasks = []
@@ -98,19 +112,23 @@ class MultiTaskSimRunner:
         # select_best_ckpt.py and eval_best_ckpt.py set this attribute on the
         # MultiTaskSimRunner instance, but without this block each child
         # runner independently calls get_seed_list() with its own default.
-        parent_seeds = getattr(self, 'eval_seeds', None)
+        parent_seeds = getattr(self, "eval_seeds", None)
         for task_name, runner in self.runners.items():
             if parent_seeds is not None:
                 runner.eval_seeds = list(parent_seeds)
-            cprint(f"\n{'='*40} Evaluating task: {task_name} (text={runner.task_text}) {'='*40}", "cyan")
+            cprint(f"\n{'=' * 40} Evaluating task: {task_name} (text={runner.task_text}) {'=' * 40}", "cyan")
             # Each task gets its own sub-directory for videos
             task_video_dir = None
             if video_save_dir is not None:
                 task_video_dir = video_save_dir / task_name
                 task_video_dir.mkdir(parents=True, exist_ok=True)
             try:
-                result = runner.run(agent, denoise_timesteps=denoise_timesteps,
-                                    eval_episodes=eval_episodes, video_save_dir=task_video_dir)
+                result = runner.run(
+                    agent,
+                    denoise_timesteps=denoise_timesteps,
+                    eval_episodes=eval_episodes,
+                    video_save_dir=task_video_dir,
+                )
                 per_task[task_name] = result
                 for v in result.get("videos", []):
                     for k, arr_or_path in v.items():

@@ -50,16 +50,14 @@ class CodebookManager(nn.Module):
         if codebook_size <= 0:
             raise ValueError(f"codebook_size must be positive, got {codebook_size}")
         if hand_max <= hand_min:
-            raise ValueError(
-                f"hand_max ({hand_max}) must be larger than hand_min ({hand_min})"
-            )
+            raise ValueError(f"hand_max ({hand_max}) must be larger than hand_min ({hand_min})")
 
         self.hand_dim = int(hand_dim)
         self.num_groups = int(num_groups)
         self.codebook_size = int(codebook_size)
         self.hand_min = float(hand_min)
         self.hand_max = float(hand_max)
-        self.total_combinations = self.codebook_size ** self.num_groups
+        self.total_combinations = self.codebook_size**self.num_groups
 
         # Persistent runtime state.  These buffers are included in the policy
         # checkpoint and moved automatically by ``model.to(device)``.
@@ -68,12 +66,8 @@ class CodebookManager(nn.Module):
             torch.empty((0, self.hand_dim), dtype=torch.float32),
             persistent=True,
         )
-        self.register_buffer(
-            "pca_permutation", torch.empty((0,), dtype=torch.long), persistent=True
-        )
-        self.register_buffer(
-            "layer_weights", torch.empty((0,), dtype=torch.float32), persistent=True
-        )
+        self.register_buffer("pca_permutation", torch.empty((0,), dtype=torch.long), persistent=True)
+        self.register_buffer("layer_weights", torch.empty((0,), dtype=torch.float32), persistent=True)
         self.register_buffer(
             "hand_normalizer_scale",
             torch.empty((0,), dtype=torch.float32),
@@ -86,9 +80,7 @@ class CodebookManager(nn.Module):
         )
 
         # Extraction-only state; the latent codebooks are unnecessary at runtime.
-        self.register_buffer(
-            "codebooks", torch.empty((0,), dtype=torch.float32), persistent=False
-        )
+        self.register_buffer("codebooks", torch.empty((0,), dtype=torch.float32), persistent=False)
 
         self.artifact_metadata: dict[str, object] = {}
         self.last_export_diagnostics: dict[str, float] = {}
@@ -172,20 +164,10 @@ class CodebookManager(nn.Module):
     # ------------------------------------------------------------------
 
     def _to_raw(self, normalized: torch.Tensor) -> torch.Tensor:
-        return (
-            (normalized + 1.0)
-            * 0.5
-            * (self.hand_max - self.hand_min)
-            + self.hand_min
-        )
+        return (normalized + 1.0) * 0.5 * (self.hand_max - self.hand_min) + self.hand_min
 
     def _from_raw(self, raw: torch.Tensor) -> torch.Tensor:
-        return (
-            (raw - self.hand_min)
-            / (self.hand_max - self.hand_min)
-            * 2.0
-            - 1.0
-        )
+        return (raw - self.hand_min) / (self.hand_max - self.hand_min) * 2.0 - 1.0
 
     @property
     def is_loaded(self) -> bool:
@@ -224,12 +206,7 @@ class CodebookManager(nn.Module):
             codebook_size=vqvae.codebook_size,
         )
         mgr.codebooks = vqvae.codebooks.detach().float().cpu().clone()
-        mgr.layer_weights = (
-            torch.softmax(vqvae.vq_layer.layer_weights.detach(), dim=0)
-            .float()
-            .cpu()
-            .clone()
-        )
+        mgr.layer_weights = torch.softmax(vqvae.vq_layer.layer_weights.detach(), dim=0).float().cpu().clone()
         mgr.artifact_metadata.update(
             {
                 "hand_dim": int(vqvae.hand_dim),
@@ -268,19 +245,14 @@ class CodebookManager(nn.Module):
         if self.codebooks.numel() == 0:
             raise RuntimeError("No latent codebooks loaded; call extract_from_vqvae().")
         if self.layer_weights.numel() != self.num_groups:
-            raise RuntimeError(
-                f"Expected {self.num_groups} layer weights, got "
-                f"{self.layer_weights.numel()}"
-            )
+            raise RuntimeError(f"Expected {self.num_groups} layer weights, got {self.layer_weights.numel()}")
 
         device = next(vqvae.parameters()).device
         was_training = vqvae.training
         vqvae.eval()
 
         poses: list[torch.Tensor] = []
-        combos = list(
-            itertools.product(range(self.codebook_size), repeat=self.num_groups)
-        )
+        combos = list(itertools.product(range(self.codebook_size), repeat=self.num_groups))
         diag_acc = {
             "decoder_min": float("inf"),
             "decoder_max": float("-inf"),
@@ -294,26 +266,17 @@ class CodebookManager(nn.Module):
                 latent = torch.zeros(vqvae.latent_dim, device=device)
                 for group, code_idx in enumerate(combo):
                     latent = latent + (
-                        self.layer_weights[group].to(device)
-                        * self.codebooks[group, code_idx].to(device)
+                        self.layer_weights[group].to(device) * self.codebooks[group, code_idx].to(device)
                     )
-                hp_norm, diag = self._decode_valid_pose(
-                    vqvae, latent.unsqueeze(0)
-                )
+                hp_norm, diag = self._decode_valid_pose(vqvae, latent.unsqueeze(0))
                 hp_raw = self._to_raw(hp_norm)
                 poses.append(hp_raw)
 
-                diag_acc["decoder_min"] = min(
-                    diag_acc["decoder_min"], diag["decoder_min"]
-                )
-                diag_acc["decoder_max"] = max(
-                    diag_acc["decoder_max"], diag["decoder_max"]
-                )
+                diag_acc["decoder_min"] = min(diag_acc["decoder_min"], diag["decoder_min"])
+                diag_acc["decoder_max"] = max(diag_acc["decoder_max"], diag["decoder_max"])
                 diag_acc["outside_count"] += diag["outside_count"]
                 diag_acc["element_count"] += diag["element_count"]
-                diag_acc["max_violation"] = max(
-                    diag_acc["max_violation"], diag["max_violation"]
-                )
+                diag_acc["max_violation"] = max(diag_acc["max_violation"], diag["max_violation"])
         finally:
             vqvae.train(was_training)
 
@@ -332,21 +295,15 @@ class CodebookManager(nn.Module):
         self.pca_permutation = torch.as_tensor(permutation, dtype=torch.long)
         self.sorted_hand_poses = all_poses[self.pca_permutation]
 
-        outside_fraction = (
-            diag_acc["outside_count"] / max(diag_acc["element_count"], 1)
-        )
+        outside_fraction = diag_acc["outside_count"] / max(diag_acc["element_count"], 1)
         self.last_export_diagnostics = {
             "decoder_min_before_clamp": float(diag_acc["decoder_min"]),
             "decoder_max_before_clamp": float(diag_acc["decoder_max"]),
             "outside_fraction": float(outside_fraction),
             "max_violation": float(diag_acc["max_violation"]),
-            "pca_explained_variance_ratio": float(
-                pca.explained_variance_ratio_[0]
-            ),
+            "pca_explained_variance_ratio": float(pca.explained_variance_ratio_[0]),
         }
-        self.artifact_metadata["export_diagnostics"] = dict(
-            self.last_export_diagnostics
-        )
+        self.artifact_metadata["export_diagnostics"] = dict(self.last_export_diagnostics)
 
         if pca.explained_variance_ratio_[0] < 0.3:
             warnings.warn(
@@ -389,24 +346,16 @@ class CodebookManager(nn.Module):
             "codebook_size": np.asarray(self.codebook_size, dtype=np.int64),
             "hand_min": np.asarray(self.hand_min, dtype=np.float64),
             "hand_max": np.asarray(self.hand_max, dtype=np.float64),
-            "metadata_json": np.asarray(
-                json.dumps(self.artifact_metadata, sort_keys=True)
-            ),
+            "metadata_json": np.asarray(json.dumps(self.artifact_metadata, sort_keys=True)),
         }
         if self.layer_weights.numel() > 0:
             payload["layer_weights"] = self.layer_weights.detach().cpu().numpy()
         if self.has_hand_normalizer:
-            payload["hand_normalizer_scale"] = (
-                self.hand_normalizer_scale.detach().cpu().numpy()
-            )
-            payload["hand_normalizer_offset"] = (
-                self.hand_normalizer_offset.detach().cpu().numpy()
-            )
+            payload["hand_normalizer_scale"] = self.hand_normalizer_scale.detach().cpu().numpy()
+            payload["hand_normalizer_offset"] = self.hand_normalizer_offset.detach().cpu().numpy()
         if self._group_sorted_poses is not None:
             for group, poses in enumerate(self._group_sorted_poses):
-                payload[f"_group_sorted_poses_g{group}"] = (
-                    poses.detach().cpu().numpy()
-                )
+                payload[f"_group_sorted_poses_g{group}"] = poses.detach().cpu().numpy()
 
         np.savez(str(path), **payload)
 
@@ -419,15 +368,9 @@ class CodebookManager(nn.Module):
             with np.load(str(path), allow_pickle=False) as data:
                 keys = set(data.files)
                 version = int(data["format_version"]) if "format_version" in keys else 0
-                loaded_hand_min = (
-                    float(data["hand_min"]) if "hand_min" in keys else 0.0
-                )
-                loaded_hand_max = (
-                    float(data["hand_max"]) if "hand_max" in keys else 65535.0
-                )
-                poses = torch.from_numpy(
-                    np.asarray(data["sorted_hand_poses"], dtype=np.float32)
-                )
+                loaded_hand_min = float(data["hand_min"]) if "hand_min" in keys else 0.0
+                loaded_hand_max = float(data["hand_max"]) if "hand_max" in keys else 65535.0
+                poses = torch.from_numpy(np.asarray(data["sorted_hand_poses"], dtype=np.float32))
 
                 # Legacy v1 stored normalised poses.
                 if version == 1:
@@ -436,46 +379,26 @@ class CodebookManager(nn.Module):
                     poses = self._to_raw(poses)
                     self.hand_min, self.hand_max = old_min, old_max
 
-                declared_hand_dim = (
-                    int(data["hand_dim"]) if "hand_dim" in keys else poses.shape[-1]
-                )
-                declared_groups = (
-                    int(data["num_groups"]) if "num_groups" in keys else self.num_groups
-                )
-                declared_size = (
-                    int(data["codebook_size"])
-                    if "codebook_size" in keys
-                    else self.codebook_size
-                )
+                declared_hand_dim = int(data["hand_dim"]) if "hand_dim" in keys else poses.shape[-1]
+                declared_groups = int(data["num_groups"]) if "num_groups" in keys else self.num_groups
+                declared_size = int(data["codebook_size"]) if "codebook_size" in keys else self.codebook_size
 
                 mismatches: list[str] = []
                 if declared_hand_dim != self.hand_dim:
-                    mismatches.append(
-                        f"hand_dim expected {self.hand_dim}, got {declared_hand_dim}"
-                    )
+                    mismatches.append(f"hand_dim expected {self.hand_dim}, got {declared_hand_dim}")
                 if declared_groups != self.num_groups:
-                    mismatches.append(
-                        f"num_groups expected {self.num_groups}, got {declared_groups}"
-                    )
+                    mismatches.append(f"num_groups expected {self.num_groups}, got {declared_groups}")
                 if declared_size != self.codebook_size:
-                    mismatches.append(
-                        f"codebook_size expected {self.codebook_size}, got {declared_size}"
-                    )
+                    mismatches.append(f"codebook_size expected {self.codebook_size}, got {declared_size}")
                 if poses.ndim != 2 or poses.shape[-1] != self.hand_dim:
                     mismatches.append(
-                        "sorted_hand_poses shape expected (*, "
-                        f"{self.hand_dim}), got {tuple(poses.shape)}"
+                        f"sorted_hand_poses shape expected (*, {self.hand_dim}), got {tuple(poses.shape)}"
                     )
-                expected_codes = self.codebook_size ** self.num_groups
+                expected_codes = self.codebook_size**self.num_groups
                 if poses.shape[0] != expected_codes:
-                    mismatches.append(
-                        f"number of poses expected {expected_codes}, got {poses.shape[0]}"
-                    )
+                    mismatches.append(f"number of poses expected {expected_codes}, got {poses.shape[0]}")
                 if mismatches:
-                    raise ValueError(
-                        f"Codebook {path} is incompatible:\n  - "
-                        + "\n  - ".join(mismatches)
-                    )
+                    raise ValueError(f"Codebook {path} is incompatible:\n  - " + "\n  - ".join(mismatches))
 
                 self.hand_min = loaded_hand_min
                 self.hand_max = loaded_hand_max
@@ -496,18 +419,12 @@ class CodebookManager(nn.Module):
                         data["hand_normalizer_offset"],
                     )
                 else:
-                    self.hand_normalizer_scale = torch.empty(
-                        (0,), dtype=torch.float32
-                    )
-                    self.hand_normalizer_offset = torch.empty(
-                        (0,), dtype=torch.float32
-                    )
+                    self.hand_normalizer_scale = torch.empty((0,), dtype=torch.float32)
+                    self.hand_normalizer_offset = torch.empty((0,), dtype=torch.float32)
 
                 if "metadata_json" in keys:
                     try:
-                        self.artifact_metadata = json.loads(
-                            str(data["metadata_json"].item())
-                        )
+                        self.artifact_metadata = json.loads(str(data["metadata_json"].item()))
                     except (json.JSONDecodeError, ValueError, TypeError):
                         self.artifact_metadata = {}
 
@@ -516,19 +433,16 @@ class CodebookManager(nn.Module):
                     key = f"_group_sorted_poses_g{group}"
                     if key in keys:
                         group_poses.append(torch.from_numpy(data[key]).float())
-                self._group_sorted_poses = (
-                    group_poses if len(group_poses) == self.num_groups else None
-                )
+                self._group_sorted_poses = group_poses if len(group_poses) == self.num_groups else None
             return
 
         # Legacy official .npy format.
         poses_np = np.load(str(path), allow_pickle=False)
         poses = torch.from_numpy(np.asarray(poses_np, dtype=np.float32))
-        expected_codes = self.codebook_size ** self.num_groups
+        expected_codes = self.codebook_size**self.num_groups
         if poses.shape != (expected_codes, self.hand_dim):
             raise ValueError(
-                f"Legacy codebook shape expected {(expected_codes, self.hand_dim)}, "
-                f"got {tuple(poses.shape)}"
+                f"Legacy codebook shape expected {(expected_codes, self.hand_dim)}, got {tuple(poses.shape)}"
             )
         self.sorted_hand_poses = poses
         self.pca_permutation = torch.arange(expected_codes, dtype=torch.long)
@@ -551,17 +465,12 @@ class CodebookManager(nn.Module):
                 for code_idx in range(self.codebook_size):
                     latent = torch.zeros(vqvae.latent_dim, device=device)
                     latent = latent + (
-                        self.layer_weights[group].to(device)
-                        * self.codebooks[group, code_idx].to(device)
+                        self.layer_weights[group].to(device) * self.codebooks[group, code_idx].to(device)
                     )
-                    hp_norm, _ = self._decode_valid_pose(
-                        vqvae, latent.unsqueeze(0)
-                    )
+                    hp_norm, _ = self._decode_valid_pose(vqvae, latent.unsqueeze(0))
                     poses.append(self._to_raw(hp_norm))
                 all_group = torch.cat(poses, dim=0)
-                projection = PCA(n_components=1).fit_transform(
-                    all_group.numpy()
-                )[:, 0]
+                projection = PCA(n_components=1).fit_transform(all_group.numpy())[:, 0]
                 order = np.argsort(projection)
                 group_results.append(all_group[order])
         finally:
@@ -588,25 +497,16 @@ class CodebookManager(nn.Module):
         num_codes = self.num_codes
         clipped = continuous_index.clamp(-1.0, 1.0)
         scaled = (clipped + 1.0) * 0.5 * (num_codes - 1)
-        discrete_idx = (
-            self._nearest_integer_half_up(scaled)
-            .long()
-            .clamp(0, num_codes - 1)
-        )
+        discrete_idx = self._nearest_integer_half_up(scaled).long().clamp(0, num_codes - 1)
         poses_raw = self.sorted_hand_poses.to(continuous_index.device)
         pose_norm = self._from_raw(poses_raw[discrete_idx])
         return pose_norm, discrete_idx
 
-    def hand_pose_to_continuous_index(
-        self, hand_pose: torch.Tensor
-    ) -> torch.Tensor:
+    def hand_pose_to_continuous_index(self, hand_pose: torch.Tensor) -> torch.Tensor:
         if not self.is_loaded:
             raise RuntimeError("No runtime codebook loaded.")
         if hand_pose.shape[-1] != self.hand_dim:
-            raise ValueError(
-                f"Expected hand pose last dimension {self.hand_dim}, "
-                f"got {hand_pose.shape[-1]}"
-            )
+            raise ValueError(f"Expected hand pose last dimension {self.hand_dim}, got {hand_pose.shape[-1]}")
         lead_shape = hand_pose.shape[:-1]
         flat = hand_pose.reshape(-1, self.hand_dim).float()
         flat_raw = self._to_raw(flat)
@@ -630,9 +530,7 @@ class CodebookManager(nn.Module):
         idx = self._nearest_integer_half_up(scaled).long().clamp(0, count - 1)
         return self._from_raw(poses[idx]), idx
 
-    def hand_pose_to_group_continuous_index(
-        self, hand_pose: torch.Tensor, group: int
-    ) -> torch.Tensor:
+    def hand_pose_to_group_continuous_index(self, hand_pose: torch.Tensor, group: int) -> torch.Tensor:
         if self._group_sorted_poses is None:
             raise RuntimeError("Per-group codebooks have not been built or loaded.")
         if not 0 <= group < self.num_groups:

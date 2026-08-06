@@ -50,7 +50,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 import torch
@@ -74,9 +74,7 @@ register_resolvers()
 # Data classes
 # ---------------------------------------------------------------------------
 
-_MILESTONE_RE = re.compile(
-    r"^epoch=\d+-step=(?P<step>\d+)-milestone=(?P<pct>\d+)pct\.pt$"
-)
+_MILESTONE_RE = re.compile(r"^epoch=\d+-step=(?P<step>\d+)-milestone=(?P<pct>\d+)pct\.pt$")
 
 
 @dataclass
@@ -274,8 +272,10 @@ def select_best_checkpoint(
     # ── 1. Validate config ────────────────────────────────────────────
     validate_eval_config(cfg)
 
-    seed = eval_seed if eval_seed is not None else (
-        cfg.eval.get("seed") if hasattr(cfg, "eval") else cfg.training.get("seed", 0)
+    seed = (
+        eval_seed
+        if eval_seed is not None
+        else (cfg.eval.get("seed") if hasattr(cfg, "eval") else cfg.training.get("seed", 0))
     )
     set_seed(seed)
 
@@ -283,9 +283,7 @@ def select_best_checkpoint(
 
     # ── 2. Discover checkpoints ───────────────────────────────────────
     milestones = discover_milestone_checkpoints(exp_dir)
-    cprint(
-        f"\nDiscovered {len(milestones)} milestone checkpoint(s):", "cyan"
-    )
+    cprint(f"\nDiscovered {len(milestones)} milestone checkpoint(s):", "cyan")
     for mc in milestones:
         cprint(f"  {mc.label}", "cyan")
 
@@ -306,9 +304,7 @@ def select_best_checkpoint(
 
     # ── 4. Phase 1: initial evaluation on all checkpoints ─────────────
     cprint(
-        f"\n{'=' * 60}\n"
-        f"  Phase 1: Initial Evaluation ({initial_episodes} episodes each)\n"
-        f"{'=' * 60}",
+        f"\n{'=' * 60}\n  Phase 1: Initial Evaluation ({initial_episodes} episodes each)\n{'=' * 60}",
         "cyan",
         attrs=["bold"],
     )
@@ -320,8 +316,14 @@ def select_best_checkpoint(
         cprint(f"  Evaluating {mc.label} ...", "cyan")
         try:
             result = evaluate_checkpoint(
-                agent, env_runner, checkpoint_store,
-                mc, phase1_seeds, use_ema, denoise_steps, device,
+                agent,
+                env_runner,
+                checkpoint_store,
+                mc,
+                phase1_seeds,
+                use_ema,
+                denoise_steps,
+                device,
             )
             acc = CkptEvalAccum(ckpt=mc, seed_offset=initial_episodes)
             acc.merge(result)
@@ -333,9 +335,7 @@ def select_best_checkpoint(
         except Exception as exc:
             cprint(f"    -> SKIPPED: {exc}", "red")
             # Still add a zero-result accumulator so the table is complete
-            accumulators.append(
-                CkptEvalAccum(ckpt=mc, seed_offset=initial_episodes)
-            )
+            accumulators.append(CkptEvalAccum(ckpt=mc, seed_offset=initial_episodes))
 
     if not accumulators:
         raise RuntimeError("No checkpoints could be evaluated.")
@@ -346,7 +346,7 @@ def select_best_checkpoint(
     best_rate = max(a.success_rate for a in accumulators)
     tied = [a for a in accumulators if a.success_rate == best_rate]
 
-    skip_phase2 = (len(tied) == 1)
+    skip_phase2 = len(tied) == 1
     if skip_phase2:
         cprint(
             f"✅ Unique best after Phase 1: {tied[0].ckpt.label} "
@@ -358,8 +358,7 @@ def select_best_checkpoint(
     # ── 6. Phase 2: incremental tie-break ─────────────────────────────
     if not skip_phase2:
         cprint(
-            f"\n⚠ Tied at top ({len(tied)} checkpoints at "
-            f"{best_rate:.1%}). Running tie-break rounds...",
+            f"\n⚠ Tied at top ({len(tied)} checkpoints at {best_rate:.1%}). Running tie-break rounds...",
             "yellow",
         )
         round_num = 0
@@ -374,8 +373,7 @@ def select_best_checkpoint(
                 break
 
             cprint(
-                f"\n  Tie-break Round {round_num} (+{actual_batch} episodes "
-                f"on {len(tied)} tied ckpt(s))",
+                f"\n  Tie-break Round {round_num} (+{actual_batch} episodes on {len(tied)} tied ckpt(s))",
                 "cyan",
             )
 
@@ -383,8 +381,14 @@ def select_best_checkpoint(
                 cprint(f"    Evaluating {acc.ckpt.label} ...", "cyan")
                 try:
                     result = evaluate_checkpoint(
-                        agent, env_runner, checkpoint_store,
-                        acc.ckpt, batch_seeds, use_ema, denoise_steps, device,
+                        agent,
+                        env_runner,
+                        checkpoint_store,
+                        acc.ckpt,
+                        batch_seeds,
+                        use_ema,
+                        denoise_steps,
+                        device,
                     )
                     acc.merge(result)
                     acc.seed_offset = batch_end
@@ -403,9 +407,10 @@ def select_best_checkpoint(
 
             if len(tied) > 1:
                 cprint(
-                    f"    Still tied: "
-                    + ", ".join(f"{a.ckpt.pct}%({_format_rate(a.success_count, a.n_episodes)})"
-                                for a in tied),
+                    "    Still tied: "
+                    + ", ".join(
+                        f"{a.ckpt.pct}%({_format_rate(a.success_count, a.n_episodes)})" for a in tied
+                    ),
                     "yellow",
                 )
 
@@ -489,59 +494,83 @@ def main() -> None:
         description="Offline best-checkpoint selector via adaptive evaluation.",
     )
     parser.add_argument(
-        "--policy-name", type=str, required=True,
+        "--policy-name",
+        type=str,
+        required=True,
         help="Policy config name (e.g. dp3, maniflow).",
     )
     parser.add_argument(
-        "--task-name", type=str, required=True,
+        "--task-name",
+        type=str,
+        required=True,
         help="Task name (e.g. pour, pick_apple_messy).",
     )
     parser.add_argument(
-        "--exp-name", type=str, required=True,
+        "--exp-name",
+        type=str,
+        required=True,
         help="Experiment timestamp/name under experiments/<policy>/<task>/.",
     )
     parser.add_argument(
-        "--initial-episodes", type=int, default=None,
+        "--initial-episodes",
+        type=int,
+        default=None,
         help="Phase-1 episodes per checkpoint (default: from config eval.select_best).",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=None,
+        "--batch-size",
+        type=int,
+        default=None,
         help="Additional episodes per round in Phase 2 (default: from config).",
     )
     parser.add_argument(
-        "--max-episodes", type=int, default=None,
+        "--max-episodes",
+        type=int,
+        default=None,
         help="Hard cap on total episodes per checkpoint (default: from config).",
     )
     parser.add_argument(
-        "--denoise-steps", type=int, default=None,
+        "--denoise-steps",
+        type=int,
+        default=None,
         help="DDIM / Euler denoising steps at inference (default: from config).",
     )
     parser.add_argument(
-        "--ema", dest="use_ema", action="store_true", default=None,
+        "--ema",
+        dest="use_ema",
+        action="store_true",
+        default=None,
         help="Use EMA weights (default: from config).",
     )
     parser.add_argument(
-        "--no-ema", dest="use_ema", action="store_false",
+        "--no-ema",
+        dest="use_ema",
+        action="store_false",
         help="Use raw model weights instead of EMA.",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed",
+        type=int,
+        default=None,
         help="Eval seed override (default: from config.yaml eval.seed).",
     )
     parser.add_argument(
-        "--link-best", action="store_true",
+        "--link-best",
+        action="store_true",
         help="Symlink the best checkpoint as checkpoints/best.pt.",
     )
     parser.add_argument(
-        "overrides", nargs="*",
+        "overrides",
+        nargs="*",
         help="Optional OmegaConf dot-list overrides (merged onto config.yaml).",
     )
     args = parser.parse_args()
 
     exp_dir = (
-        Path(ROOT_DIR) / "experiments" / args.policy_name /
-        args.task_name / args.exp_name
-    ).expanduser().resolve()
+        (Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name)
+        .expanduser()
+        .resolve()
+    )
 
     if not exp_dir.is_dir():
         cprint(f"Error: experiment directory not found: {exp_dir}", "red")
@@ -561,7 +590,9 @@ def main() -> None:
 
     # ── Resolve parameters: CLI > config > hardcoded fallback ────────────
     _sb = cfg.eval.get("select_best", {}) if hasattr(cfg, "eval") else {}
-    initial_episodes = args.initial_episodes if args.initial_episodes is not None else _sb.get("initial_episodes", 25)
+    initial_episodes = (
+        args.initial_episodes if args.initial_episodes is not None else _sb.get("initial_episodes", 25)
+    )
     batch_size = args.batch_size if args.batch_size is not None else _sb.get("batch_size", 5)
     max_episodes = args.max_episodes if args.max_episodes is not None else _sb.get("max_episodes", 100)
     denoise_steps = args.denoise_steps if args.denoise_steps is not None else _sb.get("denoise_steps", 10)

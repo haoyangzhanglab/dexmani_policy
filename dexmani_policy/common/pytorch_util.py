@@ -1,11 +1,14 @@
-import random
+from __future__ import annotations
+
 import os
+import random
 from pathlib import Path
-from typing import Any, Dict, Callable, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
+
 
 def set_project_root() -> str:
     """Change cwd to the project root and return the path.
@@ -18,18 +21,19 @@ def set_project_root() -> str:
     os.chdir(root)
     return root
 
+
 def ensure_tensor(x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
     """Convert numpy array to tensor; pass through torch.Tensor unchanged."""
     if isinstance(x, torch.Tensor):
         return x
     return torch.from_numpy(x)
 
+
 def dict_apply(
-    x: Dict[str, torch.Tensor],
-    func: Callable[[torch.Tensor], torch.Tensor]
+    x: Dict[str, torch.Tensor], func: Callable[[torch.Tensor], torch.Tensor]
 ) -> Dict[str, torch.Tensor]:
 
-    result = dict()
+    result = {}
     for key, value in x.items():
         if isinstance(value, dict):
             result[key] = dict_apply(value, func)
@@ -39,6 +43,7 @@ def dict_apply(
             result[key] = func(value)
     return result
 
+
 def optimizer_to(optimizer: torch.optim.Optimizer, device: torch.device | str) -> torch.optim.Optimizer:
     """Move all tensor state in an optimizer to the given device."""
     for state in optimizer.state.values():
@@ -47,8 +52,10 @@ def optimizer_to(optimizer: torch.optim.Optimizer, device: torch.device | str) -
                 state[k] = v.to(device=device)
     return optimizer
 
+
 def format_success_rate(rate: float | None) -> str:
-    return 'N/A' if rate is None else f'{rate*100:.1f}%'
+    return "N/A" if rate is None else f"{rate * 100:.1f}%"
+
 
 def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
     out: Dict[str, float] = {}
@@ -63,6 +70,7 @@ def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
                 pass
     return out
 
+
 def compile_models(model, ema_model=None, **compile_kwargs):
     """torch.compile the backbone of *model* and optionally *ema_model*.
 
@@ -72,10 +80,11 @@ def compile_models(model, ema_model=None, **compile_kwargs):
     Keyword arguments are forwarded to :func:`torch.compile`; defaults to
     ``mode='reduce-overhead'``.
     """
-    compile_kwargs.setdefault('mode', 'reduce-overhead')
+    compile_kwargs.setdefault("mode", "reduce-overhead")
     model.compile_backbone(**compile_kwargs)
     if ema_model is not None:
         ema_model.compile_backbone(**compile_kwargs)
+
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -85,30 +94,33 @@ def set_seed(seed: int):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
+
 def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
     # Strip _orig_mod. from keys wherever it appears.
     # torch.compile on a submodule produces "child._orig_mod.param";
     # torch.compile on the top-level model produces "_orig_mod.param".
     # Both can coexist with DDP: "_orig_mod.module.param".
-    if any('_orig_mod.' in k for k in state_dict):
-        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    if any("_orig_mod." in k for k in state_dict):
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
     first_key = next(iter(state_dict.keys()))
-    is_checkpoint_ddp = first_key.startswith('module.')
+    is_checkpoint_ddp = first_key.startswith("module.")
 
     if is_checkpoint_ddp and not is_current_ddp:
         return {k.removeprefix("module."): v for k, v in state_dict.items()}
 
     elif not is_checkpoint_ddp and is_current_ddp:
-        return {f'module.{k}': v for k, v in state_dict.items()}
+        return {f"module.{k}": v for k, v in state_dict.items()}
 
     return state_dict
 
+
 def worker_init_fn(worker_id):
-    seed = torch.initial_seed() % 2 ** 32
+    seed = torch.initial_seed() % 2**32
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
 
 def create_mlp(
     in_channels: int,
@@ -128,26 +140,27 @@ def create_mlp(
         layers.append(nn.Linear(prev, out_channels))
     return nn.Sequential(*layers)
 
+
 def count_params(module) -> tuple[int, int]:
     """Return (total, trainable) parameter counts for *module*."""
     total = sum(p.numel() for p in module.parameters())
     trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
     return total, trainable
 
+
 def print_param_count(agent) -> None:
     """Pretty-print parameter counts grouped by immediate children."""
     from termcolor import cprint
 
     total, _ = count_params(agent)
-    cprint(f'[{type(agent).__name__}] Parameter Count', 'cyan', attrs=['bold'])
-    cprint(f'  Total: {total / 1e6:.2f} M', 'white')
+    cprint(f"[{type(agent).__name__}] Parameter Count", "cyan", attrs=["bold"])
+    cprint(f"  Total: {total / 1e6:.2f} M", "white")
 
     for name, child in agent.named_children():
         t, tr = count_params(child)
         frozen = t - tr
-        color = 'green' if tr > 0 else 'white'
+        color = "green" if tr > 0 else "white"
         cprint(
-            f'  {name:<20}: {t / 1e6:.2f} M  '
-            f'(trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)',
+            f"  {name:<20}: {t / 1e6:.2f} M  (trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)",
             color,
         )

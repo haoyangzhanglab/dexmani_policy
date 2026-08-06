@@ -8,13 +8,20 @@ import numpy as np
 import torch
 from termcolor import cprint
 
-from dexmani_policy.common.pytorch_util import format_success_rate
 from dexmani_policy.common.checkpoint_io import CheckpointStore
+from dexmani_policy.common.pytorch_util import format_success_rate
+
 
 def _save_json(data: Dict[str, Any], path: Path):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False,
-                  default=lambda o: o.item() if isinstance(o, np.generic) else str(o))
+        json.dump(
+            data,
+            f,
+            indent=2,
+            ensure_ascii=False,
+            default=lambda o: o.item() if isinstance(o, np.generic) else str(o),
+        )
+
 
 class SimEvaluator:
     """Offline simulation evaluator for checkpoint assessment.
@@ -29,6 +36,7 @@ class SimEvaluator:
 
     Evaluation seeds are fixed (``eval.seed: 0``) for reproducibility.
     """
+
     def __init__(
         self,
         device,
@@ -52,6 +60,7 @@ class SimEvaluator:
 
     def _load_for_inference(self, tag_or_path: str, use_ema: bool):
         from dexmani_policy.training.eval_utils import load_ckpt_for_inference
+
         path = self.checkpoint_store.resolve_path(tag_or_path)
         load_ckpt_for_inference(self.agent, self.checkpoint_store, path, use_ema)
 
@@ -66,8 +75,7 @@ class SimEvaluator:
     ) -> Dict[str, Any]:
         if not denoise_timesteps_list:
             raise ValueError(
-                "denoise_timesteps_list cannot be empty. "
-                "Please provide at least one denoise timestep value."
+                "denoise_timesteps_list cannot be empty. Please provide at least one denoise timestep value."
             )
 
         cprint(f"Loading checkpoint: {ckpt_tag_or_path} (EMA={use_ema_for_eval})", "cyan")

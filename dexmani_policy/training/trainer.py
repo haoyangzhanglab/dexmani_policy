@@ -1,16 +1,25 @@
+from __future__ import annotations
+
 import contextlib
 import time
-import traceback
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
 
-from dexmani_policy.common.pytorch_util import compile_models, optimizer_to, dict_apply, fix_state_dict, to_log_scalars
-from dexmani_policy.training.workspace import TrainWorkspace
 from dexmani_policy.common.checkpoint_io import TrainCheckpoint, build_train_params
+from dexmani_policy.common.pytorch_util import (
+    compile_models,
+    dict_apply,
+    fix_state_dict,
+    optimizer_to,
+    to_log_scalars,
+)
+from dexmani_policy.training.workspace import TrainWorkspace
+
 
 @dataclass
 class TrainLoopConfig:
@@ -19,7 +28,9 @@ class TrainLoopConfig:
     gradient_accumulation_steps: int = 1
     max_val_steps: int | None = None  # kept for utility validate() method
 
+
 MILESTONE_RATIOS: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8, 1.0)
+
 
 class Trainer:
     """Step-driven training loop with milestone checkpointing.
@@ -37,6 +48,7 @@ class Trainer:
     Supports single-GPU and DDP (via ``distributed=True``). In DDP, only rank
     0 performs logging and checkpointing.
     """
+
     def __init__(
         self,
         device,
@@ -54,10 +66,10 @@ class Trainer:
         use_compile: bool = False,
         is_main_process: bool = True,
         distributed: bool = False,
-        train_sampler = None,
+        train_sampler=None,
         num_training_steps: Optional[int] = None,
-        val_loader = None,
-        env_runner = None,
+        val_loader=None,
+        env_runner=None,
     ):
         self.device = device
 
@@ -86,7 +98,7 @@ class Trainer:
 
         self.gradient_accumulation_steps = max(1, int(train_loop_cfg.gradient_accumulation_steps))
         # Pre-compute AMP device_type string to avoid repeated str.split on every step
-        self.amp_device_type = str(self.device).split(':')[0]
+        self.amp_device_type = str(self.device).split(":")[0]
 
         self.is_main_process = is_main_process
         self.distributed = distributed
@@ -107,15 +119,13 @@ class Trainer:
         model = self.model
         if isinstance(model, DDP):
             model = model.module
-        if hasattr(model, '_orig_mod'):
+        if hasattr(model, "_orig_mod"):
             model = model._orig_mod
         return model
 
     def apply_gradient_step(self):
         if self.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.raw_model.parameters(), max_norm=self.max_grad_norm
-            )
+            torch.nn.utils.clip_grad_norm_(self.raw_model.parameters(), max_norm=self.max_grad_norm)
 
         # Layer 2 NaN protection: detect gradient NaN/Inf before optimizer.step().
         # Loss NaN (layer 1) is caught in train_one_step(), but a gradient NaN
@@ -151,7 +161,9 @@ class Trainer:
         self.raw_model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True)
 
         if self.use_ema and checkpoint.ema_model_state is not None:
-            self.ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True)
+            self.ema_model.load_state_dict(
+                fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True
+            )
 
         self.optimizer.load_state_dict(checkpoint.optimizer_state)
         self.scheduler.load_state_dict(checkpoint.scheduler_state)
@@ -159,10 +171,11 @@ class Trainer:
         # Validate num_training_steps consistency on resume: a mismatch means the
         # dataloader config changed between runs (e.g. batch_size, num_workers),
         # which silently shifts the LR schedule curve even after load_state_dict.
-        saved_steps = checkpoint.train_params.get('num_training_steps') if checkpoint.train_params else None
+        saved_steps = checkpoint.train_params.get("num_training_steps") if checkpoint.train_params else None
         current_steps = self.num_training_steps
         if saved_steps is not None and current_steps is not None and saved_steps != current_steps:
             import warnings
+
             warnings.warn(
                 f"Resume: num_training_steps mismatch — saved={saved_steps}, current={current_steps}. "
                 f"The LR schedule was originally configured for {saved_steps} total steps; "
@@ -186,10 +199,16 @@ class Trainer:
         ts = time.strftime("%Y%m%d_%H%M%S")
         filename = f"nan_debug_epoch={self.current_epoch:04d}_step={self.global_step:08d}_{ts}.pt"
         payload = {
-            "state": {"epoch": int(self.current_epoch), "global_step": int(self.global_step), "nan_loss": float(raw_loss)},
+            "state": {
+                "epoch": int(self.current_epoch),
+                "global_step": int(self.global_step),
+                "nan_loss": float(raw_loss),
+            },
             "weights": {
                 "model": fix_state_dict(self.raw_model.state_dict(), is_current_ddp=False),
-                "ema_model": fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False) if self.use_ema else None,
+                "ema_model": fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
+                if self.use_ema
+                else None,
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
             },
@@ -228,14 +247,21 @@ class Trainer:
                 when accumulating gradients.
         """
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-        loss_kwargs = {'ema_backbone': self.ema_model.action_decoder.model} if self.use_ema_teacher_for_consistency else {}
-        with torch.amp.autocast(device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16):
+        loss_kwargs = (
+            {"ema_backbone": self.ema_model.action_decoder.model}
+            if self.use_ema_teacher_for_consistency
+            else {}
+        )
+        with torch.amp.autocast(
+            device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16
+        ):
             raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         if self.distributed:
             nan_flag = torch.tensor(
                 [0 if torch.isfinite(raw_loss) else 1],
-                dtype=torch.int, device=self.device,
+                dtype=torch.int,
+                device=self.device,
             )
             dist.all_reduce(nan_flag, op=dist.ReduceOp.MAX)
             is_nan = bool(nan_flag.item())
@@ -275,15 +301,17 @@ class Trainer:
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-            loss_kwargs = {'ema_backbone': ema_backbone} if ema_backbone is not None else {}
-            with torch.amp.autocast(device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16):
+            loss_kwargs = {"ema_backbone": ema_backbone} if ema_backbone is not None else {}
+            with torch.amp.autocast(
+                device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16
+            ):
                 loss, log_dict = agent.compute_loss(batch, **loss_kwargs)
 
-            n = batch['action'].shape[0]
+            n = batch["action"].shape[0]
             loss_sum += loss.detach() * n
-            if 'loss_flow' in log_dict:
-                flow_sum += log_dict['loss_flow'].detach() * n
-                cons_sum += log_dict['loss_consistency'].detach() * n
+            if "loss_flow" in log_dict:
+                flow_sum += log_dict["loss_flow"].detach() * n
+                cons_sum += log_dict["loss_consistency"].detach() * n
                 has_components = True
             count += n
 
@@ -320,9 +348,12 @@ class Trainer:
             raise  # OOM is fatal — training cannot continue, do not swallow
         except Exception as e:
             import traceback
+
             traceback.print_exc()
-            print(f"[WARNING] Evaluation failed at epoch={self.current_epoch}, "
-                  f"step={self.global_step}: {type(e).__name__}: {e}.")
+            print(
+                f"[WARNING] Evaluation failed at epoch={self.current_epoch}, "
+                f"step={self.global_step}: {type(e).__name__}: {e}."
+            )
             return {"eval/error": str(e)}
         success_rate = result["success_rate"]
         metrics = {
@@ -349,8 +380,9 @@ class Trainer:
         cause re-saving at incorrect steps, and resumed training at exactly the
         final step correctly skips all milestones.
         """
-        return {ratio for ratio in MILESTONE_RATIOS
-                if self.global_step >= int(self.total_train_steps * ratio)}
+        return {
+            ratio for ratio in MILESTONE_RATIOS if self.global_step >= int(self.total_train_steps * ratio)
+        }
 
     def _save_milestone_checkpoint(self, epoch: int, global_step: int, ratio: float):
         """Save a milestone checkpoint and point ``latest.pt`` at it.
@@ -362,7 +394,9 @@ class Trainer:
             epoch=epoch,
             global_step=global_step,
             model_state=fix_state_dict(checkpoint_model.state_dict(), is_current_ddp=False),
-            ema_model_state=fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False) if self.use_ema else None,
+            ema_model_state=fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
+            if self.use_ema
+            else None,
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             monitor={},
@@ -392,13 +426,13 @@ class Trainer:
                 break
 
     def on_epoch_start(self, epoch: int):
-        if hasattr(self.train_loader.dataset, 'set_epoch'):
+        if hasattr(self.train_loader.dataset, "set_epoch"):
             self.train_loader.dataset.set_epoch(epoch)
-        if hasattr(self.model, 'set_epoch'):
+        if hasattr(self.model, "set_epoch"):
             self.model.set_epoch(epoch)
 
     def train(self, resume_tag: str = "latest", resume_state=None):
-        torch.set_float32_matmul_precision('high')
+        torch.set_float32_matmul_precision("high")
 
         if resume_state is not None:
             global_step, start_epoch = resume_state
@@ -425,8 +459,11 @@ class Trainer:
         epoch = start_epoch
         if self.is_main_process:
             step_pbar = tqdm(
-                initial=global_step, total=self.total_train_steps,
-                desc="Steps", position=0, mininterval=1.0,
+                initial=global_step,
+                total=self.total_train_steps,
+                desc="Steps",
+                position=0,
+                mininterval=1.0,
             )
 
         while global_step < self.total_train_steps:
@@ -462,7 +499,7 @@ class Trainer:
                         for key, value in to_log_scalars(log_dict).items():
                             step_metrics[f"train/{key}"] = value
 
-                        if hasattr(step_pbar, 'set_postfix'):
+                        if hasattr(step_pbar, "set_postfix"):
                             step_pbar.set_postfix(
                                 step=global_step,
                                 loss=step_metrics.get("train/loss", None),
@@ -479,5 +516,5 @@ class Trainer:
             self.model.eval()
             epoch += 1
 
-        if self.is_main_process and hasattr(step_pbar, 'close'):
+        if self.is_main_process and hasattr(step_pbar, "close"):
             step_pbar.close()

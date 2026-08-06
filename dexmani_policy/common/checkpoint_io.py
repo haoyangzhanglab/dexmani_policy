@@ -36,16 +36,16 @@ def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
     keys stays consistent.
     """
     params = {
-        'n_obs_steps': model.n_obs_steps,
-        'n_action_steps': model.n_action_steps,
-        'action_dim': model.action_dim,
-        'horizon': model.horizon,
-        'action_key': getattr(model, 'action_key', 'action'),
-        'tcp_dim': getattr(model, 'tcp_dim', None),
-        'use_faas': getattr(model, 'use_faas', False),
-        'hand_dim': getattr(model, 'hand_dim', None),
-        'control_action_dim': model.control_action_dim,
-        'num_training_steps': num_training_steps,
+        "n_obs_steps": model.n_obs_steps,
+        "n_action_steps": model.n_action_steps,
+        "action_dim": model.action_dim,
+        "horizon": model.horizon,
+        "action_key": getattr(model, "action_key", "action"),
+        "tcp_dim": getattr(model, "tcp_dim", None),
+        "use_faas": getattr(model, "use_faas", False),
+        "hand_dim": getattr(model, "hand_dim", None),
+        "control_action_dim": model.control_action_dim,
+        "num_training_steps": num_training_steps,
     }
 
     return params
@@ -84,9 +84,7 @@ class CheckpointStore:
     def load(self, path: Path) -> TrainCheckpoint:
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         if payload.get("_format") != "simple.v1":
-            raise RuntimeError(
-                f"Unsupported checkpoint format: {payload.get('_format')!r}"
-            )
+            raise RuntimeError(f"Unsupported checkpoint format: {payload.get('_format')!r}")
         state = payload["state"]
         weights = payload["weights"]
         return TrainCheckpoint(
@@ -109,17 +107,11 @@ class CheckpointStore:
             else:
                 checkpoints = list(self.checkpoint_dir.glob("epoch=*.pt"))
                 if not checkpoints:
-                    raise FileNotFoundError(
-                        f"No checkpoint found in {self.checkpoint_dir}"
-                    )
-                checkpoints.sort(
-                    key=self._parse_ckpt_score, reverse=True
-                )
+                    raise FileNotFoundError(f"No checkpoint found in {self.checkpoint_dir}")
+                checkpoints.sort(key=self._parse_ckpt_score, reverse=True)
                 path = checkpoints[0]
             if path is None:
-                raise FileNotFoundError(
-                    f"No best checkpoint found in {self.checkpoint_dir}"
-                )
+                raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
         else:
             path = Path(tag_or_path)
             if not path.is_absolute():
@@ -165,10 +157,7 @@ class TopKCheckpointTracker:
                 payload = json.load(file)
             if payload.get("monitor_key") != self.monitor_key:
                 return {}
-            return {
-                str(name): float(score)
-                for name, score in payload.get("scores", {}).items()
-            }
+            return {str(name): float(score) for name, score in payload.get("scores", {}).items()}
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
 

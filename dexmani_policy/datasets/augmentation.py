@@ -5,6 +5,7 @@ import torchvision.transforms.v2 as v2
 _BT601_LUMA = (0.299, 0.587, 0.114)
 """BT.601 luma coefficients for RGB-to-grayscale conversion."""
 
+
 class Aug:
     """Prob-gated augmentation base.
 
@@ -18,7 +19,7 @@ class Aug:
     and makes a single ``.copy()`` before the first trigger.
     """
 
-    __slots__ = ('prob',)
+    __slots__ = ("prob",)
 
     def __init__(self, prob=1.0):
         self.prob = prob
@@ -26,6 +27,7 @@ class Aug:
     def _augment(self, x):
         """Modify *x* **in-place**.  Caller guarantees *x* is a detached copy."""
         raise NotImplementedError
+
 
 class PointColorJitter(Aug):
     """HSV color jitter for point cloud RGB channels (last 3 dims).
@@ -38,15 +40,14 @@ class PointColorJitter(Aug):
     on a pre-copied array.
     """
 
-    __slots__ = ('brightness', 'contrast', 'saturation', 'hue')
+    __slots__ = ("brightness", "contrast", "saturation", "hue")
 
-    def __init__(self, brightness=0.125, contrast=0.5, saturation=0.5, hue=0.08,
-                 prob=1.0):
+    def __init__(self, brightness=0.125, contrast=0.5, saturation=0.5, hue=0.08, prob=1.0):
         super().__init__(prob=prob)
         self.brightness = self._make_range(brightness, center=0.0, symmetric=True)
-        self.contrast   = self._make_range(contrast,   center=1.0)
+        self.contrast = self._make_range(contrast, center=1.0)
         self.saturation = self._make_range(saturation, center=1.0)
-        self.hue        = self._make_range(hue,        center=0.0, symmetric=True)
+        self.hue = self._make_range(hue, center=0.0, symmetric=True)
 
     @staticmethod
     def _make_range(value, center, symmetric=False):
@@ -143,15 +144,22 @@ class PointColorJitter(Aug):
         t = v * (1.0 - s * (1.0 - f))
 
         rgb = np.zeros_like(hsv)
-        for idx, (r_src, g_src, b_src) in enumerate([
-            (v, t, p), (q, v, p), (p, v, t),
-            (p, q, v), (t, p, v), (v, p, q),
-        ]):
+        for idx, (r_src, g_src, b_src) in enumerate(
+            [
+                (v, t, p),
+                (q, v, p),
+                (p, v, t),
+                (p, q, v),
+                (t, p, v),
+                (v, p, q),
+            ]
+        ):
             mask = i == idx
             rgb[mask, 0] = r_src[mask]
             rgb[mask, 1] = g_src[mask]
             rgb[mask, 2] = b_src[mask]
         return rgb
+
 
 class PointDropout(Aug):
     """Random point dropout with replacement — simulates sparse or partial scans.
@@ -164,7 +172,7 @@ class PointDropout(Aug):
     **in-place** on a pre-copied input.
     """
 
-    __slots__ = ('dropout_ratio',)
+    __slots__ = ("dropout_ratio",)
 
     def __init__(self, dropout_ratio=0.3, prob=1.0):
         super().__init__(prob=prob)
@@ -184,10 +192,11 @@ class PointDropout(Aug):
 
             keep_mask = np.ones(N, dtype=bool)
             keep_mask[drop_idx] = False
-            keep_idx = all_idx[keep_mask]       # O(N) — no sort
+            keep_idx = all_idx[keep_mask]  # O(N) — no sort
 
             fill_idx = np.random.choice(keep_idx, size=n_drop, replace=True)
             x[t, drop_idx] = x[t, fill_idx]
+
 
 class PointCoordNoiseAug(Aug):
     """Clipped Gaussian noise on ALL point XYZ coordinates (R3D-Policy, 2026).
@@ -203,7 +212,7 @@ class PointCoordNoiseAug(Aug):
     Modifies the first 3 channels **in-place** on a pre-copied input.
     """
 
-    __slots__ = ('noise_std', 'clip_range')
+    __slots__ = ("noise_std", "clip_range")
 
     def __init__(self, noise_std=0.002, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
@@ -222,6 +231,7 @@ class PointCoordNoiseAug(Aug):
             noise = np.clip(noise, -self.clip_range, self.clip_range)
             x[t, :, :3] += noise.astype(dtype)
 
+
 class PointColorNoiseAug(Aug):
     """Per-channel independent Gaussian noise on point cloud RGB.
 
@@ -237,7 +247,7 @@ class PointColorNoiseAug(Aug):
     Requires C >= 6 (xyz + rgb); silently returns for coord-only point clouds.
     """
 
-    __slots__ = ('noise_std', 'clip_range')
+    __slots__ = ("noise_std", "clip_range")
 
     def __init__(self, noise_std=0.01, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
@@ -252,6 +262,7 @@ class PointColorNoiseAug(Aug):
         noise = np.clip(noise, -self.clip_range, self.clip_range)
         rgb += noise.astype(x.dtype)
         np.clip(rgb, 0.0, 1.0, out=rgb)
+
 
 class StateNoiseAug(Aug):
     """Clipped Gaussian noise on proprioceptive state.
@@ -270,7 +281,7 @@ class StateNoiseAug(Aug):
     Modifies the array **in-place** on a pre-copied input.
     """
 
-    __slots__ = ('noise_std', 'clip_range')
+    __slots__ = ("noise_std", "clip_range")
 
     def __init__(self, noise_std=0.0002, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
@@ -281,6 +292,7 @@ class StateNoiseAug(Aug):
         noise = np.random.normal(0, self.noise_std, x.shape)
         noise = np.clip(noise, -self.clip_range, self.clip_range)
         x += noise.astype(x.dtype)
+
 
 class ImageAug:
     """Color + blur + noise for pre-resized float32 CHW tensors (no numpy roundtrip).
@@ -293,8 +305,7 @@ class ImageAug:
     kernel launches.
     """
 
-    __slots__ = ('prob', 'color_jitter', 'grayscale', 'noise', 'noise_prob',
-                 'blur', 'blur_prob')
+    __slots__ = ("prob", "color_jitter", "grayscale", "noise", "noise_prob", "blur", "blur_prob")
 
     def __init__(
         self,
@@ -313,8 +324,10 @@ class ImageAug:
         self.prob = prob
 
         self.color_jitter = v2.ColorJitter(
-            brightness=brightness, contrast=contrast,
-            saturation=saturation, hue=hue,
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            hue=hue,
         )
         self.grayscale = v2.RandomGrayscale(p=grayscale_prob) if grayscale_prob > 0 else None
 

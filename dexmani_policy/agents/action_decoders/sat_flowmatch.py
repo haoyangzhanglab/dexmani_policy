@@ -58,7 +58,7 @@ class SATFlowMatch(FlowMatch):
         loss_dict = {
             "loss": loss,
             "loss_action": loss,
-            "pred_v_magnitude": torch.sqrt(torch.mean(pred_v ** 2)),
+            "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
         }
         return loss, loss_dict
 
@@ -84,7 +84,6 @@ class SATFlowMatch(FlowMatch):
             v = self.model(x=x, timestep=ti, context=cond, shuffle=False)
             x = x + v * dt
 
-        assert torch.isfinite(x).all(), \
-            f"NaN/Inf in SATFlowMatch ODE output after {denoise_timesteps} steps"
+        assert torch.isfinite(x).all(), f"NaN/Inf in SATFlowMatch ODE output after {denoise_timesteps} steps"
 
         return x

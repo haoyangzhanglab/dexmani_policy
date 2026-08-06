@@ -1,4 +1,5 @@
 import os
+
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from dataclasses import dataclass
@@ -12,17 +13,19 @@ from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed, worker_init_fn
 
 ROOT_DIR = set_project_root()
+from omegaconf import OmegaConf
+
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
-    validate_config,
     compute_num_training_steps,
+    validate_config,
 )
-from omegaconf import OmegaConf
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
+
 
 @dataclass
 class TrainingComponents:
@@ -30,6 +33,7 @@ class TrainingComponents:
 
     Returned by :func:`build_train_components` and consumed by :func:`main`.
     """
+
     device: torch.device
     model: torch.nn.Module
     ema_model: Optional[torch.nn.Module]
@@ -41,6 +45,7 @@ class TrainingComponents:
     workspace: Any
     env_runner: Optional[Any]
     num_training_steps: int
+
 
 def build_train_components(cfg):
     if not torch.cuda.is_available():
@@ -76,6 +81,7 @@ def build_train_components(cfg):
         num_training_steps=num_training_steps,
     )
 
+
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     validate_config(cfg)
@@ -95,12 +101,13 @@ def main(cfg):
         workspace=comp.workspace,
         train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
-        max_grad_norm=cfg.training.get('max_grad_norm', 1.0),
-        use_bfloat16=cfg.training.get('use_bfloat16', False),
-        use_compile=cfg.training.get('use_compile', False),
+        max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
+        use_bfloat16=cfg.training.get("use_bfloat16", False),
+        use_compile=cfg.training.get("use_compile", False),
         num_training_steps=comp.num_training_steps,
     )
     trainer.train(resume_tag="latest")
+
 
 if __name__ == "__main__":
     main()

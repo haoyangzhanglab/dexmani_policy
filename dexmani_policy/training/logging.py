@@ -1,14 +1,17 @@
-import os
-import json
 import atexit
-import numpy as np
+import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import numpy as np
+
 os.environ.setdefault("WANDB_SILENT", "true")
+
 
 def is_video_key(key: Any) -> bool:
     return "video" in str(key).lower()
+
 
 class JsonlLogger:
     def __init__(self, output_dir: Path, filename: str = "metrics.jsonl"):
@@ -34,6 +37,7 @@ class JsonlLogger:
         finally:
             self.file = None
 
+
 class WandbLogger:
     def __init__(
         self,
@@ -50,6 +54,7 @@ class WandbLogger:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         import wandb
+
         self._wandb = wandb
         self.run = wandb.init(
             dir=str(self.output_dir),
@@ -98,4 +103,3 @@ class WandbLogger:
             pass
         finally:
             self.run = None
-

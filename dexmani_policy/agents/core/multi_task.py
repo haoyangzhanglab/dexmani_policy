@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
-from dexmani_policy.agents.core.base import BaseAgent
-from dexmani_policy.agents.core.dp import DPObsEncoder
-from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
+
 from dexmani_policy.agents.action_decoders.backbone.dit import DiTDiffusion
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.action_decoders.flowmatch import FlowMatch
+from dexmani_policy.agents.core.base import BaseAgent
+from dexmani_policy.agents.core.dp import DPObsEncoder
+from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
+
 
 class MultiTaskAgent(BaseAgent):
     """Multi-task agent: RGB + joint_state + natural language task_text → DiT backbone.
@@ -57,10 +59,12 @@ class MultiTaskAgent(BaseAgent):
         # text embedding cache (optional)
         task_texts: list = None,
     ):
-        assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip", "r3m"), \
+        assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip", "r3m"), (
             f"rgb_backbone_name must be one of resnet/clip/dino/siglip/r3m, got {rgb_backbone_name}"
-        assert action_decoder_type in ("diffusion", "flowmatch"), \
+        )
+        assert action_decoder_type in ("diffusion", "flowmatch"), (
             f"action_decoder_type must be 'diffusion' or 'flowmatch', got {action_decoder_type}"
+        )
 
         text_encoder = CLIPTextEncoder(model_name=text_encoder_model)
         obs_encoder = DPObsEncoder(
@@ -105,8 +109,12 @@ class MultiTaskAgent(BaseAgent):
             )
 
         super().__init__(
-            obs_encoder, action_decoder, horizon,
-            n_obs_steps, n_action_steps, action_dim,
+            obs_encoder,
+            action_decoder,
+            horizon,
+            n_obs_steps,
+            n_action_steps,
+            action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
 
@@ -151,6 +159,7 @@ class MultiTaskAgent(BaseAgent):
             groups.append({"params": [self.text_proj.bias], "weight_decay": 0.0, "lr": lr})
         return groups
 
+
 def example():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     B, T, H, A = 2, 2, 16, 19
@@ -160,9 +169,16 @@ def example():
     agent = MultiTaskAgent(
         rgb_backbone_name="resnet",
         state_dim=A,
-        n_emb=128, num_heads=4, n_layers=2, mlp_ratio=2.0,
-        num_training_steps=10, num_inference_steps=3,
-        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
+        n_emb=128,
+        num_heads=4,
+        n_layers=2,
+        mlp_ratio=2.0,
+        num_training_steps=10,
+        num_inference_steps=3,
+        horizon=H,
+        n_obs_steps=T,
+        n_action_steps=8,
+        action_dim=A,
     ).to(device)
 
     obs = {
@@ -180,6 +196,7 @@ def example():
     print(f"merged_cond shape: {merged.shape}")
 
     from dexmani_policy.common.normalizer import LinearNormalizer
+
     normalizer = LinearNormalizer()
     normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")
     agent.load_normalizer_from_dataset(normalizer)
@@ -196,14 +213,17 @@ def example():
     loss, loss_dict = agent.compute_loss(batch)
     print(f"loss: {loss.item():.4f}  keys={list(loss_dict.keys())}")
 
-    result = agent.predict_action({
-        "rgb": obs["rgb"].reshape(B, T, 3, 224, 224),
-        "joint_state": obs["joint_state"].reshape(B, T, A),
-        "task_text": task_texts,
-    })
+    result = agent.predict_action(
+        {
+            "rgb": obs["rgb"].reshape(B, T, 3, 224, 224),
+            "joint_state": obs["joint_state"].reshape(B, T, A),
+            "task_text": task_texts,
+        }
+    )
     print(f"pred_action: {result['pred_action'].shape}")
     print(f"control_action: {result['control_action'].shape}")
     print("=== MultiTaskAgent PASSED ===")
+
 
 if __name__ == "__main__":
     example()

@@ -1,25 +1,28 @@
-import os
 import atexit
-from pathlib import Path
-from omegaconf import OmegaConf
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
+from omegaconf import OmegaConf
+
+from dexmani_policy.common.checkpoint_io import (
+    CheckpointStore,
+    TopKCheckpointTracker,
+    TrainCheckpoint,
+)
 from dexmani_policy.training.logging import (
     JsonlLogger,
     WandbLogger,
 )
-from dexmani_policy.common.checkpoint_io import (
-    TrainCheckpoint,
-    CheckpointStore,
-    TopKCheckpointTracker,
-)
+
 
 @dataclass
 class CheckpointConfig:
     monitor_key: str
     mode: str
     topk: int
+
 
 @dataclass
 class WandbConfig:
@@ -31,13 +34,9 @@ class WandbConfig:
     mode: str
     video_fps: int = 15
 
+
 class TrainWorkspace:
-    def __init__(
-        self,
-        output_dir: str,
-        wandb_cfg: WandbConfig,
-        checkpoint_cfg: CheckpointConfig
-    ):
+    def __init__(self, output_dir: str, wandb_cfg: WandbConfig, checkpoint_cfg: CheckpointConfig):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir = self.output_dir / "checkpoints"
@@ -60,7 +59,7 @@ class TrainWorkspace:
             id=wandb_cfg.id,
             resume=wandb_cfg.resume,
             mode=wandb_cfg.mode,
-            video_fps=wandb_cfg.video_fps
+            video_fps=wandb_cfg.video_fps,
         )
 
         self._closed = False
@@ -105,4 +104,3 @@ class TrainWorkspace:
         self._closed = True
         self.json_logger.close()
         self.wandb_logger.close()
-

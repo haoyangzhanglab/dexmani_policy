@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import warnings
 from typing import Any, Dict
 
@@ -10,6 +12,7 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.action_decoders.flowmatch import FlowMatchWithConsistency
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.common.normalizer import LinearNormalizer
+
 
 class BaseAgent(nn.Module):
     def __init__(
@@ -46,8 +49,8 @@ class BaseAgent(nn.Module):
         ``horizon``) and corrupted DataLoader outputs at the earliest
         possible point, before normalisation or encoder forward.
         """
-        action = batch.get('action')
-        obs = batch.get('obs', {})
+        action = batch.get("action")
+        obs = batch.get("obs", {})
 
         if action is not None:
             if action.ndim != 3:
@@ -99,9 +102,7 @@ class BaseAgent(nn.Module):
 
         if len(batch_sizes) > 1:
             shapes = {k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)}
-            raise ValueError(
-                f"Observation batch-size mismatch across modalities: {shapes}"
-            )
+            raise ValueError(f"Observation batch-size mismatch across modalities: {shapes}")
 
         if expected_batch is not None and batch_sizes:
             obs_b = next(iter(batch_sizes))
@@ -121,9 +122,8 @@ class BaseAgent(nn.Module):
         # precision drift (±1e-7) that would trigger ValueError in
         # Uni3DPointcloudEncoder.PositionEmbeddingRandom (requires [-1, 1]).
         # Mirrors the defensive clamp from R3D-Policy.
-        if 'point_cloud' in obs:
-            obs['point_cloud'] = torch.clamp(
-                obs['point_cloud'], min=-1 - 1e-6, max=1 + 1e-6)
+        if "point_cloud" in obs:
+            obs["point_cloud"] = torch.clamp(obs["point_cloud"], min=-1 - 1e-6, max=1 + 1e-6)
         result = {}
         for k, v in obs.items():
             if torch.is_tensor(v):
@@ -131,7 +131,7 @@ class BaseAgent(nn.Module):
                 if self.training and p > 0 and k in self.normalizer.params_dict:
                     mask = torch.rand(v.shape[0], device=v.device) > p
                     v = v * mask.view(-1, *([1] * (v.ndim - 1)))
-                v = v[:, :self.n_obs_steps].flatten(0, 1)
+                v = v[:, : self.n_obs_steps].flatten(0, 1)
             result[k] = v
         if self.training:
             for k, p in self.modality_dropout_probs.items():
@@ -160,18 +160,19 @@ class BaseAgent(nn.Module):
 
     def compute_loss(self, batch, **kwargs):
         self._validate_batch(batch)
-        cond, aux = self._build_cond(batch['obs'])
-        normed_actions = self.normalizer['action'].normalize(batch['action'])
+        cond, aux = self._build_cond(batch["obs"])
+        normed_actions = self.normalizer["action"].normalize(batch["action"])
         if not torch.isfinite(normed_actions).all():
             nan_count = (~torch.isfinite(normed_actions)).sum().item()
-            raw = batch['action']
+            raw = batch["action"]
             raise ValueError(
                 f"NaN/Inf in normalized actions ({nan_count}/{normed_actions.numel()} "
                 f"elements). Raw action stats: min={raw.min():.4f} max={raw.max():.4f} "
                 f"mean={raw.mean():.4f}. Check normalizer, Zarr data, or data pipeline."
             )
         action_loss, loss_dict = self.action_decoder.compute_loss(
-            cond, normed_actions, dim_groups=self._get_dim_groups(), **kwargs)
+            cond, normed_actions, dim_groups=self._get_dim_groups(), **kwargs
+        )
         return self._merge_aux_loss(action_loss, loss_dict, aux)
 
     def _merge_aux_loss(self, action_loss, loss_dict, aux):
@@ -181,22 +182,22 @@ class BaseAgent(nn.Module):
         warnings.  The default implementation silently returns
         ``(action_loss, loss_dict)`` when *aux* contains no ``'loss'`` key.
         """
-        aux_loss = aux.get('loss')
+        aux_loss = aux.get("loss")
         if aux_loss is None:
             return action_loss, loss_dict
 
         total = action_loss + aux_loss
-        loss_dict['loss'] = total
+        loss_dict["loss"] = total
         # Preserve per-group loss_action if the action decoder already set it
         # (e.g. via dim_groups); otherwise use the raw action loss.
-        loss_dict['loss_action'] = loss_dict.get('loss_action', action_loss)
+        loss_dict["loss_action"] = loss_dict.get("loss_action", action_loss)
         for k, v in aux.items():
-            if k == 'loss':
+            if k == "loss":
                 continue
             # Log scalar aux values; skip multi-element tensors
             # (e.g. router_probs / dispatch) that can't be logged.
             if not torch.is_tensor(v) or v.numel() <= 1:
-                loss_dict[f'aux_{k}'] = v
+                loss_dict[f"aux_{k}"] = v
         return total, loss_dict
 
     @torch.no_grad()
@@ -206,7 +207,7 @@ class BaseAgent(nn.Module):
         # normalizer (which was fitted on FAAS data) sees it.  Skipped when
         # called from compute_loss (training) because the dataset already
         # outputs FAAS-dim data.
-        if getattr(self, 'use_faas', False):
+        if getattr(self, "use_faas", False):
             obs_dict = self._convert_obs_to_faas(obs_dict)
         cond, _ = self._build_cond(obs_dict)
         return self.predict_action_from_cond(cond, denoise_timesteps)
@@ -222,17 +223,17 @@ class BaseAgent(nn.Module):
         ``joint_state`` arm is **always 7D** arm joint angles, regardless of
         ``action_key``.  The action's ``tcp_dim`` is irrelevant here.
         """
-        if 'joint_state' not in obs_dict:
+        if "joint_state" not in obs_dict:
             return obs_dict
-        js = obs_dict['joint_state']
-        native_hand_dim = getattr(self.faas_mapper, 'NATIVE_HAND_DIM', 12)
+        js = obs_dict["joint_state"]
+        native_hand_dim = getattr(self.faas_mapper, "NATIVE_HAND_DIM", 12)
         # Only convert if native-dim; skip if already FAAS
         if js.shape[-1] != 7 + native_hand_dim:  # 19
             return obs_dict
-        arm_state = js[..., :7]          # STATE_ARM_DIM = 7 (fixed)
+        arm_state = js[..., :7]  # STATE_ARM_DIM = 7 (fixed)
         hand_state = js[..., 7:]
         faas_hand = self.faas_mapper.native_to_faas(hand_state)
-        return {**obs_dict, 'joint_state': torch.cat([arm_state, faas_hand], dim=-1)}
+        return {**obs_dict, "joint_state": torch.cat([arm_state, faas_hand], dim=-1)}
 
     @property
     def control_action_dim(self):
@@ -245,37 +246,40 @@ class BaseAgent(nn.Module):
         Override in subclasses (e.g. R3DAgent) to return only the primary
         (joint) dims when auxiliary heads are present.
         """
-        if getattr(self, 'use_faas', False):
-            return self.tcp_dim + getattr(self.faas_mapper, 'NATIVE_HAND_DIM', 12)
+        if getattr(self, "use_faas", False):
+            return self.tcp_dim + getattr(self.faas_mapper, "NATIVE_HAND_DIM", 12)
         return self.action_dim
 
     @torch.no_grad()
     def predict_action_from_cond(self, cond, denoise_timesteps=None):
         template = torch.zeros(
-            cond.shape[0], self.horizon, self.action_dim,
-            device=cond.device, dtype=cond.dtype,
+            cond.shape[0],
+            self.horizon,
+            self.action_dim,
+            device=cond.device,
+            dtype=cond.dtype,
         )
         pred = self.action_decoder.predict_action(cond, template, denoise_timesteps)
-        pred = self.normalizer['action'].unnormalize(pred)
+        pred = self.normalizer["action"].unnormalize(pred)
 
         # FAAS: convert the entire prediction from FAAS back to native
         # joint space so that pred_action / control_action / tail are all
         # native-dim and can be consumed directly by temporal ensembling
         # (which uses pred_action) and env.step (which uses control_action).
-        if getattr(self, 'use_faas', False):
+        if getattr(self, "use_faas", False):
             pred = self.faas_mapper.inverse_transform_action(pred, self.tcp_dim)
 
         start = self.n_obs_steps - 1
-        control_action = pred[:, start:start + self.n_action_steps]
+        control_action = pred[:, start : start + self.n_action_steps]
         # Unexecuted tail for temporal ensembling (ACT, Zhao et al. 2023).
-        tail = pred[:, start + self.n_action_steps:]
+        tail = pred[:, start + self.n_action_steps :]
         if self.control_action_dim != self.action_dim:
-            control_action = control_action[..., :self.control_action_dim]
-            tail = tail[..., :self.control_action_dim]
+            control_action = control_action[..., : self.control_action_dim]
+            tail = tail[..., : self.control_action_dim]
         return {
-            'pred_action': pred,
-            'control_action': control_action,
-            'tail': tail,
+            "pred_action": pred,
+            "control_action": control_action,
+            "tail": tail,
         }
 
     @torch.no_grad()
@@ -284,23 +288,21 @@ class BaseAgent(nn.Module):
         gt_action = batch["action"]
         # FAAS: gt_action from dataset is FAAS-dim; inverse-transform to
         # native so it matches the native pred_action from predict_action.
-        if getattr(self, 'use_faas', False):
+        if getattr(self, "use_faas", False):
             gt_action = self.faas_mapper.inverse_transform_action(gt_action, self.tcp_dim)
         pred_action = self.predict_action(obs)["pred_action"]
         return torch.nn.functional.mse_loss(pred_action, gt_action).item()
 
     def compile_backbone(self, **compile_kwargs):
-        self.action_decoder.model = torch.compile(
-            self.action_decoder.model, **compile_kwargs
-        )
+        self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
 
     def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
         action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
         for g in action_groups:
-            g['lr'] = lr
+            g["lr"] = lr
         obs_groups = get_optim_group_with_no_decay(self.obs_encoder, weight_decay=obs_wd)
         for g in obs_groups:
-            g['lr'] = obs_lr
+            g["lr"] = obs_lr
         return action_groups + obs_groups
 
     def _check_params_in_optimizer(self, optimizer: torch.optim.Optimizer):
@@ -308,7 +310,7 @@ class BaseAgent(nn.Module):
         model_param_ids = {id(p) for p in self.parameters() if p.requires_grad}
         optim_param_ids = set()
         for group in optimizer.param_groups:
-            for p in group['params']:
+            for p in group["params"]:
                 optim_param_ids.add(id(p))
 
         missing_ids = model_param_ids - optim_param_ids
@@ -316,30 +318,37 @@ class BaseAgent(nn.Module):
             missing_params = [p for p in self.parameters() if id(p) in missing_ids]
             param_info = []
             for p in missing_params:
-                name = next((n for n, pp in self.named_parameters() if pp is p), '?')
+                name = next((n for n, pp in self.named_parameters() if pp is p), "?")
                 param_info.append(f"  {name}: shape={tuple(p.shape)}, device={p.device}")
             warnings.warn(
                 f"The following {len(missing_ids)} trainable parameter(s) are NOT "
-                f"tracked by the optimizer:\n" + "\n".join(param_info) +
-                "\nThis usually means get_optim_param_groups() is missing a module. "
+                f"tracked by the optimizer:\n"
+                + "\n".join(param_info)
+                + "\nThis usually means get_optim_param_groups() is missing a module. "
                 "These parameters will not be updated during training.",
                 UserWarning,
             )
 
     def configure_optimizer(
-        self, lr, weight_decay,
-        obs_lr=None, obs_weight_decay=None,
+        self,
+        lr,
+        weight_decay,
+        obs_lr=None,
+        obs_weight_decay=None,
         betas=(0.95, 0.999),
     ):
         obs_lr = obs_lr if obs_lr is not None else lr
         obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
         groups = self.get_optim_param_groups(lr, obs_lr, weight_decay, obs_wd)
         optimizer = torch.optim.AdamW(
-            [g for g in groups if g['params']], lr=lr, betas=betas,
+            [g for g in groups if g["params"]],
+            lr=lr,
+            betas=betas,
             fused=torch.cuda.is_available(),
         )
         self._check_params_in_optimizer(optimizer)
         return optimizer
+
 
 class UNetDiffusionAgent(BaseAgent):
     def __init__(
@@ -355,7 +364,7 @@ class UNetDiffusionAgent(BaseAgent):
         n_groups: int = 8,
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
-        prediction_type: str = 'sample',
+        prediction_type: str = "sample",
         modality_dropout_probs: dict = None,
         cond_predict_scale: bool = True,
     ):
@@ -369,8 +378,16 @@ class UNetDiffusionAgent(BaseAgent):
             cond_predict_scale=cond_predict_scale,
         )
         action_decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type)
-        super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
-                         modality_dropout_probs=modality_dropout_probs)
+        super().__init__(
+            obs_encoder,
+            action_decoder,
+            horizon,
+            n_obs_steps,
+            n_action_steps,
+            action_dim,
+            modality_dropout_probs=modality_dropout_probs,
+        )
+
 
 class DiTXFlowMatchAgent(BaseAgent):
     def __init__(
@@ -394,10 +411,10 @@ class DiTXFlowMatchAgent(BaseAgent):
         pre_norm_modality: bool = False,
         denoise_timesteps: int = 10,
         flow_batch_ratio: float = 0.75,
-        t_sample_mode_for_flow: str = 'beta',
-        t_sample_mode_for_consistency: str = 'discrete',
-        dt_sample_mode_for_consistency: str = 'uniform',
-        target_t_sample_mode: str = 'relative',
+        t_sample_mode_for_flow: str = "beta",
+        t_sample_mode_for_consistency: str = "discrete",
+        dt_sample_mode_for_consistency: str = "uniform",
+        target_t_sample_mode: str = "relative",
         modality_dropout_probs: dict = None,
     ):
         backbone = DiTXFlowMatch(
@@ -426,6 +443,12 @@ class DiTXFlowMatchAgent(BaseAgent):
             dt_sample_mode_for_consistency=dt_sample_mode_for_consistency,
             target_t_sample_mode=target_t_sample_mode,
         )
-        super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim,
-                         modality_dropout_probs=modality_dropout_probs)
-
+        super().__init__(
+            obs_encoder,
+            action_decoder,
+            horizon,
+            n_obs_steps,
+            n_action_steps,
+            action_dim,
+            modality_dropout_probs=modality_dropout_probs,
+        )

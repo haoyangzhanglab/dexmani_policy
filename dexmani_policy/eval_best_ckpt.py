@@ -113,9 +113,7 @@ def evaluate_checkpoint_robotwin(
         match = [m for m in milestones if m.pct == target_pct]
         if not match:
             available = sorted(m.pct for m in milestones)
-            raise FileNotFoundError(
-                f"No {target_pct}% milestone checkpoint. Available: {available}"
-            )
+            raise FileNotFoundError(f"No {target_pct}% milestone checkpoint. Available: {available}")
         ckpt_path = match[0].path
         ckpt_label = match[0].label
     elif ckpt_tag_or_path == "best":
@@ -159,8 +157,7 @@ def evaluate_checkpoint_robotwin(
     n_total = min(episodes, len(all_seeds))
     if episodes > len(all_seeds):
         cprint(
-            f"⚠ Requested {episodes} episodes > {len(all_seeds)} available seeds, "
-            f"using {len(all_seeds)}",
+            f"⚠ Requested {episodes} episodes > {len(all_seeds)} available seeds, using {len(all_seeds)}",
             "yellow",
         )
 
@@ -189,8 +186,7 @@ def evaluate_checkpoint_robotwin(
     success_rate = n_success / n_total if n_total > 0 else 0.0
 
     task_done_steps = [
-        d["steps"] for d in per_seed_details
-        if d.get("success") and d.get("steps") is not None
+        d["steps"] for d in per_seed_details if d.get("success") and d.get("steps") is not None
     ]
     avg_steps = float(sum(task_done_steps) / len(task_done_steps)) if task_done_steps else None
 
@@ -213,16 +209,22 @@ def evaluate_checkpoint_robotwin(
 
     # Also save detailed JSON for record-keeping
     detail_file = eval_dir / "result_details.json"
-    detail_file.write_text(json.dumps({
-        "ckpt_tag": ckpt_tag_or_path,
-        "ckpt_path": str(ckpt_path),
-        "success_rate": success_rate,
-        "n_success": n_success,
-        "n_total": n_total,
-        "avg_steps": avg_steps,
-        "training_seed": train_seed,
-        "per_seed_details": per_seed_details,
-    }, indent=2, ensure_ascii=False))
+    detail_file.write_text(
+        json.dumps(
+            {
+                "ckpt_tag": ckpt_tag_or_path,
+                "ckpt_path": str(ckpt_path),
+                "success_rate": success_rate,
+                "n_success": n_success,
+                "n_total": n_total,
+                "avg_steps": avg_steps,
+                "training_seed": train_seed,
+                "per_seed_details": per_seed_details,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
     cprint(f"  Results saved to: {eval_dir}/_result.txt", "cyan")
 
@@ -239,48 +241,69 @@ def main() -> None:
         description="RoboTwin-style checkpoint evaluation (success rate only).",
     )
     parser.add_argument(
-        "--policy-name", type=str, required=True,
+        "--policy-name",
+        type=str,
+        required=True,
     )
     parser.add_argument(
-        "--task-name", type=str, required=True,
+        "--task-name",
+        type=str,
+        required=True,
     )
     parser.add_argument(
-        "--exp-name", type=str, required=True,
+        "--exp-name",
+        type=str,
+        required=True,
     )
     parser.add_argument(
-        "--ckpt-tag", type=str, default="best",
+        "--ckpt-tag",
+        type=str,
+        default="best",
         help="Checkpoint: best (reads best_ckpt.json), latest, 20pct..100pct (default: best).",
     )
     parser.add_argument(
-        "--ckpt-path", type=str, default=None,
+        "--ckpt-path",
+        type=str,
+        default=None,
         help="Direct .pt path (overrides --ckpt-tag).",
     )
     parser.add_argument(
-        "--episodes", type=int, default=None,
+        "--episodes",
+        type=int,
+        default=None,
         help="Number of seeds to evaluate (default: from config eval.offline).",
     )
     parser.add_argument(
-        "--denoise-steps", type=int, default=None,
+        "--denoise-steps",
+        type=int,
+        default=None,
         help="DDIM / Euler denoising steps (default: from config).",
     )
     parser.add_argument(
-        "--ema", dest="use_ema", action="store_true", default=None,
+        "--ema",
+        dest="use_ema",
+        action="store_true",
+        default=None,
         help="Use EMA weights (default: from config).",
     )
     parser.add_argument(
-        "--no-ema", dest="use_ema", action="store_false",
+        "--no-ema",
+        dest="use_ema",
+        action="store_false",
         help="Use raw weights instead of EMA.",
     )
     parser.add_argument(
-        "overrides", nargs="*",
+        "overrides",
+        nargs="*",
         help="Optional OmegaConf dot-list overrides.",
     )
     args = parser.parse_args()
 
     exp_dir = (
-        Path(ROOT_DIR) / "experiments" / args.policy_name /
-        args.task_name / args.exp_name
-    ).expanduser().resolve()
+        (Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name)
+        .expanduser()
+        .resolve()
+    )
 
     if not exp_dir.is_dir():
         cprint(f"Error: experiment directory not found: {exp_dir}", "red")
@@ -299,8 +322,10 @@ def main() -> None:
     # ── Resolve parameters: CLI > config > hardcoded fallback ────────────
     _off = cfg.eval.get("offline", {}) if hasattr(cfg, "eval") else {}
     episodes = args.episodes if args.episodes is not None else _off.get("eval_episodes", 100)
-    denoise_steps = args.denoise_steps if args.denoise_steps is not None else (
-        (_off.get("denoise_timesteps_list") or [10])[0]
+    denoise_steps = (
+        args.denoise_steps
+        if args.denoise_steps is not None
+        else ((_off.get("denoise_timesteps_list") or [10])[0])
     )
     use_ema = args.use_ema if args.use_ema is not None else _off.get("use_ema_for_eval", True)
 

@@ -1,13 +1,15 @@
-import zarr
-import torch
-import numpy as np
-import torch.nn as nn
-from typing import Union, Dict
 import logging
+from typing import Dict, Union
+
+import numpy as np
+import torch
+import torch.nn as nn
+import zarr
 
 from dexmani_policy.common.pytorch_util import dict_apply
 
 logger = logging.getLogger(__name__)
+
 
 def dfs_add(dest: dict, keys: list[str], value: torch.Tensor):
     if len(keys) == 1:
@@ -17,17 +19,19 @@ def dfs_add(dest: dict, keys: list[str], value: torch.Tensor):
         dest[keys[0]] = nn.ParameterDict()
     dfs_add(dest[keys[0]], keys[1:], value)
 
+
 def load_param_dict(state_dict: dict, prefix: str) -> nn.ParameterDict:
     out_dict = nn.ParameterDict()
     for key, value in state_dict.items():
         value: torch.Tensor
         if key.startswith(prefix):
-            suffix = key[len(prefix):]
-            assert suffix.startswith('.'), f"prefix '{prefix}' missing trailing dot in key '{key}'"
-            param_keys = suffix.split('.')[1:]
+            suffix = key[len(prefix) :]
+            assert suffix.startswith("."), f"prefix '{prefix}' missing trailing dot in key '{key}'"
+            param_keys = suffix.split(".")[1:]
             if param_keys:
                 dfs_add(out_dict, param_keys, value.clone())
     return out_dict
+
 
 class DictOfTensorMixin(nn.Module):
     def __init__(self, params_dict=None):
@@ -44,9 +48,11 @@ class DictOfTensorMixin(nn.Module):
         except StopIteration:
             raise RuntimeError("Normalizer has no parameters; call fit() first")
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
         old_keys = set(self.params_dict.state_dict().keys())
-        self.params_dict = load_param_dict(state_dict, prefix + 'params_dict')
+        self.params_dict = load_param_dict(state_dict, prefix + "params_dict")
         self.params_dict.requires_grad_(False)
         self._field_views.clear()
 
@@ -55,28 +61,26 @@ class DictOfTensorMixin(nn.Module):
         # as "unexpected", which would break strict=True callers like
         # load_normalizer_from_dataset.
         if len(old_keys) > 0:
-            state_prefix = prefix + 'params_dict.'
-            state_keys = {
-                k[len(state_prefix):] for k in state_dict
-                if k.startswith(state_prefix)
-            }
+            state_prefix = prefix + "params_dict."
+            state_keys = {k[len(state_prefix) :] for k in state_dict if k.startswith(state_prefix)}
             for k in sorted(old_keys - state_keys):
                 missing_keys.append(state_prefix + k)
             for k in sorted(state_keys - old_keys):
                 unexpected_keys.append(state_prefix + k)
 
+
 def fit_params(
     data: Union[torch.Tensor, np.ndarray, zarr.Array],
     last_n_dims=1,
     dtype=torch.float32,
-    mode='limits',
-    output_max=1.,
-    output_min=-1.,
+    mode="limits",
+    output_max=1.0,
+    output_min=-1.0,
     range_eps=1e-4,
     fit_offset=True,
     label=None,
 ):
-    assert mode in ['limits', 'gaussian'] and last_n_dims >= 0 and output_max > output_min
+    assert mode in ["limits", "gaussian"] and last_n_dims >= 0 and output_max > output_min
 
     if isinstance(data, zarr.Array):
         data = data[:]
@@ -88,14 +92,14 @@ def fit_params(
     dim = 1
     if last_n_dims > 0:
         dim = np.prod(data.shape[-last_n_dims:])
-    data = data.reshape(-1,dim)
+    data = data.reshape(-1, dim)
 
     input_min, _ = data.min(axis=0)
     input_max, _ = data.max(axis=0)
     input_mean = data.mean(axis=0)
     input_std = data.std(axis=0)
 
-    if mode == 'limits':
+    if mode == "limits":
         if fit_offset:
             input_range = input_max - input_min
             ignore_dim = input_range < range_eps
@@ -111,14 +115,14 @@ def fit_params(
             scale = output_abs / input_abs
             offset = torch.zeros_like(input_mean)
 
-    elif mode == 'gaussian':
+    elif mode == "gaussian":
         ignore_dim = input_std < range_eps
         scale = input_std.clone()
         scale[ignore_dim] = 1
         scale = 1 / scale
 
         if fit_offset:
-            offset = - input_mean * scale
+            offset = -input_mean * scale
         else:
             offset = torch.zeros_like(input_mean)
 
@@ -127,30 +131,35 @@ def fit_params(
         prefix = f"{label}: " if label else ""
         idx_list = ignore_dim.nonzero(as_tuple=True)[0].tolist()
         logger.info(
-            "%s%d/%d dims near-constant (range < %.0e, %s) — kept with identity scale. "
-            "Indices: %s",
-            prefix, n_ignored, ignore_dim.shape[0], range_eps, mode, idx_list,
+            "%s%d/%d dims near-constant (range < %.0e, %s) — kept with identity scale. Indices: %s",
+            prefix,
+            n_ignored,
+            ignore_dim.shape[0],
+            range_eps,
+            mode,
+            idx_list,
         )
 
     this_params = nn.ParameterDict()
-    this_params['scale'] = scale
-    this_params['offset'] = offset
+    this_params["scale"] = scale
+    this_params["offset"] = offset
     for p in this_params.parameters():
         p.requires_grad_(False)
 
     input_stats = {
-        'min': input_min,
-        'max': input_max,
-        'mean': input_mean,
-        'std': input_std,
+        "min": input_min,
+        "max": input_max,
+        "mean": input_mean,
+        "std": input_std,
     }
     return this_params, input_stats
+
 
 def normalize_tensor(x, params, forward=True):
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
-    scale = params['scale']
-    offset = params['offset']
+    scale = params["scale"]
+    offset = params["offset"]
     # Avoid redundant .to(device) when scale/offset are already on x's device
     if scale.device != x.device:
         scale = scale.to(device=x.device)
@@ -165,6 +174,7 @@ def normalize_tensor(x, params, forward=True):
         x = (x - offset) / scale
     x = x.reshape(src_shape)
     return x
+
 
 class SingleFieldLinearNormalizer(DictOfTensorMixin):
     """Linear normalizer for a single data field (joint_state or action).
@@ -189,11 +199,11 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         data: Union[torch.Tensor, np.ndarray, zarr.Array],
         last_n_dims=1,
         dtype=torch.float32,
-        mode='limits',
-        output_max=1.,
-        output_min=-1.,
+        mode="limits",
+        output_max=1.0,
+        output_min=-1.0,
         range_eps=1e-4,
-        fit_offset=True
+        fit_offset=True,
     ):
         self.params_dict, self.input_stats = fit_params(
             data,
@@ -203,7 +213,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
             output_max=output_max,
             output_min=output_min,
             range_eps=range_eps,
-            fit_offset=fit_offset
+            fit_offset=fit_offset,
         )
 
     @classmethod
@@ -225,10 +235,12 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
             x = x.flatten()
             return x
 
-        params_dict = nn.ParameterDict({
-            'scale': to_tensor(scale),
-            'offset': to_tensor(offset),
-        })
+        params_dict = nn.ParameterDict(
+            {
+                "scale": to_tensor(scale),
+                "offset": to_tensor(offset),
+            }
+        )
         obj = cls(params_dict)
         if input_stats_dict is not None:
             obj.input_stats = dict_apply(input_stats_dict, to_tensor)
@@ -239,10 +251,10 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         scale = torch.tensor([1], dtype=dtype)
         offset = torch.tensor([0], dtype=dtype)
         input_stats_dict = {
-            'min': torch.tensor([-1], dtype=dtype),
-            'max': torch.tensor([1], dtype=dtype),
-            'mean': torch.tensor([0], dtype=dtype),
-            'std': torch.tensor([1], dtype=dtype)
+            "min": torch.tensor([-1], dtype=dtype),
+            "max": torch.tensor([1], dtype=dtype),
+            "mean": torch.tensor([0], dtype=dtype),
+            "std": torch.tensor([1], dtype=dtype),
         }
         return cls.create_manual(scale, offset, input_stats_dict)
 
@@ -255,17 +267,17 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     def __call__(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self.normalize(x)
 
-class LinearNormalizer(DictOfTensorMixin):
 
+class LinearNormalizer(DictOfTensorMixin):
     @torch.no_grad()
     def fit(
         self,
         data: Union[Dict, torch.Tensor, np.ndarray, zarr.Array],
         last_n_dims=1,
         dtype=torch.float32,
-        mode='limits',
-        output_max=1.,
-        output_min=-1.,
+        mode="limits",
+        output_max=1.0,
+        output_min=-1.0,
         range_eps=1e-4,
         fit_offset=True,
     ):
@@ -286,7 +298,7 @@ class LinearNormalizer(DictOfTensorMixin):
                 self.params_dict[key] = params
                 self.input_stats[key] = stats
         else:
-            self.params_dict['_default'], self.input_stats = fit_params(
+            self.params_dict["_default"], self.input_stats = fit_params(
                 data,
                 last_n_dims=last_n_dims,
                 dtype=dtype,
@@ -298,19 +310,18 @@ class LinearNormalizer(DictOfTensorMixin):
             )
 
     @classmethod
-    def fit_obs_action(cls, joint_state, action, action_key, mode='limits'):
+    def fit_obs_action(cls, joint_state, action, action_key, mode="limits"):
         """Factory: fit a ``LinearNormalizer`` from joint_state and action arrays.
 
         Handles the ``action_ee`` special case where the normalizer is fitted on
         joint_state only and the action normalizer is built from fixed ranges.
         """
         normalizer = cls()
-        if action_key == 'action_ee':
-            normalizer.fit(data={'joint_state': joint_state}, last_n_dims=1, mode=mode)
-            normalizer['action'] = build_mixed_action_normalizer(action)
+        if action_key == "action_ee":
+            normalizer.fit(data={"joint_state": joint_state}, last_n_dims=1, mode=mode)
+            normalizer["action"] = build_mixed_action_normalizer(action)
         else:
-            normalizer.fit(data={'joint_state': joint_state, 'action': action},
-                           last_n_dims=1, mode=mode)
+            normalizer.fit(data={"joint_state": joint_state, "action": action}, last_n_dims=1, mode=mode)
         return normalizer
 
     def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
@@ -319,12 +330,12 @@ class LinearNormalizer(DictOfTensorMixin):
     def __getitem__(self, key: str):
         if key not in self._field_views:
             obj = SingleFieldLinearNormalizer(self.params_dict[key])
-            if hasattr(self, 'input_stats') and key in self.input_stats:
+            if hasattr(self, "input_stats") and key in self.input_stats:
                 obj.input_stats = self.input_stats[key]
             self._field_views[key] = obj
         return self._field_views[key]
 
-    def __setitem__(self, key: str , value: 'SingleFieldLinearNormalizer'):
+    def __setitem__(self, key: str, value: "SingleFieldLinearNormalizer"):
         self.params_dict[key] = value.params_dict
 
     def is_fitted(self, required_keys=None):
@@ -336,7 +347,7 @@ class LinearNormalizer(DictOfTensorMixin):
 
     def _normalize_impl(self, x, forward=True):
         if isinstance(x, dict):
-            result = dict()
+            result = {}
             for key, value in x.items():
                 if key not in self.params_dict:
                     result[key] = value
@@ -345,9 +356,9 @@ class LinearNormalizer(DictOfTensorMixin):
                 result[key] = normalize_tensor(value, params, forward=forward)
             return result
         else:
-            if '_default' not in self.params_dict:
+            if "_default" not in self.params_dict:
                 raise RuntimeError("Not initialized")
-            params = self.params_dict['_default']
+            params = self.params_dict["_default"]
             return normalize_tensor(x, params, forward=forward)
 
     def normalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
@@ -356,35 +367,43 @@ class LinearNormalizer(DictOfTensorMixin):
     def unnormalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self._normalize_impl(x, forward=False)
 
+
 def build_mixed_action_normalizer(action_data, ee_dim=9):
     """Build a mixed normalizer for eef_hand actions: xyz(3) + rot6d(ee_dim-3) + hand(rest).
 
     xyz and hand → limits [-1, 1] (min-max); rot6d → identity (scale=1, offset=0).
     """
-    assert action_data.shape[1] > ee_dim, \
+    assert action_data.shape[1] > ee_dim, (
         f"action_ee dim ({action_data.shape[1]}) must be > ee_dim ({ee_dim})"
+    )
     tmp = LinearNormalizer()
-    tmp.fit(data={
-        'xyz':  action_data[:, :3],
-        'hand': action_data[:, ee_dim:],
-    }, last_n_dims=1, mode='limits')
+    tmp.fit(
+        data={
+            "xyz": action_data[:, :3],
+            "hand": action_data[:, ee_dim:],
+        },
+        last_n_dims=1,
+        mode="limits",
+    )
 
-    xyz_scale  = tmp['xyz'].params_dict['scale']
-    xyz_offset = tmp['xyz'].params_dict['offset']
-    xyz_stats  = tmp['xyz'].input_stats
-    hand_scale  = tmp['hand'].params_dict['scale']
-    hand_offset = tmp['hand'].params_dict['offset']
-    hand_stats  = tmp['hand'].input_stats
+    xyz_scale = tmp["xyz"].params_dict["scale"]
+    xyz_offset = tmp["xyz"].params_dict["offset"]
+    xyz_stats = tmp["xyz"].input_stats
+    hand_scale = tmp["hand"].params_dict["scale"]
+    hand_offset = tmp["hand"].params_dict["offset"]
+    hand_stats = tmp["hand"].input_stats
 
     rot6d_dim = ee_dim - 3
-    scale  = torch.cat([xyz_scale, torch.ones(rot6d_dim), hand_scale])
+    scale = torch.cat([xyz_scale, torch.ones(rot6d_dim), hand_scale])
     offset = torch.cat([xyz_offset, torch.zeros(rot6d_dim), hand_offset])
     stats = {}
-    for k, fill in [('min', -1.), ('max', 1.), ('mean', 0.), ('std', 1.)]:
-        stats[k] = torch.cat([
-            xyz_stats[k],
-            torch.full((rot6d_dim,), fill, dtype=torch.float32),
-            hand_stats[k],
-        ])
+    for k, fill in [("min", -1.0), ("max", 1.0), ("mean", 0.0), ("std", 1.0)]:
+        stats[k] = torch.cat(
+            [
+                xyz_stats[k],
+                torch.full((rot6d_dim,), fill, dtype=torch.float32),
+                hand_stats[k],
+            ]
+        )
 
     return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stats)

@@ -1,11 +1,13 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 from transformers import SiglipVisionConfig, SiglipVisionModel
-from typing import Dict, Optional
 
 from dexmani_policy.agents.obs_encoder.rgb.base import ViTEncoder
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.types import GlobalTokenType, TuneMode
+
 
 class SigLIP(ViTEncoder):
     def __init__(
@@ -22,7 +24,9 @@ class SigLIP(ViTEncoder):
         self.global_token_type = global_token_type
         config = SiglipVisionConfig.from_pretrained(model_name)
         config._attn_implementation = "sdpa"
-        self.backbone = SiglipVisionModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
+        self.backbone = SiglipVisionModel.from_pretrained(
+            model_name, config=config, torch_dtype=torch.bfloat16
+        )
 
         if not hasattr(self.backbone.config, "patch_size"):
             raise ValueError(f"{model_name} does not look like a ViT-style SigLIP model.")
@@ -34,7 +38,9 @@ class SigLIP(ViTEncoder):
         self.num_prefix_tokens = 0  # SigLIP has no CLS token in last_hidden_state
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
 
-        self.proj = nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
+        self.proj = (
+            nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
+        )
         self.set_tune_mode(tune_mode)
 
     def _extract_patch_tokens(self, outputs) -> torch.Tensor:
@@ -63,6 +69,7 @@ class SigLIP(ViTEncoder):
 
         raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
 
+
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_name = "google/siglip-base-patch16-224"
@@ -81,7 +88,9 @@ def example() -> None:
     )
 
     intrinsics = intrinsics.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
-    camera_to_world = camera_to_world.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
+    camera_to_world = (
+        camera_to_world.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
+    )
 
     try:
         encoder = SigLIP(model_name=model_name, tune_mode="freeze").to(device)
@@ -97,7 +106,9 @@ def example() -> None:
         rgb = rgbd_batch["image"].to(device)
         depth = rgbd_batch["depth"].to(device)
         intrinsics = rgbd_batch["intrinsics"].to(device)
-        camera_to_world = None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
+        camera_to_world = (
+            None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
+        )
 
         with torch.no_grad():
             vision_out = encoder(rgb)
@@ -124,6 +135,7 @@ def example() -> None:
     except Exception as error:
         print("siglip example failed.")
         print(error)
+
 
 if __name__ == "__main__":
     example()

@@ -29,7 +29,7 @@ fi
 ZARR_PATH="${ZARR_PATH:-robot_data/${TASK_NAME}.zarr}"
 OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}}"
 
-exec python -u -m dexmani_policy.scripts.train_vq_hand \
+exec python -u -m dexmani_policy.tools.train_vq_hand \
     --config dexmani_policy/configs/dqrise.yaml \
     --zarr_path "${ZARR_PATH}" \
     --output_dir "${OUTPUT_DIR}" \

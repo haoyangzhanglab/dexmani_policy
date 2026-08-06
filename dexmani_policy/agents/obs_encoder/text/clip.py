@@ -1,10 +1,11 @@
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
-from typing import List, Optional
 from transformers import AutoTokenizer, CLIPTextModelWithProjection
 
-class CLIPTextEncoder(nn.Module):
 
+class CLIPTextEncoder(nn.Module):
     def __init__(
         self,
         model_name: str = "openai/clip-vit-base-patch32",
@@ -39,6 +40,7 @@ class CLIPTextEncoder(nn.Module):
             attention_mask=task_tokens.attention_mask,
         ).text_embeds
         return task_embeds.unsqueeze(1)
+
 
 if __name__ == "__main__":
     encoder = CLIPTextEncoder()

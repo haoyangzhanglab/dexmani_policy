@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -53,17 +52,13 @@ def _get_episode_ends(buffer) -> np.ndarray:
     raise AttributeError("ReplayBuffer does not expose episode_ends")
 
 
-def _episode_mask_to_frame_indices(
-    episode_ends: np.ndarray, episode_mask: np.ndarray
-) -> np.ndarray:
+def _episode_mask_to_frame_indices(episode_ends: np.ndarray, episode_mask: np.ndarray) -> np.ndarray:
     mask = np.asarray(episode_mask, dtype=bool)
     if len(mask) != len(episode_ends):
         raise ValueError("episode mask and episode_ends have different lengths")
     starts = np.concatenate(([0], episode_ends[:-1]))
     chunks = [
-        np.arange(start, end, dtype=np.int64)
-        for use, start, end in zip(mask, starts, episode_ends)
-        if use
+        np.arange(start, end, dtype=np.int64) for use, start, end in zip(mask, starts, episode_ends) if use
     ]
     return np.concatenate(chunks) if chunks else np.empty((0,), dtype=np.int64)
 
@@ -160,19 +155,9 @@ def train(args: argparse.Namespace) -> None:
         mode="limits",
         range_eps=1e-4,
     )
-    train_norm = (
-        normalizer["hand"]
-        .normalize(hand_data[train_indices])
-        .cpu()
-        .numpy()
-        .astype(np.float32)
-    )
+    train_norm = normalizer["hand"].normalize(hand_data[train_indices]).cpu().numpy().astype(np.float32)
     val_norm = (
-        normalizer["hand"]
-        .normalize(hand_data[val_indices])
-        .cpu()
-        .numpy()
-        .astype(np.float32)
+        normalizer["hand"].normalize(hand_data[val_indices]).cpu().numpy().astype(np.float32)
         if len(val_indices) > 0
         else np.empty((0, args.hand_dim), dtype=np.float32)
     )
@@ -241,9 +226,7 @@ def train(args: argparse.Namespace) -> None:
             milestones=[warmup_steps],
         )
     else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_steps
-        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -261,17 +244,12 @@ def train(args: argparse.Namespace) -> None:
     for epoch in range(1, args.num_epochs + 1):
         vqvae.train()
         sums = {"enc": 0.0, "vq": 0.0, "mse": 0.0}
-        usage = torch.zeros(
-            args.num_groups, args.codebook_size, dtype=torch.long
-        )
+        usage = torch.zeros(args.num_groups, args.codebook_size, dtype=torch.long)
 
         for (batch,) in train_loader:
             batch = batch.to(device, non_blocking=True)
             enc_loss, vq_loss, indices, recon_mse = vqvae(batch)
-            total_loss = (
-                args.enc_loss_weight * enc_loss
-                + args.vq_loss_weight * vq_loss
-            )
+            total_loss = args.enc_loss_weight * enc_loss + args.vq_loss_weight * vq_loss
             optimizer.zero_grad(set_to_none=True)
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(vqvae.parameters(), args.max_grad_norm)
@@ -289,10 +267,7 @@ def train(args: argparse.Namespace) -> None:
             sums["mse"] += float(recon_mse)
 
         train_metrics = {key: value / len(train_loader) for key, value in sums.items()}
-        train_total = (
-            args.enc_loss_weight * train_metrics["enc"]
-            + args.vq_loss_weight * train_metrics["vq"]
-        )
+        train_total = args.enc_loss_weight * train_metrics["enc"] + args.vq_loss_weight * train_metrics["vq"]
         train_history.append(train_total)
 
         val_metrics = {"enc": float("nan"), "vq": float("nan"), "mse": float("nan")}
@@ -306,9 +281,7 @@ def train(args: argparse.Namespace) -> None:
                     val_sums["enc"] += float(enc_loss)
                     val_sums["vq"] += float(vq_loss)
                     val_sums["mse"] += float(recon_mse)
-            val_metrics = {
-                key: value / len(val_loader) for key, value in val_sums.items()
-            }
+            val_metrics = {key: value / len(val_loader) for key, value in val_sums.items()}
 
         metrics = {
             "train_enc": train_metrics["enc"],
@@ -321,8 +294,7 @@ def train(args: argparse.Namespace) -> None:
             "lr": optimizer.param_groups[0]["lr"],
         }
         logger.info(
-            "epoch %4d | lr %.2e | train enc %.5f vq %.5f mse %.5f | "
-            "val enc %.5f vq %.5f mse %.5f",
+            "epoch %4d | lr %.2e | train enc %.5f vq %.5f mse %.5f | val enc %.5f vq %.5f mse %.5f",
             epoch,
             metrics["lr"],
             metrics["train_enc"],
@@ -347,11 +319,7 @@ def train(args: argparse.Namespace) -> None:
                 metrics=metrics,
             )
 
-        selection_mse = (
-            metrics["val_mse"]
-            if np.isfinite(metrics["val_mse"])
-            else metrics["train_mse"]
-        )
+        selection_mse = metrics["val_mse"] if np.isfinite(metrics["val_mse"]) else metrics["train_mse"]
         if selection_mse < best_val_mse:
             best_val_mse = selection_mse
             _save_checkpoint(

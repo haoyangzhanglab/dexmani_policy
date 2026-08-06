@@ -60,9 +60,7 @@ def measure(
     actions = np.asarray(buffer[action_key])
     hand = actions[:, tcp_dim:]
     if hand.shape[1] != model.hand_dim:
-        raise ValueError(
-            f"Data hand_dim={hand.shape[1]} does not match checkpoint {model.hand_dim}"
-        )
+        raise ValueError(f"Data hand_dim={hand.shape[1]} does not match checkpoint {model.hand_dim}")
 
     scale, offset = _normalizer_from_checkpoint(checkpoint)
     hand_norm = _normalize(hand, scale, offset)
@@ -87,8 +85,7 @@ def measure(
     continuous = manager.hand_pose_to_continuous_index(hand_norm)
     count = manager.num_codes
     nearest_ids = torch.floor(
-        ((continuous.squeeze(-1) + 1.0) * 0.5 * (count - 1)).clamp(0, count - 1)
-        + 0.5
+        ((continuous.squeeze(-1) + 1.0) * 0.5 * (count - 1)).clamp(0, count - 1) + 0.5
     ).long()
     nearest_counts = torch.bincount(nearest_ids, minlength=count)
     nearest_prob = nearest_counts.float() / nearest_counts.sum().clamp_min(1)
@@ -101,7 +98,7 @@ def measure(
             tuple_indices.append(model.encode_to_index(hand_norm[start : start + batch_size]))
     tuple_indices = torch.cat(tuple_indices, dim=0)
     multipliers = torch.tensor(
-        [model.codebook_size ** power for power in reversed(range(model.num_groups))],
+        [model.codebook_size**power for power in reversed(range(model.num_groups))],
         dtype=torch.long,
     )
     tuple_ids = (tuple_indices.long() * multipliers).sum(dim=-1)

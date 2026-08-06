@@ -1,18 +1,21 @@
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple
 
 from dexmani_policy.agents.obs_encoder.rgb.utils import (
     ArrayLike,
     flatten_batch,
     flatten_matrix_batch,
-    restore_batch,
     resolve_patch_grid_size,
+    restore_batch,
     to_depth_tensor,
 )
 
+
 class GeometryProcessor:
     """Depth back-projection and patch-level geometry pooling."""
+
     def __init__(self):
         self.pixel_grid_cache: Dict[Tuple[int, int, str, str], Tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -138,7 +141,9 @@ class GeometryProcessor:
             patch_grid_size=patch_grid_size,
         )
         if image_h % grid_h != 0 or image_w % grid_w != 0:
-            raise ValueError(f"Image size {(image_h, image_w)} is not divisible by patch grid size {(grid_h, grid_w)}.")
+            raise ValueError(
+                f"Image size {(image_h, image_w)} is not divisible by patch grid size {(grid_h, grid_w)}."
+            )
 
         flat_coords, leading_shape = flatten_batch(coords, trailing_ndim=3)
         flat_valid_mask, mask_leading_shape = flatten_batch(valid_mask, trailing_ndim=3)
@@ -174,6 +179,7 @@ class GeometryProcessor:
             "patch_hw": (kernel_h, kernel_w),
         }
 
+
 def example() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     geometry = GeometryProcessor()
@@ -208,6 +214,7 @@ def example() -> None:
     print("valid_mask       :", tuple(dense["valid_mask"].shape))
     print("patch_coords     :", tuple(pooled["patch_coords"].shape))
     print("patch_valid_mask :", tuple(pooled["patch_valid_mask"].shape))
+
 
 if __name__ == "__main__":
     example()

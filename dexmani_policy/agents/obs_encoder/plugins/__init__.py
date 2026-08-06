@@ -1,1 +1,1 @@
-from .token_compressor import TokenCompressor, ModulatedTokenCompressor, TopKReducer
+from .token_compressor import ModulatedTokenCompressor, TokenCompressor, TopKReducer

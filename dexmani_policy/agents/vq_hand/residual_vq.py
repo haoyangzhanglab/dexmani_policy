@@ -9,12 +9,14 @@ Ported from DQ-RISE.  Simplifications vs. original:
   - Kept: layer_weights with softmax combination, CE loss path for training
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
-from torch import nn
 from einops import rearrange, repeat
+from torch import nn
 
-from .vector_quantize import VectorQuantize, exists, default
+from .vector_quantize import VectorQuantize, default, exists
 
 
 class ResidualVQ(nn.Module):
@@ -24,7 +26,7 @@ class ResidualVQ(nn.Module):
         self,
         *,
         dim: int,
-        num_quantizers: int,       # number of residual layers
+        num_quantizers: int,  # number of residual layers
         codebook_size: int = 4,
         codebook_dim: int | None = None,
         decay: float = 0.8,
@@ -33,7 +35,7 @@ class ResidualVQ(nn.Module):
         threshold_ema_dead_code: int = 0,
         kmeans_init: bool = False,
         kmeans_iters: int = 10,
-        sample_codebook_temp: float = 1.,
+        sample_codebook_temp: float = 1.0,
         ema_update: bool = True,
         learnable_codebook: bool = False,
     ):
@@ -46,35 +48,35 @@ class ResidualVQ(nn.Module):
         self.project_out = nn.Linear(codebook_input_dim, dim) if requires_projection else nn.Identity()
 
         # Learnable layer weights (initialised [0.5, 0.5], softmax-normalised)
-        self.layer_weights = nn.Parameter(
-            torch.full((num_quantizers,), 0.5, dtype=torch.float32)
-        )
+        self.layer_weights = nn.Parameter(torch.full((num_quantizers,), 0.5, dtype=torch.float32))
 
         self.num_quantizers = num_quantizers
-        self.layers = nn.ModuleList([
-            VectorQuantize(
-                dim=codebook_dim,
-                codebook_size=codebook_size,
-                codebook_dim=codebook_dim,
-                decay=decay,
-                eps=eps,
-                ema_warmup_steps=ema_warmup_steps,
-                threshold_ema_dead_code=threshold_ema_dead_code,
-                kmeans_init=kmeans_init,
-                kmeans_iters=kmeans_iters,
-                sample_codebook_temp=sample_codebook_temp,
-                ema_update=ema_update,
-                learnable_codebook=learnable_codebook,
-                commitment_weight=1.0,   # commitment loss collected per layer
-            )
-            for _ in range(num_quantizers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                VectorQuantize(
+                    dim=codebook_dim,
+                    codebook_size=codebook_size,
+                    codebook_dim=codebook_dim,
+                    decay=decay,
+                    eps=eps,
+                    ema_warmup_steps=ema_warmup_steps,
+                    threshold_ema_dead_code=threshold_ema_dead_code,
+                    kmeans_init=kmeans_init,
+                    kmeans_iters=kmeans_iters,
+                    sample_codebook_temp=sample_codebook_temp,
+                    ema_update=ema_update,
+                    learnable_codebook=learnable_codebook,
+                    commitment_weight=1.0,  # commitment loss collected per layer
+                )
+                for _ in range(num_quantizers)
+            ]
+        )
 
     @property
     def codebooks(self):
         """Return stacked codebooks: (num_quantizers, codebook_size, codebook_dim)."""
         cbs = [layer._codebook.embed for layer in self.layers]
-        return rearrange(torch.stack(cbs, dim=0), 'q 1 c d -> q c d')
+        return rearrange(torch.stack(cbs, dim=0), "q 1 c d -> q c d")
 
     def get_codes_from_indices(self, indices):
         """
@@ -85,13 +87,16 @@ class ResidualVQ(nn.Module):
             codes: (num_quantizers, B, codebook_dim)  — per-layer code vectors
         """
         batch = indices.shape[0]
-        codebooks = repeat(self.codebooks, 'q c d -> q b c d', b=batch)   # (Q, B, C, D)
-        gather_indices = repeat(indices, 'b q -> q b 1 d', d=codebooks.shape[-1])
-        all_codes = codebooks.gather(2, gather_indices)                    # (Q, B, 1, D)
-        return all_codes.squeeze(2)                                        # (Q, B, D)
+        codebooks = repeat(self.codebooks, "q c d -> q b c d", b=batch)  # (Q, B, C, D)
+        gather_indices = repeat(indices, "b q -> q b 1 d", d=codebooks.shape[-1])
+        all_codes = codebooks.gather(2, gather_indices)  # (Q, B, 1, D)
+        return all_codes.squeeze(2)  # (Q, B, D)
 
     def forward(
-        self, x, indices=None, sample_codebook_temp=None,
+        self,
+        x,
+        indices=None,
+        sample_codebook_temp=None,
         freeze_codebook: bool = False,
     ):
         """
@@ -104,12 +109,10 @@ class ResidualVQ(nn.Module):
             all_losses:     (num_quantizers,)  per-layer commitment losses
         """
         return_loss = exists(indices)
-        device = x.device
-        num_quant = self.num_quantizers
 
         x = self.project_in(x)
 
-        quantized_out = 0.
+        quantized_out = 0.0
         residual = x
 
         all_losses = []
@@ -151,9 +154,7 @@ class ResidualVQ(nn.Module):
         if return_loss:
             return quantized_out, sum(ce_losses)
 
-        all_indices = torch.stack(all_indices, dim=-1)    # (B, N, num_quantizers)
-        all_losses = torch.stack(all_losses, dim=-1)       # (1, num_quantizers)
+        all_indices = torch.stack(all_indices, dim=-1)  # (B, N, num_quantizers)
+        all_losses = torch.stack(all_losses, dim=-1)  # (1, num_quantizers)
 
         return quantized_out, all_indices, all_losses
-
-

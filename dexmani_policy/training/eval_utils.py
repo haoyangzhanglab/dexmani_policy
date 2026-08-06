@@ -13,7 +13,6 @@ from typing import Any
 
 import hydra
 import torch
-from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.common.checkpoint_io import CheckpointStore
@@ -23,7 +22,6 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.pytorch_util import fix_state_dict
 from dexmani_policy.training.build_utils import inject_faas_into_agent
-
 
 # ---------------------------------------------------------------------------
 # 1. Config validation (was quadruplicated across 4 files)
@@ -40,10 +38,7 @@ def validate_eval_config(cfg) -> None:
     validate_action_key_consistency(cfg)
 
     if not (cfg.n_obs_steps >= 1 and cfg.n_action_steps >= 1):
-        raise ValueError(
-            f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} "
-            f"must be >= 1"
-        )
+        raise ValueError(f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} must be >= 1")
     if cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon:
         raise ValueError(
             f"n_obs_steps-1+n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) "
@@ -58,9 +53,7 @@ def validate_eval_config(cfg) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_eval_components(
-    cfg, device: torch.device
-) -> tuple[Any, Any, CheckpointStore]:
+def build_eval_components(cfg, device: torch.device) -> tuple[Any, Any, CheckpointStore]:
     """Instantiate agent, env_runner, and checkpoint_store from an OmegaConf config.
 
     Parameters
@@ -108,8 +101,7 @@ def load_ckpt_for_inference(
             actual = getattr(agent, key, None)
             if expected is not None and actual is not None and expected != actual:
                 raise ValueError(
-                    f"Checkpoint train_params.{key}={expected} does not match "
-                    f"agent.{key}={actual}."
+                    f"Checkpoint train_params.{key}={expected} does not match agent.{key}={actual}."
                 )
 
         ckpt_use_faas = train_params.get("use_faas", False)
@@ -127,8 +119,7 @@ def load_ckpt_for_inference(
     )
     if use_ema and checkpoint.ema_model_state is None and raw_state is checkpoint.model_state:
         cprint(
-            "WARNING: EMA weights requested but not found in checkpoint. "
-            "Using model weights.",
+            "WARNING: EMA weights requested but not found in checkpoint. Using model weights.",
             "yellow",
         )
 
@@ -138,9 +129,8 @@ def load_ckpt_for_inference(
     )
 
     if not agent.normalizer.is_fitted(required_keys=["action"]):
-        raise RuntimeError(
-            "Normalizer is missing required key 'action' after loading checkpoint."
-        )
+        raise RuntimeError("Normalizer is missing required key 'action' after loading checkpoint.")
+
 
 # ---------------------------------------------------------------------------
 # 4. best_ckpt.json reading (was duplicated between eval_sim.py and
@@ -174,9 +164,7 @@ def read_best_ckpt_json(exp_dir: Path) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def resolve_best_checkpoint(
-    exp_dir: Path, checkpoint_store: CheckpointStore
-) -> Path:
+def resolve_best_checkpoint(exp_dir: Path, checkpoint_store: CheckpointStore) -> Path:
     """Resolve the 'best' checkpoint with a proper fallback chain.
 
     1. ``best_ckpt.json`` (from ``select_best_ckpt.py``).

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
+import pytorch3d.ops as torch3d_ops
 import torch
 import torch.nn as nn
-import pytorch3d.ops as torch3d_ops
+
 
 def farthest_point_sample(
     pointcloud: torch.Tensor,
@@ -41,12 +44,10 @@ def farthest_point_sample(
     if not use_random:
         # Fast path — original deterministic FPS.
         sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
-            points=xyz, K=num_samples,
+            points=xyz,
+            K=num_samples,
         )
-        sampled_points = (
-            sampled_xyz if pointcloud.size(-1) == 3
-            else index_points(pointcloud, sample_idx)
-        )
+        sampled_points = sampled_xyz if pointcloud.size(-1) == 3 else index_points(pointcloud, sample_idx)
         return sampled_points.contiguous(), sample_idx
 
     start_indices = None
@@ -67,15 +68,16 @@ def farthest_point_sample(
         noisy_xyz = modified_xyz
 
     sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
-        points=noisy_xyz, K=num_samples,
+        points=noisy_xyz,
+        K=num_samples,
     )
 
     # Map back indices when random-start was used.
     if use_random_start:
         # Vectorized: swap index 0 ↔ start_indices[b] in each row of sample_idx.
-        mask_0 = sample_idx == 0                                 # (B, K)
-        si_expanded = start_indices.unsqueeze(1)                  # (B, 1)
-        mask_si = sample_idx == si_expanded                       # (B, K)
+        mask_0 = sample_idx == 0  # (B, K)
+        si_expanded = start_indices.unsqueeze(1)  # (B, 1)
+        mask_si = sample_idx == si_expanded  # (B, K)
         sample_idx[mask_0] = si_expanded.expand(B, num_samples)[mask_0]
         sample_idx[mask_si] = 0
 
@@ -92,16 +94,19 @@ def farthest_point_sample(
     if random_noise_scale == 0.0 and pointcloud.size(-1) == 3:
         if shuffle_perm is not None:
             sampled_xyz = sampled_xyz.gather(
-                1, shuffle_perm.unsqueeze(-1).expand(-1, -1, 3),
+                1,
+                shuffle_perm.unsqueeze(-1).expand(-1, -1, 3),
             )
         return sampled_xyz.contiguous(), sample_idx
 
     # Gather full channels using the (possibly remapped & shuffled) indices.
     sampled_points = torch.gather(
-        pointcloud, 1,
+        pointcloud,
+        1,
         sample_idx.unsqueeze(-1).long().expand(-1, -1, pointcloud.shape[-1]),
     )
     return sampled_points.contiguous(), sample_idx
+
 
 def preprocess_point_cloud(
     pc: torch.Tensor,
@@ -120,6 +125,7 @@ def preprocess_point_cloud(
     if pc.shape[1] > num_points:
         pc, _ = farthest_point_sample(pc, num_points, **(fps_random_config or {}))
     return pc
+
 
 def square_distance(source_xyz: torch.Tensor, target_xyz: torch.Tensor) -> torch.Tensor:
     if source_xyz.ndim != 3 or target_xyz.ndim != 3:
@@ -140,10 +146,12 @@ def square_distance(source_xyz: torch.Tensor, target_xyz: torch.Tensor) -> torch
     )
     return distance.clamp_min(0.0)
 
+
 def index_points(points: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
     batch_index = torch.arange(points.size(0), device=points.device, dtype=torch.long)
     view_shape = (points.size(0),) + (1,) * (index.ndim - 1)
     return points[batch_index.view(*view_shape), index]
+
 
 def knn_point(num_neighbors: int, support_xyz: torch.Tensor, query_xyz: torch.Tensor) -> torch.Tensor:
     result = torch3d_ops.knn_points(
@@ -153,6 +161,7 @@ def knn_point(num_neighbors: int, support_xyz: torch.Tensor, query_xyz: torch.Te
         return_sorted=False,
     )
     return result.idx if hasattr(result, "idx") else result[1]
+
 
 def query_ball_point(
     radius: float,
@@ -183,6 +192,7 @@ def query_ball_point(
 
     return neighbor_idx
 
+
 def group(
     radius: float,
     num_neighbors: int,
@@ -198,6 +208,7 @@ def group(
 
     grouped_features = index_points(features, neighbor_idx)
     return torch.cat((relative_xyz, grouped_features), dim=-1)
+
 
 def sample_and_group(
     sample_ratio: float,
@@ -227,6 +238,7 @@ def sample_and_group(
         return center_xyz, grouped_features, grouped_xyz, fps_idx
     return center_xyz, grouped_features, center_features
 
+
 def sample_and_group_all(xyz: torch.Tensor, features: torch.Tensor | None):
     center_xyz = xyz.mean(dim=1, keepdim=True)
     grouped_xyz = xyz.unsqueeze(1)
@@ -239,10 +251,12 @@ def sample_and_group_all(xyz: torch.Tensor, features: torch.Tensor | None):
 
     return center_xyz, grouped_features
 
+
 def resolve_stage_values(value, num_stages: int, name: str):
     if len(value) != num_stages:
         raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
     return tuple(value)
+
 
 def normalize_relative_xyz(
     relative_xyz: torch.Tensor,
@@ -251,6 +265,7 @@ def normalize_relative_xyz(
 ) -> torch.Tensor:
     """Normalize relative coordinates by ball query radius."""
     return relative_xyz / max(radius, eps)
+
 
 class PointMLP(nn.Module):
     """Linear + LayerNorm + GELU block used in point cloud encoders."""

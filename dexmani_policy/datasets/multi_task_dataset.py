@@ -1,28 +1,31 @@
 import hashlib
-import warnings
 import multiprocessing as mp
+import warnings
+from typing import List, Optional
+
 import numpy as np
 import torch
-from typing import List, Optional
+
 from dexmani_policy.common.normalizer import LinearNormalizer
+
 
 class MultiTaskDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         datasets: List,
         task_names: List[str],
-        sampling_strategy: str = 'balanced',
+        sampling_strategy: str = "balanced",
         task_weights: Optional[List[float]] = None,
-        normalizer_mode: str = 'shared',
+        normalizer_mode: str = "shared",
         seed: int = 42,
         deterministic: bool = False,
         task_texts: Optional[List[str]] = None,
         augmentation_cfg=None,
-        action_key: str = 'action',
+        action_key: str = "action",
     ):
         assert len(datasets) == len(task_names)
-        assert sampling_strategy in ['proportional', 'balanced', 'weighted']
-        assert normalizer_mode in ['shared', 'per_task']
+        assert sampling_strategy in ["proportional", "balanced", "weighted"]
+        assert normalizer_mode in ["shared", "per_task"]
 
         if len(set(task_names)) != len(task_names):
             raise ValueError(
@@ -44,7 +47,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
         if augmentation_cfg is not None:
             for dataset in self.datasets:
-                if hasattr(dataset, '_build_augmentors'):
+                if hasattr(dataset, "_build_augmentors"):
                     dataset.augmentation_cfg = augmentation_cfg
                     dataset._build_augmentors()
         self.num_tasks = len(datasets)
@@ -62,19 +65,19 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         # Manager-backed Value works with both fork and spawn start methods,
         # unlike mp.Value which requires fork for cross-process visibility.
         self._manager = mp.Manager()
-        self._epoch_val = self._manager.Value('i', 0)
+        self._epoch_val = self._manager.Value("i", 0)
         self.deterministic = deterministic
 
-        if sampling_strategy == 'proportional':
+        if sampling_strategy == "proportional":
             self.sample_probs = np.array(self.task_lengths) / self.total_length
-        elif sampling_strategy == 'balanced':
+        elif sampling_strategy == "balanced":
             self.sample_probs = np.ones(self.num_tasks) / self.num_tasks
-        elif sampling_strategy == 'weighted':
+        elif sampling_strategy == "weighted":
             assert task_weights is not None and len(task_weights) == self.num_tasks
             total = sum(task_weights)
             self.sample_probs = np.array(task_weights) / total
 
-        if sampling_strategy != 'weighted' and task_weights is not None:
+        if sampling_strategy != "weighted" and task_weights is not None:
             warnings.warn(
                 f"task_weights={task_weights} is ignored because "
                 f"sampling_strategy='{sampling_strategy}'. "
@@ -87,17 +90,17 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             self.epoch_indices = None
             self.current_epoch = -1
 
-        if normalizer_mode == 'shared':
+        if normalizer_mode == "shared":
             self.normalizer = self._compute_shared_normalizer()
         else:
             self.normalizers = {name: d.get_normalizer() for name, d in zip(task_names, datasets)}
 
     def _compute_shared_normalizer(self):
-        all_joint_states = [d.replay_buffer['joint_state'] for d in self.datasets]
+        all_joint_states = [d.replay_buffer["joint_state"] for d in self.datasets]
         all_actions = [d.replay_buffer[d.action_key] for d in self.datasets]
         joint_state = np.concatenate(all_joint_states, axis=0)
         action = np.concatenate(all_actions, axis=0)
-        return LinearNormalizer.fit_obs_action(joint_state, action, self.action_key, 'limits')
+        return LinearNormalizer.fit_obs_action(joint_state, action, self.action_key, "limits")
 
     def __del__(self):
         try:
@@ -125,7 +128,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         return indices
 
     def generate_fixed_indices(self):
-        if self.sampling_strategy == 'proportional':
+        if self.sampling_strategy == "proportional":
             indices = []
             for task_idx, task_length in enumerate(self.task_lengths):
                 for local_idx in range(task_length):
@@ -192,8 +195,8 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         sample = self.datasets[task_idx][local_idx]
 
         # inject task identity into obs (ManiFlow convention)
-        sample['obs']['task_text'] = self.task_texts[task_idx]
-        sample['obs']['task_name'] = self.task_names[task_idx]
+        sample["obs"]["task_text"] = self.task_texts[task_idx]
+        sample["obs"]["task_name"] = self.task_names[task_idx]
 
         return sample
 
@@ -202,7 +205,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self._epoch_val.value = epoch
 
     def get_normalizer(self, task_name: Optional[str] = None, **kwargs):
-        if self.normalizer_mode == 'shared':
+        if self.normalizer_mode == "shared":
             return self.normalizer
         else:
             if task_name is None:

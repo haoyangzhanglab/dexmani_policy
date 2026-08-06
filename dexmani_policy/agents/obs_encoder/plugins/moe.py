@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class ExpertMLP(nn.Module):
-    def __init__(self, dim, hidden_dim, out_dim=None, num_layers=2,
-                 activation=nn.GELU):
+    def __init__(self, dim, hidden_dim, out_dim=None, num_layers=2, activation=nn.GELU):
         super().__init__()
         out_dim = dim if out_dim is None else out_dim
 
@@ -27,6 +27,7 @@ class ExpertMLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
 
 class MoE(nn.Module):
     def __init__(
@@ -84,16 +85,18 @@ class MoE(nn.Module):
 
         self.use_enhanced_gate = use_enhanced_gate
 
-        self.experts = nn.ModuleList([
-            ExpertMLP(
-                dim=dim,
-                hidden_dim=hidden_dim,
-                out_dim=out_dim,
-                num_layers=num_layers,
-                activation=activation,
-            )
-            for _ in range(num_experts)
-        ])
+        self.experts = nn.ModuleList(
+            [
+                ExpertMLP(
+                    dim=dim,
+                    hidden_dim=hidden_dim,
+                    out_dim=out_dim,
+                    num_layers=num_layers,
+                    activation=activation,
+                )
+                for _ in range(num_experts)
+            ]
+        )
 
         self._init_weights()
 
@@ -126,7 +129,7 @@ class MoE(nn.Module):
             # Slice logits BEFORE softmax so that only active experts
             # compete.  Inactive experts receive exactly zero probability
             # (rather than a residual share of a full softmax).
-            logits = logits[:, :self.current_num_experts]
+            logits = logits[:, : self.current_num_experts]
         probs = torch.softmax(logits, dim=-1)
         k = min(self.current_top_k, self.current_num_experts)
         topk_prob, topk_idx = torch.topk(probs, k=k, dim=-1)
@@ -134,7 +137,7 @@ class MoE(nn.Module):
         return probs, topk_idx, topk_prob
 
     def aggregate_experts(self, z, topk_idx, topk_prob):
-        active_experts = self.experts[:self.current_num_experts]
+        active_experts = self.experts[: self.current_num_experts]
         expert_out = torch.stack([expert(z) for expert in active_experts], dim=1)
         picked = torch.gather(
             expert_out,
@@ -217,6 +220,7 @@ class MoE(nn.Module):
         aux["topk_prob"] = topk_prob
         return z_moe, aux
 
+
 def example():
     torch.manual_seed(0)
 
@@ -283,8 +287,7 @@ def example():
     # Verify aux loss fix: f_i counts ALL top-k selections, not just argmax
     f_i_sum = aux["f_i"].sum().item()
     print(f"f_i sum (probability distribution): {f_i_sum:.4f} (should be 1.0)")
-    assert abs(f_i_sum - 1.0) < 1e-6, \
-        f"f_i.sum() should be 1.0 (normalized probability), got {f_i_sum}"
+    assert abs(f_i_sum - 1.0) < 1e-6, f"f_i.sum() should be 1.0 (normalized probability), got {f_i_sum}"
     # Verify f_i accounts for all top-k selections (not just argmax):
     # When top_k>1, dispatch count (=argmax count) < topk count (=one_hot sum)
     dispatch_count = torch.bincount(aux["dispatch"], minlength=8).sum().item()
@@ -295,10 +298,16 @@ def example():
     print("\n--- Boost test ---")
     moe_boost = MoE(
         dim=64,
-        num_experts=8, top_k=2,
-        hidden_dim=128, out_dim=64, num_layers=2,
-        use_boost=True, boost_start_epoch=0, boost_interval=50,
-        boost_experts_per_step=4, boost_topk_per_step=1,
+        num_experts=8,
+        top_k=2,
+        hidden_dim=128,
+        out_dim=64,
+        num_layers=2,
+        use_boost=True,
+        boost_start_epoch=0,
+        boost_interval=50,
+        boost_experts_per_step=4,
+        boost_topk_per_step=1,
     )
     print(f"base experts={moe_boost.num_experts} top_k={moe_boost.top_k}")
 
@@ -323,12 +332,17 @@ def example():
     print("\n--- Enhanced gate test ---")
     moe_gate = MoE(
         dim=64,
-        num_experts=8, top_k=2,
-        hidden_dim=128, out_dim=64, num_layers=2,
-        use_enhanced_gate=True, gate_dropout=0.1,
+        num_experts=8,
+        top_k=2,
+        hidden_dim=128,
+        out_dim=64,
+        num_layers=2,
+        use_enhanced_gate=True,
+        gate_dropout=0.1,
     )
-    assert isinstance(moe_gate.router, nn.Sequential), \
+    assert isinstance(moe_gate.router, nn.Sequential), (
         f"Expected nn.Sequential gate, got {type(moe_gate.router)}"
+    )
     print(f"gate type: {type(moe_gate.router).__name__} (len={len(moe_gate.router)})")
     z_gate, aux_gate = moe_gate(x_test, return_aux=True)
     print(f"enhanced gate z: {z_gate.shape}, aux loss: {aux_gate['loss'].item():.4f}")
@@ -344,6 +358,7 @@ def example():
         "z_override": z_override,
         "aux_override": aux_override,
     }
+
 
 if __name__ == "__main__":
     example()

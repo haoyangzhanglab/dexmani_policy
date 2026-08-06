@@ -1,6 +1,9 @@
 """Positional encoding modules shared across backbones and point-cloud encoders."""
 
+from __future__ import annotations
+
 import math
+
 import torch
 import torch.nn as nn
 
@@ -9,6 +12,7 @@ POS_ENCODING_BASE = 10000.0
 # ---------------------------------------------------------------------------
 # 1D sinusoidal positional encoding (timestep / sequence position)
 # ---------------------------------------------------------------------------
+
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim: int):
@@ -23,6 +27,7 @@ class SinusoidalPosEmb(nn.Module):
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
+
 
 class TimestepMLP(nn.Module):
     """Sinusoidal timestep embedding followed by a 2-layer MLP with Mish activation.
@@ -44,9 +49,11 @@ class TimestepMLP(nn.Module):
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         return self.net(t)
 
+
 # ---------------------------------------------------------------------------
 # 3D sinusoidal / relative positional encodings (point-cloud coordinates)
 # ---------------------------------------------------------------------------
+
 
 class SinusoidalPosEmb3D(nn.Module):
     """Standard sinusoidal positional encoding for continuous 3D coordinates."""
@@ -70,6 +77,7 @@ class SinusoidalPosEmb3D(nn.Module):
         pos_emb = torch.cat((angles.sin(), angles.cos()), dim=-1)
         return pos_emb.flatten(start_dim=-2)
 
+
 class RelativePositionalEncoding3D(nn.Module):
     """Learned relative positional encoding for local point neighborhoods."""
 
@@ -88,9 +96,7 @@ class RelativePositionalEncoding3D(nn.Module):
 
     def forward(self, relative_xyz: torch.Tensor) -> torch.Tensor:
         if relative_xyz.ndim < 2 or relative_xyz.size(-1) != 3:
-            raise ValueError(
-                f"relative_xyz must have shape [..., 3], but got {tuple(relative_xyz.shape)}"
-            )
+            raise ValueError(f"relative_xyz must have shape [..., 3], but got {tuple(relative_xyz.shape)}")
 
         if self.use_distance:
             distance = torch.linalg.norm(relative_xyz, dim=-1, keepdim=True)

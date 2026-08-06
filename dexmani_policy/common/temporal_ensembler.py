@@ -34,7 +34,7 @@ class ChunkOverlapBlender:
 
     def __init__(self, temporal_ensemble_coeff: float = 0.01) -> None:
         # Pre-computed ACT weights for the exact 2-prediction case.
-        self.w0: float = 1.0                                 # exp(-coeff * 0)
+        self.w0: float = 1.0  # exp(-coeff * 0)
         self.w1: float = math.exp(-temporal_ensemble_coeff)  # exp(-coeff * 1)
         self.wsum: float = self.w0 + self.w1
         self.reset()
@@ -66,8 +66,7 @@ class ChunkOverlapBlender:
             overlap = min(self._prev_tail.size(1), new_head.size(1) - 1)
             control = new_head.clone()
             control[:, :overlap] = (
-                self._prev_tail[:, :overlap] * self.w0
-                + new_head[:, :overlap] * self.w1
+                self._prev_tail[:, :overlap] * self.w0 + new_head[:, :overlap] * self.w1
             ) / self.wsum
 
         # Save the unexecuted tail for the next chunk's blend.

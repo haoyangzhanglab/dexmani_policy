@@ -1,9 +1,12 @@
 from typing import Optional, Union
 
-from diffusers.optimization import (
-    Optimizer, SchedulerType, TYPE_TO_SCHEDULER_FUNCTION,
-)
 import torch.optim.lr_scheduler as _lrs
+from diffusers.optimization import (
+    TYPE_TO_SCHEDULER_FUNCTION,
+    Optimizer,
+    SchedulerType,
+)
+
 
 def compute_num_training_steps(cfg, batches_per_epoch: int) -> int:
     """Return total training steps directly from config.
@@ -13,12 +16,13 @@ def compute_num_training_steps(cfg, batches_per_epoch: int) -> int:
     """
     return cfg.training.loop.total_train_steps
 
+
 def get_scheduler(
     optimizer: Optimizer,
     name: Union[str, SchedulerType],
     num_warmup_steps: Optional[int] = None,
     num_training_steps: Optional[int] = None,
-    **kwargs
+    **kwargs,
 ):
     if name in ("one_cycle",):
         if num_training_steps is None:
@@ -56,4 +60,6 @@ def get_scheduler(
     if num_training_steps is None:
         raise ValueError(f"{name} requires `num_training_steps`, please provide that argument.")
 
-    return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, **kwargs)
+    return schedule_func(
+        optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, **kwargs
+    )

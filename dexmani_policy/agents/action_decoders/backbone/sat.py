@@ -20,17 +20,17 @@ import torch.nn.functional as F
 from timm.models.vision_transformer import Mlp, RmsNorm
 
 from dexmani_policy.agents.action_decoders.backbone.dit import (
-    modulate,
-    _approx_gelu,
     WEIGHT_INIT_STD,
+    _approx_gelu,
+    modulate,
 )
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
-
 # ---------------------------------------------------------------------------
 # Embodied Joint Codebook (EJC)
 # ---------------------------------------------------------------------------
+
 
 class EmbodiedJointCodebook(nn.Module):
     """3-field summed embedding providing per-joint structural identity.
@@ -75,12 +75,9 @@ class EmbodiedJointCodebook(nn.Module):
         self.proj_axis = nn.Linear(axis_dim, hidden_dim)
 
         # Per-joint type assignments (configurable via state_dict / manual set)
-        self.register_buffer(
-            'joint_embodiment', torch.zeros(num_joints, dtype=torch.long))
-        self.register_buffer(
-            'joint_function', torch.arange(num_joints, dtype=torch.long))
-        self.register_buffer(
-            'joint_axis', torch.zeros(num_joints, dtype=torch.long))
+        self.register_buffer("joint_embodiment", torch.zeros(num_joints, dtype=torch.long))
+        self.register_buffer("joint_function", torch.arange(num_joints, dtype=torch.long))
+        self.register_buffer("joint_axis", torch.zeros(num_joints, dtype=torch.long))
 
     def forward(self) -> torch.Tensor:
         """Return ``(num_joints, hidden_dim)`` — one embedding per action token."""
@@ -93,6 +90,7 @@ class EmbodiedJointCodebook(nn.Module):
 # ---------------------------------------------------------------------------
 # MultiModalAttention — obs-as-prefix, bidirectional action
 # ---------------------------------------------------------------------------
+
 
 class MultiModalAttention(nn.Module):
     """Single concatenated attention with observation-as-KV-prefix masking.
@@ -116,7 +114,7 @@ class MultiModalAttention(nn.Module):
         proj_drop: float = 0.0,
     ):
         super().__init__()
-        assert dim % num_heads == 0, f'dim {dim} not divisible by num_heads {num_heads}'
+        assert dim % num_heads == 0, f"dim {dim} not divisible by num_heads {num_heads}"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
 
@@ -148,9 +146,7 @@ class MultiModalAttention(nn.Module):
 
         # Single QKV projection
         qkv = (
-            self.qkv(combined)
-            .reshape(B, N_obs + Da, 3, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
+            self.qkv(combined).reshape(B, N_obs + Da, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         )
         q, k, v = qkv.unbind(0)  # each (B, num_heads, N_obs+Da, head_dim)
         q, k = self.q_norm(q), self.k_norm(k)
@@ -161,10 +157,12 @@ class MultiModalAttention(nn.Module):
         #   action rows [N_obs:, :]      = 0.0  (allow action→all)
         total = N_obs + Da
         mask = torch.zeros(total, total, dtype=combined.dtype, device=combined.device)
-        mask[:N_obs, N_obs:] = float('-inf')
+        mask[:N_obs, N_obs:] = float("-inf")
 
         x = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             attn_mask=mask,
             dropout_p=self.attn_drop.p if self.training else 0.0,
         )
@@ -184,6 +182,7 @@ class MultiModalAttention(nn.Module):
 # ---------------------------------------------------------------------------
 # SATBlock — AdaLN-modulated block
 # ---------------------------------------------------------------------------
+
 
 class SATBlock(nn.Module):
     """One SAT Transformer block with AdaLN modulation.
@@ -247,8 +246,8 @@ class SATBlock(nn.Module):
             ``(x_action, c_obs)`` — action updated via attn+MLP,
             obs updated via attn only
         """
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.adaLN_modulation(time_c).chunk(6, dim=-1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(time_c).chunk(
+            6, dim=-1
         )
 
         # Attention: updates BOTH action and obs
@@ -268,6 +267,7 @@ class SATBlock(nn.Module):
 # ---------------------------------------------------------------------------
 # SATBackbone — full backbone
 # ---------------------------------------------------------------------------
+
 
 class SATBackbone(nn.Module):
     """SAT backbone: structural-centric action Transformer.
@@ -338,17 +338,19 @@ class SATBackbone(nn.Module):
         self.obs_pre_norm = _AdaLNZeroObs(dim=hidden_dim, cond_dim=hidden_dim)
 
         # ---- Transformer blocks ----
-        self.blocks = nn.ModuleList([
-            SATBlock(
-                hidden_size=hidden_dim,
-                num_heads=n_head,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
-                p_drop_attn=p_drop_attn,
-            )
-            for _ in range(n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                SATBlock(
+                    hidden_size=hidden_dim,
+                    num_heads=n_head,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_norm=qk_norm,
+                    p_drop_attn=p_drop_attn,
+                )
+                for _ in range(n_layers)
+            ]
+        )
 
         # ---- Final projection: hidden_dim -> T ----
         self.final_layer = _FinalLayer(hidden_dim, horizon)
@@ -437,17 +439,12 @@ class SATBackbone(nn.Module):
         # 3. Per-sample random shuffle (paper §2.4, §6.3)
         perm = None
         if shuffle and self.training:
-            perm = torch.stack(
-                [torch.randperm(Da, device=x.device) for _ in range(B)], dim=0)
+            perm = torch.stack([torch.randperm(Da, device=x.device) for _ in range(B)], dim=0)
             # Shuffle action tokens: (B, Da, hidden_dim)
-            x = torch.gather(
-                x, dim=1,
-                index=perm.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+            x = torch.gather(x, dim=1, index=perm.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
             # Shuffle EJC synchronously
             ejc = ejc.unsqueeze(0).expand(B, -1, -1)
-            ejc = torch.gather(
-                ejc, dim=1,
-                index=perm.unsqueeze(-1).expand(-1, -1, ejc.shape[-1]))
+            ejc = torch.gather(ejc, dim=1, index=perm.unsqueeze(-1).expand(-1, -1, ejc.shape[-1]))
 
         # 4. Token = trajectory feature + joint identity (ADD, paper §2.3)
         x = x + ejc  # (B, Da, hidden_dim)
@@ -471,9 +468,7 @@ class SATBackbone(nn.Module):
         # 10. Unshuffle if needed (paper §2.4)
         if perm is not None:
             inv_perm = torch.argsort(perm, dim=1)  # (B, Da)
-            x = torch.gather(
-                x, dim=1,
-                index=inv_perm.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+            x = torch.gather(x, dim=1, index=inv_perm.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
 
         return x
 
@@ -494,6 +489,7 @@ class SATBackbone(nn.Module):
 # Internal helpers (pattern-matched from ditx.py)
 # ---------------------------------------------------------------------------
 
+
 class _AdaLNZeroObs(nn.Module):
     """AdaLN-Zero pre-normalisation for observation tokens.
 
@@ -510,8 +506,8 @@ class _AdaLNZeroObs(nn.Module):
 
     def initialize_weights(self):
         nn.init.zeros_(self.cond_linear.weight)
-        nn.init.constant_(self.cond_linear.bias[:self.dim], 1.0)
-        nn.init.zeros_(self.cond_linear.bias[self.dim:])
+        nn.init.constant_(self.cond_linear.bias[: self.dim], 1.0)
+        nn.init.zeros_(self.cond_linear.bias[self.dim :])
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         x = self.norm(x)

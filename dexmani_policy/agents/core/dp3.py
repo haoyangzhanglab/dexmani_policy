@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
-from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
-from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
+from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
+from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
+from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+
 
 class DP3ObsEncoder(nn.Module):
     def __init__(
@@ -19,27 +21,34 @@ class DP3ObsEncoder(nn.Module):
     ):
         super().__init__()
         self.pc_encoder = build_pc_global_encoder(
-            encoder_type, pc_dim, config={
-                'output_channels': pc_out_dim,
-                'fps_random_config': fps_random_config,
-            }
+            encoder_type,
+            pc_dim,
+            config={
+                "output_channels": pc_out_dim,
+                "fps_random_config": fps_random_config,
+            },
         )
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.num_points = num_points
-        self.use_coord_only = (pc_dim == 3)
+        self.use_coord_only = pc_dim == 3
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
         self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
-        pc = preprocess_point_cloud(obs['point_cloud'], self.num_points,
-                                     self.use_coord_only, self.fps_random_config)
-        feat = torch.cat([
-            self.pc_encoder(pc)['global_token'],
-            self.state_mlp(obs['joint_state']),
-        ], dim=-1)
+        pc = preprocess_point_cloud(
+            obs["point_cloud"], self.num_points, self.use_coord_only, self.fps_random_config
+        )
+        feat = torch.cat(
+            [
+                self.pc_encoder(pc)["global_token"],
+                self.state_mlp(obs["joint_state"]),
+            ],
+            dim=-1,
+        )
         B = feat.shape[0] // self.n_obs_steps
         return feat.reshape(B, -1), {}
+
 
 class DP3Agent(UNetDiffusionAgent):
     def __init__(
@@ -58,62 +67,78 @@ class DP3Agent(UNetDiffusionAgent):
         **kwargs,
     ):
         obs_encoder = DP3ObsEncoder(
-            encoder_type, pc_dim, pc_out_dim, state_dim,
-            num_points, n_obs_steps, state_out_dim,
+            encoder_type,
+            pc_dim,
+            pc_out_dim,
+            state_dim,
+            num_points,
+            n_obs_steps,
+            state_out_dim,
             fps_random_config=fps_random_config,
         )
-        super().__init__(
-            obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs
-        )
+        super().__init__(obs_encoder, horizon, n_obs_steps, n_action_steps, action_dim, **kwargs)
+
 
 def example():
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     B, T, H, A, N = 2, 2, 16, 19, 256
 
     agent = DP3Agent(
-        horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A,
-        encoder_type='idp3', pc_dim=3, pc_out_dim=64, state_dim=A,
+        horizon=H,
+        n_obs_steps=T,
+        n_action_steps=8,
+        action_dim=A,
+        encoder_type="idp3",
+        pc_dim=3,
+        pc_out_dim=64,
+        state_dim=A,
         num_points=N,
-        down_dims=[64, 128], diffusion_step_embed_dim=64,
-        num_training_steps=10, num_inference_steps=3,
+        down_dims=[64, 128],
+        diffusion_step_embed_dim=64,
+        num_training_steps=10,
+        num_inference_steps=3,
     ).to(device)
 
     obs = {
-        'point_cloud': torch.randn(B * T, N, 3, device=device),
-        'joint_state': torch.randn(B * T, A, device=device),
+        "point_cloud": torch.randn(B * T, N, 3, device=device),
+        "joint_state": torch.randn(B * T, A, device=device),
     }
     action = torch.randn(B, H, A, device=device)
 
-    print('=== DP3Agent smoke test ===')
-    print(f'obs point_cloud: {obs["point_cloud"].shape}')
-    print(f'obs joint_state: {obs["joint_state"].shape}')
-    print(f'action:          {action.shape}')
+    print("=== DP3Agent smoke test ===")
+    print(f"obs point_cloud: {obs['point_cloud'].shape}")
+    print(f"obs joint_state: {obs['joint_state'].shape}")
+    print(f"action:          {action.shape}")
 
     cond, _ = agent.obs_encoder(obs)
-    print(f'cond:            {cond.shape}')
+    print(f"cond:            {cond.shape}")
 
     from dexmani_policy.common.normalizer import LinearNormalizer
+
     normalizer = LinearNormalizer()
-    normalizer.fit({'action': action, 'joint_state': obs['joint_state'].reshape(B, T, A)}, mode='limits')
+    normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")
     agent.load_normalizer_from_dataset(normalizer)
 
     batch = {
-        'obs': {
-            'point_cloud': obs['point_cloud'].reshape(B, T, N, 3),
-            'joint_state': obs['joint_state'].reshape(B, T, A),
+        "obs": {
+            "point_cloud": obs["point_cloud"].reshape(B, T, N, 3),
+            "joint_state": obs["joint_state"].reshape(B, T, A),
         },
-        'action': action,
+        "action": action,
     }
     loss, loss_dict = agent.compute_loss(batch)
-    print(f'loss:            {loss.item():.4f}  keys={list(loss_dict.keys())}')
+    print(f"loss:            {loss.item():.4f}  keys={list(loss_dict.keys())}")
 
-    result = agent.predict_action({
-        'point_cloud': obs['point_cloud'].reshape(B, T, N, 3),
-        'joint_state': obs['joint_state'].reshape(B, T, A),
-    })
-    print(f'pred_action:     {result["pred_action"].shape}')
-    print(f'control_action:  {result["control_action"].shape}')
-    print('=== PASSED ===')
+    result = agent.predict_action(
+        {
+            "point_cloud": obs["point_cloud"].reshape(B, T, N, 3),
+            "joint_state": obs["joint_state"].reshape(B, T, A),
+        }
+    )
+    print(f"pred_action:     {result['pred_action'].shape}")
+    print(f"control_action:  {result['control_action'].shape}")
+    print("=== PASSED ===")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     example()

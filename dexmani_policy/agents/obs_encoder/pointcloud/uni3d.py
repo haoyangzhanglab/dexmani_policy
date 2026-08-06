@@ -4,8 +4,8 @@ FPS → k-NN patches → PointNet-style PatchEncoder (LayerNorm) →
 ViT self-attention (timm) → dense per-patch tokens + Fourier spatial pc_pe.
 """
 
-import os
 import logging
+import os
 from math import pi as _pi
 
 import torch
@@ -15,6 +15,7 @@ from .ops import farthest_point_sample
 
 logger = logging.getLogger(__name__)
 
+
 def knn_points(query, key, k, sorted=False):
     """k-nearest neighbors via pairwise distance → (dist, indices)."""
     distance = torch.cdist(query, key)
@@ -23,6 +24,7 @@ def knn_points(query, key, k, sorted=False):
     else:
         knn_dist, knn_ind = torch.topk(distance, k, dim=2, largest=False, sorted=sorted)
     return knn_dist, knn_ind
+
 
 def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
     """Randomly drop up to max_dropout_ratio of points, replacing with first point."""
@@ -35,11 +37,13 @@ def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
             result[b, drop_idx, :] = batch_pc[b, 0, :].unsqueeze(0)
     return result
 
+
 class KNNGrouper(nn.Module):
     """FPS → K centers, k-NN → K groups of relative xyz + features."""
 
-    def __init__(self, num_groups, group_size, radius=None,
-                 centralize_features=False, fps_random_config=None):
+    def __init__(
+        self, num_groups, group_size, radius=None, centralize_features=False, fps_random_config=None
+    ):
         super().__init__()
         self.num_groups = num_groups
         self.group_size = group_size
@@ -67,7 +71,8 @@ class KNNGrouper(nn.Module):
         nbr_feats = nbr_feats.reshape(B, self.num_groups, self.group_size, features.shape[-1])
 
         group_feats = torch.cat([nbr_xyz, nbr_feats], dim=-1)
-        return dict(features=group_feats, centers=centers, knn_idx=knn_idx)
+        return {"features": group_feats, "centers": centers, "knn_idx": knn_idx}
+
 
 class PatchEncoder(nn.Module):
     """PointNet-style patch encoder: conv1 → max pool → cat → conv2 → max pool."""
@@ -95,14 +100,25 @@ class PatchEncoder(nn.Module):
         x = self.conv2(x)
         return torch.max(x, dim=-2).values
 
+
 class PatchEmbed(nn.Module):
     """KNNGrouper + PatchEncoder: group points into patches and encode."""
 
-    def __init__(self, in_channels, out_channels, num_patches, patch_size,
-                 radius=None, centralize_features=False, fps_random_config=None):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        num_patches,
+        patch_size,
+        radius=None,
+        centralize_features=False,
+        fps_random_config=None,
+    ):
         super().__init__()
         self.grouper = KNNGrouper(
-            num_patches, patch_size, radius=radius,
+            num_patches,
+            patch_size,
+            radius=radius,
             centralize_features=centralize_features,
             fps_random_config=fps_random_config,
         )
@@ -113,17 +129,18 @@ class PatchEmbed(nn.Module):
         patches["embeddings"] = self.patch_encoder(patches["features"])
         return patches
 
+
 class PatchDropout(nn.Module):
     """Randomly drop patch tokens during training."""
 
     def __init__(self, prob, exclude_first_token=True):
         super().__init__()
-        assert 0 <= prob < 1.
+        assert 0 <= prob < 1.0
         self.prob = prob
         self.exclude_first_token = exclude_first_token
 
     def forward(self, x):
-        if not self.training or self.prob == 0.:
+        if not self.training or self.prob == 0.0:
             return x
         if self.exclude_first_token:
             cls_tokens, x = x[:, :1], x[:, 1:]
@@ -141,6 +158,7 @@ class PatchDropout(nn.Module):
         if self.exclude_first_token:
             x = torch.cat((cls_tokens, x), dim=1)
         return x
+
 
 class PositionEmbeddingRandom(nn.Module):
     """Fourier feature encoding of 3D coordinates (adapted from SAM)."""
@@ -168,6 +186,7 @@ class PositionEmbeddingRandom(nn.Module):
             )
         return self._pe_encoding(coords)
 
+
 class Uni3DPointcloudEncoder(nn.Module):
     """Patch-based ViT point cloud encoder (LayerNorm throughout).
 
@@ -176,25 +195,26 @@ class Uni3DPointcloudEncoder(nn.Module):
     Supports selective pretrained weight loading from safetensors.
     """
 
-    def __init__(self,
-                 pc_model='eva02_tiny_patch14_224',
-                 embed_dim=256,
-                 num_group=512,
-                 group_size=32,
-                 pc_in_channels=6,
-                 patch_dropout=0.0,
-                 drop_path_rate=0.0,
-                 feature_mode='pointsam',
-                 use_pretrained_weights=False,
-                 pretrained_weights_path=None,
-                 fps_random_config=None,
-                 **kwargs):
+    def __init__(
+        self,
+        pc_model="eva02_tiny_patch14_224",
+        embed_dim=256,
+        num_group=512,
+        group_size=32,
+        pc_in_channels=6,
+        patch_dropout=0.0,
+        drop_path_rate=0.0,
+        feature_mode="pointsam",
+        use_pretrained_weights=False,
+        pretrained_weights_path=None,
+        fps_random_config=None,
+        **kwargs,
+    ):
         super().__init__()
 
         import timm
-        self.transformer = timm.create_model(
-            pc_model, pretrained=False, drop_path_rate=drop_path_rate
-        )
+
+        self.transformer = timm.create_model(pc_model, pretrained=False, drop_path_rate=drop_path_rate)
         self.transformer_dim = self.transformer.embed_dim
         self.embed_dim = embed_dim
         self.num_group = num_group
@@ -203,7 +223,8 @@ class Uni3DPointcloudEncoder(nn.Module):
         self.patch_embed = PatchEmbed(
             in_channels=pc_in_channels,
             out_channels=512,
-            num_patches=num_group, patch_size=group_size,
+            num_patches=num_group,
+            patch_size=group_size,
             fps_random_config=fps_random_config,
         )
 
@@ -213,8 +234,7 @@ class Uni3DPointcloudEncoder(nn.Module):
             nn.Linear(128, self.transformer_dim),
         )
 
-        self.patch_proj = nn.Linear(self.patch_embed.patch_encoder.out_channels,
-                                     self.transformer_dim)
+        self.patch_proj = nn.Linear(self.patch_embed.patch_encoder.out_channels, self.transformer_dim)
         self.out_proj = nn.Linear(self.transformer_dim, embed_dim)
         self.pe_layer = PositionEmbeddingRandom(embed_dim // 2)
 
@@ -225,12 +245,15 @@ class Uni3DPointcloudEncoder(nn.Module):
         else:
             exclude_first = False
 
-        self.patch_dropout = PatchDropout(patch_dropout, exclude_first_token=exclude_first) \
-            if patch_dropout > 0. else nn.Identity()
+        self.patch_dropout = (
+            PatchDropout(patch_dropout, exclude_first_token=exclude_first)
+            if patch_dropout > 0.0
+            else nn.Identity()
+        )
 
         # Freeze unused timm params (not in forward path) for DDP compatibility
         for name, p in self.transformer.named_parameters():
-            if name in ('cls_token', 'pos_embed') or name.startswith('patch_embed.'):
+            if name in ("cls_token", "pos_embed") or name.startswith("patch_embed."):
                 p.requires_grad_(False)
 
         if use_pretrained_weights:
@@ -253,8 +276,8 @@ class Uni3DPointcloudEncoder(nn.Module):
         # dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py, so 5 levels up).
         if not os.path.isabs(pretrained_weights_path):
             _project_root = os.path.dirname(
-                os.path.dirname(os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            )
             pretrained_weights_path = os.path.join(_project_root, pretrained_weights_path)
 
         safetensors_path = os.path.join(pretrained_weights_path, "model.safetensors")
@@ -264,6 +287,7 @@ class Uni3DPointcloudEncoder(nn.Module):
             )
             try:
                 from huggingface_hub import hf_hub_download
+
                 os.makedirs(pretrained_weights_path, exist_ok=True)
                 hf_hub_download(
                     "eddie-cui/r3d-weights",
@@ -273,30 +297,28 @@ class Uni3DPointcloudEncoder(nn.Module):
             except Exception as e:
                 logger.warning(
                     "[Uni3DPointcloudEncoder] Auto-download failed (%s). "
-                    "Run 'bash scripts/download_pretrained.sh' to download manually.", e
+                    "Run 'bash scripts/download_pretrained.sh' to download manually.",
+                    e,
                 )
                 return
 
         from safetensors.torch import load_file
+
         checkpoint = load_file(safetensors_path)
 
         # Remap keys: strip 'pc_encoder.' prefix
         processed_state_dict = {}
         for key in list(checkpoint.keys()):
-            if key.startswith('pc_encoder.'):
-                new_key = key.replace('pc_encoder.', '')
+            if key.startswith("pc_encoder."):
+                new_key = key.replace("pc_encoder.", "")
                 processed_state_dict[new_key] = checkpoint[key]
 
-        missing_keys, unexpected_keys = self.load_state_dict(
-            processed_state_dict, strict=False
-        )
+        missing_keys, unexpected_keys = self.load_state_dict(processed_state_dict, strict=False)
         if missing_keys:
             logger.info("[Uni3DPointcloudEncoder] Missing keys: %s", missing_keys)
         if unexpected_keys:
             logger.info("[Uni3DPointcloudEncoder] Unexpected keys: %s", unexpected_keys)
-        logger.info(
-            "[Uni3DPointcloudEncoder] Pretrained weights loaded from %s", pretrained_weights_path
-        )
+        logger.info("[Uni3DPointcloudEncoder] Pretrained weights loaded from %s", pretrained_weights_path)
 
     @property
     def out_dim(self):

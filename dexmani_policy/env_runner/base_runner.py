@@ -1,12 +1,16 @@
-import torch
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import imageio
 import numpy as np
-from pathlib import Path
+import torch
 from termcolor import cprint
-from typing import Any, Dict, List, Optional
 
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
+
 
 class BaseRunner:
     """Abstract environment runner for agent evaluation.
@@ -24,6 +28,7 @@ class BaseRunner:
     Subclasses override ``run()`` to adapt to specific environment types
     (single-task sim, multi-task sim, real robot, etc.).
     """
+
     def __init__(
         self,
         n_obs_steps: int,
@@ -40,8 +45,8 @@ class BaseRunner:
         # Circular buffer: pre-allocated per-modality storage to avoid per-step
         # np.zeros allocations in the hot path.
         self._obs_buffer: Dict[str, np.ndarray] = {}
-        self._obs_cursor = 0   # next write position in ring buffer
-        self._obs_count = 0    # number of frames stored (0 .. n_obs_steps)
+        self._obs_cursor = 0  # next write position in ring buffer
+        self._obs_count = 0  # number of frames stored (0 .. n_obs_steps)
         self._obs_str_buffer: Dict[str, list] = {}  # for string modalities
 
         self.env_video_fps = env_video_fps  # may be None → auto-detect from env
@@ -68,14 +73,13 @@ class BaseRunner:
                 continue
             if isinstance(v, np.ndarray):
                 if k not in self._obs_buffer:
-                    self._obs_buffer[k] = np.zeros(
-                        (self.n_obs_steps,) + v.shape, dtype=v.dtype)
+                    self._obs_buffer[k] = np.zeros((self.n_obs_steps,) + v.shape, dtype=v.dtype)
                 self._obs_buffer[k][pos] = v
             elif isinstance(v, torch.Tensor):
                 if k not in self._obs_buffer:
                     self._obs_buffer[k] = torch.zeros(
-                        (self.n_obs_steps,) + tuple(v.shape),
-                        dtype=v.dtype, device=v.device)
+                        (self.n_obs_steps,) + tuple(v.shape), dtype=v.dtype, device=v.device
+                    )
                 self._obs_buffer[k][pos] = v
             elif isinstance(v, str):
                 if k not in self._obs_str_buffer:
@@ -100,11 +104,10 @@ class BaseRunner:
             if self._obs_count < self.n_obs_steps:
                 # Episode start: only _obs_count frames available.
                 # Pad the beginning with the first frame.
-                result = np.empty_like(buf) if isinstance(buf, np.ndarray) else \
-                         torch.empty_like(buf)
+                result = np.empty_like(buf) if isinstance(buf, np.ndarray) else torch.empty_like(buf)
                 pad_len = self.n_obs_steps - self._obs_count
                 result[:pad_len] = buf[0]
-                result[pad_len:] = buf[:self._obs_count]
+                result[pad_len:] = buf[: self._obs_count]
                 out[k] = result
             else:
                 # Normal case: return chronologically-ordered slice.
@@ -143,7 +146,7 @@ class BaseRunner:
             self._blender.reset()
 
     @torch.no_grad()
-    def get_action_chunk(self, obs_batch, agent, denoise_timesteps:int=None) -> np.ndarray:
+    def get_action_chunk(self, obs_batch, agent, denoise_timesteps: int = None) -> np.ndarray:
         result = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
 
         if self._blender is not None:
@@ -153,7 +156,7 @@ class BaseRunner:
 
         return result["control_action"].detach().cpu().numpy().squeeze(0)
 
-    def run_one_episode(self, agent, env, episode_seed, denoise_timesteps:int=None, **kwargs):
+    def run_one_episode(self, agent, env, episode_seed, denoise_timesteps: int = None, **kwargs):
         """Run a single evaluation episode.
 
         Environment contract (required for accurate ``avg_steps`` metrics):
@@ -186,7 +189,7 @@ class BaseRunner:
 
                 # Record first success step using the raw success_condition (no hold delay)
                 if info.get("success_condition") and task_done_step is None:
-                    task_done_step = getattr(env, 'action_cnt', None)
+                    task_done_step = getattr(env, "action_cnt", None)
 
                 if info.get("success", False):
                     episode_success = True
@@ -196,16 +199,24 @@ class BaseRunner:
 
         return episode_success, task_done_step
 
-    def run(self, agent, denoise_timesteps:int=None, eval_episodes:int=None,
-            video_save_dir: Optional[Path] = None):
+    def run(
+        self,
+        agent,
+        denoise_timesteps: int = None,
+        eval_episodes: int = None,
+        video_save_dir: Optional[Path] = None,
+    ):
         env = self.make_env()
         if self.env_video_fps is None:
-            self.env_video_fps = getattr(env, 'video_fps', 15)
+            self.env_video_fps = getattr(env, "video_fps", 15)
         eval_seeds = self.get_seed_list()
         eval_episodes = eval_episodes if eval_episodes is not None else self.default_eval_episodes
 
         if eval_episodes > len(eval_seeds):
-            cprint(f"⚠️ eval_episodes ({eval_episodes}) > available seeds ({len(eval_seeds)}), limiting to {len(eval_seeds)}", "yellow")
+            cprint(
+                f"⚠️ eval_episodes ({eval_episodes}) > available seeds ({len(eval_seeds)}), limiting to {len(eval_seeds)}",
+                "yellow",
+            )
             eval_episodes = len(eval_seeds)
 
         num_episodes = eval_episodes
@@ -225,8 +236,10 @@ class BaseRunner:
                 attempted += 1
 
                 try:
-                    episode_success, task_done_step = self.run_one_episode(agent, env, eval_seed, denoise_timesteps)
-                    total_steps = getattr(env, 'action_cnt', None)
+                    episode_success, task_done_step = self.run_one_episode(
+                        agent, env, eval_seed, denoise_timesteps
+                    )
+                    total_steps = getattr(env, "action_cnt", None)
                     video = env.get_video()
 
                     if self.clear_cache_freq > 0 and attempted % self.clear_cache_freq == 0:
@@ -235,17 +248,22 @@ class BaseRunner:
 
                     status = "success" if episode_success else "fail"
                     done_step_str = task_done_step if task_done_step is not None else "N/A"
-                    cprint(f"[progress {len(success_list)+1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}", "cyan")
+                    cprint(
+                        f"[progress {len(success_list) + 1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}",
+                        "cyan",
+                    )
 
                     success_list.append(episode_success)
                     if episode_success and task_done_step is not None:
                         task_done_step_list.append(task_done_step)
-                    episode_details.append({
-                        "seed": eval_seed,
-                        "success": episode_success,
-                        "steps": task_done_step,
-                        "total_steps": total_steps,
-                    })
+                    episode_details.append(
+                        {
+                            "seed": eval_seed,
+                            "success": episode_success,
+                            "steps": task_done_step,
+                            "total_steps": total_steps,
+                        }
+                    )
                     if video is not None:
                         if video_save_dir is not None:
                             video_path = video_save_dir / f"episode_{eval_seed}.mp4"
@@ -262,22 +280,29 @@ class BaseRunner:
                     except Exception:
                         crash_video = None
                     success_list.append(False)
-                    episode_details.append({
-                        "seed": eval_seed,
-                        "success": False,
-                        "steps": None,
-                        "error": str(e),
-                    })
+                    episode_details.append(
+                        {
+                            "seed": eval_seed,
+                            "success": False,
+                            "steps": None,
+                            "error": str(e),
+                        }
+                    )
                     if crash_video is not None:
                         if video_save_dir is not None:
                             video_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
-                            imageio.mimsave(str(video_path), crash_video.astype(np.uint8), fps=self.env_video_fps)
+                            imageio.mimsave(
+                                str(video_path), crash_video.astype(np.uint8), fps=self.env_video_fps
+                            )
                             episode_video_list.append({f"episode_{eval_seed}_crash": str(video_path)})
                         else:
                             episode_video_list.append({f"episode_{eval_seed}_crash": crash_video})
 
             if len(success_list) < num_episodes:
-                cprint(f"Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)", "red")
+                cprint(
+                    f"Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)",
+                    "red",
+                )
 
             success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
             avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
@@ -287,10 +312,13 @@ class BaseRunner:
             avg_steps_all = int(round(np.mean(all_steps))) if all_steps else None
 
             sr_str = format_success_rate(success_rate)
-            avg_steps_str = 'N/A' if avg_steps is None else str(avg_steps)
-            avg_all_str = 'N/A' if avg_steps_all is None else str(avg_steps_all)
-            cprint(f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, "
-                   f"Avg steps (success): {avg_steps_str}, Avg steps (all): {avg_all_str}", "yellow")
+            avg_steps_str = "N/A" if avg_steps is None else str(avg_steps)
+            avg_all_str = "N/A" if avg_steps_all is None else str(avg_steps_all)
+            cprint(
+                f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, "
+                f"Avg steps (success): {avg_steps_str}, Avg steps (all): {avg_all_str}",
+                "yellow",
+            )
             print("=" * 90)
 
         finally:

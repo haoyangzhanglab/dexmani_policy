@@ -1,11 +1,14 @@
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 def gather_tokens(x, idx):
     idx = idx.unsqueeze(-1).expand(-1, -1, x.size(-1))
     return torch.gather(x, 1, idx)
+
 
 class Mlp(nn.Module):
     def __init__(self, dim, mlp_ratio=4.0):
@@ -18,6 +21,7 @@ class Mlp(nn.Module):
 
     def forward(self, x):
         return x + self.fc2(self.act(self.fc1(self.norm(x))))
+
 
 class SelfAttn(nn.Module):
     """Self-attention with ``F.scaled_dot_product_attention`` → Flash Attention."""
@@ -34,19 +38,18 @@ class SelfAttn(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         h = self.norm(x)
-        qkv = (
-            self.qkv(h)
-            .reshape(B, N, 3, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = self.qkv(h).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         h = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             dropout_p=self.dropout if self.training else 0.0,
         )
         h = h.permute(0, 2, 1, 3).reshape(B, N, C)
         h = self.proj(h)
         return x + h
+
 
 class CrossAttn(nn.Module):
     """Cross-attention with ``F.scaled_dot_product_attention`` → Flash Attention.
@@ -73,16 +76,8 @@ class CrossAttn(nn.Module):
         qn = self.norm_q(q)
         kvn = self.norm_kv(kv)
 
-        q_proj = (
-            self.q_proj(qn)
-            .reshape(B, Nq, self.num_heads, self.head_dim)
-            .permute(0, 2, 1, 3)
-        )
-        kv_proj = (
-            self.kv_proj(kvn)
-            .reshape(B, Nkv, 2, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
+        q_proj = self.q_proj(qn).reshape(B, Nq, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        kv_proj = self.kv_proj(kvn).reshape(B, Nkv, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         k, v = kv_proj.unbind(0)
 
         attn_mask = None
@@ -92,13 +87,16 @@ class CrossAttn(nn.Module):
             attn_mask = attn_mask.masked_fill(kv_mask[:, None, None, :], float("-inf"))
 
         h = F.scaled_dot_product_attention(
-            q_proj, k, v,
+            q_proj,
+            k,
+            v,
             attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
         )
         h = h.permute(0, 2, 1, 3).reshape(B, Nq, C)
         h = self.proj(h)
         return q + h
+
 
 class LatentBlock(nn.Module):
     def __init__(self, dim, num_heads, self_attn=False, mlp_ratio=4.0, dropout=0.0):
@@ -114,9 +112,11 @@ class LatentBlock(nn.Module):
         latents = self.mlp(latents)
         return latents
 
+
 class IdentityReducer(nn.Module):
     def forward(self, tokens, cond=None, token_mask=None):
         return tokens, token_mask, {}
+
 
 class TopKReducer(nn.Module):
     def __init__(self, dim, keep_tokens=None, keep_ratio=None, cond_dim=None):
@@ -154,6 +154,7 @@ class TopKReducer(nn.Module):
         }
         return kept_tokens, kept_mask, aux
 
+
 class TokenCompressor(nn.Module):
     def __init__(
         self,
@@ -170,22 +171,24 @@ class TokenCompressor(nn.Module):
     ):
         super().__init__()
         self.token_proj = nn.Identity() if token_dim == latent_dim else nn.Linear(token_dim, latent_dim)
-        self.default_queries = nn.Parameter(
-            torch.randn(1, num_latents, latent_dim) / math.sqrt(latent_dim)
-        )
+        self.default_queries = nn.Parameter(torch.randn(1, num_latents, latent_dim) / math.sqrt(latent_dim))
         self.reducer = reducer if reducer is not None else IdentityReducer()
-        self.blocks = nn.ModuleList([
-            LatentBlock(
-                dim=latent_dim,
-                num_heads=num_heads,
-                self_attn=latent_self_attn,
-                mlp_ratio=mlp_ratio,
-                dropout=dropout,
-            )
-            for _ in range(depth)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                LatentBlock(
+                    dim=latent_dim,
+                    num_heads=num_heads,
+                    self_attn=latent_self_attn,
+                    mlp_ratio=mlp_ratio,
+                    dropout=dropout,
+                )
+                for _ in range(depth)
+            ]
+        )
         self.out_norm = nn.LayerNorm(latent_dim)
-        self.out_proj = nn.Identity() if out_dim is None or out_dim == latent_dim else nn.Linear(latent_dim, out_dim)
+        self.out_proj = (
+            nn.Identity() if out_dim is None or out_dim == latent_dim else nn.Linear(latent_dim, out_dim)
+        )
 
     def forward(
         self,
@@ -223,9 +226,11 @@ class TokenCompressor(nn.Module):
         }
         return latents, aux
 
+
 class IdentityModulator(nn.Module):
     def forward(self, tokens, queries, cond):
         return tokens, queries, None, {}
+
 
 class QueryFiLM(nn.Module):
     def __init__(self, dim, cond_dim, pass_cond_to_reducer=True):
@@ -242,6 +247,7 @@ class QueryFiLM(nn.Module):
             "beta": beta,
         }
         return tokens, queries, reducer_cond, aux
+
 
 class ModulatedTokenCompressor(nn.Module):
     def __init__(self, compressor, modulator=None):
@@ -283,6 +289,7 @@ class ModulatedTokenCompressor(nn.Module):
             "modulator": mod_aux,
         }
         return latents, aux
+
 
 if __name__ == "__main__":
     torch.manual_seed(0)

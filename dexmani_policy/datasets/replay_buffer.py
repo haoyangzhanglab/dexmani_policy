@@ -1,26 +1,27 @@
-import os
-import zarr
 import logging
-import numpy as np
+import os
 from functools import cached_property
 from typing import Optional
 
+import numpy as np
+import zarr
+
 logger = logging.getLogger(__name__)
+
 
 class ReplayBuffer:
     def __init__(self, root):
-        if 'data' not in root or 'meta' not in root:
+        if "data" not in root or "meta" not in root:
             raise ValueError(
-                f"Invalid root structure: missing 'data' or 'meta'. "
-                f"Available keys: {list(root.keys())}"
+                f"Invalid root structure: missing 'data' or 'meta'. Available keys: {list(root.keys())}"
             )
-        if 'episode_ends' not in root['meta']:
+        if "episode_ends" not in root["meta"]:
             raise ValueError(
                 f"Invalid root structure: missing 'episode_ends' in meta. "
                 f"Available meta keys: {list(root['meta'].keys())}"
             )
-        for key, value in root['data'].items():
-            if value.shape[0] != root['meta']['episode_ends'][-1]:
+        for key, value in root["data"].items():
+            if value.shape[0] != root["meta"]["episode_ends"][-1]:
                 raise ValueError(
                     f"Data shape mismatch for key '{key}': "
                     f"shape[0]={value.shape[0]}, expected={root['meta']['episode_ends'][-1]}"
@@ -29,47 +30,50 @@ class ReplayBuffer:
 
     @classmethod
     def copy_from_path(cls, zarr_path, keys: Optional[list] = None):
-        group = zarr.open(os.path.expanduser(zarr_path), 'r')
+        group = zarr.open(os.path.expanduser(zarr_path), "r")
 
-        meta = dict()
-        for key, value in group['meta'].items():
+        meta = {}
+        for key, value in group["meta"].items():
             if len(value.shape) == 0:
                 meta[key] = np.array(value)
             else:
                 meta[key] = value[:]
 
         if keys is None:
-            keys = list(group['data'].keys())
-        data = dict()
+            keys = list(group["data"].keys())
+        data = {}
         for key in keys:
-            arr = group['data'][key]
+            arr = group["data"][key]
             arr_data = arr[:]
             if arr_data.dtype != np.float32 and np.issubdtype(arr_data.dtype, np.floating):
                 data[key] = arr_data.astype(np.float32)
             else:
                 data[key] = arr_data
 
-        buffer = cls(root={'meta': meta, 'data': data})
+        buffer = cls(root={"meta": meta, "data": data})
         for key, value in buffer.items():
             logger.info(
-                '%-12s  shape=%-12s  dtype=%-8s  range %7.2f ~ %7.2f',
-                key, str(value.shape), str(value.dtype),
-                float(value.min()), float(value.max()),
+                "%-12s  shape=%-12s  dtype=%-8s  range %7.2f ~ %7.2f",
+                key,
+                str(value.shape),
+                str(value.dtype),
+                float(value.min()),
+                float(value.max()),
             )
-        logger.info('-' * 55)
+        logger.info("-" * 55)
         return buffer
 
     @cached_property
     def data(self):
-        return self.root['data']
+        return self.root["data"]
 
     @cached_property
     def meta(self):
-        return self.root['meta']
+        return self.root["meta"]
 
     @property
     def episode_ends(self):
-        return self.meta['episode_ends']
+        return self.meta["episode_ends"]
 
     @property
     def n_steps(self):

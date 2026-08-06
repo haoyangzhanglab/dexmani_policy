@@ -73,10 +73,7 @@ class VQVAEHand(nn.Module):
     ) -> None:
         super().__init__()
         if len(loss_weight) != hand_dim:
-            raise ValueError(
-                f"loss_weight length ({len(loss_weight)}) must equal "
-                f"hand_dim ({hand_dim})"
-            )
+            raise ValueError(f"loss_weight length ({len(loss_weight)}) must equal hand_dim ({hand_dim})")
 
         self.hand_dim = int(hand_dim)
         self.latent_dim = int(latent_dim)
@@ -85,19 +82,11 @@ class VQVAEHand(nn.Module):
         self.codebook_size = int(codebook_size)
         self.num_layers = int(num_layers)
 
-        self.register_buffer(
-            "act_scale", torch.tensor(float(act_scale), dtype=torch.float32)
-        )
-        self.register_buffer(
-            "loss_weight", torch.tensor(loss_weight, dtype=torch.float32)
-        )
+        self.register_buffer("act_scale", torch.tensor(float(act_scale), dtype=torch.float32))
+        self.register_buffer("loss_weight", torch.tensor(loss_weight, dtype=torch.float32))
 
-        self.encoder = EncoderMLP(
-            self.hand_dim, self.latent_dim, self.hidden_dim, self.num_layers
-        )
-        self.decoder = EncoderMLP(
-            self.latent_dim, self.hand_dim, self.hidden_dim, self.num_layers
-        )
+        self.encoder = EncoderMLP(self.hand_dim, self.latent_dim, self.hidden_dim, self.num_layers)
+        self.decoder = EncoderMLP(self.latent_dim, self.hand_dim, self.hidden_dim, self.num_layers)
         self.vq_layer = ResidualVQ(
             dim=self.latent_dim,
             num_quantizers=self.num_groups,
@@ -113,9 +102,7 @@ class VQVAEHand(nn.Module):
 
     def forward(self, hand_pose: torch.Tensor):
         if hand_pose.shape[-1] != self.hand_dim:
-            raise ValueError(
-                f"Expected hand_dim={self.hand_dim}, got {hand_pose.shape[-1]}"
-            )
+            raise ValueError(f"Expected hand_dim={self.hand_dim}, got {hand_pose.shape[-1]}")
         x = hand_pose / self.act_scale
         encoded = self.encoder(x)
         quantized, indices, vq_losses = self.vq_layer(encoded.unsqueeze(1))
@@ -136,9 +123,7 @@ class VQVAEHand(nn.Module):
         """Encode without changing EMA codebook state, even in train mode."""
         x = hand_pose / self.act_scale
         encoded = self.encoder(x)
-        _, indices, _ = self.vq_layer(
-            encoded.unsqueeze(1), freeze_codebook=True
-        )
+        _, indices, _ = self.vq_layer(encoded.unsqueeze(1), freeze_codebook=True)
         return indices.squeeze(1)
 
     @torch.no_grad()
@@ -168,11 +153,7 @@ class VQVAEHand(nn.Module):
     @staticmethod
     def _infer_hidden_layers(state: Mapping[str, torch.Tensor]) -> int:
         pattern = re.compile(r"^encoder\.trunk\.(\d+)\.weight$")
-        linear_indices = [
-            int(match.group(1))
-            for key in state
-            if (match := pattern.match(key)) is not None
-        ]
+        linear_indices = [int(match.group(1)) for key in state if (match := pattern.match(key)) is not None]
         if not linear_indices:
             raise ValueError("Cannot infer encoder depth from checkpoint")
         return len(linear_indices)
@@ -211,9 +192,7 @@ class VQVAEHand(nn.Module):
             raise KeyError(f"Missing codebook tensor: {embed_key}")
         codebook_size = int(state[embed_key].shape[1])
         act_scale = float(state.get("act_scale", torch.tensor(1.0)).item())
-        loss_weight_tensor = state.get(
-            "loss_weight", torch.ones(hand_dim, dtype=torch.float32)
-        )
+        loss_weight_tensor = state.get("loss_weight", torch.ones(hand_dim, dtype=torch.float32))
         loss_weight = loss_weight_tensor.detach().cpu().flatten().tolist()
 
         model = cls(
@@ -226,9 +205,7 @@ class VQVAEHand(nn.Module):
             num_layers=num_layers,
             act_scale=act_scale,
             vq_decay=float(saved_args.get("vq_decay", 0.8)),
-            threshold_ema_dead_code=int(
-                saved_args.get("threshold_ema_dead_code", 0)
-            ),
+            threshold_ema_dead_code=int(saved_args.get("threshold_ema_dead_code", 0)),
             # The saved EMA buffers and embeddings are loaded below, so no
             # fresh k-means initialisation is needed.
             kmeans_init=False,
