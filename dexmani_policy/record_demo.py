@@ -210,17 +210,25 @@ def main() -> None:
     ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, args.ckpt_tag, checkpoint_store)
 
     # ── 6. Resolve parameters ─────────────────────────────────────────────
-    denoise_steps = (
-        args.denoise_steps
-        if args.denoise_steps is not None
-        else _get_eval_param(cfg, "denoise_steps", "demo", default=10)
-    )
     use_ema = (
         args.use_ema if args.use_ema is not None else _get_eval_param(cfg, "use_ema", "demo", default=True)
     )
     demo_episodes = (
         args.episodes if args.episodes is not None else _get_eval_param(cfg, "episodes", "demo", default=5)
     )
+
+    # Denoise steps: CLI --denoise-steps (single value) > config list > config single > default
+    if args.denoise_steps is not None:
+        denoise_timesteps_list = [args.denoise_steps]
+    else:
+        dt_list = _get_eval_param(cfg, "denoise_timesteps_list", "demo", default=None)
+        if dt_list:
+            denoise_timesteps_list = list(dt_list)
+        else:
+            denoise_steps = _get_eval_param(cfg, "denoise_steps", "demo", default=10)
+            denoise_timesteps_list = [denoise_steps]
+
+    do_sweep = len(denoise_timesteps_list) > 1
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
     load_ckpt_for_inference(agent, checkpoint_store, ckpt_path, use_ema)
@@ -231,12 +239,14 @@ def main() -> None:
     # ── 7. Print recording config ─────────────────────────────────────────
     _res = env_runner.viewer_resolution
     resolution_str = f"{_res[0]}×{_res[1]}" if _res else "1920×1080 (default)"
+    dt_str = ", ".join(str(d) for d in denoise_timesteps_list) if do_sweep else str(denoise_timesteps_list[0])
     cprint(f"{'=' * 60}", "cyan")
     cprint("  Demo Video Recording", "cyan")
     cprint(f"  Policy       : {args.policy_name}", "cyan")
     cprint(f"  Task         : {args.task_name}", "cyan")
     cprint(f"  Checkpoint   : {ckpt_label}", "cyan")
     cprint(f"  Episodes     : {demo_episodes}", "cyan")
+    cprint(f"  Denoise steps: {dt_str}" + (" (sweep)" if do_sweep else ""), "cyan")
     cprint(f"  Resolution   : {resolution_str}", "cyan")
     cprint(f"  Output dir   : {video_save_dir}", "cyan")
     cprint(f"{'=' * 60}\n", "cyan")
@@ -260,26 +270,58 @@ def main() -> None:
 
     env_runner.eval_seeds = eval_seeds
 
-    # ── 9. Run episodes ───────────────────────────────────────────────────
+    # ── 9. Run episodes (sweep or single) ─────────────────────────────────
+    demo_results: list[dict] = []
 
-    result = env_runner.run(
-        agent,
-        denoise_timesteps=denoise_steps,
-        eval_episodes=demo_episodes,
-        video_save_dir=video_save_dir,
-    )
+    for dt in denoise_timesteps_list:
+        if do_sweep:
+            sub_dir = video_save_dir / f"denoise_timesteps{dt}"
+            sub_dir.mkdir(parents=True, exist_ok=True)
+            cprint(f"\n--- denoise_timesteps={dt} ---", "cyan", attrs=["bold"])
+        else:
+            sub_dir = video_save_dir
+
+        result = env_runner.run(
+            agent,
+            denoise_timesteps=dt,
+            eval_episodes=demo_episodes,
+            video_save_dir=sub_dir,
+        )
+
+        per_seed_details = collect_episode_details(result)
+        n_success = sum(1 for d in per_seed_details if d.get("success"))
+        n_total = len(per_seed_details)
+        sr = n_success / n_total if n_total else 0.0
+
+        if do_sweep:
+            cprint(
+                f"  Success: {n_success}/{n_total} = {sr:.1%}",
+                "green" if sr >= 0.5 else "red",
+            )
+            demo_results.append({"denoise_timesteps": dt, "n_success": n_success,
+                                 "n_total": n_total, "success_rate": sr})
 
     # ── 10. Report ────────────────────────────────────────────────────────
-    per_seed_details = collect_episode_details(result)
-    n_success = sum(1 for d in per_seed_details if d.get("success"))
-    n_total = len(per_seed_details)
+    if do_sweep and demo_results:
+        cprint(f"\n{'=' * 60}", "green")
+        cprint("  Denoise Timesteps Sweep Summary", "green")
+        cprint(f"  {'Denoise Steps':<16} {'Success Rate':<18}", "green")
+        cprint("  " + "-" * 34, "green")
+        for r in demo_results:
+            dt = r["denoise_timesteps"]
+            sr = f"{r['n_success']}/{r['n_total']} ({r['success_rate']:.1%})"
+            cprint(f"  {dt:<16} {sr:<18}", "green" if r["success_rate"] >= 0.5 else "red")
+        cprint(f"{'=' * 60}\n", "green")
 
     cprint(f"\n{'=' * 60}", "green")
     cprint("  Recording complete!", "green")
-    cprint(f"  Success rate : {n_success}/{n_total} = {n_success / n_total:.1%}" if n_total else "", "green")
+    if not do_sweep:
+        n_success = sum(1 for d in per_seed_details if d.get("success"))
+        n_total = len(per_seed_details)
+        cprint(f"  Success rate : {n_success}/{n_total} = {n_success / n_total:.1%}" if n_total else "", "green")
     cprint(f"  Videos saved : {video_save_dir}", "green")
 
-    video_count = len(list(video_save_dir.glob("*.mp4")))
+    video_count = len(list(video_save_dir.rglob("*.mp4")))
     cprint(f"  MP4 files    : {video_count}", "green")
     cprint(f"{'=' * 60}\n", "green")
 

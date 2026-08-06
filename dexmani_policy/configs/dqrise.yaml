@@ -187,6 +187,7 @@ env_runner:
 # ── Eval ──
 eval:
   denoise_steps: ${agent.num_inference_steps}
+  denoise_timesteps_list: null
   use_ema: true
 
   select_best:

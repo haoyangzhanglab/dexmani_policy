@@ -175,6 +175,7 @@ env_runner:
 # ── Eval ──
 eval:
   denoise_steps: 10
+  denoise_timesteps_list: null
   use_ema: true
 
   select_best:

@@ -5,8 +5,7 @@ Maps between native XHand joint space (12D) and UniDex FAAS unified hand
 joint space (32D). The mapping is derived from UniDex's hand_utils.json.
 
 Reference: UniDex (CVPR 2026), arXiv:2603.22264
-           docs/UniDex-知识体系.md §5 FAAS
-           docs/FAAS-迁移-最佳方案.md (v5)
+           CLAUDE.md § FAAS 集成
 """
 
 from __future__ import annotations

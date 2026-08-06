@@ -1,6 +1,8 @@
 # DexMani_Policy 服务器训练部署方案（v4 重构版）
 
 > **更新日期**: 2026-08-06 | **服务器**: 192.168.88.230 (8×H200) | **设计原则**: 清晰分离 × 高效同步 × 易于维护
+>
+> **文档导航**: [README](../README.md) — 项目概览 · [CLAUDE.md](../CLAUDE.md) — AI 工作速查 · [项目架构](项目架构.md) — 架构全景 · [评测机制](评测机制.md) — 评测全链路
 
 ---
 
@@ -276,15 +278,25 @@ bash scripts/remote/train_remote.sh --dry-run <config> <task>      # 预览
 **示例**:
 
 ```bash
-# 单卡训练（默认 tmux 后台）
+# ── 单卡 ──
 bash scripts/remote/train_remote.sh dp3 pour
 
-# DDP 4 卡
+# 单卡 + 指定 GPU + 指定 seed
+bash scripts/remote/train_remote.sh --gpus 0 sat pour 'training.seed=123'
+bash scripts/remote/train_remote.sh --gpus 0 maniflow pour 'training.seed=42'
+
+# 单卡 + 多个覆盖参数
+bash scripts/remote/train_remote.sh --gpus 0 sat pour \
+    'training.seed=123' 'training.loop.total_train_steps=50000'
+
+# ── DDP 多卡 ──
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
 
-# 带 Hydra 覆盖
-bash scripts/remote/train_remote.sh sat pour 'training.seed=123' 'training.loop.total_train_steps=50000'
+# DDP 多卡 + 指定 seed
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=99'
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/r3d pour 'training.seed=7'
 
+# ── 其他 ──
 # 前台调试（看完整输出，Ctrl+C 可中断）
 bash scripts/remote/train_remote.sh --fg dp3 pour 'training.loop.total_train_steps=10'
 
@@ -374,9 +386,9 @@ bash scripts/remote/sync_data.sh robot_data              # 实际传输
 8 张 H200 通过 `CUDA_VISIBLE_DEVICES` 分区，`train_remote.sh --gpus` 已集成：
 
 ```bash
-# 两个 4 卡 DDP 并行
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
-bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/dp3_faas pour
+# 两个 4 卡 DDP 并行（各自指定 seed）
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=42'
+bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/dp3_faas pour 'training.seed=99'
 
 # 8 个单卡 seed sweep
 for i in 0 1 2 3 4 5 6 7; do
@@ -481,6 +493,414 @@ scripts/
 
 ---
 
+---
+## 附录 A: SSH 终端操作常识
+
+> 面向不熟悉 Linux 终端的同学。已熟悉的可以跳过。
+
+### A.1 登录 SSH 服务器
+
+**基本命令**：
+
+```bash
+# 完整格式
+ssh 用户名@服务器地址 -p 端口号
+
+# 本项目的实际登录命令（等价于文档中用到的 ssh dexserver）
+ssh zjurobot@192.168.88.230 -p 51822
+```
+
+**配置 SSH 别名（推荐，一次配置长期省事）**：
+
+编辑本地 `~/.ssh/config`，添加：
+
+```
+Host dexserver
+    HostName 192.168.88.230
+    Port 51822
+    User zjurobot
+    ServerAliveInterval 60
+    ServerAliveCountMax 5
+```
+
+之后直接用别名登录：
+
+```bash
+ssh dexserver          # 等价于上面一长串
+```
+
+**退出 SSH**：
+
+```bash
+exit                   # 或按 Ctrl+D
+```
+
+**免密登录（SSH 密钥）**：
+
+```bash
+# 1. 本地生成密钥（如果还没有）
+ssh-keygen -t ed25519 -C "your_email@example.com"
+
+# 2. 把公钥复制到服务器
+ssh-copy-id -p 51822 zjurobot@192.168.88.230
+
+# 3. 之后 ssh dexserver 不再需要输入密码
+```
+
+> 本项目 SSH 密钥已配置 ✅。
+
+---
+
+### A.2 目录操作
+
+**新建目录**：
+
+```bash
+# 新建单个目录
+mkdir my_folder
+
+# 递归新建多级目录（推荐，不会因父目录不存在而报错）
+mkdir -p ~/ZHY/dexmani_policy/experiments/dp3/pour
+```
+
+**删除目录**：
+
+```bash
+# 删除空目录
+rmdir empty_folder
+
+# 删除非空目录（递归强制删除，谨慎！没有回收站）
+rm -rf my_folder
+
+# 更安全：先列出会删什么
+ls my_folder/           # 确认内容
+rm -rf my_folder        # 确认无误再删
+```
+
+> ⚠️ **`rm -rf` 没有确认提示，删了就没了。** 删除前务必确认路径正确。尤其在服务器上不要 `rm -rf /` 或 `rm -rf ~`。
+
+**查看目录内容**：
+
+```bash
+ls                     # 列出当前目录
+ls -la                 # 详细列表（含隐藏文件、权限、大小）
+ls -lh                 # 人类可读的文件大小（KB/MB/GB）
+ls experiments/dp3/    # 列出指定目录
+```
+
+**切换目录**：
+
+```bash
+cd ~/ZHY/dexmani_policy    # 进入项目目录
+cd ..                      # 返回上一级
+cd -                       # 返回上一次所在的目录
+cd                         # 返回 home 目录
+pwd                        # 显示当前所在完整路径
+```
+
+**创建符号链接（symlink）**：
+
+```bash
+# 让 ~/ZHY/dexmani_policy/experiments 指向 /data_ssd/ZHY/experiments
+ln -sfn /data_ssd/ZHY/experiments ~/ZHY/dexmani_policy/experiments
+
+# -s: 符号链接（类似快捷方式）
+# -f: 强制覆盖已有链接
+# -n: 如果目标是目录链接，替换链接本身而非链接内部
+```
+
+---
+
+### A.3 训练命令参数详解
+
+训练命令的核心结构只有三个位置：
+
+```
+train.py <策略类型> <任务名> [Hydra覆盖参数...]
+```
+
+#### 参数 1：策略类型（policy）
+
+决定用哪个 Agent 架构。可用值：
+
+| 策略 | 命令写法 | 说明 |
+|------|---------|------|
+| DP | `dp` | RGB+UNet+Diffusion |
+| DP3 | `dp3` | 点云+UNet+Diffusion |
+| DP3 + FAAS | `dp3_faas` | DP3 + 功能对齐动作空间 |
+| ManiFlow | `maniflow` | 点云+DiTX+FlowMatch |
+| MoE DP | `moe_dp` | RGB+MoE 多专家+Diffusion |
+| MultiTask | `multitask_dit` | 多任务 DiT |
+| R3D | `r3d` | 点云+OneWayTransformer |
+| DQ-RISE | `dqrise` | 点云+VQ 码本手势 |
+| SAT | `sat` | 结构动作 Transformer |
+
+**DDP 多卡版本**（用 `ddp/` 前缀）：
+
+| DDP 策略 | 命令写法 | GPU 数 |
+|----------|---------|--------|
+| DDP ManiFlow | `ddp/maniflow` | 4 |
+| DDP DP3 FAAS | `ddp/dp3_faas` | 4 |
+| DDP MultiTask | `ddp/multitask_dit` | 4 |
+| DDP R3D | `ddp/r3d` | 4 |
+| DDP DP | `ddp/dp` | 4 |
+| DDP DQ-RISE | `ddp/dqrise` | 4 |
+
+> `dp3`（非 FAAS）、`moe_dp`、`sat` 只支持单卡，无 DDP 版本。
+
+#### 参数 2：任务名（task）
+
+即数据集名，对应 `robot_data/<task>.zarr`。当前可用任务：
+
+```bash
+# 查看服务器上有哪些任务
+ssh dexserver 'ls /data_ssd/ZHY/robot_data/*.zarr/ 2>/dev/null'
+```
+
+| 任务 | 命令写法 | 说明 |
+|------|---------|------|
+| 倒水 | `pour` | 主要任务 |
+
+> 后续新增任务（如 `grasp`、`place` 等）直接写对应的 `.zarr` 名前缀即可。
+
+#### 参数 3：Hydra 覆盖参数（可选，可多个）
+
+用于覆盖配置文件中的任意值。格式：`key.path=value`（点号分隔层级）。训练最常用的几个：
+
+```bash
+# ---- 种子 ----
+training.seed=42                     # 设置随机种子（默认在各 config 中定义）
+
+# ---- 训练步数 ----
+training.loop.total_train_steps=50000 # 覆盖总训练步数（默认 80000）
+
+# ---- 动作空间 ----
+action_key=action_ee                 # 切换到末端执行器空间（默认 action 即关节空间）
+
+# ---- Wandb ----
+workspace.wandb_cfg.mode=online      # 启用在线 wandb（默认 offline）
+```
+
+#### 完整示例
+
+```bash
+# === 使用 train_remote.sh（推荐，自动同步代码+tmux 后台） ===
+
+# ── 单卡 ──
+
+# 最基本：DP3 训练 pour，全部默认参数
+bash scripts/remote/train_remote.sh dp3 pour
+
+# 指定 seed
+bash scripts/remote/train_remote.sh dp3 pour 'training.seed=42'
+
+# 指定 GPU + seed
+bash scripts/remote/train_remote.sh --gpus 0 sat pour 'training.seed=123'
+bash scripts/remote/train_remote.sh --gpus 0 maniflow pour 'training.seed=7'
+
+# SAT 训练，自定义 seed + 步数
+bash scripts/remote/train_remote.sh --gpus 0 sat pour \
+    'training.seed=123' 'training.loop.total_train_steps=50000'
+
+# ManiFlow 用 EE 空间 + 自定义 seed
+bash scripts/remote/train_remote.sh --gpus 0 maniflow pour \
+    'action_key=action_ee' 'training.seed=7'
+
+# ── DDP 多卡 ──
+
+# DDP 4 卡训练（默认参数）
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/dp pour
+
+# DDP 4 卡 + 指定 seed
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=99'
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/r3d pour 'training.seed=7'
+
+# DDP 4 卡 + seed + 步数
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour \
+    'training.seed=99' 'training.loop.total_train_steps=50000'
+
+# === 直接 SSH 手动启动（调试用） ===
+
+ssh dexserver
+cd ~/ZHY/dexmani_policy
+conda activate dex_policy
+export DATA_DIR=/data_ssd/ZHY
+
+python dexmani_policy/train.py --config-name=dp3 task_name=pour
+python dexmani_policy/train.py --config-name=sat task_name=pour training.seed=42 training.loop.total_train_steps=30000
+python dexmani_policy/train.py --config-name=maniflow task_name=pour action_key=action_ee training.seed=7
+```
+
+#### seed sweep（多 seed 并行扫描）
+
+```bash
+# 单卡 seed sweep：8 个 GPU 各跑一个 seed
+for seed in 0 1 2 3 4 5 6 7; do
+    bash scripts/remote/train_remote.sh --gpus $seed dp3 pour "training.seed=$seed" &
+done
+
+# 单卡 seed sweep：不同策略+seed 组合
+for seed in 42 123 999; do
+    bash scripts/remote/train_remote.sh --gpus 0 sat pour "training.seed=$seed"
+    bash scripts/remote/train_remote.sh --gpus 1 maniflow pour "training.seed=$seed"
+done
+
+# DDP 多卡 seed sweep：每 4 卡一组跑不同 seed
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=42' &
+bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/maniflow pour 'training.seed=99' &
+wait  # 等两组都完成
+```
+
+**确保训练在断开 SSH 后继续运行**：
+
+如果用直接 `python train.py` 而非 `train_remote.sh`，SSH 断开后训练会终止。需要用 `tmux` 保护：
+
+```bash
+ssh dexserver
+tmux new -s train_dp3                # 创建会话
+cd ~/ZHY/dexmani_policy && conda activate dex_policy && export DATA_DIR=/data_ssd/ZHY
+python train.py dp3 pour training.seed=42
+# Ctrl+B, D 断开 → 训练继续跑
+# 重连: ssh dexserver && tmux attach -t train_dp3
+```
+
+> `train_remote.sh` 已自动在 tmux 里启动，直接用即可，不需要手动操作 tmux。
+
+---
+
+### A.4 其他常用终端命令
+
+#### 进程管理
+
+```bash
+# 查看 Python 训练进程
+ps aux | grep python
+ps aux | grep train
+
+# 查看进程树（父子关系）
+pstree -p
+
+# 终止进程
+kill <PID>                # 优雅终止
+kill -9 <PID>             # 强制杀死（最后手段）
+pkill -f "train.py dp3"   # 按名字杀进程
+
+# 实时进程监控
+htop                       # 比 top 更友好（可能需要安装）
+top                        # 系统自带
+```
+
+#### GPU 监控
+
+```bash
+# 实时 GPU 状态（每 1 秒刷新）
+watch -n 1 nvidia-smi
+
+# 精简输出
+nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader
+
+# 持续监控 GPU 利用率
+nvidia-smi dmon -s u
+```
+
+#### 磁盘与文件
+
+```bash
+# 磁盘空间
+df -h                     # 各挂载点使用情况
+df -h /data_ssd           # 只看特定目录所在分区
+
+# 目录大小
+du -sh *                  # 当前目录下各文件/文件夹大小
+du -sh experiments/       # 某个目录总大小
+du -h --max-depth=1       # 一层深度的各子目录大小
+
+# 文件操作
+cp -r source/ dest/       # 递归复制
+mv old_name new_name      # 移动/重命名
+cat file.txt              # 查看文件内容
+less file.txt             # 分页查看（q 退出，/ 搜索）
+head -20 file.txt         # 前 20 行
+tail -20 file.txt         # 后 20 行
+tail -f metrics.jsonl     # 实时追踪文件末尾增长（Ctrl+C 退出）
+wc -l file.txt            # 统计行数
+```
+
+#### 网络与传输
+
+```bash
+# scp 传输（单文件/目录）
+# 上传：本地 → 服务器
+scp -P 51822 local_file.txt zjurobot@192.168.88.230:~/ZHY/
+scp -P 51822 -r local_dir/ zjurobot@192.168.88.230:~/ZHY/
+
+# 下载：服务器 → 本地
+scp -P 51822 zjurobot@192.168.88.230:~/ZHY/file.txt ./
+scp -P 51822 -r zjurobot@192.168.88.230:~/ZHY/dir/ ./
+
+# rsync（增量传输，比 scp 更高效）
+rsync -avz local_dir/ dexserver:~/ZHY/dir/        # 上传
+rsync -avz dexserver:~/ZHY/dir/ local_dir/         # 下载
+# -a: 归档模式（保留权限、时间戳）
+# -v: 详细输出
+# -z: 压缩传输
+# --dry-run: 只预览不实际传输
+# --delete: 删除目标端多出的文件
+```
+
+#### Tmux 速查
+
+```bash
+# 会话管理
+tmux new -s name         # 创建会话
+tmux attach -t name      # 重新连接会话
+tmux ls                  # 列出所有会话
+tmux kill-session -t name # 终止会话
+
+# 在 tmux 内部（默认前缀键: Ctrl+B）
+Ctrl+B  D    # 断开（detach），训练继续运行
+Ctrl+B  C    # 创建新窗口
+Ctrl+B  N    # 下一个窗口
+Ctrl+B  [    # 滚动模式（PgUp/PgDn 翻页，q 退出）
+```
+
+#### Conda 环境
+
+```bash
+conda env list                    # 列出所有环境
+conda activate dex_policy         # 激活环境
+conda deactivate                  # 退出环境
+pip list | grep torch             # 查看安装了哪些包
+which python                      # 确认用的是哪个 Python
+```
+
+#### 实用组合技
+
+```bash
+# 看 GPU 显存 + 对应进程
+nvidia-smi && echo "---" && ps aux | grep python | grep -v grep
+
+# 从本地看远程 GPU（不登录）
+ssh dexserver 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader'
+
+# 统计服务器上实验数量
+ssh dexserver 'ls /data_ssd/ZHY/experiments/*/*/ 2>/dev/null | wc -l'
+
+# 找大于 1GB 的文件（清理磁盘用）
+ssh dexserver 'find /data_ssd/ZHY/experiments -type f -size +1G -exec ls -lh {} \;'
+
+# 后台运行任意命令（不依赖 tmux）
+nohup python train.py dp3 pour > train.log 2>&1 &
+# nohup: 忽略 hangup 信号
+# > train.log: 标准输出到日志
+# 2>&1: 错误输出也到同一日志
+# &: 后台运行
+# 查看: tail -f train.log
+# 停止: ps aux | grep train → kill <PID>
+```
+
+---
 ## v4 更新记录（2026-08-06，架构重构）
 
 | 变更 | v3 | v4 |

@@ -2,7 +2,9 @@
 
 灵巧手操作模仿学习框架。Hydra 配置驱动，Zarr replay buffer，Diffusion/FlowMatch 动作解码，`dexmani_sim` 仿真评测。
 
-> **速查**: [训练](#训练命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [配置速查](#配置速查) · [代码风格](#代码风格) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
+> **速查**: [训练](#训练命令) · [评测](#评测命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [数据管线](#数据管线) · [配置速查](#配置速查) · [FAAS](#faas-集成) · [DQ-RISE](#dq-rise) · [代码风格](#代码风格) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
+>
+> **详细文档**: [README](README.md) — 项目概览 · [`docs/项目架构.md`](docs/项目架构.md) — 架构全景 · [`docs/评测机制.md`](docs/评测机制.md) — 评测全链路 · [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) — 远程部署
 
 ## 环境
 
@@ -31,16 +33,20 @@ ruff check dexmani_policy/    # 检查（CI 通过标准）
 ## 训练命令
 
 ```bash
+# 命令结构: train.py <策略类型> <任务名> [Hydra覆盖参数...]
+
 # === 单卡 ===
-bash scripts/training/train.sh dp3                  # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat
-bash scripts/training/train.sh dp3 'training.loop.total_train_steps=500'
+bash scripts/training/train.sh dp3 pour                 # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat
+bash scripts/training/train.sh dp3 pour 'training.seed=42'
+bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
 
 # === 多卡 DDP ===
-bash scripts/training/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas
+bash scripts/training/train_ddp.sh ddp/maniflow pour    # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas / ddp/sat
 ```
 
+> 命令参数详解（策略/任务/seed/Hydra 覆盖）→ [SSH 部署文档附录 A.3](docs/SSH服务器训练部署.md#a3-训练命令参数详解)
 > 实际存在的单卡配置 (9): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d, sat`
-> 实际存在的 DDP 配置 (6): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d`
+> 实际存在的 DDP 配置 (7): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d, ddp/sat`
 > 所有策略默认 `total_train_steps: 80000`
 
 ## 评测命令
@@ -367,7 +373,7 @@ while global_step < config.total_train_steps:
 - `find_unused_parameters=False`, `static_graph=True`
 - Normalizer 从 rank 0 broadcast
 - `OmegaConf.resolve(cfg)` 在 `mp.spawn` 前（子进程无 Hydra 运行时）
-- 仅覆盖 6 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/r3d（dp3/moe_dp/sat 仅单卡）
+- 覆盖 7 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/r3d/sat（dp3/moe_dp 仅单卡）
 - **DDP 超时**: `dist.init_process_group(timeout=30min)` — 覆盖所有集体操作（all_reduce/broadcast/barrier），防止死 rank 导致整个集群无限挂起
 
 ### EMA
@@ -437,7 +443,7 @@ MultiTaskSimRunner (独立编排器, 持有 dict[str, TaskTextSimRunner])
 configs/
   dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml
 configs/ddp/
-  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml
+  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml
 ```
 
 `dp3_faas.yaml` 通过 Hydra `defaults: [- /dp3, - _self_]` 继承 dp3 全部超参，仅覆盖维度字段。
@@ -449,7 +455,7 @@ configs/ddp/
 | action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** | 19/21 |
 | state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** | 19 |
 | backbone dims | [256,512,1024] | 同 | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] | **8L×768d** |
-| diff train/infer | 100/10 | 100/10 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | -/10 |
+| diff train/infer | 100/10 | 100/10 | -/4 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | -/10 |
 | prediction_type | sample | sample | velocity | sample | sample | sample | **epsilon** | sample | velocity (FM) |
 | lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 | 1e-4 |
 | weight_decay | 1e-6 | 1e-6 | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
@@ -479,7 +485,8 @@ configs/ddp/
 eval:
   # seed 不写则默认 training.seed + 1024（eval 与 train 种子隔离）
   # seed: 0                  # 可显式覆盖
-  denoise_steps: 10          # 共享：推理去噪步数
+  denoise_steps: 10          # 共享：推理去噪步数（单值）
+  denoise_timesteps_list: null  # 可选多值 sweep: [5, 10, 20]（覆盖 denoise_steps）
   use_ema: true              # 共享：是否使用 EMA 权重
 
   select_best:               # checkpoint 淘汰赛
@@ -500,6 +507,8 @@ eval:
 ```
 
 **参数解析优先级**: CLI flag > 子节覆盖 > eval 共享层 > 旧字段名兼容 > hardcoded fallback
+
+**denoise_timesteps_list sweep**: 设置非空列表时，`eval_best_ckpt.py` 和 `record_demo.py` 遍历列表中所有去噪步长。checkpoint 只加载一次，所有值共享同一组 seed。结果保存到 `denoise_timesteps<N>/` 子目录。`--denoise-steps N` CLI flag 强制单值（覆盖列表）。
 
 **向后兼容**: 旧 config 中的 `denoise_timesteps_list`、`use_ema_for_eval`、`eval_episodes` 等字段名自动识别。
 
@@ -632,7 +641,7 @@ dexmani_policy/
 - **里程碑 checkpoint**: 按 20%/40%/60%/80%/100% 进度保存，共 5 个；`latest.pt` symlink 指向最新里程碑
 - **FlowMatch `target_t` 训练/推理偏移**: 训练用 `target_t=0`，推理用 `target_t=dt>0`。ManiFlow 通过 EMA teacher consistency 路径缓解
 - **`tcp_dim` 命名**: 在 `action`(joint)模式下=7(臂关节角)，在 `action_ee` 模式下=9(TCP位姿)。历史命名遗留，勿据此推断语义
-- **DDP 覆盖不全**: 仅 6 种策略有 DDP 配置。`dp3`(非FAAS)和`moe_dp` 仅单卡
+- **DDP 覆盖不全**: 7 种策略有 DDP 配置。`dp3`(非FAAS)和`moe_dp` 仅单卡
 - **MoE dual-backbone**: 通过 `hasattr(config, 'pc_encoder')` 自动切换 RGB/PC 路径，非显式 `backbone_type` 字段
 - **MoE forward 返回 dict**: `MoEAgent.forward()` 返回 `dict`(含 aux_loss)，其他 agent 返回 `Tensor`。`BaseAgent.compute_loss()` 统一处理
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维拼接（非 `torch.cat`）
@@ -652,9 +661,7 @@ dexmani_policy/
 
 | 文档 | 内容 |
 |------|------|
-| `docs/DQ-RISE-知识体系.md` | DQ-RISE 论文精读 + 官方代码走读 + 本项目实现差异 + 12 个官方代码 bug |
-| `docs/UniDex-知识体系.md` | UniDex CVPR 2026 完整分析 — VLA+FAAS+多手，架构 + 与 DexMani 对比 |
-| `docs/FAAS-集成方案.md` | FAAS 集成设计文档 — 架构设计、维度分析、agent 兼容矩阵 |
-| `docs/FAAS-迁移-最佳方案.md` | FAAS 迁移 v5 实施方案 — 3 轨对比、实施步骤、风险缓解 |
-| `docs/UniDex-可借鉴设计.md` | 8 项 UniDex 可借鉴设计，3 维评分，分优先级执行路线图 |
-| `docs/评测机制-代码实现.md` | 离线仿真评测系统完整分析 — CLI→EnvRunner→Agent推理→Decoder去噪 全链路 |
+| `README.md` | 项目概览、快速开始、策略矩阵、FAQ |
+| `docs/项目架构.md` | 完整目录树、模块依赖图、类层级、数据流全景、设计模式 |
+| `docs/评测机制.md` | 离线仿真评测全链路 — CLI→EnvRunner→Agent推理→Decoder去噪 |
+| `docs/SSH服务器训练部署.md` | 远程训练部署 — SSH 配置、三向同步、训练命令、tmux/GPU 多租户；**附录 A**: SSH 终端常识 |

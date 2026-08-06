@@ -77,6 +77,20 @@ fi
 
 SESSION="${CONFIG//\//_}_${TASK}"
 
+# Include seed in session name so same config+task with different seeds
+# can run concurrently without killing each other's tmux session.
+# Extract from overrides like 'training.seed=42'.
+_seed=""
+for _override in "$@"; do
+    if [[ "$_override" == training.seed=* ]]; then
+        _seed="${_override#training.seed=}"
+        break
+    fi
+done
+if [[ -n "$_seed" ]]; then
+    SESSION="${SESSION}_s${_seed}"
+fi
+
 # ---- Dry-run mode ----
 if $DRY_RUN; then
     echo "=== DRY RUN ==="

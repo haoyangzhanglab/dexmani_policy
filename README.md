@@ -1,133 +1,131 @@
-# dexmani_policy
+# DexMani_Policy
 
-灵巧手操作模仿学习框架。Hydra 配置驱动，Zarr replay buffer，Diffusion/FlowMatch 动作解码，支持单任务/多任务训练与 `dexmani_sim` 仿真评测。
+灵巧手操作模仿学习框架 —— Hydra 配置驱动 · Zarr Replay Buffer · Diffusion/FlowMatch 动作解码 · `dexmani_sim` 仿真评测
 
-> 详细设计见 `docs/`（01 → 08）。工作速查见 `CLAUDE.md`。审查约定见 `docs/08-审查约定.md`。
-
----
-
-## 核心约束
-
-```
-horizon=16   n_obs_steps=2   n_action_steps=8   action_dim=19
-```
-
-所有策略接收 2 步历史观测，预测 16 步动作轨迹（future），实际执行前 8 步后重新推理（receding horizon control）。动作空间 = XArm7（7-DOF 关节角）+ XHand（12-DOF 关节位置）= 19 维绝对关节控制。
-
-**这些值不可随意修改**：SequenceSampler 的 `pad_before=1, pad_after=7` 与之耦合；`n_obs_steps-1 + n_action_steps ≤ horizon` 是 control_action 切片 `pred[:, 1:9, :]` 的硬约束。
-
----
-
-## 策略矩阵
-
-| Agent | 感知 | 编码器 | 骨干网络 | 解码器 | 配置 |
-|---|---|---|---|---|---|
-| **DP** | RGB + joint_state | DINO/CLIP + StateMLP | ConditionalUnet1D (FiLM) | DDIM Diffusion | `dp.yaml` |
-| **DP3** | PointCloud(1024,3) + joint_state | PointNeXT + StateMLP | ConditionalUnet1D (FiLM) | DDIM Diffusion | `dp3.yaml` |
-| **ManiFlow** | PointCloud(1024,3) + joint_state | PointNeXT + StateMLP | DiTXFlowMatch (cross-attn) | Euler ODE + Consistency | `maniflow.yaml` |
-| **MoE DP3** | 同 DP3 | DP3 encoder + 16-expert MoE router | ConditionalUnet1D | DDIM Diffusion | `moe_dp3.yaml` |
-| **MultiTask** | RGB + joint_state + language | DINO + CLIP Text + StateMLP | DiTDiffusion (AdaLN-Zero) | DDIM Diffusion | `multitask_dit.yaml` |
-
-关键差异：
-- **DP vs DP3**：RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒，适合灵巧操作中手-物交互场景。
-- **DP3 vs ManiFlow**：Diffusion (DDIM 迭代去噪) vs FlowMatch (rectified flow 直线路径 + consistency training)。FlowMatch 理论推理步数更少，consistency training 提供自校正。
-- **DP3 vs MoE DP3**：MoE 在 encoder 中引入 16 个 expert 的稀疏路由，增加模型容量但不显著增加推理 FLOPs（top-k=2 选取）。
-- **MultiTask**：通过 CLIP text embedding 为不同任务提供语言条件，共享视觉和动作 backbone。
-
----
-
-## 环境搭建
-
-- **Conda env**: `policy`
-- **Python**: 3.10+ / **CUDA**: 11.8+ / **PyTorch**: 2.x
-- **仿真评测依赖**: `dexmani_sim`（需单独安装）
-
-```bash
-conda activate policy
-pip install -e .
-cd ~/Desktop/dexmani_sim && pip install -e .
-```
-
-### 数据
-
-```
-robot_data/sim/
-├── pick_apple_messy.zarr    ├── place_milk_box.zarr
-├── pour.zarr                ├── open_box.zarr
-├── multi_grasp.zarr         ├── pick_bottle.zarr
-└── stack_cups.zarr
-```
-
-Zarr 格式，包含 `joint_state` (N,19)、`action` (N,19)、`point_cloud` (N,1024,3)、`rgb` (N,H,W,3)、`episode_ends` (n_ep,)。
+[![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-red)](https://pytorch.org/)
+[![CUDA](https://img.shields.io/badge/CUDA-11.8+-green)](https://developer.nvidia.com/cuda-toolkit)
 
 ---
 
 ## 快速开始
 
+### 环境搭建
+
+```bash
+conda activate policy                                         # Conda 环境
+pip install -e .                                              # 安装 dexmani_policy
+cd ~/Desktop/dexmani_sim && pip install -e .                  # 仿真环境（评测依赖）
+```
+
+> **数据路径**: 训练前需设 `export DATA_DIR=/path/to/robot_data`，或确保 `robot_data/` 在项目根目录下。
+
 ### 训练
 
 ```bash
-bash scripts/training/train.sh dp3                                  # 单卡
-bash scripts/training/train.sh dp3 'training.loop.num_epochs=100'   # Hydra override
-bash scripts/training/train_ddp.sh ddp/maniflow                     # 多卡 DDP
-bash scripts/training/train_ddp.sh ddp/maniflow 'training.num_gpus=2'
-bash scripts/training/train.sh multitask_dit                        # 多任务
+# 单卡 —— 9 种策略可选
+bash scripts/training/train.sh dp3 pour                      # DP3 训练 pour 任务
+bash scripts/training/train.sh maniflow pour                  # ManiFlow
+bash scripts/training/train.sh sat pour                       # SAT
+
+# 多卡 DDP —— 6 种策略可选
+bash scripts/training/train_ddp.sh ddp/maniflow pour          # ManiFlow 4 卡
+
+# Hydra 参数覆盖
+bash scripts/training/train.sh dp3 pour 'training.seed=42'
+bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
+```
+
+### 评测
+
+```bash
+# 一键管道：select best ckpt → eval → demo
+bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir>
+
+# 或分步执行
+bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_dir>     # 阶段 1: 选出最优 ckpt
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir>       # 阶段 2: 最终评测
+bash scripts/eval/record_demo.sh dp3 pour <exp_dir>           # 录制 demo 视频
 ```
 
 ### 冒烟测试
 
 ```bash
-python dexmani_policy/smoke_test.py dp3                    # 单 config
-python dexmani_policy/smoke_test.py dp3 maniflow moe_dp3   # 批量
+python dexmani_policy/smoke_test.py dp3                       # 单策略
+python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 ```
 
-### 仿真评测
+---
 
-```bash
-bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir>
-# 指定 checkpoint 和 denoise 步数
-bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir> \
-    --ckpt-tag best \
-    --denoise-steps 10
-```
+## 策略矩阵
 
-### 日志
+9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
 
-```bash
-bash scripts/utils/wandb_sync.sh <exp_dir>   # 同步 Wandb 离线日志
-```
+| Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
+|:------|:---------|:-------|:---------|:-------|:-----|
+| **DP** | RGB + Joint | DINO/CLIP/SigLIP + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp.yaml` |
+| **DP3** | PC(1024,3) + Joint | PointNeXT + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
+| **ManiFlow** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
+| **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDPM | `moe_dp.yaml` |
+| **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
+| **R3D** | PC(1024,3) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
+| **DQ-RISE** | PC(1024,3) + Joint | iDP3 + StateMLP + Codebook | UNet1D (缩减) | Diffusion ε-pred | `dqrise.yaml` |
+| **DP3 FAAS** | PC(1024,3) + Joint | 同 DP3 | 同 DP3 | 同 DP3 | `dp3_faas.yaml` |
+| **SAT** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | SATBackbone (EJC+MMA) | FlowMatch Euler | `sat.yaml` |
+
+### 关键差异速览
+
+| 对比维度 | 说明 |
+|:---------|:-----|
+| **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
+| **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
+| **DP3 vs MoE** | MoE 在 encoder 中引入 16-expert 稀疏路由 (top-2)，增容量不增推理 FLOPs |
+| **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
+| **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
+| **DP3 vs DQ-RISE** | DQ-RISE 通过 VQ-VAE 将手势离散化为 16 种码本 |
+| **Native vs FAAS** | FAAS 将 12D 手势映射到 32D 功能对齐空间，零 agent 代码变更 |
+
+> 详细对比见 [`CLAUDE.md`](CLAUDE.md) — Agent 变体章节。
+
+---
+
+## 核心约束
+
+以下常量**不可随意修改**，SequenceSampler、control_action 切片、环境接口均与之耦合：
+
+| 常量 | 值 | 说明 |
+|:-----|:---|:-----|
+| `horizon` | **16** | 预测总帧数 |
+| `n_obs_steps` | **2** | 历史观测帧数 |
+| `n_action_steps` | **8** | 每步执行的动作帧数 |
+| `action_dim` | **19** | 动作维度 (7-DOF 臂 + 12-DOF 手) |
+| `pad_before` / `pad_after` | **1** / **7** | 序列采样边界填充 |
+
+关系式：`n_obs_steps - 1 + n_action_steps ≤ horizon` → `1 + 8 ≤ 16 ✓`
 
 ---
 
 ## 数据流
 
 ```
-Zarr (N,*) → ReplayBuffer → SequenceSampler(pad_before=1, pad_after=7)
-  → Dataset.__getitem__() (增强 + torch) → DataLoader → batch (B, 16, *)
-  → Agent.compute_loss():
-      obs → normalize(joint_state) → modality_dropout → truncate[:,:2]
-        → flatten(B×2,*) → encoder → cond
-      action → normalize → decoder(cond, action) → loss
-  → loss.backward() → grad_accum → clip_grad → opt.step → EMA → ckpt
+Zarr (N,*) ──→ ReplayBuffer ──→ SequenceSampler(pad_before=1, pad_after=7)
+  └── Dataset.__getitem__() ──→ DataLoader ──→ batch (B, 16, *)
+
+Agent.compute_loss():                          Agent.predict_action():
+  obs │→ normalize │→ truncate[:,:2]            obs │→ normalize │→ truncate
+      │→ flatten(B×2,*) │→ encoder │→ cond          │→ encoder │→ cond
+  act │→ normalize │→ decoder(cond, act)             │→ decoder.predict_action(cond)
+      │→ loss (MSE)                                  │→ unnormalize
+                                                     │→ control_action = pred[:, 1:9]
 ```
 
-推理：
-```
-obs → normalize → truncate → encoder → cond
-  → decoder.predict_action(cond, template=noise)
-    [Diffusion]: DDIM 10步 → [FlowMatch]: Euler ODE 10步
-  → unnormalize → control_action = pred[:, 1:9, :]
-```
-
-| 阶段 | 形状 | 说明 |
-|---|---|---|
-| Zarr | `joint_state (N,19)`, `action (N,19)`, `point_cloud (N,1024,3)` | 原始存储 |
-| Sample | `obs (16,*)`, `action (16,19)` | 滑动窗口 |
-| Batch | `obs (B,16,*)`, `action (B,16,19)` | DataLoader 批次 |
-| Preprocessed | `obs (B×2,*)` | truncate + flatten batch+time |
-| Cond (UNet) | `(B, out_dim×2)` | DP/DP3/MoE |
-| Cond (DiT) | `(B, N_tokens, token_dim)` | ManiFlow/MultiTask |
-| Output | `pred (B,16,19)` → `control_action (B,8,19)` | 全部策略一致 |
+| 阶段 | 形状 |
+|:-----|:-----|
+| Zarr 存储 | `action (N,19)` `joint_state (N,19)` `point_cloud (N,1024,3)` |
+| Sequence Sample | `obs (*,16)` `action (16,19)` |
+| Batch | `obs (B,16,*)` `action (B,16,19)` |
+| Preprocessed | `obs (B×2,*)` → flatten batch+time |
+| Model Output | `pred (B,16,action_dim)` → `control_action (B,8,action_dim)` |
 
 ---
 
@@ -135,76 +133,58 @@ obs → normalize → truncate → encoder → cond
 
 ```
 experiments/
-└── <policy_name>/<task_name>/<timestamp>_<seed>/
-    ├── config.yaml          # Hydra 配置快照
+└── <policy>/<task>/<timestamp>_<seed>/
+    ├── config.yaml              # Hydra 配置快照
     ├── checkpoints/
-    │   ├── latest.pt → epoch=XXXX-step=YYYY-score=Z.pt
-    │   ├── epoch=XXXX-step=YYYY-score=Z.pt
-    │   └── topk_manifest.json
-    ├── logs.jsonl           # 结构化日志
-    ├── eval/                # 评测视频 + metrics.json
-    └── wandb/               # Wandb 离线日志
+    │   ├── latest.pt            # → 最新里程碑 symlink
+    │   ├── best.pt              # → 最优 ckpt symlink
+    │   ├── best_ckpt.json       # select_best_ckpt 输出
+    │   └── epoch=*-step=*-milestone=*pct.pt
+    ├── logs.jsonl               # 结构化训练日志
+    ├── eval_dexsim/             # 评测产出
+    │   ├── _result.txt
+    │   ├── result_details.json
+    │   └── <YYYYmmdd_HHMMSS>/   # 视频（默认录制）
+    └── wandb/                   # Wandb 离线日志
 ```
 
 ---
 
-## 关键约定
+## 文档导航
 
-| 约定 | 详情 |
-|---|---|
-| **Normalizer** | `mode='limits'`，全量数据拟合 → [-1,1]；`range_eps=1e-4`，极低方差维度仅零中心化不缩放；仅拟合 `joint_state` + `action`，点云/RGB 直通 |
-| **增强** | 默认禁用；`pc_dim` 须与 Zarr 点云通道数一致；`PCSpatialAug` 对 XYZ+法向施加同步旋转 |
-| **FlowMatch** | EMA teacher 提供 consistency target；推理 `target_t=dt>0` 依赖 consistency 训练泛化；`flow_batch_ratio=0.75` |
-| **MoE** | 16 experts, top-k=2；aux loss (load_balancing + entropy) 全程生效；全专家计算确保 DDP 兼容 |
-| **MultiTask** | CLIP text encoder `requires_grad_(False)` 冻结，仅 `text_proj` 可训练；text cache 预计算 |
-| **DDP** | `DistributedSampler` 分片；`batch_size` 为每卡值；`find_unused_parameters=False`；normalizer 通过 `dist.broadcast` 同步 |
-| **Checkpoint** | unwrapped 保存（无 `module.` 前缀）；`fix_state_dict()` 自动处理加载；TopK=3，monitor `test_mean_score` |
-| **NaN 防护** | 三层：loss NaN → zero_grad + raise；grad NaN → zero_grad + raise；DDP `all_reduce(nan_flag)` 防死锁 |
-| **评测** | `eval.seed: 0` 固定可复现；评测时使用 checkpoint normalizer（不从数据集重新拟合） |
-| **序列采样** | 短于 8 帧的 episode 自动 warn + skip；边界 padding 复制首尾帧 |
+| 文档 | 内容 | 适合 |
+|:-----|:-----|:-----|
+| [`CLAUDE.md`](CLAUDE.md) | AI 工作速查 —— 完整 Agent 对比、训练/评测细节、配置速查、硬编码约定 | 日常开发 |
+| [`docs/项目架构.md`](docs/项目架构.md) | 架构全景 —— 完整目录树、模块依赖图、类层级、数据流、设计模式 | 深入理解 |
+| [`docs/评测机制.md`](docs/评测机制.md) | 评测全链路 —— CLI→Checkpoint→Agent→EnvRunner→SuccessRate 完整代码走读 | 评测开发 |
+| [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) | 远程训练部署 —— SSH 配置、三向同步、GPU 多租户、tmux 管理 | 服务器运维 |
 
 ---
 
 ## 常见问题
 
 **Q: 如何新增任务？**
-1. 准备 Zarr → `robot_data/sim/<task>.zarr`
-2. 修改配置 `task_name` 和 `zarr_path`
+1. 准备 Zarr 数据 → `robot_data/<task>.zarr`
+2. 修改配置中的 `task_name` 和 `zarr_path`
 3. 若 `dexmani_sim` 有对应环境，设置 `env_runner.task_name`
 
 **Q: 如何启用数据增强？**
-取消配置中 `augmentation_cfg` block 注释。RGB 增强需 `sensor_modalities` 包含 `rgb`；PC 颜色增强需 `pc_dim >= 6`。
+取消配置中 `augmentation_cfg` 的注释。RGB 增强需 `sensor_modalities` 含 `rgb`；PC 颜色增强需 `pc_dim >= 6`。
 
 **Q: 单卡 checkpoint 能用于 DDP 续训吗？**
 能。Checkpoint 始终以 unwrapped 格式保存，`fix_state_dict()` 自动处理 `module.` 前缀。
 
 **Q: 训练中断后如何续训？**
-直接重新运行相同命令，自动 `load_for_resume("latest")`。
+直接重新运行相同命令，自动从 `latest.pt` 续训。
 
 **Q: 如何选择评测 checkpoint？**
-- `best` → TopK 中 score 最高
-- `latest` → `latest.pt` 符号链接
-- 也可传具体文件名
+- `best` → `best_ckpt.json` 或 `best.pt` symlink（推荐）
+- `latest` → `latest.pt` symlink
+- `20pct`..`100pct` → 里程碑 checkpoint
+- 直接路径 → 指定 `.pt` 文件
 
-**Q: 纯 flow 模式（无 consistency）能用吗？**
-可以，`training.use_ema_teacher_for_consistency: false`。但推理时 `target_t=dt>0` 落在训练分布外（训练时 target_t 恒为 0），`train.py` 的 `validate_config()` 会发出 warning。
+**Q: 纯 FlowMatch 模式（无 consistency）能用吗？**
+可以，设 `training.use_ema_teacher_for_consistency: false`。但推理时 `target_t=dt>0` 落在训练分布外，`train.py` 会发出 warning。
 
 **Q: 如何修改观测/动作步数？**
-修改 `horizon`、`n_obs_steps`、`n_action_steps`，且须满足 `n_obs_steps - 1 + n_action_steps ≤ horizon`。`pad_before`/`pad_after` 需同步调整。
-
----
-
-## 文档索引
-
-| 文档 | 内容 |
-|---|---|
-| `README.md` | 项目概览、快速开始、策略矩阵、FAQ |
-| `CLAUDE.md` | Claude 工作速查（调用链、关键约定、代码模式） |
-| `docs/01-项目概览.md` | 环境搭建、最小命令、架构速览 |
-| `docs/02-配置系统.md` | Hydra 配置层级、插值、校验、策略对比 |
-| `docs/03-数据集与增强.md` | Zarr 加载、ReplayBuffer、SequenceSampler、增强、Normalizer |
-| `docs/04-模型架构.md` | 5 种 Agent：Encoder/Backbone/Decoder 详解 |
-| `docs/05-训练机制.md` | Trainer 循环、EMA、checkpoint、LR schedule |
-| `docs/06-仿真评测.md` | SimEvaluator、env_runner、dexmani_sim 环境 |
-| `docs/07-多卡训练.md` | mp.spawn、DistributedSampler、rank 隔离、checkpoint 兼容 |
-| `docs/08-审查约定.md` | 已知设计模式与架构决策，防止审查误报 |
+修改 `horizon`、`n_obs_steps`、`n_action_steps`，须满足 `n_obs_steps - 1 + n_action_steps ≤ horizon`。`pad_before`/`pad_after` 需同步调整。
