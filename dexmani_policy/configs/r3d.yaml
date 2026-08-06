@@ -2,7 +2,7 @@
 # Encoder:  Uni3D (ViT-tiny, 256d, pre-trained) with color point cloud
 # Decoder:  OneWayTransformer (cross-attention) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
-# Note:     pc_dim=6 (color), use_compile=true (OneWayTransformer backbone only)
+# Note:     pc_in_channels=6 (color), use_compile=true (OneWayTransformer backbone only)
 #
 # Auxiliary loss: use_aux_ee predicts wrist pose (pos3+rot6d6=9dim) from
 # action_ee[:9] alongside the primary joint action.  Matches official
@@ -89,8 +89,6 @@ agent:
   aux_loss_weight: 1.0              # auxiliary loss weight (matches official R3D-Policy)
 
   # Uni3D encoder
-  pc_dim: 6
-  num_points: 1024
   state_dim: 19                      # joint_state from zarr is always 19-dim
   state_out_dim: 64
 
@@ -209,19 +207,24 @@ env_runner:
 
 # ── Eval ──
 eval:
-  seed: 0
+  denoise_steps: 10
+  use_ema: true
+
   select_best:
     initial_episodes: 25
     batch_size: 5
     max_episodes: 100
-    denoise_steps: 10
-    use_ema: true
-  offline:
-    ckpt_tag_or_path: best
-    eval_episodes: 100
-    denoise_timesteps_list: [10]
-    use_ema_for_eval: true
 
+  offline:
+    episodes: 100
+
+  demo:
+    episodes: 5
+    viewer_resolution: [1920, 1080]
+
+  video:
+    enabled: true
+    fps: null
 # ── Hydra ──
 hydra:
   job:

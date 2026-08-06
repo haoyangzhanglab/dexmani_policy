@@ -27,9 +27,10 @@ Algorithm
 
 Seed management
 ---------------
-``SimRunner.run()`` reads ``self.eval_seeds`` on every call.  We slice
-the full seed list so that each call uses a non-overlapping range,
-avoiding wasted repeated episodes.
+``SimRunner.run()`` reads ``self.eval_seeds`` on every call.  The full
+seed list is deterministically shuffled with the eval seed (same convention
+as ``eval_best_ckpt``), then sliced so each call uses a non-overlapping
+range, avoiding wasted repeated episodes.
 
 Usage
 -----
@@ -46,9 +47,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import random
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -61,9 +63,13 @@ from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.training.eval_utils import (
+    MilestoneCheckpoint,
+    _get_eval_param,
     build_eval_components,
     collect_episode_details,
+    discover_milestone_checkpoints,
     load_ckpt_for_inference,
+    resolve_eval_seed,
     validate_eval_config,
 )
 
@@ -73,21 +79,6 @@ register_resolvers()
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
-
-_MILESTONE_RE = re.compile(r"^epoch=\d+-step=(?P<step>\d+)-milestone=(?P<pct>\d+)pct\.pt$")
-
-
-@dataclass
-class MilestoneCheckpoint:
-    """A discovered milestone checkpoint."""
-
-    path: Path
-    pct: int  # 20, 40, 60, 80, 100
-    global_step: int
-
-    @property
-    def label(self) -> str:
-        return f"{self.pct}% (step={self.global_step})"
 
 
 @dataclass
@@ -135,50 +126,6 @@ class CkptEvalAccum:
 
 
 # ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
-
-
-def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
-    """Find milestone checkpoints in *exp_dir/checkpoints/*, sorted by pct."""
-
-    ckpt_dir = exp_dir / "checkpoints"
-    if not ckpt_dir.is_dir():
-        raise FileNotFoundError(
-            f"Checkpoint directory not found: {ckpt_dir}\n"
-            f"Make sure the experiment was run with the new step-driven "
-            f"training loop (total_train_steps in config)."
-        )
-
-    found: list[MilestoneCheckpoint] = []
-    for pt_file in sorted(ckpt_dir.glob("epoch=*.pt")):
-        m = _MILESTONE_RE.match(pt_file.name)
-        if not m:
-            continue
-        found.append(
-            MilestoneCheckpoint(
-                path=pt_file,
-                pct=int(m.group("pct")),
-                global_step=int(m.group("step")),
-            )
-        )
-
-    if not found:
-        raise FileNotFoundError(
-            f"No milestone checkpoints found in {ckpt_dir}.\n"
-            f"Expected filenames like: epoch=*-step=*-milestone=20pct.pt\n"
-            f"Run training with the new step-driven loop first."
-        )
-
-    found.sort(key=lambda c: c.pct)
-    return found
-
-
-# build_eval_components and load_ckpt_for_inference have been moved to
-# dexmani_policy.training.eval_utils (imported above).
-
-
-# ---------------------------------------------------------------------------
 # Single-checkpoint evaluation
 # ---------------------------------------------------------------------------
 
@@ -193,6 +140,7 @@ def evaluate_checkpoint(
     use_ema: bool,
     denoise_steps: int,
     device: torch.device,
+    video_save_dir: Path | None = None,
 ) -> Dict[str, Any]:
     """Run *len(seeds)* episodes for one checkpoint.  Returns env_runner result dict."""
 
@@ -201,11 +149,12 @@ def evaluate_checkpoint(
     agent.eval()
 
     env_runner.eval_seeds = list(seeds)
+    env_runner.record_video = video_save_dir is not None
     return env_runner.run(
         agent,
         denoise_timesteps=denoise_steps,
         eval_episodes=len(seeds),
-        video_save_dir=None,
+        video_save_dir=video_save_dir,
     )
 
 
@@ -255,6 +204,7 @@ def select_best_checkpoint(
     denoise_steps: int = 10,
     use_ema: bool = True,
     eval_seed: int | None = None,
+    video_save_dir: Path | None = None,
 ) -> tuple[MilestoneCheckpoint, list[CkptEvalAccum]]:
     """Run adaptive elimination to select the best checkpoint.
 
@@ -272,11 +222,7 @@ def select_best_checkpoint(
     # ── 1. Validate config ────────────────────────────────────────────
     validate_eval_config(cfg)
 
-    seed = (
-        eval_seed
-        if eval_seed is not None
-        else (cfg.eval.get("seed") if hasattr(cfg, "eval") else cfg.training.get("seed", 0))
-    )
+    seed = resolve_eval_seed(cfg, cli_seed=eval_seed)
     set_seed(seed)
 
     device = torch.device(cfg.training.device)
@@ -291,7 +237,7 @@ def select_best_checkpoint(
     agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
     eval_root_dir = exp_dir / "eval_ckpt_selector"
 
-    all_seeds = env_runner.get_seed_list()
+    all_seeds = list(env_runner.get_seed_list())
     if max_episodes > len(all_seeds):
         cprint(
             f"⚠ max_episodes ({max_episodes}) > available seeds "
@@ -301,6 +247,10 @@ def select_best_checkpoint(
         max_episodes = len(all_seeds)
     if initial_episodes > max_episodes:
         initial_episodes = max_episodes
+
+    # Deterministically shuffle seeds (same convention as eval_best_ckpt)
+    rng = random.Random(seed)
+    rng.shuffle(all_seeds)
 
     # ── 4. Phase 1: initial evaluation on all checkpoints ─────────────
     cprint(
@@ -324,6 +274,7 @@ def select_best_checkpoint(
                 use_ema,
                 denoise_steps,
                 device,
+                video_save_dir=video_save_dir,
             )
             acc = CkptEvalAccum(ckpt=mc, seed_offset=initial_episodes)
             acc.merge(result)
@@ -389,6 +340,7 @@ def select_best_checkpoint(
                         use_ema,
                         denoise_steps,
                         device,
+                        video_save_dir=video_save_dir,
                     )
                     acc.merge(result)
                     acc.seed_offset = batch_end
@@ -552,12 +504,18 @@ def main() -> None:
         "--seed",
         type=int,
         default=None,
-        help="Eval seed override (default: from config.yaml eval.seed).",
+        help="Eval seed override (default: training.seed + 1024).",
     )
     parser.add_argument(
         "--link-best",
         action="store_true",
         help="Symlink the best checkpoint as checkpoints/best.pt.",
+    )
+    parser.add_argument(
+        "--no-videos",
+        action="store_true",
+        default=False,
+        help="Disable video recording (videos are saved by default).",
     )
     parser.add_argument(
         "overrides",
@@ -595,8 +553,26 @@ def main() -> None:
     )
     batch_size = args.batch_size if args.batch_size is not None else _sb.get("batch_size", 5)
     max_episodes = args.max_episodes if args.max_episodes is not None else _sb.get("max_episodes", 100)
-    denoise_steps = args.denoise_steps if args.denoise_steps is not None else _sb.get("denoise_steps", 10)
-    use_ema = args.use_ema if args.use_ema is not None else _sb.get("use_ema", True)
+    denoise_steps = (
+        args.denoise_steps
+        if args.denoise_steps is not None
+        else _get_eval_param(cfg, "denoise_steps", "select_best", default=10)
+    )
+    use_ema = (
+        args.use_ema
+        if args.use_ema is not None
+        else _get_eval_param(cfg, "use_ema", "select_best", default=True)
+    )
+
+    # Video saving — enabled by default, configurable via eval.video.enabled.
+    # Output: exp_dir/eval_ckpt_selector/<timestamp>/episode_<seed>.mp4
+    video_enabled = _get_eval_param(cfg, "enabled", "video", default=True)
+    video_save_dir = None
+    if video_enabled and not args.no_videos:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_save_dir = exp_dir / "eval_ckpt_selector" / timestamp
+        Path(video_save_dir).mkdir(parents=True, exist_ok=True)
+        cprint(f"\n📹 Video output: {video_save_dir}", "cyan")
 
     best_ckpt, _all = select_best_checkpoint(
         exp_dir,
@@ -607,6 +583,7 @@ def main() -> None:
         denoise_steps=denoise_steps,
         use_ema=use_ema,
         eval_seed=args.seed,
+        video_save_dir=video_save_dir,
     )
 
     if args.link_best:

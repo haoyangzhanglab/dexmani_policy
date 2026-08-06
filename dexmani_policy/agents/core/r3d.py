@@ -26,8 +26,6 @@ class R3DAgent(BaseAgent):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        pc_dim: int,
-        num_points: int,
         state_dim: int,
         pc_encoder_config: dict = None,
         state_out_dim: int = 64,
@@ -48,16 +46,15 @@ class R3DAgent(BaseAgent):
         use_aux_ee: bool = False,
         joint_dim: int = 19,
         ee_dim: int = 9,
-        # Auxiliary loss weight (applied to non-joint dim groups)
-        aux_loss_weight: float = 0.1,
+        # Auxiliary loss weight (applied to non-joint dim groups).
+        # Forwarded to Diffusion; must match when use_aux_ee=True.
+        aux_loss_weight: float = 1.0,
     ):
         self.use_aux_ee = use_aux_ee
         self.joint_dim = joint_dim
         self.ee_dim = ee_dim
 
         obs_encoder = R3DObsEncoder(
-            pc_dim=pc_dim,
-            num_points=num_points,
             state_dim=state_dim,
             n_obs_steps=n_obs_steps,
             pc_encoder_config=pc_encoder_config,
@@ -136,8 +133,6 @@ def _run_smoke(use_aux_ee=False):
         n_obs_steps=T,
         n_action_steps=8,
         action_dim=action_dim,
-        pc_dim=6,
-        num_points=N,
         state_dim=19,
         pc_encoder_config={
             "pc_model": "eva02_tiny_patch14_224",

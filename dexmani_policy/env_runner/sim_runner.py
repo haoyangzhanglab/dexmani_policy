@@ -25,6 +25,9 @@ class SimRunner(BaseRunner):
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
         temporal_ensemble_coeff: float | None = None,
+        record_video: bool = True,
+        render_mode: str = "rgb_array",
+        viewer_resolution: tuple[int, int] | None = None,
     ):
         super().__init__(
             n_obs_steps=n_obs_steps,
@@ -37,6 +40,9 @@ class SimRunner(BaseRunner):
         self.task_name = task_name
         self.env_kwargs = env_kwargs or {}
         self.eval_seeds = eval_seeds
+        self.record_video = record_video
+        self.render_mode = render_mode
+        self.viewer_resolution = viewer_resolution
 
     @staticmethod
     def name_to_pascal_case(name: str) -> str:
@@ -87,7 +93,13 @@ class SimRunner(BaseRunner):
                 f"add an explicit mapping to name_to_pascal_case."
             )
         env_kwargs = self._expand_env_kwargs(self.env_kwargs)
-        return env_class(render_mode="rgb_array", record_video=True, **env_kwargs)
+        env = env_class(render_mode=self.render_mode, record_video=self.record_video, **env_kwargs)
+
+        # Apply custom viewer resolution (only meaningful when render_mode="human")
+        if self.viewer_resolution is not None and env.viewer is not None:
+            env.viewer.resolution = self.viewer_resolution
+
+        return env
 
     def get_seed_list(self) -> List[int]:
         if self.eval_seeds is not None:

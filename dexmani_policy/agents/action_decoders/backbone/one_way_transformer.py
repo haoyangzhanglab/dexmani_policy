@@ -161,21 +161,21 @@ class OneWayTransformer(nn.Module):
 
     def forward(
         self,
-        global_feature_embeded: torch.Tensor,
-        global_pe: torch.Tensor,
-        sample_embedded: torch.Tensor,
-        sample_pe: torch.Tensor,
+        context_tokens: torch.Tensor,
+        context_pe: torch.Tensor,
+        action_tokens: torch.Tensor,
+        action_pe: torch.Tensor,
         self_attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        queries = sample_embedded
-        keys = global_feature_embeded
+        queries = action_tokens
+        keys = context_tokens
 
         for layer in self.layers:
             queries, keys = layer(
                 queries=queries,
                 keys=keys,
-                query_pe=sample_pe,
-                key_pe=global_pe,
+                query_pe=action_pe,
+                key_pe=context_pe,
                 self_attn_mask=self_attn_mask,
             )
 
@@ -334,17 +334,17 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         global_feat = torch.cat([t_emb, obs_feat], dim=-1)
         keys = self.global_cond_proj(global_feat)
 
-        # ── Key positional encoding (unchanged) ──
+        # ── Key positional encoding ──
         temporal_pe = self.temporal_pe_obs[:, :T, :]
         temporal_pe = temporal_pe.repeat_interleave(K, dim=1)
-        key_pe = temporal_pe + pc_pe
+        context_pe = temporal_pe + pc_pe
 
         # ── Transformer ──
         output = self.transformer(
-            keys,
-            key_pe,
-            queries,
-            query_pe,
+            context_tokens=keys,
+            context_pe=context_pe,
+            action_tokens=queries,
+            action_pe=query_pe,
             self_attn_mask=self_attn_mask,
         )
 

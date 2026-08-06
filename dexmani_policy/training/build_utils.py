@@ -61,7 +61,7 @@ def build_dataset_and_normalizer(cfg):
 def inject_faas_into_agent(agent, cfg):
     """Post-construction FAAS attribute injection for any entry point.
 
-    Called by ``build_model_and_ema`` (training), ``eval_sim.py`` (eval),
+    Called by ``build_model_and_ema`` (training), ``eval_best_ckpt.py`` (eval),
     and ``smoke_test.py`` (smoke).  Must be called before the agent is used
     for inference so that ``predict_action`` / ``compute_action_mse`` can
     detect ``use_faas`` and apply the correct conversions.

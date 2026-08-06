@@ -156,6 +156,48 @@ class BaseRunner:
 
         return result["control_action"].detach().cpu().numpy().squeeze(0)
 
+    @staticmethod
+    def _encode_video(path: Path, frames: np.ndarray, fps: int) -> None:
+        """Encode frames to MP4, preferring ffmpeg pipe for streaming.
+
+        Falls back to imageio.mimsave if ffmpeg is not available.
+        """
+        import shutil
+        import subprocess
+
+        if shutil.which("ffmpeg"):
+            T, H, W, C = frames.shape
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "rgb24",
+                "-video_size",
+                f"{W}x{H}",
+                "-framerate",
+                str(fps),
+                "-i",
+                "-",
+                "-pix_fmt",
+                "yuv420p",
+                "-vcodec",
+                "libx264",
+                "-crf",
+                "23",
+                str(path),
+            ]
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            for frame in frames:
+                proc.stdin.write(frame.astype(np.uint8).tobytes())
+            proc.stdin.close()
+            proc.wait(timeout=60)
+        else:
+            imageio.mimsave(str(path), frames.astype(np.uint8), fps=fps)
+
     def run_one_episode(self, agent, env, episode_seed, denoise_timesteps: int = None, **kwargs):
         """Run a single evaluation episode.
 
@@ -206,6 +248,20 @@ class BaseRunner:
         eval_episodes: int = None,
         video_save_dir: Optional[Path] = None,
     ):
+        """Run *eval_episodes* evaluation trials.
+
+        Exception isolation (three-layer defence):
+
+        1. **Episode execution** (``run_one_episode``) — caught, recorded as
+           ``False``, crash video saved if possible.
+        2. **Frame extraction** (``env.get_video()``) — caught, falls back to
+           ``None`` — never corrupts the episode result.
+        3. **Video encoding** (``_encode_video``) — caught, warning printed —
+           never corrupts the episode result.
+
+        The ``episode_completed`` flag decouples execution from video I/O so
+        that video failures cannot poison ``success_list``.
+        """
         env = self.make_env()
         if self.env_video_fps is None:
             self.env_video_fps = getattr(env, "video_fps", 15)
@@ -239,8 +295,42 @@ class BaseRunner:
                     episode_success, task_done_step = self.run_one_episode(
                         agent, env, eval_seed, denoise_timesteps
                     )
+                    episode_completed = True
+                except Exception as e:
+                    episode_completed = False
+                    cprint(f"Seed {eval_seed} failed: {e}", "red")
+                    # Try to capture pre-crash video frames for diagnostics
+                    try:
+                        crash_video = env.get_video()
+                    except Exception:
+                        crash_video = None
+                    success_list.append(False)
+                    episode_details.append(
+                        {
+                            "seed": eval_seed,
+                            "success": False,
+                            "steps": None,
+                            "total_steps": getattr(env, "action_cnt", None),
+                            "error": str(e),
+                        }
+                    )
+                    if crash_video is not None and video_save_dir is not None:
+                        crash_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
+                        crash_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            self._encode_video(crash_path, crash_video, self.env_video_fps)
+                        except Exception:
+                            pass
+                        episode_video_list.append({f"episode_{eval_seed}_crash": str(crash_path)})
+
+                if episode_completed:
                     total_steps = getattr(env, "action_cnt", None)
-                    video = env.get_video()
+
+                    # get_video() is best-effort — failures must not corrupt episode metrics
+                    try:
+                        video = env.get_video()
+                    except Exception:
+                        video = None
 
                     if self.clear_cache_freq > 0 and attempted % self.clear_cache_freq == 0:
                         env.close()
@@ -264,39 +354,15 @@ class BaseRunner:
                             "total_steps": total_steps,
                         }
                     )
-                    if video is not None:
-                        if video_save_dir is not None:
-                            video_path = video_save_dir / f"episode_{eval_seed}.mp4"
-                            imageio.mimsave(str(video_path), video.astype(np.uint8), fps=self.env_video_fps)
+                    # Video encoding is best-effort — failures must not corrupt metrics
+                    if video is not None and video_save_dir is not None:
+                        video_path = video_save_dir / f"episode_{eval_seed}.mp4"
+                        video_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            self._encode_video(video_path, video, self.env_video_fps)
                             episode_video_list.append({f"episode_{eval_seed}": str(video_path)})
-                        else:
-                            episode_video_list.append({f"episode_{eval_seed}": video})
-
-                except Exception as e:
-                    cprint(f"Seed {eval_seed} failed: {e}", "red")
-                    # Try to capture pre-crash video frames for diagnostics
-                    try:
-                        crash_video = env.get_video()
-                    except Exception:
-                        crash_video = None
-                    success_list.append(False)
-                    episode_details.append(
-                        {
-                            "seed": eval_seed,
-                            "success": False,
-                            "steps": None,
-                            "error": str(e),
-                        }
-                    )
-                    if crash_video is not None:
-                        if video_save_dir is not None:
-                            video_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
-                            imageio.mimsave(
-                                str(video_path), crash_video.astype(np.uint8), fps=self.env_video_fps
-                            )
-                            episode_video_list.append({f"episode_{eval_seed}_crash": str(video_path)})
-                        else:
-                            episode_video_list.append({f"episode_{eval_seed}_crash": crash_video})
+                        except Exception as e:
+                            cprint(f"  ⚠ Video encoding failed for seed {eval_seed}: {e}", "yellow")
 
             if len(success_list) < num_episodes:
                 cprint(

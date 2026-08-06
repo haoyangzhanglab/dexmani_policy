@@ -186,75 +186,24 @@ env_runner:
 
 # ── Eval ──
 eval:
-  seed: 0
+  denoise_steps: ${agent.num_inference_steps}
+  use_ema: true
+
   select_best:
     initial_episodes: 25
     batch_size: 5
     max_episodes: 100
-    denoise_steps: 10
-    use_ema: true
+
   offline:
-    ckpt_tag_or_path: best
-    eval_episodes: 100
-    denoise_timesteps_list:
-      - ${agent.num_inference_steps}
-    use_ema_for_eval: true
+    episodes: 100
 
-# ═══════════════════════════════════════════════════════════════════════════
-# VQ-VAE Hand Pretraining (Stage 1 — train before DQ-RISE diffusion)
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# Usage:
-#   bash scripts/train_vq_hand.sh  # reads this section from dqrise.yaml
-#
-# All fields overridable via CLI:
-#   bash scripts/train_vq_hand.sh --num_epochs 2000 --lr 1e-4
-#
-vq_vae:
-  # ── Data ──
-  action_key: action_ee
-  tcp_dim: 9
-  hand_dim: 12
+  demo:
+    episodes: 5
+    viewer_resolution: [1920, 1080]
 
-  # ── Model ──
-  latent_dim: 256
-  hidden_dim: 512
-  num_groups: 2               # residual VQ layers → total = codebook_size ^ num_groups
-  codebook_size: 4            # 4² = 16 discrete hand poses
-  # Exact number of hidden Linear layers.  The legacy implementation
-  # accidentally created num_layers+1 layers; 3 preserves the historical
-  # architecture previously labelled num_layers=2.
-  num_layers: 3
-  act_scale: 1.0              # data already in [-1,1]
-  vq_decay: 0.8
-  threshold_ema_dead_code: 2         # dead-code replacement enabled (0=disabled)
-  kmeans_init: true               # k-means codebook initialisation (reduces collapse risk)
-  kmeans_iters: 10
-
-  # Per-finger L1 loss weights: thumb+index+middle=1.0, ring+pinky=0.5.
-  # 12-DOF mapping: [thumb×3, index×3, middle×2, ring×2, pinky×2]
-  loss_weight: [1.0, 1.0, 1.0,  1.0, 1.0, 1.0,  1.0, 1.0,  0.5, 0.5,  0.5, 0.5]
-
-  # ── Training ──
-  num_epochs: 1500
-  batch_size: 256
-  lr: 3.0e-4
-  betas: [0.95, 0.999]
-  weight_decay: 1.0e-6
-  enc_loss_weight: 3.0         # L1 reconstruction multiplier
-  vq_loss_weight: 5.0          # VQ commitment multiplier
-  max_grad_norm: 1.0
-  warmup_steps: 150
-  # Must match the policy dataset split so VQ and policy use the same hand
-  # normalizer and demonstration subset.
-  val_ratio: 0.05
-  max_train_episodes: 80
-  save_epochs: 100
-  codebook_report_epochs: 200
-  seed: 42
-  num_workers: 4
-  device: cuda
-
+  video:
+    enabled: true
+    fps: null
 # ── Hydra ──
 hydra:
   job:

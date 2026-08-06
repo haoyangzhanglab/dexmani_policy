@@ -253,19 +253,26 @@ env_runner:
         table_random: true
 
 
+# ── Eval ──
 eval:
-  seed: 0
+  denoise_steps: 10
+  use_ema: true
+
   select_best:
     initial_episodes: 25
     batch_size: 5
     max_episodes: 100
-    denoise_steps: 10
-    use_ema: true
+
   offline:
-    ckpt_tag_or_path: best
-    eval_episodes: 100
-    denoise_timesteps_list: [10]
-    use_ema_for_eval: true
+    episodes: 100
+
+  demo:
+    episodes: 5
+    viewer_resolution: [1920, 1080]
+
+  video:
+    enabled: true
+    fps: null
 
 hydra:
   job:

@@ -46,9 +46,47 @@ bash scripts/train_ddp.sh ddp/maniflow     # ddp/dp / ddp/maniflow / ddp/multita
 ## 评测命令
 
 ```bash
-bash scripts/eval_sim.sh dp3 pick_apple_messy <exp_dir>
+# 1. 先选出最佳 checkpoint（自适应淘汰赛）
+bash scripts/select_best_ckpt.sh dp3 pour <exp_dir>
+
+# 2. 在全部 eval seed 上评测最终成功率
+bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir>
+bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir> --ckpt-tag 40pct --episodes 50
+
+# 视频录制（默认: 录制全部 episode 到带时间戳的子目录）
+bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir>                        # 录制全部（默认）
+bash scripts/eval_best_ckpt.sh dp3 pour <exp_dir> --no-videos            # 禁用录制
 # <exp_dir> = experiments/<policy>/<task>/<timestamp>
 ```
+
+### 一键评测管道
+
+```bash
+# 串联 select → eval → demo（默认参数，一步到位）
+bash scripts/eval_pipeline.sh dp3 pour <exp_dir>
+bash scripts/eval_pipeline.sh dp3 pour <exp_dir> --no-videos              # 跳过 eval 视频
+```
+
+## Demo 视频录制（高分 viewer 捕捉）
+
+```bash
+# 从最佳 checkpoint 录制 5 个 episode 的高清 demo 视频 (1920×1080)
+bash scripts/record_demo.sh dp3 pour <exp_dir>
+
+# 指定 checkpoint、更多 episode、自定义分辨率
+bash scripts/record_demo.sh sat pour <exp_dir> --ckpt-tag 100pct --episodes 10
+bash scripts/record_demo.sh maniflow pour <exp_dir> --resolution 3840 2160
+
+# 录制特定 seed（常用于复现 eval 中的成功/失败案例）
+bash scripts/record_demo.sh dp3 pour <exp_dir> --seeds 5 12 33 78
+
+# 使用原始权重（非 EMA）、自定义输出目录
+bash scripts/record_demo.sh dp3 pour <exp_dir> --no-ema --output-dir ~/Videos/demos
+```
+
+> 需要显示器（X11/Wayland）。viewer 窗口会在录制期间打开。视频默认保存到 `experiments/<policy>/<task>/<exp>/demo_videos/<timestamp>/`。
+> 参数默认值从 `cfg.eval.demo` 读取（episodes, viewer_resolution），可通过 CLI 覆盖。
+> `--seeds` 覆盖 `--episodes`；episode 数由 seed 列表长度决定。
 
 ## 冒烟测试
 
@@ -72,7 +110,7 @@ Hydra config (configs/*.yaml)
   → Dataset (Zarr → ReplayBuffer → SequenceSampler → __getitem__)
     → Agent (obs_encoder → backbone → action_decoder)
       → Trainer (loss → backward → grad_accum → EMA → checkpoint)
-        → SimEvaluator (env_runner.run → success_rate)
+        → eval_best_ckpt.py (env_runner.run → success_rate)
 ```
 
 ### 核心不变量（碰了就炸）
@@ -104,7 +142,8 @@ Hydra config (configs/*.yaml)
 |------|------|--------|
 | `train.py` | 单卡 | `@hydra.main`，`build_train_components()` |
 | `train_ddp.py` | 多卡 DDP | `mp.spawn(ddp_worker, nprocs=N)`，compile 在 DDP 包装前 |
-| `eval_sim.py` | 独立评测 | Hydra-free CLI，从实验目录加载 `config.yaml`；`hasattr(cfg, 'eval')` 兼容历史 config |
+| `eval_best_ckpt.py` | 离线评测 | RoboTwin 风格，Hydra-free CLI，确定性种子选择，`_result.txt` 输出，默认录制视频（`--no-videos` 关闭） |
+| `record_demo.py` | Demo 录制 | 高分 viewer 捕捉 (1920×1080)，`render_mode="human"`，可自定义分辨率 |
 | `smoke_test.py` | 构建验证 | Hydra `compose` API，6 阶段 + FAAS roundtrip + MoE 子检查 |
 | `tools/train_vq_hand.py` | VQ-VAE 预训练 | DQ-RISE Stage 1 |
 
@@ -341,11 +380,17 @@ while global_step < config.total_train_steps:
 
 ## 评测
 
-### SimEvaluator
+### 评测流程
 
-- `_load_for_inference(ckpt_tag)`: 加载 checkpoint → 恢复 normalizer → 校验 `n_obs_steps`/`n_action_steps`/`action_dim`/`horizon`/`action_key`
-- FAAS 一致性: 拒绝 FAAS checkpoint 与非 FAAS config 混用（反之亦然）
-- `run()`: 遍历 `denoise_timesteps_list`，每步数独立子目录 + 汇总
+两阶段工作流：`select_best_ckpt.sh` → `eval_best_ckpt.sh`
+
+- **select_best_ckpt.py**: 自适应淘汰赛，在少量 seed(25) 上逐里程碑 checkpoint 评测，选出最优
+- **eval_best_ckpt.py**: 在全部 eval seed(~100) 上评测指定 checkpoint，输出 RoboTwin 兼容的 `_result.txt` + `result_details.json`
+- 共享 `eval_utils.py`: `build_eval_components` / `load_ckpt_for_inference` / `validate_eval_config` / `resolve_checkpoint_path` / `_get_eval_param`
+  - 加载 checkpoint → 恢复 normalizer → 校验 `n_obs_steps`/`n_action_steps`/`action_dim`/`horizon`/`action_key`
+  - FAAS 一致性: 拒绝 FAAS checkpoint 与非 FAAS config 混用（反之亦然）
+  - `fix_state_dict`: 去 `_orig_mod.` (compile) + `module.` (DDP) 前缀
+  - 参数优先级: CLI > 子节覆盖 > eval 共享层 > 旧字段名兼容 > hardcoded fallback
 - 多任务检测: `self.env_runner.is_multi_task`（属性检测）
 
 ### Env Runner 层级
@@ -368,6 +413,19 @@ MultiTaskSimRunner (独立编排器, 持有 dict[str, TaskTextSimRunner])
 - `temporal_ensemble_coeff=0.01`（全部配置已启用，之前是注释掉的）
 - 公式: `blended = (old*1.0 + new*exp(-coeff)) / (1.0+exp(-coeff))`
 - 标注 "+2.9pp avg across 7 tasks"
+
+### 视频录制
+
+评测默认不录制视频。通过 CLI flag 按需捕获：
+
+| Flag | 行为 |
+|------|------|
+| (无) | **全部录制** — 默认行为，全部 episode 落盘 |
+| `--no-videos` | **禁用录制** — CI/快速扫描时使用 |
+
+- **录制引擎**: 优先使用 `ffmpeg` 管道流式编码（低内存），自动 fallback 到 `imageio`（纯 Python）
+- **存储位置**: `{exp_dir}/eval_dexsim/<YYYYmmdd_HHMMSS>/episode_<seed>.mp4`（带时间戳子目录，匹配旧版 eval_sim 约定）
+- **命名**: `episode_<seed>.mp4`（正常）/ `episode_<seed>_crash.mp4`（崩溃）
 
 ---
 
@@ -412,6 +470,38 @@ configs/ddp/
 | ddp/multitask_dit | 16×4=64 | 64 |
 | ddp/r3d | 16×4=64 | 48 |
 | ddp/dp3_faas | 32×4=128 | 128 |
+
+### Eval 配置标准
+
+所有策略共享统一的 eval 节结构。`denoise_steps` 和 `use_ema` 在 eval 顶层定义，各子节按需覆盖。
+
+```yaml
+eval:
+  # seed 不写则默认 training.seed + 1024（eval 与 train 种子隔离）
+  # seed: 0                  # 可显式覆盖
+  denoise_steps: 10          # 共享：推理去噪步数
+  use_ema: true              # 共享：是否使用 EMA 权重
+
+  select_best:               # checkpoint 淘汰赛
+    initial_episodes: 25     # 阶段 1：每 checkpoint 测评集数
+    batch_size: 5            # 阶段 2：每轮追加集数
+    max_episodes: 100        # 每 checkpoint 集数上限
+
+  offline:                   # 最终评测
+    episodes: 100            # 总测评集数
+
+  demo:                      # Demo 录制
+    episodes: 5              # 录制集数
+    viewer_resolution: [1920, 1080]  # viewer 分辨率
+
+  video:                     # 视频输出
+    enabled: true            # 是否录制视频
+    fps: null                # null = 自动检测
+```
+
+**参数解析优先级**: CLI flag > 子节覆盖 > eval 共享层 > 旧字段名兼容 > hardcoded fallback
+
+**向后兼容**: 旧 config 中的 `denoise_timesteps_list`、`use_ema_for_eval`、`eval_episodes` 等字段名自动识别。
 
 ---
 
@@ -500,7 +590,7 @@ joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
 dexmani_policy/
   train.py                  # 单卡入口
   train_ddp.py              # 多卡 DDP 入口
-  eval_sim.py               # 独立评测入口（Hydra-free）
+  eval_best_ckpt.py          # 离线评测入口（RoboTwin 风格，Hydra-free）
   smoke_test.py             # 构建链冒烟测试
   configs/                  # 9 个 Hydra YAML
   configs/ddp/              # 6 个 DDP overlay
@@ -513,7 +603,7 @@ dexmani_policy/
     optim_util.py           # OptimGroupMixin, get_optim_group_with_no_decay
     position_encodings.py   # SinusoidalPosEmb, TimestepMLP, RelativePositionalEncoding3D
   datasets/                 # BaseDataset, PCDataset, RGBPCDataset, common/(ReplayBuffer, Sampler)
-  training/                 # Trainer, build_utils, SimEvaluator, workspace, ema, logging, lr_scheduler, eval_utils
+  training/                 # Trainer, build_utils, workspace, ema, logging, lr_scheduler, eval_utils
   env_runner/               # BaseRunner, SimRunner, MultiTaskSimRunner
   common/                   # LinearNormalizer, faas_mapper, checkpoint_io, pytorch_util, config
   tools/                    # extract_codebook.py, train_vq_hand.py, measure_vq_usage.py
@@ -567,3 +657,4 @@ dexmani_policy/
 | `docs/FAAS-集成方案.md` | FAAS 集成设计文档 — 架构设计、维度分析、agent 兼容矩阵 |
 | `docs/FAAS-迁移-最佳方案.md` | FAAS 迁移 v5 实施方案 — 3 轨对比、实施步骤、风险缓解 |
 | `docs/UniDex-可借鉴设计.md` | 8 项 UniDex 可借鉴设计，3 维评分，分优先级执行路线图 |
+| `docs/评测机制-代码实现.md` | 离线仿真评测系统完整分析 — CLI→EnvRunner→Agent推理→Decoder去噪 全链路 |

@@ -37,6 +37,7 @@ import argparse
 import json
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -45,12 +46,13 @@ from termcolor import cprint
 
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
-from dexmani_policy.select_best_ckpt import discover_milestone_checkpoints
 from dexmani_policy.training.eval_utils import (
+    _get_eval_param,
     build_eval_components,
     collect_episode_details,
     load_ckpt_for_inference,
-    read_best_ckpt_json,
+    resolve_checkpoint_path,
+    resolve_eval_seed,
     validate_eval_config,
 )
 
@@ -72,6 +74,7 @@ def evaluate_checkpoint_robotwin(
     episodes: int = 100,
     denoise_steps: int = 10,
     use_ema: bool = True,
+    video_save_dir: Path | None = None,
 ) -> tuple[float, float | None, int, int]:
     """Evaluate a checkpoint and return success rate.
 
@@ -89,62 +92,22 @@ def evaluate_checkpoint_robotwin(
     (success_rate, avg_steps, n_success, n_total)
     """
 
-    # ── 1. Validate config ────────────────────────────────────────────
+    # ── 1. Validate config + Seed ─────────────────────────────────────
     validate_eval_config(cfg)
-
-    # Use eval.seed (standardized across all three eval scripts — C6 fix).
-    # Falls back to training.seed for backward compat with older configs.
-    train_seed = (
-        cfg.eval.get("seed")
-        if hasattr(cfg, "eval") and cfg.eval.get("seed") is not None
-        else cfg.training.get("seed", 0)
-    )
-    set_seed(train_seed)
+    eval_seed = resolve_eval_seed(cfg)
+    set_seed(eval_seed)
 
     device = torch.device(cfg.training.device)
 
     # ── 2. Build components ───────────────────────────────────────────
     agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
 
+    # Enable video recording only when saving
+    if hasattr(env_runner, "record_video"):
+        env_runner.record_video = video_save_dir is not None
+
     # ── 3. Resolve & load checkpoint ──────────────────────────────────
-    if ckpt_tag_or_path.endswith("pct"):
-        milestones = discover_milestone_checkpoints(exp_dir)
-        target_pct = int(ckpt_tag_or_path.replace("pct", ""))
-        match = [m for m in milestones if m.pct == target_pct]
-        if not match:
-            available = sorted(m.pct for m in milestones)
-            raise FileNotFoundError(f"No {target_pct}% milestone checkpoint. Available: {available}")
-        ckpt_path = match[0].path
-        ckpt_label = match[0].label
-    elif ckpt_tag_or_path == "best":
-        # Read best_ckpt.json (written by select_best_ckpt.py)
-        best_info = read_best_ckpt_json(exp_dir)
-        if best_info:
-            ckpt_path = Path(best_info["ckpt_path"])
-            ckpt_label = f"best -> {best_info['pct']}% (step={best_info['global_step']})"
-            cprint(
-                f"  Auto-loaded best checkpoint: {best_info['pct']}% "
-                f"(success_rate={best_info['success_rate']:.1%}, "
-                f"n_episodes={best_info['n_episodes']})",
-                "cyan",
-            )
-        else:
-            # Fallback: try symlink
-            ckpt_path = checkpoint_store.resolve_path("best")
-            ckpt_label = f"best ({ckpt_path.name})"
-            cprint(
-                "  ⚠ best_ckpt.json not found — using best.pt symlink. "
-                "Run select_best_ckpt.sh first for automatic selection.",
-                "yellow",
-            )
-    elif ckpt_tag_or_path == "latest":
-        ckpt_path = checkpoint_store.resolve_path("latest")
-        ckpt_label = f"latest ({ckpt_path.name})"
-    else:
-        ckpt_path = Path(ckpt_tag_or_path)
-        if not ckpt_path.is_absolute():
-            ckpt_path = exp_dir / "checkpoints" / ckpt_path
-        ckpt_label = str(ckpt_path)
+    ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, ckpt_tag_or_path, checkpoint_store)
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
     load_ckpt_for_inference(agent, checkpoint_store, ckpt_path, use_ema)
@@ -162,13 +125,12 @@ def evaluate_checkpoint_robotwin(
         )
 
     # Deterministically select seeds with training seed (reproducible)
-    rng = random.Random(train_seed)
+    rng = random.Random(eval_seed)
     rng.shuffle(all_seeds)
     eval_seeds = all_seeds[:n_total]
 
     cprint(
-        f"Evaluating on {n_total} seeds from pool "
-        f"(training_seed={train_seed}, first seed={eval_seeds[0]}) ...",
+        f"Evaluating on {n_total} seeds from pool (eval_seed={eval_seed}, first seed={eval_seeds[0]}) ...",
         "cyan",
     )
 
@@ -177,7 +139,7 @@ def evaluate_checkpoint_robotwin(
         agent,
         denoise_timesteps=denoise_steps,
         eval_episodes=n_total,
-        video_save_dir=None,
+        video_save_dir=video_save_dir,
     )
 
     # ── 5. Compute metrics ────────────────────────────────────────────
@@ -200,7 +162,7 @@ def evaluate_checkpoint_robotwin(
     cprint(f"{'=' * 50}\n", "cyan")
 
     # ── 7. Save result (RoboTwin _result.txt format) ──────────────────
-    eval_dir = exp_dir / "eval_robotwin"
+    eval_dir = exp_dir / "eval_dexsim"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     # RoboTwin-style: just the float on one line
@@ -218,7 +180,7 @@ def evaluate_checkpoint_robotwin(
                 "n_success": n_success,
                 "n_total": n_total,
                 "avg_steps": avg_steps,
-                "training_seed": train_seed,
+                "eval_seed": eval_seed,
                 "per_seed_details": per_seed_details,
             },
             indent=2,
@@ -293,6 +255,12 @@ def main() -> None:
         help="Use raw weights instead of EMA.",
     )
     parser.add_argument(
+        "--no-videos",
+        action="store_true",
+        default=False,
+        help="Disable video recording (videos are saved by default).",
+    )
+    parser.add_argument(
         "overrides",
         nargs="*",
         help="Optional OmegaConf dot-list overrides.",
@@ -320,14 +288,29 @@ def main() -> None:
     cfg._exp_dir = str(exp_dir)
 
     # ── Resolve parameters: CLI > config > hardcoded fallback ────────────
-    _off = cfg.eval.get("offline", {}) if hasattr(cfg, "eval") else {}
-    episodes = args.episodes if args.episodes is not None else _off.get("eval_episodes", 100)
+    episodes = (
+        args.episodes
+        if args.episodes is not None
+        else _get_eval_param(cfg, "episodes", "offline", default=100)
+    )
     denoise_steps = (
         args.denoise_steps
         if args.denoise_steps is not None
-        else ((_off.get("denoise_timesteps_list") or [10])[0])
+        else _get_eval_param(cfg, "denoise_steps", "offline", default=10)
     )
-    use_ema = args.use_ema if args.use_ema is not None else _off.get("use_ema_for_eval", True)
+    use_ema = (
+        args.use_ema if args.use_ema is not None else _get_eval_param(cfg, "use_ema", "offline", default=True)
+    )
+
+    # Video saving — configurable via eval.video.enabled, overridable via --no-videos.
+    # Output: exp_dir/eval_dexsim/<timestamp>/episode_<seed>.mp4
+    video_enabled = _get_eval_param(cfg, "enabled", "video", default=True)
+    video_save_dir = None
+    if video_enabled and not args.no_videos:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_save_dir = exp_dir / "eval_dexsim" / timestamp
+        video_save_dir.mkdir(parents=True, exist_ok=True)
+        cprint(f"\n📹 Video output: {video_save_dir}", "cyan")
 
     ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
 
@@ -338,6 +321,7 @@ def main() -> None:
         episodes=episodes,
         denoise_steps=denoise_steps,
         use_ema=use_ema,
+        video_save_dir=video_save_dir,
     )
 
 

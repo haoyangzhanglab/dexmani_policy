@@ -1,5 +1,5 @@
 # DP3 — 3D Diffusion Policy with point cloud observation
-# Encoder:  iDP3 / PointNeXT point cloud encoder (128d)
+# Encoder:  DP3 MLP point cloud encoder (per-point MLP + max pool, 128d)
 # Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
 
@@ -67,7 +67,7 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: idp3                 # idp3 | pointnext | dp3
+  encoder_type: dp3                  # dp3 (MLP) | idp3 (Conv) | pointnext
   pc_dim: 6
   pc_out_dim: 128
   state_dim: 19
@@ -174,19 +174,24 @@ env_runner:
 
 # ── Eval ──
 eval:
-  seed: 0
+  denoise_steps: 10
+  use_ema: true
+
   select_best:
     initial_episodes: 25
     batch_size: 5
     max_episodes: 100
-    denoise_steps: 10
-    use_ema: true
-  offline:
-    ckpt_tag_or_path: best
-    eval_episodes: 100
-    denoise_timesteps_list: [10]
-    use_ema_for_eval: true
 
+  offline:
+    episodes: 100
+
+  demo:
+    episodes: 5
+    viewer_resolution: [1920, 1080]
+
+  video:
+    enabled: true
+    fps: null
 # ── Hydra ──
 hydra:
   job:

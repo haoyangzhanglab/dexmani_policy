@@ -21,8 +21,6 @@ class R3DObsEncoder(nn.Module):
 
     def __init__(
         self,
-        pc_dim: int,
-        num_points: int,
         state_dim: int,
         n_obs_steps: int,
         pc_encoder_config: dict = None,

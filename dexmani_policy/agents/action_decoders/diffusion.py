@@ -32,7 +32,7 @@ class Diffusion(nn.Module):
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
-        aux_loss_weight: float = 0.1,
+        aux_loss_weight: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -98,9 +98,8 @@ class Diffusion(nn.Module):
             # Per-dimension-group MSE losses — each group uses the per-element
             # MSE (F.mse_loss default mean over B×H×D elements), matching the
             # R3D-Policy dim_groups convention.
-            # Auxiliary groups (all except 'joint') are down-weighted by
-            # ``aux_loss_weight`` (default 0.1).  Set to 1.0 for exact
-            # R3D-Policy parity.
+            # Auxiliary groups (all except 'joint') are weighted by
+            # ``aux_loss_weight`` (default 1.0 for R3D-Policy parity).
             group_losses = []
             loss_dict = {}
             for name, (start, end) in dim_groups.items():
