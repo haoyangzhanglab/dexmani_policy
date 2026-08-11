@@ -11,6 +11,7 @@ class PointNet(nn.Module):
         self,
         input_channels: int = 3,
         output_channels: int = 256,
+        norm_before_activation: bool = False,
     ):
         super().__init__()
         if input_channels < 3:
@@ -20,7 +21,11 @@ class PointNet(nn.Module):
         self.output_channels = output_channels
 
         hidden_channels = [64, 128, 256, 512] if input_channels > 3 else [64, 128, 256]
-        self.mlp = create_mlp(input_channels, hidden_channels, use_norm=True)
+        self.mlp = create_mlp(
+            input_channels, hidden_channels,
+            use_norm=True,
+            norm_before_activation=norm_before_activation,
+        )
         self.output_projection = nn.Sequential(
             nn.Linear(hidden_channels[-1], output_channels),
             nn.LayerNorm(output_channels),

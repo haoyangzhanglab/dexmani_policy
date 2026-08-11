@@ -60,6 +60,7 @@ class BaseRunner:
         if temporal_ensemble_coeff is not None:
             self._blender = ChunkOverlapBlender(
                 temporal_ensemble_coeff=temporal_ensemble_coeff,
+                n_obs_steps=n_obs_steps,
             )
 
     def update_obs(self, observation: Dict[str, Any]):

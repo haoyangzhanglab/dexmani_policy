@@ -6,10 +6,10 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.action_decoders.backbone.ditx import DiTXFlowMatch
+from dexmani_policy.agents.action_decoders.backbone.ditx import DiTXDiffusion, DiTXFlowMatch
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.action_decoders.flowmatch import FlowMatchWithConsistency
+from dexmani_policy.agents.action_decoders.flowmatch import FlowMatchWithConsistency, StandardFlowMatch
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.common.normalizer import LinearNormalizer
 
@@ -442,6 +442,67 @@ class DiTXFlowMatchAgent(BaseAgent):
             t_sample_mode_for_consistency=t_sample_mode_for_consistency,
             dt_sample_mode_for_consistency=dt_sample_mode_for_consistency,
             target_t_sample_mode=target_t_sample_mode,
+        )
+        super().__init__(
+            obs_encoder,
+            action_decoder,
+            horizon,
+            n_obs_steps,
+            n_action_steps,
+            action_dim,
+            modality_dropout_probs=modality_dropout_probs,
+        )
+
+
+class StandardFlowMatchAgent(BaseAgent):
+    def __init__(
+        self,
+        obs_encoder: nn.Module,
+        num_obs_tokens: int,
+        obs_token_dim: int,
+        horizon: int,
+        n_obs_steps: int,
+        n_action_steps: int,
+        action_dim: int,
+        timestep_embed_dim: int = 128,
+        n_layers: int = 12,
+        hidden_dim: int = 768,
+        n_head: int = 8,
+        mlp_ratio: float = 4.0,
+        p_drop_attn: float = 0.1,
+        qkv_bias: bool = True,
+        qk_norm: bool = True,
+        pre_norm_modality: bool = False,
+        denoise_timesteps: int = 10,
+        t_sample_mode: str = "beta",
+        beta_s: float = 0.999,
+        beta_alpha: float = 1.0,
+        beta_beta: float = 1.5,
+        modality_dropout_probs: dict = None,
+    ):
+        backbone = DiTXDiffusion(
+            horizon=horizon,
+            action_dim=action_dim,
+            n_obs_steps=n_obs_steps,
+            num_obs_tokens=num_obs_tokens,
+            obs_token_dim=obs_token_dim,
+            timestep_embed_dim=timestep_embed_dim,
+            n_layers=n_layers,
+            hidden_dim=hidden_dim,
+            n_head=n_head,
+            mlp_ratio=mlp_ratio,
+            p_drop_attn=p_drop_attn,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            pre_norm_modality=pre_norm_modality,
+        )
+        action_decoder = StandardFlowMatch(
+            model=backbone,
+            num_inference_steps=denoise_timesteps,
+            t_sample_mode=t_sample_mode,
+            beta_s=beta_s,
+            beta_alpha=beta_alpha,
+            beta_beta=beta_beta,
         )
         super().__init__(
             obs_encoder,

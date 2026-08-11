@@ -32,11 +32,15 @@ class ChunkOverlapBlender:
     where ``w0 = exp(-coeff * 0) = 1.0`` and ``w1 = exp(-coeff * 1)``.
     """
 
-    def __init__(self, temporal_ensemble_coeff: float = 0.01) -> None:
+    def __init__(self, temporal_ensemble_coeff: float = 0.01, n_obs_steps: int = 2) -> None:
         # Pre-computed ACT weights for the exact 2-prediction case.
         self.w0: float = 1.0  # exp(-coeff * 0)
         self.w1: float = math.exp(-temporal_ensemble_coeff)  # exp(-coeff * 1)
         self.wsum: float = self.w0 + self.w1
+        # Action head starts at n_obs_steps-1 (0-indexed) in the horizon.
+        # For n_obs_steps=2 → start=1 (standard DP3/ManiFlow/etc.).
+        # For n_obs_steps=4 → start=3 (OPFA).
+        self._start = n_obs_steps - 1
         self.reset()
 
     def reset(self) -> None:
@@ -55,8 +59,9 @@ class ChunkOverlapBlender:
         Returns:
             ``(B, n_action_steps, A)`` — blended actions to execute.
         """
-        # Extract to-execute head: positions [1 : 1+n_action_steps].
-        new_head = action_chunk[:, 1 : 1 + n_action_steps, :]
+        s = self._start
+        # Extract to-execute head: positions [s : s+n_action_steps].
+        new_head = action_chunk[:, s : s + n_action_steps, :]
 
         if self._prev_tail is None:
             control = new_head
@@ -70,5 +75,5 @@ class ChunkOverlapBlender:
             ) / self.wsum
 
         # Save the unexecuted tail for the next chunk's blend.
-        self._prev_tail = action_chunk[:, 1 + n_action_steps :, :]
+        self._prev_tail = action_chunk[:, s + n_action_steps :, :]
         return control

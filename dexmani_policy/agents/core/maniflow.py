@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.core.base import DiTXFlowMatchAgent
+from dexmani_policy.agents.core.base import DiTXFlowMatchAgent, StandardFlowMatchAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_patch_tokenizer
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
@@ -63,6 +63,46 @@ class ManiFlowObsEncoder(nn.Module):
 
 
 class ManiFlowAgent(DiTXFlowMatchAgent):
+    def __init__(
+        self,
+        horizon: int,
+        n_obs_steps: int,
+        n_action_steps: int,
+        action_dim: int,
+        encoder_type: str,
+        pc_dim: int,
+        state_dim: int,
+        num_points: int,
+        state_out_dim: int = 64,
+        pc_encoder_config: dict = None,
+        fps_random_config: dict = None,
+        **kwargs,
+    ):
+        obs_encoder = ManiFlowObsEncoder(
+            encoder_type,
+            pc_dim,
+            state_dim,
+            num_points,
+            n_obs_steps,
+            state_out_dim,
+            pc_encoder_config,
+            fps_random_config=fps_random_config,
+        )
+        super().__init__(
+            obs_encoder,
+            num_obs_tokens=obs_encoder.num_obs_tokens,
+            obs_token_dim=obs_encoder.obs_token_dim,
+            horizon=horizon,
+            n_obs_steps=n_obs_steps,
+            n_action_steps=n_action_steps,
+            action_dim=action_dim,
+            **kwargs,
+        )
+
+
+class StandardManiFlowAgent(StandardFlowMatchAgent):
+    """Standard FlowMatch with ManiFlow observation encoder."""
+
     def __init__(
         self,
         horizon: int,

@@ -57,6 +57,10 @@ RSYNC_OPTS=(
     --exclude='/logs/'
     --exclude='/bin/'
     --exclude='/results/'
+    # Protect symlink dirs from --delete (they exist on server but not locally)
+    --filter='protect /data'
+    --filter='protect /robot_data'
+    --filter='protect /experiments'
     --delete
     $DRY_RUN
 )

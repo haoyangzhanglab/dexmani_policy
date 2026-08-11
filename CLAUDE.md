@@ -2,7 +2,7 @@
 
 灵巧手操作模仿学习框架。Hydra 配置驱动，Zarr replay buffer，Diffusion/FlowMatch 动作解码，`dexmani_sim` 仿真评测。
 
-> **速查**: [训练](#训练命令) · [评测](#评测命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [数据管线](#数据管线) · [配置速查](#配置速查) · [FAAS](#faas-集成) · [DQ-RISE](#dq-rise) · [代码风格](#代码风格) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
+> **速查**: [训练](#训练命令) · [评测](#评测命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [OPFA](#opfa-one-policy-fits-all) · [数据管线](#数据管线) · [配置速查](#配置速查) · [FAAS](#faas-集成) · [DQ-RISE](#dq-rise) · [代码风格](#代码风格) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
 >
 > **详细文档**: [README](README.md) — 项目概览 · [`docs/项目架构.md`](docs/项目架构.md) — 架构全景 · [`docs/评测机制.md`](docs/评测机制.md) — 评测全链路 · [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) — 远程部署
 
@@ -15,20 +15,12 @@ export DATA_DIR=/path/to/data          # 需设，否则 dataset 路径报错
 
 ## 代码风格
 
-参照 LeRobot 标准，通过 `ruff` 统一管理。配置在 `pyproject.toml` → `[tool.ruff]`。
-
 | 规则 | 值 |
 |------|-----|
 | 行宽 | 110 |
 | 引号 | 双引号 (`"`) |
 | 缩进 | 空格 |
-| 导入排序 | `ruff isort`: stdlib → third-party → `dexmani_policy` → local |
 | Python 目标 | 3.10 |
-
-```bash
-ruff format dexmani_policy/   # 格式化
-ruff check dexmani_policy/    # 检查（CI 通过标准）
-```
 
 ## 训练命令
 
@@ -36,18 +28,18 @@ ruff check dexmani_policy/    # 检查（CI 通过标准）
 # 命令结构: train.py <策略类型> <任务名> [Hydra覆盖参数...]
 
 # === 单卡 ===
-bash scripts/training/train.sh dp3 pour                 # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat
+bash scripts/training/train.sh dp3 pour                 # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat / opfa
 bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
 
 # === 多卡 DDP ===
-bash scripts/training/train_ddp.sh ddp/maniflow pour    # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas / ddp/sat
+bash scripts/training/train_ddp.sh ddp/maniflow pour    # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas / ddp/sat / ddp/opfa
 ```
 
 > 命令参数详解（策略/任务/seed/Hydra 覆盖）→ [SSH 部署文档附录 A.3](docs/SSH服务器训练部署.md#a3-训练命令参数详解)
-> 实际存在的单卡配置 (9): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d, sat`
-> 实际存在的 DDP 配置 (7): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d, ddp/sat`
-> 所有策略默认 `total_train_steps: 80000`
+> 实际存在的单卡配置 (11): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, opfa, r3d, sat, standard_flowmatch`
+> 实际存在的 DDP 配置 (9): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/opfa, ddp/r3d, ddp/sat, ddp/standard_flowmatch`
+> 所有策略默认 `total_train_steps: 100000`
 
 ## 评测命令
 
@@ -98,7 +90,7 @@ bash scripts/eval/record_demo.sh dp3 pour <exp_dir> --no-ema --output-dir ~/Vide
 
 ```bash
 python dexmani_policy/smoke_test.py dp3
-python dexmani_policy/smoke_test.py dp3 maniflow moe_dp r3d dqrise sat
+python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch moe_dp r3d dqrise sat opfa
 ```
 
 ## VQ-VAE 预训练（DQ-RISE Stage 1）
@@ -151,7 +143,9 @@ Hydra config (configs/*.yaml)
 | `eval_best_ckpt.py` | 离线评测 | RoboTwin 风格，Hydra-free CLI，确定性种子选择，`_result.txt` 输出，默认录制视频（`--no-videos` 关闭） |
 | `record_demo.py` | Demo 录制 | 高分 viewer 捕捉 (1920×1080)，`render_mode="human"`，可自定义分辨率 |
 | `smoke_test.py` | 构建验证 | Hydra `compose` API，6 阶段 + FAAS roundtrip + MoE 子检查 |
-| `tools/train_vq_hand.py` | VQ-VAE 预训练 | DQ-RISE Stage 1 |
+| `dexmani_policy/tools/train_vq_hand.py` | VQ-VAE 预训练 | DQ-RISE Stage 1 |
+| `dexmani_policy/agents/opfa/train_galr.py` | GaLR 自编码器训练 | OPFA Stage 1 |
+| `dexmani_policy/agents/opfa/preprocess.py` | 潜变量预计算 | OPFA Stage 2 |
 
 ---
 
@@ -161,8 +155,9 @@ Hydra config (configs/*.yaml)
 
 ```
 BaseAgent
-  ├── UNetDiffusionAgent        ← DP, DP3, MoE (共享 UNet+Diffusion 构建)
+  ├── UNetDiffusionAgent        ← DP, DP3, MoE, OPFA (共享 UNet+Diffusion 构建)
   ├── DiTXFlowMatchAgent        ← ManiFlow (DiTX+FlowMatchWithConsistency)
+  ├── StandardFlowMatchAgent    ← Standard FlowMatch (DiTDiffusion+StandardFlowMatch, 无 consistency)
   ├── SATAgent                  ← 直接继承 BaseAgent (SATBackbone+SATFlowMatch)
   ├── MultiTaskAgent            ← 直接继承 BaseAgent
   ├── R3DAgent                  ← 直接继承 BaseAgent (OneWayTransformer)
@@ -176,12 +171,14 @@ BaseAgent
 | **DP** | RGB+state | DINO/CLIP/SigLIP+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | `dp.yaml` | CNN用channels_last |
 | **DP3** | PC+state | iDP3/PointNeXT+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | `dp3.yaml` | FPS下采样, pc_dim=3 |
 | **ManiFlow** | PC+state | PointNeXT(patch)+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | `maniflow.yaml` | Token化条件, EMA教师, weight_decay=1e-3 |
+| **StandardFlowMatch** | PC+state | PointNeXT(patch)+StateMLP | **DiT**(single timestep) | **StandardFlowMatch**(no target_t) | `standard_flowmatch.yaml` | 纯 flow matching, 无 consistency, DiTDiffusion backbone |
 | **MoE** | RGB+state | R3M+StateMLP+MoE门控 | UNet1D(FiLM) | Diffusion(DDPM 100步) | `moe_dp.yaml` | 16专家top-2, 无bfloat16/compile |
 | **MultiTask** | RGB+state+text | DPObsEncoder+CLIP Text | DiT(self-attn+AdaLN) | Diffusion/FlowMatch | `multitask_dit.yaml` | 预缓存text, 均衡采样 |
 | **R3D** | PC+state | Uni3D(ViT+Fourier PE)+StateMLP | OneWayTransformer(cross-attn) | Diffusion(DDIM 10步) | `r3d.yaml` | 级联mask, 分组loss |
 | **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon, 20步) | `dqrise.yaml` | VQ码本16种手势, 3x学习率 |
 | **DP3(FAAS)** | PC+state | 同DP3 | 同DP3 | 同DP3 | `dp3_faas.yaml` | 32D FAAS空间, 零agent代码变更 |
 | **SAT** | PC+state | PointNeXT(patch)+StateMLP | SATBackbone(MultiModalAttn+EJC) | FlowMatch(Gaussian init, Euler) | `sat.yaml` | 结构中心(B,Da,T), EJC 3-field sum, per-sample shuffle, 论文对齐 |
+| **OPFA** | PC+hand_latent | PointNeXT(64d)+MLP(1024→64) | UNet1D(FiLM) | Diffusion(DDIM 10步, 1031-d) | `opfa.yaml` | GaLR潜空间, 无arm proprioception, 冻结GaLR decoder, 3阶段管道 |
 
 ### 各 Agent 关键差异
 
@@ -189,7 +186,7 @@ BaseAgent
 - **MoE** → 唯一禁用 `bfloat16` 和 `compile` 的配置（MoE gate softmax 需 float32，CUDA Graphs 内存开销）
 - **R3D** → `dim_groups` 分组 loss（关节+EE分量独立MSE），cascading self-attn mask（关节token不能attend EE token）
 - **DQRISE** → UNet 输入只有 `tcp_dim+1` 维（10D），非标准 `action_dim`
-- **ManiFlow** → 唯一用 `betas=[0.9,0.95]` + `weight_decay=1e-3` 的配置（Transformer/FlowMatching 标准）
+- **ManiFlow/StandardFlowMatch** → 唯一用 `betas=[0.9,0.95]` + `weight_decay=1e-3` 的配置（Transformer/FlowMatching 标准）
 - **MultiTask** → CLIP text encoder 冻结，仅 `text_proj` 可训练；`MultiTaskSimRunner` 编排 per-task 评测
 - **SAT** → 结构中心动作表示 `(B, Da, T)` 代替 `(B, T, Da)`；EJC (Embodied Joint Codebook) 3-field sum 提供 per-joint identity；MultiModalAttention 单次拼接注意力 (obs-as-KV-prefix)；per-sample shuffle 训练时随机排列关节 token；Obs 时间融合在特征维（token 数不随 `n_obs_steps` 增长）；`compile mode='default'`（CUDA graph 不兼容 shuffle 动态索引）；8 层 DiT-B 规模，hidden_dim=768
 - **DP/DP3/ManiFlow/MoE/MultiTask/R3D** → 全部通过 config + `inject_faas_into_agent()` 兼容 FAAS，零 agent 代码变更
@@ -230,7 +227,8 @@ SAT (CVPR 2026) 是本项目最新的 agent 变体，已通过完整论文对齐
 | Decoder | 预测目标 | 推理 | 关键参数 |
 |---------|---------|------|---------|
 | `Diffusion` | `epsilon`(noise) / `sample`(x0) / `v_prediction`(velocity) | DDIM 迭代 | `prediction_type`, `num_inference_steps` |
-| `FlowMatch` | 瞬时速度 `v=x1-x0` | Euler ODE | 仅 MultiTask 用 |
+| `FlowMatch` | 瞬时速度 `v=x1-x0` | Euler ODE | 仅 MultiTask/SAT 用 |
+| `StandardFlowMatch` | 瞬时速度 `v=x1-x0` (target_t=0 恒) | Euler ODE | `t_sample_mode`, `beta_*`, 无 consistency |
 | `FlowMatchWithConsistency` | 速度 + consistency(EMA教师) | Euler ODE | `flow_batch_ratio`, 4种时采样模式 |
 | `SATFlowMatch` | 瞬时速度 `v=x1-x0` (Gaussian init) | Euler ODE | 继承 `FlowMatch`，转发 `shuffle` 到 backbone |
 
@@ -373,7 +371,7 @@ while global_step < config.total_train_steps:
 - `find_unused_parameters=False`, `static_graph=True`
 - Normalizer 从 rank 0 broadcast
 - `OmegaConf.resolve(cfg)` 在 `mp.spawn` 前（子进程无 Hydra 运行时）
-- 覆盖 7 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/r3d/sat（dp3/moe_dp 仅单卡）
+- 覆盖 8 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/opfa/r3d/sat（dp3/moe_dp 仅单卡）
 - **DDP 超时**: `dist.init_process_group(timeout=30min)` — 覆盖所有集体操作（all_reduce/broadcast/barrier），防止死 rank 导致整个集群无限挂起
 
 ### EMA
@@ -441,30 +439,30 @@ MultiTaskSimRunner (独立编排器, 持有 dict[str, TaskTextSimRunner])
 
 ```
 configs/
-  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml
+  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml  opfa.yaml
 configs/ddp/
-  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml
+  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml  opfa.yaml
 ```
 
 `dp3_faas.yaml` 通过 Hydra `defaults: [- /dp3, - _self_]` 继承 dp3 全部超参，仅覆盖维度字段。
 
 ### 关键参数速查
 
-| 参数 | dp | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | dp3_faas | sat |
-|------|----|-----|----------|--------|---------------|-----|--------|----------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** | 19/21 |
-| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** | 19 |
-| backbone dims | [256,512,1024] | 同 | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] | **8L×768d** |
-| diff train/infer | 100/10 | 100/10 | -/4 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | -/10 |
-| prediction_type | sample | sample | velocity | sample | sample | sample | **epsilon** | sample | velocity (FM) |
-| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 | 1e-4 |
-| weight_decay | 1e-6 | 1e-6 | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
-| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| warmup | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 | 500 |
-| total_train_steps | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 | 80000 |
-| bfloat16 | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ |
-| compile | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ (mode=default) |
-| val_ratio | 0.10 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| 参数 | dp | dp3 | maniflow | standard_flowmatch | moe_dp | multitask_dit | r3d | dqrise | dp3_faas | sat | opfa |
+|------|----|-----|----------|-------------------|--------|---------------|-----|--------|----------|-----|------|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** | 19/21 | **1031** |
+| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** | 19 | — |
+| backbone dims | [256,512,1024] | 同 | 12L×768d | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] | **8L×768d** | [256,512,1024] |
+| diff train/infer | 100/10 | 100/10 | -/4 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | -/10 | 100/10 |
+| prediction_type | sample | sample | velocity | velocity | sample | sample | sample | **epsilon** | sample | velocity (FM) | sample |
+| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 | 1e-4 | **4e-4** |
+| weight_decay | 1e-6 | 1e-6 | **1e-3** | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
+| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| warmup | 500 | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 | 500 | 500 |
+| total_train_steps | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 |
+| bfloat16 | ✓ | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| compile | ✓ | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ (mode=default) | ✓ |
+| val_ratio | 0.10 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
 
 ### DDP 批次大小（每卡 × 4）
 
@@ -473,9 +471,11 @@ configs/ddp/
 | ddp/dp | 48×4=**192** | 64 |
 | ddp/dqrise | 32×4=128 | 128 |
 | ddp/maniflow | 32×4=128 | 128 |
+| ddp/standard_flowmatch | 32×4=128 | 128 |
 | ddp/multitask_dit | 16×4=64 | 64 |
 | ddp/r3d | 16×4=64 | 48 |
 | ddp/dp3_faas | 32×4=128 | 128 |
+| ddp/opfa | 16×4=64 | 32 |
 
 ### Eval 配置标准
 
@@ -573,8 +573,8 @@ joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
 
 | 阶段 | 脚本 | 内容 |
 |------|------|------|
-| 1 | `tools/train_vq_hand.py` | VQ-VAE 预训练：EncoderMLP→ResidualVQ(2组×4码字=16种手势)→DecoderMLP |
-| 2 | `tools/extract_codebook.py` | 码本提取+PCA排序（使连续VQ索引平滑插值） |
+| 1 | `dexmani_policy/tools/train_vq_hand.py` | VQ-VAE 预训练：EncoderMLP→ResidualVQ(2组×4码字=16种手势)→DecoderMLP |
+| 2 | `dexmani_policy/tools/extract_codebook.py` | 码本提取+PCA排序（使连续VQ索引平滑插值） |
 | 3 | `train.py dqrise` | 联合扩散训练：UNet输入从21D压缩到tcp_dim+1(10D)，epsilon预测 |
 
 ### CodebookManager (`agents/vq_hand/codebook_manager.py`)
@@ -593,6 +593,79 @@ joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
 
 ---
 
+## OPFA (One-Policy-Fits-All)
+
+OPFA 将 GaLR (Geometry-Aware Latent Representation) 机制迁移到 DexMani_Policy，
+实现两阶段范式：手部姿态自编码器 → 潜空间扩散策略。
+
+### 三阶段管道
+
+| 阶段 | 脚本 | 内容 |
+|------|------|------|
+| 1 | ~~`dexmani_policy.agents.opfa.train_galr`~~ | **可跳过**：直接使用官方 OPFA 预训练权重 (Hugging Face) |
+| 2 | `dexmani_policy/agents/opfa/preprocess.py` | 离线潜变量预计算：Zarr 轨迹→ GaLR encoder→obs_latents/action_latents→.pt 文件 |
+| 3 | `train.py opfa` | 潜空间扩散策略：DP3 UNet 预测 arm(7)+hand_latent(1024)=1031-d |
+
+**官方预训练权重**: `mujc2021/one-policy-fits-all` on Hugging Face
+```bash
+huggingface-cli download mujc2021/one-policy-fits-all epoch-129.pth.tar --local-dir data/pretrained/galr/
+```
+或手动下载: https://huggingface.co/mujc2021/one-policy-fits-all
+
+架构与官方 checkpoint **完全兼容** (strict=True, 217/217 keys 匹配)。
+
+### 架构
+
+```
+GaLR Encoder (frozen for policy):
+  joint angles(12-d) → FK → hand PC → KPConvFPN(64→128→256→512→1024)
+  → GeometricTransformer(3×PETransformerLayer) → L2-norm+mean-pool → latent(1024-d)
+
+GaLR Decoder (frozen for inference):
+  latent(1024-d) → Linear(1024,26) → index_select(xhand) → joint angles(12-d)
+
+OPFA Policy (trainable):
+  scene PC(xyz only) + hand_latent(1024-d) → OPFAObsEncoder(128-d per timestep)
+  → UNet1D + DDIM → pred_1031(normalized) → unnormalize → [arm_raw(7) + hand_latent_scaled(1024)]
+  → split → decode → 19-d native action
+```
+
+### 关键设计
+
+- **动作空间**: 1031 = 7 arm(原始弧度) + 1024 hand latent
+- **观测**: scene PC(xyz only, 1024 pts) + hand latent(1024-d)。**不含 arm proprioception**（忠实 OPFA 论文）
+- **Normalizer**: 在 ``[arm_raw(7), action_latent × √1024]`` = 1031-d 上拟合 per-dim ``(scale, offset)``，自动平衡 arm（弧度级，少维）和 hand-latent（多维）的损失权重——匹配官方 OPFA 做法
+- **I/O 边界**: 训练时构建 1031-d target → normalize → UNet 去噪；推理时 UNet → pred_1031 → unnormalize → split arm_raw + hand_latent_scaled → GaLR decode → 19-d 原生动作
+- **GaLR decoder**: 冻结，推理时仅作后处理；线性校正（``load_galr_correction()``）可选，需在轨迹数据上重新训练
+- **FK engine**: 使用 ``pytorch_kinematics.Chain.forward_kinematics()`` 替代手写 Rodrigues，与官方 OPFA 一致
+- **KPConv**: Linear correlation 核 ``h(y_i, x_k)=max(0, 1-||y_i-x_k||/sigma)``，参数对齐 GaLR 训练配置 (``voxel=0.01, radius=0.025, neighbor_limits=[30,15,10,5]``)
+- **PEMultiHeadAttention**: Q=proj_q(x)+proj_p(emb), K=proj_k(x)+proj_p(emb) — pos emb 加到 Q/K 投影上
+- **UNet**: down_dims=[256,512,1024]（与 DP3 同规模，1031-d 动作空间内存密集）
+
+### 兼容性
+
+- **依赖**: numpy-stl (STL mesh 加载，`pip install numpy-stl`)
+- **FaAS 不支持**: OPFA 的手部潜空间(1024-d)与 FAAS 的 32-d 空间不兼容
+- **仅 joint 模式**: `action_key=action`（不支持 EE 模式）
+
+### 关键文件
+
+| 文件 | 职责 |
+|------|------|
+| `agents/opfa/hand_fk.py` | URDF 解析 + pytorch_kinematics FK + 手部 PC/KPConv 数据生成 |
+| `agents/opfa/kpconv.py` | KPConv 层 + KPConvFPN backbone |
+| `agents/opfa/transformer.py` | GeometricTransformer + PEMultiHeadAttention |
+| `agents/opfa/point_ops.py` | grid_subsample, radius_search (纯 PyTorch) |
+| `agents/opfa/galr_autoencoder.py` | GaLRAutoencoder (GeoTransformer 包装) |
+| `agents/core/opfa.py` | OPFAAgent + OPFAObsEncoder |
+| `datasets/opfa_dataset.py` | 加载预计算潜变量的 Dataset |
+| `configs/opfa.yaml` | 单卡训练配置 |
+| `configs/ddp/opfa.yaml` | DDP overlay |
+| `dexmani_policy/agents/opfa/train_galr.py` | GaLR 自编码器训练 |
+| `dexmani_policy/agents/opfa/preprocess.py` | 离线潜变量预计算 |
+
+---
+
 ## 文件组织
 
 ```
@@ -601,10 +674,12 @@ dexmani_policy/
   train_ddp.py              # 多卡 DDP 入口
   eval_best_ckpt.py          # 离线评测入口（RoboTwin 风格，Hydra-free）
   smoke_test.py             # 构建链冒烟测试
-  configs/                  # 9 个 Hydra YAML
-  configs/ddp/              # 6 个 DDP overlay
+  configs/                  # 10 个 Hydra YAML
+  configs/ddp/              # 8 个 DDP overlay
   agents/
-    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 8 agent variants
+    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 10 agent variants
+      opfa.py                 # OPFA: OPFAAgent + OPFAObsEncoder
+    opfa/                   # OPFA: KPConv, GeometricTransformer, GaLR autoencoder, HandFK
     action_decoders/        # Diffusion, FlowMatch, FlowMatchWithConsistency, SATFlowMatch, TimeSampler
       backbone/             # UNet1D (ConditionalUnet1D), DiT, DiTX (DiTXFlowMatch), OneWayTransformer, SATBackbone
     obs_encoder/            # pointcloud/, rgb/, text/, state_mlp.py, plugins/(moe, token_compressor)
@@ -615,7 +690,7 @@ dexmani_policy/
   training/                 # Trainer, build_utils, workspace, ema, logging, lr_scheduler, eval_utils
   env_runner/               # BaseRunner, SimRunner, MultiTaskSimRunner
   common/                   # LinearNormalizer, faas_mapper, checkpoint_io, pytorch_util, config
-  tools/                    # extract_codebook.py, train_vq_hand.py, measure_vq_usage.py
+  tools/                    # train_vq_hand.py, extract_codebook.py, measure_vq_usage.py
 ```
 
 ---
@@ -639,7 +714,7 @@ dexmani_policy/
 
 - **Normalizer 全量拟合**: `get_normalizer()` 使用全部 replay buffer（含验证集），不按 `train_mask` 过滤。生态统一惯例（ManiFlow_Policy/R3D-Policy/SAT/RoboTwin 均如此）。`limits` 模式下验证集不影响 min/max
 - **里程碑 checkpoint**: 按 20%/40%/60%/80%/100% 进度保存，共 5 个；`latest.pt` symlink 指向最新里程碑
-- **FlowMatch `target_t` 训练/推理偏移**: 训练用 `target_t=0`，推理用 `target_t=dt>0`。ManiFlow 通过 EMA teacher consistency 路径缓解
+- **FlowMatchWithConsistency `target_t` 训练/推理偏移**: 训练用 `target_t=0`（flow sub-batch），推理用 `target_t=dt>0`。ManiFlow 通过 EMA teacher consistency 路径缓解。**StandardFlowMatch** 无 `target_t` 机制（DiTDiffusion 单时间步 backbone），无此偏移
 - **`tcp_dim` 命名**: 在 `action`(joint)模式下=7(臂关节角)，在 `action_ee` 模式下=9(TCP位姿)。历史命名遗留，勿据此推断语义
 - **DDP 覆盖不全**: 7 种策略有 DDP 配置。`dp3`(非FAAS)和`moe_dp` 仅单卡
 - **MoE dual-backbone**: 通过 `hasattr(config, 'pc_encoder')` 自动切换 RGB/PC 路径，非显式 `backbone_type` 字段

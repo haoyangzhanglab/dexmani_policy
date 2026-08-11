@@ -301,16 +301,86 @@ class FlowMatchWithConsistency(nn.Module):
         return ode_traj
 
 
+class StandardFlowMatch(nn.Module):
+    """Standard rectified flow matching (PointAct style).
+
+    x_t = (1-t)*x0 + t*x1,  target v = x1 - x0,  MSE loss.
+    Inference: Euler ODE integration.  No EMA teacher, no consistency loss.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        num_inference_steps: int = 10,
+        t_sample_mode: str = "beta",
+        beta_s: float = 0.999,
+        beta_alpha: float = 1.0,
+        beta_beta: float = 1.5,
+    ):
+        super().__init__()
+        self.model = model
+        self.num_inference_steps = num_inference_steps
+
+        self.sampler = TimeSampler(
+            denoise_timesteps=num_inference_steps,
+            beta_s=beta_s,
+            beta_alpha=beta_alpha,
+            beta_beta=beta_beta,
+        )
+        self.t_sample_mode = t_sample_mode
+
+    def compute_loss(self, cond, actions, **kwargs):
+        B = actions.shape[0]
+        device = actions.device
+
+        x0 = torch.randn_like(actions, device=device)
+        x1 = actions
+        t = self.sampler.sample(B, self.t_sample_mode, device=device)
+        t = t.view(-1, 1, 1)
+
+        xt = (1.0 - t) * x0 + t * x1
+
+        target_v = x1 - x0
+
+        pred_v = self.model(
+            x=xt,
+            timestep=t.squeeze(),
+            context=cond,
+        )
+
+        loss = F.mse_loss(pred_v, target_v)
+        loss_dict = {
+            "loss": loss,
+            "loss_action": loss,
+            "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
+        }
+        return loss, loss_dict
+
+    @torch.no_grad()
+    def predict_action(self, cond, action_template, denoise_timesteps=None):
+        B = action_template.shape[0]
+        device = action_template.device
+        dtype = action_template.dtype
+
+        if denoise_timesteps is None:
+            denoise_timesteps = self.num_inference_steps
+
+        x = torch.randn_like(action_template, device=device)
+        dt = 1.0 / denoise_timesteps
+
+        for i in range(denoise_timesteps):
+            ti = torch.full((B,), i * dt, device=device, dtype=dtype)
+            v = self.model(x=x, timestep=ti, context=cond)
+            x = x + v * dt
+
+        return x
+
+
 class FlowMatch(nn.Module):
-    """Pure Flow Matching decoder (no consistency training).
+    """Pure Flow Matching decoder (legacy, used by SATFlowMatch).
 
-    Uses the same backbone as Diffusion (DiTDiffusion); the only change is that
-    the prediction target shifts from noise/sample to the velocity field
-    v = x1 - x0.
-
-    Training: predict the velocity field along straight-line paths
-    x_t = t*x1 + (1-t)*x0, MSE loss.
-    Inference: Euler ODE integration x_{t+dt} = x_t + v_θ(x_t, t) * dt.
+    x_t = (1-t)*x0 + t*x1,  target v = x1 - x0,  MSE loss.
+    Inference: Euler ODE integration.  No consistency training.
     """
 
     def __init__(

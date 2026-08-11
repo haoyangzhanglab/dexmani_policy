@@ -31,7 +31,7 @@ action_dim: ${eval:'${joint_dim} + ${ee_dim} if ${use_aux_ee} else (21 if ${eq:$
 # Single-GPU: batch_size=48 tested on 24 GB (15.7 GB peak).
 # DDP across 4+ GPUs can use larger batches.
 dataloader:
-  batch_size: 48
+  batch_size: 128
   shuffle: true
   num_workers: 8
   pin_memory: true
@@ -58,7 +58,7 @@ dataset:
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
-  val_ratio: 0.05
+  val_ratio: 0.0
   max_train_episodes: 80
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}

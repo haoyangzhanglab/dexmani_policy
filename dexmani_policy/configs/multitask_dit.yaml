@@ -65,7 +65,7 @@ dataset:
       horizon: ${horizon}
       pad_before: ${eval:'${n_obs_steps} - 1'}
       pad_after: ${eval:'${n_action_steps} - 1'}
-      val_ratio: 0.05
+      val_ratio: 0.0
       max_train_episodes: 80
       sensor_modalities: ['joint_state', 'rgb']
       obs_horizon: ${n_obs_steps}
@@ -89,7 +89,7 @@ dataset:
       horizon: ${horizon}
       pad_before: ${eval:'${n_obs_steps} - 1'}
       pad_after: ${eval:'${n_action_steps} - 1'}
-      val_ratio: 0.05
+      val_ratio: 0.0
       max_train_episodes: 80
       sensor_modalities: ['joint_state', 'rgb']
       obs_horizon: ${n_obs_steps}

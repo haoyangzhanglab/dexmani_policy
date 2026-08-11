@@ -1,12 +1,12 @@
 # @package _global_
-# R3D — DDP multi-GPU training overlay
-# Usage: bash scripts/training/train_ddp.sh ddp/r3d
+# Standard FlowMatch — DDP multi-GPU training overlay
+# Usage: bash scripts/training/train_ddp.sh ddp/standard_flowmatch
 
 defaults:
-  - /r3d
+  - /standard_flowmatch
   - _self_
 
-policy_name: ddp/r3d
+policy_name: ddp/standard_flowmatch
 
 training:
   num_gpus: 4
@@ -14,11 +14,11 @@ training:
 
 dataloader:
   batch_size: 32
-  num_workers: 4               # per-GPU cap for DDP (parent r3d has 8)
+  num_workers: 4
 
 val_dataloader:
   batch_size: 32
-  num_workers: 2               # per-GPU cap for DDP
+  num_workers: 4
 
 hydra:
   job:

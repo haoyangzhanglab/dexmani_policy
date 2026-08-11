@@ -15,6 +15,68 @@ set -euo pipefail
 
 SERVER="${DEX_SERVER:-dexserver}"
 
+# Gracefully stop a single tmux session.
+# SIGINT (Ctrl+C, signal 2) → wait → SIGTERM (15) → wait → SIGKILL (9).
+# This lets PyTorch clean up CUDA context / CUDA Graph / NCCL shared memory
+# and avoids orphan GPU memory that requires nvidia-smi --gpu-reset.
+_graceful_stop() {
+    local session="$1"
+    local pane_pid
+
+    pane_pid=$(ssh "$SERVER" "tmux list-panes -t '$session' -F '#{pane_pid}' 2>/dev/null | head -1")
+    if [[ -z "$pane_pid" ]]; then
+        echo "  (session not found, nothing to stop)"
+        return 0
+    fi
+
+    # Find the *leaf* Python process (deepest child, likely train.py/train_ddp.py)
+    local python_pid
+    python_pid=$(ssh "$SERVER" "pstree -p '$pane_pid' 2>/dev/null | grep -oP 'python.*?\\((\d+)\\)' | tail -1 | grep -oP '\d+' || true")
+    if [[ -z "$python_pid" ]]; then
+        echo "  (no python process in session, using tmux kill-session)"
+        ssh "$SERVER" "tmux kill-session -t '$session' 2>/dev/null; true"
+        return 0
+    fi
+
+    echo "  Found python PID $python_pid, sending SIGINT (graceful stop)..."
+
+    # Step 1: SIGINT — equivalent to Ctrl+C, triggers PyTorch atexit handlers
+    ssh "$SERVER" "kill -INT '$python_pid' 2>/dev/null; true"
+
+    # Step 2: Wait up to 30s for graceful shutdown
+    local waited=0
+    while [[ $waited -lt 30 ]]; do
+        if ! ssh "$SERVER" "kill -0 '$python_pid' 2>/dev/null"; then
+            echo "  Process exited gracefully after ${waited}s."
+            ssh "$SERVER" "tmux kill-session -t '$session' 2>/dev/null; true"
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    # Step 3: SIGTERM — still gives Python a chance to run finally blocks
+    echo "  SIGINT timeout, escalating to SIGTERM..."
+    ssh "$SERVER" "kill -TERM '$python_pid' 2>/dev/null; true"
+
+    waited=0
+    while [[ $waited -lt 10 ]]; do
+        if ! ssh "$SERVER" "kill -0 '$python_pid' 2>/dev/null"; then
+            echo "  Process exited after SIGTERM (${waited}s)."
+            ssh "$SERVER" "tmux kill-session -t '$session' 2>/dev/null; true"
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    # Step 4: SIGKILL — last resort, may leave orphan GPU memory
+    echo "  WARNING: Forcing SIGKILL (may leave orphan GPU memory)..."
+    ssh "$SERVER" "kill -KILL '$python_pid' 2>/dev/null; true"
+    sleep 1
+    ssh "$SERVER" "tmux kill-session -t '$session' 2>/dev/null; true"
+}
+
 case "${1:-}" in
     --list|-l)
         echo "=== Active tmux sessions on $SERVER ==="
@@ -23,7 +85,15 @@ case "${1:-}" in
         ;;
     --all|-a)
         echo "Stopping ALL training sessions on $SERVER..."
-        ssh "$SERVER" "tmux list-sessions 2>/dev/null | cut -d: -f1 | xargs -r -I{} tmux kill-session -t {} 2>/dev/null; true"
+        sessions=$(ssh "$SERVER" "tmux list-sessions 2>/dev/null | cut -d: -f1" || true)
+        if [[ -z "$sessions" ]]; then
+            echo "  (no active sessions)"
+        else
+            for s in $sessions; do
+                echo "  [$s]"
+                _graceful_stop "$s"
+            done
+        fi
         echo "All sessions stopped."
         ;;
     "")
@@ -36,14 +106,7 @@ case "${1:-}" in
     *)
         SESSION="$1"
         echo "Stopping session: $SESSION"
-        if ssh "$SERVER" "tmux kill-session -t '$SESSION' 2>/dev/null"; then
-            echo "Stopped."
-        else
-            echo "Session '$SESSION' not found."
-            echo ""
-            echo "Active sessions:"
-            ssh "$SERVER" "tmux list-sessions 2>/dev/null" || echo "  (none)"
-            exit 1
-        fi
+        _graceful_stop "$SESSION"
+        echo "Stopped."
         ;;
 esac

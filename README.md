@@ -23,12 +23,14 @@ cd ~/Desktop/dexmani_sim && pip install -e .                  # 仿真环境（�
 ### 训练
 
 ```bash
-# 单卡 —— 9 种策略可选
+# 单卡 —— 11 种策略可选
 bash scripts/training/train.sh dp3 pour                      # DP3 训练 pour 任务
 bash scripts/training/train.sh maniflow pour                  # ManiFlow
 bash scripts/training/train.sh sat pour                       # SAT
+bash scripts/training/train.sh standard_flowmatch pour        # StandardFlowMatch
+bash scripts/training/train.sh opfa pour                      # OPFA
 
-# 多卡 DDP —— 6 种策略可选
+# 多卡 DDP —— 9 种策略可选
 bash scripts/training/train_ddp.sh ddp/maniflow pour          # ManiFlow 4 卡
 
 # Hydra 参数覆盖
@@ -52,26 +54,28 @@ bash scripts/eval/record_demo.sh dp3 pour <exp_dir>           # 录制 demo 视�
 
 ```bash
 python dexmani_policy/smoke_test.py dp3                       # 单策略
-python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
+python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch sat opfa  # 批量
 ```
 
 ---
 
 ## 策略矩阵
 
-9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
+9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。另有 2 种实验性策略（OPFA、StandardFlowMatch）。
 
 | Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
 |:------|:---------|:-------|:---------|:-------|:-----|
 | **DP** | RGB + Joint | DINO/CLIP/SigLIP + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp.yaml` |
 | **DP3** | PC(1024,3) + Joint | PointNeXT + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
 | **ManiFlow** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
+| **StandardFlowMatch** | PC(1024,6) + Joint | PointNetDense(per-pt) + StateMLP | DiTDiffusion (cross-attn) | FlowMatch (纯) | `standard_flowmatch.yaml` |
 | **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDPM | `moe_dp.yaml` |
 | **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
 | **R3D** | PC(1024,3) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
 | **DQ-RISE** | PC(1024,3) + Joint | iDP3 + StateMLP + Codebook | UNet1D (缩减) | Diffusion ε-pred | `dqrise.yaml` |
 | **DP3 FAAS** | PC(1024,3) + Joint | 同 DP3 | 同 DP3 | 同 DP3 | `dp3_faas.yaml` |
 | **SAT** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | SATBackbone (EJC+MMA) | FlowMatch Euler | `sat.yaml` |
+| **OPFA** | PC(1024,3) + HandLatent | PointNet + GaLR Encoder | UNet1D (512,1024,2048) | Diffusion DDIM | `opfa.yaml` |
 
 ### 关键差异速览
 
@@ -79,6 +83,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 |:---------|:-----|
 | **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
 | **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
+| **ManiFlow vs StandardFlowMatch** | DiTXFlowMatch(双时间步+consistency) vs DiTDiffusion(单时间步+纯flow) |
 | **DP3 vs MoE** | MoE 在 encoder 中引入 16-expert 稀疏路由 (top-2)，增容量不增推理 FLOPs |
 | **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
 | **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
@@ -184,7 +189,8 @@ experiments/
 - 直接路径 → 指定 `.pt` 文件
 
 **Q: 纯 FlowMatch 模式（无 consistency）能用吗？**
-可以，设 `training.use_ema_teacher_for_consistency: false`。但推理时 `target_t=dt>0` 落在训练分布外，`train.py` 会发出 warning。
+可以。使用 `StandardFlowMatch` 策略（`standard_flowmatch.yaml`），基于 DiTDiffusion backbone（单时间步），无需 EMA 教师或 consistency 训练。
+旧的 ManiFlow 配置设 `use_ema_teacher_for_consistency: false` 也可禁用 consistency，但推理时 `target_t=dt>0` 落在训练分布外（DiTXFlowMatch 需要 `target_t` 参数），有分布偏移风险。
 
 **Q: 如何修改观测/动作步数？**
 修改 `horizon`、`n_obs_steps`、`n_action_steps`，须满足 `n_obs_steps - 1 + n_action_steps ≤ horizon`。`pad_before`/`pad_after` 需同步调整。

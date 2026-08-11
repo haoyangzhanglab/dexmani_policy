@@ -74,6 +74,7 @@ def build_pc_global_encoder(
         return PointNet(
             input_channels=pc_dim,
             output_channels=cfg["output_channels"],
+            norm_before_activation=cfg.get("norm_before_activation", False),
         )
 
     if encoder_type == "idp3":

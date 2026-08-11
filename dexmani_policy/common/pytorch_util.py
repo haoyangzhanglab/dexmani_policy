@@ -128,12 +128,15 @@ def create_mlp(
     out_channels: Optional[int] = None,
     activation: type = nn.ReLU,
     use_norm: bool = False,
+    norm_before_activation: bool = False,
 ):
     layers = []
     prev = in_channels
     for h in hidden_channels:
+        if use_norm and norm_before_activation:
+            layers.append(nn.LayerNorm(prev))
         layers.extend([nn.Linear(prev, h), activation(inplace=True)])
-        if use_norm:
+        if use_norm and not norm_before_activation:
             layers.append(nn.LayerNorm(h))
         prev = h
     if out_channels is not None:

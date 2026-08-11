@@ -362,12 +362,11 @@ bash scripts/eval/record_demo.sh dp3 pour experiments/dp3/pour/2026-08-03_12-34
 bash scripts/remote/sync_code.sh
 
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
-bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/dp3_faas pour
+bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/sat pour
 bash scripts/remote/train_remote.sh --gpus 0 sat pour          # 单卡
 
 # 拉全部 pour 实验结果
 bash scripts/remote/sync_down.sh maniflow/pour
-bash scripts/remote/sync_down.sh dp3_faas/pour
 bash scripts/remote/sync_down.sh sat/pour
 ```
 
@@ -628,25 +627,30 @@ train.py <策略类型> <任务名> [Hydra覆盖参数...]
 | DP | `dp` | RGB+UNet+Diffusion |
 | DP3 | `dp3` | 点云+UNet+Diffusion |
 | DP3 + FAAS | `dp3_faas` | DP3 + 功能对齐动作空间 |
-| ManiFlow | `maniflow` | 点云+DiTX+FlowMatch |
+| ManiFlow | `maniflow` | 点云+DiTX+FlowMatch+Consistency |
+| StandardFlowMatch | `standard_flowmatch` | 点云+DiTDiffusion+纯FlowMatch（无Consistency） |
 | MoE DP | `moe_dp` | RGB+MoE 多专家+Diffusion |
 | MultiTask | `multitask_dit` | 多任务 DiT |
 | R3D | `r3d` | 点云+OneWayTransformer |
 | DQ-RISE | `dqrise` | 点云+VQ 码本手势 |
-| SAT | `sat` | 结构动作 Transformer |
+| SAT | `sat` | 结构动作 Transformer（EJC+per-sample shuffle） |
+| OPFA | `opfa` | GaLR 潜空间策略（单任务无Co-Train下0%） |
 
 **DDP 多卡版本**（用 `ddp/` 前缀）：
 
 | DDP 策略 | 命令写法 | GPU 数 |
 |----------|---------|--------|
 | DDP ManiFlow | `ddp/maniflow` | 4 |
+| DDP StandardFlowMatch | `ddp/standard_flowmatch` | 4 |
 | DDP DP3 FAAS | `ddp/dp3_faas` | 4 |
 | DDP MultiTask | `ddp/multitask_dit` | 4 |
 | DDP R3D | `ddp/r3d` | 4 |
 | DDP DP | `ddp/dp` | 4 |
 | DDP DQ-RISE | `ddp/dqrise` | 4 |
+| DDP SAT | `ddp/sat` | 4 |
+| DDP OPFA | `ddp/opfa` | 4 |
 
-> `dp3`（非 FAAS）、`moe_dp`、`sat` 只支持单卡，无 DDP 版本。
+> `dp3`（非 FAAS）、`moe_dp` 只支持单卡，无 DDP 版本。
 
 #### 参数 2：任务名（task）
 
@@ -711,6 +715,8 @@ bash scripts/remote/train_remote.sh --gpus 0 maniflow pour \
 # DDP 4 卡训练（默认参数）
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/dp pour
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/sat pour
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/standard_flowmatch pour
 
 # DDP 4 卡 + 指定 seed
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=99'
