@@ -2,7 +2,7 @@
 
 灵巧手操作模仿学习框架。Hydra 配置驱动，Zarr replay buffer，Diffusion/FlowMatch 动作解码，`dexmani_sim` 仿真评测。
 
-> **速查**: [训练](#训练命令) · [评测](#评测命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [OPFA](#opfa-one-policy-fits-all) · [数据管线](#数据管线) · [配置速查](#配置速查) · [FAAS](#faas-集成) · [DQ-RISE](#dq-rise) · [代码风格](#代码风格) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
+> **速查**: [训练](#训练命令) · [评测](#评测命令) · [Agent对比](#agent-变体) · [SAT](#sat-structural-action-transformer--论文对齐状态) · [数据管线](#数据管线) · [配置速查](#配置速查) · [FAAS](#faas-集成) · [DQ-RISE](#dq-rise) · [代码风格](#代码风格) · [硬编码与约定](#已知硬编码与设计约定) · [文件地图](#文件组织)
 >
 > **详细文档**: [README](README.md) — 项目概览 · [`docs/项目架构.md`](docs/项目架构.md) — 架构全景 · [`docs/评测机制.md`](docs/评测机制.md) — 评测全链路 · [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) — 远程部署
 
@@ -28,17 +28,17 @@ export DATA_DIR=/path/to/data          # 需设，否则 dataset 路径报错
 # 命令结构: train.py <策略类型> <任务名> [Hydra覆盖参数...]
 
 # === 单卡 ===
-bash scripts/training/train.sh dp3 pour                 # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat / opfa
+bash scripts/training/train.sh dp3 pour                 # dp / dp3 / maniflow / moe_dp / r3d / dqrise / multitask_dit / dp3_faas / sat / standard_flowmatch
 bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
 
 # === 多卡 DDP ===
-bash scripts/training/train_ddp.sh ddp/maniflow pour    # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas / ddp/sat / ddp/opfa
+bash scripts/training/train_ddp.sh ddp/maniflow pour    # ddp/dp / ddp/maniflow / ddp/multitask_dit / ddp/r3d / ddp/dqrise / ddp/dp3_faas / ddp/sat / ddp/standard_flowmatch
 ```
 
 > 命令参数详解（策略/任务/seed/Hydra 覆盖）→ [SSH 部署文档附录 A.3](docs/SSH服务器训练部署.md#a3-训练命令参数详解)
-> 实际存在的单卡配置 (11): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, opfa, r3d, sat, standard_flowmatch`
-> 实际存在的 DDP 配置 (9): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/opfa, ddp/r3d, ddp/sat, ddp/standard_flowmatch`
+> 实际存在的单卡配置 (10): `dp, dp3, dp3_faas, dqrise, maniflow, moe_dp, multitask_dit, r3d, sat, standard_flowmatch`
+> 实际存在的 DDP 配置 (8): `ddp/dp, ddp/dp3_faas, ddp/dqrise, ddp/maniflow, ddp/multitask_dit, ddp/r3d, ddp/sat, ddp/standard_flowmatch`
 > 所有策略默认 `total_train_steps: 100000`
 
 ## 评测命令
@@ -90,7 +90,7 @@ bash scripts/eval/record_demo.sh dp3 pour <exp_dir> --no-ema --output-dir ~/Vide
 
 ```bash
 python dexmani_policy/smoke_test.py dp3
-python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch moe_dp r3d dqrise sat opfa
+python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch moe_dp r3d dqrise sat
 ```
 
 ## VQ-VAE 预训练（DQ-RISE Stage 1）
@@ -144,8 +144,6 @@ Hydra config (configs/*.yaml)
 | `record_demo.py` | Demo 录制 | 高分 viewer 捕捉 (1920×1080)，`render_mode="human"`，可自定义分辨率 |
 | `smoke_test.py` | 构建验证 | Hydra `compose` API，6 阶段 + FAAS roundtrip + MoE 子检查 |
 | `dexmani_policy/tools/train_vq_hand.py` | VQ-VAE 预训练 | DQ-RISE Stage 1 |
-| `dexmani_policy/agents/opfa/train_galr.py` | GaLR 自编码器训练 | OPFA Stage 1 |
-| `dexmani_policy/agents/opfa/preprocess.py` | 潜变量预计算 | OPFA Stage 2 |
 
 ---
 
@@ -155,7 +153,7 @@ Hydra config (configs/*.yaml)
 
 ```
 BaseAgent
-  ├── UNetDiffusionAgent        ← DP, DP3, MoE, OPFA (共享 UNet+Diffusion 构建)
+  ├── UNetDiffusionAgent        ← DP, DP3, MoE (共享 UNet+Diffusion 构建)
   ├── DiTXFlowMatchAgent        ← ManiFlow (DiTX+FlowMatchWithConsistency)
   ├── StandardFlowMatchAgent    ← Standard FlowMatch (DiTDiffusion+StandardFlowMatch, 无 consistency)
   ├── SATAgent                  ← 直接继承 BaseAgent (SATBackbone+SATFlowMatch)
@@ -178,7 +176,6 @@ BaseAgent
 | **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon, 20步) | `dqrise.yaml` | VQ码本16种手势, 3x学习率 |
 | **DP3(FAAS)** | PC+state | 同DP3 | 同DP3 | 同DP3 | `dp3_faas.yaml` | 32D FAAS空间, 零agent代码变更 |
 | **SAT** | PC+state | PointNeXT(patch)+StateMLP | SATBackbone(MultiModalAttn+EJC) | FlowMatch(Gaussian init, Euler) | `sat.yaml` | 结构中心(B,Da,T), EJC 3-field sum, per-sample shuffle, 论文对齐 |
-| **OPFA** | PC+hand_latent | PointNeXT(64d)+MLP(1024→64) | UNet1D(FiLM) | Diffusion(DDIM 10步, 1031-d) | `opfa.yaml` | GaLR潜空间, 无arm proprioception, 冻结GaLR decoder, 3阶段管道 |
 
 ### 各 Agent 关键差异
 
@@ -371,7 +368,7 @@ while global_step < config.total_train_steps:
 - `find_unused_parameters=False`, `static_graph=True`
 - Normalizer 从 rank 0 broadcast
 - `OmegaConf.resolve(cfg)` 在 `mp.spawn` 前（子进程无 Hydra 运行时）
-- 覆盖 8 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/opfa/r3d/sat（dp3/moe_dp 仅单卡）
+- 覆盖 8 种策略: dp/dp3_faas/dqrise/maniflow/multitask_dit/r3d/sat/standard_flowmatch（dp3/moe_dp 仅单卡）
 - **DDP 超时**: `dist.init_process_group(timeout=30min)` — 覆盖所有集体操作（all_reduce/broadcast/barrier），防止死 rank 导致整个集群无限挂起
 
 ### EMA
@@ -439,30 +436,30 @@ MultiTaskSimRunner (独立编排器, 持有 dict[str, TaskTextSimRunner])
 
 ```
 configs/
-  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml  opfa.yaml
+  dp.yaml  dp3.yaml  maniflow.yaml  moe_dp.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml  standard_flowmatch.yaml
 configs/ddp/
-  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml  opfa.yaml
+  dp.yaml  maniflow.yaml  multitask_dit.yaml  r3d.yaml  dqrise.yaml  dp3_faas.yaml  sat.yaml  standard_flowmatch.yaml
 ```
 
 `dp3_faas.yaml` 通过 Hydra `defaults: [- /dp3, - _self_]` 继承 dp3 全部超参，仅覆盖维度字段。
 
 ### 关键参数速查
 
-| 参数 | dp | dp3 | maniflow | standard_flowmatch | moe_dp | multitask_dit | r3d | dqrise | dp3_faas | sat | opfa |
-|------|----|-----|----------|-------------------|--------|---------------|-----|--------|----------|-----|------|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** | 19/21 | **1031** |
-| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** | 19 | — |
-| backbone dims | [256,512,1024] | 同 | 12L×768d | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] | **8L×768d** | [256,512,1024] |
-| diff train/infer | 100/10 | 100/10 | -/4 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | -/10 | 100/10 |
-| prediction_type | sample | sample | velocity | velocity | sample | sample | sample | **epsilon** | sample | velocity (FM) | sample |
-| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 | 1e-4 | **4e-4** |
-| weight_decay | 1e-6 | 1e-6 | **1e-3** | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
-| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| warmup | 500 | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 | 500 | 500 |
-| total_train_steps | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 |
-| bfloat16 | ✓ | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| compile | ✓ | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ (mode=default) | ✓ |
-| val_ratio | 0.10 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| 参数 | dp | dp3 | maniflow | standard_flowmatch | moe_dp | multitask_dit | r3d | dqrise | dp3_faas | sat |
+|------|----|-----|----------|-------------------|--------|---------------|-----|--------|----------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | **39/41** | 19/21 |
+| state_dim | 19 | 19 | 19 | 19 | 19 | 19 | 19 | 19 | **39** | 19 |
+| backbone dims | [256,512,1024] | 同 | 12L×768d | 12L×768d | [256,512,1024] | 8L×512d | 4L×256d | [256,512] | [256,512,1024] | **8L×768d** |
+| diff train/infer | 100/10 | 100/10 | -/4 | -/10 | 100/**100** | 100/10 | 100/10 | 100/**20** | 100/10 | -/10 |
+| prediction_type | sample | sample | velocity | velocity | sample | sample | sample | **epsilon** | sample | velocity (FM) |
+| lr | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | 1e-4 | **3e-4** | 1e-4 | 1e-4 |
+| weight_decay | 1e-6 | 1e-6 | **1e-3** | **1e-3** | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 | 1e-6 |
+| betas | [.95,.999] | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| warmup | 500 | 500 | 500 | 500 | 500 | 500 | 500 | **2000** | 500 | 500 |
+| total_train_steps | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 | 100000 |
+| bfloat16 | ✓ | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ |
+| compile | ✓ | ✓ | ✓ | ✓ | **✗** | ✓ | ✓ | ✓ | ✓ | ✓ (mode=default) |
+| val_ratio | 0.10 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
 
 ### DDP 批次大小（每卡 × 4）
 
@@ -475,7 +472,6 @@ configs/ddp/
 | ddp/multitask_dit | 16×4=64 | 64 |
 | ddp/r3d | 16×4=64 | 48 |
 | ddp/dp3_faas | 32×4=128 | 128 |
-| ddp/opfa | 16×4=64 | 32 |
 
 ### Eval 配置标准
 
@@ -593,79 +589,6 @@ joint_state:      19 =  7+12     39 =  7+32  (arm 始终 7D!)
 
 ---
 
-## OPFA (One-Policy-Fits-All)
-
-OPFA 将 GaLR (Geometry-Aware Latent Representation) 机制迁移到 DexMani_Policy，
-实现两阶段范式：手部姿态自编码器 → 潜空间扩散策略。
-
-### 三阶段管道
-
-| 阶段 | 脚本 | 内容 |
-|------|------|------|
-| 1 | ~~`dexmani_policy.agents.opfa.train_galr`~~ | **可跳过**：直接使用官方 OPFA 预训练权重 (Hugging Face) |
-| 2 | `dexmani_policy/agents/opfa/preprocess.py` | 离线潜变量预计算：Zarr 轨迹→ GaLR encoder→obs_latents/action_latents→.pt 文件 |
-| 3 | `train.py opfa` | 潜空间扩散策略：DP3 UNet 预测 arm(7)+hand_latent(1024)=1031-d |
-
-**官方预训练权重**: `mujc2021/one-policy-fits-all` on Hugging Face
-```bash
-huggingface-cli download mujc2021/one-policy-fits-all epoch-129.pth.tar --local-dir data/pretrained/galr/
-```
-或手动下载: https://huggingface.co/mujc2021/one-policy-fits-all
-
-架构与官方 checkpoint **完全兼容** (strict=True, 217/217 keys 匹配)。
-
-### 架构
-
-```
-GaLR Encoder (frozen for policy):
-  joint angles(12-d) → FK → hand PC → KPConvFPN(64→128→256→512→1024)
-  → GeometricTransformer(3×PETransformerLayer) → L2-norm+mean-pool → latent(1024-d)
-
-GaLR Decoder (frozen for inference):
-  latent(1024-d) → Linear(1024,26) → index_select(xhand) → joint angles(12-d)
-
-OPFA Policy (trainable):
-  scene PC(xyz only) + hand_latent(1024-d) → OPFAObsEncoder(128-d per timestep)
-  → UNet1D + DDIM → pred_1031(normalized) → unnormalize → [arm_raw(7) + hand_latent_scaled(1024)]
-  → split → decode → 19-d native action
-```
-
-### 关键设计
-
-- **动作空间**: 1031 = 7 arm(原始弧度) + 1024 hand latent
-- **观测**: scene PC(xyz only, 1024 pts) + hand latent(1024-d)。**不含 arm proprioception**（忠实 OPFA 论文）
-- **Normalizer**: 在 ``[arm_raw(7), action_latent × √1024]`` = 1031-d 上拟合 per-dim ``(scale, offset)``，自动平衡 arm（弧度级，少维）和 hand-latent（多维）的损失权重——匹配官方 OPFA 做法
-- **I/O 边界**: 训练时构建 1031-d target → normalize → UNet 去噪；推理时 UNet → pred_1031 → unnormalize → split arm_raw + hand_latent_scaled → GaLR decode → 19-d 原生动作
-- **GaLR decoder**: 冻结，推理时仅作后处理；线性校正（``load_galr_correction()``）可选，需在轨迹数据上重新训练
-- **FK engine**: 使用 ``pytorch_kinematics.Chain.forward_kinematics()`` 替代手写 Rodrigues，与官方 OPFA 一致
-- **KPConv**: Linear correlation 核 ``h(y_i, x_k)=max(0, 1-||y_i-x_k||/sigma)``，参数对齐 GaLR 训练配置 (``voxel=0.01, radius=0.025, neighbor_limits=[30,15,10,5]``)
-- **PEMultiHeadAttention**: Q=proj_q(x)+proj_p(emb), K=proj_k(x)+proj_p(emb) — pos emb 加到 Q/K 投影上
-- **UNet**: down_dims=[256,512,1024]（与 DP3 同规模，1031-d 动作空间内存密集）
-
-### 兼容性
-
-- **依赖**: numpy-stl (STL mesh 加载，`pip install numpy-stl`)
-- **FaAS 不支持**: OPFA 的手部潜空间(1024-d)与 FAAS 的 32-d 空间不兼容
-- **仅 joint 模式**: `action_key=action`（不支持 EE 模式）
-
-### 关键文件
-
-| 文件 | 职责 |
-|------|------|
-| `agents/opfa/hand_fk.py` | URDF 解析 + pytorch_kinematics FK + 手部 PC/KPConv 数据生成 |
-| `agents/opfa/kpconv.py` | KPConv 层 + KPConvFPN backbone |
-| `agents/opfa/transformer.py` | GeometricTransformer + PEMultiHeadAttention |
-| `agents/opfa/point_ops.py` | grid_subsample, radius_search (纯 PyTorch) |
-| `agents/opfa/galr_autoencoder.py` | GaLRAutoencoder (GeoTransformer 包装) |
-| `agents/core/opfa.py` | OPFAAgent + OPFAObsEncoder |
-| `datasets/opfa_dataset.py` | 加载预计算潜变量的 Dataset |
-| `configs/opfa.yaml` | 单卡训练配置 |
-| `configs/ddp/opfa.yaml` | DDP overlay |
-| `dexmani_policy/agents/opfa/train_galr.py` | GaLR 自编码器训练 |
-| `dexmani_policy/agents/opfa/preprocess.py` | 离线潜变量预计算 |
-
----
-
 ## 文件组织
 
 ```
@@ -677,9 +600,7 @@ dexmani_policy/
   configs/                  # 10 个 Hydra YAML
   configs/ddp/              # 8 个 DDP overlay
   agents/
-    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 10 agent variants
-      opfa.py                 # OPFA: OPFAAgent + OPFAObsEncoder
-    opfa/                   # OPFA: KPConv, GeometricTransformer, GaLR autoencoder, HandFK
+    core/                   # BaseAgent, UNetDiffusionAgent, DiTXFlowMatchAgent, 9 agent variants
     action_decoders/        # Diffusion, FlowMatch, FlowMatchWithConsistency, SATFlowMatch, TimeSampler
       backbone/             # UNet1D (ConditionalUnet1D), DiT, DiTX (DiTXFlowMatch), OneWayTransformer, SATBackbone
     obs_encoder/            # pointcloud/, rgb/, text/, state_mlp.py, plugins/(moe, token_compressor)

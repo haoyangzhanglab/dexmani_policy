@@ -23,14 +23,13 @@ cd ~/Desktop/dexmani_sim && pip install -e .                  # 仿真环境（�
 ### 训练
 
 ```bash
-# 单卡 —— 11 种策略可选
+# 单卡 —— 10 种策略可选
 bash scripts/training/train.sh dp3 pour                      # DP3 训练 pour 任务
 bash scripts/training/train.sh maniflow pour                  # ManiFlow
 bash scripts/training/train.sh sat pour                       # SAT
 bash scripts/training/train.sh standard_flowmatch pour        # StandardFlowMatch
-bash scripts/training/train.sh opfa pour                      # OPFA
 
-# 多卡 DDP —— 9 种策略可选
+# 多卡 DDP —— 8 种策略可选
 bash scripts/training/train_ddp.sh ddp/maniflow pour          # ManiFlow 4 卡
 
 # Hydra 参数覆盖
@@ -54,14 +53,14 @@ bash scripts/eval/record_demo.sh dp3 pour <exp_dir>           # 录制 demo 视�
 
 ```bash
 python dexmani_policy/smoke_test.py dp3                       # 单策略
-python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch sat opfa  # 批量
+python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch sat  # 批量
 ```
 
 ---
 
 ## 策略矩阵
 
-9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。另有 2 种实验性策略（OPFA、StandardFlowMatch）。
+9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。另有 1 种实验性策略（StandardFlowMatch）。
 
 | Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
 |:------|:---------|:-------|:---------|:-------|:-----|
@@ -75,7 +74,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch sat opfa  # 
 | **DQ-RISE** | PC(1024,3) + Joint | iDP3 + StateMLP + Codebook | UNet1D (缩减) | Diffusion ε-pred | `dqrise.yaml` |
 | **DP3 FAAS** | PC(1024,3) + Joint | 同 DP3 | 同 DP3 | 同 DP3 | `dp3_faas.yaml` |
 | **SAT** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | SATBackbone (EJC+MMA) | FlowMatch Euler | `sat.yaml` |
-| **OPFA** | PC(1024,3) + HandLatent | PointNet + GaLR Encoder | UNet1D (512,1024,2048) | Diffusion DDIM | `opfa.yaml` |
 
 ### 关键差异速览
 

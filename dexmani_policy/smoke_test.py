@@ -83,39 +83,6 @@ def _prepare_dqrise_codebook(cfg) -> str | None:
     return tmp_path
 
 
-def _prepare_opfa_deps(cfg) -> tuple[str | None, str | None]:
-    """Create dummy GaLR checkpoint + latent file for OPFA smoke test.
-
-    OPFAAgent needs a frozen GaLR decoder for inference, and OPFADataset
-    loads pre-computed hand latents.  For smoke testing we synthesise both
-    from random data — just enough to validate the build chain.
-    """
-    if cfg.policy_name != "opfa":
-        return None, None
-
-    import numpy as np
-
-    from dexmani_policy.agents.opfa.galr_autoencoder import GaLRAutoencoder
-
-    # Dummy GaLR checkpoint
-    galr = GaLRAutoencoder()
-    galr_path = os.path.join(tempfile.gettempdir(), "smoke_test_galr.pt")
-    torch.save({"model": galr.state_dict()}, galr_path)
-    cfg.agent.galr_ckpt_path = galr_path
-
-    # Dummy latent file: per-episode (T, 1024) tensors.
-    # Generate enough episodes to cover any possible index in the replay buffer
-    # (max_train_episodes selects a random subset, so some high-index episodes
-    # may be selected).
-    n_episodes = 200  # generous upper bound
-    obs_latents = [torch.randn(300, 1024) for _ in range(n_episodes)]
-    action_latents = [torch.randn(300, 1024) for _ in range(n_episodes)]
-    latent_path = os.path.join(tempfile.gettempdir(), "smoke_test_opfa_latents.pt")
-    torch.save({"obs_latents": obs_latents, "action_latents": action_latents}, latent_path)
-    cfg.dataset.latent_path = latent_path
-
-    return galr_path, latent_path
-
 
 def smoke_test(config_name: str):
     print(f"\n{'=' * 60}")
@@ -130,11 +97,6 @@ def smoke_test(config_name: str):
         cfg.agent.codebook_path = codebook_tmp
         print(f"      [dqrise] dummy codebook → {codebook_tmp}")
 
-    # ── OPFA: inject temporary GaLR checkpoint + latent file ──────────
-    galr_tmp, latent_tmp = _prepare_opfa_deps(cfg)
-    if galr_tmp is not None:
-        print(f"      [opfa] dummy GaLR checkpoint → {galr_tmp}")
-        print(f"      [opfa] dummy latent file → {latent_tmp}")
 
     set_seed(cfg.training.seed)
 

@@ -4,6 +4,6 @@ from .dqrise import DQRISEAgent
 from .maniflow import ManiFlowAgent
 from .moe import MoEAgent
 from .multi_task import MultiTaskAgent
-from .opfa import OPFAAgent
+
 from .r3d import R3DAgent
 from .sat import SATAgent

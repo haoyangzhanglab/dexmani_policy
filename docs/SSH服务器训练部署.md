@@ -634,7 +634,6 @@ train.py <策略类型> <任务名> [Hydra覆盖参数...]
 | R3D | `r3d` | 点云+OneWayTransformer |
 | DQ-RISE | `dqrise` | 点云+VQ 码本手势 |
 | SAT | `sat` | 结构动作 Transformer（EJC+per-sample shuffle） |
-| OPFA | `opfa` | GaLR 潜空间策略（单任务无Co-Train下0%） |
 
 **DDP 多卡版本**（用 `ddp/` 前缀）：
 
@@ -648,7 +647,6 @@ train.py <策略类型> <任务名> [Hydra覆盖参数...]
 | DDP DP | `ddp/dp` | 4 |
 | DDP DQ-RISE | `ddp/dqrise` | 4 |
 | DDP SAT | `ddp/sat` | 4 |
-| DDP OPFA | `ddp/opfa` | 4 |
 
 > `dp3`（非 FAAS）、`moe_dp` 只支持单卡，无 DDP 版本。
 

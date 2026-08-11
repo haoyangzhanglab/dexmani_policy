@@ -39,7 +39,7 @@ class ChunkOverlapBlender:
         self.wsum: float = self.w0 + self.w1
         # Action head starts at n_obs_steps-1 (0-indexed) in the horizon.
         # For n_obs_steps=2 → start=1 (standard DP3/ManiFlow/etc.).
-        # For n_obs_steps=4 → start=3 (OPFA).
+        # For n_obs_steps=4 → start=3.
         self._start = n_obs_steps - 1
         self.reset()
 
