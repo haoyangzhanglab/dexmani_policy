@@ -18,6 +18,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate policy
+
 # ── Task name (first positional arg, before any --flags) ─────────────────────
 if [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
     TASK_NAME="$1"

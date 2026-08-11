@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import signal
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -106,6 +108,9 @@ class Trainer:
         self.current_epoch = -1
         self.global_step = 0
         self.num_training_steps = num_training_steps
+
+        self._interrupted = False
+        self._step_pbar = None
 
     @property
     def raw_model(self):
@@ -384,16 +389,14 @@ class Trainer:
             ratio for ratio in MILESTONE_RATIOS if self.global_step >= int(self.total_train_steps * ratio)
         }
 
-    def _save_milestone_checkpoint(self, epoch: int, global_step: int, ratio: float):
-        """Save a milestone checkpoint and point ``latest.pt`` at it.
-
-        No score, no TopK tracking — we only care about progress milestones.
-        """
-        checkpoint_model = self.raw_model
+    def _save_checkpoint(self, epoch: int, global_step: int, tag_suffix: str):
+        """Save a checkpoint with the given tag suffix and point ``latest.pt`` at it."""
+        if self.workspace is None or not self.is_main_process:
+            return
         checkpoint = TrainCheckpoint(
             epoch=epoch,
             global_step=global_step,
-            model_state=fix_state_dict(checkpoint_model.state_dict(), is_current_ddp=False),
+            model_state=fix_state_dict(self.raw_model.state_dict(), is_current_ddp=False),
             ema_model_state=fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
             if self.use_ema
             else None,
@@ -402,10 +405,32 @@ class Trainer:
             monitor={},
             train_params=build_train_params(self.raw_model, self.num_training_steps),
         )
-        pct = int(ratio * 100)
-        tag = f"epoch={epoch:04d}-step={global_step:08d}-milestone={pct:02d}pct"
+        tag = f"epoch={epoch:04d}-step={global_step:08d}-{tag_suffix}"
         checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
         self.workspace.save_latest(checkpoint_path)
+
+    def _save_milestone_checkpoint(self, epoch: int, global_step: int, ratio: float):
+        """Save a milestone checkpoint and point ``latest.pt`` at it.
+
+        No score, no TopK tracking — we only care about progress milestones.
+        """
+        pct = int(ratio * 100)
+        self._save_checkpoint(epoch, global_step, f"milestone={pct:02d}pct")
+
+    def _save_interrupt_checkpoint(self, epoch: int, global_step: int):
+        """Save a checkpoint on signal-triggered interruption."""
+        print(f"\nSaving interrupt checkpoint at step {global_step}...", flush=True)
+        self._save_checkpoint(epoch, global_step, "interrupt")
+
+    def _signal_handler(self, signum, frame):
+        """Minimal signal handler: set flag on first signal, force-exit on second."""
+        if self._interrupted:
+            signame = signal.Signals(signum).name
+            print(f"\nSecond {signame} — forcing exit.", flush=True)
+            os._exit(1)
+        signame = signal.Signals(signum).name
+        print(f"\n=== {signame} — finishing current step, then saving checkpoint... ===", flush=True)
+        self._interrupted = True
 
     def _check_milestone(self, epoch: int, global_step: int):
         """Check and save the first un-passed milestone whose threshold is met.
@@ -456,9 +481,13 @@ class Trainer:
         # Initialize milestone tracking AFTER global_step is established.
         self._passed_milestones = self._init_milestone_state()
 
+        self._interrupted = False
+        prev_sigint = signal.signal(signal.SIGINT, self._signal_handler)
+        prev_sigterm = signal.signal(signal.SIGTERM, self._signal_handler)
+
         epoch = start_epoch
         if self.is_main_process:
-            step_pbar = tqdm(
+            self._step_pbar = tqdm(
                 initial=global_step,
                 total=self.total_train_steps,
                 desc="Steps",
@@ -466,55 +495,81 @@ class Trainer:
                 mininterval=1.0,
             )
 
-        while global_step < self.total_train_steps:
-            if self.train_sampler is not None:
-                self.train_sampler.set_epoch(epoch)
+        try:
+            while global_step < self.total_train_steps and not self._interrupted:
+                if self.train_sampler is not None:
+                    self.train_sampler.set_epoch(epoch)
 
-            self.model.train()
-            self.on_epoch_start(epoch)
+                self.model.train()
+                self.on_epoch_start(epoch)
 
-            self.optimizer.zero_grad(set_to_none=True)
+                self.optimizer.zero_grad(set_to_none=True)
 
-            for micro_step, batch in enumerate(self.train_loader):
-                self.current_epoch = epoch
+                for micro_step, batch in enumerate(self.train_loader):
+                    self.current_epoch = epoch
 
-                is_boundary = (micro_step + 1) % self.gradient_accumulation_steps == 0
+                    is_boundary = (micro_step + 1) % self.gradient_accumulation_steps == 0
 
-                # DDP: suppress gradient all-reduce for non-boundary micro-batches
-                # so that gradients accumulate locally, then sync once on the boundary.
-                if self.distributed and not is_boundary:
-                    sync_ctx = self.model.no_sync()
-                else:
-                    sync_ctx = contextlib.nullcontext()
+                    # DDP: suppress gradient all-reduce for non-boundary micro-batches
+                    # so that gradients accumulate locally, then sync once on the boundary.
+                    if self.distributed and not is_boundary:
+                        sync_ctx = self.model.no_sync()
+                    else:
+                        sync_ctx = contextlib.nullcontext()
 
-                with sync_ctx:
-                    _, log_dict = self.train_one_step(batch, is_accumulation_boundary=is_boundary)
+                    with sync_ctx:
+                        _, log_dict = self.train_one_step(batch, is_accumulation_boundary=is_boundary)
 
-                if is_boundary:
-                    global_step += 1
-                    self.global_step = global_step
+                    if is_boundary:
+                        global_step += 1
+                        self.global_step = global_step
 
-                    if self.is_main_process and (global_step % self.log_interval_steps) == 0:
-                        step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
-                        for key, value in to_log_scalars(log_dict).items():
-                            step_metrics[f"train/{key}"] = value
+                        if self.is_main_process and (global_step % self.log_interval_steps) == 0:
+                            step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
+                            for key, value in to_log_scalars(log_dict).items():
+                                step_metrics[f"train/{key}"] = value
 
-                        if hasattr(step_pbar, "set_postfix"):
-                            step_pbar.set_postfix(
-                                step=global_step,
-                                loss=step_metrics.get("train/loss", None),
-                            )
-                        if self.workspace is not None:
-                            self.workspace.log(step_metrics, step=global_step)
+                            if hasattr(self._step_pbar, "set_postfix"):
+                                self._step_pbar.set_postfix(
+                                    step=global_step,
+                                    loss=step_metrics.get("train/loss", None),
+                                )
+                            if self.workspace is not None:
+                                self.workspace.log(step_metrics, step=global_step)
 
-                    # Check for milestone checkpoint.
-                    self._check_milestone(epoch, global_step)
+                        # Check for milestone checkpoint.
+                        self._check_milestone(epoch, global_step)
 
-                if global_step >= self.total_train_steps:
-                    break
+                    if global_step >= self.total_train_steps or self._interrupted:
+                        break
 
-            self.model.eval()
-            epoch += 1
+                self.model.eval()
+                epoch += 1
 
-        if self.is_main_process and hasattr(step_pbar, "close"):
-            step_pbar.close()
+            if self._interrupted and global_step > 0:
+                print(
+                    f"Training interrupted at step {global_step}/{self.total_train_steps}", flush=True
+                )
+                try:
+                    self._save_interrupt_checkpoint(epoch, global_step)
+                except Exception as e:
+                    print(f"WARNING: interrupt checkpoint failed: {e}", flush=True)
+
+        finally:
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
+
+            if self._step_pbar is not None:
+                try:
+                    self._step_pbar.close()
+                except Exception:
+                    pass
+
+            if self.workspace is not None and self.is_main_process:
+                try:
+                    self.workspace.close()
+                except Exception:
+                    pass
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()

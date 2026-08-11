@@ -21,7 +21,7 @@ LOCAL_EXP="$PROJECT_ROOT/experiments"
 # ---- End Config ----
 
 POLICY="${1:?Usage: tail_log.sh <policy> <task> [timestamp]}"
-TASK="${2:?}"
+TASK="${2:?Usage: tail_log.sh <policy> <task> [timestamp]}"
 TS="${3:-}"
 
 find_latest() {

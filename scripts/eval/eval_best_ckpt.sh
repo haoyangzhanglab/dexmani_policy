@@ -63,6 +63,14 @@ if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     exit 1
 fi
 
+# Validate at least one checkpoint exists
+if [[ ! -d "$EXP_DIR/checkpoints" ]] || \
+   ! compgen -G "$EXP_DIR/checkpoints/epoch=*.pt" > /dev/null; then
+    echo "Error: no checkpoints found in ${EXP_DIR}/checkpoints/" >&2
+    echo "The experiment may not have completed any training steps." >&2
+    exit 1
+fi
+
 exec python dexmani_policy/eval_best_ckpt.py \
     --policy-name="${POLICY}" \
     --task-name="${TASK}" \

@@ -18,6 +18,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate policy
+
 if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: bash scripts/training/train.sh <config_name> [hydra_overrides...]"
     echo ""

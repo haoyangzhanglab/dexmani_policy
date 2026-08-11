@@ -166,6 +166,6 @@ if [[ -z "$DRY_RUN" ]]; then
     echo "=== sync_down: done ==="
     echo ""
     echo "Next steps:"
-    echo "  bash scripts/eval/select_best_ckpt.sh <policy> <task> <exp_dir>"
-    echo "  bash scripts/eval/eval_best_ckpt.sh <policy> <task> <exp_dir>"
+    echo "  bash scripts/eval/select_best_ckpt.sh <policy> <task> <exp_name>"
+    echo "  bash scripts/eval/eval_best_ckpt.sh <policy> <task> <exp_name>"
 fi

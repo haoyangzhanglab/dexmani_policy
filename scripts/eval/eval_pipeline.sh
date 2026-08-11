@@ -56,6 +56,13 @@ if [[ "${1:-}" == "--no-videos" ]]; then
     shift
 fi
 
+# Reject extra positional args (only 3 positionals + --no-videos accepted)
+if [[ $# -gt 0 ]]; then
+    echo "Error: unexpected argument: $1" >&2
+    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]" >&2
+    exit 1
+fi
+
 # ── Validate experiment directory ────────────────────────────────────────────
 EXP_DIR="experiments/${POLICY}/${TASK}/${EXP_NAME}"
 
@@ -69,6 +76,19 @@ if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     echo "Error: config.yaml not found in ${EXP_DIR}" >&2
     exit 1
 fi
+
+# ── Concurrency lock (PID-file, survives SIGKILL via staleness detection) ────
+LOCK_FILE="${EXP_DIR}/.pipeline.lock"
+if [[ -f "$LOCK_FILE" ]]; then
+    old_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+        echo "Error: another eval pipeline is running for ${EXP_DIR} (PID $old_pid)" >&2
+        exit 1
+    fi
+    rm -f "$LOCK_FILE"
+fi
+echo $$ > "$LOCK_FILE"
+trap 'rm -f "$LOCK_FILE"' EXIT
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Step 1/3: Select Best Checkpoint (adaptive elimination, no videos)

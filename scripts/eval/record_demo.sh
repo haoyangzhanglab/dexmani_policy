@@ -66,6 +66,13 @@ if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     exit 1
 fi
 
+# Check for display (SAPIEN viewer requires a running X11/Wayland server)
+if [[ -z "${DISPLAY:-}" ]]; then
+    echo "Error: DISPLAY is not set — demo recording requires a graphical display." >&2
+    echo "Run on a machine with a monitor, or set DISPLAY=:0 if the X server is running." >&2
+    exit 1
+fi
+
 exec python dexmani_policy/record_demo.py \
     --policy-name="${POLICY}" \
     --task-name="${TASK}" \

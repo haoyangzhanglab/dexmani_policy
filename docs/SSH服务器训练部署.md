@@ -1,82 +1,16 @@
-# DexMani_Policy 服务器训练部署方案（v4 重构版）
+# DexMani_Policy 服务器训练部署
 
-> **更新日期**: 2026-08-06 | **服务器**: 192.168.88.230 (8×H200) | **设计原则**: 清晰分离 × 高效同步 × 易于维护
+> **服务器**: 192.168.88.230 (8×H200) | **脚本目录**: `scripts/remote/` | **更新**: 2026-08-11
 >
-> **文档导航**: [README](../README.md) — 项目概览 · [CLAUDE.md](../CLAUDE.md) — AI 工作速查 · [项目架构](项目架构.md) — 架构全景 · [评测机制](评测机制.md) — 评测全链路
+> **文档导航**: [README](../README.md) — 项目概览 · [CLAUDE.md](../CLAUDE.md) — AI 工作速查 · [同步机制分析](同步机制分析.md) — 内部深度分析 · [仿真评测](仿真评测机制.md)
 
 ---
 
-## 设计原则
+## 1. 快速开始
 
-| # | 原则 | 实现 |
-|---|------|------|
-| 1 | **数据/代码分离** | `robot_data` + `experiments` → NFS 数据盘；源码 → home overlay |
-| 2 | **三向同步** | 代码上传（频繁）、数据上传（增量）、实验下载（保护本地评测产物） |
-| 3 | **稳定高速** | rsync 默认 size+mtime 去重，源码 `-z` 压缩，数据免压缩 |
-| 4 | **清晰可靠** | 每个脚本单一职责，`--dry-run` 预览，pre-flight checks 快速失败 |
+### 1.1 SSH 配置
 
----
-
-## 服务器硬件速查
-
-| 资源 | 规格 |
-|------|------|
-| CPU | 2× Intel Xeon Platinum 8558 (Emerald Rapids), 96C/192T |
-| GPU | **8× NVIDIA H200 SXM**, 141 GB × 8 = 1.125 TB 总显存, NVSwitch 全互联 |
-| RAM | 2.0 TiB DDR5 |
-| 系统盘 | Docker overlay (`/`): 11 TB (1.6 TB 可用) |
-| 数据盘 (NFS) | `192.168.88.10:/data_ssd`: 35 TB (20 TB 可用) |
-| NAS (NFS) | `192.168.88.17:/nasPublic`: 96 TB (59 TB 可用) |
-| 网络 | 千兆 LAN，实测上传 ~25 MB/s / 下载 ~32 MB/s |
-| OS | Ubuntu 22.04.5 LTS (Docker 容器) |
-| CUDA | Driver 565.57.01 / CUDA 12.7 / toolkit 12.1 |
-
-> **Docker 注意**: `/home/` 在 overlay FS 上，容器重建可能丢失。大数据（robot_data、experiments、pretrained weights）**必须**放 `/data_ssd/ZHY/`（NFS 持久化）。代码和 conda 环境放 `/home/` 即可（Git 备份，重建成本低）。
-
----
-
-## 目录布局
-
-### 设计逻辑
-
-```
-本地机器                                服务器
-────────                                ──────
-dexmani_policy/                         ~/ZHY/dexmani_policy/         ← sync_code.sh (源码)
-├── dexmani_policy/                     ├── dexmani_policy/           ← rsync -avz --delete
-├── scripts/                            ├── scripts/
-├── configs/                            ├── configs/
-├── docs/                               ├── docs/
-├── pyproject.toml                      ├── pyproject.toml
-├── data/  (53 MB, Uni3D 权重)          ├── data → /data_ssd/ZHY/data/    ← symlink
-├── robot_data/  (8.5 GB, .zarr)        ├── robot_data → /data_ssd/...    ← symlink
-└── experiments/  (本地评测产物)         └── experiments → /data_ssd/...   ← symlink
-                                         
-                                        /data_ssd/ZHY/                ← sync_data.sh (数据集+权重)
-                                        ├── data/                     ← rsync -av (免压缩, 不删)
-                                        ├── robot_data/               ← rsync -av (增量, 免重复上传)
-                                        └── experiments/              ← sync_down.sh (下拉)
-                                            └── <policy>/<task>/<ts>/
-```
-
-### 目录职责
-
-| 目录 | 存储位置 | 大小 | 同步方向 | 频率 |
-|------|---------|------|---------|------|
-| 源码 (`dexmani_policy/`, `scripts/`, `configs/`, ...) | `~/ZHY/dexmani_policy/` (home) | ~60 MB | 本地→服务器 | **频繁**（每次改代码） |
-| 预训练权重 (`data/`) | `/data_ssd/ZHY/data/` (NFS) | ~53 MB | 本地→服务器 | 极少（权重不变） |
-| 数据集 (`robot_data/`) | `/data_ssd/ZHY/robot_data/` (NFS) | ~8.5 GB | 本地→服务器 | 偶尔（新增任务） |
-| 实验输出 (`experiments/`) | `/data_ssd/ZHY/experiments/` (NFS) | ~GB 级 | 服务器→本地 | 训练后 |
-
-> **关键**: 服务器上 `~/ZHY/dexmani_policy/` 下的 `data`、`robot_data`、`experiments` 是 **symlink**，指向 `/data_ssd/ZHY/` 下的实际目录。这样代码中 `robot_data/pour.zarr` 等相对路径无需任何修改即可工作。
-
----
-
-## Phase 0: SSH 配置
-
-**状态**: SSH 密钥已配置 ✅
-
-在本地 `~/.ssh/config` 添加便捷别名：
+在 `~/.ssh/config` 添加（已配置 ✅）：
 
 ```
 Host dexserver
@@ -87,833 +21,583 @@ Host dexserver
     ServerAliveCountMax 5
 ```
 
-之后所有脚本中 `dexserver` 等价于 `ssh zjurobot@192.168.88.230 -p 51822`。
+之后 `ssh dexserver` 即可登录。可通过 `DEX_SERVER` 环境变量覆盖别名。
 
-> 可通过环境变量 `DEX_SERVER` 覆盖服务器别名：`DEX_SERVER=myhost bash scripts/remote/sync_code.sh`
-
----
-
-## Phase 1: 服务器初始化（一次性）
-
-### 1.1 创建目录结构
+### 1.2 服务器初始化（一次性）
 
 ```bash
-# 代码目录（home，个人 workspace）
+# 1. 创建目录
 ssh dexserver 'mkdir -p ~/ZHY/dexmani_policy'
-
-# 数据目录（/data_ssd NFS，持久化）
-# 首次需 sudo 创建（zjurobot 在 sudo 组）
 ssh -t dexserver 'sudo mkdir -p /data_ssd/ZHY && sudo chown zjurobot:zjurobot /data_ssd/ZHY'
 ssh dexserver 'mkdir -p /data_ssd/ZHY/{robot_data,experiments,data}'
-```
 
-### 1.2 补装缺失的包
-
-```bash
-# dex_policy 环境（已确认存在，Python 3.10.19, torch 2.4.1+cu124）
-# 缺少 zarr 和 dexmani_policy 本身
-ssh dexserver '~/.conda/envs/dex_policy/bin/pip install zarr'
-# 等代码首次上传后再执行:
-# ssh dexserver 'cd ~/ZHY/dexmani_policy && ~/.conda/envs/dex_policy/bin/pip install -e .'
-```
-
-### 1.3 首次上传
-
-```bash
-# 1. 上传代码
+# 2. 上传代码
 bash scripts/remote/sync_code.sh
 
-# 2. 安装包
+# 3. 安装项目包
 ssh dexserver 'cd ~/ZHY/dexmani_policy && ~/.conda/envs/dex_policy/bin/pip install -e .'
 
-# 3. 创建 symlink（代码透明访问大数据）
+# 4. 创建 symlink（让代码中相对路径透明访问大数据）
 ssh dexserver 'cd ~/ZHY/dexmani_policy && \
     ln -sfn /data_ssd/ZHY/data data && \
     ln -sfn /data_ssd/ZHY/robot_data robot_data && \
     ln -sfn /data_ssd/ZHY/experiments experiments'
 
-# 4. 上传数据（8.5 GB，约 6 分钟，后续增量秒级）
+# 5. 上传数据（首次 ~6 分钟，后续增量秒级）
 bash scripts/remote/sync_data.sh
 ```
 
-### 1.4 验证链路
+### 1.3 验证
 
 ```bash
 # 冒烟测试
 ssh dexserver 'cd ~/ZHY/dexmani_policy && ~/.conda/envs/dex_policy/bin/python dexmani_policy/smoke_test.py dp3'
 
-# 短训练（10 步，前台观察）
+# 短训练（10 步，前台）
 bash scripts/remote/train_remote.sh --fg dp3 pour 'training.loop.total_train_steps=10'
 ```
 
 ---
 
-## 同步架构（核心设计）
+## 2. 架构概览
 
-### 三向同步全景
+### 2.1 目录布局
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         sync_code.sh                            │
-│  本地源码 ──── rsync -avz --delete ────→ ~/ZHY/dexmani_policy/  │
-│  频率: 高（每次改代码）  耗时: ~2-3秒   方向: 本地→服务器       │
-├─────────────────────────────────────────────────────────────────┤
-│                         sync_data.sh                            │
-│  本地 robot_data/ + data/ ── rsync -av ──→ /data_ssd/ZHY/      │
-│  频率: 低（新增数据时）  耗时: 增量秒级  方向: 本地→服务器       │
-├─────────────────────────────────────────────────────────────────┤
-│                        sync_down.sh                             │
-│  /data_ssd/ZHY/experiments/ ── rsync -av ──→ 本地 experiments/  │
-│  频率: 中（训练后评测前） 耗时: 增量秒级  方向: 服务器→本地      │
-└─────────────────────────────────────────────────────────────────┘
+本地机器                                服务器
+────────                                ──────
+dexmani_policy/                         ~/ZHY/dexmani_policy/         ← sync_code.sh (源码)
+├── dexmani_policy/                     ├── dexmani_policy/
+├── scripts/                            ├── scripts/
+├── configs/                            ├── configs/
+├── pyproject.toml                      ├── pyproject.toml
+├── data/  (预训练权重)                   ├── data → /data_ssd/ZHY/data/       ← symlink
+├── robot_data/  (.zarr 数据集)           ├── robot_data → /data_ssd/...       ← symlink
+└── experiments/  (本地评测产物)          └── experiments → /data_ssd/...      ← symlink
+
+                                        /data_ssd/ZHY/                ← sync_data.sh + sync_down.sh
+                                        ├── data/
+                                        ├── robot_data/
+                                        └── experiments/
 ```
 
-### 为什么这样设计
+### 2.2 核心设计
 
-| 决策 | 理由 |
+| 决策 | 原因 |
 |------|------|
-| 源码用 `-z` 压缩 | .py/.yaml/.sh 文本压缩比 3-4x，千兆网下省时间 |
-| 数据不用 `-z` | .zarr 和 .safetensors 已内置压缩，再压缩浪费 CPU |
-| 源码用 `--delete` | 本地删文件 → 服务器也删，保持一致 |
-| 数据不用 `--delete` | 安全：本地误删不影响服务器数据 |
-| rsync 默认 size+mtime 比较 | 文件未变 → 秒级跳过；文件变了 → 只传差异 |
-| `data/` 放 NFS 不随源码同步 | 53 MB 权重文件极少变动，与 60 MB 源码分开传输 |
+| 代码放 `~/ZHY/` (home) | 轻量（~60 MB），Git 备份，容器重建成本低 |
+| 大数据放 `/data_ssd/ZHY/` (NFS) | 持久化，容器重建不丢失 |
+| 服务器 symlink `data` → `/data_ssd/ZHY/data` 等 | 代码中 `robot_data/pour.zarr` 等相对路径无需修改 |
+| 3 个独立 sync 脚本 | 单一职责，各自按数据特性优化 flags |
 
-### 实验下载的本地保护机制（两趟 rsync）
+### 2.3 脚本角色
 
-`sync_down.sh` 不依赖文件/目录名来判断哪些是本地评测产物，而是用**两趟 rsync**，基于文件**是否存在**来决策：
-
-**Pass 1 — `rsync --ignore-existing`**（只拉新文件）
-- 本地**没有**的文件 → 下载（新的 checkpoint、新的实验 run）
-- 本地**已有**的文件 → **跳过**（不论它叫什么名字、放在哪个目录）
-
-**Pass 2 — `rsync --existing`（精确更新可变文件，仅更新已有文件）**
-- `metrics.jsonl` — 训练中持续增长
-- `checkpoints/latest.pt` — symlink 目标随训练推进变化
-- `checkpoints/scores.json` — top-k tracker 更新
-
-> **为什么这样更健壮**：
-> - 本地评测产物（`eval_dexsim/`、`demo_videos/`、`best_ckpt.json` 或未来任何新目录）只要存在于本地，就会被 Pass 1 的 `--ignore-existing` 自动跳过。**不需要预先知道它们的名字**。
-> - Checkpoint `.pt` 文件是 immutable 的（写一次不改），`--ignore-existing` 完美处理：新的会下载，已有的跳过。
-> - 如果未来评测代码改了输出路径，sync 脚本不需要同步修改。
+| 脚本 | 方向 | 传输内容 | 频率 | 触发 |
+|------|------|---------|------|------|
+| `sync_code.sh` | 本地→服务器 | 源码 | 高（每次改代码） | 手动 / train_remote 自动 |
+| `sync_data.sh` | **双向** | robot_data/ + data/ | 低（新增数据/二阶段回传） | 手动 |
+| `sync_down.sh` | 服务器→本地 | experiments/ | 中（训练后） | 手动 |
+| `train_remote.sh` | — | 启动训练 | 每次训练 | 手动 |
+| `tail_log.sh` | — | 实时日志流 | 训练中 | 手动 |
+| `stop_remote.sh` | — | 停止训练 | 训练中 | 手动 |
 
 ---
 
-## 脚本参考
+## 3. 同步机制
 
-### `sync_code.sh` — 上传源码
+### 3.1 设计哲学
+
+| 原则 | 体现 |
+|------|------|
+| **单一职责** | 3 个脚本各自处理一类数据（源码/数据集/实验产物） |
+| **安全默认** | 数据同步不加 `--delete`（防误删）；pull 不加 `--prune`（防覆盖本地） |
+| **按数据特性优化** | 源码 `-z` 压缩（文本 3-4x）；数据免压缩（.zarr 已内置）；checkpoint 利用 immutability |
+
+### 3.2 sync_code.sh — 源码上传
 
 ```bash
-bash scripts/remote/sync_code.sh              # 同步代码（增量，2-3秒）
+bash scripts/remote/sync_code.sh              # 同步（增量，2-3 秒）
 bash scripts/remote/sync_code.sh --dry-run    # 预览变更
 ```
 
-**传输内容**: `dexmani_policy/`, `scripts/`, `configs/`, `docs/`, `pyproject.toml`, `setup.py`, `requirements*.txt` 等所有非数据源码。
+**rsync flags**: `-avz --partial --progress --delete`
 
-**排除**: `.git/`, `__pycache__/`, `data/`, `robot_data/`, `experiments/`, `wandb/`, `outputs/`, `logs/` 等生成/数据目录。
+| Flag | 作用 | 设计理由 |
+|------|------|---------|
+| `-a` | 归档模式（保留权限、时间戳） | 依赖 mtime 做增量检测 |
+| `-z` | 压缩传输 | `.py`/`.yaml` 压缩比 3-4x |
+| `--partial` | 断点续传 | 中断后从断点继续 |
+| `--delete` | 删除远端残留 | 本地删文件 → 服务器同步删除 |
 
-**rsync flags**: `-avz --delete --partial` — 压缩传输 + 删远端残留 + 断点续传。
+**排除项**:
+- **递归排除**（任意深度）: `.git/`, `__pycache__/`, `*.pyc`, `*.pyo`, `*.egg-info`, `.DS_Store`
+- **根锚定排除**（仅项目根目录）: `/data`, `/robot_data`, `/experiments`, `/wandb`, `/outputs`, `/logs` 等
 
----
+**`--delete` 安全保护**: 3 个 `protect` filter 确保 `--delete` 不会删除服务器独有的 symlink 目录：
 
-### `sync_data.sh` — 上传数据
-
-```bash
-bash scripts/remote/sync_data.sh              # 上传全部数据（robot_data + data）
-bash scripts/remote/sync_data.sh robot_data   # 仅上传数据集
-bash scripts/remote/sync_data.sh data         # 仅上传预训练权重
-bash scripts/remote/sync_data.sh --dry-run    # 预览
+```
+--filter='protect /data'
+--filter='protect /robot_data'
+--filter='protect /experiments'
 ```
 
-**传输内容**: `robot_data/` → `/data_ssd/ZHY/robot_data/`, `data/` → `/data_ssd/ZHY/data/`。
+**触发时机**: 每次 `train_remote.sh` 启动时必定自动调用（pre-flight 步骤 2）。也可手动执行。
 
-**关键行为**:
-- 文件未变（同 size + mtime）→ **秒级跳过**
-- 文件新增或变更 → 仅传差异
-- 不含 `--delete`：服务器数据安全优先
+### 3.3 sync_data.sh — 数据集双向同步
 
-> **首次上传 8.5 GB 约 6 分钟**。后续增量上传仅传输新增/变更的文件，通常秒级完成。
+```bash
+bash scripts/remote/sync_data.sh                  # push: 本地→服务器（默认）
+bash scripts/remote/sync_data.sh --prune          # push + 删除服务器独有文件
+bash scripts/remote/sync_data.sh --pull           # pull: 服务器→本地（安全，不删本地文件）
+bash scripts/remote/sync_data.sh --pull --prune   # pull + 删除本地独有文件
+bash scripts/remote/sync_data.sh --dry-run        # 预览
+bash scripts/remote/sync_data.sh -c               # checksum 模式（精确但慢）
+```
 
----
+**4 种模式**:
 
-### `sync_down.sh` — 下载实验
+| 模式 | 方向 | --delete | 安全性 | 用途 |
+|------|------|----------|--------|------|
+| （默认） | local → server | 否 | 安全 | 上传新数据 |
+| `--prune` | local → server | 是 | 需确认 | 上传 + 清理服务器冗余 |
+| `--pull` | server → local | 否 | **安全** | 下载服务器独有的数据 |
+| `--pull --prune` | server → local | 是 | 需确认 | 完整镜像服务器数据 |
+
+**rsync flags**: `-av --partial --progress`（无 `-z` — `.zarr` 和 `.safetensors` 已内置压缩；无 `--delete` — 安全默认）。
+
+**与 sync_down.sh 的分工**:
+
+| | sync_data.sh | sync_down.sh |
+|------|------|------|
+| 同步内容 | `data/` + `robot_data/`（数据集、预训练权重） | `experiments/`（训练产物） |
+| 方向 | 双向（push 为主，pull 为辅） | 仅下载 |
+| 策略 | 单趟 rsync | 两趟 rsync（存在性保护） |
+
+**典型 Pull 场景 — DQ-RISE 二阶段训练**:
+
+```bash
+# 1. 服务器完成 Stage 1（VQ-VAE 预训练），产出 codebook/checkpoint 到 /data_ssd/ZHY/data/
+
+# 2. 拉回本地
+bash scripts/remote/sync_data.sh --pull --dry-run   # 预览
+bash scripts/remote/sync_data.sh --pull              # 下载
+
+# 3. 本地准备 Stage 2（DQ-RISE agent），推回服务器
+bash scripts/remote/sync_data.sh                     # 推本地新增文件
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/dqrise pour
+```
+
+> Pull 模式下本地目录不存在时会自动 `mkdir -p`。始终先 `--dry-run` 预览。
+
+### 3.4 sync_down.sh — 实验结果下载
 
 ```bash
 bash scripts/remote/sync_down.sh                          # 全部实验
 bash scripts/remote/sync_down.sh dp3/pour                 # 特定 policy/task
 bash scripts/remote/sync_down.sh dp3/pour/2026-08-03_12   # 特定 run
 bash scripts/remote/sync_down.sh --dry-run                # 预览
-bash scripts/remote/sync_down.sh --list                   # 列出服务器上的实验
+bash scripts/remote/sync_down.sh --list                   # 列出服务器实验
 bash scripts/remote/sync_down.sh --with-wandb             # 含 wandb 离线数据
 ```
 
-**关键行为**:
-- 仅传输新增/变更的文件（rsync 默认 size+mtime 比较）
-- **排除本地评测产物**（见上表），不会被覆盖
-- 5 个 milestone checkpoint .pt 文件（各 ~1.5-2GB）只在首次下载时传输；后续仅 `latest.pt` symlink 和 `metrics.jsonl` 等小文件更新
-- 不含 `--delete`：本地删了实验不会被远端删
+#### 两趟 rsync 策略
+
+这是下载链路的核心设计 — 不依赖文件名或目录名来判断哪些是本地评测产物，而是基于**文件是否已存在**来决策：
+
+**Pass 1 — 只拉新文件** (`-av --ignore-existing`)
+
+| 本地状态 | 行为 | 效果 |
+|----------|------|------|
+| 文件**不存在** | 下载 | 新 checkpoint、新实验 run |
+| 文件**已存在** | **跳过** | 保护所有本地文件不被覆盖 |
+
+**Pass 2 — 更新可变文件** (`-av --existing` + 文件过滤)
+
+Pass 2 仅更新 3 种训练中持续变化的文件：
+
+| 文件 | 为何需要更新 | 大小 |
+|------|-------------|------|
+| `metrics.jsonl` | 训练中每步追加 | ~KB |
+| `checkpoints/latest.pt` | symlink 目标随训练推进变化 | ~几十字节 |
+| `checkpoints/scores.json` | top-k tracker 更新 | ~KB |
+
+#### 为什么比基于名称排除更健壮
+
+| | 基于名称排除（脆弱） | 基于存在性保护（当前设计） |
+|------|------|------|
+| 需要预知本地文件 | 是 — 必须硬编码排除列表 | **否** — 任何本地已有文件自动跳过 |
+| 未来评测代码改变输出路径 | 需同步更新 sync 脚本 | **无需修改** |
+| 误删本地评测产物 | 可能（exclude 与 delete 不匹配时） | **从不** |
+
+> Checkpoint `.pt` 文件是 immutable 的（写一次不改），`--ignore-existing` 完美处理：新的下载，已有的跳过。本地评测产物（`eval_dexsim/`、`demo_videos/`、`best_ckpt.json` 或任何未来新目录）只要存在就被 Pass 1 自动保护。
+
+退出码 24（"some files vanished during transfer"）被捕获为良性 — 发生在训练运行中 checkpoint 被轮换时。
+
+### 3.5 路径映射
+
+```
+本地                                    服务器
+────                                    ────
+experiments/                            /data_ssd/ZHY/experiments/
+robot_data/                             /data_ssd/ZHY/robot_data/
+data/                                   /data_ssd/ZHY/data/
+dexmani_policy/                         ~/ZHY/dexmani_policy/dexmani_policy/
+scripts/                                ~/ZHY/dexmani_policy/scripts/
+```
+
+所有远程脚本通过 `DEX_SERVER` 环境变量（默认 `dexserver`）定位服务器。路径常量定义在各脚本顶部配置区。
+
+### 3.6 同步时机
+
+| 事件 | sync_code | sync_data | sync_down |
+|------|-----------|-----------|-----------|
+| `train_remote.sh` 每次调用 | **自动** | 可选（`--sync-data`） | — |
+| 改代码后 | 手动 | — | — |
+| 新增数据集 | — | 手动 (push) | — |
+| 训练完成后 | — | — | 手动 |
+| 二阶段产物回传 | — | 手动 (`--pull`) | — |
+| tail_log / stop | — | — | — |
 
 ---
 
-### `train_remote.sh` — 一键训练
+## 4. 训练控制
+
+### 4.1 train_remote.sh — 一键启动
 
 ```bash
 bash scripts/remote/train_remote.sh <config> <task> [hydra_overrides...]
-bash scripts/remote/train_remote.sh --fg <config> <task> [...]     # 前台
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 <config> <task> [...]  # 指定 GPU
-bash scripts/remote/train_remote.sh --sync-data <config> <task>    # 含数据同步
-bash scripts/remote/train_remote.sh --dry-run <config> <task>      # 预览
+
+# 常用选项
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 <config> <task> [...]   # 指定 GPU
+bash scripts/remote/train_remote.sh --fg <config> <task> [...]             # 前台（调试用）
+bash scripts/remote/train_remote.sh --sync-data <config> <task>            # 含数据上传
+bash scripts/remote/train_remote.sh --dry-run <config> <task>              # 预览
 ```
 
 **Pre-flight checks（任一失败则退出）**:
 
-| 步骤 | 检查内容 | 失败提示 |
-|------|---------|---------|
-| 1 | 服务器可达 | "Check VPN/network" |
-| 2 | 代码同步 (`sync_code.sh`) | rsync 错误 |
-| 3 | `{task}.zarr` 存在于服务器 | "Run sync_data.sh" |
-| 4 | GPU 占用情况（打印，不阻塞） | — |
-| 5 | `/data_ssd` 磁盘剩余空间 | — |
+| 步骤 | 检查 | 阻塞 |
+|------|------|------|
+| 1. SSH 可达 | `ssh -o ConnectTimeout=5` | 是 |
+| 2. 代码同步 | 自动调用 `sync_code.sh` | 是 |
+| 2b. | 数据同步（仅 `--sync-data` 时） | 是 |
+| 3. Dataset 存在 | `{task}.zarr` 在服务器上 | 是 |
+| 4. GPU 状态 | nvidia-smi 查询（仅打印） | 否 |
+| 5. 磁盘空间 | `/data_ssd` df -h（仅打印） | 否 |
 
-**示例**:
+**Session 命名规则**: `config_task` (如 `dp3_pour`)，指定 seed 时追加 `_s<seed>` (如 `dp3_pour_s42`)，确保同 config+task 不同 seed 可并行。
+
+**单卡 vs DDP**:
 
 ```bash
-# ── 单卡 ──
+# 单卡
 bash scripts/remote/train_remote.sh dp3 pour
-
-# 单卡 + 指定 GPU + 指定 seed
-bash scripts/remote/train_remote.sh --gpus 0 sat pour 'training.seed=123'
 bash scripts/remote/train_remote.sh --gpus 0 maniflow pour 'training.seed=42'
 
-# 单卡 + 多个覆盖参数
-bash scripts/remote/train_remote.sh --gpus 0 sat pour \
-    'training.seed=123' 'training.loop.total_train_steps=50000'
-
-# ── DDP 多卡 ──
+# DDP 多卡
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
-
-# DDP 多卡 + 指定 seed
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=99'
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/r3d pour 'training.seed=7'
-
-# ── 其他 ──
-# 前台调试（看完整输出，Ctrl+C 可中断）
-bash scripts/remote/train_remote.sh --fg dp3 pour 'training.loop.total_train_steps=10'
-
-# 首次在新服务器上训练（含数据上传）
-bash scripts/remote/train_remote.sh --sync-data dp3 pour
 ```
+
+支持的全部 config 名见 [CLAUDE.md](../CLAUDE.md#命令速查)。
+
+### 4.2 tail_log.sh — 实时日志
+
+```bash
+bash scripts/remote/tail_log.sh <policy> <task>              # 自动找最新 run
+bash scripts/remote/tail_log.sh <policy> <task> <timestamp>  # 指定 run
+```
+
+自动尝试服务器 `tail -f` → 不可达时回退本地文件。Ctrl+C 退出。
+
+### 4.3 stop_remote.sh — 优雅停止
+
+```bash
+bash scripts/remote/stop_remote.sh <session>    # 停止指定 session
+bash scripts/remote/stop_remote.sh --all        # 停止所有训练 session
+bash scripts/remote/stop_remote.sh --list       # 查看活跃 session
+```
+
+**三阶段停止流程**:
+
+| 阶段 | 操作 | 超时 |
+|------|------|------|
+| 1. SIGINT | `tmux send-keys C-c` → 训练代码捕获信号，优雅保存 checkpoint | — |
+| 2. 轮询等待 | 每 2s 检查 `tmux has-session` | 30s |
+| 3. Force kill | `tmux kill-session`（SIGHUP→SIGKILL） | — |
+| 4. GPU 验证 | `nvidia-smi --query-compute-apps` 检查显存释放 | — |
+
+`--all` 模式只停匹配 `*_*` 命名的 session（训练命名规则），不会误杀其他 tmux 会话。
 
 ---
 
-### `tail_log.sh` — 查看训练日志
+## 5. 日常工作流
+
+### 5.1 典型训练周期
 
 ```bash
-bash scripts/remote/tail_log.sh dp3 pour                    # 自动找最新 run
-bash scripts/remote/tail_log.sh dp3 pour 2026-08-03_12-34   # 指定 run
-```
-
-自动尝试服务器 → 本地 fallback。Ctrl+C 退出。
-
----
-
-### `stop_remote.sh` — 停止训练
-
-```bash
-bash scripts/remote/stop_remote.sh dp3_pour          # 停止特定 session
-bash scripts/remote/stop_remote.sh --all             # 停止全部
-bash scripts/remote/stop_remote.sh --list            # 查看活跃 session
-```
-
----
-
-## 日常工作流
-
-### 典型训练周期
-
-```bash
-# 1. 改完代码 → 同步到服务器（2-3秒）
+# 1. 改代码 → 同步（2-3 秒）
 bash scripts/remote/sync_code.sh
 
 # 2. 启动训练（自动再同步一次代码 + pre-flight checks）
-bash scripts/remote/train_remote.sh dp3 pour
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
 
-# 3. 监控进度
-bash scripts/remote/tail_log.sh dp3 pour                    # Ctrl+C 退出
+# 3. 监控
+bash scripts/remote/tail_log.sh maniflow pour        # Ctrl+C 退出
 
-# 4. 训练完成 → 拉取实验结果
-bash scripts/remote/sync_down.sh dp3/pour                   # 只拉这个 task
-# 或
-bash scripts/remote/sync_down.sh --list                     # 先看有哪些实验
-bash scripts/remote/sync_down.sh dp3/pour/2026-08-03_12-34  # 拉特定 run
+# 4. 训练完成 → 拉取结果
+bash scripts/remote/sync_down.sh maniflow/pour
 
 # 5. 本地评测
-bash scripts/eval/select_best_ckpt.sh dp3 pour experiments/dp3/pour/2026-08-03_12-34
-bash scripts/eval/eval_best_ckpt.sh dp3 pour experiments/dp3/pour/2026-08-03_12-34
+bash scripts/eval/eval_pipeline.sh maniflow pour experiments/maniflow/pour/<timestamp>
 
-# 6. 可选: 录制 demo 视频
-bash scripts/eval/record_demo.sh dp3 pour experiments/dp3/pour/2026-08-03_12-34
+# 6. (可选) 录制 demo
+bash scripts/eval/record_demo.sh maniflow pour experiments/maniflow/pour/<timestamp>
 ```
 
-### 改代码 + 训多个策略
+### 5.2 多实验并行
 
 ```bash
-# 改代码后，训练 3 个策略
+# 同步一次代码，启动多个训练
 bash scripts/remote/sync_code.sh
 
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
-bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/sat pour
-bash scripts/remote/train_remote.sh --gpus 0 sat pour          # 单卡
-
-# 拉全部 pour 实验结果
-bash scripts/remote/sync_down.sh maniflow/pour
-bash scripts/remote/sync_down.sh sat/pour
-```
-
-### 数据上传（新增任务后）
-
-```bash
-# 新加了数据集到本地 robot_data/，只上传新增的
-bash scripts/remote/sync_data.sh robot_data --dry-run    # 先看会传什么
-bash scripts/remote/sync_data.sh robot_data              # 实际传输
-```
-
----
-
-## GPU 多租户并行
-
-8 张 H200 通过 `CUDA_VISIBLE_DEVICES` 分区，`train_remote.sh --gpus` 已集成：
-
-```bash
-# 两个 4 卡 DDP 并行（各自指定 seed）
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=42'
-bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/dp3_faas pour 'training.seed=99'
+# 两个 4 卡 DDP 并行（不同 GPU 分区，不同 seed）
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=42' &
+bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/sat pour 'training.seed=42' &
+wait
 
 # 8 个单卡 seed sweep
-for i in 0 1 2 3 4 5 6 7; do
-    bash scripts/remote/train_remote.sh --gpus $i dp3 pour "training.seed=$i" &
+for seed in 0 1 2 3 4 5 6 7; do
+    bash scripts/remote/train_remote.sh --gpus $seed dp3 pour "training.seed=$seed" &
 done
-
-# 检查 GPU 占用
-ssh dexserver 'nvidia-smi --query-gpu=index,memory.used,name --format=csv,noheader'
 ```
 
----
-
-## Wandb
+### 5.3 二阶段训练（DQ-RISE）
 
 ```bash
-# 在线模式（需服务器能访问 wandb.ai）
-bash scripts/remote/train_remote.sh dp3 pour 'workspace.wandb_cfg.mode=online'
+# Stage 1: 服务器产 VQ-VAE 权重到 /data_ssd/ZHY/data/
 
-# 离线模式（默认），事后同步
-bash scripts/remote/sync_down.sh --with-wandb dp3/pour       # 拉 wandb 数据
-bash scripts/utils/wandb_sync.sh                            # 本地同步到云端
+# Stage 2 准备: 拉取产物
+bash scripts/remote/sync_data.sh --pull --dry-run     # 预览
+bash scripts/remote/sync_data.sh --pull                # 下载
+
+# 本地准备 Stage 2 代码 → 推回 → 训练
+bash scripts/remote/sync_code.sh
+bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/dqrise pour
+```
+
+### 5.4 紧急操作
+
+```bash
+# 立即停止所有训练
+bash scripts/remote/stop_remote.sh --all
+
+# 检查 GPU 是否清理干净
+ssh dexserver 'nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader'
+
+# 查看磁盘空间
+ssh dexserver 'df -h /data_ssd'
+
+# 强制杀 session（跳过 30s 优雅等待）
+ssh dexserver 'tmux kill-session -t dp3_pour'
 ```
 
 ---
 
-## 传输速率基准
+## 6. 参考手册
 
-> 实测环境: zhy-MS-7E06 ↔ 192.168.88.230，千兆局域网，scp 单文件，2026-08-06。
+### 6.1 服务器硬件
 
-| 方向 | 文件大小 | 耗时 | 速率 |
+| 资源 | 规格 |
+|------|------|
+| GPU | 8× NVIDIA H200 SXM (141 GB × 8 = 1.125 TB), NVSwitch 全互联 |
+| CPU | 2× Xeon Platinum 8558 (96C/192T) |
+| RAM | 2.0 TiB DDR5 |
+| 数据盘 (NFS) | `/data_ssd`: 35 TB | NAS: 96 TB |
+| 网络 | 千兆 LAN, 上传 ~25 MB/s / 下载 ~32 MB/s |
+| OS | Ubuntu 22.04 (Docker 容器) |
+| CUDA | Driver 565.57.01 / CUDA 12.7 |
+
+### 6.2 传输速率
+
+> 实测: zhy-MS-7E06 ↔ 192.168.88.230，千兆 LAN，2026-08-06。
+
+| 方向 | 文件 | 耗时 | 速率 |
 |------|------|------|------|
-| ⬆️ 上传 | 100 MB | 3.6s | **27.6 MB/s** (221 Mbps) |
-| ⬆️ 上传 | 1 GB | 40.4s | **25.4 MB/s** (203 Mbps) |
-| ⬇️ 下载 | 100 MB | 3.2s | **31.3 MB/s** (250 Mbps) |
-| ⬇️ 下载 | 1 GB | 31.2s | **32.9 MB/s** (263 Mbps) |
+| ⬆️ 上传 | 100 MB / 1 GB | 3.6s / 40.4s | 27.6 / 25.4 MB/s |
+| ⬇️ 下载 | 100 MB / 1 GB | 3.2s / 31.2s | 31.3 / 32.9 MB/s |
 
 **实际场景预估**（基于 25 MB/s 保守值）:
 
 | 操作 | 数据量 | 耗时 |
 |------|--------|------|
-| 同步源码 | ~60 MB | ~2-3 秒 |
-| 同步 robot_data（首次） | ~8.5 GB | ~6 分钟 |
-| 同步 robot_data（增量，无变化） | 0 | <1 秒 |
-| 下载 1 个实验（5 个 checkpoint .pt） | ~7-10 GB | ~5-7 分钟 |
-| 下载 1 个实验（增量，无新 checkpoint） | ~500 KB (metrics+logs) | <1 秒 |
+| sync_code | ~60 MB | 2-3 s |
+| sync_data 首次 | ~8.5 GB | ~6 min |
+| sync_data 增量（无变化） | 0 | <1 s |
+| sync_down 首次 | ~7-10 GB | ~5-7 min |
+| sync_down 增量（无新 ckpt） | ~500 KB | <1 s |
 
----
+### 6.3 脚本清单
 
-## 运维速查
+```
+scripts/remote/
+├── sync_code.sh        # 上传源码（频繁，2-3s）
+├── sync_data.sh        # 双向数据同步（增量，秒级）
+├── sync_down.sh        # 下载实验（两趟 rsync，保护本地）
+├── train_remote.sh     # 一键训练（pre-flight checks + tmux）
+├── tail_log.sh         # 实时日志流（远程 + 本地 fallback）
+└── stop_remote.sh      # 优雅停止（SIGINT → poll → kill → GPU 验证）
+```
+
+### 6.4 常用运维命令
 
 ```bash
 # GPU 状态
-ssh dexserver 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw --format=csv,noheader'
+ssh dexserver 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader'
 
-# 磁盘空间
+# 磁盘
 ssh dexserver 'df -h /data_ssd /home'
 
 # tmux 会话
-ssh dexserver 'tmux list-sessions 2>/dev/null || echo "no sessions"'
-# 或
-bash scripts/remote/stop_remote.sh --list
+ssh dexserver 'tmux list-sessions'                      # 所有会话
+bash scripts/remote/stop_remote.sh --list                # 训练会话
 
 # 训练进程
 ssh dexserver 'ps aux | grep train'
 
-# conda 环境
-ssh dexserver 'ls ~/.conda/envs/'
-
-# 服务器上的实验列表
+# 查看实验列表
 bash scripts/remote/sync_down.sh --list
+
+# 找大文件（清理磁盘用）
+ssh dexserver 'find /data_ssd/ZHY/experiments -type f -size +1G -exec ls -lh {} \;'
+```
+
+### 6.5 Wandb
+
+```bash
+# 在线模式（需服务器可访问 wandb.ai）
+bash scripts/remote/train_remote.sh dp3 pour 'workspace.wandb_cfg.mode=online'
+
+# 离线模式（默认）→ 事后同步
+bash scripts/remote/sync_down.sh --with-wandb dp3/pour
+bash scripts/utils/wandb_sync.sh
 ```
 
 ---
 
-## 脚本清单
-
-```
-scripts/
-├── training/
-│   ├── train.sh            # 本地单卡训练（原有）
-│   ├── train_ddp.sh        # 本地 DDP 训练（原有）
-│   └── train_vq_hand.sh    # VQ-VAE 预训练（原有）
-├── remote/
-│   ├── sync_code.sh        # 上传源码（频繁，2-3秒）
-│   ├── sync_data.sh        # 上传数据（增量，秒级跳过）
-│   ├── sync_down.sh        # 下载实验（保护本地评测产物）
-│   ├── train_remote.sh     # 一键训练（pre-flight checks + tmux）
-│   ├── tail_log.sh         # 实时日志流
-│   └── stop_remote.sh      # 停止训练
-├── eval/
-│   ├── select_best_ckpt.sh # 最优 checkpoint 筛选（原有）
-│   ├── eval_best_ckpt.sh   # 离线评测（原有）
-│   ├── eval_pipeline.sh    # 评测管道（原有）
-│   └── record_demo.sh      # Demo 录制（原有）
-└── utils/
-    ├── clean_experiments.sh # 清理实验（原有）
-    ├── download_pretrained.sh # 下载预训练权重（原有）
-    └── wandb_sync.sh        # Wandb 离线同步（原有）
-```
-
-> 原有 `train.sh`、`train_ddp.sh`、`eval_best_ckpt.sh` 等脚本保持不变，仅新增了 6 个远程部署脚本。
-
----
-
----
-## 附录 A: SSH 终端操作常识
+## 附录: SSH 终端操作常识
 
 > 面向不熟悉 Linux 终端的同学。已熟悉的可以跳过。
 
-### A.1 登录 SSH 服务器
-
-**基本命令**：
+### A.1 登录与退出
 
 ```bash
-# 完整格式
-ssh 用户名@服务器地址 -p 端口号
-
-# 本项目的实际登录命令（等价于文档中用到的 ssh dexserver）
-ssh zjurobot@192.168.88.230 -p 51822
+ssh dexserver          # 登录（需先配置 ~/.ssh/config）
+exit                   # 退出（或 Ctrl+D）
 ```
 
-**配置 SSH 别名（推荐，一次配置长期省事）**：
-
-编辑本地 `~/.ssh/config`，添加：
-
-```
-Host dexserver
-    HostName 192.168.88.230
-    Port 51822
-    User zjurobot
-    ServerAliveInterval 60
-    ServerAliveCountMax 5
-```
-
-之后直接用别名登录：
+### A.2 目录与文件
 
 ```bash
-ssh dexserver          # 等价于上面一长串
+mkdir -p path/to/dir           # 递归创建目录
+ls -la                         # 详细列表
+cd ~/ZHY/dexmani_policy        # 进入项目目录
+pwd                            # 显示当前路径
+
+cp -r src/ dst/                 # 复制
+mv old new                      # 移动/重命名
+rm -rf dir/                     # 删除（⚠️ 无回收站，确认后再执行）
+
+cat file.txt                    # 查看内容
+less file.txt                   # 分页查看（q 退出）
+head -20 file.txt               # 前 20 行
+tail -f metrics.jsonl           # 实时追踪（Ctrl+C 退出）
 ```
 
-**退出 SSH**：
+### A.3 Tmux 速查
 
 ```bash
-exit                   # 或按 Ctrl+D
+tmux new -s name                # 创建会话
+tmux attach -t name             # 重新连接
+tmux ls                         # 列出会话
+tmux kill-session -t name       # 终止会话
+
+# 在 tmux 内部（前缀键 Ctrl+B）
+Ctrl+B D    # 断开（训练继续运行）
+Ctrl+B [    # 滚动模式（PgUp/PgDn 翻页，q 退出）
 ```
 
-**免密登录（SSH 密钥）**：
+### A.4 训练命令结构
+
+```
+train.py <策略> <任务> [Hydra覆盖参数...]
+```
+
+**策略（policy）** — 可用值:
+
+| 策略 | 单卡写法 | DDP 写法 |
+|------|---------|---------|
+| DP3 | `dp3` | — |
+| DP3 + FAAS | `dp3_faas` | `ddp/dp3_faas` |
+| ManiFlow | `maniflow` | `ddp/maniflow` |
+| StandardFlowMatch | `standard_flowmatch` | `ddp/standard_flowmatch` |
+| MultiTask | `multitask_dit` | `ddp/multitask_dit` |
+| R3D | `r3d` | `ddp/r3d` |
+| DQ-RISE | `dqrise` | `ddp/dqrise` |
+| SAT | `sat` | `ddp/sat` |
+| DP | `dp` | `ddp/dp` |
+| MoE DP | `moe_dp` | — |
+
+**任务（task）** — 当前可用: `pour`（倒水）
+
+**常用 Hydra 覆盖参数**:
 
 ```bash
-# 1. 本地生成密钥（如果还没有）
-ssh-keygen -t ed25519 -C "your_email@example.com"
-
-# 2. 把公钥复制到服务器
-ssh-copy-id -p 51822 zjurobot@192.168.88.230
-
-# 3. 之后 ssh dexserver 不再需要输入密码
+training.seed=42                           # 随机种子
+training.loop.total_train_steps=50000      # 训练步数（默认 100000）
+action_key=action_ee                       # EE 动作空间（默认 action）
+workspace.wandb_cfg.mode=online            # Wandb 在线模式
 ```
 
-> 本项目 SSH 密钥已配置 ✅。
-
----
-
-### A.2 目录操作
-
-**新建目录**：
+**示例**:
 
 ```bash
-# 新建单个目录
-mkdir my_folder
+# 本地（原有脚本）
+bash scripts/training/train.sh dp3 pour
 
-# 递归新建多级目录（推荐，不会因父目录不存在而报错）
-mkdir -p ~/ZHY/dexmani_policy/experiments/dp3/pour
-```
-
-**删除目录**：
-
-```bash
-# 删除空目录
-rmdir empty_folder
-
-# 删除非空目录（递归强制删除，谨慎！没有回收站）
-rm -rf my_folder
-
-# 更安全：先列出会删什么
-ls my_folder/           # 确认内容
-rm -rf my_folder        # 确认无误再删
-```
-
-> ⚠️ **`rm -rf` 没有确认提示，删了就没了。** 删除前务必确认路径正确。尤其在服务器上不要 `rm -rf /` 或 `rm -rf ~`。
-
-**查看目录内容**：
-
-```bash
-ls                     # 列出当前目录
-ls -la                 # 详细列表（含隐藏文件、权限、大小）
-ls -lh                 # 人类可读的文件大小（KB/MB/GB）
-ls experiments/dp3/    # 列出指定目录
-```
-
-**切换目录**：
-
-```bash
-cd ~/ZHY/dexmani_policy    # 进入项目目录
-cd ..                      # 返回上一级
-cd -                       # 返回上一次所在的目录
-cd                         # 返回 home 目录
-pwd                        # 显示当前所在完整路径
-```
-
-**创建符号链接（symlink）**：
-
-```bash
-# 让 ~/ZHY/dexmani_policy/experiments 指向 /data_ssd/ZHY/experiments
-ln -sfn /data_ssd/ZHY/experiments ~/ZHY/dexmani_policy/experiments
-
-# -s: 符号链接（类似快捷方式）
-# -f: 强制覆盖已有链接
-# -n: 如果目标是目录链接，替换链接本身而非链接内部
-```
-
----
-
-### A.3 训练命令参数详解
-
-训练命令的核心结构只有三个位置：
-
-```
-train.py <策略类型> <任务名> [Hydra覆盖参数...]
-```
-
-#### 参数 1：策略类型（policy）
-
-决定用哪个 Agent 架构。可用值：
-
-| 策略 | 命令写法 | 说明 |
-|------|---------|------|
-| DP | `dp` | RGB+UNet+Diffusion |
-| DP3 | `dp3` | 点云+UNet+Diffusion |
-| DP3 + FAAS | `dp3_faas` | DP3 + 功能对齐动作空间 |
-| ManiFlow | `maniflow` | 点云+DiTX+FlowMatch+Consistency |
-| StandardFlowMatch | `standard_flowmatch` | 点云+DiTDiffusion+纯FlowMatch（无Consistency） |
-| MoE DP | `moe_dp` | RGB+MoE 多专家+Diffusion |
-| MultiTask | `multitask_dit` | 多任务 DiT |
-| R3D | `r3d` | 点云+OneWayTransformer |
-| DQ-RISE | `dqrise` | 点云+VQ 码本手势 |
-| SAT | `sat` | 结构动作 Transformer（EJC+per-sample shuffle） |
-
-**DDP 多卡版本**（用 `ddp/` 前缀）：
-
-| DDP 策略 | 命令写法 | GPU 数 |
-|----------|---------|--------|
-| DDP ManiFlow | `ddp/maniflow` | 4 |
-| DDP StandardFlowMatch | `ddp/standard_flowmatch` | 4 |
-| DDP DP3 FAAS | `ddp/dp3_faas` | 4 |
-| DDP MultiTask | `ddp/multitask_dit` | 4 |
-| DDP R3D | `ddp/r3d` | 4 |
-| DDP DP | `ddp/dp` | 4 |
-| DDP DQ-RISE | `ddp/dqrise` | 4 |
-| DDP SAT | `ddp/sat` | 4 |
-
-> `dp3`（非 FAAS）、`moe_dp` 只支持单卡，无 DDP 版本。
-
-#### 参数 2：任务名（task）
-
-即数据集名，对应 `robot_data/<task>.zarr`。当前可用任务：
-
-```bash
-# 查看服务器上有哪些任务
-ssh dexserver 'ls /data_ssd/ZHY/robot_data/*.zarr/ 2>/dev/null'
-```
-
-| 任务 | 命令写法 | 说明 |
-|------|---------|------|
-| 倒水 | `pour` | 主要任务 |
-
-> 后续新增任务（如 `grasp`、`place` 等）直接写对应的 `.zarr` 名前缀即可。
-
-#### 参数 3：Hydra 覆盖参数（可选，可多个）
-
-用于覆盖配置文件中的任意值。格式：`key.path=value`（点号分隔层级）。训练最常用的几个：
-
-```bash
-# ---- 种子 ----
-training.seed=42                     # 设置随机种子（默认在各 config 中定义）
-
-# ---- 训练步数 ----
-training.loop.total_train_steps=50000 # 覆盖总训练步数（默认 80000）
-
-# ---- 动作空间 ----
-action_key=action_ee                 # 切换到末端执行器空间（默认 action 即关节空间）
-
-# ---- Wandb ----
-workspace.wandb_cfg.mode=online      # 启用在线 wandb（默认 offline）
-```
-
-#### 完整示例
-
-```bash
-# === 使用 train_remote.sh（推荐，自动同步代码+tmux 后台） ===
-
-# ── 单卡 ──
-
-# 最基本：DP3 训练 pour，全部默认参数
-bash scripts/remote/train_remote.sh dp3 pour
-
-# 指定 seed
-bash scripts/remote/train_remote.sh dp3 pour 'training.seed=42'
-
-# 指定 GPU + seed
-bash scripts/remote/train_remote.sh --gpus 0 sat pour 'training.seed=123'
-bash scripts/remote/train_remote.sh --gpus 0 maniflow pour 'training.seed=7'
-
-# SAT 训练，自定义 seed + 步数
-bash scripts/remote/train_remote.sh --gpus 0 sat pour \
-    'training.seed=123' 'training.loop.total_train_steps=50000'
-
-# ManiFlow 用 EE 空间 + 自定义 seed
-bash scripts/remote/train_remote.sh --gpus 0 maniflow pour \
-    'action_key=action_ee' 'training.seed=7'
-
-# ── DDP 多卡 ──
-
-# DDP 4 卡训练（默认参数）
+# 远程（train_remote.sh）
+bash scripts/remote/train_remote.sh --gpus 0 dp3 pour 'training.seed=42'
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/dp pour
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/sat pour
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/standard_flowmatch pour
 
-# DDP 4 卡 + 指定 seed
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=99'
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/r3d pour 'training.seed=7'
-
-# DDP 4 卡 + seed + 步数
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour \
-    'training.seed=99' 'training.loop.total_train_steps=50000'
-
-# === 直接 SSH 手动启动（调试用） ===
-
-ssh dexserver
-cd ~/ZHY/dexmani_policy
-conda activate dex_policy
-export DATA_DIR=/data_ssd/ZHY
-
-python dexmani_policy/train.py --config-name=dp3 task_name=pour
-python dexmani_policy/train.py --config-name=sat task_name=pour training.seed=42 training.loop.total_train_steps=30000
-python dexmani_policy/train.py --config-name=maniflow task_name=pour action_key=action_ee training.seed=7
+# 直接 SSH（调试用）
+ssh dexserver 'cd ~/ZHY/dexmani_policy && export DATA_DIR=/data_ssd/ZHY && \
+    ~/.conda/envs/dex_policy/bin/python dexmani_policy/train.py --config-name=dp3 task_name=pour'
 ```
 
-#### seed sweep（多 seed 并行扫描）
+> `train_remote.sh` 已自动在 tmux 里启动，SSH 断开训练继续。直接 `python train.py` 需要用 `tmux` 或 `nohup` 保护。
+
+### A.5 进程与监控
 
 ```bash
-# 单卡 seed sweep：8 个 GPU 各跑一个 seed
-for seed in 0 1 2 3 4 5 6 7; do
-    bash scripts/remote/train_remote.sh --gpus $seed dp3 pour "training.seed=$seed" &
-done
+ps aux | grep python             # 查看 Python 进程
+htop                             # 进程监控（或 top）
 
-# 单卡 seed sweep：不同策略+seed 组合
-for seed in 42 123 999; do
-    bash scripts/remote/train_remote.sh --gpus 0 sat pour "training.seed=$seed"
-    bash scripts/remote/train_remote.sh --gpus 1 maniflow pour "training.seed=$seed"
-done
+nvidia-smi                       # GPU 状态
+watch -n 1 nvidia-smi            # 每秒刷新
 
-# DDP 多卡 seed sweep：每 4 卡一组跑不同 seed
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour 'training.seed=42' &
-bash scripts/remote/train_remote.sh --gpus 4,5,6,7 ddp/maniflow pour 'training.seed=99' &
-wait  # 等两组都完成
+df -h /data_ssd                  # 磁盘空间
+du -sh experiments/              # 目录大小
 ```
 
-**确保训练在断开 SSH 后继续运行**：
-
-如果用直接 `python train.py` 而非 `train_remote.sh`，SSH 断开后训练会终止。需要用 `tmux` 保护：
+### A.6 网络传输
 
 ```bash
-ssh dexserver
-tmux new -s train_dp3                # 创建会话
-cd ~/ZHY/dexmani_policy && conda activate dex_policy && export DATA_DIR=/data_ssd/ZHY
-python train.py dp3 pour training.seed=42
-# Ctrl+B, D 断开 → 训练继续跑
-# 重连: ssh dexserver && tmux attach -t train_dp3
+# scp（单文件/目录）
+scp -P 51822 local_file zjurobot@192.168.88.230:~/ZHY/      # 上传
+scp -P 51822 zjurobot@192.168.88.230:~/ZHY/file ./          # 下载
+
+# rsync（增量，更高效）
+rsync -avz local_dir/ dexserver:~/ZHY/dir/                   # 上传
+rsync -avz dexserver:~/ZHY/dir/ local_dir/                   # 下载
+# --dry-run: 预览  -z: 压缩  --delete: 删目标端多余文件
 ```
-
-> `train_remote.sh` 已自动在 tmux 里启动，直接用即可，不需要手动操作 tmux。
-
----
-
-### A.4 其他常用终端命令
-
-#### 进程管理
-
-```bash
-# 查看 Python 训练进程
-ps aux | grep python
-ps aux | grep train
-
-# 查看进程树（父子关系）
-pstree -p
-
-# 终止进程
-kill <PID>                # 优雅终止
-kill -9 <PID>             # 强制杀死（最后手段）
-pkill -f "train.py dp3"   # 按名字杀进程
-
-# 实时进程监控
-htop                       # 比 top 更友好（可能需要安装）
-top                        # 系统自带
-```
-
-#### GPU 监控
-
-```bash
-# 实时 GPU 状态（每 1 秒刷新）
-watch -n 1 nvidia-smi
-
-# 精简输出
-nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader
-
-# 持续监控 GPU 利用率
-nvidia-smi dmon -s u
-```
-
-#### 磁盘与文件
-
-```bash
-# 磁盘空间
-df -h                     # 各挂载点使用情况
-df -h /data_ssd           # 只看特定目录所在分区
-
-# 目录大小
-du -sh *                  # 当前目录下各文件/文件夹大小
-du -sh experiments/       # 某个目录总大小
-du -h --max-depth=1       # 一层深度的各子目录大小
-
-# 文件操作
-cp -r source/ dest/       # 递归复制
-mv old_name new_name      # 移动/重命名
-cat file.txt              # 查看文件内容
-less file.txt             # 分页查看（q 退出，/ 搜索）
-head -20 file.txt         # 前 20 行
-tail -20 file.txt         # 后 20 行
-tail -f metrics.jsonl     # 实时追踪文件末尾增长（Ctrl+C 退出）
-wc -l file.txt            # 统计行数
-```
-
-#### 网络与传输
-
-```bash
-# scp 传输（单文件/目录）
-# 上传：本地 → 服务器
-scp -P 51822 local_file.txt zjurobot@192.168.88.230:~/ZHY/
-scp -P 51822 -r local_dir/ zjurobot@192.168.88.230:~/ZHY/
-
-# 下载：服务器 → 本地
-scp -P 51822 zjurobot@192.168.88.230:~/ZHY/file.txt ./
-scp -P 51822 -r zjurobot@192.168.88.230:~/ZHY/dir/ ./
-
-# rsync（增量传输，比 scp 更高效）
-rsync -avz local_dir/ dexserver:~/ZHY/dir/        # 上传
-rsync -avz dexserver:~/ZHY/dir/ local_dir/         # 下载
-# -a: 归档模式（保留权限、时间戳）
-# -v: 详细输出
-# -z: 压缩传输
-# --dry-run: 只预览不实际传输
-# --delete: 删除目标端多出的文件
-```
-
-#### Tmux 速查
-
-```bash
-# 会话管理
-tmux new -s name         # 创建会话
-tmux attach -t name      # 重新连接会话
-tmux ls                  # 列出所有会话
-tmux kill-session -t name # 终止会话
-
-# 在 tmux 内部（默认前缀键: Ctrl+B）
-Ctrl+B  D    # 断开（detach），训练继续运行
-Ctrl+B  C    # 创建新窗口
-Ctrl+B  N    # 下一个窗口
-Ctrl+B  [    # 滚动模式（PgUp/PgDn 翻页，q 退出）
-```
-
-#### Conda 环境
-
-```bash
-conda env list                    # 列出所有环境
-conda activate dex_policy         # 激活环境
-conda deactivate                  # 退出环境
-pip list | grep torch             # 查看安装了哪些包
-which python                      # 确认用的是哪个 Python
-```
-
-#### 实用组合技
-
-```bash
-# 看 GPU 显存 + 对应进程
-nvidia-smi && echo "---" && ps aux | grep python | grep -v grep
-
-# 从本地看远程 GPU（不登录）
-ssh dexserver 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader'
-
-# 统计服务器上实验数量
-ssh dexserver 'ls /data_ssd/ZHY/experiments/*/*/ 2>/dev/null | wc -l'
-
-# 找大于 1GB 的文件（清理磁盘用）
-ssh dexserver 'find /data_ssd/ZHY/experiments -type f -size +1G -exec ls -lh {} \;'
-
-# 后台运行任意命令（不依赖 tmux）
-nohup python train.py dp3 pour > train.log 2>&1 &
-# nohup: 忽略 hangup 信号
-# > train.log: 标准输出到日志
-# 2>&1: 错误输出也到同一日志
-# &: 后台运行
-# 查看: tail -f train.log
-# 停止: ps aux | grep train → kill <PID>
-```
-
----
-## v4 更新记录（2026-08-06，架构重构）
-
-| 变更 | v3 | v4 |
-|------|-----|-----|
-| 同步架构 | 1 个 `sync_up.sh` 同时处理代码+数据 | **3 个独立脚本**：`sync_code.sh`（源码）、`sync_data.sh`（数据）、`sync_down.sh`（实验） |
-| 代码同步 | 混在 sync_up 中 | **独立 `sync_code.sh`**，`-z` 压缩 + `--delete`，轻量高频 |
-| 数据上传 | 混在 sync_up 中 | **独立 `sync_data.sh`**，免压缩 + 免 `--delete`，增量安全 |
-| 实验下载 | `sync_down.sh` 简单 rsync | **重写**：自动排除本地评测产物（`eval_dexsim/`, `demo_videos/`, `best_ckpt.json` ...），保护本地文件不被覆盖 |
-| `data/` 目录 | 随源码同步 | **数据盘独立存储**，symlink 透明访问 |
-| `train_remote.sh` | 调用 `sync_up.sh` | 调用 `sync_code.sh`，新增 `--sync-data` flag |
-| 目录初始化 | 手动 `mkdir` | **结构化 Phase 1 流程**，含 symlink 创建 |
-| 可视化 | 无 | **同步架构全景图** + 职责表 |

@@ -27,7 +27,6 @@ cd ~/Desktop/dexmani_sim && pip install -e .                  # 仿真环境（�
 bash scripts/training/train.sh dp3 pour                      # DP3 训练 pour 任务
 bash scripts/training/train.sh maniflow pour                  # ManiFlow
 bash scripts/training/train.sh sat pour                       # SAT
-bash scripts/training/train.sh standard_flowmatch pour        # StandardFlowMatch
 
 # 多卡 DDP —— 8 种策略可选
 bash scripts/training/train_ddp.sh ddp/maniflow pour          # ManiFlow 4 卡
@@ -36,6 +35,9 @@ bash scripts/training/train_ddp.sh ddp/maniflow pour          # ManiFlow 4 卡
 bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
 ```
+
+> 单卡策略: `dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat standard_flowmatch`
+> DDP 策略: `ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat ddp/standard_flowmatch`
 
 ### 评测
 
@@ -53,21 +55,21 @@ bash scripts/eval/record_demo.sh dp3 pour <exp_dir>           # 录制 demo 视�
 
 ```bash
 python dexmani_policy/smoke_test.py dp3                       # 单策略
-python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch sat  # 批量
+python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 ```
 
 ---
 
 ## 策略矩阵
 
-9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。另有 1 种实验性策略（StandardFlowMatch）。
+10 种 Agent（含 FAAS 变体），覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
 
 | Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
 |:------|:---------|:-------|:---------|:-------|:-----|
 | **DP** | RGB + Joint | DINO/CLIP/SigLIP + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp.yaml` |
 | **DP3** | PC(1024,3) + Joint | PointNeXT + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
 | **ManiFlow** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
-| **StandardFlowMatch** | PC(1024,6) + Joint | PointNetDense(per-pt) + StateMLP | DiTDiffusion (cross-attn) | FlowMatch (纯) | `standard_flowmatch.yaml` |
+| **StandardFlowMatch** | PC(1024,6) + Joint | PointNetDense(per-pt) + StateMLP | DiT (self-attn) | FlowMatch (纯) | `standard_flowmatch.yaml` |
 | **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDPM | `moe_dp.yaml` |
 | **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
 | **R3D** | PC(1024,3) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
@@ -81,14 +83,43 @@ python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch sat  # 批�
 |:---------|:-----|
 | **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
 | **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
-| **ManiFlow vs StandardFlowMatch** | DiTXFlowMatch(双时间步+consistency) vs DiTDiffusion(单时间步+纯flow) |
+| **ManiFlow vs StandardFlowMatch** | DiTX(双时间步+consistency) vs DiT(单时间步+纯flow) |
 | **DP3 vs MoE** | MoE 在 encoder 中引入 16-expert 稀疏路由 (top-2)，增容量不增推理 FLOPs |
 | **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
 | **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
 | **DP3 vs DQ-RISE** | DQ-RISE 通过 VQ-VAE 将手势离散化为 16 种码本 |
 | **Native vs FAAS** | FAAS 将 12D 手势映射到 32D 功能对齐空间，零 agent 代码变更 |
 
-> 详细对比见 [`CLAUDE.md`](CLAUDE.md) — Agent 变体章节。
+### Agent 继承模式
+
+添加新策略时，选择合适的父类：
+
+| 模式 | 父类 | 何时用 | 最近参考 |
+|------|------|--------|---------|
+| **A: UNet+Diffusion** | `UNetDiffusionAgent` | Flat encoding → UNet1D(FiLM) → Diffusion | `dp3.py` |
+| **B: DiTX+FlowMatch+Consistency** | `DiTXFlowMatchAgent` | Token seq → DiTX(cross-attn) → FlowMatch+consistency | `maniflow.py` |
+| **C: DiT+FlowMatch** | `StandardFlowMatchAgent` | Token seq → DiT(self-attn) → FlowMatch (no consistency) | — |
+| **D: Fully custom** | `BaseAgent` | 完全自定义 backbone + decoder | `sat.py`, `r3d.py` |
+
+> 详细集成步骤 → `dexmani-agent-integration` skill (`.agents/skills/`)
+
+### 动作空间
+
+| `action_key` | arm | hand | total | FAAS total |
+|-------------|-----|------|-------|-----------|
+| `action` (joint) | 7 (关节角) | 12 (XHand) | **19** | 39 (7+32) |
+| `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** | 41 (9+32) |
+
+`joint_state` dim ≡ action dim。FAAS 通过 `inject_faas_into_agent()` 对 DP/DP3/ManiFlow/MoE/MultiTask/R3D/SAT 零代码变更兼容。`use_aux_ee` 与 `use_faas` 互斥。
+
+### Action Decoder 类型
+
+| Decoder | 预测目标 | 推理 | 使用策略 |
+|---------|---------|------|---------|
+| `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
+| `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
+| `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
+| `StandardFlowMatch` | v (target_t=0) | Euler ODE | StandardFlowMatch |
 
 ---
 
@@ -105,6 +136,75 @@ python dexmani_policy/smoke_test.py dp3 maniflow standard_flowmatch sat  # 批�
 | `pad_before` / `pad_after` | **1** / **7** | 序列采样边界填充 |
 
 关系式：`n_obs_steps - 1 + n_action_steps ≤ horizon` → `1 + 8 ≤ 16 ✓`
+
+其他硬编码常量（不可从 config 修改）：
+
+| 项 | 值 | 位置 |
+|----|-----|------|
+| 优化器 | `AdamW(fused=True)` | `base.py:238` |
+| DDIM scheduler | `beta_start=0.0001, beta_end=0.02, schedule='squaredcos_cap_v2'` | `diffusion.py:39` |
+| StateMLP hidden | `[64]` | `state_mlp.py` |
+| ViT backbone dtype | `bfloat16 + attn_implementation="sdpa"` | dino/clip/siglip |
+| UNet conditioning | `cond_predict_scale=True` | `unet1d.py` |
+| FAAS 活跃索引 | `(1,2,3,6,7,8,12,13,17,18,22,23)`, 仅 index_bend scale=-1.0 | `faas_mapper.py` |
+
+---
+
+## 配置参考
+
+### 关键参数 (跨策略差异)
+
+| 参数 | dp3 | maniflow | standard_flowmatch | moe_dp | r3d | dqrise | sat |
+|------|-----|----------|-------------------|--------|-----|--------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
+| backbone | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
+| diff train/infer | 100/10 | -/4 | -/10 | 100/100 | 100/10 | 100/20 | -/10 |
+| prediction_type | sample | velocity | velocity | sample | sample | epsilon | velocity |
+| lr / wd | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
+| betas | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
+| val_ratio | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
+
+> dp = dp3 参数; dp3_faas = dp3 参数 + FAAS 维度 (action_dim=39/41, state_dim=39); multitask_dit = 8L×512, lr=1e-4
+> 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
+
+### 新建 Config
+
+复制 `dp3.yaml` 作为模板。必须字段：
+
+`policy_name, task_name, zarr_path, seed, horizon(16), n_obs_steps(2), n_action_steps(8), action_key, action_dim, dataloader, val_dataloader, dataset, agent, optimizer, ema, training, workspace, env_runner, eval, hydra`
+
+`action_dim` 公式：
+```yaml
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}  # 非FAAS
+# FAAS: ${eval:'41 if ${eq:${action_key},action_ee} else 39'}
+```
+
+`agent._target_` 指向 `dexmani_policy.agents.core.<name>.<Name>Agent`（无显式注册表，Hydra 直接导入）。
+
+### Eval 配置 (所有策略共享)
+
+```yaml
+eval:
+  denoise_steps: 10; use_ema: true
+  select_best: {initial_episodes: 25, batch_size: 5, max_episodes: 100}
+  offline: {episodes: 100}
+  demo: {episodes: 5, viewer_resolution: [1920, 1080]}
+```
+
+参数优先级: CLI > 子节覆盖 > eval 共享层 > 旧字段兼容 > hardcoded fallback
+
+### DDP 批次大小（每卡 × 4）
+
+| DDP 策略 | batch×4=总 | 单卡 batch |
+|---------|-----------|-----------|
+| ddp/dp | 48×4=**192** | 64 |
+| ddp/dqrise | 32×4=128 | 128 |
+| ddp/maniflow | 32×4=128 | 128 |
+| ddp/standard_flowmatch | 32×4=128 | 128 |
+| ddp/multitask_dit | 16×4=64 | 64 |
+| ddp/r3d | 16×4=64 | 48 |
+| ddp/dp3_faas | 32×4=128 | 128 |
 
 ---
 
@@ -132,6 +232,63 @@ Agent.compute_loss():                          Agent.predict_action():
 
 ---
 
+## 训练机制
+
+### NaN 两层防护
+
+| 层 | 何时 | 检测 | 响应 |
+|----|------|------|------|
+| 1 | backward **前** | `raw_loss` NaN | DDP 广播 → 保存 NaN debug checkpoint (最近5个) → raise |
+| 2 | optimizer.step **前** | 梯度 NaN | zero_grad → raise (含参数名) |
+
+诊断用 `dexmani-training-debug` skill。
+
+### 关键机制
+
+- **梯度累积**: `raw_loss / gradient_accumulation_steps` → backward; DDP 非边界 `model.no_sync()`, 仅边界 all-reduce
+- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; Resume 自动从 latest 恢复
+- **EMA**: 逆 gamma 衰减; BatchNorm affine 直接复制 (不平均)
+- **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3`(非FAAS) 和 `moe_dp` 有意仅单卡
+- **Shape 验证**: `BaseAgent._validate_batch()` 在 `compute_loss`/`predict_action` 入口校验 action ndim/horizon/dim + obs 时间维/模态batch一致性
+
+---
+
+## FAAS 集成
+
+FAAS (Function-Actuator-Aligned Space) 将 XHand 12 个原生关节映射到 **32 维功能对齐空间**（12 活跃 + 20 零填充），按关节功能组织。模型在 FAAS 空间训练/去噪，I/O 边界自动转换。
+
+```bash
+bash scripts/training/train.sh dp3_faas                           # joint mode (39D)
+bash scripts/training/train.sh dp3_faas 'action_key=action_ee'    # EE mode (41D)
+```
+
+| 层 | 位置 | 操作 |
+|----|------|------|
+| Dataset | `base_dataset.py._apply_faas_mapping()` | 增强后: native→FAAS |
+| 推理输入 | `base.py.predict_action()` | `_convert_obs_to_faas()` (幂等) |
+| 推理输出 | `base.py.predict_action_from_cond()` | unnormalize 后: FAAS→native |
+| 训练指标 | `base.py.compute_action_mse()` | GT 逆转换到 native 比较 |
+
+- **兼容**: DP, DP3, ManiFlow, MoE, MultiTask, R3D, SAT (仅 config 差异，零 agent 代码变更)
+- **不兼容**: DQRISE (VQ-VAE codebook 12D→32D 需重跑三阶段管道)
+- **互斥**: `use_aux_ee` 和 `use_faas` 不能同时启用
+
+---
+
+## DQ-RISE
+
+三阶段管道：VQ-VAE 预训练 → 码本提取+PCA排序 → 联合扩散训练。
+
+| 阶段 | 脚本 | 内容 |
+|------|------|------|
+| 1 | `dexmani_policy/tools/train_vq_hand.py` | VQ-VAE 预训练：EncoderMLP→ResidualVQ(2组×4码字=16种手势)→DecoderMLP |
+| 2 | `dexmani_policy/tools/extract_codebook.py` | 码本提取+PCA排序（使连续VQ索引平滑插值） |
+| 3 | `train.py dqrise` | 联合扩散训练：UNet输入从21D压缩到tcp_dim+1(10D)，epsilon预测 |
+
+关键发现：`vq_idx_used`（码本利用率）是决定性下游成功率预测器——<8→~0%，≥12→~60%。
+
+---
+
 ## 实验目录
 
 ```
@@ -153,14 +310,39 @@ experiments/
 
 ---
 
+## 设计约定
+
+以下设计在代码审查时容易被误判为 bug，但它们是有意为之：
+
+- **Normalizer 全量拟合**: 用全部 replay buffer (含验证集)。生态惯例 (ManiFlow/R3D/SAT/RoboTwin 均如此)。`limits` 模式下 val 不影响 min/max
+- **`tcp_dim` 命名**: joint模式=7(臂关节), ee模式=9(TCP位姿) — 历史命名，勿据此推断语义
+- **MoE forward 返回 `dict`** (含 `aux_loss`): `BaseAgent.compute_loss()` 统一处理 dict/Tensor
+- **MoE 无 bfloat16/compile**: gate softmax 需 float32; CUDA Graphs + MoE routing 内存开销大
+- **DQRISE 直接继承 `BaseAgent`**: `diffusion_action_dim = tcp_dim+1` ≠ `action_dim`，无法复用 UNetDiffusionAgent
+- **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
+- **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
+- **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0。StandardFlowMatch 无此机制
+- **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
+
+### 未启用功能 (不要意外激活)
+
+| 功能 | 位置 | 状态 |
+|------|------|------|
+| Modality Dropout | `base.py` | 全配置 `modality_dropout_probs=0.0` |
+| TokenCompressor | `obs_encoder/plugins/` | 未接入任何 config |
+| T5TextEncoder | `obs_encoder/text/t5.py` | 预留代码 |
+
+---
+
 ## 文档导航
 
 | 文档 | 内容 | 适合 |
 |:-----|:-----|:-----|
-| [`CLAUDE.md`](CLAUDE.md) | AI 工作速查 —— 完整 Agent 对比、训练/评测细节、配置速查、硬编码约定 | 日常开发 |
+| [`CLAUDE.md`](CLAUDE.md) | AI 工作速查 —— 命令、不变量、文件地图、Agent Skills | AI 编码助手 |
 | [`docs/项目架构.md`](docs/项目架构.md) | 架构全景 —— 完整目录树、模块依赖图、类层级、数据流、设计模式 | 深入理解 |
-| [`docs/评测机制.md`](docs/评测机制.md) | 评测全链路 —— CLI→Checkpoint→Agent→EnvRunner→SuccessRate 完整代码走读 | 评测开发 |
+| [`docs/仿真评测机制.md`](docs/仿真评测机制.md) | 评测全链路 —— CLI→Checkpoint→Agent→EnvRunner→SuccessRate 完整代码走读 | 评测开发 |
 | [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) | 远程训练部署 —— SSH 配置、三向同步、GPU 多租户、tmux 管理 | 服务器运维 |
+| [`docs/DP3-R3D-ManiFlow测试结果0808.md`](docs/DP3-R3D-ManiFlow测试结果0808.md) | 策略对比评测 —— DP3 vs R3D vs ManiFlow 五项任务成功率 + 里程碑分析 | 策略选型 |
 
 ---
 
@@ -187,8 +369,7 @@ experiments/
 - 直接路径 → 指定 `.pt` 文件
 
 **Q: 纯 FlowMatch 模式（无 consistency）能用吗？**
-可以。使用 `StandardFlowMatch` 策略（`standard_flowmatch.yaml`），基于 DiTDiffusion backbone（单时间步），无需 EMA 教师或 consistency 训练。
-旧的 ManiFlow 配置设 `use_ema_teacher_for_consistency: false` 也可禁用 consistency，但推理时 `target_t=dt>0` 落在训练分布外（DiTXFlowMatch 需要 `target_t` 参数），有分布偏移风险。
+可以。使用 `StandardFlowMatch` 策略（`standard_flowmatch.yaml`），基于 DiT backbone（单时间步），无需 EMA 教师或 consistency 训练。
 
 **Q: 如何修改观测/动作步数？**
 修改 `horizon`、`n_obs_steps`、`n_action_steps`，须满足 `n_obs_steps - 1 + n_action_steps ≤ horizon`。`pad_before`/`pad_after` 需同步调整。

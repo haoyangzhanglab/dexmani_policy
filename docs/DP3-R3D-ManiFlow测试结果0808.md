@@ -1,5 +1,7 @@
 # 策略对比: DP3 vs R3D vs ManiFlow
 
+> **文档导航**: [README](../README.md) — 项目概览 · [CLAUDE.md](../CLAUDE.md) — AI 工作速查 · [项目架构](项目架构.md) — 架构全景 · [仿真评测机制](仿真评测机制.md) — 评测全链路 · [SSH 部署](SSH服务器训练部署.md) — 远程训练
+>
 > 评测日期: 2026-08-08 ~ 2026-08-09 | 评测标准: 100-seed 最终成功率
 >
 > **注意**: 此文档中的 ManiFlow 指 `ManiFlowAgent`（DiTXFlowMatch + FlowMatchWithConsistency）。

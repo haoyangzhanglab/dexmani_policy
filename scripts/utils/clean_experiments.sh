@@ -35,7 +35,7 @@ Flags:
   --older-than DAYS     Only consider experiments older than DAYS.
   --include-active      Include experiments modified within SKIP_ACTIVE_MINUTES.
   --skip-active-min N   Override active threshold (default: ${SKIP_ACTIVE_MINUTES} min).
-  --toy-min-epochs N    Override toy threshold (default: ${TOY_MIN_EPOCHS} epochs).
+  --toy-min-steps N     Override toy threshold (default: ${TOY_MIN_STEPS} steps).
   --help, -h            Show this message.
 
 Examples:
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
         --older-than)       OLDER_THAN="$2"; shift ;;
         --include-active)   INCLUDE_ACTIVE=true ;;
         --skip-active-min)  SKIP_ACTIVE_MINUTES="$2"; shift ;;
-        --toy-min-epochs)   TOY_MIN_EPOCHS="$2"; shift ;;
+        --toy-min-steps)    TOY_MIN_STEPS="$2"; shift ;;
         --help|-h)          show_help ;;
         *) echo "Unknown arg: $1 (use --help for usage)"; exit 1 ;;
     esac
@@ -114,6 +114,17 @@ get_max_step() {
         [[ -n "$step" ]] && { step=$((10#$step)); [[ $step -gt $max ]] && max=$step; }
     done
     echo "$max"
+}
+
+# Recursively remove empty parent directories up to EXP_DIR.
+cleanup_parents() {
+    local exp_dir="$1" parent
+    parent="$(dirname "$exp_dir")"
+    while [[ "$parent" != "$EXP_DIR" ]] && [[ -d "$parent" ]] \
+        && [[ -z "$(ls -A "$parent" 2>/dev/null)" ]]; do
+        rmdir "$parent"
+        parent="$(dirname "$parent")"
+    done
 }
 
 # ── scan ──
@@ -195,12 +206,7 @@ if [[ ${#INCOMPLETE[@]} -gt 0 ]]; then
         echo "    -> ${INCOMPLETE_REASON[$exp_dir]}"
         if $FORCE; then
             rm -rf "$exp_dir"
-            # Clean up empty parent dirs
-            parent="$(dirname "$exp_dir")"
-            while [[ "$parent" != "$EXP_DIR" ]] && [[ -d "$parent" ]] && [[ -z "$(ls -A "$parent" 2>/dev/null)" ]]; do
-                rmdir "$parent"
-                parent="$(dirname "$parent")"
-            done
+            cleanup_parents "$exp_dir"
         fi
     done
     inc_hr=$(numfmt --to=iec "$TOTAL_INCOMPLETE_SIZE" 2>/dev/null || echo "${TOTAL_INCOMPLETE_SIZE} bytes")
@@ -216,7 +222,7 @@ fi
 if [[ ${#TOY[@]} -gt 0 ]]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    printf "  %s Class B: toy experiments (num_epochs < %d, %d total)\n" "$action_mode" "$TOY_MIN_EPOCHS" "${#TOY[@]}"
+    printf "  %s Class B: toy experiments (total_train_steps < %d, %d total)\n" "$action_mode" "$TOY_MIN_STEPS" "${#TOY[@]}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     for exp_dir in "${TOY[@]}"; do
         size_hr=$(du -sh "$exp_dir" 2>/dev/null | cut -f1)
@@ -230,11 +236,7 @@ if [[ ${#TOY[@]} -gt 0 ]]; then
         if $YES_ALL; then
             for exp_dir in "${TOY[@]}"; do
                 rm -rf "$exp_dir"
-                parent="$(dirname "$exp_dir")"
-                while [[ "$parent" != "$EXP_DIR" ]] && [[ -d "$parent" ]] && [[ -z "$(ls -A "$parent" 2>/dev/null)" ]]; do
-                    rmdir "$parent"
-                    parent="$(dirname "$parent")"
-                done
+                cleanup_parents "$exp_dir"
             done
             toy_hr=$(numfmt --to=iec "$TOTAL_TOY_SIZE" 2>/dev/null || echo "${TOTAL_TOY_SIZE} bytes")
             echo "  -> Deleted ${#TOY[@]} toy experiments, freed $toy_hr."
@@ -251,11 +253,7 @@ if [[ ${#TOY[@]} -gt 0 ]]; then
                             d="${TOY[$i]}"
                             [[ -d "$d" ]] || continue
                             rm -rf "$d"
-                            parent="$(dirname "$d")"
-                            while [[ "$parent" != "$EXP_DIR" ]] && [[ -d "$parent" ]] && [[ -z "$(ls -A "$parent" 2>/dev/null)" ]]; do
-                                rmdir "$parent"
-                                parent="$(dirname "$parent")"
-                            done
+                            cleanup_parents "$d"
                         done
                         echo "    -> Deleted current and all remaining toy experiments."
                         break
@@ -266,11 +264,7 @@ if [[ ${#TOY[@]} -gt 0 ]]; then
                         ;;
                     y|Y)
                         rm -rf "$exp_dir"
-                        parent="$(dirname "$exp_dir")"
-                        while [[ "$parent" != "$EXP_DIR" ]] && [[ -d "$parent" ]] && [[ -z "$(ls -A "$parent" 2>/dev/null)" ]]; do
-                            rmdir "$parent"
-                            parent="$(dirname "$parent")"
-                        done
+                        cleanup_parents "$exp_dir"
                         echo "    -> Deleted."
                         ;;
                     *)

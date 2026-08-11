@@ -46,6 +46,7 @@ while [[ $# -gt 0 ]]; do
         --all)
             SYNC_TARGET="--all"
             SEARCH_ROOT="${2:-experiments}"
+            [[ -n "${2:-}" ]] && shift
             [[ "$SEARCH_ROOT" != "--all" ]] || SEARCH_ROOT="experiments"
             ;;
         --help|-h)       show_help ;;

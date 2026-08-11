@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run|-n)  DRY_RUN=true; shift ;;
         --sync-data)   SYNC_DATA=true; shift ;;
         --gpus)
-            GPU_IDS="$2"
+            GPU_IDS="${2:?Error: --gpus requires a value (e.g., --gpus 0,1,2,3)}"
             shift 2
             ;;
         *) break ;;
@@ -59,6 +59,28 @@ done
 CONFIG="${1:?Error: specify config name (e.g., dp3, ddp/maniflow)}"
 TASK="${2:?Error: specify task name (e.g., pour)}"
 shift 2
+
+# Validate config name: alphanumeric, /, _, -, . only
+if [[ ! "$CONFIG" =~ ^[a-zA-Z0-9_/.-]+$ ]]; then
+    echo "Error: invalid config name '$CONFIG' (allowed: a-z, A-Z, 0-9, /, _, -, .)" >&2
+    exit 1
+fi
+
+# Validate task name: alphanumeric, _, - only
+if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: invalid task name '$TASK' (allowed: a-z, A-Z, 0-9, _, -)" >&2
+    exit 1
+fi
+
+# Validate Hydra overrides: reject shell metacharacters
+for _override in "$@"; do
+    if [[ "$_override" =~ [\;\'\"\`\|\&\<\>\(\)\{\}\#\!\$\\] ]]; then
+        echo "Error: override contains unsafe characters: $_override" >&2
+        echo "  Allowed: letters, digits, =, ., _, -, /" >&2
+        exit 1
+    fi
+done
+
 HYDRA_OVERRIDES="task_name=$TASK"
 for override in "$@"; do
     HYDRA_OVERRIDES="$HYDRA_OVERRIDES $override"
@@ -88,6 +110,10 @@ for _override in "$@"; do
     fi
 done
 if [[ -n "$_seed" ]]; then
+    if [[ ! "$_seed" =~ ^[0-9]+$ ]]; then
+        echo "Error: training.seed must be a positive integer, got: $_seed" >&2
+        exit 1
+    fi
     SESSION="${SESSION}_s${_seed}"
 fi
 
@@ -157,6 +183,11 @@ echo ""
 echo "=== Pre-flight OK ==="
 echo ""
 
+# Escape single quotes in session name for safe tmux transport.
+# Input validation (above) guarantees no shell metacharacters, but single-quote
+# escaping is defense-in-depth for the tmux single-quoted context.
+SESSION_SAFE="${SESSION//\'/\'\\\'\'}"
+
 # ═══════════════════════════════════════════════════════════════════
 # Launch
 # ═══════════════════════════════════════════════════════════════════
@@ -165,13 +196,13 @@ if $FOREGROUND; then
     ssh -t "$SERVER" "$REMOTE_CMD"
 else
     # Kill existing session with same name, then create new one
-    ssh "$SERVER" "tmux kill-session -t '$SESSION' 2>/dev/null; true"
-    ssh "$SERVER" "tmux new-session -d -s '$SESSION' '$REMOTE_CMD; echo \"\"; echo \"Training finished. Press Enter to close.\"; read'"
+    ssh "$SERVER" "tmux kill-session -t '$SESSION_SAFE' 2>/dev/null; true"
+    ssh "$SERVER" "tmux new-session -d -s '$SESSION_SAFE' '$REMOTE_CMD; echo \"\"; echo \"Training finished. Press Enter to close.\"; read'"
 
     echo "╔══════════════════════════════════════════╗"
     echo "║  Training started (tmux: $SESSION)"
     echo "╠══════════════════════════════════════════╣"
-    echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION'"
+    echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION_SAFE'"
     echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"
     echo "║  Stop:    bash scripts/remote/stop_remote.sh $SESSION"
     echo "╚══════════════════════════════════════════╝"

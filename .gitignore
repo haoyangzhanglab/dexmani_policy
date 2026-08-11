@@ -142,8 +142,8 @@ dmypy.json
 robot_data/
 experiments/
 
-.codex/
-.claude/
+# .codex/
+# .claude/
 .ruff_cache/
 .vscode/
 pretrained_models/
