@@ -197,13 +197,20 @@ if $FOREGROUND; then
 else
     # Kill existing session with same name, then create new one
     ssh "$SERVER" "tmux kill-session -t '$SESSION_SAFE' 2>/dev/null; true"
-    ssh "$SERVER" "tmux new-session -d -s '$SESSION_SAFE' '$REMOTE_CMD; echo \"\"; echo \"Training finished. Press Enter to close.\"; read'"
+    # Launch in a detached tmux session that self-destructs on completion.
+    # stdout/stderr are redirected to logs/<session>.log (root-anchored `logs/`
+    # is excluded from sync_code --delete, and .gitignore already lists it), so a
+    # crash traceback survives after the session closes. No trailing `read`, so
+    # once training exits — checkpoints already saved, GPU memory freed — tmux
+    # destroys the session automatically.
+    ssh "$SERVER" "tmux new-session -d -s '$SESSION_SAFE' 'mkdir -p $SERVER_PROJ/logs && { $REMOTE_CMD; _rc=\$?; if [ \"\$_rc\" -eq 0 ]; then echo \"[train_remote] $SESSION finished successfully (exit 0).\"; else echo \"[train_remote] $SESSION FAILED (exit \$_rc).\"; fi; } > $SERVER_PROJ/logs/${SESSION_SAFE}.log 2>&1'"
 
     echo "╔══════════════════════════════════════════╗"
     echo "║  Training started (tmux: $SESSION)"
     echo "╠══════════════════════════════════════════╣"
     echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION_SAFE'"
     echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"
+    echo "║  Console: ssh $SERVER tail -f $SERVER_PROJ/logs/${SESSION_SAFE}.log"
     echo "║  Stop:    bash scripts/remote/stop_remote.sh $SESSION"
     echo "╚══════════════════════════════════════════╝"
 fi
