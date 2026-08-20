@@ -36,8 +36,8 @@ bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
 ```
 
-> 单卡策略: `dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat standard_flowmatch`
-> DDP 策略: `ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat ddp/standard_flowmatch`
+> 单卡策略: `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat standard_flowmatch`
+> DDP 策略: `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat ddp/standard_flowmatch`
 
 ### 评测
 
@@ -69,6 +69,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **DP** | RGB + Joint | DINO/CLIP/SigLIP + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp.yaml` |
 | **DP3** | PC(1024,3) + Joint | PointNeXT + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
 | **ManiFlow** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
+| **ActionFlow** | PC(1024,6) + Joint | PointNeXT(patch) + SiLU MLP | ActionFlowDiT (AdaLN-Zero) | SimpleRectifiedFlow | `action_flow.yaml` |
 | **StandardFlowMatch** | PC(1024,6) + Joint | PointNetDense(per-pt) + StateMLP | DiT (self-attn) | FlowMatch (纯) | `standard_flowmatch.yaml` |
 | **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDPM | `moe_dp.yaml` |
 | **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
@@ -84,6 +85,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
 | **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
 | **ManiFlow vs StandardFlowMatch** | DiTX(双时间步+consistency) vs DiT(单时间步+纯flow) |
+| **ManiFlow vs ActionFlow** | FlowMatch+Consistency(EMA教师) vs SimpleRectifiedFlow(噪声偏移, KV cache, 2步推理) |
 | **DP3 vs MoE** | MoE 在 encoder 中引入 16-expert 稀疏路由 (top-2)，增容量不增推理 FLOPs |
 | **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
 | **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
@@ -120,6 +122,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
 | `StandardFlowMatch` | v (target_t=0) | Euler ODE | StandardFlowMatch |
+| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler ODE (KV cache) | ActionFlow |
 
 ---
 
@@ -154,16 +157,16 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | dp3 | maniflow | standard_flowmatch | moe_dp | r3d | dqrise | sat |
-|------|-----|----------|-------------------|--------|-----|--------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
-| backbone | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
-| diff train/infer | 100/10 | -/4 | -/10 | 100/100 | 100/10 | 100/20 | -/10 |
-| prediction_type | sample | velocity | velocity | sample | sample | epsilon | velocity |
-| lr / wd | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
-| betas | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
-| val_ratio | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
+| 参数 | action_flow | dp3 | maniflow | standard_flowmatch | moe_dp | r3d | dqrise | sat |
+|------|------------|-----|----------|-------------------|--------|-----|--------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
+| backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
+| diff train/infer | -/2 | 100/10 | -/4 | -/10 | 100/100 | 100/10 | 100/20 | -/10 |
+| prediction_type | velocity | sample | velocity | velocity | sample | sample | epsilon | velocity |
+| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
+| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
+| val_ratio | 0.05 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
 
 > dp = dp3 参数; dp3_faas = dp3 参数 + FAAS 维度 (action_dim=39/41, state_dim=39); multitask_dit = 8L×512, lr=1e-4
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
@@ -198,6 +201,7 @@ eval:
 
 | DDP 策略 | batch×4=总 | 单卡 batch |
 |---------|-----------|-----------|
+| ddp/action_flow | 32×4=128 | 128 |
 | ddp/dp | 48×4=**192** | 64 |
 | ddp/dqrise | 32×4=128 | 128 |
 | ddp/maniflow | 32×4=128 | 128 |

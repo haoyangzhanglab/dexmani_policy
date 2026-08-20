@@ -1,10 +1,9 @@
-# ManiFlow — Flow Matching with rectified flow + consistency training
-# Encoder:  PointNetDense (per-point features, 1024 points, 128d, xyz+rgb)
-# Decoder:  DiTX (cross-attention conditioning) + Euler ODE integration
+# ActionFlow — action-centric DiT + Rectified Flow policy
+# Encoder:  PointNextPatchTokenizer (token seq) + learned type embeddings
+# Decoder:  ActionFlowDiT (temporal self-attn + obs cross-attn + AdaLN-Zero) + SimpleRectifiedFlow + NoiseShift
 # Modality: point_cloud + joint_state → action
-# Key:      use_ema_teacher_for_consistency=true, target_t=0 for rectified flow
 
-policy_name: maniflow
+policy_name: action_flow
 
 # ── Task ──
 task_name: pick_apple_messy
@@ -15,7 +14,7 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action                    # action | action_ee
+action_key: action
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 # ── Dataloader ──
@@ -51,8 +50,6 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Data augmentation aligned to official R3D-Policy.
-  # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
@@ -62,16 +59,16 @@ dataset:
 
 # ── Agent ──
 agent:
-  _target_: dexmani_policy.agents.core.maniflow.ManiFlowAgent
+  _target_: dexmani_policy.agents.core.action_flow.ActionFlowAgent
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: pointnet_dense
-  pc_dim: 6                       # xyz+rgb
+  encoder_type: pointnext_tokenizer
+  pc_dim: 6
   state_dim: 19
-  num_points: 1024                # per-point token count per frame
+  num_points: 1024
 
   fps_random_config:
     use_random: true
@@ -79,43 +76,34 @@ agent:
     random_noise_scale: 0.0
     use_shuffle_output: true
 
-  # PointNetDense encoder — per-point MLP, no pooling
   pc_encoder_config:
-    out_channels: 128
-    num_points: 1024
-    hidden_dims: [64, 128, 256]
+    num_patches: 96
+    token_channels: 128
+    stem_channels: 64
+    patch_radii: [0.04, 0.08]
+    patch_neighbors: [16, 32]
 
-  # DiTX backbone
-  n_layers: 12
-  hidden_dim: 768
-  n_head: 8
-  mlp_ratio: 4.0
-  p_drop_attn: 0.1
-  qkv_bias: false
-  qk_norm: false
-  pre_norm_modality: false
+  # ActionFlow DiT backbone
+  hidden_dim: 512
+  depth: 8
+  temporal_heads: 2
+  obs_heads: 8
+  mlp_ratio: 2.5
 
-  timestep_embed_dim: 128
-  target_t_embed_dim: 128
-
-  # Flow matching
-  denoise_timesteps: 10
-  flow_batch_ratio: 0.75
-  t_sample_mode_for_flow: beta
-  t_sample_mode_for_consistency: discrete
-  dt_sample_mode_for_consistency: uniform
-  target_t_sample_mode: relative
+  # Simple rectified flow
+  denoise_steps: 2
+  noise_shift_alpha: 2.0
 
   modality_dropout_probs:
-    joint_state: 0.0                # 20% state dropout — forces reliance on point cloud
+    joint_state: 0.0
 
 # ── Optimizer ──
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-3            # DiT backbone: high wd is standard for transformers (vs 1e-6 for UNet)
-  betas: [0.9, 0.95]              # lower β1 = shorter gradient EMA, common for flow matching
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.95]
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6        # PC encoder: lighter regularization than DiT backbone
+  obs_weight_decay: 1.0e-6
 
 # ── EMA ──
 ema:
@@ -133,7 +121,7 @@ training:
   use_bfloat16: true
   use_compile: true
   use_ema: true
-  use_ema_teacher_for_consistency: true   # required: inference uses target_t=dt>0
+  use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
@@ -155,7 +143,7 @@ workspace:
     id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
-    video_fps: 15  # decoupled from env_runner; default matches frame_skip(16)/time_step(1/240)
+    video_fps: 15
 
   checkpoint_cfg:
     _target_: dexmani_policy.training.workspace.CheckpointConfig
@@ -168,29 +156,18 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 25        # PC-based policies: 25; RGB-based: 20
+  default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
-  # ── ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705) ──
-  # Blend overlapping action-chunk predictions via exponential weighting
-  # to smooth transitions between consecutive inference calls.
-  # Default: 0.01 (verified +2.9pp avg across 7 tasks).  Set to null to disable.
   temporal_ensemble_coeff: 0.01
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
-    # ── Domain randomization (convenience switches) ──
-    # texture_random: when true, enables scene texture + per-episode skybox +
-    #   light randomization + object texture + camera pose perturbation.
-    #   Does NOT enable crazy_light (per-step color flashing).
     texture_random: false
-    # instance_random: when true, enables model_id randomization.
     instance_random: true
-    # table_random: when true, enables table height randomization
-    #   (randomize_table_height with range [-0.05, 0.05]).
     table_random: true
 
 # ── Eval ──
 eval:
-  denoise_steps: 4
+  denoise_steps: 2
   denoise_timesteps_list: null
   use_ema: true
 
@@ -209,6 +186,7 @@ eval:
   video:
     enabled: true
     fps: null
+
 # ── Hydra ──
 hydra:
   job:

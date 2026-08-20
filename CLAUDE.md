@@ -24,8 +24,8 @@ bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train_ddp.sh ddp/maniflow pour
 ```
 
-> 单卡 (10): `dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat standard_flowmatch`
-> DDP (8): `ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat ddp/standard_flowmatch`
+> 单卡 (11): `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat standard_flowmatch`
+> DDP (9): `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat ddp/standard_flowmatch`
 > 全部 `total_train_steps: 100000`
 
 ### 评测
@@ -96,7 +96,8 @@ BaseAgent
   ├── SATAgent                  ← SAT (SATBackbone + SATFlowMatch)
   ├── MultiTaskAgent            ← MultiTask (DiT + Diffusion/FlowMatch)
   ├── R3DAgent                  ← R3D (OneWayTransformer + Diffusion)
-  └── DQRISEAgent               ← DQ-RISE (自定义 UNet + Diffusion, action_dim 缩减)
+  ├── DQRISEAgent               ← DQ-RISE (自定义 UNet + Diffusion, action_dim 缩减)
+  └── ActionFlowAgent           ← ActionFlow (ActionFlowDiT + SimpleRectifiedFlow, KV cache)
 ```
 
 ### Agent 继承模式 (添加新 Agent 时选)
@@ -106,7 +107,7 @@ BaseAgent
 | **A: UNet+Diffusion** | `UNetDiffusionAgent` | Flat encoding → UNet1D(FiLM) → Diffusion | `dp3.py` |
 | **B: DiTX+FlowMatch+Consistency** | `DiTXFlowMatchAgent` | Token seq → DiTX(cross-attn) → FlowMatch+consistency | `maniflow.py` |
 | **C: DiT+FlowMatch** | `StandardFlowMatchAgent` | Token seq → DiT(self-attn) → FlowMatch (no consistency) | — |
-| **D: Fully custom** | `BaseAgent` | 完全自定义 backbone + decoder | `sat.py`, `r3d.py` |
+| **D: Fully custom** | `BaseAgent` | 完全自定义 backbone + decoder | `sat.py`, `r3d.py`, `action_flow.py` |
 
 ### Agent 对比 (找最接近的参考实现)
 
@@ -116,6 +117,7 @@ BaseAgent
 | **DP** | RGB+state | DINO/CLIP/SigLIP+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | RGB, channels_last |
 | **ManiFlow** | PC+state | PointNeXT+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | Token条件, EMA教师, wd=1e-3 |
 | **StandardFlowMatch** | PC+state | PointNeXT+StateMLP | DiT(self-attn) | StandardFlowMatch | 纯 flow matching, 无 consistency |
+| **ActionFlow** | PC+state | PointNeXT+SiLU MLP | ActionFlowDiT(AdaLN-Zero) | SimpleRectifiedFlow | 噪声偏移采样, KV cache, temporal attn, 可学习 type embedding |
 | **MoE** | RGB+state | R3M+StateMLP+MoE | UNet1D(FiLM) | Diffusion(DDPM 100步) | 16专家top-2, **无bfloat16/compile** |
 | **SAT** | PC+state | PointNeXT+StateMLP | SATBackbone(EJC+MMAttn) | SATFlowMatch | (B,Da,T), shuffle, compile=default |
 | **R3D** | PC+state | Uni3D+StateMLP | OneWayTransformer | Diffusion(DDIM 10步) | 级联mask, 分组loss |
@@ -140,6 +142,7 @@ BaseAgent
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
 | `StandardFlowMatch` | v (target_t=0) | Euler ODE | StandardFlowMatch |
+| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler ODE (KV cache) | ActionFlow |
 
 ---
 
@@ -147,23 +150,23 @@ BaseAgent
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | dp3 | maniflow | standard_flowmatch | moe_dp | r3d | dqrise | sat |
-|------|-----|----------|-------------------|--------|-----|--------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
-| backbone | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
-| diff train/infer | 100/10 | -/4 | -/10 | 100/100 | 100/10 | 100/20 | -/10 |
-| prediction_type | sample | velocity | velocity | sample | sample | epsilon | velocity |
-| lr / wd | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
-| betas | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
-| val_ratio | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
+| 参数 | action_flow | dp3 | maniflow | standard_flowmatch | moe_dp | r3d | dqrise | sat |
+|------|------------|-----|----------|-------------------|--------|-----|--------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
+| backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
+| diff train/infer | -/2 | 100/10 | -/4 | -/10 | 100/100 | 100/10 | 100/20 | -/10 |
+| prediction_type | velocity | sample | velocity | velocity | sample | sample | epsilon | velocity |
+| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
+| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
+| val_ratio | 0.05 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
 
 > dp = dp3 参数; dp3_faas = dp3 参数 + FAAS 维度 (action_dim=39/41, state_dim=39); multitask_dit = 8L×512, lr=1e-4, val=0.05
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
 
 `action_dim` 公式: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}` (FAAS: 39/41)
 `agent._target_`: `dexmani_policy.agents.core.<name>.<Name>Agent` (Hydra 直接导入，无显式注册表)
-Eval 所有策略共享 `denoise_steps=10, use_ema=true`；参数优先级 CLI > 子节 > eval 共享层。
+Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, standard_flowmatch=4, dqrise=20, 其余=10)；use_ema=true 共享。；参数优先级 CLI > 子节 > eval 共享层。
 
 > Config 模板字段清单、Eval YAML 结构 → [README](README.md#配置参考)
 
@@ -189,6 +192,7 @@ Eval 所有策略共享 `denoise_steps=10, use_ema=true`；参数优先级 CLI >
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
 - **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0。StandardFlowMatch 无此机制
+- **ActionFlow 独立实现**: `action_flow_flowmatch.py` / `action_flow_dit.py` 完全独立，不共享 `time_sampler.py` / `flowmatch.py` / `ditx.py`。**不要合并或交叉引用**
 - **DDP 覆盖不全**: `dp3`(非FAAS) 和 `moe_dp` 有意仅单卡
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
 
@@ -210,7 +214,7 @@ dexmani_policy/
   train_ddp.py                # DDP 入口 (mp.spawn)
   eval_best_ckpt.py           # 离线评测 (Hydra-free CLI)
   smoke_test.py               # 构建验证 (6 阶段)
-  configs/                    # 10 YAML + 8 DDP overlay
+  configs/                    # 10 YAML + 9 DDP overlay
   agents/
     core/                     # BaseAgent + 9 variants
     action_decoders/          # Diffusion, FlowMatch variants
@@ -230,7 +234,7 @@ dexmani_policy/
 |-----------|---------|
 | 加 UNet+Diffusion agent | `dp3.py` + `dp3.yaml` |
 | 加 Transformer+FlowMatch agent | `maniflow.py` + `maniflow.yaml` |
-| 加完全自定义 backbone agent | `sat.py` + `sat.yaml` |
+| 加完全自定义 backbone agent | `sat.py` + `sat.yaml` 或 `action_flow.py` + `action_flow.yaml` |
 | 加 FAAS 变体 | `dp3_faas.yaml` (继承 dp3，仅覆盖维度) |
 | 加 DDP overlay | `configs/ddp/maniflow.yaml` |
 | 改数据增强 | `datasets/base_dataset.py` → `apply_augmentation()` |
