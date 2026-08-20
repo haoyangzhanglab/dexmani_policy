@@ -5,8 +5,6 @@
 > 评测日期: 2026-08-08 ~ 2026-08-13 | 评测标准: 100-seed 最终成功率
 >
 > **注意**: 此文档中的 ManiFlow 指 `ManiFlowAgent`（DiTXFlowMatch + FlowMatchWithConsistency）。
-> 后续新增的 `StandardFlowMatch`（DiTDiffusion + 纯 FlowMatch，无 Consistency）是独立变体，未包含在此对比中。
-
 ## 总览
 
 | 任务 | DP3 | R3D | ManiFlow | 最佳 |

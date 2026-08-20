@@ -24,8 +24,8 @@ bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train_ddp.sh ddp/maniflow pour
 ```
 
-> 单卡 (11): `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat standard_flowmatch`
-> DDP (9): `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat ddp/standard_flowmatch`
+> 单卡 (10): `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat`
+> DDP (8): `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
 > 全部 `total_train_steps: 100000`
 
 ### 评测
@@ -92,7 +92,6 @@ Config (Hydra YAML) → Dataset (Zarr→ReplayBuffer→Sampler→__getitem__)
 BaseAgent
   ├── UNetDiffusionAgent        ← DP, DP3, MoE (UNet1D + Diffusion)
   ├── DiTXFlowMatchAgent        ← ManiFlow (DiTX + FlowMatchWithConsistency)
-  ├── StandardFlowMatchAgent    ← Standard FlowMatch (DiT + StandardFlowMatch, 无 consistency)
   ├── SATAgent                  ← SAT (SATBackbone + SATFlowMatch)
   ├── MultiTaskAgent            ← MultiTask (DiT + Diffusion/FlowMatch)
   ├── R3DAgent                  ← R3D (OneWayTransformer + Diffusion)
@@ -106,7 +105,6 @@ BaseAgent
 |------|------|--------|---------|
 | **A: UNet+Diffusion** | `UNetDiffusionAgent` | Flat encoding → UNet1D(FiLM) → Diffusion | `dp3.py` |
 | **B: DiTX+FlowMatch+Consistency** | `DiTXFlowMatchAgent` | Token seq → DiTX(cross-attn) → FlowMatch+consistency | `maniflow.py` |
-| **C: DiT+FlowMatch** | `StandardFlowMatchAgent` | Token seq → DiT(self-attn) → FlowMatch (no consistency) | — |
 | **D: Fully custom** | `BaseAgent` | 完全自定义 backbone + decoder | `sat.py`, `r3d.py`, `action_flow.py` |
 
 ### Agent 对比 (找最接近的参考实现)
@@ -116,7 +114,6 @@ BaseAgent
 | **DP3** | PC+state | PointNeXT+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | **最简参考**, pc_dim=3 |
 | **DP** | RGB+state | DINO/CLIP/SigLIP+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | RGB, channels_last |
 | **ManiFlow** | PC+state | PointNeXT+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | Token条件, EMA教师, wd=1e-3 |
-| **StandardFlowMatch** | PC+state | PointNeXT+StateMLP | DiT(self-attn) | StandardFlowMatch | 纯 flow matching, 无 consistency |
 | **ActionFlow** | PC+state | PointNeXT+SiLU MLP | ActionFlowDiT(AdaLN-Zero) | SimpleRectifiedFlow | 噪声偏移采样, KV cache, temporal attn, 可学习 type embedding |
 | **MoE** | RGB+state | R3M+StateMLP+MoE | UNet1D(FiLM) | Diffusion(DDPM 100步) | 16专家top-2, **无bfloat16/compile** |
 | **SAT** | PC+state | PointNeXT+StateMLP | SATBackbone(EJC+MMAttn) | SATFlowMatch | (B,Da,T), shuffle, compile=default |
@@ -141,7 +138,6 @@ BaseAgent
 | `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `StandardFlowMatch` | v (target_t=0) | Euler ODE | StandardFlowMatch |
 | `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler ODE (KV cache) | ActionFlow |
 
 ---
@@ -150,7 +146,7 @@ BaseAgent
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | action_flow | dp3 | maniflow | standard_flowmatch | moe_dp | r3d | dqrise | sat |
+| 参数 | action_flow | dp3 | maniflow | moe_dp | r3d | dqrise | sat |
 |------|------------|-----|----------|-------------------|--------|-----|--------|-----|
 | action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
 | backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
@@ -166,7 +162,7 @@ BaseAgent
 
 `action_dim` 公式: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}` (FAAS: 39/41)
 `agent._target_`: `dexmani_policy.agents.core.<name>.<Name>Agent` (Hydra 直接导入，无显式注册表)
-Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, standard_flowmatch=4, dqrise=20, 其余=10)；use_ema=true 共享。；参数优先级 CLI > 子节 > eval 共享层。
+Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其余=10)；use_ema=true 共享。；参数优先级 CLI > 子节 > eval 共享层。
 
 > Config 模板字段清单、Eval YAML 结构 → [README](README.md#配置参考)
 
@@ -191,7 +187,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, standard_flowmat
 - **DQRISE 直接继承 `BaseAgent`**: `diffusion_action_dim = tcp_dim+1` ≠ `action_dim`，无法复用 UNetDiffusionAgent。**不要重构**
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
-- **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0。StandardFlowMatch 无此机制
+- **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0
 - **ActionFlow 独立实现**: `action_flow_flowmatch.py` / `action_flow_dit.py` 完全独立，不共享 `time_sampler.py` / `flowmatch.py` / `ditx.py`。**不要合并或交叉引用**
 - **DDP 覆盖不全**: `dp3`(非FAAS) 和 `moe_dp` 有意仅单卡
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink

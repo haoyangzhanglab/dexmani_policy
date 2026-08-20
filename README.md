@@ -36,8 +36,8 @@ bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
 ```
 
-> 单卡策略: `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat standard_flowmatch`
-> DDP 策略: `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat ddp/standard_flowmatch`
+> 单卡策略: `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat`
+> DDP 策略: `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
 
 ### 评测
 
@@ -70,7 +70,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **DP3** | PC(1024,3) + Joint | PointNeXT + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
 | **ManiFlow** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
 | **ActionFlow** | PC(1024,6) + Joint | PointNeXT(patch) + SiLU MLP | ActionFlowDiT (AdaLN-Zero) | SimpleRectifiedFlow | `action_flow.yaml` |
-| **StandardFlowMatch** | PC(1024,6) + Joint | PointNetDense(per-pt) + StateMLP | DiT (self-attn) | FlowMatch (纯) | `standard_flowmatch.yaml` |
 | **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDPM | `moe_dp.yaml` |
 | **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
 | **R3D** | PC(1024,3) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
@@ -84,7 +83,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 |:---------|:-----|
 | **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
 | **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
-| **ManiFlow vs StandardFlowMatch** | DiTX(双时间步+consistency) vs DiT(单时间步+纯flow) |
 | **ManiFlow vs ActionFlow** | FlowMatch+Consistency(EMA教师) vs SimpleRectifiedFlow(噪声偏移, KV cache, 2步推理) |
 | **DP3 vs MoE** | MoE 在 encoder 中引入 16-expert 稀疏路由 (top-2)，增容量不增推理 FLOPs |
 | **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
@@ -100,7 +98,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 |------|------|--------|---------|
 | **A: UNet+Diffusion** | `UNetDiffusionAgent` | Flat encoding → UNet1D(FiLM) → Diffusion | `dp3.py` |
 | **B: DiTX+FlowMatch+Consistency** | `DiTXFlowMatchAgent` | Token seq → DiTX(cross-attn) → FlowMatch+consistency | `maniflow.py` |
-| **C: DiT+FlowMatch** | `StandardFlowMatchAgent` | Token seq → DiT(self-attn) → FlowMatch (no consistency) | — |
 | **D: Fully custom** | `BaseAgent` | 完全自定义 backbone + decoder | `sat.py`, `r3d.py` |
 
 > 详细集成步骤 → `dexmani-agent-integration` skill (`.agents/skills/`)
@@ -121,7 +118,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `StandardFlowMatch` | v (target_t=0) | Euler ODE | StandardFlowMatch |
 | `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler ODE (KV cache) | ActionFlow |
 
 ---
@@ -157,7 +153,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | action_flow | dp3 | maniflow | standard_flowmatch | moe_dp | r3d | dqrise | sat |
+| 参数 | action_flow | dp3 | maniflow | moe_dp | r3d | dqrise | sat |
 |------|------------|-----|----------|-------------------|--------|-----|--------|-----|
 | action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
 | backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
@@ -205,7 +201,6 @@ eval:
 | ddp/dp | 48×4=**192** | 64 |
 | ddp/dqrise | 32×4=128 | 128 |
 | ddp/maniflow | 32×4=128 | 128 |
-| ddp/standard_flowmatch | 32×4=128 | 128 |
 | ddp/multitask_dit | 16×4=64 | 64 |
 | ddp/r3d | 16×4=64 | 48 |
 | ddp/dp3_faas | 32×4=128 | 128 |
@@ -325,7 +320,7 @@ experiments/
 - **DQRISE 直接继承 `BaseAgent`**: `diffusion_action_dim = tcp_dim+1` ≠ `action_dim`，无法复用 UNetDiffusionAgent
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
-- **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0。StandardFlowMatch 无此机制
+- **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
 
 ### 未启用功能 (不要意外激活)
@@ -371,9 +366,6 @@ experiments/
 - `latest` → `latest.pt` symlink
 - `20pct`..`100pct` → 里程碑 checkpoint
 - 直接路径 → 指定 `.pt` 文件
-
-**Q: 纯 FlowMatch 模式（无 consistency）能用吗？**
-可以。使用 `StandardFlowMatch` 策略（`standard_flowmatch.yaml`），基于 DiT backbone（单时间步），无需 EMA 教师或 consistency 训练。
 
 **Q: 如何修改观测/动作步数？**
 修改 `horizon`、`n_obs_steps`、`n_action_steps`，须满足 `n_obs_steps - 1 + n_action_steps ≤ horizon`。`pad_before`/`pad_after` 需同步调整。

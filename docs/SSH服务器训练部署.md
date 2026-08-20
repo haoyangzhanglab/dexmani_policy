@@ -540,7 +540,6 @@ train.py <策略> <任务> [Hydra覆盖参数...]
 | DP3 | `dp3` | — |
 | DP3 + FAAS | `dp3_faas` | `ddp/dp3_faas` |
 | ManiFlow | `maniflow` | `ddp/maniflow` |
-| StandardFlowMatch | `standard_flowmatch` | `ddp/standard_flowmatch` |
 | MultiTask | `multitask_dit` | `ddp/multitask_dit` |
 | R3D | `r3d` | `ddp/r3d` |
 | DQ-RISE | `dqrise` | `ddp/dqrise` |

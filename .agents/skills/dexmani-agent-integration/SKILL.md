@@ -19,8 +19,7 @@ no explicit registry — new agents are wired through `agent._target_` in the YA
 Confirm with the user, or state the assumption explicitly:
 
 - Which **inheritance path**: `UNetDiffusionAgent` (DP3/MoE-style, UNet+Diffusion), `DiTXFlowMatchAgent`
-  (ManiFlow-style, DiTX+FlowMatch+Consistency), `StandardFlowMatchAgent` (DiT+FlowMatch, no
-  consistency), or `BaseAgent` direct (SAT, R3D, DQRISE — full control over backbone + decoder).
+  (ManiFlow-style, DiTX+FlowMatch+Consistency), or `BaseAgent` direct (SAT, R3D, DQRISE — full control over backbone + decoder).
 - Which **modalities**: point cloud (`pc_dim`) or RGB (`rgb_backbone_name`).
 - Which **action space**: joint (19D), action_ee (21D), or FAAS (39/41D).
 - Whether **DDP** multi-GPU support is needed.
@@ -37,7 +36,6 @@ Choose one of four patterns (reference the existing agent nearest to your target
 |---------|-------------|---------------------|------------------------|---------|
 | A: UNet+Diffusion | `UNetDiffusionAgent` | `(out_dim,)` flat vector | `obs_encoder.out_dim * n_obs_steps` → `context_dim` | `dp3.py`, `dp.py`, `moe.py` |
 | B: DiTX+FlowMatch+Consistency | `DiTXFlowMatchAgent` | `(num_tokens, token_dim)` sequence | `num_obs_tokens`, `obs_token_dim` | (reserved for ManiFlow-like) |
-| C: DiT+StandardFlowMatch | `StandardFlowMatchAgent` | Same as B | Same as B (no consistency teacher) | (reserved) |
 | D: Direct BaseAgent | `BaseAgent` | Arbitrary | Build backbone + decoder yourself, pass to `super().__init__` | `sat.py`, `r3d.py`, `dqrise.py`, `multitask_dit.py` |
 
 **Pattern-D minimum skeleton** (`dp3` is a better reference for patterns A-C):
