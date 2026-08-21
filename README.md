@@ -36,8 +36,8 @@ bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train.sh dp3 pour 'training.loop.total_train_steps=500'
 ```
 
-> 单卡策略: `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat`
-> DDP 策略: `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
+> 单卡策略: `action_flow dp dp3 dqrise maniflow moe_dp multitask_dit r3d sat`
+> DDP 策略: `ddp/action_flow ddp/dp ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
 
 ### 评测
 
@@ -62,7 +62,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ## 策略矩阵
 
-10 种 Agent（含 FAAS 变体），覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
+9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
 
 | Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
 |:------|:---------|:-------|:---------|:-------|:-----|
@@ -74,7 +74,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
 | **R3D** | PC(1024,3) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
 | **DQ-RISE** | PC(1024,3) + Joint | iDP3 + StateMLP + Codebook | UNet1D (缩减) | Diffusion ε-pred | `dqrise.yaml` |
-| **DP3 FAAS** | PC(1024,3) + Joint | 同 DP3 | 同 DP3 | 同 DP3 | `dp3_faas.yaml` |
 | **SAT** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | SATBackbone (EJC+MMA) | FlowMatch Euler | `sat.yaml` |
 
 ### 关键差异速览
@@ -88,7 +87,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
 | **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
 | **DP3 vs DQ-RISE** | DQ-RISE 通过 VQ-VAE 将手势离散化为 16 种码本 |
-| **Native vs FAAS** | FAAS 将 12D 手势映射到 32D 功能对齐空间，零 agent 代码变更 |
 
 ### Agent 继承模式
 
@@ -104,12 +102,12 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ### 动作空间
 
-| `action_key` | arm | hand | total | FAAS total |
+| `action_key` | arm | hand | total |
 |-------------|-----|------|-------|-----------|
-| `action` (joint) | 7 (关节角) | 12 (XHand) | **19** | 39 (7+32) |
-| `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** | 41 (9+32) |
+| `action` (joint) | 7 (关节角) | 12 (XHand) | **19** |
+| `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** |
 
-`joint_state` dim ≡ action dim。FAAS 通过 `inject_faas_into_agent()` 对 DP/DP3/ManiFlow/MoE/MultiTask/R3D/SAT 零代码变更兼容。`use_aux_ee` 与 `use_faas` 互斥。
+`joint_state` dim ≡ action dim。
 
 ### Action Decoder 类型
 
@@ -145,7 +143,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | StateMLP hidden | `[64]` | `state_mlp.py` |
 | ViT backbone dtype | `bfloat16 + attn_implementation="sdpa"` | dino/clip/siglip |
 | UNet conditioning | `cond_predict_scale=True` | `unet1d.py` |
-| FAAS 活跃索引 | `(1,2,3,6,7,8,12,13,17,18,22,23)`, 仅 index_bend scale=-1.0 | `faas_mapper.py` |
 
 ---
 
@@ -164,7 +161,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
 | val_ratio | 0.05 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
 
-> dp = dp3 参数; dp3_faas = dp3 参数 + FAAS 维度 (action_dim=39/41, state_dim=39); multitask_dit = 8L×512, lr=1e-4
+> dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
 
 ### 新建 Config
@@ -175,8 +172,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 `action_dim` 公式：
 ```yaml
-action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}  # 非FAAS
-# FAAS: ${eval:'41 if ${eq:${action_key},action_ee} else 39'}
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 ```
 
 `agent._target_` 指向 `dexmani_policy.agents.core.<name>.<Name>Agent`（无显式注册表，Hydra 直接导入）。
@@ -203,7 +199,6 @@ eval:
 | ddp/maniflow | 32×4=128 | 128 |
 | ddp/multitask_dit | 16×4=64 | 64 |
 | ddp/r3d | 16×4=64 | 48 |
-| ddp/dp3_faas | 32×4=128 | 128 |
 
 ---
 
@@ -247,30 +242,8 @@ Agent.compute_loss():                          Agent.predict_action():
 - **梯度累积**: `raw_loss / gradient_accumulation_steps` → backward; DDP 非边界 `model.no_sync()`, 仅边界 all-reduce
 - **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; Resume 自动从 latest 恢复
 - **EMA**: 逆 gamma 衰减; BatchNorm affine 直接复制 (不平均)
-- **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3`(非FAAS) 和 `moe_dp` 有意仅单卡
+- **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3` 和 `moe_dp` 有意仅单卡
 - **Shape 验证**: `BaseAgent._validate_batch()` 在 `compute_loss`/`predict_action` 入口校验 action ndim/horizon/dim + obs 时间维/模态batch一致性
-
----
-
-## FAAS 集成
-
-FAAS (Function-Actuator-Aligned Space) 将 XHand 12 个原生关节映射到 **32 维功能对齐空间**（12 活跃 + 20 零填充），按关节功能组织。模型在 FAAS 空间训练/去噪，I/O 边界自动转换。
-
-```bash
-bash scripts/training/train.sh dp3_faas                           # joint mode (39D)
-bash scripts/training/train.sh dp3_faas 'action_key=action_ee'    # EE mode (41D)
-```
-
-| 层 | 位置 | 操作 |
-|----|------|------|
-| Dataset | `base_dataset.py._apply_faas_mapping()` | 增强后: native→FAAS |
-| 推理输入 | `base.py.predict_action()` | `_convert_obs_to_faas()` (幂等) |
-| 推理输出 | `base.py.predict_action_from_cond()` | unnormalize 后: FAAS→native |
-| 训练指标 | `base.py.compute_action_mse()` | GT 逆转换到 native 比较 |
-
-- **兼容**: DP, DP3, ManiFlow, MoE, MultiTask, R3D, SAT (仅 config 差异，零 agent 代码变更)
-- **不兼容**: DQRISE (VQ-VAE codebook 12D→32D 需重跑三阶段管道)
-- **互斥**: `use_aux_ee` 和 `use_faas` 不能同时启用
 
 ---
 

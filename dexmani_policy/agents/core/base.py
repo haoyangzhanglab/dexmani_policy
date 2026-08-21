@@ -68,7 +68,7 @@ class BaseAgent(nn.Module):
                 raise ValueError(
                     f"action dim mismatch: got {A}, expected "
                     f"{self.action_dim}.  Shape: {tuple(action.shape)}.  "
-                    f"Check action_key / use_faas consistency."
+                    f"Check action_key consistency."
                 )
 
         self._validate_obs_dict(obs, expected_batch=B if action is not None else None)
@@ -203,51 +203,16 @@ class BaseAgent(nn.Module):
     @torch.no_grad()
     def predict_action(self, obs_dict: Dict, denoise_timesteps=None) -> Dict:
         self._validate_obs_dict(obs_dict)
-        # FAAS: convert env-native joint_state (19D) → FAAS (39D) before the
-        # normalizer (which was fitted on FAAS data) sees it.  Skipped when
-        # called from compute_loss (training) because the dataset already
-        # outputs FAAS-dim data.
-        if getattr(self, "use_faas", False):
-            obs_dict = self._convert_obs_to_faas(obs_dict)
         cond, _ = self._build_cond(obs_dict)
         return self.predict_action_from_cond(cond, denoise_timesteps)
 
-    def _convert_obs_to_faas(self, obs_dict: Dict) -> Dict:
-        """Convert env-native ``joint_state`` (19D) to FAAS (39D).
-
-        **Idempotent**: only converts when the input is native-dim
-        (19D = 7 arm + 12 hand).  If already FAAS (39D), returns unchanged.
-        This guards against double-conversion when called from training
-        paths that receive FAAS-dim data from the dataset.
-
-        ``joint_state`` arm is **always 7D** arm joint angles, regardless of
-        ``action_key``.  The action's ``tcp_dim`` is irrelevant here.
-        """
-        if "joint_state" not in obs_dict:
-            return obs_dict
-        js = obs_dict["joint_state"]
-        native_hand_dim = getattr(self.faas_mapper, "NATIVE_HAND_DIM", 12)
-        # Only convert if native-dim; skip if already FAAS
-        if js.shape[-1] != 7 + native_hand_dim:  # 19
-            return obs_dict
-        arm_state = js[..., :7]  # STATE_ARM_DIM = 7 (fixed)
-        hand_state = js[..., 7:]
-        faas_hand = self.faas_mapper.native_to_faas(hand_state)
-        return {**obs_dict, "joint_state": torch.cat([arm_state, faas_hand], dim=-1)}
-
     @property
     def control_action_dim(self):
-        """Number of action dimensions passed to ``env.step`` (native space).
-
-        In FAAS mode the model trains in 39/41D but outputs are converted
-        back to native 19/21D by ``predict_action_from_cond``, so the
-        control dimension is always the native joint count.
+        """Number of action dimensions passed to ``env.step``.
 
         Override in subclasses (e.g. R3DAgent) to return only the primary
         (joint) dims when auxiliary heads are present.
         """
-        if getattr(self, "use_faas", False):
-            return self.tcp_dim + getattr(self.faas_mapper, "NATIVE_HAND_DIM", 12)
         return self.action_dim
 
     @torch.no_grad()
@@ -261,13 +226,6 @@ class BaseAgent(nn.Module):
         )
         pred = self.action_decoder.predict_action(cond, template, denoise_timesteps)
         pred = self.normalizer["action"].unnormalize(pred)
-
-        # FAAS: convert the entire prediction from FAAS back to native
-        # joint space so that pred_action / control_action / tail are all
-        # native-dim and can be consumed directly by temporal ensembling
-        # (which uses pred_action) and env.step (which uses control_action).
-        if getattr(self, "use_faas", False):
-            pred = self.faas_mapper.inverse_transform_action(pred, self.tcp_dim)
 
         start = self.n_obs_steps - 1
         control_action = pred[:, start : start + self.n_action_steps]
@@ -286,10 +244,6 @@ class BaseAgent(nn.Module):
     def compute_action_mse(self, batch: Dict[str, Any]) -> float:
         obs = batch["obs"]
         gt_action = batch["action"]
-        # FAAS: gt_action from dataset is FAAS-dim; inverse-transform to
-        # native so it matches the native pred_action from predict_action.
-        if getattr(self, "use_faas", False):
-            gt_action = self.faas_mapper.inverse_transform_action(gt_action, self.tcp_dim)
         pred_action = self.predict_action(obs)["pred_action"]
         return torch.nn.functional.mse_loss(pred_action, gt_action).item()
 

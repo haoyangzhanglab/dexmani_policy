@@ -19,7 +19,7 @@ class RGBPCDataset(BaseDataset):
 
     def get_normalizer(self, mode="limits"):
         normalizer = LinearNormalizer()
-        joint_state, action = self._get_faas_normalizer_data()
+        joint_state, action = self._get_normalizer_data()
         normalizer.fit(
             data={
                 "joint_state": joint_state,

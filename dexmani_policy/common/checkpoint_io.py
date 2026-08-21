@@ -42,7 +42,6 @@ def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
         "horizon": model.horizon,
         "action_key": getattr(model, "action_key", "action"),
         "tcp_dim": getattr(model, "tcp_dim", None),
-        "use_faas": getattr(model, "use_faas", False),
         "hand_dim": getattr(model, "hand_dim", None),
         "control_action_dim": model.control_action_dim,
         "num_training_steps": num_training_steps,

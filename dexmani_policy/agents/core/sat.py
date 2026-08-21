@@ -258,9 +258,6 @@ class SATAgent(BaseAgent):
         """Predict action — delegates to ``predict_action_from_cond``."""
         self._validate_obs_dict(obs_dict)
 
-        if getattr(self, "use_faas", False):
-            obs_dict = self._convert_obs_to_faas(obs_dict)
-
         cond, _ = self._build_cond(obs_dict)
         return self.predict_action_from_cond(cond, denoise_timesteps)
 
@@ -287,10 +284,6 @@ class SATAgent(BaseAgent):
         pred = pred.transpose(1, 2)
 
         pred = self.normalizer["action"].unnormalize(pred)
-
-        # FAAS inverse transform
-        if getattr(self, "use_faas", False):
-            pred = self.faas_mapper.inverse_transform_action(pred, self.tcp_dim)
 
         start = self.n_obs_steps - 1
         control_action = pred[:, start : start + self.n_action_steps]

@@ -538,7 +538,6 @@ train.py <策略> <任务> [Hydra覆盖参数...]
 | 策略 | 单卡写法 | DDP 写法 |
 |------|---------|---------|
 | DP3 | `dp3` | — |
-| DP3 + FAAS | `dp3_faas` | `ddp/dp3_faas` |
 | ManiFlow | `maniflow` | `ddp/maniflow` |
 | MultiTask | `multitask_dit` | `ddp/multitask_dit` |
 | R3D | `r3d` | `ddp/r3d` |

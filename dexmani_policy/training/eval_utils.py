@@ -23,9 +23,6 @@ from dexmani_policy.common.config import (
     validate_action_key_consistency,
 )
 from dexmani_policy.common.pytorch_util import fix_state_dict
-from dexmani_policy.training.build_utils import inject_faas_into_agent
-
-
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
     """Resolve the eval seed.
 
@@ -78,7 +75,6 @@ def build_eval_components(cfg, device: torch.device) -> tuple[Any, Any, Checkpoi
     """
     agent = hydra.utils.instantiate(cfg.agent)
     agent.action_key = cfg.action_key
-    inject_faas_into_agent(agent, cfg)
 
     env_runner = hydra.utils.instantiate(cfg.env_runner)
 
@@ -103,8 +99,8 @@ def load_ckpt_for_inference(
     """Load a checkpoint into *agent* for inference, with validation.
 
     Validates train_params consistency (n_obs_steps, n_action_steps,
-    action_dim, horizon, action_key), FAAS compatibility, EMA selection,
-    and normalizer integrity.
+    action_dim, horizon, action_key), EMA selection, and normalizer
+    integrity.
     """
     checkpoint = checkpoint_store.load(ckpt_path)
 
@@ -118,15 +114,7 @@ def load_ckpt_for_inference(
                     f"Checkpoint train_params.{key}={expected} does not match agent.{key}={actual}."
                 )
 
-        ckpt_use_faas = train_params.get("use_faas", False)
-        agent_use_faas = getattr(agent, "use_faas", False)
-        if ckpt_use_faas != agent_use_faas:
-            raise ValueError(
-                f"Checkpoint use_faas={ckpt_use_faas} but agent "
-                f"use_faas={agent_use_faas}. Use a matching config."
-            )
-
-    raw_state = (
+        raw_state = (
         checkpoint.ema_model_state
         if (use_ema and checkpoint.ema_model_state is not None)
         else checkpoint.model_state

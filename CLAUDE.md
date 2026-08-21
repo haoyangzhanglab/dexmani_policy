@@ -24,8 +24,8 @@ bash scripts/training/train.sh dp3 pour 'training.seed=42'
 bash scripts/training/train_ddp.sh ddp/maniflow pour
 ```
 
-> 单卡 (10): `action_flow dp dp3 dp3_faas dqrise maniflow moe_dp multitask_dit r3d sat`
-> DDP (8): `ddp/action_flow ddp/dp ddp/dp3_faas ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
+> 单卡 (9): `action_flow dp dp3 dqrise maniflow moe_dp multitask_dit r3d sat`
+> DDP (7): `ddp/action_flow ddp/dp ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
 > 全部 `total_train_steps: 100000`
 
 ### 评测
@@ -71,7 +71,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat
 | ViT backbone dtype | `bfloat16 + attn_implementation="sdpa"` | dino/clip/siglip |
 | UNet conditioning | `cond_predict_scale=True` | `unet1d.py` |
 | FlowMatch consistency 权重 | `1.0` (implicit) | `flowmatch.py:234` |
-| FAAS 活跃索引 | `(1,2,3,6,7,8,12,13,17,18,22,23)`, 仅 index_bend scale=-1.0 | `faas_mapper.py` |
 
 ---
 
@@ -120,16 +119,15 @@ BaseAgent
 | **R3D** | PC+state | Uni3D+StateMLP | OneWayTransformer | Diffusion(DDIM 10步) | 级联mask, 分组loss |
 | **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon,20步) | VQ码本, lr=3e-4, warmup=2000 |
 | **MultiTask** | RGB+state+text | DPObsEncoder+CLIP | DiT(AdaLN) | Diffusion/FlowMatch | 多任务, 预缓存text |
-| **DP3(FAAS)** | PC+state | 同DP3 | 同DP3 | 同DP3 | 32D FAAS, **零 agent 代码变更** |
 
 ### 动作空间
 
-| `action_key` | arm | hand | total | FAAS total |
+| `action_key` | arm | hand | total |
 |-------------|-----|------|-------|-----------|
-| `action` (joint) | 7 (关节角) | 12 (XHand) | **19** | 39 (7+32) |
-| `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** | 41 (9+32) |
+| `action` (joint) | 7 (关节角) | 12 (XHand) | **19** |
+| `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** |
 
-`joint_state` dim ≡ action dim。FAAS 通过 `inject_faas_into_agent()` 对 DP/DP3/ManiFlow/MoE/MultiTask/R3D/SAT 零代码变更兼容。`use_aux_ee` 与 `use_faas` 互斥。
+`joint_state` dim ≡ action dim。
 
 ### Action Decoder
 
@@ -157,10 +155,10 @@ BaseAgent
 | bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
 | val_ratio | 0.05 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
 
-> dp = dp3 参数; dp3_faas = dp3 参数 + FAAS 维度 (action_dim=39/41, state_dim=39); multitask_dit = 8L×512, lr=1e-4, val=0.05
+> dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4, val=0.05
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
 
-`action_dim` 公式: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}` (FAAS: 39/41)
+`action_dim` 公式: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`
 `agent._target_`: `dexmani_policy.agents.core.<name>.<Name>Agent` (Hydra 直接导入，无显式注册表)
 Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其余=10)；use_ema=true 共享。；参数优先级 CLI > 子节 > eval 共享层。
 
@@ -189,7 +187,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
 - **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0
 - **ActionFlow 独立实现**: `action_flow_flowmatch.py` / `action_flow_dit.py` 完全独立，不共享 `time_sampler.py` / `flowmatch.py` / `ditx.py`。**不要合并或交叉引用**
-- **DDP 覆盖不全**: `dp3`(非FAAS) 和 `moe_dp` 有意仅单卡
+- **DDP 覆盖不全**: `dp3` 和 `moe_dp` 有意仅单卡
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
 
 ### 未启用功能 (不要意外激活)
@@ -220,7 +218,7 @@ dexmani_policy/
   datasets/                   # BaseDataset, PCDataset, ReplayBuffer, SequenceSampler
   training/                   # Trainer, build_utils, ema, logging, lr_scheduler, eval_utils
   env_runner/                 # BaseRunner, SimRunner, MultiTaskSimRunner
-  common/                     # LinearNormalizer, FAASMapper, checkpoint_io, pytorch_util
+  common/                     # LinearNormalizer, checkpoint_io, pytorch_util
   tools/                      # train_vq_hand.py, extract_codebook.py
 ```
 
@@ -231,7 +229,6 @@ dexmani_policy/
 | 加 UNet+Diffusion agent | `dp3.py` + `dp3.yaml` |
 | 加 Transformer+FlowMatch agent | `maniflow.py` + `maniflow.yaml` |
 | 加完全自定义 backbone agent | `sat.py` + `sat.yaml` 或 `action_flow.py` + `action_flow.yaml` |
-| 加 FAAS 变体 | `dp3_faas.yaml` (继承 dp3，仅覆盖维度) |
 | 加 DDP overlay | `configs/ddp/maniflow.yaml` |
 | 改数据增强 | `datasets/base_dataset.py` → `apply_augmentation()` |
 | 改评测逻辑 | `env_runner/sim_runner.py` |

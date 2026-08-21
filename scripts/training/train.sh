@@ -11,7 +11,7 @@
 #   bash scripts/training/train.sh multitask_dit
 #
 # Available configs (top-level, non-ddp):
-#   action_flow  dp  dp3  maniflow  moe_dp  multitask_dit  r3d  dqrise  dp3_faas  sat
+#   action_flow  dp  dp3  maniflow  moe_dp  multitask_dit  r3d  dqrise  sat
 #
 set -euo pipefail
 

@@ -12,12 +12,9 @@ class PCDataset(BaseDataset):
 
     def get_normalizer(self, mode="limits"):
         normalizer = LinearNormalizer()
-        joint_state, action = self._get_faas_normalizer_data()
+        joint_state, action = self._get_normalizer_data()
 
         if self.use_aux_ee:
-            # EE aux loss: wrist pose = action_ee[..., :9] = pos(3) + rot6d(6)
-            # Note: use_aux_ee + use_faas is mutually exclusive (validated in
-            # _validate_faas_config), so action here is always native-dim.
             parts = [self.replay_buffer["action"]]
             parts.append(self.replay_buffer["action_ee"][..., :9])
             action = np.concatenate(parts, axis=-1)

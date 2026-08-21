@@ -21,7 +21,7 @@ Confirm with the user, or state the assumption explicitly:
 - Which **inheritance path**: `UNetDiffusionAgent` (DP3/MoE-style, UNet+Diffusion), `DiTXFlowMatchAgent`
   (ManiFlow-style, DiTX+FlowMatch+Consistency), or `BaseAgent` direct (SAT, R3D, DQRISE — full control over backbone + decoder).
 - Which **modalities**: point cloud (`pc_dim`) or RGB (`rgb_backbone_name`).
-- Which **action space**: joint (19D), action_ee (21D), or FAAS (39/41D).
+- Which **action space**: joint (19D) or action_ee (21D).
 - Whether **DDP** multi-GPU support is needed.
 
 ## Workflow
@@ -93,7 +93,7 @@ Optionally override:
 - `predict_action` / `predict_action_from_cond` — if inference needs special logic
 - `compile_backbone` — if CUDA graph incompatible (SAT uses `mode='default'`)
 - `get_optim_param_groups` — for separate LR/WD on backbone vs obs_encoder
-- `control_action_dim` (property) — for FAAS or auxiliary heads
+- `control_action_dim` (property) — for auxiliary heads
 
 ### 2. Register in `__init__.py`
 
@@ -181,7 +181,7 @@ hydra:
     subdir: ${hydra.job.num}
 ```
 
-**Known exceptions** (intentional, not errors): `dp3` (non-FAAS) and `moe_dp` have no DDP configs.
+**Known exceptions** (intentional, not errors): `dp3` and `moe_dp` have no DDP configs.
 
 ### 6. Verify with smoke test
 
@@ -193,7 +193,7 @@ python dexmani_policy/smoke_test.py <name>
 
 The 6 stages validate: (1) dataset+normalizer, (2) model+EMA, (3) optimizer+scheduler,
 (4) forward+backward, (5) predict_action shape, (6) checkpoint roundtrip.
-FAAS mode adds stage 5.0 (native-FAAS roundtrip). MoE adds stage 5.1 (enhanced gate).
+MoE adds stage 5.1 (enhanced gate).
 
 ## Conventions
 
@@ -204,19 +204,17 @@ FAAS mode adds stage 5.0 (native-FAAS roundtrip). MoE adds stage 5.1 (enhanced g
 - `cond_predict_scale=True` for UNet backbones
 - ViT backbones (DINO/CLIP/SigLIP): `bfloat16 + attn_implementation="sdpa"`
 - `compile mode='reduce-overhead'` unless shuffle/动态索引 requires `mode='default'`
-- For FAAS agents: use `dp3_faas.yaml` as the template, not `dp3.yaml`
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| `action dim mismatch` in `compute_loss` | Config `action_dim` ≠ Agent init | Align config eval expression; for FAAS: `action_dim = tcp_dim + 32` |
+| `action dim mismatch` in `compute_loss` | Config `action_dim` ≠ Agent init | Align config eval expression |
 | `_target_` not found | Class path or name wrong | Verify `agent._target_: dexmani_policy.agents.core.<name>.<Name>Agent` |
 | `obs_encoder.out_dim` AttributeError | obs_encoder missing `out_dim` | Add `self.out_dim = ...` in obs encoder `__init__` |
 | `context_dim` shape mismatch in UNet | `obs_encoder.out_dim * n_obs_steps` wrong | Verify encoder flattens time dims correctly |
 | DDP config references wrong base | Typo in `defaults` | Match base config filename exactly (no `.yaml`) |
 | Smoke test stage 1 fails with Zarr error | `DATA_DIR` not set | `export DATA_DIR=/path/to/data` |
-| FAAS `state_dim` mismatch | Forgot to override `agent.state_dim` | FAAS needs `state_dim: ${eval:'7 + ${faas_hand_dim}'}` |
 
 ## Reporting back
 

@@ -35,25 +35,19 @@ grep -rn 'n_obs_steps:' dexmani_policy/configs/*.yaml dexmani_policy/configs/ddp
 # n_action_steps must be 8 everywhere
 grep -rn 'n_action_steps:' dexmani_policy/configs/*.yaml dexmani_policy/configs/ddp/*.yaml | grep -v ': 8'
 
-# use_aux_ee and use_faas cannot both be true (mutually exclusive)
 grep -rn 'use_aux_ee.*true' dexmani_policy/configs/*.yaml
-grep -rn 'use_faas.*true' dexmani_policy/configs/*.yaml
 ```
-
-For the `use_faas` / `use_aux_ee` check: if a config has `use_aux_ee: true`, verify it does
-NOT also have `use_faas: true`. `_validate_faas_config()` in `build_utils.py` catches this
-at runtime, but checking at the config level catches it earlier.
 
 ### 2. Dimension chain consistency
 
 For each config file, parse the YAML and verify:
 
-| Rule | Non-FAAS | FAAS |
-|------|----------|------|
-| `action_dim = tcp_dim + hand_dim` | `tcp_dim + 12` | `tcp_dim + 32` |
-| `state_dim` | `19` (7 arm + 12 hand) | `39` (7 arm + 32 FAAS) |
-| `tcp_dim` | `7` (joint) or `9` (action_ee) | same |
-| `use_aux_ee` → `action_dim` | `19 + 9 = 28` | N/A (mutually exclusive) |
+| Rule | Value |
+|------|-------|
+| `action_dim = tcp_dim + hand_dim` | `tcp_dim + 12` |
+| `state_dim` | `19` (7 arm + 12 hand) |
+| `tcp_dim` | `7` (joint) or `9` (action_ee) |
+| `use_aux_ee` → `action_dim` | `19 + 9 = 28` |
 
 Implementation (one-liner to extract key dims from a config):
 ```bash
@@ -61,7 +55,7 @@ python -c "
 import yaml, sys
 d = yaml.safe_load(open('$CONFIG'))
 a = d.get('agent', d)
-print(f'action_dim={d.get(\"action_dim\")} state_dim={a.get(\"state_dim\")} tcp_dim={d.get(\"tcp_dim\")} hand_dim={d.get(\"hand_dim\")} use_faas={d.get(\"use_faas\")} use_aux_ee={d.get(\"use_aux_ee\")} action_key={d.get(\"action_key\")}')
+print(f'action_dim={d.get(\"action_dim\")} state_dim={a.get(\"state_dim\")} tcp_dim={d.get(\"tcp_dim\")} hand_dim={d.get(\"hand_dim\")} use_aux_ee={d.get(\"use_aux_ee\")} action_key={d.get(\"action_key\")}')
 "
 ```
 
@@ -138,6 +132,5 @@ Never mark an item ✅ based on reading code alone when the check is a command y
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `action_dim` doesn't match `tcp_dim + hand_dim` | `action_key` changed without updating `action_dim` | Use correct eval expression: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}` |
-| FAAS `state_dim` is 19 but should be 39 | `agent.state_dim` not overridden in FAAS config | Add `agent: {state_dim: ${eval:'7 + ${faas_hand_dim}'}}` |
 | DDP config references nonexistent base | Typo in `defaults` | Match base config filename exactly (no `.yaml`) |
 | CLAUDE.md counts don't match | Missed a CLAUDE.md update after adding/removing an agent | Sync the table, config list, and command examples |

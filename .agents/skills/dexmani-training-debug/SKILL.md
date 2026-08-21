@@ -105,11 +105,6 @@ import yaml
 with open(f"{exp_dir}/config.yaml") as f:
     cfg = yaml.safe_load(f)
 print(f"normalizer_mode={cfg.get('normalizer_mode', 'limits')}")
-print(f"use_faas={cfg.get('use_faas', False)}")
-
-# FAAS mode MUST use limits normalizer
-if cfg.get('use_faas') and cfg.get('normalizer_mode', 'limits') != 'limits':
-    print("ERROR: FAAS mode requires normalizer_mode='limits'")
 ```
 
 ### Step 4: Root-cause diagnosis
@@ -118,7 +113,6 @@ if cfg.get('use_faas') and cfg.get('normalizer_mode', 'limits') != 'limits':
 |-------|----------|------------------|-----|
 | L1 | Step 0 | Corrupted Zarr or normalizer explosion | Verify Zarr `np.isfinite()`; ensure `normalizer_mode='limits'` |
 | L1 | Mid-training | Diffusion predictions drifted outside normalizer range | Reduce LR; verify `prediction_type` (epsilon/sample/v_prediction) |
-| L1 | FAAS mode only | Gaussian normalizer unstable on zero-padded FAAS dims | Switch to `normalizer_mode='limits'` (already enforced by `_validate_faas_config`; check if bypassed) |
 | L1 | bfloat16 only | AMP overflow | Identify float32-sensitive ops (MoE softmax, FlowMatch exp); disable bfloat16 for that agent |
 | L2 | Specific params | Custom op backward instability | Inspect the params named in the error; check for division-by-zero, log(0), or sqrt(negative) |
 | L2 | MoE agent | load-balancing aux_loss produced NaN | MoE gate must use float32 (no bfloat16) and no compile — check config |

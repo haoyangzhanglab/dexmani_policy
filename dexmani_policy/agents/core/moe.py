@@ -264,15 +264,6 @@ class MoEAgent(UNetDiffusionAgent):
     @torch.no_grad()
     def predict_action(self, obs_dict, denoise_timesteps=None, override_idx=None):
         self._validate_obs_dict(obs_dict)
-        # FAAS: MoEAgent overrides predict_action and therefore does not
-        # inherit the FAAS guard from BaseAgent.  If use_faas is ever
-        # enabled for MoE, the override must be updated first.
-        if getattr(self, "use_faas", False):
-            raise NotImplementedError(
-                "MoEAgent.predict_action does not support FAAS mode. "
-                "The FAAS guard in BaseAgent.predict_action is bypassed "
-                "by this override."
-            )
         cond, _ = self._build_cond(obs_dict, override_idx=override_idx)
         return self.predict_action_from_cond(cond, denoise_timesteps)
 

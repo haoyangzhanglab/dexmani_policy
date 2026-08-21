@@ -58,9 +58,6 @@ def _prepare_dqrise_codebook(cfg) -> str | None:
 
     import numpy as np
 
-    # In FAAS mode, action_dim - tcp_dim = 32 (FAAS hand), but the codebook
-    # needs the *native* hand dim (12).  Use the explicit hand_dim field when
-    # available (dp3_faas.yaml sets hand_dim: 12).
     hand_dim = cfg.get("hand_dim", cfg.action_dim - cfg.tcp_dim)
     num_groups = 2
     codebook_size = 4
@@ -145,44 +142,11 @@ def smoke_test(config_name: str):
         result = model.predict_action(obs_sample)
         pred_shape = tuple(result["pred_action"].shape)
         ctrl_shape = tuple(result["control_action"].shape)
-        # In FAAS mode, action_dim=39 but control_action is native 19D
-        # (inverse_transform in predict_action_from_cond already converted).
         expected_ctrl_dim = model.control_action_dim
         assert ctrl_shape == (1, cfg.n_action_steps, expected_ctrl_dim), (
             f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {expected_ctrl_dim})"
         )
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
-
-    # 5.0 FAAS roundtrip test — verifies native↔FAAS mapping correctness
-    if cfg.get("use_faas", False):
-        print("[5.0/6] FAAS roundtrip test ...")
-        from dexmani_policy.common.faas_mapper import FAASHandMapper
-
-        mapper = FAASHandMapper()
-        # Action roundtrip: native → FAAS → native
-        native_action = torch.randn(4, 16, cfg.tcp_dim + 12)
-        faas_action = mapper.transform_action(native_action, cfg.tcp_dim)
-        rt_action = mapper.inverse_transform_action(faas_action, cfg.tcp_dim)
-        err_action = (native_action - rt_action).abs().max().item()
-        assert torch.allclose(native_action, rt_action, rtol=1e-6), (
-            f"FAAS action roundtrip error: {err_action:.2e}"
-        )
-        # Joint state roundtrip: arm untouched (7D fixed), hand 12D↔32D
-        native_js = torch.randn(4, 19)
-        faas_js = mapper.transform_joint_state(native_js)
-        assert torch.equal(faas_js[..., :7], native_js[..., :7]), (
-            "FAAS transform_joint_state modified arm portion!"
-        )
-        rt_hand = mapper.faas_to_native(faas_js[..., 7:])
-        err_js = (native_js[..., 7:] - rt_hand).abs().max().item()
-        assert torch.allclose(native_js[..., 7:], rt_hand, rtol=1e-6), (
-            f"FAAS joint_state roundtrip error: {err_js:.2e}"
-        )
-        # Model predict_action outputs native dims in FAAS mode
-        assert result["control_action"].shape[-1] == cfg.tcp_dim + 12, (
-            f"FAAS control_action dim {result['control_action'].shape[-1]} != native {cfg.tcp_dim + 12}"
-        )
-        print(f"      ✓ FAAS roundtrip: action_err={err_action:.1e}, js_hand_err={err_js:.1e}")
 
     # 5.1 MoE enhanced gate smoke check (exercises the use_enhanced_gate=True path
     # that is also covered by the __main__ tests in plugins/moe.py and core/moe.py)
