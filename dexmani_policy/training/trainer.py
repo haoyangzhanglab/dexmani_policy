@@ -26,7 +26,7 @@ from dexmani_policy.training.workspace import TrainWorkspace
 @dataclass
 class TrainLoopConfig:
     total_train_steps: int = 80000
-    log_interval_steps: int = 50
+    log_interval_steps: int = 100
     gradient_accumulation_steps: int = 1
     max_val_steps: int | None = None  # kept for utility validate() method
 
@@ -529,11 +529,14 @@ class Trainer:
                             for key, value in to_log_scalars(log_dict).items():
                                 step_metrics[f"train/{key}"] = value
 
-                            if hasattr(self._step_pbar, "set_postfix"):
-                                self._step_pbar.set_postfix(
-                                    step=global_step,
-                                    loss=step_metrics.get("train/loss", None),
-                                )
+                            if self._step_pbar is not None:
+                                self._step_pbar.update(self.log_interval_steps)
+                                if hasattr(self._step_pbar, "set_postfix"):
+                                    self._step_pbar.set_postfix(
+                                        loss=f"{step_metrics['train/loss']:.5f}",
+                                        step=f"{global_step:,}",
+                                        lr=f"{step_metrics['train/lr']:.2e}",
+                                    )
                             if self.workspace is not None:
                                 self.workspace.log(step_metrics, step=global_step)
 

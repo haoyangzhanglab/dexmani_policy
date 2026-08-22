@@ -77,7 +77,7 @@ agent:
     use_shuffle_output: true
 
   pc_encoder_config:
-    num_patches: 64
+    num_patches: 128
     token_channels: 128
     stem_channels: 64
     patch_radii: [0.04, 0.08]
@@ -97,7 +97,7 @@ agent:
   # For ActionFlow, denoise_steps is the number of function evaluations (NFE).
   denoise_steps: 2
   # euler accepts any positive NFE; midpoint requires an even NFE.
-  solver: euler
+  solver: midpoint
   noise_shift_alpha: 2.0
 
   modality_dropout_probs:
