@@ -141,7 +141,11 @@ class MoEObsEncoder(nn.Module):
         else:
             # ── PC path (existing logic) ──
             pc = preprocess_point_cloud(
-                obs["point_cloud"], self.num_points, self.use_coord_only, self.fps_random_config
+                obs["point_cloud"],
+                self.num_points,
+                self.use_coord_only,
+                self.fps_random_config,
+                training=self.training,
             )
             return torch.cat(
                 [

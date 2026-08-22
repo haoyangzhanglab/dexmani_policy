@@ -5,6 +5,17 @@ import torch
 import torch.nn as nn
 
 
+def resolve_fps_random_config(
+    fps_random_config: dict | None,
+    training: bool,
+) -> dict:
+    """Return FPS settings with deterministic sampling enforced for evaluation."""
+    config = dict(fps_random_config or {})
+    if not training:
+        config["use_random"] = False
+    return config
+
+
 def farthest_point_sample(
     pointcloud: torch.Tensor,
     num_samples: int = 1024,
@@ -113,17 +124,20 @@ def preprocess_point_cloud(
     num_points: int,
     use_coord_only: bool,
     fps_random_config: dict | None = None,
+    training: bool = True,
 ) -> torch.Tensor:
     """Slice channels, cast to fp32, and apply farthest-point sampling.
 
-    Shared by ``DP3ObsEncoder``, ``MoEObsEncoder``, ``ManiflowObsEncoder``.
+    Shared by the point-cloud observation encoders. Evaluation always uses
+    deterministic FPS, while training keeps the policy-specific augmentation.
     """
     if use_coord_only:
         pc = pc[..., :3]
     if pc.dtype != torch.float32:
         pc = pc.float()
     if pc.shape[1] > num_points:
-        pc, _ = farthest_point_sample(pc, num_points, **(fps_random_config or {}))
+        fps_config = resolve_fps_random_config(fps_random_config, training)
+        pc, _ = farthest_point_sample(pc, num_points, **fps_config)
     return pc
 
 
@@ -218,8 +232,9 @@ def sample_and_group(
     features: torch.Tensor | None,
     returnfps: bool = False,
     fps_random_config: dict | None = None,
+    training: bool = True,
 ):
-    fps_kwargs = fps_random_config or {}
+    fps_kwargs = resolve_fps_random_config(fps_random_config, training)
     num_centers = max(1, int(sample_ratio * xyz.size(1)))
     center_xyz, fps_idx = farthest_point_sample(xyz, num_centers, **fps_kwargs)
     center_features = None if features is None else index_points(features, fps_idx)

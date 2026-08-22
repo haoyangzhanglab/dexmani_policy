@@ -1,0 +1,73 @@
+# DexMani_Policy project defaults.
+# Loaded only after this repository is marked as trusted by Codex.
+
+# Favor reliable implementation and review for a configuration-heavy ML codebase.
+# Keep the model itself user-selectable so account-level defaults still apply.
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "high"
+model_reasoning_summary = "concise"
+model_verbosity = "low"
+personality = "pragmatic"
+
+# Let Codex perform normal local development autonomously while retaining a
+# workspace boundary. Network access for shell commands remains opt-in.
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+sandbox_mode = "workspace-write"
+allow_login_shell = true
+
+# Use current sources for fast-moving ML/Codex documentation. This controls the
+# hosted search tool and does not grant shell commands unrestricted networking.
+web_search = "live"
+
+# Keep enough command output for Hydra traces and model/config diagnostics.
+tool_output_token_limit = 16000
+
+# AGENTS.md is the primary project guide. CLAUDE.md is a fallback only when the
+# primary file is absent, so the two documents are never injected together.
+project_doc_fallback_filenames = ["CLAUDE.md"]
+project_doc_max_bytes = 32768
+
+[auto_review]
+policy = """
+Approve non-destructive actions confined to the current repository or /tmp,
+including reading files, editing requested code, running formatters, targeted
+tests, smoke tests, builds, and read-only Git inspection.
+
+Require user approval for destructive commands, writes outside the repository
+or /tmp, dependency installation, outbound shell network access, publishing,
+Git history changes, full training runs, DDP runs, long evaluations, video
+recording, or any material expansion beyond the user's request.
+"""
+
+[sandbox_workspace_write]
+network_access = false
+exclude_slash_tmp = false
+exclude_tmpdir_env_var = false
+
+[features]
+# These are stable Codex features and are explicit here for reproducible project
+# behavior across CLI and IDE sessions.
+enable_request_compression = true
+fast_mode = true
+goals = true
+multi_agent = true
+shell_snapshot = true
+shell_tool = true
+unified_exec = true
+
+[agents]
+# Leave one slot for the primary agent and cap parallel work to avoid needless
+# GPU/CPU contention in this ML repository.
+max_concurrent_threads_per_session = 3
+
+[tui]
+notifications = ["agent-turn-complete", "approval-requested"]
+notification_condition = "unfocused"
+notification_method = "auto"
+alternate_screen = "never"
+animations = false
+show_tooltips = false
+resume_cwd = "session"
+status_line = ["model-with-reasoning", "context-remaining", "current-dir", "git-branch"]
+terminal_title = ["spinner", "project", "git-branch"]

@@ -1,6 +1,6 @@
 # ActionFlow — action-centric DiT + Rectified Flow policy
-# Encoder:  PointNextPatchTokenizer (token seq) + learned type embeddings
-# Decoder:  ActionFlowDiT (temporal self-attn + obs cross-attn + AdaLN-Zero) + SimpleRectifiedFlow + NoiseShift
+# Encoder:  PointNextPatchTokenizer (token sequence) + learned type/time embeddings
+# Decoder:  ActionFlowDiT (alternating SA/CA, AdaRMS, GQA, GEGLU) + SimpleRectifiedFlow + NoiseShift
 # Modality: point_cloud + joint_state → action
 
 policy_name: action_flow
@@ -67,7 +67,7 @@ agent:
 
   encoder_type: pointnext_tokenizer
   pc_dim: 6
-  state_dim: 19
+  state_dim: ${action_dim}
   num_points: 1024
 
   fps_random_config:
@@ -77,7 +77,7 @@ agent:
     use_shuffle_output: true
 
   pc_encoder_config:
-    num_patches: 96
+    num_patches: 64
     token_channels: 128
     stem_channels: 64
     patch_radii: [0.04, 0.08]
@@ -86,12 +86,18 @@ agent:
   # ActionFlow DiT backbone
   hidden_dim: 512
   depth: 8
-  temporal_heads: 2
-  obs_heads: 8
-  mlp_ratio: 2.5
+  num_heads: 8
+  num_kv_heads: 4
+  ffn_hidden_dim: 896
+  timestep_embed_dim: 128
+  qk_norm: true
+  attn_drop: 0.0
 
   # Simple rectified flow
+  # For ActionFlow, denoise_steps is the number of function evaluations (NFE).
   denoise_steps: 2
+  # euler accepts any positive NFE; midpoint requires an even NFE.
+  solver: euler
   noise_shift_alpha: 2.0
 
   modality_dropout_probs:

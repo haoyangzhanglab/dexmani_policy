@@ -23,12 +23,13 @@ cd ~/Desktop/dexmani_sim && pip install -e .                  # 仿真环境（�
 ### 训练
 
 ```bash
-# 单卡 —— 10 种策略可选
+# 单卡 —— 9 种策略可选
 bash scripts/training/train.sh dp3 pour                      # DP3 训练 pour 任务
+bash scripts/training/train.sh action_flow pour              # ActionFlow
 bash scripts/training/train.sh maniflow pour                  # ManiFlow
 bash scripts/training/train.sh sat pour                       # SAT
 
-# 多卡 DDP —— 8 种策略可选
+# 多卡 DDP —— 7 种策略可选
 bash scripts/training/train_ddp.sh ddp/maniflow pour          # ManiFlow 4 卡
 
 # Hydra 参数覆盖
@@ -49,7 +50,15 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir>
 bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_dir>     # 阶段 1: 选出最优 ckpt
 bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir>       # 阶段 2: 最终评测
 bash scripts/eval/record_demo.sh dp3 pour <exp_dir>           # 录制 demo 视频
+
+# ActionFlow：同 checkpoint、同 seeds 的 Euler/Midpoint × NFE 配对评测
+bash scripts/eval/eval_action_flow_solvers.sh action_flow pour <exp_name> --episodes 25
 ```
+
+ActionFlow 的 `denoise_steps` 就是 NFE。Euler 支持任意正整数 NFE（包括 10）；
+Midpoint 只支持偶数 NFE。`eval_action_flow_solvers.sh` 的固定首轮组合为
+Euler-2、Midpoint-2、Euler-4、Midpoint-4、Midpoint-8，不包含 Euler-10；需要时可通过
+`eval_best_ckpt.sh --denoise-steps 10` 单独评测。
 
 ### 冒烟测试
 
@@ -62,14 +71,14 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ## 策略矩阵
 
-9 种 Agent，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
+9 种策略配置，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
 
 | Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
 |:------|:---------|:-------|:---------|:-------|:-----|
 | **DP** | RGB + Joint | DINO/CLIP/SigLIP + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp.yaml` |
 | **DP3** | PC(1024,3) + Joint | PointNeXT + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
 | **ManiFlow** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
-| **ActionFlow** | PC(1024,6) + Joint | PointNeXT(patch) + SiLU MLP | ActionFlowDiT (AdaLN-Zero) | SimpleRectifiedFlow | `action_flow.yaml` |
+| **ActionFlow** | PC(1024,6) + Joint | PointNeXT(64 patch) + SiLU MLP + obs-time PE | ActionFlowDiT (AdaRMS, GQA, GEGLU) | SimpleRectifiedFlow | `action_flow.yaml` |
 | **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDPM | `moe_dp.yaml` |
 | **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
 | **R3D** | PC(1024,3) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
@@ -116,7 +125,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler ODE (KV cache) | ActionFlow |
+| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
 
 ---
 
@@ -150,16 +159,16 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | action_flow | dp3 | maniflow | moe_dp | r3d | dqrise | sat |
-|------|------------|-----|----------|-------------------|--------|-----|--------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
-| backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
-| diff train/infer | -/2 | 100/10 | -/4 | -/10 | 100/100 | 100/10 | 100/20 | -/10 |
-| prediction_type | velocity | sample | velocity | velocity | sample | sample | epsilon | velocity |
-| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
-| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
-| val_ratio | 0.05 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
+| 参数 | action_flow | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | sat |
+|------|-------------|-----|----------|--------|---------------|-----|---------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
+| backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
+| train/infer steps | -/2 NFE | 100/10 | -/4 | 100/100 | 100/10 | 100/10 | 100/20 | -/10 |
+| prediction_type | velocity | sample | velocity | sample | sample | sample | epsilon | velocity |
+| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
+| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
+| val_ratio | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 
 > dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)

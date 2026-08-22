@@ -18,6 +18,7 @@ export DATA_DIR=/path/to/data          # 必须，否则 dataset 路径报错
 ```bash
 # 单卡: train.sh <policy> <task> [Hydra覆盖...]
 bash scripts/training/train.sh dp3 pour
+bash scripts/training/train.sh action_flow pour
 bash scripts/training/train.sh dp3 pour 'training.seed=42'
 
 # 多卡 DDP: train_ddp.sh ddp/<policy> <task>
@@ -38,7 +39,13 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir> --no-videos
 # 分步
 bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_dir>
 bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir> --ckpt-tag 40pct --episodes 50
+
+# ActionFlow solver paired ablation（Euler2/Mid2/Euler4/Mid4/Mid8；不含 Euler10）
+bash scripts/eval/eval_action_flow_solvers.sh action_flow pour <exp_name> --episodes 25
 ```
+
+ActionFlow 的 `denoise_steps` 即 NFE：Euler 支持任意正整数（包括 10），Midpoint 只支持偶数。
+需要单独评测 Euler-10 时，使用 `eval_best_ckpt.sh --denoise-steps 10`。
 
 ### Demo 录制
 
@@ -95,7 +102,7 @@ BaseAgent
   ├── MultiTaskAgent            ← MultiTask (DiT + Diffusion/FlowMatch)
   ├── R3DAgent                  ← R3D (OneWayTransformer + Diffusion)
   ├── DQRISEAgent               ← DQ-RISE (自定义 UNet + Diffusion, action_dim 缩减)
-  └── ActionFlowAgent           ← ActionFlow (ActionFlowDiT + SimpleRectifiedFlow, KV cache)
+  └── ActionFlowAgent           ← ActionFlow (独立 DiT backbone + SimpleRectifiedFlow, KV cache)
 ```
 
 ### Agent 继承模式 (添加新 Agent 时选)
@@ -113,7 +120,7 @@ BaseAgent
 | **DP3** | PC+state | PointNeXT+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | **最简参考**, pc_dim=3 |
 | **DP** | RGB+state | DINO/CLIP/SigLIP+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | RGB, channels_last |
 | **ManiFlow** | PC+state | PointNeXT+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | Token条件, EMA教师, wd=1e-3 |
-| **ActionFlow** | PC+state | PointNeXT+SiLU MLP | ActionFlowDiT(AdaLN-Zero) | SimpleRectifiedFlow | 噪声偏移采样, KV cache, temporal attn, 可学习 type embedding |
+| **ActionFlow** | PC+state | PointNeXT 64-patch+SiLU MLP+obs-time PE | ActionFlowDiT(AdaRMS) | SimpleRectifiedFlow | 8L SA/CA 交错, 8Q/4KV GQA, GEGLU, CA KV cache |
 | **MoE** | RGB+state | R3M+StateMLP+MoE | UNet1D(FiLM) | Diffusion(DDPM 100步) | 16专家top-2, **无bfloat16/compile** |
 | **SAT** | PC+state | PointNeXT+StateMLP | SATBackbone(EJC+MMAttn) | SATFlowMatch | (B,Da,T), shuffle, compile=default |
 | **R3D** | PC+state | Uni3D+StateMLP | OneWayTransformer | Diffusion(DDIM 10步) | 级联mask, 分组loss |
@@ -136,7 +143,7 @@ BaseAgent
 | `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler ODE (KV cache) | ActionFlow |
+| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
 
 ---
 
@@ -144,23 +151,23 @@ BaseAgent
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | action_flow | dp3 | maniflow | moe_dp | r3d | dqrise | sat |
-|------|------------|-----|----------|-------------------|--------|-----|--------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/28 | 21 | 19/21 |
-| backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | DiT 12L×768 | UNet[256,512,1024] | 4L×256 | UNet[256,512] | SAT 8L×768 |
-| diff train/infer | -/2 | 100/10 | -/4 | -/10 | 100/100 | 100/10 | 100/20 | -/10 |
-| prediction_type | velocity | sample | velocity | velocity | sample | sample | epsilon | velocity |
-| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
-| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
-| val_ratio | 0.05 | 0.05 | 0.05 | 0.05 | 0.10 | 0.05 | 0.05 | 0.05 |
+| 参数 | action_flow | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | sat |
+|------|-------------|-----|----------|--------|---------------|-----|---------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
+| backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
+| train/infer steps | -/2 NFE | 100/10 | -/4 | 100/100 | 100/10 | 100/10 | 100/20 | -/10 |
+| prediction_type | velocity | sample | velocity | sample | sample | sample | epsilon | velocity |
+| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
+| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
+| val_ratio | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 
 > dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4, val=0.05
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
 
 `action_dim` 公式: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`
 `agent._target_`: `dexmani_policy.agents.core.<name>.<Name>Agent` (Hydra 直接导入，无显式注册表)
-Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其余=10)；use_ema=true 共享。；参数优先级 CLI > 子节 > eval 共享层。
+Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其余=10)；use_ema=true 共享。ActionFlow 中 denoise_steps 即 NFE；参数优先级 CLI > 子节 > eval 共享层。
 
 > Config 模板字段清单、Eval YAML 结构 → [README](README.md#配置参考)
 
@@ -208,7 +215,7 @@ dexmani_policy/
   train_ddp.py                # DDP 入口 (mp.spawn)
   eval_best_ckpt.py           # 离线评测 (Hydra-free CLI)
   smoke_test.py               # 构建验证 (6 阶段)
-  configs/                    # 10 YAML + 9 DDP overlay
+  configs/                    # 9 YAML + 7 DDP overlays
   agents/
     core/                     # BaseAgent + 9 variants
     action_decoders/          # Diffusion, FlowMatch variants

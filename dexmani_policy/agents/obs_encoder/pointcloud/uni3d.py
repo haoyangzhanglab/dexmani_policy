@@ -11,7 +11,7 @@ from math import pi as _pi
 import torch
 import torch.nn as nn
 
-from .ops import farthest_point_sample
+from .ops import farthest_point_sample, resolve_fps_random_config
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,8 @@ class KNNGrouper(nn.Module):
     def forward(self, xyz, features, use_fps=True):
         B, N, _ = xyz.shape
         with torch.no_grad():
-            centers, _ = farthest_point_sample(xyz, num_samples=self.num_groups, **self.fps_random_config)
+            fps_config = resolve_fps_random_config(self.fps_random_config, self.training)
+            centers, _ = farthest_point_sample(xyz, num_samples=self.num_groups, **fps_config)
             _, knn_idx = knn_points(centers, xyz, self.group_size)
 
         batch_offset = torch.arange(B, device=xyz.device) * N

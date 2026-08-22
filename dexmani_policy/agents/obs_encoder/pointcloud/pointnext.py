@@ -91,6 +91,7 @@ class SetAbstraction(nn.Module):
                 xyz,
                 point_feature,
                 fps_random_config=self.fps_random_config,
+                training=self.training,
             )
 
         relative_xyz = neighbor_feature[..., :3]

@@ -37,7 +37,11 @@ class DP3ObsEncoder(nn.Module):
 
     def forward(self, obs: dict):
         pc = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points, self.use_coord_only, self.fps_random_config
+            obs["point_cloud"],
+            self.num_points,
+            self.use_coord_only,
+            self.fps_random_config,
+            training=self.training,
         )
         feat = torch.cat(
             [

@@ -81,7 +81,11 @@ class SATObsEncoder(nn.Module):
             ``(cond, aux)`` where cond is ``(B, num_obs_tokens, obs_token_dim)``
         """
         pc = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points, self.use_coord_only, self.fps_random_config
+            obs["point_cloud"],
+            self.num_points,
+            self.use_coord_only,
+            self.fps_random_config,
+            training=self.training,
         )
 
         pc_outputs = self.pc_encoder(pc, return_global_token=True)

@@ -46,13 +46,20 @@ class ActionFlowObsEncoder(nn.Module):
         self.state_embed = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
         self.global_embed = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
         self.patch_embed = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
+        self.obs_time_embed = nn.Parameter(
+            torch.randn(1, n_obs_steps, 1, hidden_dim) * 0.02
+        )
 
         self.num_obs_tokens = (1 + 1 + num_patches) * n_obs_steps
         self.obs_token_dim = hidden_dim
 
     def forward(self, obs: dict):
         pc = preprocess_point_cloud(
-            obs["point_cloud"], self.num_points, self.use_coord_only, self.fps_random_config
+            obs["point_cloud"],
+            self.num_points,
+            self.use_coord_only,
+            self.fps_random_config,
+            training=self.training,
         )
 
         if getattr(self.pc_encoder, "supports_global_token", True):
@@ -71,7 +78,12 @@ class ActionFlowObsEncoder(nn.Module):
 
         tokens = torch.cat([state, global_token, patch_tokens], dim=1)
         B = tokens.shape[0] // self.n_obs_steps
-        return tokens.reshape(B, self.n_obs_steps * tokens.shape[1], self.hidden_dim), {}
+        tokens_per_frame = tokens.shape[1]
+        tokens = tokens.reshape(B, self.n_obs_steps, tokens_per_frame, self.hidden_dim)
+        tokens = tokens + self.obs_time_embed.to(dtype=tokens.dtype)
+        return tokens.reshape(
+            B, self.n_obs_steps * tokens_per_frame, self.hidden_dim
+        ), {}
 
 
 class ActionFlowAgent(BaseAgent):
@@ -87,11 +99,15 @@ class ActionFlowAgent(BaseAgent):
         num_points: int,
         hidden_dim: int = 512,
         depth: int = 8,
-        temporal_heads: int = 2,
-        obs_heads: int = 8,
-        mlp_ratio: float = 2.5,
+        num_heads: int = 8,
+        num_kv_heads: int = 4,
+        ffn_hidden_dim: int = 896,
+        timestep_embed_dim: int = 128,
+        qk_norm: bool = True,
+        attn_drop: float = 0.0,
         denoise_steps: int = 2,
         noise_shift_alpha: float = 2.0,
+        solver: str = "euler",
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         modality_dropout_probs: dict | None = None,
@@ -112,14 +128,18 @@ class ActionFlowAgent(BaseAgent):
             action_dim=action_dim,
             hidden_dim=hidden_dim,
             depth=depth,
-            temporal_heads=temporal_heads,
-            obs_heads=obs_heads,
-            mlp_ratio=mlp_ratio,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            ffn_hidden_dim=ffn_hidden_dim,
+            timestep_embed_dim=timestep_embed_dim,
+            qk_norm=qk_norm,
+            attn_drop=attn_drop,
         )
         action_decoder = SimpleRectifiedFlowDecoder(
             model=backbone,
             denoise_steps=denoise_steps,
             noise_shift_alpha=noise_shift_alpha,
+            solver=solver,
         )
         super().__init__(
             obs_encoder=obs_encoder,
@@ -147,9 +167,9 @@ def example():
         num_points=N,
         hidden_dim=128,
         depth=2,
-        temporal_heads=2,
-        obs_heads=4,
-        mlp_ratio=2.0,
+        num_heads=4,
+        num_kv_heads=2,
+        ffn_hidden_dim=256,
         denoise_steps=5,
         pc_encoder_config={"out_channels": 128, "num_points": N, "hidden_dims": (64, 128, 256)},
     ).to(device)

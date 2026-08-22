@@ -11,6 +11,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     index_points,
     normalize_relative_xyz,
     query_ball_point,
+    resolve_fps_random_config,
 )
 from dexmani_policy.agents.position_encodings import (
     RelativePositionalEncoding3D,
@@ -116,8 +117,9 @@ class MultiScalePatchTokenizer(nn.Module):
             self.patch_transformer = nn.TransformerEncoder(encoder_layer, num_layers=patch_attn_layers)
 
     def forward(self, xyz: torch.Tensor, point_feature: torch.Tensor):
+        fps_config = resolve_fps_random_config(self.fps_random_config, self.training)
         patch_center, patch_center_idx = farthest_point_sample(
-            xyz, self.num_patches, **self.fps_random_config
+            xyz, self.num_patches, **fps_config
         )
         patch_center_feature = index_points(point_feature, patch_center_idx)
 
