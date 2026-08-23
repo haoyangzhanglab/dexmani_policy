@@ -85,6 +85,9 @@ agent:
 
   # ActionFlow DiT backbone
   hidden_dim: 512
+  context_dim: 256
+  # B3b: compact state branch (state_out_dim=64) — efficiency ablation.
+  state_out_dim: 64
   depth: 8
   num_heads: 8
   num_kv_heads: 4
@@ -98,7 +101,10 @@ agent:
   denoise_steps: 2
   # euler accepts any positive NFE; midpoint requires an even NFE.
   solver: midpoint
-  noise_shift_alpha: 2.0
+  # F1: noise_shift_alpha=4.0 (was 2.0)
+  # F2: noise_shift_ratio=0.75 → 75% shifted + 25% uniform i.i.d. mixture
+  noise_shift_alpha: 4.0
+  noise_shift_ratio: 0.75
 
   modality_dropout_probs:
     joint_state: 0.0
