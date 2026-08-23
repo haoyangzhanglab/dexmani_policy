@@ -5,25 +5,42 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class NoiseShiftSampler:
-    """Noise-shift timestep sampling: biases t toward 0 for harder denoising tasks."""
+class MixtureTimeSampler:
+    """i.i.d. mixture of NoiseShift and uniform timestep sampling.
 
-    def __init__(self, alpha: float = 2.0):
+    Each sample independently draws from either the shifted distribution
+    (with probability ``shifted_ratio``) or the uniform distribution.
+    This avoids batch-level forced partitioning and gives smoother
+    gradient signals across the full t-range.
+    """
+
+    def __init__(self, alpha: float = 4.0, shifted_ratio: float = 0.75):
         self.alpha = alpha
+        self.shifted_ratio = shifted_ratio
+
+    def _shift(self, u: torch.Tensor) -> torch.Tensor:
+        return u / (1 + (self.alpha - 1) * (1 - u))
 
     def sample(self, batch: int, device: torch.device) -> torch.Tensor:
         u = torch.rand(batch, device=device)
-        return u / (1 + (self.alpha - 1) * (1 - u))
+        if self.shifted_ratio == 0.0:
+            return u
+        shifted = self._shift(u)
+        if self.shifted_ratio == 1.0:
+            return shifted
+        use_shifted = torch.rand(batch, device=device) < self.shifted_ratio
+        return torch.where(use_shifted, shifted, u)
 
 
 class SimpleRectifiedFlowDecoder(nn.Module):
-    """Rectified flow matching with noise-shift sampling and KV-cache inference."""
+    """Rectified flow matching with mixture time sampling and KV-cache inference."""
 
     def __init__(
         self,
         model: nn.Module,
         denoise_steps: int = 2,
-        noise_shift_alpha: float = 2.0,
+        noise_shift_alpha: float = 4.0,
+        noise_shift_ratio: float = 0.75,
         solver: str = "euler",
     ):
         super().__init__()
@@ -33,7 +50,10 @@ class SimpleRectifiedFlowDecoder(nn.Module):
         self.model = model
         self.denoise_steps = denoise_steps
         self.solver = solver
-        self.sampler = NoiseShiftSampler(noise_shift_alpha)
+        self.sampler = MixtureTimeSampler(
+            alpha=noise_shift_alpha,
+            shifted_ratio=noise_shift_ratio,
+        )
 
     def _resolve_nfe(self, denoise_timesteps=None) -> int:
         nfe = self.denoise_steps if denoise_timesteps is None else denoise_timesteps
