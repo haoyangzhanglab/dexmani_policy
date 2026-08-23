@@ -17,6 +17,13 @@ def _rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return normalized.to(dtype=x.dtype)
 
 
+def modulate_rms(
+    x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
+    """RMSNorm followed by adaptive scale/shift modulation (standalone, no module overhead)."""
+    return _rms_norm(x, eps) * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
 class AdaptiveRMSNorm(nn.Module):
     """Parameter-free RMSNorm modulated by a flow-timestep embedding."""
 
@@ -116,23 +123,28 @@ class SelfAttention(nn.Module):
 
 
 class GQACrossAttentionWithCache(nn.Module):
-    """Action-to-observation GQA with a static per-generation KV cache.
+    """Action-to-observation GQA with asymmetric Q/KV dimensions and a static per-generation KV cache.
 
-    The cache retains the compact ``num_kv_heads`` representation and expands K/V heads immediately before scaled dot-product attention.
+    The cache retains the compact ``num_kv_heads`` representation and expands
+    K/V heads immediately before scaled dot-product attention.
+
+    ``head_dim`` is derived from ``context_dim // num_heads`` so that the
+    bottleneck lives entirely on the KV side.
     """
 
     def __init__(
         self,
-        hidden_dim: int,
+        query_dim: int,
+        context_dim: int,
         num_heads: int = 8,
         num_kv_heads: int = 4,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
     ):
         super().__init__()
-        if hidden_dim % num_heads != 0:
+        if context_dim % num_heads != 0:
             raise ValueError(
-                f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
+                f"context_dim ({context_dim}) must be divisible by num_heads ({num_heads})"
             )
         if num_heads % num_kv_heads != 0:
             raise ValueError(
@@ -141,14 +153,14 @@ class GQACrossAttentionWithCache(nn.Module):
 
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
-        self.head_dim = hidden_dim // num_heads
+        self.head_dim = context_dim // num_heads
         self.qk_norm = qk_norm
         self.attn_drop = attn_drop
 
-        self.q_proj = nn.Linear(hidden_dim, num_heads * self.head_dim)
-        self.k_proj = nn.Linear(hidden_dim, num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(hidden_dim, num_kv_heads * self.head_dim, bias=False)
-        self.out_proj = nn.Linear(num_heads * self.head_dim, hidden_dim)
+        self.q_proj = nn.Linear(query_dim, num_heads * self.head_dim)
+        self.k_proj = nn.Linear(context_dim, num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(context_dim, num_kv_heads * self.head_dim, bias=False)
+        self.out_proj = nn.Linear(num_heads * self.head_dim, query_dim)
 
         self._cached_k: torch.Tensor | None = None
         self._cached_v: torch.Tensor | None = None
@@ -226,11 +238,23 @@ class GQACrossAttentionWithCache(nn.Module):
         return self.out_proj(output)
 
 
-class ActionFlowTransformerLayer(nn.Module):
+class ActionFlowDiTXBlock(nn.Module):
+    """Full DiT-X block: Self-Attn → Cross-Attn → FFN, each zero-gated.
+
+    Modulation order (9×hidden_dim)::
+
+        scale_sa, shift_sa, gate_sa,
+        scale_ca, shift_ca, gate_ca,
+        scale_ffn, shift_ffn, gate_ffn
+
+    B4: modulation is shared across layers — each block adds only a small
+    per-layer ``modulation_table`` bias to the shared base modulation.
+    """
+
     def __init__(
         self,
         hidden_dim: int,
-        attention_type: str,
+        context_dim: int,
         num_heads: int = 8,
         num_kv_heads: int = 4,
         ffn_hidden_dim: int = 896,
@@ -238,62 +262,56 @@ class ActionFlowTransformerLayer(nn.Module):
         attn_drop: float = 0.0,
     ):
         super().__init__()
-        if attention_type not in {"self", "cross"}:
-            raise ValueError(f"Unknown attention_type: {attention_type}")
-
-        self.attention_type = attention_type
-        if attention_type == "self":
-            self.attention = SelfAttention(
-                hidden_dim=hidden_dim,
-                num_heads=num_heads,
-                qk_norm=qk_norm,
-                attn_drop=attn_drop,
-            )
-        else:
-            self.attention = GQACrossAttentionWithCache(
-                hidden_dim=hidden_dim,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                qk_norm=qk_norm,
-                attn_drop=attn_drop,
-            )
-
-        self.ffn = GEGLU(hidden_dim, ffn_hidden_dim)
-        self.ada_mod = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_dim, 6 * hidden_dim),
+        self.self_attn = SelfAttention(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            qk_norm=qk_norm,
+            attn_drop=attn_drop,
         )
+        self.cross_attn = GQACrossAttentionWithCache(
+            query_dim=hidden_dim,
+            context_dim=context_dim,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            qk_norm=qk_norm,
+            attn_drop=attn_drop,
+        )
+        self.ffn = GEGLU(hidden_dim, ffn_hidden_dim)
+        self.modulation_table = nn.Parameter(torch.zeros(1, 9, hidden_dim))
 
     def initialize_weights(self) -> None:
-        nn.init.zeros_(self.ada_mod[-1].weight)
-        nn.init.zeros_(self.ada_mod[-1].bias)
+        nn.init.zeros_(self.modulation_table)
 
     def forward(
         self,
         x: torch.Tensor,
-        timestep_embedding: torch.Tensor,
+        base_mod: torch.Tensor,
         context: torch.Tensor,
     ) -> torch.Tensor:
+        # base_mod: [B, 9*hidden_dim] from shared modulation
+        # modulation_table: [1, 9, hidden_dim] per-layer bias
+        layer_mod = base_mod.view(-1, 9, x.shape[-1]) + self.modulation_table
         (
-            scale_attn,
-            shift_attn,
-            gate_attn,
-            scale_ffn,
-            shift_ffn,
-            gate_ffn,
-        ) = self.ada_mod(timestep_embedding).chunk(6, dim=-1)
+            scale_sa, shift_sa, gate_sa,
+            scale_ca, shift_ca, gate_ca,
+            scale_ffn, shift_ffn, gate_ffn,
+        ) = layer_mod.reshape(-1, 9 * x.shape[-1]).chunk(9, dim=-1)
 
-        hidden = _rms_norm(x)
-        hidden = hidden * (1 + scale_attn[:, None]) + shift_attn[:, None]
-        if self.attention_type == "self":
-            attention_output = self.attention(hidden)
-        else:
-            attention_output = self.attention(hidden, context)
-        x = x + gate_attn[:, None] * attention_output
+        # Self-Attention
+        x = x + gate_sa.unsqueeze(1) * self.self_attn(
+            modulate_rms(x, scale_sa, shift_sa)
+        )
 
-        hidden = _rms_norm(x)
-        hidden = hidden * (1 + scale_ffn[:, None]) + shift_ffn[:, None]
-        x = x + gate_ffn[:, None] * self.ffn(hidden)
+        # Cross-Attention
+        x = x + gate_ca.unsqueeze(1) * self.cross_attn(
+            modulate_rms(x, scale_ca, shift_ca), context
+        )
+
+        # FFN
+        x = x + gate_ffn.unsqueeze(1) * self.ffn(
+            modulate_rms(x, scale_ffn, shift_ffn)
+        )
+
         return x
 
 
@@ -303,6 +321,7 @@ class ActionFlowDiT(nn.Module):
         horizon: int,
         action_dim: int,
         hidden_dim: int = 512,
+        context_dim: int | None = None,
         depth: int = 8,
         num_heads: int = 8,
         num_kv_heads: int = 4,
@@ -318,6 +337,7 @@ class ActionFlowDiT(nn.Module):
         self.horizon = horizon
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
+        self.context_dim = hidden_dim if context_dim is None else context_dim
         self.action_in = nn.Linear(action_dim, hidden_dim)
         self.action_pos = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
         self.timestep_embedder = TimestepMLP(
@@ -325,19 +345,24 @@ class ActionFlowDiT(nn.Module):
             output_dim=hidden_dim,
         )
 
-        attention_pattern = ["self" if i % 2 == 0 else "cross" for i in range(depth)]
+        # B4: shared modulation across all layers (one SiLU + Linear instead of depth copies)
+        self.shared_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 9 * hidden_dim),
+        )
+
         self.layers = nn.ModuleList(
             [
-                ActionFlowTransformerLayer(
+                ActionFlowDiTXBlock(
                     hidden_dim=hidden_dim,
-                    attention_type=attention_type,
+                    context_dim=self.context_dim,
                     num_heads=num_heads,
                     num_kv_heads=num_kv_heads,
                     ffn_hidden_dim=ffn_hidden_dim,
                     qk_norm=qk_norm,
                     attn_drop=attn_drop,
                 )
-                for attention_type in attention_pattern
+                for _ in range(depth)
             ]
         )
         self.final_norm = AdaptiveRMSNorm(
@@ -358,6 +383,10 @@ class ActionFlowDiT(nn.Module):
         nn.init.normal_(self.action_in.weight, std=WEIGHT_INIT_STD)
         nn.init.zeros_(self.action_in.bias)
         nn.init.normal_(self.action_pos, std=WEIGHT_INIT_STD)
+
+        # B4: zero-init shared modulation (overrides _basic_init's xavier_uniform)
+        nn.init.zeros_(self.shared_modulation[-1].weight)
+        nn.init.zeros_(self.shared_modulation[-1].bias)
 
         for layer in self.layers:
             layer.initialize_weights()
@@ -396,29 +425,28 @@ class ActionFlowDiT(nn.Module):
         if (
             context.ndim != 3
             or context.shape[0] != x.shape[0]
-            or context.shape[2] != self.hidden_dim
+            or context.shape[2] != self.context_dim
         ):
             raise ValueError(
-                f"context must have shape [B, L, {self.hidden_dim}] with B={x.shape[0]}, "
+                f"context must have shape [B, L, {self.context_dim}] with B={x.shape[0]}, "
                 f"got {tuple(context.shape)}"
             )
 
         hidden = self.action_in(x) + self.action_pos.to(dtype=x.dtype)
         timestep = self._prepare_timestep(timestep, x.shape[0], x.device)
         timestep_embedding = self.timestep_embedder(timestep)
+        base_mod = self.shared_modulation(timestep_embedding)  # B4: [B, 9*hidden_dim]
 
         for layer in self.layers:
-            hidden = layer(hidden, timestep_embedding, context)
+            hidden = layer(hidden, base_mod, context)
 
         hidden = self.final_norm(hidden, timestep_embedding)
         return self.action_out(hidden)
 
     def setup_kv_cache(self, context: torch.Tensor) -> None:
-        for layer in self.layers:
-            if layer.attention_type == "cross":
-                layer.attention.setup_kv_cache(context)
+        for block in self.layers:
+            block.cross_attn.setup_kv_cache(context)
 
     def clear_kv_cache(self) -> None:
-        for layer in self.layers:
-            if layer.attention_type == "cross":
-                layer.attention.clear_kv_cache()
+        for block in self.layers:
+            block.cross_attn.clear_kv_cache()
