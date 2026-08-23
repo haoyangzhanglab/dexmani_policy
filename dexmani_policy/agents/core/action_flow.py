@@ -19,6 +19,8 @@ class ActionFlowObsEncoder(nn.Module):
         num_points: int,
         n_obs_steps: int,
         hidden_dim: int = 512,
+        context_dim: int | None = None,
+        state_out_dim: int | None = None,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
     ):
@@ -28,30 +30,45 @@ class ActionFlowObsEncoder(nn.Module):
         self.pc_encoder = build_pc_patch_tokenizer(encoder_type, pc_dim, pc_encoder_config)
         self.n_obs_steps = n_obs_steps
         self.hidden_dim = hidden_dim
+        self.context_dim = hidden_dim if context_dim is None else context_dim
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
         self.fps_random_config = fps_random_config or {}
 
         token_channels = self.pc_encoder.out_dim
         num_patches = self.pc_encoder.out_shape[0]
-        self.patch_proj = nn.Linear(token_channels, hidden_dim)
-        self.global_proj = nn.Linear(token_channels, hidden_dim)
+        cdim = self.context_dim
+        self._state_cond_geom = state_out_dim is not None
 
-        self.state_encoder = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
+        if self._state_cond_geom:
+            # State-conditioned geometry: state broadcast to each frame's
+            # patch/global tokens, concat with point features, then project.
+            sdim = state_out_dim
+            self.patch_proj = nn.Linear(token_channels + sdim, cdim)
+            self.global_proj = nn.Linear(token_channels + sdim, cdim)
+            self.state_encoder = nn.Sequential(
+                nn.Linear(state_dim, sdim),
+                nn.SiLU(),
+                nn.Linear(sdim, sdim),
+            )
+            self.num_obs_tokens = (1 + num_patches) * n_obs_steps
+        else:
+            self.patch_proj = nn.Linear(token_channels, cdim)
+            self.global_proj = nn.Linear(token_channels, cdim)
+            self.state_encoder = nn.Sequential(
+                nn.Linear(state_dim, cdim),
+                nn.SiLU(),
+                nn.Linear(cdim, cdim),
+            )
+            self.state_embed = nn.Parameter(torch.randn(1, 1, cdim) * 0.02)
+            self.num_obs_tokens = (1 + 1 + num_patches) * n_obs_steps
 
-        self.state_embed = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
-        self.global_embed = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
-        self.patch_embed = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
+        self.global_embed = nn.Parameter(torch.randn(1, 1, cdim) * 0.02)
+        self.patch_embed = nn.Parameter(torch.randn(1, 1, cdim) * 0.02)
         self.obs_time_embed = nn.Parameter(
-            torch.randn(1, n_obs_steps, 1, hidden_dim) * 0.02
+            torch.randn(1, n_obs_steps, 1, cdim) * 0.02
         )
-
-        self.num_obs_tokens = (1 + 1 + num_patches) * n_obs_steps
-        self.obs_token_dim = hidden_dim
+        self.obs_token_dim = cdim
 
     def forward(self, obs: dict):
         pc = preprocess_point_cloud(
@@ -65,24 +82,35 @@ class ActionFlowObsEncoder(nn.Module):
         if getattr(self.pc_encoder, "supports_global_token", True):
             pc_out = self.pc_encoder(pc, return_global_token=True)
             patch_tokens, _, global_token = pc_out[0], pc_out[1], pc_out[2]
-            patch_tokens = self.patch_proj(patch_tokens) + self.patch_embed
-            global_token = self.global_proj(global_token) + self.global_embed
         else:
             patch_tokens = self.pc_encoder(pc)
             global_token = patch_tokens.max(dim=1).values
+            global_token = global_token.unsqueeze(1)
+
+        state_emb = self.state_encoder(obs["joint_state"])
+
+        if self._state_cond_geom:
+            # Broadcast state to each geometry token, concat, then project.
+            patch_state = state_emb[:, None, :].expand(-1, patch_tokens.shape[1], -1)
+            patch_tokens = self.patch_proj(
+                torch.cat([patch_tokens, patch_state], dim=-1)
+            ) + self.patch_embed
+            global_token = self.global_proj(
+                torch.cat([global_token, state_emb[:, None, :]], dim=-1)
+            ) + self.global_embed
+            tokens = torch.cat([global_token, patch_tokens], dim=1)
+        else:
             patch_tokens = self.patch_proj(patch_tokens) + self.patch_embed
-            global_token = self.global_proj(global_token).unsqueeze(1) + self.global_embed
+            global_token = self.global_proj(global_token) + self.global_embed
+            state = state_emb.unsqueeze(1) + self.state_embed
+            tokens = torch.cat([state, global_token, patch_tokens], dim=1)
 
-        state = self.state_encoder(obs["joint_state"])
-        state = state.unsqueeze(1) + self.state_embed
-
-        tokens = torch.cat([state, global_token, patch_tokens], dim=1)
         B = tokens.shape[0] // self.n_obs_steps
         tokens_per_frame = tokens.shape[1]
-        tokens = tokens.reshape(B, self.n_obs_steps, tokens_per_frame, self.hidden_dim)
+        tokens = tokens.reshape(B, self.n_obs_steps, tokens_per_frame, self.context_dim)
         tokens = tokens + self.obs_time_embed.to(dtype=tokens.dtype)
         return tokens.reshape(
-            B, self.n_obs_steps * tokens_per_frame, self.hidden_dim
+            B, self.n_obs_steps * tokens_per_frame, self.context_dim
         ), {}
 
 
@@ -98,6 +126,8 @@ class ActionFlowAgent(BaseAgent):
         state_dim: int,
         num_points: int,
         hidden_dim: int = 512,
+        context_dim: int | None = None,
+        state_out_dim: int | None = None,
         depth: int = 8,
         num_heads: int = 8,
         num_kv_heads: int = 4,
@@ -106,7 +136,8 @@ class ActionFlowAgent(BaseAgent):
         qk_norm: bool = True,
         attn_drop: float = 0.0,
         denoise_steps: int = 2,
-        noise_shift_alpha: float = 2.0,
+        noise_shift_alpha: float = 4.0,
+        noise_shift_ratio: float = 0.75,
         solver: str = "euler",
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
@@ -120,6 +151,8 @@ class ActionFlowAgent(BaseAgent):
             num_points=num_points,
             n_obs_steps=n_obs_steps,
             hidden_dim=hidden_dim,
+            context_dim=context_dim,
+            state_out_dim=state_out_dim,
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
         )
@@ -127,6 +160,7 @@ class ActionFlowAgent(BaseAgent):
             horizon=horizon,
             action_dim=action_dim,
             hidden_dim=hidden_dim,
+            context_dim=context_dim,
             depth=depth,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
@@ -139,6 +173,7 @@ class ActionFlowAgent(BaseAgent):
             model=backbone,
             denoise_steps=denoise_steps,
             noise_shift_alpha=noise_shift_alpha,
+            noise_shift_ratio=noise_shift_ratio,
             solver=solver,
         )
         super().__init__(
