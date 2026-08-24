@@ -120,7 +120,7 @@ BaseAgent
 | **DP3** | PC+state | PointNeXT+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | **最简参考**, pc_dim=3 |
 | **DP** | RGB+state | DINO/CLIP/SigLIP+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | RGB, channels_last |
 | **ManiFlow** | PC+state | PointNeXT+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | Token条件, EMA教师, wd=1e-3 |
-| **ActionFlow** | PC+state | PointNeXT 64-patch+SiLU MLP+obs-time PE | ActionFlowDiT(AdaRMS) | SimpleRectifiedFlow | 8L SA/CA 交错, 8Q/4KV GQA, GEGLU, CA KV cache |
+| **ActionFlow** | PC+state | PointNeXT 128-patch+SiLU MLP+state-cond geometry | ActionFlowDiT(Shared AdaRMS) | SimpleRectifiedFlow | 8×(SA→CA→FFN) DiT-X, 256D asym GQA CA, GEGLU, CA KV cache |
 | **MoE** | RGB+state | R3M+StateMLP+MoE | UNet1D(FiLM) | Diffusion(DDPM 100步) | 16专家top-2, **无bfloat16/compile** |
 | **SAT** | PC+state | PointNeXT+StateMLP | SATBackbone(EJC+MMAttn) | SATFlowMatch | (B,Da,T), shuffle, compile=default |
 | **R3D** | PC+state | Uni3D+StateMLP | OneWayTransformer | Diffusion(DDIM 10步) | 级联mask, 分组loss |
@@ -143,7 +143,7 @@ BaseAgent
 | `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
+| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=4 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
 
 ---
 
@@ -154,7 +154,7 @@ BaseAgent
 | 参数 | action_flow | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | sat |
 |------|-------------|-----|----------|--------|---------------|-----|---------|-----|
 | action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
-| backbone | ActionFlowDiT 8L×512 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
+| backbone | ActionFlowDiT 8L×512/256 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
 | train/infer steps | -/2 NFE | 100/10 | -/4 | 100/100 | 100/10 | 100/10 | 100/20 | -/10 |
 | prediction_type | velocity | sample | velocity | sample | sample | sample | epsilon | velocity |
 | lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
@@ -267,4 +267,6 @@ dexmani_policy/
 | `docs/项目架构.md` | 完整目录树、模块依赖图、类层级、数据流全景 |
 | `docs/仿真评测机制.md` | 评测全链路 — CLI → EnvRunner → Agent 推理 → Decoder 去噪 |
 | `docs/SSH服务器训练部署.md` | 远程训练部署 + SSH 常识附录 |
-| `docs/DP3-R3D-ManiFlow测试结果0808.md` | DP3 vs R3D vs ManiFlow 五项任务对比评测 |
+| `docs/DP3-R3D-ManiFlow测试结果0813.md` | DP3 vs R3D vs ManiFlow 五项任务对比评测 |
+| `docs/ActionFlow-Solver-Ablation测试结果0822.md` | ActionFlow solver/NFE + 64/128-patch 消融（pour） |
+| `docs/ActionFlow-vNext测试结果0824.md` | ActionFlow-vNext 架构升级 (B1-B4/F1-F2) 测试结果（pick_apple_messy） |
