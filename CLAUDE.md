@@ -40,12 +40,15 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir> --no-videos
 bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_dir>
 bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_dir> --ckpt-tag 40pct --episodes 50
 
-# ActionFlow solver paired ablation（Euler2/Mid2/Euler4/Mid4/Mid8；不含 Euler10）
+# ActionFlow solver paired ablation（Euler1/Mid2/Mid4/Mid8/Mid10）
 bash scripts/eval/eval_action_flow_solvers.sh action_flow pour <exp_name> --episodes 25
 ```
 
-ActionFlow 的 `denoise_steps` 即 NFE：Euler 支持任意正整数（包括 10），Midpoint 只支持偶数。
-需要单独评测 Euler-10 时，使用 `eval_best_ckpt.sh --denoise-steps 10`。
+ActionFlow 的 `denoise_steps` 即 NFE：Euler 支持任意正整数（包括 1 和 10），Midpoint 只支持偶数。
+需要单独评测其他 NFE 时，使用 `eval_best_ckpt.sh --denoise-steps N`。
+
+NFE 判据（重构计划 §19）：`G2 = SR10 - SR2 ≤ 3~5%`，`R2 = (SR2-SR1)/(SR10-SR1) ≥ 0.75`。
+仅当 `SR10 - SR2 > 5%` 才启动 FlexRF。
 
 ### Demo 录制
 
@@ -102,7 +105,7 @@ BaseAgent
   ├── MultiTaskAgent            ← MultiTask (DiT + Diffusion/FlowMatch)
   ├── R3DAgent                  ← R3D (OneWayTransformer + Diffusion)
   ├── DQRISEAgent               ← DQ-RISE (自定义 UNet + Diffusion, action_dim 缩减)
-  └── ActionFlowAgent           ← ActionFlow (独立 DiT backbone + SimpleRectifiedFlow, KV cache)
+  └── ActionFlowAgent           ← ActionFlow (GeoFormer 感知 + 独立 DiT backbone + SimpleRectifiedFlow, KV cache)
 ```
 
 ### Agent 继承模式 (添加新 Agent 时选)
@@ -120,7 +123,7 @@ BaseAgent
 | **DP3** | PC+state | PointNeXT+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | **最简参考**, pc_dim=3 |
 | **DP** | RGB+state | DINO/CLIP/SigLIP+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | RGB, channels_last |
 | **ManiFlow** | PC+state | PointNeXT+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | Token条件, EMA教师, wd=1e-3 |
-| **ActionFlow** | PC+state | PointNeXT 128-patch+SiLU MLP+state-cond geometry | ActionFlowDiT(Shared AdaRMS) | SimpleRectifiedFlow | 8×(SA→CA→FFN) DiT-X, 256D asym GQA CA, GEGLU, CA KV cache |
+| **ActionFlow** | PC+state | PointNeXT 192-patch local tokenizer → GeoFormer 4L×576(3D RoPE) → 385×768 memory | ActionFlowDiT 8L×768(Shared AdaRMS) | SimpleRectifiedFlow | cond 是 **dict** {memory,state}; 12Q/12KV full CA, SwiGLU-2048, compact 384 conditioner, CA KV cache; ~97M |
 | **MoE** | RGB+state | R3M+StateMLP+MoE | UNet1D(FiLM) | Diffusion(DDPM 100步) | 16专家top-2, **无bfloat16/compile** |
 | **SAT** | PC+state | PointNeXT+StateMLP | SATBackbone(EJC+MMAttn) | SATFlowMatch | (B,Da,T), shuffle, compile=default |
 | **R3D** | PC+state | Uni3D+StateMLP | OneWayTransformer | Diffusion(DDIM 10步) | 级联mask, 分组loss |
@@ -143,7 +146,7 @@ BaseAgent
 | `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=4 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
+| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=3 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
 
 ---
 
@@ -154,7 +157,7 @@ BaseAgent
 | 参数 | action_flow | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | sat |
 |------|-------------|-----|----------|--------|---------------|-----|---------|-----|
 | action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
-| backbone | ActionFlowDiT 8L×512/256 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
+| backbone | ActionFlowDiT 8L×768 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
 | train/infer steps | -/2 NFE | 100/10 | -/4 | 100/100 | 100/10 | 100/10 | 100/20 | -/10 |
 | prediction_type | velocity | sample | velocity | sample | sample | sample | epsilon | velocity |
 | lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
@@ -193,7 +196,14 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
 - **FlowMatchWithConsistency `target_t`**: 训练=0, 推理=dt>0
-- **ActionFlow 独立实现**: `action_flow_flowmatch.py` / `action_flow_dit.py` 完全独立，不共享 `time_sampler.py` / `flowmatch.py` / `ditx.py`。**不要合并或交叉引用**
+- **ActionFlow 独立实现**: `action_flow_flowmatch.py` / `action_flow_dit.py` / `geoformer.py` 完全独立，不共享 `time_sampler.py` / `flowmatch.py` / `ditx.py`。**不要合并或交叉引用**
+- **ActionFlow `cond` 是 dict** `{"memory": [B,385,768], "state": [B,2A]}` (其余策略是 Tensor)。`BaseAgent.predict_action_from_cond` 会直接取 `cond.shape/.device/.dtype`，所以 `ActionFlowAgent` **局部 override** 该方法。**不要为此改 BaseAgent**
+- **ActionFlow state 不进入几何**: joint_state 只作为 global modulation 进 ActionDiT，绝不 broadcast 到 geometry token
+- **GeoFormer 末尾有 `norm_out` (RMSNorm)**: pre-norm 只约束每个 sublayer 的**输入**，不约束 residual stream 的**输出**。缺它时 backward Jacobian 随权重尺度增长远快于 forward (实测 ~wscale¹¹ vs ~wscale³)；加上后输出与梯度对权重尺度**不变**。ActionDiT 末尾的 `modulate_rms` 已起同样作用。**不要删**
+- **`_rms_norm` eps = 1e-5 (非 1e-6)**: eps 同时决定近零行的 backward 增益上限 (1/√eps)，1e-6→1000×，1e-5→316×。bf16 下这是余量差别
+- **ActionFlow KV cache 是普通 python 属性**: 不能 `register_buffer`，否则进 `state_dict()`，eval 时 `strict=True` 加载会因训练/评测 batch 不同而失败 (smoke test 的 save→load 同一模型，**测不出来**)
+- **ActionFlow batch 64 × grad-accum 2**: 97M 模型在 24GB 卡上 batch 128 放不下 (实测 bf16 峰值 21.7 GiB / fp32 OOM)。等效 batch 仍是 128，`total_train_steps` 只计 optimizer step，配方不变
+- **PointNeXT `include_global_token`**: 默认 True 保持 maniflow/sat 行为；ActionFlow 传 False，**在构造期**就不建全局分支 (DDP `find_unused_parameters=False` 下建而不用会直接崩)
 - **DDP 覆盖不全**: `dp3` 和 `moe_dp` 有意仅单卡
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
 

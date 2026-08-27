@@ -78,7 +78,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **DP** | RGB + Joint | DINO/CLIP/SigLIP + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp.yaml` |
 | **DP3** | PC(1024,3) + Joint | PointNeXT + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
 | **ManiFlow** | PC(1024,3) + Joint | PointNeXT(patch) + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
-| **ActionFlow** | PC(1024,6) + Joint | PointNeXT(128 patch) + SiLU MLP + state-cond geometry | ActionFlowDiT (Shared AdaRMS, GQA, GEGLU) | SimpleRectifiedFlow | `action_flow.yaml` |
+| **ActionFlow** | PC(1024,6) + Joint | PointNeXT 192-patch local tokenizer → GeoFormer 4L×576(3D RoPE) → 385×768 memory | ActionFlowDiT 8L×768 (12Q/12KV full CA, SwiGLU-2048, shared AdaRMS, KV cache) | SimpleRectifiedFlow | `action_flow.yaml` |
 | **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDPM | `moe_dp.yaml` |
 | **MultiTask** | RGB + Joint + Text | DINO + CLIP Text + StateMLP | DiT (AdaLN-Zero) | Diffusion / FlowMatch | `multitask_dit.yaml` |
 | **R3D** | PC(1024,3) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
@@ -91,7 +91,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 |:---------|:-----|
 | **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
 | **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
-| **ManiFlow vs ActionFlow** | FlowMatch+Consistency(EMA教师) vs SimpleRectifiedFlow(NoiseShift α=4+mix, KV cache, 2步推理) |
+| **ManiFlow vs ActionFlow** | FlowMatch+Consistency(EMA教师) vs SimpleRectifiedFlow(NoiseShift α=3+mix, KV cache, 2步推理) |
 | **DP3 vs MoE** | MoE 在 encoder 中引入 16-expert 稀疏路由 (top-2)，增容量不增推理 FLOPs |
 | **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
 | **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
@@ -125,7 +125,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=4 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
+| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=3 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
 
 ---
 
@@ -162,7 +162,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | 参数 | action_flow | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | sat |
 |------|-------------|-----|----------|--------|---------------|-----|---------|-----|
 | action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
-| backbone | ActionFlowDiT 8L×512/256 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
+| backbone | ActionFlowDiT 8L×768 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
 | train/infer steps | -/2 NFE | 100/10 | -/4 | 100/100 | 100/10 | 100/10 | 100/20 | -/10 |
 | prediction_type | velocity | sample | velocity | sample | sample | sample | epsilon | velocity |
 | lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
