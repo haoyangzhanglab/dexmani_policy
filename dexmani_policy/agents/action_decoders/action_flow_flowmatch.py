@@ -14,7 +14,7 @@ class MixtureTimeSampler:
     gradient signals across the full t-range.
     """
 
-    def __init__(self, alpha: float = 4.0, shifted_ratio: float = 0.75):
+    def __init__(self, alpha: float = 3.0, shifted_ratio: float = 0.75):
         self.alpha = alpha
         self.shifted_ratio = shifted_ratio
 
@@ -33,13 +33,18 @@ class MixtureTimeSampler:
 
 
 class SimpleRectifiedFlowDecoder(nn.Module):
-    """Rectified flow matching with mixture time sampling and KV-cache inference."""
+    """Rectified flow matching with mixture time sampling and KV-cache inference.
+
+    ``cond`` is a dict mapping ``"memory"`` (geometry tokens, [B, T_mem, C])
+    and ``"state"`` (state history, [B, 2A]) to their tensors; both are passed
+    to the model as ``context`` and ``state`` respectively.
+    """
 
     def __init__(
         self,
         model: nn.Module,
         denoise_steps: int = 2,
-        noise_shift_alpha: float = 4.0,
+        noise_shift_alpha: float = 3.0,
         noise_shift_ratio: float = 0.75,
         solver: str = "euler",
     ):
@@ -70,7 +75,13 @@ class SimpleRectifiedFlowDecoder(nn.Module):
         xt = (1 - t[:, None, None]) * noise + t[:, None, None] * actions
         target = actions - noise
 
-        pred = self.model(x=xt, timestep=t, context=cond)
+        pred = self.model(
+            x=xt,
+            timestep=t,
+            context=cond["memory"],
+            state=cond["state"],
+            step_size=0.0,
+        )
         loss = F.mse_loss(pred, target)
         return loss, {
             "loss": loss,
@@ -82,7 +93,7 @@ class SimpleRectifiedFlowDecoder(nn.Module):
         }
 
     def _sample_euler(
-        self, x: torch.Tensor, cond: torch.Tensor, nfe: int
+        self, x: torch.Tensor, cond: dict, nfe: int
     ) -> torch.Tensor:
         batch_size = x.shape[0]
         dt = 1.0 / nfe
@@ -94,13 +105,19 @@ class SimpleRectifiedFlowDecoder(nn.Module):
                 device=x.device,
                 dtype=x.dtype,
             )
-            velocity = self.model(x=x, timestep=timestep, context=cond)
+            velocity = self.model(
+                x=x,
+                timestep=timestep,
+                context=cond["memory"],
+                state=cond["state"],
+                step_size=0.0,
+            )
             x = x + dt * velocity
 
         return x
 
     def _sample_midpoint(
-        self, x: torch.Tensor, cond: torch.Tensor, nfe: int
+        self, x: torch.Tensor, cond: dict, nfe: int
     ) -> torch.Tensor:
         if nfe % 2 != 0:
             raise ValueError(f"midpoint solver requires an even NFE, got {nfe}")
@@ -117,7 +134,13 @@ class SimpleRectifiedFlowDecoder(nn.Module):
                 device=x.device,
                 dtype=x.dtype,
             )
-            k1 = self.model(x=x, timestep=t_start, context=cond)
+            k1 = self.model(
+                x=x,
+                timestep=t_start,
+                context=cond["memory"],
+                state=cond["state"],
+                step_size=0.0,
+            )
 
             x_mid = x + 0.5 * dt * k1
             t_mid = torch.full(
@@ -126,7 +149,13 @@ class SimpleRectifiedFlowDecoder(nn.Module):
                 device=x.device,
                 dtype=x.dtype,
             )
-            k2 = self.model(x=x_mid, timestep=t_mid, context=cond)
+            k2 = self.model(
+                x=x_mid,
+                timestep=t_mid,
+                context=cond["memory"],
+                state=cond["state"],
+                step_size=0.0,
+            )
             x = x + dt * k2
 
         return x
@@ -136,7 +165,7 @@ class SimpleRectifiedFlowDecoder(nn.Module):
         nfe = self._resolve_nfe(denoise_timesteps)
         x = torch.randn_like(action_template)
 
-        self.model.setup_kv_cache(cond)
+        self.model.setup_kv_cache(cond["memory"])
         try:
             if self.solver == "euler":
                 x = self._sample_euler(x, cond, nfe)

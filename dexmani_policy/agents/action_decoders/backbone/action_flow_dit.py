@@ -11,59 +11,54 @@ from dexmani_policy.agents.position_encodings import TimestepMLP
 WEIGHT_INIT_STD = 0.02
 
 
-def _rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def _rms_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    # eps=1e-5 (not 1e-6) also caps the backward gain on a near-zero row: the
+    # Jacobian scales as 1/sqrt(rms^2 + eps), so a QK-Norm'd q/k row whose RMS
+    # collapses is amplified 316x rather than 1000x. Matters under bf16.
     variance = x.float().square().mean(dim=-1, keepdim=True)
     normalized = x * torch.rsqrt(variance + eps)
     return normalized.to(dtype=x.dtype)
 
 
 def modulate_rms(
-    x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, eps: float = 1e-6
+    x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, eps: float = 1e-5
 ) -> torch.Tensor:
     """RMSNorm followed by adaptive scale/shift modulation (standalone, no module overhead)."""
     return _rms_norm(x, eps) * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
-class AdaptiveRMSNorm(nn.Module):
-    """Parameter-free RMSNorm modulated by a flow-timestep embedding."""
+def _prepare_scalar(value, batch_size: int, device: torch.device) -> torch.Tensor:
+    """Normalize a python float / 0-d tensor / [B] tensor into a [B] float tensor."""
+    if not torch.is_tensor(value):
+        value = torch.tensor([value], dtype=torch.float32, device=device)
+    elif value.ndim == 0:
+        value = value[None].to(device)
+    else:
+        value = value.to(device)
+    return value.expand(batch_size)
 
-    def __init__(
-        self,
-        hidden_dim: int,
-        cond_dim: int | None = None,
-        with_gate: bool = False,
-        eps: float = 1e-6,
-    ):
+
+class RMSNorm(nn.Module):
+    """Weight-only RMSNorm.
+
+    ``eps`` is 1e-5 (not 1e-6) for the same reason as in the GeoFormer: it caps
+    the backward gain on a near-zero row at ``1/sqrt(eps)`` = 316x instead of
+    1000x. ``fusion_norm`` runs here over the state+timestep+step sum, which can
+    cancel toward zero on some dims once conditioning weights grow.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
-        cond_dim = hidden_dim if cond_dim is None else cond_dim
-        self.hidden_dim = hidden_dim
-        self.with_gate = with_gate
         self.eps = eps
-        num_outputs = 3 if with_gate else 2
-        self.modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(cond_dim, num_outputs * hidden_dim),
-        )
+        self.weight = nn.Parameter(torch.ones(dim))
 
-    def initialize_weights(self) -> None:
-        nn.init.zeros_(self.modulation[-1].weight)
-        nn.init.zeros_(self.modulation[-1].bias)
-
-    def forward(self, x: torch.Tensor, cond: torch.Tensor):
-        modulation = self.modulation(cond)
-        if self.with_gate:
-            scale, shift, gate = modulation.chunk(3, dim=-1)
-        else:
-            scale, shift = modulation.chunk(2, dim=-1)
-
-        x = _rms_norm(x, self.eps)
-        x = x * (1 + scale[:, None]) + shift[:, None]
-        if self.with_gate:
-            return x, gate
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return _rms_norm(x, self.eps) * self.weight.to(dtype=x.dtype)
 
 
-class GEGLU(nn.Module):
+class SwiGLU(nn.Module):
+    """SwiGLU feed-forward: ``out_proj(silu(gate_proj(x)) * value_proj(x))``."""
+
     def __init__(self, hidden_dim: int, ffn_hidden_dim: int):
         super().__init__()
         self.gate_proj = nn.Linear(hidden_dim, ffn_hidden_dim)
@@ -71,9 +66,7 @@ class GEGLU(nn.Module):
         self.out_proj = nn.Linear(ffn_hidden_dim, hidden_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = F.gelu(self.gate_proj(x), approximate="tanh")
-        value = self.value_proj(x)
-        return self.out_proj(gate * value)
+        return self.out_proj(F.silu(self.gate_proj(x)) * self.value_proj(x))
 
 
 class SelfAttention(nn.Module):
@@ -122,14 +115,15 @@ class SelfAttention(nn.Module):
         return self.out_proj(output)
 
 
-class GQACrossAttentionWithCache(nn.Module):
-    """Action-to-observation GQA with asymmetric Q/KV dimensions and a static per-generation KV cache.
+class CrossAttentionWithCache(nn.Module):
+    """Action-to-observation full cross-attention with a static per-generation KV cache.
 
-    The cache retains the compact ``num_kv_heads`` representation and expands
-    K/V heads immediately before scaled dot-product attention.
+    Q, K and V all use ``num_heads`` heads (no GQA in v1 — refactor spec §24).
+    The cache retains the K/V projections of the geometry memory so the context
+    is encoded once and reused across every NFE solver iteration.
 
-    ``head_dim`` is derived from ``context_dim // num_heads`` so that the
-    bottleneck lives entirely on the KV side.
+    ``head_dim`` is derived from ``context_dim // num_heads`` so the K/V
+    projection lives in the geometry-token width.
     """
 
     def __init__(
@@ -137,7 +131,6 @@ class GQACrossAttentionWithCache(nn.Module):
         query_dim: int,
         context_dim: int,
         num_heads: int = 8,
-        num_kv_heads: int = 4,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
     ):
@@ -146,20 +139,15 @@ class GQACrossAttentionWithCache(nn.Module):
             raise ValueError(
                 f"context_dim ({context_dim}) must be divisible by num_heads ({num_heads})"
             )
-        if num_heads % num_kv_heads != 0:
-            raise ValueError(
-                f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
-            )
 
         self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
         self.head_dim = context_dim // num_heads
         self.qk_norm = qk_norm
         self.attn_drop = attn_drop
 
         self.q_proj = nn.Linear(query_dim, num_heads * self.head_dim)
-        self.k_proj = nn.Linear(context_dim, num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(context_dim, num_kv_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(context_dim, num_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(context_dim, num_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(num_heads * self.head_dim, query_dim)
 
         self._cached_k: torch.Tensor | None = None
@@ -170,13 +158,13 @@ class GQACrossAttentionWithCache(nn.Module):
         k = self.k_proj(context).reshape(
             batch_size,
             context_len,
-            self.num_kv_heads,
+            self.num_heads,
             self.head_dim,
         )
         v = self.v_proj(context).reshape(
             batch_size,
             context_len,
-            self.num_kv_heads,
+            self.num_heads,
             self.head_dim,
         )
         k = k.permute(0, 2, 1, 3)
@@ -191,19 +179,6 @@ class GQACrossAttentionWithCache(nn.Module):
     def clear_kv_cache(self) -> None:
         self._cached_k = None
         self._cached_v = None
-
-    def _expand_kv_heads(
-        self,
-        k: torch.Tensor,
-        v: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.num_kv_heads == self.num_heads:
-            return k, v
-        repeats = self.num_heads // self.num_kv_heads
-        return (
-            k.repeat_interleave(repeats, dim=1),
-            v.repeat_interleave(repeats, dim=1),
-        )
 
     def forward(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
@@ -221,7 +196,6 @@ class GQACrossAttentionWithCache(nn.Module):
             k, v = self._project_kv(context)
         else:
             k, v = self._cached_k, self._cached_v
-        k, v = self._expand_kv_heads(k, v)
 
         output = F.scaled_dot_product_attention(
             q,
@@ -239,27 +213,27 @@ class GQACrossAttentionWithCache(nn.Module):
 
 
 class ActionFlowDiTXBlock(nn.Module):
-    """Full DiT-X block: Self-Attn → Cross-Attn → FFN, each zero-gated.
+    """DiT-X block: Self-Attn -> Cross-Attn -> FFN, each zero-gated.
 
-    Modulation order (9×hidden_dim)::
+    Modulation order (9 x hidden_dim)::
 
         scale_sa, shift_sa, gate_sa,
         scale_ca, shift_ca, gate_ca,
         scale_ffn, shift_ffn, gate_ffn
 
-    B4: modulation is shared across layers — each block adds only a small
-    per-layer ``modulation_table`` bias to the shared base modulation.
+    The shared modulation head lives on the parent; each block only applies a
+    per-layer affine calibration to the shared 384-D conditioner latent.
     """
 
     def __init__(
         self,
         hidden_dim: int,
         context_dim: int,
-        num_heads: int = 8,
-        num_kv_heads: int = 4,
-        ffn_hidden_dim: int = 896,
+        num_heads: int = 12,
+        ffn_hidden_dim: int = 2048,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
+        cond_bottleneck_dim: int = 384,
     ):
         super().__init__()
         self.self_attn = SelfAttention(
@@ -268,46 +242,40 @@ class ActionFlowDiTXBlock(nn.Module):
             qk_norm=qk_norm,
             attn_drop=attn_drop,
         )
-        self.cross_attn = GQACrossAttentionWithCache(
+        self.cross_attn = CrossAttentionWithCache(
             query_dim=hidden_dim,
             context_dim=context_dim,
             num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
             qk_norm=qk_norm,
             attn_drop=attn_drop,
         )
-        self.ffn = GEGLU(hidden_dim, ffn_hidden_dim)
-        self.modulation_table = nn.Parameter(torch.zeros(1, 9, hidden_dim))
-
-    def initialize_weights(self) -> None:
-        nn.init.zeros_(self.modulation_table)
+        self.ffn = SwiGLU(hidden_dim, ffn_hidden_dim)
+        self.gamma = nn.Parameter(torch.zeros(cond_bottleneck_dim))
+        self.beta = nn.Parameter(torch.zeros(cond_bottleneck_dim))
 
     def forward(
         self,
         x: torch.Tensor,
-        base_mod: torch.Tensor,
+        cond_latent: torch.Tensor,
+        shared_modulation: nn.Linear,
         context: torch.Tensor,
     ) -> torch.Tensor:
-        # base_mod: [B, 9*hidden_dim] from shared modulation
-        # modulation_table: [1, 9, hidden_dim] per-layer bias
-        layer_mod = base_mod.view(-1, 9, x.shape[-1]) + self.modulation_table
+        calibrated = cond_latent * (1 + self.gamma) + self.beta
+        mod = shared_modulation(calibrated)
         (
             scale_sa, shift_sa, gate_sa,
             scale_ca, shift_ca, gate_ca,
             scale_ffn, shift_ffn, gate_ffn,
-        ) = layer_mod.reshape(-1, 9 * x.shape[-1]).chunk(9, dim=-1)
+        ) = mod.chunk(9, dim=-1)
 
-        # Self-Attention
         x = x + gate_sa.unsqueeze(1) * self.self_attn(
             modulate_rms(x, scale_sa, shift_sa)
         )
 
-        # Cross-Attention
         x = x + gate_ca.unsqueeze(1) * self.cross_attn(
             modulate_rms(x, scale_ca, shift_ca), context
         )
 
-        # FFN
         x = x + gate_ffn.unsqueeze(1) * self.ffn(
             modulate_rms(x, scale_ffn, shift_ffn)
         )
@@ -320,13 +288,16 @@ class ActionFlowDiT(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        hidden_dim: int = 512,
+        state_dim: int,
+        hidden_dim: int = 768,
         context_dim: int | None = None,
         depth: int = 8,
-        num_heads: int = 8,
-        num_kv_heads: int = 4,
-        ffn_hidden_dim: int = 896,
+        num_heads: int = 12,
+        ffn_hidden_dim: int = 2048,
         timestep_embed_dim: int = 128,
+        step_embed_dim: int = 64,
+        state_embed_hidden_dim: int = 256,
+        cond_bottleneck_dim: int = 384,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
     ):
@@ -336,20 +307,32 @@ class ActionFlowDiT(nn.Module):
 
         self.horizon = horizon
         self.action_dim = action_dim
+        self.state_dim = state_dim
         self.hidden_dim = hidden_dim
         self.context_dim = hidden_dim if context_dim is None else context_dim
+
         self.action_in = nn.Linear(action_dim, hidden_dim)
         self.action_pos = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
+        self.state_mlp = nn.Sequential(
+            nn.Linear(2 * state_dim, state_embed_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(state_embed_hidden_dim, hidden_dim),
+        )
         self.timestep_embedder = TimestepMLP(
             pos_emb_dim=timestep_embed_dim,
             output_dim=hidden_dim,
         )
-
-        # B4: shared modulation across all layers (one SiLU + Linear instead of depth copies)
-        self.shared_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_dim, 9 * hidden_dim),
+        self.step_embedder = TimestepMLP(
+            pos_emb_dim=step_embed_dim,
+            output_dim=hidden_dim,
         )
+        self.fusion_norm = RMSNorm(hidden_dim)
+        self.compact = nn.Sequential(
+            nn.Linear(hidden_dim, cond_bottleneck_dim),
+            nn.SiLU(),
+        )
+        self.shared_modulation = nn.Linear(cond_bottleneck_dim, 9 * hidden_dim)
+        self.final_modulation = nn.Linear(cond_bottleneck_dim, 2 * hidden_dim)
 
         self.layers = nn.ModuleList(
             [
@@ -357,16 +340,13 @@ class ActionFlowDiT(nn.Module):
                     hidden_dim=hidden_dim,
                     context_dim=self.context_dim,
                     num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
                     ffn_hidden_dim=ffn_hidden_dim,
                     qk_norm=qk_norm,
                     attn_drop=attn_drop,
+                    cond_bottleneck_dim=cond_bottleneck_dim,
                 )
                 for _ in range(depth)
             ]
-        )
-        self.final_norm = AdaptiveRMSNorm(
-            hidden_dim, cond_dim=hidden_dim, with_gate=False
         )
         self.action_out = nn.Linear(hidden_dim, action_dim)
 
@@ -384,13 +364,12 @@ class ActionFlowDiT(nn.Module):
         nn.init.zeros_(self.action_in.bias)
         nn.init.normal_(self.action_pos, std=WEIGHT_INIT_STD)
 
-        # B4: zero-init shared modulation (overrides _basic_init's xavier_uniform)
-        nn.init.zeros_(self.shared_modulation[-1].weight)
-        nn.init.zeros_(self.shared_modulation[-1].bias)
-
-        for layer in self.layers:
-            layer.initialize_weights()
-        self.final_norm.initialize_weights()
+        nn.init.zeros_(self.shared_modulation.weight)
+        nn.init.zeros_(self.shared_modulation.bias)
+        nn.init.zeros_(self.final_modulation.weight)
+        nn.init.zeros_(self.final_modulation.bias)
+        nn.init.zeros_(self.step_embedder.net[-1].weight)
+        nn.init.zeros_(self.step_embedder.net[-1].bias)
         nn.init.zeros_(self.action_out.weight)
         nn.init.zeros_(self.action_out.bias)
 
@@ -401,22 +380,13 @@ class ActionFlowDiT(nn.Module):
             no_decay_names=["action_pos"],
         )
 
-    def _prepare_timestep(
-        self, timestep, batch_size: int, device: torch.device
-    ) -> torch.Tensor:
-        if not torch.is_tensor(timestep):
-            timestep = torch.tensor([timestep], dtype=torch.float32, device=device)
-        elif timestep.ndim == 0:
-            timestep = timestep[None].to(device)
-        else:
-            timestep = timestep.to(device)
-        return timestep.expand(batch_size)
-
     def forward(
         self,
         x: torch.Tensor,
-        timestep: torch.Tensor,
+        timestep: torch.Tensor | float,
         context: torch.Tensor,
+        state: torch.Tensor,
+        step_size: torch.Tensor | float = 0.0,
     ) -> torch.Tensor:
         if x.ndim != 3 or x.shape[1] != self.horizon or x.shape[2] != self.action_dim:
             raise ValueError(
@@ -431,17 +401,30 @@ class ActionFlowDiT(nn.Module):
                 f"context must have shape [B, L, {self.context_dim}] with B={x.shape[0]}, "
                 f"got {tuple(context.shape)}"
             )
+        if (
+            state.ndim != 2
+            or state.shape[0] != x.shape[0]
+            or state.shape[1] != 2 * self.state_dim
+        ):
+            raise ValueError(
+                f"state must have shape [B, {2 * self.state_dim}] with B={x.shape[0]}, "
+                f"got {tuple(state.shape)}"
+            )
 
+        batch_size = x.shape[0]
         hidden = self.action_in(x) + self.action_pos.to(dtype=x.dtype)
-        timestep = self._prepare_timestep(timestep, x.shape[0], x.device)
-        timestep_embedding = self.timestep_embedder(timestep)
-        base_mod = self.shared_modulation(timestep_embedding)  # B4: [B, 9*hidden_dim]
+        t = _prepare_scalar(timestep, batch_size, x.device)
+        d = _prepare_scalar(step_size, batch_size, x.device)
+        e = self.fusion_norm(
+            self.state_mlp(state) + self.timestep_embedder(t) + self.step_embedder(d)
+        )
+        cond_latent = self.compact(e)
 
-        for layer in self.layers:
-            hidden = layer(hidden, base_mod, context)
+        for block in self.layers:
+            hidden = block(hidden, cond_latent, self.shared_modulation, context)
 
-        hidden = self.final_norm(hidden, timestep_embedding)
-        return self.action_out(hidden)
+        scale_f, shift_f = self.final_modulation(cond_latent).chunk(2, dim=-1)
+        return self.action_out(modulate_rms(hidden, scale_f, shift_f))
 
     def setup_kv_cache(self, context: torch.Tensor) -> None:
         for block in self.layers:
@@ -450,3 +433,108 @@ class ActionFlowDiT(nn.Module):
     def clear_kv_cache(self) -> None:
         for block in self.layers:
             block.cross_attn.clear_kv_cache()
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = ActionFlowDiT(
+        horizon=16,
+        action_dim=19,
+        state_dim=19,
+        hidden_dim=768,
+        context_dim=768,
+        depth=8,
+        num_heads=12,
+        ffn_hidden_dim=2048,
+        timestep_embed_dim=128,
+        step_embed_dim=64,
+        state_embed_hidden_dim=256,
+        cond_bottleneck_dim=384,
+    ).to(device)
+
+    x = torch.randn(2, 16, 19, device=device)
+    context = torch.randn(2, 385, 768, device=device)
+    state = torch.randn(2, 38, device=device)
+    timestep = torch.rand(2, device=device)
+
+    # 2. Zero-init: every gate is 0 and action_out is 0, so output is exactly 0.
+    with torch.no_grad():
+        out_zero = model(x, timestep, context, state, 0.0)
+    assert torch.count_nonzero(out_zero) == 0
+    print("[PASS] zero-init: output is exactly zero at init")
+
+    # Break the zero-inits so the model produces a non-trivial output for parity.
+    nn.init.normal_(model.shared_modulation.weight, std=WEIGHT_INIT_STD)
+    nn.init.normal_(model.shared_modulation.bias, std=WEIGHT_INIT_STD)
+    nn.init.normal_(model.final_modulation.weight, std=WEIGHT_INIT_STD)
+    nn.init.normal_(model.final_modulation.bias, std=WEIGHT_INIT_STD)
+    nn.init.normal_(model.action_out.weight, std=WEIGHT_INIT_STD)
+    nn.init.normal_(model.action_out.bias, std=WEIGHT_INIT_STD)
+    nn.init.normal_(model.step_embedder.net[-1].weight, std=WEIGHT_INIT_STD)
+
+    # 1. Forward shape + finite backward.
+    out = model(x, 0.5, context, state, torch.tensor(0.0, device=device))
+    assert tuple(out.shape) == (2, 16, 19), tuple(out.shape)
+    out.float().square().mean().backward()
+    assert all(
+        torch.isfinite(p.grad).all().item()
+        for p in model.parameters()
+        if p.grad is not None
+    )
+    print("[PASS] forward shape [2,16,19] + finite backward")
+    model.zero_grad()
+
+    # 3. Parameter count.
+    total = sum(p.numel() for p in model.parameters())
+    print(f"[INFO] total parameters: {total:,}")
+    assert 79e6 <= total <= 82e6, total
+    print("[PASS] parameter count within [79M, 82M]")
+    breakdown = [
+        ("action_in", model.action_in),
+        ("action_pos", model.action_pos),
+        ("state_mlp", model.state_mlp),
+        ("timestep_embedder", model.timestep_embedder),
+        ("step_embedder", model.step_embedder),
+        ("fusion_norm", model.fusion_norm),
+        ("compact", model.compact),
+        ("shared_modulation", model.shared_modulation),
+        ("final_modulation", model.final_modulation),
+        ("layers (x8)", model.layers),
+        ("action_out", model.action_out),
+    ]
+    for name, sub in breakdown:
+        n = sub.numel() if isinstance(sub, torch.Tensor) else sum(
+            p.numel() for p in sub.parameters()
+        )
+        print(f"    {name}: {n:,}")
+
+    # 4. KV-cache parity.
+    model.eval()
+    with torch.no_grad():
+        out_uncached = model(x, timestep, context, state, 0.0)
+        assert torch.count_nonzero(out_uncached) > 0, "output must be non-trivial"
+        model.setup_kv_cache(context)
+        out_cached = model(x, timestep, context, state, 0.0)
+        model.clear_kv_cache()
+    torch.testing.assert_close(out_cached, out_uncached, rtol=1e-5, atol=1e-5)
+    print("[PASS] KV-cache parity (fp32, 1e-5)")
+
+    with torch.no_grad():
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            out_uncached_bf16 = model(x, timestep, context, state, 0.0)
+            model.setup_kv_cache(context)
+            out_cached_bf16 = model(x, timestep, context, state, 0.0)
+            model.clear_kv_cache()
+    torch.testing.assert_close(out_cached_bf16, out_uncached_bf16, rtol=1e-2, atol=1e-2)
+    print("[PASS] KV-cache parity (bf16, 1e-2)")
+
+    # 5. Cache must never enter state_dict (plain python attribute).
+    model.setup_kv_cache(context)
+    state_dict_keys = list(model.state_dict().keys())
+    model.clear_kv_cache()
+    assert not any("_cached_k" in k or "_cached_v" in k for k in state_dict_keys)
+    print("[PASS] KV cache not present in state_dict")
+
+    print("ALL CHECKS PASSED")
