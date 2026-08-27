@@ -1,7 +1,10 @@
-# ActionFlow — action-centric DiT + Rectified Flow policy
-# Encoder:  PointNextPatchTokenizer (token sequence) + learned type/time embeddings
-# Decoder:  ActionFlowDiT (alternating SA/CA, AdaRMS, GQA, GEGLU) + SimpleRectifiedFlow + NoiseShift
+# ActionFlow — 3D geometry memory + action-centric DiT + Rectified Flow policy
+# Encoder:  PointNeXT local tokenizer (192×256) → joint two-frame GeoFormer (4L×576,
+#           3D RoPE) → static [B, 385, 768] geometry memory
+# Decoder:  ActionFlowDiT (8L×768, SA→CA→FFN, 12Q/12KV full CA, SwiGLU-2048,
+#           compact 384 conditioner, static KV cache) + SimpleRectifiedFlow
 # Modality: point_cloud + joint_state → action
+# Params:   perception ≈17.1M + backbone ≈80.1M ≈ 97.2M
 
 policy_name: action_flow
 
@@ -18,8 +21,12 @@ action_key: action
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 # ── Dataloader ──
+# The 97M model with 192×256 patch tokens does not fit at batch 128 on a 24GB
+# card (measured peak: 21.7 GiB bf16 / OOM fp32). batch 64 × grad-accum 2 keeps
+# the effective batch at 128 and the optimizer-step count at 100k — identical
+# recipe, ~11 GiB peak.
 dataloader:
-  batch_size: 128
+  batch_size: 64
   shuffle: true
   num_workers: 8
   pin_memory: true
@@ -28,7 +35,7 @@ dataloader:
   drop_last: false
 
 val_dataloader:
-  batch_size: 128
+  batch_size: 64
   shuffle: false
   num_workers: 8
   pin_memory: true
@@ -65,7 +72,6 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: pointnext_tokenizer
   pc_dim: 6
   state_dim: ${action_dim}
   num_points: 1024
@@ -76,34 +82,47 @@ agent:
     random_noise_scale: 0.0
     use_shuffle_output: true
 
+  # PointNeXT is a *local* patch tokenizer only — no global token, no internal
+  # patch self-attention. Relational reasoning belongs to the GeoFormer.
   pc_encoder_config:
-    num_patches: 128
-    token_channels: 128
-    stem_channels: 64
+    num_patches: 192
+    stem_channels: 128
+    token_channels: 256
     patch_radii: [0.04, 0.08]
     patch_neighbors: [16, 32]
+    use_patch_self_attn: false
+
+  # GeoFormer — joint two-frame 3D relational reasoning (384 patches + 1 CLS)
+  geo_hidden_dim: 576
+  geo_depth: 4
+  geo_num_heads: 12
+  geo_ffn_hidden_dim: 1536
+  geo_qk_norm: true
+  geo_use_3d_rope: true
+  absolute_3d_pe_dim: 96
 
   # ActionFlow DiT backbone
-  hidden_dim: 512
-  context_dim: 256
-  # B3b: compact state branch (state_out_dim=64) — efficiency ablation.
-  state_out_dim: 64
+  hidden_dim: 768
+  context_dim: 768
   depth: 8
-  num_heads: 8
-  num_kv_heads: 4
-  ffn_hidden_dim: 896
-  timestep_embed_dim: 128
+  num_heads: 12
+  ffn_hidden_dim: 2048
   qk_norm: true
   attn_drop: 0.0
 
-  # Simple rectified flow
+  # Global conditioning: state + flow timestep + step size → compact latent
+  timestep_embed_dim: 128
+  step_embed_dim: 64
+  state_embed_hidden_dim: 256
+  cond_bottleneck_dim: 384
+
+  # Standard rectified flow
   # For ActionFlow, denoise_steps is the number of function evaluations (NFE).
   denoise_steps: 2
   # euler accepts any positive NFE; midpoint requires an even NFE.
   solver: midpoint
-  # F1: noise_shift_alpha=4.0 (was 2.0)
-  # F2: noise_shift_ratio=0.75 → 75% shifted + 25% uniform i.i.d. mixture
-  noise_shift_alpha: 4.0
+  # 75% NoiseShift(alpha=3) + 25% uniform i.i.d. mixture
+  noise_shift_alpha: 3.0
   noise_shift_ratio: 0.75
 
   modality_dropout_probs:
@@ -140,7 +159,8 @@ training:
   loop:
     total_train_steps: 100000
     log_interval_steps: 50
-    gradient_accumulation_steps: 1
+    # 64 × 2 = effective batch 128 (global_step counts optimizer steps only)
+    gradient_accumulation_steps: 2
 
 # ── Workspace ──
 workspace:
