@@ -32,6 +32,10 @@ from dexmani_policy.training.lr_scheduler import compute_num_training_steps
 register_resolvers()
 
 
+def _count_params(module) -> int:
+    return sum(p.numel() for p in module.parameters())
+
+
 def load_config(config_name: str):
     try:
         GlobalHydra.instance().clear()
@@ -118,6 +122,20 @@ def smoke_test(config_name: str):
     device = torch.device(cfg.training.device)
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
+    # ── ActionFlow: parameter budget + geometry-memory contract ───────
+    # Perception 15M–19M, ActionDiT 79M–82M, total 95M–101M.
+    if hasattr(model.obs_encoder, "num_memory_tokens"):
+        enc = model.obs_encoder
+        perception = _count_params(enc)
+        backbone = _count_params(model.action_decoder.model)
+        total = _count_params(model)
+        print("      [ActionFlow]")
+        print(f"      perception params: {perception:,}")
+        print(f"      backbone params:   {backbone:,}")
+        print(f"      total params:      {total:,}")
+        print(f"      memory shape:      (B, {enc.num_memory_tokens}, {enc.memory_dim})")
+        print(f"      state shape:       (B, {enc.state_hist_dim})")
+
     print("[3/6] Building optimizer & scheduler ...")
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, len(train_loader))
 
@@ -134,6 +152,19 @@ def smoke_test(config_name: str):
 
     assert torch.isfinite(raw_loss), f"Non-finite loss: {raw_loss.item()}"
     print(f"      loss: {raw_loss.item():.4f}  keys: {list(loss_dict.keys())}")
+
+    # 4.1 Gradient reachability. DDP runs with find_unused_parameters=False and
+    # static_graph=True, so a trainable parameter that never participates in the
+    # forward graph is a hard crash there — but is silently ignored single-GPU.
+    unreached = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
+    if unreached:
+        print(f"      ⚠ {len(unreached)} trainable params received no gradient (DDP will fail):")
+        for n in unreached[:10]:
+            print(f"        - {n}")
+        if len(unreached) > 10:
+            print(f"        ... and {len(unreached) - 10} more")
+    else:
+        print("      ✓ all trainable params received gradients")
 
     print("[5/6] Running predict_action ...")
     model.eval()
