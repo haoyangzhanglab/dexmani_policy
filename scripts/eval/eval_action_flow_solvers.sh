@@ -5,10 +5,16 @@
 #   bash scripts/eval/eval_action_flow_solvers.sh \
 #       <policy> <task> <exp_name> [--episodes N] [--ckpt-tag TAG] [--no-ema]
 #
-# The fixed screening candidates are Euler-2, Midpoint-2, Euler-4,
-# Midpoint-4, and Midpoint-8. Euler itself accepts any positive NFE (including
-# 10), but Euler-10 is intentionally not part of this first-pass sweep.
+# The fixed screening candidates are Euler-1, Midpoint-2, Midpoint-4,
+# Midpoint-8, and Midpoint-10. The NFE value IS the function-evaluation count:
+# Euler runs N evals, Midpoint runs N/2 macro-steps × 2 evals (so it requires an
+# even N). Euler-1 is the single-step floor and Midpoint-10 the quality ceiling.
 # Re-run selected candidates with --episodes 100 before changing the default.
+#
+# Gap metrics (see the refactor plan §19):
+#   G2 = SR_10 - SR_2                      target ≤ 3–5%
+#   R2 = (SR_2 - SR_1) / (SR_10 - SR_1)    target ≥ 0.75
+# Only if SR_10 - SR_2 > 5% is FlexRF worth implementing.
 
 set -euo pipefail
 
@@ -82,8 +88,8 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_DIR="$EXP_DIR/eval_dexsim/solver_ablation/$TIMESTAMP"
 mkdir -p "$OUTPUT_DIR"
 
-SOLVERS=(euler midpoint euler midpoint midpoint)
-NFES=(2 2 4 4 8)
+SOLVERS=(euler midpoint midpoint midpoint midpoint)
+NFES=(1 2 4 8 10)
 
 for index in "${!SOLVERS[@]}"; do
     solver="${SOLVERS[$index]}"
