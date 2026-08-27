@@ -173,6 +173,7 @@ class PointNextPatchTokenizer(nn.Module):
         patch_attn_heads: int = 4,
         patch_attn_dropout: float = 0.0,
         prepend_global_in_attn: bool = True,
+        include_global_token: bool = True,
     ):
         super().__init__()
         if input_channels < 3:
@@ -183,6 +184,7 @@ class PointNextPatchTokenizer(nn.Module):
         self.token_channels = token_channels
         self.use_patch_self_attn = use_patch_self_attn
         self.prepend_global_in_attn = prepend_global_in_attn
+        self.include_global_token = include_global_token
 
         self.geometry_stem = nn.Sequential(
             PointMLP(input_channels, stem_channels),
@@ -204,8 +206,11 @@ class PointNextPatchTokenizer(nn.Module):
 
         # When the transformer already produces a global token via the
         # learnable [CLS]-style token, the external global-token pathway
-        # is redundant — skip it to save parameters.
-        if not (use_patch_self_attn and prepend_global_in_attn):
+        # is redundant — skip it to save parameters. Likewise, when
+        # ``include_global_token`` is False the pathway is never used, so we
+        # skip construction entirely (a constructed-but-unused trainable
+        # parameter would crash DDP's find_unused_parameters=False).
+        if include_global_token and not (use_patch_self_attn and prepend_global_in_attn):
             self.global_position_embedding = SinusoidalPosEmb3D(96)
             self.global_position_projection = nn.Sequential(
                 nn.Linear(96, token_channels),
@@ -254,6 +259,12 @@ class PointNextPatchTokenizer(nn.Module):
         return tuple(outputs)
 
     def get_global_token(self, patch_token: torch.Tensor, patch_center: torch.Tensor) -> torch.Tensor:
+        if not self.include_global_token:
+            raise RuntimeError(
+                "get_global_token() was called but this PointNextPatchTokenizer was "
+                "constructed with include_global_token=False. Construct the tokenizer "
+                "with include_global_token=True (the default) to use the global token."
+            )
         # When self-attention with prepended global token is active, the
         # transformer internally maintains a [CLS]-style token (position 0)
         # that already aggregates context from all patches.
