@@ -104,6 +104,7 @@ def main(cfg):
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
         use_compile=cfg.training.get("use_compile", False),
+        compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),
         num_training_steps=comp.num_training_steps,
     )
     trainer.train(resume_tag="latest")

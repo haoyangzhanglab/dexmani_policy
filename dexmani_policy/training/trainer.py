@@ -66,6 +66,7 @@ class Trainer:
         max_grad_norm: float = 1.0,
         use_bfloat16: bool = False,
         use_compile: bool = False,
+        compile_mode: str = "reduce-overhead",
         is_main_process: bool = True,
         distributed: bool = False,
         train_sampler=None,
@@ -97,6 +98,7 @@ class Trainer:
 
         self.use_bfloat16 = use_bfloat16
         self.use_compile = use_compile
+        self.compile_mode = compile_mode
 
         self.gradient_accumulation_steps = max(1, int(train_loop_cfg.gradient_accumulation_steps))
         # Pre-compute AMP device_type string to avoid repeated str.split on every step
@@ -474,7 +476,7 @@ class Trainer:
             self.ema_model.eval()
 
         if self.use_compile:
-            compile_models(self.model, self.ema_model)
+            compile_models(self.model, self.ema_model, mode=self.compile_mode)
 
         optimizer_to(self.optimizer, self.device)
 

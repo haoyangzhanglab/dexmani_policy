@@ -129,9 +129,9 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         checkpoint = None
 
     # torch.compile must happen before DDP wrapping and after checkpoint load.
-    # Use compile_models() for unified single-GPU/DDP behavior: backbone only, mode='reduce-overhead'.
+    # Use compile_models() for unified single-GPU/DDP behavior: backbone only.
     if cfg.training.get("use_compile", False):
-        compile_models(model, ema_model)
+        compile_models(model, ema_model, mode=cfg.training.get("compile_mode", "reduce-overhead"))
 
     ddp_model = DDP(
         model,
