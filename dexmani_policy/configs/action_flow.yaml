@@ -111,10 +111,12 @@ agent:
 
   # ActionFlow DiT backbone
   hidden_dim: 768
-  context_dim: 768
+  # Compact geometry->action bandwidth: 768 -> 384 (memory_proj/abs_pe_proj/cross-attn
+  # K/V all follow ctx_dim via the ActionFlowAgent resolve).
+  context_dim: 384
   depth: 8
   num_heads: 12
-  ffn_hidden_dim: 2048
+  ffn_hidden_dim: 1536
   qk_norm: true
   attn_drop: 0.1
 
