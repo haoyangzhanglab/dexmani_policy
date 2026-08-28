@@ -61,6 +61,7 @@ dataset:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
       color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
+      dropout:     {dropout_ratio: 0.25, prob: 0.5}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
@@ -103,6 +104,9 @@ agent:
   geo_ffn_hidden_dim: 1536
   geo_qk_norm: true
   geo_use_3d_rope: true
+  geo_attn_drop: 0.1
+  # Stochastic-depth peak rate; ramps linearly 0 -> this across the 4 blocks.
+  geo_drop_path: 0.05
   absolute_3d_pe_dim: 96
 
   # ActionFlow DiT backbone
@@ -112,7 +116,7 @@ agent:
   num_heads: 12
   ffn_hidden_dim: 2048
   qk_norm: true
-  attn_drop: 0.0
+  attn_drop: 0.1
 
   # Global conditioning: state + flow timestep + step size → compact latent
   timestep_embed_dim: 128

@@ -49,6 +49,27 @@ def _apply_3d_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tor
     return torch.cat((rot0, rot1), dim=-1).reshape(B, H, N, D)
 
 
+class DropPath(nn.Module):
+    """Stochastic depth: drop a whole residual branch with probability ``drop_prob``.
+
+    Applied per-sample (batch index), not per-token, and scales the kept branch by
+    ``1/keep_prob`` so the expected magnitude is preserved (timm convention).
+    """
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+        random_tensor.div_(keep_prob)
+        return x * random_tensor
+
+
 class RMSNorm(nn.Module):
     """Root-mean-square layer normalization with a single weight vector (no bias)."""
 
@@ -131,6 +152,7 @@ class GeoFormerBlock(nn.Module):
         use_3d_rope: bool,
         attn_drop: float,
         rope: RotaryPositionEmbedding3D,
+        drop_path: float = 0.0,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -146,6 +168,8 @@ class GeoFormerBlock(nn.Module):
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
         self.norm2 = RMSNorm(hidden_dim)
         self.ffn = SwiGLU(hidden_dim, ffn_hidden_dim)
+        self.drop_path_attn = DropPath(drop_path)
+        self.drop_path_ffn = DropPath(drop_path)
 
     def forward(
         self,
@@ -179,8 +203,8 @@ class GeoFormerBlock(nn.Module):
             is_causal=False,
         )  # [B, H, N, head_dim]
         attn = attn.transpose(1, 2).reshape(B, N, D)
-        x = x + self.out_proj(attn)
-        x = x + self.ffn(self.norm2(x))
+        x = x + self.drop_path_attn(self.out_proj(attn))
+        x = x + self.drop_path_ffn(self.ffn(self.norm2(x)))
         return x
 
 
@@ -203,6 +227,7 @@ class GeoFormer(nn.Module):
         qk_norm: bool = True,
         use_3d_rope: bool = True,
         attn_drop: float = 0.0,
+        drop_path_rate: float = 0.0,
         min_wavelength: float = 0.02,
         max_wavelength: float = 2.0,
     ):
@@ -215,6 +240,9 @@ class GeoFormer(nn.Module):
         # Hoisted to GeoFormer so the rotary trig can be computed once per forward
         # (xyz is identical across blocks) and shared, instead of per block.
         self.rope = RotaryPositionEmbedding3D(hidden_dim // num_heads, min_wavelength, max_wavelength)
+        # Stochastic depth ramps linearly from 0 (first block) to drop_path_rate
+        # (last block); a 4-block transformer cannot tolerate a flat high rate.
+        drop_path_rates = [drop_path_rate * i / max(1, depth - 1) for i in range(depth)]
         self.blocks = nn.ModuleList(
             [
                 GeoFormerBlock(
@@ -225,8 +253,9 @@ class GeoFormer(nn.Module):
                     use_3d_rope,
                     attn_drop,
                     self.rope,
+                    drop_path=drop_path_rates[i],
                 )
-                for _ in range(depth)
+                for i in range(depth)
             ]
         )
         # Final norm on the residual stream, as in every pre-norm transformer.
