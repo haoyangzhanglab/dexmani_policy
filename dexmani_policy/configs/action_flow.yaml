@@ -104,6 +104,11 @@ agent:
   geo_ffn_hidden_dim: 1536
   geo_qk_norm: true
   geo_use_3d_rope: true
+  # 3D RoPE wavelengths. Metric (meters) for use_metric_xyz=true: the legacy
+  # [0.02, 2.0] normalized range / mean_scale(2.657) -> [0.0075, 0.753] m,
+  # preserving the relationship to patch_radii (min ≈ 0.5·r_small, max ≈ 25·r_large).
+  geo_min_wavelength: 0.0075
+  geo_max_wavelength: 0.753
   geo_attn_drop: 0.1
   # Stochastic-depth peak rate; ramps linearly 0 -> this across the 4 blocks.
   geo_drop_path: 0.05

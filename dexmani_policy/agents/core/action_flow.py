@@ -40,6 +40,8 @@ class ActionFlowObsEncoder(nn.Module):
         geo_use_3d_rope: bool = True,
         geo_attn_drop: float = 0.0,
         geo_drop_path: float = 0.0,
+        geo_min_wavelength: float = 0.02,
+        geo_max_wavelength: float = 2.0,
         absolute_3d_pe_dim: int = 96,
         memory_dim: int = 768,
     ):
@@ -78,6 +80,8 @@ class ActionFlowObsEncoder(nn.Module):
             use_3d_rope=geo_use_3d_rope,
             attn_drop=geo_attn_drop,
             drop_path_rate=geo_drop_path,
+            min_wavelength=geo_min_wavelength,
+            max_wavelength=geo_max_wavelength,
         )
         self.memory_proj = nn.Linear(geo_hidden_dim, memory_dim)
         self.abs_pe_embed = SinusoidalPosEmb3D(absolute_3d_pe_dim)
@@ -155,6 +159,8 @@ class ActionFlowAgent(BaseAgent):
         geo_use_3d_rope: bool = True,
         geo_attn_drop: float = 0.0,
         geo_drop_path: float = 0.0,
+        geo_min_wavelength: float = 0.02,
+        geo_max_wavelength: float = 2.0,
         absolute_3d_pe_dim: int = 96,
         hidden_dim: int = 768,
         context_dim: int | None = None,
@@ -195,6 +201,8 @@ class ActionFlowAgent(BaseAgent):
             geo_use_3d_rope=geo_use_3d_rope,
             geo_attn_drop=geo_attn_drop,
             geo_drop_path=geo_drop_path,
+            geo_min_wavelength=geo_min_wavelength,
+            geo_max_wavelength=geo_max_wavelength,
             absolute_3d_pe_dim=absolute_3d_pe_dim,
             memory_dim=ctx_dim,
         )
