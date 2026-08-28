@@ -160,6 +160,9 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
+  # Fuse the gradient finite-check into clip_grad_norm_(error_if_nonfinite=True);
+  # avoids the per-param torch.isfinite loop + GPU→CPU sync on the happy path.
+  fast_grad_finite_check: true
   loop:
     total_train_steps: 100000
     log_interval_steps: 50

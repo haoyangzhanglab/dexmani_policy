@@ -64,6 +64,7 @@ class Trainer:
         train_loop_cfg: TrainLoopConfig,
         use_ema_teacher_for_consistency: bool,
         max_grad_norm: float = 1.0,
+        fast_grad_finite_check: bool = False,
         use_bfloat16: bool = False,
         use_compile: bool = False,
         compile_mode: str = "reduce-overhead",
@@ -92,6 +93,9 @@ class Trainer:
         self.log_interval_steps = train_loop_cfg.log_interval_steps
         self.max_val_steps = train_loop_cfg.max_val_steps
         self.max_grad_norm = max_grad_norm
+        self.fast_grad_finite_check = fast_grad_finite_check
+        self._last_grad_norm: float | None = None
+        self._last_clip_ratio: float | None = None
 
         self.use_ema = self.ema_model is not None
         self.use_ema_teacher_for_consistency = use_ema_teacher_for_consistency and self.use_ema
@@ -130,18 +134,45 @@ class Trainer:
             model = model._orig_mod
         return model
 
-    def apply_gradient_step(self):
-        if self.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.raw_model.parameters(), max_norm=self.max_grad_norm)
+    def _find_nonfinite_gradients(self) -> list:
+        """Return the names of parameters whose ``.grad`` is non-finite (or None)."""
+        return [
+            name
+            for name, param in self.raw_model.named_parameters()
+            if param.grad is not None and not torch.isfinite(param.grad).all()
+        ]
 
-        # Layer 2 NaN protection: detect gradient NaN/Inf before optimizer.step().
-        # Loss NaN (layer 1) is caught in train_one_step(), but a gradient NaN
-        # could slip through clip_grad_norm_ and silently corrupt optimizer state.
-        # This fills the documented gap — see CLAUDE.md "NaN 三层防护".
+    def apply_gradient_step(self):
+        grad_norm = None
         grad_nan_params = []
-        for name, param in self.raw_model.named_parameters():
-            if param.grad is not None and not torch.isfinite(param.grad).all():
-                grad_nan_params.append(name)
+
+        # Fast path fuses the norm computation into clip_grad_norm_ via
+        # error_if_nonfinite=True, which raises before touching any parameter when
+        # a gradient is non-finite. On the happy path this skips the per-parameter
+        # torch.isfinite loop + GPU→CPU sync below. Only meaningful when we clip.
+        use_fast = self.fast_grad_finite_check and self.max_grad_norm > 0
+
+        if use_fast:
+            try:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.raw_model.parameters(),
+                    max_norm=self.max_grad_norm,
+                    error_if_nonfinite=True,
+                )
+            except RuntimeError:
+                grad_nan_params = self._find_nonfinite_gradients()
+        else:
+            if self.max_grad_norm > 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.raw_model.parameters(), max_norm=self.max_grad_norm
+                )
+
+            # Layer 2 NaN protection: detect gradient NaN/Inf before optimizer.step().
+            # Loss NaN (layer 1) is caught in train_one_step(), but a gradient NaN
+            # could slip through clip_grad_norm_ and silently corrupt optimizer state.
+            # This fills the documented gap — see CLAUDE.md "NaN 三层防护".
+            grad_nan_params = self._find_nonfinite_gradients()
+
         if grad_nan_params:
             self.optimizer.zero_grad(set_to_none=True)
             raise RuntimeError(
@@ -149,6 +180,15 @@ class Trainer:
                 f"in {len(grad_nan_params)} parameter(s): {grad_nan_params[:5]}"
                 f"{'...' if len(grad_nan_params) > 5 else ''}"
             )
+
+        # Record grad-norm diagnostics for logging (§8.8): total norm and how far
+        # it exceeded the clip threshold (clip_ratio ≥ 1 means clipping engaged).
+        if grad_norm is not None:
+            self._last_grad_norm = float(grad_norm)
+            self._last_clip_ratio = float(grad_norm) / float(self.max_grad_norm)
+        else:
+            self._last_grad_norm = None
+            self._last_clip_ratio = None
 
         self.optimizer.step()
         self.scheduler.step()
@@ -528,6 +568,9 @@ class Trainer:
 
                         if self.is_main_process and (global_step % self.log_interval_steps) == 0:
                             step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
+                            if self._last_grad_norm is not None:
+                                step_metrics["train/grad_norm"] = self._last_grad_norm
+                                step_metrics["train/clip_ratio"] = self._last_clip_ratio
                             for key, value in to_log_scalars(log_dict).items():
                                 step_metrics[f"train/{key}"] = value
 

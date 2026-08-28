@@ -185,6 +185,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
+        fast_grad_finite_check=cfg.training.get("fast_grad_finite_check", False),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
         use_compile=False,  # already applied before DDP wrapping above
         is_main_process=(rank == 0),
