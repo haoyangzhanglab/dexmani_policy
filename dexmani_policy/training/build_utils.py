@@ -43,8 +43,14 @@ def build_dataset_and_normalizer(cfg):
 # ---------------------------------------------------------------------------
 
 
-def build_model_and_ema(cfg, device, normalizer):
-    """Instantiate the agent model and, if configured, its EMA twin."""
+def build_model_and_ema(cfg, device, normalizer, rank=0):
+    """Instantiate the agent model and, if configured, its EMA twin.
+
+    ``rank`` gates whether a local EMA is built: only rank 0 (or every rank when
+    the EMA teacher feeds the consistency loss) needs a full EMA copy. Non-rank-0
+    workers receive ``ema_model=None`` — the Trainer guards every EMA site with
+    ``self.use_ema = (ema_model is not None)``, so this is safe end-to-end.
+    """
     model = hydra.utils.instantiate(cfg.agent)
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.get("action_key", "action")
@@ -53,7 +59,10 @@ def build_model_and_ema(cfg, device, normalizer):
 
     ema_model = None
     ema_updater = None
-    if cfg.training.use_ema:
+    need_local_ema = cfg.training.use_ema and (
+        rank == 0 or cfg.training.get("use_ema_teacher_for_consistency", False)
+    )
+    if need_local_ema:
         ema_model = hydra.utils.instantiate(cfg.agent)
         ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.action_key = model.action_key

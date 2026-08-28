@@ -144,6 +144,8 @@ ema:
   power: 0.75
   min_value: 0.0
   max_value: 0.9999
+  # Fuse the per-param EMA update into _foreach_mul_/_foreach_add_ (dtype-bucketed).
+  foreach: true
 
 # ── Training ──
 training:

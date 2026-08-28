@@ -93,7 +93,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         worker_init_fn=worker_init_fn,
     )
 
-    model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
+    model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer, rank=rank)
 
     # After model init, use different seeds per rank for augmentation diversity
     set_seed(cfg.training.seed + rank)
