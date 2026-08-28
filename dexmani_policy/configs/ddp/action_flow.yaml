@@ -11,6 +11,10 @@ policy_name: ddp/action_flow
 training:
   num_gpus: 4
   gpu_ids: null
+  loop:
+    # 32 × 4 GPUs × 1 = effective batch 128, matching the single-GPU recipe
+    # (64 × 2). The base overlay inherits grad_accum 2, which would give 256.
+    gradient_accumulation_steps: 1
 
 dataloader:
   batch_size: 32
