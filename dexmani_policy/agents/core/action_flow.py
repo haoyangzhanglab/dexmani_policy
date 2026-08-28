@@ -167,6 +167,7 @@ class ActionFlowAgent(BaseAgent):
         cond_bottleneck_dim: int = 384,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
+        use_step_conditioning: bool = True,
         denoise_steps: int = 2,
         noise_shift_alpha: float = 3.0,
         noise_shift_ratio: float = 0.75,
@@ -212,6 +213,7 @@ class ActionFlowAgent(BaseAgent):
             cond_bottleneck_dim=cond_bottleneck_dim,
             qk_norm=qk_norm,
             attn_drop=attn_drop,
+            use_step_conditioning=use_step_conditioning,
         )
         action_decoder = SimpleRectifiedFlowDecoder(
             model=backbone,

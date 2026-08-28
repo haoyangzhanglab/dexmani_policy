@@ -300,6 +300,7 @@ class ActionFlowDiT(nn.Module):
         cond_bottleneck_dim: int = 384,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
+        use_step_conditioning: bool = True,
     ):
         super().__init__()
         if depth <= 0:
@@ -310,6 +311,7 @@ class ActionFlowDiT(nn.Module):
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
         self.context_dim = hidden_dim if context_dim is None else context_dim
+        self.use_step_conditioning = use_step_conditioning
 
         self.action_in = nn.Linear(action_dim, hidden_dim)
         self.action_pos = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
@@ -351,6 +353,14 @@ class ActionFlowDiT(nn.Module):
         self.action_out = nn.Linear(hidden_dim, action_dim)
 
         self.initialize_weights()
+
+        if not use_step_conditioning:
+            # The step branch is meaningless while step_size is hardcoded to 0, so
+            # gate it off. Freeze (rather than delete) its params so they leave the
+            # optimizer and DDP's find_unused_parameters=False check, while their
+            # state_dict keys remain for strict-load compatibility.
+            for p in self.step_embedder.parameters():
+                p.requires_grad_(False)
 
     def initialize_weights(self) -> None:
         def _basic_init(module: nn.Module) -> None:
@@ -414,10 +424,11 @@ class ActionFlowDiT(nn.Module):
         batch_size = x.shape[0]
         hidden = self.action_in(x) + self.action_pos.to(dtype=x.dtype)
         t = _prepare_scalar(timestep, batch_size, x.device)
-        d = _prepare_scalar(step_size, batch_size, x.device)
-        e = self.fusion_norm(
-            self.state_mlp(state) + self.timestep_embedder(t) + self.step_embedder(d)
-        )
+        e = self.state_mlp(state) + self.timestep_embedder(t)
+        if self.use_step_conditioning:
+            d = _prepare_scalar(step_size, batch_size, x.device)
+            e = e + self.step_embedder(d)
+        e = self.fusion_norm(e)
         cond_latent = self.compact(e)
 
         for block in self.layers:
