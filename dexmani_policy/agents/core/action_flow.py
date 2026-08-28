@@ -221,6 +221,17 @@ class ActionFlowAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
+
+
+        """
+
+
+
+
+        """
+
+        )
+
     @torch.no_grad()
     def predict_action_from_cond(self, cond: dict, denoise_timesteps=None) -> dict:
         """Local override: ActionFlow's ``cond`` is a dict, not a tensor.
@@ -252,6 +263,19 @@ class ActionFlowAgent(BaseAgent):
             "control_action": control_action,
             "tail": tail,
         }
+
+    def compile_backbone(self, **compile_kwargs):
+        """Compile the ActionDiT backbone *and* the GeoFormer (ActionFlow-specific).
+
+        ``BaseAgent.compile_backbone`` only compiles ``action_decoder.model``; the
+        GeoFormer is a pure-torch transformer (no PyTorch3D FPS/Ball-Query/KNN) so
+        it compiles cleanly. The PointNeXT tokenizer is deliberately left eager —
+        its FPS/ball-query ops cause graph breaks.
+        """
+        super().compile_backbone(**compile_kwargs)
+        self.obs_encoder.geoformer = torch.compile(
+            self.obs_encoder.geoformer, **compile_kwargs
+        )
 
 
 def example():
