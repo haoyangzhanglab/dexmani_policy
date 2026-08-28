@@ -147,7 +147,13 @@ class GeoFormerBlock(nn.Module):
         self.norm2 = RMSNorm(hidden_dim)
         self.ffn = SwiGLU(hidden_dim, ffn_hidden_dim)
 
-    def forward(self, x: torch.Tensor, xyz: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        xyz: torch.Tensor,
+        cos: torch.Tensor | None = None,
+        sin: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         # x: [B, N, d], xyz: [B, N, 3] -> [B, N, d]
         B, N, D = x.shape
         H = self.num_heads
@@ -160,7 +166,8 @@ class GeoFormerBlock(nn.Module):
             q = _rms_norm(q)
             k = _rms_norm(k)
         if self.use_3d_rope:
-            cos, sin = self.rope(xyz)
+            if cos is None or sin is None:
+                cos, sin = self.rope(xyz)
             q = _apply_3d_rope(q, cos, sin)
             k = _apply_3d_rope(k, cos, sin)
 
@@ -203,8 +210,11 @@ class GeoFormer(nn.Module):
         assert hidden_dim % num_heads == 0
         self.hidden_dim = hidden_dim
         self.depth = depth
+        self.use_3d_rope = use_3d_rope
 
-        rope = RotaryPositionEmbedding3D(hidden_dim // num_heads, min_wavelength, max_wavelength)
+        # Hoisted to GeoFormer so the rotary trig can be computed once per forward
+        # (xyz is identical across blocks) and shared, instead of per block.
+        self.rope = RotaryPositionEmbedding3D(hidden_dim // num_heads, min_wavelength, max_wavelength)
         self.blocks = nn.ModuleList(
             [
                 GeoFormerBlock(
@@ -214,7 +224,7 @@ class GeoFormer(nn.Module):
                     qk_norm,
                     use_3d_rope,
                     attn_drop,
-                    rope,
+                    self.rope,
                 )
                 for _ in range(depth)
             ]
@@ -230,8 +240,12 @@ class GeoFormer(nn.Module):
     def forward(self, tokens: torch.Tensor, xyz: torch.Tensor) -> torch.Tensor:
         assert tokens.dim() == 3 and tokens.shape[-1] == self.hidden_dim, tokens.shape
         assert xyz.dim() == 3 and xyz.shape[-1] == 3, xyz.shape
+        # RoPE trig depends only on xyz, which is shared across blocks — compute once.
+        cos = sin = None
+        if self.use_3d_rope:
+            cos, sin = self.rope(xyz)
         for block in self.blocks:
-            tokens = block(tokens, xyz)
+            tokens = block(tokens, xyz, cos=cos, sin=sin)
         return self.norm_out(tokens)
 
 
