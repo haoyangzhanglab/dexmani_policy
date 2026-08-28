@@ -135,10 +135,10 @@ agent:
 # ── Optimizer ──
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-3
+  weight_decay: 1.0e-2
   betas: [0.9, 0.95]
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6
+  obs_weight_decay: 1.0e-3
 
 # ── EMA ──
 ema:
@@ -163,7 +163,8 @@ training:
   compile_mode: default
   use_ema: true
   use_ema_teacher_for_consistency: false
-  lr_scheduler: cosine
+  lr_scheduler: cosine_min_lr
+  lr_min_ratio: 0.1
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   # Fuse the gradient finite-check into clip_grad_norm_(error_if_nonfinite=True);

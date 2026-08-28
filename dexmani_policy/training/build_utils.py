@@ -88,6 +88,7 @@ def build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch=-1):
         num_warmup_steps=cfg.training.lr_warmup_steps,
         num_training_steps=total_steps,
         last_epoch=last_epoch,
+        lr_min_ratio=cfg.training.get("lr_min_ratio", 0.1),
     )
 
 

@@ -1,3 +1,4 @@
+import math
 from typing import Optional, Union
 
 import torch.optim.lr_scheduler as _lrs
@@ -6,6 +7,31 @@ from diffusers.optimization import (
     Optimizer,
     SchedulerType,
 )
+
+
+def _cosine_with_min_lr(
+    optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    lr_min_ratio: float = 0.1,
+    last_epoch: int = -1,
+):
+    """Cosine warmup + cosine decay that floors at ``lr_min_ratio * lr`` (not 0).
+
+    Unlike diffusers ``cosine`` (which anneals to 0), this keeps a minimum learning
+    rate so late-training steps keep updating rather than decaying to noise.
+    """
+
+    def lr_lambda(step: int) -> float:
+        if step < num_warmup_steps:
+            return float(step) / float(max(1, num_warmup_steps))
+        progress = float(step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+        progress = min(1.0, progress)
+        return lr_min_ratio + (1.0 - lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return _lrs.LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
 def compute_num_training_steps(cfg, batches_per_epoch: int) -> int:
@@ -24,6 +50,21 @@ def get_scheduler(
     num_training_steps: Optional[int] = None,
     **kwargs,
 ):
+    lr_min_ratio = kwargs.pop("lr_min_ratio", 0.1)
+
+    if name in ("cosine_min_lr",):
+        if num_warmup_steps is None or num_training_steps is None:
+            raise ValueError(
+                f"{name} requires num_warmup_steps and num_training_steps"
+            )
+        return _cosine_with_min_lr(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            lr_min_ratio=lr_min_ratio,
+            last_epoch=kwargs.get("last_epoch", -1),
+        )
+
     if name in ("one_cycle",):
         if num_training_steps is None:
             raise ValueError(f"{name} requires num_training_steps")
