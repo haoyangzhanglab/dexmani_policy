@@ -165,6 +165,7 @@ class ActionFlowAgent(BaseAgent):
         noise_shift_alpha: float = 3.0,
         noise_shift_ratio: float = 0.75,
         solver: str = "euler",
+        use_metric_xyz: bool = False,
         modality_dropout_probs: dict | None = None,
         **kwargs,
     ):
@@ -220,16 +221,65 @@ class ActionFlowAgent(BaseAgent):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
+        self.use_metric_xyz = use_metric_xyz
 
+    def preprocess(self, obs_dict: dict) -> dict:
+        """ActionFlow-specific normalization: keep point-cloud xyz in *metric* units.
 
+        FPS, ball-query, relative-xyz and 3D RoPE all consume xyz as distances, so
+        the shared per-axis min-max (which maps xyz to [-1,1] anisotropically with
+        sx != sy != sz) corrupts true geometry. With ``use_metric_xyz`` we normalize
+        only the appearance channels (rgb, dims 3:) and leave xyz raw. Everything
+        else — joint_state normalization, modality dropout, n_obs_steps slicing,
+        [B,T]->[B*T] flatten — matches ``BaseAgent.preprocess`` exactly.
 
+        Default ``use_metric_xyz=False`` reproduces legacy behaviour verbatim.
         """
+        if not self.use_metric_xyz:
+            return super().preprocess(obs_dict)
 
+        obs = dict(obs_dict)
+        pc = obs.pop("point_cloud", None)
+        obs = self.normalizer.normalize(obs)
+        if pc is not None:
+            obs["point_cloud"] = self._normalize_point_cloud_metric(pc)
 
+        result = {}
+        for k, v in obs.items():
+            if torch.is_tensor(v):
+                p = self.modality_dropout_probs.get(k, 0.0)
+                if self.training and p > 0 and k in self.normalizer.params_dict:
+                    mask = torch.rand(v.shape[0], device=v.device) > p
+                    v = v * mask.view(-1, *([1] * (v.ndim - 1)))
+                v = v[:, : self.n_obs_steps].flatten(0, 1)
+            result[k] = v
+        return result
 
+    def _normalize_point_cloud_metric(self, pc: torch.Tensor) -> torch.Tensor:
+        """Normalize rgb (dims 3:) with the fitted per-channel scale/offset; xyz raw.
 
+        The shared normalizer fits all 6 channels of point_cloud; we zero out the
+        scale/offset of the xyz channels so only appearance is normalized. The
+        appearance channels are clamped back to [-1,1] (matching the legacy clamp)
+        because color-jitter augmentation can push them past the fitted min/max;
+        xyz is deliberately left unclamped — metric coordinates must not be clipped.
         """
+        from dexmani_policy.common.normalizer import normalize_tensor
 
+        if "point_cloud" not in self.normalizer.params_dict:
+            return pc
+        params = self.normalizer["point_cloud"].params_dict
+        scale = params["scale"].clone()
+        offset = params["offset"].clone()
+        scale[:3] = 1.0
+        offset[:3] = 0.0
+        out = normalize_tensor(pc, {"scale": scale, "offset": offset}, forward=True)
+        return torch.cat(
+            [
+                out[..., :3],
+                out[..., 3:].clamp(min=-1 - 1e-6, max=1 + 1e-6),
+            ],
+            dim=-1,
         )
 
     @torch.no_grad()

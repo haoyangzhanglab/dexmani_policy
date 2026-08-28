@@ -76,6 +76,10 @@ agent:
   state_dim: ${action_dim}
   num_points: 1024
 
+  # Keep point-cloud xyz in metric units (FPS/ball-query/3D-RoPE see true
+  # distances); only rgb is per-axis normalized. Off = legacy per-axis min-max.
+  use_metric_xyz: true
+
   fps_random_config:
     use_random: true
     use_random_start: true
