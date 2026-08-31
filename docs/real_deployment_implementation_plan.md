@@ -2,20 +2,19 @@
 
 > **Audience**: Codex / repository maintainers  
 > **Scope**: `dexmani_policy` only.  
-> **Execution order**: complete this plan before starting semantic changes in `dexmani_real`.  
-> **Baseline reviewed**: `main` at `a9de8b9b8c082edc7192b5a5bf7ffaf91a7f252a` (2026-08-31).  
-> **Rule**: before every phase, re-read current `HEAD`, `AGENTS.md`, and the touched source files. If `main` has moved, re-evaluate the affected facts instead of blindly applying this snapshot.
+> **Execution order**: complete the Policy handoff in this document before starting semantic changes in `dexmani_real`.  
+> **Reviewed baseline**: `main` at `a9de8b9b8c082edc7192b5a5bf7ffaf91a7f252a` (2026-08-31).  
+> **Review status**: v2 — cross-checked against current Policy source and the current Real deployment-v2 consumer.  
+> **Rule**: before every PR, re-read current `HEAD`, `AGENTS.md`, and touched source. If `main` moved, re-evaluate affected facts instead of applying this plan mechanically.
 
 ---
 
 ## 1. Goal
 
-Make an ordinary `dexmani_policy` experiment produce a **self-contained, deterministic, machine-verifiable deployment artifact** that `dexmani_real` can consume without understanding Policy training internals.
-
-Target flow:
+Make an ordinary Policy experiment produce a **self-contained, deterministic, machine-verifiable deployment artifact** that `dexmani_real` can consume without knowing training internals.
 
 ```text
-resolved training config + Real Policy Zarr v5
+resolved Policy config + Real Policy Zarr v5
         ↓
 simple.v1 training checkpoint
         ↓
@@ -25,66 +24,70 @@ dexmani.deployment.v2 checkpoint
 + schema-v2 sidecar
 + deployment_latest.pt selector
         ↓
-strict/no-network restore in dexmani_real
+strict / no-network restore in dexmani_real
 ```
 
-The exporter is the only new cross-repo producer boundary. Do not create a registry/factory/plugin hierarchy.
+The exporter is a narrow producer boundary. Do not create a registry/factory/plugin framework.
 
 ---
 
 ## 2. Non-goals
 
-Do **not** do the following in this plan:
+Do not:
 
-- Do not modify `dexmani_real` runtime code.
-- Do not invent `dexmani.deployment.v3`.
-- Do not let Real read `simple.v1` training checkpoints directly.
-- Do not make deployment depend on optimizer/scheduler/workspace/dataset objects.
-- Do not add a global Policy builder registry; Hydra `_target_` remains the model construction mechanism.
-- Do not change ActionFlow architecture, solver, NFE, tokenization, conditioning, or parameter topology unless a separate research task requires it.
-- Do not change model quality/evaluation behavior to accommodate deployment.
-- Do not claim RGB deployment support until the evaluation preprocessing contract is reproduced exactly.
-- Do not run full training, DDP, long simulation evaluation, or any real-hardware command as part of Codex validation.
+- modify `dexmani_real` runtime in Policy PRs;
+- invent `dexmani.deployment.v3`;
+- make Real read `simple.v1` directly;
+- export optimizer/scheduler/workspace/dataset/env-runner state;
+- add a global Policy builder registry;
+- change model architecture/solver/NFE/model quality for deployment convenience;
+- claim RGB/text deployment support before their contracts exist;
+- make `dexmani_policy` runtime-depend on `dexmani_real`;
+- commit large real checkpoints or datasets as integration fixtures;
+- run real-hardware commands, long training, DDP, or long simulation evaluation from Codex.
 
 ---
 
-## 3. Cross-repo contract
+## 3. Cross-repo ownership
 
-### 3.1 Policy owns
+### Policy owns
 
-- Agent/model construction semantics.
-- `predict_action()` output semantics.
-- `action_key`, `action_dim`, `control_action_dim`.
-- `horizon`, `n_obs_steps`, `n_action_steps`.
-- Normalizer state.
-- EMA/model selection semantics.
-- Diffusion/Flow solver and NFE.
-- Model-specific constructor sanitization needed for self-contained restore.
-- Production of `dexmani.deployment.v2` and its sidecar.
+- Hydra agent/model construction semantics;
+- `predict_action()` output semantics;
+- `action_key`, model `action_dim`, `control_action_dim`;
+- `horizon`, `n_obs_steps`, `n_action_steps`;
+- normalizer state;
+- model/EMA selection semantics;
+- Diffusion/Flow solver and NFE;
+- deployment-safe constructor sanitization;
+- deployment-v2 checkpoint and sidecar production.
 
-### 3.2 Real owns
+### Real owns
 
-- Artifact no-follow/identity/SHA/provenance verification.
-- Causal observation construction.
-- Observation timestamping and run generations.
-- Action target timestamps and stale-action dropping.
-- EE→IK.
-- Workspace/collision/delta/joint-limit `SafetyGate`.
-- Coupled arm/hand publication, ticketing, ACK, SDK IO.
+- artifact no-follow/identity/SHA/TOCTOU/provenance checks;
+- causal observations and run generations;
+- action timestamps, plan deadline and stale dropping;
+- EE→IK;
+- workspace/collision/delta/joint-limit SafetyGate;
+- arm/hand coupled publication, ticket, ACK and SDK IO.
 
-### 3.3 `predict_action()` deployment contract
+Policy must not import Real in the exporter runtime. Cross-repo compatibility belongs in tests/handoff, not a production dependency.
 
-All deployable policies must return:
+---
+
+## 4. `predict_action()` deployment contract
+
+Every deployable policy must return:
 
 ```python
 {
     "pred_action": Tensor[B, horizon, model_action_dim],
     "control_action": Tensor[B, n_action_steps, control_action_dim],
-    ... optional diagnostic/model-specific outputs ...
+    ... optional model-specific diagnostics ...,
 }
 ```
 
-`tail` is optional. Real must not require it.
+`tail` is optional and is not a deployment contract.
 
 Canonical executable slice:
 
@@ -97,79 +100,63 @@ expected_control = pred_action[
 ]
 ```
 
-The exporter/verification path must establish that `control_action` matches this contract for supported policies.
+For supported policies, exporter verification must prove `control_action` matches this semantic slice for a deterministic test input/seed.
 
 ---
 
-## 4. Current reviewed issues
+## 5. Current correctness issues
 
-### P0 correctness
+1. **ActionFlow EE state mismatch**
+   - current `state_dim: ${action_dim}`;
+   - `joint_state` is always arm7 + hand12 = 19;
+   - `action_ee` is 21-D;
+   - strict `ActionFlowObsEncoder.forward()` correctly rejects the mismatch.
 
-1. **ActionFlow state dimension is wrong for `action_ee`.**
-   - Current config: `state_dim: ${action_dim}`.
-   - Real `joint_state` is always arm7 + hand12 = **19**.
-   - `action_ee` is 21-D.
-   - `ActionFlowObsEncoder.forward()` already rejects a mismatching state dimension.
+2. **Checkpoint metadata missing `use_aux_ee`**
+   - Real validates data/train/inference auxiliary-action semantics.
 
-2. **`build_train_params()` omits `use_aux_ee`.**
-   - Real deployment validation requires consistent model/data/inference auxiliary-EE semantics.
+3. **`training/eval_utils.py` `raw_state` scope bug**
+   - `raw_state` is currently assigned only under `train_params is not None`.
 
-3. **`training/eval_utils.py` has a `raw_state` scope bug.**
-   - `raw_state` is currently assigned only inside `if train_params is not None:`.
-   - Older or metadata-light checkpoints can reach an unbound variable.
+4. **Stale repository guidance**
+   - `AGENTS.md` incorrectly says `joint_state` dimension equals action dimension.
 
-4. **Policy `AGENTS.md` contains a stale invariant.**
-   - It says `joint_state` dimension equals action dimension.
-   - Correct invariant: `joint_state=19`, while action is 19 (`action`) or 21 (`action_ee`).
+5. **DQ-RISE checkpoint-selection commentary is stale**
+   - current trainer saves milestone/interrupt checkpoints with `monitor={}`;
+   - deployment-quality “best” comes from offline evaluation output, not online `val_loss` top-k.
 
-5. **DQ-RISE checkpoint-selection commentary is stale.**
-   - Current training flow saves milestone/interrupt checkpoints and does not provide online `val_loss`-driven top-k selection as described by the config comment.
-   - Deployment `best` selection must follow the actual offline evaluation outputs.
+6. **Dependency description is inconsistent**
+   - `pyproject.toml`: `hydra-core>=1.3`;
+   - `requirements.txt`: `hydra-core==1.2.0`;
+   - editable install does not cover every strategy dependency.
 
-6. **Dependency metadata is inconsistent.**
-   - `pyproject.toml`: `hydra-core>=1.3`.
-   - `requirements.txt`: `hydra-core==1.2.0`.
-   - `pip install -e .` does not install all dependencies required by all strategies.
+7. **No official deployment-v2 producer exists.**
 
-### Deployment producer gaps
+8. **Real Zarr root semantic attrs are not preserved by Policy ReplayBuffer copy logic.**
 
-7. No official producer currently writes `dexmani.deployment.v2`.
-8. Exporter cannot rely on `ReplayBuffer.copy_from_path()` for the Real semantic contract because Zarr root attrs are not preserved there.
-9. DQ-RISE fresh construction can depend on `codebook_path`, although codebook state is checkpoint-owned after restore.
-10. R3D/Uni3D construction may load pretrained weights before checkpoint restore.
-11. RGB policies have a training/eval preprocessing mismatch relative to current Real raw-RGB handoff.
+9. **DQ-RISE / R3D fresh construction can depend on training-time assets before restore.**
+
+10. **RGB evaluation preprocessing differs from current Real raw-RGB handoff.**
 
 ---
 
-## 5. Phase P0 — correctness before exporter
+# Phase P0 — Correctness before exporter
 
 **Status**: TODO  
-**Semantic goal**: fix existing Policy facts without introducing deployment artifacts.
+**Primary hypothesis**: current training/evaluation semantics can be corrected without introducing deployment behavior.
 
-### P0.1 ActionFlow state contract
-
-Files:
-
-```text
-dexmani_policy/configs/action_flow.yaml
-dexmani_policy/agents/core/action_flow.py
-AGENTS.md
-focused tests
-```
+## P0.1 ActionFlow state contract
 
 Change:
 
 ```yaml
-# before
-state_dim: ${action_dim}
-
-# after
+# dexmani_policy/configs/action_flow.yaml
 state_dim: 19
 ```
 
-Do not make `ActionFlowObsEncoder` silently slice/pad state. The strict forward check is useful and should remain.
+Do not slice/pad state in the encoder.
 
-Also fix examples in `action_flow.py` that equate state dimension to action dimension if they would be wrong for EE mode.
+Update examples/comments that imply `state_dim == action_dim`.
 
 Acceptance:
 
@@ -178,17 +165,11 @@ action_key=action     → action_dim=19, state_dim=19
 action_key=action_ee  → action_dim=21, state_dim=19
 ```
 
-Add a config/constructor test for both variants.
+Tests must resolve both the single-GPU config and `ddp/action_flow` inheritance.
 
-### P0.2 `train_params` metadata
+## P0.2 `train_params`
 
-File:
-
-```text
-dexmani_policy/common/checkpoint_io.py
-```
-
-Add:
+Add to `build_train_params()`:
 
 ```python
 "use_aux_ee": bool(getattr(model, "use_aux_ee", False)),
@@ -196,7 +177,7 @@ Add:
 
 Keep `simple.v1` top-level format unchanged.
 
-For a newly saved checkpoint, `train_params` should include at least:
+Expected new metadata includes at least:
 
 ```text
 n_obs_steps
@@ -211,66 +192,48 @@ use_aux_ee
 num_training_steps
 ```
 
-### P0.3 Fix evaluation checkpoint loading
+## P0.3 Fix evaluation checkpoint loading
 
-File:
-
-```text
-dexmani_policy/training/eval_utils.py
-```
-
-Restructure to define weight selection independently of whether `train_params` exists:
+Weight selection must be independent of metadata presence:
 
 ```python
 raw_state = checkpoint.model_state
 if use_ema:
     if checkpoint.ema_model_state is None:
-        # preserve existing simulation-eval warning fallback
+        # simulation evaluation may preserve the existing warning fallback
         warn(...)
     else:
         raw_state = checkpoint.ema_model_state
 ```
 
-`train_params` validation remains conditional.
+Deployment export is stricter: `use_ema=true` with no EMA state is an error.
 
-Important distinction:
+## P0.4 Correct checkpoint-selection documentation
 
-- Simulation evaluation may keep warning fallback to model weights when EMA is absent.
-- Deployment export with `use_ema=true` must **fail closed** if EMA state is absent.
+Do not redesign training.
 
-Tests:
-
-- metadata present + EMA present;
-- metadata absent + EMA present;
-- EMA requested + EMA absent;
-- strict state restore still succeeds for valid cases.
-
-### P0.4 Correct DQ-RISE checkpoint-selection docs/config comments
-
-Do not redesign training in this PR.
-
-Document current truth:
+Document:
 
 ```text
 training saves milestone/interrupt checkpoints;
-best deployment checkpoint is selected by offline evaluation output,
-using best_ckpt.json / best.pt according to current repository utilities.
+offline evaluation produces best_ckpt.json / best.pt evidence.
 ```
 
-Deployment `--checkpoint best` must not rank milestone filenames with missing scores.
+Also remove/move unreferenced empirical claims from runtime configs (for example “verified +2.9pp across 7 tasks”) unless a stable experiment record is linked. Runtime configs should state behavior, not unsupported historical claims.
 
-### P0.5 Fix repository guidance
+## P0.5 Repository guidance
 
-Update `AGENTS.md`:
+Fix `AGENTS.md`:
 
 ```text
-joint_state is fixed 19-D (arm7 + hand12).
-action is 19-D; action_ee is 21-D.
+joint_state = 19-D (arm7 + hand12)
+action = 19-D
+action_ee = 21-D
 ```
 
-If `pip install -e .` is not sufficient for all policies, say so explicitly instead of implying a complete environment.
+If `pip install -e .` is not a complete all-strategy environment, say so explicitly.
 
-### P0 validation
+## P0 validation
 
 Minimum:
 
@@ -283,16 +246,16 @@ python dexmani_policy/smoke_test.py sat
 git diff --check
 ```
 
-If CUDA/data/dependencies are unavailable, report the commands not run and the missing condition. Do not turn environment failures into code changes.
+Add focused config tests for ActionFlow joint/EE and DDP resolution. Report unavailable CUDA/data/dependencies; do not “fix” code to hide environment failures.
 
 ---
 
-## 6. Phase P1 — minimal deployment exporter
+# Phase P1 — Minimal deployment-v2 exporter
 
 **Status**: BLOCKED on P0  
-**Semantic goal**: make Policy the official producer of the existing Real deployment contract.
+**Primary hypothesis**: Policy can produce the existing Real contract without adding a cross-repo runtime dependency.
 
-### P1.1 Minimal package
+## P1.1 Minimal package
 
 Add only:
 
@@ -302,8 +265,6 @@ dexmani_policy/deployment/
 └── export.py
 ```
 
-Do not introduce a registry/factory.
-
 Suggested API:
 
 ```python
@@ -312,6 +273,7 @@ export_deployment_artifact(
     checkpoint_selector: str = "best",
     output_path: Path | None = None,
     verify: bool = True,
+    zarr_path: Path | None = None,
 ) -> ExportReceipt
 ```
 
@@ -321,56 +283,79 @@ CLI:
 python -m dexmani_policy.deployment.export EXP --checkpoint best --verify
 ```
 
-A console script can be added later if it improves actual use.
+Do not add a registry/factory.
 
-### P1.2 Checkpoint resolution
+## P1.2 Strict checkpoint resolution
 
-Use current repository utilities and actual evaluation outputs.
+For deployment, selector meaning must be literal.
 
-For `best`, preferred order:
+`--checkpoint best`:
 
 ```text
 best_ckpt.json
 → best.pt
-→ explicit repository-approved fallback
 → error
 ```
 
-Do not guess a best milestone from filename order when no score exists.
+**Do not silently fall back from `best` to `latest`.** If the operator wants latest, they must request `--checkpoint latest` explicitly.
 
-### P1.3 Read the Real Zarr contract directly
+Explicit paths/milestone tags are allowed if existing repository utilities resolve them deterministically.
 
-Exporter must reopen `cfg.zarr_path`:
+## P1.3 Source provenance gate
+
+Current Real restore requires the installed Policy package to match the artifact producer commit and to be clean. Therefore the first-phase exporter must fail early unless it can establish:
+
+```text
+repository == haoyangzhanglab/dexmani_policy
+HEAD is a 40-hex commit
+working tree is clean
+```
+
+Record the current clean exporter/model-source `HEAD` as `producer.commit`.
+
+Do not produce an artifact that current Real will necessarily reject later.
+
+A future “dirty research source” workflow is a separate contract change; do not smuggle it into v2 export.
+
+## P1.4 Resolve and read Real Policy Zarr v5
+
+Exporter must reopen the original Zarr and read root attrs directly:
 
 ```python
-root = zarr.open_group(str(cfg.zarr_path), mode="r")
+root = zarr.open_group(str(resolved_zarr_path), mode="r")
 attrs = dict(root.attrs)
 ```
 
-Do not infer the Real data contract from the replay-buffer object.
+Relative `cfg.zarr_path` must **not** depend on the caller's current working directory. Resolve it using the Policy repository/training path convention. If data has been relocated, allow an explicit `--zarr-path` override, but require exact task/schema/semantic agreement.
 
-Required first-phase checks should include the actual current Real Policy Zarr-v5 fields, including at least:
+Reject simulation data.
+
+Validate current Real v5 semantics, including:
 
 ```text
 schema_name == dexmani-real-policy-zarr
 schema_version == 5
 domain == real
-deployment_equivalent == true
-task/action semantics
-control dt
-observation reference/alignment
-state alignment
-sensor modalities
-point-cloud semantics when requested
+profile
+task_name
+dt
+episode_start_policy
+obs_alignment
+observation_reference
+state_alignment
+max_observation_skew_s
+action_semantics
+arm/hand delta semantics
+endpoint_delta_tolerance_rad
+deployment_equivalent
+point-cloud frame/config/sampling/transform semantics when used
 ```
 
-A simulation Zarr must be rejected by the real-deployment exporter.
+Build deployment `sensor_modalities` from the **model/dataset modality subset**, not merely from every array present in an `rgb_pc` Zarr.
 
-### P1.4 Minimal resolved inference config
+## P1.5 Minimal resolved inference config
 
-Do not embed the full training Hydra config.
-
-Embed only the values Real/model restore actually needs, e.g.:
+Embed only model restore/inference values:
 
 ```yaml
 task_name: ...
@@ -388,22 +373,24 @@ eval:
   denoise_steps: ...
 ```
 
-No dataset/env_runner/workspace `_target_` may be instantiated by Real.
+No dataset/env_runner/workspace target may enter the deployment config.
 
-### P1.5 Deployment-safe constructor sanitization
+Current Real only consumes a positive integer `eval.denoise_steps`. First-phase exporter must reject unsupported inference overrides, including a non-null `eval.denoise_timesteps_list`, rather than silently changing inference semantics.
 
-Use narrow field-based sanitization, not policy-name registries.
+## P1.6 Deployment-safe constructor sanitization
 
-#### DQ-RISE
+Use narrow field-based changes, not a policy-name registry.
 
-Set in exported config:
+### DQ-RISE
+
+Export:
 
 ```yaml
 agent:
   codebook_path: null
 ```
 
-Reason: current `CodebookManager` is checkpoint state. A deployment restore must not require the original training `.npz` after strict state restore.
+First-phase support requires the selected checkpoint itself to contain the persistent runtime codebook buffers. If an old checkpoint only works because an external `.npz` is loaded before state restore, reject it with a clear migration/retrain message. Do not silently retrofit tensor state from an external file into deployment-v2.
 
 Preserve/check:
 
@@ -415,241 +402,274 @@ codebook_size
 action_key
 ```
 
-Current default DQ-RISE uses `action_ee`, so the produced artifact is an EE action artifact.
+Current default DQ-RISE is `action_ee` and therefore produces an EE artifact.
 
-#### R3D/Uni3D
+### R3D / Uni3D
 
-If the config contains:
+If present, export:
 
 ```yaml
-agent.pc_encoder_config.use_pretrained_weights
+agent:
+  pc_encoder_config:
+    use_pretrained_weights: false
 ```
 
-export it as `false` for deployment construction, then rely on strict checkpoint restore.
+Then rely on strict checkpoint restore. Tests must prove this is topology-preserving.
 
-This must be proven topology-preserving by tests.
+### RGB backbones
 
-#### RGB backbones
+Reject in P1. Do not add DINO/R3M download hacks.
 
-Do not add ad-hoc constructor hacks in P1. Reject unsupported RGB artifacts until P4.
+## P1.7 Exact deployment-v2 payload
 
-### P1.6 Deployment-v2 payload
+The current Real reader requires exact top-level/state/weight key sets.
 
-The exporter must produce **exactly the existing Real contract**.
-
-Do not rename fields or add v3-like optional semantics in this phase.
-
-Requirements:
-
-- `torch.load(..., weights_only=True)` compatible;
-- exact top-level and state/weights key sets expected by Real;
-- canonical state-dict keys;
-- model or EMA selected according to artifact inference config;
-- normalizer state included through the selected model state;
-- producer provenance recorded;
-- no optimizer/scheduler state.
-
-### P1.7 Sidecar schema-v2
-
-New exports should always write the current Real sidecar schema v2.
-
-The sidecar writer must be verified against the actual Real parser/golden fixture. Do not reproduce the schema from memory.
-
-`required_action_steps` remains the existing serialized compatibility field. Do not reinterpret it as `n_action_steps` in the schema. Real will separately fix execution semantics.
-
-### P1.8 Atomic output
-
-Export sequence:
+Important weight semantics:
 
 ```text
-write temporary checkpoint
-→ fsync
-→ os.replace
-→ SHA-256
-→ write canonical sidecar atomically
-→ write/update relative deployment_latest.pt symlink atomically
-→ verify final files
+weights.model      → ALWAYS a non-empty canonical model state_dict
+weights.ema_model  → canonical EMA state_dict or null
 ```
 
-Do not partially update selector/sidecar if checkpoint creation fails.
+Do **not** replace `weights.model` with EMA when `eval.use_ema=true`. Real chooses the selected state at restore time. If `eval.use_ema=true`, `weights.ema_model` must exist or export fails.
 
-### P1 validation
+State dict keys must be canonical: no `module.` and no `_orig_mod.`.
 
-Add focused tests under an appropriate `tests/deployment/` or existing test convention.
+Metadata must be plain finite JSON-compatible values.
+
+## P1.8 Producer and embedded deployment receipt
+
+Current Real distinguishes checkpoint producer metadata from the smaller sidecar producer object.
+
+Checkpoint `producer` must include the fields required by the Real receipt, including:
+
+```text
+repository
+commit
+metadata_provenance
+retrofitted_train_params_fields
+```
+
+`retrofitted_train_params_fields` must always be a list, including `[]` for native metadata.
+
+`deployment_contract` must use the exact current Real schema and carry the same retrofit list.
+
+Rules:
+
+- `metadata_provenance="native"` only when required training metadata already existed and matched;
+- `metadata_provenance="retrofitted"` only for explicitly whitelisted metadata synthesis (for example old `use_aux_ee` metadata);
+- never call tensor-weight mutation a metadata retrofit.
+
+The schema-v2 **sidecar producer** remains the exact smaller object accepted by Real:
+
+```text
+repository
+commit
+metadata_provenance
+```
+
+Do not add extra sidecar producer keys without a consumer change.
+
+## P1.9 Sidecar schema-v2
+
+New exports always write current schema v2.
+
+Generate against the actual current Real parser/golden test; do not rely on memory. This is a test-time compatibility check and must not introduce a Policy runtime dependency on Real.
+
+Keep current compatibility field:
+
+```text
+required_action_steps = horizon - (n_obs_steps - 1)
+```
+
+It remains the serialized prediction-future/allocation length. It is **not** `n_action_steps`.
+
+## P1.10 Atomic publication
+
+Recommended order:
+
+```text
+validate all inputs first
+→ write checkpoint staging file
+→ fsync
+→ atomic replace final checkpoint
+→ compute SHA-256
+→ write canonical sidecar staging file
+→ fsync + atomic replace
+→ atomically update relative deployment_latest.pt symlink
+→ roundtrip verify selected final files
+```
+
+A failure may leave an unselected orphan checkpoint, but must never leave a selector pointing at an incomplete/incompatible artifact.
+
+Do not overwrite an existing deployment artifact unless an explicit `--force` policy is implemented and itself remains atomic.
+
+## P1 validation
 
 Must prove:
 
-- exact v2 payload schema;
+- exact deployment-v2 payload schema;
 - exact sidecar-v2 parser compatibility;
-- strict restore;
-- finite normalizer/model output;
-- `pred_action` and `control_action` shapes;
-- unsupported sim/RGB fail before producing final artifact;
-- interrupted export leaves no selected partial artifact.
+- exact checkpoint producer/deployment-contract receipt;
+- strict state restore;
+- normalizer completeness;
+- `pred_action` / `control_action` shapes and finite values;
+- unsupported sim/RGB/text/custom timestep-list cases fail before selector publication;
+- interrupted export never selects a partial artifact.
 
 ---
 
-## 7. Phase P2 — self-contained restore and parity
+# Phase P2 — Self-contained restore and parity
 
 **Status**: BLOCKED on P1
 
-### P2.1 No-network test
+## P2.1 No-network
 
-Patch/forbid network-backed loaders during deployment verification.
+During deployment verification, forbid/patch network-backed loaders. Restore must not need:
 
-The exported artifact restore must not require:
-
-- Hugging Face downloads;
-- Google Drive/gdown;
-- external pretrained model fetches;
+- Hugging Face download;
+- gdown/Google Drive;
+- external pretrained fetch;
 - experiment-local Python package shadowing.
 
-### P2.2 No-external-training-file test
+## P2.2 No training-only initialization files
 
-For supported strategies:
+For each supported strategy:
 
-1. export artifact;
-2. remove/rename training-only initialization file in the test fixture;
-3. instantiate deployment-safe agent;
+1. export;
+2. remove/rename training-only initialization asset in the fixture environment;
+3. instantiate from exported config;
 4. strict restore;
-5. run prediction.
+5. predict.
 
-At minimum cover DQ-RISE codebook and R3D pretrained initialization behavior.
+At minimum cover DQ-RISE and R3D.
 
-### P2.3 Direct vs exported parity
+## P2.3 Direct/export parity
 
-For a deterministic synthetic observation and seed:
+For one deterministic synthetic observation and seed, compare:
 
 ```text
-direct experiment checkpoint restore
+direct experiment restore
 vs
 exported deployment-v2 restore
 ```
 
-Compare:
+Compare both:
 
 ```text
 pred_action
 control_action
 ```
 
-with an explicit tolerance appropriate to the actual dtype/solver. Do not hide mismatches with loose tolerances.
+Use exact equality where deterministic dtype/implementation permits; otherwise use a narrow, justified tolerance. Never loosen tolerance merely to make the test pass.
 
-### P2.4 Supported matrix
+## P2.4 First-phase support matrix
 
-First-phase support target:
-
-| Policy | First-phase status | Notes |
+| Policy | Status | Qualification |
 |---|---|---|
-| DP3 | supported | point cloud + joint state |
-| ManiFlow | supported | preserve solver/NFE |
-| SAT | supported | point cloud path |
-| ActionFlow | supported after P0 | state_dim=19; preserve midpoint/NFE semantics |
-| DQ-RISE | supported after self-contained codebook restore | current default is EE action |
-| R3D | supported when deployment construction disables pretrained init | aux-EE needs full-output/control split |
+| DP3 | target supported | point cloud + joint state |
+| ManiFlow | target supported | preserve solver/NFE |
+| SAT | target supported | point-cloud path |
+| ActionFlow | after P0 | state_dim=19; preserve midpoint/NFE |
+| DQ-RISE | conditional | checkpoint must be self-contained; current default is EE action |
+| R3D | conditional | pretrained init disabled; aux-EE full/control split |
 | DP RGB | deferred | preprocessing mismatch |
 | MoE-DP RGB/R3M | deferred | preprocessing + external init |
-| MultiTask DiT | deferred | explicit task-text conditioning contract missing |
+| MultiTask DiT | deferred | explicit task-text contract missing |
 
-Do not describe deferred policies as “structurally supported”.
+Do not label deferred policies “structurally supported”.
 
 ---
 
-## 8. Phase P3 — cross-repo handoff to `dexmani_real`
+# Phase P3 — Cross-repo handoff
 
 **Status**: BLOCKED on P2  
-**This is the gate before Real control-semantic changes begin.**
+**This is the gate before Real control-semantic changes.**
 
-Deliver a handoff bundle containing:
+Deliver:
 
 ```text
 Policy commit SHA
-Policy working-tree cleanliness/provenance result
-exporter version/command
-representative deployment-v2 fixture
-fixture checkpoint SHA-256
+clean-source/provenance result
+export command/version
+representative deployment-v2 artifact or deterministic fixture generator
+artifact SHA-256
 schema-v2 sidecar
-resolved supported-policy contract
-parity-test result
+supported-policy matrix
+strict-restore result
+direct/export control_action parity result
 no-network/no-external-file result
 ```
 
-At minimum provide one deterministic fixture that Real can use for integration tests. DP3 is a reasonable first fixture; add ActionFlow/DQ-RISE/R3D fixtures as their deployment paths are qualified.
+### Fixture rule
 
-The handoff must explicitly state:
+Do **not** commit a large real DP3/DQ/R3D checkpoint to Git.
+
+Preferred options:
+
+1. deterministic tiny/synthetic fixture generator committed as code;
+2. externally stored/local integration artifact referenced by SHA-256;
+3. CI-generated artifact.
+
+A real representative checkpoint may be used locally for qualification but remains outside source control.
+
+The handoff must state explicitly:
 
 ```text
 prediction future steps != executable control steps
-Real must execute only n_action_steps control_action
+Real executes only n_action_steps control_action
 ```
 
-After this handoff is accepted, Codex moves to the Real repository plan:
+After handoff acceptance, move to:
 
 ```text
 dexmani_real/docs/policy_deployment_refactor_plan.md
 ```
 
-Do not continue changing both repos in parallel unless a newly discovered contract bug requires returning to Policy.
+Do not continue changing both repositories in parallel unless a newly discovered producer-contract bug requires returning to Policy.
 
 ---
 
-## 9. Phase P4 — deferred RGB/text deployment
+# Phase P4 — Deferred RGB/text
 
-**Status**: DEFERRED
+## RGB prerequisites
 
-### RGB prerequisite
+Artifact must explicitly encode deterministic evaluation preprocessing, e.g. resize + center crop + interpolation + color/value convention. Deployment reproduces **evaluation**, not random training augmentation.
 
-Current evaluation preprocessing is not equivalent to Real passing raw RGB directly to the model.
+Also require no-network topology construction.
 
-A future artifact must encode deterministic evaluation preprocessing, e.g.:
+## Text prerequisite
 
-```yaml
-rgb_preprocess:
-  input_shape: [H, W, 3]
-  value_range: uint8_0_255
-  color_order: rgb
-  resize: [240, 240]
-  eval_crop: [224, 224]
-  crop_mode: center
-  interpolation: bilinear
-```
-
-Deployment must reproduce **validation/evaluation**, not training random augmentation.
-
-Also require side-effect-free model construction (`load_pretrained=false` or equivalent) and no network.
-
-### Text prerequisite
-
-MultiTask deployment needs an explicit static/dynamic task-text contract. Do not infer task text from experiment directory names.
+MultiTask deployment requires explicit task-text conditioning semantics. Never infer task text from experiment directory names.
 
 ---
 
-## 10. Dependency/document cleanup
+## 6. Dependency and long-lived documentation cleanup
 
-Do after the exporter is working in the actual `policy` environment.
+Do after exporter works in the real `policy` environment.
 
-- Resolve `hydra-core` version disagreement between `pyproject.toml` and `requirements.txt`.
-- Document which dependencies are core vs strategy-specific.
-- Do not perform broad dependency upgrades in the deployment PR.
-- README should explicitly show:
+- resolve Hydra version disagreement;
+- document core vs strategy-specific dependencies;
+- avoid broad Torch/Diffusers/Transformers upgrades in deployment PRs;
+- README must explicitly state:
 
 ```text
 training checkpoint != deployment artifact
 ```
 
-Recommended user flow:
+User flow:
 
 ```text
 train
-→ evaluate/select checkpoint
+→ offline evaluate/select checkpoint
 → export deployment-v2
-→ dexmani_real inspect/check
+→ Real inspect/check
 → shadow
 ```
 
 ---
 
-## 11. Codex execution rules
+## 7. Codex execution rules
 
 Before each PR:
 
@@ -659,51 +679,45 @@ git rev-parse HEAD
 git branch --show-current
 ```
 
-Then read repository guidance.
+Each PR:
 
-Each PR must:
-
-- have one primary hypothesis/semantic change;
+- one primary semantic hypothesis;
 - preserve unrelated user changes;
-- avoid drive-by formatting/renames;
-- add focused regression tests;
-- update authoritative docs/comments affected by the change;
-- clearly report commands not run because of environment limitations.
+- no drive-by rename/reformat;
+- focused regression tests;
+- update authoritative docs/comments;
+- report commands not run and why.
 
-Do not run:
+Stop instead of guessing when:
 
-- real hardware commands;
-- long training;
-- full DDP;
-- long video evaluation;
-unless explicitly requested by the user.
-
-Stop rather than guess if:
-
-- current `main` materially diverges from this plan;
-- the Real schema/parser contradicts the assumed v2 contract;
-- config and checkpoint metadata conflict;
+- current main materially diverges;
+- Real parser/schema contradicts this plan;
+- config/checkpoint/Zarr metadata conflict;
 - strict restore has missing/unexpected keys;
-- deployment restore attempts a network call;
-- `control_action` does not match the model's declared execution slice;
-- an unsupported policy would require silent preprocessing or constructor behavior.
+- exporter cannot establish a clean producer commit;
+- restore attempts network access;
+- `control_action` differs from the declared slice;
+- unsupported preprocessing/inference behavior would need a silent fallback.
 
 ---
 
-## 12. Recommended PR sequence
+## 8. Recommended Policy PR sequence
 
 ```text
 Policy PR-1  correctness
     - ActionFlow state_dim=19
+    - single/DDP joint+EE config tests
     - AGENTS correction
     - use_aux_ee metadata
     - eval raw_state fix
-    - DQ-RISE checkpoint-selection docs
+    - DQ-RISE checkpoint-selection/config-comment cleanup
 
 Policy PR-2  deployment-v2 exporter
-    - checkpoint resolution
-    - Zarr contract
+    - strict checkpoint selector
+    - clean producer provenance
+    - Zarr contract/path resolution
     - minimal resolved cfg.agent
+    - exact checkpoint producer/receipt
     - v2 checkpoint + sidecar + selector
 
 Policy PR-3  self-contained restore/parity
@@ -712,25 +726,29 @@ Policy PR-3  self-contained restore/parity
     - no-network
     - direct/export parity
 
-Policy PR-4  cross-repo fixtures/handoff
+Policy PR-4  cross-repo fixture/handoff
 ```
 
-Do **not** start `dexmani_real` control-semantic PRs before Policy PR-4 handoff, unless the user explicitly changes the sequencing.
+Do not start Real semantic PRs before Policy PR-4 handoff unless the user explicitly changes sequencing.
 
 ---
 
-## 13. Definition of Done
+## 9. Definition of Done
 
-Policy-side real deployment work is complete when:
+Policy side is complete when:
 
 - [ ] ActionFlow joint and EE configs both consume 19-D `joint_state`.
+- [ ] DDP ActionFlow resolves the same invariant.
 - [ ] New checkpoints record `use_aux_ee`.
-- [ ] Evaluation checkpoint loading has no `raw_state` scope failure.
-- [ ] `best` selection matches the actual repository evaluation workflow.
-- [ ] One command exports an ordinary experiment to `dexmani.deployment.v2` + sidecar v2.
-- [ ] Export rejects sim data and unsupported RGB/text policies explicitly.
-- [ ] Supported point-cloud artifacts restore with strict state loading.
-- [ ] Restore is independent of network and training-only initialization files.
-- [ ] Direct and exported `control_action` parity is demonstrated.
-- [ ] A fixture + SHA + Policy commit is handed to Real.
-- [ ] README/AGENTS no longer contain the identified stale deployment/state-dimension claims.
+- [ ] Evaluation load has no `raw_state` scope failure.
+- [ ] `--checkpoint best` never silently selects latest.
+- [ ] One command exports an ordinary experiment to exact deployment-v2 + schema-v2 sidecar.
+- [ ] Exporter requires a clean, identifiable producer source under the current v2 contract.
+- [ ] `weights.model` is always canonical and non-empty; EMA semantics match Real.
+- [ ] Producer/deployment receipt retrofit metadata exactly matches Real expectations.
+- [ ] Relative/relocated Zarr handling is deterministic.
+- [ ] Unsupported sim/RGB/text/custom timestep-list cases fail explicitly.
+- [ ] Supported point-cloud artifacts strict-restore without network/training-only initialization files.
+- [ ] Direct/export `control_action` parity is demonstrated.
+- [ ] Cross-repo fixture is reproducible without committing a large real checkpoint.
+- [ ] SHA + Policy commit + qualification results are handed to Real.
