@@ -230,7 +230,7 @@ class ActionFlowDiTXBlock(nn.Module):
         hidden_dim: int,
         context_dim: int,
         num_heads: int = 12,
-        ffn_hidden_dim: int = 2048,
+        ffn_hidden_dim: int = 1536,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
         cond_bottleneck_dim: int = 384,
@@ -293,14 +293,14 @@ class ActionFlowDiT(nn.Module):
         context_dim: int | None = None,
         depth: int = 8,
         num_heads: int = 12,
-        ffn_hidden_dim: int = 2048,
+        ffn_hidden_dim: int = 1536,
         timestep_embed_dim: int = 128,
         step_embed_dim: int = 64,
         state_embed_hidden_dim: int = 256,
         cond_bottleneck_dim: int = 384,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
-        use_step_conditioning: bool = True,
+        use_step_conditioning: bool = False,
     ):
         super().__init__()
         if depth <= 0:
@@ -455,10 +455,10 @@ if __name__ == "__main__":
         action_dim=19,
         state_dim=19,
         hidden_dim=768,
-        context_dim=768,
+        context_dim=384,
         depth=8,
         num_heads=12,
-        ffn_hidden_dim=2048,
+        ffn_hidden_dim=1536,
         timestep_embed_dim=128,
         step_embed_dim=64,
         state_embed_hidden_dim=256,
@@ -466,7 +466,7 @@ if __name__ == "__main__":
     ).to(device)
 
     x = torch.randn(2, 16, 19, device=device)
-    context = torch.randn(2, 385, 768, device=device)
+    context = torch.randn(2, 385, 384, device=device)
     state = torch.randn(2, 38, device=device)
     timestep = torch.rand(2, device=device)
 
@@ -500,8 +500,8 @@ if __name__ == "__main__":
     # 3. Parameter count.
     total = sum(p.numel() for p in model.parameters())
     print(f"[INFO] total parameters: {total:,}")
-    assert 79e6 <= total <= 82e6, total
-    print("[PASS] parameter count within [79M, 82M]")
+    assert 58e6 <= total <= 60e6, total
+    print("[PASS] parameter count within [58M, 60M]")
     breakdown = [
         ("action_in", model.action_in),
         ("action_pos", model.action_pos),

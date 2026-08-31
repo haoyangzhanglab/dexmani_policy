@@ -17,8 +17,8 @@
 - 使用 Python 3.10+ 和 Conda 环境 `policy`。
 - 安装项目：`pip install -e .`。
 - 评测还需要以 editable 模式安装相邻的 `dexmani_sim` 项目。
-- 训练前设置 `DATA_DIR=/path/to/robot_data`；仓库根目录的 `robot_data/`
-  可作为本地默认数据目录。
+- 训练数据由 config 的相对路径 `robot_data/<task>.zarr` 定位（运行时 chdir 到仓库根目录），
+  不读取 `DATA_DIR` 环境变量；评测种子文件由相邻 `dexmani_sim` 包导出的 `DATA_DIR` 常量提供。
 - 训练、评测和大多数 smoke test 依赖 CUDA/GPU。不要仅因当前环境缺少 GPU、
   数据集、预训练权重、显示服务或 `dexmani_sim` 就改写核心逻辑。
 - 在非交互 shell 中优先使用 `conda run -n policy <command>`，避免依赖
@@ -27,20 +27,20 @@
 ## 常用命令
 
 ```bash
-# 单卡训练
-bash scripts/training/train.sh dp3 pour
-bash scripts/training/train.sh dp3 pour 'training.seed=42'
+# 单卡训练（task 用 task_name= 覆盖）
+bash scripts/training/train.sh dp3 'task_name=pour'
+bash scripts/training/train.sh dp3 'task_name=pour' 'training.seed=42'
 
 # 多卡训练
-bash scripts/training/train_ddp.sh ddp/maniflow pour
+bash scripts/training/train_ddp.sh ddp/maniflow 'task_name=pour'
 
 # 构建冒烟测试
 python dexmani_policy/smoke_test.py dp3
 python dexmani_policy/smoke_test.py dp3 maniflow sat
 
-# 评测管道
-bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir>
-bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir> --no-videos
+# 评测管道（<exp_name> = experiments/<policy>/<task>/ 下的时间戳目录名）
+bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name>
+bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name> --no-videos
 ```
 
 - 单卡配置：`action_flow`、`dp`、`dp3`、`dqrise`、`maniflow`、`moe_dp`、
@@ -73,10 +73,10 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir> --no-videos
   `joint_state` 维度与动作维度一致。
 - 动态动作维度公式为
   `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`。
-- 优化器保持 `AdamW(fused=True)`；UNet conditioning 保持
+- 优化器保持 `AdamW(fused=torch.cuda.is_available())`；UNet conditioning 保持
   `cond_predict_scale=True`；StateMLP hidden 保持 `[64]`。
 - DDIM scheduler 保持 `beta_start=0.0001`、`beta_end=0.02`、
-  `schedule='squaredcos_cap_v2'`。
+  `beta_schedule='squaredcos_cap_v2'`。
 - DINO/CLIP/SigLIP ViT backbone 使用 `bfloat16` 和
   `attn_implementation="sdpa"`。
 - milestone checkpoint 仅为 20/40/60/80/100%，`latest.pt` 是 symlink。
@@ -85,12 +85,12 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_dir> --no-videos
 
 - Normalizer 使用完整 replay buffer（包括验证集）拟合。
 - `tcp_dim` 是历史命名：joint 模式为 7，ee 模式为 9。
-- MoE forward 返回包含 `aux_loss` 的字典；MoE 有意禁用 bfloat16 和 compile。
+- MoE obs encoder 的 forward 返回 `(feat, aux_dict)`，其中 `aux_dict` 含 aux loss；MoE 有意禁用 bfloat16 和 compile。
 - DQ-RISE 直接继承 `BaseAgent`，其 `diffusion_action_dim=tcp_dim+1`，不要强行
   改为 `UNetDiffusionAgent`。
 - R3DObsEncoder 的 patch/state/position 表示按 feature 维组合，保持现有语义。
 - EMAModel 的 BatchNorm affine 参数直接复制，不做 EMA 平均。
-- `FlowMatchWithConsistency.target_t` 在训练时为 0，推理时为正的 `dt`。
+- `FlowMatchWithConsistency.target_t`：flow 分支训练为 0，consistency 分支训练为 `dt1(>0)`，推理为 `dt(>0)`。
 - ActionFlow 的 flowmatch、DiT 和采样逻辑是独立实现；不要与通用
   `flowmatch.py`、`ditx.py` 或 `time_sampler.py` 合并或交叉引用。
 - `dp3` 和 `moe_dp` 有意没有 DDP overlay。

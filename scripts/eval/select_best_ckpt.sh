@@ -40,7 +40,7 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  --initial-episodes N   Episodes per ckpt in Phase 1 (default: 25)"
     echo "  --batch-size N         Extra episodes per round in Phase 2 (default: 5)"
     echo "  --max-episodes N       Hard cap per ckpt (default: 100)"
-    echo "  --denoise-steps N      Inference denoising steps (default: 10)"
+    echo "  --denoise-steps N      Inference denoising steps (default: from config)"
     echo "  --no-ema               Use raw weights instead of EMA"
     echo "  --seed N               Eval seed override"
     echo "  --link-best            Symlink best ckpt as checkpoints/best.pt"

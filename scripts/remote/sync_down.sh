@@ -64,7 +64,9 @@ done
 # ---- List mode ----
 if $LIST_MODE; then
     echo "=== Experiments on server ==="
-    ssh "$SERVER" "find /data_ssd/ZHY/experiments -maxdepth 3 -mindepth 3 -type d 2>/dev/null | sort" || {
+    # List run dirs by their config.yaml marker — handles both non-DDP
+    # (<policy>/<task>/<ts>) and DDP (ddp/<policy>/<task>/<ts>) depths.
+    ssh "$SERVER" "find /data_ssd/ZHY/experiments -maxdepth 5 -name config.yaml -printf '%h\n' 2>/dev/null | sort" || {
         echo "No experiments found or server unreachable."
     }
     exit 0

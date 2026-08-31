@@ -71,6 +71,10 @@ class PointColorJitter(Aug):
         self._apply_brightness_ip(rgb)
         self._apply_contrast_ip(rgb)
         self._apply_saturation_ip(rgb)
+
+        # Brightness is additive, so dark RGB values can temporarily leave
+        # the valid RGB domain.  HSV conversion assumes RGB in [0, 1].
+        np.clip(rgb, 0.0, 1.0, out=rgb)
         self._apply_hue_ip(rgb)
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
@@ -129,7 +133,9 @@ class PointColorJitter(Aug):
         h[bm] = ((r[bm] - g[bm]) / diff[bm] + 4.0) / 6.0
 
         h %= 1.0
-        s = np.where(max_v != 0, diff / max_v, 0.0)
+        # np.where evaluates both branches, so it does not prevent 0 / 0.
+        s = np.zeros_like(diff)
+        np.divide(diff, max_v, out=s, where=max_v != 0)
         return np.stack([h, s, max_v], axis=-1)
 
     @staticmethod

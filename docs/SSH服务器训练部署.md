@@ -561,14 +561,14 @@ workspace.wandb_cfg.mode=online            # Wandb 在线模式
 
 ```bash
 # 本地（原有脚本）
-bash scripts/training/train.sh dp3 pour
+bash scripts/training/train.sh dp3 'task_name=pour'
 
 # 远程（train_remote.sh）
 bash scripts/remote/train_remote.sh --gpus 0 dp3 pour 'training.seed=42'
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
 
 # 直接 SSH（调试用）
-ssh dexserver 'cd ~/ZHY/dexmani_policy && export DATA_DIR=/data_ssd/ZHY && \
+ssh dexserver 'cd ~/ZHY/dexmani_policy && \
     ~/.conda/envs/dex_policy/bin/python dexmani_policy/train.py --config-name=dp3 task_name=pour'
 ```
 

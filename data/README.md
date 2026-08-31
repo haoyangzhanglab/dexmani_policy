@@ -20,7 +20,7 @@ data/
 
 ### 其他预训练模型
 
-DINOv2 / CLIP / SigLIP / T5 等视觉/文本骨干网络由 `transformers` 库自动从 HuggingFace Hub
+DINOv2 / CLIP / SigLIP 等视觉骨干网络由 `transformers` 库自动从 HuggingFace Hub
 下载缓存至 `~/.cache/huggingface/`，无需手动管理。
 
 ## 训练数据
@@ -28,4 +28,4 @@ DINOv2 / CLIP / SigLIP / T5 等视觉/文本骨干网络由 `transformers` 库�
 训练数据（Zarr 文件）存放于顶层 `robot_data/` 目录（不在此 `data/` 目录下）。
 原因：训练数据体积大且常跨磁盘 symlink，独立目录便于管理。
 
-格式: `robot_data/sim/<task_name>.zarr`
+格式: `robot_data/<task_name>.zarr`

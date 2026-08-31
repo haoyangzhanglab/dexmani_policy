@@ -7,7 +7,7 @@
 #   bash scripts/utils/wandb_sync.sh --dry-run --all      # list runs without syncing
 #
 # Examples:
-#   bash scripts/utils/wandb_sync.sh ./wandb/offline-run-20260401_111839-m6zq0mtq
+#   bash scripts/utils/wandb_sync.sh experiments/dp3/pour/2026-08-01_12-34-56/wandb/offline-run-20260401_111839-m6zq0mtq
 #   bash scripts/utils/wandb_sync.sh --all
 #   bash scripts/utils/wandb_sync.sh --all experiments
 #   bash scripts/utils/wandb_sync.sh --dry-run --all
@@ -29,7 +29,7 @@ Flags:
   --help, -h      Show this message.
 
 Examples:
-  bash scripts/utils/wandb_sync.sh wandb/offline-run-20260401_111839-m6zq0mtq
+  bash scripts/utils/wandb_sync.sh experiments/dp3/pour/2026-08-01_12-34-56/wandb/offline-run-20260401_111839-m6zq0mtq
   bash scripts/utils/wandb_sync.sh --all
   bash scripts/utils/wandb_sync.sh --dry-run --all
 EOF
@@ -45,9 +45,14 @@ while [[ $# -gt 0 ]]; do
         --dry-run)       DRY_RUN=true ;;
         --all)
             SYNC_TARGET="--all"
-            SEARCH_ROOT="${2:-experiments}"
-            [[ -n "${2:-}" ]] && shift
-            [[ "$SEARCH_ROOT" != "--all" ]] || SEARCH_ROOT="experiments"
+            # Consume an optional positional root, but not a flag, so
+            # `--all --dry-run` works regardless of flag order.
+            if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
+                SEARCH_ROOT="$2"
+                shift
+            else
+                SEARCH_ROOT="experiments"
+            fi
             ;;
         --help|-h)       show_help ;;
         -*)

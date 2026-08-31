@@ -170,7 +170,7 @@ class Trainer:
             # Layer 2 NaN protection: detect gradient NaN/Inf before optimizer.step().
             # Loss NaN (layer 1) is caught in train_one_step(), but a gradient NaN
             # could slip through clip_grad_norm_ and silently corrupt optimizer state.
-            # This fills the documented gap — see CLAUDE.md "NaN 三层防护".
+            # This fills the documented gap — see CLAUDE.md "NaN 两层防护".
             grad_nan_params = self._find_nonfinite_gradients()
 
         if grad_nan_params:

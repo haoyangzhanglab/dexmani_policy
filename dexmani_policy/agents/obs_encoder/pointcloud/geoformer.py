@@ -75,7 +75,6 @@ class RMSNorm(nn.Module):
 
     def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
-        self.dim = dim
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
@@ -155,7 +154,6 @@ class GeoFormerBlock(nn.Module):
         drop_path: float = 0.0,
     ):
         super().__init__()
-        self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
         self.qk_norm = qk_norm
@@ -234,7 +232,6 @@ class GeoFormer(nn.Module):
         super().__init__()
         assert hidden_dim % num_heads == 0
         self.hidden_dim = hidden_dim
-        self.depth = depth
         self.use_3d_rope = use_3d_rope
 
         # Hoisted to GeoFormer so the rotary trig can be computed once per forward

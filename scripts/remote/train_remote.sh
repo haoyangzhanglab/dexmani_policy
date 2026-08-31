@@ -210,7 +210,7 @@ else
     echo "╠══════════════════════════════════════════╣"
     echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION_SAFE'"
     echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"
-    echo "║  Console: ssh $SERVER tail -f $SERVER_PROJ/logs/${SESSION_SAFE}.log"
+    echo "║  Console: ssh $SERVER \"tail -f $SERVER_PROJ/logs/${SESSION_SAFE}.log\""
     echo "║  Stop:    bash scripts/remote/stop_remote.sh $SESSION"
     echo "╚══════════════════════════════════════════╝"
 fi

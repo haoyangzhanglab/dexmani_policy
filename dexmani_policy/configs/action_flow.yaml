@@ -1,10 +1,10 @@
 # ActionFlow — 3D geometry memory + action-centric DiT + Rectified Flow policy
 # Encoder:  PointNeXT local tokenizer (192×256) → joint two-frame GeoFormer (4L×576,
-#           3D RoPE) → static [B, 385, 768] geometry memory
-# Decoder:  ActionFlowDiT (8L×768, SA→CA→FFN, 12Q/12KV full CA, SwiGLU-2048,
+#           3D RoPE) → static [B, 385, 384] geometry memory
+# Decoder:  ActionFlowDiT (8L×768, SA→CA→FFN, 12Q/12KV full CA, SwiGLU-1536,
 #           compact 384 conditioner, static KV cache) + SimpleRectifiedFlow
 # Modality: point_cloud + joint_state → action
-# Params:   perception ≈17.1M + backbone ≈80.1M ≈ 97.2M
+# Params:   baseline (ctx 768/ffn 2048) ≈ 97.2M；当前 config (ctx 384/ffn 1536) ≈ 75.7M
 
 policy_name: action_flow
 
@@ -21,7 +21,7 @@ action_key: action
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 # ── Dataloader ──
-# The 97M model with 192×256 patch tokens does not fit at batch 128 on a 24GB
+# The model with 192×256 patch tokens does not fit at batch 128 on a 24GB
 # card (measured peak: 21.7 GiB bf16 / OOM fp32). batch 64 × grad-accum 2 keeps
 # the effective batch at 128 and the optimizer-step count at 100k — identical
 # recipe, ~11 GiB peak.
@@ -61,7 +61,7 @@ dataset:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
       color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
-      dropout:     {dropout_ratio: 0.25, prob: 0.5}
+      dropout:     {dropout_ratio: 0.25, prob: 0.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
@@ -76,10 +76,6 @@ agent:
   pc_dim: 6
   state_dim: ${action_dim}
   num_points: 1024
-
-  # Keep point-cloud xyz in metric units (FPS/ball-query/3D-RoPE see true
-  # distances); only rgb is per-axis normalized. Off = legacy per-axis min-max.
-  use_metric_xyz: true
 
   fps_random_config:
     use_random: true
@@ -104,14 +100,13 @@ agent:
   geo_ffn_hidden_dim: 1536
   geo_qk_norm: true
   geo_use_3d_rope: true
-  # 3D RoPE wavelengths. Metric (meters) for use_metric_xyz=true: the legacy
-  # [0.02, 2.0] normalized range / mean_scale(2.657) -> [0.0075, 0.753] m,
-  # preserving the relationship to patch_radii (min ≈ 0.5·r_small, max ≈ 25·r_large).
-  geo_min_wavelength: 0.0075
-  geo_max_wavelength: 0.753
-  geo_attn_drop: 0.1
+  # 3D RoPE wavelengths (normalized [-1,1] units), preserving the relationship
+  # to patch_radii (min ≈ 0.5·r_small, max ≈ 25·r_large).
+  geo_min_wavelength: 0.02
+  geo_max_wavelength: 2.0
+  geo_attn_drop: 0.0
   # Stochastic-depth peak rate; ramps linearly 0 -> this across the 4 blocks.
-  geo_drop_path: 0.05
+  geo_drop_path: 0.0
   absolute_3d_pe_dim: 96
 
   # ActionFlow DiT backbone
@@ -123,7 +118,7 @@ agent:
   num_heads: 12
   ffn_hidden_dim: 1536
   qk_norm: true
-  attn_drop: 0.1
+  attn_drop: 0.0
 
   # Global conditioning: state + flow timestep + step size → compact latent
   timestep_embed_dim: 128
@@ -149,10 +144,10 @@ agent:
 # ── Optimizer ──
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-2
+  weight_decay: 1.0e-3
   betas: [0.9, 0.95]
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-3
+  obs_weight_decay: 1.0e-6
 
 # ── EMA ──
 ema:
@@ -177,8 +172,7 @@ training:
   compile_mode: default
   use_ema: true
   use_ema_teacher_for_consistency: false
-  lr_scheduler: cosine_min_lr
-  lr_min_ratio: 0.1
+  lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   # Fuse the gradient finite-check into clip_grad_norm_(error_if_nonfinite=True);

@@ -30,15 +30,15 @@ Confirm with the user, or state the assumption explicitly:
 
 Path: `dexmani_policy/agents/core/<name>.py`
 
-Choose one of four patterns (reference the existing agent nearest to your target):
+Choose one of three patterns (reference the existing agent nearest to your target):
 
 | Pattern | Parent class | `obs_encoder` output | What you pass to parent | Examples |
 |---------|-------------|---------------------|------------------------|---------|
 | A: UNet+Diffusion | `UNetDiffusionAgent` | `(out_dim,)` flat vector | `obs_encoder.out_dim * n_obs_steps` → `context_dim` | `dp3.py`, `dp.py`, `moe.py` |
 | B: DiTX+FlowMatch+Consistency | `DiTXFlowMatchAgent` | `(num_tokens, token_dim)` sequence | `num_obs_tokens`, `obs_token_dim` | (reserved for ManiFlow-like) |
-| D: Direct BaseAgent | `BaseAgent` | Arbitrary | Build backbone + decoder yourself, pass to `super().__init__` | `sat.py`, `r3d.py`, `dqrise.py`, `multitask_dit.py` |
+| C: Direct BaseAgent | `BaseAgent` | Arbitrary | Build backbone + decoder yourself, pass to `super().__init__` | `sat.py`, `r3d.py`, `dqrise.py`, `multitask_dit.py` |
 
-**Pattern-D minimum skeleton** (`dp3` is a better reference for patterns A-C):
+**Pattern-C minimum skeleton** (`dp3` is a better reference for patterns A-B):
 
 ```python
 import torch
@@ -111,7 +111,7 @@ Copy `dp3.yaml` as a template. The required top-level fields (all 18 configs sha
 |-------|--------------|-------|
 | `policy_name` | `"<name>"` | W&B group name |
 | `task_name` | `pour` | Dataset task |
-| `zarr_path` | `robot_data/pour.zarr` | `DATA_DIR` prefix handled by config resolver |
+| `zarr_path` | `robot_data/pour.zarr` | 相对仓库根目录的路径（运行时 chdir 到根目录） |
 | `seed` | `0` | Training seed |
 | `horizon` | `16` | **Invariant — never change** |
 | `n_obs_steps` | `2` | **Invariant — never change** |
@@ -122,7 +122,7 @@ Copy `dp3.yaml` as a template. The required top-level fields (all 18 configs sha
 | `val_dataloader` | Same structure | |
 | `dataset` | `{_target_, zarr_path, horizon, ...}` | Must include `_target_` for Hydra instantiation |
 | `agent` | `{_target_, horizon, n_obs_steps, n_action_steps, action_dim, ...}` | Must include `_target_: dexmani_policy.agents.core.<name>.<Name>Agent` |
-| `optimizer` | `{lr, weight_decay, betas, ...}` | AdamW `fused=True` |
+| `optimizer` | `{lr, weight_decay, betas, ...}` | AdamW `fused=torch.cuda.is_available()` |
 | `ema` | `{_target_, ...}` | EMAModel config |
 | `training` | `{seed, device, use_bfloat16, use_compile, use_ema, ...}` | |
 | `workspace` | `{_target_, ...}` | TrainWorkspace |
@@ -143,7 +143,7 @@ Four places to update:
 
 1. **Agent 变体对比表** — add a row with columns: Agent name, Input, Encoder, Backbone, Decoder, Config, 独特点
 2. **配置速查** — add `<name>.yaml` to the file list; add a column to the parameter quick-reference table
-3. **训练命令** — add example: `bash scripts/training/train.sh <name> pour`
+3. **训练命令** — add example: `bash scripts/training/train.sh <name> 'task_name=pour'`
 4. **DDP** (if applicable) — add to the DDP config list and batch-size table
 
 ### 5. Optionally create DDP overlay
@@ -187,7 +187,6 @@ hydra:
 
 ```bash
 conda activate policy
-export DATA_DIR=/path/to/data
 python dexmani_policy/smoke_test.py <name>
 ```
 
@@ -200,7 +199,7 @@ MoE adds stage 5.1 (enhanced gate).
 - `action_dim` uses Hydra eval: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`
 - Every agent includes `example()` with standalone smoke test
 - `n_action_steps: 8` — never changes
-- AdamW `fused=True` (all configs)
+- AdamW `fused=torch.cuda.is_available()`
 - `cond_predict_scale=True` for UNet backbones
 - ViT backbones (DINO/CLIP/SigLIP): `bfloat16 + attn_implementation="sdpa"`
 - `compile mode='reduce-overhead'` unless shuffle/动态索引 requires `mode='default'`
@@ -214,7 +213,7 @@ MoE adds stage 5.1 (enhanced gate).
 | `obs_encoder.out_dim` AttributeError | obs_encoder missing `out_dim` | Add `self.out_dim = ...` in obs encoder `__init__` |
 | `context_dim` shape mismatch in UNet | `obs_encoder.out_dim * n_obs_steps` wrong | Verify encoder flattens time dims correctly |
 | DDP config references wrong base | Typo in `defaults` | Match base config filename exactly (no `.yaml`) |
-| Smoke test stage 1 fails with Zarr error | `DATA_DIR` not set | `export DATA_DIR=/path/to/data` |
+| Smoke test stage 1 fails with Zarr error | `robot_data/<task>.zarr` 不在仓库根目录 | 把数据放到 `robot_data/` 或改 `zarr_path` |
 
 ## Reporting back
 
