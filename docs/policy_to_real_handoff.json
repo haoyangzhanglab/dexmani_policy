@@ -47,7 +47,7 @@
     "sidecar_schema_version": 2,
     "embedded_contract_sha256": "4dc9b68458de1ae24997a7540b4461c72f2c59b2ac2a2c9e4601730ab4d5858f"
   },
-  "policy_contract": {
+  "representative_policy_contract": {
     "horizon": 16,
     "n_obs_steps": 2,
     "n_action_steps": 8,
@@ -55,6 +55,13 @@
     "prediction_future_steps": 15,
     "executable_control_steps": 8,
     "default_executable_output": "control_action"
+  },
+  "runtime_temporal_invariants": {
+    "artifact_driven": true,
+    "control_start_expression": "n_obs_steps - 1",
+    "required_action_steps_expression": "horizon - (n_obs_steps - 1)",
+    "prediction_future_steps_expression": "required_action_steps",
+    "executable_control_steps_expression": "n_action_steps"
   },
   "qualification": {
     "strict_restore": true,
@@ -70,8 +77,12 @@
     "real_manifest_and_normalizer": true,
     "real_full_restore": true,
     "real_isolated_preflight_prediction": true,
-    "hardware_modules_imported": false,
-    "legacy_real_preflight_action_steps": 15
+    "hardware_modules_imported": false
+  },
+  "legacy_real_observation": {
+    "artifact_scope": "representative_qualified_dp3",
+    "consumer_commit": "f758f266f85fb6d73547e7965275eb95831347b3",
+    "preflight_action_steps": 15
   },
   "support_matrix": {
     "source": "dexmani_policy/deployment/qualification_matrix.py",

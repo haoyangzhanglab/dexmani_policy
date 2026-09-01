@@ -209,7 +209,7 @@ newly selected checkpoint must repeat per-artifact parity and Real restore.
 
 ## 10. Action semantics
 
-The frozen contract is:
+The representative qualified DP3 artifact has:
 
 ```text
 horizon = 16
@@ -224,6 +224,32 @@ prediction_future_steps = 15
 executable_control_steps = 8
 ```
 
+These numbers describe this representative artifact. They are not global
+DexMani deployment protocol constants.
+
+### Runtime temporal invariants
+
+For every accepted deployment artifact, Real derives the temporal values from
+the artifact and restored manifest:
+
+```text
+control_start
+= n_obs_steps - 1
+
+required_action_steps
+= horizon - (n_obs_steps - 1)
+
+prediction_future_steps
+= required_action_steps
+
+executable_control_steps
+= n_action_steps
+```
+
+`horizon`, `n_obs_steps`, and `n_action_steps` are artifact-driven. They must be
+read from the deployment artifact/restored manifest; they are not numeric
+constants in `dexmani_real`.
+
 `pred_action` is the full model output. `control_action` is the only default
 executable Policy output. `tail` is not a Real execution contract.
 
@@ -232,9 +258,11 @@ prediction future steps != executable control steps
 Real must execute only control_action
 ```
 
-The current Real preflight receipt reports `action_steps=15`. This is the current
-legacy Real allocation/executable conflation, not the correct executable
-semantics. PR-4 records it and does not change it.
+For this representative artifact, frozen Real consumer
+`f758f266f85fb6d73547e7965275eb95831347b3` reports `action_steps=15`. This is
+an observed legacy result for this artifact and the current Real
+allocation/executable conflation. It is not a protocol constant. PR-4 records it
+and does not change it.
 
 ## 11. Known conditional and deferred policies
 
@@ -259,8 +287,23 @@ READY FOR REAL R1
 
 After PR-4 review, merge, and handoff acceptance, Real R1 may validate the full
 `pred_action`, validate the exact `control_action`, and execute only
-`control_action`. Its preflight executable `action_steps` must then change from
-15 to 8. No Real R1 implementation is part of this PR.
+`control_action`. Real R1 must replace the semantic use of
+`required_action_steps` as the executable length with artifact-derived
+`n_action_steps`. It must **not** implement this as a numeric 15-to-8 hard-coded
+rewrite.
+
+For another valid artifact:
+
+```text
+horizon = H
+n_obs_steps = O
+n_action_steps = A
+
+required_action_steps = H - (O - 1)
+executable_control_steps = A
+```
+
+No Real R1 implementation is part of this PR.
 
 Regression evidence at handoff creation:
 
