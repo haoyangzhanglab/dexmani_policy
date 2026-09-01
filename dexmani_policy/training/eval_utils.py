@@ -114,16 +114,15 @@ def load_ckpt_for_inference(
                     f"Checkpoint train_params.{key}={expected} does not match agent.{key}={actual}."
                 )
 
-        raw_state = (
-        checkpoint.ema_model_state
-        if (use_ema and checkpoint.ema_model_state is not None)
-        else checkpoint.model_state
-    )
-    if use_ema and checkpoint.ema_model_state is None and raw_state is checkpoint.model_state:
-        cprint(
-            "WARNING: EMA weights requested but not found in checkpoint. Using model weights.",
-            "yellow",
-        )
+    raw_state = checkpoint.model_state
+    if use_ema:
+        if checkpoint.ema_model_state is not None:
+            raw_state = checkpoint.ema_model_state
+        else:
+            cprint(
+                "WARNING: EMA weights requested but not found in checkpoint. Using model weights.",
+                "yellow",
+            )
 
     agent.load_state_dict(
         fix_state_dict(raw_state, is_current_ddp=False),

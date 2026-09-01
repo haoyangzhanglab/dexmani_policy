@@ -15,7 +15,8 @@
 ## 环境与依赖
 
 - 使用 Python 3.10+ 和 Conda 环境 `policy`。
-- 安装项目：`pip install -e .`。
+- 安装项目：`pip install -e .` 仅安装项目声明的核心依赖，并不是覆盖所有策略的完整环境；
+  RGB、Uni3D 等策略仍需由受管 Conda 环境提供额外依赖。
 - 评测还需要以 editable 模式安装相邻的 `dexmani_sim` 项目。
 - 训练数据由 config 的相对路径 `robot_data/<task>.zarr` 定位（运行时 chdir 到仓库根目录），
   不读取 `DATA_DIR` 环境变量；评测种子文件由相邻 `dexmani_sim` 包导出的 `DATA_DIR` 常量提供。
@@ -69,8 +70,8 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name> --no-videos
 - `horizon=16`、`n_obs_steps=2`、`n_action_steps=8`。
 - `pad_before=1`、`pad_after=7`，且
   `n_obs_steps - 1 + n_action_steps <= horizon`。
-- `action` 为 19 维（7 臂 + 12 手），`action_ee` 为 21 维（9 位姿 + 12 手）；
-  `joint_state` 维度与动作维度一致。
+- `joint_state` 固定为 19 维（7 臂 + 12 手）；`action` 为 19 维（7 臂 + 12 手），
+  `action_ee` 为 21 维（9 位姿 + 12 手）。
 - 动态动作维度公式为
   `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`。
 - 优化器保持 `AdamW(fused=torch.cuda.is_available())`；UNet conditioning 保持
