@@ -101,7 +101,13 @@ def build_tiny_dp3_artifact(
         "prediction_type": "sample",
         "cond_predict_scale": True,
     }
-    agent = DP3Agent(**{key: value for key, value in agent_config.items() if key != "_target_"})
+    # Keep the committed fixture byte-reproducible without consuming or
+    # replacing the caller's RNG stream.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        agent = DP3Agent(
+            **{key: value for key, value in agent_config.items() if key != "_target_"}
+        )
     normalizer = LinearNormalizer()
     normalizer.fit(
         {

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "handoff_phase": "Policy PR-4 / Phase P3",
+  "policy_producer": {
+    "repository": "haoyangzhanglab/dexmani_policy",
+    "commit": "fc6b7dfb45748f4187f2e82b5425721ed02b028e",
+    "clean": true
+  },
+  "real_consumer": {
+    "repository": "haoyangzhanglab/dexmani_real",
+    "commit": "f758f266f85fb6d73547e7965275eb95831347b3",
+    "clean": true
+  },
+  "artifact": {
+    "format": "dexmani.deployment.v2",
+    "checkpoint_filename": "epoch=1126-step=00080000-milestone=100pct-deployment-v2.pt",
+    "checkpoint_sha256": "28ff79a6ca5d5b746bbde877ff96abbb88543539f4c73ef554348184f446effc",
+    "sidecar_schema_version": 2,
+    "sidecar_sha256": "721ba4de21977d5591ef24afb93aecb526af1a9fa60990e85b315cd659db1f7a",
+    "embedded_contract_sha256": "eca6b7857428b8146323bc80d55c67d9b0298f34b04d9489ee093d8ab705338d"
+  },
+  "representative_qualification": {
+    "policy": "DP3",
+    "task_name": "pick_place_toy",
+    "checkpoint_selector": "100pct",
+    "source_checkpoint_filename": "epoch=1126-step=00080000-milestone=100pct.pt",
+    "source_checkpoint_sha256": "0e5615cc3be4e5299791aae24c412df3667027b06ade6cad266be48e50150e84",
+    "use_ema": true,
+    "selected_weights": "ema_model",
+    "action_key": "action",
+    "action_dim": 19,
+    "control_action_dim": 19,
+    "horizon": 16,
+    "n_obs_steps": 2,
+    "n_action_steps": 8,
+    "pred_action_max_abs_diff": 0.0,
+    "control_action_max_abs_diff": 0.0,
+    "canonical_slice_max_abs_diff": 0.0,
+    "rtol": 0.0,
+    "atol": 0.0
+  },
+  "deterministic_fixture": {
+    "generator": "tests/deployment/real_restore_fixture.py",
+    "policy": "DP3",
+    "checkpoint_sha256": "fb8a6d8618398f51b48ddfcd1412d0079076d77765a3e2b2b10fcf9b46399156",
+    "sidecar_sha256": "8e8a87ba4f453226241b687fae5113e134e0735d789d5e5c78441b7f5273daf0",
+    "sidecar_schema_version": 2,
+    "embedded_contract_sha256": "4dc9b68458de1ae24997a7540b4461c72f2c59b2ac2a2c9e4601730ab4d5858f"
+  },
+  "policy_contract": {
+    "horizon": 16,
+    "n_obs_steps": 2,
+    "n_action_steps": 8,
+    "required_action_steps": 15,
+    "prediction_future_steps": 15,
+    "executable_control_steps": 8,
+    "default_executable_output": "control_action"
+  },
+  "qualification": {
+    "strict_restore": true,
+    "direct_export_pred_action_parity": true,
+    "direct_export_control_action_parity": true,
+    "pred_action_max_abs_diff": 0.0,
+    "control_action_max_abs_diff": 0.0,
+    "no_network_restore": true,
+    "no_training_only_asset_restore": true,
+    "real_artifact_parser": true,
+    "real_safe_checkpoint_loader": true,
+    "real_provenance_gate": true,
+    "real_manifest_and_normalizer": true,
+    "real_full_restore": true,
+    "real_isolated_preflight_prediction": true,
+    "hardware_modules_imported": false,
+    "legacy_real_preflight_action_steps": 15
+  },
+  "support_matrix": {
+    "source": "dexmani_policy/deployment/qualification_matrix.py",
+    "qualified": [
+      "dp3"
+    ],
+    "conditional": [
+      "action_flow",
+      "dqrise",
+      "r3d"
+    ],
+    "deferred": [
+      "dp_rgb",
+      "maniflow",
+      "moe_dp_rgb",
+      "multitask_dit",
+      "sat"
+    ],
+    "rejected": []
+  },
+  "gate": {
+    "real_r1": "ready",
+    "required_change": "validate full pred_action, validate exact control_action, and execute only control_action"
+  }
+}
