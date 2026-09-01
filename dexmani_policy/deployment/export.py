@@ -150,6 +150,25 @@ def _producer_provenance(repo_root: Path) -> str:
     return commit
 
 
+def _require_checkpoint_under_directory(candidate: Path, checkpoint_dir: Path) -> Path:
+    try:
+        resolved_directory = checkpoint_dir.resolve(strict=True)
+        resolved_candidate = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise InvalidCheckpointError(
+            f"cannot resolve checkpoint path: {candidate}"
+        ) from exc
+    try:
+        resolved_candidate.relative_to(resolved_directory)
+    except ValueError as exc:
+        raise InvalidCheckpointError(
+            f"checkpoint resolves outside experiment/checkpoints: {candidate}"
+        ) from exc
+    if not resolved_candidate.is_file():
+        raise InvalidCheckpointError(f"checkpoint is not a file: {candidate}")
+    return resolved_candidate
+
+
 def _resolve_checkpoint(experiment_dir: Path, selector: str) -> Path:
     checkpoint_dir = experiment_dir / "checkpoints"
     if not checkpoint_dir.is_dir():
@@ -157,12 +176,14 @@ def _resolve_checkpoint(experiment_dir: Path, selector: str) -> Path:
             f"checkpoint directory not found: {checkpoint_dir}"
         )
 
-    candidate: Path | None = None
+    candidate: Path
     if selector == "best":
         index_path = experiment_dir / "best_ckpt.json"
-        if index_path.is_file():
+        if index_path.exists() or index_path.is_symlink():
             try:
                 record = json.loads(index_path.read_text(encoding="utf-8"))
+                if type(record) is not dict:
+                    raise ValueError("best checkpoint record must be an object")
                 raw_path = record.get("ckpt_relpath") or record.get("ckpt_path")
                 if not isinstance(raw_path, str) or not raw_path:
                     raise ValueError("missing checkpoint path")
@@ -170,19 +191,12 @@ def _resolve_checkpoint(experiment_dir: Path, selector: str) -> Path:
                 candidate = (
                     indexed if indexed.is_absolute() else experiment_dir / indexed
                 )
-                if not candidate.is_file():
-                    candidate = None
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                candidate = None
-        if candidate is None:
-            best_path = checkpoint_dir / "best.pt"
-            if best_path.is_file():
-                candidate = best_path
-        if candidate is None:
-            raise FileNotFoundError(
-                f"cannot resolve 'best' in {experiment_dir}; tried best_ckpt.json and "
-                "checkpoints/best.pt (latest is never an implicit fallback)"
-            )
+            except (OSError, UnicodeError, ValueError, TypeError) as exc:
+                raise InvalidCheckpointError(
+                    f"invalid best_ckpt.json: {index_path}"
+                ) from exc
+        else:
+            candidate = checkpoint_dir / "best.pt"
     elif selector == "latest":
         candidate = checkpoint_dir / "latest.pt"
     elif selector.endswith("pct"):
@@ -208,14 +222,7 @@ def _resolve_checkpoint(experiment_dir: Path, selector: str) -> Path:
         raw = Path(selector)
         candidate = raw if raw.is_absolute() else checkpoint_dir / raw
 
-    if candidate is None or not candidate.is_file():
-        raise FileNotFoundError(
-            f"checkpoint not found for selector {selector!r}: {candidate}"
-        )
-    try:
-        return candidate.resolve(strict=True)
-    except OSError as exc:
-        raise InvalidCheckpointError(f"cannot resolve checkpoint: {candidate}") from exc
+    return _require_checkpoint_under_directory(candidate, checkpoint_dir)
 
 
 def _load_config(experiment_dir: Path) -> dict[str, Any]:
@@ -615,6 +622,45 @@ def _reconcile_train_params(
     return _require_plain_metadata(result, "train_params"), provenance, retrofitted
 
 
+def _validate_resolved_config_contract(
+    cfg_plain: dict[str, Any], train: dict[str, Any]
+) -> None:
+    agent = cfg_plain.get("agent")
+    if type(agent) is not dict:
+        raise InvalidExperimentError("resolved config agent must be a plain dict")
+    for field in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
+        if field not in agent:
+            raise InvalidExperimentError(
+                f"resolved config agent is missing deployment-critical field {field}"
+            )
+        agent_value = _require_positive_int(agent[field], f"agent.{field}")
+        if agent_value != train[field]:
+            raise InvalidExperimentError(
+                f"resolved config agent.{field}={agent_value!r} conflicts with "
+                f"top-level {field}={train[field]!r}"
+            )
+
+    dataset = cfg_plain.get("dataset")
+    if type(dataset) is not dict:
+        raise InvalidExperimentError("resolved config dataset must be a plain dict")
+    expected_dataset = {
+        "action_key": train["action_key"],
+        "horizon": train["horizon"],
+        "obs_horizon": train["n_obs_steps"],
+        "pad_before": train["n_obs_steps"] - 1,
+        "pad_after": train["n_action_steps"] - 1,
+        "use_aux_ee": train["use_aux_ee"],
+    }
+    for field, expected in expected_dataset.items():
+        if field in dataset and (
+            type(dataset[field]) is not type(expected) or dataset[field] != expected
+        ):
+            raise InvalidExperimentError(
+                f"resolved config dataset.{field}={dataset[field]!r} conflicts with "
+                f"deployment contract={expected!r}"
+            )
+
+
 def _canonicalize_state_dict(value: Any, label: str) -> dict[str, torch.Tensor]:
     if type(value) is not dict or not value:
         raise InvalidCheckpointError(f"{label} must be a non-empty plain state_dict")
@@ -961,6 +1007,14 @@ def _write_sidecar_temp(directory: Path, sidecar: dict[str, Any]) -> Path:
         raise
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _load_deployment_payload(path: Path) -> dict[str, Any]:
     try:
         payload = torch.load(path, map_location="cpu", weights_only=True)
@@ -1018,6 +1072,7 @@ def _replace_relative_symlink(selector_path: Path, target: str) -> None:
     try:
         temp.symlink_to(target)
         os.replace(temp, selector_path)
+        _fsync_directory(selector_path.parent)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -1029,6 +1084,7 @@ def _rollback_selector(selector_path: Path, old: tuple[bool, str | None]) -> Non
         _replace_relative_symlink(selector_path, target)
     elif selector_path.is_symlink() or selector_path.exists():
         selector_path.unlink()
+        _fsync_directory(selector_path.parent)
 
 
 def _roundtrip_verify_published(
@@ -1080,6 +1136,7 @@ def export_deployment_artifact(
     train, metadata_provenance, retrofitted = _reconcile_train_params(
         checkpoint, cfg_plain
     )
+    _validate_resolved_config_contract(cfg_plain, train)
     model_state = _canonicalize_state_dict(checkpoint.model_state, "weights.model")
     ema_state = (
         None
@@ -1124,8 +1181,6 @@ def export_deployment_artifact(
         "weights": {"model": model_state, "ema_model": ema_state},
     }
     _validate_payload(payload)
-    if verify:
-        _verify_exported_model(payload)
 
     checkpoint_dir = experiment / "checkpoints"
     if output_path is None:
@@ -1163,6 +1218,10 @@ def export_deployment_artifact(
         checkpoint_temp = _write_checkpoint_temp(checkpoint_dir, payload)
         os.replace(checkpoint_temp, final_path)
         checkpoint_temp = None
+        _fsync_directory(checkpoint_dir)
+        reloaded_payload = _load_deployment_payload(final_path)
+        if verify:
+            _verify_exported_model(reloaded_payload)
         checkpoint_sha256 = _sha256_file(final_path)
         allocation = _build_allocation(inference, data_contract)
         embedded_hash = _sha256_bytes(
@@ -1186,13 +1245,14 @@ def export_deployment_artifact(
         sidecar_temp = _write_sidecar_temp(checkpoint_dir, sidecar)
         os.replace(sidecar_temp, sidecar_path)
         sidecar_temp = None
+        _fsync_directory(checkpoint_dir)
         _roundtrip_verify_files(final_path, sidecar_path, sidecar)
         if _producer_provenance(repo_root) != producer_commit:
             raise ArtifactPublicationError(
                 "Policy producer commit changed during deployment export"
             )
-        _replace_relative_symlink(selector_path, final_path.name)
         selector_published = True
+        _replace_relative_symlink(selector_path, final_path.name)
         _roundtrip_verify_published(selector_path, final_path, sidecar_path, sidecar)
     except BaseException as exc:
         if selector_published:

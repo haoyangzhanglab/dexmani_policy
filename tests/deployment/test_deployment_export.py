@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import numpy as np
 import torch
@@ -172,9 +172,7 @@ class CheckpointSelectionTest(unittest.TestCase):
             self.assertEqual(exporter._resolve_checkpoint(experiment, "best"), selected)
 
             (checkpoint_dir / "best.pt").unlink()
-            with self.assertRaisesRegex(
-                FileNotFoundError, "never an implicit fallback"
-            ):
+            with self.assertRaises(exporter.InvalidCheckpointError):
                 exporter._resolve_checkpoint(experiment, "best")
             self.assertEqual(
                 exporter._resolve_checkpoint(experiment, "latest"), selected
@@ -183,8 +181,153 @@ class CheckpointSelectionTest(unittest.TestCase):
     def test_missing_best_errors_even_when_latest_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             experiment, _ = _write_experiment(Path(directory))
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaises(exporter.InvalidCheckpointError):
                 exporter._resolve_checkpoint(experiment, "best")
+
+    def test_invalid_best_index_never_falls_back_to_best_symlink(self) -> None:
+        for record in (
+            "{malformed",
+            json.dumps({}),
+            json.dumps({"ckpt_relpath": "missing.pt"}),
+        ):
+            with (
+                self.subTest(record=record),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                experiment, _ = _write_experiment(Path(directory))
+                checkpoint_dir = experiment / "checkpoints"
+                selected = checkpoint_dir / "epoch=0003-step=00000042-100pct.pt"
+                (checkpoint_dir / "best.pt").symlink_to(selected.name)
+                (experiment / "best_ckpt.json").write_text(record, encoding="utf-8")
+                with self.assertRaises(exporter.InvalidCheckpointError):
+                    exporter._resolve_checkpoint(experiment, "best")
+
+    def test_best_index_rejects_relative_and_absolute_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            experiment, _ = _write_experiment(root)
+            external = root / "external.pt"
+            external.write_bytes(b"external")
+            for target in ("../external.pt", str(external.resolve())):
+                with self.subTest(target=target):
+                    (experiment / "best_ckpt.json").write_text(
+                        json.dumps({"ckpt_relpath": target}), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(
+                        exporter.InvalidCheckpointError, "outside"
+                    ):
+                        exporter._resolve_checkpoint(experiment, "best")
+
+    def test_best_and_latest_symlink_escape_are_rejected(self) -> None:
+        for selector in ("best", "latest"):
+            with (
+                self.subTest(selector=selector),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                experiment, _ = _write_experiment(root)
+                checkpoint_dir = experiment / "checkpoints"
+                external = root / "external.pt"
+                external.write_bytes(b"external")
+                link = checkpoint_dir / f"{selector}.pt"
+                link.unlink(missing_ok=True)
+                link.symlink_to(external)
+                with self.assertRaisesRegex(exporter.InvalidCheckpointError, "outside"):
+                    exporter._resolve_checkpoint(experiment, selector)
+
+    def test_explicit_and_milestone_selectors_cannot_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            experiment, _ = _write_experiment(root)
+            checkpoint_dir = experiment / "checkpoints"
+            external = root / "external.pt"
+            external.write_bytes(b"external")
+            for selector in ("../../external.pt", str(external.resolve())):
+                with self.subTest(selector=selector):
+                    with self.assertRaisesRegex(
+                        exporter.InvalidCheckpointError, "outside"
+                    ):
+                        exporter._resolve_checkpoint(experiment, selector)
+
+            milestone = checkpoint_dir / "epoch=0001-step=00000001-milestone=20pct.pt"
+            milestone.symlink_to(external)
+            with self.assertRaisesRegex(exporter.InvalidCheckpointError, "outside"):
+                exporter._resolve_checkpoint(experiment, "20pct")
+
+
+class ResolvedConfigContractTest(unittest.TestCase):
+    def test_agent_deployment_fields_are_required_and_consistent(self) -> None:
+        for field, value in (
+            ("action_dim", 21),
+            ("horizon", 15),
+            ("n_obs_steps", 3),
+            ("n_action_steps", 7),
+        ):
+            with self.subTest(field=field):
+                config = _config()
+                config["agent"][field] = value
+                with self.assertRaisesRegex(
+                    exporter.InvalidExperimentError, f"agent.{field}"
+                ):
+                    exporter._validate_resolved_config_contract(config, _train_params())
+
+        config = _config()
+        del config["agent"]["action_dim"]
+        with self.assertRaisesRegex(exporter.InvalidExperimentError, "missing"):
+            exporter._validate_resolved_config_contract(config, _train_params())
+
+    def test_dataset_present_fields_must_be_consistent(self) -> None:
+        mismatches = {
+            "action_key": "action_ee",
+            "horizon": 15,
+            "obs_horizon": 3,
+            "pad_before": 0,
+            "pad_after": 8,
+            "use_aux_ee": True,
+        }
+        for field, value in mismatches.items():
+            with self.subTest(field=field):
+                config = _config()
+                config["dataset"][field] = value
+                with self.assertRaisesRegex(
+                    exporter.InvalidExperimentError, f"dataset.{field}"
+                ):
+                    exporter._validate_resolved_config_contract(config, _train_params())
+
+    def test_actionflow_style_state_dim_does_not_equal_action_dim(self) -> None:
+        config = _config()
+        config.update({"action_key": "action_ee", "action_dim": 21})
+        config["agent"].update({"action_dim": 21, "state_dim": 19})
+        train = _train_params()
+        train.update(
+            {
+                "action_key": "action_ee",
+                "action_dim": 21,
+                "control_action_dim": 21,
+            }
+        )
+        exporter._validate_resolved_config_contract(config, train)
+
+    def test_structural_mismatch_rejects_export_when_verify_is_false(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            experiment, zarr_path = _write_experiment(root)
+            config = _config()
+            config["agent"]["action_dim"] = 21
+            OmegaConf.save(OmegaConf.create(config), experiment / "config.yaml")
+            with patch.object(exporter, "_producer_provenance", return_value=COMMIT):
+                with self.assertRaisesRegex(
+                    exporter.InvalidExperimentError, "agent.action_dim"
+                ):
+                    exporter.export_deployment_artifact(
+                        experiment,
+                        "latest",
+                        verify=False,
+                        zarr_path=zarr_path,
+                    )
+            self.assertFalse(
+                (experiment / "checkpoints" / "deployment_latest.pt").exists()
+            )
 
 
 class SourceAndPathResolutionTest(unittest.TestCase):
@@ -555,6 +698,119 @@ class ExportAndAtomicityTest(unittest.TestCase):
                         )
                 self.assertTrue(selector.is_symlink())
                 self.assertEqual(os.readlink(selector), old.name)
+
+    def test_publication_and_selector_rollback_fsync_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            experiment, zarr_path = _write_experiment(root)
+            checkpoint_dir = experiment / "checkpoints"
+            old = checkpoint_dir / "old-deployment-v2.pt"
+            old.write_bytes(b"old")
+            selector = checkpoint_dir / "deployment_latest.pt"
+            selector.symlink_to(old.name)
+            with (
+                patch.object(exporter, "_producer_provenance", return_value=COMMIT),
+                patch.object(exporter, "_fsync_directory") as fsync_directory,
+                patch.object(
+                    exporter,
+                    "_roundtrip_verify_published",
+                    side_effect=exporter.ArtifactVerificationError("verify"),
+                ),
+            ):
+                with self.assertRaises(exporter.ArtifactVerificationError):
+                    exporter.export_deployment_artifact(
+                        experiment,
+                        "latest",
+                        verify=False,
+                        zarr_path=zarr_path,
+                    )
+            self.assertEqual(fsync_directory.call_count, 4)
+            fsync_directory.assert_has_calls([call(checkpoint_dir)] * 4)
+            self.assertEqual(os.readlink(selector), old.name)
+
+    def test_selector_removal_rollback_fsyncs_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            selector = checkpoint_dir / "deployment_latest.pt"
+            selector.symlink_to("orphan-deployment-v2.pt")
+            with patch.object(exporter, "_fsync_directory") as fsync_directory:
+                exporter._rollback_selector(selector, (False, None))
+            self.assertFalse(selector.is_symlink())
+            fsync_directory.assert_called_once_with(checkpoint_dir)
+
+    def test_selector_fsync_failure_durably_restores_old_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            experiment, zarr_path = _write_experiment(root)
+            checkpoint_dir = experiment / "checkpoints"
+            old = checkpoint_dir / "old-deployment-v2.pt"
+            old.write_bytes(b"old")
+            selector = checkpoint_dir / "deployment_latest.pt"
+            selector.symlink_to(old.name)
+            barriers = [None, None, OSError("selector fsync"), None]
+            with (
+                patch.object(exporter, "_producer_provenance", return_value=COMMIT),
+                patch.object(
+                    exporter, "_fsync_directory", side_effect=barriers
+                ) as fsync_directory,
+            ):
+                with self.assertRaises(exporter.ArtifactPublicationError):
+                    exporter.export_deployment_artifact(
+                        experiment,
+                        "latest",
+                        verify=False,
+                        zarr_path=zarr_path,
+                    )
+            self.assertEqual(fsync_directory.call_count, 4)
+            self.assertTrue(selector.is_symlink())
+            self.assertEqual(os.readlink(selector), old.name)
+
+    def test_verification_uses_reloaded_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            experiment, zarr_path = _write_experiment(root)
+            reloaded = object()
+            with (
+                patch.object(exporter, "_producer_provenance", return_value=COMMIT),
+                patch.object(
+                    exporter, "_load_deployment_payload", return_value=reloaded
+                ),
+                patch.object(exporter, "_verify_exported_model") as verify_model,
+            ):
+                exporter.export_deployment_artifact(
+                    experiment,
+                    "latest",
+                    verify=True,
+                    zarr_path=zarr_path,
+                )
+            verify_model.assert_called_once_with(reloaded)
+
+    def test_serialized_verification_failure_preserves_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            experiment, zarr_path = _write_experiment(root)
+            checkpoint_dir = experiment / "checkpoints"
+            old = checkpoint_dir / "old-deployment-v2.pt"
+            old.write_bytes(b"old")
+            selector = checkpoint_dir / "deployment_latest.pt"
+            selector.symlink_to(old.name)
+            with (
+                patch.object(exporter, "_producer_provenance", return_value=COMMIT),
+                patch.object(
+                    exporter,
+                    "_verify_exported_model",
+                    side_effect=exporter.ArtifactVerificationError("model verify"),
+                ),
+            ):
+                with self.assertRaises(exporter.ArtifactVerificationError):
+                    exporter.export_deployment_artifact(
+                        experiment,
+                        "latest",
+                        verify=True,
+                        zarr_path=zarr_path,
+                    )
+            self.assertTrue(selector.is_symlink())
+            self.assertEqual(os.readlink(selector), old.name)
 
 
 class VerificationSemanticsTest(unittest.TestCase):
