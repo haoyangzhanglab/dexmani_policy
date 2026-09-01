@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -106,3 +107,22 @@ class CheckpointCorrectnessTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.equal(agent.loaded_state["weight"], torch.tensor(2.0)))
+
+    def test_eval_warns_and_falls_back_to_model_without_ema(self):
+        agent = _Agent()
+        checkpoint = _checkpoint(train_params=None, ema_model_state=None)
+
+        with patch("dexmani_policy.training.eval_utils.cprint") as mock_cprint:
+            load_ckpt_for_inference(
+                agent,
+                _CheckpointStore(checkpoint),
+                Path("unused.pt"),
+                use_ema=True,
+            )
+
+        self.assertTrue(torch.equal(agent.loaded_state["weight"], torch.tensor(1.0)))
+        self.assertTrue(agent.strict)
+        mock_cprint.assert_called_once_with(
+            "WARNING: EMA weights requested but not found in checkpoint. Using model weights.",
+            "yellow",
+        )
