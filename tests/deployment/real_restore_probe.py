@@ -50,8 +50,8 @@ def _assert_no_hardware_modules() -> None:
         raise AssertionError(f"restore imported a hardware/simulator module: {loaded}")
 
 
-def _runtime_source_config() -> SimpleNamespace:
-    """The small pure-data subset consumed by ``resolve_policy_runtime_config``."""
+def _synthetic_runtime_source_config() -> SimpleNamespace:
+    """Pure-data runtime used only by the deliberately synthetic fixture."""
     return SimpleNamespace(
         policy=SimpleNamespace(
             control_hz=16.0,
@@ -64,7 +64,15 @@ def _runtime_source_config() -> SimpleNamespace:
     )
 
 
-def _direct_restore(experiment: Path) -> dict[str, Any]:
+def _resolved_real_runtime_source_config() -> Any:
+    """Resolve the current Real config without importing Policy or hardware owners."""
+    _assert_policy_not_imported()
+    from dexmani_real.config.runtime import resolve_runtime_config
+
+    return resolve_runtime_config()
+
+
+def _direct_restore(experiment: Path, runtime_source_config: Any) -> dict[str, Any]:
     _assert_policy_not_imported()
     from dexmani_real.deployment.artifact import resolve_policy_artifact
     from dexmani_real.deployment.config import resolve_policy_runtime_config
@@ -79,7 +87,7 @@ def _direct_restore(experiment: Path) -> dict[str, Any]:
     artifact = resolve_policy_artifact(experiment)
     projection = resolve_policy_runtime_config(
         artifact=artifact,
-        runtime_config=_runtime_source_config(),
+        runtime_config=runtime_source_config,
         device="cpu",
         inference_seed=0,
     )
@@ -133,7 +141,9 @@ def _direct_restore(experiment: Path) -> dict[str, Any]:
         runtime.close()
 
 
-def _production_preflight(experiment: Path) -> dict[str, Any]:
+def _production_preflight(
+    experiment: Path, runtime_source_config: Any
+) -> dict[str, Any]:
     _assert_policy_not_imported()
     from dexmani_real.deployment.artifact import resolve_policy_artifact
     from dexmani_real.deployment.config import resolve_policy_runtime_config
@@ -142,7 +152,7 @@ def _production_preflight(experiment: Path) -> dict[str, Any]:
     artifact = resolve_policy_artifact(experiment)
     projection = resolve_policy_runtime_config(
         artifact=artifact,
-        runtime_config=_runtime_source_config(),
+        runtime_config=runtime_source_config,
         device="cpu",
         inference_seed=0,
     )
@@ -161,16 +171,26 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", required=True, type=Path)
     parser.add_argument("--mode", choices=("direct", "preflight"), required=True)
+    parser.add_argument(
+        "--synthetic-runtime",
+        action="store_true",
+        help="use the tiny fixture runtime instead of current resolved Real config",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
     try:
+        runtime_source_config = (
+            _synthetic_runtime_source_config()
+            if args.synthetic_runtime
+            else _resolved_real_runtime_source_config()
+        )
         result = (
-            _direct_restore(args.experiment)
+            _direct_restore(args.experiment, runtime_source_config)
             if args.mode == "direct"
-            else _production_preflight(args.experiment)
+            else _production_preflight(args.experiment, runtime_source_config)
         )
         _assert_no_hardware_modules()
     except BaseException as exc:

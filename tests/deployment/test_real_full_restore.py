@@ -40,6 +40,7 @@ def _probe(
     policy_root: Path,
     real_root: Path,
     mode: str,
+    synthetic_runtime: bool,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     environment = os.environ.copy()
     import_paths = [str(policy_root), str(real_root)]
@@ -47,8 +48,18 @@ def _probe(
     if prior:
         import_paths.append(prior)
     environment["PYTHONPATH"] = os.pathsep.join(import_paths)
+    command = [
+        sys.executable,
+        str(_PROBE),
+        "--experiment",
+        str(experiment),
+        "--mode",
+        mode,
+    ]
+    if synthetic_runtime:
+        command.append("--synthetic-runtime")
     completed = subprocess.run(
-        [sys.executable, str(_PROBE), "--experiment", str(experiment), "--mode", mode],
+        command,
         cwd=str(_REPOSITORY_ROOT),
         env=environment,
         capture_output=True,
@@ -97,11 +108,16 @@ class TinyDp3RealRestoreTest(unittest.TestCase):
             policy_root=self._policy_root,
             real_root=_DEFAULT_REAL_ROOT,
             mode=mode,
+            synthetic_runtime=True,
         )
 
     def test_direct_restore_validates_manifest_and_normalizer(self) -> None:
         completed, receipt = self._run(mode="direct")
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"receipt={receipt!r}\nstderr={completed.stderr}",
+        )
         self.assertTrue(receipt["ok"], receipt)
         result = receipt["result"]
         self.assertEqual(result["package_commit"], self._commit)
@@ -122,7 +138,11 @@ class TinyDp3RealRestoreTest(unittest.TestCase):
 
     def test_production_spawn_preflight_restores_and_predicts(self) -> None:
         completed, receipt = self._run(mode="preflight")
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"receipt={receipt!r}\nstderr={completed.stderr}",
+        )
         self.assertTrue(receipt["ok"], receipt)
         result = receipt["result"]
         self.assertEqual(result["package_commit"], self._commit)
@@ -153,6 +173,7 @@ class TinyDp3RealRestoreTest(unittest.TestCase):
             policy_root=dirty_root,
             real_root=_DEFAULT_REAL_ROOT,
             mode="direct",
+            synthetic_runtime=True,
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertFalse(receipt["ok"])
@@ -200,8 +221,13 @@ class FullCleanTreeDp3RestoreTest(unittest.TestCase):
             policy_root=_REPOSITORY_ROOT,
             real_root=real_root,
             mode="preflight",
+            synthetic_runtime=False,
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"receipt={receipt!r}\nstderr={completed.stderr}",
+        )
         self.assertTrue(receipt["ok"], receipt)
         result = receipt["result"]
         self.assertEqual(result["action_dim"], 19)
