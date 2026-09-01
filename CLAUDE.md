@@ -139,7 +139,7 @@ BaseAgent
 | `action` (joint) | 7 (关节角) | 12 (XHand) | **19** |
 | `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** |
 
-`joint_state` dim ≡ action dim。
+`joint_state` 固定为 19 维（7 臂 + 12 手），与 `action_ee` 的 21 维动作空间不同。
 
 ### Action Decoder
 
@@ -200,7 +200,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
 - **FlowMatchWithConsistency `target_t`**: flow 分支训练=0，consistency 分支训练=dt1(>0)，推理=dt(>0)
 - **ActionFlow 独立实现**: `action_flow_flowmatch.py` / `action_flow_dit.py` / `geoformer.py` 完全独立，不共享 `time_sampler.py` / `flowmatch.py` / `ditx.py`。**不要合并或交叉引用**
-- **ActionFlow `cond` 是 dict** `{"memory": [B,385,384], "state": [B,2A]}` (其余策略是 Tensor)。`BaseAgent.predict_action_from_cond` 会直接取 `cond.shape/.device/.dtype`，所以 `ActionFlowAgent` **局部 override** 该方法。**不要为此改 BaseAgent**
+- **ActionFlow `cond` 是 dict** `{"memory": [B,385,384], "state": [B,38]}` (其余策略是 Tensor)。`BaseAgent.predict_action_from_cond` 会直接取 `cond.shape/.device/.dtype`，所以 `ActionFlowAgent` **局部 override** 该方法。**不要为此改 BaseAgent**
 - **ActionFlow state 不进入几何**: joint_state 只作为 global modulation 进 ActionDiT，绝不 broadcast 到 geometry token
 - **GeoFormer 末尾有 `norm_out` (RMSNorm)**: pre-norm 只约束每个 sublayer 的**输入**，不约束 residual stream 的**输出**。缺它时 backward Jacobian 随权重尺度增长远快于 forward (实测 ~wscale¹¹ vs ~wscale³)；加上后输出与梯度对权重尺度**不变**。ActionDiT 末尾的 `modulate_rms` 已起同样作用。**不要删**
 - **`_rms_norm` eps = 1e-5 (非 1e-6)**: eps 同时决定近零行的 backward 增益上限 (1/√eps)，1e-6→1000×，1e-5→316×。bf16 下这是余量差别

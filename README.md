@@ -118,7 +118,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | `action` (joint) | 7 (关节角) | 12 (XHand) | **19** |
 | `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** |
 
-`joint_state` dim ≡ action dim。
+`joint_state` 固定为 19 维（7 臂 + 12 手），与 `action_ee` 的 21 维动作空间不同。
 
 ### Action Decoder 类型
 

@@ -74,7 +74,8 @@ agent:
   action_dim: ${action_dim}
 
   pc_dim: 6
-  state_dim: ${action_dim}
+  # joint_state is always arm7 + hand12, including action_ee runs.
+  state_dim: 19
   num_points: 1024
 
   fps_random_config:

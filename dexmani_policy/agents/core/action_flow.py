@@ -286,14 +286,14 @@ class ActionFlowAgent(BaseAgent):
 
 def example():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    B, T, H, A, N = 2, 2, 16, 19, 1024
+    B, T, H, A, state_dim, N = 2, 2, 16, 21, 19, 1024
 
     agent = ActionFlowAgent(
         horizon=H,
         n_obs_steps=T,
         n_action_steps=8,
         action_dim=A,
-        state_dim=A,
+        state_dim=state_dim,
         pc_dim=6,
         num_points=N,
         pc_encoder_config={
@@ -318,7 +318,7 @@ def example():
 
     obs = {
         "point_cloud": torch.randn(B * T, N, 6, device=device),
-        "joint_state": torch.randn(B * T, A, device=device),
+        "joint_state": torch.randn(B * T, state_dim, device=device),
     }
     action = torch.randn(B, H, A, device=device)
 
@@ -329,13 +329,16 @@ def example():
     from dexmani_policy.common.normalizer import LinearNormalizer
 
     normalizer = LinearNormalizer()
-    normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")
+    normalizer.fit(
+        {"action": action, "joint_state": obs["joint_state"].reshape(B, T, state_dim)},
+        mode="limits",
+    )
     agent.load_normalizer_from_dataset(normalizer)
 
     batch = {
         "obs": {
             "point_cloud": obs["point_cloud"].reshape(B, T, N, 6),
-            "joint_state": obs["joint_state"].reshape(B, T, A),
+            "joint_state": obs["joint_state"].reshape(B, T, state_dim),
         },
         "action": action,
     }
@@ -344,7 +347,7 @@ def example():
 
     result = agent.predict_action({
         "point_cloud": obs["point_cloud"].reshape(B, T, N, 6),
-        "joint_state": obs["joint_state"].reshape(B, T, A),
+        "joint_state": obs["joint_state"].reshape(B, T, state_dim),
     })
     print(f"pred_action: {tuple(result['pred_action'].shape)}")
     print(f"control_action: {tuple(result['control_action'].shape)}")

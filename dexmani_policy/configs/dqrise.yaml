@@ -160,8 +160,9 @@ workspace:
 
   checkpoint_cfg:
     _target_: dexmani_policy.training.workspace.CheckpointConfig
-    # Select checkpoints only with an offline validation metric. Confirm that
-    # the training loop writes `val_loss` into checkpoint.monitor.
+    # Training writes milestone/interrupt checkpoints with monitor={}. Offline
+    # select_best_ckpt.py selects deployment-quality checkpoints and writes
+    # best_ckpt.json (and optionally the best.pt symlink).
     monitor_key: val_loss
     mode: min
     topk: 3
@@ -176,7 +177,7 @@ env_runner:
   # ── ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705) ──
   # Blend overlapping action-chunk predictions via exponential weighting
   # to smooth transitions between consecutive inference calls.
-  # Default: 0.01 (verified +2.9pp avg across 7 tasks).  Set to null to disable.
+  # Default: 0.01. Set to null to disable.
   temporal_ensemble_coeff: 0.01
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}

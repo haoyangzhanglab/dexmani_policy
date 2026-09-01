@@ -44,6 +44,7 @@ def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
         "tcp_dim": getattr(model, "tcp_dim", None),
         "hand_dim": getattr(model, "hand_dim", None),
         "control_action_dim": model.control_action_dim,
+        "use_aux_ee": bool(getattr(model, "use_aux_ee", False)),
         "num_training_steps": num_training_steps,
     }
 
