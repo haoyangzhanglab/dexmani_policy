@@ -55,12 +55,25 @@ class CodebookManager(nn.Module):
         self.hand_dim = int(hand_dim)
         self.num_groups = int(num_groups)
         self.codebook_size = int(codebook_size)
-        self.hand_min = float(hand_min)
-        self.hand_max = float(hand_max)
         self.total_combinations = self.codebook_size**self.num_groups
 
         # Persistent runtime state.  These buffers are included in the policy
         # checkpoint and moved automatically by ``model.to(device)``.
+        # ``hand_min`` and ``hand_max`` are deliberately buffers rather than
+        # constructor-only metadata: lookup converts every runtime hand pose
+        # through this affine range.  In particular, a checkpoint produced
+        # with non-default bounds cannot safely be restored into a fresh
+        # deployment manager without them.
+        self.register_buffer(
+            "hand_min",
+            torch.tensor(float(hand_min), dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "hand_max",
+            torch.tensor(float(hand_max), dtype=torch.float32),
+            persistent=True,
+        )
         self.register_buffer(
             "sorted_hand_poses",
             torch.empty((0, self.hand_dim), dtype=torch.float32),
@@ -102,7 +115,10 @@ class CodebookManager(nn.Module):
     ):
         # Buffers are dynamically sized.  Resize them to incoming checkpoint
         # tensors before delegating to nn.Module's copy implementation.
+        had_external_codebook = self.is_loaded
         persistent_names = (
+            "hand_min",
+            "hand_max",
             "sorted_hand_poses",
             "pca_permutation",
             "layer_weights",
@@ -138,9 +154,9 @@ class CodebookManager(nn.Module):
 
         # Keep plain-Python metadata in sync with the loaded buffers (mirrors
         # what the .npz load() path does at lines 455-456).  Without this,
-        # self.num_groups / self.codebook_size / self.hand_min / self.hand_max
-        # would stay at their constructor defaults even after a checkpoint
-        # written by a different configuration is loaded.
+        # self.num_groups / self.codebook_size would stay at their constructor
+        # defaults even after a checkpoint written by a different
+        # configuration is loaded.
         if self.is_loaded:
             n_poses = self.sorted_hand_poses.shape[0]
             self.hand_dim = self.sorted_hand_poses.shape[1]
@@ -150,10 +166,21 @@ class CodebookManager(nn.Module):
             self.codebook_size = int(round(n_poses ** (1.0 / self.num_groups)))
             self.total_combinations = n_poses
 
+        if (
+            not torch.isfinite(self.hand_min)
+            or not torch.isfinite(self.hand_max)
+            or self.hand_max <= self.hand_min
+        ):
+            error_msgs.append(
+                "codebook hand_min/hand_max must be finite and satisfy hand_max > hand_min"
+            )
+
         # Backward compatibility: old policy checkpoints did not include the
         # codebook.  Loading is still safe when an external codebook was already
-        # supplied during agent construction.
-        if self.is_loaded:
+        # supplied during agent construction.  Do not use the codebook just
+        # loaded from the checkpoint as an exemption: that would make a fresh
+        # codebook_path=None deployment accept an incomplete artifact.
+        if had_external_codebook:
             for name in persistent_names:
                 key = prefix + name
                 if key not in state_dict and key in missing_keys:
@@ -183,8 +210,19 @@ class CodebookManager(nn.Module):
     def set_hand_normalizer(
         self, scale: torch.Tensor | np.ndarray, offset: torch.Tensor | np.ndarray
     ) -> None:
-        scale_t = torch.as_tensor(scale, dtype=torch.float32).flatten().cpu()
-        offset_t = torch.as_tensor(offset, dtype=torch.float32).flatten().cpu()
+        # Snapshot rather than alias the policy normalizer's CPU Parameters.
+        # The codebook metadata describes the extraction coordinate system and
+        # must remain stable if a caller subsequently updates a normalizer.
+        scale_t = (
+            torch.as_tensor(scale, dtype=torch.float32).flatten().detach().cpu().clone()
+        )
+        offset_t = (
+            torch.as_tensor(offset, dtype=torch.float32)
+            .flatten()
+            .detach()
+            .cpu()
+            .clone()
+        )
         if scale_t.numel() != self.hand_dim or offset_t.numel() != self.hand_dim:
             raise ValueError(
                 "Hand normalizer shape mismatch: "
@@ -344,8 +382,12 @@ class CodebookManager(nn.Module):
             "hand_dim": np.asarray(self.hand_dim, dtype=np.int64),
             "num_groups": np.asarray(self.num_groups, dtype=np.int64),
             "codebook_size": np.asarray(self.codebook_size, dtype=np.int64),
-            "hand_min": np.asarray(self.hand_min, dtype=np.float64),
-            "hand_max": np.asarray(self.hand_max, dtype=np.float64),
+            "hand_min": np.asarray(
+                self.hand_min.detach().cpu().item(), dtype=np.float64
+            ),
+            "hand_max": np.asarray(
+                self.hand_max.detach().cpu().item(), dtype=np.float64
+            ),
             "metadata_json": np.asarray(json.dumps(self.artifact_metadata, sort_keys=True)),
         }
         if self.layer_weights.numel() > 0:
@@ -374,10 +416,9 @@ class CodebookManager(nn.Module):
 
                 # Legacy v1 stored normalised poses.
                 if version == 1:
-                    old_min, old_max = self.hand_min, self.hand_max
-                    self.hand_min, self.hand_max = loaded_hand_min, loaded_hand_max
-                    poses = self._to_raw(poses)
-                    self.hand_min, self.hand_max = old_min, old_max
+                    poses = (poses + 1.0) * 0.5 * (
+                        loaded_hand_max - loaded_hand_min
+                    ) + loaded_hand_min
 
                 declared_hand_dim = int(data["hand_dim"]) if "hand_dim" in keys else poses.shape[-1]
                 declared_groups = int(data["num_groups"]) if "num_groups" in keys else self.num_groups
@@ -400,8 +441,8 @@ class CodebookManager(nn.Module):
                 if mismatches:
                     raise ValueError(f"Codebook {path} is incompatible:\n  - " + "\n  - ".join(mismatches))
 
-                self.hand_min = loaded_hand_min
-                self.hand_max = loaded_hand_max
+                self.hand_min.fill_(loaded_hand_min)
+                self.hand_max.fill_(loaded_hand_max)
                 self.sorted_hand_poses = poses
                 self.pca_permutation = (
                     torch.from_numpy(data["pca_permutation"]).long()

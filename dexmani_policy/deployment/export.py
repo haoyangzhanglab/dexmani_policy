@@ -15,13 +15,16 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
-import hydra
 import torch
 import zarr  # type: ignore[import-untyped]
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.deployment.restore import (
+    DeploymentRestoreError,
+    verify_deployment_prediction,
+)
 
 _REPOSITORY = "haoyangzhanglab/dexmani_policy"
 _DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
@@ -713,6 +716,10 @@ def _sanitize_agent_config(
             "codebook_manager.sorted_hand_poses",
             "codebook_manager.pca_permutation",
             "codebook_manager.layer_weights",
+            "codebook_manager.hand_normalizer_scale",
+            "codebook_manager.hand_normalizer_offset",
+            "codebook_manager.hand_min",
+            "codebook_manager.hand_max",
         )
         found: dict[str, torch.Tensor] = {}
         for suffix in required_suffixes:
@@ -725,20 +732,93 @@ def _sanitize_agent_config(
                 )
             found[suffix] = matches[0]
         poses = found["codebook_manager.sorted_hand_poses"]
+        permutation = found["codebook_manager.pca_permutation"]
+        layer_weights = found["codebook_manager.layer_weights"]
+        hand_normalizer_scale = found["codebook_manager.hand_normalizer_scale"]
+        hand_normalizer_offset = found["codebook_manager.hand_normalizer_offset"]
+        hand_min = found["codebook_manager.hand_min"]
+        hand_max = found["codebook_manager.hand_max"]
+        normalizer_suffixes = (
+            "normalizer.params_dict.action.scale",
+            "normalizer.params_dict.action.offset",
+        )
+        normalizer_state: dict[str, torch.Tensor] = {}
+        for suffix in normalizer_suffixes:
+            matches = [
+                tensor for key, tensor in model_state.items() if key.endswith(suffix)
+            ]
+            if len(matches) != 1 or matches[0].numel() == 0:
+                raise UnsupportedPolicyError(
+                    "DQ-RISE checkpoint has no complete policy action normalizer state"
+                )
+            normalizer_state[suffix] = matches[0]
+        action_scale = normalizer_state["normalizer.params_dict.action.scale"]
+        action_offset = normalizer_state["normalizer.params_dict.action.offset"]
         groups = sanitized.get("codebook_num_groups")
         size = sanitized.get("codebook_size")
+        hand_dim = train["hand_dim"]
         if (
             type(groups) is not int
             or type(size) is not int
+            or type(hand_dim) is not int
             or poses.ndim != 2
             or poses.shape[0] != size**groups
-            or poses.shape[1] != train["hand_dim"]
+            or poses.shape[1] != hand_dim
+            or permutation.ndim != 1
+            or permutation.numel() != poses.shape[0]
+            or permutation.dtype
+            not in {torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64}
+            or not torch.equal(
+                torch.sort(permutation.detach().cpu().to(torch.int64)).values,
+                torch.arange(poses.shape[0], dtype=torch.int64),
+            )
+            or layer_weights.ndim != 1
+            or layer_weights.numel() != groups
+            or hand_normalizer_scale.ndim != 1
+            or hand_normalizer_scale.numel() != hand_dim
+            or hand_normalizer_offset.ndim != 1
+            or hand_normalizer_offset.numel() != hand_dim
+            or hand_min.numel() != 1
+            or hand_max.numel() != 1
+            or action_scale.ndim != 1
+            or action_scale.numel() != train["action_dim"]
+            or action_offset.ndim != 1
+            or action_offset.numel() != train["action_dim"]
+            or not bool(torch.isfinite(poses).all())
+            or not bool(torch.isfinite(permutation).all())
+            or not bool(torch.isfinite(layer_weights).all())
+            or not bool(torch.isfinite(hand_normalizer_scale).all())
+            or not bool(torch.isfinite(hand_normalizer_offset).all())
+            or bool(torch.any(hand_normalizer_scale == 0))
+            or not bool(torch.isfinite(hand_min).all())
+            or not bool(torch.isfinite(hand_max).all())
+            or not bool(torch.isfinite(action_scale).all())
+            or not bool(torch.isfinite(action_offset).all())
+            or bool(torch.any(action_scale == 0))
+            or not bool(hand_max.item() > hand_min.item())
             or train["tcp_dim"] != sanitized.get("tcp_dim")
             or train["action_key"] != "action_ee"
         ):
             raise InvalidCheckpointError(
                 "DQ-RISE codebook/config/action metadata conflict"
             )
+        try:
+            torch.testing.assert_close(
+                action_scale[-hand_dim:].detach().cpu(),
+                hand_normalizer_scale.detach().cpu(),
+                rtol=1e-5,
+                atol=1e-6,
+            )
+            torch.testing.assert_close(
+                action_offset[-hand_dim:].detach().cpu(),
+                hand_normalizer_offset.detach().cpu(),
+                rtol=1e-5,
+                atol=1e-6,
+            )
+        except AssertionError as exc:
+            raise InvalidCheckpointError(
+                "DQ-RISE codebook hand normalizer conflicts with policy action normalizer"
+            ) from exc
         sanitized["codebook_path"] = None
     pc_encoder = sanitized.get("pc_encoder_config")
     if type(pc_encoder) is dict and "use_pretrained_weights" in pc_encoder:
@@ -909,81 +989,12 @@ def _validate_payload(payload: Any) -> None:
 
 
 def _verify_exported_model(payload: dict[str, Any]) -> None:
-    state = payload["state"]
-    inference = state["inference_config"]
-    selected = (
-        payload["weights"]["ema_model"]
-        if inference["eval"]["use_ema"]
-        else payload["weights"]["model"]
-    )
-    if selected is None:
-        raise ArtifactVerificationError("eval.use_ema requires EMA weights")
     try:
-        agent = hydra.utils.instantiate(OmegaConf.create(inference["agent"]))
-        agent.action_key = inference["action_key"]
-        agent.load_state_dict(selected, strict=True)
-        agent.to("cpu")
-        agent.eval()
-        required_normalizers = ["action", "joint_state", "point_cloud"]
-        if not agent.normalizer.is_fitted(required_keys=required_normalizers):
-            raise RuntimeError("normalizer is missing required deployment state")
-        normalizer_dims = {
-            "action": inference["action_dim"],
-            "joint_state": 19,
-            "point_cloud": state["data_contract"]["point_cloud_feature_dim"],
-        }
-        for key, expected_dim in normalizer_dims.items():
-            params = agent.normalizer.params_dict[key]
-            scale = params.get("scale")
-            offset = params.get("offset")
-            if (
-                scale is None
-                or offset is None
-                or scale.numel() != expected_dim
-                or offset.numel() != expected_dim
-                or not bool(torch.isfinite(scale).all())
-                or not bool(torch.isfinite(offset).all())
-                or bool(torch.any(scale == 0))
-            ):
-                raise RuntimeError(f"normalizer {key!r} has invalid deployment state")
-        obs = {
-            "joint_state": torch.zeros(
-                (1, inference["n_obs_steps"], 19), dtype=torch.float32
-            ),
-            "point_cloud": torch.zeros(
-                (
-                    1,
-                    inference["n_obs_steps"],
-                    state["data_contract"]["point_cloud_num_points"],
-                    state["data_contract"]["point_cloud_feature_dim"],
-                ),
-                dtype=torch.float32,
-            ),
-        }
-        with torch.inference_mode():
-            torch.manual_seed(0)
-            result = agent.predict_action(
-                obs, denoise_timesteps=inference["eval"]["denoise_steps"]
-            )
-        pred = result["pred_action"]
-        control = result["control_action"]
-        control_dim = 21 if inference["action_key"] == "action_ee" else 19
-        if tuple(pred.shape) != (1, inference["horizon"], inference["action_dim"]):
-            raise RuntimeError(f"pred_action shape mismatch: {tuple(pred.shape)}")
-        if tuple(control.shape) != (1, inference["n_action_steps"], control_dim):
-            raise RuntimeError(f"control_action shape mismatch: {tuple(control.shape)}")
-        if not bool(torch.isfinite(pred).all()) or not bool(
-            torch.isfinite(control).all()
-        ):
-            raise RuntimeError("prediction contains NaN/Inf")
-        start = inference["n_obs_steps"] - 1
-        expected = pred[:, start : start + inference["n_action_steps"], :control_dim]
-        if not torch.equal(control, expected):
-            raise RuntimeError(
-                "control_action is not the exact canonical pred_action slice"
-            )
-    except ArtifactVerificationError:
-        raise
+        verify_deployment_prediction(payload, seed=0)
+    except DeploymentRestoreError as exc:
+        raise ArtifactVerificationError(
+            "deployment agent strict restore/prediction failed"
+        ) from exc
     except Exception as exc:
         raise ArtifactVerificationError(
             "deployment agent strict restore/prediction failed"

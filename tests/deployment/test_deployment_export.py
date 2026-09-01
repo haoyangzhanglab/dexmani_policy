@@ -540,9 +540,15 @@ class ConstructorSanitizationTest(unittest.TestCase):
         with self.assertRaisesRegex(exporter.UnsupportedPolicyError, "persistent"):
             exporter._sanitize_agent_config(agent, {"weight": torch.ones(1)}, train)
         state = {
+            "codebook_manager.hand_min": torch.tensor(0.0),
+            "codebook_manager.hand_max": torch.tensor(65535.0),
             "codebook_manager.sorted_hand_poses": torch.ones(16, 12),
             "codebook_manager.pca_permutation": torch.arange(16),
             "codebook_manager.layer_weights": torch.ones(2),
+            "codebook_manager.hand_normalizer_scale": torch.ones(12),
+            "codebook_manager.hand_normalizer_offset": torch.zeros(12),
+            "normalizer.params_dict.action.scale": torch.ones(21),
+            "normalizer.params_dict.action.offset": torch.zeros(21),
         }
         sanitized = exporter._sanitize_agent_config(agent, state, train)
         self.assertIsNone(sanitized["codebook_path"])
@@ -889,6 +895,7 @@ class VerificationSemanticsTest(unittest.TestCase):
                 return {"pred_action": pred, "control_action": pred[:, 1:9, :]}
 
         payload = {
+            "_format": "dexmani.deployment.v2",
             "state": {
                 "inference_config": {
                     "agent": {"_target_": "dexmani_policy.agents.core.dp3.DP3Agent"},
