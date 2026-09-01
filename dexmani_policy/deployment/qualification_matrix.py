@@ -12,12 +12,17 @@ from typing import Final
 
 QUALIFICATION_MATRIX: Final[dict[str, dict[str, object]]] = {
     "dp3": {
-        "status": "conditional",
+        "status": "qualified",
         "evidence": [
             "synthetic_direct_export_exact_parity",
             "current_real_tiny_restore",
+            "real_checkpoint_direct_export_exact_parity",
+            "current_real_clean_tree_full_restore",
         ],
-        "condition": "real checkpoint parity and clean-tree Real restore must pass",
+        "condition": (
+            "qualified with a real action-space checkpoint; every newly selected "
+            "checkpoint must repeat per-artifact parity and Real restore"
+        ),
     },
     "action_flow": {
         "status": "conditional",
