@@ -331,34 +331,71 @@ class ResolvedConfigContractTest(unittest.TestCase):
 
 
 class SourceAndPathResolutionTest(unittest.TestCase):
+    def _git_result(self, root: Path, remote: str, *, status: str = ""):
+        def result(_root, *args):
+            values = {
+                ("rev-parse", "--show-toplevel"): str(root),
+                ("rev-parse", "HEAD"): COMMIT,
+                ("status", "--porcelain", "--untracked-files=all"): status,
+                ("remote", "get-url", "origin"): remote,
+            }
+            return values[args]
+
+        return result
+
     def test_clean_frozen_repository_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-
-            def clean_git(_root, *args):
-                values = {
-                    ("rev-parse", "--show-toplevel"): str(root),
-                    ("rev-parse", "HEAD"): COMMIT,
-                    ("status", "--porcelain", "--untracked-files=all"): "",
-                    ("remote", "get-url", "origin"): (
-                        "https://github.com/haoyangzhanglab/dexmani_policy.git"
-                    ),
-                }
-                return values[args]
-
+            remote = "https://github.com/haoyangzhanglab/dexmani_policy.git"
+            clean_git = self._git_result(root, remote)
             with patch.object(exporter, "_run_git", side_effect=clean_git):
                 self.assertEqual(exporter._producer_provenance(root), COMMIT)
-
-            def dirty_git(_root, *args):
-                if args == ("status", "--porcelain", "--untracked-files=all"):
-                    return " M dexmani_policy/dirty.py"
-                return clean_git(_root, *args)
-
+            dirty_git = self._git_result(
+                root, remote, status=" M dexmani_policy/dirty.py"
+            )
             with patch.object(exporter, "_run_git", side_effect=dirty_git):
                 with self.assertRaisesRegex(
                     exporter.InvalidExperimentError, "working tree must be clean"
                 ):
                     exporter._producer_provenance(root)
+
+    def test_exact_canonical_repository_remotes_are_accepted(self) -> None:
+        remotes = (
+            "https://github.com/haoyangzhanglab/dexmani_policy",
+            "https://github.com/haoyangzhanglab/dexmani_policy.git",
+            "git@github.com:haoyangzhanglab/dexmani_policy",
+            "git@github.com:haoyangzhanglab/dexmani_policy.git",
+            "ssh://git@github.com/haoyangzhanglab/dexmani_policy.git",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for remote in remotes:
+                with self.subTest(remote=remote):
+                    git_result = self._git_result(root, remote)
+                    with patch.object(exporter, "_run_git", side_effect=git_result):
+                        self.assertEqual(exporter._producer_provenance(root), COMMIT)
+
+    def test_wrong_or_tricky_repository_remotes_are_rejected(self) -> None:
+        remotes = (
+            "https://evilgithub.com/haoyangzhanglab/dexmani_policy.git",
+            "https://github.com/other/dexmani_policy.git",
+            "https://github.com/haoyangzhanglab/other.git",
+            "git@evilgithub.com:haoyangzhanglab/dexmani_policy.git",
+            "git@github.com:other/dexmani_policy.git",
+            "git@github.com:haoyangzhanglab/other.git",
+            "https://github.com/haoyangzhanglab/other/../dexmani_policy.git",
+            "https://github.com/haoyangzhanglab/dexmani_policy.git/extra",
+            "https://github.com:443/haoyangzhanglab/dexmani_policy.git",
+            "https://[github.com]/haoyangzhanglab/dexmani_policy.git",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for remote in remotes:
+                with self.subTest(remote=remote):
+                    git_result = self._git_result(root, remote)
+                    with patch.object(exporter, "_run_git", side_effect=git_result):
+                        with self.assertRaises(exporter.InvalidExperimentError):
+                            exporter._producer_provenance(root)
 
     def test_config_relative_zarr_is_repository_relative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

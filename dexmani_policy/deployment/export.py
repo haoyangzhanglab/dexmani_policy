@@ -13,6 +13,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import hydra
 import torch
@@ -25,6 +26,7 @@ from dexmani_policy.common.config import register_resolvers
 _REPOSITORY = "haoyangzhanglab/dexmani_policy"
 _DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
 _GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+_SCP_REMOTE_RE = re.compile(r"git@github\.com:haoyangzhanglab/dexmani_policy(?:\.git)?")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _POINT_COUNTS = frozenset({1024, 2048, 4096, 8192})
 _POINT_FEATURE_DIM = 6
@@ -125,6 +127,24 @@ def _run_git(repo_root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _is_expected_repository_remote(remote: str) -> bool:
+    if _SCP_REMOTE_RE.fullmatch(remote) is not None:
+        return True
+    try:
+        parsed = urlparse(remote)
+    except ValueError:
+        return False
+    expected_netloc = {
+        "https": "github.com",
+        "ssh": "git@github.com",
+    }.get(parsed.scheme)
+    if expected_netloc is None or parsed.netloc != expected_netloc:
+        return False
+    if parsed.params or parsed.query or parsed.fragment:
+        return False
+    return parsed.path.removesuffix(".git") == f"/{_REPOSITORY}"
+
+
 def _producer_provenance(repo_root: Path) -> str:
     top_level = Path(_run_git(repo_root, "rev-parse", "--show-toplevel"))
     if top_level.resolve() != repo_root.resolve():
@@ -139,11 +159,7 @@ def _producer_provenance(repo_root: Path) -> str:
             "Policy working tree must be clean for deployment export"
         )
     remote = _run_git(repo_root, "remote", "get-url", "origin")
-    normalized = remote.removesuffix(".git").rstrip("/")
-    if not (
-        normalized.endswith("github.com/haoyangzhanglab/dexmani_policy")
-        or normalized == "git@github.com:haoyangzhanglab/dexmani_policy"
-    ):
+    if not _is_expected_repository_remote(remote):
         raise InvalidExperimentError(
             f"Policy origin does not identify {_REPOSITORY}: {remote!r}"
         )
