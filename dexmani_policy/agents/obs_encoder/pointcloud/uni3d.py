@@ -208,6 +208,7 @@ class Uni3DPointcloudEncoder(nn.Module):
         feature_mode="pointsam",
         use_pretrained_weights=False,
         pretrained_weights_path=None,
+        allow_random_init=False,
         fps_random_config=None,
         **kwargs,
     ):
@@ -258,20 +259,30 @@ class Uni3DPointcloudEncoder(nn.Module):
                 p.requires_grad_(False)
 
         if use_pretrained_weights:
-            self._load_pretrained_weights(pretrained_weights_path)
+            self._load_pretrained_weights(pretrained_weights_path, allow_random_init)
         else:
             logger.info("[Uni3DPointcloudEncoder] Random initialization (training from scratch)")
 
-    def _load_pretrained_weights(self, pretrained_weights_path):
+    def _load_pretrained_weights(self, pretrained_weights_path, allow_random_init=False):
         """Selectively load pretrained weights from safetensors (strict=False).
 
         If the local file is missing, attempts to auto-download from HuggingFace Hub
-        (eddie-cui/r3d-weights). This makes manual download optional — the first run
-        will pull the weights automatically if the network is available.
+        (eddie-cui/r3d-weights).  Fail-closed by default: a missing path, failed
+        download, or large-scale key mismatch raises unless ``allow_random_init=True``
+        explicitly permits falling back to (partially) random initialization.
         """
         if pretrained_weights_path is None:
-            logger.warning("[Uni3DPointcloudEncoder] pretrained_weights_path is None, skipping")
-            return
+            if allow_random_init:
+                logger.warning(
+                    "[Uni3DPointcloudEncoder] pretrained_weights_path is None; "
+                    "training from scratch (allow_random_init=True)."
+                )
+                return
+            raise ValueError(
+                "[Uni3DPointcloudEncoder] use_pretrained_weights=True but "
+                "pretrained_weights_path is None. Provide the path or set "
+                "allow_random_init=True to train from scratch."
+            )
 
         # Resolve relative paths against project root (this file is at
         # dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py, so 5 levels up).
@@ -296,12 +307,19 @@ class Uni3DPointcloudEncoder(nn.Module):
                     local_dir=pretrained_weights_path,
                 )
             except Exception as e:
-                logger.warning(
-                    "[Uni3DPointcloudEncoder] Auto-download failed (%s). "
-                    "Run 'bash scripts/utils/download_pretrained.sh' to download manually.",
-                    e,
-                )
-                return
+                if allow_random_init:
+                    logger.warning(
+                        "[Uni3DPointcloudEncoder] Auto-download failed (%s); "
+                        "training from scratch (allow_random_init=True).",
+                        e,
+                    )
+                    return
+                raise RuntimeError(
+                    f"[Uni3DPointcloudEncoder] pretrained weights missing and "
+                    f"auto-download failed: {e}. Run "
+                    f"'bash scripts/utils/download_pretrained.sh' or set "
+                    f"allow_random_init=True."
+                ) from e
 
         from safetensors.torch import load_file
 
@@ -315,11 +333,38 @@ class Uni3DPointcloudEncoder(nn.Module):
                 processed_state_dict[new_key] = checkpoint[key]
 
         missing_keys, unexpected_keys = self.load_state_dict(processed_state_dict, strict=False)
+
+        total_expected = len(self.state_dict())
+        loaded = total_expected - len(missing_keys)
+        ratio = loaded / total_expected if total_expected > 0 else 0.0
+
         if missing_keys:
             logger.info("[Uni3DPointcloudEncoder] Missing keys: %s", missing_keys)
         if unexpected_keys:
             logger.info("[Uni3DPointcloudEncoder] Unexpected keys: %s", unexpected_keys)
-        logger.info("[Uni3DPointcloudEncoder] Pretrained weights loaded from %s", pretrained_weights_path)
+
+        # Large-scale key mismatch: fewer than half the expected keys loaded means
+        # the checkpoint is for a different model/architecture.
+        if ratio < 0.5:
+            msg = (
+                f"[Uni3DPointcloudEncoder] Only {loaded}/{total_expected} ({ratio:.1%}) "
+                f"expected keys loaded from {safetensors_path} — checkpoint is likely "
+                f"for a different model."
+            )
+            if allow_random_init:
+                logger.warning(
+                    "%s Continuing with partial/random init (allow_random_init=True).", msg
+                )
+                return
+            raise ValueError(msg)
+
+        logger.info(
+            "[Uni3DPointcloudEncoder] Pretrained weights loaded from %s (%d/%d keys, %.1f%%)",
+            pretrained_weights_path,
+            loaded,
+            total_expected,
+            ratio * 100,
+        )
 
     @property
     def out_dim(self):

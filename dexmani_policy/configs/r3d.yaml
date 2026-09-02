@@ -103,6 +103,7 @@ agent:
     feature_mode: pointsam
     use_pretrained_weights: true
     pretrained_weights_path: data/pretrained/uni3d
+    allow_random_init: false
 
   fps_random_config:
     use_random: true
