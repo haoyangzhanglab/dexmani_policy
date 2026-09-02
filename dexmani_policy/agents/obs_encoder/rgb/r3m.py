@@ -168,9 +168,11 @@ class R3M(nn.Module):
             else nn.Conv2d(self.hidden_dim, self.out_dim, kernel_size=1)
         )
 
-        # R3M was trained with inputs in [0, 255] followed by ImageNet
-        # normalization.  The ImageProcessor passes [0, 1] images (mean=0,
-        # std=1 preset), so we convert back to [0, 255] and normalise here.
+        # Official R3M preprocessing: [0, 1] → ImageNet normalization.  Official
+        # R3M takes uint8 [0, 255], divides by 255 to [0, 1], then applies
+        # ImageNet norm — equivalent to normalizing a [0, 1] image directly.
+        # The ImageProcessor "r3m" preset is identity (mean=0, std=1), so images
+        # arrive here already in [0, 1].
         self.normlayer = T.Normalize(
             mean=list(_R3M_IMAGENET_MEAN),
             std=list(_R3M_IMAGENET_STD),
@@ -230,8 +232,8 @@ class R3M(nn.Module):
 
         flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
 
-        # Match R3M's training preprocessing: [0, 1] → [0, 255] → ImageNet norm.
-        flat_rgb = flat_rgb.mul(255.0)
+        # Official R3M: [0, 1] → ImageNet norm.  The dataset already emits
+        # float [0, 1], so there is no ×255.
         flat_rgb = self.normlayer(flat_rgb)
 
         feature_map = self.backbone(flat_rgb)
