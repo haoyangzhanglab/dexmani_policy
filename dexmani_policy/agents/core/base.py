@@ -176,7 +176,7 @@ class BaseAgent(nn.Module):
         return self._merge_aux_loss(action_loss, loss_dict, aux)
 
     def _merge_aux_loss(self, action_loss, loss_dict, aux):
-        """Merge auxiliary encoder losses (e.g. MoE load-balance) into the total.
+        """Merge auxiliary encoder losses into the total.
 
         Subclasses may override this to add domain-specific logging or
         warnings.  The default implementation silently returns

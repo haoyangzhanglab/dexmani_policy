@@ -156,7 +156,7 @@ class FinalLayer(nn.Module):
 
 
 class DiTDiffusion(nn.Module):
-    """DiT backbone for diffusion-based action prediction (DP3, MoE).
+    """DiT backbone for diffusion-based action prediction (MultiTask).
 
     Encodes actions and observation context through separate MLP embedders,
     applies a stack of self-attention DiT blocks with AdaLN (Adaptive Layer

@@ -25,7 +25,7 @@ TASK="${2:?Usage: tail_log.sh <policy> <task> [timestamp]}"
 TS="${3:-}"
 
 # Validate inputs (POLICY/TASK/TS are interpolated into remote shell code).
-if [[ ! "$POLICY" =~ ^(ddp/)?(action_flow|dp|dp3|dqrise|maniflow|moe_dp|multitask_dit|r3d|sat)$ ]]; then
+if [[ ! "$POLICY" =~ ^(ddp/)?(action_flow|dp|dp3|dqrise|maniflow|multitask_dit|r3d|sat)$ ]]; then
     echo "Error: unknown policy '$POLICY'" >&2
     exit 1
 fi

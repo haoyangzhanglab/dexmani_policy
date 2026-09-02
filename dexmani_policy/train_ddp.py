@@ -50,7 +50,7 @@ def setup_ddp(rank: int, world_size: int):
     short enough to avoid wasting cluster time on a truly dead rank.
 
     The timeout covers **every** collective in this process group:
-    ``dist.all_reduce`` in the NaN sentinel,
+    ``dist.all_gather`` in the NaN sentinel,
     ``dist.broadcast`` in normalizer sync, and the implicit
     barrier inside DDP backward.
     """

@@ -196,8 +196,9 @@ class MultiTaskSimRunner:
                 }
 
         # ── Aggregate: macro (mean per-task SR) + micro (across all (task, seed)) ──
-        # A failed task aborts below, so every task here has a non-None SR; a
-        # task that failed is never silently dropped from the macro average.
+        # Failed tasks carry success_rate=None here and are filtered out of
+        # `rates` below; the abort after aggregation keeps a reduced macro
+        # average from being silently reported.
         rates = [r["success_rate"] for r in per_task.values() if r["success_rate"] is not None]
         steps = [r["avg_steps"] for r in per_task.values() if r["avg_steps"] is not None]
 

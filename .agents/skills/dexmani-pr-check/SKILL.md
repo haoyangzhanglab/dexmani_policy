@@ -70,8 +70,7 @@ echo "=== DDP configs ==="
 ls dexmani_policy/configs/ddp/*.yaml 2>/dev/null | sed 's|.*/ddp/||; s|\.yaml$||'
 ```
 
-Known intentional gaps (not errors): `dp3` and `moe_dp` — CLAUDE.md documents these as
-single-GPU-only.
+Known intentional gaps (not errors): `dp3` — CLAUDE.md documents it as single-GPU-only.
 
 ### 4. CLAUDE.md table consistency
 
@@ -109,12 +108,8 @@ intentional. Flag any change that "fixes" one of these as a regression:
 - Normalizer fits on **all** replay buffer data (train + val) — not a leak, `limits` mode
   means val doesn't change min/max. Every codebase in this ecosystem does this.
 - `tcp_dim` naming: means "arm control dim" (7 for joint, 9 for ee mode), not literally TCP.
-- `MoEAgent.forward()` returns `dict` (with `aux_loss`); all other agents return `Tensor`.
-  `BaseAgent.compute_loss()` handles both — do not "fix" by removing aux_loss.
 - `DQRISEAgent` bypasses `UNetDiffusionAgent` — its `diffusion_action_dim = tcp_dim+1`
   (≠ `action_dim`) so it cannot reuse the standard UNet path. Do not refactor into UNetDiffusionAgent.
-- MoE disables `bfloat16` and `compile` — gate softmax requires float32, CUDA Graphs have
-  high memory overhead with MoE routing. Do not re-enable.
 
 ## Report format
 

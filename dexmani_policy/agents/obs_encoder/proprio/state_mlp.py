@@ -38,7 +38,7 @@ def create_state_mlp(
 ) -> StateMLP:
     """Create the standard StateMLP used by all observation encoders.
 
-    Every encoder (DP, DP3, MoE, ManiFlow, MultiTask, R3D) embeds the
+    Every encoder (DP, DP3, ManiFlow, MultiTask, R3D) embeds the
     robot's joint state through this MLP before concatenating it with
     vision / point-cloud features.  This factory centralises the
     project-wide default so that a change to the state-encoding

@@ -544,7 +544,6 @@ train.py <策略> <任务> [Hydra覆盖参数...]
 | DQ-RISE | `dqrise` | `ddp/dqrise` |
 | SAT | `sat` | `ddp/sat` |
 | DP | `dp` | `ddp/dp` |
-| MoE DP | `moe_dp` | — |
 
 **任务（task）** — 当前可用: `pour`（倒水）
 

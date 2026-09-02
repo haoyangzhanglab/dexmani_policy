@@ -44,7 +44,7 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name>
 bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name> --no-videos
 ```
 
-- 单卡配置：`action_flow`、`dp`、`dp3`、`dqrise`、`maniflow`、`moe_dp`、
+- 单卡配置：`action_flow`、`dp`、`dp3`、`dqrise`、`maniflow`、
   `multitask_dit`、`r3d`、`sat`。
 - DDP 配置：`ddp/action_flow`、`ddp/dp`、`ddp/dqrise`、`ddp/maniflow`、
   `ddp/multitask_dit`、`ddp/r3d`、`ddp/sat`。
@@ -86,7 +86,6 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name> --no-videos
 
 - Normalizer 使用完整 replay buffer（包括验证集）拟合。
 - `tcp_dim` 是历史命名：joint 模式为 7，ee 模式为 9。
-- MoE obs encoder 的 forward 返回 `(feat, aux_dict)`，其中 `aux_dict` 含 aux loss；MoE 有意禁用 bfloat16 和 compile。
 - DQ-RISE 直接继承 `BaseAgent`，其 `diffusion_action_dim=tcp_dim+1`，不要强行
   改为 `UNetDiffusionAgent`。
 - R3DObsEncoder 的 patch/state/position 表示按 feature 维组合，保持现有语义。
@@ -94,7 +93,7 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name> --no-videos
 - `FlowMatchWithConsistency.target_t`：flow 分支训练为 0，consistency 分支训练为 `dt1(>0)`，推理为 `dt(>0)`。
 - ActionFlow 的 flowmatch、DiT 和采样逻辑是独立实现；不要与通用
   `flowmatch.py`、`ditx.py` 或 `time_sampler.py` 合并或交叉引用。
-- `dp3` 和 `moe_dp` 有意没有 DDP overlay。
+- `dp3` 有意没有 DDP overlay。
 - 不要意外启用 modality dropout、TokenCompressor 或 T5TextEncoder 预留功能。
 
 ## 验证要求

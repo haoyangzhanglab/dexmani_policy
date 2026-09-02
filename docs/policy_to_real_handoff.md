@@ -201,7 +201,7 @@ source. This table is a handoff snapshot, not another registry.
 |---|---|
 | Qualified | DP3 |
 | Conditional | ActionFlow, DQ-RISE, R3D |
-| Deferred | ManiFlow, SAT, DP RGB, MoE-DP RGB, MultiTask DiT |
+| Deferred | ManiFlow, SAT, DP RGB, MultiTask DiT |
 | Rejected | none |
 
 DP3 qualification applies to the evidenced real action-space checkpoint. Every
@@ -273,8 +273,8 @@ and does not change it.
 - R3D remains conditional on strict restore with
   `use_pretrained_weights=false`.
 - ManiFlow and SAT have no PR-3 direct/export parity evidence.
-- DP RGB and MoE-DP RGB remain deferred until deterministic deployment
-  preprocessing and external-initialization contracts exist.
+- DP RGB remains deferred until deterministic deployment preprocessing and
+  external-initialization contracts exist.
 - MultiTask DiT remains deferred until task-text semantics are explicit.
 
 No conditional or deferred policy is promoted by this handoff.

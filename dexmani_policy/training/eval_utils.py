@@ -264,7 +264,7 @@ def compute_eval_stats(result: dict) -> dict:
     Handles single-task (top-level ``episode_details``) and multi-task
     (``per_task`` nested) results uniformly.  The evaluation unit is
     ``(task, seed)``: ``micro`` averages over every such unit, ``macro``
-    averages over tasks (equal to micro when there is a single task).
+    averages over tasks (None for single-task; callers fall back to micro).
 
     Returns
     -------

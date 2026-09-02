@@ -113,9 +113,8 @@ print(f"normalizer_mode={cfg.get('normalizer_mode', 'limits')}")
 |-------|----------|------------------|-----|
 | L1 | Step 0 | Corrupted Zarr or normalizer explosion | Verify Zarr `np.isfinite()`; ensure `normalizer_mode='limits'` |
 | L1 | Mid-training | Diffusion predictions drifted outside normalizer range | Reduce LR; verify `prediction_type` (epsilon/sample/v_prediction) |
-| L1 | bfloat16 only | AMP overflow | Identify float32-sensitive ops (MoE softmax, FlowMatch exp); disable bfloat16 for that agent |
+| L1 | bfloat16 only | AMP overflow | Identify float32-sensitive ops (FlowMatch exp); disable bfloat16 for that agent |
 | L2 | Specific params | Custom op backward instability | Inspect the params named in the error; check for division-by-zero, log(0), or sqrt(negative) |
-| L2 | MoE agent | load-balancing aux_loss produced NaN | MoE gate must use float32 (no bfloat16) and no compile — check config |
 | L2 | FlowMatch | Time-derivative instability near t=0 | `t_sample_mode` configuration — try `beta` mode with higher `beta_s` |
 
 ### Step 5: Apply fixes and retry
@@ -153,7 +152,6 @@ NaN debug checkpoint format (`simple.v1`):
 
 ## Conventions (what is normal, not a bug)
 
-- MoE without `bfloat16` / `compile` is **expected** — gate softmax needs float32
 - `raw_loss / gradient_accumulation_steps` before backward is **correct** — not a missing division
 - Normalizer fits on **all** replay buffer data (train + val) — by design, not a leak
 - Milestone checkpoints at 20/40/60/80/100% — `latest.pt` is a symlink, not a copy

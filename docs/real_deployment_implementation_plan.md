@@ -574,7 +574,6 @@ Use exact equality where deterministic dtype/implementation permits; otherwise u
 | DQ-RISE | conditional | checkpoint must be self-contained; current default is EE action |
 | R3D | conditional | pretrained init disabled; aux-EE full/control split |
 | DP RGB | deferred | preprocessing mismatch |
-| MoE-DP RGB/R3M | deferred | preprocessing + external init |
 | MultiTask DiT | deferred | explicit task-text contract missing |
 
 Do not label deferred policies “structurally supported”.

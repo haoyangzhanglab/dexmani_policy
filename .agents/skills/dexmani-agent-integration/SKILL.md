@@ -18,7 +18,7 @@ no explicit registry — new agents are wired through `agent._target_` in the YA
 
 Confirm with the user, or state the assumption explicitly:
 
-- Which **inheritance path**: `UNetDiffusionAgent` (DP3/MoE-style, UNet+Diffusion), `DiTXFlowMatchAgent`
+- Which **inheritance path**: `UNetDiffusionAgent` (DP3-style, UNet+Diffusion), `DiTXFlowMatchAgent`
   (ManiFlow-style, DiTX+FlowMatch+Consistency), or `BaseAgent` direct (SAT, R3D, DQRISE — full control over backbone + decoder).
 - Which **modalities**: point cloud (`pc_dim`) or RGB (`rgb_backbone_name`).
 - Which **action space**: joint (19D) or action_ee (21D).
@@ -34,7 +34,7 @@ Choose one of three patterns (reference the existing agent nearest to your targe
 
 | Pattern | Parent class | `obs_encoder` output | What you pass to parent | Examples |
 |---------|-------------|---------------------|------------------------|---------|
-| A: UNet+Diffusion | `UNetDiffusionAgent` | `(out_dim,)` flat vector | `obs_encoder.out_dim * n_obs_steps` → `context_dim` | `dp3.py`, `dp.py`, `moe.py` |
+| A: UNet+Diffusion | `UNetDiffusionAgent` | `(out_dim,)` flat vector | `obs_encoder.out_dim * n_obs_steps` → `context_dim` | `dp3.py`, `dp.py` |
 | B: DiTX+FlowMatch+Consistency | `DiTXFlowMatchAgent` | `(num_tokens, token_dim)` sequence | `num_obs_tokens`, `obs_token_dim` | (reserved for ManiFlow-like) |
 | C: Direct BaseAgent | `BaseAgent` | Arbitrary | Build backbone + decoder yourself, pass to `super().__init__` | `sat.py`, `r3d.py`, `dqrise.py`, `multitask_dit.py` |
 
@@ -181,7 +181,7 @@ hydra:
     subdir: ${hydra.job.num}
 ```
 
-**Known exceptions** (intentional, not errors): `dp3` and `moe_dp` have no DDP configs.
+**Known exceptions** (intentional, not errors): `dp3` has no DDP config.
 
 ### 6. Verify with smoke test
 
@@ -192,7 +192,6 @@ python dexmani_policy/smoke_test.py <name>
 
 The 6 stages validate: (1) dataset+normalizer, (2) model+EMA, (3) optimizer+scheduler,
 (4) forward+backward, (5) predict_action shape, (6) checkpoint roundtrip.
-MoE adds stage 5.1 (enhanced gate).
 
 ## Conventions
 
