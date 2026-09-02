@@ -8,6 +8,7 @@ import torch
 from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import format_success_rate
+from dexmani_policy.env_runner.base_runner import _classify_eval_exception
 from dexmani_policy.env_runner.sim_runner import SimRunner
 
 
@@ -146,6 +147,7 @@ class MultiTaskSimRunner:
                     "episode_details": [],
                     "error": str(e),
                     "error_type": type(e).__name__,
+                    "error_category": _classify_eval_exception(e),
                 }
             except Exception as e:
                 cprint(f"\n❌ Unexpected error in task {task_name}: {type(e).__name__}: {e}", "red")
@@ -159,6 +161,7 @@ class MultiTaskSimRunner:
                     "episode_details": [],
                     "error": str(e),
                     "error_type": type(e).__name__,
+                    "error_category": _classify_eval_exception(e),
                 }
 
         rates = [r["success_rate"] for r in per_task.values() if r["success_rate"] is not None]
@@ -168,6 +171,12 @@ class MultiTaskSimRunner:
         avg_steps = int(round(sum(steps) / len(steps))) if steps else None
 
         self.print_summary(per_task, avg_success_rate, avg_steps, rates, failed_tasks)
+
+        if failed_tasks:
+            raise RuntimeError(
+                f"Multi-task evaluation failed for tasks: {failed_tasks}. "
+                f"Refusing to report a reduced aggregate success rate."
+            )
 
         results = {
             "success_rate": avg_success_rate,

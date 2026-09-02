@@ -12,6 +12,31 @@ from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
 
 
+class EvalEpisodeError(RuntimeError):
+    """Fatal per-episode failure that must abort the whole eval run (non-zero exit).
+
+    Raised when a model-forward / env / OOM / contract error occurs during an
+    episode — distinct from a genuine ``success=False`` task outcome, which the
+    episode loop records normally without raising.
+    """
+
+    def __init__(self, category: str, seed: int, message: str):
+        super().__init__(f"[{category}] seed {seed}: {message}")
+        self.category = category
+        self.seed = seed
+
+
+def _classify_eval_exception(e: BaseException) -> str:
+    """Tag an episode exception with a coarse category for diagnostics."""
+    if isinstance(e, torch.cuda.OutOfMemoryError):
+        return "oom"
+    if isinstance(e, ValueError):
+        return "value_error"
+    if isinstance(e, RuntimeError):
+        return "runtime_error"
+    return type(e).__name__
+
+
 class BaseRunner:
     """Abstract environment runner for agent evaluation.
 
@@ -22,8 +47,8 @@ class BaseRunner:
     - Runs ``num_episodes`` trials, each starting from ``env.reset()`` and
       stepping until termination or ``max_steps``.
     - Collects video frames and success/failure outcomes per episode.
-    - Handles evaluation errors per-episode (continues to next episode on
-      failure rather than aborting the entire run).
+    - Fails fast on model/env/OOM errors (raises ``EvalEpisodeError`` → non-zero
+      exit); records genuine ``success=False`` task outcomes normally.
 
     Subclasses override ``run()`` to adapt to specific environment types
     (single-task sim, multi-task sim, real robot, etc.).
@@ -192,10 +217,25 @@ class BaseRunner:
                 str(path),
             ]
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            for frame in frames:
-                proc.stdin.write(frame.astype(np.uint8).tobytes())
-            proc.stdin.close()
-            proc.wait(timeout=60)
+            try:
+                for frame in frames:
+                    proc.stdin.write(frame.astype(np.uint8).tobytes())
+                proc.stdin.close()
+                proc.wait(timeout=60)
+            finally:
+                # Reap a hung/zombie ffmpeg on BrokenPipeError / TimeoutExpired so
+                # a failed encode never leaks a subprocess.
+                if proc.poll() is None:
+                    try:
+                        proc.stdin.close()
+                    except Exception:
+                        pass
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
         else:
             imageio.mimsave(str(path), frames.astype(np.uint8), fps=fps)
 
@@ -216,6 +256,13 @@ class BaseRunner:
         obs, info = env.reset(seed=episode_seed, options=kwargs.get("options", None))
         self.reset()
         self.update_obs(obs)
+
+        # A4: restore deterministic policy RNG so (checkpoint, seed) → identical
+        # policy noise. env.reset seeds only the sim's internal RNG; the decoder's
+        # torch.randn_like draws from the global generator, so re-seed it per episode.
+        torch.manual_seed(episode_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(episode_seed)
 
         done = False
         truncated = False
@@ -251,41 +298,47 @@ class BaseRunner:
     ):
         """Run *eval_episodes* evaluation trials.
 
-        Exception isolation (three-layer defence):
+        Exception taxonomy (fail-fast):
 
-        1. **Episode execution** (``run_one_episode``) — caught, recorded as
-           ``False``, crash video saved if possible.
-        2. **Frame extraction** (``env.get_video()``) — caught, falls back to
-           ``None`` — never corrupts the episode result.
-        3. **Video encoding** (``_encode_video``) — caught, warning printed —
-           never corrupts the episode result.
-
-        The ``episode_completed`` flag decouples execution from video I/O so
-        that video failures cannot poison ``success_list``.
+        1. **Episode execution** (``run_one_episode``) — any model-forward /
+           env / OOM / contract exception is classified and re-raised as
+           :class:`EvalEpisodeError`, aborting the whole run with a non-zero
+           exit; a genuine ``success=False`` task outcome is recorded normally.
+        2. **Frame extraction** (``env.get_video()``) — best-effort, falls back
+           to ``None`` — never corrupts the episode result.
+        3. **Video encoding** (``_encode_video``) — best-effort, warning
+           printed — never corrupts the episode result.
         """
-        env = self.make_env()
-        if self.env_video_fps is None:
-            self.env_video_fps = getattr(env, "video_fps", 15)
-        eval_seeds = self.get_seed_list()
-        eval_episodes = eval_episodes if eval_episodes is not None else self.default_eval_episodes
-
-        if eval_episodes > len(eval_seeds):
-            cprint(
-                f"⚠️ eval_episodes ({eval_episodes}) > available seeds ({len(eval_seeds)}), limiting to {len(eval_seeds)}",
-                "yellow",
-            )
-            eval_episodes = len(eval_seeds)
-
-        num_episodes = eval_episodes
         success_list = []
         task_done_step_list = []
         episode_video_list = []
         episode_details = []  # per-episode: {seed, success, steps}
         attempted = 0
+        env = None
 
         print("=" * 90)
 
         try:
+            # A3: env construction + seed resolution inside the guard, so a
+            # make_env()/get_seed_list() failure has one fail-fast exit path.
+            env = self.make_env()
+            if self.env_video_fps is None:
+                self.env_video_fps = getattr(env, "video_fps", 15)
+            eval_seeds = self.get_seed_list()
+            if not eval_seeds:
+                raise RuntimeError("seed pool is empty — cannot evaluate")
+
+            eval_episodes = eval_episodes if eval_episodes is not None else self.default_eval_episodes
+
+            if eval_episodes > len(eval_seeds):
+                cprint(
+                    f"⚠️ eval_episodes ({eval_episodes}) > available seeds ({len(eval_seeds)}), limiting to {len(eval_seeds)}",
+                    "yellow",
+                )
+                eval_episodes = len(eval_seeds)
+
+            num_episodes = eval_episodes
+
             seed_idx = 0
             while len(success_list) < num_episodes and seed_idx < len(eval_seeds):
                 eval_seed = eval_seeds[seed_idx]
@@ -297,15 +350,28 @@ class BaseRunner:
                         agent, env, eval_seed, denoise_timesteps
                     )
                     episode_completed = True
+                except EvalEpisodeError:
+                    raise
                 except Exception as e:
-                    episode_completed = False
-                    cprint(f"Seed {eval_seed} failed: {e}", "red")
-                    # Try to capture pre-crash video frames for diagnostics
+                    category = _classify_eval_exception(e)
+                    cprint(f"Seed {eval_seed} FAILED (fatal, category={category}): {e}", "red")
+                    # Best-effort crash video, but never let it mask the fatal error.
+                    crash_video = None
                     try:
                         crash_video = env.get_video()
                     except Exception:
                         crash_video = None
-                    success_list.append(False)
+                    encoded = False
+                    if crash_video is not None and video_save_dir is not None:
+                        crash_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
+                        crash_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            self._encode_video(crash_path, crash_video, self.env_video_fps)
+                            encoded = True
+                        except Exception:
+                            pass
+                        if encoded:
+                            episode_video_list.append({f"episode_{eval_seed}_crash": str(crash_path)})
                     episode_details.append(
                         {
                             "seed": eval_seed,
@@ -313,16 +379,10 @@ class BaseRunner:
                             "steps": None,
                             "total_steps": getattr(env, "action_cnt", None),
                             "error": str(e),
+                            "error_category": category,
                         }
                     )
-                    if crash_video is not None and video_save_dir is not None:
-                        crash_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
-                        crash_path.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            self._encode_video(crash_path, crash_video, self.env_video_fps)
-                        except Exception:
-                            pass
-                        episode_video_list.append({f"episode_{eval_seed}_crash": str(crash_path)})
+                    raise EvalEpisodeError(category, eval_seed, str(e)) from e
 
                 if episode_completed:
                     total_steps = getattr(env, "action_cnt", None)
@@ -334,8 +394,12 @@ class BaseRunner:
                         video = None
 
                     if self.clear_cache_freq > 0 and attempted % self.clear_cache_freq == 0:
-                        env.close()
+                        old_env = env
                         env = self.make_env()
+                        try:
+                            old_env.close()
+                        except Exception:
+                            pass
 
                     status = "success" if episode_success else "fail"
                     done_step_str = task_done_step if task_done_step is not None else "N/A"
@@ -389,7 +453,11 @@ class BaseRunner:
             print("=" * 90)
 
         finally:
-            env.close()
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    pass
 
         return {
             "success_rate": success_rate,

@@ -46,6 +46,7 @@ from termcolor import cprint
 
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
+from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
     _get_eval_param,
     build_eval_components,
@@ -53,6 +54,7 @@ from dexmani_policy.training.eval_utils import (
     load_ckpt_for_inference,
     resolve_checkpoint_path,
     resolve_eval_seed,
+    validate_denoise_steps,
     validate_eval_config,
 )
 
@@ -233,6 +235,7 @@ def evaluate_checkpoint_robotwin(
     agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = _setup_eval(
         cfg, exp_dir, ckpt_tag_or_path, use_ema, video_save_dir=video_save_dir,
     )
+    validate_denoise_steps([denoise_steps], getattr(agent.action_decoder, "solver", None))
     eval_seeds = _select_eval_seeds(env_runner, eval_seed, episodes)
 
     info = _run_one_timestep(
@@ -290,6 +293,7 @@ def evaluate_checkpoint_sweep(
     agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = _setup_eval(
         cfg, exp_dir, ckpt_tag_or_path, use_ema, video_save_dir=video_save_dir,
     )
+    validate_denoise_steps(denoise_timesteps_list, getattr(agent.action_decoder, "solver", None))
 
     # ── 2. Same seeds for all denoise values (fair comparison) ──────────
     eval_seeds = _select_eval_seeds(env_runner, eval_seed, episodes)
@@ -455,6 +459,8 @@ def main() -> None:
         if args.episodes is not None
         else _get_eval_param(cfg, "episodes", "offline", default=100)
     )
+    if episodes <= 0:
+        raise ValueError(f"episodes must be positive, got {episodes}")
     use_ema = (
         args.use_ema if args.use_ema is not None else _get_eval_param(cfg, "use_ema", "offline", default=True)
     )
@@ -489,29 +495,36 @@ def main() -> None:
 
     ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
 
-    if do_sweep:
-        cprint(
-            f"\n🔁 Denoise timesteps sweep: {denoise_timesteps_list}", "cyan", attrs=["bold"],
-        )
-        evaluate_checkpoint_sweep(
-            exp_dir,
-            cfg,
-            ckpt_tag_or_path=ckpt_tag_or_path,
-            episodes=episodes,
-            denoise_timesteps_list=denoise_timesteps_list,
-            use_ema=use_ema,
-            video_save_dir=video_save_dir,
-        )
-    else:
-        evaluate_checkpoint_robotwin(
-            exp_dir,
-            cfg,
-            ckpt_tag_or_path=ckpt_tag_or_path,
-            episodes=episodes,
-            denoise_steps=denoise_timesteps_list[0],
-            use_ema=use_ema,
-            video_save_dir=video_save_dir,
-        )
+    try:
+        if do_sweep:
+            cprint(
+                f"\n🔁 Denoise timesteps sweep: {denoise_timesteps_list}", "cyan", attrs=["bold"],
+            )
+            evaluate_checkpoint_sweep(
+                exp_dir,
+                cfg,
+                ckpt_tag_or_path=ckpt_tag_or_path,
+                episodes=episodes,
+                denoise_timesteps_list=denoise_timesteps_list,
+                use_ema=use_ema,
+                video_save_dir=video_save_dir,
+            )
+        else:
+            evaluate_checkpoint_robotwin(
+                exp_dir,
+                cfg,
+                ckpt_tag_or_path=ckpt_tag_or_path,
+                episodes=episodes,
+                denoise_steps=denoise_timesteps_list[0],
+                use_ema=use_ema,
+                video_save_dir=video_save_dir,
+            )
+    except EvalEpisodeError as e:
+        cprint(f"Fatal eval error (category={e.category}, seed={e.seed}): {e}", "red")
+        sys.exit(1)
+    except (ValueError, RuntimeError, OSError, FileNotFoundError) as e:
+        cprint(f"Eval failed: {type(e).__name__}: {e}", "red")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

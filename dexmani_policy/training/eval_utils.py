@@ -60,6 +60,25 @@ def validate_eval_config(cfg) -> None:
         )
 
 
+def validate_denoise_steps(denoise_timesteps_list, solver: str | None) -> None:
+    """Pre-episode NFE validation, single-sourced with the ActionFlow decoder.
+
+    Guards the CLI ``--denoise-steps`` override so an invalid NFE (e.g. odd
+    value with the midpoint solver) fails at startup instead of being swallowed
+    by the per-episode exception layer after ``env.reset``.  ``solver`` is
+    ``None`` for non-ActionFlow decoders (which take no even-NFE constraint).
+    """
+    if not denoise_timesteps_list:
+        raise ValueError("denoise_timesteps_list must be non-empty")
+    for nfe in denoise_timesteps_list:
+        if isinstance(nfe, bool) or not isinstance(nfe, int):
+            raise ValueError(f"denoise step must be an integer, got {nfe!r}")
+        if nfe <= 0:
+            raise ValueError(f"denoise step must be positive, got {nfe}")
+        if solver == "midpoint" and nfe % 2 != 0:
+            raise ValueError(f"midpoint solver requires an even NFE, got {nfe}")
+
+
 # ---------------------------------------------------------------------------
 # 2. Agent / env_runner construction
 # ---------------------------------------------------------------------------
@@ -150,8 +169,10 @@ def read_best_ckpt_json(exp_dir: Path) -> dict | None:
         return None
     try:
         best_info = json.loads(best_json.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
+    except json.JSONDecodeError as e:
+        raise ValueError(f"best_ckpt.json is malformed JSON: {e}") from e
+    except OSError as e:
+        raise OSError(f"best_ckpt.json is unreadable: {e}") from e
 
     # Resolve relative paths (written by select_best_ckpt.py as ckpt_relpath)
     ckpt_path = Path(best_info.get("ckpt_path", ""))
