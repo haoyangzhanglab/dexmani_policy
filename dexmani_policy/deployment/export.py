@@ -1134,14 +1134,66 @@ def _roundtrip_verify_published(
     _roundtrip_verify_files(checkpoint_path, sidecar_path, sidecar)
 
 
+def publish_deployment_selector(
+    selector_path: Path,
+    checkpoint_path: Path,
+    sidecar_path: Path,
+) -> None:
+    """Commit the deployment selector in one atomic, verified step.
+
+    Re-reads the on-disk sidecar as the expected content, captures the old
+    selector, swaps in a relative symlink to *checkpoint_path*, roundtrip-verifies
+    the published artifact, and rolls back on any failure.  Called exactly once by
+    ``qualify_policy_parity`` after direct/deployment parity and sidecar validation
+    pass.
+    """
+    raw = sidecar_path.read_bytes()
+    sidecar = json.loads(
+        raw, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token))
+    )
+    old_selector = _capture_selector(selector_path)
+    selector_published = False
+    try:
+        _replace_relative_symlink(selector_path, checkpoint_path.name)
+        selector_published = True
+        _roundtrip_verify_published(selector_path, checkpoint_path, sidecar_path, sidecar)
+    except BaseException:
+        if selector_published:
+            _rollback_selector(selector_path, old_selector)
+        raise
+
+
+def cleanup_candidate_artifact(checkpoint_path: Path, sidecar_path: Path) -> None:
+    """Remove an unpublished candidate deployment artifact (checkpoint + sidecar).
+
+    Idempotent; the deployment selector is left untouched.  Called on
+    qualification failure so a same-name retry does not hit the export
+    ``FileExistsError`` guard.
+    """
+    for path in (checkpoint_path, sidecar_path):
+        try:
+            if path.is_symlink() or path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+
 def export_deployment_artifact(
     experiment_dir: Path,
     checkpoint_selector: str = "best",
     output_path: Path | None = None,
     verify: bool = True,
     zarr_path: Path | None = None,
+    publish: bool = True,
 ) -> ExportReceipt:
-    """Export one selected simple.v1 checkpoint and atomically publish its selector."""
+    """Export one selected simple.v1 checkpoint as a deployment-v2 artifact.
+
+    When ``publish=True`` (default) the ``deployment_latest.pt`` selector is
+    atomically swapped to point at the new artifact.  When ``publish=False`` the
+    checkpoint + sidecar are written but the selector is left untouched — used by
+    ``qualify_policy_parity`` so the selector is only committed after direct/
+    deployment parity and sidecar validation pass.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     producer_commit = _producer_provenance(repo_root)
     try:
@@ -1236,7 +1288,7 @@ def export_deployment_artifact(
         raise FileExistsError(
             f"refusing to overwrite deployment artifact: {final_path}"
         )
-    old_selector = _capture_selector(selector_path)
+    old_selector = _capture_selector(selector_path) if publish else None
 
     checkpoint_temp: Path | None = None
     sidecar_temp: Path | None = None
@@ -1278,9 +1330,10 @@ def export_deployment_artifact(
             raise ArtifactPublicationError(
                 "Policy producer commit changed during deployment export"
             )
-        selector_published = True
-        _replace_relative_symlink(selector_path, final_path.name)
-        _roundtrip_verify_published(selector_path, final_path, sidecar_path, sidecar)
+        if publish:
+            selector_published = True
+            _replace_relative_symlink(selector_path, final_path.name)
+            _roundtrip_verify_published(selector_path, final_path, sidecar_path, sidecar)
     except BaseException as exc:
         if selector_published:
             try:

@@ -8,9 +8,10 @@ if TYPE_CHECKING:
     from dexmani_policy.deployment.export import (
         ExportReceipt,
         export_deployment_artifact,
+        publish_deployment_selector,
     )
 
-__all__ = ["ExportReceipt", "export_deployment_artifact"]
+__all__ = ["ExportReceipt", "export_deployment_artifact", "publish_deployment_selector"]
 
 
 def __getattr__(name: str) -> Any:

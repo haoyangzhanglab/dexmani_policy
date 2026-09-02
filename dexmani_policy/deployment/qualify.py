@@ -236,26 +236,38 @@ def qualify_policy_parity(
         output_path=output_path,
         verify=verify_export,
         zarr_path=zarr_path,
+        publish=False,
     )
     # This is intentionally the safe artifact reload owned by the exporter,
     # rather than retaining the in-memory publication payload.
-    payload = exporter._load_deployment_payload(receipt.checkpoint_path)
-    deployment = restore_deployment_agent(payload, device=device)
-    _require_matching_specs(direct.spec, deployment.spec)
-
-    observation = deterministic_observation(direct.spec, device=device)
-    direct_snapshot = direct_prediction_snapshot(
-        direct, seed=seed, observation=_clone_observation(observation)
-    )
-    deployment_snapshot = prediction_snapshot(
-        deployment, seed=seed, observation=_clone_observation(observation)
-    )
     try:
+        payload = exporter._load_deployment_payload(receipt.checkpoint_path)
+        deployment = restore_deployment_agent(payload, device=device)
+        _require_matching_specs(direct.spec, deployment.spec)
+
+        observation = deterministic_observation(direct.spec, device=device)
+        direct_snapshot = direct_prediction_snapshot(
+            direct, seed=seed, observation=_clone_observation(observation)
+        )
+        deployment_snapshot = prediction_snapshot(
+            deployment, seed=seed, observation=_clone_observation(observation)
+        )
         assert_prediction_parity(
             direct_snapshot, deployment_snapshot, atol=atol, rtol=rtol
         )
     except DeploymentRestoreError as exc:
+        # Drop the candidate, keep the selector unchanged, and re-raise so a
+        # same-name retry is idempotent.
+        exporter.cleanup_candidate_artifact(receipt.checkpoint_path, receipt.sidecar_path)
         raise PolicyParityError("direct/export prediction parity failed") from exc
+    except Exception:
+        exporter.cleanup_candidate_artifact(receipt.checkpoint_path, receipt.sidecar_path)
+        raise
+
+    # Parity + sidecar validation passed — commit the selector exactly once.
+    exporter.publish_deployment_selector(
+        receipt.selector_path, receipt.checkpoint_path, receipt.sidecar_path
+    )
 
     pred_max = _max_abs_diff(
         direct_snapshot.pred_action, deployment_snapshot.pred_action
