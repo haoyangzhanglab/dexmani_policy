@@ -2,13 +2,10 @@ from typing import Dict, Optional
 
 import torch.nn as nn
 
-from dexmani_policy.agents.obs_encoder.pointcloud import (
-    MultiStagePointNet,
-    PointNet,
-    PointNetDense,
-    PointNextEncoder,
-    PointNextPatchTokenizer,
-)
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import MultiStagePointNet, PointNet
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet_dense import PointNetDense
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnext import PointNextEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnext_tokenizer import PointNextPatchTokenizer
 
 GLOBAL_ENCODER_CONFIGS: Dict[str, Dict] = {
     "dp3": {

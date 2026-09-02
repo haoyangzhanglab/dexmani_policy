@@ -1,7 +1,7 @@
-from .ops import farthest_point_sample
-from .pointnet import MultiStagePointNet, PointNet
-from .pointnet_dense import PointNetDense
-from .pointnext import PointNextEncoder
-from .pointnext_tokenizer import PointNextPatchTokenizer
-from .r3d_obs_encoder import R3DObsEncoder
-from .uni3d import Uni3DPointcloudEncoder
+"""Point-cloud observation encoders.
+
+Import encoders directly from their modules (e.g.
+``from ...pointcloud.pointnet import PointNet``); this package does not
+re-export them, so a single encoder import never eagerly pulls heavyweight
+deps (pytorch3d, Uni3D).
+"""

@@ -9,8 +9,9 @@ from dexmani_policy.agents.obs_encoder.plugins.moe import MoE
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
-from dexmani_policy.agents.obs_encoder.rgb import R3M, ResNet
+from dexmani_policy.agents.obs_encoder.rgb.r3m import R3M
 from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
+from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNet
 
 
 class MoEObsEncoder(nn.Module):

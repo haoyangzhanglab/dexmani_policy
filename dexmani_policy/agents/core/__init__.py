@@ -1,10 +1,7 @@
-from .action_flow import ActionFlowAgent
-from .dp import DPAgent
-from .dp3 import DP3Agent
-from .dqrise import DQRISEAgent
-from .maniflow import ManiFlowAgent
-from .moe import MoEAgent
-from .multi_task import MultiTaskAgent
+"""Concrete agent implementations.
 
-from .r3d import R3DAgent
-from .sat import SATAgent
+Import agents directly from their modules (e.g.
+``from dexmani_policy.agents.core.dp3 import DP3Agent``); this package does not
+re-export them, so importing ``dexmani_policy.agents.core`` stays lightweight
+and never eagerly loads a heavyweight backbone.
+"""

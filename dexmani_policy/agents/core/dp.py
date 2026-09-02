@@ -4,8 +4,9 @@ from torchvision.transforms import v2
 
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
-from dexmani_policy.agents.obs_encoder.rgb import R3M, ResNet
+from dexmani_policy.agents.obs_encoder.rgb.r3m import R3M
 from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
+from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNet
 
 
 class DPObsEncoder(nn.Module):
