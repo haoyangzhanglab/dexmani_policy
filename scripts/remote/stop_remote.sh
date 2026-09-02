@@ -77,8 +77,8 @@ case "${1:-}" in
         else
             stopped=0
             for s in $sessions; do
-                # Only stop sessions matching training naming convention (config_task)
-                [[ "$s" == *_* ]] || continue
+                # Only stop this repo's training sessions (dex_-prefixed).
+                [[ "$s" == dex_* ]] || continue
                 echo "  [$s]"
                 _graceful_stop "$s"
                 stopped=$((stopped + 1))
@@ -95,6 +95,10 @@ case "${1:-}" in
         ;;
     *)
         SESSION="$1"
+        if [[ ! "$SESSION" =~ ^dex_[a-zA-Z0-9_.-]+$ ]]; then
+            echo "Error: invalid session name '$SESSION'. Expected format: dex_<config>_<task>[_s<seed>]" >&2
+            exit 1
+        fi
         echo "Stopping session: $SESSION"
         _graceful_stop "$SESSION"
         echo "Stopped."

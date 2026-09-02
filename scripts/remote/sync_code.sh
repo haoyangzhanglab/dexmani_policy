@@ -27,6 +27,8 @@ REMOTE_CODE="$SERVER:~/ZHY/dexmani_policy/"
 DRY_RUN=""
 case "${1:-}" in
     --dry-run|-n) DRY_RUN="--dry-run" ;;
+    "")           : ;;
+    *)            echo "Error: unexpected argument '${1:-}' (only --dry-run is accepted)" >&2; exit 1 ;;
 esac
 
 RSYNC_OPTS=(

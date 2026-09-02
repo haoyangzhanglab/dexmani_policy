@@ -24,9 +24,23 @@ POLICY="${1:?Usage: tail_log.sh <policy> <task> [timestamp]}"
 TASK="${2:?Usage: tail_log.sh <policy> <task> [timestamp]}"
 TS="${3:-}"
 
+# Validate inputs (POLICY/TASK/TS are interpolated into remote shell code).
+if [[ ! "$POLICY" =~ ^(ddp/)?(action_flow|dp|dp3|dqrise|maniflow|moe_dp|multitask_dit|r3d|sat)$ ]]; then
+    echo "Error: unknown policy '$POLICY'" >&2
+    exit 1
+fi
+if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: invalid task '$TASK'" >&2
+    exit 1
+fi
+if [[ -n "$TS" && ! "$TS" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}(_[0-9]+)?$ ]]; then
+    echo "Error: invalid timestamp '$TS'" >&2
+    exit 1
+fi
+
 find_latest() {
     local base="$1"
-    ssh "$SERVER" "ls -dt $base/$POLICY/$TASK/*/ 2>/dev/null | head -1" 2>/dev/null
+    ssh "$SERVER" "ls -dt '$base/$POLICY/$TASK'/*/ 2>/dev/null | head -1" 2>/dev/null
 }
 
 # Try server first, then local

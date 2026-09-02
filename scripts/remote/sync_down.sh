@@ -57,9 +57,23 @@ while [[ $# -gt 0 ]]; do
         --dry-run|-n) DRY_RUN="--dry-run"; shift ;;
         --with-wandb) WITH_WANDB=true; shift ;;
         --list|-l)    LIST_MODE=true; shift ;;
-        *)            SUBPATH="$1"; shift ;;
+        -*)           echo "Error: unknown option '$1'" >&2; exit 1 ;;
+        *)
+            if [[ -n "$SUBPATH" ]]; then
+                echo "Error: unexpected extra argument '$1' (SUBPATH already set to '$SUBPATH')" >&2
+                exit 1
+            fi
+            SUBPATH="$1"; shift ;;
     esac
 done
+
+# Validate SUBPATH: clean relative path (no absolute, .., empty, or bad components).
+if [[ -n "$SUBPATH" ]]; then
+    if [[ ! "$SUBPATH" =~ ^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*$ ]] || [[ "$SUBPATH" =~ (^|/)\.\.(/|$) ]]; then
+        echo "Error: invalid SUBPATH '$SUBPATH' (must be a clean relative path like 'dp3/pour')" >&2
+        exit 1
+    fi
+fi
 
 # ---- List mode ----
 if $LIST_MODE; then

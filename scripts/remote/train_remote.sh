@@ -51,9 +51,22 @@ while [[ $# -gt 0 ]]; do
             GPU_IDS="${2:?Error: --gpus requires a value (e.g., --gpus 0,1,2,3)}"
             shift 2
             ;;
+        -*) echo "Error: unknown option '$1'" >&2; exit 1 ;;
         *) break ;;
     esac
 done
+
+# Validate --gpus: comma-separated non-negative integers, no duplicates.
+if [[ -n "$GPU_IDS" ]]; then
+    if [[ ! "$GPU_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        echo "Error: --gpus must be a comma-separated list of integers (e.g. 0,1,2,3), got '$GPU_IDS'" >&2
+        exit 1
+    fi
+    if echo "$GPU_IDS" | tr ',' '\n' | sort -n | uniq -d | grep -q .; then
+        echo "Error: --gpus contains duplicate ids: '$GPU_IDS'" >&2
+        exit 1
+    fi
+fi
 
 # Validate positional args
 CONFIG="${1:?Error: specify config name (e.g., dp3, ddp/maniflow)}"
@@ -97,7 +110,7 @@ if [[ -n "$GPU_IDS" ]]; then
     REMOTE_CMD="export CUDA_VISIBLE_DEVICES=$GPU_IDS && $REMOTE_CMD"
 fi
 
-SESSION="${CONFIG//\//_}_${TASK}"
+SESSION="dex_${CONFIG//\//_}_${TASK}"
 
 # Include seed in session name so same config+task with different seeds
 # can run concurrently without killing each other's tmux session.
@@ -174,6 +187,20 @@ echo "OK"
 # 4. GPU check
 echo "[4/5] GPU status:"
 ssh "$SERVER" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader" 2>/dev/null || echo "  (could not query GPUs)"
+
+# Validate requested GPU ids are in range (best-effort).
+if [[ -n "$GPU_IDS" ]]; then
+    _gpu_count=$(ssh "$SERVER" "nvidia-smi --query-gpu=count --format=csv,noheader" 2>/dev/null || true)
+    if [[ -n "$_gpu_count" && "$_gpu_count" =~ ^[0-9]+$ ]]; then
+        _max_id=$((_gpu_count - 1))
+        for _gid in $(echo "$GPU_IDS" | tr ',' ' '); do
+            if [[ $_gid -gt $_max_id ]]; then
+                echo "Error: GPU id $_gid out of range (server has $_gpu_count GPUs: 0..$_max_id)" >&2
+                exit 1
+            fi
+        done
+    fi
+fi
 
 # 5. Disk space
 echo -n "[5/5] Disk space /data_ssd ... "
