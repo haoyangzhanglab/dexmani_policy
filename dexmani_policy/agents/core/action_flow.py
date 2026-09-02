@@ -181,6 +181,16 @@ class ActionFlowAgent(BaseAgent):
         modality_dropout_probs: dict | None = None,
         **kwargs,
     ):
+        if n_obs_steps != 2:
+            raise ValueError(
+                f"ActionFlow only supports n_obs_steps=2, got {n_obs_steps}"
+            )
+        if n_obs_steps - 1 + n_action_steps > horizon:
+            raise ValueError(
+                f"n_obs_steps-1+n_action_steps ({n_obs_steps - 1 + n_action_steps}) exceeds "
+                f"horizon ({horizon}); the control_action slice would be out of bounds"
+            )
+
         # Resolved once so the memory width and the cross-attention context
         # width cannot drift apart when context_dim is left unset.
         ctx_dim = hidden_dim if context_dim is None else context_dim

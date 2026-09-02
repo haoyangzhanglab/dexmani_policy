@@ -51,6 +51,14 @@ class SimpleRectifiedFlowDecoder(nn.Module):
         super().__init__()
         if solver not in {"euler", "midpoint"}:
             raise ValueError(f"Unknown solver: {solver}")
+        if noise_shift_alpha <= 0:
+            raise ValueError(f"noise_shift_alpha must be > 0, got {noise_shift_alpha}")
+        if not (0.0 <= noise_shift_ratio <= 1.0):
+            raise ValueError(f"noise_shift_ratio must be in [0, 1], got {noise_shift_ratio}")
+        if isinstance(denoise_steps, bool) or not isinstance(denoise_steps, int) or denoise_steps <= 0:
+            raise ValueError(f"denoise_steps must be a positive integer, got {denoise_steps!r}")
+        if solver == "midpoint" and denoise_steps % 2 != 0:
+            raise ValueError(f"midpoint solver requires an even NFE, got denoise_steps={denoise_steps}")
 
         self.model = model
         self.denoise_steps = denoise_steps
@@ -62,9 +70,12 @@ class SimpleRectifiedFlowDecoder(nn.Module):
 
     def _resolve_nfe(self, denoise_timesteps=None) -> int:
         nfe = self.denoise_steps if denoise_timesteps is None else denoise_timesteps
-        nfe = int(nfe)
+        if isinstance(nfe, bool) or not isinstance(nfe, int):
+            raise ValueError(f"nfe must be an integer, got {nfe!r} (no silent truncation)")
         if nfe <= 0:
             raise ValueError(f"nfe must be positive, got {nfe}")
+        if self.solver == "midpoint" and nfe % 2 != 0:
+            raise ValueError(f"midpoint solver requires an even NFE, got {nfe}")
         return nfe
 
     def compute_loss(self, cond, actions, **kwargs):
@@ -165,8 +176,8 @@ class SimpleRectifiedFlowDecoder(nn.Module):
         nfe = self._resolve_nfe(denoise_timesteps)
         x = torch.randn_like(action_template)
 
-        self.model.setup_kv_cache(cond["memory"])
         try:
+            self.model.setup_kv_cache(cond["memory"])
             if self.solver == "euler":
                 x = self._sample_euler(x, cond, nfe)
             else:
