@@ -95,13 +95,7 @@ Optionally override:
 - `get_optim_param_groups` — for separate LR/WD on backbone vs obs_encoder
 - `control_action_dim` (property) — for auxiliary heads
 
-### 2. Register in `__init__.py`
-
-File: `dexmani_policy/agents/core/__init__.py`
-
-Add: `from .<name> import <Name>Agent`
-
-### 3. Create the config YAML
+### 2. Create the config YAML
 
 Path: `dexmani_policy/configs/<name>.yaml`
 
@@ -137,7 +131,7 @@ action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 Copy the `eval:` section **exactly** from `dp3.yaml` — all policies share the same eval structure.
 
-### 4. Update CLAUDE.md
+### 3. Update CLAUDE.md
 
 Four places to update:
 
@@ -146,7 +140,7 @@ Four places to update:
 3. **训练命令** — add example: `bash scripts/training/train.sh <name> 'task_name=pour'`
 4. **DDP** (if applicable) — add to the DDP config list and batch-size table
 
-### 5. Optionally create DDP overlay
+### 4. Optionally create DDP overlay
 
 Path: `dexmani_policy/configs/ddp/<name>.yaml`
 
@@ -183,7 +177,7 @@ hydra:
 
 **Known exceptions** (intentional, not errors): `dp3` has no DDP config.
 
-### 6. Verify with smoke test
+### 5. Verify with smoke test
 
 ```bash
 conda activate policy
@@ -217,4 +211,5 @@ The 6 stages validate: (1) dataset+normalizer, (2) model+EMA, (3) optimizer+sche
 ## Reporting back
 
 Confirm: (a) smoke test passes, (b) DDP smoke if applicable, (c) CLAUDE.md table consistent
-with config, (d) `__init__.py` has export, (e) anything still unverified.
+with config, (d) config `_target_` resolves to the new class (no `__init__.py` registration
+needed — barrels are docstring-only), (e) anything still unverified.

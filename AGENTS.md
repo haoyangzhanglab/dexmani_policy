@@ -94,6 +94,10 @@ bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name> --no-videos
 - ActionFlow 的 flowmatch、DiT 和采样逻辑是独立实现；不要与通用
   `flowmatch.py`、`ditx.py` 或 `time_sampler.py` 合并或交叉引用。
 - `dp3` 有意没有 DDP overlay。
+- Uni3D 预训练权重 fail-closed：`use_pretrained_weights=true` 时权重缺失/下载失败/key
+  匹配率 <0.5 直接抛异常，除非显式 `allow_random_init=true`（默认 false）。
+- `__init__.py` barrel 已清空为纯文档字符串（不 re-export）；Hydra 走 `_target_` 直接
+  模块导入，新增 Agent 无需在 `__init__.py` 注册。
 - 不要意外启用 modality dropout、TokenCompressor 或 T5TextEncoder 预留功能。
 
 ## 验证要求

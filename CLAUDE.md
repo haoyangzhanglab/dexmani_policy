@@ -182,7 +182,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 
 **NaN 两层防护**: L1 (backward前, loss NaN → 保存 debug ckpt → raise) / L2 (optimizer.step前, 梯度 NaN → zero_grad → raise)。诊断用 `dexmani-training-debug` skill。
 
-**Checkpoint**: 20/40/60/80/100% 里程碑; `latest.pt` symlink; 自动 resume。**DDP**: ckpt 加载在 compile + DDP 包装**前**; timeout=30min; `dp3` 仅单卡。**Shape 验证**: `_validate_batch()` 在 `compute_loss`/`predict_action` 入口。
+**Checkpoint**: 20/40/60/80/100% 里程碑; `latest.pt` symlink; 自动 resume（含 EMA updater 计数器 + RNG 状态，精确恢复）。**DDP**: ckpt 加载在 compile + DDP 包装**前**; timeout=30min; `dp3` 仅单卡。**Shape 验证**: `_validate_batch()` 在 `compute_loss`/`predict_action` 入口。
 
 > 详细机制 → [README](README.md#训练机制)
 
@@ -206,6 +206,8 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 - **PointNeXT `include_global_token`**: 默认 True 保持 sat 行为（maniflow 已改用 pointnet_dense）；ActionFlow 传 False，**在构造期**就不建全局分支 (DDP `find_unused_parameters=False` 下建而不用会直接崩)
 - **DDP 覆盖不全**: `dp3` 有意仅单卡
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
+- **Uni3D 预训练权重 fail-closed**: `use_pretrained_weights=true` 时权重缺失/下载失败/key 匹配率 <0.5 直接抛异常（不再静默回退随机初始化），除非 `allow_random_init=true`（默认 false，r3d.yaml 已 pin）
+- **`__init__.py` barrel 已清空**: `core`/`rgb`/`pointcloud`/`text`/`plugins` 为纯文档字符串，不再 eager re-export；消费方走具体模块直接导入，Hydra 走 `_target_` 直接模块路径，新增 Agent 无需在 `__init__.py` 注册
 
 ### 未启用功能 (不要意外激活)
 
@@ -227,9 +229,9 @@ dexmani_policy/
   eval_best_ckpt.py           # 离线评测 (Hydra-free CLI)
   record_demo.py              # 离线 demo 视频录制
   smoke_test.py               # 构建验证 (6 阶段)
-  configs/                    # 9 YAML + 7 DDP overlays
+  configs/                    # 8 YAML + 7 DDP overlays
   agents/
-    core/                     # BaseAgent + 9 variants
+    core/                     # BaseAgent + 8 variants
     action_decoders/          # Diffusion, FlowMatch variants
       backbone/               # UNet1D, DiT, DiTX, OneWayTransformer, SATBackbone
     obs_encoder/              # pointcloud/, rgb/, text/, state_mlp.py, plugins/

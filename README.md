@@ -23,7 +23,7 @@ cd ~/Desktop/dexmani_sim && pip install -e .                  # 仿真环境（�
 ### 训练
 
 ```bash
-# 单卡 —— 9 种策略可选（task 用 task_name= 覆盖）
+# 单卡 —— 8 种策略可选（task 用 task_name= 覆盖）
 bash scripts/training/train.sh dp3 'task_name=pour'           # DP3 训练 pour 任务
 bash scripts/training/train.sh action_flow 'task_name=pour'   # ActionFlow
 bash scripts/training/train.sh maniflow 'task_name=pour'      # ManiFlow
@@ -73,7 +73,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ## 策略矩阵
 
-9 种策略配置，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
+8 种策略配置，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
 
 | Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
 |:------|:---------|:-------|:---------|:-------|:-----|
@@ -251,7 +251,7 @@ Agent.compute_loss():                          Agent.predict_action():
 ### 关键机制
 
 - **梯度累积**: `raw_loss / gradient_accumulation_steps` → backward; DDP 非边界 `model.no_sync()`, 仅边界 all-reduce
-- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; Resume 自动从 latest 恢复
+- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; 自动 resume（含 EMA updater 计数器 + RNG 状态，精确恢复）
 - **EMA**: 逆 gamma 衰减; BatchNorm affine 直接复制 (不平均)
 - **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3` 有意仅单卡
 - **Shape 验证**: `BaseAgent._validate_batch()` 在 `compute_loss`/`predict_action` 入口校验 action ndim/horizon/dim + obs 时间维/模态batch一致性
@@ -304,6 +304,8 @@ experiments/
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
 - **FlowMatchWithConsistency `target_t`**: flow 分支训练=0，consistency 分支训练=dt1(>0)，推理=dt(>0)
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
+- **Uni3D 预训练权重 fail-closed**: `use_pretrained_weights=true` 时，权重路径缺失/下载失败/key 匹配率 <0.5 会**直接抛异常**（不再静默回退随机初始化），除非显式 `allow_random_init=true`；默认 `false`，r3d.yaml 已 pin
+- **`__init__.py` barrel 已清空**: `core`/`rgb`/`pointcloud`/`text`/`plugins` 五个 barrel 为纯文档字符串，不再 eager re-export；消费方走具体模块直接导入，Hydra 走 `_target_` 直接模块路径，新增 Agent 无需在 `__init__.py` 注册
 
 ### 未启用功能 (不要意外激活)
 
