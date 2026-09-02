@@ -22,6 +22,7 @@ from dexmani_policy.common.pytorch_util import (
     compile_models,
     fix_state_dict,
     set_project_root,
+    set_rng_state,
     set_seed,
     worker_init_fn,
 )
@@ -30,6 +31,7 @@ from dexmani_policy.training.build_utils import (
     build_model_and_ema,
     build_scheduler,
     validate_config,
+    validate_grad_accum_divisibility,
 )
 from dexmani_policy.training.lr_scheduler import compute_num_training_steps
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
@@ -61,7 +63,7 @@ def setup_ddp(rank: int, world_size: int):
     )
 
 
-def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
+def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     setup_ddp(rank, world_size)
 
     actual_gpu_id = gpu_ids[rank] if gpu_ids else rank
@@ -99,6 +101,10 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     set_seed(cfg.training.seed + rank)
 
     batches_per_epoch = len(train_loader)
+    validate_grad_accum_divisibility(
+        batches_per_epoch,
+        cfg.training.get("loop", {}).get("gradient_accumulation_steps", 1),
+    )
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
     if rank == 0:
@@ -115,16 +121,17 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
     resume_global_step = 0
     resume_start_epoch = 0
     try:
-        ckpt_path = checkpoint_store.resolve_path("latest")
+        ckpt_path = checkpoint_store.resolve_path(resume_from if resume_from else "latest")
         checkpoint = checkpoint_store.load(ckpt_path)
         model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
         if ema_model is not None and checkpoint.ema_model_state is not None:
             ema_model.load_state_dict(
                 fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True
             )
-        optimizer.load_state_dict(checkpoint.optimizer_state)
         resume_global_step = checkpoint.global_step
-        resume_start_epoch = checkpoint.epoch + 1
+        # Replay semantics (matches single-GPU load_for_resume): sampler position
+        # is not persisted, so resume replays this epoch from its start.
+        resume_start_epoch = checkpoint.epoch
     except FileNotFoundError:
         checkpoint = None
 
@@ -166,12 +173,26 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids):
         batches_per_epoch,
         last_epoch=resume_global_step - 1 if checkpoint is None else -1,
     )
-    # Restore full scheduler state (aligned with single-GPU load_for_resume).
-    # When resuming, load_state_dict overrides the initial state set by
-    # last_epoch, so last_epoch=-1 above is intentional — it avoids a
-    # misleading intermediate state before the checkpoint state is applied.
+    # Restore optimizer then scheduler state (aligned with single-GPU
+    # load_for_resume).  B2 resume order: construct optimizer (above) →
+    # construct scheduler (above) → load optimizer state → load scheduler
+    # state.  load_state_dict overrides the initial state set by last_epoch,
+    # so last_epoch=-1 above is intentional — it avoids a misleading
+    # intermediate state before the checkpoint state is applied.
     if checkpoint is not None:
+        optimizer.load_state_dict(checkpoint.optimizer_state)
         scheduler.load_state_dict(checkpoint.scheduler_state)
+
+        # B1: restore the EMA decay warmup counter so get_decay() resumes from
+        # the saved step, and restore the rank-0 RNG stream for reproducible
+        # data augmentation (non-rank-0 ranks keep their per-rank seed).
+        if ema_updater is not None:
+            if checkpoint.ema_updater_step is not None:
+                ema_updater.optimization_step = int(checkpoint.ema_updater_step)
+            if checkpoint.ema_decay is not None:
+                ema_updater.decay = float(checkpoint.ema_decay)
+        if rank == 0 and checkpoint.rng_state is not None:
+            set_rng_state(checkpoint.rng_state)
 
     trainer = Trainer(
         device=device,
@@ -267,7 +288,8 @@ def main(cfg):
         os.environ["MASTER_PORT"] = str(sock.getsockname()[1])
         sock.close()
 
-    mp.spawn(ddp_worker, args=(num_gpus, cfg, gpu_ids), nprocs=num_gpus, join=True)
+    resume_from = cfg.get("resume_from", None)
+    mp.spawn(ddp_worker, args=(num_gpus, cfg, gpu_ids, resume_from), nprocs=num_gpus, join=True)
 
 
 if __name__ == "__main__":

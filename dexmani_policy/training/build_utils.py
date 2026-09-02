@@ -13,6 +13,7 @@ __all__ = [
     "build_optimizer_and_scheduler",
     "validate_config",
     "compute_num_training_steps",
+    "validate_grad_accum_divisibility",
 ]
 
 # ---------------------------------------------------------------------------
@@ -92,17 +93,28 @@ def build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch=-1):
     )
 
 
-def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
-    """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
-    # Guard: tail batches are silently dropped when gradient_accumulation_steps
-    # does not divide the dataloader.  Warn if this is ever configured.
-    grad_accum = cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
+def validate_grad_accum_divisibility(batches_per_epoch: int, grad_accum: int) -> None:
+    """Warn when gradient accumulation leaves a dropped tail micro-batch.
+
+    The train loop only steps the optimizer on accumulation boundaries
+    (``(micro_step + 1) % grad_accum == 0``); when ``batches_per_epoch`` is not
+    a multiple of ``grad_accum``, the final partial group's gradients are
+    silently discarded at epoch end.  Called from both the single-GPU and DDP
+    entries so the tail policy is explicit and consistent.
+    """
+    grad_accum = max(1, int(grad_accum))
     if grad_accum > 1 and batches_per_epoch % grad_accum != 0:
         print(
             f"[WARNING] gradient_accumulation_steps ({grad_accum}) does not divide "
             f"batches_per_epoch ({batches_per_epoch}). {batches_per_epoch % grad_accum} "
-            f"tail batch(es) will be silently discarded at epoch end."
+            f"tail micro-batch(es) will be dropped at epoch end."
         )
+
+
+def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
+    """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
+    grad_accum = cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
+    validate_grad_accum_divisibility(batches_per_epoch, grad_accum)
     optimizer = model.configure_optimizer(**cfg.optimizer)
     scheduler = build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch)
     return optimizer, scheduler

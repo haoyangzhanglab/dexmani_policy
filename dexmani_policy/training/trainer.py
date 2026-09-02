@@ -17,7 +17,9 @@ from dexmani_policy.common.pytorch_util import (
     compile_models,
     dict_apply,
     fix_state_dict,
+    get_rng_state,
     optimizer_to,
+    set_rng_state,
     to_log_scalars,
 )
 from dexmani_policy.training.workspace import TrainWorkspace
@@ -160,7 +162,14 @@ class Trainer:
                     error_if_nonfinite=True,
                 )
             except RuntimeError:
+                # error_if_nonfinite raises RuntimeError for non-finite grads,
+                # but a bare except also swallows unrelated errors (device
+                # mismatch, internal clip failure).  Only treat it as a
+                # non-finite-gradient case when non-finite params are confirmed;
+                # otherwise re-raise the original error.
                 grad_nan_params = self._find_nonfinite_gradients()
+                if not grad_nan_params:
+                    raise
         else:
             if self.max_grad_norm > 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -198,7 +207,14 @@ class Trainer:
             self.ema_updater.step(self.raw_model)
 
     def load_for_resume(self, tag_or_path: str = "latest"):
-        """Restore model/EMA/optimizer/scheduler from a checkpoint. Returns (global_step, start_epoch)."""
+        """Restore model/EMA/optimizer/scheduler from a checkpoint.
+
+        Returns ``(global_step, start_epoch)``.  ``start_epoch`` is the epoch
+        the checkpoint was saved during — the sampler position is **not**
+        persisted, so the trainer replays that epoch from its start (micro-step
+        0, a clean accumulation boundary).  This avoids silently skipping the
+        remaining micro-batches of the checkpointed epoch.
+        """
         try:
             checkpoint = self.workspace.load_checkpoint(tag_or_path)
         except FileNotFoundError:
@@ -214,6 +230,20 @@ class Trainer:
 
         self.optimizer.load_state_dict(checkpoint.optimizer_state)
         self.scheduler.load_state_dict(checkpoint.scheduler_state)
+
+        # Restore the EMA decay warmup counter so get_decay() resumes from the
+        # saved step instead of restarting from 0 (which would silently reset
+        # the decay schedule after an interrupt).
+        if self.use_ema and self.ema_updater is not None:
+            if checkpoint.ema_updater_step is not None:
+                self.ema_updater.optimization_step = int(checkpoint.ema_updater_step)
+            if checkpoint.ema_decay is not None:
+                self.ema_updater.decay = float(checkpoint.ema_decay)
+
+        # Restore the process RNG stream so data augmentation / shuffle resumes
+        # deterministically alongside the replayed epoch.
+        if checkpoint.rng_state is not None:
+            set_rng_state(checkpoint.rng_state)
 
         # Validate num_training_steps consistency on resume: a mismatch means the
         # dataloader config changed between runs (e.g. batch_size, num_workers),
@@ -233,9 +263,9 @@ class Trainer:
                 UserWarning,
             )
 
-        return checkpoint.global_step, checkpoint.epoch + 1
+        return checkpoint.global_step, checkpoint.epoch
 
-    def _save_nan_debug(self, raw_loss):
+    def _save_nan_debug(self, raw_loss, nan_rank=None):
         if self.workspace is None:
             return
         output_dir = self.workspace.output_dir
@@ -250,6 +280,7 @@ class Trainer:
                 "epoch": int(self.current_epoch),
                 "global_step": int(self.global_step),
                 "nan_loss": float(raw_loss),
+                "nan_rank": nan_rank,
             },
             "weights": {
                 "model": fix_state_dict(self.raw_model.state_dict(), is_current_ddp=False),
@@ -305,22 +336,33 @@ class Trainer:
             raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
         if self.distributed:
-            nan_flag = torch.tensor(
-                [0 if torch.isfinite(raw_loss) else 1],
-                dtype=torch.int,
-                device=self.device,
-            )
-            dist.all_reduce(nan_flag, op=dist.ReduceOp.MAX)
-            is_nan = bool(nan_flag.item())
+            # Gather every rank's detached loss so the debug checkpoint records
+            # the rank that actually produced the non-finite loss (not rank 0's
+            # own, possibly finite, micro-batch).
+            loss_tensor = raw_loss.detach().reshape(1)
+            gathered = [torch.zeros_like(loss_tensor) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered, loss_tensor)
+            gathered_losses = torch.cat(gathered)
+            finite_mask = torch.isfinite(gathered_losses)
+            is_nan = not bool(finite_mask.all().item())
+            nan_rank = int((~finite_mask).nonzero()[0].item()) if is_nan else None
         else:
+            gathered_losses = None
             is_nan = not torch.isfinite(raw_loss)
+            nan_rank = None
 
         if is_nan:
-            debug_path = self._save_nan_debug(raw_loss)
+            nan_loss = (
+                gathered_losses[nan_rank].item()
+                if gathered_losses is not None and nan_rank is not None
+                else float(raw_loss.detach())
+            )
+            debug_path = self._save_nan_debug(nan_loss, nan_rank=nan_rank)
             self.optimizer.zero_grad(set_to_none=True)
+            rank_str = f"rank={nan_rank}, " if nan_rank is not None else ""
             raise RuntimeError(
-                f"Non-finite loss at epoch={self.current_epoch}, step={self.global_step}: "
-                f"raw_loss={raw_loss.item()}. Debug checkpoint saved to {debug_path}"
+                f"Non-finite loss at epoch={self.current_epoch}, step={self.global_step} "
+                f"({rank_str}raw_loss={nan_loss}). Debug checkpoint saved to {debug_path}"
             )
 
         # Scale loss so that the *sum* of micro-batch gradients equals the
@@ -446,6 +488,19 @@ class Trainer:
             scheduler_state=self.scheduler.state_dict(),
             monitor={},
             train_params=build_train_params(self.raw_model, self.num_training_steps),
+            # Persist the full training state machine: EMA decay warmup counter
+            # and the process RNG stream, so resume reproduces the same schedule.
+            ema_updater_step=(
+                self.ema_updater.optimization_step
+                if self.use_ema and self.ema_updater is not None
+                else None
+            ),
+            ema_decay=(
+                self.ema_updater.decay
+                if self.use_ema and self.ema_updater is not None
+                else None
+            ),
+            rng_state=get_rng_state(),
         )
         tag = f"epoch={epoch:04d}-step={global_step:08d}-{tag_suffix}"
         checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
@@ -547,6 +602,7 @@ class Trainer:
 
                 self.optimizer.zero_grad(set_to_none=True)
 
+                epoch_completed = True
                 for micro_step, batch in enumerate(self.train_loader):
                     self.current_epoch = epoch
 
@@ -589,10 +645,15 @@ class Trainer:
                         self._check_milestone(epoch, global_step)
 
                     if global_step >= self.total_train_steps or self._interrupted:
+                        epoch_completed = False
                         break
 
                 self.model.eval()
-                epoch += 1
+                # Only advance the epoch if it actually completed; on interrupt
+                # the in-progress epoch is replayed from its start on resume
+                # (sampler position is not persisted).
+                if epoch_completed:
+                    epoch += 1
 
             if self._interrupted and global_step > 0:
                 print(

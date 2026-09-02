@@ -51,12 +51,17 @@ class TrainWorkspace:
         )
 
         self.json_logger = JsonlLogger(output_dir=self.output_dir)
+        # Derive the W&B id from the experiment identity (the timestamped
+        # output_dir basename) rather than the policy+task+seed triple alone.
+        # A fixed triple collides across re-runs and would re-attach a fresh
+        # run to a stale remote run under resume="allow".
+        wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}"
         self.wandb_logger = WandbLogger(
             output_dir=self.output_dir,
             project=wandb_cfg.project,
             name=wandb_cfg.name,
             group=wandb_cfg.group,
-            id=wandb_cfg.id,
+            id=wandb_id,
             resume=wandb_cfg.resume,
             mode=wandb_cfg.mode,
             video_fps=wandb_cfg.video_fps,

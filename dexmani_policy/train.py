@@ -108,7 +108,10 @@ def main(cfg):
         compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),
         num_training_steps=comp.num_training_steps,
     )
-    trainer.train(resume_tag="latest")
+    # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>` (Hydra
+    # override). Defaults to the in-run "latest" tag when not provided.
+    resume_from = cfg.get("resume_from", None)
+    trainer.train(resume_tag=resume_from if resume_from else "latest")
 
 
 if __name__ == "__main__":

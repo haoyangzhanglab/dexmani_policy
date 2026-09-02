@@ -25,6 +25,11 @@ class TrainCheckpoint:
     scheduler_state: Dict[str, Any]
     monitor: Dict[str, Any]
     train_params: Optional[Dict[str, Any]] = None
+    # Full training state machine (resume). Optional for backward compatibility
+    # with checkpoints saved before these fields existed.
+    ema_updater_step: Optional[int] = None
+    ema_decay: Optional[float] = None
+    rng_state: Optional[Dict[str, Any]] = None
 
 
 def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
@@ -65,6 +70,9 @@ class CheckpointStore:
                 "global_step": int(checkpoint.global_step),
                 "monitor": checkpoint.monitor,
                 "train_params": checkpoint.train_params,
+                "ema_updater_step": checkpoint.ema_updater_step,
+                "ema_decay": checkpoint.ema_decay,
+                "rng_state": checkpoint.rng_state,
             },
             "weights": {
                 "model": checkpoint.model_state,
@@ -92,6 +100,9 @@ class CheckpointStore:
             global_step=int(state["global_step"]),
             monitor=state.get("monitor", {}),
             train_params=state.get("train_params"),
+            ema_updater_step=state.get("ema_updater_step"),
+            ema_decay=state.get("ema_decay"),
+            rng_state=state.get("rng_state"),
             model_state=weights["model"],
             ema_model_state=weights.get("ema_model"),
             optimizer_state=weights["optimizer"],
@@ -114,7 +125,13 @@ class CheckpointStore:
                 raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
         else:
             path = Path(tag_or_path)
-            if not path.is_absolute():
+            if path.is_absolute():
+                # An absolute experiment directory resolves to its resume
+                # checkpoint; an absolute .pt file is used directly.  This is
+                # what `resume_from=<experiment_dir|checkpoint>` relies on.
+                if path.is_dir():
+                    path = path / "checkpoints" / "latest.pt"
+            else:
                 path = self.checkpoint_dir / path
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")

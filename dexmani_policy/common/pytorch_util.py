@@ -95,6 +95,34 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = True
 
 
+def get_rng_state() -> Dict[str, Any]:
+    """Capture the full process RNG state (Python/NumPy/Torch/CUDA).
+
+    Serialized into a checkpoint so a resumed run reproduces the same data
+    augmentation / shuffle stream it would have followed uninterrupted.
+    """
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def set_rng_state(state: Optional[Dict[str, Any]]) -> None:
+    """Restore the RNG state captured by :func:`get_rng_state` (no-op on None)."""
+    if not state:
+        return
+    if state.get("python") is not None:
+        random.setstate(state["python"])
+    if state.get("numpy") is not None:
+        np.random.set_state(state["numpy"])
+    if state.get("torch") is not None:
+        torch.set_rng_state(state["torch"])
+    if state.get("torch_cuda") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
 def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
     # Strip _orig_mod. from keys wherever it appears.
     # torch.compile on a submodule produces "child._orig_mod.param";
