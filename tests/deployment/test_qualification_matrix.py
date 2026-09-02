@@ -17,7 +17,6 @@ class QualificationMatrixTest(unittest.TestCase):
                 "maniflow",
                 "sat",
                 "dp_rgb",
-                "moe_dp_rgb",
                 "multitask_dit",
             },
         )

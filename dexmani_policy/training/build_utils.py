@@ -125,16 +125,6 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
 # ---------------------------------------------------------------------------
 
 
-def _validate_moe_config(cfg):
-    """Check MoE expert count vs top_k consistency."""
-    agent_cfg = cfg.agent
-    if "num_experts" not in agent_cfg:
-        return
-    num_experts = agent_cfg.get("num_experts", 0)
-    top_k = agent_cfg.get("top_k", 0)
-    assert top_k <= num_experts, f"top_k ({top_k}) must be <= num_experts ({num_experts})"
-
-
 def _validate_augmentation_consistency(cfg):
     """Warn/error when PC color augmentation is configured but pc_dim < 6."""
     agent_cfg = cfg.agent
@@ -199,7 +189,6 @@ def validate_config(cfg):
     if cfg.optimizer.get("obs_lr") is not None:
         assert cfg.optimizer.obs_lr >= 0, "optimizer.obs_lr must be non-negative (0 means freeze)"
 
-    _validate_moe_config(cfg)
     _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)
     validate_action_key_consistency(cfg)

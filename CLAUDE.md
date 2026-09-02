@@ -26,7 +26,7 @@ bash scripts/training/train.sh dp3 'task_name=pour' 'training.seed=42'
 bash scripts/training/train_ddp.sh ddp/maniflow 'task_name=pour'
 ```
 
-> 单卡 (9): `action_flow dp dp3 dqrise maniflow moe_dp multitask_dit r3d sat`
+> 单卡 (8): `action_flow dp dp3 dqrise maniflow multitask_dit r3d sat`
 > DDP (7): `ddp/action_flow ddp/dp ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
 > 全部 `total_train_steps: 100000`
 
@@ -101,7 +101,7 @@ Config (Hydra YAML) → Dataset (Zarr→ReplayBuffer→Sampler→__getitem__)
 
 ```
 BaseAgent
-  ├── UNetDiffusionAgent        ← DP, DP3, MoE (UNet1D + Diffusion)
+  ├── UNetDiffusionAgent        ← DP, DP3 (UNet1D + Diffusion)
   ├── DiTXFlowMatchAgent        ← ManiFlow (DiTX + FlowMatchWithConsistency)
   ├── SATAgent                  ← SAT (SATBackbone + SATFlowMatch)
   ├── MultiTaskAgent            ← MultiTask (DiT + Diffusion/FlowMatch)
@@ -126,7 +126,6 @@ BaseAgent
 | **DP** | RGB+state | DINO/CLIP/SigLIP+StateMLP | UNet1D(FiLM) | Diffusion(DDIM 10步) | RGB, channels_last |
 | **ManiFlow** | PC+state | PointNetDense+StateMLP | DiTX(cross-attn) | FlowMatch+Consistency | Token条件, EMA教师, wd=1e-3 |
 | **ActionFlow** | PC+state | PointNeXT 192-patch local tokenizer → GeoFormer 4L×576(3D RoPE) → 385×384 memory | ActionFlowDiT 8L×768(Shared AdaRMS) | SimpleRectifiedFlow | cond 是 **dict** {memory,state}; 12Q/12KV full CA, SwiGLU-1536, compact 384 conditioner, CA KV cache; ~75.7M |
-| **MoE** | RGB+state | R3M+StateMLP+MoE | UNet1D(FiLM) | Diffusion(DDIM 100步) | 16专家top-2, **无bfloat16/compile** |
 | **SAT** | PC+state | PointNeXT+StateMLP | SATBackbone(EJC+MMAttn) | SATFlowMatch | (B,Da,T), shuffle, compile=default |
 | **R3D** | PC+state | Uni3D+StateMLP | OneWayTransformer | Diffusion(DDIM 10步) | 级联mask, 分组loss |
 | **DQRISE** | PC+state | iDP3+StateMLP | UNet1D(tcp+1维) | Diffusion(epsilon,20步) | VQ码本, lr=3e-4, warmup=2000 |
@@ -145,7 +144,7 @@ BaseAgent
 
 | Decoder | 预测目标 | 推理 | 谁用 |
 |---------|---------|------|------|
-| `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
+| `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
 | `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=3 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
@@ -156,16 +155,16 @@ BaseAgent
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | action_flow | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | sat |
-|------|-------------|-----|----------|--------|---------------|-----|---------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
-| backbone | ActionFlowDiT 8L×768 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
-| train/infer steps | -/2 NFE | 100/10 | -/4 | 100/100 | 100/10 | 100/10 | 100/20 | -/10 |
-| prediction_type | velocity | sample | velocity | sample | sample | sample | epsilon | velocity |
-| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
-| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
-| val_ratio | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 参数 | action_flow | dp3 | maniflow | multitask_dit | r3d | dqrise | sat |
+|------|-------------|-----|----------|---------------|-----|---------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
+| backbone | ActionFlowDiT 8L×768 | UNet[256,512,1024] | DiTX 12L×768 | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
+| train/infer steps | -/2 NFE | 100/10 | -/4 | 100/10 | 100/10 | 100/20 | -/10 |
+| prediction_type | velocity | sample | velocity | sample | sample | epsilon | velocity |
+| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
+| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
+| val_ratio | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 
 > dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
@@ -183,7 +182,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 
 **NaN 两层防护**: L1 (backward前, loss NaN → 保存 debug ckpt → raise) / L2 (optimizer.step前, 梯度 NaN → zero_grad → raise)。诊断用 `dexmani-training-debug` skill。
 
-**Checkpoint**: 20/40/60/80/100% 里程碑; `latest.pt` symlink; 自动 resume。**DDP**: ckpt 加载在 compile + DDP 包装**前**; timeout=30min; `dp3`/`moe_dp` 仅单卡。**Shape 验证**: `_validate_batch()` 在 `compute_loss`/`predict_action` 入口。
+**Checkpoint**: 20/40/60/80/100% 里程碑; `latest.pt` symlink; 自动 resume。**DDP**: ckpt 加载在 compile + DDP 包装**前**; timeout=30min; `dp3` 仅单卡。**Shape 验证**: `_validate_batch()` 在 `compute_loss`/`predict_action` 入口。
 
 > 详细机制 → [README](README.md#训练机制)
 
@@ -193,8 +192,6 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 
 - **Normalizer 全量拟合**: 用全部 replay buffer (含验证集)。生态惯例 (ManiFlow/R3D/SAT/RoboTwin 均如此)。`limits` 模式下 val 不影响 min/max
 - **`tcp_dim` 命名**: joint模式=7(臂关节), ee模式=9(TCP位姿) — 历史命名，勿据此推断语义
-- **MoE forward 返回 `dict`** (含 `aux_loss`): `BaseAgent.compute_loss()` 统一处理 dict/Tensor
-- **MoE 无 bfloat16/compile**: gate softmax 需 float32; CUDA Graphs + MoE routing 内存开销大。**不要重新启用**
 - **DQRISE 直接继承 `BaseAgent`**: `diffusion_action_dim = tcp_dim+1` ≠ `action_dim`，无法复用 UNetDiffusionAgent。**不要重构**
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
@@ -207,7 +204,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 - **ActionFlow KV cache 是普通 python 属性**: 不能 `register_buffer`，否则进 `state_dict()`，eval 时 `strict=True` 加载会因训练/评测 batch 不同而失败 (smoke test 的 save→load 同一模型，**测不出来**)
 - **ActionFlow batch 64 × grad-accum 2**: 模型在 24GB 卡上 batch 128 放不下 (实测 bf16 峰值 21.7 GiB / fp32 OOM)。等效 batch 仍是 128，`total_train_steps` 只计 optimizer step，配方不变
 - **PointNeXT `include_global_token`**: 默认 True 保持 sat 行为（maniflow 已改用 pointnet_dense）；ActionFlow 传 False，**在构造期**就不建全局分支 (DDP `find_unused_parameters=False` 下建而不用会直接崩)
-- **DDP 覆盖不全**: `dp3` 和 `moe_dp` 有意仅单卡
+- **DDP 覆盖不全**: `dp3` 有意仅单卡
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
 
 ### 未启用功能 (不要意外激活)

@@ -97,7 +97,6 @@
     "deferred": [
       "dp_rgb",
       "maniflow",
-      "moe_dp_rgb",
       "multitask_dit",
       "sat"
     ],

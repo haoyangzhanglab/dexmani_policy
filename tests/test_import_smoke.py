@@ -16,7 +16,6 @@ AGENT_MODULES = [
     "dexmani_policy.agents.core.dp3",
     "dexmani_policy.agents.core.dqrise",
     "dexmani_policy.agents.core.maniflow",
-    "dexmani_policy.agents.core.moe",
     "dexmani_policy.agents.core.multi_task",
     "dexmani_policy.agents.core.r3d",
     "dexmani_policy.agents.core.sat",
@@ -51,7 +50,7 @@ class TestPerPolicyImportSmoke(unittest.TestCase):
             ("dexmani_policy.agents.obs_encoder.rgb", ["R3M", "ResNet"]),
             ("dexmani_policy.agents.obs_encoder.pointcloud", ["PointNet", "PointNextEncoder"]),
             ("dexmani_policy.agents.obs_encoder.text", ["CLIPTextEncoder", "T5TextEncoder"]),
-            ("dexmani_policy.agents.obs_encoder.plugins", ["MoE", "TokenCompressor"]),
+            ("dexmani_policy.agents.obs_encoder.plugins", ["TokenCompressor"]),
         ]
         for barrel, names in cases:
             mod = importlib.import_module(barrel)

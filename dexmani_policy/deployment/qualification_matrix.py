@@ -64,11 +64,6 @@ QUALIFICATION_MATRIX: Final[dict[str, dict[str, object]]] = {
         "evidence": [],
         "condition": "RGB preprocessing deployment contract is not defined",
     },
-    "moe_dp_rgb": {
-        "status": "deferred",
-        "evidence": [],
-        "condition": "RGB preprocessing and external initialization are deferred",
-    },
     "multitask_dit": {
         "status": "deferred",
         "evidence": [],

@@ -37,7 +37,7 @@ bash scripts/training/train.sh dp3 'task_name=pour' 'training.seed=42'
 bash scripts/training/train.sh dp3 'task_name=pour' 'training.loop.total_train_steps=500'
 ```
 
-> 单卡策略: `action_flow dp dp3 dqrise maniflow moe_dp multitask_dit r3d sat`
+> 单卡策略: `action_flow dp dp3 dqrise maniflow multitask_dit r3d sat`
 > DDP 策略: `ddp/action_flow ddp/dp ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
 
 ### 评测
@@ -81,7 +81,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **DP3** | PC(1024,6) + Joint | PointNet + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
 | **ManiFlow** | PC(1024,6) + Joint | PointNetDense + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
 | **ActionFlow** | PC(1024,6) + Joint | PointNeXT 192-patch local tokenizer → GeoFormer 4L×576(3D RoPE) → 385×384 memory | ActionFlowDiT 8L×768 (12Q/12KV full CA, SwiGLU-1536, shared AdaRMS, KV cache) | SimpleRectifiedFlow | `action_flow.yaml` |
-| **MoE** | RGB + Joint | R3M + MoE(16×top-2) + StateMLP | UNet1D (FiLM) | Diffusion DDIM (100步) | `moe_dp.yaml` |
 | **MultiTask** | RGB + Joint + Text | ResNet(resnet18) + CLIP Text + StateMLP | DiT (AdaLN) | Diffusion / FlowMatch | `multitask_dit.yaml` |
 | **R3D** | PC(1024,6) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
 | **DQ-RISE** | PC(1024,6) + Joint | iDP3 + StateMLP + Codebook | UNet1D (缩减) | Diffusion ε-pred | `dqrise.yaml` |
@@ -94,7 +93,6 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 | **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
 | **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
 | **ManiFlow vs ActionFlow** | FlowMatch+Consistency(EMA教师) vs SimpleRectifiedFlow(NoiseShift α=3+mix, KV cache, 2步推理) |
-| **DP3 vs MoE** | MoE 在 encoder 中引入 16-expert 稀疏路由 (top-2)，增容量不增推理 FLOPs |
 | **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
 | **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
 | **DP3 vs DQ-RISE** | DQ-RISE 通过 VQ-VAE 将手势离散化为 16 种手势 |
@@ -124,7 +122,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 | Decoder | 预测目标 | 推理 | 使用策略 |
 |---------|---------|------|---------|
-| `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, MoE, R3D, DQRISE |
+| `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, R3D, DQRISE |
 | `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
 | `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
 | `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=3 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
@@ -161,16 +159,16 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ### 关键参数 (跨策略差异)
 
-| 参数 | action_flow | dp3 | maniflow | moe_dp | multitask_dit | r3d | dqrise | sat |
-|------|-------------|-----|----------|--------|---------------|-----|---------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
-| backbone | ActionFlowDiT 8L×768 | UNet[256,512,1024] | DiTX 12L×768 | UNet[256,512,1024] | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
-| train/infer steps | -/2 NFE | 100/10 | -/4 | 100/100 | 100/10 | 100/10 | 100/20 | -/10 |
-| prediction_type | velocity | sample | velocity | sample | sample | sample | epsilon | velocity |
-| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
-| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | **✗ / ✗** | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
-| val_ratio | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 参数 | action_flow | dp3 | maniflow | multitask_dit | r3d | dqrise | sat |
+|------|-------------|-----|----------|---------------|-----|---------|-----|
+| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
+| backbone | ActionFlowDiT 8L×768 | UNet[256,512,1024] | DiTX 12L×768 | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
+| train/infer steps | -/2 NFE | 100/10 | -/4 | 100/10 | 100/10 | 100/20 | -/10 |
+| prediction_type | velocity | sample | velocity | sample | sample | epsilon | velocity |
+| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
+| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
+| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
+| val_ratio | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 
 > dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
@@ -255,7 +253,7 @@ Agent.compute_loss():                          Agent.predict_action():
 - **梯度累积**: `raw_loss / gradient_accumulation_steps` → backward; DDP 非边界 `model.no_sync()`, 仅边界 all-reduce
 - **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; Resume 自动从 latest 恢复
 - **EMA**: 逆 gamma 衰减; BatchNorm affine 直接复制 (不平均)
-- **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3` 和 `moe_dp` 有意仅单卡
+- **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3` 有意仅单卡
 - **Shape 验证**: `BaseAgent._validate_batch()` 在 `compute_loss`/`predict_action` 入口校验 action ndim/horizon/dim + obs 时间维/模态batch一致性
 
 ---
@@ -301,8 +299,6 @@ experiments/
 
 - **Normalizer 全量拟合**: 用全部 replay buffer (含验证集)。生态惯例 (ManiFlow/R3D/SAT/RoboTwin 均如此)。`limits` 模式下 val 不影响 min/max
 - **`tcp_dim` 命名**: joint模式=7(臂关节), ee模式=9(TCP位姿) — 历史命名，勿据此推断语义
-- **MoE forward 返回 `dict`** (含 `aux_loss`): `BaseAgent.compute_loss()` 统一处理 dict/Tensor
-- **MoE 无 bfloat16/compile**: gate softmax 需 float32; CUDA Graphs + MoE routing 内存开销大
 - **DQRISE 直接继承 `BaseAgent`**: `diffusion_action_dim = tcp_dim+1` ≠ `action_dim`，无法复用 UNetDiffusionAgent
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
