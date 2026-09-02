@@ -17,6 +17,8 @@
 5. 完整训练后，仅对固定 `40pct` checkpoint 做受控 NFE 校准；
 6. 不运行 checkpoint tournament、solver sweep、multi-seed training 或 architecture ablation。
 
+> 范围：本轮仅用单卡 `train.sh action_flow` 训练与评测；`ddp/action_flow` 只由 config contract test（`tests/test_action_flow_config.py`）覆盖其配置组合，不纳入本轮训练/评测。
+
 ### 当前 canonical recipe 必须保持
 
 ```text
@@ -88,13 +90,15 @@ midpoint => NFE 必须为偶数
 
 不要使用 `int(2.7) -> 2` 这种静默截断；非整数直接报错。
 
+> 现状：`solver ∈ {euler,midpoint}` 已在 init 校验（`action_flow_flowmatch.py:52`），midpoint 偶数 NFE 已在 sampling 时校验（`:122`）。本轮需补齐的是 `noise_shift_alpha > 0`、`0 <= noise_shift_ratio <= 1`、以及 NFE 正整数校验（`_resolve_nfe` 目前 `int(nfe)` 会静默截断 `2.7 -> 2`，`:65`），并把 midpoint 偶数校验提前到 init/override。
+
 目标是避免 100k 训练完成后才在 evaluation 阶段发现非法 solver/NFE 配置。
 
 ---
 
 ### 2.3 P1 — KV cache exception-safe cleanup
 
-当前 inference 已使用 static geometry KV cache。把 cache 生命周期收紧为：
+当前 `predict_action` 已用 `try/finally` 包裹 sampling 且 `finally` 中调用 `clear_kv_cache()`（`action_flow_flowmatch.py:169-175`），正常路径的异常安全已满足。唯一缺口是 `setup_kv_cache(memory)` 位于 try 块外（`:168`）；把它移入 try 内即可（可选、非必需——`setup_kv_cache` 是单条原子赋值 `action_flow_dit.py:177`，不存在 partial cache 状态）：
 
 ```python
 try:
@@ -103,8 +107,6 @@ try:
 finally:
     model.clear_kv_cache()
 ```
-
-即使 `setup_kv_cache` 或 sampling 中途失败，也不能让 model 保留 partial/stale cache。
 
 **正常路径输出必须完全不变。**
 
@@ -139,7 +141,7 @@ ActionDiT   ~= 58.81M
 total       ~= 75.66M
 ```
 
-`dexmani_policy/smoke_test.py` 中旧的 95M–101M 注释/预算已过期。
+`dexmani_policy/smoke_test.py` 中旧的 95M–101M 参数注释已过期（该处仅 print 参数量、无 assert gate，见 `smoke_test.py:126`）；本轮把注释更新为 PR-11 数值，并**新增**宽松 gate（当前不存在，是新增而非「更新预算」）。
 
 建议更新并加入宽松 regression gate，例如：
 
@@ -160,6 +162,10 @@ total       ~= 75.66M
 本轮只修注释/docstring，统一成 **normalized-workspace / coordinate-wavelength 3D RoPE**。
 
 **不要**再次启用 raw metric xyz，也不要改 radius / wavelength。
+
+涉及文件：
+
+- `dexmani_policy/agents/obs_encoder/pointcloud/geoformer.py`（位于 obs_encoder/pointcloud，而非 action_decoders）
 
 ---
 
@@ -237,7 +243,7 @@ bash scripts/training/train.sh action_flow \
   'training.loop.total_train_steps=600'
 ```
 
-选择 600 step 的原因：跨过历史约 step 326 的 bf16/compile 非有限梯度故障点，并跨过 warmup=500。
+选择 600 step 的原因：跨过 warmup=500，并留出数值余量。历史上约 step 326 曾在 `reduce-overhead`(CUDA graphs) 编译模式下出现 bf16 非有限梯度；当前 config 已用 `compile_mode: default` 规避（默认模式数值稳定），该故障点不应再复现。
 
 注意：600-step run 的 cosine schedule 被压缩，**不得把其 loss 或性能当作 100k 的缩短实验**。
 
@@ -247,12 +253,14 @@ Preflight 只检查：
 loss finite
 grad finite
 grad_norm / clip_ratio 合理
-compile 无异常
+compile 无异常                  （stdout 观察；日志不记录）
 checkpoint 保存正常
-无重复 recompile / 明显资源泄漏
+无重复 recompile / 明显资源泄漏   （stdout + nvidia-smi 观察；无日志/checkpoint 记录）
 ```
 
 不运行 simulation、video、NFE sweep。
+
+> 注：训练日志只记录 `grad_norm` / `clip_ratio`（`trainer.py`），「compile 无异常」「资源泄漏」只能从终端 stdout 与 `nvidia-smi` 目测，无自动化门禁。
 
 ---
 
@@ -299,7 +307,7 @@ weights    = EMA
 solver     = midpoint
 task       = pour
 same eval seed subset
-video      = off
+video      = off（sweep 路径例外：仍会写视频，见 §8.2 注 1）
 ```
 
 不得同时搜索 checkpoint 或 solver。
@@ -329,11 +337,17 @@ python dexmani_policy/eval_best_ckpt.py \
 
 不要使用 `eval_action_flow_solvers.sh`，因为它包含 Euler-1 等额外 solver candidate，本轮只校准 midpoint NFE。
 
+> 注 1（video）：`--no-videos` 只对 single-value 评测生效；sweep 路径（`denoise_timesteps_list` 长度 > 1）会无条件写 timestamped 视频目录（`eval_best_ckpt.py:485-488`），因此上述 sweep 仍会生成 ~25 seeds × 4 NFE 的视频。若要避免，改用 `--denoise-steps` 逐值跑 single-value（每次单独加载 checkpoint），或接受额外视频输出。
+
+> 注 2（NFE 判据）：本轮 midpoint-only 校准不含 Euler-1，因此无法计算 CLAUDE.md NFE 判据中的效率腿 `R2 = (SR2−SR1)/(SR10−SR1)`（SR1 需 Euler-1）；本指南用「SR plateau 最小 NFE」规则替代效率判定。
+
 ### 8.3 Screening 判定规则
 
 不要只看 raw SR，要读取 `per_seed_details` 做 paired seed comparison。
 
 设 `S_N` 为 25 seeds 中 NFE=N 的成功数。
+
+Sweep 结果落于 `exp_dir/eval_dexsim/<timestamp>/denoise_timesteps<N>/result_details.json`（每 NFE 一份，`per_seed_details` 字段为 `{seed, success, steps, total_steps}`）；`eval_summary.json` 只有聚合 SR/avg_steps/n_total，无 per-seed 数据。paired net wins 定义：`#{seed: 候选 NFE 成功且 NFE2 失败} − #{seed: NFE2 成功且候选 NFE 失败}`。
 
 1. 若 `max(S_4,S_8,S_10) - S_2 <= 1`，且 paired comparison 没有明显单向改善：
    - `N* = 2`。
@@ -381,14 +395,23 @@ NFE=N*
 
 各 100 个相同 seeds；不要把 2/4/8/10 全部扩大到 100 episodes。
 
-可以分别调用 `eval_best_ckpt.py`，或仅对 `[2,N*]` 使用同一 multi-value sweep。
+可以分别调用 `eval_best_ckpt.py`，或仅对 `[2,N*]` 使用同一 multi-value sweep：
+
+```bash
+python dexmani_policy/eval_best_ckpt.py \
+  --policy-name=action_flow --task-name=pour --exp-name=<EXP_NAME> \
+  --ckpt-tag=40pct --episodes=100 --no-videos \
+  'eval.denoise_timesteps_list=[2,N*]'
+```
+
+（`--episodes=100` 是 100-seed 确认的关键覆盖项；sweep 仍会写视频，见 §8.2 注 1。）
 
 ### 最终 default NFE 判定
 
 只有当：
 
 ```text
-SR(N*) - SR(2) >= 5 percentage points
+SR(N*) - SR(2) >= 5 percentage points   (== 0.05 absolute，对 0-1 成功率等价于 5%)
 ```
 
 且 paired seeds 明显单向改善时，才把 default quality operating point 改成 `N*`。
@@ -460,13 +483,13 @@ architecture/config grid search
 - 5 个 milestones 正常保存；
 - strict EMA checkpoint restore 正常；
 - `40pct` NFE screening/最终评测完成；
-- `result_details.json` 中核对 checkpoint、`n_total`、`denoise_steps` 与 per-seed details。
+- `result_details.json` 中核对 `ckpt_tag`/`ckpt_path`、`n_total`、`denoise_steps` 与 per-seed details。
 
 ### 12.2 40pct 性能 gate
 
 历史 anchor：`68/100`（NFE2）。
 
-单 train-seed 下采用宽松 gate：
+单 train-seed 下采用宽松 gate（此处 `SR` 指**最终选定的 default NFE** 在 40pct 的 100-seed SR——`N*=2` 时为 NFE2，否则为 N*）：
 
 ```text
 Green : SR >= 0.65
@@ -475,6 +498,8 @@ Red   : SR < 0.60
 ```
 
 `SR > 0.70` 只能记为 positive signal，不得凭单 train seed 宣称 architecture improvement。
+
+Yellow（0.60–0.65）不自动停止也不自动通过：记录为边缘结果，人工 review 后决定是否进入后续阶段（§14 的 stop 条件只覆盖 Red `< 0.60`）。
 
 ---
 

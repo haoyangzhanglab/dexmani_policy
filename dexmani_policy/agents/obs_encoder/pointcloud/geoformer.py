@@ -1,7 +1,7 @@
 """GeoFormer: a two-frame 3D geometric self-attention encoder.
 
 Relational reasoning over point-cloud patch tokens conditioned on their 3D
-coordinates via a metric-wavelength 3D RoPE. Fully self-contained (torch only);
+coordinates via a coordinate-wavelength 3D RoPE over normalized-workspace units. Fully self-contained (torch only);
 knows nothing about joint_state, actions, flow timesteps, NFE, or robot FK.
 
 Public contract:
@@ -84,17 +84,20 @@ class RMSNorm(nn.Module):
 
 
 class RotaryPositionEmbedding3D(nn.Module):
-    """Metric-wavelength 3D rotary embedding over (x, y, z) patch centers.
+    """Coordinate-wavelength 3D rotary embedding over (x, y, z) patch centers.
 
     head_dim is split into three axis blocks of head_dim // 3, each containing
     head_dim // 6 even/odd frequency pairs. Rotation angle for axis a is
-    ``2 * pi * xyz[..., a] / wavelength``, so the same physical distance maps to
-    the same rotary phase across episodes (no per-cloud normalization).
+    ``2 * pi * xyz[..., a] / wavelength``. The patch centers are consumed in
+    normalized-workspace units (dataset-normalized xyz, clamped to [-1, 1] before
+    the encoder), so a given normalized distance maps to the same rotary phase;
+    wavelengths are specified in those same [-1, 1] units.
 
     Design note: base=10000 sinusoidal frequencies give wavelengths ~1..10000 in
     normalized units, far too coarse to resolve 0.04-0.08 patch radii, which
-    would leave RoPE effectively inert. Hence the metric wavelength range
-    [0.02, 2.0], exposed as kwargs so it is tunable without a code change.
+    would leave RoPE effectively inert. Hence the coordinate wavelength range
+    [0.02, 2.0] (in normalized [-1, 1] units), exposed as kwargs so it is
+    tunable without a code change.
     """
 
     def __init__(
@@ -108,7 +111,7 @@ class RotaryPositionEmbedding3D(nn.Module):
         self.head_dim = head_dim
         self.half_axis = head_dim // 6
 
-        # Log-spaced wavelengths; inv_freq = 2*pi / wavelength (radians per unit distance).
+        # Log-spaced wavelengths; inv_freq = 2*pi / wavelength (radians per unit normalized coordinate).
         wavelengths = torch.logspace(
             math.log10(min_wavelength), math.log10(max_wavelength), self.half_axis
         )
