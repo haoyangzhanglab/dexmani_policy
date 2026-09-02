@@ -39,6 +39,9 @@ class MultiTaskSimRunner:
 
         self.is_multi_task = True
         self.env_video_fps = env_video_fps
+        # Shared seed pool propagated to every child runner (set by the eval
+        # entry points before ``run``). None → each child uses its own default.
+        self.eval_seeds: Optional[List[int]] = None
         self.runners: Dict[str, TaskTextSimRunner] = {}
 
         for cfg in task_configs:
@@ -70,7 +73,30 @@ class MultiTaskSimRunner:
                 temporal_ensemble_coeff=temporal_ensemble_coeff,
             )
 
-    def print_summary(self, per_task, avg_success_rate, avg_steps, rates, failed_tasks):
+    def get_seed_list(self) -> List[int]:
+        """Return the shared seed pool applied to every child task runner.
+
+        The multi-task evaluation unit is ``(task, seed)``: one seed pool is
+        propagated to every task, so a single seed list is the correct
+        interface for the eval entry points (``_select_eval_seeds`` /
+        ``select_best_ckpt``).  Delegates to the first child runner (seed file
+        / default pool) when no explicit pool has been set.
+        """
+        if self.eval_seeds is not None:
+            return list(self.eval_seeds)
+        return next(iter(self.runners.values())).get_seed_list()
+
+    def print_summary(
+        self,
+        per_task,
+        macro_success_rate,
+        micro_success_rate,
+        micro_n_success,
+        micro_n_valid,
+        avg_steps,
+        rates,
+        failed_tasks,
+    ):
         cprint("\n" + "=" * 90, "yellow")
         cprint("[Multi-Task Summary]", "yellow")
         for task_name, result in per_task.items():
@@ -88,11 +114,16 @@ class MultiTaskSimRunner:
         if failed_tasks:
             cprint(f"  Failed tasks: {failed_tasks}", "red")
 
-        total_sr_str = format_success_rate(avg_success_rate)
-        success_count = len(rates)
-        total_count = len(self.runners)
+        macro_str = format_success_rate(macro_success_rate)
+        micro_str = format_success_rate(micro_success_rate)
+        n_tasks = len(self.runners)
         cprint(
-            f"  Overall ({success_count}/{total_count} tasks): success_rate={total_sr_str}, avg_steps (success only)={avg_steps}",
+            f"  Macro ({len(rates)}/{n_tasks} tasks): success_rate={macro_str}",
+            "yellow",
+        )
+        cprint(
+            f"  Micro ({micro_n_success}/{micro_n_valid} episodes): "
+            f"success_rate={micro_str}, avg_steps (success only)={avg_steps}",
             "yellow",
         )
         cprint(f"{'=' * 90}", "yellow")
@@ -164,13 +195,28 @@ class MultiTaskSimRunner:
                     "error_category": _classify_eval_exception(e),
                 }
 
+        # ── Aggregate: macro (mean per-task SR) + micro (across all (task, seed)) ──
+        # A failed task aborts below, so every task here has a non-None SR; a
+        # task that failed is never silently dropped from the macro average.
         rates = [r["success_rate"] for r in per_task.values() if r["success_rate"] is not None]
         steps = [r["avg_steps"] for r in per_task.values() if r["avg_steps"] is not None]
 
-        avg_success_rate = sum(rates) / len(rates) if rates else None
+        macro_success_rate = sum(rates) / len(rates) if rates else None
         avg_steps = int(round(sum(steps) / len(steps))) if steps else None
 
-        self.print_summary(per_task, avg_success_rate, avg_steps, rates, failed_tasks)
+        # Micro: denominator is the actual number of completed (task, seed)
+        # episode units — not the per-task seed count (which would undercount
+        # and could yield a success rate > 1).
+        micro_n_success = sum(
+            1 for r in per_task.values() for d in r.get("episode_details", []) if d.get("success")
+        )
+        micro_n_valid = sum(len(r.get("episode_details", [])) for r in per_task.values())
+        micro_success_rate = (micro_n_success / micro_n_valid) if micro_n_valid > 0 else None
+
+        self.print_summary(
+            per_task, macro_success_rate, micro_success_rate,
+            micro_n_success, micro_n_valid, avg_steps, rates, failed_tasks,
+        )
 
         if failed_tasks:
             raise RuntimeError(
@@ -179,10 +225,14 @@ class MultiTaskSimRunner:
             )
 
         results = {
-            "success_rate": avg_success_rate,
+            "success_rate": macro_success_rate,   # macro (mean per-task); see micro_success_rate
+            "macro_success_rate": macro_success_rate,
+            "micro_success_rate": micro_success_rate,
             "avg_steps": avg_steps,
             "videos": all_videos,
             "per_task": per_task,
             "failed_tasks": failed_tasks,
+            "n_success": micro_n_success,
+            "n_valid_episodes": micro_n_valid,
         }
         return results

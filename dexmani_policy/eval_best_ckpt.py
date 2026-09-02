@@ -51,6 +51,7 @@ from dexmani_policy.training.eval_utils import (
     _get_eval_param,
     build_eval_components,
     collect_episode_details,
+    compute_eval_stats,
     load_ckpt_for_inference,
     resolve_checkpoint_path,
     resolve_eval_seed,
@@ -142,21 +143,28 @@ def _run_one_timestep(
     *exp_dir*/eval_dexsim (single-value) or a ``denoise_timesteps<N>/``
     subdirectory of *video_save_dir* (sweep).
 
-    Returns a dict with keys: ``success_rate``, ``avg_steps``, ``n_success``,
-    ``n_total``, ``per_seed_details``.
+    Returns a dict with keys: ``success_rate`` (micro), ``macro_success_rate``,
+    ``avg_steps``, ``n_success``, ``n_total``, ``per_seed_details``.
     """
-    n_total = len(eval_seeds)
+    n_seeds = len(eval_seeds)
     env_runner.eval_seeds = eval_seeds
     result = env_runner.run(
         agent,
         denoise_timesteps=denoise_steps,
-        eval_episodes=n_total,
+        eval_episodes=n_seeds,
         video_save_dir=video_save_dir,
     )
 
     per_seed_details: list[dict] = collect_episode_details(result)
-    n_success = sum(1 for d in per_seed_details if d.get("success"))
-    success_rate = n_success / n_total if n_total > 0 else 0.0
+    stats = compute_eval_stats(result)
+    # Micro denominator = actual completed (task, seed) episode units; for a
+    # single task this equals n_seeds, so the single-task path is unchanged.
+    n_success = stats["n_success"]
+    n_total = stats["n_valid_episodes"]
+    success_rate = stats["micro_success_rate"]
+    macro_success_rate = (
+        stats["macro_success_rate"] if stats["macro_success_rate"] is not None else success_rate
+    )
 
     task_done_steps = [
         d["steps"] for d in per_seed_details if d.get("success") and d.get("steps") is not None
@@ -180,8 +188,10 @@ def _run_one_timestep(
                 "ckpt_tag": ckpt_tag_or_path,
                 "ckpt_path": str(ckpt_path),
                 "success_rate": success_rate,
+                "macro_success_rate": macro_success_rate,
                 "n_success": n_success,
                 "n_total": n_total,
+                "n_tasks": stats["n_tasks"],
                 "avg_steps": avg_steps,
                 "eval_seed": eval_seed,
                 "denoise_steps": denoise_steps,
@@ -194,6 +204,7 @@ def _run_one_timestep(
 
     return {
         "success_rate": success_rate,
+        "macro_success_rate": macro_success_rate,
         "avg_steps": avg_steps,
         "n_success": n_success,
         "n_total": n_total,
@@ -248,9 +259,14 @@ def evaluate_checkpoint_robotwin(
     avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"
     cprint(f"\n{'=' * 50}", "cyan")
     cprint(f"  Checkpoint   : {ckpt_label}", "cyan")
-    cprint(f"  Seeds        : {info['n_total']}", "cyan")
+    cprint(f"  Episodes     : {info['n_total']}", "cyan")
     cprint(f"  Denoise steps: {denoise_steps}", "cyan")
     cprint(f"  Success rate : {info['n_success']}/{info['n_total']} = {info['success_rate']:.1%}", "green")
+    if (
+        info["macro_success_rate"] is not None
+        and abs(info["macro_success_rate"] - info["success_rate"]) > 1e-9
+    ):
+        cprint(f"  Macro SR     : {info['macro_success_rate']:.1%}", "cyan")
     cprint(f"  Avg steps    : {avg_str}", "cyan")
     cprint(f"{'=' * 50}\n", "cyan")
 
@@ -297,7 +313,6 @@ def evaluate_checkpoint_sweep(
 
     # ── 2. Same seeds for all denoise values (fair comparison) ──────────
     eval_seeds = _select_eval_seeds(env_runner, eval_seed, episodes)
-    n_total = len(eval_seeds)
 
     # ── 3. Sweep over denoise timesteps ─────────────────────────────────
     sweep_results: list[dict] = []
@@ -314,7 +329,7 @@ def evaluate_checkpoint_sweep(
 
         avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"
         cprint(
-            f"  Success: {info['n_success']}/{n_total} = {info['success_rate']:.1%}  "
+            f"  Success: {info['n_success']}/{info['n_total']} = {info['success_rate']:.1%}  "
             f"Avg steps: {avg_str}",
             "green" if info["success_rate"] >= 0.5 else "red",
         )

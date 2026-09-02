@@ -258,6 +258,61 @@ def collect_episode_details(result: dict) -> list[dict]:
     return []
 
 
+def compute_eval_stats(result: dict) -> dict:
+    """Compute success-rate statistics from a runner result dict.
+
+    Handles single-task (top-level ``episode_details``) and multi-task
+    (``per_task`` nested) results uniformly.  The evaluation unit is
+    ``(task, seed)``: ``micro`` averages over every such unit, ``macro``
+    averages over tasks (equal to micro when there is a single task).
+
+    Returns
+    -------
+    dict with keys:
+        micro_success_rate (float): ``n_success / n_valid_episodes`` (0.0 if none)
+        macro_success_rate (float | None): mean per-task SR (None for single-task)
+        n_success (int): successes across all (task, seed) units
+        n_valid_episodes (int): episode units that completed (micro denominator)
+        n_tasks (int): 1 for single-task, ``len(per_task)`` for multi-task
+        per_task (dict | None): ``{task_name: {success_rate, n_success, n_valid}}``
+            (multi-task only)
+    """
+    per_seed_details = collect_episode_details(result)
+    n_success = sum(1 for d in per_seed_details if d.get("success"))
+    n_valid = len(per_seed_details)
+    micro = (n_success / n_valid) if n_valid > 0 else 0.0
+
+    per_task = result.get("per_task", {})
+    per_task_stats: dict | None = None
+    macro: float | None = None
+    if per_task:
+        task_srs: list[float] = []
+        per_task_stats = {}
+        for task_name, task_result in per_task.items():
+            t_details = task_result.get("episode_details", [])
+            t_success = sum(1 for d in t_details if d.get("success"))
+            t_valid = len(t_details)
+            t_sr = (t_success / t_valid) if t_valid > 0 else None
+            per_task_stats[task_name] = {
+                "success_rate": t_sr,
+                "n_success": t_success,
+                "n_valid": t_valid,
+            }
+            if t_sr is not None:
+                task_srs.append(t_sr)
+        if task_srs:
+            macro = sum(task_srs) / len(task_srs)
+
+    return {
+        "micro_success_rate": micro,
+        "macro_success_rate": macro,
+        "n_success": n_success,
+        "n_valid_episodes": n_valid,
+        "n_tasks": len(per_task) if per_task else 1,
+        "per_task": per_task_stats,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 7. Eval config field access
 # ---------------------------------------------------------------------------
