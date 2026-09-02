@@ -123,7 +123,7 @@ def smoke_test(config_name: str):
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
     # ── ActionFlow: parameter budget + geometry-memory contract ───────
-    # Perception 15M–19M, ActionDiT 79M–82M, total 95M–101M.
+    # Perception ≈ 16.85M, ActionDiT ≈ 58.81M, total ≈ 75.66M (PR-11 context=384).
     if hasattr(model.obs_encoder, "num_memory_tokens"):
         enc = model.obs_encoder
         perception = _count_params(enc)
@@ -135,6 +135,11 @@ def smoke_test(config_name: str):
         print(f"      total params:      {total:,}")
         print(f"      memory shape:      (B, {enc.num_memory_tokens}, {enc.memory_dim})")
         print(f"      state shape:       (B, {enc.state_hist_dim})")
+        # Loose regression gate: catch accidental context=768 revert, redundant
+        # global-token branch, or dropped geometry-memory layers.
+        assert 16_000_000 < perception < 18_000_000, f"perception params out of budget: {perception:,}"
+        assert 58_000_000 < backbone < 60_000_000, f"backbone params out of budget: {backbone:,}"
+        assert 74_000_000 < total < 78_000_000, f"total params out of budget: {total:,}"
 
     print("[3/6] Building optimizer & scheduler ...")
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, len(train_loader))
