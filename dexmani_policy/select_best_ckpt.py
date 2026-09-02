@@ -1,36 +1,37 @@
-"""Offline best-checkpoint selector via adaptive elimination evaluation.
+"""Offline best-checkpoint selector via fixed-seed two-stage evaluation.
 
 Discovers milestone checkpoints from an experiment directory, runs a
-batched-elimination evaluation to identify the single best checkpoint,
+deterministic two-stage evaluation to identify the single best checkpoint,
 and optionally symlinks it as ``best.pt``.
 
 Algorithm
 ---------
 
-**Phase 1 — Initial evaluation**:
+**Stage 1 — Initial evaluation**:
     Run ``initial_episodes`` (default 25) on every discovered milestone
-    checkpoint.  If one checkpoint has a strictly higher success rate than
-    all others, it is selected immediately.
+    checkpoint, using a fixed, deterministically-shuffled seed slice that is
+    identical across checkpoints.
 
-**Phase 2 — Incremental tie-break**:
-    When two or more checkpoints share the highest success rate, additional
-    batches (``batch_size`` episodes each, using **fresh** seeds) are run
-    only on the tied checkpoints.  This repeats until:
+**Stage 2 — Tie-break**:
+    When two or more checkpoints share the highest success rate, run a single
+    additional batch of ``batch_size`` fresh seeds (the same slice for every
+    tied candidate) and merge.  Equal denominators guarantee a fair comparison.
 
-    * a unique best emerges, or
-    * ``max_episodes`` total episodes have been run on the tied candidates.
-
-**Tiebreak** (when ``max_episodes`` is exhausted with no unique winner):
+**Tiebreak** (when still tied after Stage 2):
     1. Higher success rate.
     2. Lower ``avg_steps`` (faster task completion).
     3. Higher ``global_step`` (more training).
 
+**Fail-fast**: a load/model/CUDA error on any checkpoint aborts the run (never
+silently treated as 0%); if every checkpoint scores 0%, no ``best_ckpt.json``
+is written and the run exits non-zero.
+
 Seed management
 ---------------
-``SimRunner.run()`` reads ``self.eval_seeds`` on every call.  The full
-seed list is deterministically shuffled with the eval seed (same convention
-as ``eval_best_ckpt``), then sliced so each call uses a non-overlapping
-range, avoiding wasted repeated episodes.
+The full seed list is deterministically shuffled with the eval seed (same
+convention as ``eval_best_ckpt``); ``all_seeds[:initial_episodes]`` are Stage 1
+and the next ``batch_size`` are Stage 2.  ``BaseRunner.run_one_episode`` re-seeds
+the policy RNG per episode so ``(checkpoint, seed)`` is reproducible.
 
 Usage
 -----
@@ -62,6 +63,7 @@ from termcolor import cprint
 from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
+from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
     MilestoneCheckpoint,
     _get_eval_param,
@@ -70,6 +72,7 @@ from dexmani_policy.training.eval_utils import (
     discover_milestone_checkpoints,
     load_ckpt_for_inference,
     resolve_eval_seed,
+    validate_denoise_steps,
     validate_eval_config,
 )
 
@@ -89,7 +92,6 @@ class CkptEvalAccum:
     success_list: list[bool] = field(default_factory=list)
     episode_details: list[dict] = field(default_factory=list)
     task_done_steps: list[int] = field(default_factory=list)
-    seed_offset: int = 0
 
     # ---- derived ----
 
@@ -180,17 +182,12 @@ def _print_table(accumulators: list[CkptEvalAccum], title: str) -> None:
     print()
 
 
-def _best_among_tied(
-    tied: list[CkptEvalAccum],
-) -> CkptEvalAccum:
-    """Tiebreak: highest success_rate → lowest avg_steps → highest global_step."""
-    return max(
-        tied,
-        key=lambda a: (
-            a.success_rate,
-            -(a.avg_steps if a.avg_steps is not None else float("inf")),
-            a.ckpt.global_step,
-        ),
+def _rank_key(a: CkptEvalAccum) -> tuple[float, float, int]:
+    """Sort key: success_rate → lower avg_steps → higher global_step."""
+    return (
+        a.success_rate,
+        -(a.avg_steps if a.avg_steps is not None else float("inf")),
+        a.ckpt.global_step,
     )
 
 
@@ -252,122 +249,65 @@ def select_best_checkpoint(
     rng = random.Random(seed)
     rng.shuffle(all_seeds)
 
-    # ── 4. Phase 1: initial evaluation on all checkpoints ─────────────
+    # Fixed, deterministic seed slices — identical for every checkpoint, so
+    # equal-denominator comparisons and reproducible results hold.
+    phase1_seeds = all_seeds[:initial_episodes]
+    tie_seeds = all_seeds[initial_episodes : min(initial_episodes + batch_size, max_episodes)]
+
+    # ── 4. Stage 1: initial evaluation on all checkpoints ─────────────
     cprint(
-        f"\n{'=' * 60}\n  Phase 1: Initial Evaluation ({initial_episodes} episodes each)\n{'=' * 60}",
+        f"\n{'=' * 60}\n  Phase 1: Initial Evaluation ({len(phase1_seeds)} episodes each)\n{'=' * 60}",
         "cyan",
         attrs=["bold"],
     )
 
     accumulators: list[CkptEvalAccum] = []
-    phase1_seeds = all_seeds[:initial_episodes]
-
     for mc in milestones:
         cprint(f"  Evaluating {mc.label} ...", "cyan")
-        try:
-            result = evaluate_checkpoint(
-                agent,
-                env_runner,
-                checkpoint_store,
-                mc,
-                phase1_seeds,
-                use_ema,
-                denoise_steps,
-                device,
-                video_save_dir=video_save_dir,
-            )
-            acc = CkptEvalAccum(ckpt=mc, seed_offset=initial_episodes)
-            acc.merge(result)
-            accumulators.append(acc)
-            cprint(
-                f"    -> {_format_rate(acc.success_count, acc.n_episodes)}",
-                "green",
-            )
-        except Exception as exc:
-            cprint(f"    -> SKIPPED: {exc}", "red")
-            # Still add a zero-result accumulator so the table is complete
-            accumulators.append(CkptEvalAccum(ckpt=mc, seed_offset=initial_episodes))
+        # No try/except: a load/model/CUDA failure is fatal and aborts the run
+        # (an errored checkpoint must not be silently treated as 0%).
+        result = evaluate_checkpoint(
+            agent, env_runner, checkpoint_store, mc, phase1_seeds,
+            use_ema, denoise_steps, device, video_save_dir=video_save_dir,
+        )
+        acc = CkptEvalAccum(ckpt=mc)
+        acc.merge(result)
+        accumulators.append(acc)
+        cprint(f"    -> {_format_rate(acc.success_count, acc.n_episodes)}", "green")
 
     if not accumulators:
         raise RuntimeError("No checkpoints could be evaluated.")
 
     _print_table(accumulators, "Phase 1 Results:")
 
-    # ── 5. Check for unique best ──────────────────────────────────────
+    # ── 5. Tie-break (single deterministic batch, same seeds for all tied) ──
     best_rate = max(a.success_rate for a in accumulators)
     tied = [a for a in accumulators if a.success_rate == best_rate]
 
-    skip_phase2 = len(tied) == 1
-    if skip_phase2:
+    if len(tied) > 1 and tie_seeds:
         cprint(
-            f"✅ Unique best after Phase 1: {tied[0].ckpt.label} "
-            f"— {_format_rate(tied[0].success_count, tied[0].n_episodes)}",
-            "green",
-            attrs=["bold"],
-        )
-
-    # ── 6. Phase 2: incremental tie-break ─────────────────────────────
-    if not skip_phase2:
-        cprint(
-            f"\n⚠ Tied at top ({len(tied)} checkpoints at {best_rate:.1%}). Running tie-break rounds...",
+            f"\n⚠ Tied at top ({len(tied)} checkpoints at {best_rate:.1%}). "
+            f"Running a single tie-break batch (+{len(tie_seeds)} episodes each)...",
             "yellow",
         )
-        round_num = 0
-        seed_offset = initial_episodes
-
-        while len(tied) > 1 and seed_offset < max_episodes:
-            round_num += 1
-            batch_end = min(seed_offset + batch_size, max_episodes)
-            batch_seeds = all_seeds[seed_offset:batch_end]
-            actual_batch = len(batch_seeds)
-            if actual_batch == 0:
-                break
-
-            cprint(
-                f"\n  Tie-break Round {round_num} (+{actual_batch} episodes on {len(tied)} tied ckpt(s))",
-                "cyan",
+        for acc in tied:
+            cprint(f"    Evaluating {acc.ckpt.label} ...", "cyan")
+            result = evaluate_checkpoint(
+                agent, env_runner, checkpoint_store, acc.ckpt, tie_seeds,
+                use_ema, denoise_steps, device, video_save_dir=video_save_dir,
             )
+            acc.merge(result)
+            cprint(f"      -> {_format_rate(acc.success_count, acc.n_episodes)}", "green")
 
-            for acc in tied:
-                cprint(f"    Evaluating {acc.ckpt.label} ...", "cyan")
-                try:
-                    result = evaluate_checkpoint(
-                        agent,
-                        env_runner,
-                        checkpoint_store,
-                        acc.ckpt,
-                        batch_seeds,
-                        use_ema,
-                        denoise_steps,
-                        device,
-                        video_save_dir=video_save_dir,
-                    )
-                    acc.merge(result)
-                    acc.seed_offset = batch_end
-                    cprint(
-                        f"      -> {_format_rate(acc.success_count, acc.n_episodes)}",
-                        "green",
-                    )
-                except Exception as exc:
-                    cprint(f"      -> batch failed: {exc}", "red")
+        # Recompute the tied set on the merged results — every tied candidate
+        # consumed the same tie_seeds, so denominators stay equal.
+        best_rate = max(a.success_rate for a in tied)
+        tied = [a for a in tied if a.success_rate == best_rate]
 
-            seed_offset = batch_end
+        _print_table(accumulators, "Tie-break Results:")
 
-            # Recompute tied set
-            best_rate = max(a.success_rate for a in tied)
-            tied = [a for a in tied if a.success_rate == best_rate]
-
-            if len(tied) > 1:
-                cprint(
-                    "    Still tied: "
-                    + ", ".join(
-                        f"{a.ckpt.pct}%({_format_rate(a.success_count, a.n_episodes)})" for a in tied
-                    ),
-                    "yellow",
-                )
-
-    # ── 7. Final selection ────────────────────────────────────────────
-    best = _best_among_tied(tied)
+    # ── 6. Final selection (single rank key) ──────────────────────────
+    best = max(tied, key=_rank_key)
 
     avg_str = f"{best.avg_steps:.1f}" if best.avg_steps is not None else "N/A"
     cprint(f"\n{'=' * 60}", "green", attrs=["bold"])
@@ -381,7 +321,7 @@ def select_best_checkpoint(
         )
     else:
         cprint(
-            f"  ⚠ Max episodes reached. Tiebreak by avg_steps → global_step.\n"
+            f"  ⚠ Still tied after tie-break. Tiebreak by avg_steps → global_step.\n"
             f"  ✅ Best checkpoint: {best.ckpt.label}\n"
             f"     Success: {_format_rate(best.success_count, best.n_episodes)}\n"
             f"     Avg steps: {avg_str}",
@@ -389,6 +329,32 @@ def select_best_checkpoint(
             attrs=["bold"],
         )
     cprint(f"{'=' * 60}\n", "green", attrs=["bold"])
+
+    # ── 7. All-fail guard ─────────────────────────────────────────────
+    if best.success_count == 0:
+        eval_root_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = eval_root_dir / "best_ckpt_selection.json"
+        summary = {
+            "best_checkpoint": None,
+            "error": "All milestone checkpoints scored 0% success",
+            "all_results": [
+                {
+                    "pct": a.ckpt.pct,
+                    "global_step": a.ckpt.global_step,
+                    "success_rate": a.success_rate,
+                    "avg_steps": a.avg_steps,
+                    "n_episodes": a.n_episodes,
+                    "path": str(a.ckpt.path),
+                }
+                for a in accumulators
+            ],
+        }
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        cprint(f"  Summary saved to: {summary_path}", "cyan")
+        raise RuntimeError(
+            "All milestone checkpoints scored 0% success — refusing to write best_ckpt.json."
+        )
 
     # Save summary JSON
     eval_root_dir.mkdir(parents=True, exist_ok=True)
@@ -574,17 +540,28 @@ def main() -> None:
         Path(video_save_dir).mkdir(parents=True, exist_ok=True)
         cprint(f"\n📹 Video output: {video_save_dir}", "cyan")
 
-    best_ckpt, _all = select_best_checkpoint(
-        exp_dir,
-        cfg,
-        initial_episodes=initial_episodes,
-        batch_size=batch_size,
-        max_episodes=max_episodes,
-        denoise_steps=denoise_steps,
-        use_ema=use_ema,
-        eval_seed=args.seed,
-        video_save_dir=video_save_dir,
-    )
+    if initial_episodes <= 0 or max_episodes <= 0:
+        cprint(f"Error: initial/max episodes must be positive (got {initial_episodes}/{max_episodes})", "red")
+        sys.exit(1)
+
+    try:
+        best_ckpt, _all = select_best_checkpoint(
+            exp_dir,
+            cfg,
+            initial_episodes=initial_episodes,
+            batch_size=batch_size,
+            max_episodes=max_episodes,
+            denoise_steps=denoise_steps,
+            use_ema=use_ema,
+            eval_seed=args.seed,
+            video_save_dir=video_save_dir,
+        )
+    except EvalEpisodeError as e:
+        cprint(f"Fatal eval error (category={e.category}, seed={e.seed}): {e}", "red")
+        sys.exit(1)
+    except (ValueError, RuntimeError, OSError, FileNotFoundError) as e:
+        cprint(f"Selection failed: {type(e).__name__}: {e}", "red")
+        sys.exit(1)
 
     if args.link_best:
         best_link = exp_dir / "checkpoints" / "best.pt"
