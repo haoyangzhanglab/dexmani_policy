@@ -13,6 +13,10 @@ from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
 class R3DObsEncoder(nn.Module):
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return ("joint_state", "point_cloud")
+
     """Uni3D point cloud encoder + StateMLP.
 
     forward(obs) -> (cond_tokens, {})

@@ -62,7 +62,10 @@ QUALIFICATION_MATRIX: Final[dict[str, dict[str, object]]] = {
     "dp_rgb": {
         "status": "deferred",
         "evidence": [],
-        "condition": "RGB preprocessing deployment contract is not defined",
+        "condition": (
+            "RGB schema and ImageProcessor metadata are defined, but the "
+            "current validation config performs separate dataset resize/crop"
+        ),
     },
     "multitask_dit": {
         "status": "deferred",

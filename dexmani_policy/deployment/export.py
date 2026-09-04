@@ -1,4 +1,4 @@
-"""Export a resolved Policy experiment to the frozen Real deployment-v2 contract."""
+"""Export a resolved Policy experiment to an explicit Real deployment artifact."""
 
 from __future__ import annotations
 
@@ -10,24 +10,42 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
+import numpy as np
 import torch
 import zarr  # type: ignore[import-untyped]
 from omegaconf import OmegaConf
 
+from dexmani_policy.agents.obs_encoder.rgb.image_processor import (
+    IMAGE_PROCESSOR_PRESETS,
+)
 from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.deployment.restore import (
     DeploymentRestoreError,
     verify_deployment_prediction,
 )
+from dexmani_policy.deployment.contract import (
+    DEPLOYMENT_FORMAT,
+    DeploymentContractError,
+    parse_deployment_contract,
+)
 
 _REPOSITORY = "haoyangzhanglab/dexmani_policy"
-_DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
+_SUPPORTED_OBSERVATION_FIELDS = frozenset(
+    {
+        "joint_state",
+        "point_cloud",
+        "rgb",
+        "contact_force",
+        "fingertip_points",
+    }
+)
 _GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SCP_REMOTE_RE = re.compile(r"git@github\.com:haoyangzhanglab/dexmani_policy(?:\.git)?")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -324,15 +342,11 @@ def _dataset_modalities(cfg_plain: dict[str, Any]) -> list[str]:
     if any(
         key in agent
         for key in (
-            "rgb_backbone_name",
-            "rgb_backbone_config",
             "text_encoder_model",
             "task_texts",
         )
     ):
-        raise UnsupportedPolicyError(
-            "RGB and dynamic task-text deployment are deferred"
-        )
+        raise UnsupportedPolicyError("dynamic task-text deployment is unsupported")
     dataset = cfg_plain.get("dataset")
     if type(dataset) is not dict:
         raise UnsupportedPolicyError("a single resolved dataset config is required")
@@ -343,13 +357,17 @@ def _dataset_modalities(cfg_plain: dict[str, Any]) -> list[str]:
         raise UnsupportedPolicyError(
             "dataset.sensor_modalities must be an explicit string list"
         )
-    if "rgb" in modalities:
-        raise UnsupportedPolicyError("RGB deployment is deferred")
-    if set(modalities) != {"joint_state", "point_cloud"} or len(modalities) != 2:
+    if (
+        not modalities
+        or len(set(modalities)) != len(modalities)
+        or "joint_state" not in modalities
+        or set(modalities) - _SUPPORTED_OBSERVATION_FIELDS
+    ):
         raise UnsupportedPolicyError(
-            "first-phase deployment requires exactly joint_state + point_cloud"
+            "deployment observation fields must be unique supported names and include "
+            "joint_state"
         )
-    return ["joint_state", "point_cloud"]
+    return list(modalities)
 
 
 def _validate_agent_targets(value: Any, path: str = "agent") -> None:
@@ -453,122 +471,264 @@ def _validate_table_plane(value: Any) -> str:
     return encoded
 
 
-def _validate_zarr_contract(
+def _build_observation_contract(
     path: Path,
     cfg_plain: dict[str, Any],
-    sensor_modalities: list[str],
+    observation_fields: list[str],
 ) -> dict[str, Any]:
+    """Build the observation contract from resolved config and source arrays."""
     try:
         root = zarr.open_group(str(path), mode="r")
         attrs = dict(root.attrs)
+        arrays = root["data"]
     except Exception as exc:
         raise InvalidZarrError(f"cannot open Real Policy Zarr: {path}") from exc
-    missing = [key for key in (*_CORE_ZARR_KEYS, *_POINT_ZARR_KEYS) if key not in attrs]
+    _validate_core_zarr_attrs(attrs, cfg_plain, observation_fields)
+    _validate_required_zarr_arrays(root, cfg_plain)
+
+    fields: dict[str, dict[str, Any]] = {}
+    for name in observation_fields:
+        array = _observation_array(arrays, name)
+        if name == "joint_state":
+            _validate_observation_array(array, name, (19,), np.dtype(np.float32))
+            fields[name] = _observation_field(
+                (19,),
+                "float32",
+                "joint_position",
+                {
+                    "frame": "robot_joint",
+                    "units": "rad",
+                    "joint_order": "xarm7_xhand12",
+                },
+            )
+        elif name == "point_cloud":
+            point_count, feature_dim = _validate_point_cloud(array, attrs, cfg_plain)
+            fields[name] = _observation_field(
+                (point_count, feature_dim),
+                "float32",
+                "xyzrgb",
+                {
+                    "frame": "xarm_base",
+                    "position_units": "m",
+                    "color_order": "rgb",
+                },
+            )
+        elif name == "rgb":
+            tail = _validate_observation_array(array, name, None, np.dtype(np.uint8))
+            if len(tail) != 3 or tail[-1] != 3:
+                raise InvalidZarrError("Zarr rgb must have shape [T, H, W, 3]")
+            if (
+                attrs.get("camera_extrinsic_semantics")
+                != "T_xarm_base_from_color;native_color_optical_to_xarm_base"
+            ):
+                raise InvalidZarrError("Zarr RGB camera semantics are invalid")
+            fields[name] = _observation_field(
+                tail,
+                "uint8",
+                "raw_image",
+                {
+                    "color_order": "rgb",
+                    "value_range": [0, 255],
+                    "layout": "HWC",
+                },
+            )
+        elif name == "contact_force":
+            _validate_observation_array(array, name, (5, 3), np.dtype(np.float32))
+            unit = attrs.get("contact_force_unit")
+            if unit != "sdk_scaled_unknown_si":
+                raise InvalidZarrError(
+                    "Zarr contact_force_unit must be 'sdk_scaled_unknown_si'"
+                )
+            if (
+                attrs.get("contact_force_frame")
+                != "xhand_sensor_native_axes_per_finger"
+            ):
+                raise InvalidZarrError("Zarr contact_force_frame is invalid")
+            si_verified = attrs.get("contact_force_si_verified")
+            if si_verified is not False:
+                raise InvalidZarrError("Zarr contact_force_si_verified must be false")
+            fields[name] = _observation_field(
+                (5, 3),
+                "float32",
+                "per_finger_sensor_axes",
+                {
+                    "frame": "xhand_sensor_native_axes_per_finger",
+                    "units": unit,
+                    "si_verified": si_verified,
+                    "finger_order": "thumb_index_mid_ring_pinky",
+                },
+            )
+        elif name == "fingertip_points":
+            _validate_observation_array(array, name, (5, 3), np.dtype(np.float32))
+            if attrs.get("fingertip_points_frame") != "xarm_base":
+                raise InvalidZarrError("Zarr fingertip_points_frame is invalid")
+            if attrs.get("fingertip_points_unit") != "m":
+                raise InvalidZarrError("Zarr fingertip_points_unit must be 'm'")
+            fields[name] = _observation_field(
+                (5, 3),
+                "float32",
+                "point_xyz",
+                {
+                    "frame": "xarm_base",
+                    "units": "m",
+                    "finger_order": "thumb_index_mid_ring_pinky",
+                },
+            )
+        else:  # _dataset_modalities already rejects unknown values.
+            raise InvalidZarrError(f"unsupported observation field: {name!r}")
+
+    contract = {
+        "schema_name": attrs["schema_name"],
+        "schema_version": attrs["schema_version"],
+        "domain": attrs["domain"],
+        "profile": attrs["profile"],
+        "task_name": attrs["task_name"],
+        "dt": attrs["dt"],
+        "obs_alignment": attrs["obs_alignment"],
+        "observation_reference": attrs["observation_reference"],
+        "state_alignment": attrs["state_alignment"],
+        "action_semantics": attrs["action_semantics"],
+        "deployment_equivalent": attrs["deployment_equivalent"],
+        "requires_hand": True,
+        "observation_fields": fields,
+    }
+    return _require_plain_metadata(contract, "data_contract")
+
+
+def _validate_core_zarr_attrs(
+    attrs: Mapping[str, Any],
+    cfg_plain: Mapping[str, Any],
+    observation_fields: list[str],
+) -> None:
+    required = {
+        "schema_name",
+        "schema_version",
+        "domain",
+        "profile",
+        "task_name",
+        "dt",
+        "episode_start_policy",
+        "obs_alignment",
+        "observation_reference",
+        "state_alignment",
+        "action_semantics",
+        "deployment_equivalent",
+    }
+    missing = sorted(required - set(attrs))
     if missing:
         raise InvalidZarrError(f"Real Policy Zarr is missing semantic attrs: {missing}")
-    expected_fixed = {
-        "schema_name": "dexmani-real-policy-zarr",
-        "schema_version": 5,
-        "domain": "real",
-        "episode_start_policy": "full_history",
-        "obs_alignment": "obs[t]_before_action[t]",
-        "observation_reference": "camera_source_monotonic_ns",
-        "state_alignment": "camera_source_aligned_state",
-        "action_semantics": "deployment_grid_rate_limited_target",
-        "deployment_equivalent": True,
-    }
-    mismatches = {
-        key: (attrs.get(key), value)
-        for key, value in expected_fixed.items()
-        if attrs.get(key) != value
-    }
-    if mismatches:
-        raise InvalidZarrError(f"invalid Real Policy Zarr semantics: {mismatches}")
-    if attrs["profile"] not in {"pointcloud", "rgb_pc"}:
-        raise InvalidZarrError(
-            "point-cloud policy requires pointcloud or rgb_pc profile"
-        )
+    if (
+        attrs["schema_name"] != "dexmani-real-policy-zarr"
+        or attrs["schema_version"] != 5
+        or attrs["domain"] != "real"
+        or attrs["episode_start_policy"] != "full_history"
+        or attrs["obs_alignment"] != "obs[t]_before_action[t]"
+        or attrs["action_semantics"] != "deployment_grid_rate_limited_target"
+        or attrs["deployment_equivalent"] is not True
+    ):
+        raise InvalidZarrError("invalid Real Policy Zarr semantics")
     task_name = cfg_plain.get("task_name")
     if type(task_name) is not str or not task_name or attrs["task_name"] != task_name:
-        raise InvalidZarrError(
-            f"Zarr task_name={attrs['task_name']!r} does not match config task_name={task_name!r}"
-        )
+        raise InvalidZarrError("Zarr task_name does not match resolved config")
     dt = _require_finite_number(attrs["dt"], "Zarr dt", positive=True)
+    dataset = cfg_plain.get("dataset")
     for config_dt in (
         cfg_plain.get("dt"),
         cfg_plain.get("control_dt_s"),
-        cfg_plain.get("dataset", {}).get("dt"),
+        dataset.get("dt") if type(dataset) is dict else None,
     ):
         if config_dt is not None and (
             isinstance(config_dt, bool)
             or not isinstance(config_dt, (int, float))
             or not math.isclose(float(config_dt), dt, rel_tol=0.0, abs_tol=1e-9)
         ):
-            raise InvalidZarrError(
-                f"Zarr dt={dt!r} conflicts with experiment dt={config_dt!r}"
-            )
-    _require_finite_number(
-        attrs["max_observation_skew_s"], "max_observation_skew_s", positive=True
+            raise InvalidZarrError("Zarr dt conflicts with resolved config")
+    visual = "rgb" in observation_fields or "point_cloud" in observation_fields
+    expected_reference = (
+        "camera_source_monotonic_ns" if visual else "grid_anchor_monotonic_ns"
     )
-    arm_delta = attrs["arm_max_delta_rad_per_tick"]
-    if arm_delta is not None:
-        _require_finite_number(arm_delta, "arm_max_delta_rad_per_tick", positive=True)
-    _require_finite_number(
-        attrs["hand_max_delta_rad_per_tick"],
-        "hand_max_delta_rad_per_tick",
-        positive=True,
+    expected_alignment = (
+        "camera_source_aligned_state" if visual else "control_grid_state"
     )
-    endpoint = _require_finite_number(
-        attrs["endpoint_delta_tolerance_rad"],
-        "endpoint_delta_tolerance_rad",
-        positive=False,
-    )
-    if endpoint < 0.0:
-        raise InvalidZarrError("endpoint_delta_tolerance_rad must be non-negative")
-    for key in ("profile", "task_name"):
-        if type(attrs[key]) is not str or not attrs[key]:
-            raise InvalidZarrError(f"Zarr {key} must be a non-empty string")
-    point_mismatches = {
-        key: (attrs.get(key), expected)
-        for key, expected in _POINT_SEMANTICS.items()
-        if attrs.get(key) != expected
-    }
-    if point_mismatches:
+    if (
+        attrs["observation_reference"] != expected_reference
+        or attrs["state_alignment"] != expected_alignment
+    ):
         raise InvalidZarrError(
-            f"invalid Real point-cloud semantics: {point_mismatches}"
+            "Zarr observation timing conflicts with selected modalities"
         )
-    if _SHA256_RE.fullmatch(str(attrs["point_cloud_config_sha256"])) is None:
-        raise InvalidZarrError("point_cloud_config_sha256 must be lowercase SHA-256")
-    _validate_table_plane(attrs["point_cloud_table_plane_abcd_json"])
-    point_count, point_feature_dim = _point_array_shape(root)
-    _validate_required_zarr_arrays(root, cfg_plain)
 
-    agent = cfg_plain["agent"]
-    configured_count = agent.get("num_points")
-    if configured_count is not None and configured_count != point_count:
+
+def _observation_array(arrays: Any, name: str) -> Any:
+    try:
+        return arrays[name]
+    except Exception as exc:
+        raise InvalidZarrError(f"Zarr data/{name} is missing") from exc
+
+
+def _validate_observation_array(
+    array: Any,
+    name: str,
+    expected_tail: tuple[int, ...] | None,
+    expected_dtype: np.dtype[Any],
+) -> tuple[int, ...]:
+    try:
+        shape = tuple(int(value) for value in array.shape)
+        dtype = np.dtype(array.dtype)
+    except Exception as exc:
+        raise InvalidZarrError(f"Zarr data/{name} is not a valid array") from exc
+    if (
+        len(shape) < 2
+        or shape[0] < 1
+        or dtype != expected_dtype
+        or (expected_tail is not None and shape[1:] != expected_tail)
+    ):
         raise InvalidZarrError(
-            f"Zarr point count={point_count} conflicts with agent.num_points={configured_count}"
+            f"Zarr data/{name} shape/dtype does not match the observation contract"
         )
-    configured_feature_dims = [agent.get("pc_dim")]
+    return shape[1:]
+
+
+def _validate_point_cloud(
+    array: Any, attrs: Mapping[str, Any], cfg_plain: Mapping[str, Any]
+) -> tuple[int, int]:
+    tail = _validate_observation_array(array, "point_cloud", None, np.dtype(np.float32))
+    if len(tail) != 2 or tail[0] not in _POINT_COUNTS or tail[1] != _POINT_FEATURE_DIM:
+        raise InvalidZarrError("unsupported point-cloud shape")
+    if any(attrs.get(key) != value for key, value in _POINT_SEMANTICS.items()):
+        raise InvalidZarrError("invalid Real point-cloud semantics")
+    if _SHA256_RE.fullmatch(str(attrs.get("point_cloud_config_sha256"))) is None:
+        raise InvalidZarrError("point_cloud_config_sha256 must be lowercase SHA-256")
+    _validate_table_plane(attrs.get("point_cloud_table_plane_abcd_json"))
+    agent = cfg_plain.get("agent")
+    if type(agent) is not dict:
+        raise InvalidExperimentError("config.agent must be a plain mapping")
+    configured_count = agent.get("num_points")
+    if configured_count is not None and configured_count != tail[0]:
+        raise InvalidZarrError("Zarr point count conflicts with agent.num_points")
+    configured_dims = [agent.get("pc_dim")]
     pc_encoder = agent.get("pc_encoder_config")
     if type(pc_encoder) is dict:
-        configured_feature_dims.append(pc_encoder.get("pc_in_channels"))
-    for configured_dim in configured_feature_dims:
-        if configured_dim is not None and configured_dim != point_feature_dim:
-            raise InvalidZarrError(
-                f"Zarr point feature dim={point_feature_dim} conflicts with agent config={configured_dim}"
-            )
+        configured_dims.append(pc_encoder.get("pc_in_channels"))
+    if any(value is not None and value != tail[1] for value in configured_dims):
+        raise InvalidZarrError("Zarr point feature dim conflicts with agent config")
+    return tail
 
-    contract = {key: attrs[key] for key in _CORE_ZARR_KEYS}
-    contract.update({key: attrs[key] for key in _POINT_ZARR_KEYS})
-    contract.update(
-        {
-            "sensor_modalities": list(sensor_modalities),
-            "point_cloud_num_points": point_count,
-            "point_cloud_feature_dim": point_feature_dim,
-        }
-    )
-    return _require_plain_metadata(contract, "data_contract")
+
+def _observation_field(
+    shape: tuple[int, ...],
+    dtype: str,
+    numeric_representation: str,
+    semantics: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "shape": list(shape),
+        "dtype": dtype,
+        "semantics": {
+            "representation": numeric_representation,
+            **semantics,
+        },
+    }
 
 
 def _expected_train_params(cfg_plain: dict[str, Any]) -> dict[str, Any]:
@@ -834,7 +994,7 @@ def _build_inference_config(
         raise InvalidExperimentError("config.eval must be a mapping")
     if eval_config.get("denoise_timesteps_list") is not None:
         raise UnsupportedPolicyError(
-            "eval.denoise_timesteps_list is unsupported for deployment-v2"
+            "eval.denoise_timesteps_list is unsupported for deployment"
         )
     denoise_steps = _require_positive_int(
         eval_config.get("denoise_steps"), "eval.denoise_steps"
@@ -856,24 +1016,234 @@ def _build_inference_config(
     return _require_plain_metadata(inference, "inference_config")
 
 
-def _augment_data_contract(
-    zarr_contract: dict[str, Any], train: dict[str, Any]
-) -> dict[str, Any]:
-    result = dict(zarr_contract)
-    result.update(
-        {
-            "action_key": train["action_key"],
-            "model_action_dim": train["action_dim"],
-            "horizon": train["horizon"],
-            "n_obs_steps": train["n_obs_steps"],
-            "n_action_steps": train["n_action_steps"],
-            "pad_before": train["n_obs_steps"] - 1,
-            "pad_after": train["n_action_steps"] - 1,
-            "padding_semantics": "repeat_edge",
-            "use_aux_ee": train["use_aux_ee"],
-        }
+def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
+    """Record the restored agent's one and only raw-RGB processing path.
+
+    Runtime deliberately passes raw HWC uint8 frames to ``ImageProcessor``.
+    A training dataset that separately resizes or crops validation RGB has no
+    equivalent single processor path today, so it is rejected rather than
+    publishing a misleading deployment contract.
+    """
+    if type(agent) is not dict or type(dataset) is not dict:
+        raise InvalidExperimentError(
+            "resolved agent and dataset config are required for RGB deployment"
+        )
+    if (
+        "rgb_preprocess_size" not in dataset
+        or "rgb_random_crop_size" not in dataset
+        or "rgb_keep_uint8" not in dataset
+    ):
+        raise InvalidExperimentError(
+            "RGB export requires explicit resolved validation preprocessing"
+        )
+    if _optional_hw(dataset["rgb_preprocess_size"], "rgb_preprocess_size") is not None:
+        raise UnsupportedPolicyError(
+            "RGB export requires validation RGB without dataset resize"
+        )
+    if (
+        _optional_hw(dataset["rgb_random_crop_size"], "rgb_random_crop_size")
+        is not None
+    ):
+        raise UnsupportedPolicyError(
+            "RGB export requires validation RGB without dataset crop"
+        )
+    if type(dataset["rgb_keep_uint8"]) is not bool:
+        raise InvalidExperimentError("dataset.rgb_keep_uint8 must be bool")
+
+    backbone_name = agent.get("rgb_backbone_name")
+    backbone_config = agent.get("rgb_backbone_config")
+    if type(backbone_name) is not str or backbone_name not in IMAGE_PROCESSOR_PRESETS:
+        raise UnsupportedPolicyError("RGB deployment requires a supported backbone")
+    if backbone_config is None:
+        backbone_config = {}
+    if type(backbone_config) is not dict:
+        raise InvalidExperimentError("agent.rgb_backbone_config must be a mapping")
+    if any(
+        key in backbone_config
+        for key in ("resize_shortest_edge", "image_mean", "image_std")
+    ):
+        raise UnsupportedPolicyError(
+            "RGB deployment does not support unowned ImageProcessor overrides"
+        )
+
+    preset = IMAGE_PROCESSOR_PRESETS[backbone_name]
+    image_size = _processor_hw(
+        (
+            backbone_config["image_size"]
+            if backbone_config.get("image_size") is not None
+            else preset.get("image_size")
+        ),
+        "image_size",
     )
-    return _require_plain_metadata(result, "data_contract")
+    center_crop = _processor_hw(
+        (
+            backbone_config["center_crop_size"]
+            if backbone_config.get("center_crop_size") is not None
+            else preset.get("center_crop_size")
+        ),
+        "center_crop_size",
+    )
+    if center_crop is not None:
+        raise UnsupportedPolicyError(
+            "RGB deployment supports only ImageProcessor direct resize without crop"
+        )
+    interpolation = (
+        backbone_config["interpolation"]
+        if backbone_config.get("interpolation") is not None
+        else preset.get("interpolation")
+    )
+    if type(interpolation) is str:
+        interpolation = interpolation.lower()
+    if interpolation not in {"nearest", "bilinear", "bicubic"}:
+        raise InvalidExperimentError("agent RGB interpolation is unsupported")
+    mean = _processor_rgb_vector(preset.get("image_mean"), "image_mean")
+    std = _processor_rgb_vector(preset.get("image_std"), "image_std")
+
+    return {
+        "input_color_order": "rgb",
+        "input_value_range": [0, 255],
+        "resize_hw": None if image_size is None else list(image_size),
+        "center_crop_hw": None,
+        "interpolation": interpolation,
+        # ImageProcessor's F.interpolate call has no antialias argument.
+        "antialias": False,
+        "output_layout": "CHW",
+        "output_dtype": "float32",
+        "scale": 1.0 / 255.0,
+        "normalize_mean": list(mean),
+        "normalize_std": list(std),
+    }
+
+
+def _validate_normalizer_state(
+    state_dict: dict[str, torch.Tensor],
+    observation_fields: Mapping[str, Any],
+    action_dim: int,
+) -> None:
+    """Validate checkpoint normalizer state against actual model inputs."""
+    if type(observation_fields) is not dict:
+        raise InvalidCheckpointError("observation_fields must be a plain mapping")
+    keys = ["action", *observation_fields]
+    parameter_names = _normalizer_parameter_names(state_dict)
+    unknown = sorted(set(parameter_names) - set(keys))
+    if unknown:
+        raise InvalidCheckpointError(
+            "checkpoint normalizer contains fields outside the artifact "
+            f"contract: {unknown}"
+        )
+    for key in keys:
+        names = parameter_names.get(key, frozenset())
+        if names not in {frozenset(), frozenset({"scale", "offset"})}:
+            raise InvalidCheckpointError(
+                f"checkpoint has incomplete normalizer state for {key!r}"
+            )
+        if key == "rgb":
+            if names:
+                raise UnsupportedPolicyError(
+                    "RGB must not be included in the training normalizer"
+                )
+            continue
+        if not names:
+            if key in {"action", "joint_state"}:
+                raise InvalidCheckpointError(
+                    f"checkpoint is missing required normalizer state for {key!r}"
+                )
+            continue
+        scale = state_dict[f"normalizer.params_dict.{key}.scale"]
+        offset = state_dict[f"normalizer.params_dict.{key}.offset"]
+        expected_dim = (
+            action_dim
+            if key == "action"
+            else _normalizer_feature_dim(observation_fields[key], key)
+        )
+        if (
+            scale.numel() != expected_dim
+            or offset.numel() != expected_dim
+            or not bool(torch.isfinite(scale).all())
+            or not bool(torch.isfinite(offset).all())
+            or bool(torch.any(scale == 0))
+        ):
+            raise InvalidCheckpointError(
+                f"checkpoint normalizer state is invalid for {key!r}"
+            )
+    if "action" not in parameter_names:
+        raise InvalidCheckpointError("checkpoint is missing action normalizer state")
+
+
+def _normalizer_parameter_names(
+    state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, frozenset[str]]:
+    """Enumerate only canonical top-level normalizer affine parameters."""
+    prefix = "normalizer.params_dict."
+    result: dict[str, set[str]] = {}
+    for state_key in state_dict:
+        if not state_key.startswith(prefix):
+            continue
+        parts = state_key[len(prefix) :].split(".")
+        if len(parts) != 2 or not parts[0] or parts[1] not in {"scale", "offset"}:
+            raise InvalidCheckpointError(
+                "checkpoint normalizer keys must use "
+                "normalizer.params_dict.<key>.(scale|offset)"
+            )
+        result.setdefault(parts[0], set()).add(parts[1])
+    return {key: frozenset(names) for key, names in result.items()}
+
+
+def _normalizer_feature_dim(field: Any, key: str) -> int:
+    if type(field) is not dict:
+        raise InvalidCheckpointError(f"observation field {key!r} is invalid")
+    shape = field.get("shape")
+    if type(shape) is not list or not shape or type(shape[-1]) is not int:
+        raise InvalidCheckpointError(f"observation field {key!r} has invalid shape")
+    return shape[-1]
+
+
+def _processor_hw(value: Any, label: str) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if type(value) is int and value > 0:
+        return value, value
+    if (
+        type(value) is tuple
+        and len(value) == 2
+        and all(type(item) is int and item > 0 for item in value)
+    ):
+        return value
+    if (
+        type(value) is list
+        and len(value) == 2
+        and all(type(item) is int and item > 0 for item in value)
+    ):
+        return value[0], value[1]
+    raise InvalidExperimentError(f"agent RGB {label} must be positive [H, W] or null")
+
+
+def _processor_rgb_vector(value: Any, label: str) -> tuple[float, float, float]:
+    if (
+        type(value) not in {tuple, list}
+        or len(value) != 3
+        or any(
+            isinstance(item, bool) or not isinstance(item, (int, float))
+            for item in value
+        )
+    ):
+        raise InvalidExperimentError(f"agent RGB {label} must be three finite numbers")
+    result = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in result):
+        raise InvalidExperimentError(f"agent RGB {label} must be three finite numbers")
+    return result  # type: ignore[return-value]
+
+
+def _optional_hw(value: Any, label: str) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not list
+        or len(value) != 2
+        or any(type(item) is not int or item <= 0 for item in value)
+    ):
+        raise InvalidExperimentError(f"dataset.{label} must be [H, W] or null")
+    return value[0], value[1]
 
 
 def _require_plain_metadata(value: Any, label: str) -> Any:
@@ -925,28 +1295,25 @@ def _sha256_file(path: Path) -> str:
 def _build_allocation(
     inference: dict[str, Any], data: dict[str, Any]
 ) -> dict[str, Any]:
-    action_key = inference["action_key"]
-    control_action_dim = 21 if action_key == "action_ee" else 19
-    auxiliary_layout = "joint19_ee9" if inference["use_aux_ee"] else "none"
+    fields = data.get("observation_fields")
+    if type(fields) is not dict or not fields:
+        raise InvalidExperimentError("observation_fields must be a non-empty mapping")
     allocation = {
         "task_name": inference["task_name"],
-        "action_key": action_key,
+        "action_key": inference["action_key"],
         "action_dim": inference["action_dim"],
-        "control_action_dim": control_action_dim,
-        "auxiliary_action_layout": auxiliary_layout,
+        "control_action_dim": 21 if inference["action_key"] == "action_ee" else 19,
+        "auxiliary_action_layout": (
+            "joint19_ee9" if inference["use_aux_ee"] else "none"
+        ),
         "n_obs_steps": inference["n_obs_steps"],
         "n_action_steps": inference["n_action_steps"],
         "horizon": inference["horizon"],
         "required_action_steps": inference["horizon"] - (inference["n_obs_steps"] - 1),
         "control_dt_s": data["dt"],
-        "sensor_modalities": data["sensor_modalities"],
-        "observation_fields": ["arm_qpos", "hand_qpos", "point_cloud"],
-        "requires_hand": True,
-        "point_cloud_num_points": data["point_cloud_num_points"],
-        "point_cloud_feature_dim": data["point_cloud_feature_dim"],
-        "rgb_shape": None,
-        "rgb_color_order": None,
-        "rgb_value_range": None,
+        "observation_fields": list(fields),
+        "observation_specs": fields,
+        "requires_hand": data["requires_hand"],
     }
     required_steps = allocation["required_action_steps"]
     if required_steps <= 0 or required_steps > _MAX_ACTION_STEPS:
@@ -957,23 +1324,25 @@ def _build_allocation(
 
 
 def _validate_payload(payload: Any) -> None:
-    if type(payload) is not dict or set(payload) != {"_format", "state", "weights"}:
+    if type(payload) is not dict or not {"_format", "state", "weights"}.issubset(
+        payload
+    ):
         raise ArtifactVerificationError("deployment checkpoint payload schema mismatch")
-    if payload["_format"] != _DEPLOYMENT_FORMAT:
+    if payload["_format"] != DEPLOYMENT_FORMAT:
         raise ArtifactVerificationError("deployment checkpoint format mismatch")
     state = payload["state"]
     weights = payload["weights"]
-    if type(state) is not dict or set(state) != {
+    required_state = {
         "epoch",
         "global_step",
         "train_params",
         "inference_config",
         "data_contract",
         "producer",
-        "deployment_contract",
-    }:
+    }
+    if type(state) is not dict or not required_state.issubset(state):
         raise ArtifactVerificationError("deployment checkpoint state schema mismatch")
-    if type(weights) is not dict or set(weights) != {"model", "ema_model"}:
+    if type(weights) is not dict or not {"model", "ema_model"}.issubset(weights):
         raise ArtifactVerificationError("deployment checkpoint weights schema mismatch")
     _canonicalize_state_dict(weights["model"], "weights.model")
     if weights["ema_model"] is not None:
@@ -983,9 +1352,12 @@ def _validate_payload(payload: Any) -> None:
         "inference_config",
         "data_contract",
         "producer",
-        "deployment_contract",
     ):
         _require_plain_metadata(state[name], name)
+    try:
+        parse_deployment_contract(payload)
+    except DeploymentContractError as exc:
+        raise ArtifactVerificationError("invalid deployment metadata") from exc
 
 
 def _verify_exported_model(payload: dict[str, Any]) -> None:
@@ -1156,7 +1528,9 @@ def publish_deployment_selector(
     try:
         _replace_relative_symlink(selector_path, checkpoint_path.name)
         selector_published = True
-        _roundtrip_verify_published(selector_path, checkpoint_path, sidecar_path, sidecar)
+        _roundtrip_verify_published(
+            selector_path, checkpoint_path, sidecar_path, sidecar
+        )
     except BaseException:
         if selector_published:
             _rollback_selector(selector_path, old_selector)
@@ -1186,7 +1560,7 @@ def export_deployment_artifact(
     zarr_path: Path | None = None,
     publish: bool = True,
 ) -> ExportReceipt:
-    """Export one selected simple.v1 checkpoint as a deployment-v2 artifact.
+    """Export one selected simple.v1 checkpoint as a deployment artifact.
 
     When ``publish=True`` (default) the ``deployment_latest.pt`` selector is
     atomically swapped to point at the new artifact.  When ``publish=False`` the
@@ -1208,9 +1582,8 @@ def export_deployment_artifact(
         )
     selected_path = _resolve_checkpoint(experiment, checkpoint_selector)
     cfg_plain = _load_config(experiment)
-    sensor_modalities = _dataset_modalities(cfg_plain)
+    observation_fields = _dataset_modalities(cfg_plain)
     resolved_zarr = _resolve_zarr_path(cfg_plain, repo_root, zarr_path)
-    zarr_contract = _validate_zarr_contract(resolved_zarr, cfg_plain, sensor_modalities)
     checkpoint = _load_training_checkpoint(selected_path)
     train, metadata_provenance, retrofitted = _reconcile_train_params(
         checkpoint, cfg_plain
@@ -1231,23 +1604,29 @@ def export_deployment_artifact(
     if inference["eval"]["use_ema"] and "codebook_path" in cfg_plain["agent"]:
         assert ema_state is not None
         _sanitize_agent_config(cfg_plain["agent"], ema_state, train)
-    data_contract = _augment_data_contract(zarr_contract, train)
+    zarr_contract = _build_observation_contract(
+        resolved_zarr, cfg_plain, observation_fields
+    )
+    if "rgb" in observation_fields:
+        inference["rgb_preprocessing"] = _rgb_preprocessing(
+            cfg_plain["agent"], cfg_plain["dataset"]
+        )
+    selected_state = ema_state if inference["eval"]["use_ema"] else model_state
+    assert selected_state is not None
+    _validate_normalizer_state(
+        selected_state,
+        zarr_contract["observation_fields"],
+        train["action_dim"],
+    )
+    data_contract = zarr_contract
     producer = {
         "repository": _REPOSITORY,
         "commit": producer_commit,
         "metadata_provenance": metadata_provenance,
         "retrofitted_train_params_fields": retrofitted,
     }
-    deployment_contract = {
-        "schema_version": 1,
-        "inference_config": inference,
-        "data_contract": data_contract,
-        "train_params": train,
-        "producer": producer,
-        "retrofitted_train_params_fields": retrofitted,
-    }
     payload = {
-        "_format": _DEPLOYMENT_FORMAT,
+        "_format": DEPLOYMENT_FORMAT,
         "state": {
             "epoch": int(checkpoint.epoch),
             "global_step": int(checkpoint.global_step),
@@ -1255,7 +1634,6 @@ def export_deployment_artifact(
             "inference_config": inference,
             "data_contract": data_contract,
             "producer": producer,
-            "deployment_contract": deployment_contract,
         },
         "weights": {"model": model_state, "ema_model": ema_state},
     }
@@ -1263,7 +1641,7 @@ def export_deployment_artifact(
 
     checkpoint_dir = experiment / "checkpoints"
     if output_path is None:
-        final_path = checkpoint_dir / f"{selected_path.stem}-deployment-v2.pt"
+        final_path = checkpoint_dir / f"{selected_path.stem}-deployment.pt"
     else:
         requested = Path(output_path)
         final_path = (
@@ -1304,7 +1682,9 @@ def export_deployment_artifact(
         checkpoint_sha256 = _sha256_file(final_path)
         allocation = _build_allocation(inference, data_contract)
         embedded_hash = _sha256_bytes(
-            _canonical_json(deployment_contract).encode("utf-8")
+            _canonical_json(
+                {"inference_config": inference, "data_contract": data_contract}
+            ).encode("utf-8")
         )
         sidecar = {
             "schema_version": 2,
@@ -1333,7 +1713,9 @@ def export_deployment_artifact(
         if publish:
             selector_published = True
             _replace_relative_symlink(selector_path, final_path.name)
-            _roundtrip_verify_published(selector_path, final_path, sidecar_path, sidecar)
+            _roundtrip_verify_published(
+                selector_path, final_path, sidecar_path, sidecar
+            )
     except BaseException as exc:
         if selector_published:
             try:

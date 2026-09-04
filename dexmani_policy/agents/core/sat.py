@@ -24,6 +24,10 @@ from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
 class SATObsEncoder(nn.Module):
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return ("joint_state", "point_cloud")
+
     """Observation encoder for SAT — paper §4.2 temporal fusion in feature dim.
 
     Encodes raw point clouds and joint state into a sequence of observation

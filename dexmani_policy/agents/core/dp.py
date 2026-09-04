@@ -10,6 +10,11 @@ from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNet
 
 
 class DPObsEncoder(nn.Module):
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        """Return the exact raw observation fields consumed by ``forward``."""
+        return ("joint_state", "rgb")
+
     def __init__(
         self,
         rgb_backbone_name: str,

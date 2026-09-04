@@ -155,6 +155,35 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 
 ---
 
+## Real deployment artifact contract
+
+`dexmani_policy.deployment` exports a resolved experiment checkpoint for the
+Real runtime. Every artifact uses `dexmani.deployment`; its only persisted
+observation declaration is the ordered `data_contract.observation_fields`
+mapping. Each field records its raw shape, dtype and semantics. The training
+experiment's `dataset.sensor_modalities` is the single manual selection used
+by export; it is not copied into the artifact as a competing list.
+
+- **Encoder-owned inputs**: export and restore require the selected fields to
+  match the instantiated encoder's `consumed_observation_fields`. A field that
+  the model does not consume cannot be silently forwarded, ignored or padded.
+- **Raw boundary**: `rgb` is raw HWC `uint8` RGB in `[0, 255]`; its resize and
+  normalization metadata belongs to Policy and must match the restored
+  `ImageProcessor`. Other fields carry the raw tensor specification needed by
+  the runtime that provides them.
+- **Real data boundary**: export accepts Real Policy Zarr schema v5 only with
+  `episode_start_policy="full_history"` and `deployment_equivalent=true`, and
+  verifies the selected arrays before publication. The current `contact_force`
+  source remains native per-finger sensor axes with
+  `units="sdk_scaled_unknown_si"` and `si_verified=false`.
+
+The deployment modules expose `parse_deployment_contract`,
+`export_deployment_artifact`, `deployment_spec`, `restore_deployment_agent`,
+`inspect_experiment`, and `load_experiment`.
+`docs/项目架构.md` records their ownership in more detail.
+
+---
+
 ## 配置参考
 
 ### 关键参数 (跨策略差异)
@@ -229,7 +258,7 @@ Agent.compute_loss():                          Agent.predict_action():
 
 | 阶段 | 形状 |
 |:-----|:-----|
-| Zarr 存储 | `action (N,19)` `joint_state (N,19)` `point_cloud (N,1024,3)` |
+| Zarr 存储 | `action (N,19)` `joint_state (N,19)` `point_cloud (N,1024,6)` |
 | Sequence Sample | `obs (*,16)` `action (16,19)` |
 | Batch | `obs (B,16,*)` `action (B,16,19)` |
 | Preprocessed | `obs (B×2,*)` → flatten batch+time |

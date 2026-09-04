@@ -1,4 +1,4 @@
-"""Direct/export inference parity qualification for deployment-v2 artifacts.
+"""Direct/export inference parity qualification for deployment artifacts.
 
 The direct branch deliberately constructs only the resolved experiment's
 ``agent``.  In particular, it never constructs the training dataset, an
@@ -23,6 +23,11 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.deployment import export as exporter
+from dexmani_policy.deployment.contract import (
+    DEPLOYMENT_FORMAT,
+    DeploymentContractError,
+    parse_deployment_contract,
+)
 from dexmani_policy.deployment.restore import (
     DeploymentRestoreError,
     DeploymentSpec,
@@ -92,8 +97,7 @@ def restore_direct_policy(
     *,
     checkpoint_selector: str = "best",
     device: torch.device | str = "cpu",
-    point_cloud_num_points: int | None = None,
-    point_cloud_feature_dim: int | None = None,
+    data_contract: Mapping[str, Any] | None = None,
 ) -> DirectRestoredPolicy:
     """Strictly restore the selected simple.v1 model or EMA from an experiment.
 
@@ -128,12 +132,14 @@ def restore_direct_policy(
     selected_state = exporter._canonicalize_state_dict(
         selected_raw, f"weights.{selected_weights}"
     )
-    spec = _direct_spec(
-        inference,
-        agent_config,
-        point_cloud_num_points=point_cloud_num_points,
-        point_cloud_feature_dim=point_cloud_feature_dim,
-    )
+    if data_contract is None:
+        data_contract = _validated_observation_contract(experiment, None)
+    observation_fields = data_contract.get("observation_fields")
+    if isinstance(observation_fields, Mapping) and "rgb" in observation_fields:
+        inference["rgb_preprocessing"] = exporter._rgb_preprocessing(
+            cfg_plain["agent"], cfg_plain["dataset"]
+        )
+    spec = _direct_spec(inference, data_contract)
     try:
         import hydra
 
@@ -188,10 +194,9 @@ def direct_prediction_snapshot(
     except Exception as exc:
         raise PolicyParityError("direct agent prediction failed") from exc
     try:
-        return validate_prediction(
-            result, restored.spec, batch_size=obs["joint_state"].shape[0]
-        )
-    except (KeyError, DeploymentRestoreError) as exc:
+        batch_size = next(iter(obs.values())).shape[0]
+        return validate_prediction(result, restored.spec, batch_size=batch_size)
+    except DeploymentRestoreError as exc:
         raise PolicyParityError(
             "direct agent prediction violates deployment contract"
         ) from exc
@@ -210,24 +215,23 @@ def qualify_policy_parity(
     rtol: float = 0.0,
     tolerance_reason: str | None = None,
 ) -> ParityReport:
-    """Export one checkpoint and prove direct/deployment-v2 prediction parity.
+    """Export one checkpoint and prove direct/deployment prediction parity.
 
     The exact same synthetic observation is cloned for both predictions, and
     Python, NumPy, Torch, and CUDA RNG state are reset before each prediction.
     The exported payload is reloaded with the exporter's ``weights_only``
-    deployment-v2 parser before strict deployment restore.
+    deployment parser before strict deployment restore.
     """
     _validate_tolerance(atol, "atol")
     _validate_tolerance(rtol, "rtol")
     _require_tolerance_reason(atol, rtol, tolerance_reason)
     experiment = _resolve_experiment(experiment_dir)
-    point_contract = _validated_point_cloud_contract(experiment, zarr_path)
+    data_contract = _validated_observation_contract(experiment, zarr_path)
     direct = restore_direct_policy(
         experiment,
         checkpoint_selector=checkpoint_selector,
         device=device,
-        point_cloud_num_points=point_contract["point_cloud_num_points"],
-        point_cloud_feature_dim=point_contract["point_cloud_feature_dim"],
+        data_contract=data_contract,
     )
 
     receipt = exporter.export_deployment_artifact(
@@ -258,10 +262,14 @@ def qualify_policy_parity(
     except DeploymentRestoreError as exc:
         # Drop the candidate, keep the selector unchanged, and re-raise so a
         # same-name retry is idempotent.
-        exporter.cleanup_candidate_artifact(receipt.checkpoint_path, receipt.sidecar_path)
+        exporter.cleanup_candidate_artifact(
+            receipt.checkpoint_path, receipt.sidecar_path
+        )
         raise PolicyParityError("direct/export prediction parity failed") from exc
     except Exception:
-        exporter.cleanup_candidate_artifact(receipt.checkpoint_path, receipt.sidecar_path)
+        exporter.cleanup_candidate_artifact(
+            receipt.checkpoint_path, receipt.sidecar_path
+        )
         raise
 
     # Parity + sidecar validation passed — commit the selector exactly once.
@@ -323,92 +331,34 @@ def _resolve_experiment(experiment_dir: Path) -> Path:
 
 def _direct_spec(
     inference: Mapping[str, Any],
-    agent_config: Mapping[str, Any],
-    *,
-    point_cloud_num_points: int | None,
-    point_cloud_feature_dim: int | None,
+    data_contract: Mapping[str, Any],
 ) -> DeploymentSpec:
-    """Build the shared inference shape contract without opening a Zarr store."""
+    """Parse the same contract used by the exported restore path."""
     try:
-        eval_config = inference["eval"]
-        if (point_cloud_num_points is None) != (point_cloud_feature_dim is None):
-            raise ValueError("point-cloud contract must provide both N and feature dim")
-        spec = DeploymentSpec(
-            action_key=_required_action_key(inference.get("action_key")),
-            action_dim=_positive_int(inference.get("action_dim"), "action_dim"),
-            horizon=_positive_int(inference.get("horizon"), "horizon"),
-            n_obs_steps=_positive_int(inference.get("n_obs_steps"), "n_obs_steps"),
-            n_action_steps=_positive_int(
-                inference.get("n_action_steps"), "n_action_steps"
-            ),
-            denoise_steps=_positive_int(
-                eval_config.get("denoise_steps"), "eval.denoise_steps"
-            ),
-            point_cloud_num_points=_positive_int(
-                (
-                    point_cloud_num_points
-                    if point_cloud_num_points is not None
-                    else agent_config.get("num_points")
-                ),
-                (
-                    "point_cloud_num_points"
-                    if point_cloud_num_points is not None
-                    else "agent.num_points"
-                ),
-            ),
-            point_cloud_feature_dim=_positive_int(
-                (
-                    point_cloud_feature_dim
-                    if point_cloud_feature_dim is not None
-                    else agent_config.get("pc_dim")
-                ),
-                (
-                    "point_cloud_feature_dim"
-                    if point_cloud_feature_dim is not None
-                    else "agent.pc_dim"
-                ),
-            ),
+        return parse_deployment_contract(
+            {
+                "_format": DEPLOYMENT_FORMAT,
+                "state": {
+                    "inference_config": dict(inference),
+                    "data_contract": dict(data_contract),
+                },
+            }
         )
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+    except DeploymentContractError as exc:
         raise PolicyParityError(
-            "resolved direct agent is missing point-cloud inference dimensions"
+            "resolved direct deployment contract is invalid"
         ) from exc
-    if spec.n_obs_steps - 1 + spec.n_action_steps > spec.horizon:
-        raise PolicyParityError("observation/action window exceeds horizon")
-    if spec.action_dim < spec.control_action_dim:
-        raise PolicyParityError("action_dim is smaller than control_action_dim")
-    return spec
 
 
-def _validated_point_cloud_contract(
+def _validated_observation_contract(
     experiment: Path, zarr_override: Path | None
-) -> dict[str, int]:
-    """Read only the exporter's validated Zarr shape contract, never a dataset."""
+) -> dict[str, Any]:
+    """Read the exporter's validated Zarr contract without constructing a dataset."""
     cfg_plain = exporter._load_config(experiment)
     modalities = exporter._dataset_modalities(cfg_plain)
     repo_root = Path(__file__).resolve().parents[2]
     zarr_path = exporter._resolve_zarr_path(cfg_plain, repo_root, zarr_override)
-    contract = exporter._validate_zarr_contract(zarr_path, cfg_plain, modalities)
-    return {
-        "point_cloud_num_points": _positive_int(
-            contract.get("point_cloud_num_points"), "point_cloud_num_points"
-        ),
-        "point_cloud_feature_dim": _positive_int(
-            contract.get("point_cloud_feature_dim"), "point_cloud_feature_dim"
-        ),
-    }
-
-
-def _required_action_key(value: Any) -> str:
-    if value not in {"action", "action_ee"}:
-        raise ValueError("action_key must be 'action' or 'action_ee'")
-    return value
-
-
-def _positive_int(value: Any, label: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise ValueError(f"{label} must be a positive int")
-    return value
+    return exporter._build_observation_contract(zarr_path, cfg_plain, modalities)
 
 
 def _require_matching_specs(
@@ -421,8 +371,10 @@ def _require_matching_specs(
         "n_obs_steps",
         "n_action_steps",
         "denoise_steps",
-        "point_cloud_num_points",
-        "point_cloud_feature_dim",
+        "observation_fields",
+        "control_dt_s",
+        "requires_hand",
+        "rgb_preprocessing",
     ):
         if getattr(reference, name) != getattr(candidate, name):
             raise PolicyParityError(

@@ -52,7 +52,7 @@ dataset:
   rgb_preprocess_size: [240, 240]
   rgb_random_crop_size: [224, 224]
 
-  # GPU preprocessing: no CPU resize/crop — encoder handles spatial transforms on GPU
+  # CPU validation preprocessing resizes then crops before the encoder's GPU path.
   # Conservative RGB augmentation — 25% trigger rate, mild magnitudes.
   # Reference: DexUMI uses brightness=0.6 for challenging lighting; we stay lower.
   rgb_color_aug:

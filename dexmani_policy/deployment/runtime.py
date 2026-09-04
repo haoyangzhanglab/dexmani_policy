@@ -19,13 +19,19 @@ from typing import TYPE_CHECKING, Any, final
 import numpy as np
 
 if TYPE_CHECKING:
-    from dexmani_policy.deployment.restore import DeploymentSpec, RestoredDeployment
+    from dexmani_policy.deployment.contract import (
+        DeploymentSpec,
+        ObservationFieldSpec,
+        RgbPreprocessingSpec,
+    )
+    from dexmani_policy.deployment.restore import (
+        RestoredDeployment,
+    )
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _EXPERIMENTS_ROOT = _REPOSITORY_ROOT / "experiments"
 _DEPLOYMENT_SELECTOR = Path("checkpoints/deployment_latest.pt")
-_JOINT_STATE_DIM = 19
 
 
 @dataclass(frozen=True)
@@ -38,14 +44,10 @@ class PolicySpec:
     horizon: int
     n_obs_steps: int
     n_action_steps: int
-    sensor_modalities: tuple[str, ...]
-    point_cloud_num_points: int | None
-    point_cloud_feature_dim: int | None
-    rgb_shape: tuple[int, ...] | None
-    rgb_color_order: str | None
-    rgb_value_range: tuple[float, float] | None
+    observation_fields: tuple[ObservationFieldSpec, ...]
     control_dt_s: float
     requires_hand: bool
+    rgb_preprocessing: RgbPreprocessingSpec | None = None
 
     def __post_init__(self) -> None:
         if self.action_key not in {"action", "action_ee"}:
@@ -68,60 +70,9 @@ class PolicySpec:
             raise ValueError("action_dim must not be smaller than control_action_dim")
         if self.n_obs_steps - 1 + self.n_action_steps > self.horizon:
             raise ValueError("observation/action window exceeds horizon")
-        if (
-            type(self.sensor_modalities) is not tuple
-            or not self.sensor_modalities
-            or any(
-                type(modality) is not str or not modality
-                for modality in self.sensor_modalities
-            )
-            or len(set(self.sensor_modalities)) != len(self.sensor_modalities)
-        ):
-            raise ValueError("sensor_modalities must be unique non-empty strings")
-        if "joint_state" not in self.sensor_modalities:
-            raise ValueError("sensor_modalities must include joint_state")
-
-        point_dimensions = (
-            self.point_cloud_num_points,
-            self.point_cloud_feature_dim,
-        )
-        if "point_cloud" in self.sensor_modalities:
-            if any(type(value) is not int or value <= 0 for value in point_dimensions):
-                raise ValueError(
-                    "point-cloud modalities require positive point dimensions"
-                )
-        elif any(value is not None for value in point_dimensions):
-            raise ValueError("point-cloud dimensions require the point_cloud modality")
-
-        rgb_contract = (self.rgb_shape, self.rgb_color_order, self.rgb_value_range)
-        if "rgb" in self.sensor_modalities:
-            if any(value is None for value in rgb_contract):
-                raise ValueError("rgb modality requires the complete RGB contract")
-        elif any(value is not None for value in rgb_contract):
-            raise ValueError("RGB contract fields require the rgb modality")
-        if self.rgb_shape is not None and (
-            type(self.rgb_shape) is not tuple
-            or not self.rgb_shape
-            or any(type(value) is not int or value <= 0 for value in self.rgb_shape)
-        ):
-            raise ValueError("rgb_shape must contain positive integers")
-        if self.rgb_color_order is not None and (
-            type(self.rgb_color_order) is not str or not self.rgb_color_order
-        ):
-            raise ValueError("rgb_color_order must be a non-empty string")
-        if self.rgb_value_range is not None:
-            if (
-                type(self.rgb_value_range) is not tuple
-                or len(self.rgb_value_range) != 2
-                or any(
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not np.isfinite(float(value))
-                    for value in self.rgb_value_range
-                )
-                or self.rgb_value_range[0] >= self.rgb_value_range[1]
-            ):
-                raise ValueError("rgb_value_range must be an increasing finite pair")
+        names = tuple(field.name for field in self.observation_fields)
+        if not names or len(set(names)) != len(names):
+            raise ValueError("observation_fields must be non-empty and unique")
         if (
             isinstance(self.control_dt_s, bool)
             or not isinstance(self.control_dt_s, (int, float))
@@ -131,7 +82,8 @@ class PolicySpec:
             raise ValueError("control_dt_s must be a positive finite number")
         if type(self.requires_hand) is not bool:
             raise ValueError("requires_hand must be bool")
-
+        if ("rgb" in names) != (self.rgb_preprocessing is not None):
+            raise ValueError("RGB preprocessing must match the rgb observation field")
 
 @dataclass(frozen=True)
 class ExperimentInfo:
@@ -369,7 +321,7 @@ class LoadedPolicy:
     ) -> dict[str, Any]:
         if not isinstance(observation, Mapping):
             raise TypeError("observation must be a mapping of NumPy arrays")
-        required = set(self.spec.sensor_modalities)
+        required = {field.name for field in self.spec.observation_fields}
         actual = set(observation)
         if actual != required:
             raise ValueError(
@@ -377,44 +329,58 @@ class LoadedPolicy:
                 f"expected {sorted(required)}"
             )
 
-        expected_shapes: dict[str, tuple[int, ...]] = {
-            "joint_state": (self.spec.n_obs_steps, _JOINT_STATE_DIM)
-        }
-        if "point_cloud" in required:
-            if (
-                self.spec.point_cloud_num_points is None
-                or self.spec.point_cloud_feature_dim is None
-            ):
-                raise RuntimeError("point-cloud dimensions are missing from PolicySpec")
-            expected_shapes["point_cloud"] = (
-                self.spec.n_obs_steps,
-                self.spec.point_cloud_num_points,
-                self.spec.point_cloud_feature_dim,
-            )
-        if "rgb" in required:
-            if self.spec.rgb_shape is None:
-                raise RuntimeError("RGB shape is missing from PolicySpec")
-            expected_shapes["rgb"] = (self.spec.n_obs_steps, *self.spec.rgb_shape)
-
         import torch
 
         tensors: dict[str, Any] = {}
-        for name in self.spec.sensor_modalities:
-            value = observation[name]
+        for field in self.spec.observation_fields:
+            value = observation[field.name]
             if not isinstance(value, np.ndarray):
-                raise TypeError(f"observation[{name!r}] must be a NumPy array")
-            if value.shape != expected_shapes[name]:
+                raise TypeError(f"observation[{field.name!r}] must be a NumPy array")
+            expected_shape = (self.spec.n_obs_steps, *field.shape)
+            if value.shape != expected_shape:
                 raise ValueError(
-                    f"observation[{name!r}] shape mismatch: got {value.shape}, "
-                    f"expected {expected_shapes[name]}"
+                    f"observation[{field.name!r}] shape mismatch: got {value.shape}, "
+                    f"expected {expected_shape}"
                 )
-            if value.dtype.kind not in "fiu" or not np.isfinite(value).all():
+            expected_dtype = _numpy_dtype(field.dtype)
+            if value.dtype != expected_dtype:
+                raise TypeError(
+                    f"observation[{field.name!r}] dtype mismatch: got {value.dtype}, "
+                    f"expected {expected_dtype}"
+                )
+            if field.dtype == "float32" and not np.isfinite(value).all():
                 raise ValueError(
-                    f"observation[{name!r}] must contain finite real numbers"
+                    f"observation[{field.name!r}] must contain finite real numbers"
                 )
-            contiguous = np.ascontiguousarray(value, dtype=np.float32)
-            tensors[name] = torch.from_numpy(contiguous).unsqueeze(0).to(self._device)
-        return tensors
+            if field.name == "rgb":
+                _validate_rgb_value_range(value, field.semantics)
+            tensor = torch.from_numpy(np.ascontiguousarray(value)).unsqueeze(0)
+            tensors[field.name] = tensor.to(self._device)
+        from dexmani_policy.deployment.restore import prepare_deployment_observation
+
+        return prepare_deployment_observation(tensors, self._deployment_spec())
+
+
+def _numpy_dtype(name: str) -> np.dtype[Any]:
+    try:
+        dtype = np.dtype(name)
+    except TypeError as exc:
+        raise RuntimeError(f"unsupported deployment dtype: {name!r}") from exc
+    if dtype not in {np.dtype(np.float32), np.dtype(np.uint8)}:
+        raise RuntimeError(f"unsupported deployment dtype: {name!r}")
+    return dtype
+
+
+def _validate_rgb_value_range(value: np.ndarray, metadata: Mapping[str, Any]) -> None:
+    raw_range = metadata.get("value_range")
+    if (
+        type(raw_range) not in {list, tuple}
+        or len(raw_range) != 2
+        or tuple(raw_range) != (0, 255)
+        or value.min(initial=0) < 0
+        or value.max(initial=0) > 255
+    ):
+        raise ValueError("observation['rgb'] violates the RGB value range")
 
 
 def _visible_directories(directory: Path) -> tuple[Path, ...]:
@@ -515,31 +481,6 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
     task_name = inference.get("task_name")
     if type(task_name) is not str or not task_name:
         raise RuntimeError("inference_config.task_name must be a non-empty string")
-    raw_modalities = data.get("sensor_modalities")
-    if (
-        type(raw_modalities) is not list
-        or any(type(item) is not str or not item for item in raw_modalities)
-        or len(set(raw_modalities)) != len(raw_modalities)
-    ):
-        raise RuntimeError("data_contract.sensor_modalities must be unique strings")
-    sensor_modalities = tuple(raw_modalities)
-    if set(sensor_modalities) != {"joint_state", "point_cloud"}:
-        raise RuntimeError(
-            "current deployment runtime requires joint_state + point_cloud"
-        )
-
-    control_dt_s = _positive_float(data.get("dt"), "data_contract.dt")
-    requires_hand = data.get("requires_hand", True)
-    if type(requires_hand) is not bool:
-        raise RuntimeError("data_contract.requires_hand must be bool when present")
-    rgb_shape = _optional_shape(data.get("rgb_shape"), "data_contract.rgb_shape")
-    rgb_color_order = _optional_string(
-        data.get("rgb_color_order"), "data_contract.rgb_color_order"
-    )
-    rgb_value_range = _optional_range(
-        data.get("rgb_value_range"), "data_contract.rgb_value_range"
-    )
-
     return (
         PolicySpec(
             action_key=deployment.action_key,
@@ -548,14 +489,10 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
             horizon=deployment.horizon,
             n_obs_steps=deployment.n_obs_steps,
             n_action_steps=deployment.n_action_steps,
-            sensor_modalities=sensor_modalities,
-            point_cloud_num_points=deployment.point_cloud_num_points,
-            point_cloud_feature_dim=deployment.point_cloud_feature_dim,
-            rgb_shape=rgb_shape,
-            rgb_color_order=rgb_color_order,
-            rgb_value_range=rgb_value_range,
-            control_dt_s=control_dt_s,
-            requires_hand=requires_hand,
+            observation_fields=deployment.observation_fields,
+            control_dt_s=deployment.control_dt_s,
+            requires_hand=deployment.requires_hand,
+            rgb_preprocessing=deployment.rgb_preprocessing,
         ),
         task_name,
     )
@@ -567,53 +504,3 @@ def _short_selector(experiment_dir: Path) -> str:
     except ValueError:
         return str(experiment_dir)
     return relative.as_posix() if len(relative.parts) == 3 else str(experiment_dir)
-
-
-def _positive_float(value: Any, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise RuntimeError(f"{label} must be a positive finite number")
-    result = float(value)
-    if not np.isfinite(result) or result <= 0.0:
-        raise RuntimeError(f"{label} must be a positive finite number")
-    return result
-
-
-def _optional_shape(value: Any, label: str) -> tuple[int, ...] | None:
-    if value is None:
-        return None
-    if (
-        type(value) is not list
-        or not value
-        or any(type(item) is not int or item <= 0 for item in value)
-    ):
-        raise RuntimeError(f"{label} must be a positive integer list or None")
-    return tuple(value)
-
-
-def _optional_string(value: Any, label: str) -> str | None:
-    if value is None:
-        return None
-    if type(value) is not str or not value:
-        raise RuntimeError(f"{label} must be a non-empty string or None")
-    return value
-
-
-def _optional_range(value: Any, label: str) -> tuple[float, float] | None:
-    if value is None:
-        return None
-    if type(value) is not list or len(value) != 2:
-        raise RuntimeError(f"{label} must be a two-number list or None")
-    low = _finite_float(value[0], label)
-    high = _finite_float(value[1], label)
-    if low >= high:
-        raise RuntimeError(f"{label} lower bound must be less than upper bound")
-    return low, high
-
-
-def _finite_float(value: Any, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise RuntimeError(f"{label} must contain finite numbers")
-    result = float(value)
-    if not np.isfinite(result):
-        raise RuntimeError(f"{label} must contain finite numbers")
-    return result

@@ -9,12 +9,20 @@ import numpy as np
 import torch
 
 from dexmani_policy.deployment import runtime
+from dexmani_policy.deployment.contract import ObservationFieldSpec
 from dexmani_policy.deployment.restore import DeploymentSpec, RestoredDeployment
+
+
+def _fields() -> tuple[ObservationFieldSpec, ...]:
+    return (
+        ObservationFieldSpec("joint_state", (19,), "float32", {}),
+        ObservationFieldSpec("point_cloud", (4, 6), "float32", {}),
+    )
 
 
 def _payload() -> dict:
     return {
-        "_format": "dexmani.deployment.v2",
+        "_format": "dexmani.deployment",
         "state": {
             "inference_config": {
                 "task_name": "task",
@@ -26,10 +34,12 @@ def _payload() -> dict:
                 "eval": {"denoise_steps": 10},
             },
             "data_contract": {
-                "sensor_modalities": ["joint_state", "point_cloud"],
-                "point_cloud_num_points": 4,
-                "point_cloud_feature_dim": 6,
+                "observation_fields": {
+                    "joint_state": {"shape": [19], "dtype": "float32"},
+                    "point_cloud": {"shape": [4, 6], "dtype": "float32"},
+                },
                 "dt": 0.1,
+                "requires_hand": True,
             },
         },
         "weights": {},
@@ -117,10 +127,10 @@ class DeploymentRuntimeTest(unittest.TestCase):
             self.assertEqual(info.selector, "policy/task/run")
             self.assertEqual(info.checkpoint_name, "artifact.pt")
             self.assertEqual(
-                info.spec.sensor_modalities, ("joint_state", "point_cloud")
+                tuple(field.name for field in info.spec.observation_fields),
+                ("joint_state", "point_cloud"),
             )
-            self.assertEqual(info.spec.point_cloud_num_points, 4)
-            self.assertIsNone(info.spec.rgb_shape)
+            self.assertEqual(info.spec.observation_fields[1].shape, (4, 6))
             self.assertEqual(info.spec.control_dt_s, 0.1)
             self.assertTrue(info.spec.requires_hand)
 
@@ -138,8 +148,10 @@ class DeploymentRuntimeTest(unittest.TestCase):
                     n_obs_steps=2,
                     n_action_steps=8,
                     denoise_steps=10,
-                    point_cloud_num_points=4,
-                    point_cloud_feature_dim=6,
+                    observation_fields=_fields(),
+                    control_dt_s=0.1,
+                    requires_hand=True,
+                    rgb_preprocessing=None,
                 ),
             )
             with (
@@ -157,7 +169,7 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 )
 
             observation = {
-                "joint_state": np.zeros((2, 19), dtype=np.float64),
+                "joint_state": np.zeros((2, 19), dtype=np.float32),
                 "point_cloud": np.zeros((2, 4, 6), dtype=np.float32),
             }
             action = loaded.predict(observation)
@@ -181,7 +193,7 @@ class DeploymentRuntimeTest(unittest.TestCase):
         agent = _Agent()
         restored = RestoredDeployment(
             agent=agent,
-            spec=DeploymentSpec("action", 19, 16, 2, 8, 10, 4, 6),
+            spec=DeploymentSpec("action", 19, 16, 2, 8, 10, _fields(), 0.1, True, None),
         )
         info = runtime.ExperimentInfo(
             selector="policy/task/run",
@@ -197,12 +209,7 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 16,
                 2,
                 8,
-                ("joint_state", "point_cloud"),
-                4,
-                6,
-                None,
-                None,
-                None,
+                _fields(),
                 0.1,
                 True,
             ),
@@ -216,7 +223,7 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 }
             )
 
-    def test_policy_spec_rejects_inconsistent_modality_contract(self) -> None:
+    def test_policy_spec_rejects_empty_observation_fields(self) -> None:
         with self.assertRaises(ValueError):
             runtime.PolicySpec(
                 "action",
@@ -225,12 +232,7 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 16,
                 2,
                 8,
-                ("joint_state", "point_cloud"),
-                None,
-                None,
-                None,
-                None,
-                None,
+                (),
                 0.1,
                 True,
             )

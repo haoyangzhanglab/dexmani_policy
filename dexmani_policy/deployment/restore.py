@@ -1,8 +1,4 @@
-"""Strict, deterministic restore and parity helpers for deployment-v2.
-
-This module deliberately knows only the frozen deployment checkpoint payload.
-It does not read training checkpoints, datasets, or ``dexmani_real``.
-"""
+"""Strict, deterministic restore and parity helpers for deployment artifacts."""
 
 from __future__ import annotations
 
@@ -16,37 +12,22 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-_DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
-_REQUIRED_NORMALIZER_KEYS = ("action", "joint_state", "point_cloud")
-_JOINT_STATE_DIM = 19
+from dexmani_policy.deployment.contract import (
+    DeploymentContractError,
+    DeploymentSpec,
+    ObservationFieldSpec,
+    parse_deployment_contract,
+)
+
 _MAX_PARITY_TOLERANCE = 1e-5
 
 
 class DeploymentRestoreError(RuntimeError):
-    """Raised when a deployment-v2 artifact cannot be restored safely."""
+    """Raised when a deployment artifact cannot be restored safely."""
 
 
 class PredictionParityError(DeploymentRestoreError):
     """Raised when two deterministic deployment predictions differ."""
-
-
-@dataclass(frozen=True)
-class DeploymentSpec:
-    """Inference dimensions extracted from one deployment-v2 payload."""
-
-    action_key: str
-    action_dim: int
-    horizon: int
-    n_obs_steps: int
-    n_action_steps: int
-    denoise_steps: int
-    point_cloud_num_points: int
-    point_cloud_feature_dim: int
-
-    @property
-    def control_action_dim(self) -> int:
-        """The currently frozen deployment action-space control dimension."""
-        return 21 if self.action_key == "action_ee" else 19
 
 
 @dataclass(frozen=True)
@@ -81,53 +62,11 @@ seed_everything = reset_inference_seed
 
 
 def deployment_spec(payload: Mapping[str, Any]) -> DeploymentSpec:
-    """Extract and validate the subset of deployment-v2 used for restore."""
-    if not isinstance(payload, Mapping):
-        raise DeploymentRestoreError("deployment payload must be a mapping")
-    artifact_format = payload.get("_format")
-    if artifact_format != _DEPLOYMENT_FORMAT:
-        raise DeploymentRestoreError(
-            f"unsupported deployment checkpoint format: {artifact_format!r}"
-        )
-
-    state = _mapping(payload.get("state"), "payload.state")
-    inference = _mapping(state.get("inference_config"), "state.inference_config")
-    data = _mapping(state.get("data_contract"), "state.data_contract")
-    eval_config = _mapping(inference.get("eval"), "inference_config.eval")
-
-    action_key = inference.get("action_key")
-    if action_key not in {"action", "action_ee"}:
-        raise DeploymentRestoreError(
-            "inference_config.action_key must be 'action' or 'action_ee'"
-        )
-    action_dim = _positive_int(inference.get("action_dim"), "action_dim")
-    horizon = _positive_int(inference.get("horizon"), "horizon")
-    n_obs_steps = _positive_int(inference.get("n_obs_steps"), "n_obs_steps")
-    n_action_steps = _positive_int(inference.get("n_action_steps"), "n_action_steps")
-    if n_obs_steps - 1 + n_action_steps > horizon:
-        raise DeploymentRestoreError(
-            "n_obs_steps - 1 + n_action_steps exceeds deployment horizon"
-        )
-    control_dim = 21 if action_key == "action_ee" else 19
-    if action_dim < control_dim:
-        raise DeploymentRestoreError(
-            f"action_dim={action_dim} is smaller than control_action_dim={control_dim}"
-        )
-
-    return DeploymentSpec(
-        action_key=action_key,
-        action_dim=action_dim,
-        horizon=horizon,
-        n_obs_steps=n_obs_steps,
-        n_action_steps=n_action_steps,
-        denoise_steps=_positive_int(eval_config.get("denoise_steps"), "denoise_steps"),
-        point_cloud_num_points=_positive_int(
-            data.get("point_cloud_num_points"), "point_cloud_num_points"
-        ),
-        point_cloud_feature_dim=_positive_int(
-            data.get("point_cloud_feature_dim"), "point_cloud_feature_dim"
-        ),
-    )
+    """Extract the one canonical deployment contract."""
+    try:
+        return parse_deployment_contract(payload)
+    except DeploymentContractError as exc:
+        raise DeploymentRestoreError("invalid deployment contract") from exc
 
 
 def deterministic_observation(
@@ -135,37 +74,39 @@ def deterministic_observation(
     *,
     batch_size: int = 1,
     device: torch.device | str = "cpu",
-    dtype: torch.dtype = torch.float32,
 ) -> dict[str, torch.Tensor]:
-    """Create a bounded, non-zero synthetic point-cloud observation.
+    """Create a bounded, non-zero synthetic deployment observation.
 
     The values are arithmetic rather than sampled, so the observation itself
-    is reproducible without consuming an RNG stream.  Every value lies in
-    ``(-1, 1)``; a point cloud with accidental all-zero handling therefore
-    cannot make exporter verification vacuous.
+    is reproducible without consuming an RNG stream. Floating-point values lie
+    in ``(-1, 1)`` so accidental all-zero handling cannot make verification
+    vacuous; raw RGB uses deterministic nonzero ``uint8`` values.
     """
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError("batch_size must be a positive int")
-    if not dtype.is_floating_point:
-        raise ValueError("dtype must be floating point")
-
-    joint_shape = (batch_size, spec.n_obs_steps, _JOINT_STATE_DIM)
-    point_shape = (
-        batch_size,
-        spec.n_obs_steps,
-        spec.point_cloud_num_points,
-        spec.point_cloud_feature_dim,
-    )
-    return {
-        "joint_state": _bounded_nonzero_values(joint_shape, device=device, dtype=dtype),
-        "point_cloud": _bounded_nonzero_values(point_shape, device=device, dtype=dtype),
-    }
+    result: dict[str, torch.Tensor] = {}
+    for field in spec.observation_fields:
+        shape = (batch_size, spec.n_obs_steps, *field.shape)
+        if field.dtype == "float32":
+            result[field.name] = _bounded_nonzero_values(
+                shape, device=device, dtype=torch.float32
+            )
+        elif field.dtype == "uint8":
+            values = torch.arange(math.prod(shape), device=device, dtype=torch.int64)
+            result[field.name] = (
+                values.remainder(251).add(1).to(torch.uint8).reshape(shape)
+            )
+        else:  # Parsed contracts cannot reach this branch.
+            raise DeploymentRestoreError(
+                f"unsupported observation dtype for {field.name!r}"
+            )
+    return result
 
 
 def restore_deployment_agent(
     payload: Mapping[str, Any], *, device: torch.device | str = "cpu"
 ) -> RestoredDeployment:
-    """Instantiate a deployment-v2 agent and load the selected weights strictly."""
+    """Instantiate an explicit deployment agent and load weights strictly."""
     spec = deployment_spec(payload)
     state = _mapping(payload.get("state"), "payload.state")
     inference = _mapping(state.get("inference_config"), "state.inference_config")
@@ -192,6 +133,8 @@ def restore_deployment_agent(
         agent.eval()
         _validate_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
+        _validate_consumed_observation_fields(agent, spec)
+        _validate_rgb_processor(agent, spec)
     except DeploymentRestoreError:
         raise
     except Exception as exc:
@@ -199,10 +142,6 @@ def restore_deployment_agent(
             f"deployment agent strict restore failed using weights.{selected_name}"
         ) from exc
     return RestoredDeployment(agent=agent, spec=spec)
-
-
-# Explicit name for consumers that use the artifact format in their API.
-restore_deployment_v2 = restore_deployment_agent
 
 
 def prediction_snapshot(
@@ -217,24 +156,32 @@ def prediction_snapshot(
         if observation is None
         else dict(observation)
     )
-    _validate_observation(obs, restored.spec)
+    model_observation = prepare_deployment_observation(obs, restored.spec)
     reset_inference_seed(seed)
     try:
         with torch.inference_mode():
             result = restored.agent.predict_action(
-                obs, denoise_timesteps=restored.spec.denoise_steps
+                model_observation, denoise_timesteps=restored.spec.denoise_steps
             )
     except Exception as exc:
         raise DeploymentRestoreError("deployment agent prediction failed") from exc
-    return validate_prediction(
-        result, restored.spec, batch_size=obs["joint_state"].shape[0]
-    )
+    batch_size = next(iter(obs.values())).shape[0]
+    return validate_prediction(result, restored.spec, batch_size=batch_size)
+
+
+def prepare_deployment_observation(
+    observation: Mapping[str, torch.Tensor], spec: DeploymentSpec
+) -> dict[str, torch.Tensor]:
+    """Validate raw artifact inputs before the agent-owned encoder path."""
+    raw = dict(observation)
+    _validate_observation(raw, spec)
+    return raw
 
 
 def verify_deployment_prediction(
     payload: Mapping[str, Any], *, seed: int = 0
 ) -> PredictionSnapshot:
-    """Strictly restore a deployment-v2 artifact and run one contract prediction."""
+    """Strictly restore an explicit deployment artifact and run one prediction."""
     return prediction_snapshot(restore_deployment_agent(payload), seed=seed)
 
 
@@ -243,21 +190,20 @@ def validate_deployment_normalizer(agent: Any, spec: DeploymentSpec) -> None:
     normalizer = getattr(agent, "normalizer", None)
     if normalizer is None:
         raise DeploymentRestoreError("deployment agent has no normalizer")
-    try:
-        fitted = normalizer.is_fitted(required_keys=list(_REQUIRED_NORMALIZER_KEYS))
-    except Exception as exc:
-        raise DeploymentRestoreError("cannot inspect deployment normalizer") from exc
-    if not fitted:
-        raise DeploymentRestoreError("normalizer is missing required deployment state")
-
-    expected_dims = {
-        "action": spec.action_dim,
-        "joint_state": _JOINT_STATE_DIM,
-        "point_cloud": spec.point_cloud_feature_dim,
-    }
     params_dict = getattr(normalizer, "params_dict", None)
     if params_dict is None:
         raise DeploymentRestoreError("normalizer has no params_dict")
+    try:
+        actual_keys = set(params_dict.keys())
+    except (AttributeError, TypeError) as exc:
+        raise DeploymentRestoreError("normalizer keys are not inspectable") from exc
+    fields = {field.name: field for field in spec.observation_fields}
+    if "action" not in actual_keys or actual_keys - {"action", *fields}:
+        raise DeploymentRestoreError("normalizer contains fields outside the contract")
+    expected_dims = {
+        key: spec.action_dim if key == "action" else fields[key].shape[-1]
+        for key in actual_keys
+    }
     for key, expected_dim in expected_dims.items():
         try:
             params = params_dict[key]
@@ -388,12 +334,6 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     return value
 
 
-def _positive_int(value: Any, label: str) -> int:
-    if type(value) is not int or value < 1:
-        raise DeploymentRestoreError(f"{label} must be a positive int")
-    return value
-
-
 def _state_dict(value: Any, label: str) -> dict[str, torch.Tensor]:
     if type(value) is not dict or not value:
         raise DeploymentRestoreError(f"{label} must be a non-empty plain state_dict")
@@ -437,38 +377,152 @@ def _validate_agent_dimensions(agent: Any, spec: DeploymentSpec) -> None:
 def _validate_observation(
     observation: Mapping[str, torch.Tensor], spec: DeploymentSpec
 ) -> None:
-    try:
-        joint_state = observation["joint_state"]
-        point_cloud = observation["point_cloud"]
-    except KeyError as exc:
+    if not isinstance(observation, Mapping):
+        raise DeploymentRestoreError("deployment observation must be a mapping")
+    expected_names = {field.name for field in spec.observation_fields}
+    if set(observation) != expected_names:
         raise DeploymentRestoreError(
-            "observation must include joint_state and point_cloud"
-        ) from exc
-    if not torch.is_tensor(joint_state) or not torch.is_tensor(point_cloud):
-        raise DeploymentRestoreError("deployment observation values must be tensors")
-    expected_joint = (joint_state.shape[0], spec.n_obs_steps, _JOINT_STATE_DIM)
-    expected_point = (
-        joint_state.shape[0],
-        spec.n_obs_steps,
-        spec.point_cloud_num_points,
-        spec.point_cloud_feature_dim,
+            "deployment observation fields mismatch: "
+            f"got {sorted(observation)}, expected {sorted(expected_names)}"
+        )
+    batch_size: int | None = None
+    for field in spec.observation_fields:
+        value = observation[field.name]
+        if not torch.is_tensor(value):
+            raise DeploymentRestoreError(
+                f"deployment observation {field.name!r} must be a tensor"
+            )
+        expected_dtype = _torch_dtype(field)
+        if value.dtype != expected_dtype:
+            raise DeploymentRestoreError(
+                f"deployment observation {field.name!r} dtype mismatch: "
+                f"got {value.dtype}, expected {expected_dtype}"
+            )
+        if value.ndim < 2:
+            raise DeploymentRestoreError(
+                f"deployment observation {field.name!r} lacks batch/time axes"
+            )
+        current_batch = int(value.shape[0])
+        if current_batch < 1:
+            raise DeploymentRestoreError("observation batch size must be positive")
+        if batch_size is None:
+            batch_size = current_batch
+        elif current_batch != batch_size:
+            raise DeploymentRestoreError("deployment observation batch sizes differ")
+        expected_shape = (current_batch, spec.n_obs_steps, *field.shape)
+        if tuple(value.shape) != expected_shape:
+            raise DeploymentRestoreError(
+                f"deployment observation {field.name!r} shape mismatch: "
+                f"got {tuple(value.shape)}, expected {expected_shape}"
+            )
+        if value.dtype.is_floating_point and not bool(torch.isfinite(value).all()):
+            raise DeploymentRestoreError(
+                f"deployment observation {field.name!r} contains NaN/Inf"
+            )
+
+
+def _torch_dtype(field: ObservationFieldSpec) -> torch.dtype:
+    if field.dtype == "float32":
+        return torch.float32
+    if field.dtype == "uint8":
+        return torch.uint8
+    raise DeploymentRestoreError(
+        f"unsupported deployment observation dtype: {field.dtype!r}"
     )
-    if tuple(joint_state.shape) != expected_joint:
+
+
+def _validate_consumed_observation_fields(agent: Any, spec: DeploymentSpec) -> None:
+    """Require the restored encoder to consume the artifact fields exactly."""
+    try:
+        consumed = agent.obs_encoder.consumed_observation_fields
+    except Exception as exc:
         raise DeploymentRestoreError(
-            "joint_state observation shape mismatch: "
-            f"got {tuple(joint_state.shape)}, expected {expected_joint}"
-        )
-    if tuple(point_cloud.shape) != expected_point:
-        raise DeploymentRestoreError(
-            "point_cloud observation shape mismatch: "
-            f"got {tuple(point_cloud.shape)}, expected {expected_point}"
-        )
-    if joint_state.shape[0] < 1:
-        raise DeploymentRestoreError("observation batch size must be positive")
-    if not bool(torch.isfinite(joint_state).all()) or not bool(
-        torch.isfinite(point_cloud).all()
+            "deployment requires agent.obs_encoder.consumed_observation_fields"
+        ) from exc
+    expected = tuple(field.name for field in spec.observation_fields)
+    if (
+        type(consumed) is not tuple
+        or not consumed
+        or any(type(name) is not str or not name for name in consumed)
+        or consumed != expected
     ):
-        raise DeploymentRestoreError("deployment observation contains NaN/Inf")
+        raise DeploymentRestoreError(
+            "deployment observation_fields do not match "
+            "the restored agent consumer contract"
+        )
+
+
+def _validate_rgb_processor(agent: Any, spec: DeploymentSpec) -> None:
+    """Keep RGB execution in the restored agent's existing ImageProcessor."""
+    preprocessing = spec.rgb_preprocessing
+    if preprocessing is None:
+        return
+    try:
+        processor = agent.obs_encoder.image_processor
+        image_size = processor.image_size
+        center_crop_size = processor.center_crop_size
+        resize_shortest_edge = processor.resize_shortest_edge
+        interpolation = processor.interpolation
+        mean = processor.image_mean
+        std = processor.image_std
+    except Exception as exc:
+        raise DeploymentRestoreError(
+            "deployment RGB requires agent.obs_encoder.image_processor"
+        ) from exc
+    # ``ImageProcessor`` only applies a center crop on its legacy
+    # resize-shortest-edge branch. That branch has no raw-RGB deployment
+    # equivalent, so deployment supports the direct-resize path only.
+    if resize_shortest_edge is not None or center_crop_size is not None:
+        raise DeploymentRestoreError(
+            "deployment supports only direct ImageProcessor resize without crop"
+        )
+    if (
+        _optional_hw_tuple(image_size) != preprocessing.resize_hw
+        or _optional_hw_tuple(center_crop_size) != preprocessing.center_crop_hw
+        or interpolation != preprocessing.interpolation
+        or preprocessing.input_color_order != "rgb"
+        or preprocessing.input_value_range != (0.0, 255.0)
+        or preprocessing.output_layout != "CHW"
+        or preprocessing.output_dtype != "float32"
+        or preprocessing.scale != 1.0 / 255.0
+        # ImageProcessor.resize_tensor uses F.interpolate without the
+        # torchvision antialias option. Recording True would claim a
+        # transform that the restored agent never executes.
+        or preprocessing.antialias
+    ):
+        raise DeploymentRestoreError(
+            "deployment RGB preprocessing conflicts with agent ImageProcessor"
+        )
+    _validate_rgb_stats(mean, preprocessing.normalize_mean, "image_mean")
+    _validate_rgb_stats(std, preprocessing.normalize_std, "image_std")
+
+
+def _optional_hw_tuple(value: Any) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or any(type(item) is not int or item <= 0 for item in value)
+    ):
+        raise DeploymentRestoreError("agent ImageProcessor size is invalid")
+    return value
+
+
+def _validate_rgb_stats(
+    value: Any,
+    expected: tuple[float, float, float] | None,
+    label: str,
+) -> None:
+    if expected is None or not torch.is_tensor(value) or tuple(value.shape) != (3,):
+        raise DeploymentRestoreError(
+            f"deployment RGB preprocessing {label} conflicts with agent ImageProcessor"
+        )
+    expected_tensor = torch.tensor(expected, dtype=torch.float32)
+    if not torch.equal(value.detach().cpu().to(dtype=torch.float32), expected_tensor):
+        raise DeploymentRestoreError(
+            f"deployment RGB preprocessing {label} conflicts with agent ImageProcessor"
+        )
 
 
 def _bounded_nonzero_values(

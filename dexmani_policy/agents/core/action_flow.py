@@ -13,6 +13,10 @@ from dexmani_policy.agents.position_encodings import SinusoidalPosEmb3D
 
 
 class ActionFlowObsEncoder(nn.Module):
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return ("joint_state", "point_cloud")
+
     """Two-frame 3D geometry memory for ActionFlow.
 
     PointNeXT extracts *local* patch geometry only; a joint GeoFormer over both

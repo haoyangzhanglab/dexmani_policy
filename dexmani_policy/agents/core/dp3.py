@@ -8,6 +8,10 @@ from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
 class DP3ObsEncoder(nn.Module):
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return ("joint_state", "point_cloud")
+
     def __init__(
         self,
         encoder_type: str,
