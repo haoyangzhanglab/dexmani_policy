@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -178,7 +179,10 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 "joint_state": np.zeros((2, 19), dtype=np.float32),
                 "point_cloud": np.zeros((2, 4, 6), dtype=np.float32),
             }
-            action = loaded.predict(observation)
+            observation["point_cloud"].setflags(write=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                action = loaded.predict(observation)
             self.assertEqual(action.shape, (8, 19))
             self.assertEqual(action.dtype, np.float64)
             self.assertTrue(np.isfinite(action).all())

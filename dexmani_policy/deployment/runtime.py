@@ -354,7 +354,10 @@ class LoadedPolicy:
                 )
             if field.name == "rgb":
                 _validate_rgb_value_range(value, field.semantics)
-            tensor = torch.from_numpy(np.ascontiguousarray(value)).unsqueeze(0)
+            contiguous_value = np.ascontiguousarray(value)
+            if not contiguous_value.flags.writeable:
+                contiguous_value = contiguous_value.copy()
+            tensor = torch.from_numpy(contiguous_value).unsqueeze(0)
             tensors[field.name] = tensor.to(self._device)
         from dexmani_policy.deployment.restore import prepare_deployment_observation
 
