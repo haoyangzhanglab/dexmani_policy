@@ -9,7 +9,6 @@ useful deployment boundary check even on a machine with no simulator install.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -25,6 +24,7 @@ from omegaconf import OmegaConf
 from dexmani_policy.deployment import export as exporter
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
+    DEPLOYMENT_SCHEMA_VERSION,
     DeploymentContractError,
     parse_deployment_contract,
 )
@@ -50,14 +50,13 @@ class PolicyParityError(RuntimeError):
 
 @dataclass(frozen=True)
 class DirectRestoredPolicy:
-    """A strict restore from a selected simple.v1 experiment checkpoint."""
+    """A strict restore from one selected experiment checkpoint."""
 
     agent: Any
     spec: DeploymentSpec
     experiment_dir: Path
     checkpoint_path: Path
     checkpoint_selector: str
-    checkpoint_sha256: str
     use_ema: bool
     selected_weights: str
 
@@ -69,9 +68,7 @@ class ParityReport:
     experiment_dir: str
     selected_checkpoint: str
     checkpoint_selector: str
-    source_checkpoint_sha256: str
     deployment_checkpoint: str
-    deployment_checkpoint_sha256: str
     use_ema: bool
     selected_weights: str
     action_key: str
@@ -99,7 +96,7 @@ def restore_direct_policy(
     device: torch.device | str = "cpu",
     data_contract: Mapping[str, Any] | None = None,
 ) -> DirectRestoredPolicy:
-    """Strictly restore the selected simple.v1 model or EMA from an experiment.
+    """Strictly restore the selected model or EMA from an experiment.
 
     The resolved ``config.yaml`` is the constructor source of truth.  This
     intentionally does *not* use the dataset or environment portions of that
@@ -167,7 +164,6 @@ def restore_direct_policy(
         experiment_dir=experiment,
         checkpoint_path=selected_path,
         checkpoint_selector=checkpoint_selector,
-        checkpoint_sha256=_sha256_file(selected_path),
         use_ema=use_ema,
         selected_weights=selected_weights,
     )
@@ -208,7 +204,6 @@ def qualify_policy_parity(
     checkpoint_selector: str = "best",
     output_path: Path | None = None,
     zarr_path: Path | None = None,
-    verify_export: bool = True,
     seed: int = 0,
     device: torch.device | str = "cpu",
     atol: float = 0.0,
@@ -238,7 +233,7 @@ def qualify_policy_parity(
         direct.experiment_dir,
         checkpoint_selector=checkpoint_selector,
         output_path=output_path,
-        verify=verify_export,
+        verify=False,
         zarr_path=zarr_path,
         publish=False,
     )
@@ -262,20 +257,14 @@ def qualify_policy_parity(
     except DeploymentRestoreError as exc:
         # Drop the candidate, keep the selector unchanged, and re-raise so a
         # same-name retry is idempotent.
-        exporter.cleanup_candidate_artifact(
-            receipt.checkpoint_path, receipt.sidecar_path
-        )
+        exporter.cleanup_candidate_artifact(receipt.checkpoint_path)
         raise PolicyParityError("direct/export prediction parity failed") from exc
     except Exception:
-        exporter.cleanup_candidate_artifact(
-            receipt.checkpoint_path, receipt.sidecar_path
-        )
+        exporter.cleanup_candidate_artifact(receipt.checkpoint_path)
         raise
 
-    # Parity + sidecar validation passed — commit the selector exactly once.
-    exporter.publish_deployment_selector(
-        receipt.selector_path, receipt.checkpoint_path, receipt.sidecar_path
-    )
+    # Parity passed — commit the selector exactly once.
+    exporter.publish_deployment_selector(receipt.selector_path, receipt.checkpoint_path)
 
     pred_max = _max_abs_diff(
         direct_snapshot.pred_action, deployment_snapshot.pred_action
@@ -297,9 +286,7 @@ def qualify_policy_parity(
         experiment_dir=str(direct.experiment_dir),
         selected_checkpoint=str(direct.checkpoint_path),
         checkpoint_selector=direct.checkpoint_selector,
-        source_checkpoint_sha256=direct.checkpoint_sha256,
         deployment_checkpoint=str(receipt.checkpoint_path),
-        deployment_checkpoint_sha256=receipt.checkpoint_sha256,
         use_ema=direct.use_ema,
         selected_weights=direct.selected_weights,
         action_key=direct.spec.action_key,
@@ -338,10 +325,13 @@ def _direct_spec(
         return parse_deployment_contract(
             {
                 "_format": DEPLOYMENT_FORMAT,
-                "state": {
+                "contract": {
+                    "schema_version": DEPLOYMENT_SCHEMA_VERSION,
                     "inference_config": dict(inference),
                     "data_contract": dict(data_contract),
+                    "producer": {},
                 },
+                "weights": {"contract_probe": torch.ones(1)},
             }
         )
     except DeploymentContractError as exc:
@@ -413,14 +403,6 @@ def _max_abs_diff(reference: torch.Tensor, candidate: torch.Tensor) -> float:
     return float(torch.max(torch.abs(reference - candidate)).item())
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _validate_tolerance(value: float, label: str) -> None:
     if type(value) not in {int, float} or not math.isfinite(value) or value < 0:
         raise ValueError(f"{label} must be a finite non-negative number")
@@ -468,12 +450,6 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="required justification when --atol or --rtol is non-zero",
     )
-    parser.add_argument(
-        "--verify-export",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="run the exporter's strict deployment preflight too (default: true)",
-    )
     return parser.parse_args()
 
 
@@ -484,7 +460,6 @@ def main() -> None:
         checkpoint_selector=args.checkpoint,
         output_path=args.output,
         zarr_path=args.zarr_path,
-        verify_export=args.verify_export,
         seed=args.seed,
         device=args.device,
         atol=args.atol,

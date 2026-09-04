@@ -7,6 +7,7 @@ import torch
 
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
+    DEPLOYMENT_SCHEMA_VERSION,
     DeploymentContractError,
     parse_deployment_contract,
 )
@@ -20,7 +21,8 @@ from dexmani_policy.deployment.restore import (
 def _payload() -> dict:
     return {
         "_format": DEPLOYMENT_FORMAT,
-        "state": {
+        "contract": {
+            "schema_version": DEPLOYMENT_SCHEMA_VERSION,
             "inference_config": {
                 "action_key": "action",
                 "action_dim": 19,
@@ -58,7 +60,9 @@ def _payload() -> dict:
                     },
                 },
             },
+            "producer": {},
         },
+        "weights": {"weight": torch.ones(1)},
     }
 
 
@@ -74,20 +78,20 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertTrue(spec.requires_hand)
         self.assertEqual(spec.rgb_preprocessing.resize_hw, (224, 224))
 
-    def test_unknown_format_is_not_accepted(self) -> None:
+    def test_legacy_format_is_not_accepted(self) -> None:
         payload = copy.deepcopy(_payload())
-        payload["_format"] = "unsupported"
+        payload["_format"] = "dexmani.deployment"
         with self.assertRaises(DeploymentContractError):
             parse_deployment_contract(payload)
 
     def test_shape_dtype_and_rgb_presence_are_boundary_checks(self) -> None:
         payload = copy.deepcopy(_payload())
-        payload["state"]["data_contract"]["observation_fields"]["rgb"]["shape"] = []
+        payload["contract"]["data_contract"]["observation_fields"]["rgb"]["shape"] = []
         with self.assertRaises(DeploymentContractError):
             parse_deployment_contract(payload)
 
         payload = copy.deepcopy(_payload())
-        del payload["state"]["data_contract"]["observation_fields"]["rgb"]
+        del payload["contract"]["data_contract"]["observation_fields"]["rgb"]
         with self.assertRaises(DeploymentContractError):
             parse_deployment_contract(payload)
 
@@ -95,14 +99,14 @@ class DeploymentContractTest(unittest.TestCase):
         self,
     ) -> None:
         payload = copy.deepcopy(_payload())
-        payload["state"]["data_contract"]["observation_fields"] = {
+        payload["contract"]["data_contract"]["observation_fields"] = {
             "custom_signal": {
                 "shape": [7],
                 "dtype": "float32",
                 "semantics": {"units": "domain_owned"},
             }
         }
-        payload["state"]["inference_config"].pop("rgb_preprocessing")
+        payload["contract"]["inference_config"].pop("rgb_preprocessing")
         spec = parse_deployment_contract(payload)
         self.assertEqual(spec.observation_fields[0].name, "custom_signal")
         self.assertEqual(spec.observation_fields[0].semantics["units"], "domain_owned")

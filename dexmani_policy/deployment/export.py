@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -51,7 +50,6 @@ _SCP_REMOTE_RE = re.compile(r"git@github\.com:haoyangzhanglab/dexmani_policy(?:\
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _POINT_COUNTS = frozenset({1024, 2048, 4096, 8192})
 _POINT_FEATURE_DIM = 6
-_MAX_ACTION_STEPS = 32
 _POINT_SEMANTICS = {
     "point_cloud_frame": "xarm_base",
     "point_cloud_color_source": "mean_rgb_of_aligned_depth_pixels_per_voxel",
@@ -126,9 +124,7 @@ class ArtifactVerificationError(DeploymentExportError):
 @dataclass(frozen=True)
 class ExportReceipt:
     checkpoint_path: Path
-    sidecar_path: Path
     selector_path: Path
-    checkpoint_sha256: str
     producer_commit: str
     metadata_provenance: str
     checkpoint_selector: str
@@ -1280,80 +1276,23 @@ def _canonical_json(value: Any) -> str:
         raise InvalidCheckpointError("metadata must be canonical finite JSON") from exc
 
 
-def _sha256_bytes(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _build_allocation(
-    inference: dict[str, Any], data: dict[str, Any]
-) -> dict[str, Any]:
-    fields = data.get("observation_fields")
-    if type(fields) is not dict or not fields:
-        raise InvalidExperimentError("observation_fields must be a non-empty mapping")
-    allocation = {
-        "task_name": inference["task_name"],
-        "action_key": inference["action_key"],
-        "action_dim": inference["action_dim"],
-        "control_action_dim": 21 if inference["action_key"] == "action_ee" else 19,
-        "auxiliary_action_layout": (
-            "joint19_ee9" if inference["use_aux_ee"] else "none"
-        ),
-        "n_obs_steps": inference["n_obs_steps"],
-        "n_action_steps": inference["n_action_steps"],
-        "horizon": inference["horizon"],
-        "required_action_steps": inference["horizon"] - (inference["n_obs_steps"] - 1),
-        "control_dt_s": data["dt"],
-        "observation_fields": list(fields),
-        "observation_specs": fields,
-        "requires_hand": data["requires_hand"],
-    }
-    required_steps = allocation["required_action_steps"]
-    if required_steps <= 0 or required_steps > _MAX_ACTION_STEPS:
-        raise InvalidExperimentError(
-            "required_action_steps exceeds the Real IPC contract"
-        )
-    return allocation
-
-
 def _validate_payload(payload: Any) -> None:
-    if type(payload) is not dict or not {"_format", "state", "weights"}.issubset(
-        payload
-    ):
+    if type(payload) is not dict or set(payload) != {"_format", "contract", "weights"}:
         raise ArtifactVerificationError("deployment checkpoint payload schema mismatch")
     if payload["_format"] != DEPLOYMENT_FORMAT:
         raise ArtifactVerificationError("deployment checkpoint format mismatch")
-    state = payload["state"]
+    contract = payload["contract"]
     weights = payload["weights"]
-    required_state = {
-        "epoch",
-        "global_step",
-        "train_params",
+    if type(contract) is not dict or set(contract) != {
+        "schema_version",
         "inference_config",
         "data_contract",
         "producer",
-    }
-    if type(state) is not dict or not required_state.issubset(state):
-        raise ArtifactVerificationError("deployment checkpoint state schema mismatch")
-    if type(weights) is not dict or not {"model", "ema_model"}.issubset(weights):
-        raise ArtifactVerificationError("deployment checkpoint weights schema mismatch")
-    _canonicalize_state_dict(weights["model"], "weights.model")
-    if weights["ema_model"] is not None:
-        _canonicalize_state_dict(weights["ema_model"], "weights.ema_model")
-    for name in (
-        "train_params",
-        "inference_config",
-        "data_contract",
-        "producer",
-    ):
-        _require_plain_metadata(state[name], name)
+    }:
+        raise ArtifactVerificationError("deployment contract schema mismatch")
+    _canonicalize_state_dict(weights, "weights")
+    for name in ("inference_config", "data_contract", "producer"):
+        _require_plain_metadata(contract[name], f"contract.{name}")
     try:
         parse_deployment_contract(payload)
     except DeploymentContractError as exc:
@@ -1389,23 +1328,6 @@ def _write_checkpoint_temp(directory: Path, payload: dict[str, Any]) -> Path:
         raise
 
 
-def _write_sidecar_temp(directory: Path, sidecar: dict[str, Any]) -> Path:
-    descriptor, raw_path = tempfile.mkstemp(
-        prefix=".deployment-sidecar-", suffix=".tmp", dir=directory
-    )
-    path = Path(raw_path)
-    try:
-        payload = _canonical_json(sidecar).encode("utf-8")
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        return path
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-
-
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -1423,32 +1345,6 @@ def _load_deployment_payload(path: Path) -> dict[str, Any]:
         ) from exc
     _validate_payload(payload)
     return payload
-
-
-def _roundtrip_verify_files(
-    checkpoint_path: Path, sidecar_path: Path, expected_sidecar: dict[str, Any]
-) -> None:
-    _load_deployment_payload(checkpoint_path)
-    try:
-        raw = sidecar_path.read_bytes()
-        decoded = json.loads(
-            raw, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token))
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise ArtifactVerificationError("cannot reload deployment sidecar") from exc
-    if raw != _canonical_json(decoded).encode("utf-8") or decoded != expected_sidecar:
-        raise ArtifactVerificationError(
-            "deployment sidecar is not canonical or changed"
-        )
-    checkpoint = decoded["checkpoint"]
-    if (
-        checkpoint["filename"] != checkpoint_path.name
-        or checkpoint["size_bytes"] != checkpoint_path.stat().st_size
-        or checkpoint["sha256"] != _sha256_file(checkpoint_path)
-    ):
-        raise ArtifactVerificationError(
-            "deployment sidecar checkpoint identity mismatch"
-        )
 
 
 def _capture_selector(selector_path: Path) -> tuple[bool, str | None]:
@@ -1486,12 +1382,7 @@ def _rollback_selector(selector_path: Path, old: tuple[bool, str | None]) -> Non
         _fsync_directory(selector_path.parent)
 
 
-def _roundtrip_verify_published(
-    selector_path: Path,
-    checkpoint_path: Path,
-    sidecar_path: Path,
-    sidecar: dict[str, Any],
-) -> None:
+def _verify_published_selector(selector_path: Path, checkpoint_path: Path) -> None:
     if (
         not selector_path.is_symlink()
         or os.readlink(selector_path) != checkpoint_path.name
@@ -1503,53 +1394,33 @@ def _roundtrip_verify_published(
         raise ArtifactVerificationError(
             "deployment selector resolves to the wrong checkpoint"
         )
-    _roundtrip_verify_files(checkpoint_path, sidecar_path, sidecar)
+    _load_deployment_payload(checkpoint_path)
 
 
 def publish_deployment_selector(
     selector_path: Path,
     checkpoint_path: Path,
-    sidecar_path: Path,
 ) -> None:
-    """Commit the deployment selector in one atomic, verified step.
-
-    Re-reads the on-disk sidecar as the expected content, captures the old
-    selector, swaps in a relative symlink to *checkpoint_path*, roundtrip-verifies
-    the published artifact, and rolls back on any failure.  Called exactly once by
-    ``qualify_policy_parity`` after direct/deployment parity and sidecar validation
-    pass.
-    """
-    raw = sidecar_path.read_bytes()
-    sidecar = json.loads(
-        raw, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token))
-    )
+    """Atomically publish one already-qualified canonical v2 artifact."""
     old_selector = _capture_selector(selector_path)
     selector_published = False
     try:
         _replace_relative_symlink(selector_path, checkpoint_path.name)
         selector_published = True
-        _roundtrip_verify_published(
-            selector_path, checkpoint_path, sidecar_path, sidecar
-        )
+        _verify_published_selector(selector_path, checkpoint_path)
     except BaseException:
         if selector_published:
             _rollback_selector(selector_path, old_selector)
         raise
 
 
-def cleanup_candidate_artifact(checkpoint_path: Path, sidecar_path: Path) -> None:
-    """Remove an unpublished candidate deployment artifact (checkpoint + sidecar).
-
-    Idempotent; the deployment selector is left untouched.  Called on
-    qualification failure so a same-name retry does not hit the export
-    ``FileExistsError`` guard.
-    """
-    for path in (checkpoint_path, sidecar_path):
-        try:
-            if path.is_symlink() or path.exists():
-                path.unlink()
-        except OSError:
-            pass
+def cleanup_candidate_artifact(checkpoint_path: Path) -> None:
+    """Remove one unpublished candidate artifact after failed qualification."""
+    try:
+        if checkpoint_path.is_symlink() or checkpoint_path.exists():
+            checkpoint_path.unlink()
+    except OSError:
+        pass
 
 
 def export_deployment_artifact(
@@ -1560,13 +1431,13 @@ def export_deployment_artifact(
     zarr_path: Path | None = None,
     publish: bool = True,
 ) -> ExportReceipt:
-    """Export one selected simple.v1 checkpoint as a deployment artifact.
+    """Export one selected checkpoint as a canonical v2 deployment artifact.
 
     When ``publish=True`` (default) the ``deployment_latest.pt`` selector is
     atomically swapped to point at the new artifact.  When ``publish=False`` the
-    checkpoint + sidecar are written but the selector is left untouched — used by
-    ``qualify_policy_parity`` so the selector is only committed after direct/
-    deployment parity and sidecar validation pass.
+    artifact is written but the selector is left untouched — used by
+    ``qualify_policy_parity`` so the selector is committed only after direct/
+    deployment parity passes.
     """
     repo_root = Path(__file__).resolve().parents[2]
     producer_commit = _producer_provenance(repo_root)
@@ -1611,7 +1482,8 @@ def export_deployment_artifact(
         inference["rgb_preprocessing"] = _rgb_preprocessing(
             cfg_plain["agent"], cfg_plain["dataset"]
         )
-    selected_state = ema_state if inference["eval"]["use_ema"] else model_state
+    selected_weights = "ema_model" if inference["eval"]["use_ema"] else "model"
+    selected_state = ema_state if selected_weights == "ema_model" else model_state
     assert selected_state is not None
     _validate_normalizer_state(
         selected_state,
@@ -1624,24 +1496,28 @@ def export_deployment_artifact(
         "commit": producer_commit,
         "metadata_provenance": metadata_provenance,
         "retrofitted_train_params_fields": retrofitted,
+        "source_checkpoint": selected_path.name,
+        "selected_weights": selected_weights,
+    }
+    deployment_inference = {
+        **inference,
+        "eval": {"denoise_steps": inference["eval"]["denoise_steps"]},
     }
     payload = {
         "_format": DEPLOYMENT_FORMAT,
-        "state": {
-            "epoch": int(checkpoint.epoch),
-            "global_step": int(checkpoint.global_step),
-            "train_params": train,
-            "inference_config": inference,
+        "contract": {
+            "schema_version": 2,
+            "inference_config": deployment_inference,
             "data_contract": data_contract,
             "producer": producer,
         },
-        "weights": {"model": model_state, "ema_model": ema_state},
+        "weights": selected_state,
     }
     _validate_payload(payload)
 
     checkpoint_dir = experiment / "checkpoints"
     if output_path is None:
-        final_path = checkpoint_dir / f"{selected_path.stem}-deployment.pt"
+        final_path = checkpoint_dir / f"{selected_path.stem}-deployment-v2.pt"
     else:
         requested = Path(output_path)
         final_path = (
@@ -1655,22 +1531,12 @@ def export_deployment_artifact(
         raise ArtifactPublicationError(
             "output_path must be a .pt file in experiment/checkpoints"
         )
-    sidecar_path = final_path.with_name(f"{final_path.name}.deployment.json")
     selector_path = checkpoint_dir / "deployment_latest.pt"
-    if (
-        final_path.exists()
-        or final_path.is_symlink()
-        or sidecar_path.exists()
-        or sidecar_path.is_symlink()
-    ):
+    if final_path.exists() or final_path.is_symlink():
         raise FileExistsError(
             f"refusing to overwrite deployment artifact: {final_path}"
         )
-    old_selector = _capture_selector(selector_path) if publish else None
-
     checkpoint_temp: Path | None = None
-    sidecar_temp: Path | None = None
-    selector_published = False
     try:
         checkpoint_temp = _write_checkpoint_temp(checkpoint_dir, payload)
         os.replace(checkpoint_temp, final_path)
@@ -1679,51 +1545,13 @@ def export_deployment_artifact(
         reloaded_payload = _load_deployment_payload(final_path)
         if verify:
             _verify_exported_model(reloaded_payload)
-        checkpoint_sha256 = _sha256_file(final_path)
-        allocation = _build_allocation(inference, data_contract)
-        embedded_hash = _sha256_bytes(
-            _canonical_json(
-                {"inference_config": inference, "data_contract": data_contract}
-            ).encode("utf-8")
-        )
-        sidecar = {
-            "schema_version": 2,
-            "checkpoint": {
-                "filename": final_path.name,
-                "size_bytes": final_path.stat().st_size,
-                "sha256": checkpoint_sha256,
-            },
-            "embedded_contract_sha256": embedded_hash,
-            "allocation": allocation,
-            "producer": {
-                "repository": _REPOSITORY,
-                "commit": producer_commit,
-                "metadata_provenance": metadata_provenance,
-            },
-        }
-        sidecar_temp = _write_sidecar_temp(checkpoint_dir, sidecar)
-        os.replace(sidecar_temp, sidecar_path)
-        sidecar_temp = None
-        _fsync_directory(checkpoint_dir)
-        _roundtrip_verify_files(final_path, sidecar_path, sidecar)
         if _producer_provenance(repo_root) != producer_commit:
             raise ArtifactPublicationError(
                 "Policy producer commit changed during deployment export"
             )
         if publish:
-            selector_published = True
-            _replace_relative_symlink(selector_path, final_path.name)
-            _roundtrip_verify_published(
-                selector_path, final_path, sidecar_path, sidecar
-            )
+            publish_deployment_selector(selector_path, final_path)
     except BaseException as exc:
-        if selector_published:
-            try:
-                _rollback_selector(selector_path, old_selector)
-            except Exception as rollback_exc:
-                raise ArtifactPublicationError(
-                    "deployment publication failed and selector rollback also failed"
-                ) from rollback_exc
         if isinstance(exc, DeploymentExportError):
             raise
         raise ArtifactPublicationError(
@@ -1732,14 +1560,10 @@ def export_deployment_artifact(
     finally:
         if checkpoint_temp is not None:
             checkpoint_temp.unlink(missing_ok=True)
-        if sidecar_temp is not None:
-            sidecar_temp.unlink(missing_ok=True)
 
     return ExportReceipt(
         checkpoint_path=final_path,
-        sidecar_path=sidecar_path,
         selector_path=selector_path,
-        checkpoint_sha256=checkpoint_sha256,
         producer_commit=producer_commit,
         metadata_provenance=metadata_provenance,
         checkpoint_selector=checkpoint_selector,
@@ -1774,9 +1598,7 @@ def main() -> None:
         _canonical_json(
             {
                 "checkpoint_path": str(receipt.checkpoint_path),
-                "sidecar_path": str(receipt.sidecar_path),
                 "selector_path": str(receipt.selector_path),
-                "checkpoint_sha256": receipt.checkpoint_sha256,
                 "producer_commit": receipt.producer_commit,
                 "metadata_provenance": receipt.metadata_provenance,
                 "checkpoint_selector": receipt.checkpoint_selector,

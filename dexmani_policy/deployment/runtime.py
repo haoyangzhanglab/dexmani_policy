@@ -466,17 +466,12 @@ def _experiment_identity(experiment_dir: Path) -> tuple[str, str]:
 
 
 def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
+    from dexmani_policy.deployment.contract import deployment_contract
     from dexmani_policy.deployment.restore import deployment_spec
 
     deployment = deployment_spec(payload)
-    try:
-        state = payload["state"]
-        inference = state["inference_config"]
-        data = state["data_contract"]
-    except (KeyError, TypeError) as exc:
-        raise RuntimeError("deployment checkpoint metadata is incomplete") from exc
-    if not isinstance(inference, Mapping) or not isinstance(data, Mapping):
-        raise RuntimeError("deployment checkpoint metadata must contain mappings")
+    contract = deployment_contract(payload)
+    inference = contract["inference_config"]
 
     task_name = inference.get("task_name")
     if type(task_name) is not str or not task_name:

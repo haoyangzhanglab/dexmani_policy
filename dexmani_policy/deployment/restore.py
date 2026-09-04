@@ -16,6 +16,7 @@ from dexmani_policy.deployment.contract import (
     DeploymentContractError,
     DeploymentSpec,
     ObservationFieldSpec,
+    deployment_contract,
     parse_deployment_contract,
 )
 
@@ -108,20 +109,10 @@ def restore_deployment_agent(
 ) -> RestoredDeployment:
     """Instantiate an explicit deployment agent and load weights strictly."""
     spec = deployment_spec(payload)
-    state = _mapping(payload.get("state"), "payload.state")
-    inference = _mapping(state.get("inference_config"), "state.inference_config")
+    contract = deployment_contract(payload)
+    inference = _mapping(contract.get("inference_config"), "contract.inference_config")
     agent_config = _mapping(inference.get("agent"), "inference_config.agent")
-    weights = _mapping(payload.get("weights"), "payload.weights")
-    eval_config = _mapping(inference.get("eval"), "inference_config.eval")
-    use_ema = eval_config.get("use_ema")
-    if type(use_ema) is not bool:
-        raise DeploymentRestoreError("inference_config.eval.use_ema must be bool")
-
-    selected_name = "ema_model" if use_ema else "model"
-    selected = weights.get(selected_name)
-    if selected is None and use_ema:
-        raise DeploymentRestoreError("eval.use_ema requires EMA weights")
-    selected_state = _state_dict(selected, f"weights.{selected_name}")
+    selected_state = _state_dict(payload.get("weights"), "payload.weights")
 
     try:
         import hydra
@@ -138,9 +129,7 @@ def restore_deployment_agent(
     except DeploymentRestoreError:
         raise
     except Exception as exc:
-        raise DeploymentRestoreError(
-            f"deployment agent strict restore failed using weights.{selected_name}"
-        ) from exc
+        raise DeploymentRestoreError("deployment agent strict restore failed") from exc
     return RestoredDeployment(agent=agent, spec=spec)
 
 

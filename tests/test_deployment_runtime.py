@@ -9,7 +9,11 @@ import numpy as np
 import torch
 
 from dexmani_policy.deployment import runtime
-from dexmani_policy.deployment.contract import ObservationFieldSpec
+from dexmani_policy.deployment.contract import (
+    DEPLOYMENT_FORMAT,
+    DEPLOYMENT_SCHEMA_VERSION,
+    ObservationFieldSpec,
+)
 from dexmani_policy.deployment.restore import DeploymentSpec, RestoredDeployment
 
 
@@ -22,8 +26,9 @@ def _fields() -> tuple[ObservationFieldSpec, ...]:
 
 def _payload() -> dict:
     return {
-        "_format": "dexmani.deployment",
-        "state": {
+        "_format": DEPLOYMENT_FORMAT,
+        "contract": {
+            "schema_version": DEPLOYMENT_SCHEMA_VERSION,
             "inference_config": {
                 "task_name": "task",
                 "action_key": "action",
@@ -41,8 +46,9 @@ def _payload() -> dict:
                 "dt": 0.1,
                 "requires_hand": True,
             },
+            "producer": {},
         },
-        "weights": {},
+        "weights": {"weight": torch.ones(1)},
     }
 
 

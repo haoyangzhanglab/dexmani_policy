@@ -158,11 +158,15 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 ## Real deployment artifact contract
 
 `dexmani_policy.deployment` exports a resolved experiment checkpoint for the
-Real runtime. Every artifact uses `dexmani.deployment`; its only persisted
-observation declaration is the ordered `data_contract.observation_fields`
-mapping. Each field records its raw shape, dtype and semantics. The training
-experiment's `dataset.sensor_modalities` is the single manual selection used
-by export; it is not copied into the artifact as a competing list.
+Real runtime. Every artifact uses `dexmani.deployment.v2` with exactly three
+top-level fields: `_format`, `contract`, and one selected `weights` state dict.
+`contract` is the sole metadata owner (`schema_version`, `inference_config`,
+`data_contract`, `producer`); there is no sidecar, hash manifest, or dormant
+model/EMA copy. Its only persisted observation declaration is the ordered
+`data_contract.observation_fields` mapping. Each field records its raw shape,
+dtype and semantics. The training experiment's `dataset.sensor_modalities` is
+the single manual selection used by export; it is not copied into the artifact
+as a competing list.
 
 - **Encoder-owned inputs**: export and restore require the selected fields to
   match the instantiated encoder's `consumed_observation_fields`. A field that

@@ -5,7 +5,10 @@ import unittest
 import torch
 
 from dexmani_policy.deployment import export
-from dexmani_policy.deployment.contract import DEPLOYMENT_FORMAT
+from dexmani_policy.deployment.contract import (
+    DEPLOYMENT_FORMAT,
+    DEPLOYMENT_SCHEMA_VERSION,
+)
 
 
 class DeploymentExportTest(unittest.TestCase):
@@ -19,7 +22,7 @@ class DeploymentExportTest(unittest.TestCase):
             "n_action_steps": 8,
             "use_aux_ee": False,
             "agent": {},
-            "eval": {"use_ema": False, "denoise_steps": 10},
+            "eval": {"denoise_steps": 10},
         }
         data = {
             "dt": 0.1,
@@ -31,27 +34,21 @@ class DeploymentExportTest(unittest.TestCase):
         }
         payload = {
             "_format": DEPLOYMENT_FORMAT,
-            "state": {
-                "epoch": 1,
-                "global_step": 2,
-                "train_params": {},
+            "contract": {
+                "schema_version": DEPLOYMENT_SCHEMA_VERSION,
                 "inference_config": inference,
                 "data_contract": data,
                 "producer": {},
             },
-            "weights": {"model": {"weight": torch.ones(1)}, "ema_model": None},
+            "weights": {"weight": torch.ones(1)},
         }
 
         export._validate_payload(payload)
         self.assertNotIn("sensor_modalities", data)
         self.assertNotIn("normalizer_keys", data)
-        self.assertNotIn("deployment_contract", payload["state"])
-
-        allocation = export._build_allocation(inference, data)
-        self.assertEqual(
-            allocation["observation_fields"], ["joint_state", "point_cloud"]
-        )
-        self.assertEqual(allocation["observation_specs"], data["observation_fields"])
+        self.assertEqual(set(payload), {"_format", "contract", "weights"})
+        self.assertEqual(payload["contract"]["inference_config"], inference)
+        self.assertEqual(payload["weights"], {"weight": torch.ones(1)})
 
 
 if __name__ == "__main__":

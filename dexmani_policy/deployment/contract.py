@@ -7,7 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-DEPLOYMENT_FORMAT = "dexmani.deployment"
+DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
+DEPLOYMENT_SCHEMA_VERSION = 2
 SUPPORTED_OBSERVATION_DTYPES = frozenset({"float32", "uint8"})
 
 
@@ -81,16 +82,34 @@ class DeploymentSpec:
         return 21 if self.action_key == "action_ee" else 19
 
 
-def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
-    """Parse only the fields needed to construct and call the model."""
+def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the sole persisted contract of one canonical v2 artifact."""
     root = _mapping(payload, "deployment payload")
     if root.get("_format") != DEPLOYMENT_FORMAT:
         raise DeploymentContractError(
             f"unsupported deployment format: {root.get('_format')!r}"
         )
-    state = _mapping(root.get("state"), "payload.state")
-    inference = _mapping(state.get("inference_config"), "state.inference_config")
-    data = _mapping(state.get("data_contract"), "state.data_contract")
+    if set(root) != {"_format", "contract", "weights"}:
+        raise DeploymentContractError(
+            "deployment payload must contain format, contract, and weights"
+        )
+    contract = _mapping(root.get("contract"), "payload.contract")
+    if contract.get("schema_version") != DEPLOYMENT_SCHEMA_VERSION:
+        raise DeploymentContractError(
+            f"unsupported deployment schema version: {contract.get('schema_version')!r}"
+        )
+    for name in ("inference_config", "data_contract", "producer"):
+        _mapping(contract.get(name), f"contract.{name}")
+    if not _mapping(root.get("weights"), "payload.weights"):
+        raise DeploymentContractError("deployment weights must not be empty")
+    return contract
+
+
+def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
+    """Parse the model-facing portion of one canonical v2 contract."""
+    contract = deployment_contract(payload)
+    inference = _mapping(contract.get("inference_config"), "contract.inference_config")
+    data = _mapping(contract.get("data_contract"), "contract.data_contract")
     eval_config = _mapping(inference.get("eval"), "inference_config.eval")
 
     action_key = inference.get("action_key")
@@ -280,10 +299,12 @@ def _freeze_value(value: Any) -> Any:
 
 __all__ = [
     "DEPLOYMENT_FORMAT",
+    "DEPLOYMENT_SCHEMA_VERSION",
     "DeploymentContractError",
     "DeploymentSpec",
     "FrozenMetadata",
     "ObservationFieldSpec",
     "RgbPreprocessingSpec",
+    "deployment_contract",
     "parse_deployment_contract",
 ]
