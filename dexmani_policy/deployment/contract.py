@@ -78,6 +78,7 @@ class DeploymentSpec:
     n_obs_steps: int
     n_action_steps: int
     denoise_steps: int
+    temporal_ensemble_coeff: float | None
     observation_fields: tuple[ObservationFieldSpec, ...]
     control_dt_s: float
     requires_hand: bool
@@ -117,6 +118,10 @@ def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
     inference = _mapping(contract.get("inference_config"), "contract.inference_config")
     data = _mapping(contract.get("data_contract"), "contract.data_contract")
     eval_config = _mapping(inference.get("eval"), "inference_config.eval")
+    if "temporal_ensemble_coeff" not in eval_config:
+        raise DeploymentContractError(
+            "inference_config.eval.temporal_ensemble_coeff is required"
+        )
 
     action_key = inference.get("action_key")
     if action_key not in {"action", "action_ee"}:
@@ -144,6 +149,9 @@ def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
         n_obs_steps=n_obs_steps,
         n_action_steps=n_action_steps,
         denoise_steps=_positive_int(eval_config.get("denoise_steps"), "denoise_steps"),
+        temporal_ensemble_coeff=_optional_nonnegative_float(
+            eval_config["temporal_ensemble_coeff"], "temporal_ensemble_coeff"
+        ),
         observation_fields=fields,
         control_dt_s=control_dt_s,
         requires_hand=requires_hand,
@@ -320,6 +328,15 @@ def _positive_float(value: Any, label: str) -> float:
     result = _finite_float(value, label)
     if result <= 0.0:
         raise DeploymentContractError(f"{label} must be positive")
+    return result
+
+
+def _optional_nonnegative_float(value: Any, label: str) -> float | None:
+    if value is None:
+        return None
+    result = _finite_float(value, label)
+    if result < 0.0:
+        raise DeploymentContractError(f"{label} must be non-negative or null")
     return result
 
 

@@ -9,6 +9,7 @@ from unittest import mock
 import numpy as np
 import torch
 
+from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
 from dexmani_policy.deployment import runtime
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
@@ -37,7 +38,10 @@ def _payload() -> dict:
                 "horizon": 16,
                 "n_obs_steps": 2,
                 "n_action_steps": 8,
-                "eval": {"denoise_steps": 10},
+                "eval": {
+                    "denoise_steps": 10,
+                    "temporal_ensemble_coeff": None,
+                },
             },
             "data_contract": {
                 "observation_fields": {
@@ -86,6 +90,75 @@ class _Agent:
     def to(self, device: str):
         self.devices.append(device)
         return self
+
+
+class _ChunkAgent(_Agent):
+    def __init__(self, chunks: list[torch.Tensor]) -> None:
+        super().__init__()
+        self._chunks = chunks
+        self._index = 0
+
+    def predict_action(self, observation, denoise_timesteps):
+        prediction = self._chunks[self._index]
+        self._index += 1
+        return {
+            "pred_action": prediction,
+            "control_action": prediction[:, 1:9, :19],
+        }
+
+
+def _observation() -> dict[str, np.ndarray]:
+    return {
+        "joint_state": np.zeros((2, 19), dtype=np.float32),
+        "point_cloud": np.zeros((2, 4, 6), dtype=np.float32),
+    }
+
+
+def _loaded_policy(
+    agent: _Agent,
+    *,
+    action_dim: int = 19,
+    coefficient: float | None = None,
+) -> runtime.LoadedPolicy:
+    deployment_spec = DeploymentSpec(
+        action_key="action",
+        action_dim=action_dim,
+        horizon=16,
+        n_obs_steps=2,
+        n_action_steps=8,
+        denoise_steps=10,
+        temporal_ensemble_coeff=coefficient,
+        observation_fields=_fields(),
+        control_dt_s=0.1,
+        requires_hand=True,
+        rgb_preprocessing=None,
+    )
+    info = runtime.ExperimentInfo(
+        selector="policy/task/run",
+        experiment_dir=Path("/experiment"),
+        policy_name="policy",
+        task_name="task",
+        checkpoint_path=Path("/experiment/checkpoints/artifact.pt"),
+        checkpoint_name="artifact.pt",
+        spec=runtime.PolicySpec(
+            action_key="action",
+            action_dim=action_dim,
+            control_action_dim=19,
+            horizon=16,
+            n_obs_steps=2,
+            n_action_steps=8,
+            temporal_ensemble_coeff=coefficient,
+            observation_fields=_fields(),
+            control_dt_s=0.1,
+            requires_hand=True,
+        ),
+    )
+    return runtime.LoadedPolicy(
+        info,
+        RestoredDeployment(agent=agent, spec=deployment_spec),
+        device="cpu",
+        seed=0,
+    )
 
 
 class DeploymentRuntimeTest(unittest.TestCase):
@@ -155,6 +228,7 @@ class DeploymentRuntimeTest(unittest.TestCase):
                     n_obs_steps=2,
                     n_action_steps=8,
                     denoise_steps=10,
+                    temporal_ensemble_coeff=None,
                     observation_fields=_fields(),
                     control_dt_s=0.1,
                     requires_hand=True,
@@ -203,7 +277,9 @@ class DeploymentRuntimeTest(unittest.TestCase):
         agent = _Agent()
         restored = RestoredDeployment(
             agent=agent,
-            spec=DeploymentSpec("action", 19, 16, 2, 8, 10, _fields(), 0.1, True, None),
+            spec=DeploymentSpec(
+                "action", 19, 16, 2, 8, 10, None, _fields(), 0.1, True, None
+            ),
         )
         info = runtime.ExperimentInfo(
             selector="policy/task/run",
@@ -219,6 +295,7 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 16,
                 2,
                 8,
+                None,
                 _fields(),
                 0.1,
                 True,
@@ -242,10 +319,70 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 16,
                 2,
                 8,
+                None,
                 (),
                 0.1,
                 True,
             )
+
+    def test_temporal_blender_matches_reference_and_slices_aux_dimensions(self) -> None:
+        chunks = [
+            torch.arange(16 * 28, dtype=torch.float32).reshape(1, 16, 28),
+            torch.arange(16 * 28, dtype=torch.float32).reshape(1, 16, 28) + 1000,
+        ]
+        loaded = _loaded_policy(_ChunkAgent(chunks), action_dim=28, coefficient=0.2)
+        reference = ChunkOverlapBlender(0.2, n_obs_steps=2)
+
+        first = loaded.predict(_observation())
+        second = loaded.predict(_observation())
+        expected_first = reference.update(chunks[0][..., :19], 8)[0].double().numpy()
+        expected_second = reference.update(chunks[1][..., :19], 8)[0].double().numpy()
+
+        self.assertEqual(first.shape, (8, 19))
+        self.assertEqual(second.shape, (8, 19))
+        np.testing.assert_array_equal(first, expected_first)
+        np.testing.assert_array_equal(second, expected_second)
+
+    def test_reset_episode_clears_temporal_overlap(self) -> None:
+        chunks = [
+            torch.zeros((1, 16, 19)),
+            torch.full((1, 16, 19), 10.0),
+        ]
+        loaded = _loaded_policy(_ChunkAgent(chunks), coefficient=0.1)
+        loaded.predict(_observation())
+        loaded.reset_episode()
+
+        after_reset = loaded.predict(_observation())
+
+        np.testing.assert_array_equal(
+            after_reset, chunks[1][:, 1:9, :][0].double().numpy()
+        )
+
+    def test_warmup_preserves_existing_blender_object_state_and_rng(self) -> None:
+        chunks = [
+            torch.zeros((1, 16, 19)),
+            torch.full((1, 16, 19), 100.0),
+            torch.full((1, 16, 19), 200.0),
+            torch.full((1, 16, 19), 10.0),
+        ]
+        loaded = _loaded_policy(_ChunkAgent(chunks), coefficient=0.1)
+        reference = ChunkOverlapBlender(0.1, n_obs_steps=2)
+        loaded.predict(_observation())
+        reference.update(chunks[0], 8)
+        original_blender = loaded._blender
+
+        np.random.seed(41)
+        torch.manual_seed(43)
+        expected_numpy = np.random.RandomState(41).random_sample()
+        expected_torch = torch.rand((), generator=torch.Generator().manual_seed(43))
+        loaded.warmup(samples=2)
+
+        self.assertIs(loaded._blender, original_blender)
+        self.assertEqual(np.random.random(), expected_numpy)
+        torch.testing.assert_close(torch.rand(()), expected_torch)
+        after_warmup = loaded.predict(_observation())
+        expected = reference.update(chunks[3], 8)[0].double().numpy()
+        np.testing.assert_array_equal(after_warmup, expected)
 
 
 if __name__ == "__main__":

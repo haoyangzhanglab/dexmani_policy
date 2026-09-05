@@ -33,7 +33,7 @@ from dexmani_policy.training.build_utils import (
     build_model_and_ema,
     build_scheduler,
     validate_config,
-    validate_grad_accum_divisibility,
+    validate_gradient_accumulation,
 )
 from dexmani_policy.training.lr_scheduler import compute_num_training_steps
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
@@ -105,7 +105,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     set_seed(cfg.training.seed + rank)
 
     batches_per_epoch = len(train_loader)
-    validate_grad_accum_divisibility(
+    validate_gradient_accumulation(
         batches_per_epoch,
         cfg.training.get("loop", {}).get("gradient_accumulation_steps", 1),
     )

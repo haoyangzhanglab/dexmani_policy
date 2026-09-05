@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 import numpy as np
 import torch
 
-from dexmani_policy.deployment import export
+from dexmani_policy.deployment import export, qualify
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
     DEPLOYMENT_SCHEMA_VERSION,
@@ -47,9 +49,7 @@ class DeploymentExportTest(unittest.TestCase):
                 ["joint_state"],
             )
 
-        self.assertEqual(
-            contract["action_semantics"], "teleop_published_joint_target"
-        )
+        self.assertEqual(contract["action_semantics"], "teleop_published_joint_target")
         self.assertNotIn("deployment_equivalent", contract)
 
     def test_real_zarr_v5_contract_is_rejected(self) -> None:
@@ -69,7 +69,10 @@ class DeploymentExportTest(unittest.TestCase):
             "n_action_steps": 8,
             "use_aux_ee": False,
             "agent": {},
-            "eval": {"denoise_steps": 10},
+            "eval": {
+                "denoise_steps": 10,
+                "temporal_ensemble_coeff": None,
+            },
         }
         data = {
             "dt": 0.1,
@@ -96,6 +99,98 @@ class DeploymentExportTest(unittest.TestCase):
         self.assertEqual(set(payload), {"_format", "contract", "weights"})
         self.assertEqual(payload["contract"]["inference_config"], inference)
         self.assertEqual(payload["weights"], {"weight": torch.ones(1)})
+
+    def test_selected_inference_resolver_uses_best_record_or_config(self) -> None:
+        config = {
+            "eval": {
+                "use_ema": False,
+                "denoise_steps": 3,
+                "denoise_timesteps_list": None,
+            },
+            "env_runner": {"temporal_ensemble_coeff": 0.4},
+        }
+        with TemporaryDirectory() as directory:
+            experiment = Path(directory)
+            checkpoint = experiment / "checkpoints" / "epoch-10.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.touch()
+            record = {
+                "record_version": 2,
+                "ckpt_relpath": "checkpoints/epoch-10.pt",
+                "pct": 100,
+                "global_step": 10,
+                "success_rate": 1.0,
+                "avg_steps": 4.0,
+                "n_episodes": 2,
+                "inference": {
+                    "use_ema": True,
+                    "denoise_steps": 7,
+                    "temporal_ensemble_coeff": 0.2,
+                    "policy_seed_mode": "per_episode",
+                },
+                "selection": {
+                    "shuffle_seed": 0,
+                    "seeds": [1, 2],
+                    "initial_episodes": 2,
+                    "tie_break_used": False,
+                },
+            }
+            (experiment / "best_ckpt.json").write_text(json.dumps(record))
+
+            best = export._resolve_selected_inference_settings(
+                experiment, "best", config
+            )
+            latest = export._resolve_selected_inference_settings(
+                experiment, "latest", config
+            )
+
+        self.assertEqual((best.use_ema, best.denoise_steps), (True, 7))
+        self.assertEqual(best.temporal_ensemble_coeff, 0.2)
+        self.assertEqual((latest.use_ema, latest.denoise_steps), (False, 3))
+        self.assertEqual(latest.temporal_ensemble_coeff, 0.4)
+
+    def test_export_and_direct_restore_call_the_shared_resolver(self) -> None:
+        marker = RuntimeError("shared resolver called")
+        config = {"agent": {}}
+        with TemporaryDirectory() as directory:
+            experiment = Path(directory)
+            checkpoint = experiment / "checkpoints" / "latest.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.touch()
+            with (
+                mock.patch.object(
+                    export, "_producer_provenance", return_value="0" * 40
+                ),
+                mock.patch.object(
+                    export, "_resolve_checkpoint", return_value=checkpoint
+                ),
+                mock.patch.object(export, "_load_config", return_value=config),
+                mock.patch.object(
+                    export,
+                    "_resolve_selected_inference_settings",
+                    side_effect=marker,
+                ) as resolver,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "shared resolver called"):
+                    export.export_deployment_artifact(experiment, "latest")
+                resolver.assert_called_once_with(experiment, "latest", config)
+
+            with (
+                mock.patch.object(
+                    export, "_resolve_checkpoint", return_value=checkpoint
+                ),
+                mock.patch.object(export, "_load_config", return_value=config),
+                mock.patch.object(
+                    export,
+                    "_resolve_selected_inference_settings",
+                    side_effect=marker,
+                ) as resolver,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "shared resolver called"):
+                    qualify.restore_direct_policy(
+                        experiment, checkpoint_selector="latest"
+                    )
+                resolver.assert_called_once_with(experiment, "latest", config)
 
     def test_dp_rgb_preprocessing_records_validation_and_processor_stages(self) -> None:
         metadata = export._rgb_preprocessing(

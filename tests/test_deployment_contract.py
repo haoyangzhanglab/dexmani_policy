@@ -50,7 +50,10 @@ def _payload() -> dict:
                 "horizon": 16,
                 "n_obs_steps": 2,
                 "n_action_steps": 8,
-                "eval": {"denoise_steps": 10},
+                "eval": {
+                    "denoise_steps": 10,
+                    "temporal_ensemble_coeff": 0.01,
+                },
                 "rgb_preprocessing": {
                     "input_layout": "HWC",
                     "input_dtype": "uint8",
@@ -102,8 +105,29 @@ class DeploymentContractTest(unittest.TestCase):
         )
         self.assertEqual(spec.observation_fields[1].shape, (480, 640, 3))
         self.assertEqual(spec.control_dt_s, 0.1)
+        self.assertEqual(spec.temporal_ensemble_coeff, 0.01)
         self.assertTrue(spec.requires_hand)
         self.assertEqual(spec.rgb_preprocessing.resize_hw, (240, 240))
+
+    def test_temporal_ensemble_coefficient_is_required_and_validated(self) -> None:
+        payload = copy.deepcopy(_payload())
+        del payload["contract"]["inference_config"]["eval"]["temporal_ensemble_coeff"]
+        with self.assertRaisesRegex(DeploymentContractError, "is required"):
+            parse_deployment_contract(payload)
+
+        for invalid in (True, float("inf"), -0.01):
+            payload = copy.deepcopy(_payload())
+            payload["contract"]["inference_config"]["eval"][
+                "temporal_ensemble_coeff"
+            ] = invalid
+            with self.assertRaises(DeploymentContractError):
+                parse_deployment_contract(payload)
+
+        payload = copy.deepcopy(_payload())
+        payload["contract"]["inference_config"]["eval"][
+            "temporal_ensemble_coeff"
+        ] = None
+        self.assertIsNone(parse_deployment_contract(payload).temporal_ensemble_coeff)
 
     def test_legacy_format_is_not_accepted(self) -> None:
         payload = copy.deepcopy(_payload())
@@ -264,7 +288,7 @@ class DeploymentContractTest(unittest.TestCase):
             agent=direct_agent,
             spec=spec,
             experiment_dir=Path("/experiment"),
-            checkpoint_path=Path("/experiment/best.pt"),
+            checkpoint_path=Path("/experiment/selected.pt"),
             checkpoint_selector="best",
             use_ema=False,
             selected_weights="model",

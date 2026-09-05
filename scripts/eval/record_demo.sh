@@ -17,10 +17,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# Activate conda environment
-eval "$(conda shell.bash hook)"
-conda activate policy
-
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
@@ -30,7 +26,7 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  exp_name      experiment timestamp/name under experiments/<policy>/<task>/"
     echo ""
     echo "Options (record_demo.py):"
-    echo "  --ckpt-tag TAG       Checkpoint: best, latest, 20pct..100pct (default: best)"
+    echo "  --ckpt-tag TAG       Checkpoint: best (strict record), latest, 20pct..100pct (default: best)"
     echo "  --episodes N         Number of episodes to record (default: from config)"
     echo "  --seeds S1 S2 ...    Specific seed numbers to record (overrides --episodes)"
     echo "  --output-dir DIR     Output directory (default: exp_dir/demo_videos/)"
@@ -73,7 +69,7 @@ if [[ -z "${DISPLAY:-}" ]]; then
     exit 1
 fi
 
-exec python dexmani_policy/record_demo.py \
+exec conda run --no-capture-output -n policy python dexmani_policy/record_demo.py \
     --policy-name="${POLICY}" \
     --task-name="${TASK}" \
     --exp-name="${EXP_NAME}" \

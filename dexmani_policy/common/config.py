@@ -25,18 +25,32 @@ def validate_action_key_consistency(cfg) -> None:
     if action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be explicitly set to 'action' or 'action_ee'")
 
-    env_kwargs = cfg.get("env_runner", {}).get("env_kwargs", {})
-    if isinstance(env_kwargs, (dict, DictConfig)):
-        actual_control = env_kwargs.get("control_mode", "joint")
-    else:
-        actual_control = "joint"
     expected_control = "ee" if action_key == "action_ee" else "joint"
-    if actual_control != expected_control:
-        raise ValueError(
-            f"action_key='{action_key}' requires control_mode='{expected_control}', "
-            f"but env_runner.env_kwargs.control_mode='{actual_control}'. "
-            f"Check CLI overrides for env_runner.env_kwargs.control_mode."
-        )
+    env_runner = cfg.get("env_runner", {})
+    task_configs = env_runner.get("task_configs")
+    if task_configs is not None:
+        for task_index, task_config in enumerate(task_configs):
+            env_kwargs = task_config.get("env_kwargs", {})
+            actual_control = env_kwargs.get("control_mode", "joint")
+            if actual_control != expected_control:
+                task_name = task_config.get("task_name", f"index {task_index}")
+                raise ValueError(
+                    f"action_key='{action_key}' requires control_mode='{expected_control}', "
+                    f"but env_runner.task_configs task '{task_name}' has "
+                    f"control_mode='{actual_control}'."
+                )
+    else:
+        env_kwargs = env_runner.get("env_kwargs", {})
+        if isinstance(env_kwargs, (dict, DictConfig)):
+            actual_control = env_kwargs.get("control_mode", "joint")
+        else:
+            actual_control = "joint"
+        if actual_control != expected_control:
+            raise ValueError(
+                f"action_key='{action_key}' requires control_mode='{expected_control}', "
+                f"but env_runner.env_kwargs.control_mode='{actual_control}'. "
+                f"Check CLI overrides for env_runner.env_kwargs.control_mode."
+            )
 
     # Guard against CLI overrides that desync dataset.action_key from the
     # top-level action_key (e.g. --dataset.action_key=action while

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, final
 import numpy as np
 
 if TYPE_CHECKING:
+    from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
     from dexmani_policy.deployment.contract import (
         DeploymentSpec,
         ObservationFieldSpec,
@@ -44,6 +45,7 @@ class PolicySpec:
     horizon: int
     n_obs_steps: int
     n_action_steps: int
+    temporal_ensemble_coeff: float | None
     observation_fields: tuple[ObservationFieldSpec, ...]
     control_dt_s: float
     requires_hand: bool
@@ -70,6 +72,15 @@ class PolicySpec:
             raise ValueError("action_dim must not be smaller than control_action_dim")
         if self.n_obs_steps - 1 + self.n_action_steps > self.horizon:
             raise ValueError("observation/action window exceeds horizon")
+        if self.temporal_ensemble_coeff is not None and (
+            isinstance(self.temporal_ensemble_coeff, bool)
+            or not isinstance(self.temporal_ensemble_coeff, (int, float))
+            or not np.isfinite(float(self.temporal_ensemble_coeff))
+            or self.temporal_ensemble_coeff < 0.0
+        ):
+            raise ValueError(
+                "temporal_ensemble_coeff must be finite and non-negative or None"
+            )
         names = tuple(field.name for field in self.observation_fields)
         if not names or len(set(names)) != len(names):
             raise ValueError("observation_fields must be non-empty and unique")
@@ -211,6 +222,7 @@ class LoadedPolicy:
         self._restored: RestoredDeployment | None = restored
         self._device = device
         self._seed = seed
+        self._blender = self._new_blender()
 
     def warmup(self, *, samples: int) -> tuple[float, ...]:
         """Run deterministic synthetic samples and return durations in seconds.
@@ -238,12 +250,15 @@ class LoadedPolicy:
             name: value.squeeze(0).numpy() for name, value in synthetic_tensors.items()
         }
         durations: list[float] = []
+        original_blender = self._blender
+        self._blender = self._new_blender()
         try:
             for _ in range(samples):
                 started = time.perf_counter()
                 self.predict(observation)
                 durations.append(time.perf_counter() - started)
         finally:
+            self._blender = original_blender
             random.setstate(python_state)
             np.random.set_state(numpy_state)
             torch.random.set_rng_state(torch_state)
@@ -265,8 +280,17 @@ class LoadedPolicy:
                 tensors, denoise_timesteps=restored.spec.denoise_steps
             )
         snapshot = validate_prediction(result, restored.spec, batch_size=1)
+        if self._blender is None:
+            control_tensor = snapshot.control_action
+        else:
+            full_control_prediction = snapshot.pred_action[
+                ..., : self.spec.control_action_dim
+            ]
+            control_tensor = self._blender.update(
+                full_control_prediction, n_action_steps=self.spec.n_action_steps
+            )
         control_action = (
-            snapshot.control_action.squeeze(0).to(dtype=torch.float64).numpy().copy()
+            control_tensor.squeeze(0).to(dtype=torch.float64).numpy().copy()
         )
         expected_shape = (self.spec.n_action_steps, self.spec.control_action_dim)
         if (
@@ -285,6 +309,8 @@ class LoadedPolicy:
         from dexmani_policy.deployment.restore import reset_inference_seed
 
         reset_inference_seed(self._seed)
+        if self._blender is not None:
+            self._blender.reset()
         reset_method = getattr(restored.agent, "reset_episode", None)
         if reset_method is not None:
             if not callable(reset_method):
@@ -311,6 +337,17 @@ class LoadedPolicy:
 
     def _deployment_spec(self) -> DeploymentSpec:
         return self._require_open().spec
+
+    def _new_blender(self) -> ChunkOverlapBlender | None:
+        coefficient = self.spec.temporal_ensemble_coeff
+        if coefficient is None:
+            return None
+        from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
+
+        return ChunkOverlapBlender(
+            temporal_ensemble_coeff=coefficient,
+            n_obs_steps=self.spec.n_obs_steps,
+        )
 
     def _require_open(self) -> RestoredDeployment:
         if self._restored is None:
@@ -489,6 +526,7 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
             horizon=deployment.horizon,
             n_obs_steps=deployment.n_obs_steps,
             n_action_steps=deployment.n_action_steps,
+            temporal_ensemble_coeff=deployment.temporal_ensemble_coeff,
             observation_fields=deployment.observation_fields,
             control_dt_s=deployment.control_dt_s,
             requires_hand=deployment.requires_hand,

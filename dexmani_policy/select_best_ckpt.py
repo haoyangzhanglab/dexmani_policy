@@ -2,7 +2,7 @@
 
 Discovers milestone checkpoints from an experiment directory, runs a
 deterministic two-stage evaluation to identify the single best checkpoint,
-and optionally symlinks it as ``best.pt``.
+and writes its strict v2 selection record.
 
 Algorithm
 ---------
@@ -203,7 +203,7 @@ def select_best_checkpoint(
     eval_seed: int | None = None,
     video_save_dir: Path | None = None,
 ) -> tuple[MilestoneCheckpoint, list[CkptEvalAccum]]:
-    """Run adaptive elimination to select the best checkpoint.
+    """Run fixed two-stage evaluation with an optional exact-tie batch.
 
     Parameters
     ----------
@@ -234,7 +234,9 @@ def select_best_checkpoint(
     agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
     eval_root_dir = exp_dir / "eval_ckpt_selector"
 
-    all_seeds = list(env_runner.get_seed_list())
+    # A malformed seed source must not cause duplicate environment episodes or
+    # duplicate seed metadata in the selection record.
+    all_seeds = list(dict.fromkeys(env_runner.get_seed_list()))
     if max_episodes > len(all_seeds):
         cprint(
             f"⚠ max_episodes ({max_episodes}) > available seeds "
@@ -252,7 +254,9 @@ def select_best_checkpoint(
     # Fixed, deterministic seed slices — identical for every checkpoint, so
     # equal-denominator comparisons and reproducible results hold.
     phase1_seeds = all_seeds[:initial_episodes]
-    tie_seeds = all_seeds[initial_episodes : min(initial_episodes + batch_size, max_episodes)]
+    tie_seeds = all_seeds[
+        initial_episodes : min(initial_episodes + batch_size, max_episodes)
+    ]
 
     # ── 4. Stage 1: initial evaluation on all checkpoints ─────────────
     cprint(
@@ -267,8 +271,15 @@ def select_best_checkpoint(
         # No try/except: a load/model/CUDA failure is fatal and aborts the run
         # (an errored checkpoint must not be silently treated as 0%).
         result = evaluate_checkpoint(
-            agent, env_runner, checkpoint_store, mc, phase1_seeds,
-            use_ema, denoise_steps, device, video_save_dir=video_save_dir,
+            agent,
+            env_runner,
+            checkpoint_store,
+            mc,
+            phase1_seeds,
+            use_ema,
+            denoise_steps,
+            device,
+            video_save_dir=video_save_dir,
         )
         acc = CkptEvalAccum(ckpt=mc)
         acc.merge(result)
@@ -284,7 +295,8 @@ def select_best_checkpoint(
     best_rate = max(a.success_rate for a in accumulators)
     tied = [a for a in accumulators if a.success_rate == best_rate]
 
-    if len(tied) > 1 and tie_seeds:
+    tie_break_used = len(tied) > 1 and bool(tie_seeds)
+    if tie_break_used:
         cprint(
             f"\n⚠ Tied at top ({len(tied)} checkpoints at {best_rate:.1%}). "
             f"Running a single tie-break batch (+{len(tie_seeds)} episodes each)...",
@@ -293,11 +305,20 @@ def select_best_checkpoint(
         for acc in tied:
             cprint(f"    Evaluating {acc.ckpt.label} ...", "cyan")
             result = evaluate_checkpoint(
-                agent, env_runner, checkpoint_store, acc.ckpt, tie_seeds,
-                use_ema, denoise_steps, device, video_save_dir=video_save_dir,
+                agent,
+                env_runner,
+                checkpoint_store,
+                acc.ckpt,
+                tie_seeds,
+                use_ema,
+                denoise_steps,
+                device,
+                video_save_dir=video_save_dir,
             )
             acc.merge(result)
-            cprint(f"      -> {_format_rate(acc.success_count, acc.n_episodes)}", "green")
+            cprint(
+                f"      -> {_format_rate(acc.success_count, acc.n_episodes)}", "green"
+            )
 
         # Recompute the tied set on the merged results — every tied candidate
         # consumed the same tie_seeds, so denominators stay equal.
@@ -385,14 +406,33 @@ def select_best_checkpoint(
     cprint(f"  Summary saved to: {summary_path}", "cyan")
 
     # ── Save best_ckpt.json in experiment root (handoff to eval_best_ckpt) ──
+    ckpt_relpath = best.ckpt.path.resolve().relative_to(exp_dir.resolve())
+    selection_seeds = list(phase1_seeds)
+    if tie_break_used:
+        selection_seeds.extend(
+            seed for seed in tie_seeds if seed not in selection_seeds
+        )
+    temporal_ensemble_coeff = cfg.env_runner.get("temporal_ensemble_coeff", None)
     best_info = {
-        "ckpt_path": str(best.ckpt.path),
-        "ckpt_relpath": str(best.ckpt.path.relative_to(exp_dir)),
+        "record_version": 2,
+        "ckpt_relpath": str(ckpt_relpath),
         "pct": best.ckpt.pct,
         "global_step": best.ckpt.global_step,
         "success_rate": best.success_rate,
         "avg_steps": best.avg_steps,
         "n_episodes": best.n_episodes,
+        "inference": {
+            "use_ema": bool(use_ema),
+            "denoise_steps": int(denoise_steps),
+            "temporal_ensemble_coeff": temporal_ensemble_coeff,
+            "policy_seed_mode": "episode_seed",
+        },
+        "selection": {
+            "shuffle_seed": seed,
+            "seeds": selection_seeds,
+            "initial_episodes": len(phase1_seeds),
+            "tie_break_used": tie_break_used,
+        },
     }
     best_info_path = exp_dir / "best_ckpt.json"
     with open(best_info_path, "w", encoding="utf-8") as f:
@@ -409,7 +449,10 @@ def select_best_checkpoint(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Offline best-checkpoint selector via adaptive evaluation.",
+        description=(
+            "Offline best-checkpoint selector via fixed two-stage evaluation "
+            "with an optional exact-tie batch."
+        ),
     )
     parser.add_argument(
         "--policy-name",
@@ -439,13 +482,16 @@ def main() -> None:
         "--batch-size",
         type=int,
         default=None,
-        help="Additional episodes per round in Phase 2 (default: from config).",
+        help="Additional episodes in the optional exact-tie stage (default: from config).",
     )
     parser.add_argument(
         "--max-episodes",
         type=int,
         default=None,
-        help="Hard cap on total episodes per checkpoint (default: from config).",
+        help=(
+            "Hard cap covering the initial stage plus one optional tie-break batch "
+            "(default: from config)."
+        ),
     )
     parser.add_argument(
         "--denoise-steps",
@@ -473,11 +519,6 @@ def main() -> None:
         help="Eval seed override (default: training.seed + 1024).",
     )
     parser.add_argument(
-        "--link-best",
-        action="store_true",
-        help="Symlink the best checkpoint as checkpoints/best.pt.",
-    )
-    parser.add_argument(
         "--no-videos",
         action="store_true",
         default=False,
@@ -491,7 +532,13 @@ def main() -> None:
     args = parser.parse_args()
 
     exp_dir = (
-        (Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name)
+        (
+            Path(ROOT_DIR)
+            / "experiments"
+            / args.policy_name
+            / args.task_name
+            / args.exp_name
+        )
         .expanduser()
         .resolve()
     )
@@ -512,13 +559,21 @@ def main() -> None:
     # Stash exp_dir so build_eval_components can build paths
     cfg._exp_dir = str(exp_dir)
 
-    # ── Resolve parameters: CLI > config > hardcoded fallback ────────────
+    # ── Resolve parameters: CLI > config > defaults ───────────────────────
     _sb = cfg.eval.get("select_best", {}) if hasattr(cfg, "eval") else {}
     initial_episodes = (
-        args.initial_episodes if args.initial_episodes is not None else _sb.get("initial_episodes", 25)
+        args.initial_episodes
+        if args.initial_episodes is not None
+        else _sb.get("initial_episodes", 25)
     )
-    batch_size = args.batch_size if args.batch_size is not None else _sb.get("batch_size", 5)
-    max_episodes = args.max_episodes if args.max_episodes is not None else _sb.get("max_episodes", 100)
+    batch_size = (
+        args.batch_size if args.batch_size is not None else _sb.get("batch_size", 5)
+    )
+    max_episodes = (
+        args.max_episodes
+        if args.max_episodes is not None
+        else _sb.get("max_episodes", 100)
+    )
     denoise_steps = (
         args.denoise_steps
         if args.denoise_steps is not None
@@ -540,12 +595,16 @@ def main() -> None:
         Path(video_save_dir).mkdir(parents=True, exist_ok=True)
         cprint(f"\n📹 Video output: {video_save_dir}", "cyan")
 
-    if initial_episodes <= 0 or max_episodes <= 0:
-        cprint(f"Error: initial/max episodes must be positive (got {initial_episodes}/{max_episodes})", "red")
+    if initial_episodes <= 0 or max_episodes <= 0 or batch_size < 0:
+        cprint(
+            "Error: initial/max episodes must be positive and batch size non-negative "
+            f"(got {initial_episodes}/{max_episodes}/{batch_size})",
+            "red",
+        )
         sys.exit(1)
 
     try:
-        best_ckpt, _all = select_best_checkpoint(
+        select_best_checkpoint(
             exp_dir,
             cfg,
             initial_episodes=initial_episodes,
@@ -562,14 +621,6 @@ def main() -> None:
     except (ValueError, RuntimeError, OSError, FileNotFoundError) as e:
         cprint(f"Selection failed: {type(e).__name__}: {e}", "red")
         sys.exit(1)
-
-    if args.link_best:
-        best_link = exp_dir / "checkpoints" / "best.pt"
-        if best_link.exists() or best_link.is_symlink():
-            best_link.unlink()
-        best_link.symlink_to(best_ckpt.path.name)
-        cprint(f"  🔗 best.pt -> {best_ckpt.path.name}", "green")
-
 
 if __name__ == "__main__":
     main()

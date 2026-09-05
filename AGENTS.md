@@ -24,6 +24,15 @@
   数据集、预训练权重、显示服务或 `dexmani_sim` 就改写核心逻辑。
 - 在非交互 shell 中优先使用 `conda run -n policy <command>`，避免依赖
   `conda activate` 的 shell 状态。
+- 本机有 GPU；sandbox 内 CUDA 不可见时，使用命令级提权进行 GPU 检查和必要的
+  smoke test，不据此判定本机无 GPU，不修改核心逻辑或全局关闭 sandbox。
+
+## 修复 workflow
+
+用户要求执行 v2 修复 workflow 时，先读 `docs/repair_workflow.md` 和
+`docs/repair_progress.md`。按 workflow 自动完成阶段验收、精简交接与后续阶段，
+无需逐阶段确认。允许按任务难度调用 `sol-high`、`terra-xhigh`、`luna-max`
+三档 agent；具体分工、验证节奏及本轮优先约束以 workflow 为准。
 
 ## 常用命令
 

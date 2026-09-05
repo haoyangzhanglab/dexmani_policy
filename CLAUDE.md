@@ -33,7 +33,7 @@ bash scripts/training/train_ddp.sh ddp/maniflow 'task_name=pour'
 ### 评测
 
 ```bash
-# 一键管道: select best ckpt → eval all seeds
+# 一键管道: select → held-out eval → demo
 bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name>
 bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name> --no-videos
 
@@ -225,7 +225,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 dexmani_policy/
   train.py                    # 单卡入口 (@hydra.main)
   train_ddp.py                # DDP 入口 (mp.spawn)
-  select_best_ckpt.py         # 里程碑自适应淘汰 → best_ckpt.json
+  select_best_ckpt.py         # 固定 initial stage + 可选 exact-tie → best_ckpt.json
   eval_best_ckpt.py           # 离线评测 (Hydra-free CLI)
   record_demo.py              # 离线 demo 视频录制
   smoke_test.py               # 构建验证 (6 阶段)

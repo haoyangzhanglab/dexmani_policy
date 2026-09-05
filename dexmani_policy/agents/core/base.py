@@ -158,6 +158,9 @@ class BaseAgent(nn.Module):
         """
         return None
 
+    def forward(self, batch, **kwargs):
+        return self.compute_loss(batch, **kwargs)
+
     def compute_loss(self, batch, **kwargs):
         self._validate_batch(batch)
         cond, aux = self._build_cond(batch["obs"])
@@ -406,5 +409,4 @@ class DiTXFlowMatchAgent(BaseAgent):
             action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-
 

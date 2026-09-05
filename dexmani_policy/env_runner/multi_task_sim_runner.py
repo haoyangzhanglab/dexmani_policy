@@ -8,7 +8,7 @@ import torch
 from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import format_success_rate
-from dexmani_policy.env_runner.base_runner import _classify_eval_exception
+from dexmani_policy.env_runner.base_runner import EvalEpisodeError, _classify_eval_exception
 from dexmani_policy.env_runner.sim_runner import SimRunner
 
 
@@ -71,6 +71,8 @@ class MultiTaskSimRunner:
                 env_kwargs=env_kwargs,
                 clear_cache_freq=clear_cache_freq,
                 temporal_ensemble_coeff=temporal_ensemble_coeff,
+                rgb_preprocess_size=cfg.get("rgb_preprocess_size"),
+                rgb_random_crop_size=cfg.get("rgb_random_crop_size"),
             )
 
     def get_seed_list(self) -> List[int]:
@@ -167,6 +169,8 @@ class MultiTaskSimRunner:
                         all_videos.append({f"{task_name}_{k}": arr_or_path})
             except KeyboardInterrupt:
                 cprint(f"\n⚠️ Evaluation interrupted by user during task {task_name}", "yellow")
+                raise
+            except EvalEpisodeError:
                 raise
             except (RuntimeError, ValueError, AttributeError) as e:
                 cprint(f"Task {task_name} failed: {type(e).__name__}: {e}", "red")

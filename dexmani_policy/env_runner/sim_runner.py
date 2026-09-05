@@ -25,6 +25,8 @@ class SimRunner(BaseRunner):
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
         temporal_ensemble_coeff: float | None = None,
+        rgb_preprocess_size: tuple[int, int] | None = None,
+        rgb_random_crop_size: tuple[int, int] | None = None,
         record_video: bool = True,
         render_mode: str = "rgb_array",
         viewer_resolution: tuple[int, int] | None = None,
@@ -36,6 +38,8 @@ class SimRunner(BaseRunner):
             sensor_modalities=sensor_modalities,
             clear_cache_freq=clear_cache_freq,
             temporal_ensemble_coeff=temporal_ensemble_coeff,
+            rgb_preprocess_size=rgb_preprocess_size,
+            rgb_random_crop_size=rgb_random_crop_size,
         )
         self.task_name = task_name
         self.env_kwargs = env_kwargs or {}

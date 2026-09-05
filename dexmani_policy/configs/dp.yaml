@@ -181,6 +181,8 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   default_eval_episodes: 25
   sensor_modalities: ${dataset.sensor_modalities}
+  rgb_preprocess_size: ${dataset.rgb_preprocess_size}
+  rgb_random_crop_size: ${dataset.rgb_random_crop_size}
   # ── ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705) ──
   # Blend overlapping action-chunk predictions via exponential weighting
   # to smooth transitions between consecutive inference calls.

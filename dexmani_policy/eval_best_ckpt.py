@@ -1,16 +1,18 @@
 """RoboTwin-style checkpoint evaluation — simple, reproducible, no fluff.
 
-Loads a checkpoint and runs it on all evaluation seeds from the seed pool.
+Loads a checkpoint and runs it on deterministic evaluation seeds. For ``best``,
+the seeds used to select the checkpoint are excluded.
 Output is a single success rate, matching RoboTwin's ``_result.txt`` format.
 
 Methodology (1:1 RoboTwin ``eval_policy.py``)
 ----------------------------------------------
 
-1. Load the specified checkpoint (EMA weights by default).
+1. Load the specified checkpoint with explicitly resolved EMA/raw weights.
 2. Use ``training.seed`` from the experiment config — same seed the
    model was trained with.
-3. Read the full evaluation seed pool (~100 seeds from
-   ``eval_seeds/<task>.txt`` or ``range(100)``).
+3. Read the evaluation seed pool (~100 seeds from ``eval_seeds/<task>.txt``
+   or ``range(100)``), then exclude ``best_ckpt.json`` selection seeds for
+   final ``best`` evaluation.
 4. Run one episode per seed (deterministic env + policy: re-running
    the same seed produces identical results).
 5. Output: ``success_rate = n_success / n_total`` and avg steps.
@@ -53,6 +55,7 @@ from dexmani_policy.training.eval_utils import (
     collect_episode_details,
     compute_eval_stats,
     load_ckpt_for_inference,
+    read_best_ckpt_json,
     resolve_checkpoint_path,
     resolve_eval_seed,
     validate_denoise_steps,
@@ -61,7 +64,6 @@ from dexmani_policy.training.eval_utils import (
 
 ROOT_DIR = set_project_root()
 register_resolvers()
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers (used by both single-value and sweep paths)
@@ -92,7 +94,9 @@ def _setup_eval(
     if hasattr(env_runner, "record_video"):
         env_runner.record_video = video_save_dir is not None
 
-    ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, ckpt_tag_or_path, checkpoint_store)
+    ckpt_path, ckpt_label = resolve_checkpoint_path(
+        exp_dir, ckpt_tag_or_path, checkpoint_store
+    )
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
     load_ckpt_for_inference(agent, checkpoint_store, ckpt_path, use_ema)
@@ -103,19 +107,34 @@ def _setup_eval(
     return agent, env_runner, checkpoint_store, ckpt_path, ckpt_label, eval_seed, device
 
 
-def _select_eval_seeds(env_runner, eval_seed: int, episodes: int) -> list[int]:
-    """Deterministically select *episodes* seeds from the seed pool."""
-    all_seeds = list(env_runner.get_seed_list())
-    n_total = min(episodes, len(all_seeds))
-    if episodes > len(all_seeds):
-        cprint(
-            f"⚠ Requested {episodes} episodes > {len(all_seeds)} available seeds, using {len(all_seeds)}",
-            "yellow",
-        )
+def _select_eval_seeds(
+    env_runner,
+    eval_seed: int,
+    episodes: int,
+    excluded_seeds: list[int] | None = None,
+) -> list[int]:
+    """Select deterministic seeds after excluding checkpoint-selection seeds."""
+    if episodes <= 0:
+        raise ValueError(f"episodes must be positive, got {episodes}")
 
+    all_seeds = list(dict.fromkeys(env_runner.get_seed_list()))
     rng = random.Random(eval_seed)
     rng.shuffle(all_seeds)
-    eval_seeds = all_seeds[:n_total]
+
+    excluded = set(excluded_seeds or [])
+    eligible_seeds = [seed for seed in all_seeds if seed not in excluded]
+    if not eligible_seeds:
+        raise RuntimeError(
+            "No evaluation seeds remain after excluding checkpoint-selection seeds."
+        )
+    n_total = min(episodes, len(eligible_seeds))
+    if episodes > len(eligible_seeds):
+        cprint(
+            f"Requested {episodes} episodes, only {len(eligible_seeds)} disjoint "
+            f"held-out seeds remain; evaluating all {len(eligible_seeds)}.",
+            "yellow",
+        )
+    eval_seeds = eligible_seeds[:n_total]
 
     cprint(
         f"Evaluating on {n_total} seeds (eval_seed={eval_seed}, first seed={eval_seeds[0]}) ...",
@@ -136,6 +155,9 @@ def _run_one_timestep(
     ckpt_path: Path,
     ckpt_label: str,
     eval_seed: int,
+    selection_seeds_excluded: list[int],
+    heldout_from_selection: bool,
+    use_ema: bool,
 ) -> dict:
     """Run eval at a single denoise step count; save per-value results.
 
@@ -163,13 +185,19 @@ def _run_one_timestep(
     n_total = stats["n_valid_episodes"]
     success_rate = stats["micro_success_rate"]
     macro_success_rate = (
-        stats["macro_success_rate"] if stats["macro_success_rate"] is not None else success_rate
+        stats["macro_success_rate"]
+        if stats["macro_success_rate"] is not None
+        else success_rate
     )
 
     task_done_steps = [
-        d["steps"] for d in per_seed_details if d.get("success") and d.get("steps") is not None
+        d["steps"]
+        for d in per_seed_details
+        if d.get("success") and d.get("steps") is not None
     ]
-    avg_steps = float(sum(task_done_steps) / len(task_done_steps)) if task_done_steps else None
+    avg_steps = (
+        float(sum(task_done_steps) / len(task_done_steps)) if task_done_steps else None
+    )
 
     # ── Save results ───────────────────────────────────────────────────
     if video_save_dir is not None:
@@ -194,6 +222,10 @@ def _run_one_timestep(
                 "n_tasks": stats["n_tasks"],
                 "avg_steps": avg_steps,
                 "eval_seed": eval_seed,
+                "evaluation_seeds": eval_seeds,
+                "selection_seeds_excluded": selection_seeds_excluded,
+                "heldout_from_selection": heldout_from_selection,
+                "use_ema": use_ema,
                 "denoise_steps": denoise_steps,
                 "per_seed_details": per_seed_details,
             },
@@ -209,6 +241,10 @@ def _run_one_timestep(
         "n_success": n_success,
         "n_total": n_total,
         "per_seed_details": per_seed_details,
+        "evaluation_seeds": eval_seeds,
+        "selection_seeds_excluded": selection_seeds_excluded,
+        "heldout_from_selection": heldout_from_selection,
+        "use_ema": use_ema,
     }
 
 
@@ -234,25 +270,47 @@ def evaluate_checkpoint_robotwin(
     ----------
     cfg : pre-loaded OmegaConf config with ``_exp_dir`` injected.
     ckpt_tag_or_path : ``"best"``, ``"latest"``, ``"20pct"``, or a path.
-        ``"best"`` reads ``best_ckpt.json`` (written by ``select_best_ckpt.py``).
+        ``"best"`` requires the strict v2 record written by ``select_best_ckpt.py``.
     episodes : number of seeds to evaluate (default: 100).
     denoise_steps : DDIM/Euler inference steps.
-    use_ema : use EMA weights if available.
+    use_ema : select EMA weights; missing EMA weights are an error.
 
     Returns
     -------
     (success_rate, avg_steps, n_success, n_total)
     """
-    agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = _setup_eval(
-        cfg, exp_dir, ckpt_tag_or_path, use_ema, video_save_dir=video_save_dir,
+    agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = (
+        _setup_eval(
+            cfg,
+            exp_dir,
+            ckpt_tag_or_path,
+            use_ema,
+            video_save_dir=video_save_dir,
+        )
     )
-    validate_denoise_steps([denoise_steps], getattr(agent.action_decoder, "solver", None))
-    eval_seeds = _select_eval_seeds(env_runner, eval_seed, episodes)
+    validate_denoise_steps(
+        [denoise_steps], getattr(agent.action_decoder, "solver", None)
+    )
+    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
+    selection_seeds = best_info["selection"]["seeds"] if best_info else []
+    eval_seeds = _select_eval_seeds(
+        env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+    )
 
     info = _run_one_timestep(
-        agent, env_runner, eval_seeds, denoise_steps, video_save_dir=None,
-        exp_dir=exp_dir, ckpt_tag_or_path=ckpt_tag_or_path,
-        ckpt_path=ckpt_path, ckpt_label=ckpt_label, eval_seed=eval_seed,
+        agent,
+        env_runner,
+        eval_seeds,
+        denoise_steps,
+        video_save_dir=None,
+        exp_dir=exp_dir,
+        ckpt_tag_or_path=ckpt_tag_or_path,
+        ckpt_path=ckpt_path,
+        ckpt_label=ckpt_label,
+        eval_seed=eval_seed,
+        selection_seeds_excluded=selection_seeds,
+        heldout_from_selection=best_info is not None,
+        use_ema=use_ema,
     )
 
     # ── Report ─────────────────────────────────────────────────────────
@@ -261,7 +319,10 @@ def evaluate_checkpoint_robotwin(
     cprint(f"  Checkpoint   : {ckpt_label}", "cyan")
     cprint(f"  Episodes     : {info['n_total']}", "cyan")
     cprint(f"  Denoise steps: {denoise_steps}", "cyan")
-    cprint(f"  Success rate : {info['n_success']}/{info['n_total']} = {info['success_rate']:.1%}", "green")
+    cprint(
+        f"  Success rate : {info['n_success']}/{info['n_total']} = {info['success_rate']:.1%}",
+        "green",
+    )
     if (
         info["macro_success_rate"] is not None
         and abs(info["macro_success_rate"] - info["success_rate"]) > 1e-9
@@ -306,13 +367,25 @@ def evaluate_checkpoint_sweep(
         raise ValueError("denoise_timesteps_list must be non-empty")
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
-    agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = _setup_eval(
-        cfg, exp_dir, ckpt_tag_or_path, use_ema, video_save_dir=video_save_dir,
+    agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = (
+        _setup_eval(
+            cfg,
+            exp_dir,
+            ckpt_tag_or_path,
+            use_ema,
+            video_save_dir=video_save_dir,
+        )
     )
-    validate_denoise_steps(denoise_timesteps_list, getattr(agent.action_decoder, "solver", None))
+    validate_denoise_steps(
+        denoise_timesteps_list, getattr(agent.action_decoder, "solver", None)
+    )
 
     # ── 2. Same seeds for all denoise values (fair comparison) ──────────
-    eval_seeds = _select_eval_seeds(env_runner, eval_seed, episodes)
+    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
+    selection_seeds = best_info["selection"]["seeds"] if best_info else []
+    eval_seeds = _select_eval_seeds(
+        env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+    )
 
     # ── 3. Sweep over denoise timesteps ─────────────────────────────────
     sweep_results: list[dict] = []
@@ -322,9 +395,19 @@ def evaluate_checkpoint_sweep(
 
         sub_dir = video_save_dir / f"denoise_timesteps{dt}" if video_save_dir else None
         info = _run_one_timestep(
-            agent, env_runner, eval_seeds, dt, video_save_dir=sub_dir,
-            exp_dir=exp_dir, ckpt_tag_or_path=ckpt_tag_or_path,
-            ckpt_path=ckpt_path, ckpt_label=ckpt_label, eval_seed=eval_seed,
+            agent,
+            env_runner,
+            eval_seeds,
+            dt,
+            video_save_dir=sub_dir,
+            exp_dir=exp_dir,
+            ckpt_tag_or_path=ckpt_tag_or_path,
+            ckpt_path=ckpt_path,
+            ckpt_label=ckpt_label,
+            eval_seed=eval_seed,
+            selection_seeds_excluded=selection_seeds,
+            heldout_from_selection=best_info is not None,
+            use_ema=use_ema,
         )
 
         avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"
@@ -337,23 +420,30 @@ def evaluate_checkpoint_sweep(
         sweep_results.append({"denoise_timesteps": dt, **info})
 
     # ── 4. Aggregate summary ───────────────────────────────────────────
-    _save_sweep_summary(video_save_dir or (exp_dir / "eval_dexsim"), sweep_results, ckpt_label)
+    _save_sweep_summary(
+        video_save_dir or (exp_dir / "eval_dexsim"), sweep_results, ckpt_label
+    )
 
     return sweep_results
 
 
-def _save_sweep_summary(save_dir: Path, sweep_results: list[dict], ckpt_label: str) -> None:
+def _save_sweep_summary(
+    save_dir: Path, sweep_results: list[dict], ckpt_label: str
+) -> None:
     """Save ``eval_summary.json`` and print a comparison table."""
     save_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
         "checkpoint": ckpt_label,
-        "results": {f"denoise_timesteps{r['denoise_timesteps']}": {
-            "success_rate": r["success_rate"],
-            "avg_steps": r["avg_steps"],
-            "n_success": r["n_success"],
-            "n_total": r["n_total"],
-        } for r in sweep_results},
+        "results": {
+            f"denoise_timesteps{r['denoise_timesteps']}": {
+                "success_rate": r["success_rate"],
+                "avg_steps": r["avg_steps"],
+                "n_success": r["n_success"],
+                "n_total": r["n_total"],
+            }
+            for r in sweep_results
+        },
     }
     (save_dir / "eval_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False)
@@ -369,9 +459,118 @@ def _save_sweep_summary(save_dir: Path, sweep_results: list[dict], ckpt_label: s
         dt = r["denoise_timesteps"]
         sr = f"{r['n_success']}/{r['n_total']} ({r['success_rate']:.1%})"
         avg = f"{r['avg_steps']:.1f}" if r["avg_steps"] is not None else "N/A"
-        cprint(f"  {dt:<16} {sr:<18} {avg:<12}", "green" if r["success_rate"] >= 0.5 else "red")
+        cprint(
+            f"  {dt:<16} {sr:<18} {avg:<12}",
+            "green" if r["success_rate"] >= 0.5 else "red",
+        )
     cprint(f"{'=' * 60}\n", "cyan", attrs=["bold"])
     cprint(f"  Summary saved to: {save_dir}/eval_summary.json", "cyan")
+
+
+def _present_config_value(cfg, paths: list[str]):
+    """Return the first explicitly present value among dotted config paths."""
+    for path in paths:
+        node = cfg
+        for part in path.split("."):
+            if not hasattr(node, "__contains__") or part not in node:
+                break
+            node = node[part]
+        else:
+            return True, node
+    return False, None
+
+
+def _config_temporal_ensemble_coeff(cfg):
+    present, value = _present_config_value(
+        cfg,
+        [
+            "eval.offline.temporal_ensemble_coeff",
+            "eval.temporal_ensemble_coeff",
+            "env_runner.temporal_ensemble_coeff",
+        ],
+    )
+    return value if present else None
+
+
+def _resolve_final_eval_request(
+    cfg,
+    exp_dir: Path,
+    ckpt_tag_or_path: str,
+    dotlist_overrides: list[str],
+    *,
+    cli_use_ema: bool | None = None,
+    cli_denoise_steps: int | None = None,
+):
+    """Resolve final-eval inference with CLI > dotlist > record > config."""
+    override_cfg = OmegaConf.from_dotlist(dotlist_overrides)
+    merged_cfg = OmegaConf.merge(cfg, override_cfg)
+
+    config_use_ema = _get_eval_param(cfg, "use_ema", "offline", default=True)
+    config_dt_list = _get_eval_param(
+        cfg, "denoise_timesteps_list", "offline", default=None
+    )
+    if config_dt_list is not None:
+        denoise_timesteps_list = list(config_dt_list)
+    else:
+        denoise_timesteps_list = [
+            _get_eval_param(cfg, "denoise_steps", "offline", default=10)
+        ]
+    use_ema = config_use_ema
+    temporal_ensemble_coeff = _config_temporal_ensemble_coeff(cfg)
+
+    best_info = None
+    if ckpt_tag_or_path == "best":
+        best_info = read_best_ckpt_json(exp_dir)
+        inference = best_info["inference"]
+        use_ema = inference["use_ema"]
+        denoise_timesteps_list = [inference["denoise_steps"]]
+        temporal_ensemble_coeff = inference["temporal_ensemble_coeff"]
+
+    present, value = _present_config_value(
+        override_cfg, ["eval.offline.use_ema", "eval.use_ema"]
+    )
+    if present:
+        use_ema = value
+
+    list_present, list_value = _present_config_value(
+        override_cfg,
+        ["eval.offline.denoise_timesteps_list", "eval.denoise_timesteps_list"],
+    )
+    step_present, step_value = _present_config_value(
+        override_cfg, ["eval.offline.denoise_steps", "eval.denoise_steps"]
+    )
+    if list_present and list_value is not None:
+        denoise_timesteps_list = list(list_value)
+    elif step_present:
+        denoise_timesteps_list = [step_value]
+
+    present, value = _present_config_value(
+        override_cfg,
+        [
+            "eval.offline.temporal_ensemble_coeff",
+            "eval.temporal_ensemble_coeff",
+            "env_runner.temporal_ensemble_coeff",
+        ],
+    )
+    if present:
+        temporal_ensemble_coeff = value
+
+    if cli_use_ema is not None:
+        use_ema = cli_use_ema
+    if cli_denoise_steps is not None:
+        denoise_timesteps_list = [cli_denoise_steps]
+    if not isinstance(use_ema, bool):
+        raise ValueError(f"use_ema must resolve to boolean, got {use_ema!r}")
+    if "env_runner" not in merged_cfg:
+        raise ValueError("Evaluation config is missing env_runner")
+    merged_cfg.env_runner.temporal_ensemble_coeff = temporal_ensemble_coeff
+    return (
+        merged_cfg,
+        use_ema,
+        denoise_timesteps_list,
+        temporal_ensemble_coeff,
+        best_info,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +601,7 @@ def main() -> None:
         "--ckpt-tag",
         type=str,
         default="best",
-        help="Checkpoint: best (reads best_ckpt.json), latest, 20pct..100pct (default: best).",
+        help="Checkpoint: best (strict v2 best_ckpt.json), latest, 20pct..100pct (default: best).",
     )
     parser.add_argument(
         "--ckpt-path",
@@ -449,7 +648,13 @@ def main() -> None:
     args = parser.parse_args()
 
     exp_dir = (
-        (Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name)
+        (
+            Path(ROOT_DIR)
+            / "experiments"
+            / args.policy_name
+            / args.task_name
+            / args.exp_name
+        )
         .expanduser()
         .resolve()
     )
@@ -463,12 +668,17 @@ def main() -> None:
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")
         sys.exit(1)
 
-    cfg = OmegaConf.load(cfg_path)
-    if args.overrides:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+    ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
+    cfg, use_ema, denoise_timesteps_list, _, _ = _resolve_final_eval_request(
+        OmegaConf.load(cfg_path),
+        exp_dir,
+        ckpt_tag_or_path,
+        args.overrides,
+        cli_use_ema=args.use_ema,
+        cli_denoise_steps=args.denoise_steps,
+    )
     cfg._exp_dir = str(exp_dir)
 
-    # ── Resolve parameters: CLI > config > hardcoded fallback ────────────
     episodes = (
         args.episodes
         if args.episodes is not None
@@ -476,20 +686,6 @@ def main() -> None:
     )
     if episodes <= 0:
         raise ValueError(f"episodes must be positive, got {episodes}")
-    use_ema = (
-        args.use_ema if args.use_ema is not None else _get_eval_param(cfg, "use_ema", "offline", default=True)
-    )
-
-    # Denoise steps: CLI --denoise-steps (single value) > config list > config single > default
-    if args.denoise_steps is not None:
-        denoise_timesteps_list = [args.denoise_steps]
-    else:
-        dt_list = _get_eval_param(cfg, "denoise_timesteps_list", "offline", default=None)
-        if dt_list:
-            denoise_timesteps_list = list(dt_list)
-        else:
-            denoise_steps = _get_eval_param(cfg, "denoise_steps", "offline", default=10)
-            denoise_timesteps_list = [denoise_steps]
 
     do_sweep = len(denoise_timesteps_list) > 1
 
@@ -508,12 +704,12 @@ def main() -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         video_save_dir = exp_dir / "eval_dexsim" / timestamp
 
-    ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
-
     try:
         if do_sweep:
             cprint(
-                f"\n🔁 Denoise timesteps sweep: {denoise_timesteps_list}", "cyan", attrs=["bold"],
+                f"\n🔁 Denoise timesteps sweep: {denoise_timesteps_list}",
+                "cyan",
+                attrs=["bold"],
             )
             evaluate_checkpoint_sweep(
                 exp_dir,

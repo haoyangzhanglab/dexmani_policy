@@ -30,7 +30,8 @@ class FlowMatchWithConsistency(nn.Module):
     Parameters:
         model: Backbone (DiTXFlowMatch) that predicts velocity given (x, t, target_t, context).
         denoise_timesteps: Number of Euler integration steps at inference.
-        flow_batch_ratio: Fraction of batch used for flow loss (remainder for consistency).
+        flow_batch_ratio: Fraction of samples allocated to flow training
+            (remainder for consistency); this is not a loss weight.
         target_t_sample_mode: ``"relative"`` — model receives dt as target_t;
             ``"absolute"`` — model receives t+dt as target_t.
     """
@@ -46,6 +47,15 @@ class FlowMatchWithConsistency(nn.Module):
         target_t_sample_mode: str = "relative",
     ) -> None:
         super().__init__()
+
+        if denoise_timesteps <= 0:
+            raise ValueError("denoise_timesteps must be greater than 0")
+        if not 0 < flow_batch_ratio < 1:
+            raise ValueError("flow_batch_ratio must be between 0 and 1")
+        if target_t_sample_mode not in {"relative", "absolute"}:
+            raise ValueError(
+                "target_t_sample_mode must be either 'relative' or 'absolute'"
+            )
 
         self.model = model
         self.denoise_timesteps = denoise_timesteps
@@ -143,8 +153,10 @@ class FlowMatchWithConsistency(nn.Module):
 
         if self.target_t_sample_mode == "relative":
             target_t_next = dt1
+            target_t_ct = dt1
         elif self.target_t_sample_mode == "absolute":
             target_t_next = torch.clamp(t_next.squeeze() + dt1, max=1.0)
+            target_t_ct = t_next.squeeze()
 
         x0_ct = torch.randn_like(actions, device=actions.device)
         x1_ct = actions
@@ -169,11 +181,7 @@ class FlowMatchWithConsistency(nn.Module):
         consistency_target_dict = {
             "xt": xt_ct,
             "t": t_ct,
-            "target_t": (
-                dt1
-                if self.target_t_sample_mode == "relative"
-                else target_t_next.squeeze()
-            ),
+            "target_t": target_t_ct,
             "vt_target": vt_target_ct,
         }
         return consistency_target_dict

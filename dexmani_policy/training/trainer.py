@@ -26,6 +26,7 @@ from dexmani_policy.common.pytorch_util import (
     set_rng_state,
     to_log_scalars,
 )
+from dexmani_policy.training.build_utils import validate_gradient_accumulation
 from dexmani_policy.training.workspace import TrainWorkspace
 
 
@@ -112,8 +113,9 @@ class Trainer:
         self.use_compile = use_compile
         self.compile_mode = compile_mode
 
-        self.gradient_accumulation_steps = max(
-            1, int(train_loop_cfg.gradient_accumulation_steps)
+        self.gradient_accumulation_steps = train_loop_cfg.gradient_accumulation_steps
+        validate_gradient_accumulation(
+            len(self.train_loader), self.gradient_accumulation_steps
         )
         # Pre-compute AMP device_type string to avoid repeated str.split on every step
         self.amp_device_type = str(self.device).split(":")[0]
@@ -305,13 +307,16 @@ class Trainer:
         return ckpt_dir / filename
 
     def train_one_step(
-        self, batch: Dict[str, Any], *, is_accumulation_boundary: bool = True
+        self,
+        batch: Dict[str, Any],
+        *,
+        is_accumulation_boundary: bool = True,
+        loss_divisor: int = 1,
     ):
         """Forward + backward on one micro-batch.
 
-        When ``gradient_accumulation_steps > 1`` the loss is scaled by
-        ``1 / gradient_accumulation_steps`` and ``optimizer.step()`` /
-        ``scheduler.step()`` / EMA are deferred until the accumulation
+        The epoch loop supplies the logical group's ``loss_divisor`` and defers
+        ``optimizer.step()`` / ``scheduler.step()`` / EMA until the accumulation
         boundary (``is_accumulation_boundary=True``).
 
         Parameters:
@@ -319,6 +324,8 @@ class Trainer:
             is_accumulation_boundary: If ``True``, apply gradient step after
                 backward.  Set to ``False`` for intermediate micro-batches
                 when accumulating gradients.
+            loss_divisor: Number of micro-batches in the logical accumulation
+                group.
         """
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = (
@@ -331,7 +338,7 @@ class Trainer:
             dtype=torch.bfloat16,
             enabled=self.use_bfloat16,
         ):
-            raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
+            raw_loss, log_dict = self.model(batch, **loss_kwargs)
 
         if self.distributed:
             # Gather every rank's detached loss so the debug checkpoint records
@@ -367,7 +374,7 @@ class Trainer:
 
         # Scale loss so that the *sum* of micro-batch gradients equals the
         # gradient of the full batch (loss averaged across micro-batches).
-        (raw_loss / self.gradient_accumulation_steps).backward()
+        (raw_loss / loss_divisor).backward()
 
         if is_accumulation_boundary:
             self.apply_gradient_step()
@@ -621,13 +628,20 @@ class Trainer:
 
                 self.optimizer.zero_grad(set_to_none=True)
 
+                num_batches = len(self.train_loader)
                 epoch_completed = True
                 for micro_step, batch in enumerate(self.train_loader):
                     self.current_epoch = epoch
 
-                    is_boundary = (
-                        micro_step + 1
-                    ) % self.gradient_accumulation_steps == 0
+                    group_start = (
+                        micro_step // self.gradient_accumulation_steps
+                    ) * self.gradient_accumulation_steps
+                    group_size = min(
+                        self.gradient_accumulation_steps,
+                        num_batches - group_start,
+                    )
+                    group_pos = micro_step - group_start
+                    is_boundary = group_pos + 1 == group_size
 
                     # DDP: suppress gradient all-reduce for non-boundary micro-batches
                     # so that gradients accumulate locally, then sync once on the boundary.
@@ -638,7 +652,9 @@ class Trainer:
 
                     with sync_ctx:
                         _, log_dict = self.train_one_step(
-                            batch, is_accumulation_boundary=is_boundary
+                            batch,
+                            is_accumulation_boundary=is_boundary,
+                            loss_divisor=group_size,
                         )
 
                     if is_boundary:

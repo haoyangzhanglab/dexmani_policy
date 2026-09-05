@@ -10,6 +10,7 @@ from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
+from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
 
 
 class EvalEpisodeError(RuntimeError):
@@ -62,6 +63,8 @@ class BaseRunner:
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
         temporal_ensemble_coeff: float | None = None,
+        rgb_preprocess_size: tuple[int, int] | None = None,
+        rgb_random_crop_size: tuple[int, int] | None = None,
     ):
         self.is_multi_task = False
         self.n_obs_steps = n_obs_steps
@@ -77,6 +80,8 @@ class BaseRunner:
         self.env_video_fps = env_video_fps  # may be None → auto-detect from env
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
+        self.rgb_preprocess_size = rgb_preprocess_size
+        self.rgb_random_crop_size = rgb_random_crop_size
 
         # ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705).
         # When coeff is set (e.g. 0.01), consecutive overlapping chunks are
@@ -158,6 +163,13 @@ class BaseRunner:
             return x
 
         stacked_obs = self.get_stacked_obs()
+        if "rgb" in stacked_obs:
+            stacked_obs["rgb"] = preprocess_validation_rgb(
+                stacked_obs["rgb"],
+                resize_hw=self.rgb_preprocess_size,
+                center_crop_hw=self.rgb_random_crop_size,
+                keep_uint8=False,
+            )
         obs_batch = dict_apply(stacked_obs, lambda x: to_torch(x, device=device))
         obs_batch = dict_apply(obs_batch, lambda x: x.unsqueeze(0) if torch.is_tensor(x) else x)
 
@@ -176,7 +188,7 @@ class BaseRunner:
         result = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
 
         if self._blender is not None:
-            full_pred = result["pred_action"]  # (B, horizon, A)
+            full_pred = result["pred_action"][..., : agent.control_action_dim]  # (B, horizon, A)
             blended = self._blender.update(full_pred, n_action_steps=agent.n_action_steps)
             return blended.detach().cpu().numpy().squeeze(0)
 

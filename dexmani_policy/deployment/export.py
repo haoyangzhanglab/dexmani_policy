@@ -114,6 +114,13 @@ class ExportReceipt:
     checkpoint_selector: str
 
 
+@dataclass(frozen=True)
+class _SelectedInferenceSettings:
+    use_ema: bool
+    denoise_steps: int
+    temporal_ensemble_coeff: float | None
+
+
 def _run_git(repo_root: Path, *args: str) -> str:
     try:
         result = subprocess.run(
@@ -195,25 +202,15 @@ def _resolve_checkpoint(experiment_dir: Path, selector: str) -> Path:
 
     candidate: Path
     if selector == "best":
-        index_path = experiment_dir / "best_ckpt.json"
-        if index_path.exists() or index_path.is_symlink():
-            try:
-                record = json.loads(index_path.read_text(encoding="utf-8"))
-                if type(record) is not dict:
-                    raise ValueError("best checkpoint record must be an object")
-                raw_path = record.get("ckpt_relpath") or record.get("ckpt_path")
-                if not isinstance(raw_path, str) or not raw_path:
-                    raise ValueError("missing checkpoint path")
-                indexed = Path(raw_path)
-                candidate = (
-                    indexed if indexed.is_absolute() else experiment_dir / indexed
-                )
-            except (OSError, UnicodeError, ValueError, TypeError) as exc:
-                raise InvalidCheckpointError(
-                    f"invalid best_ckpt.json: {index_path}"
-                ) from exc
-        else:
-            candidate = checkpoint_dir / "best.pt"
+        from dexmani_policy.training.eval_utils import read_best_ckpt_json
+
+        try:
+            record = read_best_ckpt_json(experiment_dir)
+        except (OSError, ValueError) as exc:
+            raise InvalidCheckpointError(
+                f"invalid best_ckpt.json: {experiment_dir / 'best_ckpt.json'}"
+            ) from exc
+        candidate = experiment_dir / record["ckpt_relpath"]
     elif selector == "latest":
         candidate = checkpoint_dir / "latest.pt"
     elif selector.endswith("pct"):
@@ -964,21 +961,11 @@ def _sanitize_agent_config(
 
 
 def _build_inference_config(
-    cfg_plain: dict[str, Any], agent_config: dict[str, Any], train: dict[str, Any]
+    cfg_plain: dict[str, Any],
+    agent_config: dict[str, Any],
+    train: dict[str, Any],
+    selected: _SelectedInferenceSettings,
 ) -> dict[str, Any]:
-    eval_config = cfg_plain.get("eval")
-    if type(eval_config) is not dict:
-        raise InvalidExperimentError("config.eval must be a mapping")
-    if eval_config.get("denoise_timesteps_list") is not None:
-        raise UnsupportedPolicyError(
-            "eval.denoise_timesteps_list is unsupported for deployment"
-        )
-    denoise_steps = _require_positive_int(
-        eval_config.get("denoise_steps"), "eval.denoise_steps"
-    )
-    use_ema = eval_config.get("use_ema")
-    if type(use_ema) is not bool:
-        raise InvalidExperimentError("eval.use_ema must be bool")
     inference = {
         "task_name": cfg_plain["task_name"],
         "action_key": train["action_key"],
@@ -988,9 +975,71 @@ def _build_inference_config(
         "n_action_steps": train["n_action_steps"],
         "use_aux_ee": train["use_aux_ee"],
         "agent": agent_config,
-        "eval": {"use_ema": use_ema, "denoise_steps": denoise_steps},
+        "eval": {
+            "use_ema": selected.use_ema,
+            "denoise_steps": selected.denoise_steps,
+            "temporal_ensemble_coeff": selected.temporal_ensemble_coeff,
+        },
     }
     return _require_plain_metadata(inference, "inference_config")
+
+
+def _resolve_selected_inference_settings(
+    experiment_dir: Path,
+    checkpoint_selector: str,
+    cfg_plain: Mapping[str, Any],
+) -> _SelectedInferenceSettings:
+    """Resolve the selected checkpoint's exact Policy-owned inference settings."""
+    if checkpoint_selector == "best":
+        from dexmani_policy.training.eval_utils import read_best_ckpt_json
+
+        try:
+            inference = read_best_ckpt_json(experiment_dir)["inference"]
+        except (OSError, ValueError) as exc:
+            raise InvalidCheckpointError(
+                f"invalid best_ckpt.json: {experiment_dir / 'best_ckpt.json'}"
+            ) from exc
+        prefix = "best_ckpt.json inference"
+    else:
+        eval_config = cfg_plain.get("eval")
+        if type(eval_config) is not dict:
+            raise InvalidExperimentError("config.eval must be a mapping")
+        if eval_config.get("denoise_timesteps_list") is not None:
+            raise UnsupportedPolicyError(
+                "eval.denoise_timesteps_list is unsupported for deployment"
+            )
+        env_runner = cfg_plain.get("env_runner")
+        if type(env_runner) is not dict:
+            raise InvalidExperimentError("config.env_runner must be a mapping")
+        if "temporal_ensemble_coeff" not in env_runner:
+            raise InvalidExperimentError(
+                "config.env_runner.temporal_ensemble_coeff is required"
+            )
+        inference = {
+            "use_ema": eval_config.get("use_ema"),
+            "denoise_steps": eval_config.get("denoise_steps"),
+            "temporal_ensemble_coeff": env_runner["temporal_ensemble_coeff"],
+        }
+        prefix = "config"
+
+    use_ema = inference["use_ema"]
+    if type(use_ema) is not bool:
+        raise InvalidExperimentError(f"{prefix}.use_ema must be bool")
+    denoise_steps = _require_positive_int(
+        inference["denoise_steps"], f"{prefix}.denoise_steps"
+    )
+    coefficient = inference["temporal_ensemble_coeff"]
+    if coefficient is not None:
+        if isinstance(coefficient, bool) or not isinstance(coefficient, (int, float)):
+            raise InvalidExperimentError(
+                f"{prefix}.temporal_ensemble_coeff must be numeric or null"
+            )
+        coefficient = float(coefficient)
+        if not math.isfinite(coefficient) or coefficient < 0.0:
+            raise InvalidExperimentError(
+                f"{prefix}.temporal_ensemble_coeff must be finite and non-negative"
+            )
+    return _SelectedInferenceSettings(use_ema, denoise_steps, coefficient)
 
 
 def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
@@ -1438,6 +1487,9 @@ def export_deployment_artifact(
         )
     selected_path = _resolve_checkpoint(experiment, checkpoint_selector)
     cfg_plain = _load_config(experiment)
+    selected_inference = _resolve_selected_inference_settings(
+        experiment, checkpoint_selector, cfg_plain
+    )
     observation_fields = _dataset_modalities(cfg_plain)
     resolved_zarr = _resolve_zarr_path(cfg_plain, repo_root, zarr_path)
     checkpoint = _load_training_checkpoint(selected_path)
@@ -1452,7 +1504,9 @@ def export_deployment_artifact(
         else _canonicalize_state_dict(checkpoint.ema_model_state, "weights.ema_model")
     )
     agent_config = _sanitize_agent_config(cfg_plain["agent"], model_state, train)
-    inference = _build_inference_config(cfg_plain, agent_config, train)
+    inference = _build_inference_config(
+        cfg_plain, agent_config, train, selected_inference
+    )
     if inference["eval"]["use_ema"] and ema_state is None:
         raise InvalidCheckpointError(
             "eval.use_ema=true requires checkpoint EMA weights"
@@ -1486,7 +1540,10 @@ def export_deployment_artifact(
     }
     deployment_inference = {
         **inference,
-        "eval": {"denoise_steps": inference["eval"]["denoise_steps"]},
+        "eval": {
+            "denoise_steps": inference["eval"]["denoise_steps"],
+            "temporal_ensemble_coeff": inference["eval"]["temporal_ensemble_coeff"],
+        },
     }
     payload = {
         "_format": DEPLOYMENT_FORMAT,

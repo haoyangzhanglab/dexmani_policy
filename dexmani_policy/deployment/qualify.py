@@ -107,6 +107,9 @@ def restore_direct_policy(
     experiment = _resolve_experiment(experiment_dir)
     selected_path = exporter._resolve_checkpoint(experiment, checkpoint_selector)
     cfg_plain = exporter._load_config(experiment)
+    selected_inference = exporter._resolve_selected_inference_settings(
+        experiment, checkpoint_selector, cfg_plain
+    )
     checkpoint = exporter._load_training_checkpoint(selected_path)
     train, _, _ = exporter._reconcile_train_params(checkpoint, cfg_plain)
     exporter._validate_resolved_config_contract(cfg_plain, train)
@@ -114,7 +117,9 @@ def restore_direct_policy(
     # Reuse the exporter's resolved-eval checks, but retain the original agent
     # mapping below: direct qualification must represent the experiment itself,
     # not the deployment constructor sanitization.
-    inference = exporter._build_inference_config(cfg_plain, cfg_plain["agent"], train)
+    inference = exporter._build_inference_config(
+        cfg_plain, cfg_plain["agent"], train, selected_inference
+    )
     agent_config = cfg_plain["agent"]
     exporter._validate_agent_targets(agent_config)
     use_ema = inference["eval"]["use_ema"]
@@ -363,6 +368,7 @@ def _require_matching_specs(
         "n_obs_steps",
         "n_action_steps",
         "denoise_steps",
+        "temporal_ensemble_coeff",
         "observation_fields",
         "control_dt_s",
         "requires_hand",

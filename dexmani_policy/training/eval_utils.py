@@ -143,13 +143,12 @@ def load_ckpt_for_inference(
 
     raw_state = checkpoint.model_state
     if use_ema:
-        if checkpoint.ema_model_state is not None:
-            raw_state = checkpoint.ema_model_state
-        else:
-            cprint(
-                "WARNING: EMA weights requested but not found in checkpoint. Using model weights.",
-                "yellow",
+        if checkpoint.ema_model_state is None:
+            raise RuntimeError(
+                f"EMA weights were requested, but checkpoint {ckpt_path} has no EMA state. "
+                "Use use_ema=False (or --no-ema) to explicitly load raw model weights."
             )
+        raw_state = checkpoint.ema_model_state
 
     agent.load_state_dict(
         fix_state_dict(raw_state, is_current_ddp=False),
@@ -168,15 +167,14 @@ def load_ckpt_for_inference(
 # ---------------------------------------------------------------------------
 
 
-def read_best_ckpt_json(exp_dir: Path) -> dict | None:
-    """Read ``best_ckpt.json`` from *exp_dir*, resolving relative paths.
-
-    Returns the parsed dict (with ``ckpt_path`` resolved to absolute), or
-    ``None`` if the file does not exist or is malformed.
-    """
+def read_best_ckpt_json(exp_dir: Path) -> dict:
+    """Read and validate the strict v2 selection record in *exp_dir*."""
     best_json = exp_dir / "best_ckpt.json"
     if not best_json.is_file():
-        return None
+        raise FileNotFoundError(
+            f"Selection record not found: {best_json}. Run select_best_ckpt.py "
+            "before evaluating 'best', or explicitly select latest/milestone/path."
+        )
     try:
         best_info = json.loads(best_json.read_text())
     except json.JSONDecodeError as e:
@@ -184,57 +182,106 @@ def read_best_ckpt_json(exp_dir: Path) -> dict | None:
     except OSError as e:
         raise OSError(f"best_ckpt.json is unreadable: {e}") from e
 
-    # Resolve relative paths (written by select_best_ckpt.py as ckpt_relpath)
-    ckpt_path = Path(best_info.get("ckpt_path", ""))
-    if not ckpt_path.is_absolute():
-        best_info["ckpt_path"] = str(exp_dir / ckpt_path)
+    if not isinstance(best_info, dict):
+        raise ValueError("best_ckpt.json must contain a JSON object")
+    if best_info.get("record_version") != 2:
+        raise ValueError("best_ckpt.json must have record_version=2")
+
+    required_top = {
+        "ckpt_relpath",
+        "pct",
+        "global_step",
+        "success_rate",
+        "avg_steps",
+        "n_episodes",
+        "inference",
+        "selection",
+    }
+    missing = sorted(required_top - best_info.keys())
+    if missing:
+        raise ValueError(f"best_ckpt.json v2 is missing required fields: {missing}")
+
+    inference = best_info["inference"]
+    if not isinstance(inference, dict):
+        raise ValueError("best_ckpt.json inference must be an object")
+    missing = sorted(
+        {
+            "use_ema",
+            "denoise_steps",
+            "temporal_ensemble_coeff",
+            "policy_seed_mode",
+        }
+        - inference.keys()
+    )
+    if missing:
+        raise ValueError(
+            f"best_ckpt.json inference is missing required fields: {missing}"
+        )
+    if not isinstance(inference["use_ema"], bool):
+        raise ValueError("best_ckpt.json inference.use_ema must be boolean")
+    denoise_steps = inference["denoise_steps"]
+    if (
+        isinstance(denoise_steps, bool)
+        or not isinstance(denoise_steps, int)
+        or denoise_steps <= 0
+    ):
+        raise ValueError(
+            "best_ckpt.json inference.denoise_steps must be a positive integer"
+        )
+    coeff = inference["temporal_ensemble_coeff"]
+    if coeff is not None and (
+        isinstance(coeff, bool) or not isinstance(coeff, (int, float))
+    ):
+        raise ValueError(
+            "best_ckpt.json inference.temporal_ensemble_coeff must be numeric or null"
+        )
+
+    selection = best_info["selection"]
+    if not isinstance(selection, dict):
+        raise ValueError("best_ckpt.json selection must be an object")
+    missing = sorted(
+        {"shuffle_seed", "seeds", "initial_episodes", "tie_break_used"}
+        - selection.keys()
+    )
+    if missing:
+        raise ValueError(
+            f"best_ckpt.json selection is missing required fields: {missing}"
+        )
+    seeds = selection["seeds"]
+    if (
+        not isinstance(seeds, list)
+        or not seeds
+        or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds)
+        or len(seeds) != len(set(seeds))
+    ):
+        raise ValueError(
+            "best_ckpt.json selection.seeds must be a non-empty list of unique integers"
+        )
+
+    ckpt_relpath = best_info["ckpt_relpath"]
+    if not isinstance(ckpt_relpath, str) or not ckpt_relpath:
+        raise ValueError("best_ckpt.json ckpt_relpath must be a non-empty string")
+    relative_path = Path(ckpt_relpath)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError(
+            "best_ckpt.json ckpt_relpath must be relative to the experiment directory"
+        )
+
+    ckpt_path = (exp_dir / relative_path).resolve()
+    resolved_exp_dir = exp_dir.resolve()
+    if not ckpt_path.is_relative_to(resolved_exp_dir):
+        raise ValueError(
+            "best_ckpt.json ckpt_relpath resolves outside the experiment directory"
+        )
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint recorded by best_ckpt.json does not exist: {ckpt_path}"
+        )
     return best_info
 
 
 # ---------------------------------------------------------------------------
-# 5. Best-checkpoint resolution fallback
-# ---------------------------------------------------------------------------
-
-
-def resolve_best_checkpoint(exp_dir: Path, checkpoint_store: CheckpointStore) -> Path:
-    """Resolve the 'best' checkpoint with a proper fallback chain.
-
-    1. ``best_ckpt.json`` (from ``select_best_ckpt.py``).
-    2. ``best.pt`` symlink.
-    3. ``latest.pt`` symlink.
-    4. Raise ``FileNotFoundError``.
-
-    The old behaviour of falling through to a filename-score sort on
-    milestone checkpoints (all scoring ``-inf``) is removed — that path
-    picked an arbitrary checkpoint and was never correct.
-    """
-    # 1. best_ckpt.json
-    best_info = read_best_ckpt_json(exp_dir)
-    if best_info:
-        path = Path(best_info["ckpt_path"])
-        if path.is_file():
-            return path
-
-    # 2. best.pt symlink
-    best_symlink = exp_dir / "checkpoints" / "best.pt"
-    if best_symlink.is_symlink() or best_symlink.is_file():
-        return checkpoint_store.resolve_path(str(best_symlink))
-
-    # 3. latest.pt symlink
-    try:
-        return checkpoint_store.resolve_path("latest")
-    except FileNotFoundError:
-        pass
-
-    raise FileNotFoundError(
-        f"Cannot resolve 'best' checkpoint in {exp_dir}.\n"
-        f"  Tried: best_ckpt.json, best.pt symlink, latest.pt symlink.\n"
-        f"  Run 'bash scripts/eval/select_best_ckpt.sh ...' first to generate best_ckpt.json."
-    )
-
-
-# ---------------------------------------------------------------------------
-# 6. Episode detail extraction (handles both single-task and multi-task
+# 5. Episode detail extraction (handles both single-task and multi-task
 #    result dicts — fixes C2 / C4)
 # ---------------------------------------------------------------------------
 
@@ -426,7 +473,7 @@ def resolve_checkpoint_path(
     """Resolve a checkpoint tag to an absolute path and human-readable label.
 
     Supported tags:
-    - ``"best"`` — reads ``best_ckpt.json``, falls back to ``best.pt`` symlink
+    - ``"best"`` — reads the strict v2 ``best_ckpt.json`` selection record
     - ``"latest"`` — ``checkpoint_store.resolve_path("latest")``
     - ``"20pct".."100pct"`` — matched against milestone checkpoints
     - any other string — treated as a filename inside ``checkpoints/``
@@ -445,23 +492,14 @@ def resolve_checkpoint_path(
 
     if ckpt_tag_or_path == "best":
         best_info = read_best_ckpt_json(exp_dir)
-        if best_info:
-            ckpt_path = Path(best_info["ckpt_path"])
-            label = f"best -> {best_info['pct']}% (step={best_info['global_step']})"
-            cprint(
-                f"  Auto-loaded best checkpoint: {best_info['pct']}% "
-                f"(success_rate={best_info['success_rate']:.1%}, "
-                f"n_episodes={best_info['n_episodes']})",
-                "cyan",
-            )
-        else:
-            ckpt_path = checkpoint_store.resolve_path("best")
-            label = f"best ({ckpt_path.name})"
-            cprint(
-                "  ⚠ best_ckpt.json not found — using best.pt symlink. "
-                "Run select_best_ckpt.sh first for automatic selection.",
-                "yellow",
-            )
+        ckpt_path = (exp_dir / best_info["ckpt_relpath"]).resolve()
+        label = f"best -> {best_info['pct']}% (step={best_info['global_step']})"
+        cprint(
+            f"  Auto-loaded best checkpoint: {best_info['pct']}% "
+            f"(success_rate={best_info['success_rate']:.1%}, "
+            f"n_episodes={best_info['n_episodes']})",
+            "cyan",
+        )
         return ckpt_path, label
 
     if ckpt_tag_or_path == "latest":

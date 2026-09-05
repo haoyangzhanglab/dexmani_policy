@@ -181,11 +181,15 @@ class PointDropout(Aug):
     __slots__ = ("dropout_ratio",)
 
     def __init__(self, dropout_ratio=0.3, prob=1.0):
+        if not 0 <= dropout_ratio <= 1:
+            raise ValueError("dropout_ratio must be between 0 and 1")
         super().__init__(prob=prob)
         self.dropout_ratio = dropout_ratio
 
     def _augment(self, x):
         # x: (T, N, C) — guaranteed to be a detached copy
+        if self.dropout_ratio == 0:
+            return
         T, N = x.shape[:2]
         if N <= 1:
             return  # can't dropout from a point cloud with ≤ 1 point

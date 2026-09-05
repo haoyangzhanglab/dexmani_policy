@@ -50,7 +50,7 @@ class ReplayBuffer:
             else:
                 data[key] = arr_data
 
-        buffer = cls(root={"meta": meta, "data": data})
+        buffer = cls(root={"meta": meta, "data": data, "attrs": dict(group.attrs)})
         for key, value in buffer.items():
             logger.info(
                 "%-12s  shape=%-12s  dtype=%-8s  range %7.2f ~ %7.2f",
@@ -70,6 +70,10 @@ class ReplayBuffer:
     @cached_property
     def meta(self):
         return self.root["meta"]
+
+    @property
+    def attrs(self):
+        return self.root.get("attrs", {})
 
     @property
     def episode_ends(self):

@@ -81,9 +81,6 @@ if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     exit 1
 fi
 
-eval "$(conda shell.bash hook)"
-conda activate policy
-
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_DIR="$EXP_DIR/eval_dexsim/solver_ablation/$TIMESTAMP"
 mkdir -p "$OUTPUT_DIR"
@@ -102,7 +99,7 @@ for index in "${!SOLVERS[@]}"; do
     echo "  checkpoint=$CKPT_TAG episodes=$EPISODES $EMA_ARG"
     echo "============================================================"
 
-    python dexmani_policy/eval_best_ckpt.py \
+    conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py \
         --policy-name="$POLICY" \
         --task-name="$TASK" \
         --exp-name="$EXP_NAME" \

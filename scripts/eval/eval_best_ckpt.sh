@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # RoboTwin-style checkpoint evaluation — simple success rate.
 #
-# Loads a checkpoint and evaluates it on all seeds from the pool.
+# Loads a checkpoint and evaluates it on deterministic seeds. For `best`, the
+# strict selection record's seeds are excluded from final evaluation.
 # Output is the success rate (matching RoboTwin _result.txt format).
 #
 # Usage:
@@ -17,10 +18,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# Activate conda environment
-eval "$(conda shell.bash hook)"
-conda activate policy
-
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
@@ -31,7 +28,7 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo ""
     echo "Options (eval_best_ckpt.py):"
     echo "  --ckpt-tag TAG       Checkpoint: best, latest, 20pct..100pct (default: best)"
-    echo "                         'best' reads best_ckpt.json written by select_best_ckpt.sh"
+    echo "                         'best' requires strict v2 best_ckpt.json written by select_best_ckpt.sh"
     echo "  --ckpt-path PATH     Direct .pt path (overrides --ckpt-tag)"
     echo "  --episodes N         Number of seeds (default: 100)"
     echo "  --denoise-steps N    Single inference step count (default: from config)"
@@ -71,7 +68,7 @@ if [[ ! -d "$EXP_DIR/checkpoints" ]] || \
     exit 1
 fi
 
-exec python dexmani_policy/eval_best_ckpt.py \
+exec conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py \
     --policy-name="${POLICY}" \
     --task-name="${TASK}" \
     --exp-name="${EXP_NAME}" \

@@ -308,6 +308,7 @@ class LinearNormalizer(DictOfTensorMixin):
                 range_eps=range_eps,
                 fit_offset=fit_offset,
             )
+        self._field_views.clear()
 
     @classmethod
     def fit_obs_action(cls, joint_state, action, action_key, mode="limits"):
@@ -337,6 +338,7 @@ class LinearNormalizer(DictOfTensorMixin):
 
     def __setitem__(self, key: str, value: "SingleFieldLinearNormalizer"):
         self.params_dict[key] = value.params_dict
+        self._field_views.pop(key, None)
 
     def is_fitted(self, required_keys=None):
         if len(self.params_dict) == 0:

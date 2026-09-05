@@ -162,7 +162,7 @@ workspace:
     _target_: dexmani_policy.training.workspace.CheckpointConfig
     # Training writes milestone/interrupt checkpoints with monitor={}. Offline
     # select_best_ckpt.py selects deployment-quality checkpoints and writes
-    # best_ckpt.json (and optionally the best.pt symlink).
+    # strict best_ckpt.json selection record.
     monitor_key: val_loss
     mode: min
     topk: 3

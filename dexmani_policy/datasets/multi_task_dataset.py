@@ -23,9 +23,29 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         augmentation_cfg=None,
         action_key: str = "action",
     ):
-        assert len(datasets) == len(task_names)
-        assert sampling_strategy in ["proportional", "balanced", "weighted"]
-        assert normalizer_mode in ["shared", "per_task"]
+        if len(datasets) != len(task_names):
+            raise ValueError("datasets and task_names must have the same length")
+        if task_texts is not None and len(task_texts) != len(datasets):
+            raise ValueError("task_texts must have the same length as datasets")
+        if sampling_strategy not in ["proportional", "balanced", "weighted"]:
+            raise ValueError(
+                "sampling_strategy must be 'proportional', 'balanced', or 'weighted'"
+            )
+        if normalizer_mode not in ["shared", "per_task"]:
+            raise ValueError("normalizer_mode must be 'shared' or 'per_task'")
+
+        if sampling_strategy == "weighted":
+            if task_weights is None or len(task_weights) != len(datasets):
+                raise ValueError(
+                    "weighted sampling requires task_weights for every dataset"
+                )
+            weights = np.asarray(task_weights, dtype=float)
+            if not np.isfinite(weights).all():
+                raise ValueError("task_weights must all be finite")
+            if (weights < 0).any():
+                raise ValueError("task_weights must all be nonnegative")
+            if weights.sum() <= 0:
+                raise ValueError("task_weights must sum to a positive value")
 
         if len(set(task_names)) != len(task_names):
             raise ValueError(
@@ -73,9 +93,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         elif sampling_strategy == "balanced":
             self.sample_probs = np.ones(self.num_tasks) / self.num_tasks
         elif sampling_strategy == "weighted":
-            assert task_weights is not None and len(task_weights) == self.num_tasks
-            total = sum(task_weights)
-            self.sample_probs = np.array(task_weights) / total
+            self.sample_probs = weights / weights.sum()
 
         if sampling_strategy != "weighted" and task_weights is not None:
             warnings.warn(

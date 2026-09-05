@@ -2,8 +2,8 @@
 # One-shot evaluation pipeline: select_best_ckpt → eval_best_ckpt → record_demo.
 #
 # Runs the full three-stage evaluation workflow with sensible defaults:
-#   1. Select the best checkpoint via adaptive elimination (no videos).
-#   2. Evaluate the best checkpoint on all 100 seeds (with videos by default).
+#   1. Select the best checkpoint with a fixed initial stage and optional tie batch.
+#   2. Evaluate the best checkpoint on disjoint held-out seeds (with videos by default).
 #   3. Record 5 high-resolution demo videos from the best checkpoint.
 #
 # Usage:
@@ -18,15 +18,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# Activate conda environment
-eval "$(conda shell.bash hook)"
-conda activate policy
-
 # ── Usage ────────────────────────────────────────────────────────────────────
 if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]"
     echo ""
-    echo "One-shot evaluation pipeline: select best ckpt → eval on 100 seeds → 5 demo videos."
+    echo "One-shot evaluation pipeline: select best ckpt → held-out eval → 5 demo videos."
     echo ""
     echo "Positional args:"
     echo "  policy_name   Policy config name (e.g. dp3, maniflow, maniflow_8l_abl)"
@@ -91,32 +87,32 @@ echo $$ > "$LOCK_FILE"
 trap 'rm -f "$LOCK_FILE"' EXIT
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 1/3: Select Best Checkpoint (adaptive elimination, no videos)
+# Step 1/3: Select Best Checkpoint (fixed two-stage selection, no videos)
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
 echo "  Step 1/3: Select Best Checkpoint"
-echo "  (adaptive elimination across all milestones, no videos)"
+echo "  (fixed initial stage plus optional exact-tie batch, no videos)"
 echo "============================================================"
 echo ""
 
-python dexmani_policy/select_best_ckpt.py \
+conda run --no-capture-output -n policy python dexmani_policy/select_best_ckpt.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
     --no-videos
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 2/3: Evaluate Best Checkpoint (100 seeds)
+# Step 2/3: Evaluate Best Checkpoint (held-out seeds)
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
-echo "  Step 2/3: Evaluate Best Checkpoint (100 seeds)"
+echo "  Step 2/3: Evaluate Best Checkpoint (held-out seeds)"
 echo "============================================================"
 echo ""
 
 # shellcheck disable=SC2086
-python dexmani_policy/eval_best_ckpt.py \
+conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
@@ -131,7 +127,7 @@ echo "  Step 3/3: Record Demo Videos (5 episodes, 1920×1080)"
 echo "============================================================"
 echo ""
 
-python dexmani_policy/record_demo.py \
+conda run --no-capture-output -n policy python dexmani_policy/record_demo.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \

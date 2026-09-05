@@ -43,12 +43,12 @@ bash scripts/training/train.sh dp3 'task_name=pour' 'training.loop.total_train_s
 ### 评测
 
 ```bash
-# 一键管道：select best ckpt → eval → demo
+# 一键管道：select → held-out eval → demo
 bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name>
 
 # 或分步执行
-bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_name>     # 阶段 1: 选出最优 ckpt
-bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_name>       # 阶段 2: 最终评测
+bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_name>     # 阶段 1: fixed two-stage selection
+bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_name>       # 阶段 2: held-out 最终评测
 bash scripts/eval/record_demo.sh dp3 pour <exp_name>           # 录制 demo 视频
 
 # ActionFlow：同 checkpoint、同 seeds 的 Euler/Midpoint × NFE 配对评测
@@ -167,6 +167,11 @@ model/EMA copy. Its only persisted observation declaration is the ordered
 dtype and semantics. The training experiment's `dataset.sensor_modalities` is
 the single manual selection used by export; it is not copied into the artifact
 as a competing list.
+
+`inference_config.eval` 显式保存 `denoise_steps` 与
+`temporal_ensemble_coeff`（有限非负数或 `null`）。`use_ema` 只在 export 时选择权重，
+不会作为 artifact runtime 的重复开关；非 `null` coefficient 会在 runtime 启用
+`ChunkOverlapBlender`。
 
 - **Encoder-owned inputs**: export and restore require the selected fields to
   match the instantiated encoder's `consumed_observation_fields`. A field that
@@ -321,7 +326,6 @@ experiments/
     ├── best_ckpt.json           # select_best_ckpt 输出（实验根目录）
     ├── checkpoints/
     │   ├── latest.pt            # → 最新里程碑 symlink
-    │   ├── best.pt              # → 最优 ckpt symlink（仅 --link-best 时生成）
     │   └── epoch=*-step=*-milestone=*pct.pt
     ├── logs.jsonl               # 结构化训练日志
     ├── eval_dexsim/             # 评测产出
@@ -342,7 +346,7 @@ experiments/
 - **DQRISE 直接继承 `BaseAgent`**: `diffusion_action_dim = tcp_dim+1` ≠ `action_dim`，无法复用 UNetDiffusionAgent
 - **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
 - **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
-- **FlowMatchWithConsistency `target_t`**: flow 分支训练=0，consistency 分支训练=dt1(>0)，推理=dt(>0)
+- **FlowMatchWithConsistency `target_t`**: flow 分支训练=0；relative consistency 使用 `dt1`；absolute consistency 的 student 使用 `t_next`，teacher 使用 `clamp(t_next+dt1)`；推理按模式使用 `dt` 或 `clamp(t+dt)`
 - **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
 - **Uni3D 预训练权重 fail-closed**: `use_pretrained_weights=true` 时，权重路径缺失/下载失败/key 匹配率 <0.5 会**直接抛异常**（不再静默回退随机初始化），除非显式 `allow_random_init=true`；默认 `false`，r3d.yaml 已 pin
 - **`__init__.py` barrel 已清空**: `core`/`rgb`/`pointcloud`/`text`/`plugins` 五个 barrel 为纯文档字符串，不再 eager re-export；消费方走具体模块直接导入，Hydra 走 `_target_` 直接模块路径，新增 Agent 无需在 `__init__.py` 注册
@@ -387,7 +391,7 @@ experiments/
 直接重新运行相同命令，自动从 `latest.pt` 续训。
 
 **Q: 如何选择评测 checkpoint？**
-- `best` → `best_ckpt.json` 或 `best.pt` symlink（推荐）
+- `best` → 严格 v2 `best_ckpt.json`（缺失、字段无效或 checkpoint 缺失会失败；先运行 selector）
 - `latest` → `latest.pt` symlink
 - `20pct`..`100pct` → 里程碑 checkpoint
 - 直接路径 → 指定 `.pt` 文件

@@ -57,9 +57,9 @@ shell_tool = true
 unified_exec = true
 
 [agents]
-# Leave one slot for the primary agent and cap parallel work to avoid needless
-# GPU/CPU contention in this ML repository.
-max_concurrent_threads_per_session = 3
+# This limit excludes the primary agent: one implementation owner plus one
+# independent helper. The repair workflow serializes GPU work and shared files.
+max_concurrent_threads_per_session = 2
 
 [tui]
 notifications = ["agent-turn-complete", "approval-requested"]
