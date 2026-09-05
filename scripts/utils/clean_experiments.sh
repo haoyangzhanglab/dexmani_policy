@@ -81,7 +81,7 @@ is_active() {
     [[ $age_minutes -lt $SKIP_ACTIVE_MINUTES ]]
 }
 
-# Read total_train_steps from config.yaml; fall back to num_epochs (old format).
+# Read total_train_steps from config.yaml.
 # Empty string on failure.
 get_total_train_steps() {
     python -c "
@@ -90,20 +90,14 @@ try:
     from omegaconf import OmegaConf
     cfg = OmegaConf.load(sys.argv[1])
     loop = cfg.training.loop
-    # Try new format first, fallback to old
-    steps = loop.get('total_train_steps', None)
-    if steps is None and 'num_epochs' in loop:
-        # Old config: approximate steps from epochs (assume ~80 steps/epoch)
-        steps = loop.num_epochs * 80
-    if steps is not None:
-        print(int(steps))
+    print(int(loop.total_train_steps))
 except Exception:
     pass
 " "$1/config.yaml" 2>/dev/null || true
 }
 
 # Scan checkpoint filenames for the maximum completed step.
-# Looks for both old (epoch=*step=*) and new (epoch=*step=*milestone=*) patterns.
+# Reads the canonical epoch=*step=* checkpoint names.
 # Returns -1 if no checkpoints found.
 get_max_step() {
     local ckpt_dir="$1" max=-1 step pt_file base

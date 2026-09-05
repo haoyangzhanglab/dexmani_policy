@@ -82,7 +82,7 @@ agent:
 
   rgb_backbone_name: dino
   rgb_backbone_config:
-    model_name: small               # facebook/dinov2-small, 384d
+    model_name: facebook/dinov2-small  # 384d
     tune_mode: lora
     global_token_type: avg
     image_size: [224, 224]

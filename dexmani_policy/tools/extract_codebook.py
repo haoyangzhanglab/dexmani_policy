@@ -26,20 +26,12 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _extract_hand_normalizer(checkpoint: dict) -> tuple[torch.Tensor, torch.Tensor] | None:
-    state = checkpoint.get("normalizer_state_dict")
-    if state is not None:
-        scale_key = "params_dict.hand.scale"
-        offset_key = "params_dict.hand.offset"
-        if scale_key in state and offset_key in state:
-            return state[scale_key].detach().cpu(), state[offset_key].detach().cpu()
-
-    params = checkpoint.get("normalizer_params")
-    try:
-        hand = params["hand"]
-        return hand["scale"].detach().cpu(), hand["offset"].detach().cpu()
-    except (TypeError, KeyError, AttributeError):
-        return None
+def _extract_hand_normalizer(checkpoint: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    state = checkpoint["normalizer_state_dict"]
+    return (
+        state["params_dict.hand.scale"].detach().cpu(),
+        state["params_dict.hand.offset"].detach().cpu(),
+    )
 
 
 def extract_codebook(
@@ -56,19 +48,14 @@ def extract_codebook(
 
     manager = CodebookManager.extract_from_vqvae(vqvae)
     normalizer = _extract_hand_normalizer(checkpoint)
-    if normalizer is None:
-        raise ValueError(
-            "Checkpoint does not contain a recoverable hand normalizer. "
-            "Re-train or convert the checkpoint before exporting a codebook."
-        )
     manager.set_hand_normalizer(*normalizer)
     manager.artifact_metadata.update(
         {
             "source_checkpoint": str(Path(checkpoint_path).resolve()),
             "source_checkpoint_sha256": sha256_file(checkpoint_path),
-            "source_epoch": int(checkpoint.get("epoch", -1)),
-            "checkpoint_metrics": checkpoint.get("metrics", {}),
-            "split_metadata": checkpoint.get("split_metadata", {}),
+            "source_epoch": int(checkpoint["epoch"]),
+            "checkpoint_metrics": checkpoint["metrics"],
+            "split_metadata": checkpoint["split_metadata"],
         }
     )
 
@@ -91,7 +78,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
     parser.add_argument("--include_per_group", action="store_true")
     args = parser.parse_args()
     extract_codebook(

@@ -14,11 +14,16 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint, build_train_params
+from dexmani_policy.common.checkpoint_io import (
+    CheckpointStore,
+    TrainCheckpoint,
+    build_train_params,
+)
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import (
     dict_apply,
     fix_state_dict,
+    get_rng_state,
     set_seed,
     worker_init_fn,
 )
@@ -77,12 +82,13 @@ def _prepare_dqrise_codebook(cfg) -> str | None:
         "layer_weights": np.ones(num_groups, dtype=np.float32) / num_groups,
     }
     for g in range(num_groups):
-        save_data[f"_group_sorted_poses_g{g}"] = np.random.randn(codebook_size, hand_dim).astype(np.float32)
+        save_data[f"_group_sorted_poses_g{g}"] = np.random.randn(
+            codebook_size, hand_dim
+        ).astype(np.float32)
 
     tmp_path = os.path.join(tempfile.gettempdir(), "smoke_test_dqrise_codebook.npz")
     np.savez(tmp_path, **save_data)
     return tmp_path
-
 
 
 def smoke_test(config_name: str):
@@ -98,7 +104,6 @@ def smoke_test(config_name: str):
         cfg.agent.codebook_path = codebook_tmp
         print(f"      [dqrise] dummy codebook → {codebook_tmp}")
 
-
     set_seed(cfg.training.seed)
 
     print("[1/6] Building dataset & normalizer ...")
@@ -110,11 +115,17 @@ def smoke_test(config_name: str):
     val_dataset = dataset.get_validation_dataset()
     if val_dataset is not None:
         print(f"      val dataset size: {len(val_dataset)}")
-        if hasattr(dataset, "sampling_strategy") and dataset.sampling_strategy == "weighted":
-            assert hasattr(val_dataset, "task_weights") and val_dataset.task_weights is not None, (
-                "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
+        if (
+            hasattr(dataset, "sampling_strategy")
+            and dataset.sampling_strategy == "weighted"
+        ):
+            assert (
+                hasattr(val_dataset, "task_weights")
+                and val_dataset.task_weights is not None
+            ), "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
+            print(
+                f"      ✓ weighted strategy validation set OK (task_weights={val_dataset.task_weights})"
             )
-            print(f"      ✓ weighted strategy validation set OK (task_weights={val_dataset.task_weights})")
     else:
         print("      no validation set (val_ratio=0)")
 
@@ -133,12 +144,18 @@ def smoke_test(config_name: str):
         print(f"      perception params: {perception:,}")
         print(f"      backbone params:   {backbone:,}")
         print(f"      total params:      {total:,}")
-        print(f"      memory shape:      (B, {enc.num_memory_tokens}, {enc.memory_dim})")
+        print(
+            f"      memory shape:      (B, {enc.num_memory_tokens}, {enc.memory_dim})"
+        )
         print(f"      state shape:       (B, {enc.state_hist_dim})")
         # Loose regression gate: catch accidental context=768 revert, redundant
         # global-token branch, or dropped geometry-memory layers.
-        assert 16_000_000 < perception < 18_000_000, f"perception params out of budget: {perception:,}"
-        assert 58_000_000 < backbone < 60_000_000, f"backbone params out of budget: {backbone:,}"
+        assert (
+            16_000_000 < perception < 18_000_000
+        ), f"perception params out of budget: {perception:,}"
+        assert (
+            58_000_000 < backbone < 60_000_000
+        ), f"backbone params out of budget: {backbone:,}"
         assert 74_000_000 < total < 78_000_000, f"total params out of budget: {total:,}"
 
     print("[3/6] Building optimizer & scheduler ...")
@@ -150,7 +167,11 @@ def smoke_test(config_name: str):
 
     use_ema_teacher = cfg.training.use_ema_teacher_for_consistency
     # loss_kwargs logic intentionally mirrors trainer.py; duplicated so smoke test stays self-contained
-    loss_kwargs = {"ema_backbone": ema_model.action_decoder.model} if use_ema_teacher and ema_model else {}
+    loss_kwargs = (
+        {"ema_backbone": ema_model.action_decoder.model}
+        if use_ema_teacher and ema_model
+        else {}
+    )
     model.train()
     raw_loss, loss_dict = model.compute_loss(batch, **loss_kwargs)
     raw_loss.backward()
@@ -161,9 +182,13 @@ def smoke_test(config_name: str):
     # 4.1 Gradient reachability. DDP runs with find_unused_parameters=False and
     # static_graph=True, so a trainable parameter that never participates in the
     # forward graph is a hard crash there — but is silently ignored single-GPU.
-    unreached = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
+    unreached = [
+        n for n, p in model.named_parameters() if p.requires_grad and p.grad is None
+    ]
     if unreached:
-        print(f"      ⚠ {len(unreached)} trainable params received no gradient (DDP will fail):")
+        print(
+            f"      ⚠ {len(unreached)} trainable params received no gradient (DDP will fail):"
+        )
         for n in unreached[:10]:
             print(f"        - {n}")
         if len(unreached) > 10:
@@ -179,13 +204,15 @@ def smoke_test(config_name: str):
         pred_shape = tuple(result["pred_action"].shape)
         ctrl_shape = tuple(result["control_action"].shape)
         expected_ctrl_dim = model.control_action_dim
-        assert ctrl_shape == (1, cfg.n_action_steps, expected_ctrl_dim), (
-            f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {expected_ctrl_dim})"
-        )
+        assert ctrl_shape == (
+            1,
+            cfg.n_action_steps,
+            expected_ctrl_dim,
+        ), f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {expected_ctrl_dim})"
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
 
     print("[6/6] Checkpoint save → load roundtrip ...")
-    num_training_steps = compute_num_training_steps(cfg, len(train_loader))
+    num_training_steps = compute_num_training_steps(cfg)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_dir = pathlib.Path(tmpdir)
@@ -193,7 +220,11 @@ def smoke_test(config_name: str):
 
         # Capture pre-save state dicts (unwrap from compile if needed)
         model_sd = {k: v.clone() for k, v in model.state_dict().items()}
-        ema_sd = {k: v.clone() for k, v in ema_model.state_dict().items()} if ema_model is not None else None
+        ema_sd = (
+            {k: v.clone() for k, v in ema_model.state_dict().items()}
+            if ema_model is not None
+            else None
+        )
         opt_sd = optimizer.state_dict()
         sched_sd = scheduler.state_dict()
 
@@ -202,11 +233,18 @@ def smoke_test(config_name: str):
             epoch=0,
             global_step=1,
             model_state=fix_state_dict(model_sd, is_current_ddp=False),
-            ema_model_state=fix_state_dict(ema_sd, is_current_ddp=False) if ema_sd is not None else None,
+            ema_model_state=(
+                fix_state_dict(ema_sd, is_current_ddp=False)
+                if ema_sd is not None
+                else None
+            ),
             optimizer_state=opt_sd,
             scheduler_state=sched_sd,
             monitor={"test_mean_score": 0.85},
             train_params=build_train_params(model, num_training_steps),
+            ema_updater_step=None,
+            ema_decay=None,
+            rng_state=get_rng_state(),
         )
         ckpt_path = store.save("epoch=0000-step=00000001-score=0.8500.pt", ckpt)
         print(f"      saved checkpoint: {ckpt_path.name}")
@@ -222,7 +260,9 @@ def smoke_test(config_name: str):
         loaded_model_sd = {k: v.to(device) for k, v in loaded_model_sd.items()}
         for key in model_sd:
             if not torch.equal(model_sd[key], loaded_model_sd[key]):
-                raise AssertionError(f"Model state dict mismatch for key '{key}' after roundtrip")
+                raise AssertionError(
+                    f"Model state dict mismatch for key '{key}' after roundtrip"
+                )
         print("      ✓ model state dict roundtrip OK")
 
         if ema_sd is not None and loaded.ema_model_state is not None:
@@ -230,7 +270,9 @@ def smoke_test(config_name: str):
             loaded_ema_sd = {k: v.to(device) for k, v in loaded_ema_sd.items()}
             for key in ema_sd:
                 if not torch.equal(ema_sd[key], loaded_ema_sd[key]):
-                    raise AssertionError(f"EMA state dict mismatch for key '{key}' after roundtrip")
+                    raise AssertionError(
+                        f"EMA state dict mismatch for key '{key}' after roundtrip"
+                    )
             print("      ✓ EMA state dict roundtrip OK")
 
         tp = loaded.train_params

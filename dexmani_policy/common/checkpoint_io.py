@@ -13,6 +13,7 @@ from typing import Any, Dict, Literal, Optional
 import torch
 
 MonitorMode = Literal["max", "min"]
+TRAIN_CHECKPOINT_FORMAT = "simple.v2"
 
 
 @dataclass
@@ -24,15 +25,13 @@ class TrainCheckpoint:
     optimizer_state: Dict[str, Any]
     scheduler_state: Dict[str, Any]
     monitor: Dict[str, Any]
-    train_params: Optional[Dict[str, Any]] = None
-    # Full training state machine (resume). Optional for backward compatibility
-    # with checkpoints saved before these fields existed.
-    ema_updater_step: Optional[int] = None
-    ema_decay: Optional[float] = None
-    rng_state: Optional[Dict[str, Any]] = None
+    train_params: Dict[str, Any]
+    ema_updater_step: Optional[int]
+    ema_decay: Optional[float]
+    rng_state: Dict[str, Any]
 
 
-def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
+def build_train_params(model, num_training_steps: int) -> Dict[str, Any]:
     """Build the ``train_params`` metadata dict embedded in every checkpoint.
 
     This is the **single source of truth** for which agent attributes are
@@ -45,7 +44,7 @@ def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
         "n_action_steps": model.n_action_steps,
         "action_dim": model.action_dim,
         "horizon": model.horizon,
-        "action_key": getattr(model, "action_key", "action"),
+        "action_key": model.action_key,
         "tcp_dim": getattr(model, "tcp_dim", None),
         "hand_dim": getattr(model, "hand_dim", None),
         "control_action_dim": model.control_action_dim,
@@ -54,6 +53,17 @@ def build_train_params(model, num_training_steps=None) -> Dict[str, Any]:
     }
 
     return params
+
+
+def validate_training_steps(
+    checkpoint: TrainCheckpoint, current_num_training_steps: int
+) -> None:
+    saved_num_training_steps = checkpoint.train_params["num_training_steps"]
+    if saved_num_training_steps != current_num_training_steps:
+        raise ValueError(
+            "Checkpoint training-step contract mismatch: "
+            f"saved={saved_num_training_steps}, current={current_num_training_steps}"
+        )
 
 
 class CheckpointStore:
@@ -80,7 +90,7 @@ class CheckpointStore:
                 "optimizer": checkpoint.optimizer_state,
                 "scheduler": checkpoint.scheduler_state,
             },
-            "_format": "simple.v1",
+            "_format": TRAIN_CHECKPOINT_FORMAT,
             "_saved_at": time.time(),
         }
         torch.save(payload, tmp_path)
@@ -91,20 +101,38 @@ class CheckpointStore:
 
     def load(self, path: Path) -> TrainCheckpoint:
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
-        if payload.get("_format") != "simple.v1":
-            raise RuntimeError(f"Unsupported checkpoint format: {payload.get('_format')!r}")
+        if set(payload) != {"state", "weights", "_format", "_saved_at"}:
+            raise RuntimeError("Checkpoint root does not match the training schema")
+        if payload.get("_format") != TRAIN_CHECKPOINT_FORMAT:
+            raise RuntimeError(
+                f"Unsupported checkpoint format: {payload.get('_format')!r}"
+            )
         state = payload["state"]
         weights = payload["weights"]
+        expected_state = {
+            "epoch",
+            "global_step",
+            "monitor",
+            "train_params",
+            "ema_updater_step",
+            "ema_decay",
+            "rng_state",
+        }
+        expected_weights = {"model", "ema_model", "optimizer", "scheduler"}
+        if set(state) != expected_state or set(weights) != expected_weights:
+            raise RuntimeError(
+                f"Checkpoint does not match the {TRAIN_CHECKPOINT_FORMAT} schema"
+            )
         return TrainCheckpoint(
             epoch=int(state["epoch"]),
             global_step=int(state["global_step"]),
-            monitor=state.get("monitor", {}),
-            train_params=state.get("train_params"),
-            ema_updater_step=state.get("ema_updater_step"),
-            ema_decay=state.get("ema_decay"),
-            rng_state=state.get("rng_state"),
+            monitor=state["monitor"],
+            train_params=state["train_params"],
+            ema_updater_step=state["ema_updater_step"],
+            ema_decay=state["ema_decay"],
+            rng_state=state["rng_state"],
             model_state=weights["model"],
-            ema_model_state=weights.get("ema_model"),
+            ema_model_state=weights["ema_model"],
             optimizer_state=weights["optimizer"],
             scheduler_state=weights["scheduler"],
         )
@@ -118,11 +146,15 @@ class CheckpointStore:
             else:
                 checkpoints = list(self.checkpoint_dir.glob("epoch=*.pt"))
                 if not checkpoints:
-                    raise FileNotFoundError(f"No checkpoint found in {self.checkpoint_dir}")
+                    raise FileNotFoundError(
+                        f"No checkpoint found in {self.checkpoint_dir}"
+                    )
                 checkpoints.sort(key=self._parse_ckpt_score, reverse=True)
                 path = checkpoints[0]
             if path is None:
-                raise FileNotFoundError(f"No best checkpoint found in {self.checkpoint_dir}")
+                raise FileNotFoundError(
+                    f"No best checkpoint found in {self.checkpoint_dir}"
+                )
         else:
             path = Path(tag_or_path)
             if path.is_absolute():
@@ -174,7 +206,10 @@ class TopKCheckpointTracker:
                 payload = json.load(file)
             if payload.get("monitor_key") != self.monitor_key:
                 return {}
-            return {str(name): float(score) for name, score in payload.get("scores", {}).items()}
+            return {
+                str(name): float(score)
+                for name, score in payload.get("scores", {}).items()
+            }
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
 
@@ -210,12 +245,7 @@ class TopKCheckpointTracker:
         if path.name in self._score_cache:
             return self._score_cache[path.name]
 
-        # Backward-compatible filename fallback.
-        match = re.search(r"-score=([\d.eE+-]+)\.pt$", path.name)
-        if match:
-            score = float(match.group(1))
-        else:
-            score = self._read_score_from_checkpoint(path)
+        score = self._read_score_from_checkpoint(path)
         self._score_cache[path.name] = score
         return score
 

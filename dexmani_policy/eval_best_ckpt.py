@@ -494,7 +494,7 @@ def main() -> None:
     do_sweep = len(denoise_timesteps_list) > 1
 
     # Video saving — configurable via eval.video.enabled, overridable via --no-videos.
-    # Single-value: exp_dir/eval_dexsim/_result.txt (backward compat)
+    # Single-value: exp_dir/eval_dexsim/_result.txt
     # Sweep:        exp_dir/eval_dexsim/<timestamp>/denoise_timesteps<N>/* + eval_summary.json
     video_enabled = _get_eval_param(cfg, "enabled", "video", default=True)
     video_save_dir = None

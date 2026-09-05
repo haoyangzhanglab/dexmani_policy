@@ -52,13 +52,17 @@ def _get_episode_ends(buffer) -> np.ndarray:
     raise AttributeError("ReplayBuffer does not expose episode_ends")
 
 
-def _episode_mask_to_frame_indices(episode_ends: np.ndarray, episode_mask: np.ndarray) -> np.ndarray:
+def _episode_mask_to_frame_indices(
+    episode_ends: np.ndarray, episode_mask: np.ndarray
+) -> np.ndarray:
     mask = np.asarray(episode_mask, dtype=bool)
     if len(mask) != len(episode_ends):
         raise ValueError("episode mask and episode_ends have different lengths")
     starts = np.concatenate(([0], episode_ends[:-1]))
     chunks = [
-        np.arange(start, end, dtype=np.int64) for use, start, end in zip(mask, starts, episode_ends) if use
+        np.arange(start, end, dtype=np.int64)
+        for use, start, end in zip(mask, starts, episode_ends)
+        if use
     ]
     return np.concatenate(chunks) if chunks else np.empty((0,), dtype=np.int64)
 
@@ -82,8 +86,6 @@ def _save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "normalizer_state_dict": normalizer.state_dict(),
-        # Retained for backward compatibility with older analysis utilities.
-        "normalizer_params": normalizer.params_dict,
         "args": vars(args),
         "model_config": {
             "hand_dim": vqvae.hand_dim,
@@ -93,11 +95,15 @@ def _save_checkpoint(
             "codebook_size": vqvae.codebook_size,
             "num_layers": vqvae.num_layers,
             "act_scale": float(vqvae.act_scale.detach().cpu()),
+            "loss_weight": vqvae.loss_weight.detach().cpu().tolist(),
+            "vq_decay": args.vq_decay,
+            "threshold_ema_dead_code": args.threshold_ema_dead_code,
+            "kmeans_iters": args.kmeans_iters,
         },
         "split_metadata": split_metadata,
         "metrics": metrics,
         "train_history": train_history,
-        "format_version": 2,
+        "format_version": 3,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,9 +161,19 @@ def train(args: argparse.Namespace) -> None:
         mode="limits",
         range_eps=1e-4,
     )
-    train_norm = normalizer["hand"].normalize(hand_data[train_indices]).cpu().numpy().astype(np.float32)
+    train_norm = (
+        normalizer["hand"]
+        .normalize(hand_data[train_indices])
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
     val_norm = (
-        normalizer["hand"].normalize(hand_data[val_indices]).cpu().numpy().astype(np.float32)
+        normalizer["hand"]
+        .normalize(hand_data[val_indices])
+        .cpu()
+        .numpy()
+        .astype(np.float32)
         if len(val_indices) > 0
         else np.empty((0, args.hand_dim), dtype=np.float32)
     )
@@ -226,7 +242,9 @@ def train(args: argparse.Namespace) -> None:
             milestones=[warmup_steps],
         )
     else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps
+        )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -267,7 +285,10 @@ def train(args: argparse.Namespace) -> None:
             sums["mse"] += float(recon_mse)
 
         train_metrics = {key: value / len(train_loader) for key, value in sums.items()}
-        train_total = args.enc_loss_weight * train_metrics["enc"] + args.vq_loss_weight * train_metrics["vq"]
+        train_total = (
+            args.enc_loss_weight * train_metrics["enc"]
+            + args.vq_loss_weight * train_metrics["vq"]
+        )
         train_history.append(train_total)
 
         val_metrics = {"enc": float("nan"), "vq": float("nan"), "mse": float("nan")}
@@ -281,7 +302,9 @@ def train(args: argparse.Namespace) -> None:
                     val_sums["enc"] += float(enc_loss)
                     val_sums["vq"] += float(vq_loss)
                     val_sums["mse"] += float(recon_mse)
-            val_metrics = {key: value / len(val_loader) for key, value in val_sums.items()}
+            val_metrics = {
+                key: value / len(val_loader) for key, value in val_sums.items()
+            }
 
         metrics = {
             "train_enc": train_metrics["enc"],
@@ -319,7 +342,11 @@ def train(args: argparse.Namespace) -> None:
                 metrics=metrics,
             )
 
-        selection_mse = metrics["val_mse"] if np.isfinite(metrics["val_mse"]) else metrics["train_mse"]
+        selection_mse = (
+            metrics["val_mse"]
+            if np.isfinite(metrics["val_mse"])
+            else metrics["train_mse"]
+        )
         if selection_mse < best_val_mse:
             best_val_mse = selection_mse
             _save_checkpoint(
@@ -451,7 +478,9 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--output_dir is required")
     if args.hand_dim is None or args.hand_dim <= 0:
         buffer = ReplayBuffer.copy_from_path(args.zarr_path, keys=[args.action_key])
-        args.hand_dim = int(np.asarray(buffer[args.action_key]).shape[-1] - args.tcp_dim)
+        args.hand_dim = int(
+            np.asarray(buffer[args.action_key]).shape[-1] - args.tcp_dim
+        )
     if args.loss_weight is None:
         args.loss_weight = [1.0] * args.hand_dim
     train(args)

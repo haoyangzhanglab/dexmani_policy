@@ -222,9 +222,7 @@ vq_vae:
   hidden_dim: 512
   num_groups: 2               # residual VQ layers → total = codebook_size ^ num_groups
   codebook_size: 4            # 4² = 16 discrete hand poses
-  # Exact number of hidden Linear layers.  The legacy implementation
-  # accidentally created num_layers+1 layers; 3 preserves the historical
-  # architecture previously labelled num_layers=2.
+  # Exact number of hidden Linear layers.
   num_layers: 3
   act_scale: 1.0              # data already in [-1,1]
   vq_decay: 0.8

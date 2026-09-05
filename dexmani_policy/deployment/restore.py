@@ -161,9 +161,20 @@ def prediction_snapshot(
 def prepare_deployment_observation(
     observation: Mapping[str, torch.Tensor], spec: DeploymentSpec
 ) -> dict[str, torch.Tensor]:
-    """Validate raw artifact inputs before the agent-owned encoder path."""
+    """Validate raw inputs and reproduce validation RGB before ImageProcessor."""
     raw = dict(observation)
     _validate_observation(raw, spec)
+    preprocessing = spec.rgb_preprocessing
+    if preprocessing is not None:
+        from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
+
+        input_device = raw["rgb"].device
+        raw["rgb"] = preprocess_validation_rgb(
+            raw["rgb"].cpu(),
+            resize_hw=preprocessing.resize_hw,
+            center_crop_hw=preprocessing.center_crop_hw,
+            keep_uint8=preprocessing.output_dtype == "uint8",
+        ).to(input_device)
     return raw
 
 
@@ -442,15 +453,13 @@ def _validate_consumed_observation_fields(agent: Any, spec: DeploymentSpec) -> N
 
 
 def _validate_rgb_processor(agent: Any, spec: DeploymentSpec) -> None:
-    """Keep RGB execution in the restored agent's existing ImageProcessor."""
+    """Require the restored ImageProcessor to match the recorded second stage."""
     preprocessing = spec.rgb_preprocessing
     if preprocessing is None:
         return
     try:
         processor = agent.obs_encoder.image_processor
         image_size = processor.image_size
-        center_crop_size = processor.center_crop_size
-        resize_shortest_edge = processor.resize_shortest_edge
         interpolation = processor.interpolation
         mean = processor.image_mean
         std = processor.image_std
@@ -458,26 +467,9 @@ def _validate_rgb_processor(agent: Any, spec: DeploymentSpec) -> None:
         raise DeploymentRestoreError(
             "deployment RGB requires agent.obs_encoder.image_processor"
         ) from exc
-    # ``ImageProcessor`` only applies a center crop on its legacy
-    # resize-shortest-edge branch. That branch has no raw-RGB deployment
-    # equivalent, so deployment supports the direct-resize path only.
-    if resize_shortest_edge is not None or center_crop_size is not None:
-        raise DeploymentRestoreError(
-            "deployment supports only direct ImageProcessor resize without crop"
-        )
     if (
-        _optional_hw_tuple(image_size) != preprocessing.resize_hw
-        or _optional_hw_tuple(center_crop_size) != preprocessing.center_crop_hw
-        or interpolation != preprocessing.interpolation
-        or preprocessing.input_color_order != "rgb"
-        or preprocessing.input_value_range != (0.0, 255.0)
-        or preprocessing.output_layout != "CHW"
-        or preprocessing.output_dtype != "float32"
-        or preprocessing.scale != 1.0 / 255.0
-        # ImageProcessor.resize_tensor uses F.interpolate without the
-        # torchvision antialias option. Recording True would claim a
-        # transform that the restored agent never executes.
-        or preprocessing.antialias
+        _optional_hw_tuple(image_size) != preprocessing.processor_image_size_hw
+        or interpolation != preprocessing.processor_interpolation
     ):
         raise DeploymentRestoreError(
             "deployment RGB preprocessing conflicts with agent ImageProcessor"
@@ -500,10 +492,10 @@ def _optional_hw_tuple(value: Any) -> tuple[int, int] | None:
 
 def _validate_rgb_stats(
     value: Any,
-    expected: tuple[float, float, float] | None,
+    expected: tuple[float, float, float],
     label: str,
 ) -> None:
-    if expected is None or not torch.is_tensor(value) or tuple(value.shape) != (3,):
+    if not torch.is_tensor(value) or tuple(value.shape) != (3,):
         raise DeploymentRestoreError(
             f"deployment RGB preprocessing {label} conflicts with agent ImageProcessor"
         )

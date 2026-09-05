@@ -29,17 +29,15 @@ def _cosine_with_min_lr(
             max(1, num_training_steps - num_warmup_steps)
         )
         progress = min(1.0, progress)
-        return lr_min_ratio + (1.0 - lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        return lr_min_ratio + (1.0 - lr_min_ratio) * 0.5 * (
+            1.0 + math.cos(math.pi * progress)
+        )
 
     return _lrs.LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
-def compute_num_training_steps(cfg, batches_per_epoch: int) -> int:
-    """Return total training steps directly from config.
-
-    The ``batches_per_epoch`` parameter is retained for backward compatibility
-    with the call signature but is no longer used for calculation.
-    """
+def compute_num_training_steps(cfg) -> int:
+    """Return the configured number of training steps."""
     return cfg.training.loop.total_train_steps
 
 
@@ -54,9 +52,7 @@ def get_scheduler(
 
     if name in ("cosine_min_lr",):
         if num_warmup_steps is None or num_training_steps is None:
-            raise ValueError(
-                f"{name} requires num_warmup_steps and num_training_steps"
-            )
+            raise ValueError(f"{name} requires num_warmup_steps and num_training_steps")
         return _cosine_with_min_lr(
             optimizer,
             num_warmup_steps=num_warmup_steps,
@@ -78,13 +74,6 @@ def get_scheduler(
             final_div_factor=kwargs.get("final_div_factor", 1e4),
         )
 
-    if name in ("cosine_annealing",):
-        raise ValueError(
-            "cosine_annealing is deprecated and has been removed. "
-            "Use lr_scheduler='cosine' instead (diffusers CosineWithWarmup, "
-            "supports warmup)."
-        )
-
     # --- diffusers standard schedulers ---
     name = SchedulerType(name)
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
@@ -93,14 +82,21 @@ def get_scheduler(
         return schedule_func(optimizer, **kwargs)
 
     if num_warmup_steps is None:
-        raise ValueError(f"{name} requires `num_warmup_steps`, please provide that argument.")
+        raise ValueError(
+            f"{name} requires `num_warmup_steps`, please provide that argument."
+        )
 
     if name == SchedulerType.CONSTANT_WITH_WARMUP:
         return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, **kwargs)
 
     if num_training_steps is None:
-        raise ValueError(f"{name} requires `num_training_steps`, please provide that argument.")
+        raise ValueError(
+            f"{name} requires `num_training_steps`, please provide that argument."
+        )
 
     return schedule_func(
-        optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, **kwargs
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        **kwargs,
     )

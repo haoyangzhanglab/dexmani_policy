@@ -12,7 +12,11 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
-from dexmani_policy.common.checkpoint_io import TrainCheckpoint, build_train_params
+from dexmani_policy.common.checkpoint_io import (
+    TrainCheckpoint,
+    build_train_params,
+    validate_training_steps,
+)
 from dexmani_policy.common.pytorch_util import (
     compile_models,
     dict_apply,
@@ -65,6 +69,7 @@ class Trainer:
         workspace: Optional[TrainWorkspace],
         train_loop_cfg: TrainLoopConfig,
         use_ema_teacher_for_consistency: bool,
+        num_training_steps: int,
         max_grad_norm: float = 1.0,
         fast_grad_finite_check: bool = False,
         use_bfloat16: bool = False,
@@ -73,7 +78,6 @@ class Trainer:
         is_main_process: bool = True,
         distributed: bool = False,
         train_sampler=None,
-        num_training_steps: Optional[int] = None,
         val_loader=None,
         env_runner=None,
     ):
@@ -100,13 +104,17 @@ class Trainer:
         self._last_clip_ratio: float | None = None
 
         self.use_ema = self.ema_model is not None
-        self.use_ema_teacher_for_consistency = use_ema_teacher_for_consistency and self.use_ema
+        self.use_ema_teacher_for_consistency = (
+            use_ema_teacher_for_consistency and self.use_ema
+        )
 
         self.use_bfloat16 = use_bfloat16
         self.use_compile = use_compile
         self.compile_mode = compile_mode
 
-        self.gradient_accumulation_steps = max(1, int(train_loop_cfg.gradient_accumulation_steps))
+        self.gradient_accumulation_steps = max(
+            1, int(train_loop_cfg.gradient_accumulation_steps)
+        )
         # Pre-compute AMP device_type string to avoid repeated str.split on every step
         self.amp_device_type = str(self.device).split(":")[0]
 
@@ -206,7 +214,7 @@ class Trainer:
         if self.use_ema and self.ema_updater is not None:
             self.ema_updater.step(self.raw_model)
 
-    def load_for_resume(self, tag_or_path: str = "latest"):
+    def load_for_resume(self, tag_or_path: str):
         """Restore model/EMA/optimizer/scheduler from a checkpoint.
 
         Returns ``(global_step, start_epoch)``.  ``start_epoch`` is the epoch
@@ -215,17 +223,18 @@ class Trainer:
         0, a clean accumulation boundary).  This avoids silently skipping the
         remaining micro-batches of the checkpointed epoch.
         """
-        try:
-            checkpoint = self.workspace.load_checkpoint(tag_or_path)
-        except FileNotFoundError:
-            return 0, 0
+        checkpoint = self.workspace.load_checkpoint(tag_or_path)
+        validate_training_steps(checkpoint, self.num_training_steps)
 
         is_current_ddp = isinstance(self.raw_model, DDP)
-        self.raw_model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True)
+        self.raw_model.load_state_dict(
+            fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True
+        )
 
         if self.use_ema and checkpoint.ema_model_state is not None:
             self.ema_model.load_state_dict(
-                fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True
+                fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False),
+                strict=True,
             )
 
         self.optimizer.load_state_dict(checkpoint.optimizer_state)
@@ -242,26 +251,7 @@ class Trainer:
 
         # Restore the process RNG stream so data augmentation / shuffle resumes
         # deterministically alongside the replayed epoch.
-        if checkpoint.rng_state is not None:
-            set_rng_state(checkpoint.rng_state)
-
-        # Validate num_training_steps consistency on resume: a mismatch means the
-        # dataloader config changed between runs (e.g. batch_size, num_workers),
-        # which silently shifts the LR schedule curve even after load_state_dict.
-        saved_steps = checkpoint.train_params.get("num_training_steps") if checkpoint.train_params else None
-        current_steps = self.num_training_steps
-        if saved_steps is not None and current_steps is not None and saved_steps != current_steps:
-            import warnings
-
-            warnings.warn(
-                f"Resume: num_training_steps mismatch — saved={saved_steps}, current={current_steps}. "
-                f"The LR schedule was originally configured for {saved_steps} total steps; "
-                f"the current config would produce {current_steps}. "
-                f"The scheduler state_dict has been restored from the checkpoint, but the "
-                f"underlying schedule curve may be distorted. "
-                f"Consider matching the original dataloader configuration to avoid LR drift.",
-                UserWarning,
-            )
+        set_rng_state(checkpoint.rng_state)
 
         return checkpoint.global_step, checkpoint.epoch
 
@@ -283,14 +273,18 @@ class Trainer:
                 "nan_rank": nan_rank,
             },
             "weights": {
-                "model": fix_state_dict(self.raw_model.state_dict(), is_current_ddp=False),
-                "ema_model": fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
-                if self.use_ema
-                else None,
+                "model": fix_state_dict(
+                    self.raw_model.state_dict(), is_current_ddp=False
+                ),
+                "ema_model": (
+                    fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
+                    if self.use_ema
+                    else None
+                ),
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
             },
-            "_format": "simple.v1",
+            "_format": "dexmani.nan-debug.v1",
             "_saved_at": time.time(),
         }
         # Atomic write pattern: save to .tmp then os.replace() so a crash
@@ -310,7 +304,9 @@ class Trainer:
 
         return ckpt_dir / filename
 
-    def train_one_step(self, batch: Dict[str, Any], *, is_accumulation_boundary: bool = True):
+    def train_one_step(
+        self, batch: Dict[str, Any], *, is_accumulation_boundary: bool = True
+    ):
         """Forward + backward on one micro-batch.
 
         When ``gradient_accumulation_steps > 1`` the loss is scaled by
@@ -331,7 +327,9 @@ class Trainer:
             else {}
         )
         with torch.amp.autocast(
-            device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16
+            device_type=self.amp_device_type,
+            dtype=torch.bfloat16,
+            enabled=self.use_bfloat16,
         ):
             raw_loss, log_dict = self.model.compute_loss(batch, **loss_kwargs)
 
@@ -340,7 +338,9 @@ class Trainer:
             # the rank that actually produced the non-finite loss (not rank 0's
             # own, possibly finite, micro-batch).
             loss_tensor = raw_loss.detach().reshape(1)
-            gathered = [torch.zeros_like(loss_tensor) for _ in range(dist.get_world_size())]
+            gathered = [
+                torch.zeros_like(loss_tensor) for _ in range(dist.get_world_size())
+            ]
             dist.all_gather(gathered, loss_tensor)
             gathered_losses = torch.cat(gathered)
             finite_mask = torch.isfinite(gathered_losses)
@@ -390,9 +390,13 @@ class Trainer:
 
         for batch in self.val_loader:
             batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-            loss_kwargs = {"ema_backbone": ema_backbone} if ema_backbone is not None else {}
+            loss_kwargs = (
+                {"ema_backbone": ema_backbone} if ema_backbone is not None else {}
+            )
             with torch.amp.autocast(
-                device_type=self.amp_device_type, dtype=torch.bfloat16, enabled=self.use_bfloat16
+                device_type=self.amp_device_type,
+                dtype=torch.bfloat16,
+                enabled=self.use_bfloat16,
             ):
                 loss, log_dict = agent.compute_loss(batch, **loss_kwargs)
 
@@ -446,7 +450,9 @@ class Trainer:
             return {"eval/error": str(e)}
         success_rate = result["success_rate"]
         metrics = {
-            "eval/success_rate": success_rate * 100 if success_rate is not None else None,
+            "eval/success_rate": (
+                success_rate * 100 if success_rate is not None else None
+            ),
             "eval/avg_steps": result["avg_steps"],
             "eval/avg_steps_all": result.get("avg_steps_all"),
         }
@@ -458,7 +464,9 @@ class Trainer:
             sr = task_result.get("success_rate")
             if sr is not None:
                 metrics[f"eval/per_task/{task_name}/success_rate"] = sr * 100
-                metrics[f"eval/per_task/{task_name}/avg_steps"] = task_result.get("avg_steps")
+                metrics[f"eval/per_task/{task_name}/avg_steps"] = task_result.get(
+                    "avg_steps"
+                )
         return metrics
 
     def _init_milestone_state(self) -> set[float]:
@@ -470,7 +478,9 @@ class Trainer:
         final step correctly skips all milestones.
         """
         return {
-            ratio for ratio in MILESTONE_RATIOS if self.global_step >= int(self.total_train_steps * ratio)
+            ratio
+            for ratio in MILESTONE_RATIOS
+            if self.global_step >= int(self.total_train_steps * ratio)
         }
 
     def _save_checkpoint(self, epoch: int, global_step: int, tag_suffix: str):
@@ -480,10 +490,14 @@ class Trainer:
         checkpoint = TrainCheckpoint(
             epoch=epoch,
             global_step=global_step,
-            model_state=fix_state_dict(self.raw_model.state_dict(), is_current_ddp=False),
-            ema_model_state=fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
-            if self.use_ema
-            else None,
+            model_state=fix_state_dict(
+                self.raw_model.state_dict(), is_current_ddp=False
+            ),
+            ema_model_state=(
+                fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
+                if self.use_ema
+                else None
+            ),
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             monitor={},
@@ -526,7 +540,10 @@ class Trainer:
             print(f"\nSecond {signame} — forcing exit.", flush=True)
             os._exit(1)
         signame = signal.Signals(signum).name
-        print(f"\n=== {signame} — finishing current step, then saving checkpoint... ===", flush=True)
+        print(
+            f"\n=== {signame} — finishing current step, then saving checkpoint... ===",
+            flush=True,
+        )
         self._interrupted = True
 
     def _check_milestone(self, epoch: int, global_step: int):
@@ -553,11 +570,13 @@ class Trainer:
         if hasattr(self.model, "set_epoch"):
             self.model.set_epoch(epoch)
 
-    def train(self, resume_tag: str = "latest", resume_state=None):
+    def train(self, resume_tag: str | None = None, resume_state=None):
         torch.set_float32_matmul_precision("high")
 
         if resume_state is not None:
             global_step, start_epoch = resume_state
+        elif resume_tag is None:
+            global_step, start_epoch = 0, 0
         else:
             global_step, start_epoch = self.load_for_resume(resume_tag)
 
@@ -606,7 +625,9 @@ class Trainer:
                 for micro_step, batch in enumerate(self.train_loader):
                     self.current_epoch = epoch
 
-                    is_boundary = (micro_step + 1) % self.gradient_accumulation_steps == 0
+                    is_boundary = (
+                        micro_step + 1
+                    ) % self.gradient_accumulation_steps == 0
 
                     # DDP: suppress gradient all-reduce for non-boundary micro-batches
                     # so that gradients accumulate locally, then sync once on the boundary.
@@ -616,13 +637,18 @@ class Trainer:
                         sync_ctx = contextlib.nullcontext()
 
                     with sync_ctx:
-                        _, log_dict = self.train_one_step(batch, is_accumulation_boundary=is_boundary)
+                        _, log_dict = self.train_one_step(
+                            batch, is_accumulation_boundary=is_boundary
+                        )
 
                     if is_boundary:
                         global_step += 1
                         self.global_step = global_step
 
-                        if self.is_main_process and (global_step % self.log_interval_steps) == 0:
+                        if (
+                            self.is_main_process
+                            and (global_step % self.log_interval_steps) == 0
+                        ):
                             step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
                             if self._last_grad_norm is not None:
                                 step_metrics["train/grad_norm"] = self._last_grad_norm
@@ -657,7 +683,8 @@ class Trainer:
 
             if self._interrupted and global_step > 0:
                 print(
-                    f"Training interrupted at step {global_step}/{self.total_train_steps}", flush=True
+                    f"Training interrupted at step {global_step}/{self.total_train_steps}",
+                    flush=True,
                 )
                 try:
                     self._save_interrupt_checkpoint(epoch, global_step)

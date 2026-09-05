@@ -10,7 +10,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.pytorch_util import set_project_root, set_seed, worker_init_fn
+from dexmani_policy.common.pytorch_util import (
+    set_project_root,
+    set_seed,
+    worker_init_fn,
+)
 
 ROOT_DIR = set_project_root()
 from omegaconf import OmegaConf
@@ -62,7 +66,7 @@ def build_train_components(cfg):
 
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
-    num_training_steps = compute_num_training_steps(cfg, batches_per_epoch)
+    num_training_steps = compute_num_training_steps(cfg)
 
     workspace = hydra.utils.instantiate(cfg.workspace)
     env_runner = None
@@ -99,7 +103,9 @@ def main(cfg):
         scheduler=comp.scheduler,
         train_loader=comp.train_loader,
         workspace=comp.workspace,
-        train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
+        train_loop_cfg=TrainLoopConfig(
+            **OmegaConf.to_container(cfg.training.loop, resolve=True)
+        ),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         fast_grad_finite_check=cfg.training.get("fast_grad_finite_check", False),
@@ -108,10 +114,9 @@ def main(cfg):
         compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),
         num_training_steps=comp.num_training_steps,
     )
-    # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>` (Hydra
-    # override). Defaults to the in-run "latest" tag when not provided.
+    # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>`.
     resume_from = cfg.get("resume_from", None)
-    trainer.train(resume_tag=resume_from if resume_from else "latest")
+    trainer.train(resume_tag=resume_from)
 
 
 if __name__ == "__main__":

@@ -18,11 +18,10 @@ import torch
 from termcolor import cprint
 
 from dexmani_policy.common.checkpoint_io import CheckpointStore
-from dexmani_policy.common.config import (
-    normalize_action_key,
-    validate_action_key_consistency,
-)
+from dexmani_policy.common.config import validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import fix_state_dict
+
+
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
     """Resolve the eval seed.
 
@@ -46,11 +45,12 @@ def validate_eval_config(cfg) -> None:
     Replaces the duplicated copies across eval entry points,
     ``select_best_ckpt.py``, ``eval_best_ckpt.py``, and the trainer.
     """
-    normalize_action_key(cfg)
     validate_action_key_consistency(cfg)
 
     if not (cfg.n_obs_steps >= 1 and cfg.n_action_steps >= 1):
-        raise ValueError(f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} must be >= 1")
+        raise ValueError(
+            f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} must be >= 1"
+        )
     if cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon:
         raise ValueError(
             f"n_obs_steps-1+n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) "
@@ -84,7 +84,9 @@ def validate_denoise_steps(denoise_timesteps_list, solver: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_eval_components(cfg, device: torch.device) -> tuple[Any, Any, CheckpointStore]:
+def build_eval_components(
+    cfg, device: torch.device
+) -> tuple[Any, Any, CheckpointStore]:
     """Instantiate agent, env_runner, and checkpoint_store from an OmegaConf config.
 
     Parameters
@@ -125,7 +127,13 @@ def load_ckpt_for_inference(
 
     train_params = checkpoint.train_params
     if train_params is not None:
-        for key in ("n_obs_steps", "n_action_steps", "action_dim", "horizon", "action_key"):
+        for key in (
+            "n_obs_steps",
+            "n_action_steps",
+            "action_dim",
+            "horizon",
+            "action_key",
+        ):
             expected = train_params.get(key)
             actual = getattr(agent, key, None)
             if expected is not None and actual is not None and expected != actual:
@@ -149,7 +157,9 @@ def load_ckpt_for_inference(
     )
 
     if not agent.normalizer.is_fitted(required_keys=["action"]):
-        raise RuntimeError("Normalizer is missing required key 'action' after loading checkpoint.")
+        raise RuntimeError(
+            "Normalizer is missing required key 'action' after loading checkpoint."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +328,9 @@ def compute_eval_stats(result: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _get_eval_param(cfg, param: str, section: str | None = None, *, default: Any = None) -> Any:
+def _get_eval_param(
+    cfg, param: str, section: str | None = None, *, default: Any = None
+) -> Any:
     """Read an eval config parameter with three-level fallback.
 
     Resolution order:
@@ -349,7 +361,9 @@ def _get_eval_param(cfg, param: str, section: str | None = None, *, default: Any
 # 8. Milestone checkpoint discovery
 # ---------------------------------------------------------------------------
 
-_MILESTONE_RE = re.compile(r"^epoch=\d+-step=(?P<step>\d+)-milestone=(?P<pct>\d+)pct\.pt$")
+_MILESTONE_RE = re.compile(
+    r"^epoch=\d+-step=(?P<step>\d+)-milestone=(?P<pct>\d+)pct\.pt$"
+)
 
 
 @dataclass
@@ -424,7 +438,9 @@ def resolve_checkpoint_path(
         match = [m for m in milestones if m.pct == target_pct]
         if not match:
             available = sorted(m.pct for m in milestones)
-            raise FileNotFoundError(f"No {target_pct}% milestone checkpoint. Available: {available}")
+            raise FileNotFoundError(
+                f"No {target_pct}% milestone checkpoint. Available: {available}"
+            )
         return match[0].path, match[0].label
 
     if ckpt_tag_or_path == "best":

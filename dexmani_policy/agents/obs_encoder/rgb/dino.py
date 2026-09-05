@@ -1,4 +1,3 @@
-import logging
 from typing import Optional
 
 import torch
@@ -8,26 +7,6 @@ from transformers import AutoConfig, AutoModel
 from dexmani_policy.agents.obs_encoder.rgb.base import ViTEncoder
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
 from dexmani_policy.agents.obs_encoder.rgb.types import GlobalTokenType, TuneMode
-
-logger = logging.getLogger(__name__)
-
-_DINO_VARIANTS = {
-    "small": "facebook/dinov2-small",
-    "base": "facebook/dinov2-base",
-}
-
-
-def _resolve_dino_model_name(name: str) -> str:
-    """Expand short variant names to full HuggingFace model IDs.
-
-    Short names like ``"small"`` / ``"base"`` are expanded to the
-    corresponding ``facebook/dinov2-*`` ID.  Full HF IDs pass through
-    unchanged, preserving backward compatibility.
-    """
-    resolved = _DINO_VARIANTS.get(name, name)
-    if resolved != name:
-        logger.info("DINO variant shorthand '%s' resolved to '%s'", name, resolved)
-    return resolved
 
 
 class DINO(ViTEncoder):
@@ -40,13 +19,14 @@ class DINO(ViTEncoder):
     ):
         super().__init__()
 
-        model_name = _resolve_dino_model_name(model_name)
         self.model_name = model_name
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
         config = AutoConfig.from_pretrained(model_name)
         config._attn_implementation = "sdpa"
-        self.backbone = AutoModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
+        self.backbone = AutoModel.from_pretrained(
+            model_name, config=config, torch_dtype=torch.bfloat16
+        )
 
         if not hasattr(self.backbone.config, "patch_size"):
             raise ValueError(f"{model_name} does not look like a ViT-style DINO model.")
@@ -55,20 +35,16 @@ class DINO(ViTEncoder):
 
         self.patch_size = int(self.backbone.config.patch_size)
         self.hidden_dim = int(self.backbone.config.hidden_size)
-        self.num_register_tokens = int(getattr(self.backbone.config, "num_register_tokens", 0))
+        self.num_register_tokens = int(
+            getattr(self.backbone.config, "num_register_tokens", 0)
+        )
         self.num_prefix_tokens = 1 + self.num_register_tokens
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
 
-        logger.info(
-            "DINO backbone %s: hidden_dim=%d num_register_tokens=%d num_prefix_tokens=%d",
-            model_name,
-            self.hidden_dim,
-            self.num_register_tokens,
-            self.num_prefix_tokens,
-        )
-
         self.proj = (
-            nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
+            nn.Identity()
+            if self.out_dim == self.hidden_dim
+            else nn.Linear(self.hidden_dim, self.out_dim)
         )
         self.set_tune_mode(tune_mode)
 
@@ -112,9 +88,15 @@ def example() -> None:
         dtype=torch.float32,
     )
 
-    intrinsics = intrinsics.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
+    intrinsics = (
+        intrinsics.unsqueeze(0)
+        .unsqueeze(0)
+        .expand(images.shape[0], images.shape[1], -1, -1)
+    )
     camera_to_world = (
-        camera_to_world.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
+        camera_to_world.unsqueeze(0)
+        .unsqueeze(0)
+        .expand(images.shape[0], images.shape[1], -1, -1)
     )
 
     try:
@@ -132,7 +114,9 @@ def example() -> None:
         depth = rgbd_batch["depth"].to(device)
         intrinsics = rgbd_batch["intrinsics"].to(device)
         camera_to_world = (
-            None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
+            None
+            if rgbd_batch["camera_to_world"] is None
+            else rgbd_batch["camera_to_world"].to(device)
         )
 
         with torch.no_grad():

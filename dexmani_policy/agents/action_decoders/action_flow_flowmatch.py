@@ -54,11 +54,21 @@ class SimpleRectifiedFlowDecoder(nn.Module):
         if noise_shift_alpha <= 0:
             raise ValueError(f"noise_shift_alpha must be > 0, got {noise_shift_alpha}")
         if not (0.0 <= noise_shift_ratio <= 1.0):
-            raise ValueError(f"noise_shift_ratio must be in [0, 1], got {noise_shift_ratio}")
-        if isinstance(denoise_steps, bool) or not isinstance(denoise_steps, int) or denoise_steps <= 0:
-            raise ValueError(f"denoise_steps must be a positive integer, got {denoise_steps!r}")
+            raise ValueError(
+                f"noise_shift_ratio must be in [0, 1], got {noise_shift_ratio}"
+            )
+        if (
+            isinstance(denoise_steps, bool)
+            or not isinstance(denoise_steps, int)
+            or denoise_steps <= 0
+        ):
+            raise ValueError(
+                f"denoise_steps must be a positive integer, got {denoise_steps!r}"
+            )
         if solver == "midpoint" and denoise_steps % 2 != 0:
-            raise ValueError(f"midpoint solver requires an even NFE, got denoise_steps={denoise_steps}")
+            raise ValueError(
+                f"midpoint solver requires an even NFE, got denoise_steps={denoise_steps}"
+            )
 
         self.model = model
         self.denoise_steps = denoise_steps
@@ -71,7 +81,9 @@ class SimpleRectifiedFlowDecoder(nn.Module):
     def _resolve_nfe(self, denoise_timesteps=None) -> int:
         nfe = self.denoise_steps if denoise_timesteps is None else denoise_timesteps
         if isinstance(nfe, bool) or not isinstance(nfe, int):
-            raise ValueError(f"nfe must be an integer, got {nfe!r} (no silent truncation)")
+            raise ValueError(
+                f"nfe must be an integer, got {nfe!r} (no silent truncation)"
+            )
         if nfe <= 0:
             raise ValueError(f"nfe must be positive, got {nfe}")
         if self.solver == "midpoint" and nfe % 2 != 0:
@@ -91,7 +103,6 @@ class SimpleRectifiedFlowDecoder(nn.Module):
             timestep=t,
             context=cond["memory"],
             state=cond["state"],
-            step_size=0.0,
         )
         loss = F.mse_loss(pred, target)
         return loss, {
@@ -99,13 +110,11 @@ class SimpleRectifiedFlowDecoder(nn.Module):
             "loss_action": loss,
             "loss_flow": loss,
             "loss_consistency": torch.zeros_like(loss),
-            "pred_v_magnitude": torch.sqrt(torch.mean(pred ** 2)),
+            "pred_v_magnitude": torch.sqrt(torch.mean(pred**2)),
             "t_mean": t.mean(),
         }
 
-    def _sample_euler(
-        self, x: torch.Tensor, cond: dict, nfe: int
-    ) -> torch.Tensor:
+    def _sample_euler(self, x: torch.Tensor, cond: dict, nfe: int) -> torch.Tensor:
         batch_size = x.shape[0]
         dt = 1.0 / nfe
 
@@ -121,15 +130,12 @@ class SimpleRectifiedFlowDecoder(nn.Module):
                 timestep=timestep,
                 context=cond["memory"],
                 state=cond["state"],
-                step_size=0.0,
             )
             x = x + dt * velocity
 
         return x
 
-    def _sample_midpoint(
-        self, x: torch.Tensor, cond: dict, nfe: int
-    ) -> torch.Tensor:
+    def _sample_midpoint(self, x: torch.Tensor, cond: dict, nfe: int) -> torch.Tensor:
         if nfe % 2 != 0:
             raise ValueError(f"midpoint solver requires an even NFE, got {nfe}")
 
@@ -150,7 +156,6 @@ class SimpleRectifiedFlowDecoder(nn.Module):
                 timestep=t_start,
                 context=cond["memory"],
                 state=cond["state"],
-                step_size=0.0,
             )
 
             x_mid = x + 0.5 * dt * k1
@@ -165,7 +170,6 @@ class SimpleRectifiedFlowDecoder(nn.Module):
                 timestep=t_mid,
                 context=cond["memory"],
                 state=cond["state"],
-                step_size=0.0,
             )
             x = x + dt * k2
 

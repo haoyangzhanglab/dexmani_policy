@@ -18,24 +18,23 @@ from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 
 
 def _args_dict(checkpoint: dict) -> dict:
-    args = checkpoint.get("args", {})
-    return vars(args) if hasattr(args, "__dict__") else dict(args)
+    args = checkpoint["args"]
+    if type(args) is not dict:
+        raise ValueError("VQ checkpoint args must be a mapping")
+    return args
 
 
 def _normalizer_from_checkpoint(checkpoint: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    state = checkpoint.get("normalizer_state_dict")
-    if state is not None:
-        return (
-            state["params_dict.hand.scale"].float(),
-            state["params_dict.hand.offset"].float(),
-        )
-    params = checkpoint.get("normalizer_params")
-    if params is not None:
-        return params["hand"]["scale"].float(), params["hand"]["offset"].float()
-    raise ValueError("Checkpoint has no hand normalizer")
+    state = checkpoint["normalizer_state_dict"]
+    return (
+        state["params_dict.hand.scale"].float(),
+        state["params_dict.hand.offset"].float(),
+    )
 
 
-def _normalize(data: np.ndarray, scale: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
+def _normalize(
+    data: np.ndarray, scale: torch.Tensor, offset: torch.Tensor
+) -> torch.Tensor:
     tensor = torch.from_numpy(np.asarray(data, dtype=np.float32))
     return tensor * scale.cpu() + offset.cpu()
 
@@ -52,15 +51,17 @@ def measure(
 ) -> dict:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = _args_dict(checkpoint)
-    action_key = action_key or args.get("action_key", "action_ee")
-    tcp_dim = int(tcp_dim if tcp_dim is not None else args.get("tcp_dim", 9))
+    action_key = action_key or args["action_key"]
+    tcp_dim = int(tcp_dim if tcp_dim is not None else args["tcp_dim"])
 
     model = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu").eval()
     buffer = ReplayBuffer.copy_from_path(zarr_path, keys=[action_key])
     actions = np.asarray(buffer[action_key])
     hand = actions[:, tcp_dim:]
     if hand.shape[1] != model.hand_dim:
-        raise ValueError(f"Data hand_dim={hand.shape[1]} does not match checkpoint {model.hand_dim}")
+        raise ValueError(
+            f"Data hand_dim={hand.shape[1]} does not match checkpoint {model.hand_dim}"
+        )
 
     scale, offset = _normalizer_from_checkpoint(checkpoint)
     hand_norm = _normalize(hand, scale, offset)
@@ -95,7 +96,9 @@ def measure(
     batch_size = 4096
     with torch.no_grad():
         for start in range(0, len(hand_norm), batch_size):
-            tuple_indices.append(model.encode_to_index(hand_norm[start : start + batch_size]))
+            tuple_indices.append(
+                model.encode_to_index(hand_norm[start : start + batch_size])
+            )
     tuple_indices = torch.cat(tuple_indices, dim=0)
     multipliers = torch.tensor(
         [model.codebook_size**power for power in reversed(range(model.num_groups))],
@@ -106,7 +109,9 @@ def measure(
 
     generator = torch.Generator().manual_seed(seed)
     subset_size = min(sample_size, len(hand_norm))
-    subset = hand_norm[torch.randperm(len(hand_norm), generator=generator)[:subset_size]]
+    subset = hand_norm[
+        torch.randperm(len(hand_norm), generator=generator)[:subset_size]
+    ]
     with torch.no_grad():
         enc, vq, _, mse = model(subset)
 

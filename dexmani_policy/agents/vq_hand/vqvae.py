@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,14 +17,7 @@ def _orthogonal_init(module: nn.Module) -> None:
 
 
 class EncoderMLP(nn.Module):
-    """MLP with an explicit number of hidden linear layers.
-
-    ``num_layers=1`` now means exactly ``input -> hidden -> output``.  The
-    previous implementation accidentally created ``num_layers + 1`` hidden
-    layers.  Existing checkpoints remain loadable through
-    :meth:`VQVAEHand.from_checkpoint`, which infers the actual depth from the
-    state dict rather than trusting legacy configuration metadata.
-    """
+    """MLP with an explicit number of hidden linear layers."""
 
     def __init__(
         self,
@@ -73,7 +63,9 @@ class VQVAEHand(nn.Module):
     ) -> None:
         super().__init__()
         if len(loss_weight) != hand_dim:
-            raise ValueError(f"loss_weight length ({len(loss_weight)}) must equal hand_dim ({hand_dim})")
+            raise ValueError(
+                f"loss_weight length ({len(loss_weight)}) must equal hand_dim ({hand_dim})"
+            )
 
         self.hand_dim = int(hand_dim)
         self.latent_dim = int(latent_dim)
@@ -82,11 +74,19 @@ class VQVAEHand(nn.Module):
         self.codebook_size = int(codebook_size)
         self.num_layers = int(num_layers)
 
-        self.register_buffer("act_scale", torch.tensor(float(act_scale), dtype=torch.float32))
-        self.register_buffer("loss_weight", torch.tensor(loss_weight, dtype=torch.float32))
+        self.register_buffer(
+            "act_scale", torch.tensor(float(act_scale), dtype=torch.float32)
+        )
+        self.register_buffer(
+            "loss_weight", torch.tensor(loss_weight, dtype=torch.float32)
+        )
 
-        self.encoder = EncoderMLP(self.hand_dim, self.latent_dim, self.hidden_dim, self.num_layers)
-        self.decoder = EncoderMLP(self.latent_dim, self.hand_dim, self.hidden_dim, self.num_layers)
+        self.encoder = EncoderMLP(
+            self.hand_dim, self.latent_dim, self.hidden_dim, self.num_layers
+        )
+        self.decoder = EncoderMLP(
+            self.latent_dim, self.hand_dim, self.hidden_dim, self.num_layers
+        )
         self.vq_layer = ResidualVQ(
             dim=self.latent_dim,
             num_quantizers=self.num_groups,
@@ -102,7 +102,9 @@ class VQVAEHand(nn.Module):
 
     def forward(self, hand_pose: torch.Tensor):
         if hand_pose.shape[-1] != self.hand_dim:
-            raise ValueError(f"Expected hand_dim={self.hand_dim}, got {hand_pose.shape[-1]}")
+            raise ValueError(
+                f"Expected hand_dim={self.hand_dim}, got {hand_pose.shape[-1]}"
+            )
         x = hand_pose / self.act_scale
         encoded = self.encoder(x)
         quantized, indices, vq_losses = self.vq_layer(encoded.unsqueeze(1))
@@ -136,80 +138,35 @@ class VQVAEHand(nn.Module):
     def codebooks(self) -> torch.Tensor:
         return self.vq_layer.codebooks
 
-    # ------------------------------------------------------------------
-    # Robust checkpoint reconstruction
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _args_to_dict(args) -> dict:
-        if args is None:
-            return {}
-        if isinstance(args, Mapping):
-            return dict(args)
-        if hasattr(args, "__dict__"):
-            return vars(args)
-        return {}
-
-    @staticmethod
-    def _infer_hidden_layers(state: Mapping[str, torch.Tensor]) -> int:
-        pattern = re.compile(r"^encoder\.trunk\.(\d+)\.weight$")
-        linear_indices = [int(match.group(1)) for key in state if (match := pattern.match(key)) is not None]
-        if not linear_indices:
-            raise ValueError("Cannot infer encoder depth from checkpoint")
-        return len(linear_indices)
-
     @classmethod
     def from_checkpoint(
         cls,
-        checkpoint: Mapping,
+        checkpoint: dict,
         *,
         map_location: str | torch.device = "cpu",
-        strict: bool = True,
     ) -> "VQVAEHand":
-        """Construct from either a complete training checkpoint or state dict.
-
-        Architecture dimensions are inferred from tensor shapes.  This loads
-        both corrected checkpoints and legacy checkpoints whose saved
-        ``num_layers`` value was off by one.
-        """
-        if "model_state_dict" in checkpoint:
-            state = checkpoint["model_state_dict"]
-            saved_args = cls._args_to_dict(checkpoint.get("args"))
-        else:
-            state = checkpoint
-            saved_args = {}
-
-        state = {key: value.to(map_location) for key, value in state.items()}
-        first_weight = state["encoder.trunk.0.weight"]
-        hand_dim = int(first_weight.shape[1])
-        hidden_dim = int(first_weight.shape[0])
-        latent_dim = int(state["encoder.head.weight"].shape[0])
-        num_layers = cls._infer_hidden_layers(state)
-        num_groups = int(state["vq_layer.layer_weights"].numel())
-
-        embed_key = "vq_layer.layers.0._codebook.embed"
-        if embed_key not in state:
-            raise KeyError(f"Missing codebook tensor: {embed_key}")
-        codebook_size = int(state[embed_key].shape[1])
-        act_scale = float(state.get("act_scale", torch.tensor(1.0)).item())
-        loss_weight_tensor = state.get("loss_weight", torch.ones(hand_dim, dtype=torch.float32))
-        loss_weight = loss_weight_tensor.detach().cpu().flatten().tolist()
+        """Construct from the current VQ training checkpoint schema."""
+        if checkpoint.get("format_version") != 3:
+            raise ValueError("VQ checkpoint must use format_version=3")
+        config = checkpoint["model_config"]
+        state = {
+            key: value.to(map_location)
+            for key, value in checkpoint["model_state_dict"].items()
+        }
 
         model = cls(
-            hand_dim=hand_dim,
-            loss_weight=loss_weight,
-            latent_dim=latent_dim,
-            hidden_dim=hidden_dim,
-            num_groups=num_groups,
-            codebook_size=codebook_size,
-            num_layers=num_layers,
-            act_scale=act_scale,
-            vq_decay=float(saved_args.get("vq_decay", 0.8)),
-            threshold_ema_dead_code=int(saved_args.get("threshold_ema_dead_code", 0)),
-            # The saved EMA buffers and embeddings are loaded below, so no
-            # fresh k-means initialisation is needed.
+            hand_dim=int(config["hand_dim"]),
+            loss_weight=list(config["loss_weight"]),
+            latent_dim=int(config["latent_dim"]),
+            hidden_dim=int(config["hidden_dim"]),
+            num_groups=int(config["num_groups"]),
+            codebook_size=int(config["codebook_size"]),
+            num_layers=int(config["num_layers"]),
+            act_scale=float(config["act_scale"]),
+            vq_decay=float(config["vq_decay"]),
+            threshold_ema_dead_code=int(config["threshold_ema_dead_code"]),
             kmeans_init=False,
-            kmeans_iters=int(saved_args.get("kmeans_iters", 10)),
+            kmeans_iters=int(config["kmeans_iters"]),
         )
-        model.load_state_dict(state, strict=strict)
+        model.load_state_dict(state, strict=True)
         return model

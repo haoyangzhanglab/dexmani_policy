@@ -70,7 +70,6 @@ def build_backbone(
     # Pop ImageProcessor-level overrides before passing to backbone constructor.
     # The backbone classes (ResNet, DINO, CLIP, SigLIP) don't accept these params.
     image_size = cfg.pop("image_size", None)
-    center_crop_size = cfg.pop("center_crop_size", None)
     interpolation = cfg.pop("interpolation", None)
 
     if name == "resnet":
@@ -97,10 +96,6 @@ def build_backbone(
     else:
         raise ValueError(f"Unsupported backbone name: {name}")
 
-    # Only warn when the resolved backbone model genuinely differs from the preset
-    # default (e.g. DINO 'base' → 'vit_base_...').  Shorthand aliases ('small' →
-    # 'facebook/dinov2-small') are resolved by the backbone constructor and won't
-    # trigger a false-alarm mismatch here.
     resolved_name = getattr(backbone, "model_name", cfg.get("model_name"))
     if str(resolved_name) != str(base_cfg.get("model_name")):
         warnings.warn(
@@ -118,8 +113,6 @@ def build_backbone(
     # second redundant resize on GPU.
     if image_size is not None:
         image_processor.image_size = to_hw(image_size)
-    if center_crop_size is not None:
-        image_processor.center_crop_size = to_hw(center_crop_size)
     if interpolation is not None:
         image_processor.interpolation = get_interpolation(interpolation)
 

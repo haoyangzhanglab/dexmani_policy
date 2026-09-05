@@ -41,7 +41,6 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
     },
     "siglip": {
         "image_size": (224, 224),
-        "center_crop_size": None,
         "image_mean": (0.5, 0.5, 0.5),
         "image_std": (0.5, 0.5, 0.5),
         "interpolation": "bilinear",
@@ -64,21 +63,14 @@ class ImageProcessor:
     def __init__(
         self,
         image_size: Union[int, Tuple[int, int], None] = None,
-        resize_shortest_edge: Optional[int] = None,
-        center_crop_size: Union[int, Tuple[int, int], None] = None,
         image_mean: Sequence[float] = (0.485, 0.456, 0.406),
         image_std: Sequence[float] = (0.229, 0.224, 0.225),
         interpolation: str = "bilinear",
     ):
         self.image_size = to_hw(image_size)
-        self.resize_shortest_edge = resize_shortest_edge
-        self.center_crop_size = to_hw(center_crop_size)
         self.image_mean = torch.tensor(image_mean, dtype=torch.float32)
         self.image_std = torch.tensor(image_std, dtype=torch.float32)
         self.interpolation = get_interpolation(interpolation)
-
-        if self.image_size is not None and self.resize_shortest_edge is not None:
-            raise ValueError("Use either image_size or resize_shortest_edge, not both.")
 
     @classmethod
     def from_preset(cls, name: str) -> "ImageProcessor":
@@ -93,14 +85,15 @@ class ImageProcessor:
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, object]]:
         if image_batch.ndim != 4 or image_batch.shape[1] != 3:
             raise ValueError("image_batch should have shape [N, 3, H, W].")
-        if depth_batch is not None and (depth_batch.ndim != 4 or depth_batch.shape[1] != 1):
+        if depth_batch is not None and (
+            depth_batch.ndim != 4 or depth_batch.shape[1] != 1
+        ):
             raise ValueError("depth_batch should have shape [N, 1, H, W].")
 
         orig_h, orig_w = image_batch.shape[-2:]
         scale_x, scale_y = 1.0, 1.0
         crop_top, crop_left = 0, 0
 
-        # Direct resize to target (community standard: ACT, RoboTwin, DexUMI, original DP).
         if self.image_size is not None:
             target_h, target_w = self.image_size
             # If image is already at the target size, skip the resize entirely.
@@ -111,48 +104,21 @@ class ImageProcessor:
                     image_batch, size=(target_h, target_w), mode=self.interpolation
                 )
                 if depth_batch is not None:
-                    depth_batch = self.resize_tensor(depth_batch, size=(target_h, target_w), mode="nearest")
+                    depth_batch = self.resize_tensor(
+                        depth_batch, size=(target_h, target_w), mode="nearest"
+                    )
             processed_h, processed_w = target_h, target_w
 
-        # resize_shortest_edge + center_crop (legacy path; kept for compatibility).
-        elif self.resize_shortest_edge is not None:
-            scale = float(self.resize_shortest_edge) / float(min(orig_h, orig_w))
-            resized_h = int(round(orig_h * scale))
-            resized_w = int(round(orig_w * scale))
-
-            if resized_h != orig_h or resized_w != orig_w:
-                scale_x = float(resized_w) / float(orig_w)
-                scale_y = float(resized_h) / float(orig_h)
-                image_batch = self.resize_tensor(
-                    image_batch, size=(resized_h, resized_w), mode=self.interpolation
-                )
-                if depth_batch is not None:
-                    depth_batch = self.resize_tensor(depth_batch, size=(resized_h, resized_w), mode="nearest")
-
-            processed_h, processed_w = resized_h, resized_w
-
-            if self.center_crop_size is not None:
-                crop_h, crop_w = self.center_crop_size
-                if crop_h > resized_h or crop_w > resized_w:
-                    raise ValueError(
-                        f"Crop size {(crop_h, crop_w)} is larger than image size {(resized_h, resized_w)}."
-                    )
-                crop_top = int(round((resized_h - crop_h) / 2.0))
-                crop_left = int(round((resized_w - crop_w) / 2.0))
-                processed_h, processed_w = crop_h, crop_w
-                image_batch = image_batch[
-                    ..., crop_top : crop_top + crop_h, crop_left : crop_left + crop_w
-                ].contiguous()
-                if depth_batch is not None:
-                    depth_batch = depth_batch[
-                        ..., crop_top : crop_top + crop_h, crop_left : crop_left + crop_w
-                    ].contiguous()
         else:
             processed_h, processed_w = orig_h, orig_w
 
         spatial = make_spatial_transform_meta(
             orig_hw=(orig_h, orig_w),
-            resized_hw=(processed_h, processed_w) if (scale_x, scale_y) != (1.0, 1.0) else (orig_h, orig_w),
+            resized_hw=(
+                (processed_h, processed_w)
+                if (scale_x, scale_y) != (1.0, 1.0)
+                else (orig_h, orig_w)
+            ),
             processed_hw=(processed_h, processed_w),
             resize_scale_xy=(scale_x, scale_y),
             crop_top_left=(crop_top, crop_left),
@@ -172,8 +138,12 @@ class ImageProcessor:
         return F.interpolate(x, size=size, mode=mode, align_corners=False)
 
     def normalize(self, image_batch: torch.Tensor) -> torch.Tensor:
-        mean = self.image_mean.to(device=image_batch.device, dtype=image_batch.dtype).view(1, 3, 1, 1)
-        std = self.image_std.to(device=image_batch.device, dtype=image_batch.dtype).view(1, 3, 1, 1)
+        mean = self.image_mean.to(
+            device=image_batch.device, dtype=image_batch.dtype
+        ).view(1, 3, 1, 1)
+        std = self.image_std.to(
+            device=image_batch.device, dtype=image_batch.dtype
+        ).view(1, 3, 1, 1)
         return image_batch.sub(mean).div(std)
 
     def process_images(self, images: ArrayLike) -> Dict[str, object]:
@@ -226,9 +196,13 @@ class ImageProcessor:
                 leading_shape=leading_shape,
                 device=flat_images.device,
             )
-            flat_camera_to_world = cam_tensor[:, :3, :] if cam_tensor.shape[-2] == 4 else cam_tensor
+            flat_camera_to_world = (
+                cam_tensor[:, :3, :] if cam_tensor.shape[-2] == 4 else cam_tensor
+            )
 
-        flat_images, flat_depths, spatial = self.apply_spatial_transform(flat_images, flat_depths)
+        flat_images, flat_depths, spatial = self.apply_spatial_transform(
+            flat_images, flat_depths
+        )
         flat_images = self.normalize(flat_images)
 
         scale_x, scale_y = spatial["resize_scale_xy"]

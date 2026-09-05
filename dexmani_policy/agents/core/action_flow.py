@@ -3,12 +3,16 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.action_decoders.action_flow_flowmatch import SimpleRectifiedFlowDecoder
+from dexmani_policy.agents.action_decoders.action_flow_flowmatch import (
+    SimpleRectifiedFlowDecoder,
+)
 from dexmani_policy.agents.action_decoders.backbone.action_flow_dit import ActionFlowDiT
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.geoformer import GeoFormer
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.pointnext_tokenizer import PointNextPatchTokenizer
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnext_tokenizer import (
+    PointNextPatchTokenizer,
+)
 from dexmani_policy.agents.position_encodings import SinusoidalPosEmb3D
 
 
@@ -73,7 +77,9 @@ class ActionFlowObsEncoder(nn.Module):
         num_patches = self.pc_encoder.out_shape[0]
 
         self.local_to_geo = nn.Linear(token_channels, geo_hidden_dim)
-        self.frame_embedding = nn.Parameter(torch.randn(n_obs_steps, geo_hidden_dim) * 0.02)
+        self.frame_embedding = nn.Parameter(
+            torch.randn(n_obs_steps, geo_hidden_dim) * 0.02
+        )
         self.cls_token = nn.Parameter(torch.randn(1, 1, geo_hidden_dim) * 0.02)
         self.geoformer = GeoFormer(
             hidden_dim=geo_hidden_dim,
@@ -172,12 +178,10 @@ class ActionFlowAgent(BaseAgent):
         num_heads: int = 12,
         ffn_hidden_dim: int = 1536,
         timestep_embed_dim: int = 128,
-        step_embed_dim: int = 64,
         state_embed_hidden_dim: int = 256,
         cond_bottleneck_dim: int = 384,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
-        use_step_conditioning: bool = False,
         denoise_steps: int = 2,
         noise_shift_alpha: float = 3.0,
         noise_shift_ratio: float = 0.75,
@@ -229,12 +233,10 @@ class ActionFlowAgent(BaseAgent):
             num_heads=num_heads,
             ffn_hidden_dim=ffn_hidden_dim,
             timestep_embed_dim=timestep_embed_dim,
-            step_embed_dim=step_embed_dim,
             state_embed_hidden_dim=state_embed_hidden_dim,
             cond_bottleneck_dim=cond_bottleneck_dim,
             qk_norm=qk_norm,
             attn_drop=attn_drop,
-            use_step_conditioning=use_step_conditioning,
         )
         action_decoder = SimpleRectifiedFlowDecoder(
             model=backbone,
@@ -252,6 +254,7 @@ class ActionFlowAgent(BaseAgent):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
+
     @torch.no_grad()
     def predict_action_from_cond(self, cond: dict, denoise_timesteps=None) -> dict:
         """Local override: ActionFlow's ``cond`` is a dict, not a tensor.
@@ -359,10 +362,12 @@ def example():
     loss, loss_dict = agent.compute_loss(batch)
     print(f"loss: {loss.item():.4f}  keys={list(loss_dict.keys())}")
 
-    result = agent.predict_action({
-        "point_cloud": obs["point_cloud"].reshape(B, T, N, 6),
-        "joint_state": obs["joint_state"].reshape(B, T, state_dim),
-    })
+    result = agent.predict_action(
+        {
+            "point_cloud": obs["point_cloud"].reshape(B, T, N, 6),
+            "joint_state": obs["joint_state"].reshape(B, T, state_dim),
+        }
+    )
     print(f"pred_action: {tuple(result['pred_action'].shape)}")
     print(f"control_action: {tuple(result['control_action'].shape)}")
     print("=== PASSED ===")

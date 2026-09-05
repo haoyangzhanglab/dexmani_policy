@@ -38,13 +38,17 @@ def dict_apply(
         if isinstance(value, dict):
             result[key] = dict_apply(value, func)
         elif isinstance(value, list):
-            result[key] = [func(item) if isinstance(item, torch.Tensor) else item for item in value]
+            result[key] = [
+                func(item) if isinstance(item, torch.Tensor) else item for item in value
+            ]
         else:
             result[key] = func(value)
     return result
 
 
-def optimizer_to(optimizer: torch.optim.Optimizer, device: torch.device | str) -> torch.optim.Optimizer:
+def optimizer_to(
+    optimizer: torch.optim.Optimizer, device: torch.device | str
+) -> torch.optim.Optimizer:
     """Move all tensor state in an optimizer to the given device."""
     for state in optimizer.state.values():
         for k, v in state.items():
@@ -105,21 +109,18 @@ def get_rng_state() -> Dict[str, Any]:
         "python": random.getstate(),
         "numpy": np.random.get_state(),
         "torch": torch.get_rng_state(),
-        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "torch_cuda": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        ),
     }
 
 
-def set_rng_state(state: Optional[Dict[str, Any]]) -> None:
-    """Restore the RNG state captured by :func:`get_rng_state` (no-op on None)."""
-    if not state:
-        return
-    if state.get("python") is not None:
-        random.setstate(state["python"])
-    if state.get("numpy") is not None:
-        np.random.set_state(state["numpy"])
-    if state.get("torch") is not None:
-        torch.set_rng_state(state["torch"])
-    if state.get("torch_cuda") is not None and torch.cuda.is_available():
+def set_rng_state(state: Dict[str, Any]) -> None:
+    """Restore the RNG state captured by :func:`get_rng_state`."""
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if state["torch_cuda"] is not None and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state["torch_cuda"])
 
 

@@ -123,7 +123,6 @@ agent:
 
   # Global conditioning: state + flow timestep + step size → compact latent
   timestep_embed_dim: 128
-  step_embed_dim: 64
   state_embed_hidden_dim: 256
   cond_bottleneck_dim: 384
 
@@ -135,10 +134,6 @@ agent:
   # 75% NoiseShift(alpha=3) + 25% uniform i.i.d. mixture
   noise_shift_alpha: 3.0
   noise_shift_ratio: 0.75
-  # step_size is hardcoded to 0, so the step_embedder is a meaningless constant
-  # bias. Gate it off (module kept but frozen; state_dict keys unchanged).
-  use_step_conditioning: false
-
   modality_dropout_probs:
     joint_state: 0.0
 

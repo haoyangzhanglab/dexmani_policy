@@ -7,8 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
-DEPLOYMENT_SCHEMA_VERSION = 2
+DEPLOYMENT_FORMAT = "dexmani.deployment.v3"
+DEPLOYMENT_SCHEMA_VERSION = 3
 SUPPORTED_OBSERVATION_DTYPES = frozenset({"float32", "uint8"})
 
 
@@ -47,10 +47,13 @@ class ObservationFieldSpec:
 
 @dataclass(frozen=True)
 class RgbPreprocessingSpec:
-    """Deterministic Policy-owned preprocessing for raw RGB frames."""
+    """Exact validation-spatial and ImageProcessor chain for raw RGB."""
 
+    input_layout: str
+    input_dtype: str
     input_color_order: str
     input_value_range: tuple[float, float]
+    execution_device: str
     resize_hw: tuple[int, int] | None
     center_crop_hw: tuple[int, int] | None
     interpolation: str
@@ -58,8 +61,11 @@ class RgbPreprocessingSpec:
     output_layout: str
     output_dtype: str
     scale: float
-    normalize_mean: tuple[float, float, float] | None
-    normalize_std: tuple[float, float, float] | None
+    output_value_range: tuple[float, float]
+    processor_image_size_hw: tuple[int, int] | None
+    processor_interpolation: str
+    normalize_mean: tuple[float, float, float]
+    normalize_std: tuple[float, float, float]
 
 
 @dataclass(frozen=True)
@@ -83,7 +89,7 @@ class DeploymentSpec:
 
 
 def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return the sole persisted contract of one canonical v2 artifact."""
+    """Return the sole persisted contract of one canonical v3 artifact."""
     root = _mapping(payload, "deployment payload")
     if root.get("_format") != DEPLOYMENT_FORMAT:
         raise DeploymentContractError(
@@ -106,7 +112,7 @@ def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
-    """Parse the model-facing portion of one canonical v2 contract."""
+    """Parse the model-facing portion of one canonical v3 contract."""
     contract = deployment_contract(payload)
     inference = _mapping(contract.get("inference_config"), "contract.inference_config")
     data = _mapping(contract.get("data_contract"), "contract.data_contract")
@@ -185,23 +191,45 @@ def _observation_fields(value: Any) -> tuple[ObservationFieldSpec, ...]:
 def _rgb_preprocessing(
     value: Any, fields: tuple[ObservationFieldSpec, ...]
 ) -> RgbPreprocessingSpec | None:
-    has_rgb = any(field.name == "rgb" for field in fields)
-    if not has_rgb:
+    rgb_fields = tuple(field for field in fields if field.name == "rgb")
+    if not rgb_fields:
         if value is not None:
             raise DeploymentContractError("rgb_preprocessing requires an rgb field")
         return None
     metadata = _mapping(value, "inference_config.rgb_preprocessing")
-    mean = _optional_vector(metadata.get("normalize_mean"), "normalize_mean")
-    std = _optional_vector(metadata.get("normalize_std"), "normalize_std")
-    if (mean is None) != (std is None):
-        raise DeploymentContractError("RGB normalization needs both mean and std")
-    return RgbPreprocessingSpec(
+    required = {
+        "input_layout",
+        "input_dtype",
+        "input_color_order",
+        "input_value_range",
+        "execution_device",
+        "resize_hw",
+        "center_crop_hw",
+        "interpolation",
+        "antialias",
+        "output_layout",
+        "output_dtype",
+        "scale",
+        "output_value_range",
+        "processor_image_size_hw",
+        "processor_interpolation",
+        "normalize_mean",
+        "normalize_std",
+    }
+    if set(metadata) != required:
+        raise DeploymentContractError(
+            "rgb_preprocessing must contain the complete v3 RGB chain"
+        )
+    result = RgbPreprocessingSpec(
+        input_layout=_string(metadata.get("input_layout"), "input_layout"),
+        input_dtype=_string(metadata.get("input_dtype"), "input_dtype"),
         input_color_order=_string(
             metadata.get("input_color_order"), "input_color_order"
         ),
         input_value_range=_numeric_pair(
             metadata.get("input_value_range"), "input_value_range"
         ),
+        execution_device=_string(metadata.get("execution_device"), "execution_device"),
         resize_hw=_optional_hw(metadata.get("resize_hw"), "resize_hw"),
         center_crop_hw=_optional_hw(metadata.get("center_crop_hw"), "center_crop_hw"),
         interpolation=_string(metadata.get("interpolation"), "interpolation"),
@@ -209,9 +237,71 @@ def _rgb_preprocessing(
         output_layout=_string(metadata.get("output_layout"), "output_layout"),
         output_dtype=_string(metadata.get("output_dtype"), "output_dtype"),
         scale=_positive_float(metadata.get("scale"), "scale"),
-        normalize_mean=mean,
-        normalize_std=std,
+        output_value_range=_numeric_pair(
+            metadata.get("output_value_range"), "output_value_range"
+        ),
+        processor_image_size_hw=_optional_hw(
+            metadata.get("processor_image_size_hw"), "processor_image_size_hw"
+        ),
+        processor_interpolation=_string(
+            metadata.get("processor_interpolation"), "processor_interpolation"
+        ),
+        normalize_mean=_vector(metadata.get("normalize_mean"), "normalize_mean"),
+        normalize_std=_vector(metadata.get("normalize_std"), "normalize_std"),
     )
+    _validate_rgb_chain(result, rgb_fields[0])
+    return result
+
+
+def _validate_rgb_chain(
+    preprocessing: RgbPreprocessingSpec, field: ObservationFieldSpec
+) -> None:
+    semantics = field.semantics
+    if (
+        field.dtype != "uint8"
+        or len(field.shape) != 3
+        or field.shape[-1] != 3
+        or preprocessing.input_layout != "HWC"
+        or preprocessing.input_dtype != "uint8"
+        or preprocessing.input_color_order != "rgb"
+        or preprocessing.input_value_range != (0.0, 255.0)
+        or preprocessing.execution_device != "cpu"
+        or semantics.get("layout") != preprocessing.input_layout
+        or semantics.get("color_order") != preprocessing.input_color_order
+        or semantics.get("value_range") != preprocessing.input_value_range
+    ):
+        raise DeploymentContractError(
+            "rgb_preprocessing input semantics conflict with the rgb field"
+        )
+    if preprocessing.resize_hw is None:
+        expected_output = ("HWC", "uint8", 1.0, (0.0, 255.0))
+        if preprocessing.center_crop_hw is not None:
+            raise DeploymentContractError("RGB center crop requires dataset resize")
+    else:
+        if preprocessing.interpolation != "bilinear" or not preprocessing.antialias:
+            raise DeploymentContractError(
+                "validation RGB resize must use bilinear antialiasing"
+            )
+        if preprocessing.output_dtype == "uint8":
+            expected_output = ("CHW", "uint8", 1.0, (0.0, 255.0))
+        else:
+            expected_output = ("CHW", "float32", 1.0 / 255.0, (0.0, 1.0))
+    actual_output = (
+        preprocessing.output_layout,
+        preprocessing.output_dtype,
+        preprocessing.scale,
+        preprocessing.output_value_range,
+    )
+    if actual_output != expected_output:
+        raise DeploymentContractError(
+            "rgb_preprocessing output semantics conflict with validation RGB"
+        )
+    if preprocessing.processor_interpolation not in {
+        "nearest",
+        "bilinear",
+        "bicubic",
+    }:
+        raise DeploymentContractError("unsupported ImageProcessor interpolation")
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -275,9 +365,7 @@ def _numeric_pair(value: Any, label: str) -> tuple[float, float]:
     return result
 
 
-def _optional_vector(value: Any, label: str) -> tuple[float, float, float] | None:
-    if value is None:
-        return None
+def _vector(value: Any, label: str) -> tuple[float, float, float]:
     if type(value) is not list or len(value) != 3:
         raise DeploymentContractError(f"{label} must contain three numbers")
     return tuple(_finite_float(item, label) for item in value)  # type: ignore[return-value]

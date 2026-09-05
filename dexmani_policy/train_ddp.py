@@ -5,7 +5,6 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import pathlib
 import socket
-import warnings
 
 import hydra
 import torch
@@ -16,7 +15,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from dexmani_policy.common.checkpoint_io import CheckpointStore
+from dexmani_policy.common.checkpoint_io import (
+    CheckpointStore,
+    validate_training_steps,
+)
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import (
     compile_models,
@@ -95,7 +97,9 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         worker_init_fn=worker_init_fn,
     )
 
-    model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer, rank=rank)
+    model, ema_model, ema_updater = build_model_and_ema(
+        cfg, device, normalizer, rank=rank
+    )
 
     # After model init, use different seeds per rank for augmentation diversity
     set_seed(cfg.training.seed + rank)
@@ -120,25 +124,30 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     # recompilation on load_state_dict-triggered guard failures.
     resume_global_step = 0
     resume_start_epoch = 0
-    try:
-        ckpt_path = checkpoint_store.resolve_path(resume_from if resume_from else "latest")
+    checkpoint = None
+    if resume_from is not None:
+        ckpt_path = checkpoint_store.resolve_path(resume_from)
         checkpoint = checkpoint_store.load(ckpt_path)
-        model.load_state_dict(fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True)
+        validate_training_steps(checkpoint, compute_num_training_steps(cfg))
+        model.load_state_dict(
+            fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True
+        )
         if ema_model is not None and checkpoint.ema_model_state is not None:
             ema_model.load_state_dict(
-                fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False), strict=True
+                fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False),
+                strict=True,
             )
         resume_global_step = checkpoint.global_step
         # Replay semantics (matches single-GPU load_for_resume): sampler position
         # is not persisted, so resume replays this epoch from its start.
         resume_start_epoch = checkpoint.epoch
-    except FileNotFoundError:
-        checkpoint = None
 
     # torch.compile must happen before DDP wrapping and after checkpoint load.
     # Use compile_models() for unified single-GPU/DDP behavior: backbone only.
     if cfg.training.get("use_compile", False):
-        compile_models(model, ema_model, mode=cfg.training.get("compile_mode", "reduce-overhead"))
+        compile_models(
+            model, ema_model, mode=cfg.training.get("compile_mode", "reduce-overhead")
+        )
 
     ddp_model = DDP(
         model,
@@ -149,28 +158,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         static_graph=True,
     )
 
-    total_steps = compute_num_training_steps(cfg, batches_per_epoch)
-
-    # Warn if num_training_steps changed since the checkpoint was saved.
-    # Duplicates trainer.py:load_for_resume logic — necessary because DDP
-    # bypasses load_for_resume (passes resume_state directly to train()).
-    if checkpoint is not None:
-        saved_steps = checkpoint.train_params.get("num_training_steps") if checkpoint.train_params else None
-        if saved_steps is not None and saved_steps != total_steps:
-            warnings.warn(
-                f"DDP Resume: num_training_steps mismatch — saved={saved_steps}, current={total_steps}. "
-                f"The LR schedule was originally configured for {saved_steps} total steps; "
-                f"the current config would produce {total_steps}. "
-                f"The scheduler state_dict will be restored from the checkpoint, but the "
-                f"underlying schedule curve may be distorted. "
-                f"Consider matching the original dataloader configuration to avoid LR drift.",
-                UserWarning,
-            )
+    total_steps = compute_num_training_steps(cfg)
 
     scheduler = build_scheduler(
         cfg,
         optimizer,
-        batches_per_epoch,
         last_epoch=resume_global_step - 1 if checkpoint is None else -1,
     )
     # Restore optimizer then scheduler state (aligned with single-GPU
@@ -191,7 +183,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
                 ema_updater.optimization_step = int(checkpoint.ema_updater_step)
             if checkpoint.ema_decay is not None:
                 ema_updater.decay = float(checkpoint.ema_decay)
-        if rank == 0 and checkpoint.rng_state is not None:
+        if rank == 0:
             set_rng_state(checkpoint.rng_state)
 
     trainer = Trainer(
@@ -203,7 +195,9 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         scheduler=scheduler,
         train_loader=train_loader,
         workspace=workspace,
-        train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
+        train_loop_cfg=TrainLoopConfig(
+            **OmegaConf.to_container(cfg.training.loop, resolve=True)
+        ),
         use_ema_teacher_for_consistency=cfg.training.use_ema_teacher_for_consistency,
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         fast_grad_finite_check=cfg.training.get("fast_grad_finite_check", False),
@@ -262,11 +256,15 @@ def main(cfg):
             )
         for gpu_id in gpu_ids:
             if gpu_id >= available_gpus:
-                raise ValueError(f"GPU {gpu_id} not available. Only {available_gpus} GPUs detected.")
+                raise ValueError(
+                    f"GPU {gpu_id} not available. Only {available_gpus} GPUs detected."
+                )
         print(f"Using GPUs: {gpu_ids}")
     else:
         if num_gpus > available_gpus:
-            raise ValueError(f"Requested {num_gpus} GPUs but only {available_gpus} available.")
+            raise ValueError(
+                f"Requested {num_gpus} GPUs but only {available_gpus} available."
+            )
         gpu_ids = list(range(num_gpus))
         print(f"Using default GPUs: {gpu_ids}")
 
@@ -289,7 +287,12 @@ def main(cfg):
         sock.close()
 
     resume_from = cfg.get("resume_from", None)
-    mp.spawn(ddp_worker, args=(num_gpus, cfg, gpu_ids, resume_from), nprocs=num_gpus, join=True)
+    mp.spawn(
+        ddp_worker,
+        args=(num_gpus, cfg, gpu_ids, resume_from),
+        nprocs=num_gpus,
+        join=True,
+    )
 
 
 if __name__ == "__main__":

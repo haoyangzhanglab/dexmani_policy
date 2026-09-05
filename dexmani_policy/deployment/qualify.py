@@ -32,8 +32,10 @@ from dexmani_policy.deployment.restore import (
     DeploymentRestoreError,
     DeploymentSpec,
     PredictionSnapshot,
+    _validate_rgb_processor,
     assert_prediction_parity,
     deterministic_observation,
+    prepare_deployment_observation,
     prediction_snapshot,
     reset_inference_seed,
     restore_deployment_agent,
@@ -125,7 +127,7 @@ def restore_direct_policy(
 
     # This is the same canonical key normalization the exporter applies before
     # strict loading.  It preserves the selected model/EMA tensors while making
-    # ordinary compiled/DDP simple.v1 checkpoints directly restorable.
+    # ordinary compiled/DDP simple.v2 checkpoints directly restorable.
     selected_state = exporter._canonicalize_state_dict(
         selected_raw, f"weights.{selected_weights}"
     )
@@ -140,9 +142,7 @@ def restore_direct_policy(
     try:
         import hydra
 
-        # Training commands chdir to the repository root before Hydra builds an
-        # agent.  Preserve that behaviour for constructor-time relative assets
-        # (for example a legacy codebook_path), regardless of the caller's cwd.
+        # Resolve constructor-time relative assets from the repository root.
         with _repository_cwd():
             agent = hydra.utils.instantiate(OmegaConf.create(dict(agent_config)))
         agent.action_key = spec.action_key
@@ -151,11 +151,12 @@ def restore_direct_policy(
         agent.eval()
         _validate_direct_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
+        _validate_rgb_processor(agent, spec)
     except DeploymentRestoreError:
         raise
     except Exception as exc:
         raise PolicyParityError(
-            f"direct agent strict restore failed using simple.v1 {selected_weights}"
+            f"direct agent strict restore failed using simple.v2 {selected_weights}"
         ) from exc
 
     return DirectRestoredPolicy(
@@ -181,11 +182,12 @@ def direct_prediction_snapshot(
         if observation is None
         else dict(observation)
     )
+    model_observation = prepare_deployment_observation(obs, restored.spec)
     reset_inference_seed(seed)
     try:
         with torch.inference_mode():
             result = restored.agent.predict_action(
-                obs, denoise_timesteps=restored.spec.denoise_steps
+                model_observation, denoise_timesteps=restored.spec.denoise_steps
             )
     except Exception as exc:
         raise PolicyParityError("direct agent prediction failed") from exc

@@ -25,14 +25,16 @@ from dexmani_policy.agents.obs_encoder.rgb.image_processor import (
 )
 from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
+from dexmani_policy.deployment.contract import (
+    DEPLOYMENT_FORMAT,
+    DEPLOYMENT_SCHEMA_VERSION,
+    DeploymentContractError,
+    parse_deployment_contract,
+)
 from dexmani_policy.deployment.restore import (
     DeploymentRestoreError,
     verify_deployment_prediction,
-)
-from dexmani_policy.deployment.contract import (
-    DEPLOYMENT_FORMAT,
-    DeploymentContractError,
-    parse_deployment_contract,
 )
 
 _REPOSITORY = "haoyangzhanglab/dexmani_policy"
@@ -64,24 +66,6 @@ _POINT_SEMANTICS = {
     ),
 }
 
-_CORE_ZARR_KEYS = (
-    "schema_name",
-    "schema_version",
-    "domain",
-    "profile",
-    "task_name",
-    "dt",
-    "episode_start_policy",
-    "obs_alignment",
-    "observation_reference",
-    "state_alignment",
-    "max_observation_skew_s",
-    "action_semantics",
-    "arm_max_delta_rad_per_tick",
-    "hand_max_delta_rad_per_tick",
-    "endpoint_delta_tolerance_rad",
-    "deployment_equivalent",
-)
 _POINT_ZARR_KEYS = (
     "point_cloud_frame",
     "point_cloud_color_source",
@@ -283,7 +267,7 @@ def _load_training_checkpoint(path: Path) -> TrainCheckpoint:
         checkpoint = CheckpointStore(path.parent).load(path)
     except Exception as exc:
         raise InvalidCheckpointError(
-            f"cannot load simple.v1 checkpoint: {path}"
+            f"cannot load simple.v2 checkpoint: {path}"
         ) from exc
     if checkpoint.epoch < 0 or checkpoint.global_step < 0:
         raise InvalidCheckpointError(
@@ -584,7 +568,6 @@ def _build_observation_contract(
         "observation_reference": attrs["observation_reference"],
         "state_alignment": attrs["state_alignment"],
         "action_semantics": attrs["action_semantics"],
-        "deployment_equivalent": attrs["deployment_equivalent"],
         "requires_hand": True,
         "observation_fields": fields,
     }
@@ -608,19 +591,17 @@ def _validate_core_zarr_attrs(
         "observation_reference",
         "state_alignment",
         "action_semantics",
-        "deployment_equivalent",
     }
     missing = sorted(required - set(attrs))
     if missing:
         raise InvalidZarrError(f"Real Policy Zarr is missing semantic attrs: {missing}")
     if (
         attrs["schema_name"] != "dexmani-real-policy-zarr"
-        or attrs["schema_version"] != 5
+        or attrs["schema_version"] != 6
         or attrs["domain"] != "real"
         or attrs["episode_start_policy"] != "full_history"
         or attrs["obs_alignment"] != "obs[t]_before_action[t]"
-        or attrs["action_semantics"] != "deployment_grid_rate_limited_target"
-        or attrs["deployment_equivalent"] is not True
+        or attrs["action_semantics"] != "teleop_published_joint_target"
     ):
         raise InvalidZarrError("invalid Real Policy Zarr semantics")
     task_name = cfg_plain.get("task_name")
@@ -1013,38 +994,33 @@ def _build_inference_config(
 
 
 def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
-    """Record the restored agent's one and only raw-RGB processing path.
-
-    Runtime deliberately passes raw HWC uint8 frames to ``ImageProcessor``.
-    A training dataset that separately resizes or crops validation RGB has no
-    equivalent single processor path today, so it is rejected rather than
-    publishing a misleading deployment contract.
-    """
+    """Record the exact validation-spatial and ImageProcessor RGB chain."""
     if type(agent) is not dict or type(dataset) is not dict:
         raise InvalidExperimentError(
             "resolved agent and dataset config are required for RGB deployment"
         )
-    if (
-        "rgb_preprocess_size" not in dataset
-        or "rgb_random_crop_size" not in dataset
-        or "rgb_keep_uint8" not in dataset
-    ):
+    if dataset.get("_target_") != "dexmani_policy.datasets.rgb_dataset.RGBDataset":
+        raise UnsupportedPolicyError(
+            "RGB deployment requires the current RGBDataset validation contract"
+        )
+    if "rgb_preprocess_size" not in dataset or "rgb_random_crop_size" not in dataset:
         raise InvalidExperimentError(
             "RGB export requires explicit resolved validation preprocessing"
         )
-    if _optional_hw(dataset["rgb_preprocess_size"], "rgb_preprocess_size") is not None:
-        raise UnsupportedPolicyError(
-            "RGB export requires validation RGB without dataset resize"
+    resize_hw = _optional_hw(dataset["rgb_preprocess_size"], "rgb_preprocess_size")
+    center_crop_hw = _optional_hw(
+        dataset["rgb_random_crop_size"], "rgb_random_crop_size"
+    )
+    if resize_hw is None and center_crop_hw is not None:
+        raise InvalidExperimentError(
+            "dataset.rgb_random_crop_size requires rgb_preprocess_size"
         )
-    if (
-        _optional_hw(dataset["rgb_random_crop_size"], "rgb_random_crop_size")
-        is not None
-    ):
-        raise UnsupportedPolicyError(
-            "RGB export requires validation RGB without dataset crop"
-        )
-    if type(dataset["rgb_keep_uint8"]) is not bool:
+    keep_uint8 = dataset.get("rgb_keep_uint8", DEFAULT_RGB_KEEP_UINT8)
+    if type(keep_uint8) is not bool:
         raise InvalidExperimentError("dataset.rgb_keep_uint8 must be bool")
+    validation_keeps_uint8 = (
+        resize_hw is not None and keep_uint8 and dataset.get("rgb_color_aug") is None
+    )
 
     backbone_name = agent.get("rgb_backbone_name")
     backbone_config = agent.get("rgb_backbone_config")
@@ -1056,7 +1032,7 @@ def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
         raise InvalidExperimentError("agent.rgb_backbone_config must be a mapping")
     if any(
         key in backbone_config
-        for key in ("resize_shortest_edge", "image_mean", "image_std")
+        for key in ("center_crop_size", "image_mean", "image_std")
     ):
         raise UnsupportedPolicyError(
             "RGB deployment does not support unowned ImageProcessor overrides"
@@ -1071,18 +1047,6 @@ def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
         ),
         "image_size",
     )
-    center_crop = _processor_hw(
-        (
-            backbone_config["center_crop_size"]
-            if backbone_config.get("center_crop_size") is not None
-            else preset.get("center_crop_size")
-        ),
-        "center_crop_size",
-    )
-    if center_crop is not None:
-        raise UnsupportedPolicyError(
-            "RGB deployment supports only ImageProcessor direct resize without crop"
-        )
     interpolation = (
         backbone_config["interpolation"]
         if backbone_config.get("interpolation") is not None
@@ -1095,17 +1059,38 @@ def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
     mean = _processor_rgb_vector(preset.get("image_mean"), "image_mean")
     std = _processor_rgb_vector(preset.get("image_std"), "image_std")
 
+    if resize_hw is None:
+        output_layout = "HWC"
+        output_dtype = "uint8"
+        output_value_range = [0, 255]
+        scale = 1.0
+    elif validation_keeps_uint8:
+        output_layout = "CHW"
+        output_dtype = "uint8"
+        output_value_range = [0, 255]
+        scale = 1.0
+    else:
+        output_layout = "CHW"
+        output_dtype = "float32"
+        output_value_range = [0, 1]
+        scale = 1.0 / 255.0
+
     return {
+        "input_layout": "HWC",
+        "input_dtype": "uint8",
         "input_color_order": "rgb",
         "input_value_range": [0, 255],
-        "resize_hw": None if image_size is None else list(image_size),
-        "center_crop_hw": None,
-        "interpolation": interpolation,
-        # ImageProcessor's F.interpolate call has no antialias argument.
-        "antialias": False,
-        "output_layout": "CHW",
-        "output_dtype": "float32",
-        "scale": 1.0 / 255.0,
+        "execution_device": "cpu",
+        "resize_hw": None if resize_hw is None else list(resize_hw),
+        "center_crop_hw": (None if center_crop_hw is None else list(center_crop_hw)),
+        "interpolation": "bilinear",
+        "antialias": True,
+        "output_layout": output_layout,
+        "output_dtype": output_dtype,
+        "scale": scale,
+        "output_value_range": output_value_range,
+        "processor_image_size_hw": (None if image_size is None else list(image_size)),
+        "processor_interpolation": interpolation,
         "normalize_mean": list(mean),
         "normalize_std": list(std),
     }
@@ -1401,7 +1386,7 @@ def publish_deployment_selector(
     selector_path: Path,
     checkpoint_path: Path,
 ) -> None:
-    """Atomically publish one already-qualified canonical v2 artifact."""
+    """Atomically publish one already-qualified canonical v3 artifact."""
     old_selector = _capture_selector(selector_path)
     selector_published = False
     try:
@@ -1431,7 +1416,7 @@ def export_deployment_artifact(
     zarr_path: Path | None = None,
     publish: bool = True,
 ) -> ExportReceipt:
-    """Export one selected checkpoint as a canonical v2 deployment artifact.
+    """Export one selected checkpoint as a canonical v3 deployment artifact.
 
     When ``publish=True`` (default) the ``deployment_latest.pt`` selector is
     atomically swapped to point at the new artifact.  When ``publish=False`` the
@@ -1506,7 +1491,7 @@ def export_deployment_artifact(
     payload = {
         "_format": DEPLOYMENT_FORMAT,
         "contract": {
-            "schema_version": 2,
+            "schema_version": DEPLOYMENT_SCHEMA_VERSION,
             "inference_config": deployment_inference,
             "data_contract": data_contract,
             "producer": producer,
@@ -1517,7 +1502,7 @@ def export_deployment_artifact(
 
     checkpoint_dir = experiment / "checkpoints"
     if output_path is None:
-        final_path = checkpoint_dir / f"{selected_path.stem}-deployment-v2.pt"
+        final_path = checkpoint_dir / f"{selected_path.stem}-deployment-v3.pt"
     else:
         requested = Path(output_path)
         final_path = (

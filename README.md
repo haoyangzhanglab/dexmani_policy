@@ -158,7 +158,7 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 ## Real deployment artifact contract
 
 `dexmani_policy.deployment` exports a resolved experiment checkpoint for the
-Real runtime. Every artifact uses `dexmani.deployment.v2` with exactly three
+Real runtime. Every artifact uses `dexmani.deployment.v3` with exactly three
 top-level fields: `_format`, `contract`, and one selected `weights` state dict.
 `contract` is the sole metadata owner (`schema_version`, `inference_config`,
 `data_contract`, `producer`); there is no sidecar, hash manifest, or dormant
@@ -171,12 +171,15 @@ as a competing list.
 - **Encoder-owned inputs**: export and restore require the selected fields to
   match the instantiated encoder's `consumed_observation_fields`. A field that
   the model does not consume cannot be silently forwarded, ignored or padded.
-- **Raw boundary**: `rgb` is raw HWC `uint8` RGB in `[0, 255]`; its resize and
-  normalization metadata belongs to Policy and must match the restored
-  `ImageProcessor`. Other fields carry the raw tensor specification needed by
-  the runtime that provides them.
-- **Real data boundary**: export accepts Real Policy Zarr schema v5 only with
-  `episode_start_policy="full_history"` and `deployment_equivalent=true`, and
+- **Raw boundary**: `rgb` is raw HWC `uint8` RGB in `[0, 255]`. The artifact
+  records the validation dataset's deterministic CPU resize/center-crop and
+  pixel output semantics separately from the restored `ImageProcessor` target
+  size, interpolation, and normalization parameters. Deployment applies the
+  former before the latter. Other fields carry the raw tensor specification
+  needed by the runtime that provides them.
+- **Real data boundary**: export accepts Real Policy Zarr schema v6 only with
+  `episode_start_policy="full_history"` and
+  `action_semantics="teleop_published_joint_target"`, and
   verifies the selected arrays before publication. The current `contact_force`
   source remains native per-finger sensor axes with
   `units="sdk_scaled_unknown_si"` and `si_verified=false`.
@@ -230,7 +233,7 @@ eval:
   demo: {episodes: 5, viewer_resolution: [1920, 1080]}
 ```
 
-参数优先级: CLI > 子节覆盖 > eval 共享层 > 旧字段兼容 > hardcoded fallback
+参数优先级: CLI > 子节覆盖 > eval 共享层 > hardcoded default
 
 ### DDP 批次大小（4 卡，grad-accum=1）
 
@@ -294,6 +297,8 @@ Agent.compute_loss():                          Agent.predict_action():
 ## DQ-RISE
 
 三阶段管道：VQ-VAE 预训练 → 码本提取+PCA排序 → 联合扩散训练。
+VQ checkpoint 只接受 `format_version=3`，运行时 codebook 只接受完整的 `.npz` v3；
+旧 checkpoint、缺字段 codebook 和 `.npy` codebook 必须重新训练或重新提取，不做兼容加载。
 
 | 阶段 | 脚本 | 内容 |
 |------|------|------|
@@ -306,6 +311,8 @@ Agent.compute_loss():                          Agent.predict_action():
 ---
 
 ## 实验目录
+
+训练 checkpoint 使用严格的 `simple.v2` schema；旧 `simple.v1` checkpoint 不再加载。
 
 ```
 experiments/

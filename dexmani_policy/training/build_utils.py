@@ -2,9 +2,12 @@
 
 import hydra
 
-from dexmani_policy.common.config import normalize_action_key, validate_action_key_consistency
+from dexmani_policy.common.config import validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import print_param_count
-from dexmani_policy.training.lr_scheduler import compute_num_training_steps, get_scheduler
+from dexmani_policy.training.lr_scheduler import (
+    compute_num_training_steps,
+    get_scheduler,
+)
 
 __all__ = [
     "build_dataset_and_normalizer",
@@ -54,7 +57,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
     """
     model = hydra.utils.instantiate(cfg.agent)
     model.load_normalizer_from_dataset(normalizer)
-    model.action_key = cfg.get("action_key", "action")
+    model.action_key = cfg.action_key
     model.to(device)
     print_param_count(model)
 
@@ -80,9 +83,9 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
 # ---------------------------------------------------------------------------
 
 
-def build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch=-1):
+def build_scheduler(cfg, optimizer, last_epoch=-1):
     """Build the LR scheduler with the correct total step count."""
-    total_steps = compute_num_training_steps(cfg, batches_per_epoch)
+    total_steps = compute_num_training_steps(cfg)
     return get_scheduler(
         optimizer=optimizer,
         name=cfg.training.lr_scheduler,
@@ -113,10 +116,12 @@ def validate_grad_accum_divisibility(batches_per_epoch: int, grad_accum: int) ->
 
 def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
     """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
-    grad_accum = cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
+    grad_accum = (
+        cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
+    )
     validate_grad_accum_divisibility(batches_per_epoch, grad_accum)
     optimizer = model.configure_optimizer(**cfg.optimizer)
-    scheduler = build_scheduler(cfg, optimizer, batches_per_epoch, last_epoch)
+    scheduler = build_scheduler(cfg, optimizer, last_epoch)
     return optimizer, scheduler
 
 
@@ -174,12 +179,14 @@ def validate_config(cfg):
 
     Called by all entry points before training or evaluation.
     """
-    normalize_action_key(cfg)
-
     if cfg.n_obs_steps > cfg.horizon:
-        raise ValueError(f"n_obs_steps ({cfg.n_obs_steps}) cannot exceed horizon ({cfg.horizon})")
+        raise ValueError(
+            f"n_obs_steps ({cfg.n_obs_steps}) cannot exceed horizon ({cfg.horizon})"
+        )
     if cfg.n_action_steps > cfg.horizon:
-        raise ValueError(f"n_action_steps ({cfg.n_action_steps}) cannot exceed horizon ({cfg.horizon})")
+        raise ValueError(
+            f"n_action_steps ({cfg.n_action_steps}) cannot exceed horizon ({cfg.horizon})"
+        )
     if cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon:
         raise ValueError(
             f"n_obs_steps-1 + n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) "
@@ -187,7 +194,9 @@ def validate_config(cfg):
         )
 
     if cfg.optimizer.get("obs_lr") is not None:
-        assert cfg.optimizer.obs_lr >= 0, "optimizer.obs_lr must be non-negative (0 means freeze)"
+        assert (
+            cfg.optimizer.obs_lr >= 0
+        ), "optimizer.obs_lr must be non-negative (0 means freeze)"
 
     _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)

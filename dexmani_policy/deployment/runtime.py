@@ -85,6 +85,7 @@ class PolicySpec:
         if ("rgb" in names) != (self.rgb_preprocessing is not None):
             raise ValueError("RGB preprocessing must match the rgb observation field")
 
+
 @dataclass(frozen=True)
 class ExperimentInfo:
     """Resolved experiment identity and immutable deployment contract."""
@@ -358,10 +359,11 @@ class LoadedPolicy:
             if not contiguous_value.flags.writeable:
                 contiguous_value = contiguous_value.copy()
             tensor = torch.from_numpy(contiguous_value).unsqueeze(0)
-            tensors[field.name] = tensor.to(self._device)
+            tensors[field.name] = tensor
         from dexmani_policy.deployment.restore import prepare_deployment_observation
 
-        return prepare_deployment_observation(tensors, self._deployment_spec())
+        prepared = prepare_deployment_observation(tensors, self._deployment_spec())
+        return {name: value.to(self._device) for name, value in prepared.items()}
 
 
 def _numpy_dtype(name: str) -> np.dtype[Any]:

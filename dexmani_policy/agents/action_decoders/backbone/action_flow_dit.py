@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
-
 WEIGHT_INIT_STD = 0.02
 
 
@@ -263,9 +262,15 @@ class ActionFlowDiTXBlock(nn.Module):
         calibrated = cond_latent * (1 + self.gamma) + self.beta
         mod = shared_modulation(calibrated)
         (
-            scale_sa, shift_sa, gate_sa,
-            scale_ca, shift_ca, gate_ca,
-            scale_ffn, shift_ffn, gate_ffn,
+            scale_sa,
+            shift_sa,
+            gate_sa,
+            scale_ca,
+            shift_ca,
+            gate_ca,
+            scale_ffn,
+            shift_ffn,
+            gate_ffn,
         ) = mod.chunk(9, dim=-1)
 
         x = x + gate_sa.unsqueeze(1) * self.self_attn(
@@ -276,9 +281,7 @@ class ActionFlowDiTXBlock(nn.Module):
             modulate_rms(x, scale_ca, shift_ca), context
         )
 
-        x = x + gate_ffn.unsqueeze(1) * self.ffn(
-            modulate_rms(x, scale_ffn, shift_ffn)
-        )
+        x = x + gate_ffn.unsqueeze(1) * self.ffn(modulate_rms(x, scale_ffn, shift_ffn))
 
         return x
 
@@ -295,12 +298,10 @@ class ActionFlowDiT(nn.Module):
         num_heads: int = 12,
         ffn_hidden_dim: int = 1536,
         timestep_embed_dim: int = 128,
-        step_embed_dim: int = 64,
         state_embed_hidden_dim: int = 256,
         cond_bottleneck_dim: int = 384,
         qk_norm: bool = True,
         attn_drop: float = 0.0,
-        use_step_conditioning: bool = False,
     ):
         super().__init__()
         if depth <= 0:
@@ -311,8 +312,6 @@ class ActionFlowDiT(nn.Module):
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
         self.context_dim = hidden_dim if context_dim is None else context_dim
-        self.use_step_conditioning = use_step_conditioning
-
         self.action_in = nn.Linear(action_dim, hidden_dim)
         self.action_pos = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
         self.state_mlp = nn.Sequential(
@@ -322,10 +321,6 @@ class ActionFlowDiT(nn.Module):
         )
         self.timestep_embedder = TimestepMLP(
             pos_emb_dim=timestep_embed_dim,
-            output_dim=hidden_dim,
-        )
-        self.step_embedder = TimestepMLP(
-            pos_emb_dim=step_embed_dim,
             output_dim=hidden_dim,
         )
         self.fusion_norm = RMSNorm(hidden_dim)
@@ -354,14 +349,6 @@ class ActionFlowDiT(nn.Module):
 
         self.initialize_weights()
 
-        if not use_step_conditioning:
-            # The step branch is meaningless while step_size is hardcoded to 0, so
-            # gate it off. Freeze (rather than delete) its params so they leave the
-            # optimizer and DDP's find_unused_parameters=False check, while their
-            # state_dict keys remain for strict-load compatibility.
-            for p in self.step_embedder.parameters():
-                p.requires_grad_(False)
-
     def initialize_weights(self) -> None:
         def _basic_init(module: nn.Module) -> None:
             if isinstance(module, nn.Linear):
@@ -378,8 +365,6 @@ class ActionFlowDiT(nn.Module):
         nn.init.zeros_(self.shared_modulation.bias)
         nn.init.zeros_(self.final_modulation.weight)
         nn.init.zeros_(self.final_modulation.bias)
-        nn.init.zeros_(self.step_embedder.net[-1].weight)
-        nn.init.zeros_(self.step_embedder.net[-1].bias)
         nn.init.zeros_(self.action_out.weight)
         nn.init.zeros_(self.action_out.bias)
 
@@ -396,7 +381,6 @@ class ActionFlowDiT(nn.Module):
         timestep: torch.Tensor | float,
         context: torch.Tensor,
         state: torch.Tensor,
-        step_size: torch.Tensor | float = 0.0,
     ) -> torch.Tensor:
         if x.ndim != 3 or x.shape[1] != self.horizon or x.shape[2] != self.action_dim:
             raise ValueError(
@@ -425,9 +409,6 @@ class ActionFlowDiT(nn.Module):
         hidden = self.action_in(x) + self.action_pos.to(dtype=x.dtype)
         t = _prepare_scalar(timestep, batch_size, x.device)
         e = self.state_mlp(state) + self.timestep_embedder(t)
-        if self.use_step_conditioning:
-            d = _prepare_scalar(step_size, batch_size, x.device)
-            e = e + self.step_embedder(d)
         e = self.fusion_norm(e)
         cond_latent = self.compact(e)
 
@@ -460,7 +441,6 @@ if __name__ == "__main__":
         num_heads=12,
         ffn_hidden_dim=1536,
         timestep_embed_dim=128,
-        step_embed_dim=64,
         state_embed_hidden_dim=256,
         cond_bottleneck_dim=384,
     ).to(device)
@@ -472,7 +452,7 @@ if __name__ == "__main__":
 
     # 2. Zero-init: every gate is 0 and action_out is 0, so output is exactly 0.
     with torch.no_grad():
-        out_zero = model(x, timestep, context, state, 0.0)
+        out_zero = model(x, timestep, context, state)
     assert torch.count_nonzero(out_zero) == 0
     print("[PASS] zero-init: output is exactly zero at init")
 
@@ -483,10 +463,9 @@ if __name__ == "__main__":
     nn.init.normal_(model.final_modulation.bias, std=WEIGHT_INIT_STD)
     nn.init.normal_(model.action_out.weight, std=WEIGHT_INIT_STD)
     nn.init.normal_(model.action_out.bias, std=WEIGHT_INIT_STD)
-    nn.init.normal_(model.step_embedder.net[-1].weight, std=WEIGHT_INIT_STD)
 
     # 1. Forward shape + finite backward.
-    out = model(x, 0.5, context, state, torch.tensor(0.0, device=device))
+    out = model(x, 0.5, context, state)
     assert tuple(out.shape) == (2, 16, 19), tuple(out.shape)
     out.float().square().mean().backward()
     assert all(
@@ -507,7 +486,6 @@ if __name__ == "__main__":
         ("action_pos", model.action_pos),
         ("state_mlp", model.state_mlp),
         ("timestep_embedder", model.timestep_embedder),
-        ("step_embedder", model.step_embedder),
         ("fusion_norm", model.fusion_norm),
         ("compact", model.compact),
         ("shared_modulation", model.shared_modulation),
@@ -516,27 +494,29 @@ if __name__ == "__main__":
         ("action_out", model.action_out),
     ]
     for name, sub in breakdown:
-        n = sub.numel() if isinstance(sub, torch.Tensor) else sum(
-            p.numel() for p in sub.parameters()
+        n = (
+            sub.numel()
+            if isinstance(sub, torch.Tensor)
+            else sum(p.numel() for p in sub.parameters())
         )
         print(f"    {name}: {n:,}")
 
     # 4. KV-cache parity.
     model.eval()
     with torch.no_grad():
-        out_uncached = model(x, timestep, context, state, 0.0)
+        out_uncached = model(x, timestep, context, state)
         assert torch.count_nonzero(out_uncached) > 0, "output must be non-trivial"
         model.setup_kv_cache(context)
-        out_cached = model(x, timestep, context, state, 0.0)
+        out_cached = model(x, timestep, context, state)
         model.clear_kv_cache()
     torch.testing.assert_close(out_cached, out_uncached, rtol=1e-5, atol=1e-5)
     print("[PASS] KV-cache parity (fp32, 1e-5)")
 
     with torch.no_grad():
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            out_uncached_bf16 = model(x, timestep, context, state, 0.0)
+            out_uncached_bf16 = model(x, timestep, context, state)
             model.setup_kv_cache(context)
-            out_cached_bf16 = model(x, timestep, context, state, 0.0)
+            out_cached_bf16 = model(x, timestep, context, state)
             model.clear_kv_cache()
     torch.testing.assert_close(out_cached_bf16, out_uncached_bf16, rtol=1e-2, atol=1e-2)
     print("[PASS] KV-cache parity (bf16, 1e-2)")
