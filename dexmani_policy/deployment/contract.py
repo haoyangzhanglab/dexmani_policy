@@ -7,8 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-DEPLOYMENT_FORMAT = "dexmani.deployment.v3"
-DEPLOYMENT_SCHEMA_VERSION = 3
+DEPLOYMENT_FORMAT = "dexmani.deployment"
 SUPPORTED_OBSERVATION_DTYPES = frozenset({"float32", "uint8"})
 
 
@@ -78,7 +77,6 @@ class DeploymentSpec:
     n_obs_steps: int
     n_action_steps: int
     denoise_steps: int
-    temporal_ensemble_coeff: float | None
     observation_fields: tuple[ObservationFieldSpec, ...]
     control_dt_s: float
     requires_hand: bool
@@ -90,7 +88,7 @@ class DeploymentSpec:
 
 
 def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return the sole persisted contract of one canonical v3 artifact."""
+    """Return the sole persisted contract of one canonical artifact."""
     root = _mapping(payload, "deployment payload")
     if root.get("_format") != DEPLOYMENT_FORMAT:
         raise DeploymentContractError(
@@ -101,10 +99,6 @@ def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
             "deployment payload must contain format, contract, and weights"
         )
     contract = _mapping(root.get("contract"), "payload.contract")
-    if contract.get("schema_version") != DEPLOYMENT_SCHEMA_VERSION:
-        raise DeploymentContractError(
-            f"unsupported deployment schema version: {contract.get('schema_version')!r}"
-        )
     for name in ("inference_config", "data_contract", "producer"):
         _mapping(contract.get(name), f"contract.{name}")
     if not _mapping(root.get("weights"), "payload.weights"):
@@ -113,15 +107,11 @@ def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
-    """Parse the model-facing portion of one canonical v3 contract."""
+    """Parse the model-facing portion of one canonical contract."""
     contract = deployment_contract(payload)
     inference = _mapping(contract.get("inference_config"), "contract.inference_config")
     data = _mapping(contract.get("data_contract"), "contract.data_contract")
     eval_config = _mapping(inference.get("eval"), "inference_config.eval")
-    if "temporal_ensemble_coeff" not in eval_config:
-        raise DeploymentContractError(
-            "inference_config.eval.temporal_ensemble_coeff is required"
-        )
 
     action_key = inference.get("action_key")
     if action_key not in {"action", "action_ee"}:
@@ -149,9 +139,6 @@ def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
         n_obs_steps=n_obs_steps,
         n_action_steps=n_action_steps,
         denoise_steps=_positive_int(eval_config.get("denoise_steps"), "denoise_steps"),
-        temporal_ensemble_coeff=_optional_nonnegative_float(
-            eval_config["temporal_ensemble_coeff"], "temporal_ensemble_coeff"
-        ),
         observation_fields=fields,
         control_dt_s=control_dt_s,
         requires_hand=requires_hand,
@@ -226,7 +213,7 @@ def _rgb_preprocessing(
     }
     if set(metadata) != required:
         raise DeploymentContractError(
-            "rgb_preprocessing must contain the complete v3 RGB chain"
+            "rgb_preprocessing must contain the complete RGB chain"
         )
     result = RgbPreprocessingSpec(
         input_layout=_string(metadata.get("input_layout"), "input_layout"),
@@ -331,15 +318,6 @@ def _positive_float(value: Any, label: str) -> float:
     return result
 
 
-def _optional_nonnegative_float(value: Any, label: str) -> float | None:
-    if value is None:
-        return None
-    result = _finite_float(value, label)
-    if result < 0.0:
-        raise DeploymentContractError(f"{label} must be non-negative or null")
-    return result
-
-
 def _finite_float(value: Any, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise DeploymentContractError(f"{label} must be finite")
@@ -404,7 +382,6 @@ def _freeze_value(value: Any) -> Any:
 
 __all__ = [
     "DEPLOYMENT_FORMAT",
-    "DEPLOYMENT_SCHEMA_VERSION",
     "DeploymentContractError",
     "DeploymentSpec",
     "FrozenMetadata",

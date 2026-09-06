@@ -32,10 +32,6 @@ if TYPE_CHECKING:
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _EXPERIMENTS_ROOT = _REPOSITORY_ROOT / "experiments"
 _DEPLOYMENT_SELECTOR = Path("checkpoints/deployment_latest.pt")
-_GENERIC_TEMPORAL_ENSEMBLE_ERROR = (
-    "Generic chunk deployment does not support temporal_ensemble_coeff.\n"
-    "Re-export this experiment with temporal_ensemble_coeff=null."
-)
 
 
 @dataclass(frozen=True)
@@ -48,7 +44,6 @@ class PolicySpec:
     horizon: int
     n_obs_steps: int
     n_action_steps: int
-    temporal_ensemble_coeff: float | None
     observation_fields: tuple[ObservationFieldSpec, ...]
     control_dt_s: float
     requires_hand: bool
@@ -75,15 +70,6 @@ class PolicySpec:
             raise ValueError("action_dim must not be smaller than control_action_dim")
         if self.n_obs_steps - 1 + self.n_action_steps > self.horizon:
             raise ValueError("observation/action window exceeds horizon")
-        if self.temporal_ensemble_coeff is not None and (
-            isinstance(self.temporal_ensemble_coeff, bool)
-            or not isinstance(self.temporal_ensemble_coeff, (int, float))
-            or not np.isfinite(float(self.temporal_ensemble_coeff))
-            or self.temporal_ensemble_coeff < 0.0
-        ):
-            raise ValueError(
-                "temporal_ensemble_coeff must be finite and non-negative or None"
-            )
         names = tuple(field.name for field in self.observation_fields)
         if not names or len(set(names)) != len(names):
             raise ValueError("observation_fields must be non-empty and unique")
@@ -199,7 +185,6 @@ def load_experiment(
     checkpoint_path = _resolve_deployment_checkpoint(experiment_dir)
     payload = _read_deployment_payload(checkpoint_path, map_location="cpu")
     info = _experiment_info(experiment_dir, checkpoint_path, payload)
-    _require_generic_chunk_semantics(info.spec)
 
     from dexmani_policy.deployment.restore import restore_deployment_agent
 
@@ -226,7 +211,6 @@ class LoadedPolicy:
         self._restored: RestoredDeployment | None = restored
         self._device = device
         self._seed = seed
-        _require_generic_chunk_semantics(self.spec)
 
     def warmup(self, *, samples: int) -> tuple[float, ...]:
         """Run deterministic synthetic samples and return durations in seconds.
@@ -505,7 +489,6 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
             horizon=deployment.horizon,
             n_obs_steps=deployment.n_obs_steps,
             n_action_steps=deployment.n_action_steps,
-            temporal_ensemble_coeff=deployment.temporal_ensemble_coeff,
             observation_fields=deployment.observation_fields,
             control_dt_s=deployment.control_dt_s,
             requires_hand=deployment.requires_hand,
@@ -513,12 +496,6 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
         ),
         task_name,
     )
-
-
-def _require_generic_chunk_semantics(spec: PolicySpec) -> None:
-    """Reject artifacts whose generic output would require hidden chunk state."""
-    if spec.temporal_ensemble_coeff is not None:
-        raise ValueError(_GENERIC_TEMPORAL_ENSEMBLE_ERROR)
 
 
 def _short_selector(experiment_dir: Path) -> str:

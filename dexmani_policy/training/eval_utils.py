@@ -8,8 +8,6 @@ logic across the evaluation pipeline.
 from __future__ import annotations
 
 import json
-import math
-from numbers import Real
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,7 +175,7 @@ def load_ckpt_for_inference(
 
 
 def read_best_ckpt_json(exp_dir: Path) -> dict:
-    """Read and validate the strict v2 selection record in *exp_dir*."""
+    """Read and validate the strict selection record in *exp_dir*."""
     best_json = exp_dir / "best_ckpt.json"
     if not best_json.is_file():
         raise FileNotFoundError(
@@ -193,8 +191,6 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
 
     if not isinstance(best_info, dict):
         raise ValueError("best_ckpt.json must contain a JSON object")
-    if best_info.get("record_version") != 2:
-        raise ValueError("best_ckpt.json must have record_version=2")
 
     required_top = {
         "ckpt_relpath",
@@ -208,7 +204,7 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
     }
     missing = sorted(required_top - best_info.keys())
     if missing:
-        raise ValueError(f"best_ckpt.json v2 is missing required fields: {missing}")
+        raise ValueError(f"best_ckpt.json is missing required fields: {missing}")
 
     inference = best_info["inference"]
     if not isinstance(inference, dict):
@@ -217,7 +213,6 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
         {
             "use_ema",
             "denoise_steps",
-            "temporal_ensemble_coeff",
             "policy_seed_mode",
         }
         - inference.keys()
@@ -236,17 +231,6 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
     ):
         raise ValueError(
             "best_ckpt.json inference.denoise_steps must be a positive integer"
-        )
-    coeff = inference["temporal_ensemble_coeff"]
-    if coeff is not None and (
-        isinstance(coeff, bool)
-        or not isinstance(coeff, Real)
-        or not math.isfinite(coeff)
-        or coeff < 0
-    ):
-        raise ValueError(
-            "best_ckpt.json inference.temporal_ensemble_coeff must be a finite, "
-            "non-negative real number or null"
         )
     if inference["policy_seed_mode"] != "episode_seed":
         raise ValueError(

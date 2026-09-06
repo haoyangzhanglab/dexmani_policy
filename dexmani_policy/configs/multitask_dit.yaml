@@ -223,7 +223,6 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   default_eval_episodes: 20
   sensor_modalities: ['joint_state', 'rgb']
-  temporal_ensemble_coeff: null
   task_configs:
     - task_name: pick_bottle
       task_text: ${dataset.task_texts[0]}

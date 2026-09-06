@@ -158,7 +158,6 @@ def _run_one_timestep(
     selection_seeds_excluded: list[int],
     heldout_from_selection: bool,
     use_ema: bool,
-    temporal_ensemble_coeff: float | None,
 ) -> dict:
     """Run eval at a single denoise step count; save per-value results.
 
@@ -217,7 +216,6 @@ def _run_one_timestep(
                 "heldout_from_selection": heldout_from_selection,
                 "use_ema": use_ema,
                 "denoise_steps": denoise_steps,
-                "temporal_ensemble_coeff": temporal_ensemble_coeff,
                 "per_seed_details": per_seed_details,
             },
             indent=2,
@@ -253,7 +251,6 @@ def evaluate_checkpoint_robotwin(
     episodes: int = 100,
     denoise_steps: int = 10,
     use_ema: bool = True,
-    temporal_ensemble_coeff: float | None = None,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
 ) -> tuple[float, float | None, int, int]:
@@ -263,7 +260,7 @@ def evaluate_checkpoint_robotwin(
     ----------
     cfg : pre-loaded OmegaConf config with ``_exp_dir`` injected.
     ckpt_tag_or_path : ``"best"``, ``"latest"``, ``"20pct"``, or a path.
-        ``"best"`` requires the strict v2 record written by ``select_best_ckpt.py``.
+        ``"best"`` requires the strict record written by ``select_best_ckpt.py``.
     episodes : number of seeds to evaluate (default: 100).
     denoise_steps : DDIM/Euler inference steps.
     use_ema : select EMA weights; missing EMA weights are an error.
@@ -272,8 +269,6 @@ def evaluate_checkpoint_robotwin(
     -------
     (success_rate, avg_steps, n_success, n_total)
     """
-    if temporal_ensemble_coeff is None:
-        temporal_ensemble_coeff = cfg.env_runner.get("temporal_ensemble_coeff")
     result_save_dir = result_save_dir or exp_dir / "eval_dexsim"
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
         _setup_eval(
@@ -306,7 +301,6 @@ def evaluate_checkpoint_robotwin(
         selection_seeds_excluded=selection_seeds,
         heldout_from_selection=best_info is not None,
         use_ema=use_ema,
-        temporal_ensemble_coeff=temporal_ensemble_coeff,
     )
 
     # ── Report ─────────────────────────────────────────────────────────
@@ -346,7 +340,6 @@ def evaluate_checkpoint_sweep(
     episodes: int = 100,
     denoise_timesteps_list: list[int],
     use_ema: bool = True,
-    temporal_ensemble_coeff: float | None = None,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
 ) -> list[dict]:
@@ -362,8 +355,6 @@ def evaluate_checkpoint_sweep(
     """
     if not denoise_timesteps_list:
         raise ValueError("denoise_timesteps_list must be non-empty")
-    if temporal_ensemble_coeff is None:
-        temporal_ensemble_coeff = cfg.env_runner.get("temporal_ensemble_coeff")
     if result_save_dir is None:
         if video_save_dir is not None:
             result_save_dir = video_save_dir
@@ -418,7 +409,6 @@ def evaluate_checkpoint_sweep(
             selection_seeds_excluded=selection_seeds,
             heldout_from_selection=best_info is not None,
             use_ema=use_ema,
-            temporal_ensemble_coeff=temporal_ensemble_coeff,
         )
 
         avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"
@@ -489,18 +479,6 @@ def _present_config_value(cfg, paths: list[str]):
     return False, None
 
 
-def _config_temporal_ensemble_coeff(cfg):
-    present, value = _present_config_value(
-        cfg,
-        [
-            "eval.offline.temporal_ensemble_coeff",
-            "eval.temporal_ensemble_coeff",
-            "env_runner.temporal_ensemble_coeff",
-        ],
-    )
-    return value if present else None
-
-
 def _resolve_final_eval_request(
     cfg,
     exp_dir: Path,
@@ -525,7 +503,6 @@ def _resolve_final_eval_request(
             _get_eval_param(cfg, "denoise_steps", "offline", default=10)
         ]
     use_ema = config_use_ema
-    temporal_ensemble_coeff = _config_temporal_ensemble_coeff(cfg)
 
     best_info = None
     if ckpt_tag_or_path == "best":
@@ -533,7 +510,6 @@ def _resolve_final_eval_request(
         inference = best_info["inference"]
         use_ema = inference["use_ema"]
         denoise_timesteps_list = [inference["denoise_steps"]]
-        temporal_ensemble_coeff = inference["temporal_ensemble_coeff"]
 
     present, value = _present_config_value(
         override_cfg, ["eval.offline.use_ema", "eval.use_ema"]
@@ -553,17 +529,6 @@ def _resolve_final_eval_request(
     elif step_present:
         denoise_timesteps_list = [step_value]
 
-    present, value = _present_config_value(
-        override_cfg,
-        [
-            "eval.offline.temporal_ensemble_coeff",
-            "eval.temporal_ensemble_coeff",
-            "env_runner.temporal_ensemble_coeff",
-        ],
-    )
-    if present:
-        temporal_ensemble_coeff = value
-
     if cli_use_ema is not None:
         use_ema = cli_use_ema
     if cli_denoise_steps is not None:
@@ -572,12 +537,10 @@ def _resolve_final_eval_request(
         raise ValueError(f"use_ema must resolve to boolean, got {use_ema!r}")
     if "env_runner" not in merged_cfg:
         raise ValueError("Evaluation config is missing env_runner")
-    merged_cfg.env_runner.temporal_ensemble_coeff = temporal_ensemble_coeff
     return (
         merged_cfg,
         use_ema,
         denoise_timesteps_list,
-        temporal_ensemble_coeff,
         best_info,
     )
 
@@ -678,7 +641,7 @@ def main() -> None:
         sys.exit(1)
 
     ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
-    cfg, use_ema, denoise_timesteps_list, temporal_ensemble_coeff, _ = _resolve_final_eval_request(
+    cfg, use_ema, denoise_timesteps_list, _ = _resolve_final_eval_request(
         OmegaConf.load(cfg_path),
         exp_dir,
         ckpt_tag_or_path,
@@ -734,7 +697,6 @@ def main() -> None:
                 episodes=episodes,
                 denoise_timesteps_list=denoise_timesteps_list,
                 use_ema=use_ema,
-                temporal_ensemble_coeff=temporal_ensemble_coeff,
                 video_save_dir=video_save_dir,
                 result_save_dir=result_save_dir,
             )
@@ -746,7 +708,6 @@ def main() -> None:
                 episodes=episodes,
                 denoise_steps=denoise_timesteps_list[0],
                 use_ema=use_ema,
-                temporal_ensemble_coeff=temporal_ensemble_coeff,
                 video_save_dir=video_save_dir,
                 result_save_dir=result_save_dir,
             )

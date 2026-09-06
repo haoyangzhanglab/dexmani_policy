@@ -160,20 +160,18 @@ python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
 ## Real deployment artifact contract
 
 `dexmani_policy.deployment` exports a resolved experiment checkpoint for the
-Real runtime. Every artifact uses `dexmani.deployment.v3` with exactly three
+Real runtime. Every artifact uses `dexmani.deployment` with exactly three
 top-level fields: `_format`, `contract`, and one selected `weights` state dict.
-`contract` is the sole metadata owner (`schema_version`, `inference_config`,
-`data_contract`, `producer`); there is no sidecar, hash manifest, or dormant
+`contract` is the sole metadata owner (`inference_config`, `data_contract`,
+`producer`); there is no sidecar, hash manifest, or dormant
 model/EMA copy. Its only persisted observation declaration is the ordered
 `data_contract.observation_fields` mapping. Each field records its raw shape,
 dtype and semantics. The training experiment's `dataset.sensor_modalities` is
 the single manual selection used by export; it is not copied into the artifact
 as a competing list.
 
-`inference_config.eval` 显式保存 `denoise_steps` 与
-`temporal_ensemble_coeff`（有限非负数或 `null`）。`use_ema` 只在 export 时选择权重，
-不会作为 artifact runtime 的重复开关；非 `null` coefficient 会在 runtime 启用
-`ChunkOverlapBlender`。
+`inference_config.eval` 显式保存 `denoise_steps`。`use_ema` 只在 export 时选择权重，
+不会作为 artifact runtime 的重复开关。
 
 - **Encoder-owned inputs**: export and restore require the selected fields to
   match the instantiated encoder's `consumed_observation_fields`. A field that

@@ -28,7 +28,6 @@ from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
-    DEPLOYMENT_SCHEMA_VERSION,
     DeploymentContractError,
     parse_deployment_contract,
 )
@@ -124,7 +123,6 @@ class ExportReceipt:
 class _SelectedInferenceSettings:
     use_ema: bool
     denoise_steps: int
-    temporal_ensemble_coeff: float | None
 
 
 def _run_git(repo_root: Path, *args: str) -> str:
@@ -1010,7 +1008,6 @@ def _build_inference_config(
         "eval": {
             "use_ema": selected.use_ema,
             "denoise_steps": selected.denoise_steps,
-            "temporal_ensemble_coeff": selected.temporal_ensemble_coeff,
         },
     }
     return _require_plain_metadata(inference, "inference_config")
@@ -1040,17 +1037,9 @@ def _resolve_selected_inference_settings(
             raise UnsupportedPolicyError(
                 "eval.denoise_timesteps_list is unsupported for deployment"
             )
-        env_runner = cfg_plain.get("env_runner")
-        if type(env_runner) is not dict:
-            raise InvalidExperimentError("config.env_runner must be a mapping")
-        if "temporal_ensemble_coeff" not in env_runner:
-            raise InvalidExperimentError(
-                "config.env_runner.temporal_ensemble_coeff is required"
-            )
         inference = {
             "use_ema": eval_config.get("use_ema"),
             "denoise_steps": eval_config.get("denoise_steps"),
-            "temporal_ensemble_coeff": env_runner["temporal_ensemble_coeff"],
         }
         prefix = "config"
 
@@ -1060,18 +1049,7 @@ def _resolve_selected_inference_settings(
     denoise_steps = _require_positive_int(
         inference["denoise_steps"], f"{prefix}.denoise_steps"
     )
-    coefficient = inference["temporal_ensemble_coeff"]
-    if coefficient is not None:
-        if isinstance(coefficient, bool) or not isinstance(coefficient, (int, float)):
-            raise InvalidExperimentError(
-                f"{prefix}.temporal_ensemble_coeff must be numeric or null"
-            )
-        coefficient = float(coefficient)
-        if not math.isfinite(coefficient) or coefficient < 0.0:
-            raise InvalidExperimentError(
-                f"{prefix}.temporal_ensemble_coeff must be finite and non-negative"
-            )
-    return _SelectedInferenceSettings(use_ema, denoise_steps, coefficient)
+    return _SelectedInferenceSettings(use_ema, denoise_steps)
 
 
 def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
@@ -1350,7 +1328,6 @@ def _validate_payload(payload: Any) -> None:
     contract = payload["contract"]
     weights = payload["weights"]
     if type(contract) is not dict or set(contract) != {
-        "schema_version",
         "inference_config",
         "data_contract",
         "producer",
@@ -1467,7 +1444,7 @@ def publish_deployment_selector(
     selector_path: Path,
     checkpoint_path: Path,
 ) -> None:
-    """Atomically publish one already-qualified canonical v3 artifact."""
+    """Atomically publish one already-qualified canonical artifact."""
     old_selector = _capture_selector(selector_path)
     selector_published = False
     try:
@@ -1497,7 +1474,7 @@ def export_deployment_artifact(
     zarr_path: Path | None = None,
     publish: bool = True,
 ) -> ExportReceipt:
-    """Export one selected checkpoint as a canonical v3 deployment artifact.
+    """Export one selected checkpoint as a canonical deployment artifact.
 
     When ``publish=True`` (default) the ``deployment_latest.pt`` selector is
     atomically swapped to point at the new artifact.  When ``publish=False`` the
@@ -1574,13 +1551,11 @@ def export_deployment_artifact(
         **inference,
         "eval": {
             "denoise_steps": inference["eval"]["denoise_steps"],
-            "temporal_ensemble_coeff": inference["eval"]["temporal_ensemble_coeff"],
         },
     }
     payload = {
         "_format": DEPLOYMENT_FORMAT,
         "contract": {
-            "schema_version": DEPLOYMENT_SCHEMA_VERSION,
             "inference_config": deployment_inference,
             "data_contract": data_contract,
             "producer": producer,
@@ -1591,7 +1566,7 @@ def export_deployment_artifact(
 
     checkpoint_dir = experiment / "checkpoints"
     if output_path is None:
-        final_path = checkpoint_dir / f"{selected_path.stem}-deployment-v3.pt"
+        final_path = checkpoint_dir / f"{selected_path.stem}-deployment.pt"
     else:
         requested = Path(output_path)
         final_path = (

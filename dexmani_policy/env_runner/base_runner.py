@@ -11,11 +11,6 @@ from termcolor import cprint
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
 
-_GENERIC_TEMPORAL_ENSEMBLE_ERROR = (
-    "Generic chunk deployment does not support temporal_ensemble_coeff.\n"
-    "Re-export this experiment with temporal_ensemble_coeff=null."
-)
-
 
 class EvalEpisodeError(RuntimeError):
     """Fatal per-episode failure that must abort the whole eval run (non-zero exit).
@@ -66,7 +61,6 @@ class BaseRunner:
         sensor_modalities: List[str] | None = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
-        temporal_ensemble_coeff: float | None = None,
         rgb_preprocess_size: tuple[int, int] | None = None,
         rgb_random_crop_size: tuple[int, int] | None = None,
     ):
@@ -86,9 +80,6 @@ class BaseRunner:
         self.clear_cache_freq = clear_cache_freq
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size
-
-        if temporal_ensemble_coeff is not None:
-            raise ValueError(_GENERIC_TEMPORAL_ENSEMBLE_ERROR)
 
     def update_obs(self, observation: Dict[str, Any]):
         """Write one observation frame into the circular buffer.

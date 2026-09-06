@@ -414,9 +414,7 @@ def select_best_checkpoint(
         selection_seeds.extend(
             seed for seed in tie_seeds if seed not in selection_seeds
         )
-    temporal_ensemble_coeff = cfg.env_runner.get("temporal_ensemble_coeff", None)
     best_info = {
-        "record_version": 2,
         "ckpt_relpath": str(ckpt_relpath),
         "pct": best.ckpt.pct,
         "global_step": best.ckpt.global_step,
@@ -426,7 +424,6 @@ def select_best_checkpoint(
         "inference": {
             "use_ema": bool(use_ema),
             "denoise_steps": int(denoise_steps),
-            "temporal_ensemble_coeff": temporal_ensemble_coeff,
             "policy_seed_mode": "episode_seed",
         },
         "selection": {

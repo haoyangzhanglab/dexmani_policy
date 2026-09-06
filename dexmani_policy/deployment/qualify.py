@@ -24,7 +24,6 @@ from omegaconf import OmegaConf
 from dexmani_policy.deployment import export as exporter
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
-    DEPLOYMENT_SCHEMA_VERSION,
     DeploymentContractError,
     parse_deployment_contract,
 )
@@ -333,7 +332,6 @@ def _direct_spec(
             {
                 "_format": DEPLOYMENT_FORMAT,
                 "contract": {
-                    "schema_version": DEPLOYMENT_SCHEMA_VERSION,
                     "inference_config": dict(inference),
                     "data_contract": dict(data_contract),
                     "producer": {},
@@ -368,7 +366,6 @@ def _require_matching_specs(
         "n_obs_steps",
         "n_action_steps",
         "denoise_steps",
-        "temporal_ensemble_coeff",
         "observation_fields",
         "control_dt_s",
         "requires_hand",

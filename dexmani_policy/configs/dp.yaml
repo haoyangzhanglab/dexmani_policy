@@ -183,7 +183,6 @@ env_runner:
   sensor_modalities: ${dataset.sensor_modalities}
   rgb_preprocess_size: ${dataset.rgb_preprocess_size}
   rgb_random_crop_size: ${dataset.rgb_random_crop_size}
-  temporal_ensemble_coeff: null
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
     texture_random: false

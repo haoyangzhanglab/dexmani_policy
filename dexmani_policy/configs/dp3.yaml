@@ -154,7 +154,6 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   default_eval_episodes: 25        # PC-based policies: 25; RGB-based: 20
   sensor_modalities: ${dataset.sensor_modalities}
-  temporal_ensemble_coeff: null
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
     # ── Domain randomization (convenience switches) ──

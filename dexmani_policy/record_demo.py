@@ -75,7 +75,7 @@ def _resolve_demo_inference(
     *,
     cli_use_ema: bool | None,
     cli_denoise_steps: int | None,
-) -> tuple[bool, list[int], float | int | None]:
+) -> tuple[bool, list[int]]:
     """Resolve the policy settings used for a demo recording.
 
     ``best`` replays the strict selection record unless an EMA or NFE CLI
@@ -86,7 +86,6 @@ def _resolve_demo_inference(
         inference = read_best_ckpt_json(exp_dir)["inference"]
         use_ema = inference["use_ema"]
         denoise_timesteps_list = [inference["denoise_steps"]]
-        temporal_ensemble_coeff = inference["temporal_ensemble_coeff"]
     else:
         use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
         configured_steps = _get_eval_param(
@@ -98,16 +97,13 @@ def _resolve_demo_inference(
             denoise_timesteps_list = [
                 _get_eval_param(cfg, "denoise_steps", "demo", default=10)
             ]
-        temporal_ensemble_coeff = cfg.env_runner.get(
-            "temporal_ensemble_coeff", None
-        )
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema
     if cli_denoise_steps is not None:
         denoise_timesteps_list = [cli_denoise_steps]
 
-    return use_ema, denoise_timesteps_list, temporal_ensemble_coeff
+    return use_ema, denoise_timesteps_list
 
 
 def main() -> None:
@@ -223,16 +219,13 @@ def main() -> None:
     device = torch.device(cfg.training.device)
     cprint(f"Device: {device}", "cyan")
 
-    use_ema, denoise_timesteps_list, temporal_ensemble_coeff = (
-        _resolve_demo_inference(
-            cfg,
-            exp_dir,
-            args.ckpt_tag,
-            cli_use_ema=args.use_ema,
-            cli_denoise_steps=args.denoise_steps,
-        )
+    use_ema, denoise_timesteps_list = _resolve_demo_inference(
+        cfg,
+        exp_dir,
+        args.ckpt_tag,
+        cli_use_ema=args.use_ema,
+        cli_denoise_steps=args.denoise_steps,
     )
-    cfg.env_runner.temporal_ensemble_coeff = temporal_ensemble_coeff
 
     # ── 3. Build agent and env_runner ─────────────────────────────────────
     agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
