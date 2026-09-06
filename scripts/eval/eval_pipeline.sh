@@ -4,7 +4,7 @@
 # Runs the full three-stage evaluation workflow with sensible defaults:
 #   1. Select the best checkpoint with a fixed initial stage and optional tie batch.
 #   2. Evaluate the best checkpoint on disjoint held-out seeds (with videos by default).
-#   3. Record 5 high-resolution demo videos from the best checkpoint.
+#   3. Record 5 high-resolution demo videos using the selected best policy.
 #
 # Usage:
 #   bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]

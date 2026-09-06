@@ -269,9 +269,8 @@ class BaseRunner:
         self.reset()
         self.update_obs(obs)
 
-        # A4: restore deterministic policy RNG so (checkpoint, seed) → identical
-        # policy noise. env.reset seeds only the sim's internal RNG; the decoder's
-        # torch.randn_like draws from the global generator, so re-seed it per episode.
+        # Seed policy noise per episode. ``env.reset`` controls only the
+        # simulator's RNG; decoder sampling uses the global Torch generator.
         torch.manual_seed(episode_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(episode_seed)
@@ -331,8 +330,8 @@ class BaseRunner:
         print("=" * 90)
 
         try:
-            # A3: env construction + seed resolution inside the guard, so a
-            # make_env()/get_seed_list() failure has one fail-fast exit path.
+            # Keep setup inside the guard so construction and seed-pool errors
+            # follow the same fail-fast cleanup path as episode errors.
             env = self.make_env()
             if self.env_video_fps is None:
                 self.env_video_fps = getattr(env, "video_fps", 15)
@@ -406,12 +405,7 @@ class BaseRunner:
                         video = None
 
                     if self.clear_cache_freq > 0 and attempted % self.clear_cache_freq == 0:
-                        old_env = env
-                        env = self.make_env()
-                        try:
-                            old_env.close()
-                        except Exception:
-                            pass
+                        env = self._refresh_env(env)
 
                     status = "success" if episode_success else "fail"
                     done_step_str = task_done_step if task_done_step is not None else "N/A"
@@ -480,6 +474,13 @@ class BaseRunner:
             "episodes_collected": len(success_list),
             "episodes_requested": num_episodes,
         }
+
+    def _refresh_env(self, env):
+        try:
+            env.close()
+        except Exception:
+            pass
+        return self.make_env()
 
     def make_env(self):
         raise NotImplementedError

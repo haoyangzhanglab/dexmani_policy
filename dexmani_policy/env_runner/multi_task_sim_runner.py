@@ -142,10 +142,8 @@ class MultiTaskSimRunner:
         all_videos = []
         failed_tasks = []
 
-        # Propagate eval_seeds to child runners (C3 fix).
-        # select_best_ckpt.py and eval_best_ckpt.py set this attribute on the
-        # MultiTaskSimRunner instance, but without this block each child
-        # runner independently calls get_seed_list() with its own default.
+        # Entry points set seeds on the parent; child runners must receive the
+        # same list instead of resolving independent defaults.
         parent_seeds = getattr(self, "eval_seeds", None)
         for task_name, runner in self.runners.items():
             if parent_seeds is not None:

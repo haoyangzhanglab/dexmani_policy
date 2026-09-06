@@ -347,10 +347,10 @@ bash scripts/remote/tail_log.sh maniflow pour        # Ctrl+C 退出
 bash scripts/remote/sync_down.sh maniflow/pour
 
 # 5. 本地评测
-bash scripts/eval/eval_pipeline.sh maniflow pour experiments/maniflow/pour/<timestamp>
+bash scripts/eval/eval_pipeline.sh maniflow pour <timestamp>
 
 # 6. (可选) 录制 demo
-bash scripts/eval/record_demo.sh maniflow pour experiments/maniflow/pour/<timestamp>
+bash scripts/eval/record_demo.sh maniflow pour <timestamp>
 ```
 
 ### 5.2 多实验并行

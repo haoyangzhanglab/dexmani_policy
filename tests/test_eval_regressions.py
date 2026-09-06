@@ -14,8 +14,10 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from dexmani_policy import eval_best_ckpt, record_demo
 from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.common.config import validate_action_key_consistency
+from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
 from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
 from dexmani_policy.env_runner.base_runner import BaseRunner, EvalEpisodeError
 from dexmani_policy.eval_best_ckpt import (
@@ -74,6 +76,70 @@ def _valid_record(ckpt_relpath="checkpoints/selected.pt"):
 
 
 class EvalRegressionTests(unittest.TestCase):
+    def test_temporal_ensemble_coefficient_validation(self):
+        for coeff in (0, 0.01):
+            with self.subTest(coeff=coeff):
+                ChunkOverlapBlender(temporal_ensemble_coeff=coeff)
+
+        for coeff in (-0.01, float("nan"), float("inf"), float("-inf"), True):
+            with self.subTest(coeff=coeff):
+                with self.assertRaises(ValueError):
+                    ChunkOverlapBlender(temporal_ensemble_coeff=coeff)
+
+        runner = BaseRunner(
+            n_obs_steps=2,
+            default_eval_episodes=1,
+            temporal_ensemble_coeff=None,
+        )
+        self.assertIsNone(runner._blender)
+
+    def test_periodic_refresh_closes_before_constructing_next_env(self):
+        events = []
+
+        class FakeEnv:
+            def __init__(self, index):
+                self.index = index
+                self.action_cnt = 0
+                self.closed = False
+
+            def get_video(self):
+                return None
+
+            def close(self):
+                self.closed = True
+                events.append(f"close {self.index}")
+
+        class FakeRunner(BaseRunner):
+            def __init__(self):
+                super().__init__(
+                    n_obs_steps=2,
+                    default_eval_episodes=1,
+                    clear_cache_freq=1,
+                    env_video_fps=15,
+                )
+                self.next_env = 0
+                self.created_envs = []
+
+            def make_env(self):
+                if self.created_envs and not self.created_envs[-1].closed:
+                    raise AssertionError("old environment was still live during refresh")
+                index = self.next_env
+                self.next_env += 1
+                events.append(f"make {index}")
+                env = FakeEnv(index)
+                self.created_envs.append(env)
+                return env
+
+            def get_seed_list(self):
+                return [7]
+
+            def run_one_episode(self, agent, env, episode_seed, denoise_timesteps=None):
+                return False, None
+
+        FakeRunner().run(agent=None, eval_episodes=1)
+
+        self.assertEqual(events[:3], ["make 0", "close 0", "make 1"])
+
     def test_runner_rgb_matches_validation_preprocessing_and_keeps_raw_history(self):
         runner = BaseRunner(
             n_obs_steps=2,
@@ -239,6 +305,48 @@ class SelectionContractTests(unittest.TestCase):
             self.assertEqual(parsed["ckpt_relpath"], "checkpoints/selected.pt")
             self.assertEqual(resolved, selected.resolve())
             self.assertIn("80%", label)
+
+    def test_strict_v2_record_validates_coefficient_and_seed_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_dir = Path(tmp)
+            checkpoint = exp_dir / "checkpoints" / "selected.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.touch()
+
+            for coeff in (None, 0, 0.01):
+                with self.subTest(coeff=coeff):
+                    record = _valid_record()
+                    record["inference"]["temporal_ensemble_coeff"] = coeff
+                    (exp_dir / "best_ckpt.json").write_text(json.dumps(record))
+                    self.assertEqual(
+                        read_best_ckpt_json(exp_dir)["inference"][
+                            "temporal_ensemble_coeff"
+                        ],
+                        coeff,
+                    )
+
+            for coeff in (
+                -0.01,
+                float("nan"),
+                float("inf"),
+                float("-inf"),
+                True,
+                "0.01",
+            ):
+                with self.subTest(coeff=coeff):
+                    record = _valid_record()
+                    record["inference"]["temporal_ensemble_coeff"] = coeff
+                    (exp_dir / "best_ckpt.json").write_text(json.dumps(record))
+                    with self.assertRaisesRegex(ValueError, "temporal_ensemble_coeff"):
+                        read_best_ckpt_json(exp_dir)
+
+            for seed_mode in ("per_episode", None, True):
+                with self.subTest(seed_mode=seed_mode):
+                    record = _valid_record()
+                    record["inference"]["policy_seed_mode"] = seed_mode
+                    (exp_dir / "best_ckpt.json").write_text(json.dumps(record))
+                    with self.assertRaisesRegex(ValueError, "policy_seed_mode"):
+                        read_best_ckpt_json(exp_dir)
 
     def test_best_requires_a_v2_selection_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -489,14 +597,14 @@ class SelectionContractTests(unittest.TestCase):
                 [2, 4],
                 8,
                 None,
-                exp_dir=exp_dir,
+                result_save_dir=exp_dir / "eval_dexsim",
                 ckpt_tag_or_path="best",
                 ckpt_path=exp_dir / "checkpoints" / "selected.pt",
-                ckpt_label="best",
                 eval_seed=17,
                 selection_seeds_excluded=[1, 3],
                 heldout_from_selection=True,
                 use_ema=True,
+                temporal_ensemble_coeff=None,
             )
             details = json.loads(
                 (exp_dir / "eval_dexsim" / "result_details.json").read_text()
@@ -507,7 +615,477 @@ class SelectionContractTests(unittest.TestCase):
         self.assertTrue(details["heldout_from_selection"])
         self.assertTrue(details["use_ema"])
         self.assertEqual(details["denoise_steps"], 8)
+        self.assertIsNone(details["temporal_ensemble_coeff"])
         self.assertEqual(info["n_total"], 2)
+
+    def test_eval_main_passes_resolved_coefficient_to_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exp_dir = root / "experiments" / "dp3" / "pour" / "test-exp"
+            checkpoint = exp_dir / "checkpoints" / "selected.pt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.touch()
+            cfg = OmegaConf.create(
+                {
+                    "training": {"device": "cpu", "seed": 42},
+                    "env_runner": {"temporal_ensemble_coeff": 0.5},
+                    "eval": {"use_ema": False, "denoise_steps": 4},
+                }
+            )
+            OmegaConf.save(cfg, exp_dir / "config.yaml")
+            (exp_dir / "best_ckpt.json").write_text(json.dumps(_valid_record()))
+            argv = [
+                "eval_best_ckpt.py",
+                "--policy-name",
+                "dp3",
+                "--task-name",
+                "pour",
+                "--exp-name",
+                "test-exp",
+                "--no-videos",
+            ]
+
+            with (
+                mock.patch.object(eval_best_ckpt, "ROOT_DIR", str(root)),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(eval_best_ckpt, "evaluate_checkpoint_robotwin") as run,
+            ):
+                eval_best_ckpt.main()
+
+        self.assertEqual(run.call_args.kwargs["temporal_ensemble_coeff"], 0.1)
+
+
+class EvalVideoOutputContractTests(unittest.TestCase):
+    def _config(self):
+        return OmegaConf.create(
+            {
+                "n_obs_steps": 2,
+                "n_action_steps": 8,
+                "horizon": 16,
+                "action_key": "action",
+                "training": {"device": "cpu", "seed": 42},
+                "env_runner": {"env_kwargs": {"control_mode": "joint"}},
+            }
+        )
+
+    def _runner(self):
+        class FakeRunner:
+            def __init__(self):
+                self.runners = {
+                    "first": SimpleNamespace(),
+                    "second": SimpleNamespace(),
+                }
+                self.calls = []
+
+            def get_seed_list(self):
+                return [2]
+
+            def run(self, *args, **kwargs):
+                self.calls.append(kwargs)
+                return {"episode_details": [{"seed": 2, "success": True, "steps": 9}]}
+
+        return FakeRunner()
+
+    def _agent(self):
+        class FakeAgent:
+            action_decoder = SimpleNamespace(solver=None)
+
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+        return FakeAgent()
+
+    def _patch_eval_setup(self, agent, runner, ckpt_path):
+        return (
+            mock.patch.object(
+                eval_best_ckpt,
+                "build_eval_components",
+                return_value=(agent, runner, object()),
+            ),
+            mock.patch.object(
+                eval_best_ckpt,
+                "resolve_checkpoint_path",
+                return_value=(ckpt_path, "latest"),
+            ),
+            mock.patch.object(eval_best_ckpt, "load_ckpt_for_inference"),
+        )
+
+    def test_single_video_separates_result_and_video_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = self._runner()
+            result_dir = root / "eval_dexsim"
+            video_dir = result_dir / "timestamp"
+            with contextlib.ExitStack() as stack:
+                for patch in self._patch_eval_setup(
+                    self._agent(), runner, root / "checkpoints" / "latest.pt"
+                ):
+                    stack.enter_context(patch)
+                eval_best_ckpt.evaluate_checkpoint_robotwin(
+                    root,
+                    self._config(),
+                    ckpt_tag_or_path="latest",
+                    episodes=1,
+                    denoise_steps=4,
+                    use_ema=False,
+                    video_save_dir=video_dir,
+                    result_save_dir=result_dir,
+                )
+
+            self.assertEqual(runner.calls[0]["video_save_dir"], video_dir)
+            self.assertTrue(all(child.record_video for child in runner.runners.values()))
+            self.assertTrue((result_dir / "_result.txt").is_file())
+            self.assertFalse((video_dir / "_result.txt").exists())
+
+    def test_single_no_video_keeps_runner_video_path_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = self._runner()
+            result_dir = root / "eval_dexsim"
+            cfg = self._config()
+            cfg.env_runner.temporal_ensemble_coeff = 0.03
+            with contextlib.ExitStack() as stack:
+                for patch in self._patch_eval_setup(
+                    self._agent(), runner, root / "checkpoints" / "latest.pt"
+                ):
+                    stack.enter_context(patch)
+                eval_best_ckpt.evaluate_checkpoint_robotwin(
+                    root,
+                    cfg,
+                    ckpt_tag_or_path="latest",
+                    episodes=1,
+                    denoise_steps=4,
+                    use_ema=False,
+                    video_save_dir=None,
+                    result_save_dir=result_dir,
+                )
+
+            self.assertIsNone(runner.calls[0]["video_save_dir"])
+            self.assertTrue(
+                all(not child.record_video for child in runner.runners.values())
+            )
+            self.assertTrue((result_dir / "_result.txt").is_file())
+            details = json.loads((result_dir / "result_details.json").read_text())
+            self.assertEqual(details["temporal_ensemble_coeff"], 0.03)
+
+    def test_sweep_video_shares_per_timestep_result_and_video_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = self._runner()
+            result_dir = root / "eval_dexsim" / "timestamp"
+            with contextlib.ExitStack() as stack:
+                for patch in self._patch_eval_setup(
+                    self._agent(), runner, root / "checkpoints" / "latest.pt"
+                ):
+                    stack.enter_context(patch)
+                eval_best_ckpt.evaluate_checkpoint_sweep(
+                    root,
+                    self._config(),
+                    ckpt_tag_or_path="latest",
+                    episodes=1,
+                    denoise_timesteps_list=[2, 4],
+                    use_ema=False,
+                    video_save_dir=result_dir,
+                    result_save_dir=result_dir,
+                )
+
+            self.assertEqual(
+                [call["video_save_dir"] for call in runner.calls],
+                [
+                    result_dir / "denoise_timesteps2",
+                    result_dir / "denoise_timesteps4",
+                ],
+            )
+            self.assertTrue(all(child.record_video for child in runner.runners.values()))
+            self.assertTrue((result_dir / "denoise_timesteps2" / "_result.txt").is_file())
+            self.assertTrue((result_dir / "denoise_timesteps4" / "_result.txt").is_file())
+            self.assertTrue((result_dir / "eval_summary.json").is_file())
+
+    def test_sweep_no_video_keeps_result_root_out_of_runner_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = self._runner()
+            result_dir = root / "eval_dexsim" / "timestamp"
+            with contextlib.ExitStack() as stack:
+                for patch in self._patch_eval_setup(
+                    self._agent(), runner, root / "checkpoints" / "latest.pt"
+                ):
+                    stack.enter_context(patch)
+                eval_best_ckpt.evaluate_checkpoint_sweep(
+                    root,
+                    self._config(),
+                    ckpt_tag_or_path="latest",
+                    episodes=1,
+                    denoise_timesteps_list=[2, 4],
+                    use_ema=False,
+                    video_save_dir=None,
+                    result_save_dir=result_dir,
+                )
+
+            self.assertEqual(
+                [call["video_save_dir"] for call in runner.calls], [None, None]
+            )
+            self.assertTrue(
+                all(not child.record_video for child in runner.runners.values())
+            )
+            self.assertTrue((result_dir / "denoise_timesteps2" / "_result.txt").is_file())
+            self.assertTrue((result_dir / "denoise_timesteps4" / "_result.txt").is_file())
+            self.assertTrue((result_dir / "eval_summary.json").is_file())
+
+    def test_sweep_creates_no_video_result_root_before_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result_dir = root / "eval_dexsim" / "timestamp"
+            runner = self._runner()
+
+            def build_components(cfg, device):
+                self.assertTrue(result_dir.is_dir())
+                return self._agent(), runner, object()
+
+            with (
+                mock.patch.object(
+                    eval_best_ckpt,
+                    "build_eval_components",
+                    side_effect=build_components,
+                ),
+                mock.patch.object(
+                    eval_best_ckpt,
+                    "resolve_checkpoint_path",
+                    return_value=(root / "checkpoints" / "latest.pt", "latest"),
+                ),
+                mock.patch.object(eval_best_ckpt, "load_ckpt_for_inference"),
+            ):
+                eval_best_ckpt.evaluate_checkpoint_sweep(
+                    root,
+                    self._config(),
+                    ckpt_tag_or_path="latest",
+                    episodes=1,
+                    denoise_timesteps_list=[2, 4],
+                    use_ema=False,
+                    video_save_dir=None,
+                    result_save_dir=result_dir,
+                )
+
+
+class DemoInferenceContractTests(unittest.TestCase):
+    def _config(self):
+        return OmegaConf.create(
+            {
+                "eval": {
+                    "use_ema": False,
+                    "denoise_steps": 10,
+                    "denoise_timesteps_list": None,
+                },
+                "env_runner": {"temporal_ensemble_coeff": 0.5},
+            }
+        )
+
+    def _write_record(self, exp_dir: Path):
+        checkpoint = exp_dir / "checkpoints" / "selected.pt"
+        checkpoint.parent.mkdir()
+        checkpoint.touch()
+        record = _valid_record()
+        record["inference"].update(
+            {
+                "use_ema": True,
+                "denoise_steps": 4,
+                "temporal_ensemble_coeff": 0.02,
+            }
+        )
+        (exp_dir / "best_ckpt.json").write_text(json.dumps(record))
+        return record
+
+    def test_best_uses_recorded_inference_without_cli_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_dir = Path(tmp)
+            self._write_record(exp_dir)
+
+            use_ema, nfe, coeff = record_demo._resolve_demo_inference(
+                self._config(),
+                exp_dir,
+                "best",
+                cli_use_ema=None,
+                cli_denoise_steps=None,
+            )
+
+        self.assertTrue(use_ema)
+        self.assertEqual(nfe, [4])
+        self.assertEqual(coeff, 0.02)
+
+    def test_best_cli_overrides_ema_and_denoise_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_dir = Path(tmp)
+            self._write_record(exp_dir)
+
+            use_ema, nfe, coeff = record_demo._resolve_demo_inference(
+                self._config(),
+                exp_dir,
+                "best",
+                cli_use_ema=False,
+                cli_denoise_steps=6,
+            )
+
+        self.assertFalse(use_ema)
+        self.assertEqual(nfe, [6])
+        self.assertEqual(coeff, 0.02)
+
+    def test_non_best_retains_demo_config_resolution_and_sweep(self):
+        cfg = self._config()
+        cfg.eval.demo = {
+            "use_ema": True,
+            "denoise_timesteps_list": [6, 10],
+        }
+
+        use_ema, nfe, coeff = record_demo._resolve_demo_inference(
+            cfg,
+            Path("/unused"),
+            "latest",
+            cli_use_ema=None,
+            cli_denoise_steps=None,
+        )
+
+        self.assertTrue(use_ema)
+        self.assertEqual(nfe, [6, 10])
+        self.assertEqual(coeff, 0.5)
+
+    def test_main_injects_best_coefficient_before_component_build(self):
+        class BuildStopped(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exp_dir = root / "experiments" / "dp3" / "pour" / "test-exp"
+            exp_dir.mkdir(parents=True)
+            cfg = OmegaConf.create(
+                {
+                    "n_obs_steps": 2,
+                    "n_action_steps": 8,
+                    "horizon": 16,
+                    "action_key": "action",
+                    "training": {"device": "cpu", "seed": 42},
+                    "env_runner": {
+                        "env_kwargs": {"control_mode": "joint"},
+                        "temporal_ensemble_coeff": 0.5,
+                    },
+                    "eval": {"use_ema": False, "denoise_steps": 10},
+                }
+            )
+            OmegaConf.save(cfg, exp_dir / "config.yaml")
+            self._write_record(exp_dir)
+
+            def stop_at_build(resolved_cfg, device):
+                self.assertEqual(device, torch.device("cpu"))
+                self.assertEqual(
+                    resolved_cfg.env_runner.temporal_ensemble_coeff, 0.02
+                )
+                raise BuildStopped
+
+            argv = [
+                "record_demo.py",
+                "--policy-name",
+                "dp3",
+                "--task-name",
+                "pour",
+                "--exp-name",
+                "test-exp",
+            ]
+            with (
+                mock.patch.object(record_demo, "ROOT_DIR", str(root)),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(record_demo, "set_seed"),
+                mock.patch.object(
+                    record_demo,
+                    "build_eval_components",
+                    side_effect=stop_at_build,
+                ) as build,
+                self.assertRaises(BuildStopped),
+            ):
+                record_demo.main()
+
+        build.assert_called_once()
+
+    def test_demo_configures_every_leaf_runner_for_viewer_capture(self):
+        class FakeAgent:
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+        class FakeRunner:
+            def __init__(self):
+                self.runners = {
+                    "first": SimpleNamespace(),
+                    "second": SimpleNamespace(),
+                }
+
+            def get_seed_list(self):
+                return [2]
+
+            def run(self, *args, **kwargs):
+                return {"episode_details": [{"seed": 2, "success": True, "steps": 9}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exp_dir = root / "experiments" / "dp3" / "pour" / "test-exp"
+            exp_dir.mkdir(parents=True)
+            cfg = OmegaConf.create(
+                {
+                    "n_obs_steps": 2,
+                    "n_action_steps": 8,
+                    "horizon": 16,
+                    "action_key": "action",
+                    "training": {"device": "cpu", "seed": 42},
+                    "env_runner": {"env_kwargs": {"control_mode": "joint"}},
+                    "eval": {"use_ema": False, "denoise_steps": 4},
+                }
+            )
+            OmegaConf.save(cfg, exp_dir / "config.yaml")
+            runner = FakeRunner()
+            argv = [
+                "record_demo.py",
+                "--policy-name",
+                "dp3",
+                "--task-name",
+                "pour",
+                "--exp-name",
+                "test-exp",
+                "--ckpt-tag",
+                "latest",
+                "--episodes",
+                "1",
+                "--resolution",
+                "640",
+                "480",
+                "--fps",
+                "24",
+            ]
+            with (
+                mock.patch.object(record_demo, "ROOT_DIR", str(root)),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(record_demo, "set_seed"),
+                mock.patch.object(
+                    record_demo,
+                    "build_eval_components",
+                    return_value=(FakeAgent(), runner, object()),
+                ),
+                mock.patch.object(
+                    record_demo,
+                    "resolve_checkpoint_path",
+                    return_value=(root / "checkpoints" / "latest.pt", "latest"),
+                ),
+                mock.patch.object(record_demo, "load_ckpt_for_inference"),
+            ):
+                record_demo.main()
+
+        for child in runner.runners.values():
+            self.assertEqual(child.render_mode, "human")
+            self.assertTrue(child.record_video)
+            self.assertEqual(child.viewer_resolution, (640, 480))
+            self.assertEqual(child.env_video_fps, 24)
 
 
 if __name__ == "__main__":

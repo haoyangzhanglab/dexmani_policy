@@ -11,6 +11,9 @@ Key differences from ``eval_best_ckpt.py``:
 - Designed for machines **with a display** (X11/Wayland). The viewer window
   will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
+- With ``--ckpt-tag best``, reuses the strict selection record's EMA choice,
+  denoising step count, and temporal-ensemble coefficient. Explicit
+  ``--ema``/``--no-ema`` and ``--denoise-steps`` override the selected policy.
 
 Usage
 -----
@@ -53,7 +56,9 @@ from dexmani_policy.training.eval_utils import (
     _get_eval_param,
     build_eval_components,
     collect_episode_details,
+    iter_leaf_env_runners,
     load_ckpt_for_inference,
+    read_best_ckpt_json,
     resolve_checkpoint_path,
     resolve_eval_seed,
     validate_eval_config,
@@ -61,6 +66,48 @@ from dexmani_policy.training.eval_utils import (
 
 ROOT_DIR = set_project_root()
 register_resolvers()
+
+
+def _resolve_demo_inference(
+    cfg,
+    exp_dir: Path,
+    ckpt_tag: str,
+    *,
+    cli_use_ema: bool | None,
+    cli_denoise_steps: int | None,
+) -> tuple[bool, list[int], float | int | None]:
+    """Resolve the policy settings used for a demo recording.
+
+    ``best`` replays the strict selection record unless an EMA or NFE CLI
+    override is supplied. Other checkpoint tags retain ``eval.demo`` config
+    behavior.
+    """
+    if ckpt_tag == "best":
+        inference = read_best_ckpt_json(exp_dir)["inference"]
+        use_ema = inference["use_ema"]
+        denoise_timesteps_list = [inference["denoise_steps"]]
+        temporal_ensemble_coeff = inference["temporal_ensemble_coeff"]
+    else:
+        use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
+        configured_steps = _get_eval_param(
+            cfg, "denoise_timesteps_list", "demo", default=None
+        )
+        if configured_steps:
+            denoise_timesteps_list = list(configured_steps)
+        else:
+            denoise_timesteps_list = [
+                _get_eval_param(cfg, "denoise_steps", "demo", default=10)
+            ]
+        temporal_ensemble_coeff = cfg.env_runner.get(
+            "temporal_ensemble_coeff", None
+        )
+
+    if cli_use_ema is not None:
+        use_ema = cli_use_ema
+    if cli_denoise_steps is not None:
+        denoise_timesteps_list = [cli_denoise_steps]
+
+    return use_ema, denoise_timesteps_list, temporal_ensemble_coeff
 
 
 def main() -> None:
@@ -111,14 +158,14 @@ def main() -> None:
         "--denoise-steps",
         type=int,
         default=None,
-        help="DDIM/Euler denoising steps (default: from config).",
+        help="DDIM/Euler denoising steps (best: selection record; otherwise config).",
     )
     parser.add_argument(
         "--ema",
         dest="use_ema",
         action="store_true",
         default=None,
-        help="Use EMA weights (default: from config).",
+        help="Use EMA weights (best: selection record; otherwise config).",
     )
     parser.add_argument(
         "--no-ema",
@@ -176,25 +223,38 @@ def main() -> None:
     device = torch.device(cfg.training.device)
     cprint(f"Device: {device}", "cyan")
 
+    use_ema, denoise_timesteps_list, temporal_ensemble_coeff = (
+        _resolve_demo_inference(
+            cfg,
+            exp_dir,
+            args.ckpt_tag,
+            cli_use_ema=args.use_ema,
+            cli_denoise_steps=args.denoise_steps,
+        )
+    )
+    cfg.env_runner.temporal_ensemble_coeff = temporal_ensemble_coeff
+
     # ── 3. Build agent and env_runner ─────────────────────────────────────
     agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
-
-    # Switch to viewer-based rendering for high-res video capture
-    env_runner.render_mode = "human"
-    env_runner.record_video = True
 
     # Apply viewer resolution from CLI or config
     _demo_resolution = args.resolution
     if _demo_resolution is None:
         _demo_resolution = _get_eval_param(cfg, "viewer_resolution", "demo", default=[1920, 1080])
-    env_runner.viewer_resolution = tuple(_demo_resolution)
+    resolved_resolution = tuple(_demo_resolution)
+    resolved_fps = (
+        args.fps
+        if args.fps is not None
+        else _get_eval_param(cfg, "fps", "video", default=None)
+    )
 
-    if args.fps is not None:
-        env_runner.env_video_fps = args.fps
-    else:
-        _demo_fps = _get_eval_param(cfg, "fps", "video", default=None)
-        if _demo_fps is not None:
-            env_runner.env_video_fps = _demo_fps
+    # Switch every leaf to viewer-based rendering for high-res video capture.
+    for leaf_runner in iter_leaf_env_runners(env_runner):
+        leaf_runner.render_mode = "human"
+        leaf_runner.record_video = True
+        leaf_runner.viewer_resolution = resolved_resolution
+        if resolved_fps is not None:
+            leaf_runner.env_video_fps = resolved_fps
 
     # ── 4. Resolve output directory ───────────────────────────────────────
     if args.output_dir:
@@ -210,23 +270,9 @@ def main() -> None:
     ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, args.ckpt_tag, checkpoint_store)
 
     # ── 6. Resolve parameters ─────────────────────────────────────────────
-    use_ema = (
-        args.use_ema if args.use_ema is not None else _get_eval_param(cfg, "use_ema", "demo", default=True)
-    )
     demo_episodes = (
         args.episodes if args.episodes is not None else _get_eval_param(cfg, "episodes", "demo", default=5)
     )
-
-    # Denoise steps: CLI --denoise-steps (single value) > config list > config single > default
-    if args.denoise_steps is not None:
-        denoise_timesteps_list = [args.denoise_steps]
-    else:
-        dt_list = _get_eval_param(cfg, "denoise_timesteps_list", "demo", default=None)
-        if dt_list:
-            denoise_timesteps_list = list(dt_list)
-        else:
-            denoise_steps = _get_eval_param(cfg, "denoise_steps", "demo", default=10)
-            denoise_timesteps_list = [denoise_steps]
 
     do_sweep = len(denoise_timesteps_list) > 1
 
@@ -237,8 +283,7 @@ def main() -> None:
     cprint("✅ Checkpoint loaded\n", "green")
 
     # ── 7. Print recording config ─────────────────────────────────────────
-    _res = env_runner.viewer_resolution
-    resolution_str = f"{_res[0]}×{_res[1]}" if _res else "1920×1080 (default)"
+    resolution_str = f"{resolved_resolution[0]}×{resolved_resolution[1]}"
     dt_str = ", ".join(str(d) for d in denoise_timesteps_list) if do_sweep else str(denoise_timesteps_list[0])
     cprint(f"{'=' * 60}", "cyan")
     cprint("  Demo Video Recording", "cyan")
@@ -252,8 +297,7 @@ def main() -> None:
     cprint(f"{'=' * 60}\n", "cyan")
 
     # ── 8. Select seeds ────────────────────────────────────────────────────
-    # Deterministically shuffled with eval_seed, matching eval_best_ckpt and
-    # select_best_ckpt conventions — same experiment always picks the same subset.
+    # Match evaluation and selection seed ordering when seeds are not explicit.
     if args.seeds:
         eval_seeds = args.seeds
         demo_episodes = len(eval_seeds)
@@ -263,7 +307,6 @@ def main() -> None:
         )
     else:
         all_seeds = list(env_runner.get_seed_list())
-        # Deterministically shuffle (same convention as eval_best_ckpt / select_best_ckpt)
         rng = random.Random(eval_seed)
         rng.shuffle(all_seeds)
         eval_seeds = all_seeds[:demo_episodes]

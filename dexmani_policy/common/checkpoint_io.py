@@ -66,6 +66,22 @@ def validate_training_steps(
         )
 
 
+def validate_ema_resume_state(
+    checkpoint: TrainCheckpoint, *, require_ema: bool
+) -> None:
+    """Require the complete EMA state needed to resume EMA training."""
+    if not require_ema:
+        return
+    if checkpoint.ema_model_state is None:
+        raise RuntimeError("Resume checkpoint is missing required ema_model_state")
+
+    step = checkpoint.ema_updater_step
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise RuntimeError(
+            "Resume checkpoint ema_updater_step must be an int (not bool) >= 0"
+        )
+
+
 class CheckpointStore:
     def __init__(self, checkpoint_dir: Path):
         self.checkpoint_dir = Path(checkpoint_dir)

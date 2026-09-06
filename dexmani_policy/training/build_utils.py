@@ -170,6 +170,14 @@ def validate_config(cfg):
 
     Called by all entry points before training or evaluation.
     """
+    training_cfg = cfg.get("training", {})
+    if training_cfg.get(
+        "use_ema_teacher_for_consistency", False
+    ) and not training_cfg.get("use_ema", False):
+        raise ValueError(
+            "use_ema_teacher_for_consistency=true requires training.use_ema=true"
+        )
+
     if cfg.n_obs_steps > cfg.horizon:
         raise ValueError(
             f"n_obs_steps ({cfg.n_obs_steps}) cannot exceed horizon ({cfg.horizon})"

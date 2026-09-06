@@ -57,6 +57,8 @@ bash scripts/eval/eval_action_flow_solvers.sh action_flow pour <exp_name> --epis
 
 `<exp_name>` = `experiments/<policy>/<task>/` 下的时间戳/名称目录（非完整路径）。
 
+`best` 只接受严格 v2 `best_ckpt.json`。最终评测默认复用 record 中选定的 EMA、NFE 和 temporal ensemble coefficient；显式 CLI / dotlist 才覆盖它。`record_demo.sh` 的 `best` 也复用同一策略，`--ema` / `--no-ema` 与 `--denoise-steps` 可显式覆盖；非 `best` 保持配置驱动行为。评测的结果目录和视频目录彼此独立，`--no-videos` 不会跳过结果写入。
+
 ActionFlow 的 `denoise_steps` 就是 NFE。Euler 支持任意正整数 NFE（包括 1 和 10）；
 Midpoint 只支持偶数 NFE。`eval_action_flow_solvers.sh` 的固定首轮组合为
 Euler-1、Midpoint-2、Midpoint-4、Midpoint-8、Midpoint-10；需要评测其他 NFE 时可通过
@@ -238,7 +240,8 @@ eval:
   demo: {episodes: 5, viewer_resolution: [1920, 1080]}
 ```
 
-参数优先级: CLI > 子节覆盖 > eval 共享层 > hardcoded default
+普通 checkpoint 的参数优先级：CLI > 子节覆盖 > eval 共享层 > hardcoded default。
+`best` 最终评测：显式 CLI > 显式 dotlist > selection record > config；`best` demo 的 EMA/NFE：显式 CLI > selection record，temporal coefficient 始终来自 selection record。
 
 ### DDP 批次大小（4 卡，grad-accum=1）
 
@@ -292,7 +295,7 @@ Agent.compute_loss():                          Agent.predict_action():
 ### 关键机制
 
 - **梯度累积**: `raw_loss / gradient_accumulation_steps` → backward; DDP 非边界 `model.no_sync()`, 仅边界 all-reduce
-- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; 自动 resume（含 EMA updater 计数器 + RNG 状态，精确恢复）
+- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; 自动 resume（含 EMA updater 计数器 + RNG 状态，精确恢复）。启用 EMA 时，恢复 checkpoint 必须同时含 EMA 权重和非负 updater step。
 - **EMA**: 逆 gamma 衰减; BatchNorm affine 直接复制 (不平均)
 - **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3` 有意仅单卡
 - **Shape 验证**: `BaseAgent._validate_batch()` 在 `compute_loss`/`predict_action` 入口校验 action ndim/horizon/dim + obs 时间维/模态batch一致性
@@ -329,9 +332,9 @@ experiments/
     │   └── epoch=*-step=*-milestone=*pct.pt
     ├── logs.jsonl               # 结构化训练日志
     ├── eval_dexsim/             # 评测产出
-    │   ├── _result.txt
+    │   ├── _result.txt          # 单 NFE 结果
     │   ├── result_details.json
-    │   └── <YYYYmmdd_HHMMSS>/   # 视频（默认录制）
+    │   └── <YYYYmmdd_HHMMSS>/   # 单 NFE 视频，或 sweep 的分 NFE 结果/可选视频
     └── wandb/                   # Wandb 离线日志
 ```
 
@@ -370,7 +373,6 @@ experiments/
 | [`docs/仿真评测机制.md`](docs/仿真评测机制.md) | 评测全链路 —— CLI→Checkpoint→Agent→EnvRunner→SuccessRate 完整代码走读 | 评测开发 |
 | [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) | 远程训练部署 —— SSH 配置、三向同步、GPU 多租户、tmux 管理 | 服务器运维 |
 | [`docs/DP3-R3D-ManiFlow测试结果0813.md`](docs/DP3-R3D-ManiFlow测试结果0813.md) | 策略对比评测 —— DP3 vs R3D vs ManiFlow 五项任务成功率 + 里程碑分析 | 策略选型 |
-| [`docs/ActionFlow-架构与实验结果.md`](docs/ActionFlow-架构与实验结果.md) | ActionFlow 唯一权威文档 —— 历史架构沿革/当前架构/实验记录/结论方法论 | ActionFlow 开发 |
 
 ---
 
@@ -388,7 +390,7 @@ experiments/
 能。Checkpoint 始终以 unwrapped 格式保存，`fix_state_dict()` 自动处理 `module.` 前缀。
 
 **Q: 训练中断后如何续训？**
-直接重新运行相同命令，自动从 `latest.pt` 续训。
+直接重新运行相同命令，自动从 `latest.pt` 续训。若当前训练启用 EMA，checkpoint 缺少 EMA 权重或非负 updater step 会明确失败，不会用构造期 EMA 静默继续。
 
 **Q: 如何选择评测 checkpoint？**
 - `best` → 严格 v2 `best_ckpt.json`（缺失、字段无效或 checkpoint 缺失会失败；先运行 selector）

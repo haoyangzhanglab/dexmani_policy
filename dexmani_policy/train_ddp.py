@@ -17,6 +17,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from dexmani_policy.common.checkpoint_io import (
     CheckpointStore,
+    validate_ema_resume_state,
     validate_training_steps,
 )
 from dexmani_policy.common.config import register_resolvers
@@ -129,10 +130,13 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         ckpt_path = checkpoint_store.resolve_path(resume_from)
         checkpoint = checkpoint_store.load(ckpt_path)
         validate_training_steps(checkpoint, compute_num_training_steps(cfg))
+        validate_ema_resume_state(
+            checkpoint, require_ema=ema_model is not None
+        )
         model.load_state_dict(
             fix_state_dict(checkpoint.model_state, is_current_ddp=False), strict=True
         )
-        if ema_model is not None and checkpoint.ema_model_state is not None:
+        if ema_model is not None:
             ema_model.load_state_dict(
                 fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False),
                 strict=True,
@@ -165,22 +169,16 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         optimizer,
         last_epoch=resume_global_step - 1 if checkpoint is None else -1,
     )
-    # Restore optimizer then scheduler state (aligned with single-GPU
-    # load_for_resume).  B2 resume order: construct optimizer (above) →
-    # construct scheduler (above) → load optimizer state → load scheduler
-    # state.  load_state_dict overrides the initial state set by last_epoch,
-    # so last_epoch=-1 above is intentional — it avoids a misleading
-    # intermediate state before the checkpoint state is applied.
+    # Restore optimizer then scheduler state. ``last_epoch=-1`` above avoids
+    # an intermediate scheduler state before the checkpoint state is applied.
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint.optimizer_state)
         scheduler.load_state_dict(checkpoint.scheduler_state)
 
-        # B1: restore the EMA decay warmup counter so get_decay() resumes from
-        # the saved step, and restore the rank-0 RNG stream for reproducible
-        # data augmentation (non-rank-0 ranks keep their per-rank seed).
+        # Restore the EMA update counter and the rank-0 RNG stream. Other
+        # ranks retain their independently derived RNG seeds.
         if ema_updater is not None:
-            if checkpoint.ema_updater_step is not None:
-                ema_updater.optimization_step = int(checkpoint.ema_updater_step)
+            ema_updater.optimization_step = checkpoint.ema_updater_step
             if checkpoint.ema_decay is not None:
                 ema_updater.decay = float(checkpoint.ema_decay)
         if rank == 0:

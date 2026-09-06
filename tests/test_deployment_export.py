@@ -126,7 +126,7 @@ class DeploymentExportTest(unittest.TestCase):
                     "use_ema": True,
                     "denoise_steps": 7,
                     "temporal_ensemble_coeff": 0.2,
-                    "policy_seed_mode": "per_episode",
+                    "policy_seed_mode": "episode_seed",
                 },
                 "selection": {
                     "shuffle_seed": 0,

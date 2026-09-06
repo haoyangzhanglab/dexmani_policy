@@ -10,6 +10,7 @@ Reference:
 from __future__ import annotations
 
 import math
+from numbers import Real
 
 import torch
 from torch import Tensor
@@ -33,6 +34,15 @@ class ChunkOverlapBlender:
     """
 
     def __init__(self, temporal_ensemble_coeff: float = 0.01, n_obs_steps: int = 2) -> None:
+        if (
+            isinstance(temporal_ensemble_coeff, bool)
+            or not isinstance(temporal_ensemble_coeff, Real)
+            or not math.isfinite(temporal_ensemble_coeff)
+            or temporal_ensemble_coeff < 0
+        ):
+            raise ValueError(
+                "temporal_ensemble_coeff must be a finite, non-negative real number"
+            )
         # Pre-computed ACT weights for the exact 2-prediction case.
         self.w0: float = 1.0  # exp(-coeff * 0)
         self.w1: float = math.exp(-temporal_ensemble_coeff)  # exp(-coeff * 1)

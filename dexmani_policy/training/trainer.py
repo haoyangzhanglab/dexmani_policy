@@ -15,6 +15,7 @@ from tqdm import tqdm
 from dexmani_policy.common.checkpoint_io import (
     TrainCheckpoint,
     build_train_params,
+    validate_ema_resume_state,
     validate_training_steps,
 )
 from dexmani_policy.common.pytorch_util import (
@@ -227,13 +228,14 @@ class Trainer:
         """
         checkpoint = self.workspace.load_checkpoint(tag_or_path)
         validate_training_steps(checkpoint, self.num_training_steps)
+        validate_ema_resume_state(checkpoint, require_ema=self.use_ema)
 
         is_current_ddp = isinstance(self.raw_model, DDP)
         self.raw_model.load_state_dict(
             fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True
         )
 
-        if self.use_ema and checkpoint.ema_model_state is not None:
+        if self.use_ema:
             self.ema_model.load_state_dict(
                 fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False),
                 strict=True,
@@ -246,8 +248,7 @@ class Trainer:
         # saved step instead of restarting from 0 (which would silently reset
         # the decay schedule after an interrupt).
         if self.use_ema and self.ema_updater is not None:
-            if checkpoint.ema_updater_step is not None:
-                self.ema_updater.optimization_step = int(checkpoint.ema_updater_step)
+            self.ema_updater.optimization_step = checkpoint.ema_updater_step
             if checkpoint.ema_decay is not None:
                 self.ema_updater.decay = float(checkpoint.ema_decay)
 

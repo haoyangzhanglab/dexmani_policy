@@ -8,6 +8,8 @@ logic across the evaluation pipeline.
 from __future__ import annotations
 
 import json
+import math
+from numbers import Real
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +106,13 @@ def build_eval_components(
     checkpoint_store = CheckpointStore(ckpt_dir)
 
     return agent, env_runner, checkpoint_store
+
+
+def iter_leaf_env_runners(env_runner):
+    runners = getattr(env_runner, "runners", None)
+    if isinstance(runners, dict):
+        return tuple(runners.values())
+    return (env_runner,)
 
 
 # ---------------------------------------------------------------------------
@@ -230,10 +239,18 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
         )
     coeff = inference["temporal_ensemble_coeff"]
     if coeff is not None and (
-        isinstance(coeff, bool) or not isinstance(coeff, (int, float))
+        isinstance(coeff, bool)
+        or not isinstance(coeff, Real)
+        or not math.isfinite(coeff)
+        or coeff < 0
     ):
         raise ValueError(
-            "best_ckpt.json inference.temporal_ensemble_coeff must be numeric or null"
+            "best_ckpt.json inference.temporal_ensemble_coeff must be a finite, "
+            "non-negative real number or null"
+        )
+    if inference["policy_seed_mode"] != "episode_seed":
+        raise ValueError(
+            "best_ckpt.json inference.policy_seed_mode must be 'episode_seed'"
         )
 
     selection = best_info["selection"]
@@ -281,8 +298,7 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. Episode detail extraction (handles both single-task and multi-task
-#    result dicts — fixes C2 / C4)
+# 5. Episode detail extraction for single-task and multi-task result dicts
 # ---------------------------------------------------------------------------
 
 

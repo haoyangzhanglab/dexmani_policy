@@ -54,6 +54,7 @@ from dexmani_policy.training.eval_utils import (
     build_eval_components,
     collect_episode_details,
     compute_eval_stats,
+    iter_leaf_env_runners,
     load_ckpt_for_inference,
     read_best_ckpt_json,
     resolve_checkpoint_path,
@@ -82,7 +83,7 @@ def _setup_eval(
 
     Returns
     -------
-    (agent, env_runner, checkpoint_store, ckpt_path, ckpt_label, eval_seed, device)
+    (agent, env_runner, ckpt_path, ckpt_label, eval_seed)
     """
     validate_eval_config(cfg)
     eval_seed = resolve_eval_seed(cfg)
@@ -91,8 +92,8 @@ def _setup_eval(
     device = torch.device(cfg.training.device)
     agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
 
-    if hasattr(env_runner, "record_video"):
-        env_runner.record_video = video_save_dir is not None
+    for leaf_runner in iter_leaf_env_runners(env_runner):
+        leaf_runner.record_video = video_save_dir is not None
 
     ckpt_path, ckpt_label = resolve_checkpoint_path(
         exp_dir, ckpt_tag_or_path, checkpoint_store
@@ -104,7 +105,7 @@ def _setup_eval(
     agent.eval()
     cprint("✅ Checkpoint loaded\n", "green")
 
-    return agent, env_runner, checkpoint_store, ckpt_path, ckpt_label, eval_seed, device
+    return agent, env_runner, ckpt_path, ckpt_label, eval_seed
 
 
 def _select_eval_seeds(
@@ -150,20 +151,18 @@ def _run_one_timestep(
     denoise_steps: int,
     video_save_dir: Path | None,
     *,
-    exp_dir: Path,
+    result_save_dir: Path,
     ckpt_tag_or_path: str,
     ckpt_path: Path,
-    ckpt_label: str,
     eval_seed: int,
     selection_seeds_excluded: list[int],
     heldout_from_selection: bool,
     use_ema: bool,
+    temporal_ensemble_coeff: float | None,
 ) -> dict:
     """Run eval at a single denoise step count; save per-value results.
 
-    Saves ``_result.txt`` + ``result_details.json`` into
-    *exp_dir*/eval_dexsim (single-value) or a ``denoise_timesteps<N>/``
-    subdirectory of *video_save_dir* (sweep).
+    Saves ``_result.txt`` + ``result_details.json`` into *result_save_dir*.
 
     Returns a dict with keys: ``success_rate`` (micro), ``macro_success_rate``,
     ``avg_steps``, ``n_success``, ``n_total``, ``per_seed_details``.
@@ -199,18 +198,9 @@ def _run_one_timestep(
         float(sum(task_done_steps) / len(task_done_steps)) if task_done_steps else None
     )
 
-    # ── Save results ───────────────────────────────────────────────────
-    if video_save_dir is not None:
-        # Sweep: save into the per-timestep subdirectory
-        save_dir = video_save_dir
-        save_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        save_dir = exp_dir / "eval_dexsim"
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-    save_dir.mkdir(parents=True, exist_ok=True)
-    (save_dir / "_result.txt").write_text(f"{success_rate}\n")
-    (save_dir / "result_details.json").write_text(
+    result_save_dir.mkdir(parents=True, exist_ok=True)
+    (result_save_dir / "_result.txt").write_text(f"{success_rate}\n")
+    (result_save_dir / "result_details.json").write_text(
         json.dumps(
             {
                 "ckpt_tag": ckpt_tag_or_path,
@@ -227,6 +217,7 @@ def _run_one_timestep(
                 "heldout_from_selection": heldout_from_selection,
                 "use_ema": use_ema,
                 "denoise_steps": denoise_steps,
+                "temporal_ensemble_coeff": temporal_ensemble_coeff,
                 "per_seed_details": per_seed_details,
             },
             indent=2,
@@ -262,7 +253,9 @@ def evaluate_checkpoint_robotwin(
     episodes: int = 100,
     denoise_steps: int = 10,
     use_ema: bool = True,
+    temporal_ensemble_coeff: float | None = None,
     video_save_dir: Path | None = None,
+    result_save_dir: Path | None = None,
 ) -> tuple[float, float | None, int, int]:
     """Evaluate a checkpoint and return success rate.
 
@@ -279,7 +272,10 @@ def evaluate_checkpoint_robotwin(
     -------
     (success_rate, avg_steps, n_success, n_total)
     """
-    agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = (
+    if temporal_ensemble_coeff is None:
+        temporal_ensemble_coeff = cfg.env_runner.get("temporal_ensemble_coeff")
+    result_save_dir = result_save_dir or exp_dir / "eval_dexsim"
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
         _setup_eval(
             cfg,
             exp_dir,
@@ -302,15 +298,15 @@ def evaluate_checkpoint_robotwin(
         env_runner,
         eval_seeds,
         denoise_steps,
-        video_save_dir=None,
-        exp_dir=exp_dir,
+        video_save_dir=video_save_dir,
+        result_save_dir=result_save_dir,
         ckpt_tag_or_path=ckpt_tag_or_path,
         ckpt_path=ckpt_path,
-        ckpt_label=ckpt_label,
         eval_seed=eval_seed,
         selection_seeds_excluded=selection_seeds,
         heldout_from_selection=best_info is not None,
         use_ema=use_ema,
+        temporal_ensemble_coeff=temporal_ensemble_coeff,
     )
 
     # ── Report ─────────────────────────────────────────────────────────
@@ -331,8 +327,7 @@ def evaluate_checkpoint_robotwin(
     cprint(f"  Avg steps    : {avg_str}", "cyan")
     cprint(f"{'=' * 50}\n", "cyan")
 
-    save_dir = exp_dir / "eval_dexsim"
-    cprint(f"  Results saved to: {save_dir}/_result.txt", "cyan")
+    cprint(f"  Results saved to: {result_save_dir}/_result.txt", "cyan")
 
     return info["success_rate"], info["avg_steps"], info["n_success"], info["n_total"]
 
@@ -351,7 +346,9 @@ def evaluate_checkpoint_sweep(
     episodes: int = 100,
     denoise_timesteps_list: list[int],
     use_ema: bool = True,
+    temporal_ensemble_coeff: float | None = None,
     video_save_dir: Path | None = None,
+    result_save_dir: Path | None = None,
 ) -> list[dict]:
     """Evaluate a checkpoint at multiple denoising step counts.
 
@@ -360,14 +357,23 @@ def evaluate_checkpoint_sweep(
     is apples-to-apples.
 
     Results are saved into ``denoise_timesteps<N>/`` subdirectories under
-    *video_save_dir* (or ``exp_dir/eval_dexsim/<timestamp>/``), plus an
+    *result_save_dir* (or ``exp_dir/eval_dexsim/<timestamp>/``), plus an
     aggregate ``eval_summary.json``.
     """
     if not denoise_timesteps_list:
         raise ValueError("denoise_timesteps_list must be non-empty")
+    if temporal_ensemble_coeff is None:
+        temporal_ensemble_coeff = cfg.env_runner.get("temporal_ensemble_coeff")
+    if result_save_dir is None:
+        if video_save_dir is not None:
+            result_save_dir = video_save_dir
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            result_save_dir = exp_dir / "eval_dexsim" / timestamp
+    result_save_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
-    agent, env_runner, ckpt_store, ckpt_path, ckpt_label, eval_seed, device = (
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
         _setup_eval(
             cfg,
             exp_dir,
@@ -393,21 +399,26 @@ def evaluate_checkpoint_sweep(
     for dt in denoise_timesteps_list:
         cprint(f"\n--- denoise_timesteps={dt} ---", "cyan", attrs=["bold"])
 
-        sub_dir = video_save_dir / f"denoise_timesteps{dt}" if video_save_dir else None
+        result_sub_dir = result_save_dir / f"denoise_timesteps{dt}"
+        video_sub_dir = (
+            video_save_dir / f"denoise_timesteps{dt}"
+            if video_save_dir is not None
+            else None
+        )
         info = _run_one_timestep(
             agent,
             env_runner,
             eval_seeds,
             dt,
-            video_save_dir=sub_dir,
-            exp_dir=exp_dir,
+            video_save_dir=video_sub_dir,
+            result_save_dir=result_sub_dir,
             ckpt_tag_or_path=ckpt_tag_or_path,
             ckpt_path=ckpt_path,
-            ckpt_label=ckpt_label,
             eval_seed=eval_seed,
             selection_seeds_excluded=selection_seeds,
             heldout_from_selection=best_info is not None,
             use_ema=use_ema,
+            temporal_ensemble_coeff=temporal_ensemble_coeff,
         )
 
         avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"
@@ -420,9 +431,7 @@ def evaluate_checkpoint_sweep(
         sweep_results.append({"denoise_timesteps": dt, **info})
 
     # ── 4. Aggregate summary ───────────────────────────────────────────
-    _save_sweep_summary(
-        video_save_dir or (exp_dir / "eval_dexsim"), sweep_results, ckpt_label
-    )
+    _save_sweep_summary(result_save_dir, sweep_results, ckpt_label)
 
     return sweep_results
 
@@ -619,14 +628,14 @@ def main() -> None:
         "--denoise-steps",
         type=int,
         default=None,
-        help="DDIM / Euler denoising steps (default: from config).",
+        help="DDIM / Euler denoising steps (best: selection record; otherwise config).",
     )
     parser.add_argument(
         "--ema",
         dest="use_ema",
         action="store_true",
         default=None,
-        help="Use EMA weights (default: from config).",
+        help="Use EMA weights (best: selection record; otherwise config).",
     )
     parser.add_argument(
         "--no-ema",
@@ -669,7 +678,7 @@ def main() -> None:
         sys.exit(1)
 
     ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
-    cfg, use_ema, denoise_timesteps_list, _, _ = _resolve_final_eval_request(
+    cfg, use_ema, denoise_timesteps_list, temporal_ensemble_coeff, _ = _resolve_final_eval_request(
         OmegaConf.load(cfg_path),
         exp_dir,
         ckpt_tag_or_path,
@@ -690,19 +699,26 @@ def main() -> None:
     do_sweep = len(denoise_timesteps_list) > 1
 
     # Video saving — configurable via eval.video.enabled, overridable via --no-videos.
-    # Single-value: exp_dir/eval_dexsim/_result.txt
-    # Sweep:        exp_dir/eval_dexsim/<timestamp>/denoise_timesteps<N>/* + eval_summary.json
+    # Single-value: results use exp_dir/eval_dexsim/; videos use a timestamped child.
+    # Sweep: result subdirectories always use a timestamped root; video output
+    # shares those subdirectories only when recording is enabled.
     video_enabled = _get_eval_param(cfg, "enabled", "video", default=True)
-    video_save_dir = None
-    if video_enabled and not args.no_videos:
+    record_video = video_enabled and not args.no_videos
+    eval_save_dir = exp_dir / "eval_dexsim"
+    if do_sweep:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_save_dir = exp_dir / "eval_dexsim" / timestamp
+        result_save_dir = eval_save_dir / timestamp
+        video_save_dir = result_save_dir if record_video else None
+    else:
+        result_save_dir = eval_save_dir
+        video_save_dir = None
+        if record_video:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            video_save_dir = eval_save_dir / timestamp
+
+    if video_save_dir is not None:
         video_save_dir.mkdir(parents=True, exist_ok=True)
         cprint(f"\n📹 Video output: {video_save_dir}", "cyan")
-    elif do_sweep:
-        # Sweep always uses a timestamped dir for per-value subdirectories
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_save_dir = exp_dir / "eval_dexsim" / timestamp
 
     try:
         if do_sweep:
@@ -718,7 +734,9 @@ def main() -> None:
                 episodes=episodes,
                 denoise_timesteps_list=denoise_timesteps_list,
                 use_ema=use_ema,
+                temporal_ensemble_coeff=temporal_ensemble_coeff,
                 video_save_dir=video_save_dir,
+                result_save_dir=result_save_dir,
             )
         else:
             evaluate_checkpoint_robotwin(
@@ -728,7 +746,9 @@ def main() -> None:
                 episodes=episodes,
                 denoise_steps=denoise_timesteps_list[0],
                 use_ema=use_ema,
+                temporal_ensemble_coeff=temporal_ensemble_coeff,
                 video_save_dir=video_save_dir,
+                result_save_dir=result_save_dir,
             )
     except EvalEpisodeError as e:
         cprint(f"Fatal eval error (category={e.category}, seed={e.seed}): {e}", "red")
