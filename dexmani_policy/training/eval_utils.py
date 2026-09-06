@@ -170,7 +170,6 @@ def load_ckpt_for_inference(
 
 # ---------------------------------------------------------------------------
 # 4. best_ckpt.json reading (shared across eval entry points)
-#    eval_best_ckpt.py)
 # ---------------------------------------------------------------------------
 
 

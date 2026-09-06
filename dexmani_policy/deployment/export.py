@@ -65,15 +65,6 @@ _POINT_SEMANTICS = {
     ),
 }
 
-_POINT_ZARR_KEYS = (
-    "point_cloud_frame",
-    "point_cloud_color_source",
-    "point_cloud_policy_id",
-    "point_cloud_config_sha256",
-    "point_cloud_table_plane_abcd_json",
-    "point_cloud_sampling",
-    "point_cloud_transform",
-)
 _FINGERTIP_SEMANTICS = {
     "fingertip_points_frame": "xarm_base",
     "fingertip_points_unit": "m",
@@ -365,22 +356,6 @@ def _validate_agent_targets(value: Any, path: str = "agent") -> None:
     elif type(value) is list:
         for index, nested in enumerate(value):
             _validate_agent_targets(nested, f"{path}[{index}]")
-
-
-def _point_array_shape(root: Any) -> tuple[int, int]:
-    try:
-        array = root["data"]["point_cloud"]
-        shape = tuple(int(value) for value in array.shape)
-    except Exception as exc:
-        raise InvalidZarrError("Zarr data/point_cloud is missing") from exc
-    if len(shape) != 3:
-        raise InvalidZarrError("Zarr point_cloud must have shape [T, N, F]")
-    count, feature_dim = shape[-2:]
-    if count not in _POINT_COUNTS or feature_dim != _POINT_FEATURE_DIM:
-        raise InvalidZarrError(
-            f"unsupported point-cloud shape: N={count}, feature_dim={feature_dim}"
-        )
-    return count, feature_dim
 
 
 def _validate_required_zarr_arrays(root: Any, cfg_plain: dict[str, Any]) -> None:

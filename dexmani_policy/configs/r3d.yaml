@@ -28,23 +28,13 @@ action_dim: ${eval:'${joint_dim} + ${ee_dim} if ${use_aux_ee} else (21 if ${eq:$
 
 # ── Dataloader ──
 # NOTE: R3D ViT encoder is memory-intensive (512 patch tokens × N samples).
-# Single-GPU: batch_size=48 tested on 24 GB (15.7 GB peak).
-# DDP across 4+ GPUs can use larger batches.
+# Single-GPU: batch_size=128; DDP: 32/GPU × 4 (see ddp/r3d.yaml).
 dataloader:
   batch_size: 128
   shuffle: true
   num_workers: 8
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
-  drop_last: false
-
-val_dataloader:
-  batch_size: 32
-  shuffle: false
-  num_workers: 4
-  pin_memory: true
-  persistent_workers: false
   prefetch_factor: 2
   drop_last: false
 
@@ -174,12 +164,6 @@ workspace:
     resume: allow
     mode: offline
     video_fps: 15  # decoupled from env_runner; default matches frame_skip(16)/time_step(1/240)
-
-  checkpoint_cfg:
-    _target_: dexmani_policy.training.workspace.CheckpointConfig
-    monitor_key: test_mean_score
-    mode: max
-    topk: 3
 
 # ── Env Runner ──
 env_runner:

@@ -4,7 +4,6 @@
 #
 # Effective batch size: per_gpu_batch × num_gpus × gradient_accumulation_steps
 #   train: 32 × 4 × 1 = 128  (matches single-GPU 128)
-#   val:   32 × 4 × 1 = 128  (matches single-GPU 128)
 
 defaults:
   - /maniflow
@@ -19,16 +18,3 @@ training:
 dataloader:
   batch_size: 32
   num_workers: 4
-
-val_dataloader:
-  batch_size: 32
-  num_workers: 4
-
-hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
-  run:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
-  sweep:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
-    subdir: ${hydra.job.num}

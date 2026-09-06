@@ -42,9 +42,6 @@ class ManiFlowObsEncoder(nn.Module):
             self.num_obs_tokens = token_seq_len * n_obs_steps
         self.obs_token_dim = pc_out_dim + self.state_mlp.out_dim
 
-    def get_global_token(self, patch_token, patch_center) -> torch.Tensor:
-        return self.pc_encoder.get_global_token(patch_token, patch_center)
-
     def forward(self, obs: dict):
         pc = preprocess_point_cloud(
             obs["point_cloud"],

@@ -27,15 +27,6 @@ dataloader:
   prefetch_factor: 2
   drop_last: true
 
-val_dataloader:
-  batch_size: 64
-  shuffle: false
-  num_workers: 8
-  pin_memory: true
-  persistent_workers: false
-  prefetch_factor: 2
-  drop_last: true
-
 # ── Dataset ──
 dataset:
   _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
@@ -66,7 +57,7 @@ dataset:
     blur_prob: 0.0                # explicit disable — preserves fine gripper details
     prob: 0.25
 
-  # Joint-state augmentation — mild Gaussian noise, 50% trigger rate.
+  # Joint-state augmentation — mild Gaussian noise, always-on (prob 1.0).
   augmentation_cfg:
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
@@ -167,12 +158,6 @@ workspace:
     resume: allow
     mode: offline
     video_fps: 15  # decoupled from env_runner; default matches frame_skip(16)/time_step(1/240)
-
-  checkpoint_cfg:
-    _target_: dexmani_policy.training.workspace.CheckpointConfig
-    monitor_key: test_mean_score
-    mode: max
-    topk: 3
 
 # ── Env Runner ──
 env_runner:

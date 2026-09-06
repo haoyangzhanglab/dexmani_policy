@@ -262,14 +262,6 @@ class SATAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def predict_action(self, obs_dict, denoise_timesteps=None):
-        """Predict action — delegates to ``predict_action_from_cond``."""
-        self._validate_obs_dict(obs_dict)
-
-        cond, _ = self._build_cond(obs_dict)
-        return self.predict_action_from_cond(cond, denoise_timesteps)
-
-    @torch.no_grad()
     def predict_action_from_cond(self, cond, denoise_timesteps=None):
         """Inference from pre-built condition tensor.
 

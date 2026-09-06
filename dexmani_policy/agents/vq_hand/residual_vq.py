@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange
 from torch import nn
 
 from .vector_quantize import VectorQuantize, default, exists
@@ -77,20 +77,6 @@ class ResidualVQ(nn.Module):
         """Return stacked codebooks: (num_quantizers, codebook_size, codebook_dim)."""
         cbs = [layer._codebook.embed for layer in self.layers]
         return rearrange(torch.stack(cbs, dim=0), "q 1 c d -> q c d")
-
-    def get_codes_from_indices(self, indices):
-        """
-        Reconstruct quantized vector from per-layer indices.
-        Args:
-            indices: (B, num_quantizers)  — one index per layer
-        Returns:
-            codes: (num_quantizers, B, codebook_dim)  — per-layer code vectors
-        """
-        batch = indices.shape[0]
-        codebooks = repeat(self.codebooks, "q c d -> q b c d", b=batch)  # (Q, B, C, D)
-        gather_indices = repeat(indices, "b q -> q b 1 d", d=codebooks.shape[-1])
-        all_codes = codebooks.gather(2, gather_indices)  # (Q, B, 1, D)
-        return all_codes.squeeze(2)  # (Q, B, D)
 
     def forward(
         self,

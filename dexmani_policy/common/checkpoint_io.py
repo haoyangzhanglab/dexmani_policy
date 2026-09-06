@@ -1,18 +1,14 @@
-"""Atomic training checkpoint I/O with persistent top-k score tracking."""
+"""Atomic training checkpoint I/O."""
 
 from __future__ import annotations
 
-import json
-import os
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
-MonitorMode = Literal["max", "min"]
 TRAIN_CHECKPOINT_FORMAT = "simple.v2"
 
 
@@ -153,24 +149,9 @@ class CheckpointStore:
             scheduler_state=weights["scheduler"],
         )
 
-    def resolve_path(self, tag_or_path: str, best_fn=None) -> Path:
+    def resolve_path(self, tag_or_path: str) -> Path:
         if tag_or_path == "latest":
             path = self.checkpoint_dir / "latest.pt"
-        elif tag_or_path == "best":
-            if best_fn is not None:
-                path = best_fn()
-            else:
-                checkpoints = list(self.checkpoint_dir.glob("epoch=*.pt"))
-                if not checkpoints:
-                    raise FileNotFoundError(
-                        f"No checkpoint found in {self.checkpoint_dir}"
-                    )
-                checkpoints.sort(key=self._parse_ckpt_score, reverse=True)
-                path = checkpoints[0]
-            if path is None:
-                raise FileNotFoundError(
-                    f"No best checkpoint found in {self.checkpoint_dir}"
-                )
         else:
             path = Path(tag_or_path)
             if path.is_absolute():
@@ -184,123 +165,3 @@ class CheckpointStore:
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
         return path
-
-    @staticmethod
-    def _parse_ckpt_score(path: Path) -> float:
-        match = re.search(r"-score=([\d.eE+-]+)\.pt$", path.name)
-        return float(match.group(1)) if match else float("-inf")
-
-
-class TopKCheckpointTracker:
-    """Track top-k checkpoints across process restarts.
-
-    Scores are persisted in ``scores.json``.  If the index is absent or stale,
-    the tracker recovers the authoritative score from each checkpoint's
-    ``state.monitor`` dictionary rather than trusting filesystem order.
-    """
-
-    def __init__(
-        self,
-        checkpoint_dir: Path,
-        monitor_key: str,
-        mode: MonitorMode = "max",
-        k: int = 3,
-    ) -> None:
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.monitor_key = monitor_key
-        self.mode = mode
-        self.k = int(k)
-        self.index_path = self.checkpoint_dir / "scores.json"
-        self._score_cache: dict[str, float] = self._load_index()
-
-    def _load_index(self) -> dict[str, float]:
-        if not self.index_path.exists():
-            return {}
-        try:
-            with open(self.index_path, "r", encoding="utf-8") as file:
-                payload = json.load(file)
-            if payload.get("monitor_key") != self.monitor_key:
-                return {}
-            return {
-                str(name): float(score)
-                for name, score in payload.get("scores", {}).items()
-            }
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return {}
-
-    def _write_index(self) -> None:
-        payload = {
-            "monitor_key": self.monitor_key,
-            "mode": self.mode,
-            "scores": self._score_cache,
-        }
-        tmp = self.index_path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as file:
-            json.dump(payload, file, indent=2, sort_keys=True)
-        os.replace(tmp, self.index_path)
-
-    def _list_ckpts(self) -> list[Path]:
-        return list(self.checkpoint_dir.glob("epoch=*.pt"))
-
-    def _invalid_score(self) -> float:
-        return float("-inf" if self.mode == "max" else "inf")
-
-    def _read_score_from_checkpoint(self, path: Path) -> float:
-        try:
-            payload = torch.load(path, map_location="cpu", weights_only=False)
-            monitor = payload.get("state", {}).get("monitor", {})
-            score = monitor.get(self.monitor_key)
-            if score is None:
-                return self._invalid_score()
-            return float(score)
-        except (OSError, RuntimeError, ValueError, TypeError):
-            return self._invalid_score()
-
-    def _score(self, path: Path) -> float:
-        if path.name in self._score_cache:
-            return self._score_cache[path.name]
-
-        score = self._read_score_from_checkpoint(path)
-        self._score_cache[path.name] = score
-        return score
-
-    def _sorted_ckpts(self) -> list[Path]:
-        reverse = self.mode == "max"
-        checkpoints = self._list_ckpts()
-        sorted_paths = sorted(checkpoints, key=self._score, reverse=reverse)
-        self._write_index()
-        return sorted_paths
-
-    def update(
-        self,
-        checkpoint_path: Path,
-        checkpoint: Optional[TrainCheckpoint] = None,
-    ) -> Optional[Path]:
-        checkpoint_path = Path(checkpoint_path)
-        if checkpoint is not None:
-            score = checkpoint.monitor.get(self.monitor_key)
-            if score is not None:
-                self._score_cache[checkpoint_path.name] = float(score)
-        else:
-            self._score_cache[checkpoint_path.name] = self._score(checkpoint_path)
-
-        if self.k > 0:
-            checkpoints = self._sorted_ckpts()
-            for path in checkpoints[self.k :]:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-                self._score_cache.pop(path.name, None)
-        self._write_index()
-        return self.best_path()
-
-    def best_path(self) -> Optional[Path]:
-        checkpoints = self._sorted_ckpts()
-        if not checkpoints:
-            return None
-        best = checkpoints[0]
-        if self._score(best) == self._invalid_score():
-            return None
-        return best

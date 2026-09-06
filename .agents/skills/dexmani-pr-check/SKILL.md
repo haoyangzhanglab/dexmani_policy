@@ -44,10 +44,9 @@ For each config file, parse the YAML and verify:
 
 | Rule | Value |
 |------|-------|
-| `action_dim = tcp_dim + hand_dim` | `tcp_dim + 12` |
+| `action_dim` | 通用 `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`（joint=19, ee=21） |
 | `state_dim` | `19` (7 arm + 12 hand) |
-| `tcp_dim` | `7` (joint) or `9` (action_ee) |
-| `use_aux_ee` → `action_dim` | `19 + 9 = 28` |
+| DQRISE `tcp_dim`/`hand_dim` | `7`/`12` (joint) 或 `9`/`12` (action_ee)；仅 `dqrise.yaml` 显式定义 |
 
 Implementation (one-liner to extract key dims from a config):
 ```bash

@@ -45,9 +45,7 @@ class TrainingComponents:
     optimizer: torch.optim.Optimizer
     scheduler: Any
     train_loader: DataLoader
-    val_loader: Optional[DataLoader]
     workspace: Any
-    env_runner: Optional[Any]
     num_training_steps: int
 
 
@@ -60,7 +58,6 @@ def build_train_components(cfg):
     dataset, normalizer = build_dataset_and_normalizer(cfg)
 
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
-    val_loader = None
 
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
@@ -69,7 +66,6 @@ def build_train_components(cfg):
     num_training_steps = compute_num_training_steps(cfg)
 
     workspace = hydra.utils.instantiate(cfg.workspace)
-    env_runner = None
 
     return TrainingComponents(
         device=device,
@@ -79,9 +75,7 @@ def build_train_components(cfg):
         optimizer=optimizer,
         scheduler=scheduler,
         train_loader=train_loader,
-        val_loader=val_loader,
         workspace=workspace,
-        env_runner=env_runner,
         num_training_steps=num_training_steps,
     )
 

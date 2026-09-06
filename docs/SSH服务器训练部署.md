@@ -219,7 +219,6 @@ Pass 2 仅更新 3 种训练中持续变化的文件：
 |------|-------------|------|
 | `metrics.jsonl` | 训练中每步追加 | ~KB |
 | `checkpoints/latest.pt` | symlink 目标随训练推进变化 | ~几十字节 |
-| `checkpoints/scores.json` | top-k tracker 更新 | ~KB |
 
 Pass 2 不使用 `--ignore-existing`，因此可安全保留它的 partial 传输。
 

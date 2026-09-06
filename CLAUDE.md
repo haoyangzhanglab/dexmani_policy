@@ -168,7 +168,7 @@ BaseAgent
 
 > dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4
 > 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
-> action_flow 当前 config = 最优配方（归一化 xyz + baseline 优化器 wd=1e-3/obs_wd=1e-6 + cosine + context 384/ffn 1536 + 无 dropout + step-gate off）。「科学 PR 全开」（metric xyz / wd=1e-2 / cosine_min_lr / dropout）已证伪负收益。见 [docs/ActionFlow-架构与实验结果.md](docs/ActionFlow-架构与实验结果.md)
+> action_flow 当前 config = 最优配方（归一化 xyz + baseline 优化器 wd=1e-3/obs_wd=1e-6 + cosine + context 384/ffn 1536 + 无 dropout + step-gate off）。「科学 PR 全开」（metric xyz / wd=1e-2 / cosine_min_lr / dropout）已证伪负收益。
 
 `action_dim` 公式: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`
 `agent._target_`: `dexmani_policy.agents.core.<name>.<Name>Agent` (Hydra 直接导入，无显式注册表)
@@ -281,5 +281,3 @@ dexmani_policy/
 | `docs/项目架构.md` | 完整目录树、模块依赖图、类层级、数据流全景 |
 | `docs/仿真评测机制.md` | 评测全链路 — CLI → EnvRunner → Agent 推理 → Decoder 去噪 |
 | `docs/SSH服务器训练部署.md` | 远程训练部署 + SSH 常识附录 |
-| `docs/DP3-R3D-ManiFlow测试结果0813.md` | DP3 vs R3D vs ManiFlow 五项任务对比评测 |
-| `docs/ActionFlow-架构与实验结果.md` | ActionFlow 唯一权威文档（历史架构沿革 + 当前架构 + 实验记录 + 结论方法论） |

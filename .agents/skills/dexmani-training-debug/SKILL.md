@@ -34,8 +34,8 @@ Note whether the error was **Layer 1** (loss NaN, "Non-finite loss") or **Layer 
 
 | Layer | Where | When | Error message | NaN source |
 |-------|-------|------|--------------|------------|
-| **Layer 1** | `trainer.py:271` | After `compute_loss()`, **before** `backward()` | `"Non-finite loss at epoch=X, step=Y"` | Data corruption or forward-pass instability |
-| **Layer 2** | `trainer.py:140` | After `clip_grad_norm_()`, **before** `optimizer.step()` | `"Non-finite gradient in N parameter(s): [name1, name2, ...]"` | Backward-pass numerical instability in specific ops |
+| **Layer 1** | `trainer.py:362` | After `compute_loss()`, **before** `backward()` | `"Non-finite loss at epoch=X, step=Y"` | Data corruption or forward-pass instability |
+| **Layer 2** | `trainer.py:193` | After `clip_grad_norm_()`, **before** `optimizer.step()` | `"Non-finite gradient at epoch=X, step=Y in N parameter(s): [name1, ...]"` | Backward-pass numerical instability in specific ops |
 
 **Diagnostic implication**: Layer 1 → investigate data pipeline + forward pass.
 Layer 2 → investigate the specific parameters listed in the error message.
@@ -123,15 +123,15 @@ After diagnosis, apply the fix and resume training:
 
 ```bash
 # Training auto-resumes from latest.pt symlink
-bash scripts/training/train.sh <policy> <task>
+bash scripts/training/train.sh <config_name>
 
 # Or if you want a fresh start with modified config:
-bash scripts/training/train.sh <policy> <task> 'training.seed=43'  # new seed
+bash scripts/training/train.sh <config_name> 'task_name=pour' 'training.seed=43'  # new seed
 ```
 
 ## Contract
 
-NaN debug checkpoint format (`simple.v1`):
+NaN debug checkpoint format (`dexmani.nan-debug.v1`):
 ```python
 {
     "state": {"epoch": int, "global_step": int, "nan_loss": float},
@@ -141,7 +141,7 @@ NaN debug checkpoint format (`simple.v1`):
         "optimizer": state_dict,
         "scheduler": state_dict,
     },
-    "_format": "simple.v1",
+    "_format": "dexmani.nan-debug.v1",
     "_saved_at": timestamp,
 }
 ```

@@ -57,7 +57,7 @@ bash scripts/eval/eval_action_flow_solvers.sh action_flow pour <exp_name> --epis
 
 `<exp_name>` = `experiments/<policy>/<task>/` 下的时间戳/名称目录（非完整路径）。
 
-`best` 只接受严格 v2 `best_ckpt.json`。最终评测默认复用 record 中选定的 EMA、NFE 和 temporal ensemble coefficient；显式 CLI / dotlist 才覆盖它。`record_demo.sh` 的 `best` 也复用同一策略，`--ema` / `--no-ema` 与 `--denoise-steps` 可显式覆盖；非 `best` 保持配置驱动行为。评测的结果目录和视频目录彼此独立，`--no-videos` 不会跳过结果写入。
+`best` 只接受 `best_ckpt.json`。最终评测默认复用 record 中选定的 EMA 和 NFE；显式 CLI / dotlist 才覆盖它们。`record_demo.sh` 的 `best` 也复用同一策略，`--ema` / `--no-ema` 与 `--denoise-steps` 可显式覆盖；非 `best` 保持配置驱动行为。评测的结果目录和视频目录彼此独立，`--no-videos` 不会跳过结果写入。
 
 ActionFlow 的 `denoise_steps` 就是 NFE。Euler 支持任意正整数 NFE（包括 1 和 10）；
 Midpoint 只支持偶数 NFE。`eval_action_flow_solvers.sh` 的固定首轮组合为
@@ -182,7 +182,7 @@ as a competing list.
   size, interpolation, and normalization parameters. Deployment applies the
   former before the latter. Other fields carry the raw tensor specification
   needed by the runtime that provides them.
-- **Real data boundary**: export accepts Real Policy Zarr schema v6 only with
+- **Real data boundary**: export accepts Real Policy Zarr schema v7 only with
   `episode_start_policy="full_history"` and
   `action_semantics="teleop_published_joint_target"`, and
   verifies the selected arrays before publication. The current `contact_force`
@@ -218,7 +218,7 @@ The deployment modules expose `parse_deployment_contract`,
 
 复制 `dp3.yaml` 作为模板。必须字段：
 
-`policy_name, task_name, zarr_path, seed, horizon(16), n_obs_steps(2), n_action_steps(8), action_key, action_dim, dataloader, val_dataloader, dataset, agent, optimizer, ema, training, workspace, env_runner, eval, hydra`
+`policy_name, task_name, zarr_path, seed, horizon(16), n_obs_steps(2), n_action_steps(8), action_key, action_dim, dataloader, dataset, agent, optimizer, ema, training, workspace, env_runner, eval, hydra`
 
 `action_dim` 公式：
 ```yaml
@@ -239,7 +239,7 @@ eval:
 ```
 
 普通 checkpoint 的参数优先级：CLI > 子节覆盖 > eval 共享层 > hardcoded default。
-`best` 最终评测：显式 CLI > 显式 dotlist > selection record > config；`best` demo 的 EMA/NFE：显式 CLI > selection record，temporal coefficient 始终来自 selection record。
+`best` 最终评测：显式 CLI > 显式 dotlist > selection record > config；`best` demo 的 EMA/NFE：显式 CLI > selection record。
 
 ### DDP 批次大小（4 卡，grad-accum=1）
 
@@ -328,7 +328,7 @@ experiments/
     ├── checkpoints/
     │   ├── latest.pt            # → 最新里程碑 symlink
     │   └── epoch=*-step=*-milestone=*pct.pt
-    ├── logs.jsonl               # 结构化训练日志
+    ├── metrics.jsonl            # 结构化训练日志
     ├── eval_dexsim/             # 评测产出
     │   ├── _result.txt          # 单 NFE 结果
     │   ├── result_details.json
@@ -370,7 +370,6 @@ experiments/
 | [`docs/项目架构.md`](docs/项目架构.md) | 架构全景 —— 完整目录树、模块依赖图、类层级、数据流、设计模式 | 深入理解 |
 | [`docs/仿真评测机制.md`](docs/仿真评测机制.md) | 评测全链路 —— CLI→Checkpoint→Agent→EnvRunner→SuccessRate 完整代码走读 | 评测开发 |
 | [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) | 远程训练部署 —— SSH 配置、三向同步、GPU 多租户、tmux 管理 | 服务器运维 |
-| [`docs/DP3-R3D-ManiFlow测试结果0813.md`](docs/DP3-R3D-ManiFlow测试结果0813.md) | 策略对比评测 —— DP3 vs R3D vs ManiFlow 五项任务成功率 + 里程碑分析 | 策略选型 |
 
 ---
 
@@ -391,7 +390,7 @@ experiments/
 直接重新运行相同命令，自动从 `latest.pt` 续训。若当前训练启用 EMA，checkpoint 缺少 EMA 权重或非负 updater step 会明确失败，不会用构造期 EMA 静默继续。
 
 **Q: 如何选择评测 checkpoint？**
-- `best` → 严格 v2 `best_ckpt.json`（缺失、字段无效或 checkpoint 缺失会失败；先运行 selector）
+- `best` → `best_ckpt.json`（缺失、字段无效或 checkpoint 缺失会失败；先运行 selector）
 - `latest` → `latest.pt` symlink
 - `20pct`..`100pct` → 里程碑 checkpoint
 - 直接路径 → 指定 `.pt` 文件

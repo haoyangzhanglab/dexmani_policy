@@ -383,20 +383,6 @@ class VectorQuantize(nn.Module):
         )
         self.codebook_size = codebook_size
 
-    @property
-    def codebook(self):
-        """Return codebook embedding (codebook_size, dim)."""
-        return rearrange(self._codebook.embed, "1 c d -> c d")
-
-    @codebook.setter
-    def codebook(self, codes):
-        self._codebook.embed.copy_(rearrange(codes, "c d -> 1 c d"))
-
-    def get_codes_from_indices(self, indices):
-        """Look up codebook vectors from indices (B,)."""
-        codes = self.codebook[indices]  # (B, dim)
-        return codes
-
     def forward(self, x, indices=None, sample_codebook_temp=None, freeze_codebook=False):
         """
         Args:

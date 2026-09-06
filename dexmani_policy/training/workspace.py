@@ -8,20 +8,12 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint_io import (
     CheckpointStore,
-    TopKCheckpointTracker,
     TrainCheckpoint,
 )
 from dexmani_policy.training.logging import (
     JsonlLogger,
     WandbLogger,
 )
-
-
-@dataclass
-class CheckpointConfig:
-    monitor_key: str
-    mode: str
-    topk: int
 
 
 @dataclass
@@ -36,19 +28,12 @@ class WandbConfig:
 
 
 class TrainWorkspace:
-    def __init__(self, output_dir: str, wandb_cfg: WandbConfig, checkpoint_cfg: CheckpointConfig):
+    def __init__(self, output_dir: str, wandb_cfg: WandbConfig):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir = self.output_dir / "checkpoints"
 
         self.checkpoint_store = CheckpointStore(self.checkpoint_dir)
-
-        self.topk_tracker = TopKCheckpointTracker(
-            checkpoint_dir=self.checkpoint_dir,
-            monitor_key=checkpoint_cfg.monitor_key,
-            mode=checkpoint_cfg.mode,
-            k=checkpoint_cfg.topk,
-        )
 
         self.json_logger = JsonlLogger(output_dir=self.output_dir)
         # Derive the W&B id from the experiment identity (the timestamped
@@ -76,7 +61,7 @@ class TrainWorkspace:
         self.wandb_logger.log_config(cfg_dict, self.output_dir)
 
     def resolve_checkpoint_path(self, tag_or_path: str) -> Path:
-        return self.checkpoint_store.resolve_path(tag_or_path, best_fn=self.topk_tracker.best_path)
+        return self.checkpoint_store.resolve_path(tag_or_path)
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
         self.json_logger.log(data, step=step)
@@ -94,9 +79,6 @@ class TrainWorkspace:
         tmp_path.symlink_to(checkpoint_path.name)
         os.replace(tmp_path, latest_path)
         return latest_path
-
-    def save_topk(self, checkpoint_path: Path, checkpoint: TrainCheckpoint) -> Optional[Path]:
-        return self.topk_tracker.update(checkpoint_path, checkpoint)
 
     def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
         path = self.resolve_checkpoint_path(tag_or_path)

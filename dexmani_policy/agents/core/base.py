@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -242,13 +242,6 @@ class BaseAgent(nn.Module):
             "control_action": control_action,
             "tail": tail,
         }
-
-    @torch.no_grad()
-    def compute_action_mse(self, batch: Dict[str, Any]) -> float:
-        obs = batch["obs"]
-        gt_action = batch["action"]
-        pred_action = self.predict_action(obs)["pred_action"]
-        return torch.nn.functional.mse_loss(pred_action, gt_action).item()
 
     def compile_backbone(self, **compile_kwargs):
         self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)

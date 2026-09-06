@@ -141,26 +141,6 @@ def preprocess_point_cloud(
     return pc
 
 
-def square_distance(source_xyz: torch.Tensor, target_xyz: torch.Tensor) -> torch.Tensor:
-    if source_xyz.ndim != 3 or target_xyz.ndim != 3:
-        raise ValueError(
-            f"source_xyz and target_xyz must have shape [B, N, 3] / [B, M, 3], "
-            f"but got {tuple(source_xyz.shape)} and {tuple(target_xyz.shape)}"
-        )
-    if source_xyz.size(-1) != 3 or target_xyz.size(-1) != 3:
-        raise ValueError(
-            f"source_xyz and target_xyz last dim must be 3, "
-            f"but got {source_xyz.size(-1)} and {target_xyz.size(-1)}"
-        )
-
-    distance = (
-        source_xyz.square().sum(dim=-1, keepdim=True)
-        - 2 * source_xyz @ target_xyz.transpose(1, 2)
-        + target_xyz.square().sum(dim=-1).unsqueeze(1)
-    )
-    return distance.clamp_min(0.0)
-
-
 def index_points(points: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
     batch_index = torch.arange(points.size(0), device=points.device, dtype=torch.long)
     view_shape = (points.size(0),) + (1,) * (index.ndim - 1)

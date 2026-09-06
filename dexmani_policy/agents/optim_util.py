@@ -3,14 +3,6 @@ from typing import List, Optional, Tuple
 import torch.nn as nn
 
 
-def get_default_optim_group(module: nn.Module, weight_decay: float):
-    module_params = {
-        "params": [p for p in module.parameters() if p.requires_grad],
-        "weight_decay": weight_decay,
-    }
-    return [module_params]
-
-
 def get_optim_group_with_no_decay(
     module: nn.Module,
     weight_decay: float,

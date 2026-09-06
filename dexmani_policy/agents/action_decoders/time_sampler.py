@@ -1,17 +1,7 @@
 import math
 
-import numpy as np
 import torch
 from torch.distributions import Beta
-
-
-def logit_normal_density(t: np.ndarray, m: float = 0.0, s: float = 1.0) -> np.ndarray:
-    t = np.clip(t, 1e-10, 1 - 1e-10)
-    logit_t = np.log(t / (1 - t))
-    density = (
-        (1 / (s * np.sqrt(2 * np.pi))) * (1 / (t * (1 - t))) * np.exp(-((logit_t - m) ** 2) / (2 * s**2))
-    )
-    return density
 
 
 def sample_logit_normal(

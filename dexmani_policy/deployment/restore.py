@@ -58,10 +58,6 @@ def reset_inference_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-# A concise alias for callers that do not distinguish train and inference seeding.
-seed_everything = reset_inference_seed
-
-
 def deployment_spec(payload: Mapping[str, Any]) -> DeploymentSpec:
     """Extract the one canonical deployment contract."""
     try:
@@ -315,17 +311,6 @@ def assert_prediction_parity(
                 f"{name} parity mismatch (max_abs_error={max_abs_error:.9g}, "
                 f"atol={atol}, rtol={rtol})"
             )
-
-
-def compare_prediction_snapshots(
-    reference: PredictionSnapshot,
-    candidate: PredictionSnapshot,
-    *,
-    atol: float = 0.0,
-    rtol: float = 0.0,
-) -> None:
-    """Alias retaining a descriptive name for direct/export parity tests."""
-    assert_prediction_parity(reference, candidate, atol=atol, rtol=rtol)
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:

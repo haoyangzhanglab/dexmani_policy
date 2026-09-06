@@ -39,15 +39,6 @@ dataloader:
   prefetch_factor: 2
   drop_last: false
 
-val_dataloader:
-  batch_size: 128
-  shuffle: false
-  num_workers: 4
-  pin_memory: true
-  persistent_workers: false
-  prefetch_factor: 2
-  drop_last: false
-
 # ── Dataset ──
 dataset:
   _target_: dexmani_policy.datasets.pc_dataset.PCDataset
@@ -157,15 +148,6 @@ workspace:
     resume: allow
     mode: offline
     video_fps: 15
-
-  checkpoint_cfg:
-    _target_: dexmani_policy.training.workspace.CheckpointConfig
-    # Training writes milestone/interrupt checkpoints with monitor={}. Offline
-    # select_best_ckpt.py selects deployment-quality checkpoints and writes
-    # strict best_ckpt.json selection record.
-    monitor_key: val_loss
-    mode: min
-    topk: 3
 
 # ── Env Runner ──
 env_runner:

@@ -29,8 +29,7 @@
 
 ## 修复 workflow
 
-用户要求执行 v2 修复 workflow 时，先读 `docs/repair_workflow.md` 和
-`docs/repair_progress.md`。按 workflow 自动完成阶段验收、精简交接与后续阶段，
+用户要求执行修复 workflow 时，按 workflow 自动完成阶段验收、精简交接与后续阶段，
 无需逐阶段确认。允许按任务难度调用 `sol-high`、`terra-xhigh`、`luna-max`
 三档 agent；具体分工、验证节奏及本轮优先约束以 workflow 为准。
 

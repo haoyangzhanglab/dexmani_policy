@@ -19,9 +19,6 @@ class GeometryProcessor:
     def __init__(self):
         self.pixel_grid_cache: Dict[Tuple[int, int, str, str], Tuple[torch.Tensor, torch.Tensor]] = {}
 
-    def clear_cache(self) -> None:
-        self.pixel_grid_cache.clear()
-
     def get_pixel_grid(
         self,
         image_h: int,

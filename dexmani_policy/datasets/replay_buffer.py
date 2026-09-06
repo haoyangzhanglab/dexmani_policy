@@ -72,18 +72,8 @@ class ReplayBuffer:
         return self.root["meta"]
 
     @property
-    def attrs(self):
-        return self.root.get("attrs", {})
-
-    @property
     def episode_ends(self):
         return self.meta["episode_ends"]
-
-    @property
-    def n_steps(self):
-        if len(self.episode_ends) == 0:
-            return 0
-        return self.episode_ends[-1]
 
     @property
     def n_episodes(self):
@@ -91,9 +81,6 @@ class ReplayBuffer:
 
     def keys(self):
         return self.data.keys()
-
-    def values(self):
-        return self.data.values()
 
     def items(self):
         return self.data.items()

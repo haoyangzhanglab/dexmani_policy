@@ -91,7 +91,6 @@ class BaseDataset(torch.utils.data.Dataset):
         augmentation_cfg: dict | None = None,
         action_key: str = "action",
         use_aux_ee: bool = False,
-        tcp_dim: int | None = None,
         obs_horizon: Optional[int] = None,
         rgb_preprocess_size: Optional[Tuple[int, int]] = None,
         rgb_random_crop_size: Optional[Tuple[int, int]] = None,
@@ -105,7 +104,6 @@ class BaseDataset(torch.utils.data.Dataset):
 
         self.action_key = action_key
         self.use_aux_ee = use_aux_ee
-        self.tcp_dim = tcp_dim
         self.obs_horizon = obs_horizon
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size

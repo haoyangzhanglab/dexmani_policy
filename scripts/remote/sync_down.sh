@@ -132,7 +132,6 @@ PASS2_OPTS=(
     --partial
     --include='metrics.jsonl'
     --include='checkpoints/latest.pt'
-    --include='checkpoints/scores.json'
     --include='*/'
     --exclude='*'
     "${WANDB_EXCLUDE[@]}"

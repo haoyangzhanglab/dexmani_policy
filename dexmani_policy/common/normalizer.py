@@ -217,12 +217,6 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         )
 
     @classmethod
-    def create_fit_params(cls, data: Union[torch.Tensor, np.ndarray, zarr.Array], **kwargs):
-        obj = cls()
-        obj.fit(data, **kwargs)
-        return obj
-
-    @classmethod
     def create_manual(
         cls,
         scale: Union[torch.Tensor, np.ndarray],

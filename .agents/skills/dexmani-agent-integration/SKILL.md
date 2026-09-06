@@ -99,7 +99,7 @@ Optionally override:
 
 Path: `dexmani_policy/configs/<name>.yaml`
 
-Copy `dp3.yaml` as a template. The required top-level fields (all 18 configs share these):
+Copy `dp3.yaml` as a template. The required top-level fields (all base configs share these):
 
 | Field | Typical value | Notes |
 |-------|--------------|-------|
@@ -113,7 +113,6 @@ Copy `dp3.yaml` as a template. The required top-level fields (all 18 configs sha
 | `action_key` | `action` | `action` (joint) or `action_ee` (end-effector) |
 | `action_dim` | `${eval:'...'}` | See formula below |
 | `dataloader` | `{batch_size, num_workers, ...}` | |
-| `val_dataloader` | Same structure | |
 | `dataset` | `{_target_, zarr_path, horizon, ...}` | Must include `_target_` for Hydra instantiation |
 | `agent` | `{_target_, horizon, n_obs_steps, n_action_steps, action_dim, ...}` | Must include `_target_: dexmani_policy.agents.core.<name>.<Name>Agent` |
 | `optimizer` | `{lr, weight_decay, betas, ...}` | AdamW `fused=torch.cuda.is_available()` |
@@ -160,19 +159,6 @@ training:
 dataloader:
   batch_size: <per_gpu_batch>
   num_workers: 4
-
-val_dataloader:
-  batch_size: <per_gpu_batch>
-  num_workers: 4
-
-hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
-  run:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
-  sweep:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
-    subdir: ${hydra.job.num}
 ```
 
 **Known exceptions** (intentional, not errors): `dp3` has no DDP config.

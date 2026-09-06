@@ -49,7 +49,6 @@ class Diffusion(nn.Module):
             prediction_type=prediction_type,
         )
         self.num_inference_steps = num_inference_steps
-        self._prediction_type = prediction_type
         self._cached_alphas_device = None
 
     def compute_loss(
