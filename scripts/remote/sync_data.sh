@@ -91,8 +91,12 @@ upload_dir() {
     if [[ -n "$PULL" ]]; then
         # ---- Pull: server → local ----
         if [[ ! -d "$local_path" ]]; then
-            echo "[mkdir] $local_name/ — creating local directory"
-            mkdir -p "$local_path"
+            if [[ -n "$DRY_RUN" ]]; then
+                echo "[would create] $local_name/"
+            else
+                echo "[mkdir] $local_name/ — creating local directory"
+                mkdir -p "$local_path"
+            fi
         fi
         echo "[sync] /data_ssd/ZHY/$remote_subdir/ → $local_name/"
         rsync "${RSYNC_OPTS[@]}" "$REMOTE_DATA/$remote_subdir/" "$local_path/"

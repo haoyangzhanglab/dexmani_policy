@@ -66,6 +66,13 @@ if [[ ! -d "$EXP_DIR" ]]; then
     exit 0
 fi
 
+# Resolve the managed environment once. The resulting interpreter can be used
+# for every config without starting Conda once per experiment.
+if ! POLICY_PYTHON=$(conda run --no-capture-output -n policy python -c 'import sys; print(sys.executable)'); then
+    echo "ERROR: cannot resolve the policy environment Python." >&2
+    exit 1
+fi
+
 # ── helpers ──
 
 # Return 0 (true) if the experiment was modified recently enough to be
@@ -81,19 +88,16 @@ is_active() {
     [[ $age_minutes -lt $SKIP_ACTIVE_MINUTES ]]
 }
 
-# Read total_train_steps from config.yaml.
-# Empty string on failure.
+# Read total_train_steps from config.yaml. Callers must skip an experiment when
+# this fails so a parse problem can never turn into an automatic deletion.
 get_total_train_steps() {
-    python -c "
+    "$POLICY_PYTHON" -c '
 import sys
-try:
-    from omegaconf import OmegaConf
-    cfg = OmegaConf.load(sys.argv[1])
-    loop = cfg.training.loop
-    print(int(loop.total_train_steps))
-except Exception:
-    pass
-" "$1/config.yaml" 2>/dev/null || true
+from omegaconf import OmegaConf
+
+cfg = OmegaConf.load(sys.argv[1])
+print(int(cfg.training.loop.total_train_steps))
+' "$1/config.yaml"
 }
 
 # Scan checkpoint filenames for the maximum completed step.
@@ -148,7 +152,10 @@ while IFS= read -r -d '' checkpoints_dir; do
         continue
     fi
 
-    total_steps=$(get_total_train_steps "$exp_dir")
+    if ! total_steps=$(get_total_train_steps "$exp_dir"); then
+        SKIPPED+=("$exp_dir|SKIP: could not read training.loop.total_train_steps")
+        continue
+    fi
     max_step=$(get_max_step "$checkpoints_dir")
     size=$(du -sb "$exp_dir" 2>/dev/null | cut -f1)
 
@@ -180,8 +187,6 @@ done < <(find "$EXP_DIR" -type d -name checkpoints -print0)
 
 if [[ ${#INCOMPLETE[@]} -eq 0 ]] && [[ ${#TOY[@]} -eq 0 ]]; then
     echo "No incomplete or toy experiments found."
-    [[ ${#SKIPPED[@]} -gt 0 ]] && echo "(${#SKIPPED[@]} experiments skipped — still active)"
-    exit 0
 fi
 
 action_mode="[DRY RUN]"
@@ -273,11 +278,11 @@ if [[ ${#TOY[@]} -gt 0 ]]; then
     fi
 fi
 
-# ── skipped (active) experiments ──
+# ── skipped experiments ──────────────────────────────────────────────────────
 
 if [[ ${#SKIPPED[@]} -gt 0 ]]; then
     echo ""
-    echo "━━ ${#SKIPPED[@]} experiment(s) skipped (modified within ${SKIP_ACTIVE_MINUTES}min):"
+    echo "━━ ${#SKIPPED[@]} experiment(s) skipped:"
     for s in "${SKIPPED[@]}"; do
         exp_dir="${s%%|*}"; reason="${s#*|}"
         rel_path="${exp_dir#$ROOT_DIR/}"

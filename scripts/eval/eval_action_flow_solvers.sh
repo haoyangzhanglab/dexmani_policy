@@ -57,10 +57,18 @@ EMA_ARG="--ema"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --episodes)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --episodes requires a value." >&2
+                exit 1
+            fi
             EPISODES="$2"
             shift 2
             ;;
         --ckpt-tag)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --ckpt-tag requires a value." >&2
+                exit 1
+            fi
             CKPT_TAG="$2"
             shift 2
             ;;

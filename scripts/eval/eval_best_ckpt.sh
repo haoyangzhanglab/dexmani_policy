@@ -18,7 +18,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
     echo "Positional args:"
@@ -40,6 +40,11 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42"
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 40pct"
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --episodes 50"
+    exit 0
+fi
+
+if [[ $# -lt 3 ]]; then
+    echo "Usage: bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]" >&2
     exit 1
 fi
 
@@ -57,14 +62,6 @@ fi
 
 if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     echo "Error: config.yaml not found in ${EXP_DIR}" >&2
-    exit 1
-fi
-
-# Validate at least one checkpoint exists
-if [[ ! -d "$EXP_DIR/checkpoints" ]] || \
-   ! compgen -G "$EXP_DIR/checkpoints/epoch=*.pt" > /dev/null; then
-    echo "Error: no checkpoints found in ${EXP_DIR}/checkpoints/" >&2
-    echo "The experiment may not have completed any training steps." >&2
     exit 1
 fi
 

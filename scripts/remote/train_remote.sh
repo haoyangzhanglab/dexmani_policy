@@ -12,6 +12,8 @@
 #   bash scripts/remote/train_remote.sh dp3 pour
 #   bash scripts/remote/train_remote.sh ddp/maniflow pour
 #   bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
+#   # For DDP, the number of visible GPUs must equal training.num_gpus.
+#   bash scripts/remote/train_remote.sh --gpus 0,1 ddp/maniflow pour 'training.num_gpus=2'
 #   bash scripts/remote/train_remote.sh --fg dp3 pour 'training.seed=123'
 #   bash scripts/remote/train_remote.sh --sync-data dp3 pour  # first run on new server
 #   bash scripts/remote/train_remote.sh --dry-run dp3 pour    # preview only
@@ -20,20 +22,19 @@
 #   1. Server reachable
 #   2. Code synced (sync_code.sh)
 #   3. robot_data exists for this task
-#   4. GPU memory available
+#   4. GPU status available
 #   5. Disk space on /data_ssd
 # ============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ---- Config ----
 SERVER="${DEX_SERVER:-dexserver}"
-SERVER_PROJ="~/ZHY/dexmani_policy"
+SERVER_PROJ='$HOME/ZHY/dexmani_policy'
 SERVER_DATA="/data_ssd/ZHY"
-CONDA_PYTHON="~/.conda/envs/dex_policy/bin/python"
+CONDA_PYTHON='$HOME/.conda/envs/dex_policy/bin/python'
 # ---- End Config ----
 
 FOREGROUND=false
@@ -85,30 +86,33 @@ if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     exit 1
 fi
 
-# Validate Hydra overrides: reject shell metacharacters
-for _override in "$@"; do
-    if [[ "$_override" =~ [\;\'\"\`\|\&\<\>\(\)\{\}\#\!\$\\] ]]; then
-        echo "Error: override contains unsafe characters: $_override" >&2
-        echo "  Allowed: letters, digits, =, ., _, -, /" >&2
-        exit 1
-    fi
-done
-
-HYDRA_OVERRIDES="task_name=$TASK"
-for override in "$@"; do
-    HYDRA_OVERRIDES="$HYDRA_OVERRIDES $override"
-done
-
 # ---- Build remote command ----
 if [[ "$CONFIG" == ddp/* ]]; then
     ENTRY="dexmani_policy/train_ddp.py"
 else
     ENTRY="dexmani_policy/train.py"
 fi
-REMOTE_CMD="cd $SERVER_PROJ && $CONDA_PYTHON $ENTRY --config-name=$CONFIG $HYDRA_OVERRIDES"
+
+# The remote command crosses SSH and, for background jobs, tmux. Quote every
+# argument for the final remote Bash instead of concatenating user input into a
+# command string. The outer SSH transport uses POSIX single quotes, while the
+# remote interpreter is explicitly Bash so printf %q has defined semantics.
+REMOTE_CMD="cd \"$SERVER_PROJ\" && \"$CONDA_PYTHON\""
+REMOTE_ARGS=("$ENTRY" "--config-name=$CONFIG" "task_name=$TASK" "$@")
+for remote_arg in "${REMOTE_ARGS[@]}"; do
+    printf -v remote_arg_q '%q' "$remote_arg"
+    REMOTE_CMD+=" $remote_arg_q"
+done
 if [[ -n "$GPU_IDS" ]]; then
-    REMOTE_CMD="export CUDA_VISIBLE_DEVICES=$GPU_IDS && $REMOTE_CMD"
+    printf -v gpu_ids_q '%q' "$GPU_IDS"
+    REMOTE_CMD="export CUDA_VISIBLE_DEVICES=$gpu_ids_q && $REMOTE_CMD"
 fi
+
+remote_bash_invocation() {
+    local remote_script="$1"
+    local escaped_script="${remote_script//\'/\'\\\'\'}"
+    printf "bash -lc '%s'" "$escaped_script"
+}
 
 SESSION="dex_${CONFIG//\//_}_${TASK}"
 
@@ -136,7 +140,9 @@ if $DRY_RUN; then
     echo "Config:    $CONFIG"
     echo "Task:      $TASK"
     echo "Session:   $SESSION"
-    echo "Overrides: $HYDRA_OVERRIDES"
+    printf "Overrides:"
+    printf " %q" "${REMOTE_ARGS[@]:2}"
+    printf "\n"
     echo "GPU:       ${GPU_IDS:-auto}"
     echo "Command:   $REMOTE_CMD"
     echo ""
@@ -210,34 +216,38 @@ echo ""
 echo "=== Pre-flight OK ==="
 echo ""
 
-# Escape single quotes in session name for safe tmux transport.
-# Input validation (above) guarantees no shell metacharacters, but single-quote
-# escaping is defense-in-depth for the tmux single-quoted context.
-SESSION_SAFE="${SESSION//\'/\'\\\'\'}"
-
 # ═══════════════════════════════════════════════════════════════════
 # Launch
 # ═══════════════════════════════════════════════════════════════════
 if $FOREGROUND; then
     echo "Launching in foreground (Ctrl+C to stop)..."
-    ssh -t "$SERVER" "$REMOTE_CMD"
+    ssh -t "$SERVER" "$(remote_bash_invocation "$REMOTE_CMD")"
 else
     # Kill existing session with same name, then create new one
-    ssh "$SERVER" "tmux kill-session -t '$SESSION_SAFE' 2>/dev/null; true"
+    printf -v session_q '%q' "$SESSION"
+    if ! ssh "$SERVER" "$(remote_bash_invocation "tmux kill-session -t $session_q 2>/dev/null || true")"; then
+        echo "ERROR: failed to contact '$SERVER' while replacing tmux session '$SESSION'." >&2
+        exit 1
+    fi
     # Launch in a detached tmux session that self-destructs on completion.
     # stdout/stderr are redirected to logs/<session>.log (root-anchored `logs/`
     # is excluded from sync_code --delete, and .gitignore already lists it), so a
     # crash traceback survives after the session closes. No trailing `read`, so
     # once training exits — checkpoints already saved, GPU memory freed — tmux
     # destroys the session automatically.
-    ssh "$SERVER" "tmux new-session -d -s '$SESSION_SAFE' 'mkdir -p $SERVER_PROJ/logs && { $REMOTE_CMD; _rc=\$?; if [ \"\$_rc\" -eq 0 ]; then echo \"[train_remote] $SESSION finished successfully (exit 0).\"; else echo \"[train_remote] $SESSION FAILED (exit \$_rc).\"; fi; } > $SERVER_PROJ/logs/${SESSION_SAFE}.log 2>&1'"
+    REMOTE_TMUX_SCRIPT="mkdir -p \"$SERVER_PROJ/logs\" && { $REMOTE_CMD; _rc=\$?; if [[ \$_rc -eq 0 ]]; then echo \"[train_remote] $SESSION finished successfully (exit 0).\"; else echo \"[train_remote] $SESSION FAILED (exit \$_rc).\"; fi; } > \"$SERVER_PROJ/logs/${SESSION}.log\" 2>&1"
+    printf -v tmux_script_q '%q' "$REMOTE_TMUX_SCRIPT"
+    if ! ssh "$SERVER" "$(remote_bash_invocation "tmux new-session -d -s $session_q bash -lc $tmux_script_q")"; then
+        echo "ERROR: failed to start tmux session '$SESSION' on '$SERVER'." >&2
+        exit 1
+    fi
 
     echo "╔══════════════════════════════════════════╗"
     echo "║  Training started (tmux: $SESSION)"
     echo "╠══════════════════════════════════════════╣"
-    echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION_SAFE'"
+    echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION'"
     echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"
-    echo "║  Console: ssh $SERVER \"tail -f $SERVER_PROJ/logs/${SESSION_SAFE}.log\""
+    echo "║  Console: ssh $SERVER \"tail -f $SERVER_PROJ/logs/${SESSION}.log\""
     echo "║  Stop:    bash scripts/remote/stop_remote.sh $SESSION"
     echo "╚══════════════════════════════════════════╝"
 fi

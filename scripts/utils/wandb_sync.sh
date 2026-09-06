@@ -72,12 +72,6 @@ if [[ -z "$SYNC_TARGET" ]]; then
     exit 1
 fi
 
-# Check wandb CLI availability
-if ! command -v wandb &>/dev/null; then
-    echo "Error: 'wandb' CLI not found. Install with: pip install wandb" >&2
-    exit 1
-fi
-
 # sync_one: sync (or dry-run print) a single run directory
 sync_one() {
     local run_dir="$1"
@@ -89,7 +83,7 @@ sync_one() {
         echo "  [dry-run] $run_dir  (id=$run_id, $size)"
     else
         echo "Syncing: $run_dir"
-        wandb sync "$run_dir"
+        conda run --no-capture-output -n policy wandb sync "$run_dir"
     fi
 }
 

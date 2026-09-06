@@ -185,7 +185,7 @@ bash scripts/remote/sync_data.sh                     # 推本地新增文件
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/dqrise pour
 ```
 
-> Pull 模式下本地目录不存在时会自动 `mkdir -p`。始终先 `--dry-run` 预览。
+> 非 dry-run 的 pull 模式下，本地目录不存在时会自动 `mkdir -p`；`--dry-run` 是只读预览，不创建目录。
 
 ### 3.4 sync_down.sh — 实验结果下载
 
@@ -202,12 +202,14 @@ bash scripts/remote/sync_down.sh --with-wandb             # 含 wandb 离线数�
 
 这是下载链路的核心设计 — 不依赖文件名或目录名来判断哪些是本地评测产物，而是基于**文件是否已存在**来决策：
 
-**Pass 1 — 只拉新文件** (`-av --ignore-existing`)
+**Pass 1 — 只拉新文件** (`-av --ignore-existing`，不保留 partial 文件)
 
 | 本地状态 | 行为 | 效果 |
 |----------|------|------|
 | 文件**不存在** | 下载 | 新 checkpoint、新实验 run |
 | 文件**已存在** | **跳过** | 保护所有本地文件不被覆盖 |
+
+本地评测产物（如 `eval_dexsim/`、`demo_videos/`、`best_ckpt.json`）同样因已存在而被保护。Pass 1 不使用 `--partial`：若 checkpoint 下载中断，下次会重新下载，而不会把半成品永久跳过。
 
 **Pass 2 — 更新可变文件** (`-av --existing` + 文件过滤)
 
@@ -219,15 +221,7 @@ Pass 2 仅更新 3 种训练中持续变化的文件：
 | `checkpoints/latest.pt` | symlink 目标随训练推进变化 | ~几十字节 |
 | `checkpoints/scores.json` | top-k tracker 更新 | ~KB |
 
-#### 为什么比基于名称排除更健壮
-
-| | 基于名称排除（脆弱） | 基于存在性保护（当前设计） |
-|------|------|------|
-| 需要预知本地文件 | 是 — 必须硬编码排除列表 | **否** — 任何本地已有文件自动跳过 |
-| 未来评测代码改变输出路径 | 需同步更新 sync 脚本 | **无需修改** |
-| 误删本地评测产物 | 可能（exclude 与 delete 不匹配时） | **从不** |
-
-> Checkpoint `.pt` 文件是 immutable 的（写一次不改），`--ignore-existing` 完美处理：新的下载，已有的跳过。本地评测产物（`eval_dexsim/`、`demo_videos/`、`best_ckpt.json` 或任何未来新目录）只要存在就被 Pass 1 自动保护。
+Pass 2 不使用 `--ignore-existing`，因此可安全保留它的 partial 传输。
 
 退出码 24（"some files vanished during transfer"）被捕获为良性 — 发生在训练运行中 checkpoint 被轮换时。
 
@@ -271,6 +265,14 @@ bash scripts/remote/train_remote.sh --fg <config> <task> [...]             # 前
 bash scripts/remote/train_remote.sh --sync-data <config> <task>            # 含数据上传
 bash scripts/remote/train_remote.sh --dry-run <config> <task>              # 预览
 ```
+
+DDP 中 `--gpus` 暴露的卡数必须与 `training.num_gpus` 相等。DDP overlay 默认是 4；若只使用两卡，显式传入 `training.num_gpus=2`，并记录有效 batch size 已随之变化：
+
+```bash
+bash scripts/remote/train_remote.sh --gpus 0,1 ddp/maniflow pour 'training.num_gpus=2'
+```
+
+Hydra 覆盖参数按独立参数转发；含空格或列表语法的值按常规 shell 方式整体引用。
 
 **Pre-flight checks（任一失败则退出）**:
 
@@ -316,14 +318,14 @@ bash scripts/remote/stop_remote.sh --all        # 停止所有训练 session
 bash scripts/remote/stop_remote.sh --list       # 查看活跃 session
 ```
 
-**三阶段停止流程**:
+**四阶段停止流程**:
 
 | 阶段 | 操作 | 超时 |
 |------|------|------|
 | 1. SIGINT | `tmux send-keys C-c` → 训练代码捕获信号，优雅保存 checkpoint | — |
 | 2. 轮询等待 | 每 2s 检查 `tmux has-session` | 30s |
-| 3. Force kill | `tmux kill-session`（SIGHUP→SIGKILL） | — |
-| 4. GPU 验证 | `nvidia-smi --query-compute-apps` 检查显存释放 | — |
+| 3. Force kill | `tmux kill-session` | — |
+| 4. GPU 验证 | `nvidia-smi --query-compute-apps` 检查显存释放；查询失败仅警告 | — |
 
 `--all` 模式只停匹配 `*_*` 命名的 session（训练命名规则），不会误杀其他 tmux 会话。
 
@@ -349,7 +351,7 @@ bash scripts/remote/sync_down.sh maniflow/pour
 # 5. 本地评测
 bash scripts/eval/eval_pipeline.sh maniflow pour <timestamp>
 
-# 6. (可选) 录制 demo
+# 6. 需要不同 seeds 或分辨率时，再单独重录 demo
 bash scripts/eval/record_demo.sh maniflow pour <timestamp>
 ```
 

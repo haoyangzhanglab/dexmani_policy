@@ -16,17 +16,13 @@ echo "[download_pretrained] Downloading Uni3D weights from eddie-cui/r3d-weights
 
 mkdir -p "$TARGET_DIR"
 
-# 尝试 huggingface-cli；fallback 到 Python API
-if command -v huggingface-cli &>/dev/null; then
-    huggingface-cli download eddie-cui/r3d-weights model.safetensors \
-        --local-dir "$TARGET_DIR"
-else
-    python3 -c "
+conda run --no-capture-output -n policy python -c '
+import sys
 from huggingface_hub import hf_hub_download
-hf_hub_download('eddie-cui/r3d-weights', 'model.safetensors',
-                local_dir='$TARGET_DIR')
-print('Downloaded to $TARGET_DIR/model.safetensors')
-"
-fi
+
+target_dir = sys.argv[1]
+hf_hub_download("eddie-cui/r3d-weights", "model.safetensors", local_dir=target_dir)
+print(f"Downloaded to {target_dir}/model.safetensors")
+' "$TARGET_DIR"
 
 echo "[download_pretrained] Done: $TARGET_DIR/model.safetensors"

@@ -19,7 +19,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # ── Usage ────────────────────────────────────────────────────────────────────
-if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]"
     echo ""
     echo "One-shot evaluation pipeline: select best ckpt → held-out eval → 5 demo videos."
@@ -37,6 +37,11 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Examples:"
     echo "  bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56"
     echo "  bash scripts/eval/eval_pipeline.sh maniflow_8l_abl pour 2026-08-04_22-19_42 --no-videos"
+    exit 0
+fi
+
+if [[ $# -lt 3 ]]; then
+    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]" >&2
     exit 1
 fi
 
@@ -73,18 +78,15 @@ if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     exit 1
 fi
 
-# ── Concurrency lock (PID-file, survives SIGKILL via staleness detection) ────
+# ── Concurrency lock ─────────────────────────────────────────────────────────
 LOCK_FILE="${EXP_DIR}/.pipeline.lock"
-if [[ -f "$LOCK_FILE" ]]; then
-    old_pid=$(cat "$LOCK_FILE" 2>/dev/null)
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-        echo "Error: another eval pipeline is running for ${EXP_DIR} (PID $old_pid)" >&2
-        exit 1
-    fi
-    rm -f "$LOCK_FILE"
+# Keep the lock file in place. flock locks its inode, so it releases safely
+# when this process exits without stale-PID cleanup races.
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "Error: another eval pipeline is running for ${EXP_DIR}" >&2
+    exit 1
 fi
-echo $$ > "$LOCK_FILE"
-trap 'rm -f "$LOCK_FILE"' EXIT
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Step 1/3: Select Best Checkpoint (fixed two-stage selection, no videos)
@@ -119,11 +121,11 @@ conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py 
     $NO_VIDEOS
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 3/3: Record Demo Videos (5 episodes, non-fatal — needs display)
+# Step 3/3: Record Demo Videos (5 episodes)
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
-echo "  Step 3/3: Record Demo Videos (5 episodes, 1920×1080)"
+echo "  Step 3/3: Record Demo Videos (5 episodes, default 1280×960)"
 echo "============================================================"
 echo ""
 
@@ -131,7 +133,10 @@ conda run --no-capture-output -n policy python dexmani_policy/record_demo.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
-    || echo "⚠  Demo recording skipped (no display, or environment error)"
+    || {
+        echo "ERROR: demo recording failed; checkpoint selection and held-out evaluation completed." >&2
+        exit 1
+    }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Summary

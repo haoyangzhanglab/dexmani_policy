@@ -1,15 +1,15 @@
 """Demo video recording — high-resolution viewer capture for presentations.
 
 Loads a trained checkpoint and records evaluation episodes using the SAPIEN
-viewer at high resolution (default 1920×1080), suitable for making demo videos.
+viewer at high resolution (default 1280×960), suitable for making demo videos.
 
 Key differences from ``eval_best_ckpt.py``:
 
 - Uses ``render_mode="human"`` → viewer is created → video frames come from
-  ``get_viewer_rgb()`` at the viewer window's native resolution (1920×1080),
+  ``get_viewer_rgb()`` at the configured viewer resolution (default 1280×960),
   instead of the 320×240 sensor camera used in headless eval.
-- Designed for machines **with a display** (X11/Wayland). The viewer window
-  will open during recording — this is expected.
+- Designed for machines with an X11 ``DISPLAY``. Wayland sessions require
+  XWayland. The viewer window will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
 - With ``--ckpt-tag best``, reuses the strict selection record's EMA choice,
   denoising step count, and temporal-ensemble coefficient. Explicit
@@ -185,7 +185,7 @@ def main() -> None:
         nargs=2,
         default=None,
         metavar=("WIDTH", "HEIGHT"),
-        help="Viewer window resolution WIDTH HEIGHT (default: 1920 1080).",
+        help="Viewer window resolution WIDTH HEIGHT (default: 1280 960).",
     )
     parser.add_argument(
         "--fps",
@@ -240,7 +240,7 @@ def main() -> None:
     # Apply viewer resolution from CLI or config
     _demo_resolution = args.resolution
     if _demo_resolution is None:
-        _demo_resolution = _get_eval_param(cfg, "viewer_resolution", "demo", default=[1920, 1080])
+        _demo_resolution = _get_eval_param(cfg, "viewer_resolution", "demo", default=[1280, 960])
     resolved_resolution = tuple(_demo_resolution)
     resolved_fps = (
         args.fps

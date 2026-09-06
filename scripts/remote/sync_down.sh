@@ -9,31 +9,10 @@
 #   bash scripts/remote/sync_down.sh --dry-run                 # Preview what would transfer
 #   bash scripts/remote/sync_down.sh --list                    # List experiments on server
 #
-# Two-pass sync strategy (no name-based assumptions):
-#
-#   Pass 1 — "only new files"
-#     rsync --ignore-existing
-#     → Files that DON'T exist locally are downloaded (new checkpoints, new runs).
-#     → Files that DO exist locally are SKIPPED — regardless of their name/path.
-#       This includes locally-generated eval outputs, demo videos, etc.
-#       No hardcoded directory name assumptions needed.
-#
-#   Pass 2 — "mutable training files"
-#     Targeted rsync for files that change DURING training:
-#       - metrics.jsonl          (grows with each log step)
-#       - checkpoints/latest.pt  (symlink target changes)
-#       - checkpoints/scores.json (top-k tracker updates)
-#     These are small text files — re-transfer is cheap.
-#
-#   Why this is robust:
-#     - Checkpoint .pt files are immutable (written once, never modified).
-#       --ignore-existing handles them correctly: new ones downloaded,
-#       existing ones skipped.
-#     - Locally-generated files (eval_dexsim, demo_videos, best_ckpt.json,
-#       whatever future eval scripts create) are protected by their mere
-#       existence — no need to know their names in advance.
-#     - If eval output paths change in a future code update, no sync
-#       script change needed.
+# Two-pass sync: Pass 1 downloads only new files and protects any existing
+# local artifact; Pass 2 updates the three small mutable training entries.
+# Pass 1 deliberately does not retain partial transfers: --ignore-existing
+# would otherwise mistake an interrupted checkpoint for a complete one.
 # ============================================================================
 
 set -euo pipefail
@@ -94,7 +73,14 @@ LOCAL_PATH="$LOCAL_EXP${SUBPATH:+/$SUBPATH}"
 [[ "$REMOTE_PATH" != */ ]] && REMOTE_PATH="$REMOTE_PATH/"
 [[ "$LOCAL_PATH" != */ ]] && LOCAL_PATH="$LOCAL_PATH/"
 
-mkdir -p "$(dirname "$LOCAL_PATH")"
+LOCAL_PARENT="$(dirname "$LOCAL_PATH")"
+if [[ ! -d "$LOCAL_PARENT" ]]; then
+    if [[ -n "$DRY_RUN" ]]; then
+        echo "[would create] $LOCAL_PARENT"
+    else
+        mkdir -p "$LOCAL_PARENT"
+    fi
+fi
 
 # ---- Wandb handling ----
 WANDB_EXCLUDE=()
@@ -110,15 +96,13 @@ echo ""
 # ═══════════════════════════════════════════════════════════════════
 # Pass 1: Download new files only
 # ═══════════════════════════════════════════════════════════════════
-# --ignore-existing: skip any file that already exists on the receiver.
-# This is the core robustness mechanism — locally-generated eval artifacts
-# (no matter their name) exist locally → automatically protected.
+# Do not combine --partial with --ignore-existing: a later sync would skip an
+# interrupted checkpoint merely because its partial destination file exists.
 echo "--- Pass 1/2: new files (--ignore-existing) ---"
 
 PASS1_OPTS=(
     -av
     --ignore-existing
-    --partial
     --progress
     "${WANDB_EXCLUDE[@]}"
     $DRY_RUN
@@ -137,19 +121,8 @@ rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
 # ═══════════════════════════════════════════════════════════════════
 # Pass 2: Force-update files that change during training
 # ═══════════════════════════════════════════════════════════════════
-# These files are small (text) and change continuously during training.
-# --ignore-existing would skip them (they already exist locally), so we
-# do a targeted second pass WITHOUT --ignore-existing.
-#
-# --existing ensures we only UPDATE files already pulled by pass 1,
-# never create new ones (pass 1 already handles new experiment dirs).
-#
-# File filter explained:
-#   --include='metrics.jsonl'           → training metrics (grows)
-#   --include='checkpoints/latest.pt'   → symlink to latest checkpoint
-#   --include='checkpoints/scores.json' → top-k checkpoint tracker
-#   --include='*/'                      → recurse into directories
-#   --exclude='*'                       → skip everything else
+# --existing and the file filter update only mutable training metadata.
+# This pass has no --ignore-existing, so retaining a partial transfer is safe.
 echo ""
 echo "--- Pass 2/2: mutable training files (--existing) ---"
 

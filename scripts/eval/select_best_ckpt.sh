@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/select_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
     echo "Positional args:"
@@ -41,6 +41,11 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35"
     echo "  bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\"
     echo "      --initial-episodes 25 --max-episodes 50"
+    exit 0
+fi
+
+if [[ $# -lt 3 ]]; then
+    echo "Usage: bash scripts/eval/select_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]" >&2
     exit 1
 fi
 

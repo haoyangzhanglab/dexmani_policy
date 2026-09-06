@@ -70,6 +70,7 @@ from dexmani_policy.training.eval_utils import (
     build_eval_components,
     collect_episode_details,
     discover_milestone_checkpoints,
+    iter_leaf_env_runners,
     load_ckpt_for_inference,
     resolve_eval_seed,
     validate_denoise_steps,
@@ -151,7 +152,8 @@ def evaluate_checkpoint(
     agent.eval()
 
     env_runner.eval_seeds = list(seeds)
-    env_runner.record_video = video_save_dir is not None
+    for leaf_runner in iter_leaf_env_runners(env_runner):
+        leaf_runner.record_video = video_save_dir is not None
     return env_runner.run(
         agent,
         denoise_timesteps=denoise_steps,

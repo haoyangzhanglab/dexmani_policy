@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # High-resolution demo video recording from a trained checkpoint.
 #
-# Uses the SAPIEN viewer (render_mode="human") to capture 1920×1080 video
-# frames, ideal for presentations and demo reels.
+# Uses the SAPIEN viewer (render_mode="human") to capture 1280×960 video
+# frames by default; pass --resolution WIDTH HEIGHT to override it.
 #
 # Usage:
 #   bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]
@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
     echo "Positional args:"
@@ -30,7 +30,7 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  --episodes N         Number of episodes to record (default: from config)"
     echo "  --seeds S1 S2 ...    Specific seed numbers to record (overrides --episodes)"
     echo "  --output-dir DIR     Output directory (default: exp_dir/demo_videos/)"
-    echo "  --resolution W H     Viewer resolution WIDTH HEIGHT (default: 1920 1080)"
+    echo "  --resolution W H     Viewer resolution WIDTH HEIGHT (default: 1280 960)"
     echo "  --fps N              Video FPS override (default: auto-detect from env)"
     echo "  --denoise-steps N    Single inference step count (best: selection record; otherwise config)"
     echo "                       To sweep a non-best checkpoint, set in config:"
@@ -42,6 +42,11 @@ if [[ $# -lt 3 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  bash scripts/eval/record_demo.sh sat pour 2026-08-01_12-34-56 --episodes 10"
     echo "  bash scripts/eval/record_demo.sh maniflow pour 2026-08-01_12-34-56 --resolution 3840 2160"
     echo "  bash scripts/eval/record_demo.sh dp3 pour 2026-08-01_12-34-56 --seeds 5 12 33 78"
+    exit 0
+fi
+
+if [[ $# -lt 3 ]]; then
+    echo "Usage: bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]" >&2
     exit 1
 fi
 
@@ -62,10 +67,10 @@ if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     exit 1
 fi
 
-# Check for display (SAPIEN viewer requires a running X11/Wayland server)
+# SAPIEN's viewer requires an X11 DISPLAY. Wayland sessions need XWayland.
 if [[ -z "${DISPLAY:-}" ]]; then
-    echo "Error: DISPLAY is not set — demo recording requires a graphical display." >&2
-    echo "Run on a machine with a monitor, or set DISPLAY=:0 if the X server is running." >&2
+    echo "Error: DISPLAY is not set — demo recording requires X11 or XWayland." >&2
+    echo "Run on a machine with a display server, or set DISPLAY=:0 if XWayland is running." >&2
     exit 1
 fi
 

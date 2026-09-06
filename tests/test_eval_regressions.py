@@ -25,7 +25,7 @@ from dexmani_policy.eval_best_ckpt import (
     _run_one_timestep,
     _select_eval_seeds,
 )
-from dexmani_policy.select_best_ckpt import select_best_checkpoint
+from dexmani_policy.select_best_ckpt import evaluate_checkpoint, select_best_checkpoint
 from dexmani_policy.training.eval_utils import (
     MilestoneCheckpoint,
     load_ckpt_for_inference,
@@ -484,6 +484,56 @@ class SelectionContractTests(unittest.TestCase):
         self.assertEqual(record["selection"]["seeds"], expected[:3])
         self.assertTrue(record["selection"]["tie_break_used"])
         self.assertEqual(record["n_episodes"], 3)
+
+    def test_selector_propagates_video_setting_to_multitask_child_runners(self):
+        ckpt = MilestoneCheckpoint(path=Path("/tmp/checkpoint.pt"), pct=20, global_step=1)
+        seeds = [3, 7]
+        agent = mock.Mock()
+        checkpoint_store = mock.sentinel.checkpoint_store
+
+        for video_save_dir, expected_record_video in (
+            (None, False),
+            (Path("/tmp/videos"), True),
+        ):
+            with self.subTest(video_save_dir=video_save_dir):
+                child_a = SimpleNamespace(record_video=not expected_record_video)
+                child_b = SimpleNamespace(record_video=not expected_record_video)
+                parent = SimpleNamespace(
+                    runners={"task_a": child_a, "task_b": child_b},
+                    run=mock.Mock(return_value={"episode_details": []}),
+                )
+
+                with mock.patch(
+                    "dexmani_policy.select_best_ckpt.load_ckpt_for_inference"
+                ) as load_ckpt:
+                    evaluate_checkpoint(
+                        agent,
+                        parent,
+                        checkpoint_store,
+                        ckpt,
+                        seeds,
+                        use_ema=False,
+                        denoise_steps=4,
+                        device=torch.device("cpu"),
+                        video_save_dir=video_save_dir,
+                    )
+
+                load_ckpt.assert_called_once_with(
+                    agent, checkpoint_store, ckpt.path, False
+                )
+                agent.to.assert_called_with(torch.device("cpu"))
+                agent.eval.assert_called_once_with()
+                self.assertEqual(parent.eval_seeds, seeds)
+                self.assertEqual(child_a.record_video, expected_record_video)
+                self.assertEqual(child_b.record_video, expected_record_video)
+                parent.run.assert_called_once_with(
+                    agent,
+                    denoise_timesteps=4,
+                    eval_episodes=len(seeds),
+                    video_save_dir=video_save_dir,
+                )
+
+            agent.reset_mock()
 
     def test_best_inference_precedence_handles_sections_lists_and_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1086,6 +1136,78 @@ class DemoInferenceContractTests(unittest.TestCase):
             self.assertTrue(child.record_video)
             self.assertEqual(child.viewer_resolution, (640, 480))
             self.assertEqual(child.env_video_fps, 24)
+
+    def test_demo_defaults_to_1280x960_without_resolution_override(self):
+        class FakeAgent:
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+        class FakeRunner:
+            def __init__(self):
+                self.runners = {
+                    "first": SimpleNamespace(),
+                    "second": SimpleNamespace(),
+                }
+
+            def get_seed_list(self):
+                return [2]
+
+            def run(self, *args, **kwargs):
+                return {"episode_details": [{"seed": 2, "success": True, "steps": 9}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exp_dir = root / "experiments" / "dp3" / "pour" / "test-exp"
+            exp_dir.mkdir(parents=True)
+            cfg = OmegaConf.create(
+                {
+                    "n_obs_steps": 2,
+                    "n_action_steps": 8,
+                    "horizon": 16,
+                    "action_key": "action",
+                    "training": {"device": "cpu", "seed": 42},
+                    "env_runner": {"env_kwargs": {"control_mode": "joint"}},
+                    "eval": {"use_ema": False, "denoise_steps": 4},
+                }
+            )
+            OmegaConf.save(cfg, exp_dir / "config.yaml")
+            runner = FakeRunner()
+            argv = [
+                "record_demo.py",
+                "--policy-name",
+                "dp3",
+                "--task-name",
+                "pour",
+                "--exp-name",
+                "test-exp",
+                "--ckpt-tag",
+                "latest",
+                "--episodes",
+                "1",
+            ]
+            with (
+                mock.patch.object(record_demo, "ROOT_DIR", str(root)),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(record_demo, "set_seed"),
+                mock.patch.object(
+                    record_demo,
+                    "build_eval_components",
+                    return_value=(FakeAgent(), runner, object()),
+                ),
+                mock.patch.object(
+                    record_demo,
+                    "resolve_checkpoint_path",
+                    return_value=(root / "checkpoints" / "latest.pt", "latest"),
+                ),
+                mock.patch.object(record_demo, "load_ckpt_for_inference"),
+            ):
+                record_demo.main()
+
+        for child in runner.runners.values():
+            self.assertEqual(child.viewer_resolution, (1280, 960))
 
 
 if __name__ == "__main__":

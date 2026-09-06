@@ -75,6 +75,12 @@ _POINT_ZARR_KEYS = (
     "point_cloud_sampling",
     "point_cloud_transform",
 )
+_FINGERTIP_SEMANTICS = {
+    "fingertip_points_frame": "xarm_base",
+    "fingertip_points_unit": "m",
+    "fingertip_points_derivation": "fk_from_processed_joint_state",
+    "fingertip_points_policy_id": "arm_hand_fk_from_joint_state_v1",
+}
 
 
 class DeploymentExportError(RuntimeError):
@@ -479,16 +485,14 @@ def _build_observation_contract(
                 },
             )
         elif name == "point_cloud":
-            point_count, feature_dim = _validate_point_cloud(array, attrs, cfg_plain)
+            (point_count, feature_dim), point_semantics = _validate_point_cloud(
+                array, attrs, cfg_plain
+            )
             fields[name] = _observation_field(
                 (point_count, feature_dim),
                 "float32",
                 "xyzrgb",
-                {
-                    "frame": "xarm_base",
-                    "position_units": "m",
-                    "color_order": "rgb",
-                },
+                point_semantics,
             )
         elif name == "rgb":
             tail = _validate_observation_array(array, name, None, np.dtype(np.uint8))
@@ -537,19 +541,12 @@ def _build_observation_contract(
             )
         elif name == "fingertip_points":
             _validate_observation_array(array, name, (5, 3), np.dtype(np.float32))
-            if attrs.get("fingertip_points_frame") != "xarm_base":
-                raise InvalidZarrError("Zarr fingertip_points_frame is invalid")
-            if attrs.get("fingertip_points_unit") != "m":
-                raise InvalidZarrError("Zarr fingertip_points_unit must be 'm'")
+            fingertip_semantics = _validate_fingertip_points(attrs)
             fields[name] = _observation_field(
                 (5, 3),
                 "float32",
                 "point_xyz",
-                {
-                    "frame": "xarm_base",
-                    "units": "m",
-                    "finger_order": "thumb_index_mid_ring_pinky",
-                },
+                fingertip_semantics,
             )
         else:  # _dataset_modalities already rejects unknown values.
             raise InvalidZarrError(f"unsupported observation field: {name!r}")
@@ -594,7 +591,7 @@ def _validate_core_zarr_attrs(
         raise InvalidZarrError(f"Real Policy Zarr is missing semantic attrs: {missing}")
     if (
         attrs["schema_name"] != "dexmani-real-policy-zarr"
-        or attrs["schema_version"] != 6
+        or attrs["schema_version"] != 7
         or attrs["domain"] != "real"
         or attrs["episode_start_policy"] != "full_history"
         or attrs["obs_alignment"] != "obs[t]_before_action[t]"
@@ -665,15 +662,18 @@ def _validate_observation_array(
 
 def _validate_point_cloud(
     array: Any, attrs: Mapping[str, Any], cfg_plain: Mapping[str, Any]
-) -> tuple[int, int]:
+) -> tuple[tuple[int, int], dict[str, str]]:
     tail = _validate_observation_array(array, "point_cloud", None, np.dtype(np.float32))
     if len(tail) != 2 or tail[0] not in _POINT_COUNTS or tail[1] != _POINT_FEATURE_DIM:
         raise InvalidZarrError("unsupported point-cloud shape")
     if any(attrs.get(key) != value for key, value in _POINT_SEMANTICS.items()):
         raise InvalidZarrError("invalid Real point-cloud semantics")
-    if _SHA256_RE.fullmatch(str(attrs.get("point_cloud_config_sha256"))) is None:
+    config_sha256 = attrs.get("point_cloud_config_sha256")
+    if type(config_sha256) is not str or _SHA256_RE.fullmatch(config_sha256) is None:
         raise InvalidZarrError("point_cloud_config_sha256 must be lowercase SHA-256")
-    _validate_table_plane(attrs.get("point_cloud_table_plane_abcd_json"))
+    table_plane_abcd_json = _validate_table_plane(
+        attrs.get("point_cloud_table_plane_abcd_json")
+    )
     agent = cfg_plain.get("agent")
     if type(agent) is not dict:
         raise InvalidExperimentError("config.agent must be a plain mapping")
@@ -686,7 +686,39 @@ def _validate_point_cloud(
         configured_dims.append(pc_encoder.get("pc_in_channels"))
     if any(value is not None and value != tail[1] for value in configured_dims):
         raise InvalidZarrError("Zarr point feature dim conflicts with agent config")
-    return tail
+    return tail, {
+        "frame": str(attrs["point_cloud_frame"]),
+        "position_units": "m",
+        "color_order": "rgb",
+        "color_source": str(attrs["point_cloud_color_source"]),
+        "policy_id": str(attrs["point_cloud_policy_id"]),
+        "config_sha256": config_sha256,
+        "table_plane_abcd_json": table_plane_abcd_json,
+        "sampling": str(attrs["point_cloud_sampling"]),
+        "transform": str(attrs["point_cloud_transform"]),
+    }
+
+
+def _validate_fingertip_points(attrs: Mapping[str, Any]) -> dict[str, str]:
+    for key, expected in _FINGERTIP_SEMANTICS.items():
+        if attrs.get(key) != expected:
+            raise InvalidZarrError(f"Zarr {key} is invalid")
+    geometry_sha256 = attrs.get("fingertip_points_geometry_sha256")
+    if (
+        type(geometry_sha256) is not str
+        or _SHA256_RE.fullmatch(geometry_sha256) is None
+    ):
+        raise InvalidZarrError(
+            "Zarr fingertip_points_geometry_sha256 must be lowercase SHA-256"
+        )
+    return {
+        "frame": str(attrs["fingertip_points_frame"]),
+        "units": str(attrs["fingertip_points_unit"]),
+        "finger_order": "thumb_index_mid_ring_pinky",
+        "derivation": str(attrs["fingertip_points_derivation"]),
+        "policy_id": str(attrs["fingertip_points_policy_id"]),
+        "geometry_sha256": geometry_sha256,
+    }
 
 
 def _observation_field(

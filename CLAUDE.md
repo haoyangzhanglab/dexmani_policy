@@ -60,7 +60,7 @@ bash scripts/eval/record_demo.sh sat pour <exp_name> --ckpt-tag 100pct --seeds 5
 bash scripts/eval/record_demo.sh maniflow pour <exp_name> --no-ema --resolution 3840 2160
 ```
 
-> 需 X11/Wayland。视频 → `experiments/<policy>/<task>/<exp>/demo_videos/<timestamp>/`。
+> 需 X11 `DISPLAY`；Wayland 会话需 XWayland。视频 → `experiments/<policy>/<task>/<exp>/demo_videos/<timestamp>/`。
 > `--seeds` 覆盖 `--episodes`。
 
 ### 验证

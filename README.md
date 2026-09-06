@@ -237,7 +237,7 @@ eval:
   use_ema: true      # 所有策略共享
   select_best: {initial_episodes: 25, batch_size: 5, max_episodes: 100}
   offline: {episodes: 100}
-  demo: {episodes: 5, viewer_resolution: [1920, 1080]}
+  demo: {episodes: 5, viewer_resolution: [1280, 960]}
 ```
 
 普通 checkpoint 的参数优先级：CLI > 子节覆盖 > eval 共享层 > hardcoded default。

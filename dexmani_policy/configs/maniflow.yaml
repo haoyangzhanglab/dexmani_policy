@@ -204,7 +204,7 @@ eval:
 
   demo:
     episodes: 5
-    viewer_resolution: [1920, 1080]
+    viewer_resolution: [1280, 960]
 
   video:
     enabled: true
