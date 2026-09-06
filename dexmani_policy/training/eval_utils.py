@@ -191,7 +191,7 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
     if not isinstance(best_info, dict):
         raise ValueError("best_ckpt.json must contain a JSON object")
 
-    required_top = {
+    expected_top = {
         "ckpt_relpath",
         "pct",
         "global_step",
@@ -201,25 +201,14 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
         "inference",
         "selection",
     }
-    missing = sorted(required_top - best_info.keys())
-    if missing:
-        raise ValueError(f"best_ckpt.json is missing required fields: {missing}")
+    if set(best_info) != expected_top:
+        raise ValueError("best_ckpt.json does not match current schema")
 
     inference = best_info["inference"]
     if not isinstance(inference, dict):
         raise ValueError("best_ckpt.json inference must be an object")
-    missing = sorted(
-        {
-            "use_ema",
-            "denoise_steps",
-            "policy_seed_mode",
-        }
-        - inference.keys()
-    )
-    if missing:
-        raise ValueError(
-            f"best_ckpt.json inference is missing required fields: {missing}"
-        )
+    if set(inference) != {"use_ema", "denoise_steps", "policy_seed_mode"}:
+        raise ValueError("best_ckpt.json does not match current schema")
     if not isinstance(inference["use_ema"], bool):
         raise ValueError("best_ckpt.json inference.use_ema must be boolean")
     denoise_steps = inference["denoise_steps"]
@@ -239,14 +228,13 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
     selection = best_info["selection"]
     if not isinstance(selection, dict):
         raise ValueError("best_ckpt.json selection must be an object")
-    missing = sorted(
-        {"shuffle_seed", "seeds", "initial_episodes", "tie_break_used"}
-        - selection.keys()
-    )
-    if missing:
-        raise ValueError(
-            f"best_ckpt.json selection is missing required fields: {missing}"
-        )
+    if set(selection) != {
+        "shuffle_seed",
+        "seeds",
+        "initial_episodes",
+        "tie_break_used",
+    }:
+        raise ValueError("best_ckpt.json does not match current schema")
     seeds = selection["seeds"]
     if (
         not isinstance(seeds, list)

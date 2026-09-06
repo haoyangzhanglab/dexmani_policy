@@ -68,6 +68,29 @@ def _deployment_spec() -> DeploymentSpec:
     )
 
 
+def _best_ckpt_record() -> dict:
+    """A best_ckpt.json record matching the current strict schema."""
+    return {
+        "ckpt_relpath": "checkpoints/step-100000.pt",
+        "pct": 100,
+        "global_step": 100000,
+        "success_rate": 0.8,
+        "avg_steps": 150.5,
+        "n_episodes": 100,
+        "inference": {
+            "use_ema": True,
+            "denoise_steps": 10,
+            "policy_seed_mode": "episode_seed",
+        },
+        "selection": {
+            "shuffle_seed": 0,
+            "seeds": [1, 2, 3],
+            "initial_episodes": 3,
+            "tie_break_used": False,
+        },
+    }
+
+
 class _FakeAgent:
     """Deterministic agent whose control_action is the canonical pred slice."""
 
@@ -290,6 +313,44 @@ class DeploymentContractTest(unittest.TestCase):
             from dexmani_policy.training.eval_utils import read_best_ckpt_json
 
             with self.assertRaises(ValueError):
+                read_best_ckpt_json(exp_dir)
+
+    def test_best_ckpt_extra_record_version_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_dir = Path(tmp)
+            ckpt = exp_dir / "checkpoints" / "step-100000.pt"
+            ckpt.parent.mkdir(parents=True, exist_ok=True)
+            ckpt.touch()
+            record = _best_ckpt_record()
+            record["record_version"] = 1
+            (exp_dir / "best_ckpt.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+
+            from dexmani_policy.training.eval_utils import read_best_ckpt_json
+
+            with self.assertRaisesRegex(
+                ValueError, "does not match current schema"
+            ):
+                read_best_ckpt_json(exp_dir)
+
+    def test_best_ckpt_inference_temporal_ensemble_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_dir = Path(tmp)
+            ckpt = exp_dir / "checkpoints" / "step-100000.pt"
+            ckpt.parent.mkdir(parents=True, exist_ok=True)
+            ckpt.touch()
+            record = _best_ckpt_record()
+            record["inference"]["temporal_ensemble_coeff"] = 1.0
+            (exp_dir / "best_ckpt.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+
+            from dexmani_policy.training.eval_utils import read_best_ckpt_json
+
+            with self.assertRaisesRegex(
+                ValueError, "does not match current schema"
+            ):
                 read_best_ckpt_json(exp_dir)
 
     def test_configs_have_no_temporal_key(self):
