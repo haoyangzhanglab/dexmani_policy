@@ -1,83 +1,49 @@
-# DexMani Policy — Deployment Semantics Simplification Guide
+# DexMani Policy — Canonical Deployment Cleanup Guide
 
 > Repository: `haoyangzhanglab/dexmani_policy`  
-> Reviewed baseline: `c212b5a9820f4e30eacbdd975748b1d4d7f5fc47`  
+> Reviewed code baseline: `c212b5a9820f4e30eacbdd975748b1d4d7f5fc47`  
 > Intended executor: Claude Code / Codex  
-> Scope: personal PhD robot-learning research. Optimize for correct experiment semantics, a small public contract, fast iteration, and deterministic offline verification. Do **not** turn this repository into a backward-compatible deployment framework.
+> Scope: personal PhD robot-learning research. Prefer the smallest change that makes training/sim/deployment semantics explicit and consistent. Do not refactor working boundaries merely to make them look smaller.
 
 ---
 
 ## 1. Goal
 
-The canonical inference path is already correct and must remain the center of the design:
+The canonical Policy inference path is already correct:
 
 ```text
-raw Policy observation
-        ↓
+raw observation
+    ↓
 Policy-owned preprocessing
-        ↓
+    ↓
 agent.predict_action(...)
-        ↓
+    ↓
 validate_prediction(...)
-        ↓
+    ↓
 snapshot.control_action
-        ↓
+    ↓
 finite float64 [N, D_control]
 ```
 
-This task simplifies the surrounding deployment contract. It does **not** change the model, training objective, sampler, action representation, or canonical `control_action` semantics.
+This task removes one obsolete generic concept — `temporal_ensemble_coeff` — from the active Policy pipeline while preserving everything else that already has clear research value.
 
 Required outcomes:
 
-1. Remove the obsolete generic `temporal_ensemble_coeff` concept from active configs, eval, selection, export, artifact, runtime, and docs.
-2. Bump the deployment artifact to a clean v4 schema; do not add legacy migration logic.
-3. Keep model/restore details inside Policy and expose a lean `PolicySpec` to Real.
-4. Preserve exact canonical `control_action` execution in both sim and deployment runtime.
-5. Relax Git provenance from an iteration-blocking gate to recorded metadata while retaining useful provenance.
-6. Add only small deterministic offline tests that lock these semantics.
+1. Generic sim/deployment always executes canonical `control_action` directly.
+2. `temporal_ensemble_coeff` disappears from new configs, eval APIs/results, checkpoint-selection writes, deployment artifacts, runtime state, and current docs.
+3. Deployment artifact schema advances once to v4 because its persisted contract changes.
+4. Existing expensive `best_ckpt.json` selection records remain usable **only when their old coefficient is null**; non-null historical records are rejected because they encode different evaluation semantics.
+5. Current strict Git provenance, normalizer/preprocessing checks, `PolicySpec` fields, restore logic, and qualification logic remain intact except where they directly reference the removed field.
 
-The target is a standard robot-learning Policy runtime, not a generic serving SDK.
-
----
-
-## 2. Ownership boundary
-
-### `dexmani_policy` owns
-
-```text
-model architecture
-checkpoint restore
-EMA weight selection
-denoise / solver settings
-normalizer
-RGB/model preprocessing
-training horizon and internal action layout
-canonical control_action extraction
-sim evaluation semantics
-deployment artifact internals
-```
-
-### `dexmani_real` may depend only on
-
-```text
-load_experiment(...)
-LoadedPolicy.spec
-LoadedPolicy.predict(observation) -> [N, D_control]
-LoadedPolicy.reset_episode()
-LoadedPolicy.close()
-```
-
-Real must not parse artifact internals or know how Diffusion / Flow / RISE-style models produce the chunk.
+Do not add a replacement temporal mechanism.
 
 ---
 
-## 3. Non-negotiable invariants
+## 2. Preserve these invariants
 
-Do not change the following behavior while simplifying the contract.
+### Runtime
 
-### 3.1 Canonical runtime output
-
-`LoadedPolicy.predict()` remains equivalent to:
+`LoadedPolicy.predict()` must remain equivalent to:
 
 ```python
 result = restored.agent.predict_action(
@@ -85,53 +51,78 @@ result = restored.agent.predict_action(
     denoise_timesteps=restored.spec.denoise_steps,
 )
 snapshot = validate_prediction(result, restored.spec, batch_size=1)
-control_action = snapshot.control_action[0]
-return finite_float64_numpy_copy(control_action)
+return snapshot.control_action[0]  # copied to finite float64 NumPy [N,D]
 ```
 
-It must not use:
+It must not depend on:
 
 ```text
 pred_action tail
-previous action chunks
+previous chunks
+overlap state
 post-hoc smoothing
-overlap blending
-temporal ensemble state
 RTC history
 ```
 
-### 3.2 Canonical sim execution
+### Sim runner
 
-Until a future experiment explicitly introduces `steps_per_inference`, one Policy query means one executable chunk:
+Until a future explicit experiment changes it:
 
 ```text
 obs history
 → predict_action()
-→ control_action [N,D]
-→ env.step(action[0:N]) in order
+→ canonical control_action [N,D]
+→ env.step() over N actions in order
 → next query
 ```
 
-Do not introduce overlapping replanning in this task.
+Do not add `steps_per_inference`, chunk merging, or overlapping replanning in this task.
 
-### 3.3 Observation preprocessing ownership
+### Restore / preprocessing
 
-Raw observation validation is public; model preprocessing is private to Policy.
-
-Real may know raw field shape/dtype/essential semantics. Real must not reproduce:
+Preserve:
 
 ```text
-ImageProcessor normalization
-model resize/crop chain
-normalizer internals
-encoder-specific transforms
+EMA/raw checkpoint selection
+denoise_steps
+normalizer validation
+RGB preprocessing reproduction
+point-cloud/fingertip semantic validation
+prediction parity / qualification
 ```
+
+These protect real train/deploy consistency and are not production-only ceremony.
 
 ---
 
-## 4. Verified current problems
+## 3. Do not slim `PolicySpec` in this task
 
-The current tree still carries `temporal_ensemble_coeff` through many active layers even though generic runtime/sim reject non-null values. Search currently reaches at least:
+Current `PolicySpec` exposes more metadata than Real presently consumes, including fields such as:
+
+```text
+action_dim
+horizon
+requires_hand
+rgb_preprocessing
+```
+
+That is not currently a correctness problem and removing them would enlarge the cross-repository patch for little benefit.
+
+Required change:
+
+```text
+remove PolicySpec.temporal_ensemble_coeff
+```
+
+Otherwise preserve the public `PolicySpec` shape and validation.
+
+Real must still treat model-specific details as Policy-owned; that ownership rule does not require deleting harmless read-only metadata now.
+
+---
+
+## 4. Remove generic temporal semantics end-to-end
+
+Current active references span at least:
 
 ```text
 dexmani_policy/deployment/contract.py
@@ -148,310 +139,197 @@ dexmani_policy/eval_best_ckpt.py
 dexmani_policy/record_demo.py
 dexmani_policy/training/eval_utils.py
 
-configs / README / docs
+dexmani_policy/configs/*.yaml
+README.md
+docs/仿真评测机制.md
+docs/项目架构.md
 ```
 
-This is dead configuration, not a supported research feature. Keeping a field whose only valid runtime value is `null` creates unnecessary producer/consumer checks and future ambiguity.
+Search the tree before editing; do not rely on this list being exhaustive.
 
-The exporter also currently requires a clean working tree and a specific origin URL. This is stronger than needed for a personal research workflow: provenance is useful, but local experimental changes should not be blocked solely because the tree is dirty.
+### 4.1 Env runners and configs
 
----
+Remove `temporal_ensemble_coeff` from runner constructor signatures, `super(...)` forwarding, Hydra configs, and generic rejection guards.
 
-## 5. Target public `PolicySpec`
-
-After this task, the Real-facing `PolicySpec` should contain only information required to construct raw observations and execute the returned action chunk:
-
-```python
-@dataclass(frozen=True)
-class PolicySpec:
-    action_key: str                # "action" | "action_ee"
-    control_action_dim: int        # 19 | 21
-    n_obs_steps: int
-    n_action_steps: int
-    observation_fields: tuple[ObservationFieldSpec, ...]
-    control_dt_s: float
-```
-
-### Keep `ObservationFieldSpec`
-
-Each raw observation field still needs:
-
-```text
-name
-shape
-dtype
-essential semantics
-```
-
-Essential semantics include information that can produce a real train/deploy mismatch, for example:
-
-```text
-coordinate frame
-units
-xyzrgb representation
-point-cloud preprocessing/config identity
-fingertip geometry identity
-RGB raw value range / color order
-```
-
-Do not reduce the cross-repo contract to shape-only validation.
-
-### Move out of public `PolicySpec`
-
-The following may remain in the internal deployment/restore spec if needed, but should not be part of the Real-facing contract:
-
-```text
-action_dim
-horizon
-denoise_steps
-requires_hand
-rgb_preprocessing
-model preprocessing internals
-```
-
-`action_key` + `control_action_dim` already describe the supported Real control boundary; both supported action spaces include the 12-DOF hand.
-
-Do not rename `action` / `action_ee` in this task. Avoid pointless cross-repository churn.
-
----
-
-## 6. Deployment artifact v4
-
-### 6.1 Bump schema once
-
-Update:
-
-```text
-DEPLOYMENT_FORMAT / DEPLOYMENT_SCHEMA_VERSION
-```
-
-to a v4 contract.
-
-Do not add runtime support for both v3 and v4. Existing v3 artifacts can be re-exported when needed.
-
-### 6.2 Remove temporal ensemble from artifact
-
-Remove `temporal_ensemble_coeff` from:
-
-```text
-DeploymentSpec
-parse_deployment_contract()
-inference_config.eval
-export payload construction
-qualification / parity metadata
-runtime PolicySpec construction
-runtime generic temporal guard
-```
-
-After the change there must be no artifact field that means “generic temporal blending”.
-
-### 6.3 Preserve internal information actually required for restore
-
-The v4 artifact may still contain internal restore fields such as:
-
-```text
-action_dim
-horizon
-denoise_steps
-rgb_preprocessing
-agent config / weights / normalizer-related state
-```
-
-Do not remove data merely because Real does not need to see it.
-
-This distinction is important:
-
-```text
-artifact/restore contract  !=  public Real-facing PolicySpec
-```
-
----
-
-## 7. Remove `temporal_ensemble_coeff` from the full active pipeline
-
-This removal must be end-to-end rather than replacing a float with more `None` checks.
-
-### 7.1 Env runners
-
-Remove the argument/config field from:
-
-```text
-BaseRunner
-SimRunner
-MultiTaskSimRunner
-Hydra env_runner configs
-```
-
-Delete the generic temporal rejection constant/guard.
-
-Preserve:
+Preserve exactly:
 
 ```python
 result = agent.predict_action(...)
 return result["control_action"]
 ```
 
-and sequential `env.step()` execution.
+Do not introduce another action postprocessor.
 
-### 7.2 Best-checkpoint selection record
+### 4.2 Eval / demo APIs and result metadata
 
-`best_ckpt.json` currently writes `record_version=2` with:
-
-```json
-"inference": {
-  "use_ema": ...,
-  "denoise_steps": ...,
-  "temporal_ensemble_coeff": ...,
-  "policy_seed_mode": "episode_seed"
-}
-```
-
-Change the selection schema to a clean v3 record:
-
-```json
-"inference": {
-  "use_ema": ...,
-  "denoise_steps": ...,
-  "policy_seed_mode": "episode_seed"
-}
-```
-
-Update writer and reader together:
+Remove the unused coefficient argument/value propagation from:
 
 ```text
-select_best_ckpt.py
-training/eval_utils.py
 eval_best_ckpt.py
 record_demo.py
-export.py
+related shell/config plumbing found by search
 ```
 
-Do not add a permanent v2 compatibility adapter. Old selection records can be recreated/updated when an old experiment needs deployment.
+Do not write the field into new `result_details.json` or demo metadata when it has no runtime effect.
 
-Do not rerun expensive selection automatically as part of tests.
-
-### 7.3 Export inference settings
-
-`_SelectedInferenceSettings` should become only:
-
-```python
-@dataclass(frozen=True)
-class _SelectedInferenceSettings:
-    use_ema: bool
-    denoise_steps: int
-```
-
-Resolve these two values from either `best_ckpt.json` or resolved config. Remove all coefficient validation and all requirements that `env_runner.temporal_ensemble_coeff` exist.
-
-### 7.4 Runtime / qualification
-
-Delete:
-
-```text
-_GENERIC_TEMPORAL_ENSEMBLE_ERROR
-_require_generic_chunk_semantics(...)
-PolicySpec.temporal_ensemble_coeff
-qualification comparisons for this field
-```
-
-Do not replace them with a differently named generic blending flag.
-
-### 7.5 Active config and docs search gate
-
-After code changes, search the active repository for:
-
-```text
-temporal_ensemble_coeff
-ChunkOverlapBlender
-temporal_ensembler
-```
-
-Expected result:
-
-```text
-no active code/config/current architecture documentation references
-```
-
-Historical experiment artifacts or Git history do not need rewriting.
+Historical result files are data; do not rewrite them.
 
 ---
 
-## 8. Provenance: record it, do not use it as an iteration gate
+## 5. `best_ckpt.json`: new v3, narrow v2 compatibility
 
-Keep useful Git provenance but relax the current export policy.
+Checkpoint selection can be expensive, so do not force valid historical null-coefficient selections to be rerun.
 
-### Required behavior
+### New writes
 
-Exporter should still establish:
+`select_best_ckpt.py` should write:
+
+```json
+{
+  "record_version": 3,
+  "inference": {
+    "use_ema": true,
+    "denoise_steps": 10,
+    "policy_seed_mode": "episode_seed"
+  }
+}
+```
+
+plus the existing checkpoint/selection/result fields.
+
+### Reader
+
+`read_best_ckpt_json()` should support only:
 
 ```text
-repository top level
-40-hex HEAD commit
-working-tree dirty/clean state
-origin URL when available
+v3:
+    no temporal field
+
+v2 legacy:
+    temporal_ensemble_coeff must exist and be null
+    normalize/ignore that obsolete null field
 ```
 
-The v4 producer metadata should record, at minimum:
-
-```yaml
-producer:
-  repository: haoyangzhanglab/dexmani_policy
-  commit: <40-hex HEAD>
-  dirty: true | false
-  origin: <string or null>
-```
-
-### Required policy
+If a v2 record contains a non-null coefficient, reject it with an explicit message such as:
 
 ```text
-dirty tree
-→ warning + dirty=true
-→ export continues
+This best_ckpt.json was selected under obsolete temporal-ensemble semantics.
+Re-run checkpoint selection under the current canonical control_action semantics.
 ```
+
+This is the only intentional compatibility shim in this task. Do not add a general record migration framework.
+
+Update all callers to consume only:
 
 ```text
-origin URL differs from canonical GitHub URL
-→ record it
-→ do not reject solely for that reason
+use_ema
+denoise_steps
+policy_seed_mode
 ```
 
-It is acceptable to keep failure for cases where the exporter cannot establish that it is running inside the expected repository root or cannot obtain a valid HEAD commit; those indicate an ambiguous artifact producer rather than ordinary research iteration.
-
-Do not implement signing, supply-chain verification, remote allowlists, or artifact registries.
+from the normalized inference record.
 
 ---
 
-## 9. Point-cloud / fingertip contracts
+## 6. Deployment artifact: clean v4
 
-Do not weaken geometry contracts while simplifying deployment.
+The deployment artifact is derived from an experiment/checkpoint and is cheap to regenerate compared with checkpoint selection. Prefer a clean artifact contract rather than carrying v3 compatibility indefinitely.
 
-For point cloud, preserve validation that prevents train/Real mismatch. Prefer a compact representation such as:
+### Required
 
-```text
-shape / dtype
-frame = xarm_base
-representation = xyzrgb
-config_sha256
-```
-
-Existing detailed fields may remain if removing them would require an unrelated data-schema migration. Do not expand them further.
-
-For fingertip points, preserve enough metadata to guarantee:
+Advance:
 
 ```text
-frame
-units
-finger ordering
-geometry identity
+DEPLOYMENT_FORMAT        -> dexmani.deployment.v4
+DEPLOYMENT_SCHEMA_VERSION -> 4
 ```
 
-The objective is “minimal sufficient semantics”, not “fewest strings possible”.
+Remove `temporal_ensemble_coeff` from:
+
+```text
+DeploymentSpec
+parse_deployment_contract()
+export inference payload
+runtime PolicySpec construction
+runtime generic temporal guard
+qualification field comparisons
+```
+
+The artifact still keeps all internal information required to restore the model, including where applicable:
+
+```text
+action_dim
+horizon
+denoise_steps
+rgb_preprocessing
+agent config
+weights
+normalizer-related state
+```
+
+Do not conflate:
+
+```text
+artifact restore metadata
+```
+
+with:
+
+```text
+Real-facing runtime semantics
+```
+
+### Legacy artifact policy
+
+Do not teach the new runtime to load v3 deployment artifacts. Re-export old experiments to produce v4 artifacts.
+
+Because the v2 `best_ckpt.json` null case remains readable, this re-export should not require repeating checkpoint selection.
 
 ---
 
-## 10. Files expected to change
+## 7. Preserve Git provenance exactly unless a real bug is found
 
-The executor must first search the tree and then confirm the final list. Expected production files include:
+Do **not** relax the current exporter provenance rules as part of this cleanup.
+
+Current checks for:
+
+```text
+repository root
+valid 40-hex HEAD
+clean working tree
+expected origin
+```
+
+are low-cost research reproducibility guards: the recorded commit only identifies the exact exporting code when the tree is clean.
+
+Do not add dirty-tree export, provenance flags, signing, registries, or remote abstraction in this task.
+
+If the executor discovers an independent provenance bug, report it separately rather than bundling a redesign into this patch.
+
+---
+
+## 8. Preserve observation/data semantic checks
+
+Do not simplify point-cloud/fingertip/RGB contracts just because this task removes an unrelated temporal field.
+
+In particular preserve the checks that prevent:
+
+```text
+wrong coordinate frame
+wrong units
+wrong xyzrgb preprocessing
+wrong point-cloud config identity
+wrong fingertip geometry/order
+wrong RGB preprocessing
+```
+
+No observation/data schema migration belongs in this task.
+
+---
+
+## 9. Expected files
+
+Search first, then minimize the final patch. Expected production files are primarily:
 
 ```text
 dexmani_policy/deployment/contract.py
@@ -468,155 +346,115 @@ dexmani_policy/eval_best_ckpt.py
 dexmani_policy/record_demo.py
 dexmani_policy/training/eval_utils.py
 
-relevant Hydra configs
+dexmani_policy/configs/*.yaml
 README.md
 docs/仿真评测机制.md
 docs/项目架构.md
 ```
 
-Plus a small deployment contract test file.
-
-Do not modify model/agent implementation unless a compile/test failure proves a direct dependency.
+Do not modify agents, losses, samplers, datasets, normalizers, or training code unless a direct compile/call-site dependency is demonstrated.
 
 ---
 
-## 11. Implementation phases
+## 10. Recommended implementation order
 
-Keep commits/reasoning separable even if the final change is one branch.
+### Phase A — sim/eval metadata cleanup
 
-### Phase A — remove temporal semantics from sim/eval metadata
+1. Remove env-runner constructor/config field.
+2. Remove eval/demo argument and result propagation.
+3. Write `best_ckpt.json` v3.
+4. Implement the narrow v2-null reader path.
+5. Verify canonical sim chunk execution is unchanged.
 
-1. Remove runner args/config.
-2. Remove best-checkpoint field and bump selection record v2 → v3.
-3. Update readers/callers.
-4. Verify sim still executes canonical `control_action` only.
+### Phase B — deployment artifact v4
 
-### Phase B — deployment v4
+1. Remove coefficient from internal deployment spec and export payload.
+2. Bump artifact v3 → v4.
+3. Remove runtime/qualification temporal guards/fields.
+4. Keep all unrelated `PolicySpec`, restore, preprocessing, and provenance behavior unchanged.
 
-1. Remove coefficient from artifact contract/export/restore metadata.
-2. Bump deployment v3 → v4.
-3. Remove runtime/qualification temporal guards.
-4. Slim the public `PolicySpec` without deleting internal restore data.
+### Phase C — docs + lightweight regression
 
-### Phase C — provenance relaxation
+1. Update README and durable docs to implemented behavior.
+2. Add focused offline checks.
+3. Run final stale-reference search.
 
-1. Preserve valid commit/root checks.
-2. Record dirty state and origin.
-3. Convert dirty/noncanonical-origin failure to warning/metadata.
-
-### Phase D — docs/tests
-
-1. Add focused tests.
-2. Update durable docs to actual code behavior.
-3. Search for stale generic temporal references.
-
-Do not mix a new inference algorithm into any phase.
+Do not combine a new inference algorithm with any phase.
 
 ---
 
-## 12. Focused offline tests
+## 11. Lightweight regression coverage
 
-Create a small deterministic test module, for example:
+Neither this repository nor its `pyproject.toml` currently establishes pytest as a required test framework. Do not add pytest only for this task.
+
+Prefer a small standard-library `unittest` module, for example:
 
 ```text
 tests/test_deployment_contract.py
 ```
 
-Do not restore a large historical suite.
+run with:
 
-### Test A — canonical runtime output
-
-Fake/restored agent returns both:
-
-```text
-pred_action
-control_action
+```bash
+python -m unittest discover -s tests -p 'test_deployment_contract.py'
 ```
 
-Assert exact array equality:
+Alternatively, if the executor finds an existing repository convention better suited to lightweight contract checks, use it and document the command.
 
-```text
-LoadedPolicy.predict(obs) == validated control_action[0]
-```
+Required checks:
 
-Shape-only testing is insufficient.
+### A. Canonical runtime output
 
-### Test B — public `PolicySpec` boundary
+Use a tiny fake restored agent exposing both `pred_action` and `control_action`; assert exact equality between `LoadedPolicy.predict()` and validated `control_action[0]`.
 
-Assert the public spec exposes the required Real-facing fields and does not expose:
-
-```text
-temporal_ensemble_coeff
-horizon
-denoise_steps
-rgb_preprocessing
-```
-
-Internal deployment spec may still contain restore fields.
-
-### Test C — v4 contract round trip
-
-Construct/minimally export a v4 payload and verify:
-
-```text
-parse
-inspect_experiment / equivalent metadata path
-restore metadata
-```
-
-without loading a large model where avoidable.
-
-### Test D — best_ckpt v3
+### B. Best-checkpoint records
 
 Verify:
 
 ```text
-writer schema and reader schema agree
-inference contains use_ema / denoise_steps / policy_seed_mode
-no temporal coefficient
+v3 record -> accepted
+v2 + null coefficient -> accepted/normalized
+v2 + non-null coefficient -> rejected
 ```
 
-### Test E — dirty provenance does not block
+### C. Artifact v4
 
-Mock Git command results:
+Verify a minimal v4 contract parses and the obsolete temporal field is neither required nor exposed.
 
-```text
-valid repo root
-valid commit
-dirty status
-noncanonical/local origin
-```
+### D. Runtime spec
 
-Assert export provenance construction succeeds and records the state.
+Verify `PolicySpec` no longer has `temporal_ensemble_coeff`, while unrelated existing fields remain available.
+
+No large checkpoint, dataset, simulator, or GPU is required for these checks.
 
 ---
 
-## 13. Cross-repository handoff to `dexmani_real`
+## 12. Cross-repository handoff
 
-After Policy v4 lands, Real should see only:
-
-```text
-PolicySpec.action_key
-PolicySpec.control_action_dim
-PolicySpec.n_obs_steps
-PolicySpec.n_action_steps
-PolicySpec.observation_fields
-PolicySpec.control_dt_s
-```
-
-and:
+After this Policy patch:
 
 ```text
-LoadedPolicy.predict(obs) -> finite float64 [N, D_control]
+dexmani_real
 ```
 
-Do not add a v3/v4 compatibility layer to Real. Update Real after Policy v4 is available.
+must remove its `PolicySpec.temporal_ensemble_coeff` compatibility check before using the new runtime.
+
+Do not require Real to parse artifact v4 directly. Real continues to consume the public `dexmani_policy.deployment` API.
+
+Recommended order:
+
+```text
+1. finish + offline-verify Policy cleanup
+2. update Real public-contract validation
+3. re-export one representative experiment to v4
+4. run Policy check / Real shadow before physical execution
+```
 
 ---
 
-## 14. Explicit non-goals
+## 13. Explicit non-goals
 
-Do not implement:
+Do not implement or redesign:
 
 ```text
 Temporal Ensemble
@@ -624,47 +462,48 @@ ACT overlap aggregation
 ChunkOverlapBlender replacement
 RTC
 previous-action conditioning
-steps_per_inference < n_action_steps
-receding-horizon merge logic
+steps_per_inference
+chunk overlap/merge
 action smoothing
 adaptive horizon
 latency compensation
-new sampler / solver
-Flow Matching distillation
-model architecture changes
-training objective changes
-data schema redesign
+sampler / solver
+Flow Matching objective/distillation
+model architecture
+training objective
+normalizer semantics
+observation/data schema
+PolicySpec slimming beyond the removed field
+Git provenance policy
 artifact migration framework
-artifact signing / registry
 ```
-
-`steps_per_inference` is intentionally deferred. If later experiments show that `n_action_steps * dt` is too open-loop, it must be introduced as one explicit sim+Real experiment, not hidden in runtime.
 
 ---
 
-## 15. Validation commands
+## 14. Validation
 
 Before editing:
 
 ```bash
 git status --short
 git rev-parse HEAD
-rg -n "temporal_ensemble_coeff|ChunkOverlapBlender|temporal_ensembler" .
+rg -n "temporal_ensemble_coeff|ChunkOverlapBlender|temporal_ensembler" \
+  dexmani_policy README.md docs scripts
 ```
 
 After editing:
 
 ```bash
 python -m compileall -q dexmani_policy
-python -m pytest -q tests/test_deployment_contract.py
+python -m unittest discover -s tests -p 'test_deployment_contract.py'
 
 git diff --check
 git diff --stat
 rg -n "temporal_ensemble_coeff|ChunkOverlapBlender|temporal_ensembler" \
-  dexmani_policy configs README.md docs
+  dexmani_policy README.md docs scripts
 ```
 
-The final `rg` should produce no active current-behavior references. Adjust config root names to the actual tree discovered by the executor.
+The final search may contain the intentionally narrow v2 `best_ckpt.json` compatibility check and this guide. It must not show a current sim/runtime/deployment feature or config option.
 
 Do not run unless separately authorized:
 
@@ -672,72 +511,63 @@ Do not run unless separately authorized:
 training
 DDP/NCCL
 large checkpoint sweeps
-long simulator evaluations
+full simulator benchmark
 real robot code
 ```
 
 ---
 
-## 16. Definition of Done
+## 15. Definition of Done
 
-All of the following must hold:
+All must hold:
 
 ```text
-generic Policy runtime
-→ no temporal ensemble field/state/guard
-→ exact canonical control_action
+new sim/config/eval path
+→ no temporal ensemble option
+→ canonical control_action only
 ```
 
 ```text
-sim runner
-→ exact canonical control_action
-→ no overlap/blending state
-```
-
-```text
-best_ckpt selection
-→ v3 metadata
-→ no temporal ensemble field
+best_ckpt.json v3
+→ no temporal field
+v2 + null
+→ still reusable
+v2 + non-null
+→ explicit rejection
 ```
 
 ```text
 deployment artifact
 → v4
-→ no temporal ensemble field
-→ restore still deterministic
+→ no temporal field
+→ deterministic restore semantics unchanged
 ```
 
 ```text
-public PolicySpec
-→ only Real-required raw observation/action timing contract
-```
-
-```text
-dirty working tree
-→ provenance recorded
-→ export not rejected solely for dirty state
+LoadedPolicy.predict()
+→ exact validated control_action
 ```
 
 and:
 
-- compileall passes;
-- focused tests pass;
-- `git diff --check` passes;
-- active docs match the implemented behavior;
-- no generic blending/RTC/replanning feature was added.
+- strict Git provenance unchanged;
+- existing `PolicySpec` fields unchanged except removal of temporal coefficient;
+- observation/preprocessing/normalizer contracts unchanged;
+- compile and lightweight tests pass;
+- durable docs match actual code;
+- no new action aggregation/replanning mechanism is introduced.
 
 ---
 
-## 17. Final Claude Code / Codex report
+## 16. Final Claude Code / Codex report
 
-Return:
+Report:
 
 ### Changed
-- files changed;
-- deployment schema version;
-- best_ckpt record version;
-- removed temporal semantics;
-- public `PolicySpec` fields after the change.
+- exact files;
+- `best_ckpt.json` version behavior;
+- deployment artifact version;
+- removed temporal field/call paths.
 
 ### Preserved
 Explicitly confirm:
@@ -745,25 +575,19 @@ Explicitly confirm:
 ```text
 canonical control_action
 sim sequential chunk execution
-normalizer / preprocessing ownership
-checkpoint restore semantics
+PolicySpec unrelated fields
+normalizer/preprocessing semantics
+strict provenance
 ```
 
 ### Verified
-- compileall result;
-- focused pytest result;
-- `git diff --check` result;
-- final stale-reference search result.
+- compile command;
+- lightweight regression command;
+- `git diff --check`;
+- stale-reference search.
 
 ### Not Verified
-Explicitly list unrun items, especially:
-
-```text
-large GPU checkpoint restore
-full simulator benchmark
-training
-real robot deployment
-```
+Explicitly list unrun items such as GPU checkpoint restore, full simulator evaluation, training, and real robot deployment.
 
 ### Remaining risk
-Report only concrete remaining risks found from code/tests. Do not propose RTC, temporal smoothing, or a new deployment framework as generic follow-up work.
+Only concrete code/test risks. Do not propose temporal smoothing, RTC, or a new serving framework as generic follow-up work.
