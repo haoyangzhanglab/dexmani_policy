@@ -3,6 +3,8 @@
 > Repository: `haoyangzhanglab/dexmani_policy`  
 > Intended executor: Claude Code / Codex  
 > Scope: personal PhD robot-learning research. Keep exactly one current implementation and one current metadata contract. Do not keep compatibility layers or versioned schema branches.
+>
+> **Current repository constraint:** there is no trained Policy checkpoint available in this repository at this stage. This task must therefore be completed and verified without training, checkpoint selection, real checkpoint restore, or real deployment export.
 
 ---
 
@@ -28,22 +30,65 @@ This task removes obsolete generic temporal-ensemble semantics and leaves the re
 
 Required outcomes:
 
-1. Generic sim/deployment executes canonical `control_action` directly.
+1. Generic sim/deployment code has exactly one semantic target: canonical `control_action`.
 2. `temporal_ensemble_coeff` disappears from active configs, eval, selection metadata, export, runtime, artifact contract, and current docs.
 3. `best_ckpt.json` has one strict current shape with **no version field**.
 4. deployment artifact has one strict current shape with **no v1/v2/v3 schema dispatch or compatibility reader**.
-5. old metadata/artifacts are regenerated or manually updated outside the runtime when needed; production code does not carry migration logic.
+5. production code contains no legacy metadata/artifact migration logic.
 6. existing checkpoint restore, preprocessing, normalizer, qualification, and provenance behavior remains unchanged unless directly coupled to the removed field.
+7. all verification in this phase is source-level or synthetic/offline; a real trained checkpoint is not required for Definition of Done.
 
 The target is one readable research code path, not a compatibility framework.
 
 ---
 
-## 2. Non-negotiable invariants
+## 2. Hard execution constraints
 
-### Runtime
+Claude Code / Codex must **not** run or initiate any of the following during this task:
 
-`LoadedPolicy.predict()` must remain equivalent to:
+```text
+policy training
+resume training
+fine-tuning
+train.py
+train_ddp.py
+DDP / NCCL
+checkpoint selection sweep
+select_best_ckpt.py as a real evaluation job
+eval_best_ckpt.py as a real simulator evaluation
+long simulator rollout
+real checkpoint restore
+real deployment export
+GPU inference that depends on trained weights
+real robot code
+```
+
+Do not create or train a dummy neural policy merely to satisfy a validation step.
+
+Do not fabricate a “representative trained experiment”.
+
+Use only:
+
+```text
+source inspection
+Hydra/config parsing where lightweight
+synthetic metadata
+synthetic deployment payloads
+fake agents / fake restored objects
+temporary files
+deterministic CPU-only contract checks
+compile/static checks
+```
+
+If a validation step genuinely requires trained weights, mark it **Deferred / Not Verified** rather than generating weights.
+
+---
+
+## 3. Non-negotiable invariants
+
+### Runtime semantics
+
+`LoadedPolicy.predict()` must remain logically equivalent to:
 
 ```python
 result = restored.agent.predict_action(
@@ -65,9 +110,11 @@ temporal ensemble
 RTC history
 ```
 
-### Sim
+A fake agent/restored object may be used to test this code path; a trained checkpoint is not needed.
 
-Keep:
+### Sim semantics
+
+Keep the one intended execution rule:
 
 ```text
 obs history
@@ -79,9 +126,11 @@ obs history
 
 Do not introduce `steps_per_inference`, overlap merging, or replanning in this task.
 
+Do not run a long simulator evaluation just to prove this. Inspect/test the runner logic directly.
+
 ### Restore / preprocessing
 
-Preserve:
+Preserve existing code and contracts for:
 
 ```text
 EMA/raw weight selection
@@ -93,13 +142,13 @@ prediction parity / qualification
 strict Git provenance
 ```
 
-These are useful reproducibility/correctness checks and are unrelated to temporal cleanup.
+These should be source/synthetic tested where possible. Real trained-weight restore is explicitly deferred.
 
 ---
 
-## 3. No compatibility layer and no schema-version machinery
+## 4. No compatibility layer and no schema-version machinery
 
-This repository is a personal research project. After this cleanup there should be exactly one supported shape for each current metadata object.
+After this cleanup there should be exactly one supported shape for each current metadata object.
 
 Do **not** implement or retain logic such as:
 
@@ -118,34 +167,17 @@ Do not add:
 legacy parser
 migration adapter
 compatibility shim
-v2-null special case
 artifact upgrader
 schema registry
 ```
 
-### Old files
+The repository currently has no trained checkpoint that needs preservation during this task, so no runtime compatibility mechanism is justified.
 
-If an old experiment has stale metadata:
-
-```text
-best_ckpt.json
-```
-
-update/regenerate that file once before using the experiment.
-
-If an old experiment has a stale deployment artifact:
-
-```text
-checkpoints/deployment_latest.pt
-```
-
-re-export it using the current code.
-
-The runtime should remain clean rather than permanently supporting historical formats.
+Future stale experiment metadata/artifacts, if encountered later, should be updated/re-exported once with the then-current code rather than expanding the runtime parser.
 
 ---
 
-## 4. `best_ckpt.json`: one current schema
+## 5. `best_ckpt.json`: one current schema
 
 Remove `record_version` entirely.
 
@@ -171,52 +203,50 @@ legacy fields
 
 Update `select_best_ckpt.py` to write only the current schema.
 
+Do **not** run checkpoint selection in this phase.
+
 ### Reader
 
 Update `read_best_ckpt_json()` to validate only the current required keys/types.
 
 Do not inspect a version number and do not normalize historical records.
 
-If the file does not match the current schema, fail with a concise message such as:
+If the file does not match the current schema, fail with a concise current-contract error.
+
+### Offline verification
+
+Use a temporary directory and hand-written synthetic JSON records to test:
 
 ```text
-best_ckpt.json does not match the current schema; regenerate/update it with the current code.
+valid current record → accepted
+missing required key → rejected
+obsolete temporal field / obsolete version field → not part of the current expected schema
 ```
 
-Do not teach the reader how to interpret old layouts.
-
-### Existing experiments
-
-Do not automatically rerun expensive checkpoint selection in tests or migration code.
-
-For existing experiments that were already selected under canonical `temporal_ensemble_coeff=null` semantics, the developer may perform a one-time metadata edit that removes obsolete fields. That is repository maintenance, not runtime compatibility logic.
-
-Experiments selected under non-null temporal ensemble semantics should be re-evaluated rather than silently reused.
+Do not create a checkpoint or invoke an environment.
 
 ---
 
-## 5. Deployment artifact: one current unversioned contract
+## 6. Deployment artifact: one current unversioned contract
 
-The artifact should also expose one current format only.
+The artifact should expose one current format only.
 
-Prefer an unversioned marker such as:
+Prefer a stable artifact-type marker such as:
 
 ```text
 _format = "dexmani.deployment"
 ```
 
-or an equivalent stable artifact-type marker.
-
-Remove persisted version-dispatch fields such as:
+Remove persisted compatibility-dispatch fields such as:
 
 ```text
 schema_version
 v1/v2/v3 format suffixes
 ```
 
-if they exist solely for compatibility dispatch.
+when they exist solely for historical version dispatch.
 
-The parser should validate the **current required structure**, not a historical version number.
+The parser validates the current required structure, not a history of structures.
 
 Required current top-level semantics remain conceptually:
 
@@ -225,8 +255,6 @@ artifact type marker
 contract
 weights
 ```
-
-and contract contains the current restore/inference/data/provenance metadata required by Policy.
 
 ### Remove temporal field
 
@@ -243,7 +271,7 @@ qualification comparisons
 
 ### Preserve restore data
 
-Do not remove fields that are actually needed to restore the trained model, for example:
+Do not remove fields actually needed for a future trained model restore, for example:
 
 ```text
 action_dim
@@ -255,21 +283,26 @@ weights
 normalizer-related state
 ```
 
-### Old artifacts
+### Offline verification only
 
-Do not load them through compatibility code.
+There is no trained checkpoint, therefore **do not call real export as an acceptance condition**.
 
-Simply:
+Instead build a minimal synthetic artifact mapping in a test using small dummy `torch.Tensor` weights and the current contract structure. Verify:
 
 ```text
-old deployment artifact
-→ re-export experiment
-→ current deployment artifact
+current artifact structure parses
+required fields are enforced
+temporal field is absent
+schema-version dispatch is absent
 ```
+
+Do not call `restore_deployment_agent()` on a real model in this phase unless it can be exercised with a deliberately tiny fake object without trained weights.
+
+Real artifact export/restore is deferred until the first trained checkpoint exists.
 
 ---
 
-## 6. Do not slim unrelated `PolicySpec` fields
+## 7. Do not slim unrelated `PolicySpec` fields
 
 The only mandatory public-spec removal in this task is:
 
@@ -286,13 +319,13 @@ requires_hand
 rgb_preprocessing
 ```
 
-unless a direct compile/call-site audit proves they are already dead and removing them is truly local.
+unless a direct compile/call-site audit proves removal is truly local and necessary.
 
-Do not create unnecessary cross-repository churn under the label of cleanup.
+Do not create unnecessary cross-repository churn.
 
 ---
 
-## 7. Remove temporal semantics end-to-end
+## 8. Remove temporal semantics end-to-end
 
 Search before editing. Current references are expected in areas including:
 
@@ -341,17 +374,17 @@ record_demo.py
 related scripts/config plumbing
 ```
 
-Do not rewrite historical result files.
+Do not run those programs as long evaluations in this task.
 
 ### Selection/export/runtime
 
-Remove the field from new checkpoint-selection metadata, export inference settings, artifact contract, runtime spec, and qualification comparisons.
+Remove the field from checkpoint-selection metadata, export inference settings, artifact contract, runtime spec, and qualification comparisons.
 
 Do not replace it with another generic blending flag.
 
 ---
 
-## 8. Preserve strict provenance
+## 9. Preserve strict provenance
 
 Do not relax exporter provenance in this task.
 
@@ -364,13 +397,13 @@ clean working tree
 expected origin
 ```
 
-For a research artifact, a clean tree makes the recorded commit meaningful.
+Do not run a real deployment export just to exercise those checks while no trained checkpoint exists.
 
-Do not add dirty-tree compatibility metadata, signing, registries, or remote abstraction.
+Unit-test pure provenance helpers only if directly touched; otherwise leave them alone.
 
 ---
 
-## 9. Preserve observation/data semantics
+## 10. Preserve observation/data semantics
 
 Do not simplify point-cloud/fingertip/RGB contracts while removing an unrelated temporal field.
 
@@ -389,7 +422,7 @@ No data-schema redesign belongs in this task.
 
 ---
 
-## 10. Expected patch scope
+## 11. Expected patch scope
 
 Search first and keep the patch minimal. Expected production areas:
 
@@ -419,7 +452,7 @@ Do not modify agents, losses, samplers, datasets, normalizers, or training objec
 
 ---
 
-## 11. Recommended implementation order
+## 12. Recommended implementation order
 
 ### Phase A — remove temporal runtime/eval semantics
 
@@ -427,7 +460,7 @@ Do not modify agents, losses, samplers, datasets, normalizers, or training objec
 2. Remove eval/demo argument/result propagation.
 3. Remove coefficient from checkpoint-selection writer/reader.
 4. Remove `record_version`; validate one current `best_ckpt.json` shape.
-5. Verify sim execution is unchanged.
+5. Inspect/synthetically test sim runner semantics without running a long evaluation.
 
 ### Phase B — simplify deployment artifact contract
 
@@ -435,18 +468,19 @@ Do not modify agents, losses, samplers, datasets, normalizers, or training objec
 2. Remove artifact schema-version dispatch/version fields.
 3. Keep one stable unversioned artifact marker + current required structure.
 4. Preserve restore/preprocessing/provenance logic.
+5. Validate the parser with a synthetic payload; do not export a trained model.
 
 ### Phase C — docs + lightweight regression
 
 1. Update durable docs to the actual implementation.
-2. Add small offline checks.
+2. Add small CPU-only offline checks.
 3. Search for obsolete temporal/version compatibility code.
 
 ---
 
-## 12. Lightweight regression coverage
+## 13. Lightweight regression coverage
 
-Do not create a large test framework.
+Do not create a large test framework and do not require real weights.
 
 A small standard-library `unittest` module is sufficient, for example:
 
@@ -458,63 +492,102 @@ Required checks:
 
 ### A. Canonical runtime output
 
-Fake agent exposes `pred_action` and `control_action`; assert:
+Use a fake restored object / fake agent exposing `pred_action` and `control_action`; assert:
 
 ```text
 LoadedPolicy.predict(obs) == validated control_action[0]
 ```
 
+No trained checkpoint.
+
 ### B. Current best_ckpt schema
 
-Verify one valid current record is accepted and missing/obsolete fields are rejected through ordinary required-key validation.
+Use synthetic JSON in `tempfile.TemporaryDirectory()`.
 
-Do **not** test v1/v2/v3 compatibility.
+Verify one valid current record is accepted and malformed/obsolete layouts are rejected by current required-key validation.
+
+Do not test historical version compatibility.
 
 ### C. Current deployment contract
 
-Verify a minimal current artifact parses without any schema-version value.
+Construct a minimal synthetic artifact mapping with tiny dummy tensor weights.
 
-Do **not** test old artifact versions.
+Verify parsing without any schema-version value.
+
+Do not export or restore a trained experiment.
 
 ### D. Runtime spec
 
-Verify `PolicySpec` no longer exposes `temporal_ensemble_coeff` and canonical prediction semantics remain unchanged.
+Verify `PolicySpec` no longer exposes `temporal_ensemble_coeff` and unrelated fields remain intact.
+
+### E. Config construction
+
+Where inexpensive, compose representative Hydra configs and verify env-runner construction no longer expects the removed field.
+
+Do not build datasets/models if that requires unavailable data or trained weights.
 
 ---
 
-## 13. Cross-repository handoff
+## 14. Cross-repository handoff for the current no-checkpoint phase
 
-After Policy cleanup, Real should continue using only:
+After Policy source cleanup, proceed to `dexmani_real` **without** requiring a real artifact.
 
-```text
-dexmani_policy.deployment public API
-```
-
-Real must remove its `temporal_ensemble_coeff` compatibility guard.
-
-Real does not need to know or validate artifact versions because artifact parsing remains Policy-owned.
-
-Recommended sequence:
+Real should be updated against the public Policy Python contract using:
 
 ```text
-1. finish Policy cleanup
-2. compile/offline check
-3. update/re-export one representative experiment metadata/artifact
-4. update Real
-5. Real shadow/check
-6. only then physical rollout
+synthetic/fake PolicySpec
+synthetic/fake action chunks
 ```
+
+Do not block Real cleanup on:
+
+```text
+trained checkpoint
+deployment_latest.pt
+real load_experiment()
+GPU inference
+```
+
+Current sequence:
+
+```text
+1. finish Policy source cleanup
+2. compile + synthetic contract checks
+3. update Real source against current public contract
+4. Real compile + synthetic rollout checks
+5. stop this cleanup phase
+```
+
+A later integration phase begins only after a real trained checkpoint exists:
+
+```text
+trained checkpoint
+→ current best/eval metadata
+→ current deployment artifact export
+→ Policy restore/inference validation
+→ Real check/shadow
+→ physical eval
+```
+
+That later phase is **not** part of this task.
 
 ---
 
-## 14. Explicit non-goals
+## 15. Explicit non-goals
 
-Do not implement:
+Do not implement or execute:
 
 ```text
 compatibility readers
 record/artifact version dispatch
 legacy migrations
+policy training / fine-tuning
+DDP/NCCL
+checkpoint generation
+checkpoint selection sweep
+real checkpoint restore
+real deployment export
+full simulator evaluation
 Temporal Ensemble
 ChunkOverlapBlender replacement
 RTC
@@ -533,7 +606,7 @@ Git provenance redesign
 
 ---
 
-## 15. Validation
+## 16. Validation
 
 Before editing:
 
@@ -556,72 +629,89 @@ rg -n "temporal_ensemble_coeff|ChunkOverlapBlender|temporal_ensembler|record_ver
   dexmani_policy README.md docs scripts
 ```
 
+If the chosen lightweight test path differs, run and report the actual deterministic CPU-only command.
+
 Expected final search:
 
 - no active temporal mechanism/config;
 - no best-checkpoint/deployment compatibility-version dispatch;
 - this implementation guide may mention removed names descriptively.
 
-Do not run training, DDP, large checkpoint sweeps, full simulator benchmarks, or real robot code unless separately authorized.
+Do not invoke any training/evaluation/export command that needs real trained weights.
 
 ---
 
-## 16. Definition of Done
+## 17. Definition of Done for this phase
 
-All must hold:
+All must hold **without a trained checkpoint**:
 
 ```text
-sim/runtime
+sim/runtime source semantics
 → canonical control_action only
 → no generic temporal option/state
 ```
 
 ```text
-best_ckpt.json
+best_ckpt.json code path
 → exactly one current schema
 → no record_version
 → no compatibility parser
+→ synthetic reader tests pass
 ```
 
 ```text
-deployment artifact
+deployment artifact code path
 → exactly one current contract
 → no schema-version dispatch
 → no temporal field
-```
-
-```text
-old metadata/artifacts
-→ regenerated or manually updated when needed
-→ not supported by permanent runtime compatibility code
+→ synthetic parser tests pass
 ```
 
 and:
 
-- strict Git provenance unchanged;
-- restore/preprocessing/normalizer semantics unchanged;
-- unrelated `PolicySpec` fields unchanged;
-- lightweight tests and compile checks pass;
+- strict Git provenance code remains unchanged;
+- restore/preprocessing/normalizer semantics remain unchanged;
+- unrelated `PolicySpec` fields remain unchanged;
+- compile and CPU-only lightweight checks pass;
 - durable docs match current code;
-- no new action aggregation/replanning mechanism exists.
+- no new action aggregation/replanning mechanism exists;
+- **no strategy training, checkpoint creation, checkpoint selection, real artifact export, or real checkpoint restore was performed.**
 
 ---
 
-## 17. Final Claude Code / Codex report
+## 18. Deferred integration validation
+
+Explicitly defer until a trained checkpoint exists:
+
+```text
+real checkpoint restore
+real deployment artifact export
+artifact → restore round trip with actual agent weights
+GPU inference
+full simulator evaluation
+Policy → Real integration using real artifact
+real robot shadow/run/eval
+```
+
+These are not failures of the current cleanup and must not block completion.
+
+---
+
+## 19. Final Claude Code / Codex report
 
 ### Changed
 Report exact files and the single current metadata/artifact shapes.
 
 ### Preserved
-Confirm canonical `control_action`, sequential sim execution, restore/preprocessing, `PolicySpec` unrelated fields, and strict provenance.
+Confirm canonical `control_action`, sequential sim semantics, restore/preprocessing, unrelated `PolicySpec` fields, and strict provenance.
 
 ### Verified
-Report compile, lightweight tests, `git diff --check`, and final stale-reference search.
+Report only commands actually run: compile, synthetic/unit checks, diff check, stale-reference search.
 
-### Manual follow-up
-List any old experiments whose `best_ckpt.json` or deployment artifact must be regenerated/updated once.
+### Explicitly Not Run
+Must state that no policy training, checkpoint selection, real checkpoint restore, real deployment export, long simulator evaluation, or real robot work was executed.
 
-### Not Verified
-List GPU/full-sim/training/real-robot work not executed.
+### Deferred
+List real-checkpoint integration validation as a future phase after a trained checkpoint exists.
 
 Do not propose compatibility layers or temporal smoothing as follow-up work.
