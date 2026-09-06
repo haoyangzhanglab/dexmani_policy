@@ -223,11 +223,7 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   default_eval_episodes: 20
   sensor_modalities: ['joint_state', 'rgb']
-  # ── ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705) ──
-  # Blend overlapping action-chunk predictions via exponential weighting
-  # to smooth transitions between consecutive inference calls.
-  # Default: 0.01. Set to null to disable.
-  temporal_ensemble_coeff: 0.01
+  temporal_ensemble_coeff: null
   task_configs:
     - task_name: pick_bottle
       task_text: ${dataset.task_texts[0]}

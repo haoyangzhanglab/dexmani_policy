@@ -9,7 +9,6 @@ from unittest import mock
 import numpy as np
 import torch
 
-from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
 from dexmani_policy.deployment import runtime
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
@@ -325,51 +324,58 @@ class DeploymentRuntimeTest(unittest.TestCase):
                 True,
             )
 
-    def test_temporal_blender_matches_reference_and_slices_aux_dimensions(self) -> None:
+    def test_predict_returns_the_exact_canonical_control_action(self) -> None:
         chunks = [
             torch.arange(16 * 28, dtype=torch.float32).reshape(1, 16, 28),
             torch.arange(16 * 28, dtype=torch.float32).reshape(1, 16, 28) + 1000,
         ]
-        loaded = _loaded_policy(_ChunkAgent(chunks), action_dim=28, coefficient=0.2)
-        reference = ChunkOverlapBlender(0.2, n_obs_steps=2)
+        loaded = _loaded_policy(_ChunkAgent(chunks), action_dim=28)
 
         first = loaded.predict(_observation())
         second = loaded.predict(_observation())
-        expected_first = reference.update(chunks[0][..., :19], 8)[0].double().numpy()
-        expected_second = reference.update(chunks[1][..., :19], 8)[0].double().numpy()
+        expected_first = chunks[0][:, 1:9, :19][0].double().numpy()
+        expected_second = chunks[1][:, 1:9, :19][0].double().numpy()
 
         self.assertEqual(first.shape, (8, 19))
         self.assertEqual(second.shape, (8, 19))
         np.testing.assert_array_equal(first, expected_first)
         np.testing.assert_array_equal(second, expected_second)
 
-    def test_reset_episode_clears_temporal_overlap(self) -> None:
-        chunks = [
-            torch.zeros((1, 16, 19)),
-            torch.full((1, 16, 19), 10.0),
-        ]
-        loaded = _loaded_policy(_ChunkAgent(chunks), coefficient=0.1)
-        loaded.predict(_observation())
-        loaded.reset_episode()
+    def test_runtime_rejects_noncanonical_temporal_ensemble_artifacts(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "Generic chunk deployment does not support"
+        ):
+            _loaded_policy(_Agent(), coefficient=0.0)
 
-        after_reset = loaded.predict(_observation())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "experiments"
+            _experiment(root)
+            payload = _payload()
+            payload["contract"]["inference_config"]["eval"][
+                "temporal_ensemble_coeff"
+            ] = 0.01
+            with (
+                mock.patch.object(runtime, "_EXPERIMENTS_ROOT", root),
+                mock.patch.object(
+                    runtime, "_read_deployment_payload", return_value=payload
+                ),
+                mock.patch(
+                    "dexmani_policy.deployment.restore.restore_deployment_agent"
+                ) as restore,
+            ):
+                with self.assertRaisesRegex(ValueError, "Re-export this experiment"):
+                    runtime.load_experiment("policy/task/run", device="cpu")
+            restore.assert_not_called()
 
-        np.testing.assert_array_equal(
-            after_reset, chunks[1][:, 1:9, :][0].double().numpy()
-        )
-
-    def test_warmup_preserves_existing_blender_object_state_and_rng(self) -> None:
+    def test_warmup_preserves_rng(self) -> None:
         chunks = [
             torch.zeros((1, 16, 19)),
             torch.full((1, 16, 19), 100.0),
             torch.full((1, 16, 19), 200.0),
             torch.full((1, 16, 19), 10.0),
         ]
-        loaded = _loaded_policy(_ChunkAgent(chunks), coefficient=0.1)
-        reference = ChunkOverlapBlender(0.1, n_obs_steps=2)
+        loaded = _loaded_policy(_ChunkAgent(chunks))
         loaded.predict(_observation())
-        reference.update(chunks[0], 8)
-        original_blender = loaded._blender
 
         np.random.seed(41)
         torch.manual_seed(43)
@@ -377,11 +383,10 @@ class DeploymentRuntimeTest(unittest.TestCase):
         expected_torch = torch.rand((), generator=torch.Generator().manual_seed(43))
         loaded.warmup(samples=2)
 
-        self.assertIs(loaded._blender, original_blender)
         self.assertEqual(np.random.random(), expected_numpy)
         torch.testing.assert_close(torch.rand(()), expected_torch)
         after_warmup = loaded.predict(_observation())
-        expected = reference.update(chunks[3], 8)[0].double().numpy()
+        expected = chunks[3][:, 1:9, :][0].double().numpy()
         np.testing.assert_array_equal(after_warmup, expected)
 
 

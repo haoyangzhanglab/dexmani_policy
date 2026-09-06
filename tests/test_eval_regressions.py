@@ -17,7 +17,6 @@ from omegaconf import OmegaConf
 from dexmani_policy import eval_best_ckpt, record_demo
 from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.common.config import validate_action_key_consistency
-from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
 from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
 from dexmani_policy.env_runner.base_runner import BaseRunner, EvalEpisodeError
 from dexmani_policy.eval_best_ckpt import (
@@ -41,13 +40,14 @@ with mock.patch.dict(sys.modules, {"dexmani_sim": _dexmani_sim_stub}):
     from dexmani_policy.env_runner.multi_task_sim_runner import MultiTaskSimRunner
 
 
-class _BlenderAgent:
-    control_action_dim = 19
-    n_action_steps = 8
-
+class _ControlActionAgent:
     def predict_action(self, **kwargs):
+        control = torch.full((1, 8, 19), 17.0, dtype=torch.float32)
         return {
-            "pred_action": torch.arange(16 * 28, dtype=torch.float32).reshape(1, 16, 28)
+            "pred_action": torch.arange(16 * 28, dtype=torch.float32).reshape(
+                1, 16, 28
+            ),
+            "control_action": control,
         }
 
 
@@ -77,21 +77,19 @@ def _valid_record(ckpt_relpath="checkpoints/selected.pt"):
 
 class EvalRegressionTests(unittest.TestCase):
     def test_temporal_ensemble_coefficient_validation(self):
-        for coeff in (0, 0.01):
-            with self.subTest(coeff=coeff):
-                ChunkOverlapBlender(temporal_ensemble_coeff=coeff)
-
-        for coeff in (-0.01, float("nan"), float("inf"), float("-inf"), True):
-            with self.subTest(coeff=coeff):
-                with self.assertRaises(ValueError):
-                    ChunkOverlapBlender(temporal_ensemble_coeff=coeff)
-
-        runner = BaseRunner(
+        BaseRunner(
             n_obs_steps=2,
             default_eval_episodes=1,
             temporal_ensemble_coeff=None,
         )
-        self.assertIsNone(runner._blender)
+        for coeff in (0, 0.01):
+            with self.subTest(coeff=coeff):
+                with self.assertRaisesRegex(ValueError, "Re-export this experiment"):
+                    BaseRunner(
+                        n_obs_steps=2,
+                        default_eval_episodes=1,
+                        temporal_ensemble_coeff=coeff,
+                    )
 
     def test_periodic_refresh_closes_before_constructing_next_env(self):
         events = []
@@ -185,17 +183,16 @@ class EvalRegressionTests(unittest.TestCase):
             torch.from_numpy(np.stack([first, second])).unsqueeze(0),
         )
 
-    def test_blender_receives_control_action_dimensions_only(self):
+    def test_runner_uses_canonical_control_action(self):
         runner = BaseRunner(
             n_obs_steps=2,
             default_eval_episodes=1,
-            temporal_ensemble_coeff=0.01,
         )
 
-        action_chunk = runner.get_action_chunk({}, _BlenderAgent())
+        action_chunk = runner.get_action_chunk({}, _ControlActionAgent())
 
         self.assertEqual(action_chunk.shape, (8, 19))
-        self.assertEqual(runner._blender._prev_tail.shape[-1], 19)
+        np.testing.assert_array_equal(action_chunk, np.full((8, 19), 17.0))
 
     def test_single_task_control_validation_is_preserved(self):
         validate_action_key_consistency(

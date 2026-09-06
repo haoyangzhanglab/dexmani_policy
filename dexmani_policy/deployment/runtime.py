@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, final
 import numpy as np
 
 if TYPE_CHECKING:
-    from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
     from dexmani_policy.deployment.contract import (
         DeploymentSpec,
         ObservationFieldSpec,
@@ -33,6 +32,10 @@ if TYPE_CHECKING:
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _EXPERIMENTS_ROOT = _REPOSITORY_ROOT / "experiments"
 _DEPLOYMENT_SELECTOR = Path("checkpoints/deployment_latest.pt")
+_GENERIC_TEMPORAL_ENSEMBLE_ERROR = (
+    "Generic chunk deployment does not support temporal_ensemble_coeff.\n"
+    "Re-export this experiment with temporal_ensemble_coeff=null."
+)
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,7 @@ def load_experiment(
     checkpoint_path = _resolve_deployment_checkpoint(experiment_dir)
     payload = _read_deployment_payload(checkpoint_path, map_location="cpu")
     info = _experiment_info(experiment_dir, checkpoint_path, payload)
+    _require_generic_chunk_semantics(info.spec)
 
     from dexmani_policy.deployment.restore import restore_deployment_agent
 
@@ -222,7 +226,7 @@ class LoadedPolicy:
         self._restored: RestoredDeployment | None = restored
         self._device = device
         self._seed = seed
-        self._blender = self._new_blender()
+        _require_generic_chunk_semantics(self.spec)
 
     def warmup(self, *, samples: int) -> tuple[float, ...]:
         """Run deterministic synthetic samples and return durations in seconds.
@@ -250,15 +254,12 @@ class LoadedPolicy:
             name: value.squeeze(0).numpy() for name, value in synthetic_tensors.items()
         }
         durations: list[float] = []
-        original_blender = self._blender
-        self._blender = self._new_blender()
         try:
             for _ in range(samples):
                 started = time.perf_counter()
                 self.predict(observation)
                 durations.append(time.perf_counter() - started)
         finally:
-            self._blender = original_blender
             random.setstate(python_state)
             np.random.set_state(numpy_state)
             torch.random.set_rng_state(torch_state)
@@ -280,17 +281,8 @@ class LoadedPolicy:
                 tensors, denoise_timesteps=restored.spec.denoise_steps
             )
         snapshot = validate_prediction(result, restored.spec, batch_size=1)
-        if self._blender is None:
-            control_tensor = snapshot.control_action
-        else:
-            full_control_prediction = snapshot.pred_action[
-                ..., : self.spec.control_action_dim
-            ]
-            control_tensor = self._blender.update(
-                full_control_prediction, n_action_steps=self.spec.n_action_steps
-            )
         control_action = (
-            control_tensor.squeeze(0).to(dtype=torch.float64).numpy().copy()
+            snapshot.control_action.squeeze(0).to(dtype=torch.float64).numpy().copy()
         )
         expected_shape = (self.spec.n_action_steps, self.spec.control_action_dim)
         if (
@@ -309,8 +301,6 @@ class LoadedPolicy:
         from dexmani_policy.deployment.restore import reset_inference_seed
 
         reset_inference_seed(self._seed)
-        if self._blender is not None:
-            self._blender.reset()
         reset_method = getattr(restored.agent, "reset_episode", None)
         if reset_method is not None:
             if not callable(reset_method):
@@ -337,17 +327,6 @@ class LoadedPolicy:
 
     def _deployment_spec(self) -> DeploymentSpec:
         return self._require_open().spec
-
-    def _new_blender(self) -> ChunkOverlapBlender | None:
-        coefficient = self.spec.temporal_ensemble_coeff
-        if coefficient is None:
-            return None
-        from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
-
-        return ChunkOverlapBlender(
-            temporal_ensemble_coeff=coefficient,
-            n_obs_steps=self.spec.n_obs_steps,
-        )
 
     def _require_open(self) -> RestoredDeployment:
         if self._restored is None:
@@ -534,6 +513,12 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
         ),
         task_name,
     )
+
+
+def _require_generic_chunk_semantics(spec: PolicySpec) -> None:
+    """Reject artifacts whose generic output would require hidden chunk state."""
+    if spec.temporal_ensemble_coeff is not None:
+        raise ValueError(_GENERIC_TEMPORAL_ENSEMBLE_ERROR)
 
 
 def _short_selector(experiment_dir: Path) -> str:

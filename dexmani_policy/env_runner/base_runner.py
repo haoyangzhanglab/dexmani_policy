@@ -9,8 +9,12 @@ import torch
 from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
-from dexmani_policy.common.temporal_ensembler import ChunkOverlapBlender
 from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
+
+_GENERIC_TEMPORAL_ENSEMBLE_ERROR = (
+    "Generic chunk deployment does not support temporal_ensemble_coeff.\n"
+    "Re-export this experiment with temporal_ensemble_coeff=null."
+)
 
 
 class EvalEpisodeError(RuntimeError):
@@ -83,15 +87,8 @@ class BaseRunner:
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size
 
-        # ACT temporal ensembling (Zhao et al. 2023, arXiv:2304.13705).
-        # When coeff is set (e.g. 0.01), consecutive overlapping chunks are
-        # blended via exponential weighting for smoother action transitions.
-        self._blender: ChunkOverlapBlender | None = None
         if temporal_ensemble_coeff is not None:
-            self._blender = ChunkOverlapBlender(
-                temporal_ensemble_coeff=temporal_ensemble_coeff,
-                n_obs_steps=n_obs_steps,
-            )
+            raise ValueError(_GENERIC_TEMPORAL_ENSEMBLE_ERROR)
 
     def update_obs(self, observation: Dict[str, Any]):
         """Write one observation frame into the circular buffer.
@@ -180,17 +177,10 @@ class BaseRunner:
         self._obs_str_buffer.clear()
         self._obs_cursor = 0
         self._obs_count = 0
-        if self._blender is not None:
-            self._blender.reset()
 
     @torch.no_grad()
     def get_action_chunk(self, obs_batch, agent, denoise_timesteps: int = None) -> np.ndarray:
         result = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
-
-        if self._blender is not None:
-            full_pred = result["pred_action"][..., : agent.control_action_dim]  # (B, horizon, A)
-            blended = self._blender.update(full_pred, n_action_steps=agent.n_action_steps)
-            return blended.detach().cpu().numpy().squeeze(0)
 
         return result["control_action"].detach().cpu().numpy().squeeze(0)
 
