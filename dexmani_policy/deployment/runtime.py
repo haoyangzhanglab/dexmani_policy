@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         RgbPreprocessingSpec,
     )
     from dexmani_policy.deployment.restore import (
+        PredictionSnapshot,
         RestoredDeployment,
     )
 
@@ -48,6 +49,11 @@ class PolicySpec:
     control_dt_s: float
     requires_hand: bool
     rgb_preprocessing: RgbPreprocessingSpec | None = None
+
+    @property
+    def chunk_size(self) -> int:
+        """Number of future actions, including the normal query interval."""
+        return self.horizon - self.n_obs_steps + 1
 
     def __post_init__(self) -> None:
         if self.action_key not in {"action", "action_ee"}:
@@ -252,19 +258,10 @@ class LoadedPolicy:
         return tuple(durations)
 
     def predict(self, observation: Mapping[str, np.ndarray]) -> np.ndarray:
-        """Predict one finite float64 ``[N, D]`` control-action chunk."""
-        restored = self._require_open()
-        tensors = self._observation_tensors(observation)
-
+        """Return a finite float64 copy ``[n_action_steps, control_action_dim]``."""
         import torch
 
-        from dexmani_policy.deployment.restore import validate_prediction
-
-        with torch.inference_mode():
-            result = restored.agent.predict_action(
-                tensors, denoise_timesteps=restored.spec.denoise_steps
-            )
-        snapshot = validate_prediction(result, restored.spec, batch_size=1)
+        snapshot = self._predict_snapshot(observation)
         control_action = (
             snapshot.control_action.squeeze(0).to(dtype=torch.float64).numpy().copy()
         )
@@ -277,6 +274,44 @@ class LoadedPolicy:
                 "Policy prediction is not a finite float64 control-action chunk"
             )
         return control_action
+
+    def predict_action_chunk(
+        self, observation: Mapping[str, np.ndarray]
+    ) -> np.ndarray:
+        """Return a finite float64 ownership copy ``[chunk_size, control_action_dim]``.
+
+        Uses the canonical future prediction starting at ``n_obs_steps - 1``.
+        Its first ``n_action_steps`` rows are the same sample's control actions.
+        """
+        import torch
+
+        snapshot = self._predict_snapshot(observation)
+        chunk = snapshot.pred_action[
+            0, self.spec.n_obs_steps - 1 :, : self.spec.control_action_dim
+        ].to(dtype=torch.float64).numpy().copy()
+        if (
+            chunk.shape != (self.spec.chunk_size, self.spec.control_action_dim)
+            or not np.isfinite(chunk).all()
+        ):
+            raise RuntimeError("Policy prediction is not a finite float64 future chunk")
+        return chunk
+
+    def _predict_snapshot(
+        self, observation: Mapping[str, np.ndarray]
+    ) -> PredictionSnapshot:
+        """Run one inference through the shared deployment validation boundary."""
+        restored = self._require_open()
+        tensors = self._observation_tensors(observation)
+
+        import torch
+
+        from dexmani_policy.deployment.restore import validate_prediction
+
+        with torch.inference_mode():
+            result = restored.agent.predict_action(
+                tensors, denoise_timesteps=restored.spec.denoise_steps
+            )
+        return validate_prediction(result, restored.spec, batch_size=1)
 
     def reset_episode(self) -> None:
         """Reset Policy-owned stochastic and optional episode-local model state."""

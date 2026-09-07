@@ -232,7 +232,7 @@ class BaseAgent(nn.Module):
 
         start = self.n_obs_steps - 1
         control_action = pred[:, start : start + self.n_action_steps]
-        # Unexecuted tail for temporal ensembling (ACT, Zhao et al. 2023).
+        # Remaining future action tail.
         tail = pred[:, start + self.n_action_steps :]
         if self.control_action_dim != self.action_dim:
             control_action = control_action[..., : self.control_action_dim]
@@ -402,4 +402,3 @@ class DiTXFlowMatchAgent(BaseAgent):
             action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-

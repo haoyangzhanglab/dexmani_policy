@@ -10,6 +10,15 @@
 
 ---
 
+Implementation status: the Policy runtime now exposes the API specified below.
+`PolicySpec.chunk_size` and `DeploymentSpec.chunk_size` are derived properties;
+`LoadedPolicy.predict_action_chunk(observation)` returns an independent finite
+NumPy `float64 [chunk_size, control_action_dim]` copy of the validated canonical
+future prediction. `predict()` retains its `n_action_steps` output, and the
+artifact schema is unchanged. The baseline descriptions and implementation
+checklist below record the requirements for this change. Real migration remains
+a separate repository task.
+
 ## 1. Goal
 
 `dexmani_policy` already computes everything needed by the desired real-robot rollout. The missing piece is only the public deployment surface.

@@ -86,6 +86,11 @@ class DeploymentSpec:
     def control_action_dim(self) -> int:
         return 21 if self.action_key == "action_ee" else 19
 
+    @property
+    def chunk_size(self) -> int:
+        """Number of canonical future actions; never persisted separately."""
+        return self.horizon - self.n_obs_steps + 1
+
 
 def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     """Return the sole persisted contract of one canonical artifact."""

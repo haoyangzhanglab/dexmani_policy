@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import copy
 import json
+import random
 import tempfile
 import unittest
+from dataclasses import asdict, replace
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -25,11 +28,16 @@ from dexmani_policy.deployment.contract import (
     deployment_contract,
     parse_deployment_contract,
 )
-from dexmani_policy.deployment.restore import RestoredDeployment
+from dexmani_policy.deployment.restore import (
+    DeploymentRestoreError,
+    RestoredDeployment,
+    validate_prediction,
+)
 from dexmani_policy.deployment.runtime import (
     ExperimentInfo,
     LoadedPolicy,
     PolicySpec,
+    load_experiment,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +109,130 @@ class _FakeAgent:
         return {"pred_action": pred, "control_action": control}
 
 
+def _runtime(spec, agent, *, seed=0):
+    policy_spec = PolicySpec(
+        **{key: value for key, value in vars(spec).items() if key != "denoise_steps"},
+        control_action_dim=spec.control_action_dim,
+    )
+    info = ExperimentInfo(
+        selector="p/t/e", experiment_dir=Path("."), policy_name="p", task_name="t",
+        checkpoint_path=Path("ckpt"), checkpoint_name="ckpt", spec=policy_spec,
+    )
+    return LoadedPolicy(info, RestoredDeployment(agent, spec), device="cpu", seed=seed)
+
+
+class _SyntheticAgent:
+    def __init__(self, spec, *, stochastic=False, dtype=torch.float32):
+        self.spec = spec
+        self.stochastic = stochastic
+        self.calls = 0
+        self.pred = torch.arange(spec.horizon * spec.action_dim, dtype=dtype).reshape(
+            1, spec.horizon, spec.action_dim
+        )
+
+    def predict_action(self, tensors, denoise_timesteps=None):
+        self.calls += 1
+        self.last_tensors = tensors
+        self.last_denoise_steps = denoise_timesteps
+        pred = self.pred
+        if self.stochastic:
+            pred = pred + torch.rand_like(pred) + random.random() + np.random.random()
+        start = self.spec.n_obs_steps - 1
+        return {
+            "pred_action": pred,
+            "control_action": pred[
+                :, start : start + self.spec.n_action_steps, : self.spec.control_action_dim
+            ],
+        }
+
+
 class DeploymentContractTest(unittest.TestCase):
+    def test_full_chunk_contract(self):
+        for action_key, action_dim in (("action", 19), ("action", 25), ("action_ee", 24)):
+            for n_action_steps in (8, 15):
+                for dtype in (torch.float32, torch.float64):
+                    with self.subTest(key=action_key, steps=n_action_steps, dtype=dtype):
+                        spec = replace(
+                            _deployment_spec(), action_key=action_key,
+                            action_dim=action_dim, n_action_steps=n_action_steps,
+                        )
+                        agent = _SyntheticAgent(spec, dtype=dtype)
+                        policy = _runtime(spec, agent)
+                        obs = {"joint_state": np.zeros((2, 6), dtype=np.float32)}
+                        with patch(
+                            "dexmani_policy.deployment.restore.validate_prediction",
+                            wraps=validate_prediction,
+                        ) as validate:
+                            chunk = policy.predict_action_chunk(obs)
+                            self.assertEqual(validate.call_count, 1)
+                        self.assertEqual(agent.calls, 1)
+                        self.assertEqual(agent.last_denoise_steps, spec.denoise_steps)
+                        self.assertEqual(agent.last_tensors["joint_state"].shape, (1, 2, 6))
+                        self.assertEqual(policy.spec.chunk_size, 15)
+                        self.assertEqual(spec.chunk_size, 15)
+                        self.assertNotIn("chunk_size", asdict(policy.spec))
+                        self.assertNotIn("chunk_size", asdict(spec))
+                        self.assertEqual(chunk.shape, (15, spec.control_action_dim))
+                        self.assertEqual(chunk.dtype, np.float64)
+                        self.assertTrue(np.isfinite(chunk).all())
+                        self.assertTrue(chunk.flags.owndata)
+                        expected = agent.pred[0, 1:, :spec.control_action_dim].numpy()
+                        np.testing.assert_array_equal(chunk, expected)
+                        control = policy.predict(obs)  # Deterministic fake: same sample.
+                        self.assertEqual(agent.calls, 2)
+                        self.assertEqual(control.shape, (n_action_steps, spec.control_action_dim))
+                        self.assertEqual(control.dtype, np.float64)
+                        self.assertTrue(np.isfinite(control).all())
+                        np.testing.assert_array_equal(chunk[:n_action_steps], control)
+                        chunk[0, 0] = -999
+                        self.assertNotEqual(expected[0, 0], -999)
+                        self.assertNotEqual(control[0, 0], -999)
+
+    def test_chunk_reuses_prediction_rejections(self):
+        spec = _deployment_spec()
+        for failure in ("shape", "finite", "canonical"):
+            with self.subTest(failure=failure):
+                agent = _SyntheticAgent(spec)
+                result = agent.predict_action({})
+                if failure == "shape":
+                    result["pred_action"] = result["pred_action"][:, :-1]
+                elif failure == "finite":
+                    result["pred_action"][0, -1, 0] = float("nan")
+                else:
+                    result["control_action"] = result["control_action"] + 1
+                with patch.object(agent, "predict_action", return_value=result):
+                    with self.assertRaises(DeploymentRestoreError):
+                        _runtime(spec, agent).predict_action_chunk(
+                            {"joint_state": np.zeros((2, 6), dtype=np.float32)}
+                        )
+
+    def test_episode_seed_and_warmup_preserve_stream(self):
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        torch_state = torch.random.get_rng_state()
+        try:
+            spec = _deployment_spec()
+            policy = _runtime(spec, _SyntheticAgent(spec, stochastic=True), seed=42)
+            obs = {"joint_state": np.zeros((2, 6), dtype=np.float32)}
+            policy.reset_episode()
+            expected = policy.predict_action_chunk(obs)
+            policy.reset_episode()
+            np.testing.assert_array_equal(expected, policy.predict_action_chunk(obs))
+            policy.reset_episode()
+            durations = policy.warmup(samples=2)
+            self.assertEqual(len(durations), 2)
+            np.testing.assert_array_equal(expected, policy.predict_action_chunk(obs))
+            other = _runtime(spec, _SyntheticAgent(spec, stochastic=True), seed=43)
+            other.reset_episode()
+            self.assertFalse(np.array_equal(expected, other.predict_action_chunk(obs)))
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            torch.random.set_rng_state(torch_state)
+
+    def test_negative_runtime_seed_rejected_before_loading(self):
+        with self.assertRaisesRegex(ValueError, "seed must be a non-negative int"):
+            load_experiment("unused", device="cpu", seed=-1)
+
     def test_canonical_runtime_output(self):
         """LoadedPolicy.predict returns the validated control_action[0]."""
         deployment_spec = _deployment_spec()
@@ -199,6 +330,13 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertNotIn("schema_version", contract)
 
         spec = parse_deployment_contract(payload)
+        self.assertEqual(spec.chunk_size, 15)
+        self.assertNotIn("chunk_size", contract["inference_config"])
+        payload["contract"]["inference_config"]["n_action_steps"] = 15
+        self.assertEqual(parse_deployment_contract(payload).n_action_steps, 15)
+        payload["contract"]["inference_config"]["n_action_steps"] = 16
+        with self.assertRaisesRegex(DeploymentContractError, "window exceeds horizon"):
+            parse_deployment_contract(payload)
         self.assertFalse(hasattr(spec, "temporal_ensemble_coeff"))
         self.assertEqual(spec.denoise_steps, 10)
         self.assertEqual(spec.control_action_dim, 19)
