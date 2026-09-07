@@ -76,7 +76,7 @@ class MultiTaskSimRunner:
             )
 
         # Capture each task's default pool before eval entry points inject any
-        # selected subset into ``runner.eval_seeds``.  Deduplicate while keeping
+        # selected subset into ``runner.eval_seeds``. Deduplicate while keeping
         # file order, matching the selector's seed handling.
         self._task_seed_pools: Dict[str, List[int]] = {
             task_name: list(dict.fromkeys(runner.get_seed_list()))
@@ -86,9 +86,9 @@ class MultiTaskSimRunner:
     def get_seed_list(self) -> List[int]:
         """Return the reference seed pool used by shared eval entry points.
 
-        The first task provides reference seed *identities*.  ``run`` maps each
+        The first task provides reference seed identities. ``run`` maps each
         selected reference seed to the same ordinal position in every task's
-        own task-specific seed pool.  The reference pool is truncated to the
+        own task-specific seed pool. The reference pool is truncated to the
         shortest task pool so every selected position is valid for all tasks.
         """
         if self.eval_seeds is not None:
@@ -99,16 +99,21 @@ class MultiTaskSimRunner:
         return list(self._task_seed_pools[reference_task][:common_count])
 
     def _map_reference_seeds(self, task_name: str, reference_seeds: List[int]) -> List[int]:
+        """Map selected reference seeds to a task-specific pool by position.
+
+        Eval entry points always select from ``get_seed_list()``, so normal
+        selection/final-eval calls take the positional mapping path. If a caller
+        explicitly supplies arbitrary numeric ``eval_seeds`` that are not from
+        the reference pool, preserve the historical override semantics and pass
+        those numbers through unchanged.
+        """
         reference_task = next(iter(self.runners))
         reference_pool = self._task_seed_pools[reference_task]
         task_pool = self._task_seed_pools[task_name]
         reference_indices = {seed: idx for idx, seed in enumerate(reference_pool)}
 
-        missing = [seed for seed in reference_seeds if seed not in reference_indices]
-        if missing:
-            raise ValueError(
-                f"Reference eval seeds are not present in task '{reference_task}' seed pool: {missing}"
-            )
+        if any(seed not in reference_indices for seed in reference_seeds):
+            return list(reference_seeds)
 
         indices = [reference_indices[seed] for seed in reference_seeds]
         if indices and max(indices) >= len(task_pool):
@@ -172,8 +177,8 @@ class MultiTaskSimRunner:
         all_videos = []
         failed_tasks = []
 
-        # Entry points select a subset from the reference task.  Map that subset
-        # into each task's own seed pool by ordinal position.  Without a parent
+        # Entry points select a subset from the reference task. Map that subset
+        # into each task's own seed pool by ordinal position. Without a parent
         # subset, leave each child on its own default task-specific pool.
         parent_seeds = getattr(self, "eval_seeds", None)
         for task_name, runner in self.runners.items():
