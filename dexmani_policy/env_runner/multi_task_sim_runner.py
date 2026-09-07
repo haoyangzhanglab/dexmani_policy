@@ -38,8 +38,10 @@ class MultiTaskSimRunner:
 
         self.is_multi_task = True
         self.env_video_fps = env_video_fps
-        # Shared seed pool propagated to every child runner (set by the eval
-        # entry points before ``run``). None → each child uses its own default.
+        # Eval entry points select from the first task's pool as a reference.
+        # ``run`` maps those selected reference seeds by ordinal position into
+        # each task's own seed pool, preserving paired checkpoint comparisons
+        # without forcing different tasks to share the same numeric seeds.
         self.eval_seeds: Optional[List[int]] = None
         self.runners: Dict[str, TaskTextSimRunner] = {}
 
@@ -73,18 +75,53 @@ class MultiTaskSimRunner:
                 rgb_random_crop_size=cfg.get("rgb_random_crop_size"),
             )
 
-    def get_seed_list(self) -> List[int]:
-        """Return the shared seed pool applied to every child task runner.
+        # Capture each task's default pool before eval entry points inject any
+        # selected subset into ``runner.eval_seeds``. Deduplicate while keeping
+        # file order, matching the selector's seed handling.
+        self._task_seed_pools: Dict[str, List[int]] = {
+            task_name: list(dict.fromkeys(runner.get_seed_list()))
+            for task_name, runner in self.runners.items()
+        }
 
-        The multi-task evaluation unit is ``(task, seed)``: one seed pool is
-        propagated to every task, so a single seed list is the correct
-        interface for the eval entry points (``_select_eval_seeds`` /
-        ``select_best_ckpt``).  Delegates to the first child runner (seed file
-        / default pool) when no explicit pool has been set.
+    def get_seed_list(self) -> List[int]:
+        """Return the reference seed pool used by shared eval entry points.
+
+        The first task provides reference seed identities. ``run`` maps each
+        selected reference seed to the same ordinal position in every task's
+        own task-specific seed pool. The reference pool is truncated to the
+        shortest task pool so every selected position is valid for all tasks.
         """
         if self.eval_seeds is not None:
             return list(self.eval_seeds)
-        return next(iter(self.runners.values())).get_seed_list()
+
+        reference_task = next(iter(self.runners))
+        common_count = min(len(pool) for pool in self._task_seed_pools.values())
+        return list(self._task_seed_pools[reference_task][:common_count])
+
+    def _map_reference_seeds(self, task_name: str, reference_seeds: List[int]) -> List[int]:
+        """Map selected reference seeds to a task-specific pool by position.
+
+        Eval entry points always select from ``get_seed_list()``, so normal
+        selection/final-eval calls take the positional mapping path. If a caller
+        explicitly supplies arbitrary numeric ``eval_seeds`` that are not from
+        the reference pool, preserve the historical override semantics and pass
+        those numbers through unchanged.
+        """
+        reference_task = next(iter(self.runners))
+        reference_pool = self._task_seed_pools[reference_task]
+        task_pool = self._task_seed_pools[task_name]
+        reference_indices = {seed: idx for idx, seed in enumerate(reference_pool)}
+
+        if any(seed not in reference_indices for seed in reference_seeds):
+            return list(reference_seeds)
+
+        indices = [reference_indices[seed] for seed in reference_seeds]
+        if indices and max(indices) >= len(task_pool):
+            raise ValueError(
+                f"Task '{task_name}' seed pool has {len(task_pool)} seeds, "
+                f"but selected reference position {max(indices)} is out of range."
+            )
+        return [task_pool[idx] for idx in indices]
 
     def print_summary(
         self,
@@ -140,12 +177,15 @@ class MultiTaskSimRunner:
         all_videos = []
         failed_tasks = []
 
-        # Entry points set seeds on the parent; child runners must receive the
-        # same list instead of resolving independent defaults.
+        # Entry points select a subset from the reference task. Map that subset
+        # into each task's own seed pool by ordinal position. Without a parent
+        # subset, leave each child on its own default task-specific pool.
         parent_seeds = getattr(self, "eval_seeds", None)
         for task_name, runner in self.runners.items():
             if parent_seeds is not None:
-                runner.eval_seeds = list(parent_seeds)
+                runner.eval_seeds = self._map_reference_seeds(task_name, list(parent_seeds))
+            else:
+                runner.eval_seeds = None
             cprint(f"\n{'=' * 40} Evaluating task: {task_name} (text={runner.task_text}) {'=' * 40}", "cyan")
             # Each task gets its own sub-directory for videos
             task_video_dir = None
