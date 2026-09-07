@@ -1,717 +1,680 @@
-# DexMani Policy — Canonical Deployment Cleanup Guide
+# DexMani Policy — Real Rollout Deployment API Upgrade Guide
 
 > Repository: `haoyangzhanglab/dexmani_policy`  
 > Intended executor: Claude Code / Codex  
-> Scope: personal PhD robot-learning research. Keep exactly one current implementation and one current metadata contract. Do not keep compatibility layers or versioned schema branches.
+> Baseline reviewed: `main@7d8018681bd1f38d4864b54ccf0b26500d9fd4de`  
+> Cross-repository consumer: `haoyangzhanglab/dexmani_real`  
+> Scope: make the existing Policy deployment runtime expose the complete canonical future action chunk required by a simple real-robot receding-horizon rollout. Keep the current model, training, checkpoint and artifact semantics otherwise unchanged.
 >
-> **Current repository constraint:** there is no trained Policy checkpoint available in this repository at this stage. This task must therefore be completed and verified without training, checkpoint selection, real checkpoint restore, or real deployment export.
+> This document supersedes the previous temporal-ensemble cleanup plan in this file. The temporal-ensemble/schema cleanup has already landed. Do **not** reintroduce Temporal Ensemble, overlap blending, RTC, compatibility branches or artifact-version machinery.
 
 ---
 
 ## 1. Goal
 
-The canonical inference path is already correct:
+`dexmani_policy` already computes everything needed by the desired real-robot rollout. The missing piece is only the public deployment surface.
+
+Current model path:
 
 ```text
-raw observation
-    ↓
-Policy-owned preprocessing
+observation
     ↓
 agent.predict_action(...)
     ↓
-validate_prediction(...)
+pred_action [B, horizon, action_dim]
     ↓
-snapshot.control_action
-    ↓
-finite float64 [N, D_control]
+canonical control slice
+    control_action [B, n_action_steps, control_action_dim]
 ```
 
-This task removes obsolete generic temporal-ensemble semantics and leaves the repository with one simple current deployment contract.
+Current `LoadedPolicy.predict()` exposes only the short canonical `control_action` slice to Real.
 
-Required outcomes:
+Target public deployment surface:
 
-1. Generic sim/deployment code has exactly one semantic target: canonical `control_action`.
-2. `temporal_ensemble_coeff` disappears from active configs, eval, selection metadata, export, runtime, artifact contract, and current docs.
-3. `best_ckpt.json` has one strict current shape with **no version field**.
-4. deployment artifact has one strict current shape with **no v1/v2/v3 schema dispatch or compatibility reader**.
-5. production code contains no legacy metadata/artifact migration logic.
-6. existing checkpoint restore, preprocessing, normalizer, qualification, and provenance behavior remains unchanged unless directly coupled to the removed field.
-7. all verification in this phase is source-level or synthetic/offline; a real trained checkpoint is not required for Definition of Done.
+```text
+observation
+    ↓
+LoadedPolicy.predict_action_chunk(...)
+    ↓
+canonical future control chunk
+    [chunk_size, control_action_dim]
+```
 
-The target is one readable research code path, not a compatibility framework.
+where:
+
+```text
+start = n_obs_steps - 1
+chunk_size = horizon - start
+           = horizon - n_obs_steps + 1
+```
+
+The first `n_action_steps` rows of this full future chunk must remain exactly equal to the existing `control_action`.
+
+The target is a **small API exposure**, not a model or deployment-format redesign.
 
 ---
 
-## 2. Hard execution constraints
+## 2. Current source facts that must guide the implementation
 
-Claude Code / Codex must **not** run or initiate any of the following during this task:
+### 2.1 Agent already produces the full prediction
 
-```text
-policy training
-resume training
-fine-tuning
-train.py
-train_ddp.py
-DDP / NCCL
-checkpoint selection sweep
-select_best_ckpt.py as a real evaluation job
-eval_best_ckpt.py as a real simulator evaluation
-long simulator rollout
-real checkpoint restore
-real deployment export
-GPU inference that depends on trained weights
-real robot code
-```
-
-Do not create or train a dummy neural policy merely to satisfy a validation step.
-
-Do not fabricate a “representative trained experiment”.
-
-Use only:
-
-```text
-source inspection
-Hydra/config parsing where lightweight
-synthetic metadata
-synthetic deployment payloads
-fake agents / fake restored objects
-temporary files
-deterministic CPU-only contract checks
-compile/static checks
-```
-
-If a validation step genuinely requires trained weights, mark it **Deferred / Not Verified** rather than generating weights.
-
----
-
-## 3. Non-negotiable invariants
-
-### Runtime semantics
-
-`LoadedPolicy.predict()` must remain logically equivalent to:
+`dexmani_policy/agents/core/base.py` currently computes:
 
 ```python
-result = restored.agent.predict_action(
-    tensors,
-    denoise_timesteps=restored.spec.denoise_steps,
-)
-snapshot = validate_prediction(result, restored.spec, batch_size=1)
-return snapshot.control_action[0]  # finite float64 NumPy [N,D]
+pred = ...  # [B, horizon, action_dim]
+start = self.n_obs_steps - 1
+control_action = pred[:, start : start + self.n_action_steps]
+tail = pred[:, start + self.n_action_steps :]
 ```
 
-It must not use:
+and returns:
 
 ```text
-pred_action tail
-previous chunks
-overlap state
-action smoothing
-temporal ensemble
-RTC history
+pred_action
+control_action
+tail
 ```
 
-A fake agent/restored object may be used to test this code path; a trained checkpoint is not needed.
+Therefore:
 
-### Sim semantics
+- do not change training;
+- do not change the action decoder;
+- do not add a second model call;
+- do not reconstruct future actions from `control_action`;
+- do not blend old/new chunks in Policy.
 
-Keep the one intended execution rule:
+### 2.2 Deployment restore already validates the full prediction
+
+`dexmani_policy/deployment/restore.py::validate_prediction()` already verifies:
 
 ```text
-obs history
-→ predict_action()
-→ canonical control_action [N,D]
-→ env.step() over N actions in order
-→ next query
+pred_action.shape == [B, horizon, action_dim]
+control_action.shape == [B, n_action_steps, control_action_dim]
+control_action == exact canonical slice of pred_action
+all values finite
 ```
 
-Do not introduce `steps_per_inference`, overlap merging, or replanning in this task.
+Reuse this validated `PredictionSnapshot`. Do not create a parallel validation path.
 
-Do not run a long simulator evaluation just to prove this. Inspect/test the runner logic directly.
+### 2.3 Artifact contract already contains enough information
 
-### Restore / preprocessing
-
-Preserve existing code and contracts for:
+The persisted deployment contract already contains:
 
 ```text
-EMA/raw weight selection
-denoise_steps
-normalizer validation
-RGB preprocessing
-point-cloud/fingertip semantic validation
-prediction parity / qualification
-strict Git provenance
+horizon
+n_obs_steps
+n_action_steps
+action_key
+action_dim
+control_dt_s
+...
 ```
 
-These should be source/synthetic tested where possible. Real trained-weight restore is explicitly deferred.
+No persisted `chunk_size` field is required.
 
----
-
-## 4. No compatibility layer and no schema-version machinery
-
-After this cleanup there should be exactly one supported shape for each current metadata object.
-
-Do **not** implement or retain logic such as:
+`chunk_size` is a deterministic derived property:
 
 ```python
-if version == 1:
-    ...
-elif version == 2:
-    ...
-elif version == 3:
-    ...
+horizon - n_obs_steps + 1
 ```
 
-Do not add:
+Do **not** bump the artifact schema or modify `_format = "dexmani.deployment"` for this task.
 
-```text
-legacy parser
-migration adapter
-compatibility shim
-artifact upgrader
-schema registry
-```
+### 2.4 Evaluation seed support already exists
 
-The repository currently has no trained checkpoint that needs preservation during this task, so no runtime compatibility mechanism is justified.
+`load_experiment(..., seed=...)` already accepts any non-negative integer and `LoadedPolicy.reset_episode()` resets Policy-owned stochastic state from that seed.
 
-Future stale experiment metadata/artifacts, if encountered later, should be updated/re-exported once with the then-current code rather than expanding the runtime parser.
+`LoadedPolicy.warmup()` already snapshots/restores Python, NumPy, Torch and initialized CUDA RNG states, so warmup must continue not to consume the rollout stochastic stream.
+
+Do not add a training-seed argument to the deployment runtime. Training seed remains experiment/checkpoint identity; Real evaluation seed is the runtime stochastic seed.
 
 ---
 
-## 5. `best_ckpt.json`: one current schema
+## 3. Desired public contract
 
-Remove `record_version` entirely.
+### 3.1 Add derived `chunk_size`
 
-The current record should contain the existing checkpoint/result/selection fields plus:
+Add a read-only derived property to the public runtime `PolicySpec`:
 
-```json
-"inference": {
-  "use_ema": true,
-  "denoise_steps": 10,
-  "policy_seed_mode": "episode_seed"
-}
+```python
+@property
+def chunk_size(self) -> int:
+    return self.horizon - self.n_obs_steps + 1
 ```
 
-No:
+For symmetry, adding the same derived property to internal `DeploymentSpec` is recommended if it removes duplicated arithmetic in validation/tests.
+
+Requirements:
 
 ```text
-record_version
-temporal_ensemble_coeff
-legacy fields
+chunk_size > 0
+n_action_steps <= chunk_size
 ```
 
-### Writer
-
-Update `select_best_ckpt.py` to write only the current schema.
-
-Do **not** run checkpoint selection in this phase.
-
-### Reader
-
-Update `read_best_ckpt_json()` to validate only the current required keys/types.
-
-Do not inspect a version number and do not normalize historical records.
-
-If the file does not match the current schema, fail with a concise current-contract error.
-
-### Offline verification
-
-Use a temporary directory and hand-written synthetic JSON records to test:
+The second invariant is already implied by the existing:
 
 ```text
-valid current record → accepted
-missing required key → rejected
-obsolete temporal field / obsolete version field → not part of the current expected schema
+n_obs_steps - 1 + n_action_steps <= horizon
 ```
 
-Do not create a checkpoint or invoke an environment.
+Do not persist `chunk_size` separately.
+
+### 3.2 Add `LoadedPolicy.predict_action_chunk()`
+
+Recommended API:
+
+```python
+def predict_action_chunk(
+    self,
+    observation: Mapping[str, np.ndarray],
+) -> np.ndarray:
+    """Return the canonical finite float64 future control chunk [C,D]."""
+```
+
+Required implementation semantics:
+
+```text
+observation
+→ existing _observation_tensors()
+→ restored.agent.predict_action(...)
+→ existing validate_prediction(...)
+→ snapshot.pred_action
+→ slice from start=n_obs_steps-1 to horizon
+→ slice control dimensions only
+→ ownership-copy NumPy float64 [chunk_size, control_action_dim]
+→ finite/shape validation
+```
+
+Conceptually:
+
+```python
+start = self.spec.n_obs_steps - 1
+chunk = snapshot.pred_action[
+    0,
+    start:,
+    : self.spec.control_action_dim,
+]
+```
+
+Return a standalone NumPy ownership copy, consistent with the current `predict()` boundary.
+
+### 3.3 Keep `LoadedPolicy.predict()` during migration
+
+Do not break existing simulation/deployment callers in the same patch.
+
+Keep current behavior:
+
+```text
+predict(obs)
+→ [n_action_steps, control_action_dim]
+```
+
+The exact required relationship is:
+
+```python
+predict(obs) == predict_action_chunk(obs)[:n_action_steps]
+```
+
+for the same model state and same stochastic draw.
+
+Do **not** implement that relationship by calling the stochastic model twice. If both outputs are needed in one operation, derive them from the same validated model result.
+
+It is acceptable for `predict()` and `predict_action_chunk()` to each perform one inference when called independently. Tests that compare them must reset the episode RNG or use a deterministic fake agent.
+
+After `dexmani_real` migrates completely, a later cleanup may reconsider whether `predict()` remains public. That deletion is not required here.
 
 ---
 
-## 6. Deployment artifact: one current unversioned contract
+## 4. Meaning of `n_action_steps`
 
-The artifact should expose one current format only.
-
-Prefer a stable artifact-type marker such as:
+Do not create a new Policy field such as:
 
 ```text
-_format = "dexmani.deployment"
-```
-
-Remove persisted compatibility-dispatch fields such as:
-
-```text
-schema_version
-v1/v2/v3 format suffixes
-```
-
-when they exist solely for historical version dispatch.
-
-The parser validates the current required structure, not a history of structures.
-
-Required current top-level semantics remain conceptually:
-
-```text
-artifact type marker
-contract
-weights
-```
-
-### Remove temporal field
-
-Remove `temporal_ensemble_coeff` from:
-
-```text
-DeploymentSpec
-contract parser
-export payload
-runtime PolicySpec construction
-runtime generic temporal guard
-qualification comparisons
-```
-
-### Preserve restore data
-
-Do not remove fields actually needed for a future trained model restore, for example:
-
-```text
-action_dim
-horizon
-denoise_steps
-rgb_preprocessing
-agent config
-weights
-normalizer-related state
-```
-
-### Offline verification only
-
-There is no trained checkpoint, therefore **do not call real export as an acceptance condition**.
-
-Instead build a minimal synthetic artifact mapping in a test using small dummy `torch.Tensor` weights and the current contract structure. Verify:
-
-```text
-current artifact structure parses
-required fields are enforced
-temporal field is absent
-schema-version dispatch is absent
-```
-
-Do not call `restore_deployment_agent()` on a real model in this phase unless it can be exercised with a deliberately tiny fake object without trained weights.
-
-Real artifact export/restore is deferred until the first trained checkpoint exists.
-
----
-
-## 7. Do not slim unrelated `PolicySpec` fields
-
-The only mandatory public-spec removal in this task is:
-
-```text
-PolicySpec.temporal_ensemble_coeff
-```
-
-Keep existing unrelated fields such as:
-
-```text
-action_dim
-horizon
-requires_hand
-rgb_preprocessing
-```
-
-unless a direct compile/call-site audit proves removal is truly local and necessary.
-
-Do not create unnecessary cross-repository churn.
-
----
-
-## 8. Remove temporal semantics end-to-end
-
-Search before editing. Current references are expected in areas including:
-
-```text
-dexmani_policy/deployment/contract.py
-dexmani_policy/deployment/export.py
-dexmani_policy/deployment/runtime.py
-dexmani_policy/deployment/qualify.py
-
-dexmani_policy/env_runner/base_runner.py
-dexmani_policy/env_runner/sim_runner.py
-dexmani_policy/env_runner/multi_task_sim_runner.py
-
-dexmani_policy/select_best_ckpt.py
-dexmani_policy/eval_best_ckpt.py
-dexmani_policy/record_demo.py
-dexmani_policy/training/eval_utils.py
-
-dexmani_policy/configs/*.yaml
-README.md
-docs/仿真评测机制.md
-docs/项目架构.md
-scripts/
-```
-
-### Env runners/configs
-
-Remove:
-
-```text
-temporal_ensemble_coeff constructor args
-forwarding
-Hydra config keys
-generic temporal rejection guards
-```
-
-Preserve canonical `control_action` execution.
-
-### Eval/demo
-
-Remove coefficient arguments and result metadata from:
-
-```text
-eval_best_ckpt.py
-record_demo.py
-related scripts/config plumbing
-```
-
-Do not run those programs as long evaluations in this task.
-
-### Selection/export/runtime
-
-Remove the field from checkpoint-selection metadata, export inference settings, artifact contract, runtime spec, and qualification comparisons.
-
-Do not replace it with another generic blending flag.
-
----
-
-## 9. Preserve strict provenance
-
-Do not relax exporter provenance in this task.
-
-Preserve existing checks for:
-
-```text
-repository root
-valid HEAD commit
-clean working tree
-expected origin
-```
-
-Do not run a real deployment export just to exercise those checks while no trained checkpoint exists.
-
-Unit-test pure provenance helpers only if directly touched; otherwise leave them alone.
-
----
-
-## 10. Preserve observation/data semantics
-
-Do not simplify point-cloud/fingertip/RGB contracts while removing an unrelated temporal field.
-
-Preserve checks that prevent:
-
-```text
-wrong coordinate frame
-wrong units
-wrong xyzrgb preprocessing
-wrong point-cloud config identity
-wrong fingertip geometry/order
-wrong RGB preprocessing
-```
-
-No data-schema redesign belongs in this task.
-
----
-
-## 11. Expected patch scope
-
-Search first and keep the patch minimal. Expected production areas:
-
-```text
-dexmani_policy/deployment/contract.py
-dexmani_policy/deployment/export.py
-dexmani_policy/deployment/runtime.py
-dexmani_policy/deployment/qualify.py
-
-dexmani_policy/env_runner/base_runner.py
-dexmani_policy/env_runner/sim_runner.py
-dexmani_policy/env_runner/multi_task_sim_runner.py
-
-dexmani_policy/select_best_ckpt.py
-dexmani_policy/eval_best_ckpt.py
-dexmani_policy/record_demo.py
-dexmani_policy/training/eval_utils.py
-
-dexmani_policy/configs/*.yaml
-README.md
-docs/仿真评测机制.md
-docs/项目架构.md
-relevant scripts
-```
-
-Do not modify agents, losses, samplers, datasets, normalizers, or training objectives unless a direct dependency is demonstrated.
-
----
-
-## 12. Recommended implementation order
-
-### Phase A — remove temporal runtime/eval semantics
-
-1. Remove env-runner config/constructor field.
-2. Remove eval/demo argument/result propagation.
-3. Remove coefficient from checkpoint-selection writer/reader.
-4. Remove `record_version`; validate one current `best_ckpt.json` shape.
-5. Inspect/synthetically test sim runner semantics without running a long evaluation.
-
-### Phase B — simplify deployment artifact contract
-
-1. Remove coefficient from export/contract/runtime/qualification.
-2. Remove artifact schema-version dispatch/version fields.
-3. Keep one stable unversioned artifact marker + current required structure.
-4. Preserve restore/preprocessing/provenance logic.
-5. Validate the parser with a synthetic payload; do not export a trained model.
-
-### Phase C — docs + lightweight regression
-
-1. Update durable docs to the actual implementation.
-2. Add small CPU-only offline checks.
-3. Search for obsolete temporal/version compatibility code.
-
----
-
-## 13. Lightweight regression coverage
-
-Do not create a large test framework and do not require real weights.
-
-A small standard-library `unittest` module is sufficient, for example:
-
-```text
-tests/test_deployment_contract.py
-```
-
-Required checks:
-
-### A. Canonical runtime output
-
-Use a fake restored object / fake agent exposing `pred_action` and `control_action`; assert:
-
-```text
-LoadedPolicy.predict(obs) == validated control_action[0]
-```
-
-No trained checkpoint.
-
-### B. Current best_ckpt schema
-
-Use synthetic JSON in `tempfile.TemporaryDirectory()`.
-
-Verify one valid current record is accepted and malformed/obsolete layouts are rejected by current required-key validation.
-
-Do not test historical version compatibility.
-
-### C. Current deployment contract
-
-Construct a minimal synthetic artifact mapping with tiny dummy tensor weights.
-
-Verify parsing without any schema-version value.
-
-Do not export or restore a trained experiment.
-
-### D. Runtime spec
-
-Verify `PolicySpec` no longer exposes `temporal_ensemble_coeff` and unrelated fields remain intact.
-
-### E. Config construction
-
-Where inexpensive, compose representative Hydra configs and verify env-runner construction no longer expects the removed field.
-
-Do not build datasets/models if that requires unavailable data or trained weights.
-
----
-
-## 14. Cross-repository handoff for the current no-checkpoint phase
-
-After Policy source cleanup, proceed to `dexmani_real` **without** requiring a real artifact.
-
-Real should be updated against the public Policy Python contract using:
-
-```text
-synthetic/fake PolicySpec
-synthetic/fake action chunks
-```
-
-Do not block Real cleanup on:
-
-```text
-trained checkpoint
-deployment_latest.pt
-real load_experiment()
-GPU inference
-```
-
-Current sequence:
-
-```text
-1. finish Policy source cleanup
-2. compile + synthetic contract checks
-3. update Real source against current public contract
-4. Real compile + synthetic rollout checks
-5. stop this cleanup phase
-```
-
-A later integration phase begins only after a real trained checkpoint exists:
-
-```text
-trained checkpoint
-→ current best/eval metadata
-→ current deployment artifact export
-→ Policy restore/inference validation
-→ Real check/shadow
-→ physical eval
-```
-
-That later phase is **not** part of this task.
-
----
-
-## 15. Explicit non-goals
-
-Do not implement or execute:
-
-```text
-compatibility readers
-record/artifact version dispatch
-legacy migrations
-policy training / fine-tuning
-DDP/NCCL
-checkpoint generation
-checkpoint selection sweep
-real checkpoint restore
-real deployment export
-full simulator evaluation
-Temporal Ensemble
-ChunkOverlapBlender replacement
-RTC
+replan_steps
 steps_per_inference
-chunk merging
-action smoothing
-adaptive horizon
-latency compensation
-sampler/solver redesign
-model architecture changes
-training objective changes
-normalizer/data schema changes
-PolicySpec redesign beyond the removed field
-Git provenance redesign
+execution_horizon
+async_horizon
 ```
+
+For the current DexMani stack, preserve the existing `n_action_steps` meaning:
+
+```text
+number of canonical actions normally consumed before the next Policy query
+```
+
+This already matches current simulation execution and is sufficient for Real to choose its inference cadence.
+
+The relationship is:
+
+```text
+full future chunk length = chunk_size
+normal query interval     = n_action_steps
+```
+
+A useful future tail exists when:
+
+```text
+chunk_size > n_action_steps
+```
+
+If they are equal, the Policy is still valid; Real simply has no extra future tail with which to hide inference latency.
+
+Do not force `n_action_steps < chunk_size` in Policy.
 
 ---
 
-## 16. Validation
+## 5. Do not add action aggregation semantics
+
+This task must not introduce:
+
+```text
+Temporal Ensemble
+ChunkOverlapBlender
+weighted averaging
+RTC
+previous-chunk state
+new/old chunk interpolation
+adaptive horizon
+queue thresholds
+latency-dependent model behavior
+```
+
+The Policy side only returns a canonical prediction.
+
+Real owns timestamp scheduling and may replace an old future plan with a newer valid future plan. Policy does not need to know about that scheduling decision.
+
+If a future research model requires RTC, temporal consistency guidance or model-aware chunk stitching, implement it as a model/inference algorithm in `dexmani_policy` behind the same final action-chunk API. Do not put generic blending state into this deployment runtime now.
+
+---
+
+## 6. Keep simulation semantics unchanged
+
+Do not modify simulation runners merely to mimic the Real scheduler.
+
+Current simulation behavior can remain conceptually:
+
+```text
+obs
+→ policy.predict_action()
+→ control_action [n_action_steps,D]
+→ env.step() over those actions
+→ next Policy query
+```
+
+The new full-chunk API exists for the real deployment boundary, where a timestamped hardware executor can continue consuming the unexecuted future tail while the next inference is running.
+
+Do not add Real timing or timestamp logic to `env_runner`.
+
+---
+
+## 7. Seed semantics: preserve and verify, do not redesign
+
+The Policy repository already has two distinct concepts:
+
+```text
+training/checkpoint seed identity
+runtime/evaluation seed
+```
+
+Simulation evaluation already exposes explicit `eval_seeds`. Preserve that design.
+
+Deployment runtime requirements:
+
+```text
+load_experiment(seed >= 0) accepted
+reset_episode() resets inference stochastic stream
+warmup() does not consume the episode stream
+```
+
+Recommended lightweight regression checks:
+
+1. negative seed is rejected;
+2. two resets with the same seed reproduce a deterministic fake/stochastic test stream;
+3. different seeds produce different stochastic streams where a synthetic stochastic fake is used;
+4. warmup leaves the rollout RNG stream unchanged.
+
+Do not encode an `eval_seed` field into the deployment artifact. It is a per-rollout runtime input owned by the caller.
+
+---
+
+## 8. EEF/tactile are explicitly outside this task
+
+Current Real `main` can already construct:
+
+```text
+eef_pose [T,9]
+tactile_force [T,5,120,3]
+```
+
+but current Policy exporter `_SUPPORTED_OBSERVATION_FIELDS` still does not admit these fields.
+
+Do **not** opportunistically add them while implementing the chunk API.
+
+EEF/tactile end-to-end Policy support requires a separate, hypothesis-driven change across the Policy data/model/export path. Keep this rollout API patch focused.
+
+Similarly, do not alter:
+
+```text
+processed/Zarr schemas
+normalizers
+datasets
+observation encoders
+point-cloud semantics
+fingertip semantics
+RGB preprocessing
+```
+
+unless a direct compile dependency is discovered.
+
+---
+
+## 9. Preserve strict deployment provenance and current schema
+
+Recent Policy cleanup intentionally converged on:
+
+```text
+one current deployment format
+one current best_ckpt schema
+strict metadata/provenance
+no temporal compatibility dispatch
+```
+
+Do not undo that work.
+
+Preserve:
+
+```text
+DEPLOYMENT_FORMAT = "dexmani.deployment"
+strict top-level contract structure
+strict restore dimensions
+normalizer validation
+RGB preprocessing validation
+producer Git provenance
+checkpoint selection/export semantics
+```
+
+No version branching or compatibility adapter should be added for `chunk_size`; it is derived.
+
+---
+
+## 10. Expected production patch
+
+Primary files expected to change:
+
+```text
+dexmani_policy/deployment/runtime.py
+```
+
+Likely small supporting changes:
+
+```text
+dexmani_policy/deployment/contract.py      # derived property only, if useful
+dexmani_policy/agents/core/base.py         # stale tail comment only, optional
+tests/test_deployment_contract.py          # deterministic API regression tests
+docs/policy_deployment_simplification_guide.md
+```
+
+Files that should normally **not** require functional changes:
+
+```text
+dexmani_policy/deployment/export.py
+dexmani_policy/deployment/restore.py
+training code
+agent architectures
+action decoders
+normalizers
+datasets
+env runners
+Hydra configs
+checkpoint selection
+```
+
+If one of these must change, first demonstrate the direct dependency and keep the patch minimal.
+
+---
+
+## 11. Recommended implementation order
+
+### P0 — verify current baseline
 
 Before editing:
 
 ```bash
 git status --short
 git rev-parse HEAD
-rg -n "temporal_ensemble_coeff|ChunkOverlapBlender|temporal_ensembler|record_version|schema_version" \
-  dexmani_policy README.md docs scripts
+rg -n "pred_action|control_action|tail|n_action_steps|horizon|n_obs_steps" \
+  dexmani_policy/deployment dexmani_policy/agents/core tests
 ```
 
-After editing:
+Confirm the source facts in this guide still match current `main`.
+
+### P1 — derived chunk contract
+
+1. Add `PolicySpec.chunk_size`.
+2. Optionally add `DeploymentSpec.chunk_size` to centralize the same arithmetic.
+3. Add unit checks for the derived value and invariant.
+4. Do not change serialized artifact fields.
+
+### P2 — full future chunk API
+
+1. Add `LoadedPolicy.predict_action_chunk()`.
+2. Reuse `validate_prediction()`.
+3. Slice `snapshot.pred_action` from `n_obs_steps - 1` through the end.
+4. Slice only `control_action_dim` dimensions.
+5. Return finite `float64 [chunk_size,D]` ownership copy.
+6. Preserve `predict()` behavior.
+
+### P3 — deterministic tests
+
+Add CPU-only synthetic/fake-agent tests for:
+
+```text
+chunk shape
+chunk dtype
+finite values
+exact canonical slice
+first n_action_steps == control_action
+control_action_dim trimming
+chunk_size derivation
+seed validation/reset semantics
+warmup RNG preservation if inexpensive to isolate
+```
+
+Do not require robot hardware.
+
+### P4 — cross-repo handoff
+
+Only after the public API is green should `dexmani_real` switch its inference worker to `predict_action_chunk()`.
+
+Final code should not contain a long-lived fallback such as:
+
+```python
+if hasattr(runtime, "predict_action_chunk"):
+    ...
+else:
+    runtime.predict(...)
+```
+
+Coordinate repository revisions instead of maintaining a compatibility branch.
+
+---
+
+## 12. Required tests
+
+At minimum, cover the following with a deterministic fake agent/restored object.
+
+### A. Existing canonical control output remains unchanged
+
+```text
+predict(obs)
+→ exact validated control_action
+→ float64 [n_action_steps,D_control]
+```
+
+### B. Full chunk is the canonical future slice
+
+Given synthetic:
+
+```text
+pred_action [1,horizon,action_dim]
+```
+
+assert:
+
+```python
+chunk == pred_action[
+    0,
+    n_obs_steps - 1 :,
+    :control_action_dim,
+]
+```
+
+### C. Prefix relation
+
+Assert:
+
+```python
+chunk[:n_action_steps] == control_action[0]
+```
+
+### D. Auxiliary action dimensions never leak to Real
+
+For a Policy where:
+
+```text
+action_dim > control_action_dim
+```
+
+verify the full deployment chunk contains exactly `control_action_dim` columns.
+
+### E. No artifact schema change
+
+Existing synthetic deployment contract/parser tests must pass without a new persisted `chunk_size` key.
+
+---
+
+## 13. Explicit non-goals
+
+Do not implement in this task:
+
+```text
+Temporal Ensemble
+RTC
+chunk blending
+old/new prediction aggregation
+PolicyServer / remote inference
+action queue
+queue threshold
+adaptive query cadence
+new deployment schema version
+persisted chunk_size
+Real robot timing logic
+hardware safety
+rollout outcome handling
+recording changes
+EEF/tactile model support
+training changes
+sampler/solver changes
+new action representation
+```
+
+---
+
+## 14. Cross-repository ownership contract
+
+After this task, the intended boundary is:
+
+```text
+dexmani_policy
+    owns:
+        model
+        stochastic inference
+        horizon
+        n_obs_steps
+        n_action_steps
+        full canonical future action chunk
+
+    exposes:
+        PolicySpec.chunk_size          # derived
+        predict_action_chunk(obs)
+        reset_episode(seed-owned state)
+
+
+dexmani_real
+    owns:
+        causal physical observation
+        inference cadence = n_action_steps * control_dt
+        target timestamps
+        stale-action filtering
+        future-plan replacement
+        IK / safety
+        robot execution
+        recording / outcome
+```
+
+Neither repository should implement the other side's responsibilities.
+
+---
+
+## 15. Validation commands
+
+Use the repository's existing environment and tests. At minimum:
 
 ```bash
 python -m compileall -q dexmani_policy
 python -m unittest discover -s tests -p 'test_deployment_contract.py'
-
 git diff --check
 git diff --stat
-rg -n "temporal_ensemble_coeff|ChunkOverlapBlender|temporal_ensembler|record_version|schema_version" \
-  dexmani_policy README.md docs scripts
 ```
 
-If the chosen lightweight test path differs, run and report the actual deterministic CPU-only command.
+Also inspect for accidental reintroduction of removed mechanisms:
 
-Expected final search:
+```bash
+rg -n "temporal_ensemble|ChunkOverlapBlender|RTC|replan_steps|queue_threshold" \
+  dexmani_policy/deployment dexmani_policy/agents/core
+```
 
-- no active temporal mechanism/config;
-- no best-checkpoint/deployment compatibility-version dispatch;
-- this implementation guide may mention removed names descriptively.
-
-Do not invoke any training/evaluation/export command that needs real trained weights.
+Descriptive comments/docs may mention non-goals, but no active generic mechanism should be introduced.
 
 ---
 
-## 17. Definition of Done for this phase
+## 16. Definition of Done
 
-All must hold **without a trained checkpoint**:
+All of the following must hold:
 
 ```text
-sim/runtime source semantics
-→ canonical control_action only
-→ no generic temporal option/state
+Policy artifact schema
+→ unchanged
 ```
 
 ```text
-best_ckpt.json code path
-→ exactly one current schema
-→ no record_version
-→ no compatibility parser
-→ synthetic reader tests pass
+PolicySpec.chunk_size
+→ derived from horizon and n_obs_steps
+→ not persisted separately
 ```
 
 ```text
-deployment artifact code path
-→ exactly one current contract
-→ no schema-version dispatch
-→ no temporal field
-→ synthetic parser tests pass
+LoadedPolicy.predict()
+→ unchanged canonical [n_action_steps,D] semantics
+```
+
+```text
+LoadedPolicy.predict_action_chunk()
+→ one inference
+→ existing validate_prediction()
+→ exact future slice of pred_action
+→ finite float64 [chunk_size,D_control]
 ```
 
 and:
 
-- strict Git provenance code remains unchanged;
-- restore/preprocessing/normalizer semantics remain unchanged;
-- unrelated `PolicySpec` fields remain unchanged;
-- compile and CPU-only lightweight checks pass;
-- durable docs match current code;
-- no new action aggregation/replanning mechanism exists;
-- **no strategy training, checkpoint creation, checkpoint selection, real artifact export, or real checkpoint restore was performed.**
+- no model/training behavior changed;
+- no temporal aggregation mechanism added;
+- no compatibility branch added;
+- arbitrary non-negative runtime seed support remains intact;
+- warmup remains RNG-neutral for the episode stream;
+- existing strict deployment/provenance checks remain intact;
+- deterministic tests pass;
+- `dexmani_real` can consume the new API without understanding Policy internals.
 
----
-
-## 18. Deferred integration validation
-
-Explicitly defer until a trained checkpoint exists:
-
-```text
-real checkpoint restore
-real deployment artifact export
-artifact → restore round trip with actual agent weights
-GPU inference
-full simulator evaluation
-Policy → Real integration using real artifact
-real robot shadow/run/eval
-```
-
-These are not failures of the current cleanup and must not block completion.
-
----
-
-## 19. Final Claude Code / Codex report
-
-### Changed
-Report exact files and the single current metadata/artifact shapes.
-
-### Preserved
-Confirm canonical `control_action`, sequential sim semantics, restore/preprocessing, unrelated `PolicySpec` fields, and strict provenance.
-
-### Verified
-Report only commands actually run: compile, synthetic/unit checks, diff check, stale-reference search.
-
-### Explicitly Not Run
-Must state that no policy training, checkpoint selection, real checkpoint restore, real deployment export, long simulator evaluation, or real robot work was executed.
-
-### Deferred
-List real-checkpoint integration validation as a future phase after a trained checkpoint exists.
-
-Do not propose compatibility layers or temporal smoothing as follow-up work.
+The final result should be a **narrower, more useful public deployment API**, not a broader deployment framework.
