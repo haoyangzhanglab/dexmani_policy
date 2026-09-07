@@ -182,7 +182,7 @@ env_runner:
     # instance_random: when true, enables model_id randomization.
     instance_random: true
     # table_random: when true, enables table height randomization
-    #   (randomize_table_height with range [-0.05, 0.05]).
+    #   (randomize_table_height with range [-0.01, 0.02]).
     table_random: true
 
 # ── Eval ──
