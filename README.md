@@ -182,12 +182,12 @@ as a competing list.
   size, interpolation, and normalization parameters. Deployment applies the
   former before the latter. Other fields carry the raw tensor specification
   needed by the runtime that provides them.
-- **Real data boundary**: export accepts Real Policy Zarr schema v7 only with
+- **Real data boundary**: export accepts Real Policy Zarr schema v8 only with
   `episode_start_policy="full_history"` and
   `action_semantics="teleop_published_joint_target"`, and
   verifies the selected arrays before publication. The current `contact_force`
   source remains native per-finger sensor axes with
-  `units="sdk_scaled_unknown_si"` and `si_verified=false`.
+  `units="xhand_sdk_native_unknown_si"` and `si_verified=false`.
 
 The deployment modules expose `parse_deployment_contract`,
 `export_deployment_artifact`, `deployment_spec`, `restore_deployment_agent`,
