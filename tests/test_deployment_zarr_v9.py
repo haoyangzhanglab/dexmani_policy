@@ -1,4 +1,4 @@
-"""Focused regression tests for the Real Policy Zarr v8 data boundary.
+"""Focused regression tests for the Real Policy Zarr v9 data boundary.
 
 These exercise ``deployment/export.py``'s Zarr ingestion — the ``contact_force``
 units contract and the schema-version gate — against a minimal temp Zarr, with
@@ -36,7 +36,7 @@ def _cfg() -> dict:
 def _write_zarr(
     path: Path,
     *,
-    schema_version: int = 8,
+    schema_version: int = 9,
     contact_force_unit: str = "xhand_sdk_native_unknown_si",
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
@@ -68,29 +68,29 @@ def _write_zarr(
         data.create_dataset(name, shape=shape, dtype=np.float32)
 
 
-class TestPolicyZarrV8Boundary(unittest.TestCase):
-    def test_accepts_v8_native_contact_force(self) -> None:
+class TestPolicyZarrV9Boundary(unittest.TestCase):
+    def test_accepts_v9_native_contact_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "t.zarr"
             _write_zarr(
                 path,
-                schema_version=8,
+                schema_version=9,
                 contact_force_unit="xhand_sdk_native_unknown_si",
             )
             contract = _build_observation_contract(
                 path, _cfg(), ["joint_state", "contact_force"]
             )
-        self.assertEqual(contract["schema_version"], 8)
+        self.assertEqual(contract["schema_version"], 9)
         semantics = contract["observation_fields"]["contact_force"]["semantics"]
         self.assertEqual(semantics["representation"], "per_finger_sensor_axes")
         self.assertEqual(semantics["units"], "xhand_sdk_native_unknown_si")
         self.assertEqual(semantics["frame"], "xhand_sensor_native_axes_per_finger")
         self.assertIs(semantics["si_verified"], False)
 
-    def test_rejects_v7_schema(self) -> None:
+    def test_rejects_v8_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "t.zarr"
-            _write_zarr(path, schema_version=7)
+            _write_zarr(path, schema_version=8)
             with self.assertRaisesRegex(
                 InvalidZarrError, "invalid Real Policy Zarr semantics"
             ):
@@ -103,7 +103,7 @@ class TestPolicyZarrV8Boundary(unittest.TestCase):
             path = Path(tmp) / "t.zarr"
             _write_zarr(
                 path,
-                schema_version=8,
+                schema_version=9,
                 contact_force_unit="sdk_scaled_unknown_si",
             )
             with self.assertRaisesRegex(

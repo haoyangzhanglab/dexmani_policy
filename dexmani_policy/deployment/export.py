@@ -563,7 +563,7 @@ def _validate_core_zarr_attrs(
         raise InvalidZarrError(f"Real Policy Zarr is missing semantic attrs: {missing}")
     if (
         attrs["schema_name"] != "dexmani-real-policy-zarr"
-        or attrs["schema_version"] != 8
+        or attrs["schema_version"] != 9
         or attrs["domain"] != "real"
         or attrs["episode_start_policy"] != "full_history"
         or attrs["obs_alignment"] != "obs[t]_before_action[t]"
