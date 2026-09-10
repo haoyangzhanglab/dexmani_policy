@@ -182,8 +182,8 @@ as a competing list.
   size, interpolation, and normalization parameters. Deployment applies the
   former before the latter. Other fields carry the raw tensor specification
   needed by the runtime that provides them.
-- **Real data boundary**: export accepts Real Policy Zarr schema v10 only with
-  `episode_start_policy="full_history"` and
+- **Real data boundary**: export accepts the Real Policy Zarr (`schema_version` is
+  informational metadata, not an exact compatibility gate) and requires
   `action_semantics="teleop_published_joint_target"`, and
   verifies the selected arrays before publication. The current `contact_force`
   source remains native per-finger sensor axes with
