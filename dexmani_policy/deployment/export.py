@@ -438,7 +438,7 @@ def _build_observation_contract(
         arrays = root["data"]
     except Exception as exc:
         raise InvalidZarrError(f"cannot open Real Policy Zarr: {path}") from exc
-    _validate_core_zarr_attrs(attrs, cfg_plain, observation_fields)
+    _validate_core_zarr_attrs(attrs, cfg_plain)
     _validate_required_zarr_arrays(root, cfg_plain)
 
     fields: dict[str, dict[str, Any]] = {}
@@ -531,8 +531,9 @@ def _build_observation_contract(
         "task_name": attrs["task_name"],
         "dt": attrs["dt"],
         "obs_alignment": attrs["obs_alignment"],
-        "observation_reference": attrs["observation_reference"],
+        "observation_alignment": attrs["observation_alignment"],
         "state_alignment": attrs["state_alignment"],
+        "contact_force_source": attrs["contact_force_source"],
         "action_semantics": attrs["action_semantics"],
         "requires_hand": True,
         "observation_fields": fields,
@@ -543,7 +544,6 @@ def _build_observation_contract(
 def _validate_core_zarr_attrs(
     attrs: Mapping[str, Any],
     cfg_plain: Mapping[str, Any],
-    observation_fields: list[str],
 ) -> None:
     required = {
         "schema_name",
@@ -554,8 +554,9 @@ def _validate_core_zarr_attrs(
         "dt",
         "episode_start_policy",
         "obs_alignment",
-        "observation_reference",
+        "observation_alignment",
         "state_alignment",
+        "contact_force_source",
         "action_semantics",
     }
     missing = sorted(required - set(attrs))
@@ -563,7 +564,8 @@ def _validate_core_zarr_attrs(
         raise InvalidZarrError(f"Real Policy Zarr is missing semantic attrs: {missing}")
     if (
         attrs["schema_name"] != "dexmani-real-policy-zarr"
-        or attrs["schema_version"] != 9
+        or type(attrs["schema_version"]) is not int
+        or attrs["schema_version"] != 10
         or attrs["domain"] != "real"
         or attrs["episode_start_policy"] != "full_history"
         or attrs["obs_alignment"] != "obs[t]_before_action[t]"
@@ -586,19 +588,14 @@ def _validate_core_zarr_attrs(
             or not math.isclose(float(config_dt), dt, rel_tol=0.0, abs_tol=1e-9)
         ):
             raise InvalidZarrError("Zarr dt conflicts with resolved config")
-    visual = "rgb" in observation_fields or "point_cloud" in observation_fields
-    expected_reference = (
-        "camera_source_monotonic_ns" if visual else "grid_anchor_monotonic_ns"
-    )
-    expected_alignment = (
-        "camera_source_aligned_state" if visual else "control_grid_state"
-    )
+    # Every modality uses the logical control step, never camera exposure time.
     if (
-        attrs["observation_reference"] != expected_reference
-        or attrs["state_alignment"] != expected_alignment
+        attrs["observation_alignment"] != "control_step_latest_causal"
+        or attrs["state_alignment"] != "control_step"
+        or attrs["contact_force_source"] != "raw_hand_contact_control_step"
     ):
         raise InvalidZarrError(
-            "Zarr observation timing conflicts with selected modalities"
+            "Zarr observation timing/source must use the control-step contract"
         )
 
 

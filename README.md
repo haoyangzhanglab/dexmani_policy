@@ -182,12 +182,19 @@ as a competing list.
   size, interpolation, and normalization parameters. Deployment applies the
   former before the latter. Other fields carry the raw tensor specification
   needed by the runtime that provides them.
-- **Real data boundary**: export accepts Real Policy Zarr schema v8 only with
+- **Real data boundary**: export accepts Real Policy Zarr schema v10 only with
   `episode_start_policy="full_history"` and
   `action_semantics="teleop_published_joint_target"`, and
   verifies the selected arrays before publication. The current `contact_force`
   source remains native per-finger sensor axes with
   `units="xhand_sdk_native_unknown_si"` and `si_verified=false`.
+  All profiles use `observation_alignment="control_step_latest_causal"`,
+  `state_alignment="control_step"`, and
+  `contact_force_source="raw_hand_contact_control_step"`. These are persisted in
+  `data_contract`; camera exposure timestamps are not the state/contact timeline.
+  Old v8/v9 stores are rejected, not relabeled or accepted through compatibility
+  aliases. Rebuild data from the Real control-step processing pipeline. This does
+  not change model windows, action dimensions, or runtime safety checks.
 
 The deployment modules expose `parse_deployment_contract`,
 `export_deployment_artifact`, `deployment_spec`, `restore_deployment_agent`,
