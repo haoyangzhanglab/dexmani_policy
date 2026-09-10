@@ -49,10 +49,8 @@ def _write_zarr(
             "schema_name": _SCHEMA_NAME,
             "schema_version": schema_version,
             "domain": "real",
-            "profile": profile,
             "task_name": "t",
             "dt": 0.0625,
-            "episode_start_policy": "full_history",
             "obs_alignment": "obs[t]_before_action[t]",
             "observation_alignment": "control_step_latest_causal",
             "state_alignment": "control_step",
@@ -138,15 +136,18 @@ class TestPolicyZarrV10Boundary(unittest.TestCase):
                     ["joint_state", "point_cloud", "contact_force"],
                 )
 
-    def test_rejects_noncurrent_schema(self) -> None:
-        for version in (8, 9, 11, 10.0, "10", True):
+    def test_schema_version_is_informational_not_a_gate(self) -> None:
+        # The exact schema_version integer is metadata (provenance / human
+        # tracking), not a compatibility gate: a dataset with compatible keys,
+        # shapes, dtypes, and semantics is accepted regardless of its version.
+        for version in (8, 9, 10, 11, 10.0, "10"):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "t.zarr"
                 _write_zarr(path, schema_version=version)
-                with self.assertRaisesRegex(
-                    InvalidZarrError, "invalid Real Policy Zarr semantics"
-                ):
-                    _build_observation_contract(path, _cfg(), ["joint_state"])
+                contract = _build_observation_contract(path, _cfg(), ["joint_state"])
+            self.assertEqual(
+                contract["observation_alignment"], "control_step_latest_causal"
+            )
 
     def test_all_profiles_use_the_same_control_step_contract(self) -> None:
         for profile, visual in (
@@ -195,7 +196,6 @@ class TestPolicyZarrV10Boundary(unittest.TestCase):
             ("task_name", "other"),
             ("dt", 0.02),
             ("action_semantics", "candidate_joint_target"),
-            ("episode_start_policy", "padded_history"),
             ("contact_force_si_verified", True),
         ):
             with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:

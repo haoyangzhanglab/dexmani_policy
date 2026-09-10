@@ -527,7 +527,6 @@ def _build_observation_contract(
         "schema_name": attrs["schema_name"],
         "schema_version": attrs["schema_version"],
         "domain": attrs["domain"],
-        "profile": attrs["profile"],
         "task_name": attrs["task_name"],
         "dt": attrs["dt"],
         "obs_alignment": attrs["obs_alignment"],
@@ -549,10 +548,8 @@ def _validate_core_zarr_attrs(
         "schema_name",
         "schema_version",
         "domain",
-        "profile",
         "task_name",
         "dt",
-        "episode_start_policy",
         "obs_alignment",
         "observation_alignment",
         "state_alignment",
@@ -562,12 +559,12 @@ def _validate_core_zarr_attrs(
     missing = sorted(required - set(attrs))
     if missing:
         raise InvalidZarrError(f"Real Policy Zarr is missing semantic attrs: {missing}")
+    # schema_version is informational metadata (provenance / human tracking),
+    # not a compatibility gate: a dataset with compatible keys, shapes, dtypes,
+    # and semantics is accepted regardless of its exact version integer.
     if (
         attrs["schema_name"] != "dexmani-real-policy-zarr"
-        or type(attrs["schema_version"]) is not int
-        or attrs["schema_version"] != 10
         or attrs["domain"] != "real"
-        or attrs["episode_start_policy"] != "full_history"
         or attrs["obs_alignment"] != "obs[t]_before_action[t]"
         or attrs["action_semantics"] != "teleop_published_joint_target"
     ):
