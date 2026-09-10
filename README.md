@@ -188,13 +188,17 @@ as a competing list.
   verifies the selected arrays before publication. The current `contact_force`
   source remains native per-finger sensor axes with
   `units="xhand_sdk_native_unknown_si"` and `si_verified=false`.
-  All profiles use `observation_alignment="control_step_latest_causal"`,
+  All modality combinations use `observation_alignment="control_step_latest_causal"`,
   `state_alignment="control_step"`, and
   `contact_force_source="raw_hand_contact_control_step"`. These are persisted in
   `data_contract`; camera exposure timestamps are not the state/contact timeline.
   Old v8/v9 stores are rejected, not relabeled or accepted through compatibility
   aliases. Rebuild data from the Real control-step processing pipeline. This does
   not change model windows, action dimensions, or runtime safety checks.
+- **Config JSON propagation**: the point-cloud `processing_config_json` and
+  fingertip `fingertip_config_json` attrs are structurally checked and
+  propagated verbatim into the deployment artifact semantics so the Real
+  runtime can exact-compare the full numeric derivation config and FK geometry.
 
 The deployment modules expose `parse_deployment_contract`,
 `export_deployment_artifact`, `deployment_spec`, `restore_deployment_agent`,

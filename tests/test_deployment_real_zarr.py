@@ -1,8 +1,10 @@
-"""Focused regression tests for the Real Policy Zarr v10 data boundary.
+"""Focused regression tests for the Real Policy Zarr data boundary.
 
 These exercise ``deployment/export.py``'s Zarr ingestion — the ``contact_force``
-units contract and the schema-version gate — against a minimal temp Zarr, with
-no trained checkpoint and no hardware.
+units contract, control-step semantics, ``schema_version`` as informational
+metadata rather than a version gate, and the point-cloud/fingertip numeric
+config JSON propagation — against a minimal temp Zarr, with no trained
+checkpoint and no hardware.
 """
 
 from __future__ import annotations
@@ -60,8 +62,9 @@ def _cfg() -> dict:
 def _write_zarr(
     path: Path,
     *,
-    schema_version: int = 10,
-    profile: str = "joint",
+    schema_version: int = 11,
+    rgb: bool = False,
+    point_cloud: bool = False,
     contact_force_unit: str = "xhand_sdk_native_unknown_si",
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
@@ -90,20 +93,20 @@ def _write_zarr(
         ("contact_force", (1, 5, 3)),
     ):
         data.create_dataset(name, shape=shape, dtype=np.float32)
-    if profile in {"rgb", "rgb_pc"}:
+    if rgb:
         data.create_dataset("rgb", shape=(1, 8, 8, 3), dtype=np.uint8)
         root.attrs["camera_extrinsic_semantics"] = (
             "T_xarm_base_from_color;native_color_optical_to_xarm_base"
         )
-    if profile in {"pointcloud", "rgb_pc"}:
+    if point_cloud:
         data.create_dataset("point_cloud", shape=(1, 1024, 6), dtype=np.float32)
         root.attrs.update(_POINT_SEMANTICS)
         root.attrs["point_cloud_table_plane_abcd_json"] = "null"
         root.attrs["processing_config_json"] = _PROCESSING_CONFIG_JSON
 
 
-class TestPolicyZarrV10Boundary(unittest.TestCase):
-    def test_accepts_v10_native_contact_force(self) -> None:
+class TestRealZarrBoundary(unittest.TestCase):
+    def test_accepts_native_contact_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "t.zarr"
             _write_zarr(
@@ -125,10 +128,10 @@ class TestPolicyZarrV10Boundary(unittest.TestCase):
         self.assertEqual(semantics["frame"], "xhand_sensor_native_axes_per_finger")
         self.assertIs(semantics["si_verified"], False)
 
-    def test_v10_data_contract_parses_with_unchanged_runtime_dimensions(self) -> None:
+    def test_data_contract_parses_with_unchanged_runtime_dimensions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "t.zarr"
-            _write_zarr(path, profile="pointcloud")
+            _write_zarr(path, point_cloud=True)
             contract = _build_observation_contract(
                 path, _cfg(), ["joint_state", "point_cloud", "contact_force"]
             )
@@ -171,16 +174,16 @@ class TestPolicyZarrV10Boundary(unittest.TestCase):
                 contract["observation_alignment"], "control_step_latest_causal"
             )
 
-    def test_all_profiles_use_the_same_control_step_contract(self) -> None:
-        for profile, visual in (
-            ("joint", []),
-            ("rgb", ["rgb"]),
-            ("pointcloud", ["point_cloud"]),
-            ("rgb_pc", ["rgb", "point_cloud"]),
+    def test_modality_combinations_use_the_same_control_step_contract(self) -> None:
+        for flags, visual in (
+            ({}, []),
+            ({"rgb": True}, ["rgb"]),
+            ({"point_cloud": True}, ["point_cloud"]),
+            ({"rgb": True, "point_cloud": True}, ["rgb", "point_cloud"]),
         ):
-            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "t.zarr"
-                _write_zarr(path, profile=profile)
+                _write_zarr(path, **flags)
                 fields = ["joint_state", "contact_force", *visual]
                 contract = _build_observation_contract(path, _cfg(), fields)
                 self.assertEqual(list(contract["observation_fields"]), fields)
