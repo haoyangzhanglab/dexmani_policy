@@ -7,6 +7,7 @@ no trained checkpoint and no hardware.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ import zarr
 from dexmani_policy.deployment.contract import DEPLOYMENT_FORMAT, parse_deployment_contract
 from dexmani_policy.deployment.export import (
     InvalidZarrError,
+    _FINGERTIP_SEMANTICS,
     _POINT_SEMANTICS,
     _build_observation_contract,
     _validate_fingertip_points,
@@ -24,6 +26,25 @@ from dexmani_policy.deployment.export import (
 )
 
 _SCHEMA_NAME = "dexmani-real-policy-zarr"
+# The producer owns the numeric content; this boundary only proves the attr is
+# a JSON object with the guaranteed members and propagates it verbatim.
+_PROCESSING_CONFIG_JSON = json.dumps(
+    {
+        "pointcloud": {"num_points": 1024, "voxel_size_m": 0.005},
+        "table_plane_abcd": None,
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+)
+_FINGERTIP_CONFIG_JSON = json.dumps(
+    {
+        "fingertip_link_names": ["tip_a", "tip_b", "tip_c", "tip_d", "tip_e"],
+        "handbase_position_eef_m": [-0.015, 0.0, 0.0],
+        "handbase_quat_eef_wxyz": [0.707107, 0.0, 0.707107, 0.0],
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+)
 
 
 def _cfg() -> dict:
@@ -78,6 +99,7 @@ def _write_zarr(
         data.create_dataset("point_cloud", shape=(1, 1024, 6), dtype=np.float32)
         root.attrs.update(_POINT_SEMANTICS)
         root.attrs["point_cloud_table_plane_abcd_json"] = "null"
+        root.attrs["processing_config_json"] = _PROCESSING_CONFIG_JSON
 
 
 class TestPolicyZarrV10Boundary(unittest.TestCase):
@@ -247,6 +269,7 @@ class TestPolicyZarrV10Boundary(unittest.TestCase):
                     "spatial_candidate_cap;coarse_voxel_stratified_hash_or_cyclic_pad"
                 ),
                 "point_cloud_table_plane_abcd_json": "null",
+                "processing_config_json": _PROCESSING_CONFIG_JSON,
             }
             tail, semantics = _validate_point_cloud(point_cloud, attrs, {"agent": {}})
         self.assertEqual(tail, (1024, 6))
@@ -255,6 +278,30 @@ class TestPolicyZarrV10Boundary(unittest.TestCase):
             semantics["policy_id"],
             "depth_to_color_orthogonal_edge_table_voxel_radius_graph_v9",
         )
+        # The full numeric config rides along verbatim for Real's exact compare.
+        self.assertEqual(
+            semantics["processing_config_json"], _PROCESSING_CONFIG_JSON
+        )
+
+    def test_point_cloud_rejects_missing_or_malformed_processing_config(self) -> None:
+        for encoded in (
+            None,
+            "",
+            "{not json",
+            json.dumps({"pointcloud": {}}),
+            json.dumps([1, 2]),
+        ):
+            with self.subTest(encoded=encoded), tempfile.TemporaryDirectory() as tmp:
+                root = zarr.open_group(str(Path(tmp) / "t.zarr"), mode="w")
+                point_cloud = root.create_dataset(
+                    "point_cloud", shape=(1, 1024, 6), dtype=np.float32
+                )
+                attrs = dict(_POINT_SEMANTICS)
+                attrs["point_cloud_table_plane_abcd_json"] = "null"
+                if encoded is not None:
+                    attrs["processing_config_json"] = encoded
+                with self.assertRaises(InvalidZarrError):
+                    _validate_point_cloud(point_cloud, attrs, {"agent": {}})
 
     def test_fingertip_points_accepts_without_geometry_sha256(self) -> None:
         attrs = {
@@ -262,10 +309,28 @@ class TestPolicyZarrV10Boundary(unittest.TestCase):
             "fingertip_points_unit": "m",
             "fingertip_points_derivation": "fk_from_processed_joint_state",
             "fingertip_points_policy_id": "arm_hand_fk_from_joint_state_v1",
+            "fingertip_config_json": _FINGERTIP_CONFIG_JSON,
         }
         semantics = _validate_fingertip_points(attrs)
         self.assertNotIn("geometry_sha256", semantics)
         self.assertEqual(semantics["policy_id"], "arm_hand_fk_from_joint_state_v1")
+        # The numeric FK geometry rides along verbatim for Real's exact compare.
+        self.assertEqual(semantics["fingertip_config_json"], _FINGERTIP_CONFIG_JSON)
+
+    def test_fingertip_rejects_missing_or_malformed_config(self) -> None:
+        for encoded in (
+            None,
+            "",
+            "{not json",
+            json.dumps({"fingertip_link_names": []}),
+            json.dumps([1, 2]),
+        ):
+            with self.subTest(encoded=encoded):
+                attrs = dict(_FINGERTIP_SEMANTICS)
+                if encoded is not None:
+                    attrs["fingertip_config_json"] = encoded
+                with self.assertRaises(InvalidZarrError):
+                    _validate_fingertip_points(attrs)
 
 
 if __name__ == "__main__":

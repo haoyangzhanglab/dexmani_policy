@@ -70,6 +70,15 @@ _FINGERTIP_SEMANTICS = {
     "fingertip_points_derivation": "fk_from_processed_joint_state",
     "fingertip_points_policy_id": "arm_hand_fk_from_joint_state_v1",
 }
+# Members the Real producer guarantees inside each canonical config JSON attr.
+_PROCESSING_CONFIG_MEMBERS = frozenset({"pointcloud", "table_plane_abcd"})
+_FINGERTIP_CONFIG_MEMBERS = frozenset(
+    {
+        "fingertip_link_names",
+        "handbase_position_eef_m",
+        "handbase_quat_eef_wxyz",
+    }
+)
 
 
 class DeploymentExportError(RuntimeError):
@@ -426,6 +435,31 @@ def _validate_table_plane(value: Any) -> str:
     return encoded
 
 
+def _validate_config_json_attr(
+    attrs: Mapping[str, Any], key: str, required_members: frozenset[str]
+) -> str:
+    """Require one producer-owned numeric config JSON and keep it verbatim.
+
+    The Real producer owns the numeric contract; this side only proves the
+    attr is a non-empty JSON object carrying the required members, then
+    propagates the original string so the Real deployment runtime can
+    exact-compare the full physics-changing configuration.
+    """
+    encoded = attrs.get(key)
+    if type(encoded) is not str or not encoded:
+        raise InvalidZarrError(f"Zarr {key} must be a non-empty string")
+    try:
+        parsed = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        raise InvalidZarrError(f"Zarr {key} is not valid JSON") from exc
+    if type(parsed) is not dict or not required_members <= set(parsed):
+        raise InvalidZarrError(
+            f"Zarr {key} must encode an object containing "
+            f"{sorted(required_members)}"
+        )
+    return encoded
+
+
 def _build_observation_contract(
     path: Path,
     cfg_plain: dict[str, Any],
@@ -637,6 +671,9 @@ def _validate_point_cloud(
     table_plane_abcd_json = _validate_table_plane(
         attrs.get("point_cloud_table_plane_abcd_json")
     )
+    processing_config_json = _validate_config_json_attr(
+        attrs, "processing_config_json", _PROCESSING_CONFIG_MEMBERS
+    )
     agent = cfg_plain.get("agent")
     if type(agent) is not dict:
         raise InvalidExperimentError("config.agent must be a plain mapping")
@@ -656,6 +693,7 @@ def _validate_point_cloud(
         "color_source": str(attrs["point_cloud_color_source"]),
         "policy_id": str(attrs["point_cloud_policy_id"]),
         "table_plane_abcd_json": table_plane_abcd_json,
+        "processing_config_json": processing_config_json,
         "sampling": str(attrs["point_cloud_sampling"]),
         "transform": str(attrs["point_cloud_transform"]),
     }
@@ -665,12 +703,16 @@ def _validate_fingertip_points(attrs: Mapping[str, Any]) -> dict[str, str]:
     for key, expected in _FINGERTIP_SEMANTICS.items():
         if attrs.get(key) != expected:
             raise InvalidZarrError(f"Zarr {key} is invalid")
+    fingertip_config_json = _validate_config_json_attr(
+        attrs, "fingertip_config_json", _FINGERTIP_CONFIG_MEMBERS
+    )
     return {
         "frame": str(attrs["fingertip_points_frame"]),
         "units": str(attrs["fingertip_points_unit"]),
         "finger_order": "thumb_index_mid_ring_pinky",
         "derivation": str(attrs["fingertip_points_derivation"]),
         "policy_id": str(attrs["fingertip_points_policy_id"]),
+        "fingertip_config_json": fingertip_config_json,
     }
 
 
