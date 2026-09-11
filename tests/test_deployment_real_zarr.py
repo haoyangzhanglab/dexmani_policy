@@ -20,11 +20,15 @@ import zarr
 from dexmani_policy.deployment.contract import DEPLOYMENT_FORMAT, parse_deployment_contract
 from dexmani_policy.deployment.export import (
     InvalidZarrError,
+    _EEF_POSE_SEMANTICS,
     _FINGERTIP_SEMANTICS,
     _POINT_SEMANTICS,
+    _TACTILE_FORCE_SEMANTICS,
     _build_observation_contract,
+    _validate_eef_pose,
     _validate_fingertip_points,
     _validate_point_cloud,
+    _validate_tactile_force,
 )
 
 _SCHEMA_NAME = "dexmani-real-policy-zarr"
@@ -62,10 +66,12 @@ def _cfg() -> dict:
 def _write_zarr(
     path: Path,
     *,
-    schema_version: int = 11,
+    schema_version: int = 12,
     rgb: bool = False,
     point_cloud: bool = False,
     contact_force_unit: str = "xhand_sdk_native_unknown_si",
+    eef_pose: bool = False,
+    tactile_force: bool = False,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs.update(
@@ -103,6 +109,19 @@ def _write_zarr(
         root.attrs.update(_POINT_SEMANTICS)
         root.attrs["point_cloud_table_plane_abcd_json"] = "null"
         root.attrs["processing_config_json"] = _PROCESSING_CONFIG_JSON
+    if eef_pose:
+        data.create_dataset("eef_pose", shape=(1, 9), dtype=np.float32)
+        root.attrs.update(_EEF_POSE_SEMANTICS)
+    if tactile_force:
+        data.create_dataset("tactile_force", shape=(1, 5, 120, 3), dtype=np.float32)
+        root.attrs.update(_TACTILE_FORCE_SEMANTICS)
+        root.attrs.update(
+            {
+                "tactile_force_unit": "xhand_sdk_native_unknown_si",
+                "tactile_force_si_verified": False,
+                "tactile_force_spatial_geometry_verified": False,
+            }
+        )
 
 
 class TestRealZarrBoundary(unittest.TestCase):
@@ -334,6 +353,72 @@ class TestRealZarrBoundary(unittest.TestCase):
                     attrs["fingertip_config_json"] = encoded
                 with self.assertRaises(InvalidZarrError):
                     _validate_fingertip_points(attrs)
+
+    def test_eef_pose_accepts_canonical_fk_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.zarr"
+            _write_zarr(path, eef_pose=True)
+            contract = _build_observation_contract(
+                path, _cfg(), ["joint_state", "eef_pose"]
+            )
+        semantics = contract["observation_fields"]["eef_pose"]["semantics"]
+        self.assertEqual(semantics["representation"], "position_m_rot6d")
+        self.assertEqual(semantics["frame"], "xarm_base")
+        self.assertEqual(semantics["position_units"], "m")
+        self.assertEqual(semantics["rotation_representation"], "rot6d")
+        self.assertEqual(
+            semantics["derivation"], "canonical_arm_fk_from_aligned_qpos"
+        )
+        self.assertEqual(
+            semantics["algorithm_id"], "xarm7_custom_eef_pinocchio_fk_v1"
+        )
+
+    def test_eef_pose_rejects_fk_identity_drift(self) -> None:
+        for key, value in (
+            ("eef_pose_frame", "camera"),
+            ("eef_pose_components", "position_m(3)+quat_wxyz(4)"),
+            ("eef_pose_derivation", "firmware_eef"),
+            ("eef_pose_algorithm_id", "other"),
+        ):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "t.zarr"
+                _write_zarr(path, eef_pose=True)
+                zarr.open_group(str(path), mode="a").attrs[key] = value
+                with self.assertRaises(InvalidZarrError):
+                    _build_observation_contract(
+                        path, _cfg(), ["joint_state", "eef_pose"]
+                    )
+
+    def test_tactile_force_accepts_native_unknown_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.zarr"
+            _write_zarr(path, tactile_force=True)
+            contract = _build_observation_contract(
+                path, _cfg(), ["joint_state", "tactile_force"]
+            )
+        semantics = contract["observation_fields"]["tactile_force"]["semantics"]
+        self.assertEqual(
+            semantics["representation"], "xhand_sdk_raw_force_fx_fy_fz_bias_corrected"
+        )
+        self.assertEqual(semantics["unit"], "xhand_sdk_native_unknown_si")
+        self.assertIs(semantics["si_verified"], False)
+        self.assertIs(semantics["spatial_geometry_verified"], False)
+        self.assertEqual(semantics["finger_order"], "thumb_index_mid_ring_pinky")
+
+    def test_tactile_force_rejects_unproven_unit_or_geometry(self) -> None:
+        for key, value in (
+            ("tactile_force_unit", "newton"),
+            ("tactile_force_si_verified", True),
+            ("tactile_force_spatial_geometry_verified", True),
+        ):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "t.zarr"
+                _write_zarr(path, tactile_force=True)
+                zarr.open_group(str(path), mode="a").attrs[key] = value
+                with self.assertRaises(InvalidZarrError):
+                    _build_observation_contract(
+                        path, _cfg(), ["joint_state", "tactile_force"]
+                    )
 
 
 if __name__ == "__main__":

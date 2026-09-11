@@ -40,6 +40,8 @@ _SUPPORTED_OBSERVATION_FIELDS = frozenset(
         "rgb",
         "contact_force",
         "fingertip_points",
+        "eef_pose",
+        "tactile_force",
     }
 )
 _POINT_COUNTS = frozenset({1024, 2048, 4096, 8192})
@@ -63,6 +65,23 @@ _FINGERTIP_SEMANTICS = {
     "fingertip_points_unit": "m",
     "fingertip_points_derivation": "fk_from_processed_joint_state",
     "fingertip_points_policy_id": "arm_hand_fk_from_joint_state_v1",
+}
+# Canonical EEF observation identity; deploy-time FK must resolve to the same
+# derivation and algorithm so a silent frame/FK drift cannot change the values.
+_EEF_POSE_SEMANTICS = {
+    "eef_pose_frame": "xarm_base",
+    "eef_pose_components": "position_m(3)+rot6d(6)",
+    "eef_pose_derivation": "canonical_arm_fk_from_aligned_qpos",
+    "eef_pose_algorithm_id": "xarm7_custom_eef_pinocchio_fk_v1",
+}
+# Dense tactile ordering/axis identity; unit honesty is checked separately
+# because XHand SDK native values are not proven to be Newtons.
+_TACTILE_FORCE_SEMANTICS = {
+    "tactile_force_representation": "xhand_sdk_raw_force_fx_fy_fz_bias_corrected",
+    "tactile_force_finger_order": "thumb_index_mid_ring_pinky",
+    "tactile_force_sensor_order": "xhand_sdk_sensor_data_order",
+    "tactile_force_point_order": "xhand_sdk_sensor_data_raw_force_order",
+    "tactile_force_axis_labels": "fx_fy_fz",
 }
 # Members the Real producer guarantees inside each canonical config JSON attr.
 _PROCESSING_CONFIG_MEMBERS = frozenset({"pointcloud", "table_plane_abcd"})
@@ -494,6 +513,24 @@ def _build_observation_contract(
                 "point_xyz",
                 fingertip_semantics,
             )
+        elif name == "eef_pose":
+            _validate_observation_array(array, name, (9,), np.dtype(np.float32))
+            fields[name] = _observation_field(
+                (9,),
+                "float32",
+                "position_m_rot6d",
+                _validate_eef_pose(attrs),
+            )
+        elif name == "tactile_force":
+            _validate_observation_array(
+                array, name, (5, 120, 3), np.dtype(np.float32)
+            )
+            fields[name] = _observation_field(
+                (5, 120, 3),
+                "float32",
+                "xhand_sdk_raw_force_fx_fy_fz_bias_corrected",
+                _validate_tactile_force(attrs),
+            )
         else:  # _dataset_modalities already rejects unknown values.
             raise InvalidZarrError(f"unsupported observation field: {name!r}")
 
@@ -653,6 +690,47 @@ def _validate_fingertip_points(attrs: Mapping[str, Any]) -> dict[str, str]:
         "derivation": str(attrs["fingertip_points_derivation"]),
         "policy_id": str(attrs["fingertip_points_policy_id"]),
         "fingertip_config_json": fingertip_config_json,
+    }
+
+
+def _validate_eef_pose(attrs: Mapping[str, Any]) -> dict[str, str]:
+    for key, expected in _EEF_POSE_SEMANTICS.items():
+        if attrs.get(key) != expected:
+            raise InvalidZarrError(f"Zarr {key} is invalid")
+    return {
+        "frame": str(attrs["eef_pose_frame"]),
+        "position_units": "m",
+        "rotation_representation": "rot6d",
+        "derivation": str(attrs["eef_pose_derivation"]),
+        "algorithm_id": str(attrs["eef_pose_algorithm_id"]),
+    }
+
+
+def _validate_tactile_force(attrs: Mapping[str, Any]) -> dict[str, Any]:
+    for key, expected in _TACTILE_FORCE_SEMANTICS.items():
+        if attrs.get(key) != expected:
+            raise InvalidZarrError(f"Zarr {key} is invalid")
+    unit = attrs.get("tactile_force_unit")
+    if unit != "xhand_sdk_native_unknown_si":
+        raise InvalidZarrError(
+            "Zarr tactile_force_unit must be 'xhand_sdk_native_unknown_si'"
+        )
+    si_verified = attrs.get("tactile_force_si_verified")
+    if si_verified is not False:
+        raise InvalidZarrError("Zarr tactile_force_si_verified must be false")
+    spatial_verified = attrs.get("tactile_force_spatial_geometry_verified")
+    if spatial_verified is not False:
+        raise InvalidZarrError(
+            "Zarr tactile_force_spatial_geometry_verified must be false"
+        )
+    return {
+        "finger_order": str(attrs["tactile_force_finger_order"]),
+        "sensor_order": str(attrs["tactile_force_sensor_order"]),
+        "point_order": str(attrs["tactile_force_point_order"]),
+        "axis_labels": str(attrs["tactile_force_axis_labels"]),
+        "unit": unit,
+        "si_verified": si_verified,
+        "spatial_geometry_verified": spatial_verified,
     }
 
 
