@@ -346,7 +346,7 @@ Do not encode an `eval_seed` field into the deployment artifact. It is a per-rol
 
 ---
 
-## 8. EEF/tactile are explicitly outside this task
+## 8. EEF/tactile contract vs. model support
 
 Current Real `main` can already construct:
 
@@ -355,11 +355,17 @@ eef_pose [T,9]
 tactile_force [T,5,120,3]
 ```
 
-but current Policy exporter `_SUPPORTED_OBSERVATION_FIELDS` still does not admit these fields.
+and the Policy exporter/data contract now admits these fields
+(`_SUPPORTED_OBSERVATION_FIELDS` includes `eef_pose` and `tactile_force`).
 
-Do **not** opportunistically add them while implementing the chunk API.
+Current model encoders, however, do **not** consume them: every encoder's
+`consumed_observation_fields` is still `joint_state + point_cloud` (or
+`joint_state + rgb`). Contract support is not model support — a strict restore
+of an EEF/tactile artifact still fails the encoder-consumer check.
 
-EEF/tactile end-to-end Policy support requires a separate, hypothesis-driven change across the Policy data/model/export path. Keep this rollout API patch focused.
+Do **not** opportunistically wire EEF/tactile into an encoder without a
+hypothesis. EEF/tactile end-to-end model support requires a separate,
+hypothesis-driven change across the Policy data/model/export path.
 
 Similarly, do not alter:
 
