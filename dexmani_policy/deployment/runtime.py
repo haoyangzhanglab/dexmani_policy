@@ -168,10 +168,21 @@ def list_experiments(filter: str | None = None) -> tuple[str, ...]:
     return tuple(sorted(selectors))
 
 
-def inspect_experiment(selector: str | os.PathLike[str]) -> ExperimentInfo:
-    """Read one experiment's deployment metadata without constructing a model."""
+def inspect_experiment(
+    selector: str | os.PathLike[str],
+    *,
+    artifact: str | None = None,
+) -> ExperimentInfo:
+    """Read one experiment's deployment metadata without constructing a model.
+
+    ``artifact=None`` follows the ``checkpoints/deployment_latest.pt``
+    selector; an explicit ``artifact`` must be a plain filename inside the
+    experiment's ``checkpoints/`` directory.  ``ExperimentInfo.checkpoint_name``
+    is always the resolved real filename (symlinks followed), so a caller can
+    pin the exact artifact for a later :func:`load_experiment`.
+    """
     experiment_dir = resolve_experiment(selector)
-    checkpoint_path = _resolve_deployment_checkpoint(experiment_dir)
+    checkpoint_path = _resolve_deployment_checkpoint(experiment_dir, artifact=artifact)
     payload = _read_deployment_payload(checkpoint_path, map_location="meta")
     return _experiment_info(experiment_dir, checkpoint_path, payload)
 
@@ -180,15 +191,23 @@ def load_experiment(
     selector: str | os.PathLike[str],
     device: str = "cuda:0",
     seed: int = 0,
+    *,
+    artifact: str | None = None,
 ) -> LoadedPolicy:
-    """Strictly restore the selected deployment artifact as a NumPy runtime."""
+    """Strictly restore the selected deployment artifact as a NumPy runtime.
+
+    ``artifact`` selects the deployment file exactly as in
+    :func:`inspect_experiment`; pass the previously resolved
+    ``ExperimentInfo.checkpoint_name`` so one session cannot silently switch
+    artifacts between inspection and load.
+    """
     if type(device) is not str or not device:
         raise ValueError("device must be a non-empty string")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative int")
 
     experiment_dir = resolve_experiment(selector)
-    checkpoint_path = _resolve_deployment_checkpoint(experiment_dir)
+    checkpoint_path = _resolve_deployment_checkpoint(experiment_dir, artifact=artifact)
     payload = _read_deployment_payload(checkpoint_path, map_location="cpu")
     info = _experiment_info(experiment_dir, checkpoint_path, payload)
 
@@ -434,16 +453,38 @@ def _visible_directories(directory: Path) -> tuple[Path, ...]:
         return ()
 
 
-def _resolve_deployment_checkpoint(experiment_dir: Path) -> Path:
+def _resolve_deployment_checkpoint(
+    experiment_dir: Path,
+    *,
+    artifact: str | None = None,
+) -> Path:
+    """Resolve one deployment artifact inside ``experiment/checkpoints``.
+
+    ``artifact=None`` follows the ``deployment_latest.pt`` selector (possibly a
+    symlink) to its real target.  An explicit artifact must be a plain
+    filename; path traversal, absolute paths, and symlinks escaping
+    ``checkpoints/`` are rejected so the Policy package stays the sole owner
+    of checkpoint filesystem layout.
+    """
     checkpoint_dir = experiment_dir / "checkpoints"
-    selector_path = experiment_dir / _DEPLOYMENT_SELECTOR
+    if artifact is None:
+        selector_path = experiment_dir / _DEPLOYMENT_SELECTOR
+    else:
+        if type(artifact) is not str or not artifact:
+            raise ValueError("artifact must be a non-empty filename or None")
+        if Path(artifact).is_absolute() or Path(artifact).name != artifact:
+            raise ValueError(
+                "artifact must be a plain filename inside the experiment's "
+                f"checkpoints/ directory: {artifact!r}"
+            )
+        selector_path = checkpoint_dir / artifact
     try:
         resolved_dir = checkpoint_dir.resolve(strict=True)
         checkpoint_path = selector_path.resolve(strict=True)
         checkpoint_path.relative_to(resolved_dir)
     except (OSError, ValueError) as exc:
         raise FileNotFoundError(
-            f"valid deployment checkpoint selector not found: {selector_path}"
+            f"valid deployment checkpoint not found: {selector_path}"
         ) from exc
     if not checkpoint_path.is_file():
         raise FileNotFoundError(
