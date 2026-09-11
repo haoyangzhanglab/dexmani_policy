@@ -6,14 +6,11 @@ import argparse
 import json
 import math
 import os
-import re
-import subprocess
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
 
 import numpy as np
 import torch
@@ -36,7 +33,6 @@ from dexmani_policy.deployment.restore import (
     verify_deployment_prediction,
 )
 
-_REPOSITORY = "haoyangzhanglab/dexmani_policy"
 _SUPPORTED_OBSERVATION_FIELDS = frozenset(
     {
         "joint_state",
@@ -46,8 +42,6 @@ _SUPPORTED_OBSERVATION_FIELDS = frozenset(
         "fingertip_points",
     }
 )
-_GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
-_SCP_REMOTE_RE = re.compile(r"git@github\.com:haoyangzhanglab/dexmani_policy(?:\.git)?")
 _POINT_COUNTS = frozenset({1024, 2048, 4096, 8192})
 _POINT_FEATURE_DIM = 6
 _POINT_SEMANTICS = {
@@ -113,7 +107,6 @@ class ArtifactVerificationError(DeploymentExportError):
 class ExportReceipt:
     checkpoint_path: Path
     selector_path: Path
-    producer_commit: str
     metadata_provenance: str
     checkpoint_selector: str
 
@@ -122,59 +115,6 @@ class ExportReceipt:
 class _SelectedInferenceSettings:
     use_ema: bool
     denoise_steps: int
-
-
-def _run_git(repo_root: Path, *args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), *args],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise InvalidExperimentError("cannot establish Policy git provenance") from exc
-    return result.stdout.strip()
-
-
-def _is_expected_repository_remote(remote: str) -> bool:
-    if _SCP_REMOTE_RE.fullmatch(remote) is not None:
-        return True
-    try:
-        parsed = urlparse(remote)
-    except ValueError:
-        return False
-    expected_netloc = {
-        "https": "github.com",
-        "ssh": "git@github.com",
-    }.get(parsed.scheme)
-    if expected_netloc is None or parsed.netloc != expected_netloc:
-        return False
-    if parsed.params or parsed.query or parsed.fragment:
-        return False
-    return parsed.path.removesuffix(".git") == f"/{_REPOSITORY}"
-
-
-def _producer_provenance(repo_root: Path) -> str:
-    top_level = Path(_run_git(repo_root, "rev-parse", "--show-toplevel"))
-    if top_level.resolve() != repo_root.resolve():
-        raise InvalidExperimentError(
-            "exporter package is not rooted in the Policy repository"
-        )
-    commit = _run_git(repo_root, "rev-parse", "HEAD")
-    if _GIT_COMMIT_RE.fullmatch(commit) is None:
-        raise InvalidExperimentError("Policy HEAD is not a lowercase 40-hex commit")
-    if _run_git(repo_root, "status", "--porcelain", "--untracked-files=all"):
-        raise InvalidExperimentError(
-            "Policy working tree must be clean for deployment export"
-        )
-    remote = _run_git(repo_root, "remote", "get-url", "origin")
-    if not _is_expected_repository_remote(remote):
-        raise InvalidExperimentError(
-            f"Policy origin does not identify {_REPOSITORY}: {remote!r}"
-        )
-    return commit
 
 
 def _require_checkpoint_under_directory(candidate: Path, checkpoint_dir: Path) -> Path:
@@ -1480,7 +1420,6 @@ def export_deployment_artifact(
     deployment parity passes.
     """
     repo_root = Path(__file__).resolve().parents[2]
-    producer_commit = _producer_provenance(repo_root)
     try:
         experiment = Path(experiment_dir).expanduser().resolve(strict=True)
     except OSError as exc:
@@ -1537,8 +1476,6 @@ def export_deployment_artifact(
     )
     data_contract = zarr_contract
     producer = {
-        "repository": _REPOSITORY,
-        "commit": producer_commit,
         "metadata_provenance": metadata_provenance,
         "retrofitted_train_params_fields": retrofitted,
         "source_checkpoint": selected_path.name,
@@ -1591,10 +1528,6 @@ def export_deployment_artifact(
         reloaded_payload = _load_deployment_payload(final_path)
         if verify:
             _verify_exported_model(reloaded_payload)
-        if _producer_provenance(repo_root) != producer_commit:
-            raise ArtifactPublicationError(
-                "Policy producer commit changed during deployment export"
-            )
         if publish:
             publish_deployment_selector(selector_path, final_path)
     except BaseException as exc:
@@ -1610,7 +1543,6 @@ def export_deployment_artifact(
     return ExportReceipt(
         checkpoint_path=final_path,
         selector_path=selector_path,
-        producer_commit=producer_commit,
         metadata_provenance=metadata_provenance,
         checkpoint_selector=checkpoint_selector,
     )
@@ -1645,7 +1577,6 @@ def main() -> None:
             {
                 "checkpoint_path": str(receipt.checkpoint_path),
                 "selector_path": str(receipt.selector_path),
-                "producer_commit": receipt.producer_commit,
                 "metadata_provenance": receipt.metadata_provenance,
                 "checkpoint_selector": receipt.checkpoint_selector,
             }

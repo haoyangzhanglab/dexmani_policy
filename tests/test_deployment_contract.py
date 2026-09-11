@@ -12,7 +12,7 @@ import json
 import random
 import tempfile
 import unittest
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -526,6 +526,47 @@ class DeploymentContractTest(unittest.TestCase):
             self.skipTest(f"BaseRunner not importable here: {exc}")
         params = inspect.signature(BaseRunner.__init__).parameters
         self.assertNotIn("temporal_ensemble_coeff", params)
+
+
+class ExportGitProvenanceRemovalTest(unittest.TestCase):
+    """Export correctness must not depend on the code directory's git state.
+
+    Scientific/model checks (strict restore, weights selection, normalizer,
+    dimensions, observation contract, prediction smoke test, parity) are
+    covered elsewhere and are intentionally NOT part of this removal.
+    """
+
+    def test_export_source_has_no_git_machinery(self):
+        from dexmani_policy.deployment import export as export_module
+
+        source = Path(export_module.__file__).read_text(encoding="utf-8")
+        for token in (
+            "subprocess",
+            "urlparse",
+            "_run_git",
+            "_producer_provenance",
+            "_is_expected_repository_remote",
+            "_GIT_COMMIT_RE",
+            "_SCP_REMOTE_RE",
+            "producer_commit",
+            "rev-parse",
+            "haoyangzhanglab",
+        ):
+            with self.subTest(token=token):
+                self.assertNotIn(token, source)
+
+    def test_export_receipt_keeps_non_git_fields_only(self):
+        from dexmani_policy.deployment.export import ExportReceipt
+
+        self.assertEqual(
+            {field.name for field in fields(ExportReceipt)},
+            {
+                "checkpoint_path",
+                "selector_path",
+                "metadata_provenance",
+                "checkpoint_selector",
+            },
+        )
 
 
 if __name__ == "__main__":
