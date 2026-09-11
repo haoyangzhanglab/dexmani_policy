@@ -113,6 +113,7 @@ def _runtime(spec, agent, *, seed=0):
     policy_spec = PolicySpec(
         **{key: value for key, value in vars(spec).items() if key != "denoise_steps"},
         control_action_dim=spec.control_action_dim,
+        default_inference_steps=spec.denoise_steps,
     )
     info = ExperimentInfo(
         selector="p/t/e", experiment_dir=Path("."), policy_name="p", task_name="t",
@@ -246,6 +247,7 @@ class DeploymentContractTest(unittest.TestCase):
             observation_fields=(_joint_state_field(),),
             control_dt_s=0.02,
             requires_hand=True,
+            default_inference_steps=10,
             rgb_preprocessing=None,
         )
         info = ExperimentInfo(
@@ -281,6 +283,7 @@ class DeploymentContractTest(unittest.TestCase):
             observation_fields=(_joint_state_field(),),
             control_dt_s=0.02,
             requires_hand=True,
+            default_inference_steps=10,
             rgb_preprocessing=None,
         )
         self.assertFalse(hasattr(spec, "temporal_ensemble_coeff"))

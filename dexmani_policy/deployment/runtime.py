@@ -37,7 +37,13 @@ _DEPLOYMENT_SELECTOR = Path("checkpoints/deployment_latest.pt")
 
 @dataclass(frozen=True)
 class PolicySpec:
-    """Policy-owned model and observation contract exposed to runtimes."""
+    """Policy-owned model and observation contract exposed to runtimes.
+
+    ``default_inference_steps`` is the artifact's persisted ``denoise_steps``
+    value: the default number of denoising/flow-solver steps (NFE for
+    ActionFlow) used when a runtime does not override it.  It never changes
+    architecture, weights, or the observation contract.
+    """
 
     action_key: str
     action_dim: int
@@ -48,6 +54,7 @@ class PolicySpec:
     observation_fields: tuple[ObservationFieldSpec, ...]
     control_dt_s: float
     requires_hand: bool
+    default_inference_steps: int
     rgb_preprocessing: RgbPreprocessingSpec | None = None
 
     @property
@@ -64,6 +71,7 @@ class PolicySpec:
             "horizon",
             "n_obs_steps",
             "n_action_steps",
+            "default_inference_steps",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive int")
@@ -193,6 +201,7 @@ def load_experiment(
     seed: int = 0,
     *,
     artifact: str | None = None,
+    inference_steps: int | None = None,
 ) -> LoadedPolicy:
     """Strictly restore the selected deployment artifact as a NumPy runtime.
 
@@ -200,11 +209,17 @@ def load_experiment(
     :func:`inspect_experiment`; pass the previously resolved
     ``ExperimentInfo.checkpoint_name`` so one session cannot silently switch
     artifacts between inspection and load.
+
+    ``inference_steps`` overrides the artifact's default inference steps
+    (``PolicySpec.default_inference_steps``) for this runtime only; ``None``
+    keeps the artifact default.  Warmup and every prediction use the same
+    effective value.
     """
     if type(device) is not str or not device:
         raise ValueError("device must be a non-empty string")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative int")
+    _validate_inference_steps(inference_steps)
 
     experiment_dir = resolve_experiment(selector)
     checkpoint_path = _resolve_deployment_checkpoint(experiment_dir, artifact=artifact)
@@ -214,9 +229,22 @@ def load_experiment(
     from dexmani_policy.deployment.restore import restore_deployment_agent
 
     restored = restore_deployment_agent(payload, device=device)
-    runtime = LoadedPolicy(info, restored, device=device, seed=seed)
+    runtime = LoadedPolicy(
+        info,
+        restored,
+        device=device,
+        seed=seed,
+        inference_steps=inference_steps,
+    )
     runtime.reset_episode()
     return runtime
+
+
+def _validate_inference_steps(inference_steps: int | None) -> None:
+    if inference_steps is not None and (
+        type(inference_steps) is not int or inference_steps < 1
+    ):
+        raise ValueError("inference_steps must be a positive int or None")
 
 
 @final
@@ -230,12 +258,17 @@ class LoadedPolicy:
         *,
         device: str,
         seed: int,
+        inference_steps: int | None = None,
     ) -> None:
+        _validate_inference_steps(inference_steps)
         self.info = info
         self.spec = info.spec
         self._restored: RestoredDeployment | None = restored
         self._device = device
         self._seed = seed
+        self._inference_steps = (
+            restored.spec.denoise_steps if inference_steps is None else inference_steps
+        )
 
     def warmup(self, *, samples: int) -> tuple[float, ...]:
         """Run deterministic synthetic samples and return durations in seconds.
@@ -328,7 +361,7 @@ class LoadedPolicy:
 
         with torch.inference_mode():
             result = restored.agent.predict_action(
-                tensors, denoise_timesteps=restored.spec.denoise_steps
+                tensors, denoise_timesteps=self._inference_steps
             )
         return validate_prediction(result, restored.spec, batch_size=1)
 
@@ -568,6 +601,7 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
             observation_fields=deployment.observation_fields,
             control_dt_s=deployment.control_dt_s,
             requires_hand=deployment.requires_hand,
+            default_inference_steps=deployment.denoise_steps,
             rgb_preprocessing=deployment.rgb_preprocessing,
         ),
         task_name,
