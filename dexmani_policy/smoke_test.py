@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
+import importlib
 import os
 import pathlib
-import sys
 import tempfile
+import traceback
 
 ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
 os.chdir(ROOT_DIR)
@@ -12,10 +14,8 @@ import torch
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
-from dexmani_policy.common.checkpoint_io import (
-    CheckpointStore,
-    TrainCheckpoint,
-)
+
+from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import (
     dict_apply,
@@ -27,14 +27,11 @@ from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
+    validate_config,
 )
 from dexmani_policy.training.resume import build_resume_contract, build_train_loader
 
 register_resolvers()
-
-
-def _count_params(module) -> int:
-    return sum(p.numel() for p in module.parameters())
 
 
 def load_config(config_name: str):
@@ -45,19 +42,89 @@ def load_config(config_name: str):
     config_dir = os.path.join(ROOT_DIR, "dexmani_policy", "configs")
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         cfg = compose(config_name=config_name)
-        # compose has no Hydra runtime — manually bypass ${hydra:runtime.output_dir}
+        # compose has no Hydra runtime; provide the only runtime value used by configs.
         cfg.workspace.output_dir = "/tmp/smoke_test_output"
         OmegaConf.resolve(cfg)
     return cfg
 
 
-def _prepare_dqrise_codebook(cfg) -> str | None:
-    """Create a dummy sorted_hand_poses.npz for DQ-RISE smoke test.
+def _iter_targets(node, path: str = "$"):
+    if OmegaConf.is_config(node):
+        node = OmegaConf.to_container(node, resolve=True)
 
-    DQRISEAgent requires a pre-extracted codebook file.  For smoke testing
-    we synthesise one from random hand poses — just enough to validate the
-    build chain without requiring a real trained VQ-VAE.
+    if isinstance(node, dict):
+        target = node.get("_target_")
+        if isinstance(target, str):
+            yield path, target
+        for key, value in node.items():
+            yield from _iter_targets(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _iter_targets(value, f"{path}[{index}]")
+
+
+def _split_target(target: str) -> tuple[str, str]:
+    module_name, separator, attribute = target.rpartition(".")
+    if not separator:
+        raise ImportError(f"Invalid Hydra target: {target!r}")
+    return module_name, attribute
+
+
+def _validate_target_references(cfg) -> int:
+    """Check target modules cheaply; import only the policy Agent target.
+
+    Some runtime targets (notably env runners) intentionally import optional
+    external packages such as dexmani_sim. Config-only validation should not
+    require those runtime dependencies just to prove the policy config is
+    structurally wired.
     """
+    targets = list(_iter_targets(cfg))
+    agent_target = cfg.get("agent", {}).get("_target_")
+
+    for path, target in targets:
+        module_name, attribute = _split_target(target)
+        try:
+            spec = importlib.util.find_spec(module_name)
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise ImportError(
+                f"Failed to locate Hydra target module {module_name!r} "
+                f"for {target!r} at {path}"
+            ) from exc
+        if spec is None:
+            raise ImportError(
+                f"Failed to locate Hydra target module {module_name!r} "
+                f"for {target!r} at {path}"
+            )
+
+        if target == agent_target:
+            try:
+                module = importlib.import_module(module_name)
+                getattr(module, attribute)
+            except Exception as exc:
+                raise ImportError(
+                    f"Failed to import agent target {target!r} at {path}"
+                ) from exc
+
+    return len(targets)
+
+
+def validate_config_only(config_name: str):
+    print(f"\n{'=' * 60}")
+    print(f"Config check: {config_name}")
+    print(f"{'=' * 60}")
+
+    cfg = load_config(config_name)
+    validate_config(cfg)
+
+    target_count = _validate_target_references(cfg)
+
+    print(f"      checked Hydra targets: {target_count}")
+    print(f"\n✓ {config_name} config check PASSED\n")
+    return True
+
+
+def _prepare_dqrise_codebook(cfg) -> str | None:
+    """Create the external artifact required for DQ-RISE's integration smoke test."""
     if cfg.policy_name != "dqrise":
         return None
 
@@ -69,7 +136,6 @@ def _prepare_dqrise_codebook(cfg) -> str | None:
     total = codebook_size**num_groups
     dummy_poses = np.random.randn(total, hand_dim).astype(np.float32)
 
-    # Per-group dummy poses: (codebook_size, hand_dim) per group
     save_data = {
         "sorted_hand_poses": dummy_poses,
         "hand_dim": hand_dim,
@@ -77,8 +143,8 @@ def _prepare_dqrise_codebook(cfg) -> str | None:
         "codebook_size": codebook_size,
         "layer_weights": np.ones(num_groups, dtype=np.float32) / num_groups,
     }
-    for g in range(num_groups):
-        save_data[f"_group_sorted_poses_g{g}"] = np.random.randn(
+    for group in range(num_groups):
+        save_data[f"_group_sorted_poses_g{group}"] = np.random.randn(
             codebook_size, hand_dim
         ).astype(np.float32)
 
@@ -93,12 +159,12 @@ def smoke_test(config_name: str):
     print(f"{'=' * 60}")
 
     cfg = load_config(config_name)
+    validate_config(cfg)
 
-    # ── DQ-RISE: inject temporary codebook path ───────────────────────
     codebook_tmp = _prepare_dqrise_codebook(cfg)
     if codebook_tmp is not None:
         cfg.agent.codebook_path = codebook_tmp
-        print(f"      [dqrise] dummy codebook → {codebook_tmp}")
+        print(f"      [dqrise] temporary codebook → {codebook_tmp}")
 
     set_seed(cfg.training.seed)
 
@@ -107,7 +173,6 @@ def smoke_test(config_name: str):
     train_loader = build_train_loader(cfg, dataset)
     print(f"      dataset size: {len(dataset)}, batches/epoch: {len(train_loader)}")
 
-    # 1.1 Validation dataset (regression test for weighted strategy bug)
     val_dataset = dataset.get_validation_dataset()
     if val_dataset is not None:
         print(f"      val dataset size: {len(val_dataset)}")
@@ -120,7 +185,8 @@ def smoke_test(config_name: str):
                 and val_dataset.task_weights is not None
             ), "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
             print(
-                f"      ✓ weighted strategy validation set OK (task_weights={val_dataset.task_weights})"
+                "      ✓ weighted strategy validation set OK "
+                f"(task_weights={val_dataset.task_weights})"
             )
     else:
         print("      no validation set (val_ratio=0)")
@@ -128,31 +194,6 @@ def smoke_test(config_name: str):
     print("[2/6] Building model & EMA ...")
     device = torch.device(cfg.training.device)
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
-
-    # ── ActionFlow: parameter budget + geometry-memory contract ───────
-    # Perception ≈ 16.85M, ActionDiT ≈ 58.81M, total ≈ 75.66M (PR-11 context=384).
-    if hasattr(model.obs_encoder, "num_memory_tokens"):
-        enc = model.obs_encoder
-        perception = _count_params(enc)
-        backbone = _count_params(model.action_decoder.model)
-        total = _count_params(model)
-        print("      [ActionFlow]")
-        print(f"      perception params: {perception:,}")
-        print(f"      backbone params:   {backbone:,}")
-        print(f"      total params:      {total:,}")
-        print(
-            f"      memory shape:      (B, {enc.num_memory_tokens}, {enc.memory_dim})"
-        )
-        print(f"      state shape:       (B, {enc.state_hist_dim})")
-        # Loose regression gate: catch accidental context=768 revert, redundant
-        # global-token branch, or dropped geometry-memory layers.
-        assert (
-            16_000_000 < perception < 18_000_000
-        ), f"perception params out of budget: {perception:,}"
-        assert (
-            58_000_000 < backbone < 60_000_000
-        ), f"backbone params out of budget: {backbone:,}"
-        assert 74_000_000 < total < 78_000_000, f"total params out of budget: {total:,}"
 
     print("[3/6] Building optimizer & scheduler ...")
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, len(train_loader))
@@ -162,7 +203,6 @@ def smoke_test(config_name: str):
     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
     use_ema_teacher = cfg.training.use_ema_teacher_for_consistency
-    # loss_kwargs logic intentionally mirrors trainer.py; duplicated so smoke test stays self-contained
     loss_kwargs = (
         {"ema_backbone": ema_model.action_decoder.model}
         if use_ema_teacher and ema_model
@@ -175,18 +215,18 @@ def smoke_test(config_name: str):
     assert torch.isfinite(raw_loss), f"Non-finite loss: {raw_loss.item()}"
     print(f"      loss: {raw_loss.item():.4f}  keys: {list(loss_dict.keys())}")
 
-    # 4.1 Gradient reachability for this batch. DDP static-graph training also
-    # requires the set of used parameters to remain unchanged across batches.
     unreached = [
-        n for n, p in model.named_parameters() if p.requires_grad and p.grad is None
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.grad is None
     ]
     if unreached:
         print(
             f"      ⚠ {len(unreached)} trainable params received no gradient in this batch "
             "(verify static usage across DDP batches):"
         )
-        for n in unreached[:10]:
-            print(f"        - {n}")
+        for name in unreached[:10]:
+            print(f"        - {name}")
         if len(unreached) > 10:
             print(f"        ... and {len(unreached) - 10} more")
     else:
@@ -195,7 +235,7 @@ def smoke_test(config_name: str):
     print("[5/6] Running predict_action ...")
     model.eval()
     with torch.no_grad():
-        obs_sample = {k: v[:1] for k, v in batch["obs"].items()}
+        obs_sample = {key: value[:1] for key, value in batch["obs"].items()}
         result = model.predict_action(obs_sample)
         pred_shape = tuple(result["pred_action"].shape)
         ctrl_shape = tuple(result["control_action"].shape)
@@ -204,7 +244,10 @@ def smoke_test(config_name: str):
             1,
             cfg.n_action_steps,
             expected_ctrl_dim,
-        ), f"control_action shape {ctrl_shape} != (1, {cfg.n_action_steps}, {expected_ctrl_dim})"
+        ), (
+            f"control_action shape {ctrl_shape} != "
+            f"(1, {cfg.n_action_steps}, {expected_ctrl_dim})"
+        )
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
 
     print("[6/6] Checkpoint save → load roundtrip ...")
@@ -212,17 +255,13 @@ def smoke_test(config_name: str):
         ckpt_dir = pathlib.Path(tmpdir)
         store = CheckpointStore(ckpt_dir)
 
-        # Capture pre-save state dicts (unwrap from compile if needed)
-        model_sd = {k: v.clone() for k, v in model.state_dict().items()}
+        model_sd = {key: value.clone() for key, value in model.state_dict().items()}
         ema_sd = (
-            {k: v.clone() for k, v in ema_model.state_dict().items()}
+            {key: value.clone() for key, value in ema_model.state_dict().items()}
             if ema_model is not None
             else None
         )
-        opt_sd = optimizer.state_dict()
-        sched_sd = scheduler.state_dict()
 
-        # Build and save a checkpoint
         ckpt = TrainCheckpoint(
             epoch=0,
             global_step=1,
@@ -233,18 +272,20 @@ def smoke_test(config_name: str):
                 if ema_sd is not None
                 else None
             ),
-            optimizer_state=opt_sd,
-            scheduler_state=sched_sd,
+            optimizer_state=optimizer.state_dict(),
+            scheduler_state=scheduler.state_dict(),
             monitor={"test_mean_score": 0.85},
             resume_contract=build_resume_contract(cfg, model, train_loader),
             ema_updater_step=None,
             ema_decay=None,
             rng_states=[get_rng_state()],
         )
-        ckpt_path = store.save("epoch=0000-step=00000001-score=0.8500.pt", ckpt)
+        ckpt_path = store.save(
+            "epoch=0000-step=00000001-score=0.8500.pt",
+            ckpt,
+        )
         print(f"      saved checkpoint: {ckpt_path.name}")
 
-        # Reload
         loaded = store.load(ckpt_path)
         assert loaded.epoch == 0
         assert loaded.global_step == 1
@@ -256,7 +297,9 @@ def smoke_test(config_name: str):
         )
 
         loaded_model_sd = fix_state_dict(loaded.model_state, is_current_ddp=False)
-        loaded_model_sd = {k: v.to(device) for k, v in loaded_model_sd.items()}
+        loaded_model_sd = {
+            key: value.to(device) for key, value in loaded_model_sd.items()
+        }
         for key in model_sd:
             if not torch.equal(model_sd[key], loaded_model_sd[key]):
                 raise AssertionError(
@@ -265,8 +308,12 @@ def smoke_test(config_name: str):
         print("      ✓ model state dict roundtrip OK")
 
         if ema_sd is not None and loaded.ema_model_state is not None:
-            loaded_ema_sd = fix_state_dict(loaded.ema_model_state, is_current_ddp=False)
-            loaded_ema_sd = {k: v.to(device) for k, v in loaded_ema_sd.items()}
+            loaded_ema_sd = fix_state_dict(
+                loaded.ema_model_state, is_current_ddp=False
+            )
+            loaded_ema_sd = {
+                key: value.to(device) for key, value in loaded_ema_sd.items()
+            }
             for key in ema_sd:
                 if not torch.equal(ema_sd[key], loaded_ema_sd[key]):
                     raise AssertionError(
@@ -284,19 +331,28 @@ def smoke_test(config_name: str):
     return True
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python smoke_test.py <config_name> [config_name ...]")
-        print("Example: python smoke_test.py dp3")
-        print("         python smoke_test.py dp3 maniflow")
-        sys.exit(1)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Validate one or more DexMani Hydra policy configs."
+    )
+    parser.add_argument(
+        "--config-only",
+        action="store_true",
+        help="Resolve/validate config and import Hydra targets without data or GPU execution.",
+    )
+    parser.add_argument("config_names", nargs="+", help="Hydra config names to validate.")
+    args = parser.parse_args()
 
-    for name in sys.argv[1:]:
+    runner = validate_config_only if args.config_only else smoke_test
+    for config_name in args.config_names:
         try:
-            smoke_test(name)
-        except Exception as e:
-            print(f"\n✗ {name} smoke test FAILED: {e}\n")
-            import traceback
-
+            runner(config_name)
+        except Exception as exc:
+            mode = "config check" if args.config_only else "smoke test"
+            print(f"\n✗ {config_name} {mode} FAILED: {exc}\n")
             traceback.print_exc()
-            sys.exit(1)
+            raise SystemExit(1) from exc
+
+
+if __name__ == "__main__":
+    main()

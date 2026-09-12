@@ -1,201 +1,116 @@
 ---
 name: dexmani-agent-integration
 description: >
-  Guide for adding a new agent variant to DexMani_Policy. Covers agent class,
-  config YAML, CLAUDE.md registration, optional DDP overlay, and smoke test
-  verification. Use when: adding a new policy type, creating a new agent class,
-  or asked to "add a new agent", "create a new policy", "extend the agent zoo".
+  Workflow for adding or materially changing a DexMani policy. Use for a new
+  policy, new agent variant, architecture replacement, action-representation
+  change, or policy-level integration work.
 ---
 
 # DexMani Agent Integration
 
-Add each agent variant as a self-contained class under `dexmani_policy/agents/core/` with a
-corresponding Hydra config in `dexmani_policy/configs/`. The agent system is Hydra-driven with
-no explicit registry — new agents are wired through `agent._target_` in the YAML config.
-`dp3` is the simplest reference; `sat` is the most complex.
+This skill defines the **process**, not the current policy catalog. Treat the resolved Hydra config and implementation as the source of truth.
 
-## Before starting
+## 1. Discover the real implementation
 
-Confirm with the user, or state the assumption explicitly:
+Start from the target config:
 
-- Which **inheritance path**: `UNetDiffusionAgent` (DP3-style, UNet+Diffusion), `DiTXFlowMatchAgent`
-  (ManiFlow-style, DiTX+FlowMatch+Consistency), or `BaseAgent` direct (SAT, R3D, DQRISE — full control over backbone + decoder).
-- Which **modalities**: point cloud (`pc_dim`) or RGB (`rgb_backbone_name`).
-- Which **action space**: joint (19D) or action_ee (21D).
-- Whether **DDP** multi-GPU support is needed.
-
-## Workflow
-
-### 1. Create the agent core file
-
-Path: `dexmani_policy/agents/core/<name>.py`
-
-Choose one of three patterns (reference the existing agent nearest to your target):
-
-| Pattern | Parent class | `obs_encoder` output | What you pass to parent | Examples |
-|---------|-------------|---------------------|------------------------|---------|
-| A: UNet+Diffusion | `UNetDiffusionAgent` | `(out_dim,)` flat vector | `obs_encoder.out_dim * n_obs_steps` → `context_dim` | `dp3.py`, `dp.py` |
-| B: DiTX+FlowMatch+Consistency | `DiTXFlowMatchAgent` | `(num_tokens, token_dim)` sequence | `num_obs_tokens`, `obs_token_dim` | (reserved for ManiFlow-like) |
-| C: Direct BaseAgent | `BaseAgent` | Arbitrary | Build backbone + decoder yourself, pass to `super().__init__` | `sat.py`, `r3d.py`, `dqrise.py`, `multitask_dit.py` |
-
-**Pattern-C minimum skeleton** (`dp3` is a better reference for patterns A-B):
-
-```python
-import torch
-from torch import nn
-from dexmani_policy.agents.core.base import BaseAgent
-
-class MyObsEncoder(nn.Module):
-    def __init__(self, ...):
-        super().__init__()
-        self.out_dim = ...  # MANDATORY: exposed for context_dim computation
-
-    def forward(self, obs):
-        # obs keys already preprocessed (normalized, time-flattened to B*T)
-        # return (cond, aux_dict)
-        return cond, {}
-
-class MyAgent(BaseAgent):
-    def __init__(self, horizon, n_obs_steps, n_action_steps, action_dim, ...):
-        obs_encoder = MyObsEncoder(...)
-        backbone = ...  # your nn.Module
-        action_decoder = ...  # Diffusion / FlowMatch wrapping backbone
-        super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim)
-
-
-def example():
-    """Standalone smoke test — every agent must have this."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    B, T, H, A = 2, 2, 16, 19
-    agent = MyAgent(horizon=H, n_obs_steps=T, n_action_steps=8, action_dim=A, ...).to(device)
-    obs = {"joint_state": torch.randn(B * T, A, device=device)}
-    action = torch.randn(B, H, A, device=device)
-    from dexmani_policy.common.normalizer import LinearNormalizer
-    normalizer = LinearNormalizer()
-    normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")
-    agent.load_normalizer_from_dataset(normalizer)
-    batch = {"obs": {k: v.reshape(B, T, *v.shape[1:]) for k, v in obs.items()}, "action": action}
-    loss, loss_dict = agent.compute_loss(batch)
-    print(f"loss: {loss.item():.4f}  keys={list(loss_dict.keys())}")
-    result = agent.predict_action({k: v.reshape(B, T, *v.shape[1:]) for k, v in obs.items()})
-    print(f"pred_action: {result['pred_action'].shape}  control_action: {result['control_action'].shape}")
-    print(f"=== {MyAgent.__name__} PASSED ===")
-
-if __name__ == "__main__":
-    example()
+```text
+dexmani_policy/configs/<config>.yaml
+        ↓
+agent._target_
+        ↓
+actual Agent class/module
 ```
 
-Must call `super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim, ...)`.
-Must include `example()` with `if __name__ == "__main__":` guard.
+Do not infer the module/class from the config name. Search existing configs and implementations for the closest semantic pattern only after resolving the target.
 
-Optionally override:
-- `compute_loss` — if action format differs (SAT's axis transpose)
-- `predict_action` / `predict_action_from_cond` — if inference needs special logic
-- `compile_backbone` — if CUDA graph incompatible (SAT uses `mode='default'`)
-- `get_optim_param_groups` — for separate LR/WD on backbone vs obs_encoder
-- `control_action_dim` (property) — for auxiliary heads
+For an existing experiment, read its saved `config.yaml` first; the current repository config may have changed since training.
 
-### 2. Create the config YAML
+## 2. Define the policy contract
 
-Path: `dexmani_policy/configs/<name>.yaml`
+Before editing, state the intended design in five parts:
 
-Copy `dp3.yaml` as a template. The required top-level fields (all base configs share these):
+- **Observation Representation**
+- **Policy Architecture**
+- **Action Representation**
+- **Training Objective**
+- **Inference Algorithm**
 
-| Field | Typical value | Notes |
-|-------|--------------|-------|
-| `policy_name` | `"<name>"` | W&B group name |
-| `task_name` | `pour` | Dataset task |
-| `zarr_path` | `robot_data/pour.zarr` | 相对仓库根目录的路径（运行时 chdir 到根目录） |
-| `seed` | `0` | Training seed |
-| `horizon` | `16` | **Invariant — never change** |
-| `n_obs_steps` | `2` | **Invariant — never change** |
-| `n_action_steps` | `8` | **Invariant — never change** |
-| `action_key` | `action` | `action` (joint) or `action_ee` (end-effector) |
-| `action_dim` | `${eval:'...'}` | See formula below |
-| `dataloader` | `{batch_size, num_workers, ...}` | |
-| `dataset` | `{_target_, zarr_path, horizon, ...}` | Must include `_target_` for Hydra instantiation |
-| `agent` | `{_target_, horizon, n_obs_steps, n_action_steps, action_dim, ...}` | Must include `_target_: dexmani_policy.agents.core.<name>.<Name>Agent` |
-| `optimizer` | `{lr, weight_decay, betas, ...}` | AdamW `fused=torch.cuda.is_available()` |
-| `ema` | `{_target_, ...}` | EMAModel config |
-| `training` | `{seed, device, use_bfloat16, use_compile, use_ema, ...}` | |
-| `workspace` | `{_target_, ...}` | TrainWorkspace |
-| `env_runner` | `{_target_, task_name, ...}` | SimRunner |
-| `eval` | `{denoise_steps, use_ema, select_best, ...}` | Copy from dp3.yaml exactly |
-| `hydra` | `{job, run, sweep}` | Output dirs |
+Also identify the environment-facing `control_action` contract and any external artifact/dependency required by the policy.
 
-`action_dim` formula (paste into config):
-```yaml
-action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
+This prevents accidental architecture drift from copy-pasting a superficially similar policy.
+
+## 3. Trace interfaces end to end
+
+Follow the actual call chain:
+
+```text
+dataset
+→ Agent preprocessing / obs_encoder
+→ backbone / action_decoder
+→ compute_loss
+→ predict_action
+→ control_action
+→ env runner
 ```
 
-Copy the `eval:` section **exactly** from `dp3.yaml` — all policies share the same eval structure.
+Check tensor semantics and shapes at interface boundaries. Reuse shared modules only when their semantics match; keep policy-specific behavior local.
 
-### 3. Update CLAUDE.md
+Avoid speculative framework abstractions. One exceptional policy does not justify a new registry/plugin layer.
 
-Four places to update:
+## 4. Implement and configure
 
-1. **Agent 变体对比表** — add a row with columns: Agent name, Input, Encoder, Backbone, Decoder, Config, 独特点
-2. **配置速查** — add `<name>.yaml` to the file list; add a column to the parameter quick-reference table
-3. **训练命令** — add example: `bash scripts/training/train.sh <name> 'task_name=pour'`
-4. **DDP** (if applicable) — add to the DDP config list and batch-size table
+Typical additions are:
 
-### 4. Optionally create DDP overlay
+- Agent / policy-local modules
+- one Hydra config
+- optional DDP overlay when DDP support is actually required
+- focused regression coverage where useful
 
-Path: `dexmani_policy/configs/ddp/<name>.yaml`
+Hydra `_target_` is the wiring mechanism. Do not add a separate policy registry.
 
-Template:
-```yaml
-# @package _global_
-defaults:
-  - /<name>
-  - _self_
+Do not blindly copy another config's optimizer, eval, horizon, action dimensions, or decoder settings. Resolve what the new policy actually requires and let repository-level validation enforce shared constraints.
 
-policy_name: ddp/<name>
+## 5. Validate cheaply first
 
-training:
-  num_gpus: 4
-  gpu_ids: null
-
-dataloader:
-  batch_size: <per_gpu_batch>
-  num_workers: 4
-```
-
-**Known exceptions** (intentional, not errors): `dp3` has no DDP config.
-
-### 5. Verify with smoke test
+Run:
 
 ```bash
-conda activate policy
-python dexmani_policy/smoke_test.py <name>
+python dexmani_policy/smoke_test.py --config-only <config_name>
 ```
 
-The 6 stages validate: (1) dataset+normalizer, (2) model+EMA, (3) optimizer+scheduler,
-(4) forward+backward, (5) predict_action shape, (6) checkpoint roundtrip.
+This is the first acceptance gate for a new/changed config.
 
-## Conventions
+Then, when data/GPU are available:
 
-- `action_dim` uses Hydra eval: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`
-- Every agent includes `example()` with standalone smoke test
-- `n_action_steps: 8` — never changes
-- AdamW `fused=torch.cuda.is_available()`
-- `cond_predict_scale=True` for UNet backbones
-- ViT backbones (DINO/CLIP/SigLIP): `bfloat16 + attn_implementation="sdpa"`
-- `compile mode='reduce-overhead'` unless shuffle/动态索引 requires `mode='default'`
+```bash
+python dexmani_policy/smoke_test.py <config_name>
+```
 
-## Troubleshooting
+If shared code changed, search for real dependents and run additional targeted smoke tests. Do not run unrelated policies just to increase coverage.
 
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| `action dim mismatch` in `compute_loss` | Config `action_dim` ≠ Agent init | Align config eval expression |
-| `_target_` not found | Class path or name wrong | Verify `agent._target_: dexmani_policy.agents.core.<name>.<Name>Agent` |
-| `obs_encoder.out_dim` AttributeError | obs_encoder missing `out_dim` | Add `self.out_dim = ...` in obs encoder `__init__` |
-| `context_dim` shape mismatch in UNet | `obs_encoder.out_dim * n_obs_steps` wrong | Verify encoder flattens time dims correctly |
-| DDP config references wrong base | Typo in `defaults` | Match base config filename exactly (no `.yaml`) |
-| Smoke test stage 1 fails with Zarr error | `robot_data/<task>.zarr` 不在仓库根目录 | 把数据放到 `robot_data/` 或改 `zarr_path` |
+## 6. Documentation rule
 
-## Reporting back
+A normal policy addition or policy-local architecture/hyperparameter change should not require edits to:
 
-Confirm: (a) smoke test passes, (b) DDP smoke if applicable, (c) CLAUDE.md table consistent
-with config, (d) config `_target_` resolves to the new class (no `__init__.py` registration
-needed — barrels are docstring-only), (e) anything still unverified.
+- `README.md`
+- `AGENTS.md`
+- `CLAUDE.md`
+- project Skills
+
+Update global files only when the change modifies a public CLI, repository-wide contract, common workflow, environment requirement, or other global interface.
+
+`docs/` is frozen unless the user explicitly asks to change it.
+
+## Reporting
+
+Report:
+
+- changed files
+- the five-part policy contract
+- config-only result
+- full smoke result, or why it was not run
+- additional dependent-policy checks for shared changes
+- remaining unverified items
+
+Never report PASS for a command that was not executed.

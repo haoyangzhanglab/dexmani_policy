@@ -1,130 +1,100 @@
 ---
 name: dexmani-pr-check
 description: >
-  Read-only pre-PR audit. Validates config invariants (horizon/n_obs_steps/
-  n_action_steps), dimension chains (action_dim/state_dim/tcp_dim), DDP
-  coverage, and CLAUDE.md consistency. Works alongside smoke_test.py
-  (build chain) by adding config- and documentation-level checks.
-  Use when: preparing a PR, asked to "review my changes", "check before
-  PR", or "audit the codebase".
+  Read-only, diff-aware pre-PR review for DexMani_Policy. Use for review,
+  audit, check-before-PR, or correctness validation of a change set.
 ---
 
 # DexMani PR Check
 
-Audit the codebase against DexMani_Policy standards and report pass/fail per item with
-concrete fixes. This is a **read-only audit**: report the fixes, do not apply them unless
-the user asks. Works alongside `smoke_test.py` (build-chain integrity) by adding config-level
-and documentation-level verification.
+Review the actual diff and validate only the affected contracts. Do not maintain or enforce a static policy inventory.
 
-Run commands from the project root unless noted.
+## 1. Determine blast radius
 
-## Checks
+Inspect changed files first.
 
-### 1. Core invariants
+Classify changes as:
 
-These four constants must hold across **all** config files (single-GPU + DDP).
-Run from the project root:
+- policy-local config/Agent/component
+- shared Agent/base/encoder/decoder component
+- dataset/data contract
+- training/resume/checkpoint
+- evaluation/deployment
+- scripts/public CLI
+- documentation/agent infrastructure
 
-```bash
-# horizon must be 16 everywhere
-grep -rn 'horizon:' dexmani_policy/configs/*.yaml dexmani_policy/configs/ddp/*.yaml | grep -v ': 16'
+For a policy config, follow its resolved `agent._target_`; do not infer implementation from filenames.
 
-# n_obs_steps must be 2 everywhere
-grep -rn 'n_obs_steps:' dexmani_policy/configs/*.yaml dexmani_policy/configs/ddp/*.yaml | grep -v ': 2'
+For shared code, search imports/config targets to identify real dependents instead of guessing from a hard-coded policy list.
 
-# n_action_steps must be 8 everywhere
-grep -rn 'n_action_steps:' dexmani_policy/configs/*.yaml dexmani_policy/configs/ddp/*.yaml | grep -v ': 8'
+## 2. Review correctness
 
-grep -rn 'use_aux_ee.*true' dexmani_policy/configs/*.yaml
+For each affected path, check the relevant interfaces:
+
+```text
+config
+→ construction
+→ observation representation
+→ policy/action representation
+→ training objective
+→ inference
+→ environment-facing output
 ```
 
-### 2. Dimension chain consistency
+Look for concrete defects such as:
 
-For each config file, parse the YAML and verify:
+- unresolved Hydra interpolation or `_target_`
+- inconsistent dataset/action/env contracts
+- wrong tensor semantics across module boundaries
+- objective/model-output mismatch
+- inference shape or control-action mismatch
+- missing optimizer coverage
+- broken resume/eval/deployment state contract
+- accidental cross-policy behavior changes
+- unrelated refactor that enlarges risk without serving the task
 
-| Rule | Value |
-|------|-------|
-| `action_dim` | 通用 `${eval:'21 if ${eq:${action_key},action_ee} else 19'}`（joint=19, ee=21） |
-| `state_dim` | `19` (7 arm + 12 hand) |
-| DQRISE `tcp_dim`/`hand_dim` | `7`/`12` (joint) 或 `9`/`12` (action_ee)；仅 `dqrise.yaml` 显式定义 |
+Do not enforce universal architecture formulas that are not actually repository contracts.
 
-Implementation (one-liner to extract key dims from a config):
-```bash
-python -c "
-import yaml, sys
-d = yaml.safe_load(open('$CONFIG'))
-a = d.get('agent', d)
-print(f'action_dim={d.get(\"action_dim\")} state_dim={a.get(\"state_dim\")} tcp_dim={d.get(\"tcp_dim\")} hand_dim={d.get(\"hand_dim\")} use_aux_ee={d.get(\"use_aux_ee\")} action_key={d.get(\"action_key\")}')
-"
-```
+## 3. Validate in cost order
 
-### 3. DDP coverage
-
-List available configs and cross-reference:
+For each changed/affected config:
 
 ```bash
-echo "=== Single-GPU configs ==="
-ls dexmani_policy/configs/*.yaml | grep -v '/ddp/' | sed 's|.*/||; s|\.yaml$||'
-echo "=== DDP configs ==="
-ls dexmani_policy/configs/ddp/*.yaml 2>/dev/null | sed 's|.*/ddp/||; s|\.yaml$||'
+python dexmani_policy/smoke_test.py --config-only <config_name>
 ```
 
-Known intentional gaps (not errors): `dp3` — CLAUDE.md documents it as single-GPU-only.
-
-### 4. CLAUDE.md table consistency
-
-Three counts must match:
-- Agent rows in the comparison table in CLAUDE.md
-- Single-GPU config YAML files (`ls dexmani_policy/configs/*.yaml | grep -v ddp/ | wc -l`)
-- Agent core Python files (`ls dexmani_policy/agents/core/*.py | grep -v '__init__\|base\.py' | wc -l`)
-
-Also verify:
-```bash
-# Each config's _target_ points to a real class file
-for cfg in dexmani_policy/configs/*.yaml; do
-  target=$(grep '_target_:' "$cfg" | head -1 | sed 's/.*_target_: *//')
-  module_path=$(echo "$target" | sed 's|\.|/|g; s|/agents/|dexmani_policy/agents/|')
-  [ -f "${module_path%%.*}.py" ] || echo "MISSING: $target in $cfg"
-done
-```
-
-### 5. Changed-file smoke test
+For model/config integration changes, when data/GPU are available:
 
 ```bash
-# Identify configs changed in the current diff
-git diff --name-only HEAD | grep 'dexmani_policy/configs/.*\.yaml' | while read cfg; do
-  name=$(basename "$cfg" .yaml)
-  echo "=== Smoke testing $name ==="
-  python dexmani_policy/smoke_test.py "$name" || echo "FAILED: $name"
-done
+python dexmani_policy/smoke_test.py <config_name>
 ```
 
-### 6. Known convention violations audit
+For shared modules, add targeted dependent configs based on actual usage.
 
-These are design conventions documented in CLAUDE.md that look like bugs but are
-intentional. Flag any change that "fixes" one of these as a regression:
+Do not mark a command-based check PASS unless it was run. Environment-limited checks are **NOT VERIFIED**, not PASS.
 
-- Normalizer fits on **all** replay buffer data (train + val) — not a leak, `limits` mode
-  means val doesn't change min/max. Every codebase in this ecosystem does this.
-- `tcp_dim` naming: means "arm control dim" (7 for joint, 9 for ee mode), not literally TCP.
-- `DQRISEAgent` bypasses `UNetDiffusionAgent` — its `diffusion_action_dim = tcp_dim+1`
-  (≠ `action_dim`) so it cannot reuse the standard UNet path. Do not refactor into UNetDiffusionAgent.
+## 4. Documentation review
+
+Global docs should not duplicate policy-specific layer counts, hidden dims, LR/WD, NFE, batch size, parameter counts, policy lists, or experiment conclusions.
+
+A normal policy addition should not require global documentation changes. Global documentation is expected only for public CLI/repository-contract/workflow changes.
+
+`docs/` is frozen unless explicitly requested.
 
 ## Report format
 
-- One line per check: ✅ pass / ❌ fail / ⚠️ not run, with a short reason.
-- For each ❌: name the file and the exact change, pointing to an existing correct config
-  (e.g. `dp3.yaml`) as reference.
-- End with a verdict: **ready for PR** or **needs fixes** (list blocking items first).
-- Then offer to apply the fixes.
+Order findings by severity:
 
-Keep the report short — checks that pass need one line, not an explanation.
-Never mark an item ✅ based on reading code alone when the check is a command you did not run.
+- **BLOCKER** — likely incorrect behavior/data/state contract
+- **MAJOR** — significant regression or incomplete integration
+- **MINOR** — real maintainability/clarity issue
+- **NOT VERIFIED** — relevant validation blocked by environment
 
-## Troubleshooting
+For each finding, give file/path, evidence, consequence, and smallest coherent fix.
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `action_dim` doesn't match `tcp_dim + hand_dim` | `action_key` changed without updating `action_dim` | Use correct eval expression: `${eval:'21 if ${eq:${action_key},action_ee} else 19'}` |
-| DDP config references nonexistent base | Typo in `defaults` | Match base config filename exactly (no `.yaml`) |
-| CLAUDE.md counts don't match | Missed a CLAUDE.md update after adding/removing an agent | Sync the table, config list, and command examples |
+End with:
+
+- `ready for PR`, or
+- `needs fixes`
+
+Keep passing checks concise.
