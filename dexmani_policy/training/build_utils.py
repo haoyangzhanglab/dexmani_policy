@@ -141,9 +141,9 @@ def _validate_augmentation_consistency(cfg):
         f"Either set agent.pc_dim=6 or remove the augmentation key."
     )
     if pc_color is not None:
-        assert pc_dim >= 6, missing_rgb
+        raise ValueError(missing_rgb)
     if pc_color_noise is not None:
-        assert pc_dim >= 6, f"PC color_noise augmentation: {missing_rgb}"
+        raise ValueError(f"PC color_noise augmentation: {missing_rgb}")
 
 
 def _validate_aux_config(cfg):
@@ -193,9 +193,8 @@ def validate_config(cfg):
         )
 
     if cfg.optimizer.get("obs_lr") is not None:
-        assert (
-            cfg.optimizer.obs_lr >= 0
-        ), "optimizer.obs_lr must be non-negative (0 means freeze)"
+        if cfg.optimizer.obs_lr < 0:
+            raise ValueError("optimizer.obs_lr must be non-negative (0 means freeze)")
 
     _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)

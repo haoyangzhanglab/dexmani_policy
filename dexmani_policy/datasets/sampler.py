@@ -101,6 +101,8 @@ class SequenceSampler:
         episode_ends = replay_buffer.episode_ends[:]
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
+        else:
+            episode_mask = np.array(episode_mask, dtype=bool, copy=True)
 
         if not np.any(episode_mask):
             raise ValueError(

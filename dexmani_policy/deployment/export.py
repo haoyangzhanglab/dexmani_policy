@@ -226,7 +226,7 @@ def _load_training_checkpoint(path: Path) -> TrainCheckpoint:
         checkpoint = CheckpointStore(path.parent).load(path)
     except Exception as exc:
         raise InvalidCheckpointError(
-            f"cannot load simple.v2 checkpoint: {path}"
+            f"cannot load simple.v3 checkpoint: {path}"
         ) from exc
     if checkpoint.epoch < 0 or checkpoint.global_step < 0:
         raise InvalidCheckpointError(
@@ -796,26 +796,25 @@ def _expected_train_params(cfg_plain: dict[str, Any]) -> dict[str, Any]:
 def _reconcile_train_params(
     checkpoint: TrainCheckpoint, cfg_plain: dict[str, Any]
 ) -> tuple[dict[str, Any], str, list[str]]:
-    if type(checkpoint.train_params) is not dict:
-        raise InvalidCheckpointError("checkpoint train_params must be a plain dict")
-    native = checkpoint.train_params
+    native = checkpoint.resume_contract.get("agent")
+    if type(native) is not dict:
+        raise InvalidCheckpointError(
+            "checkpoint resume_contract.agent must be a plain dict"
+        )
     expected = _expected_train_params(cfg_plain)
     retrofitted: list[str] = []
     result: dict[str, Any] = {}
     for key, expected_value in expected.items():
         if key not in native:
-            if key == "use_aux_ee":
-                result[key] = expected_value
-                retrofitted.append(key)
-                continue
-            raise InvalidCheckpointError(f"checkpoint train_params is missing {key}")
+            raise InvalidCheckpointError(
+                f"checkpoint resume_contract.agent is missing {key}"
+            )
         if native[key] != expected_value:
             raise InvalidCheckpointError(
-                f"checkpoint train_params.{key}={native[key]!r} conflicts with config={expected_value!r}"
+                f"checkpoint resume_contract.agent.{key}={native[key]!r} "
+                f"conflicts with config={expected_value!r}"
             )
         result[key] = native[key]
-    if "num_training_steps" in native:
-        result["num_training_steps"] = native["num_training_steps"]
     provenance = "retrofitted" if retrofitted else "native"
     return _require_plain_metadata(result, "train_params"), provenance, retrofitted
 

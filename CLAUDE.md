@@ -182,7 +182,7 @@ Eval 各策略 denoise_steps 不同 (action_flow=2, maniflow=4, dqrise=20, 其�
 
 **NaN 两层防护**: L1 (backward前, loss NaN → 保存 debug ckpt → raise) / L2 (optimizer.step前, 梯度 NaN → zero_grad → raise)。诊断用 `dexmani-training-debug` skill。
 
-**Checkpoint**: 20/40/60/80/100% 里程碑; `latest.pt` symlink; 自动 resume（含 EMA updater 计数器 + RNG 状态，精确恢复）。**DDP**: ckpt 加载在 compile + DDP 包装**前**; timeout=30min; `dp3` 仅单卡。**Shape 验证**: `_validate_batch()` 在 `compute_loss`/`predict_action` 入口。
+**Checkpoint**: 20/40/60/80/100% 里程碑; `latest.pt` symlink; 显式 `+resume_from=...` 恢复（`simple.v3`，含 EMA updater、各 rank RNG、下一 micro-batch 游标及严格 resume contract；多 worker 随机增强不保证 bitwise continuation）。**DDP**: ckpt 加载在 compile + DDP 包装**前**; timeout=30min; `dp3` 仅单卡。**Shape 验证**: `_validate_batch()` 在 `compute_loss`/`predict_action` 入口。
 
 > 详细机制 → [README](README.md#训练机制)
 

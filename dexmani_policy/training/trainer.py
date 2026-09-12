@@ -14,9 +14,6 @@ from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint_io import (
     TrainCheckpoint,
-    build_train_params,
-    validate_ema_resume_state,
-    validate_training_steps,
 )
 from dexmani_policy.common.pytorch_util import (
     compile_models,
@@ -24,11 +21,11 @@ from dexmani_policy.common.pytorch_util import (
     fix_state_dict,
     get_rng_state,
     optimizer_to,
-    set_rng_state,
     to_log_scalars,
 )
 from dexmani_policy.training.build_utils import validate_gradient_accumulation
 from dexmani_policy.training.workspace import TrainWorkspace
+from dexmani_policy.training.resume import restore_training_state
 
 
 @dataclass
@@ -71,6 +68,7 @@ class Trainer:
         train_loop_cfg: TrainLoopConfig,
         use_ema_teacher_for_consistency: bool,
         num_training_steps: int,
+        resume_contract: dict,
         max_grad_norm: float = 1.0,
         fast_grad_finite_check: bool = False,
         use_bfloat16: bool = False,
@@ -117,12 +115,16 @@ class Trainer:
 
         self.is_main_process = is_main_process
         self.distributed = distributed
-        self.train_sampler = train_sampler
-        self.current_epoch = -1
+        self._ddp_backward_initialized = False
+        self.train_sampler = train_sampler if train_sampler is not None else train_loader.sampler
+        self.resume_contract = resume_contract
+        self.next_micro_step = 0
+        self.current_epoch = 0
         self.global_step = 0
         self.num_training_steps = num_training_steps
 
         self._interrupted = False
+        self._stop_requested = False
         self._step_pbar = None
 
     @property
@@ -212,45 +214,14 @@ class Trainer:
             self.ema_updater.step(self.raw_model)
 
     def load_for_resume(self, tag_or_path: str):
-        """Restore model/EMA/optimizer/scheduler from a checkpoint.
-
-        Returns ``(global_step, start_epoch)``.  ``start_epoch`` is the epoch
-        the checkpoint was saved during — the sampler position is **not**
-        persisted, so the trainer replays that epoch from its start (micro-step
-        0, a clean accumulation boundary).  This avoids silently skipping the
-        remaining micro-batches of the checkpointed epoch.
-        """
+        """Restore the shared v3 state before compilation."""
         checkpoint = self.workspace.load_checkpoint(tag_or_path)
-        validate_training_steps(checkpoint, self.num_training_steps)
-        validate_ema_resume_state(checkpoint, require_ema=self.use_ema)
-
-        is_current_ddp = isinstance(self.raw_model, DDP)
-        self.raw_model.load_state_dict(
-            fix_state_dict(checkpoint.model_state, is_current_ddp), strict=True
+        return restore_training_state(
+            checkpoint, resume_contract=self.resume_contract, model=self.raw_model,
+            ema_model=self.ema_model, ema_updater=self.ema_updater,
+            optimizer=self.optimizer, scheduler=self.scheduler, device=self.device,
+            rank=dist.get_rank() if self.distributed else 0,
         )
-
-        if self.use_ema:
-            self.ema_model.load_state_dict(
-                fix_state_dict(checkpoint.ema_model_state, is_current_ddp=False),
-                strict=True,
-            )
-
-        self.optimizer.load_state_dict(checkpoint.optimizer_state)
-        self.scheduler.load_state_dict(checkpoint.scheduler_state)
-
-        # Restore the EMA decay warmup counter so get_decay() resumes from the
-        # saved step instead of restarting from 0 (which would silently reset
-        # the decay schedule after an interrupt).
-        if self.use_ema and self.ema_updater is not None:
-            self.ema_updater.optimization_step = checkpoint.ema_updater_step
-            if checkpoint.ema_decay is not None:
-                self.ema_updater.decay = float(checkpoint.ema_decay)
-
-        # Restore the process RNG stream so data augmentation / shuffle resumes
-        # deterministically alongside the replayed epoch.
-        set_rng_state(checkpoint.rng_state)
-
-        return checkpoint.global_step, checkpoint.epoch
 
     def _save_nan_debug(self, raw_loss, nan_rank=None):
         if self.workspace is None:
@@ -387,16 +358,22 @@ class Trainer:
         return {
             ratio
             for ratio in MILESTONE_RATIOS
-            if self.global_step >= int(self.total_train_steps * ratio)
+            if self.global_step / self.total_train_steps >= ratio
         }
 
     def _save_checkpoint(self, epoch: int, global_step: int, tag_suffix: str):
         """Save a checkpoint with the given tag suffix and point ``latest.pt`` at it."""
+        rng_states = [get_rng_state()]
+        if self.distributed:
+            local_rng = rng_states[0]
+            rng_states = [None] * dist.get_world_size()
+            dist.all_gather_object(rng_states, local_rng)
         if self.workspace is None or not self.is_main_process:
             return
         checkpoint = TrainCheckpoint(
-            epoch=epoch,
+            epoch=self.current_epoch,
             global_step=global_step,
+            next_micro_step=self.next_micro_step,
             model_state=fix_state_dict(
                 self.raw_model.state_dict(), is_current_ddp=False
             ),
@@ -408,7 +385,7 @@ class Trainer:
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             monitor={},
-            train_params=build_train_params(self.raw_model, self.num_training_steps),
+            resume_contract=self.resume_contract,
             # Persist the full training state machine: EMA decay warmup counter
             # and the process RNG stream, so resume reproduces the same schedule.
             ema_updater_step=(
@@ -421,9 +398,9 @@ class Trainer:
                 if self.use_ema and self.ema_updater is not None
                 else None
             ),
-            rng_state=get_rng_state(),
+            rng_states=rng_states,
         )
-        tag = f"epoch={epoch:04d}-step={global_step:08d}-{tag_suffix}"
+        tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"
         checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
         self.workspace.save_latest(checkpoint_path)
 
@@ -442,7 +419,7 @@ class Trainer:
 
     def _signal_handler(self, signum, frame):
         """Minimal signal handler: set flag on first signal, force-exit on second."""
-        if self._interrupted:
+        if self._stop_requested:
             signame = signal.Signals(signum).name
             print(f"\nSecond {signame} — forcing exit.", flush=True)
             os._exit(1)
@@ -451,7 +428,7 @@ class Trainer:
             f"\n=== {signame} — finishing current step, then saving checkpoint... ===",
             flush=True,
         )
-        self._interrupted = True
+        self._stop_requested = True
 
     def _check_milestone(self, epoch: int, global_step: int):
         """Check and save the first un-passed milestone whose threshold is met.
@@ -461,8 +438,6 @@ class Trainer:
         ``total_train_steps`` is typically much larger, at most one milestone
         is crossed per step under normal operation.
         """
-        if self.workspace is None or not self.is_main_process:
-            return
         for ratio in MILESTONE_RATIOS:
             if ratio in self._passed_milestones:
                 continue
@@ -474,18 +449,18 @@ class Trainer:
     def on_epoch_start(self, epoch: int):
         if hasattr(self.train_loader.dataset, "set_epoch"):
             self.train_loader.dataset.set_epoch(epoch)
-        if hasattr(self.model, "set_epoch"):
-            self.model.set_epoch(epoch)
+        if hasattr(self.raw_model, "set_epoch"):
+            self.raw_model.set_epoch(epoch)
 
     def train(self, resume_tag: str | None = None, resume_state=None):
         torch.set_float32_matmul_precision("high")
 
         if resume_state is not None:
-            global_step, start_epoch = resume_state
+            global_step, start_epoch, self.next_micro_step = resume_state
         elif resume_tag is None:
             global_step, start_epoch = 0, 0
         else:
-            global_step, start_epoch = self.load_for_resume(resume_tag)
+            global_step, start_epoch, self.next_micro_step = self.load_for_resume(resume_tag)
 
         self.global_step = global_step
         if start_epoch > 0:
@@ -505,10 +480,12 @@ class Trainer:
         self._passed_milestones = self._init_milestone_state()
 
         self._interrupted = False
+        self._stop_requested = False
         prev_sigint = signal.signal(signal.SIGINT, self._signal_handler)
         prev_sigterm = signal.signal(signal.SIGTERM, self._signal_handler)
 
         epoch = start_epoch
+        self.current_epoch = epoch
         if self.is_main_process:
             self._step_pbar = tqdm(
                 initial=global_step,
@@ -519,18 +496,19 @@ class Trainer:
             )
 
         try:
-            while global_step < self.total_train_steps and not self._interrupted:
+            while global_step < self.total_train_steps:
                 if self.train_sampler is not None:
-                    self.train_sampler.set_epoch(epoch)
+                    self.train_sampler.set_epoch(epoch, self.next_micro_step)
 
                 self.model.train()
                 self.on_epoch_start(epoch)
 
                 self.optimizer.zero_grad(set_to_none=True)
 
-                num_batches = len(self.train_loader)
-                epoch_completed = True
-                for micro_step, batch in enumerate(self.train_loader):
+                num_batches = self.resume_contract["batches_per_epoch"]
+                group_metric_sums = {}
+                group_metric_count = 0
+                for micro_step, batch in enumerate(self.train_loader, start=self.next_micro_step):
                     self.current_epoch = epoch
 
                     group_start = (
@@ -545,7 +523,12 @@ class Trainer:
 
                     # DDP: suppress gradient all-reduce for non-boundary micro-batches
                     # so that gradients accumulate locally, then sync once on the boundary.
-                    if self.distributed and not is_boundary:
+                    # PyTorch 2.4 static_graph initializes its reducer on the
+                    # first synchronized backward. A first-ever no_sync()
+                    # backward trips expect_autograd_hooks_ at the boundary.
+                    # Averaging the first micro-gradient early is linear and
+                    # preserves the accumulated global-mean gradient.
+                    if self.distributed and not is_boundary and self._ddp_backward_initialized:
                         sync_ctx = self.model.no_sync()
                     else:
                         sync_ctx = contextlib.nullcontext()
@@ -557,22 +540,50 @@ class Trainer:
                             loss_divisor=group_size,
                         )
 
+                    self._ddp_backward_initialized = True
+                    for key, value in to_log_scalars(log_dict).items():
+                        group_metric_sums[key] = group_metric_sums.get(key, 0.0) + value
+                    group_metric_count += 1
+
                     if is_boundary:
+                        group_metrics = {
+                            key: value / group_metric_count
+                            for key, value in group_metric_sums.items()
+                        }
+                        group_metric_sums = {}
+                        group_metric_count = 0
                         global_step += 1
                         self.global_step = global_step
+                        self.next_micro_step = micro_step + 1
+                        if self.next_micro_step == num_batches:
+                            self.current_epoch = epoch + 1
+                            self.next_micro_step = 0
+                        if self.distributed:
+                            stop = torch.tensor(int(self._stop_requested), device=self.device)
+                            dist.all_reduce(stop, op=dist.ReduceOp.MAX)
+                            self._interrupted = bool(stop.item())
+                        else:
+                            self._interrupted = self._stop_requested
 
-                        if (
-                            self.is_main_process
-                            and (global_step % self.log_interval_steps) == 0
-                        ):
+                        if (global_step % self.log_interval_steps) == 0:
                             step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
                             if self._last_grad_norm is not None:
                                 step_metrics["train/grad_norm"] = self._last_grad_norm
                                 step_metrics["train/clip_ratio"] = self._last_clip_ratio
-                            for key, value in to_log_scalars(log_dict).items():
+                            for key, value in group_metrics.items():
                                 step_metrics[f"train/{key}"] = value
 
-                            if self._step_pbar is not None:
+                            if self.distributed:
+                                keys = sorted(step_metrics)
+                                packed = torch.tensor(
+                                    [step_metrics[key] for key in keys],
+                                    dtype=torch.float64, device=self.device,
+                                )
+                                dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+                                packed /= dist.get_world_size()
+                                step_metrics = dict(zip(keys, packed.cpu().tolist()))
+
+                            if self.is_main_process and self._step_pbar is not None:
                                 self._step_pbar.update(self.log_interval_steps)
                                 if hasattr(self._step_pbar, "set_postfix"):
                                     self._step_pbar.set_postfix(
@@ -580,22 +591,19 @@ class Trainer:
                                         step=f"{global_step:,}",
                                         lr=f"{step_metrics['train/lr']:.2e}",
                                     )
-                            if self.workspace is not None:
+                            if self.is_main_process and self.workspace is not None:
                                 self.workspace.log(step_metrics, step=global_step)
 
                         # Check for milestone checkpoint.
                         self._check_milestone(epoch, global_step)
 
-                    if global_step >= self.total_train_steps or self._interrupted:
-                        epoch_completed = False
+                    if is_boundary and (global_step >= self.total_train_steps or self._interrupted):
                         break
 
                 self.model.eval()
-                # Only advance the epoch if it actually completed; on interrupt
-                # the in-progress epoch is replayed from its start on resume
-                # (sampler position is not persisted).
-                if epoch_completed:
-                    epoch += 1
+                epoch = self.current_epoch
+                if self._interrupted:
+                    break
 
             if self._interrupted and global_step > 0:
                 print(

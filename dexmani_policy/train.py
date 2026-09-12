@@ -13,7 +13,6 @@ from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import (
     set_project_root,
     set_seed,
-    worker_init_fn,
 )
 
 ROOT_DIR = set_project_root()
@@ -27,6 +26,7 @@ from dexmani_policy.training.build_utils import (
     validate_config,
 )
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
+from dexmani_policy.training.resume import build_train_loader, build_resume_contract
 
 register_resolvers()
 
@@ -57,7 +57,7 @@ def build_train_components(cfg):
 
     dataset, normalizer = build_dataset_and_normalizer(cfg)
 
-    train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
+    train_loader = build_train_loader(cfg, dataset)
 
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
 
@@ -107,6 +107,7 @@ def main(cfg):
         use_compile=cfg.training.get("use_compile", False),
         compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),
         num_training_steps=comp.num_training_steps,
+        resume_contract=build_resume_contract(cfg, comp.model, comp.train_loader),
     )
     # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>`.
     resume_from = cfg.get("resume_from", None)

@@ -304,7 +304,7 @@ Agent.compute_loss():                          Agent.predict_action():
 ### 关键机制
 
 - **梯度累积**: `raw_loss / gradient_accumulation_steps` → backward; DDP 非边界 `model.no_sync()`, 仅边界 all-reduce
-- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; 自动 resume（含 EMA updater 计数器 + RNG 状态，精确恢复）。启用 EMA 时，恢复 checkpoint 必须同时含 EMA 权重和非负 updater step。
+- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; 显式 `+resume_from=<experiment_dir|checkpoint.pt>` 恢复（含 EMA updater、各 rank RNG 和下一 micro-batch 游标）。启用 EMA 时，恢复 checkpoint 必须同时含 EMA 权重和非负 updater step。
 - **EMA**: 逆 gamma 衰减; BatchNorm affine 直接复制 (不平均)
 - **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3` 有意仅单卡
 - **Shape 验证**: `BaseAgent._validate_batch()` 在 `compute_loss`/`predict_action` 入口校验 action ndim/horizon/dim + obs 时间维/模态batch一致性
@@ -329,7 +329,10 @@ VQ checkpoint 只接受 `format_version=3`，运行时 codebook 只接受完整�
 
 ## 实验目录
 
-训练 checkpoint 使用严格的 `simple.v2` schema；旧 `simple.v1` checkpoint 不再加载。
+训练 checkpoint 使用严格的 `simple.v3` schema；旧训练 schema（包括 `simple.v1/v2`）不再加载。
+`resume_contract` 递归核对策略、数据、batch/world size、优化器和调度参数；
+保存仅发生在完整梯度累积组更新结束后，epoch 末尾游标归一为下一 epoch。
+恢复保证采样连续及优化器状态一致；多 worker 随机数据增强不保证 bitwise continuation。
 
 ```
 experiments/

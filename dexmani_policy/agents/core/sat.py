@@ -59,6 +59,11 @@ class SATObsEncoder(nn.Module):
         pc_encoder_config.setdefault("fps_random_config", fps_random_config)
 
         self.pc_encoder = build_pc_patch_tokenizer(encoder_type, pc_dim, pc_encoder_config)
+        if not getattr(self.pc_encoder, "supports_global_token", False):
+            raise ValueError(
+                f"SAT requires a tokenizer with a global token; {encoder_type!r} "
+                "does not support one. Use pointnext_tokenizer."
+            )
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
@@ -93,9 +98,18 @@ class SATObsEncoder(nn.Module):
         )
 
         pc_outputs = self.pc_encoder(pc, return_global_token=True)
-        patch_token, _, global_token = (pc_outputs[0], pc_outputs[1], pc_outputs[2])
+        if not isinstance(pc_outputs, tuple) or len(pc_outputs) != 3:
+            raise ValueError("SAT tokenizer must return (patch_tokens, patch_centers, global_token)")
+        patch_token, patch_centers, global_token = pc_outputs
+        if (
+            not all(isinstance(value, torch.Tensor) for value in pc_outputs)
+            or patch_token.ndim != 3
+            or patch_centers.shape != (*patch_token.shape[:2], 3)
+            or global_token.shape != (patch_token.shape[0], 1, patch_token.shape[2])
+        ):
+            raise ValueError("SAT tokenizer requires patches (BT,K,D), centers (BT,K,3), global token (BT,1,D)")
         # patch_token: (B*T, K, D_pc)
-        # global_token: (B*T, D_pc)
+        # global_token: (B*T, 1, D_pc)
 
         # [global_token, patch_0, patch_1, ...]
         pc_feat = torch.cat([global_token, patch_token], dim=1)  # (B*T, K+1, D_pc)

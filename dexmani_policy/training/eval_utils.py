@@ -17,7 +17,11 @@ import hydra
 import torch
 from termcolor import cprint
 
-from dexmani_policy.common.checkpoint_io import CheckpointStore
+from dexmani_policy.common.checkpoint_io import (
+    CheckpointStore,
+    build_agent_contract,
+    validate_resume_contract,
+)
 from dexmani_policy.common.config import validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import fix_state_dict
 
@@ -126,27 +130,17 @@ def load_ckpt_for_inference(
 ) -> None:
     """Load a checkpoint into *agent* for inference, with validation.
 
-    Validates train_params consistency (n_obs_steps, n_action_steps,
-    action_dim, horizon, action_key), EMA selection, and normalizer
+    Validates the complete agent resume contract, EMA selection, and normalizer
     integrity.
     """
     checkpoint = checkpoint_store.load(ckpt_path)
 
-    train_params = checkpoint.train_params
-    if train_params is not None:
-        for key in (
-            "n_obs_steps",
-            "n_action_steps",
-            "action_dim",
-            "horizon",
-            "action_key",
-        ):
-            expected = train_params.get(key)
-            actual = getattr(agent, key, None)
-            if expected is not None and actual is not None and expected != actual:
-                raise ValueError(
-                    f"Checkpoint train_params.{key}={expected} does not match agent.{key}={actual}."
-                )
+    agent_contract = checkpoint.resume_contract.get("agent")
+    if type(agent_contract) is not dict:
+        raise RuntimeError("Checkpoint resume_contract.agent must be a plain dict")
+    validate_resume_contract(
+        {"agent": agent_contract}, {"agent": build_agent_contract(agent)}
+    )
 
     raw_state = checkpoint.model_state
     if use_ema:

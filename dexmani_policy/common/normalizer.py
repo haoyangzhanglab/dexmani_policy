@@ -236,6 +236,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
             }
         )
         obj = cls(params_dict)
+        obj.params_dict.requires_grad_(False)
         if input_stats_dict is not None:
             obj.input_stats = dict_apply(input_stats_dict, to_tensor)
         return obj

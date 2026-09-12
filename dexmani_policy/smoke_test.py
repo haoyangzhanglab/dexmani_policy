@@ -12,12 +12,9 @@ import torch
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader
-
 from dexmani_policy.common.checkpoint_io import (
     CheckpointStore,
     TrainCheckpoint,
-    build_train_params,
 )
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import (
@@ -25,14 +22,13 @@ from dexmani_policy.common.pytorch_util import (
     fix_state_dict,
     get_rng_state,
     set_seed,
-    worker_init_fn,
 )
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
 )
-from dexmani_policy.training.lr_scheduler import compute_num_training_steps
+from dexmani_policy.training.resume import build_resume_contract, build_train_loader
 
 register_resolvers()
 
@@ -108,7 +104,7 @@ def smoke_test(config_name: str):
 
     print("[1/6] Building dataset & normalizer ...")
     dataset, normalizer = build_dataset_and_normalizer(cfg)
-    train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
+    train_loader = build_train_loader(cfg, dataset)
     print(f"      dataset size: {len(dataset)}, batches/epoch: {len(train_loader)}")
 
     # 1.1 Validation dataset (regression test for weighted strategy bug)
@@ -179,15 +175,15 @@ def smoke_test(config_name: str):
     assert torch.isfinite(raw_loss), f"Non-finite loss: {raw_loss.item()}"
     print(f"      loss: {raw_loss.item():.4f}  keys: {list(loss_dict.keys())}")
 
-    # 4.1 Gradient reachability. DDP runs with find_unused_parameters=False and
-    # static_graph=True, so a trainable parameter that never participates in the
-    # forward graph is a hard crash there — but is silently ignored single-GPU.
+    # 4.1 Gradient reachability for this batch. DDP static-graph training also
+    # requires the set of used parameters to remain unchanged across batches.
     unreached = [
         n for n, p in model.named_parameters() if p.requires_grad and p.grad is None
     ]
     if unreached:
         print(
-            f"      ⚠ {len(unreached)} trainable params received no gradient (DDP will fail):"
+            f"      ⚠ {len(unreached)} trainable params received no gradient in this batch "
+            "(verify static usage across DDP batches):"
         )
         for n in unreached[:10]:
             print(f"        - {n}")
@@ -212,8 +208,6 @@ def smoke_test(config_name: str):
         print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
 
     print("[6/6] Checkpoint save → load roundtrip ...")
-    num_training_steps = compute_num_training_steps(cfg)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_dir = pathlib.Path(tmpdir)
         store = CheckpointStore(ckpt_dir)
@@ -232,6 +226,7 @@ def smoke_test(config_name: str):
         ckpt = TrainCheckpoint(
             epoch=0,
             global_step=1,
+            next_micro_step=0,
             model_state=fix_state_dict(model_sd, is_current_ddp=False),
             ema_model_state=(
                 fix_state_dict(ema_sd, is_current_ddp=False)
@@ -241,10 +236,10 @@ def smoke_test(config_name: str):
             optimizer_state=opt_sd,
             scheduler_state=sched_sd,
             monitor={"test_mean_score": 0.85},
-            train_params=build_train_params(model, num_training_steps),
+            resume_contract=build_resume_contract(cfg, model, train_loader),
             ema_updater_step=None,
             ema_decay=None,
-            rng_state=get_rng_state(),
+            rng_states=[get_rng_state()],
         )
         ckpt_path = store.save("epoch=0000-step=00000001-score=0.8500.pt", ckpt)
         print(f"      saved checkpoint: {ckpt_path.name}")
@@ -253,8 +248,12 @@ def smoke_test(config_name: str):
         loaded = store.load(ckpt_path)
         assert loaded.epoch == 0
         assert loaded.global_step == 1
+        assert loaded.next_micro_step == 0
         assert loaded.monitor.get("test_mean_score") == 0.85
-        assert loaded.train_params.get("num_training_steps") == num_training_steps
+        assert (
+            loaded.resume_contract["training"]["num_training_steps"]
+            == cfg.training.loop.total_train_steps
+        )
 
         loaded_model_sd = fix_state_dict(loaded.model_state, is_current_ddp=False)
         loaded_model_sd = {k: v.to(device) for k, v in loaded_model_sd.items()}
@@ -275,11 +274,11 @@ def smoke_test(config_name: str):
                     )
             print("      ✓ EMA state dict roundtrip OK")
 
-        tp = loaded.train_params
-        assert tp.get("n_obs_steps") == model.n_obs_steps
-        assert tp.get("n_action_steps") == model.n_action_steps
-        assert tp.get("action_dim") == model.action_dim
-        print("      ✓ train_params roundtrip OK")
+        agent_contract = loaded.resume_contract["agent"]
+        assert agent_contract["n_obs_steps"] == model.n_obs_steps
+        assert agent_contract["n_action_steps"] == model.n_action_steps
+        assert agent_contract["action_dim"] == model.action_dim
+        print("      ✓ resume contract roundtrip OK")
 
     print(f"\n✓ {config_name} smoke test PASSED\n")
     return True

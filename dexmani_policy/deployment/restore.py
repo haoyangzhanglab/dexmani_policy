@@ -136,12 +136,16 @@ def prediction_snapshot(
     observation: Mapping[str, torch.Tensor] | None = None,
 ) -> PredictionSnapshot:
     """Run one seeded prediction and validate the complete output contract."""
+    agent_device = _agent_device(restored.agent)
     obs = (
-        deterministic_observation(restored.spec)
+        deterministic_observation(restored.spec, device=agent_device)
         if observation is None
         else dict(observation)
     )
     model_observation = prepare_deployment_observation(obs, restored.spec)
+    model_observation = {
+        name: value.to(device=agent_device) for name, value in model_observation.items()
+    }
     reset_inference_seed(seed)
     try:
         with torch.inference_mode():
@@ -152,6 +156,19 @@ def prediction_snapshot(
         raise DeploymentRestoreError("deployment agent prediction failed") from exc
     batch_size = next(iter(obs.values())).shape[0]
     return validate_prediction(result, restored.spec, batch_size=batch_size)
+
+
+def _agent_device(agent: Any) -> torch.device:
+    """Return the current execution device of a restored agent."""
+    try:
+        return next(agent.parameters()).device
+    except StopIteration:
+        try:
+            return next(agent.buffers()).device
+        except StopIteration as exc:
+            raise DeploymentRestoreError(
+                "deployment agent has no parameter or buffer device"
+            ) from exc
 
 
 def prepare_deployment_observation(

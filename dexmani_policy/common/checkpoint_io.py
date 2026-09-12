@@ -9,33 +9,28 @@ from typing import Any, Dict, Optional
 
 import torch
 
-TRAIN_CHECKPOINT_FORMAT = "simple.v2"
+TRAIN_CHECKPOINT_FORMAT = "simple.v3"
 
 
 @dataclass
 class TrainCheckpoint:
     epoch: int
     global_step: int
+    next_micro_step: int
     model_state: Dict[str, Any]
     ema_model_state: Optional[Dict[str, Any]]
     optimizer_state: Dict[str, Any]
     scheduler_state: Dict[str, Any]
     monitor: Dict[str, Any]
-    train_params: Dict[str, Any]
+    resume_contract: Dict[str, Any]
     ema_updater_step: Optional[int]
     ema_decay: Optional[float]
-    rng_state: Dict[str, Any]
+    rng_states: list[Dict[str, Any]]
 
 
-def build_train_params(model, num_training_steps: int) -> Dict[str, Any]:
-    """Build the ``train_params`` metadata dict embedded in every checkpoint.
-
-    This is the **single source of truth** for which agent attributes are
-    serialised alongside the weights.  Both the trainer (save path) and
-    the smoke test (roundtrip path) call this function so that the set of
-    keys stays consistent.
-    """
-    params = {
+def build_agent_contract(model) -> Dict[str, Any]:
+    """Agent metadata shared by training, evaluation and deployment export."""
+    return {
         "n_obs_steps": model.n_obs_steps,
         "n_action_steps": model.n_action_steps,
         "action_dim": model.action_dim,
@@ -45,21 +40,34 @@ def build_train_params(model, num_training_steps: int) -> Dict[str, Any]:
         "hand_dim": getattr(model, "hand_dim", None),
         "control_action_dim": model.control_action_dim,
         "use_aux_ee": bool(getattr(model, "use_aux_ee", False)),
-        "num_training_steps": num_training_steps,
     }
 
-    return params
 
+def validate_resume_contract(saved, current) -> None:
+    """Report all missing, extra and changed values, including nested keys."""
+    differences = []
 
-def validate_training_steps(
-    checkpoint: TrainCheckpoint, current_num_training_steps: int
-) -> None:
-    saved_num_training_steps = checkpoint.train_params["num_training_steps"]
-    if saved_num_training_steps != current_num_training_steps:
-        raise ValueError(
-            "Checkpoint training-step contract mismatch: "
-            f"saved={saved_num_training_steps}, current={current_num_training_steps}"
-        )
+    def compare(left, right, path):
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(left.keys() | right.keys()):
+                child = f"{path}.{key}"
+                if key not in left:
+                    differences.append(f"{child}: missing in checkpoint")
+                elif key not in right:
+                    differences.append(f"{child}: unexpected checkpoint key")
+                else:
+                    compare(left[key], right[key], child)
+        elif isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                differences.append(f"{path}: length saved={len(left)}, current={len(right)}")
+            for i, (a, b) in enumerate(zip(left, right)):
+                compare(a, b, f"{path}[{i}]")
+        elif type(left) is not type(right) or left != right:
+            differences.append(f"{path}: saved={left!r}, current={right!r}")
+
+    compare(saved, current, "resume_contract")
+    if differences:
+        raise ValueError("Resume contract mismatch:\n" + "\n".join(differences))
 
 
 def validate_ema_resume_state(
@@ -90,11 +98,12 @@ class CheckpointStore:
             "state": {
                 "epoch": int(checkpoint.epoch),
                 "global_step": int(checkpoint.global_step),
+                "next_micro_step": checkpoint.next_micro_step,
                 "monitor": checkpoint.monitor,
-                "train_params": checkpoint.train_params,
+                "resume_contract": checkpoint.resume_contract,
                 "ema_updater_step": checkpoint.ema_updater_step,
                 "ema_decay": checkpoint.ema_decay,
-                "rng_state": checkpoint.rng_state,
+                "rng_states": checkpoint.rng_states,
             },
             "weights": {
                 "model": checkpoint.model_state,
@@ -124,25 +133,34 @@ class CheckpointStore:
         expected_state = {
             "epoch",
             "global_step",
+            "next_micro_step",
             "monitor",
-            "train_params",
+            "resume_contract",
             "ema_updater_step",
             "ema_decay",
-            "rng_state",
+            "rng_states",
         }
         expected_weights = {"model", "ema_model", "optimizer", "scheduler"}
         if set(state) != expected_state or set(weights) != expected_weights:
             raise RuntimeError(
                 f"Checkpoint does not match the {TRAIN_CHECKPOINT_FORMAT} schema"
             )
+        for key in ("epoch", "global_step", "next_micro_step"):
+            if type(state[key]) is not int or state[key] < 0:
+                raise ValueError(f"Checkpoint {key} must be an int >= 0")
+        if not isinstance(state["resume_contract"], dict):
+            raise ValueError("Checkpoint resume_contract must be a dict")
+        if not isinstance(state["rng_states"], list) or not state["rng_states"]:
+            raise ValueError("Checkpoint rng_states must be a nonempty rank-ordered list")
         return TrainCheckpoint(
             epoch=int(state["epoch"]),
             global_step=int(state["global_step"]),
+            next_micro_step=state["next_micro_step"],
             monitor=state["monitor"],
-            train_params=state["train_params"],
+            resume_contract=state["resume_contract"],
             ema_updater_step=state["ema_updater_step"],
             ema_decay=state["ema_decay"],
-            rng_state=state["rng_state"],
+            rng_states=state["rng_states"],
             model_state=weights["model"],
             ema_model_state=weights["ema_model"],
             optimizer_state=weights["optimizer"],

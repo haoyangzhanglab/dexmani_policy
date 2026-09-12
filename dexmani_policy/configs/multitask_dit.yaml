@@ -109,21 +109,18 @@ agent:
     tune_mode: full
     norm_mode: group_norm
     image_size: [224, 224]
-    crop_ratio: 0.95
   # rgb_backbone_name: r3m
   # rgb_backbone_config:
   #   model_name: resnet18          # resnet18(512d) | resnet34(512d) | resnet50(2048d)
   #   tune_mode: full               # freeze | full
   #   norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
   #   image_size: [224, 224]
-  #   crop_ratio: 0.95
   # rgb_backbone_name: dino
   # rgb_backbone_config:
   #   model_name: facebook/dinov2-small  # 384d
   #   tune_mode: lora
   #   global_token_type: avg
   #   image_size: [224, 224]
-  #   crop_ratio: 0.95
   state_dim: 19
   state_out_dim: 64
 

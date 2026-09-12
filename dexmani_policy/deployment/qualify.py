@@ -131,7 +131,7 @@ def restore_direct_policy(
 
     # This is the same canonical key normalization the exporter applies before
     # strict loading.  It preserves the selected model/EMA tensors while making
-    # ordinary compiled/DDP simple.v2 checkpoints directly restorable.
+    # ordinary compiled/DDP simple.v3 checkpoints directly restorable.
     selected_state = exporter._canonicalize_state_dict(
         selected_raw, f"weights.{selected_weights}"
     )
@@ -160,7 +160,7 @@ def restore_direct_policy(
         raise
     except Exception as exc:
         raise PolicyParityError(
-            f"direct agent strict restore failed using simple.v2 {selected_weights}"
+            f"direct agent strict restore failed using simple.v3 {selected_weights}"
         ) from exc
 
     return DirectRestoredPolicy(
