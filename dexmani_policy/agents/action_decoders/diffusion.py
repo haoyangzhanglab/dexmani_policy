@@ -21,9 +21,9 @@ class Diffusion(nn.Module):
     Training: adds noise to actions, model predicts target, MSE loss.
     Inference: DDIM iterative denoising from random noise (default 10 steps).
 
-    The noise scheduler uses a fixed configuration (squaredcos_cap_v2 beta
-    schedule, beta_start=0.0001, beta_end=0.02) that is intentionally
-    non-configurable — see CLAUDE.md "已知硬编码与设计约定".
+    The noise scheduler intentionally uses a fixed squared-cosine configuration
+    with ``beta_start=0.0001`` and ``beta_end=0.02``. Callers configure the
+    training/inference step counts and prediction type, not the beta schedule.
     """
 
     def __init__(

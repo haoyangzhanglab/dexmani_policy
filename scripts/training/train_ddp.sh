@@ -2,33 +2,23 @@
 # Multi-GPU (DDP) training launcher for dexmani_policy.
 #
 # Usage:
-#   bash scripts/training/train_ddp.sh <config_name> [hydra_overrides...]
-#
-# Examples:
-#   bash scripts/training/train_ddp.sh ddp/maniflow
-#   bash scripts/training/train_ddp.sh ddp/dp 'training.loop.total_train_steps=100'
-#   bash scripts/training/train_ddp.sh ddp/dqrise 'training.seed=123'
-#
-# Available DDP configs:
-#   ddp/action_flow  ddp/dp  ddp/dqrise  ddp/maniflow  ddp/multitask_dit  ddp/r3d  ddp/sat
+#   bash scripts/training/train_ddp.sh ddp/<config_name> [hydra_overrides...]
 #
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# Activate conda environment
 eval "$(conda shell.bash hook)"
 conda activate policy
 
 if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: bash scripts/training/train_ddp.sh <config_name> [hydra_overrides...]"
+    echo "Usage: bash scripts/training/train_ddp.sh ddp/<config_name> [hydra_overrides...]"
     echo ""
-    echo "Examples:"
-    echo "  bash scripts/training/train_ddp.sh ddp/maniflow"
-    echo "  bash scripts/training/train_ddp.sh ddp/dp 'training.loop.total_train_steps=100'"
+    echo "Example:"
+    echo "  bash scripts/training/train_ddp.sh ddp/CONFIG_NAME 'task_name=pour'"
     echo ""
-    echo "Config file is dexmani_policy/configs/<config_name>.yaml"
+    echo "DDP overlays are Hydra files under dexmani_policy/configs/ddp/."
     exit 1
 fi
 

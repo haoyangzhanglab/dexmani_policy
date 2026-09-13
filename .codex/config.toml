@@ -1,30 +1,21 @@
 # DexMani_Policy project defaults.
 # Loaded only after this repository is marked as trusted by Codex.
 
-# Favor reliable implementation and review for a configuration-heavy ML codebase.
-# Keep the model itself user-selectable so account-level defaults still apply.
 model_reasoning_effort = "high"
 plan_mode_reasoning_effort = "high"
 model_reasoning_summary = "concise"
 model_verbosity = "low"
 personality = "pragmatic"
 
-# Let Codex perform normal local development autonomously while retaining a
-# workspace boundary. Network access for shell commands remains opt-in.
 approval_policy = "on-request"
 approvals_reviewer = "auto_review"
 sandbox_mode = "workspace-write"
 allow_login_shell = true
 
-# Use current sources for fast-moving ML/Codex documentation. This controls the
-# hosted search tool and does not grant shell commands unrestricted networking.
 web_search = "live"
-
-# Keep enough command output for Hydra traces and model/config diagnostics.
 tool_output_token_limit = 16000
 
-# AGENTS.md is the primary project guide. CLAUDE.md is a fallback only when the
-# primary file is absent, so the two documents are never injected together.
+# AGENTS.md is the primary project guide; CLAUDE.md is a compact fallback.
 project_doc_fallback_filenames = ["CLAUDE.md"]
 project_doc_max_bytes = 32768
 
@@ -46,8 +37,6 @@ exclude_slash_tmp = false
 exclude_tmpdir_env_var = false
 
 [features]
-# These are stable Codex features and are explicit here for reproducible project
-# behavior across CLI and IDE sessions.
 enable_request_compression = true
 fast_mode = true
 goals = true
@@ -57,8 +46,6 @@ shell_tool = true
 unified_exec = true
 
 [agents]
-# This limit excludes the primary agent: one implementation owner plus one
-# independent helper. The repair workflow serializes GPU work and shared files.
 max_concurrent_threads_per_session = 2
 
 [tui]

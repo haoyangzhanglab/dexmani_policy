@@ -1,413 +1,160 @@
 # DexMani_Policy
 
-灵巧手操作模仿学习框架 —— Hydra 配置驱动 · Zarr Replay Buffer · Diffusion/FlowMatch 动作解码 · `dexmani_sim` 仿真评测
+灵巧手操作 imitation learning / robot policy 研发仓库。训练由 Hydra 配置驱动，数据使用 Zarr，评测通过 `dexmani_sim` 完成。
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-red)](https://pytorch.org/)
-[![CUDA](https://img.shields.io/badge/CUDA-11.8+-green)](https://developer.nvidia.com/cuda-toolkit)
-
----
+Policy 的**当前实现事实以 Hydra config 和源码为准**。README 只维护稳定的使用入口，不维护 Policy 架构、超参数或策略数量快照。
 
 ## 快速开始
 
-### 环境搭建
+### 环境
 
 ```bash
-conda activate policy                                         # Conda 环境
-pip install -e .                                              # 安装 dexmani_policy
-cd ~/Desktop/dexmani_sim && pip install -e .                  # 仿真环境（评测依赖）
+conda activate policy
+pip install -e .
 ```
 
-> **数据路径**: 训练数据从 `robot_data/<task>.zarr` 读取（`zarr_path` 相对仓库根目录）；确保 `robot_data/` 在项目根目录下即可，无需设环境变量。
-
-### 训练
+`pip install -e .` 安装项目声明的核心依赖；完整研究环境仍以受管 Conda 环境 `policy` 为准。仿真评测需要另外以 editable 模式安装 `dexmani_sim`：
 
 ```bash
-# 单卡 —— 8 种策略可选（task 用 task_name= 覆盖）
-bash scripts/training/train.sh dp3 'task_name=pour'           # DP3 训练 pour 任务
-bash scripts/training/train.sh action_flow 'task_name=pour'   # ActionFlow
-bash scripts/training/train.sh maniflow 'task_name=pour'      # ManiFlow
-bash scripts/training/train.sh sat 'task_name=pour'           # SAT
-
-# 多卡 DDP —— 7 种策略可选
-bash scripts/training/train_ddp.sh ddp/maniflow 'task_name=pour'  # ManiFlow 4 卡
-
-# Hydra 参数覆盖
-bash scripts/training/train.sh dp3 'task_name=pour' 'training.seed=42'
-bash scripts/training/train.sh dp3 'task_name=pour' 'training.loop.total_train_steps=500'
+pip install -e /path/to/dexmani_sim
 ```
 
-> 单卡策略: `action_flow dp dp3 dqrise maniflow multitask_dit r3d sat`
-> DDP 策略: `ddp/action_flow ddp/dp ddp/dqrise ddp/maniflow ddp/multitask_dit ddp/r3d ddp/sat`
+训练数据默认由 config 中的 `zarr_path` 指向仓库根目录下的 `robot_data/<task>.zarr`。
 
-### 评测
+### 发现可用配置
+
+单卡 Policy config：
 
 ```bash
-# 一键管道：select → held-out eval → demo
-bash scripts/eval/eval_pipeline.sh dp3 pour <exp_name>
-
-# 或分步执行
-bash scripts/eval/select_best_ckpt.sh dp3 pour <exp_name>     # 阶段 1: fixed two-stage selection
-bash scripts/eval/eval_best_ckpt.sh dp3 pour <exp_name>       # 阶段 2: held-out 最终评测
-bash scripts/eval/record_demo.sh dp3 pour <exp_name>           # 录制 demo 视频
-
-# ActionFlow：同 checkpoint、同 seeds 的 Euler/Midpoint × NFE 配对评测
-bash scripts/eval/eval_action_flow_solvers.sh action_flow pour <exp_name> --episodes 25
+ls dexmani_policy/configs/*.yaml
 ```
 
-`<exp_name>` = `experiments/<policy>/<task>/` 下的时间戳/名称目录（非完整路径）。
-
-`best` 只接受 `best_ckpt.json`。最终评测默认复用 record 中选定的 EMA 和 NFE；显式 CLI / dotlist 才覆盖它们。`record_demo.sh` 的 `best` 也复用同一策略，`--ema` / `--no-ema` 与 `--denoise-steps` 可显式覆盖；非 `best` 保持配置驱动行为。评测的结果目录和视频目录彼此独立，`--no-videos` 不会跳过结果写入。
-
-ActionFlow 的 `denoise_steps` 就是 NFE。Euler 支持任意正整数 NFE（包括 1 和 10）；
-Midpoint 只支持偶数 NFE。`eval_action_flow_solvers.sh` 的固定首轮组合为
-Euler-1、Midpoint-2、Midpoint-4、Midpoint-8、Midpoint-10；需要评测其他 NFE 时可通过
-`eval_best_ckpt.sh --denoise-steps N` 单独评测。
-
-### 冒烟测试
+DDP overlay：
 
 ```bash
-python dexmani_policy/smoke_test.py dp3                       # 单策略
-python dexmani_policy/smoke_test.py dp3 maniflow sat          # 批量
+ls dexmani_policy/configs/ddp/*.yaml
 ```
 
----
+不要从 README/CLAUDE 的静态列表推断当前 Policy 集合；配置目录是当前入口。
 
-## 策略矩阵
+## 训练
 
-8 种策略配置，覆盖 RGB/点云/语言多模态，Diffusion/FlowMatch 双解码范式。
+```bash
+# 单卡
+bash scripts/training/train.sh <config_name> 'task_name=<task>'
 
-| Agent | 感知模态 | 编码器 | 骨干网络 | 解码器 | 配置 |
-|:------|:---------|:-------|:---------|:-------|:-----|
-| **DP** | RGB + Joint | DINO/CLIP/SigLIP + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp.yaml` |
-| **DP3** | PC(1024,6) + Joint | PointNet + StateMLP | UNet1D (FiLM) | Diffusion DDIM | `dp3.yaml` |
-| **ManiFlow** | PC(1024,6) + Joint | PointNetDense + StateMLP | DiTX (cross-attn) | FlowMatch + Consistency | `maniflow.yaml` |
-| **ActionFlow** | PC(1024,6) + Joint | PointNeXT 192-patch local tokenizer → GeoFormer 4L×576(3D RoPE) → 385×384 memory | ActionFlowDiT 8L×768 (12Q/12KV full CA, SwiGLU-1536, shared AdaRMS, KV cache) | SimpleRectifiedFlow | `action_flow.yaml` |
-| **MultiTask** | RGB + Joint + Text | ResNet(resnet18) + CLIP Text + StateMLP | DiT (AdaLN) | Diffusion / FlowMatch | `multitask_dit.yaml` |
-| **R3D** | PC(1024,6) + Joint | Uni3D(ViT+Fourier) + StateMLP | OneWayTransformer | Diffusion DDIM | `r3d.yaml` |
-| **DQ-RISE** | PC(1024,6) + Joint | iDP3 + StateMLP + Codebook | UNet1D (缩减) | Diffusion ε-pred | `dqrise.yaml` |
-| **SAT** | PC(1024,6) + Joint | PointNeXT(patch) + StateMLP | SATBackbone (EJC+MMA) | FlowMatch Euler | `sat.yaml` |
+# DDP（存在对应 overlay 时）
+bash scripts/training/train_ddp.sh ddp/<config_name> 'task_name=<task>'
 
-### 关键差异速览
-
-| 对比维度 | 说明 |
-|:---------|:-----|
-| **DP vs DP3** | RGB 图像 vs 点云。DP3 对遮挡和视角变化更鲁棒 |
-| **DP3 vs ManiFlow** | Diffusion (DDIM) vs FlowMatch (直线路径 + consistency) |
-| **ManiFlow vs ActionFlow** | FlowMatch+Consistency(EMA教师) vs SimpleRectifiedFlow(NoiseShift α=3+mix, KV cache, 2步推理) |
-| **DP3 vs SAT** | SAT 使用结构中心动作表示 (B,Da,T) + EJC 关节编码，CVPR 2026 |
-| **DP3 vs R3D** | R3D 使用级联 self-attn mask + 分组 loss |
-| **DP3 vs DQ-RISE** | DQ-RISE 通过 VQ-VAE 将手势离散化为 16 种手势 |
-
-### Agent 继承模式
-
-添加新策略时，选择合适的父类：
-
-| 模式 | 父类 | 何时用 | 最近参考 |
-|------|------|--------|---------|
-| **A: UNet+Diffusion** | `UNetDiffusionAgent` | Flat encoding → UNet1D(FiLM) → Diffusion | `dp3.py` |
-| **B: DiTX+FlowMatch+Consistency** | `DiTXFlowMatchAgent` | Token seq → DiTX(cross-attn) → FlowMatch+consistency | `maniflow.py` |
-| **C: Fully custom** | `BaseAgent` | 完全自定义 backbone + decoder | `sat.py`, `r3d.py` |
-
-> 详细集成步骤 → `dexmani-agent-integration` skill (`.agents/skills/`)
-
-### 动作空间
-
-| `action_key` | arm | hand | total |
-|-------------|-----|------|-------|-----------|
-| `action` (joint) | 7 (关节角) | 12 (XHand) | **19** |
-| `action_ee` (ee) | 9 (pos3+rot6d) | 12 (XHand) | **21** |
-
-`joint_state` 固定为 19 维（7 臂 + 12 手），与 `action_ee` 的 21 维动作空间不同。
-
-### Action Decoder 类型
-
-| Decoder | 预测目标 | 推理 | 使用策略 |
-|---------|---------|------|---------|
-| `Diffusion` | ε / x0 / v | DDIM 迭代 | DP, DP3, R3D, DQRISE |
-| `FlowMatch` / `SATFlowMatch` | v=x1-x0 | Euler ODE | MultiTask, SAT |
-| `FlowMatchWithConsistency` | v + consistency(EMA教师) | Euler ODE | ManiFlow |
-| `SimpleRectifiedFlow` | v=x1-x0 (NoiseShift α=3 + 75/25 uniform mixture) | Euler（任意正 NFE）/ Explicit Midpoint（偶数 NFE，KV cache） | ActionFlow |
-
----
-
-## 核心约束
-
-以下常量**不可随意修改**，SequenceSampler、control_action 切片、环境接口均与之耦合：
-
-| 常量 | 值 | 说明 |
-|:-----|:---|:-----|
-| `horizon` | **16** | 预测总帧数 |
-| `n_obs_steps` | **2** | 历史观测帧数 |
-| `n_action_steps` | **8** | 每步执行的动作帧数 |
-| `action_dim` | **19** | 动作维度 (7-DOF 臂 + 12-DOF 手) |
-| `pad_before` / `pad_after` | **1** / **7** | 序列采样边界填充 |
-
-关系式：`n_obs_steps - 1 + n_action_steps ≤ horizon` → `1 + 8 ≤ 16 ✓`
-
-其他硬编码常量（不可从 config 修改）：
-
-| 项 | 值 | 位置 |
-|----|-----|------|
-| 优化器 | `AdamW(fused=torch.cuda.is_available())` | `base.py:297` |
-| DDIM scheduler | `beta_start=0.0001, beta_end=0.02, beta_schedule='squaredcos_cap_v2'` | `diffusion.py:43` |
-| StateMLP hidden | `[64]` | `state_mlp.py` |
-| ViT backbone dtype | `bfloat16 + attn_implementation="sdpa"` | dino/clip/siglip |
-| UNet conditioning | `cond_predict_scale=True` | `unet1d.py` |
-
----
-
-## Real deployment artifact contract
-
-`dexmani_policy.deployment` exports a resolved experiment checkpoint for the
-Real runtime. Every artifact uses `dexmani.deployment` with exactly three
-top-level fields: `_format`, `contract`, and one selected `weights` state dict.
-`contract` is the sole metadata owner (`inference_config`, `data_contract`,
-`producer`); there is no sidecar, hash manifest, or dormant
-model/EMA copy. Its only persisted observation declaration is the ordered
-`data_contract.observation_fields` mapping. Each field records its raw shape,
-dtype and semantics. The training experiment's `dataset.sensor_modalities` is
-the single manual selection used by export; it is not copied into the artifact
-as a competing list.
-
-`inference_config.eval` 显式保存 `denoise_steps`。`use_ema` 只在 export 时选择权重，
-不会作为 artifact runtime 的重复开关。
-
-- **Encoder-owned inputs**: export and restore require the selected fields to
-  match the instantiated encoder's `consumed_observation_fields`. A field that
-  the model does not consume cannot be silently forwarded, ignored or padded.
-- **Raw boundary**: `rgb` is raw HWC `uint8` RGB in `[0, 255]`. The artifact
-  records the validation dataset's deterministic CPU resize/center-crop and
-  pixel output semantics separately from the restored `ImageProcessor` target
-  size, interpolation, and normalization parameters. Deployment applies the
-  former before the latter. Other fields carry the raw tensor specification
-  needed by the runtime that provides them.
-- **Real data boundary**: export accepts the Real Policy Zarr (`schema_version` is
-  informational metadata, not an exact compatibility gate) and requires
-  `action_semantics="teleop_published_joint_target"`, and
-  verifies the selected arrays before publication. The current `contact_force`
-  source remains native per-finger sensor axes with
-  `units="xhand_sdk_native_unknown_si"` and `si_verified=false`.
-  All modality combinations use `observation_alignment="control_step_latest_causal"`,
-  `state_alignment="control_step"`, and
-  `contact_force_source="raw_hand_contact_control_step"`. These are persisted in
-  `data_contract`; camera exposure timestamps are not the state/contact timeline.
-  Old v8/v9 stores are rejected, not relabeled or accepted through compatibility
-  aliases. Rebuild data from the Real control-step processing pipeline. This does
-  not change model windows, action dimensions, or runtime safety checks.
-- **Config JSON propagation**: the point-cloud `processing_config_json` and
-  fingertip `fingertip_config_json` attrs are structurally checked and
-  propagated verbatim into the deployment artifact semantics so the Real
-  runtime can exact-compare the full numeric derivation config and FK geometry.
-
-The deployment modules expose `parse_deployment_contract`,
-`export_deployment_artifact`, `deployment_spec`, `restore_deployment_agent`,
-`inspect_experiment`, and `load_experiment`.
-`docs/项目架构.md` records their ownership in more detail.
-
----
-
-## 配置参考
-
-### 关键参数 (跨策略差异)
-
-| 参数 | action_flow | dp3 | maniflow | multitask_dit | r3d | dqrise | sat |
-|------|-------------|-----|----------|---------------|-----|---------|-----|
-| action_dim | 19/21 | 19/21 | 19/21 | 19/21 | 19/21/28 | 19/21 | 19/21 |
-| backbone | ActionFlowDiT 8L×768 | UNet[256,512,1024] | DiTX 12L×768 | DiT 8L×512 | OneWay 4L | UNet[256,512] | SAT 8L×768 |
-| train/infer steps | -/2 NFE | 100/10 | -/4 | 100/10 | 100/10 | 100/20 | -/10 |
-| prediction_type | velocity | sample | velocity | sample | sample | epsilon | velocity |
-| lr / wd | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / **1e-3** | 1e-4 / 1e-6 | 1e-4 / 1e-6 | **3e-4** / 1e-6 | 1e-4 / 1e-6 |
-| betas | **[.9,.95]** | [.95,.999] | **[.9,.95]** | [.95,.999] | [.95,.999] | [.95,.999] | [.95,.999] |
-| bfloat16 / compile | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓(default) |
-| val_ratio | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
-
-> dp = dp3 参数; multitask_dit = 8L×512, lr=1e-4
-> 全部 `total_train_steps: 100000`, `warmup: 500` (dqrise: 2000)
-
-### 新建 Config
-
-复制 `dp3.yaml` 作为模板。必须字段：
-
-`policy_name, task_name, zarr_path, seed, horizon(16), n_obs_steps(2), n_action_steps(8), action_key, action_dim, dataloader, dataset, agent, optimizer, ema, training, workspace, env_runner, eval, hydra`
-
-`action_dim` 公式：
-```yaml
-action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
+# Hydra override
+bash scripts/training/train.sh <config_name> \
+  'task_name=<task>' \
+  'training.seed=42'
 ```
 
-`agent._target_` 指向 `dexmani_policy.agents.core.<name>.<Name>Agent`（无显式注册表，Hydra 直接导入）。
+`<config_name>` 直接对应 Hydra config。Policy 的 Agent 实现由 config 中的 `agent._target_` 决定；文件名和类名不要求与 config 名同名。
 
-### Eval 配置
+### 续训
 
-```yaml
-eval:
-  denoise_steps: 10  # 默认值；action_flow=2 / maniflow=4 / dqrise=20 由各自 config 覆盖
-  use_ema: true      # 所有策略共享
-  select_best: {initial_episodes: 25, batch_size: 5, max_episodes: 100}
-  offline: {episodes: 100}
-  demo: {episodes: 5, viewer_resolution: [1280, 960]}
+训练不会因为“重复执行同一命令”而自动续训。需要显式传入：
+
+```bash
+bash scripts/training/train.sh <config_name> \
+  'task_name=<task>' \
+  '+resume_from=/absolute/path/to/experiment_or_checkpoint'
 ```
 
-普通 checkpoint 的参数优先级：CLI > 子节覆盖 > eval 共享层 > hardcoded default。
-`best` 最终评测：显式 CLI > 显式 dotlist > selection record > config；`best` demo 的 EMA/NFE：显式 CLI > selection record。
+Resume 使用严格 contract 校验训练状态。Checkpoint 权重能够被其他流程读取，不代表不同 world size、batch/loader 或训练配置之间可以直接 strict resume。
 
-### DDP 批次大小（4 卡，grad-accum=1）
+## 配置与验证
 
-| DDP 策略 | 每卡 batch | 4 卡总 batch | 单卡 batch |
-|---------|-----------|-------------|-----------|
-| ddp/action_flow | 32 | 128 | 64 |
-| ddp/dp | 48 | **192** | 64 |
-| ddp/dqrise | 32 | 128 | 128 |
-| ddp/maniflow | 32 | 128 | 128 |
-| ddp/multitask_dit | 16 | 64 | 64 |
-| ddp/r3d | 32 | 128 | 128 |
-| ddp/sat | 32 | 128 | 128 |
+修改或新增 Policy 后，优先执行轻量 config check：
 
----
-
-## 数据流
-
-```
-Zarr (N,*) ──→ ReplayBuffer ──→ SequenceSampler(pad_before=1, pad_after=7)
-  └── Dataset.__getitem__() ──→ DataLoader ──→ batch (B, 16, *)
-
-Agent.compute_loss():                          Agent.predict_action():
-  obs │→ normalize │→ truncate[:,:2]            obs │→ normalize │→ truncate
-      │→ flatten(B×2,*) │→ encoder │→ cond          │→ encoder │→ cond
-  act │→ normalize │→ decoder(cond, act)             │→ decoder.predict_action(cond)
-      │→ loss (MSE)                                  │→ unnormalize
-                                                     │→ control_action = pred[:, 1:9]
+```bash
+python dexmani_policy/smoke_test.py --config-only <config_name>
 ```
 
-| 阶段 | 形状 |
-|:-----|:-----|
-| Zarr 存储 | `action (N,19)` `joint_state (N,19)` `point_cloud (N,1024,6)` |
-| Sequence Sample | `obs (*,16)` `action (16,19)` |
-| Batch | `obs (B,16,*)` `action (B,16,19)` |
-| Preprocessed | `obs (B×2,*)` → flatten batch+time |
-| Model Output | `pred (B,16,action_dim)` → `control_action (B,8,action_dim)` |
+它会完成 Hydra compose/resolve、公共 config 校验、`_target_` module 存在性检查以及 `agent._target_` 实际 import；不会构建数据集、仿真环境或运行 GPU forward。
 
----
+需要验证完整训练构建链时：
 
-## 训练机制
-
-### NaN 两层防护
-
-| 层 | 何时 | 检测 | 响应 |
-|----|------|------|------|
-| 1 | backward **前** | `raw_loss` NaN | DDP 广播 → 保存 NaN debug checkpoint (最近5个) → raise |
-| 2 | optimizer.step **前** | 梯度 NaN | zero_grad → raise (含参数名) |
-
-诊断用 `dexmani-training-debug` skill。
-
-### 关键机制
-
-- **梯度累积**: `raw_loss / gradient_accumulation_steps` → backward; DDP 非边界 `model.no_sync()`, 仅边界 all-reduce
-- **Checkpoint**: 20/40/60/80/100% 里程碑各一个; `latest.pt` symlink 指向最新; 显式 `+resume_from=<experiment_dir|checkpoint.pt>` 恢复（含 EMA updater、各 rank RNG 和下一 micro-batch 游标）。启用 EMA 时，恢复 checkpoint 必须同时含 EMA 权重和非负 updater step。
-- **EMA**: 逆 gamma 衰减; BatchNorm affine 直接复制 (不平均)
-- **DDP**: `mp.spawn`, NCCL, `find_unused_parameters=False`; ckpt 加载在 compile + DDP 包装**之前**; timeout=30min; `dp3` 有意仅单卡
-- **Shape 验证**: `BaseAgent._validate_batch()` 在 `compute_loss`/`predict_action` 入口校验 action ndim/horizon/dim + obs 时间维/模态batch一致性
-
----
-
-## DQ-RISE
-
-三阶段管道：VQ-VAE 预训练 → 码本提取+PCA排序 → 联合扩散训练。
-VQ checkpoint 只接受 `format_version=3`，运行时 codebook 只接受完整的 `.npz` v3；
-旧 checkpoint、缺字段 codebook 和 `.npy` codebook 必须重新训练或重新提取，不做兼容加载。
-
-| 阶段 | 脚本 | 内容 |
-|------|------|------|
-| 1 | `dexmani_policy/tools/train_vq_hand.py` | VQ-VAE 预训练：EncoderMLP→ResidualVQ(2组×4码字=16种手势)→DecoderMLP |
-| 2 | `dexmani_policy/tools/extract_codebook.py` | 码本提取+PCA排序（使连续VQ索引平滑插值） |
-| 3 | `train.py dqrise` | 联合扩散训练：UNet输入从21D压缩到tcp_dim+1(10D)，epsilon预测 |
-
-关键发现：`vq_idx_used`（码本利用率）是决定性下游成功率预测器——<8→~0%，≥12→~60%。
-
----
-
-## 实验目录
-
-训练 checkpoint 使用严格的 `simple.v3` schema；旧训练 schema（包括 `simple.v1/v2`）不再加载。
-`resume_contract` 递归核对策略、数据、batch/world size、优化器和调度参数；
-保存仅发生在完整梯度累积组更新结束后，epoch 末尾游标归一为下一 epoch。
-恢复保证采样连续及优化器状态一致；多 worker 随机数据增强不保证 bitwise continuation。
-
-```
-experiments/
-└── <policy>/<task>/<timestamp>_<seed>/
-    ├── config.yaml              # Hydra 配置快照
-    ├── best_ckpt.json           # select_best_ckpt 输出（实验根目录）
-    ├── checkpoints/
-    │   ├── latest.pt            # → 最新里程碑 symlink
-    │   └── epoch=*-step=*-milestone=*pct.pt
-    ├── metrics.jsonl            # 结构化训练日志
-    ├── eval_dexsim/             # 评测产出
-    │   ├── _result.txt          # 单 NFE 结果
-    │   ├── result_details.json
-    │   └── <YYYYmmdd_HHMMSS>/   # 单 NFE 视频，或 sweep 的分 NFE 结果/可选视频
-    └── wandb/                   # Wandb 离线日志
+```bash
+python dexmani_policy/smoke_test.py <config_name>
 ```
 
----
+完整 smoke test 覆盖 dataset/normalizer、model/EMA、optimizer/scheduler、forward/backward、inference 和 checkpoint roundtrip。共享模块改动应再选择实际依赖该模块的其他 config 做回归。
 
-## 设计约定
+## Policy 开发入口
 
-以下设计在代码审查时容易被误判为 bug，但它们是有意为之：
+处理某个 Policy 时，从 config 动态追踪，而不是依赖文档中的架构快照：
 
-- **Normalizer 全量拟合**: 用全部 replay buffer (含验证集)。生态惯例 (ManiFlow/R3D/SAT/RoboTwin 均如此)。`limits` 模式下 val 不影响 min/max
-- **`tcp_dim` 命名**: joint模式=7(臂关节), ee模式=9(TCP位姿) — 历史命名，勿据此推断语义
-- **DQRISE 直接继承 `BaseAgent`**: `diffusion_action_dim = tcp_dim+1` ≠ `action_dim`，无法复用 UNetDiffusionAgent
-- **R3DObsEncoder 拼接**: patch_tokens + state_emb + pc_pe 沿 feature 维 (非 `torch.cat`)
-- **EMAModel BatchNorm**: affine 参数直接复制，不 EMA 平均
-- **FlowMatchWithConsistency `target_t`**: flow 分支训练=0；relative consistency 使用 `dt1`；absolute consistency 的 student 使用 `t_next`，teacher 使用 `clamp(t_next+dt1)`；推理按模式使用 `dt` 或 `clamp(t+dt)`
-- **Milestone checkpoint**: 仅 20/40/60/80/100% 五个; `latest.pt` 是 symlink
-- **Uni3D 预训练权重 fail-closed**: `use_pretrained_weights=true` 时，权重路径缺失/下载失败/key 匹配率 <0.5 会**直接抛异常**（不再静默回退随机初始化），除非显式 `allow_random_init=true`；默认 `false`，r3d.yaml 已 pin
-- **`__init__.py` barrel 已清空**: `core`/`rgb`/`pointcloud`/`text`/`plugins` 五个 barrel 为纯文档字符串，不再 eager re-export；消费方走具体模块直接导入，Hydra 走 `_target_` 直接模块路径，新增 Agent 无需在 `__init__.py` 注册
+```text
+resolved Hydra config
+→ agent._target_
+→ Agent construction
+→ obs_encoder
+→ backbone / action_decoder
+→ compute_loss
+→ predict_action
+→ control_action
+```
 
-### 未启用功能 (不要意外激活)
+重点分别确认：
 
-| 功能 | 位置 | 状态 |
-|------|------|------|
-| Modality Dropout | `base.py` | 全配置 `modality_dropout_probs=0.0` |
-| TokenCompressor | `obs_encoder/plugins/` | 未接入任何 config |
-| T5TextEncoder | `obs_encoder/text/t5.py` | 预留代码 |
+- Observation Representation
+- Policy Architecture
+- Action Representation
+- Training Objective
+- Inference Algorithm
 
----
+具体 layer 数、hidden dim、encoder、optimizer、NFE、tensor shape 等都应从当前 config 与实现读取。
 
-## 文档导航
+## 评测
 
-| 文档 | 内容 | 适合 |
-|:-----|:-----|:-----|
-| [`CLAUDE.md`](CLAUDE.md) | AI 工作速查 —— 命令、不变量、文件地图、Agent Skills | AI 编码助手 |
-| [`docs/项目架构.md`](docs/项目架构.md) | 架构全景 —— 完整目录树、模块依赖图、类层级、数据流、设计模式 | 深入理解 |
-| [`docs/仿真评测机制.md`](docs/仿真评测机制.md) | 评测全链路 —— CLI→Checkpoint→Agent→EnvRunner→SuccessRate 完整代码走读 | 评测开发 |
-| [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md) | 远程训练部署 —— SSH 配置、三向同步、GPU 多租户、tmux 管理 | 服务器运维 |
+```bash
+# 一键 select → held-out eval → demo
+bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>
 
----
+# 分步
+bash scripts/eval/select_best_ckpt.sh <policy_name> <task_name> <exp_name>
+bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name>
+bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
+```
 
-## 常见问题
+`<exp_name>` 是 `experiments/<policy>/<task>/` 下的实验目录名。评测具体参数以实验保存的 config、CLI override 和对应评测代码为准。
 
-**Q: 如何新增任务？**
-1. 准备 Zarr 数据 → `robot_data/<task>.zarr`
-2. 修改配置中的 `task_name` 和 `zarr_path`
-3. 若 `dexmani_sim` 有对应环境，设置 `env_runner.task_name`
+## Deployment
 
-**Q: 如何启用数据增强？**
-取消配置中 `augmentation_cfg` 的注释。RGB 增强需 `sensor_modalities` 含 `rgb`；PC 颜色增强需 `pc_dim >= 6`。
+Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact、observation contract 和 runtime restore 的具体语义以实现和 `docs/项目架构.md` 为准；README 不复制其内部 schema。
 
-**Q: 单卡 checkpoint 能用于 DDP 续训吗？**
-能。Checkpoint 始终以 unwrapped 格式保存，`fix_state_dict()` 自动处理 `module.` 前缀。
+## 仓库结构
 
-**Q: 训练中断后如何续训？**
-直接重新运行相同命令，自动从 `latest.pt` 续训。若当前训练启用 EMA，checkpoint 缺少 EMA 权重或非负 updater step 会明确失败，不会用构造期 EMA 静默继续。
+```text
+dexmani_policy/
+  configs/           # Hydra Policy configs + DDP overlays
+  agents/            # Agent / encoder / backbone / decoder
+  datasets/          # Dataset, replay buffer, sampler
+  training/          # Build, trainer, EMA, resume, workspace
+  env_runner/        # Simulation runners
+  common/            # Shared config/checkpoint/normalizer utilities
+  deployment/        # Real deployment artifact/runtime
+  train.py           # Single-GPU entry
+  train_ddp.py       # DDP entry
+  smoke_test.py      # Config + integration validation
 
-**Q: 如何选择评测 checkpoint？**
-- `best` → `best_ckpt.json`（缺失、字段无效或 checkpoint 缺失会失败；先运行 selector）
-- `latest` → `latest.pt` symlink
-- `20pct`..`100pct` → 里程碑 checkpoint
-- 直接路径 → 指定 `.pt` 文件
+scripts/
+  training/
+  eval/
+  remote/
+```
 
-**Q: 如何修改观测/动作步数？**
-修改 `horizon`、`n_obs_steps`、`n_action_steps`，须满足 `n_obs_steps - 1 + n_action_steps ≤ horizon`。`pad_before`/`pad_after` 需同步调整。
+## 文档与 AI 编码入口
+
+- `AGENTS.md`：项目级 coding contract，Codex 的主要入口。
+- `CLAUDE.md`：精简、独立可用的 AI 工作速查。
+- `.agents/skills/`：新增 Policy、PR review、训练数值问题的过程性 workflow。
+- `docs/项目架构.md`：架构背景。
+- `docs/仿真评测机制.md`：仿真评测链路。
+- `docs/SSH服务器训练部署.md`：服务器训练与同步。
+
+全局文档不维护 Policy-specific 超参数、当前 Policy 数量或实验结论；这些信息属于 config、代码、实验快照和局部测试。
