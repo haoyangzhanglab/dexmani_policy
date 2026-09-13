@@ -131,7 +131,9 @@ def _prepare_dqrise_codebook(cfg, normalizer) -> str | None:
 
     from dexmani_policy.agents.vq_hand.codebook_manager import CodebookManager
 
-    hand_dim = int(cfg.get("hand_dim", cfg.action_dim - cfg.tcp_dim))
+    action_dim = int(cfg.agent.action_dim)
+    tcp_dim = int(cfg.agent.tcp_dim)
+    hand_dim = action_dim - tcp_dim
     num_groups = int(cfg.agent.get("codebook_num_groups", 2))
     codebook_size = int(cfg.agent.get("codebook_size", 4))
     total_codes = codebook_size**num_groups
@@ -342,7 +344,7 @@ def smoke_test(config_name: str):
                     raise AssertionError(
                         f"EMA state dict mismatch for key '{key}' after roundtrip"
                     )
-            print("      ✓ EMA state dict roundtrip OK")
+            print("      ✓ EMA model state dict roundtrip OK")
 
         agent_contract = loaded.resume_contract["agent"]
         assert agent_contract["n_obs_steps"] == model.n_obs_steps
