@@ -123,33 +123,52 @@ def validate_config_only(config_name: str):
     return True
 
 
-def _prepare_dqrise_codebook(cfg) -> str | None:
-    """Create the external artifact required for DQ-RISE's integration smoke test."""
+def _prepare_dqrise_codebook(cfg, normalizer) -> str | None:
+    """Create a schema-valid DQ-RISE codebook matching the smoke dataset normalizer."""
     if cfg.policy_name != "dqrise":
         return None
 
-    import numpy as np
+    from dexmani_policy.agents.vq_hand.codebook_manager import CodebookManager
 
-    hand_dim = cfg.get("hand_dim", cfg.action_dim - cfg.tcp_dim)
-    num_groups = 2
-    codebook_size = 4
-    total = codebook_size**num_groups
-    dummy_poses = np.random.randn(total, hand_dim).astype(np.float32)
+    hand_dim = int(cfg.get("hand_dim", cfg.action_dim - cfg.tcp_dim))
+    num_groups = int(cfg.agent.get("codebook_num_groups", 2))
+    codebook_size = int(cfg.agent.get("codebook_size", 4))
+    total_codes = codebook_size**num_groups
 
-    save_data = {
-        "sorted_hand_poses": dummy_poses,
-        "hand_dim": hand_dim,
-        "num_groups": num_groups,
-        "codebook_size": codebook_size,
-        "layer_weights": np.ones(num_groups, dtype=np.float32) / num_groups,
-    }
-    for group in range(num_groups):
-        save_data[f"_group_sorted_poses_g{group}"] = np.random.randn(
-            codebook_size, hand_dim
-        ).astype(np.float32)
+    manager = CodebookManager(
+        hand_dim=hand_dim,
+        num_groups=num_groups,
+        codebook_size=codebook_size,
+    )
 
-    tmp_path = os.path.join(tempfile.gettempdir(), "smoke_test_dqrise_codebook.npz")
-    np.savez(tmp_path, **save_data)
+    # Deterministic synthetic prototypes are enough to exercise DQ-RISE's
+    # integration path. Persist them through CodebookManager.save() so the
+    # fixture always follows the runtime artifact schema instead of duplicating it.
+    positions = torch.linspace(-1.0, 1.0, total_codes, dtype=torch.float32).unsqueeze(1)
+    per_dim_offset = torch.linspace(
+        -0.05, 0.05, hand_dim, dtype=torch.float32
+    ).unsqueeze(0)
+    normalized_poses = (positions + per_dim_offset).clamp(-1.0, 1.0)
+    manager.sorted_hand_poses = (
+        (normalized_poses + 1.0)
+        * 0.5
+        * (manager.hand_max - manager.hand_min)
+        + manager.hand_min
+    )
+    manager.pca_permutation = torch.arange(total_codes, dtype=torch.long)
+    manager.layer_weights = torch.full(
+        (num_groups,), 1.0 / num_groups, dtype=torch.float32
+    )
+
+    action_params = normalizer["action"].params_dict
+    manager.set_hand_normalizer(
+        action_params["scale"][-hand_dim:],
+        action_params["offset"][-hand_dim:],
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as file:
+        tmp_path = file.name
+    manager.save(tmp_path)
     return tmp_path
 
 
@@ -160,18 +179,17 @@ def smoke_test(config_name: str):
 
     cfg = load_config(config_name)
     validate_config(cfg)
-
-    codebook_tmp = _prepare_dqrise_codebook(cfg)
-    if codebook_tmp is not None:
-        cfg.agent.codebook_path = codebook_tmp
-        print(f"      [dqrise] temporary codebook → {codebook_tmp}")
-
     set_seed(cfg.training.seed)
 
     print("[1/6] Building dataset & normalizer ...")
     dataset, normalizer = build_dataset_and_normalizer(cfg)
     train_loader = build_train_loader(cfg, dataset)
     print(f"      dataset size: {len(dataset)}, batches/epoch: {len(train_loader)}")
+
+    codebook_tmp = _prepare_dqrise_codebook(cfg, normalizer)
+    if codebook_tmp is not None:
+        cfg.agent.codebook_path = codebook_tmp
+        print(f"      [dqrise] temporary codebook → {codebook_tmp}")
 
     val_dataset = dataset.get_validation_dataset()
     if val_dataset is not None:
@@ -193,7 +211,11 @@ def smoke_test(config_name: str):
 
     print("[2/6] Building model & EMA ...")
     device = torch.device(cfg.training.device)
-    model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
+    try:
+        model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
+    finally:
+        if codebook_tmp is not None:
+            pathlib.Path(codebook_tmp).unlink(missing_ok=True)
 
     print("[3/6] Building optimizer & scheduler ...")
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, len(train_loader))
@@ -338,7 +360,10 @@ def main():
     parser.add_argument(
         "--config-only",
         action="store_true",
-        help="Resolve/validate config and import Hydra targets without data or GPU execution.",
+        help=(
+            "Resolve/validate config, check Hydra target modules, and import the "
+            "agent target without data or GPU execution."
+        ),
     )
     parser.add_argument("config_names", nargs="+", help="Hydra config names to validate.")
     args = parser.parse_args()
