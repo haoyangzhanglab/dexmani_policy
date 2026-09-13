@@ -125,7 +125,8 @@ def validate_config_only(config_name: str):
 
 def _prepare_dqrise_codebook(cfg, normalizer) -> str | None:
     """Create a schema-valid DQ-RISE codebook matching the smoke dataset normalizer."""
-    if cfg.policy_name != "dqrise":
+    agent_target = str(cfg.get("agent", {}).get("_target_", ""))
+    if not agent_target.endswith(".DQRISEAgent"):
         return None
 
     from dexmani_policy.agents.vq_hand.codebook_manager import CodebookManager
@@ -186,11 +187,6 @@ def smoke_test(config_name: str):
     train_loader = build_train_loader(cfg, dataset)
     print(f"      dataset size: {len(dataset)}, batches/epoch: {len(train_loader)}")
 
-    codebook_tmp = _prepare_dqrise_codebook(cfg, normalizer)
-    if codebook_tmp is not None:
-        cfg.agent.codebook_path = codebook_tmp
-        print(f"      [dqrise] temporary codebook → {codebook_tmp}")
-
     val_dataset = dataset.get_validation_dataset()
     if val_dataset is not None:
         print(f"      val dataset size: {len(val_dataset)}")
@@ -208,6 +204,11 @@ def smoke_test(config_name: str):
             )
     else:
         print("      no validation set (val_ratio=0)")
+
+    codebook_tmp = _prepare_dqrise_codebook(cfg, normalizer)
+    if codebook_tmp is not None:
+        cfg.agent.codebook_path = codebook_tmp
+        print(f"      [dqrise] temporary codebook → {codebook_tmp}")
 
     print("[2/6] Building model & EMA ...")
     device = torch.device(cfg.training.device)
