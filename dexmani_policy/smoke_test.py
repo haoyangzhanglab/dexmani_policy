@@ -344,7 +344,7 @@ def smoke_test(config_name: str):
                     raise AssertionError(
                         f"EMA state dict mismatch for key '{key}' after roundtrip"
                     )
-            print("      ✓ EMA model state dict roundtrip OK")
+            print("      ✓ EMA state dict roundtrip OK")
 
         agent_contract = loaded.resume_contract["agent"]
         assert agent_contract["n_obs_steps"] == model.n_obs_steps
