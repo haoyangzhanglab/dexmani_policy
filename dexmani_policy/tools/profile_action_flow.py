@@ -1,12 +1,15 @@
-"""Segment-level latency / memory profiler for the ActionFlow policy.
+"""ActionFlow model-side B=1 steady-state GPU inference profiler.
 
-Measures training (forward / backward / optimizer+EMA step) and inference
-(predict_action) latency using ``torch.cuda.Event`` — NOT full simulator episode
-wall-clock — so numbers are attributable to the model, not the environment.
+Inference reuses one real dataset observation already on the GPU. CUDA events
+measure condition building (preprocessing + obs encoder) and action generation
+on the same pass; loading, H2D, D2H and warmup are excluded. Models are freshly
+initialized, with dataset-derived normalization; this does not measure quality.
+The separate training mode retains forward / backward / optimizer+EMA profiling.
 
 Usage:
     python dexmani_policy/tools/profile_action_flow.py [config_name] \
-        [--warmup 50] [--measurement 500] [--mode train|infer|both]
+        [--warmup 50] [--measurement 500] [--mode infer|train] \
+        [--precision fp32|bf16] [--compile] [--nfe N]
 """
 
 from __future__ import annotations
@@ -23,11 +26,18 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 os.chdir(_project_root)
 
+import hydra
 import torch
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.pytorch_util import dict_apply, set_seed, worker_init_fn
+from dexmani_policy.common.pytorch_util import (
+    compile_models,
+    count_params,
+    dict_apply,
+    set_seed,
+    worker_init_fn,
+)
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
@@ -109,7 +119,7 @@ def _report(title: str, summary: dict):
         return
     print(
         f"  {title:<20} mean={summary['mean_ms']:>8.3f}ms  "
-        f"median={summary['median_ms']:>8.3f}ms  "
+        f"p50={summary['median_ms']:>8.3f}ms  "
         f"p95={summary['p95_ms']:>8.3f}ms  "
         f"{summary['samples_per_sec']:>9.1f} it/s"
     )
@@ -180,54 +190,103 @@ def _profile_training(model, ema_model, ema_updater, optimizer, batches, cfg, wa
         _report(name, _summarize(timers[name]))
 
 
-def _profile_inference(model, batches, cfg, warmup, measure):
-    device = torch.device(cfg.training.device)
-    timers = {"obs_encoder": [], "decoder_denoise": [], "predict_total": []}
+def _profile_inference(model, obs, device, warmup, measure, *, precision, nfe):
+    timers = {"obs_encoder": [], "action_generate": [], "total": []}
+    start = torch.cuda.Event(enable_timing=True)
+    mid = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    with torch.inference_mode(), torch.autocast(
+        device_type="cuda", dtype=torch.bfloat16, enabled=(precision == "bf16")
+    ):
+        for i in range(warmup):
+            result = model.predict_action(obs, denoise_timesteps=nfe)
+            if i == 0:
+                expected_shapes = {
+                    "pred_action": (1, model.horizon, model.action_dim),
+                    "control_action": (1, model.n_action_steps, model.control_action_dim),
+                }
+                for name, shape in expected_shapes.items():
+                    if tuple(result[name].shape) != shape:
+                        raise ValueError(f"{name}: expected {shape}, got {tuple(result[name].shape)}")
+                if not torch.isfinite(result["pred_action"]).all().item():
+                    raise ValueError("Warmup produced non-finite actions")
+                print(f"  output shapes     {expected_shapes}")
+            del result
+
+        # No warmup outputs or conditions remain live at the resident baseline.
+        torch.cuda.synchronize(device)
+        resident_mib = torch.cuda.memory_allocated(device) / 1024**2
+        torch.cuda.reset_peak_memory_stats(device)
+
+        for _ in range(measure):
+            start.record()
+            cond, aux = model._build_cond(obs)
+            mid.record()
+            result = model.predict_action_from_cond(cond, denoise_timesteps=nfe)
+            end.record()
+
+            # One uninterrupted pipeline; only synchronize after generation.
+            end.synchronize()
+            timers["obs_encoder"].append(start.elapsed_time(mid))
+            timers["action_generate"].append(mid.elapsed_time(end))
+            timers["total"].append(start.elapsed_time(end))
+            # Do not overlap the previous request's tensors with the next one.
+            del result, cond, aux
+
+        peak_mib = torch.cuda.max_memory_allocated(device) / 1024**2
+
+    print("\nLatency (GPU-side; warmup and data transfer excluded)")
+    print("  obs_encoder = condition_build: preprocessing + normalization + encoder")
+    print("  action_generate includes noise, KV cache, solver and action unnormalization")
+    for name in timers:
+        _report(name, _summarize(timers[name]))
+    print(f"\n  resident allocated (steady-state): {resident_mib:.1f} MiB")
+    print(f"  peak allocated (measurement):     {peak_mib:.1f} MiB")
+
+
+def _run_inference(cfg, device, args):
+    dataset, normalizer = build_dataset_and_normalizer(cfg)
+    model = hydra.utils.instantiate(cfg.agent)
+    model.load_normalizer_from_dataset(normalizer)
+    model.action_key = cfg.action_key
+    model.to(device)
     model.eval()
 
-    print(f"\n== Inference (NFE={cfg.agent.denoise_steps}, solver={cfg.agent.solver}) ==")
-    for i in range(warmup + measure):
-        batch = dict_apply(next(batches), lambda x: x.to(device, non_blocking=True))
-        obs = {k: v[:1] for k, v in batch["obs"].items()}
+    sample = dataset[0]
+    obs = {name: value.unsqueeze(0).to(device) for name, value in sample["obs"].items()}
+    del sample, dataset, normalizer
 
-        if i < warmup:
-            with torch.no_grad():
-                model.predict_action(obs)
-            continue
+    params = {
+        "total": count_params(model)[0],
+        "obs_encoder": count_params(model.obs_encoder)[0],
+        "ActionDiT": count_params(model.action_decoder.model)[0],
+    }
+    # Keep solver-specific validation in the decoder, including even midpoint NFE.
+    nfe = model.action_decoder._resolve_nfe(args.nfe)
+    compile_mode = cfg.training.get("compile_mode", "reduce-overhead")
+    print("\n== ActionFlow model-side B=1 steady-state GPU inference ==")
+    print(f"  device            {device} ({torch.cuda.get_device_name(device)})")
+    print(f"  precision         {args.precision}")
+    print(f"  compile           {args.compile}" + (f" (mode={compile_mode})" if args.compile else ""))
+    print(f"  solver            {model.action_decoder.solver}")
+    print(f"  NFE               {nfe}")
+    print("  batch             1")
+    print(f"  warmup/measurement {args.warmup}/{args.measurement}")
+    print("\nParameters (before compile)")
+    for name, count in params.items():
+        print(f"  {name:<18} {count:,} ({count / 1e6:.3f} M)")
 
-        with torch.no_grad():
-            t_enc = CudaTimer()
-            with t_enc:
-                cond, _ = model._build_cond(obs)
-            t_dec = CudaTimer()
-            with t_dec:
-                model.predict_action_from_cond(cond)
-            t_tot = CudaTimer()
-            with t_tot:
-                model.predict_action(obs)
-
-        timers["obs_encoder"].append(t_enc.ms)
-        timers["decoder_denoise"].append(t_dec.ms)
-        timers["predict_total"].append(t_tot.ms)
-
-    for name in ("obs_encoder", "decoder_denoise", "predict_total"):
-        _report(name, _summarize(timers[name]))
+    if args.compile:
+        compile_models(model, None, mode=compile_mode)
+    _profile_inference(
+        model, obs, device, args.warmup, args.measurement,
+        precision=args.precision, nfe=nfe,
+    )
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("config", nargs="?", default="action_flow")
-    parser.add_argument("--warmup", type=int, default=50)
-    parser.add_argument("--measurement", type=int, default=500)
-    parser.add_argument("--mode", choices=["train", "infer", "both"], default="both")
-    args = parser.parse_args()
-
-    cfg = _load_cfg(args.config)
-
-    set_seed(cfg.training.seed)
-    device = torch.device(cfg.training.device)
-
-    print(f"Device: {device}  ({torch.cuda.get_device_name(0)})")
+def _run_training(cfg, device, args):
+    print(f"Device: {device}  ({torch.cuda.get_device_name(device)})")
     dataset, normalizer = build_dataset_and_normalizer(cfg)
     train_loader = DataLoader(dataset, worker_init_fn=worker_init_fn, **cfg.dataloader)
     model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
@@ -235,14 +294,51 @@ def main():
 
     batches = _cycle(train_loader)
 
-    if args.mode in ("train", "both"):
-        _profile_training(model, ema_model, ema_updater, optimizer, batches, cfg, args.warmup, args.measurement)
-    if args.mode in ("infer", "both"):
-        _profile_inference(model, batches, cfg, args.warmup, args.measurement)
+    _profile_training(model, ema_model, ema_updater, optimizer, batches, cfg, args.warmup, args.measurement)
 
     torch.cuda.synchronize()
     peak = torch.cuda.max_memory_allocated(device) / 1024**2
     print(f"\npeak CUDA memory (during warmup+measurement): {peak:.1f} MiB")
+
+
+def _positive_int(value):
+    value = int(value)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", nargs="?", default="action_flow")
+    parser.add_argument("--warmup", type=_positive_int, default=50)
+    parser.add_argument("--measurement", type=_positive_int, default=500)
+    parser.add_argument("--mode", choices=["train", "infer"], default="infer")
+    parser.add_argument("--precision", choices=["fp32", "bf16"], default="fp32",
+                        help="inference autocast precision (default: fp32)")
+    parser.add_argument("--compile", action="store_true",
+                        help="compile inference via the Agent's existing compile_backbone protocol")
+    parser.add_argument("--nfe", type=_positive_int,
+                        help="inference NFE override (default: configured decoder NFE)")
+    args = parser.parse_args(argv)
+    if args.mode == "train" and (args.precision != "fp32" or args.compile or args.nfe is not None):
+        parser.error("--precision bf16, --compile and --nfe are inference-only options")
+    return args
+
+
+def main():
+    args = _parse_args()
+    cfg = _load_cfg(args.config)
+    device = torch.device(cfg.training.device)
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError("ActionFlow GPU profiling requires an available CUDA device")
+    set_seed(cfg.training.seed)
+    # Events must record on the model's device, including non-default GPU indices.
+    with torch.cuda.device(device):
+        if args.mode == "infer":
+            _run_inference(cfg, device, args)
+        else:
+            _run_training(cfg, device, args)
 
 
 if __name__ == "__main__":
