@@ -19,6 +19,7 @@ from dexmani_policy.common.checkpoint_io import (
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import (
     compile_models,
+    print_param_count,
     set_project_root,
     set_seed,
 )
@@ -92,6 +93,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
     if rank == 0:
+        print_param_count(model)
         workspace = hydra.utils.instantiate(cfg.workspace)
         workspace.save_hydra_config(cfg)
         checkpoint_store = workspace.checkpoint_store

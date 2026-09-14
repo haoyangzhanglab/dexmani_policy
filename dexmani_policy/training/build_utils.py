@@ -59,7 +59,6 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
     model.to(device)
-    print_param_count(model)
 
     ema_model = None
     ema_updater = None
@@ -112,6 +111,7 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
     )
     validate_gradient_accumulation(batches_per_epoch, grad_accum)
     optimizer = model.configure_optimizer(**cfg.optimizer)
+    print_param_count(model)
     scheduler = build_scheduler(cfg, optimizer, last_epoch)
     return optimizer, scheduler
 
@@ -194,7 +194,10 @@ def validate_config(cfg):
 
     if cfg.optimizer.get("obs_lr") is not None:
         if cfg.optimizer.obs_lr < 0:
-            raise ValueError("optimizer.obs_lr must be non-negative (0 means freeze)")
+            raise ValueError(
+                "optimizer.obs_lr must be non-negative "
+                "(0 freezes obs_encoder parameters)"
+            )
 
     _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)
