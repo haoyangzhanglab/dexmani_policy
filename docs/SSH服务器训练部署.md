@@ -44,17 +44,19 @@ Local checkpoint selection / evaluation
 
 ---
 
-## 2. Prerequisites
+## 2. Prerequisites and First-time Bootstrap
+
+### 2.1 Prerequisites
 
 远程 workflow 假设：
 
 1. 本机已经配置可用的 SSH alias；
 2. `DEX_SERVER` 指向目标 SSH alias，或使用脚本默认 alias；
-3. 远端存在项目目录和持久数据目录；
+3. 远端存在脚本期望的项目目录和持久数据 root；
 4. 远端存在脚本配置的 Python/Conda environment；
-5. `dexmani_policy` 已在远端环境中 editable install；
+5. `dexmani_policy` 能在该远端环境中 import；
 6. 需要远端 simulator 操作时，`dexmani_sim` 也已在对应环境中安装；
-7. 训练数据已同步到脚本期望的数据根目录。
+7. 训练数据最终位于 `train_remote.sh` 检查的数据 root，并能通过 repository-relative `robot_data/...` 路径访问。
 
 推荐只在本机 `~/.ssh/config` 保存真实 HostName / User / Port，不把基础设施 identity 写进仓库文档。
 
@@ -70,24 +72,37 @@ Host <ssh-alias>
 可选覆盖：
 
 ```bash
-export DEX_SERVER=<ssh-alias>
+export DEX_SERVER="<ssh-alias>"
 ```
 
-### 2.1 本地与远端 Python 环境
-
-本地 README 约定的研究环境与远端训练脚本使用的 Python executable 不要求同名。远端实际 executable 由 `train_remote.sh` 配置区决定。
-
-不要根据环境名推断依赖一致性；需要确认时直接检查：
+后续手工 SSH 示例统一可使用：
 
 ```bash
-# 本地
-python -c 'import torch, dexmani_policy; print(torch.__version__)'
-
-# 远端：使用 train_remote.sh 配置的 Python 路径
-ssh "$DEX_SERVER" '<remote-python> -c "import torch, dexmani_policy; print(torch.__version__)"'
+SERVER="${DEX_SERVER:-dexserver}"
 ```
 
-### 2.2 Runtime Directory Boundary
+这里的 `dexserver` 只是当前脚本默认 alias；真实 host identity 由本机 SSH config 管理。
+
+### 2.2 本地与远端 Python 环境
+
+本地 README 约定的研究环境与远端训练脚本使用的 Python executable 不要求同名。远端实际 executable 由 `train_remote.sh` 配置区的 `CONDA_PYTHON` 决定。
+
+不要根据环境名推断依赖一致性；需要确认时：
+
+1. 查看 `scripts/remote/train_remote.sh` 中的 `CONDA_PYTHON`；
+2. 使用该 executable 在远端检查 import / version。
+
+例如将脚本中的值代入 `<remote-python>` 后：
+
+```bash
+SERVER="${DEX_SERVER:-dexserver}"
+python -c 'import torch, dexmani_policy; print(torch.__version__)'
+ssh "$SERVER" '<remote-python> -c '\''import torch, dexmani_policy; print(torch.__version__)'\'''
+```
+
+`<remote-python>` 是占位符，不应原样执行。
+
+### 2.3 Runtime Directory Boundary
 
 当前 remote scripts 将三类数据分开管理：
 
@@ -112,7 +127,40 @@ experiments/
 
 指向持久数据盘，使代码中的相对路径不需要感知物理存储位置。
 
-具体远端 root path 不在本文复制，查看各 remote script 顶部配置区。
+具体远端 root path 不在本文复制，查看 `sync_code.sh`、`sync_data.sh`、`sync_down.sh`、`train_remote.sh` 顶部配置区。
+
+### 2.4 First-time Bootstrap Checklist
+
+换新服务器、容器重建或首次初始化时，不要只运行 `train_remote.sh`；先确认 remote path contract 已建立。
+
+推荐顺序：
+
+```text
+1. 查看 remote scripts 顶部配置
+   ├── SSH alias / DEX_SERVER
+   ├── remote project root
+   ├── persistent data root
+   └── remote Python executable
+
+2. 在远端创建 project parent / persistent data directories
+
+3. bash scripts/remote/sync_code.sh
+
+4. 在远端 Python 环境执行 editable install
+   <remote-python> -m pip install -e <remote-project-root>
+
+5. 在 remote project root 建立 data / robot_data / experiments symlink
+   → 指向 persistent data root 下对应目录
+
+6. bash scripts/remote/sync_data.sh --dry-run
+7. bash scripts/remote/sync_data.sh
+
+8. 做 config-only / 最小训练验证后再启动长训练
+```
+
+为什么 symlink 是重要 contract：训练 config 通常使用 repository-relative `robot_data/<task>.zarr`，Hydra experiment 输出也使用 repository-relative `experiments/...`。remote scripts 把持久数据放在独立 data root 时，缺少这些 symlink 会导致 dataset 找不到或 experiment 写入非持久 source tree。
+
+Bootstrap 中的真实 path 应从当前脚本读取，不在本文维护第二份硬编码副本。
 
 ---
 
@@ -179,7 +227,7 @@ bash scripts/remote/sync_data.sh data
 # 精确 checksum compare
 bash scripts/remote/sync_data.sh --checksum
 
-# server → local
+# remote → local
 bash scripts/remote/sync_data.sh --pull
 
 # destructive mirror
@@ -201,7 +249,7 @@ no --delete
 
 即：本地缺失某个远端文件不会导致远端删除。
 
-这是为了避免“本地只是 partial copy，却把远端完整数据误删”的情况。
+注意这只是**删除安全**：普通 rsync 仍可能根据 size/mtime 更新已存在的目标文件；如果需要先确认覆盖行为，使用 `--dry-run`。
 
 ### 4.3 Pull Mode
 
@@ -218,7 +266,7 @@ local data
 - 远端 Stage 1 训练产生的 codebook/checkpoint；
 - 服务器生成后需要本地分析或二阶段准备的 data artifact。
 
-默认 pull 同样不删除本地独有文件。
+默认 pull 同样不删除本地独有文件，但可能更新同名且被 rsync 判定为变化的本地文件；需要保护本地修改时先 dry-run。
 
 ### 4.4 `--prune` Is Destructive
 
@@ -296,6 +344,26 @@ Pass 1 不保留 partial destination，以避免下一次 `--ignore-existing` �
 
 训练运行过程中可能出现文件在 rsync 扫描后被轮换/消失。脚本将 rsync exit code 24 视为可接受的并发变化；其他 rsync error 仍然失败。
 
+### 5.4 Offline W&B
+
+如果训练使用 W&B offline mode，需要把对应 `wandb/` artifact 拉回本地：
+
+```bash
+bash scripts/remote/sync_down.sh --with-wandb <optional-subpath>
+```
+
+随后可按工具脚本执行：
+
+```bash
+# 先预览
+bash scripts/utils/wandb_sync.sh --dry-run --all
+
+# 同步 experiments/ 下所有 offline runs
+bash scripts/utils/wandb_sync.sh --all
+```
+
+上传需要本地 W&B credential / network；`wandb_sync.sh` 使用本地受管 `policy` 环境。
+
 ---
 
 ## 6. Remote Training — `train_remote.sh`
@@ -324,6 +392,8 @@ bash scripts/remote/train_remote.sh --sync-data <config> <task> [overrides...]
 # 只预览 command + code sync
 bash scripts/remote/train_remote.sh --dry-run <config> <task> [overrides...]
 ```
+
+`--sync-data` 不能替代 Section 2.4 的 first-time directory/symlink bootstrap；它只是在 launch 前调用当前 `sync_data.sh`。
 
 当前可用 config 不从本文枚举，使用：
 
@@ -372,7 +442,7 @@ SSH reachable
 → disk-space query
 ```
 
-其中 dataset/source/SSH 失败会阻止 launch；GPU/disk status 中部分 query 属于 diagnostic，但 invalid requested GPU id 会失败。
+其中 dataset/source/SSH 失败会阻止 launch；GPU/disk status 中部分 query 属于 diagnostic，但如果能够查询 GPU 数且显式 requested GPU id 越界，launch 会失败。
 
 ### 6.5 Foreground vs Tmux
 
@@ -449,9 +519,10 @@ bash scripts/remote/stop_remote.sh --all
 ```text
 1. send Ctrl+C / SIGINT to tmux pane
         ↓
-2. training finishes current step
+2. Trainer completes the current logical optimizer-step boundary
         ↓
-3. Trainer attempts interrupt checkpoint
+3. if interrupted after at least one completed optimizer step:
+       attempt interrupt checkpoint
         ↓
 4. wait for session to exit
         ↓
@@ -460,7 +531,7 @@ bash scripts/remote/stop_remote.sh --all
 6. best-effort GPU-memory check
 ```
 
-第二次 signal 或 force kill 可能绕过完整的 graceful save，因此只有正常第一阶段 SIGINT 路径才能依赖 interrupt-checkpoint behavior。
+第二次 signal 或 force kill 可能绕过完整的 graceful save。当前 Trainer 只在 interrupted 且 `global_step > 0` 时尝试 interrupt checkpoint，因此“收到 SIGINT”本身不保证一定产生 checkpoint。
 
 `--all` 只处理 remote trainer 命名空间内的 training sessions，而不是无差别终止所有 tmux 会话。
 
@@ -489,6 +560,10 @@ bash scripts/remote/sync_down.sh <policy>/<task>
 # 6. checkpoint selection + held-out evaluation + demo
 bash scripts/eval/eval_pipeline.sh <policy> <task> <exp_name>
 ```
+
+这里 `<config>` 是 Hydra config path；`<policy>` 是 experiment `policy_name` 路径。DDP overlay 可以让二者都带 `ddp/...`，最终以保存的 `config.yaml` 与实际 `experiments/...` 目录为准。
+
+`eval_pipeline.sh --no-videos` 只关闭 Step 2 final-eval 的视频；Step 3 demo 仍然录制视频。如果需要完全不录 demo，应分步运行 selection/eval，而不是依赖该 flag。
 
 ### 9.2 Multi-seed / Ablation Runs
 
@@ -531,7 +606,8 @@ remote Stage 2 training
 先检查：
 
 ```bash
-ssh "$DEX_SERVER" 'echo ok'
+SERVER="${DEX_SERVER:-dexserver}"
+ssh "$SERVER" 'echo ok'
 ```
 
 如果失败，remote script 无法可靠判断训练状态。不要在网络不可达时把“session 查不到”解释为训练已经停止。
@@ -549,6 +625,8 @@ bash scripts/remote/sync_data.sh robot_data
 
 如果任务数据命名与 Hydra `task_name` 不一致，应修 config/data contract，而不是跳过 pre-flight。
 
+如果数据已在 persistent root 但训练仍找不到，还要检查 remote project 的 `robot_data` symlink 是否正确。
+
 ### 10.3 GPU OOM / Wrong GPU Set
 
 检查：
@@ -565,7 +643,7 @@ model-specific activation/token memory
 
 ### 10.4 Disk Full
 
-训练 checkpoint 和 logs 都需要写空间。disk query 失败或空间不足时，不应继续长训练直到 checkpoint save 才发现错误。
+训练 checkpoint 和 logs 都需要写空间。当前 `train_remote.sh` 的 disk-space query 主要是 diagnostic，不包含通用的自动 free-space threshold；看到空间不足时应在启动长训练前人工处理。
 
 ### 10.5 Partial Experiment Pull
 
