@@ -452,6 +452,26 @@ class Trainer:
         if hasattr(self.raw_model, "set_epoch"):
             self.raw_model.set_epoch(epoch)
 
+    def _step_performance_metrics(self, samples: int, elapsed: float) -> dict:
+        """Wall-clock telemetry for one optimizer update at a logging boundary.
+
+        Includes data wait and optimizer/scheduler/EMA, excludes logging and
+        checkpointing. CUDA execution is asynchronous; no synchronize is added,
+        so these are approximate wall-clock measurements, not GPU kernel times.
+        """
+        if self.distributed:
+            local = torch.tensor([samples, elapsed], dtype=torch.float64, device=self.device)
+            gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered, local)
+            values = torch.stack(gathered).cpu()
+            samples = values[:, 0].sum().item()
+            elapsed = values[:, 1].max().item()
+        return {
+            "train/step_time": elapsed,
+            "train/samples_per_sec": samples / elapsed,
+            "train/samples_per_step": samples,
+        }
+
     def train(self, resume_tag: str | None = None, resume_state=None):
         torch.set_float32_matmul_precision("high")
 
@@ -508,8 +528,12 @@ class Trainer:
                 num_batches = self.resume_contract["batches_per_epoch"]
                 group_metric_sums = {}
                 group_metric_count = 0
+                group_samples = 0
+                # Start before iterator creation, including the epoch's first data wait.
+                group_start_time = time.perf_counter()
                 for micro_step, batch in enumerate(self.train_loader, start=self.next_micro_step):
                     self.current_epoch = epoch
+                    group_samples += batch["action"].shape[0]
 
                     group_start = (
                         micro_step // self.gradient_accumulation_steps
@@ -540,6 +564,8 @@ class Trainer:
                             loss_divisor=group_size,
                         )
 
+                    if is_boundary:
+                        group_elapsed = time.perf_counter() - group_start_time
                     self._ddp_backward_initialized = True
                     for key, value in to_log_scalars(log_dict).items():
                         group_metric_sums[key] = group_metric_sums.get(key, 0.0) + value
@@ -583,6 +609,10 @@ class Trainer:
                                 packed /= dist.get_world_size()
                                 step_metrics = dict(zip(keys, packed.cpu().tolist()))
 
+                            step_metrics.update(
+                                self._step_performance_metrics(group_samples, group_elapsed)
+                            )
+
                             if self.is_main_process and self._step_pbar is not None:
                                 self._step_pbar.update(self.log_interval_steps)
                                 if hasattr(self._step_pbar, "set_postfix"):
@@ -596,6 +626,9 @@ class Trainer:
 
                         # Check for milestone checkpoint.
                         self._check_milestone(epoch, global_step)
+                        group_samples = 0
+                        # Exclude this update's logging/checkpoint work from the next one.
+                        group_start_time = time.perf_counter()
 
                     if is_boundary and (global_step >= self.total_train_steps or self._interrupted):
                         break

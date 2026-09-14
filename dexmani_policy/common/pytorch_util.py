@@ -100,10 +100,12 @@ def set_seed(seed: int):
 
 
 def get_rng_state() -> Dict[str, Any]:
-    """Capture the full process RNG state (Python/NumPy/Torch/CUDA).
+    """Capture main-process Python/NumPy/Torch/CUDA RNG for checkpoint resume.
 
-    Serialized into a checkpoint so a resumed run reproduces the same data
-    augmentation / shuffle stream it would have followed uninterrupted.
+    Together with the saved sampler epoch/cursor, this restores process RNG
+    and sample ordering. DataLoader worker augmentation RNG and prefetch state
+    are not captured, so worker augmentation is not guaranteed to be bit-exact
+    across resume, including with persistent workers.
     """
     return {
         "python": random.getstate(),
@@ -116,7 +118,7 @@ def get_rng_state() -> Dict[str, Any]:
 
 
 def set_rng_state(state: Dict[str, Any]) -> None:
-    """Restore the RNG state captured by :func:`get_rng_state`."""
+    """Restore the main-process RNG state captured by :func:`get_rng_state`."""
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch"])

@@ -289,6 +289,8 @@ class BaseAgent(nn.Module):
     ):
         obs_lr = obs_lr if obs_lr is not None else lr
         obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
+        if obs_lr == 0:
+            self.obs_encoder.requires_grad_(False)
         groups = self.get_optim_param_groups(lr, obs_lr, weight_decay, obs_wd)
         optimizer = torch.optim.AdamW(
             [g for g in groups if g["params"]],
