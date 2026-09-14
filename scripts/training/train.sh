@@ -6,12 +6,6 @@
 #
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$ROOT_DIR"
-
-eval "$(conda shell.bash hook)"
-conda activate policy
-
 if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: bash scripts/training/train.sh <config_name> [hydra_overrides...]"
     echo ""
@@ -19,10 +13,18 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     echo "  bash scripts/training/train.sh CONFIG_NAME 'task_name=pour' 'training.seed=42'"
     echo ""
     echo "Configs are Hydra files under dexmani_policy/configs/."
-    exit 1
+    if [[ $# -eq 0 ]]; then
+        exit 1
+    fi
+    exit 0
 fi
 
 CONFIG="$1"
 shift
 
-exec python dexmani_policy/train.py --config-name="${CONFIG}" "$@"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# Keep Conda activation hooks outside this shell's nounset mode and stream logs.
+exec conda run --no-capture-output -n policy \
+    python -u dexmani_policy/train.py --config-name="${CONFIG}" "$@"

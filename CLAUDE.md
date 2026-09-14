@@ -22,6 +22,9 @@ ls dexmani_policy/configs/ddp/*.yaml
 bash scripts/training/train.sh <config_name> 'task_name=<task>'
 bash scripts/training/train_ddp.sh ddp/<config_name> 'task_name=<task>'
 
+# VQ 手部预训练（后续参数使用 --option value）
+bash scripts/training/train_vq_hand.sh <task_name>
+
 # 快速 config 检查（无数据/GPU forward）
 python dexmani_policy/smoke_test.py --config-only <config_name>
 
@@ -36,6 +39,10 @@ bash scripts/training/train.sh <config_name> \
   'task_name=<task>' \
   '+resume_from=/absolute/path/to/experiment_or_checkpoint'
 ```
+
+本地 `scripts/training/` 启动器通过 `conda run --no-capture-output -n policy` 和 `python -u` 自动选择环境并实时输出日志，无需提前激活；要求 `conda` 在 `PATH` 中可用。不要在启用 `set -u` 的 shell 中直接执行 Conda 激活钩子，以免触发未定义变量错误。
+
+单卡和 DDP 启动器的 `-h` / `--help` 无需 Conda，返回退出码 0；VQ 的帮助参数转发给 Python，需要 `policy` 环境。单卡 / DDP 命令追加 `--cfg job --resolve` 可仅预览解析配置，不启动训练，也不替代 config validation。
 
 重复执行同一训练命令不会自动 resume；resume 必须显式指定。
 

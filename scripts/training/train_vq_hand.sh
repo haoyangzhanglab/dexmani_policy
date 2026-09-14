@@ -18,12 +18,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# Activate conda environment
-eval "$(conda shell.bash hook)"
-conda activate policy
-
 # ── Task name (first positional arg, before any --flags) ─────────────────────
-if [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
+if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
     TASK_NAME="$1"
     shift
 else
@@ -33,7 +29,9 @@ fi
 ZARR_PATH="${ZARR_PATH:-robot_data/${TASK_NAME}.zarr}"
 OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}}"
 
-exec python -u -m dexmani_policy.tools.train_vq_hand \
+# Keep Conda activation hooks outside this shell's nounset mode and stream logs.
+exec conda run --no-capture-output -n policy \
+    python -u -m dexmani_policy.tools.train_vq_hand \
     --config dexmani_policy/configs/dqrise.yaml \
     --zarr_path "${ZARR_PATH}" \
     --output_dir "${OUTPUT_DIR}" \

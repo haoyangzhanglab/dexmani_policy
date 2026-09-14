@@ -39,6 +39,10 @@ ls dexmani_policy/configs/ddp/*.yaml
 
 ## 训练
 
+本地训练脚本要求 `conda` 命令在 `PATH` 中可用，并已配置好 `policy` 环境。脚本通过 `conda run --no-capture-output -n policy` 启动 `python -u`，无需提前手动激活环境，日志实时输出。命令参数保持不变，脚本会自动切换到仓库根目录。
+
+Conda 激活钩子由 `conda run` 执行，避免在训练脚本的 `set -u` 下读取未定义变量而退出（例如 GCC 激活脚本中的 `SYS_SYSROOT: 未绑定的变量`）。
+
 ```bash
 # 单卡
 bash scripts/training/train.sh <config_name> 'task_name=<task>'
@@ -53,6 +57,24 @@ bash scripts/training/train.sh <config_name> \
 ```
 
 `<config_name>` 直接对应 Hydra config。Policy 的 Agent 实现由 config 中的 `agent._target_` 决定；文件名和类名不要求与 config 名同名。
+
+查看启动器帮助：
+
+```bash
+bash scripts/training/train.sh --help
+bash scripts/training/train_ddp.sh --help
+```
+
+这两个帮助命令无需调用 Conda，成功返回退出码 0；缺少 config 参数时显示用法并返回非零退出码。需要仅预览 Hydra 解析后的配置时，可在单卡或 DDP 训练命令末尾追加 `--cfg job --resolve`；这不会开始训练，也不替代下文的 config validation。
+
+### VQ 手部预训练
+
+```bash
+bash scripts/training/train_vq_hand.sh <task_name>
+bash scripts/training/train_vq_hand.sh --help
+```
+
+该脚本同样自动使用 `policy` 环境。首个位置参数为任务名，后续参数使用 Python CLI 的 `--option value` 格式；`-h` 和 `--help` 均转发给 Python，查看帮助需要该环境及模块依赖可用。任务和路径也可通过 `TASK_NAME`、`ZARR_PATH`、`OUTPUT_DIR` 环境变量指定；显式任务位置参数优先于 `TASK_NAME`。
 
 ### 续训
 
