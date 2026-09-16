@@ -279,9 +279,7 @@ def evaluate_checkpoint_robotwin(
             video_save_dir=video_save_dir,
         )
     )
-    validate_denoise_steps(
-        [denoise_steps], getattr(agent.action_decoder, "solver", None)
-    )
+    validate_denoise_steps([denoise_steps])
     best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
     selection_seeds = best_info["selection"]["seeds"] if best_info else []
     eval_seeds = _select_eval_seeds(
@@ -373,9 +371,7 @@ def evaluate_checkpoint_sweep(
             video_save_dir=video_save_dir,
         )
     )
-    validate_denoise_steps(
-        denoise_timesteps_list, getattr(agent.action_decoder, "solver", None)
-    )
+    validate_denoise_steps(denoise_timesteps_list)
 
     # ── 2. Same seeds for all denoise values (fair comparison) ──────────
     best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None

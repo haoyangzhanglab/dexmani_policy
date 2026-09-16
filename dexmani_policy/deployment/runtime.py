@@ -40,9 +40,9 @@ class PolicySpec:
     """Policy-owned model and observation contract exposed to runtimes.
 
     ``default_inference_steps`` is the artifact's persisted ``denoise_steps``
-    value: the default number of denoising/flow-solver steps (NFE for
-    ActionFlow) used when a runtime does not override it.  It never changes
-    architecture, weights, or the observation contract.
+    value: the default number of denoising steps used when a
+    runtime does not override it.  It never changes architecture, weights, or
+    the observation contract.
     """
 
     action_key: str

@@ -64,13 +64,11 @@ def validate_eval_config(cfg) -> None:
         )
 
 
-def validate_denoise_steps(denoise_timesteps_list, solver: str | None) -> None:
-    """Pre-episode NFE validation, single-sourced with the ActionFlow decoder.
+def validate_denoise_steps(denoise_timesteps_list) -> None:
+    """Pre-episode NFE validation for the CLI ``--denoise-steps`` override.
 
-    Guards the CLI ``--denoise-steps`` override so an invalid NFE (e.g. odd
-    value with the midpoint solver) fails at startup instead of being swallowed
-    by the per-episode exception layer after ``env.reset``.  ``solver`` is
-    ``None`` for non-ActionFlow decoders (which take no even-NFE constraint).
+    Fails at startup on an invalid NFE (non-integer or non-positive) instead of
+    being swallowed by the per-episode exception layer after ``env.reset``.
     """
     if not denoise_timesteps_list:
         raise ValueError("denoise_timesteps_list must be non-empty")
@@ -79,8 +77,6 @@ def validate_denoise_steps(denoise_timesteps_list, solver: str | None) -> None:
             raise ValueError(f"denoise step must be an integer, got {nfe!r}")
         if nfe <= 0:
             raise ValueError(f"denoise step must be positive, got {nfe}")
-        if solver == "midpoint" and nfe % 2 != 0:
-            raise ValueError(f"midpoint solver requires an even NFE, got {nfe}")
 
 
 # ---------------------------------------------------------------------------
