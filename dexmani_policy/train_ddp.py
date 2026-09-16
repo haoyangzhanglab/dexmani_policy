@@ -27,6 +27,7 @@ from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_scheduler,
+    print_training_recipe,
     validate_config,
     validate_gradient_accumulation,
 )
@@ -93,6 +94,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
     if rank == 0:
+        print_training_recipe(cfg, world_size=world_size, batches_per_epoch=batches_per_epoch)
         print_param_count(model)
         workspace = hydra.utils.instantiate(cfg.workspace)
         workspace.save_hydra_config(cfg)

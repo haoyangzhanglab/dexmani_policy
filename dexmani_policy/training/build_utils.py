@@ -1,6 +1,7 @@
 """Shared build functions for training/eval entry points."""
 
 import hydra
+from torch.nn.modules.batchnorm import _BatchNorm
 
 from dexmani_policy.common.config import validate_action_key_consistency
 from dexmani_policy.common.pytorch_util import print_param_count
@@ -17,6 +18,7 @@ __all__ = [
     "validate_config",
     "compute_num_training_steps",
     "validate_gradient_accumulation",
+    "print_training_recipe",
 ]
 
 # ---------------------------------------------------------------------------
@@ -47,6 +49,30 @@ def build_dataset_and_normalizer(cfg):
 # ---------------------------------------------------------------------------
 
 
+def _validate_ema_batchnorm_compatibility(model) -> None:
+    """Reject BatchNorm whose parameters or running statistics can change."""
+    unsafe = []
+    for name, module in model.named_modules():
+        if not isinstance(module, _BatchNorm):
+            continue
+        has_trainable_params = any(
+            p.requires_grad for p in module.parameters(recurse=False)
+        )
+        updates_running_stats = bool(module.training and module.track_running_stats)
+        if has_trainable_params or updates_running_stats:
+            unsafe.append(name or "<root>")
+    if unsafe:
+        names = "\n".join(f"  {name}" for name in unsafe[:8])
+        if len(unsafe) > 8:
+            names += f"\n  ... ({len(unsafe) - 8} more)"
+        raise ValueError(
+            "EMA is incompatible with active/trainable BatchNorm in this repository:\n"
+            f"{names}\n"
+            "EMA does not maintain BatchNorm running statistics consistently.\n"
+            "Use group_norm, frozen_bn, freeze the BatchNorm backbone, or disable EMA."
+        )
+
+
 def build_model_and_ema(cfg, device, normalizer, rank=0):
     """Instantiate the agent model and, if configured, its EMA twin.
 
@@ -59,6 +85,9 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
     model.to(device)
+
+    if cfg.training.use_ema:
+        _validate_ema_batchnorm_compatibility(model)
 
     ema_model = None
     ema_updater = None
@@ -114,6 +143,55 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
     print_param_count(model)
     scheduler = build_scheduler(cfg, optimizer, last_epoch)
     return optimizer, scheduler
+
+
+# ---------------------------------------------------------------------------
+# Training Recipe
+# ---------------------------------------------------------------------------
+
+
+def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int) -> None:
+    """Print configured training budgets; sample counts are nominal, not exact."""
+    per_device_batch = int(cfg.dataloader.batch_size)
+    grad_accum = int(cfg.training.get("loop", {}).get("gradient_accumulation_steps", 1))
+    total_train_steps = int(cfg.training.loop.total_train_steps)
+    nominal_global_batch = per_device_batch * world_size * grad_accum
+    updates_per_epoch = (batches_per_epoch + grad_accum - 1) // grad_accum
+    remainder = batches_per_epoch % grad_accum
+    last_group_microbatches = grad_accum if remainder == 0 else remainder
+    last_group_global_batch = per_device_batch * world_size * last_group_microbatches
+    has_partial_accumulation_group = last_group_microbatches != grad_accum
+    lr = cfg.optimizer.lr
+    obs_lr = cfg.optimizer.get("obs_lr")
+    obs_lr = lr if obs_lr is None else obs_lr
+
+    rows = [
+        ("per-device batch", per_device_batch),
+        ("world size", world_size),
+        ("gradient accumulation", grad_accum),
+        ("nominal global batch", nominal_global_batch),
+        ("batches / epoch", batches_per_epoch),
+        ("optimizer updates / epoch", updates_per_epoch),
+        ("partial accum group", "yes" if has_partial_accumulation_group else "no"),
+        ("last group micro-batches", last_group_microbatches),
+        ("last group global batch", last_group_global_batch),
+        ("total optimizer updates", total_train_steps),
+        ("nominal sample budget", nominal_global_batch * total_train_steps),
+        ("drop_last", cfg.dataloader.drop_last),
+        ("learning rate", f"{lr:.3e}"),
+        ("obs learning rate", f"{obs_lr:.3e}"),
+        ("warmup updates", cfg.training.lr_warmup_steps),
+        ("scheduler", cfg.training.lr_scheduler),
+        ("precision", "bf16" if cfg.training.get("use_bfloat16", False) else "fp32"),
+        ("torch.compile", cfg.training.get("use_compile", False)),
+        ("EMA", cfg.training.use_ema),
+    ]
+    print("=" * 60)
+    print("Training Recipe")
+    print("-" * 60)
+    for label, value in rows:
+        print(f"{label:<26}: {value}")
+    print("=" * 60)
 
 
 # ---------------------------------------------------------------------------

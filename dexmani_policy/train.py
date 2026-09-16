@@ -23,6 +23,7 @@ from dexmani_policy.training.build_utils import (
     build_model_and_ema,
     build_optimizer_and_scheduler,
     compute_num_training_steps,
+    print_training_recipe,
     validate_config,
 )
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
@@ -63,6 +64,7 @@ def build_train_components(cfg):
 
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
+    print_training_recipe(cfg, world_size=1, batches_per_epoch=batches_per_epoch)
     num_training_steps = compute_num_training_steps(cfg)
 
     workspace = hydra.utils.instantiate(cfg.workspace)

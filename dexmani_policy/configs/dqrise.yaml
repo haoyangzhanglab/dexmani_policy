@@ -37,7 +37,7 @@ dataloader:
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
-  drop_last: false
+  drop_last: true
 
 # ── Dataset ──
 dataset:
