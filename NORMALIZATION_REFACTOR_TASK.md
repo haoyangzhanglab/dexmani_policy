@@ -2,15 +2,13 @@
 
 > 基线代码：`d9e097bf27cab007ec59196d3169e6b41a1e3cb6`
 >
-> 目标：在**不引入独立 Processor artifact、不改变 `simple.v3` checkpoint 顶层格式、尽量保持已有实验行为与旧 checkpoint 兼容**的前提下，统一 RGB、point cloud、proprioception、未来 tactile 等模态的 statistical normalization contract，并修复 SAT/R3D 当前点云归一化职责混杂问题。
+> 目标：在**不兼容旧 config / 旧 checkpoint** 的前提下，以最小改动建立统一、明确、高效的 feature-level normalization contract；保持 `simple.v3` checkpoint 顶层格式不变，并修复 SAT/R3D 当前点云归一化职责混杂问题，同时为 RGB、tactile、PointACT、Any3D-VLA 等后续模态/策略扩展提供稳定主干。
 
 ---
 
-## 1. 最终审查结论
+## 1. 最终结论
 
-方案审查通过，按本任务书实施。
-
-最终架构采用：
+本任务采用：
 
 ```text
 Feature-level Normalization Spec
@@ -20,36 +18,49 @@ Feature-level Normalization Spec
 Encoder-specific deterministic preprocessing
 ```
 
-不新增完整 `MultiModalNormalizer`、`PointCloudAdapter` 或 LeRobot-style 独立 `ProcessorPipeline`。
+明确**不引入**：
+
+```text
+MultiModalNormalizer
+PointCloudAdapter
+独立 Processor checkpoint/artifact
+完整 LeRobot-style ProcessorPipeline
+legacy normalization fallback
+旧 checkpoint migration
+```
 
 ### 1.1 核心原则
 
-1. **Dataset 提供 canonical data、stochastic augmentation 和 normalization statistics 的数据来源。**
-2. **Policy config 决定每个 feature 使用何种 statistical normalization。**
+1. **Dataset 只负责 canonical data、stochastic augmentation，以及提供 normalization statistics 的数据来源。**
+2. **顶层 Policy config 明确决定每个 feature 的 statistical normalization mode。**
 3. **默认 normalization statistics 使用完整 replay buffer / 完整 dataset。**
-   - 保持 Diffusion Policy / DP3 等官方实现和社区常见做法；
-   - 不因 `val_ratio` 或 `max_train_episodes` 改变统计范围；
-   - 本任务不引入 `scope: train`。
+   - 与 Diffusion Policy / DP3 family 官方实现和社区常见做法一致；
+   - `val_ratio`、`train_mask`、`max_train_episodes` 不改变默认统计范围；
+   - 本任务不增加 `scope: train`。
 4. **`BaseAgent.normalizer` 继续拥有 fitted `scale/offset`，并随 model/EMA checkpoint 保存。**
-5. **结构、空间和几何预处理不属于 generic normalization。**
-   - resize / crop / ImageNet normalization；
-   - FPS / KNN / ball query；
-   - voxel / GridSample；
-   - CenterShift / centroid shift；
-   - workspace crop / RGB-D lifting / normal estimation；
-   均由具体 encoder / modality processor 负责。
-6. **Inference 以 checkpoint 中的 normalizer state 为统计量唯一来源，不重新访问训练数据集。**
-7. **旧 resolved config 没有 `normalization:` 时走 legacy path，保证旧实验不会被新语义静默改变。**
+5. **结构、空间、几何、预训练 backbone 输入处理不属于 generic normalization。**
+6. **推理只依赖 config + checkpoint；不得重新访问训练数据集计算 statistics。**
+7. **所有当前 Policy config 必须显式声明 `normalization:`；缺失即 fail-fast。**
+8. **旧 config / checkpoint 不要求兼容，不保留双轨逻辑。**
 
-### 1.2 本次真正改变的模型行为
+### 1.2 本次有意改变的模型行为
 
-当前 Policy 中，唯一有意改变 point-cloud 数值语义的是：
+当前 Policy 中，只有 SAT 的 point-cloud numerical contract 有意变化：
 
 ```text
 SAT: point_cloud limits -> identity
 ```
 
-DP3 / DQ-RISE(iDP3) / ManiFlow / R3D 保持现有 `limits` 语义；DP/RGB 保持 generic normalizer 不处理 RGB。
+其余当前策略保持原有数值 recipe：
+
+```text
+DP                RGB identity
+DP3               point_cloud limits
+DQ-RISE / iDP3    point_cloud limits
+ManiFlow          point_cloud limits
+R3D               point_cloud limits
+MultiTask DiT     RGB identity
+```
 
 ---
 
@@ -65,37 +76,48 @@ PCDataset.get_normalizer()
 MultiTaskDataset.get_normalizer()
 ```
 
-`PCDataset.get_normalizer()` 无条件把 `point_cloud` 与 `joint_state/action` 一起按 `mode="limits", last_n_dims=1` 拟合。
+特别是 `PCDataset.get_normalizer()` 无条件把 `point_cloud` 与 `joint_state/action` 一起以：
 
-结果是所有使用 `PCDataset` 的策略共享同一 point-cloud normalization，即使其 encoder contract 不同。
+```python
+last_n_dims=1
+mode="limits"
+```
+
+拟合，导致所有 `PCDataset` Policy 被迫共享同一 point-cloud normalization contract。
+
+这对 DP3 / ManiFlow / R3D baseline 尚可，但不适用于 SAT / PointNeXT 的 metric fixed-radius geometry。
 
 ### 2.2 SAT 的 metric geometry 被 per-axis min-max 改变
 
-当前 `XYZRGB` 六个 channel 分别 min-max。XYZ 对应：
+当前 XYZRGB 六个 channel 独立 min-max，因此 XYZ 实际为：
 
 ```text
 scale_x != scale_y != scale_z
 ```
 
-所以 Euclidean geometry 被 anisotropic scaling 改变。
+这会改变 Euclidean geometry。
 
-SAT/PointNeXT 当前使用固定：
+SAT 当前 PointNeXT tokenizer 使用：
 
 ```yaml
 patch_radii: [0.05, 0.10]
 ```
 
-若在此之前做 dataset-wise per-axis limits，固定半径不再具有稳定 metric semantics。
+若先做 dataset-wise per-axis limits，固定半径失去稳定 metric semantics。
 
-SAT 官方实现采用 point-cloud identity 路径，因此新 SAT 应切换为 `identity`。
+因此新 SAT 必须：
 
-### 2.3 R3D clamp 泄漏到所有 point-cloud policy
+```text
+point_cloud normalization = identity
+```
 
-当前 `BaseAgent.preprocess()` 在 normalizer 之后对所有 `point_cloud` 做全 tensor clamp。
+### 2.3 R3D clamp 泄漏到所有 point-cloud Policy
 
-这个要求实际来自 Uni3D `PositionEmbeddingRandom` 对 XYZ `[-1, 1]` 的 contract，却影响 DP3 / ManiFlow / SAT / DQ-RISE，并连 RGB channel 一起 clamp。
+当前 `BaseAgent.preprocess()` 在 normalizer 后对所有 `point_cloud` 做全 tensor clamp。
 
-必须局部化到 R3D/Uni3D encoder boundary，并仅 clamp XYZ。
+该限制实际上来自 Uni3D `PositionEmbeddingRandom` 对 XYZ `[-1, 1]` 的要求，却影响 DP3 / ManiFlow / SAT / DQ-RISE，且连 RGB channel 一起 clamp。
+
+必须局部化到 R3D observation encoder，并仅处理 XYZ。
 
 ### 2.4 Identity modality 与 modality dropout 错误耦合
 
@@ -105,26 +127,32 @@ SAT 官方实现采用 point-cloud identity 路径，因此新 SAT 应切换为 
 key in self.normalizer.params_dict
 ```
 
-新架构中 `identity` 最佳实现是不注册 normalizer params，因此 RGB、SAT point cloud、未来 tactile RGB 等 identity modality 也必须正常支持 dropout。
+但新设计中：
 
-### 2.5 MultiTaskDataset 存在独立 normalizer 构建路径
+```text
+identity = 不注册 params_dict[field]
+```
 
-当前 `MultiTaskDataset` 在构造阶段自行 eager 计算 shared/per-task normalizer。
+因此 RGB、SAT point cloud、未来 tactile RGB 等 identity modality 仍必须正常支持 dropout。
 
-如果只修改 Base/PC dataset，会形成两套 normalization 构建逻辑。本任务必须同时统一 MultiTask shared-normalizer 路径。
+### 2.5 MultiTaskDataset 具有第二套 normalizer ownership
+
+当前 `MultiTaskDataset` 在 Dataset 内部 eager 构建 shared/per-task normalizer。
+
+这会与新的统一 builder 形成双轨逻辑，必须删除 Dataset-side normalizer ownership。
 
 ---
 
-## 3. 归一化与预处理职责边界
+## 3. 最终职责边界
 
-### 3.1 最终数据流
+### 3.1 数据流
 
 ```text
 Dataset
   │
   ├─ load canonical data
   ├─ stochastic augmentation
-  └─ dataset-defined deterministic preprocessing（仅数据表示需要时）
+  └─ dataset-defined representation preprocessing（仅数据表示需要时）
   │
   ▼
 raw observation
@@ -161,7 +189,7 @@ normalizer["action"].unnormalize()
 robot / env
 ```
 
-### 3.2 Generic normalization 第一版只支持
+### 3.2 Generic normalization 第一版只允许
 
 ```text
 identity
@@ -170,12 +198,16 @@ gaussian
 auto
 ```
 
-- `identity`：generic normalizer 完全不处理该 field；
-- `limits`：当前 per-channel min-max affine normalization；
-- `gaussian`：当前 z-score affine normalization；
-- `auto`：只允许用于 `action`，保留 `action` / `action_ee` 的现有特殊规则。
+定义：
 
-### 3.3 明确禁止放入 generic normalization 的操作
+- `identity`：generic normalizer 原样通过，不注册任何参数；
+- `limits`：沿用当前 per-channel min-max affine transform；
+- `gaussian`：沿用当前 z-score affine transform；
+- `auto`：只允许用于 `action`，根据 action representation 选择现有 action normalizer 逻辑。
+
+### 3.3 禁止进入 generic normalization 的操作
+
+以下全部属于 Encoder / modality-specific preprocess：
 
 ```text
 resize / crop
@@ -187,32 +219,42 @@ workspace crop
 normal estimation
 RGB-D lifting
 camera fusion
-coordinate-frame coupled transforms
+coordinate-frame coupled transform
 ```
 
-未来新增策略时必须继续遵守这一边界。
+未来新增策略不得把这些操作伪装成 normalization mode。
 
 ---
 
 ## 4. Config Contract
 
-所有**新实验 config**增加顶层：
+所有当前和未来 Policy config **必须**存在顶层：
 
 ```yaml
 normalization:
   joint_state: limits
   action: auto
-  point_cloud: limits
 ```
 
-约束：
+根据实际 observation 再增加 feature。
 
-- `auto` 只允许用于 `action`；
-- `identity` 不注册任何 `params_dict[field]`；
-- `limits/gaussian` 默认从完整 dataset / replay buffer 拟合；
-- normalization key 只允许数值 feature，不包含 `task_text/task_name` 等非数值字段。
+### 4.1 校验规则
 
-### 4.1 当前 Policy mapping
+`validate_config(cfg)` 必须验证：
+
+1. `normalization` 必须存在且为 mapping；
+2. mode 只能是：
+   ```text
+   identity | limits | gaussian | auto
+   ```
+3. `auto` 只能用于 `action`；
+4. `joint_state` 和 `action` 必须显式存在；
+5. 每个 `dataset.sensor_modalities` 中的数值 observation feature 必须在 normalization spec 中显式声明；
+6. `task_text/task_name` 等非数值字段不能放入 normalization；
+7. `identity` 是显式 contract，不能用“省略 key”代替 config declaration；
+8. DDP overlay 不重复定义 normalization，继承 base config。
+
+### 4.2 当前 Policy mapping
 
 #### DP
 
@@ -232,7 +274,7 @@ normalization:
   point_cloud: limits
 ```
 
-#### DQ-RISE（当前默认 iDP3）
+#### DQ-RISE / iDP3
 
 ```yaml
 normalization:
@@ -241,7 +283,7 @@ normalization:
   point_cloud: limits
 ```
 
-#### ManiFlow（当前 PointNetDense）
+#### ManiFlow
 
 ```yaml
 normalization:
@@ -268,7 +310,7 @@ normalization:
   point_cloud: identity
 ```
 
-#### MultiTask DiT（当前 RGB）
+#### MultiTask DiT
 
 ```yaml
 normalization:
@@ -277,9 +319,7 @@ normalization:
   rgb: identity
 ```
 
-DDP overlay 不重复定义 normalization，默认继承对应 base config。
-
-### 4.2 未来扩展示例
+### 4.3 未来扩展示例
 
 Numeric tactile / force-torque：
 
@@ -290,7 +330,7 @@ normalization:
   tactile_force: gaussian
 ```
 
-GelSight / DIGIT image tactile：
+GelSight / DIGIT：
 
 ```yaml
 normalization:
@@ -308,48 +348,69 @@ normalization:
   point_cloud: identity
 ```
 
-其 voxel / centroid / CenterShift / GridSample / NormalizeColor 属于各自 encoder contract。
+其 voxel / centroid / CenterShift / GridSample / NormalizeColor 由各自 encoder/preprocessor 处理。
 
 ---
 
 ## 5. Normalization Statistics Scope
 
-### 5.1 默认行为：full dataset
+### 5.1 默认使用 full dataset
 
-新 normalization builder 默认使用完整 replay buffer：
+所有 `limits/gaussian` statistics 默认来自完整 replay buffer：
 
 ```text
 all dataset episodes
     -> min / max / mean / std
 ```
 
-`train_mask`、`val_mask` 和 `max_train_episodes` **不参与默认 normalization statistics**。
+以下字段**不改变**默认 normalization statistics 范围：
+
+```text
+train_mask
+val_mask
+val_ratio
+max_train_episodes
+```
 
 理由：
 
-1. 保持 Diffusion Policy / DP3 family 官方和社区常见行为；
-2. 保持本次重构前后的数值 recipe 尽可能一致；
-3. 避免一次架构重构同时改变 baseline 的 normalization protocol；
-4. `max_train_episodes` 在当前代码中主要控制训练采样量，不把剩余 demo 视作严格 unseen test set。
+1. 与 Diffusion Policy / DP3 family 官方实现和社区常见实践一致；
+2. 保持 DP3 / ManiFlow / R3D 等 baseline 重构前后 numerical recipe 不变；
+3. 避免一次架构清理同时引入新的 data-efficiency protocol。
 
-### 5.2 本任务不新增 train-only scope
+### 5.2 本任务不实现 train-only scope
 
-本任务不增加：
+不增加：
 
 ```yaml
 normalization:
   scope: train
 ```
 
-未来若开展严格 data-efficiency / held-out-distribution 实验，再作为独立研究 protocol 增加 `full | train` scope，并做单变量 ablation。
+未来如研究严格 data-efficiency 或 held-out distribution，再独立增加 `full | train` scope 并作为实验变量验证。
 
 ---
 
 ## 6. Dataset Normalization Data API
 
-### 6.1 BaseDataset
+### 6.1 删除 Dataset-side normalization policy
 
-新增统一接口：
+本任务完成后删除：
+
+```text
+BaseDataset.get_normalizer()
+PCDataset.get_normalizer()
+MultiTaskDataset.get_normalizer()
+BaseDataset._get_normalizer_data()
+MultiTaskDataset._compute_shared_normalizer()
+MultiTaskDataset.normalizer / normalizers ownership
+```
+
+Dataset 不再构建或保存 normalizer。
+
+### 6.2 BaseDataset 新增统一数据接口
+
+新增：
 
 ```python
 def iter_normalization_data(self, key: str):
@@ -358,44 +419,51 @@ def iter_normalization_data(self, key: str):
 
 第一版语义：
 
-- 单任务 dataset 通常只 yield **一个完整 replay-buffer array**；
-- 不按 episode 遍历，不应用 `train_mask`；
-- `joint_state` / generic numeric observation field 直接返回完整 array；
-- `action` 必须返回与训练 sample 相同的 effective action representation。
+- 单任务 dataset 通常只 yield 一个完整 replay-buffer array；
+- 不按 episode 切分；
+- 不应用 `train_mask`；
+- generic numeric observation field 直接 yield `replay_buffer[key]`；
+- `action` yield 与训练 target 完全一致的 effective action representation。
 
-示意：
-
-```python
-def iter_normalization_data(self, key):
-    if key == "action":
-        yield self._get_effective_action_data()
-        return
-
-    if key in self.replay_buffer:
-        yield self.replay_buffer[key]
-        return
-
-    raise KeyError(...)
-```
-
-### 6.2 Effective action semantics
-
-统一抽出一个明确 helper，例如：
+推荐同时抽取：
 
 ```python
 def _get_effective_action_data(self):
     ...
 ```
 
-必须保持当前训练语义：
+### 6.3 Effective action semantics
 
-- `action_key == "action"`：joint action；
-- `action_key == "action_ee"`：EE action；
-- `use_aux_ee == true`：`joint action + action_ee[..., :9]` concat。
+必须保持当前行为：
 
-不能只机械读取 `replay_buffer[action_key]` 而遗漏 auxiliary target。
+```text
+action_key == action
+    -> joint action
 
-### 6.3 MultiTaskDataset
+action_key == action_ee
+    -> EE action
+
+use_aux_ee == true
+    -> joint action + action_ee[..., :9]
+```
+
+`auto` action normalization 规则：
+
+- `action_key == "action_ee"`：继续使用 `build_mixed_action_normalizer()`；
+- 其他 action representation：对 effective action 使用 `limits`；
+- `use_aux_ee=true` 的 concat action 继续按现有 limits 语义处理。
+
+### 6.4 MultiTaskDataset
+
+`MultiTaskDataset` 不再拥有：
+
+```text
+normalizer_mode
+normalizer
+normalizers
+```
+
+当前标准 MultiTask 只支持 **shared normalization**。
 
 新增：
 
@@ -405,25 +473,18 @@ def iter_normalization_data(self, key):
         yield from dataset.iter_normalization_data(key)
 ```
 
-语义：
+要求：
 
-- `normalizer_mode="shared"`：builder 对所有 child dataset 的完整数据做 shared statistics；
-- `normalizer_mode="per_task"`：保持当前标准训练入口 `NotImplementedError`，本任务不扩展 per-task runtime；
-- child datasets 同名 field 的最后一维 shape 必须一致，否则 fail-fast。
-
-### 6.4 Legacy normalizer 构建改为 lazy
-
-当前 `MultiTaskDataset.__init__` eager 构建 normalizer。修改为：
-
-- 新 config 路径不在 Dataset constructor 内计算 normalizer；
-- legacy `get_normalizer()` 第一次被调用时再构建并 cache；
-- 保留 legacy API，避免旧 experiment config 失效。
+- builder 对所有 child dataset 的完整 field 数据构建 shared statistics；
+- 同名 feature 的最后一维 shape 必须一致，否则 fail-fast；
+- 从 `multitask_dit.yaml` 删除 `normalizer_mode`；
+- 本任务不实现 per-task normalization，未来确有需求时再设计 runtime routing。
 
 ---
 
 ## 7. LinearNormalizer 修改
 
-### 7.1 保留现有类和 state_dict key hierarchy
+### 7.1 保留现有类和 state_dict hierarchy
 
 继续使用：
 
@@ -434,9 +495,9 @@ normalizer.params_dict.<field>.scale
 normalizer.params_dict.<field>.offset
 ```
 
-本任务禁止迁移到新的 module tree，以保持已有 checkpoint key 路径。
+不创建新的 module tree，以保持代码简单并让 checkpoint 中 fitted statistics 仍归 Agent 所有。
 
-### 7.2 新增 per-field fitting
+### 7.2 新增 per-field fit
 
 新增：
 
@@ -451,11 +512,11 @@ LinearNormalizer.fit_field(
 )
 ```
 
-该方法复用现有 `fit_params()`，只拟合一个 feature。
+直接复用现有 `fit_params()`。
 
-### 7.3 新增 chunk fitting，仅用于多 dataset / 大 field 聚合
+### 7.3 新增 chunk fit
 
-新增轻量：
+新增：
 
 ```python
 LinearNormalizer.fit_field_chunks(
@@ -468,53 +529,61 @@ LinearNormalizer.fit_field_chunks(
 )
 ```
 
-用途：
+只用于：
 
-- MultiTask shared normalization；
-- 未来大规模 tactile / point-cloud 多 dataset 聚合；
-- 避免先 `np.concatenate` 超大 observation arrays。
+```text
+MultiTask shared normalization
+未来多 dataset point cloud / tactile 聚合
+```
 
-实现要求：
+要求：
 
+- 不先 concatenate 巨大 observation arrays；
 - streaming 合并 `count/min/max/mean/variance`；
-- 使用稳定的 parallel/Welford merge；
-- 最终 `scale/offset` 与现有 `fit_params()` 语义一致；
-- `limits` near-constant dimension 行为保持当前实现；
-- `gaussian` 保持当前 z-score semantics；
-- 与一次性 concatenate + fit 在合理 tolerance 内一致。
+- 使用稳定的 Welford/parallel variance merge；
+- `limits` near-constant behavior 与当前 `fit_params()` 一致；
+- `gaussian` semantics 与当前实现一致；
+- 与 concatenate + existing fit 在合理 tolerance 内一致。
 
-对单任务 dataset，不应为了形式统一而逐 episode streaming；直接一个完整 array 即可。
+单任务 dataset 不做逐 episode streaming，直接用完整 array。
 
-### 7.4 Identity 为零开销 passthrough
+### 7.4 Identity = 零开销 passthrough
 
-`identity` 不创建：
+对于：
+
+```yaml
+rgb: identity
+point_cloud: identity
+```
+
+不创建：
 
 ```text
 params_dict[field]
 ```
 
-直接依赖现有：
+利用现有：
 
 ```python
 if key not in self.params_dict:
     result[key] = value
 ```
 
-必须保证：
+因此 identity 必须保持：
 
 ```text
-0 additional normalization kernel
+0 normalization kernel
 0 scale/offset state
-0 forced dtype conversion
+0 dtype conversion
 ```
 
 尤其不能破坏 RGB uint8 fast path。
 
 ---
 
-## 8. Normalizer Builder
+## 8. 统一 Normalizer Builder
 
-在 `training/build_utils.py` 或一个小型共享 helper 中实现：
+在 `training/build_utils.py` 或一个轻量共享 helper 中增加：
 
 ```python
 resolve_normalization_spec(cfg)
@@ -524,131 +593,151 @@ attach_normalization_spec(model, cfg)
 
 ### 8.1 build_dataset_and_normalizer
 
-目标：
+改为唯一标准路径：
 
 ```python
 dataset = hydra.utils.instantiate(cfg.dataset)
-
-if "normalization" not in cfg:
-    # legacy experiment
-    normalizer = dataset.get_normalizer()
-    return dataset, normalizer
-
-spec = resolve_normalization_spec(cfg)
-normalizer = build_normalizer(dataset, spec, cfg.action_key)
+spec = resolve_normalization_spec(cfg.normalization)
+normalizer = build_normalizer(
+    dataset=dataset,
+    spec=spec,
+    action_key=cfg.action_key,
+)
 return dataset, normalizer
 ```
 
-### 8.2 build_normalizer
+不存在 fallback。
+
+### 8.2 build_normalizer 规则
 
 伪代码：
 
 ```python
-def build_normalizer(dataset, spec, action_key):
-    normalizer = LinearNormalizer()
+normalizer = LinearNormalizer()
 
-    for key, mode in spec.items():
-        if mode == "identity":
-            continue
+for key, mode in spec.items():
+    if mode == "identity":
+        continue
 
-        chunks = dataset.iter_normalization_data(key)
+    if key == "action" and mode == "auto":
+        action = collect_small_feature(
+            dataset.iter_normalization_data("action")
+        )
+        if action_key == "action_ee":
+            normalizer["action"] = build_mixed_action_normalizer(action)
+        else:
+            normalizer.fit_field("action", action, mode="limits")
+        continue
 
-        if key == "action" and mode == "auto":
-            action = collect_small_field(chunks)
-            if action_key == "action_ee":
-                normalizer["action"] = build_mixed_action_normalizer(action)
-            else:
-                normalizer.fit_field("action", action, mode="limits")
-            continue
-
-        normalizer.fit_field_chunks(key, chunks, mode=mode)
-
-    return normalizer
+    chunks = dataset.iter_normalization_data(key)
+    normalizer.fit_field_chunks(key, chunks, mode=mode)
 ```
 
-`action` 维度小，可以 concatenate；point cloud/tactile 等大 field 使用 chunk fit。
+实现可对单 chunk 做 fast path：直接 `fit_field()`，避免额外 streaming overhead。
 
-### 8.3 Config validation
+### 8.3 normalization spec 绑定到 model/EMA
 
-增加 fail-fast：
+`build_model_and_ema()` 在构造 model 后统一：
 
-- mode 仅允许 `identity/limits/gaussian/auto`；
-- `auto` 仅允许 `action`；
-- `action` 必须存在且最终拥有 normalizer params；
-- normalization spec 中未知 numeric field 应在 dataset build 时明确报错；
-- MultiTask shared field shape 不一致时报错。
+```python
+model.normalization_spec = normalized_plain_spec
+```
+
+EMA model 同样设置相同 spec。
+
+该 spec 是 semantic metadata，不是 trainable state。
 
 ---
 
 ## 9. BaseAgent 修改
 
-### 9.1 删除 generic point-cloud clamp
+### 9.1 删除 global point-cloud clamp
 
-删除 `BaseAgent.preprocess()` 中：
+删除：
 
 ```python
 if "point_cloud" in obs:
     obs["point_cloud"] = torch.clamp(...)
 ```
 
-BaseAgent 不应该知道 Uni3D 的坐标范围要求。
+`BaseAgent` 不再知道 Uni3D 的输入范围要求。
 
-### 9.2 Modality dropout 与 normalization 解耦
-
-由：
-
-```python
-if self.training and p > 0 and k in self.normalizer.params_dict:
-```
+### 9.2 modality dropout 与 normalizer 解耦
 
 改为：
 
 ```python
 if self.training and p > 0:
+    mask = ...
+    v = v * ...
 ```
 
-并删除“没有 normalizer params 所以 dropout 无效”的 warning。
-
-Normalization ownership 和 modality dropout 是两个独立机制。
-
-### 9.3 normalization_spec
-
-BaseAgent 增加简单 metadata attribute：
+不能依赖：
 
 ```python
-self.normalization_spec = None
+key in self.normalizer.params_dict
 ```
 
-由 training/eval/deployment builder attach；不作为 constructor 参数，避免修改全部 Agent signature。
+删除对应“没有 normalizer params 因而 dropout 无效”的 warning。
+
+### 9.3 Normalization state validation
+
+增加轻量 helper，例如：
+
+```python
+validate_normalizer_state(normalizer, normalization_spec)
+```
+
+规则：
+
+- `identity` field：允许/要求没有 params entry；
+- `limits/gaussian` field：必须存在 params entry；
+- `action:auto`：必须最终存在 `action` params；
+- scale/offset 必须 finite；
+- loaded checkpoint 与 spec 不一致时 fail-fast。
+
+Training build、eval restore、deployment restore 复用同一 validator。
 
 ---
 
-## 10. R3D / Uni3D 修改
+## 10. R3D-specific 修复
 
-R3D 保持：
+R3D 继续：
 
 ```yaml
 point_cloud: limits
 ```
 
-在 `R3DObsEncoder` 或 `Uni3DPointcloudEncoder` 的明确 input boundary 对 XYZ 做 defensive clamp：
+但 clamp 从 `BaseAgent` 移到 `R3DObsEncoder` 输入边界。
+
+推荐：
 
 ```python
-xyz = pc[..., :3].clamp(-1 - 1e-6, 1 + 1e-6)
+pc = obs["point_cloud"]
+if pc.dtype != torch.float32:
+    pc = pc.float()
+
+pc = pc.clone()
+pc[..., :3].clamp_(
+    min=-1 - 1e-6,
+    max=1 + 1e-6,
+)
+
+patch_tokens, pc_pe = self.pc_encoder(...)
 ```
 
 要求：
 
 - 只 clamp XYZ；
 - RGB 不 clamp；
-- 不影响其他 point-cloud policy；
-- 保持 `PositionEmbeddingRandom` 的 fail-fast range check。
+- clamp 发生在 Uni3D 的 FPS/KNN/PE 之前；
+- 其他 point-cloud Policy 不受该逻辑影响。
 
 ---
 
-## 11. SAT 修改
+## 11. SAT-specific 修复
 
-SAT 新 config：
+SAT config 改为：
 
 ```yaml
 normalization:
@@ -657,108 +746,150 @@ normalization:
   point_cloud: identity
 ```
 
-目标数据流：
+结果：
 
 ```text
-canonical metric XYZRGB
-    -> generic normalizer identity
-    -> PointNeXT FPS
-    -> radius 0.05 / 0.10 neighborhoods
+raw metric XYZ
+  -> generic normalizer identity
+  -> PointNeXT FPS
+  -> patch radius 0.05 / 0.10
 ```
 
-新 SAT 必须重新训练。
+必须验证：
 
-旧 SAT experiment 使用旧 resolved config（无 `normalization:`）时继续走 legacy `PCDataset.get_normalizer()`，保持旧 limits semantics，避免旧 checkpoint 被新语义误加载。
+- `normalizer.params_dict` 不包含 `point_cloud`；
+- point cloud 经过 BaseAgent generic preprocessing 后数值不变；
+- XYZ pairwise distance 不变；
+- PointNeXT fixed-radius neighborhood 在 metric coordinate 上执行。
+
+SAT 按新 contract 重新训练；不考虑旧 SAT checkpoint。
 
 ---
 
-## 12. Legacy Compatibility
+## 12. RGB / Tactile / Future 3D Contract
 
-### 12.1 旧 resolved config
+### 12.1 RGB
 
-若：
-
-```python
-"normalization" not in cfg
+```yaml
+rgb: identity
 ```
 
-则：
+Generic normalizer 不处理 RGB。
+
+现有路径保持：
 
 ```text
-继续调用 dataset.get_normalizer()
-model.normalization_spec = None
-不向 agent contract 添加 normalization 字段
+Dataset CPU resize/crop/augmentation
+-> uint8 or [0,1]
+-> vision encoder processor
+-> backbone-specific normalization
 ```
 
-目标：
+不得因为统一 normalization 而破坏现有 RGB uint8 fast path。
 
-- 旧实验目录无需修改 `config.yaml`；
-- 旧 DP/DP3/ManiFlow/R3D/DQ-RISE/SAT checkpoint 仍按旧语义恢复；
-- `load_state_dict(strict=True)` 保持可用。
+### 12.2 Numeric tactile
 
-### 12.2 新 config
+例如：
 
-显式存在 `normalization:` 时：
+```yaml
+tactile_force: gaussian
+```
+
+由 generic normalizer 拟合 full-dataset mean/std。
+
+### 12.3 Image tactile
+
+例如 GelSight：
+
+```yaml
+tactile_rgb: identity
+```
+
+resize/crop/backbone normalization 留给 tactile encoder。
+
+### 12.4 PointACT
+
+```yaml
+point_cloud: identity
+```
+
+其：
 
 ```text
-走新 builder
-使用 full-dataset statistics
-启用 versioned normalization semantic contract
+voxel
+centroid shift
+RGB fixed transform
+与 absolute state/action 的坐标同步变换
 ```
 
-### 12.3 Legacy Dataset API
+属于 PointACT-specific preprocessing，不进入 generic normalizer。
 
-本任务保留：
+### 12.5 Any3D-VLA / Concerto
 
-```python
-BaseDataset.get_normalizer()
-PCDataset.get_normalizer()
-MultiTaskDataset.get_normalizer()
+```yaml
+point_cloud: identity
 ```
 
-仅用于 legacy path。
+其：
 
-本任务不做删除 API 的 cleanup，以降低迁移风险。
+```text
+CenterShift
+GridSample
+NormalizeColor
+normal / grid_coord construction
+```
+
+属于 Any3D/Concerto encoder contract。
 
 ---
 
-## 13. Checkpoint / EMA / Resume Contract
+## 13. Checkpoint Contract
 
 ### 13.1 `simple.v3` 顶层格式不变
 
 继续：
 
 ```text
-state
-weights
-  ├─ model
-  ├─ ema_model
-  ├─ optimizer
-  └─ scheduler
+checkpoint
+├─ state
+│  ├─ epoch
+│  ├─ global_step
+│  ├─ resume_contract
+│  └─ ...
+└─ weights
+   ├─ model
+   ├─ ema_model
+   ├─ optimizer
+   └─ scheduler
 ```
 
-不新增：
+不增加：
 
 ```text
 normalizer.pt
 stats.json
 processor.json
+pointcloud_stats.npz
 ```
 
-### 13.2 Normalizer state 继续属于 Agent
+### 13.2 Fitted statistics 仍属于 model state
 
-`scale/offset` 继续存在：
+例如：
 
 ```text
-model.normalizer.params_dict.<field>.scale
-model.normalizer.params_dict.<field>.offset
+normalizer.params_dict.joint_state.scale
+normalizer.params_dict.joint_state.offset
+normalizer.params_dict.action.scale
+normalizer.params_dict.action.offset
+normalizer.params_dict.point_cloud.scale
+normalizer.params_dict.point_cloud.offset
 ```
 
-EMA model 同样携带。
+`identity` field 无 state entry。
 
-### 13.3 normalization semantic contract
+### 13.3 Semantic contract 加入 agent contract
 
-对**新 config**，`build_agent_contract(model)` 增加：
+`build_agent_contract(model)` 增加：
 
 ```python
 "normalization": {
@@ -767,200 +898,254 @@ EMA model 同样携带。
 }
 ```
 
-例如 SAT：
+contract 保存**类型和语义**，不保存 min/max/mean/std 数值。
 
-```json
-{
-  "version": 1,
-  "fields": {
-    "joint_state": "limits",
-    "action": "auto",
-    "point_cloud": "identity"
-  }
-}
+实际 statistics 只存在 `model.state_dict()`。
+
+### 13.4 不做旧 checkpoint migration
+
+本任务不支持：
+
+```text
+旧 config
+旧 checkpoint
+旧 resume contract
 ```
 
-注意：
-
-- contract 只保存 mode / version；
-- 不保存 min/max/mean/std/scale/offset；
-- 数值 state 只来自 model checkpoint。
-
-旧 model `normalization_spec=None` 时不增加该 contract key，以兼容旧 checkpoint。
+新代码只保证新 normalization contract 产生的实验内部 train/resume/eval/deployment 一致。
 
 ---
 
-## 14. Eval / Inference / Deployment
+## 14. Training / DDP / EMA
 
-### 14.1 Evaluation
+### 14.1 Training
 
-`build_eval_components()` 在 instantiate agent 后：
+训练构建顺序：
+
+```text
+resolve config
+-> validate normalization spec
+-> build dataset
+-> build normalizer from full dataset
+-> instantiate Agent
+-> load normalizer state into Agent
+-> attach normalization_spec
+-> build EMA copy
+-> optimizer / scheduler
+```
+
+### 14.2 DDP
+
+保持现有 normalizer broadcast 机制，但必须验证：
+
+- rank 0 构建的 normalizer state 完整广播；
+- identity field 不要求不存在的 params；
+- 各 rank normalization_spec 完全一致；
+- DP / DP3 / SAT 至少各做一个 targeted DDP/static contract test（有环境时）。
+
+### 14.3 EMA
+
+EMA model：
+
+```text
+normalizer state = main model 初始化时完整复制
+normalization_spec = main model 相同 semantic metadata
+```
+
+Normalizer params 非 trainable，不做 EMA average；继续保持固定 state。
+
+---
+
+## 15. Eval / Inference
+
+### 15.1 Eval build
+
+`build_eval_components()` 在实例化 agent 后必须从 resolved config 设置：
 
 ```python
-attach_normalization_spec(agent, cfg)
+agent.normalization_spec = resolve_normalization_spec(cfg.normalization)
 ```
 
-加载顺序：
+然后在 checkpoint load 前校验 agent contract。
+
+### 15.2 Inference restore
+
+流程：
 
 ```text
-instantiate agent
--> attach semantic spec
--> validate checkpoint agent contract
--> load_state_dict(strict=True)
--> normalizer scale/offset restored
--> inference
-```
-
-评测不得重新构建 dataset normalizer。
-
-### 14.2 Training Resume
-
-新实验 resume contract 已包含 normalization semantics，因此 mode 改变必须在 load weights 前 fail-fast。
-
-旧 experiment 因 config 无 normalization 字段，继续生成旧式 contract。
-
-### 14.3 Deployment artifact
-
-Deployment 需要同时保证两件事：
-
-1. model weights 中包含实际 normalizer state；
-2. deployment inference semantic contract 中包含 normalization version/mapping（新实验）。
-
-Exporter 构建 inference config / deployment contract 时应从 resolved experiment config 或 checkpoint agent contract 携带该 mapping。
-
-Restore：
-
-```text
-instantiate agent
--> attach normalization semantic spec
+resolved experiment config
+-> instantiate Agent
+-> attach normalization_spec
+-> load checkpoint
 -> validate contract
--> strict-load selected model/EMA state
--> raw real observation uses checkpoint normalizer
+-> strict load model / EMA state
+-> validate normalizer state
+-> raw env obs
+-> Agent.normalizer.normalize(obs)
+-> ObsEncoder preprocess
+-> Policy
+-> normalizer["action"].unnormalize(pred)
 ```
 
-部署运行时绝不能访问训练 Zarr 来重算 statistics。
+**Inference 不读取 training dataset。**
 
 ---
 
-## 15. RGB / Tactile / Future 3D Extension Rules
+## 16. Deployment Artifact
 
-### 15.1 RGB
+当前 deployment inference config 主要携带 agent config，而 `normalization` 为顶层 experiment config，因此必须显式传播。
 
-通常：
-
-```yaml
-rgb: identity
-```
-
-Generic normalizer 必须保持 uint8/float 输入原样。
-
-`/255`、resize/crop、ImageNet mean/std、DINO/SigLIP/Qwen-VL processor 等属于 RGB encoder contract。
-
-### 15.2 Numeric tactile / force-torque
-
-优先根据模型设计使用：
+Deployment inference contract 增加：
 
 ```yaml
-tactile_force: gaussian
+normalization:
+  version: 1
+  fields:
+    joint_state: limits
+    action: auto
+    point_cloud: identity
 ```
 
-或 `limits`。
+要求：
 
-### 15.3 Tactile image
-
-GelSight / DIGIT 等：
-
-```yaml
-tactile_rgb: identity
-```
-
-后续图像处理属于 tactile encoder。
-
-### 15.4 PointACT
-
-```yaml
-point_cloud: identity
-```
-
-其 voxel、centroid shift、RGB fixed mapping，以及与 absolute EEF state/action 的 coordinate-frame 同步由 PointACT-specific processor/encoder 处理。
-
-### 15.5 Any3D-VLA / Concerto
-
-```yaml
-point_cloud: identity
-```
-
-CenterShift / GridSample / NormalizeColor / normals / camera-patch association 属于 Any3D/Concerto input pipeline。
+1. export 从 resolved experiment config 读取 normalization spec；
+2. artifact contract 保存 normalization semantic contract；
+3. restore 实例化 Agent 后将 spec 设置到 `agent.normalization_spec`；
+4. fitted `scale/offset` 仍只从 artifact model/EMA weights 恢复；
+5. restore 后调用统一 `validate_normalizer_state()`；
+6. deployment runtime 不依赖 training Zarr 计算 normalization statistics。
 
 ---
 
-## 16. 文件级修改清单
+## 17. MultiTask 规则
+
+当前 MultiTask 只支持 shared normalizer。
+
+`multitask_dit.yaml` 删除：
+
+```yaml
+normalizer_mode: shared
+```
+
+统一由顶层：
+
+```yaml
+normalization:
+  joint_state: limits
+  action: auto
+  rgb: identity
+```
+
+控制。
+
+Shared statistics 来源：
+
+```text
+child dataset 1 full replay buffer
++ child dataset 2 full replay buffer
++ ...
+-> shared statistics
+```
+
+本任务不实现 per-task normalization routing。
+
+---
+
+## 18. 文件级修改清单
 
 ### 必改
 
-1. `dexmani_policy/common/normalizer.py`
-   - `fit_field()`；
-   - `fit_field_chunks()`；
-   - 保持原 state_dict hierarchy。
+#### `dexmani_policy/common/normalizer.py`
 
-2. `dexmani_policy/datasets/base_dataset.py`
-   - `_get_effective_action_data()`；
-   - `iter_normalization_data(key)`，默认 full replay buffer；
-   - 保留 legacy `get_normalizer()`。
+- 新增 `fit_field()`；
+- 新增 `fit_field_chunks()`；
+- 保持现有 `params_dict` state_dict hierarchy；
+- 保持 identity passthrough；
+- 增加 normalization-state validation helper（也可放 build/checkpoint util，但只保留一份实现）。
 
-3. `dexmani_policy/datasets/pc_dataset.py`
-   - 保留 legacy `get_normalizer()`；
-   - 新 config 标准路径不再依赖该方法。
+#### `dexmani_policy/datasets/base_dataset.py`
 
-4. `dexmani_policy/datasets/multi_task_dataset.py`
-   - `iter_normalization_data(key)`；
-   - legacy normalizer 改 lazy construction/cache；
-   - 新 shared path 由统一 builder 构建。
+- 删除 Dataset-side `get_normalizer()`；
+- 删除 `_get_normalizer_data()`；
+- 新增 `_get_effective_action_data()`；
+- 新增 `iter_normalization_data(key)`。
 
-5. `dexmani_policy/training/build_utils.py`
-   - normalization spec resolve / validation；
-   - new normalizer builder；
-   - attach spec to model/EMA。
+#### `dexmani_policy/datasets/pc_dataset.py`
 
-6. `dexmani_policy/agents/core/base.py`
-   - 删除 generic PC clamp；
-   - modality dropout 与 normalizer params 解耦；
-   - `normalization_spec` metadata。
+- 删除 `get_normalizer()`；
+- 保留数据加载/augmentation职责。
 
-7. `dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py` 或 `uni3d.py`
-   - R3D-only XYZ clamp。
+#### `dexmani_policy/datasets/multi_task_dataset.py`
 
-8. `dexmani_policy/common/checkpoint_io.py`
-   - 新实验 agent contract 增加 normalization version/mapping。
+- 删除 `normalizer_mode`；
+- 删除 normalizer/normalizers ownership；
+- 删除 `_compute_shared_normalizer()` / `get_normalizer()`；
+- 新增 `iter_normalization_data(key)`。
 
-9. `dexmani_policy/training/eval_utils.py`
-   - eval instantiate 后 attach normalization spec。
+#### `dexmani_policy/training/build_utils.py`
 
-10. deployment export / qualify / restore 相关文件
-   - 新实验携带并验证 normalization semantic contract；
-   - 不改变实际 normalizer state ownership。
+- 新增/复用 normalization spec resolver；
+- 新增统一 `build_normalizer()`；
+- `build_dataset_and_normalizer()` 只走新路径；
+- build model/EMA 时绑定相同 normalization spec；
+- config validation 强制 `normalization:`。
 
-11. 当前所有 base Policy YAML
-   - 增加顶层 `normalization:`；
-   - SAT point cloud 改 `identity`。
+#### `dexmani_policy/agents/core/base.py`
 
-### 不做
+- 删除 global point-cloud clamp；
+- modality dropout 与 normalizer params 解耦；
+- 删除 obsolete warning。
 
-- 不改 `simple.v3` checkpoint root schema；
-- 不新增 standalone processor artifact；
-- 不引入 train-only statistics；
-- 不重写 ReplayBuffer；
-- 不实现 PointACT / Any3D 本体；
-- 不新增 quantile/fixed-affine，除非后续有明确需求；
-- 不删除 legacy `get_normalizer()` API。
+#### `dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py`
+
+- 增加 R3D-only XYZ clamp。
+
+#### `dexmani_policy/common/checkpoint_io.py`
+
+- `build_agent_contract()` 增加 versioned normalization contract。
+
+#### `dexmani_policy/training/eval_utils.py`
+
+- eval agent 实例化后绑定 normalization spec；
+- load 后验证 normalizer state。
+
+#### `dexmani_policy/deployment/export.py`
+
+- deployment inference contract 显式携带 normalization spec。
+
+#### `dexmani_policy/deployment/restore.py`
+
+- restore agent 后绑定 normalization spec；
+- strict weight load 后验证 normalizer state。
+
+#### 当前所有 base config
+
+- `dp.yaml`
+- `dp3.yaml`
+- `dqrise.yaml`
+- `maniflow.yaml`
+- `r3d.yaml`
+- `sat.yaml`
+- `multitask_dit.yaml`
+
+全部加入显式 `normalization:`。
+
+### 需要同步检查
+
+- `train.py`
+- `train_ddp.py`
+- `training/resume.py`
+- `smoke_test.py`
+- deployment qualify/export/restore tests
+- 所有直接调用 `dataset.get_normalizer()` 或依赖 `normalizer_mode` 的代码
 
 ---
 
-## 17. Validation Plan
+## 19. Validation Matrix
 
-### 17.1 Config-only
+### 19.1 Config-only
 
-对全部 current policy：
+所有当前 config：
 
 ```bash
 python dexmani_policy/smoke_test.py --config-only dp
@@ -972,123 +1157,205 @@ python dexmani_policy/smoke_test.py --config-only sat
 python dexmani_policy/smoke_test.py --config-only multitask_dit
 ```
 
-### 17.2 Numerical parity
+要求：
+
+- normalization spec resolve 正确；
+- 缺字段/非法 mode fail-fast；
+- Hydra targets 正常。
+
+### 19.2 Full-dataset numerical parity
 
 对 DP3 / DQ-RISE / ManiFlow / R3D：
 
-- 新 builder 的 full-dataset `limits` scale/offset 与旧 `dataset.get_normalizer()` 一致；
-- tolerance 内数值等价；
-- action/action_ee/use_aux_ee 行为一致。
-
-### 17.3 Identity zero-cost
-
-验证：
-
-- DP RGB identity 后 dtype/range 不被 generic normalizer 改变；
-- SAT `point_cloud` 不存在 `normalizer.params_dict.point_cloud.*`；
-- SAT normalization 前后 XYZ pairwise distances 一致。
-
-### 17.4 R3D clamp isolation
-
-验证：
-
-- only R3D/Uni3D path clamp XYZ；
-- RGB 不 clamp；
-- SAT/DP3/ManiFlow/DQ-RISE 不执行该 clamp；
-- `PositionEmbeddingRandom` contract 仍满足。
-
-### 17.5 MultiTask
-
-验证：
-
-- shared stats 来自所有 child datasets 的完整 normalization data；
-- 与当前 full-array shared normalizer 在 state/action 上数值一致；
-- constructor 不为新 config eager 构建 legacy normalizer。
-
-### 17.6 Checkpoint round-trip
-
-对 representative DP、DP3、SAT、R3D：
-
 ```text
-build -> fit normalizer -> state_dict
--> fresh agent -> strict load
--> normalization output equal
--> prediction path runnable
+新 limits scale/offset
+≈
+重构前完整 replay-buffer limits scale/offset
 ```
 
-EMA 同样验证。
+允许合理浮点误差。
 
-### 17.7 Legacy compatibility
+### 19.3 Identity correctness
 
-使用至少一个旧 experiment config/checkpoint 验证：
-
-- 无 `normalization:` 时走 legacy path；
-- agent contract 不出现新增 normalization key；
-- `strict=True` 正常加载；
-- 旧 SAT 仍保持旧 limits semantics。
-
-### 17.8 Deployment
-
-至少完成静态/round-trip 验证：
-
-- deployment artifact 包含新 normalization semantic contract；
-- restore 不访问 training Zarr 计算 stats；
-- state_dict 恢复后 required `action` normalizer 存在；
-- identity observation field 不要求 params。
-
----
-
-## 18. Definition of Done
-
-全部满足后任务完成：
-
-1. 新 config 的 normalization mode 由顶层 `normalization:` 唯一声明。
-2. 默认 statistics 明确使用 full dataset / full replay buffer。
-3. DP3 / DQ-RISE / ManiFlow / R3D full-dataset limits 与旧实现数值等价。
-4. SAT point cloud 改为 identity，并重新训练新实验。
-5. BaseAgent 不再含通用 point-cloud clamp。
-6. R3D clamp 仅作用 XYZ 且局部化。
-7. Identity modality 仍可 modality dropout。
-8. MultiTask shared normalization 走统一 builder，不形成双轨逻辑。
-9. `simple.v3` 顶层 checkpoint schema 不变。
-10. Normalizer statistics 继续由 model/EMA state_dict 保存。
-11. 新实验 resume/eval/deployment 对 normalization semantic mismatch fail-fast。
-12. 旧 resolved config + checkpoint 仍可走 legacy path。
-13. RGB uint8 fast path不受影响。
-14. 未来 tactile / PointACT / Any3D-VLA 不需要再次修改 Dataset -> Normalizer -> Checkpoint 主干。
-
----
-
-## 19. 实施顺序
-
-建议严格按以下顺序实施，降低回归定位成本：
+DP RGB：
 
 ```text
-P0  normalizer per-field API + tests
- ↓
-P1  BaseDataset / MultiTask normalization-data API
- ↓
-P2  unified builder + config validation + current YAML
- ↓
-P3  BaseAgent dropout 解耦 + 删除 global clamp
- ↓
-P4  R3D XYZ clamp localize + SAT identity
- ↓
-P5  resume/eval/deployment normalization contract
- ↓
-P6  legacy checkpoint + full smoke regression
+dtype unchanged
+value unchanged
+uint8 fast path preserved
 ```
 
-每一步均应先完成 targeted unit/static test，再进入下一步；不在本任务中顺带进行无关架构重构。
+SAT point cloud：
+
+```text
+value unchanged
+XYZ pairwise distance unchanged
+normalizer.params_dict has no point_cloud entry
+```
+
+### 19.4 R3D clamp
+
+验证：
+
+```text
+only XYZ clamped
+RGB unchanged by clamp
+Uni3D PE bounds valid
+other PC policies not clamped
+```
+
+### 19.5 Modality dropout
+
+构造 identity point cloud / RGB 且 `p=1.0`：
+
+```text
+training -> dropped
+inference -> not dropped
+```
+
+与 normalizer params presence 无关。
+
+### 19.6 MultiTask
+
+验证 shared stats 等价于：
+
+```text
+concat(all child full datasets) -> existing fit
+```
+
+并验证 shape mismatch fail-fast。
+
+### 19.7 Checkpoint roundtrip
+
+新训练产生的 checkpoint：
+
+```text
+save
+-> fresh Agent
+-> attach same normalization spec
+-> strict load
+-> validate normalizer state
+```
+
+验证 model 与 EMA。
+
+### 19.8 Resume contract mismatch
+
+人工改：
+
+```text
+point_cloud: limits
+```
+
+为：
+
+```text
+point_cloud: identity
+```
+
+加载 checkpoint 必须在 rollout 前 fail-fast。
+
+### 19.9 Inference without Dataset
+
+只提供：
+
+```text
+resolved config + checkpoint
+```
+
+必须完成：
+
+```text
+Agent construction
+normalizer restore
+observation normalization
+predict_action
+Action unnormalize
+```
+
+不得访问 training dataset statistics。
+
+### 19.10 Deployment
+
+验证：
+
+```text
+export
+-> artifact contract carries normalization spec
+-> restore
+-> strict weight load
+-> normalizer validation
+-> prediction verification
+```
 
 ---
 
-## 20. 最终工程约束
+## 20. Definition of Done
 
-后续任何新模态/新策略都按三个问题归类：
+全部满足才完成：
 
-1. **Canonical data 是什么？** —— Dataset contract。
-2. **需要什么 statistical normalization？** —— `normalization:` + `LinearNormalizer`。
-3. **还需要什么结构/几何/预训练 backbone preprocessing？** —— Encoder contract。
+- [ ] 所有当前 config 显式包含 `normalization:`。
+- [ ] config 缺少 normalization 时 fail-fast，不存在 fallback。
+- [ ] Dataset 不再决定 normalization mode，也不持有 normalizer。
+- [ ] MultiTask 不再有 `normalizer_mode` 或 per-task normalizer ownership。
+- [ ] `LinearNormalizer` 支持 per-field fit 与 chunk fit。
+- [ ] 默认 statistics 来自完整 replay buffer / full dataset。
+- [ ] DP / DP3 / DQ-RISE / ManiFlow / R3D baseline normalization recipe 保持一致。
+- [ ] SAT point cloud 改为 identity，并重新训练。
+- [ ] BaseAgent 不再全局 clamp point cloud。
+- [ ] R3D 仅在自身 encoder boundary clamp XYZ。
+- [ ] modality dropout 支持 identity modality。
+- [ ] RGB uint8 fast path 不受 generic normalizer 影响。
+- [ ] checkpoint `simple.v3` 顶层格式不变。
+- [ ] fitted stats 只保存在 model/EMA state，不新增 sidecar artifact。
+- [ ] normalization semantic contract 进入 train/eval/deployment contract。
+- [ ] inference/deployment 不依赖 training dataset 重算 statistics。
+- [ ] 不包含旧 config/checkpoint compatibility、migration 或 legacy 分支。
+- [ ] config-only smoke 全部通过。
+- [ ] 有环境时 representative full smoke 覆盖 DP、DP3、R3D、SAT、MultiTask。
 
-只要保持这三层分离，RGB、多摄像头、numeric tactile、GelSight、PointACT、Any3D-VLA、Concerto、PointTransformer 等后续扩展都不应再次修改 Dataset -> Normalizer -> Checkpoint 的主干架构。
+---
+
+## 21. 非目标
+
+本任务不做：
+
+```text
+旧 checkpoint migration
+legacy config compatibility
+train-only normalization scope
+PointACT 实现
+Any3D-VLA 实现
+tactile encoder 实现
+quantile normalization
+fixed-affine generic mode
+ReplayBuffer 重写
+完整 LeRobot ProcessorPipeline
+checkpoint simple.v3 schema 升级
+额外 sidecar normalization artifact
+```
+
+这些均应在有明确研究/工程需求时单独实施。
+
+---
+
+## 22. 最终工程规则
+
+后续新增任意模态或 3D policy，只回答三个问题：
+
+1. **Dataset 的 canonical representation 是什么？**
+2. **该 feature 需要何种 statistical normalization？**
+   - `identity / limits / gaussian / action:auto`
+3. **Encoder 还需要什么结构/几何/backbone-specific preprocessing？**
+
+只要保持：
+
+```text
+Dataset data contract
+        ≠
+Statistical normalization contract
+        ≠
+Encoder preprocessing contract
+```
+
+RGB、多摄像头、numeric tactile、GelSight、PointACT、Any3D-VLA、Concerto、PointTransformer 等后续扩展都不应再次修改 Dataset -> Normalizer -> Checkpoint 的主干架构。
