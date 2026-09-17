@@ -562,6 +562,97 @@ def build_mixed_action_normalizer(action_data, ee_dim=9):
     return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stats)
 
 
+ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
+NON_NUMERIC_OBSERVATION_FIELDS = frozenset({"task_text", "task_name"})
+
+
+def validate_normalization_spec(
+    spec: dict,
+    *,
+    observation_fields=None,
+) -> dict:
+    """Validate one feature-level normalization spec; return a canonical plain mapping.
+
+    This is the single shared grammar for ``normalization: {field: mode}`` used by
+    training config validation, the versioned checkpoint/deployment contract
+    parser (``parse_normalization_contract``), and checkpoint/config
+    reconciliation — so training and deployment can never diverge on normalization
+    semantics.
+
+    Rules:
+    - ``spec`` must be a plain mapping of non-empty string keys to string modes;
+    - mode must be one of ``identity | limits | gaussian | auto``;
+    - ``auto`` is only allowed for ``action``;
+    - ``joint_state`` and ``action`` must be explicitly declared;
+    - ``action`` must not be ``identity`` (``BaseAgent`` always calls
+      ``normalizer['action'].normalize/unnormalize``, which requires fitted params);
+    - ``rgb``, if present, must be ``identity`` (replay-buffer statistics are HWC
+      but the runtime tensor is CHW, so the generic affine normalizer's last-dim
+      feature assumption is wrong for RGB);
+    - non-numeric observation fields (``task_text``/``task_name``) must not appear.
+
+    If ``observation_fields`` (the numeric observation field names, excluding
+    ``action``) is given, this additionally enforces exact coverage:
+    ``set(spec) == set(observation_fields) | {"action"}`` — rejecting both a
+    missing numeric field and an extra/nonexistent one.
+    """
+    if type(spec) is not dict:
+        raise ValueError("normalization spec must be a plain mapping of field -> mode")
+
+    result: dict = {}
+    for key, mode in spec.items():
+        if type(key) is not str or not key:
+            raise ValueError(f"normalization keys must be non-empty strings, got {key!r}")
+        if key in NON_NUMERIC_OBSERVATION_FIELDS:
+            raise ValueError(
+                f"normalization must not declare non-numeric field {key!r} "
+                "(task_text/task_name are not statistically normalized)"
+            )
+        if type(mode) is not str:
+            raise ValueError(f"normalization.{key} mode must be a string, got {mode!r}")
+        if mode not in ALLOWED_NORMALIZATION_MODES:
+            raise ValueError(
+                f"normalization.{key} has invalid mode {mode!r}; "
+                f"expected one of {sorted(ALLOWED_NORMALIZATION_MODES)}"
+            )
+        if mode == "auto" and key != "action":
+            raise ValueError(
+                f"normalization mode 'auto' is only allowed for 'action', got '{key}'"
+            )
+        result[key] = mode
+
+    for required in ("joint_state", "action"):
+        if required not in result:
+            raise ValueError(
+                f"normalization must explicitly declare '{required}' (e.g. {required}: limits)"
+            )
+    if result["action"] == "identity":
+        raise ValueError(
+            "normalization.action must not be 'identity': BaseAgent always calls "
+            "normalizer['action'].normalize/unnormalize, which requires fitted params. "
+            "Use 'auto', 'limits', or 'gaussian'."
+        )
+    if "rgb" in result and result["rgb"] != "identity":
+        raise ValueError(
+            f"normalization.rgb must be 'identity' (got {result['rgb']!r}): replay-buffer "
+            "RGB statistics are HWC but the runtime tensor is CHW, so the generic affine "
+            "normalizer's last-dim feature assumption is wrong for RGB."
+        )
+
+    if observation_fields is not None:
+        expected = set(observation_fields) | {"action"}
+        actual = set(result)
+        missing = expected - actual
+        extra = actual - expected
+        if missing or extra:
+            raise ValueError(
+                "normalization fields must exactly match numeric observation fields + "
+                f"action: missing={sorted(missing)}, extra={sorted(extra)}"
+            )
+
+    return result
+
+
 def validate_normalizer_state(normalizer: "LinearNormalizer", normalization_spec: dict) -> None:
     """Validate fitted normalizer params against the semantic normalization spec.
 

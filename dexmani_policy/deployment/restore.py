@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.checkpoint_io import NORMALIZATION_CONTRACT_VERSION
+from dexmani_policy.common.checkpoint_io import parse_normalization_contract
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.deployment.contract import (
     DeploymentContractError,
@@ -102,28 +102,29 @@ def deterministic_observation(
     return result
 
 
-def _extract_normalization_spec(inference: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract the plain ``{field: mode}`` spec from the versioned contract.
+def _extract_normalization_spec(
+    inference: Mapping[str, Any], *, observation_fields=None
+) -> dict[str, Any]:
+    """Strictly parse the versioned normalization contract into a plain spec.
 
-    Fails fast on a missing/mismatched contract so a future or corrupt
-    ``normalization`` block is never silently interpreted as version 1.
+    Delegates to the shared ``parse_normalization_contract`` (exact
+    ``{version, fields}`` keys, supported version, and the same mode grammar
+    training uses) so a corrupt/future contract, an illegal mode (``banana``),
+    ``action: identity``, ``rgb: limits``, or a field set that does not exactly
+    match the artifact's declared observation fields can never be silently
+    accepted here while being rejected on the training side.
     """
     normalization = inference.get("normalization")
     if type(normalization) is not dict:
         raise DeploymentRestoreError(
             "artifact is missing the normalization semantic contract"
         )
-    if normalization.get("version") != NORMALIZATION_CONTRACT_VERSION:
-        raise DeploymentRestoreError(
-            "unsupported normalization contract version "
-            f"{normalization.get('version')!r} (expected {NORMALIZATION_CONTRACT_VERSION})"
+    try:
+        return parse_normalization_contract(
+            normalization, observation_fields=observation_fields
         )
-    fields = normalization.get("fields")
-    if type(fields) is not dict or not fields:
-        raise DeploymentRestoreError(
-            "artifact normalization contract has no fields"
-        )
-    return dict(fields)
+    except ValueError as exc:
+        raise DeploymentRestoreError(f"invalid normalization contract: {exc}") from exc
 
 
 def restore_deployment_agent(
@@ -146,7 +147,10 @@ def restore_deployment_agent(
         agent.eval()
         _validate_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
-        agent.normalization_spec = _extract_normalization_spec(inference)
+        observation_field_names = {field.name for field in spec.observation_fields}
+        agent.normalization_spec = _extract_normalization_spec(
+            inference, observation_fields=observation_field_names
+        )
         validate_normalizer_state(agent.normalizer, agent.normalization_spec)
         _validate_consumed_observation_fields(agent, spec)
         _validate_rgb_processor(agent, spec)

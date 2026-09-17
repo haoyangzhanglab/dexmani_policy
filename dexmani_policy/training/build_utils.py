@@ -8,7 +8,9 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from dexmani_policy.common.config import validate_action_key_consistency
 from dexmani_policy.common.normalizer import (
     LinearNormalizer,
+    NON_NUMERIC_OBSERVATION_FIELDS,
     build_mixed_action_normalizer,
+    validate_normalization_spec,
     validate_normalizer_state,
 )
 from dexmani_policy.common.pytorch_util import print_param_count
@@ -35,16 +37,12 @@ __all__ = [
 # Normalization spec & builder
 # ---------------------------------------------------------------------------
 
-_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
-_NON_NUMERIC_OBS_FIELDS = frozenset({"task_text", "task_name"})
-
-
 def resolve_normalization_spec(cfg) -> dict:
     """Extract and validate the top-level feature-level normalization spec.
 
-    Returns a plain ``{field: mode}`` mapping.  ``mode`` must be one of
-    ``identity | limits | gaussian | auto``; ``auto`` is only allowed for
-    ``action``.  ``joint_state`` and ``action`` are required.
+    Delegates the mode grammar to the shared ``validate_normalization_spec`` so
+    training and deployment can never diverge on normalization semantics.
+    Returns a plain ``{field: mode}`` mapping.
     """
     normalization = cfg.get("normalization")
     if normalization is None:
@@ -57,29 +55,7 @@ def resolve_normalization_spec(cfg) -> dict:
     if not isinstance(normalization, dict):
         raise ValueError("config.normalization must be a mapping of field -> mode")
 
-    spec = {}
-    for key, mode in normalization.items():
-        if not isinstance(key, str) or key in _NON_NUMERIC_OBS_FIELDS:
-            raise ValueError(
-                f"normalization keys must be numeric observation fields; got {key!r}"
-            )
-        if mode not in _NORMALIZATION_MODES:
-            raise ValueError(
-                f"normalization.{key} has invalid mode {mode!r}; "
-                f"expected one of {sorted(_NORMALIZATION_MODES)}"
-            )
-        if mode == "auto" and key != "action":
-            raise ValueError(
-                f"normalization mode 'auto' is only allowed for 'action', got '{key}'"
-            )
-        spec[key] = mode
-
-    for required in ("joint_state", "action"):
-        if required not in spec:
-            raise ValueError(
-                f"normalization must explicitly declare '{required}' (e.g. {required}: limits)"
-            )
-    return spec
+    return validate_normalization_spec(normalization)
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
@@ -334,42 +310,74 @@ def _validate_aux_config(cfg):
             raise ValueError("use_aux_ee=true requires joint_dim and ee_dim in config.")
 
 
-def _validate_normalization_config(cfg):
-    """Validate the feature-level normalization spec and its sensor-modality coverage."""
-    spec = resolve_normalization_spec(cfg)
+_METRIC_POINTNEXT_ENCODER_TYPES = frozenset({"pointnext", "pointnext_tokenizer"})
 
+
+def _numeric_modalities(sensor_modalities) -> set:
+    return {
+        modality
+        for modality in sensor_modalities
+        if modality not in NON_NUMERIC_OBSERVATION_FIELDS
+    }
+
+
+def _resolve_numeric_observation_fields(cfg) -> set:
+    """Return the exact numeric observation field set for coverage checking.
+
+    Single-task: the dataset's own ``sensor_modalities``.  MultiTask: all child
+    datasets must declare the *same* numeric modality set — a mismatch is a
+    startup fail-fast, never a silently-constructed union.
+    """
     dataset = cfg.get("dataset", {})
     sensor_modalities = dataset.get("sensor_modalities")
     if sensor_modalities is not None:
-        modality_lists = [sensor_modalities]
-    else:
-        child_datasets = dataset.get("datasets")
-        modality_lists = (
-            [] if child_datasets is None
-            else [child.get("sensor_modalities", []) for child in child_datasets]
-        )
+        return _numeric_modalities(sensor_modalities)
 
-    declared = set()
-    for mods in modality_lists:
-        for modality in mods:
-            if modality in _NON_NUMERIC_OBS_FIELDS:
-                continue
-            declared.add(modality)
+    child_datasets = dataset.get("datasets")
+    if child_datasets is None:
+        return set()
 
-    missing = declared - set(spec.keys())
-    if missing:
+    child_sets = [_numeric_modalities(child.get("sensor_modalities", [])) for child in child_datasets]
+    distinct = {frozenset(s) for s in child_sets}
+    if len(distinct) > 1:
         raise ValueError(
-            f"dataset sensor modalities {sorted(missing)} are not declared in "
-            "config.normalization; every numeric observation feature needs an "
-            "explicit normalization mode."
+            "MultiTask child datasets declare inconsistent numeric observation "
+            f"field sets: {[sorted(s) for s in child_sets]}. Shared Policy "
+            "normalization requires every task to observe the same numeric "
+            "fields; per-task normalization is not supported."
+        )
+    return child_sets[0] if child_sets else set()
+
+
+def _validate_encoder_normalization_contract(cfg, spec) -> None:
+    """Reject metric-sensitive PointNext point-cloud encoders paired with a
+    non-identity ``point_cloud`` normalization mode.
+
+    PointNeXT (``encoder_type in {pointnext, pointnext_tokenizer}``) uses FPS and
+    fixed ball-query radii directly on point-cloud coordinates; per-axis min-max
+    (``limits``) rescaling would change Euclidean geometry underneath a radius
+    that stays fixed. This single rule covers every agent exposing
+    ``agent.encoder_type`` (DP3, DQ-RISE, ManiFlow, SAT) — no per-agent special
+    case is kept.
+    """
+    agent = cfg.get("agent", {})
+    encoder_type = agent.get("encoder_type")
+    if encoder_type in _METRIC_POINTNEXT_ENCODER_TYPES and spec.get("point_cloud") != "identity":
+        raise ValueError(
+            f"agent.encoder_type={encoder_type!r} requires normalization.point_cloud: "
+            "identity (PointNeXT FPS/ball-query radii need metric-space coordinates; "
+            "per-axis min-max would change Euclidean geometry)."
         )
 
-    agent_target = str(cfg.get("agent", {}).get("_target_", ""))
-    if agent_target.endswith(".SATAgent") and spec.get("point_cloud") != "identity":
-        raise ValueError(
-            "SAT requires normalization.point_cloud: identity "
-            "(PointNeXT fixed-radius neighborhoods need metric-space coordinates)."
-        )
+
+def _validate_normalization_config(cfg):
+    """Validate the feature-level normalization spec and its sensor-modality coverage."""
+    spec = resolve_normalization_spec(cfg)
+    numeric_fields = _resolve_numeric_observation_fields(cfg)
+    # Re-validate with exact-coverage enforcement (missing AND extra fields),
+    # reusing the same shared grammar `resolve_normalization_spec` already applied.
+    validate_normalization_spec(dict(spec), observation_fields=numeric_fields)
+    _validate_encoder_normalization_contract(cfg, spec)
 
 
 def validate_config(cfg):

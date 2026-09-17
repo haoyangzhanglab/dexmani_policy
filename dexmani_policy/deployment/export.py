@@ -24,8 +24,10 @@ from dexmani_policy.common.checkpoint_io import (
     CheckpointStore,
     TrainCheckpoint,
     make_normalization_contract,
+    parse_normalization_contract,
 )
 from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.common.normalizer import validate_normalization_spec
 from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
@@ -1008,17 +1010,75 @@ def _sanitize_agent_config(
     return sanitized
 
 
+def _reconcile_normalization_contract(
+    checkpoint: TrainCheckpoint,
+    cfg_plain: dict[str, Any],
+    observation_fields: list[str],
+) -> dict[str, Any]:
+    """Prove the checkpoint's fitted normalizer state and the resolved config agree
+    on normalization *semantics* before either is used to build a deployment artifact.
+
+    The checkpoint's ``scale``/``offset`` are fitted under whatever normalization
+    spec was active when training saved this checkpoint
+    (``resume_contract.agent.normalization``). If the resolved config's live
+    ``normalization:`` block has since drifted (e.g. ``point_cloud: limits`` ->
+    ``gaussian``), the weights and any artifact metadata built from the *current*
+    config would silently disagree — and because every mode shares the same
+    ``scale``/``offset`` key hierarchy, no state_dict shape/key check can catch
+    this. This is the single source of truth for that agreement; callers must use
+    its returned canonical contract as the artifact's normalization metadata
+    rather than independently re-deriving one from ``cfg_plain``.
+    """
+    native = checkpoint.resume_contract.get("agent")
+    if type(native) is not dict:
+        raise InvalidCheckpointError(
+            "checkpoint resume_contract.agent must be a plain dict"
+        )
+    saved_contract = native.get("normalization")
+    if type(saved_contract) is not dict:
+        raise InvalidCheckpointError(
+            "checkpoint resume_contract.agent.normalization must be a plain dict"
+        )
+    try:
+        saved_spec = parse_normalization_contract(
+            saved_contract, observation_fields=observation_fields
+        )
+    except ValueError as exc:
+        raise InvalidCheckpointError(
+            f"checkpoint normalization contract is invalid: {exc}"
+        ) from exc
+
+    current_raw = cfg_plain.get("normalization")
+    if type(current_raw) is not dict or not current_raw:
+        raise InvalidExperimentError(
+            "resolved config must declare top-level normalization"
+        )
+    try:
+        current_spec = validate_normalization_spec(
+            current_raw, observation_fields=observation_fields
+        )
+    except ValueError as exc:
+        raise InvalidExperimentError(
+            f"resolved config normalization is invalid: {exc}"
+        ) from exc
+
+    saved_canonical = make_normalization_contract(saved_spec)
+    current_canonical = make_normalization_contract(current_spec)
+    if saved_canonical != current_canonical:
+        raise InvalidCheckpointError(
+            "checkpoint saved normalization contract conflicts with the resolved "
+            f"config: checkpoint={saved_canonical!r}, config={current_canonical!r}"
+        )
+    return saved_canonical
+
+
 def _build_inference_config(
     cfg_plain: dict[str, Any],
     agent_config: dict[str, Any],
     train: dict[str, Any],
     selected: _SelectedInferenceSettings,
+    normalization_contract: dict[str, Any],
 ) -> dict[str, Any]:
-    normalization = cfg_plain.get("normalization")
-    if type(normalization) is not dict or not normalization:
-        raise InvalidExperimentError(
-            "resolved config must declare top-level normalization"
-        )
     inference = {
         "task_name": cfg_plain["task_name"],
         "action_key": train["action_key"],
@@ -1027,7 +1087,7 @@ def _build_inference_config(
         "n_obs_steps": train["n_obs_steps"],
         "n_action_steps": train["n_action_steps"],
         "use_aux_ee": train["use_aux_ee"],
-        "normalization": make_normalization_contract(normalization),
+        "normalization": normalization_contract,
         "agent": agent_config,
         "eval": {
             "use_ema": selected.use_ema,
@@ -1183,11 +1243,22 @@ def _validate_normalizer_state(
     state_dict: dict[str, torch.Tensor],
     observation_fields: Mapping[str, Any],
     action_dim: int,
+    normalization_spec: Mapping[str, str],
 ) -> None:
-    """Validate checkpoint normalizer state against actual model inputs."""
+    """Validate checkpoint normalizer state against the semantic normalization spec.
+
+    Fully spec-driven: which fields must carry fitted ``scale``/``offset`` (and
+    which must not) is decided entirely by ``normalization_spec``, never by
+    hard-coding that ``joint_state``/``action`` always have params or that
+    ``rgb`` is always excluded — those are just what the current 7 default
+    configs happen to declare.
+    """
     if type(observation_fields) is not dict:
         raise InvalidCheckpointError("observation_fields must be a plain mapping")
     keys = ["action", *observation_fields]
+    expected_param_fields = {
+        key for key, mode in normalization_spec.items() if mode != "identity"
+    }
     parameter_names = _normalizer_parameter_names(state_dict)
     unknown = sorted(set(parameter_names) - set(keys))
     if unknown:
@@ -1201,18 +1272,17 @@ def _validate_normalizer_state(
             raise InvalidCheckpointError(
                 f"checkpoint has incomplete normalizer state for {key!r}"
             )
-        if key == "rgb":
+        if key not in expected_param_fields:
             if names:
-                raise UnsupportedPolicyError(
-                    "RGB must not be included in the training normalizer"
+                raise InvalidCheckpointError(
+                    f"checkpoint normalizer state for identity field {key!r} must "
+                    "have no scale/offset params"
                 )
             continue
         if not names:
-            if key in {"action", "joint_state"}:
-                raise InvalidCheckpointError(
-                    f"checkpoint is missing required normalizer state for {key!r}"
-                )
-            continue
+            raise InvalidCheckpointError(
+                f"checkpoint is missing required normalizer state for {key!r}"
+            )
         scale = state_dict[f"normalizer.params_dict.{key}.scale"]
         offset = state_dict[f"normalizer.params_dict.{key}.offset"]
         expected_dim = (
@@ -1230,7 +1300,7 @@ def _validate_normalizer_state(
             raise InvalidCheckpointError(
                 f"checkpoint normalizer state is invalid for {key!r}"
             )
-    if "action" not in parameter_names:
+    if "action" not in parameter_names and "action" in expected_param_fields:
         raise InvalidCheckpointError("checkpoint is missing action normalizer state")
 
 
@@ -1536,8 +1606,11 @@ def export_deployment_artifact(
         else _canonicalize_state_dict(checkpoint.ema_model_state, "weights.ema_model")
     )
     agent_config = _sanitize_agent_config(cfg_plain["agent"], model_state, train)
+    normalization_contract = _reconcile_normalization_contract(
+        checkpoint, cfg_plain, observation_fields
+    )
     inference = _build_inference_config(
-        cfg_plain, agent_config, train, selected_inference
+        cfg_plain, agent_config, train, selected_inference, normalization_contract
     )
     if inference["eval"]["use_ema"] and ema_state is None:
         raise InvalidCheckpointError(
@@ -1560,6 +1633,7 @@ def export_deployment_artifact(
         selected_state,
         zarr_contract["observation_fields"],
         train["action_dim"],
+        normalization_contract["fields"],
     )
     data_contract = zarr_contract
     producer = {

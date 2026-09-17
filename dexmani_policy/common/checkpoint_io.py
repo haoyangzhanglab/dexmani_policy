@@ -19,6 +19,44 @@ def make_normalization_contract(spec) -> Dict[str, Any]:
     return {"version": NORMALIZATION_CONTRACT_VERSION, "fields": dict(spec)}
 
 
+def parse_normalization_contract(
+    contract,
+    *,
+    observation_fields=None,
+) -> Dict[str, str]:
+    """Strictly parse a versioned normalization contract into a canonical spec.
+
+    Pairs with ``make_normalization_contract`` to form the single closed loop used
+    by training checkpoints and deployment artifacts alike:
+
+        validated spec -> make_normalization_contract -> persisted contract
+            -> parse_normalization_contract -> validated spec
+
+    Requires ``contract`` to be a plain mapping with exactly the keys
+    ``{"version", "fields"}``, ``version == NORMALIZATION_CONTRACT_VERSION``, and
+    ``fields`` accepted by ``validate_normalization_spec``. Returns the canonical
+    plain ``{field: mode}`` mapping.
+    """
+    from dexmani_policy.common.normalizer import validate_normalization_spec
+
+    if type(contract) is not dict:
+        raise ValueError("normalization contract must be a plain mapping")
+    if set(contract) != {"version", "fields"}:
+        raise ValueError(
+            f"normalization contract must have exactly keys "
+            f"{{'version', 'fields'}}, got {sorted(contract)}"
+        )
+    if contract["version"] != NORMALIZATION_CONTRACT_VERSION:
+        raise ValueError(
+            f"unsupported normalization contract version {contract['version']!r} "
+            f"(expected {NORMALIZATION_CONTRACT_VERSION})"
+        )
+    fields = contract["fields"]
+    if type(fields) is not dict:
+        raise ValueError("normalization contract 'fields' must be a plain mapping")
+    return validate_normalization_spec(fields, observation_fields=observation_fields)
+
+
 @dataclass
 class TrainCheckpoint:
     epoch: int

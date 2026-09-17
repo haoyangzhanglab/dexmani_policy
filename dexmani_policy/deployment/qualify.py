@@ -114,11 +114,20 @@ def restore_direct_policy(
     train, _, _ = exporter._reconcile_train_params(checkpoint, cfg_plain)
     exporter._validate_resolved_config_contract(cfg_plain, train)
 
+    # Same checkpoint/config normalization reconciliation the exporter enforces —
+    # the direct branch must not use an independently-derived (and potentially
+    # stale) normalization spec for the same checkpoint weights, or direct/export
+    # parity could pass while both branches silently share the same wrong metadata.
+    dataset_modalities = exporter._dataset_modalities(cfg_plain)
+    normalization_contract = exporter._reconcile_normalization_contract(
+        checkpoint, cfg_plain, dataset_modalities
+    )
+
     # Reuse the exporter's resolved-eval checks, but retain the original agent
     # mapping below: direct qualification must represent the experiment itself,
     # not the deployment constructor sanitization.
     inference = exporter._build_inference_config(
-        cfg_plain, cfg_plain["agent"], train, selected_inference
+        cfg_plain, cfg_plain["agent"], train, selected_inference, normalization_contract
     )
     agent_config = cfg_plain["agent"]
     exporter._validate_agent_targets(agent_config)
@@ -156,12 +165,7 @@ def restore_direct_policy(
         agent.eval()
         _validate_direct_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
-        normalization = cfg_plain.get("normalization")
-        if type(normalization) is not dict or not normalization:
-            raise PolicyParityError(
-                "resolved config must declare top-level normalization"
-            )
-        agent.normalization_spec = dict(normalization)
+        agent.normalization_spec = dict(normalization_contract["fields"])
         validate_normalizer_state(agent.normalizer, agent.normalization_spec)
         _validate_rgb_processor(agent, spec)
     except DeploymentRestoreError:

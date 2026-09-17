@@ -22,6 +22,8 @@ from dexmani_policy.deployment.restore import (
     _extract_normalization_spec,
 )
 
+_OBS_FIELDS = {"joint_state", "point_cloud"}
+
 
 def _train():
     return {
@@ -39,26 +41,71 @@ def _selected():
 
 
 def test_build_inference_config_embeds_normalization_contract():
-    cfg_plain = {
-        "task_name": "toy",
-        "normalization": {"joint_state": "limits", "action": "auto", "point_cloud": "identity"},
-    }
+    cfg_plain = {"task_name": "toy"}
     agent_config = {"_target_": "dexmani_policy.agents.core.base.BaseAgent"}
-    inference = exporter._build_inference_config(
-        cfg_plain, agent_config, _train(), _selected()
+    contract = make_normalization_contract(
+        {"joint_state": "limits", "action": "auto", "point_cloud": "identity"}
     )
-    assert inference["normalization"] == {
-        "version": 1,
-        "fields": {"joint_state": "limits", "action": "auto", "point_cloud": "identity"},
+    inference = exporter._build_inference_config(
+        cfg_plain, agent_config, _train(), _selected(), contract
+    )
+    assert inference["normalization"] == contract
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint/config normalization reconciliation (P1-1)
+# ---------------------------------------------------------------------------
+
+
+def _fake_checkpoint(saved_normalization):
+    """A minimal stand-in for TrainCheckpoint carrying only what reconciliation reads."""
+    resume_contract = {
+        "agent": {
+            "n_obs_steps": 2,
+            "normalization": saved_normalization,
+        }
     }
+    return type("_FakeCheckpoint", (), {"resume_contract": resume_contract})()
 
 
-def test_build_inference_config_requires_normalization():
-    cfg_plain = {"task_name": "toy"}  # no top-level normalization
-    with pytest.raises(exporter.InvalidExperimentError):
-        exporter._build_inference_config(
-            cfg_plain, {"_target_": "x"}, _train(), _selected()
+def test_reconcile_normalization_contract_matching_passes():
+    spec = {"joint_state": "limits", "action": "auto", "point_cloud": "limits"}
+    checkpoint = _fake_checkpoint(make_normalization_contract(spec))
+    cfg_plain = {"normalization": dict(spec)}
+    result = exporter._reconcile_normalization_contract(
+        checkpoint, cfg_plain, ["joint_state", "point_cloud"]
+    )
+    assert result == make_normalization_contract(spec)
+
+
+def test_reconcile_normalization_contract_mismatched_mode_rejected():
+    # Checkpoint weights were fitted under point_cloud=limits; config has since
+    # drifted to gaussian. Both share the same scale/offset key hierarchy, so
+    # only a semantic contract comparison — not a state_dict shape/key check —
+    # can catch this.
+    saved_spec = {"joint_state": "limits", "action": "auto", "point_cloud": "limits"}
+    current_spec = {"joint_state": "limits", "action": "auto", "point_cloud": "gaussian"}
+    checkpoint = _fake_checkpoint(make_normalization_contract(saved_spec))
+    cfg_plain = {"normalization": current_spec}
+    with pytest.raises(exporter.InvalidCheckpointError):
+        exporter._reconcile_normalization_contract(
+            checkpoint, cfg_plain, ["joint_state", "point_cloud"]
         )
+
+
+def test_reconcile_normalization_contract_version_mismatch_rejected():
+    spec = {"joint_state": "limits", "action": "auto"}
+    checkpoint = _fake_checkpoint({"version": 99, "fields": spec})
+    cfg_plain = {"normalization": dict(spec)}
+    with pytest.raises(exporter.InvalidCheckpointError):
+        exporter._reconcile_normalization_contract(checkpoint, cfg_plain, ["joint_state"])
+
+
+def test_reconcile_normalization_contract_missing_saved_contract_rejected():
+    checkpoint = _fake_checkpoint(None)
+    cfg_plain = {"normalization": {"joint_state": "limits", "action": "auto"}}
+    with pytest.raises(exporter.InvalidCheckpointError):
+        exporter._reconcile_normalization_contract(checkpoint, cfg_plain, ["joint_state"])
 
 
 def _payload(spec):
@@ -165,3 +212,129 @@ def test_extract_normalization_spec_rejects_missing_contract():
         _extract_normalization_spec({})  # no normalization key
     with pytest.raises(DeploymentRestoreError):
         _extract_normalization_spec({"normalization": {"version": 1}})  # no fields
+
+
+# ---------------------------------------------------------------------------
+# Strict deployment contract parser (P2-6) — every violation below must be
+# rejected via the shared validate_normalization_spec/parse_normalization_contract,
+# not just the loose "version exists, fields is dict" check that used to exist.
+# ---------------------------------------------------------------------------
+
+
+def _inference(normalization):
+    return {"normalization": normalization}
+
+
+def test_extract_normalization_spec_rejects_extra_top_level_key():
+    spec = {"joint_state": "limits", "action": "auto"}
+    normalization = {**make_normalization_contract(spec), "extra": 1}
+    with pytest.raises(DeploymentRestoreError):
+        _extract_normalization_spec(_inference(normalization))
+
+
+def test_extract_normalization_spec_rejects_banana_mode():
+    spec = {"joint_state": "limits", "action": "auto", "point_cloud": "banana"}
+    with pytest.raises(DeploymentRestoreError):
+        _extract_normalization_spec(_inference(make_normalization_contract(spec)))
+
+
+def test_extract_normalization_spec_rejects_auto_on_point_cloud():
+    spec = {"joint_state": "limits", "action": "auto", "point_cloud": "auto"}
+    with pytest.raises(DeploymentRestoreError):
+        _extract_normalization_spec(_inference(make_normalization_contract(spec)))
+
+
+def test_extract_normalization_spec_rejects_action_identity():
+    spec = {"joint_state": "limits", "action": "identity"}
+    with pytest.raises(DeploymentRestoreError):
+        _extract_normalization_spec(_inference(make_normalization_contract(spec)))
+
+
+def test_extract_normalization_spec_rejects_rgb_limits():
+    spec = {"joint_state": "limits", "action": "auto", "rgb": "limits"}
+    with pytest.raises(DeploymentRestoreError):
+        _extract_normalization_spec(_inference(make_normalization_contract(spec)))
+
+
+def test_extract_normalization_spec_rejects_extra_nonexistent_identity_field():
+    spec = {
+        "joint_state": "limits",
+        "action": "auto",
+        "point_cloud": "identity",
+        "phantom": "identity",
+    }
+    with pytest.raises(DeploymentRestoreError):
+        _extract_normalization_spec(
+            _inference(make_normalization_contract(spec)),
+            observation_fields={"joint_state", "point_cloud"},
+        )
+
+
+def test_extract_normalization_spec_rejects_missing_observation_field():
+    spec = {"joint_state": "limits", "action": "auto"}
+    with pytest.raises(DeploymentRestoreError):
+        _extract_normalization_spec(
+            _inference(make_normalization_contract(spec)),
+            observation_fields={"joint_state", "point_cloud"},
+        )
+
+
+def test_extract_normalization_spec_exact_coverage_ok():
+    spec = {"joint_state": "limits", "action": "auto", "point_cloud": "identity"}
+    fields = _extract_normalization_spec(
+        _inference(make_normalization_contract(spec)),
+        observation_fields={"joint_state", "point_cloud"},
+    )
+    assert fields == spec
+
+
+# ---------------------------------------------------------------------------
+# Export-side spec-driven normalizer state validation (P1/P2-4) — no more
+# hard-coded "joint_state/action always require params" or "rgb always
+# forbidden"; every requirement is decided by the normalization_spec.
+# ---------------------------------------------------------------------------
+
+
+def _obs_fields():
+    return {
+        "joint_state": {"shape": [19], "dtype": "float32", "semantics": {}},
+        "point_cloud": {"shape": [1024, 6], "dtype": "float32", "semantics": {}},
+    }
+
+
+def _state_dict(fields):
+    state = {}
+    for key, dim in fields.items():
+        state[f"normalizer.params_dict.{key}.scale"] = torch.ones(dim)
+        state[f"normalizer.params_dict.{key}.offset"] = torch.zeros(dim)
+    return state
+
+
+def test_export_validate_normalizer_state_joint_state_identity_accepted():
+    spec = {"joint_state": "identity", "action": "auto"}
+    state = _state_dict({"action": 19})  # no joint_state params
+    exporter._validate_normalizer_state(state, _obs_fields(), 19, spec)  # no raise
+
+
+def test_export_validate_normalizer_state_joint_state_identity_with_params_rejected():
+    spec = {"joint_state": "identity", "action": "auto"}
+    state = _state_dict({"action": 19, "joint_state": 19})
+    with pytest.raises(exporter.InvalidCheckpointError):
+        exporter._validate_normalizer_state(state, _obs_fields(), 19, spec)
+
+
+def test_export_validate_normalizer_state_required_field_missing_rejected():
+    spec = {"joint_state": "limits", "action": "auto"}
+    state = _state_dict({"action": 19})  # missing required joint_state params
+    with pytest.raises(exporter.InvalidCheckpointError):
+        exporter._validate_normalizer_state(state, _obs_fields(), 19, spec)
+
+
+def test_export_validate_normalizer_state_point_cloud_identity_no_params():
+    spec = {
+        "joint_state": "limits",
+        "action": "auto",
+        "point_cloud": "identity",
+    }
+    state = _state_dict({"action": 19, "joint_state": 19})
+    exporter._validate_normalizer_state(state, _obs_fields(), 19, spec)  # no raise
