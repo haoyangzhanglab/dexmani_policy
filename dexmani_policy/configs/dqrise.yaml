@@ -227,8 +227,12 @@ vq_vae:
   vq_loss_weight: 5.0          # VQ commitment multiplier
   max_grad_norm: 1.0
   warmup_steps: 150
-  # Must match the policy dataset split so VQ and policy use the same hand
-  # normalizer and demonstration subset.
+  # VQ-VAE train/validation split controls only which episodes optimize/evaluate
+  # the VQ model. Hand normalization statistics are fitted on the full hand
+  # dataset, matching the Policy full-dataset action normalizer, so the Policy
+  # and VQ/codebook share the same hand coordinate system even if val_ratio or
+  # max_train_episodes differ from the Policy dataset section above.
+  # max_train_episodes below caps VQ-VAE optimization data, not normalization.
   val_ratio: 0.05
   max_train_episodes: 80
   save_epochs: 100

@@ -2,7 +2,10 @@
 
 Correctness guarantees in this version:
 * train/validation split is episode-level;
-* normalizer is fitted only on the selected training episodes;
+* VQ-VAE model optimization uses only the selected training episodes;
+* hand normalization statistics are fitted on the full hand dataset so they
+  match the Policy full-dataset action normalizer;
+* validation uses the held-out episode split in that shared normalized space;
 * the same ``get_val_mask``/``downsample_mask`` logic as policy training is used;
 * validation commitment loss is meaningful with the fixed VectorQuantize;
 * checkpoints contain explicit model, split, and normalizer metadata;
