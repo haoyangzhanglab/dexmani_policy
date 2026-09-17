@@ -6,8 +6,6 @@ from typing import List, Optional
 import numpy as np
 import torch
 
-from dexmani_policy.common.normalizer import LinearNormalizer
-
 
 class MultiTaskDataset(torch.utils.data.Dataset):
     def __init__(
@@ -16,7 +14,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         task_names: List[str],
         sampling_strategy: str = "balanced",
         task_weights: Optional[List[float]] = None,
-        normalizer_mode: str = "shared",
         seed: int = 42,
         deterministic: bool = False,
         task_texts: Optional[List[str]] = None,
@@ -31,8 +28,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             raise ValueError(
                 "sampling_strategy must be 'proportional', 'balanced', or 'weighted'"
             )
-        if normalizer_mode not in ["shared", "per_task"]:
-            raise ValueError("normalizer_mode must be 'shared' or 'per_task'")
 
         if sampling_strategy == "weighted":
             if task_weights is None or len(task_weights) != len(datasets):
@@ -71,7 +66,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                     dataset.augmentation_cfg = augmentation_cfg
                     dataset._build_augmentors()
         self.num_tasks = len(datasets)
-        self.normalizer_mode = normalizer_mode
         self.seed = seed
         self.sampling_strategy = sampling_strategy
         self.task_weights = task_weights
@@ -108,17 +102,14 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             self.epoch_indices = None
             self.current_epoch = -1
 
-        if normalizer_mode == "shared":
-            self.normalizer = self._compute_shared_normalizer()
-        else:
-            self.normalizers = {name: d.get_normalizer() for name, d in zip(task_names, datasets)}
+    def iter_normalization_data(self, key: str):
+        """Yield the normalization statistics source for every child dataset.
 
-    def _compute_shared_normalizer(self):
-        all_joint_states = [d.replay_buffer["joint_state"] for d in self.datasets]
-        all_actions = [d.replay_buffer[d.action_key] for d in self.datasets]
-        joint_state = np.concatenate(all_joint_states, axis=0)
-        action = np.concatenate(all_actions, axis=0)
-        return LinearNormalizer.fit_obs_action(joint_state, action, self.action_key, "limits")
+        Shared-normalization aggregation is performed by the caller
+        (``build_normalizer``) via streaming; this dataset owns no normalizer.
+        """
+        for dataset in self.datasets:
+            yield from dataset.iter_normalization_data(key)
 
     def __del__(self):
         try:
@@ -222,14 +213,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self._epoch = epoch
         self._epoch_val.value = epoch
 
-    def get_normalizer(self, task_name: Optional[str] = None, **kwargs):
-        if self.normalizer_mode == "shared":
-            return self.normalizer
-        else:
-            if task_name is None:
-                raise ValueError("normalizer_mode='per_task' requires task_name argument")
-            return self.normalizers[task_name]
-
     def get_validation_dataset(self):
         val_datasets = [d.get_validation_dataset() for d in self.datasets]
         valid_triples = [
@@ -251,7 +234,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             task_names=list(val_names),
             sampling_strategy=self.sampling_strategy,
             task_weights=val_weights,
-            normalizer_mode=self.normalizer_mode,
             seed=self.seed,
             deterministic=True,
             task_texts=list(val_texts),

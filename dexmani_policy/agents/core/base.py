@@ -34,7 +34,6 @@ class BaseAgent(nn.Module):
         self.action_dim = action_dim
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = LinearNormalizer()
-        self._dropout_warned_keys = set()
 
     def load_normalizer_from_dataset(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
@@ -118,31 +117,15 @@ class BaseAgent(nn.Module):
     # ------------------------------------------------------------------
     def preprocess(self, obs_dict: Dict) -> Dict:
         obs = self.normalizer.normalize(obs_dict)
-        # Clamp normalized point cloud coordinates to guard against float32
-        # precision drift (±1e-7) that would trigger ValueError in
-        # Uni3DPointcloudEncoder.PositionEmbeddingRandom (requires [-1, 1]).
-        # Mirrors the defensive clamp from R3D-Policy.
-        if "point_cloud" in obs:
-            obs["point_cloud"] = torch.clamp(obs["point_cloud"], min=-1 - 1e-6, max=1 + 1e-6)
         result = {}
         for k, v in obs.items():
             if torch.is_tensor(v):
                 p = self.modality_dropout_probs.get(k, 0.0)
-                if self.training and p > 0 and k in self.normalizer.params_dict:
+                if self.training and p > 0:
                     mask = torch.rand(v.shape[0], device=v.device) > p
                     v = v * mask.view(-1, *([1] * (v.ndim - 1)))
                 v = v[:, : self.n_obs_steps].flatten(0, 1)
             result[k] = v
-        if self.training:
-            for k, p in self.modality_dropout_probs.items():
-                if p > 0 and k not in self.normalizer.params_dict and k not in self._dropout_warned_keys:
-                    warnings.warn(
-                        f"modality_dropout for '{k}' (prob={p}) has no effect: "
-                        f"'{k}' is not in normalizer.params_dict. "
-                        f"Only fitted modalities support dropout.",
-                        UserWarning,
-                    )
-                    self._dropout_warned_keys.add(k)
         return result
 
     def _build_cond(self, obs_dict):

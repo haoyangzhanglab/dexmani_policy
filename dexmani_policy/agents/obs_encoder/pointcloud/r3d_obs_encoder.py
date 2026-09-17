@@ -61,6 +61,12 @@ class R3DObsEncoder(nn.Module):
         if pc.dtype != torch.float32:
             pc = pc.float()
 
+        # Uni3D's PositionEmbeddingRandom requires XYZ in [-1, 1]. Clamp only the
+        # XYZ channels (never RGB) at the encoder boundary. This was previously a
+        # global BaseAgent clamp that leaked to every point-cloud policy.
+        pc = pc.clone()
+        pc[..., :3].clamp_(min=-1 - 1e-6, max=1 + 1e-6)
+
         patch_tokens, pc_pe = self.pc_encoder(pc, inference_mode=not self.training)
 
         state_emb = self.state_mlp(state)

@@ -1,9 +1,16 @@
 """Shared build functions for training/eval entry points."""
 
 import hydra
+import numpy as np
+from omegaconf import DictConfig, OmegaConf
 from torch.nn.modules.batchnorm import _BatchNorm
 
 from dexmani_policy.common.config import validate_action_key_consistency
+from dexmani_policy.common.normalizer import (
+    LinearNormalizer,
+    build_mixed_action_normalizer,
+    validate_normalizer_state,
+)
 from dexmani_policy.common.pytorch_util import print_param_count
 from dexmani_policy.training.lr_scheduler import (
     compute_num_training_steps,
@@ -12,6 +19,9 @@ from dexmani_policy.training.lr_scheduler import (
 
 __all__ = [
     "build_dataset_and_normalizer",
+    "build_normalizer",
+    "resolve_normalization_spec",
+    "attach_normalization_spec",
     "build_model_and_ema",
     "build_scheduler",
     "build_optimizer_and_scheduler",
@@ -22,25 +32,104 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Dataset & Normalizer
+# Normalization spec & builder
 # ---------------------------------------------------------------------------
+
+_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
+_NON_NUMERIC_OBS_FIELDS = frozenset({"task_text", "task_name"})
+
+
+def resolve_normalization_spec(cfg) -> dict:
+    """Extract and validate the top-level feature-level normalization spec.
+
+    Returns a plain ``{field: mode}`` mapping.  ``mode`` must be one of
+    ``identity | limits | gaussian | auto``; ``auto`` is only allowed for
+    ``action``.  ``joint_state`` and ``action`` are required.
+    """
+    normalization = cfg.get("normalization")
+    if normalization is None:
+        raise ValueError(
+            "config.normalization is required: every Policy config must declare a "
+            "top-level `normalization:` mapping (e.g. {joint_state: limits, action: auto})."
+        )
+    if isinstance(normalization, DictConfig):
+        normalization = OmegaConf.to_container(normalization, resolve=True)
+    if not isinstance(normalization, dict):
+        raise ValueError("config.normalization must be a mapping of field -> mode")
+
+    spec = {}
+    for key, mode in normalization.items():
+        if not isinstance(key, str) or key in _NON_NUMERIC_OBS_FIELDS:
+            raise ValueError(
+                f"normalization keys must be numeric observation fields; got {key!r}"
+            )
+        if mode not in _NORMALIZATION_MODES:
+            raise ValueError(
+                f"normalization.{key} has invalid mode {mode!r}; "
+                f"expected one of {sorted(_NORMALIZATION_MODES)}"
+            )
+        if mode == "auto" and key != "action":
+            raise ValueError(
+                f"normalization mode 'auto' is only allowed for 'action', got '{key}'"
+            )
+        spec[key] = mode
+
+    for required in ("joint_state", "action"):
+        if required not in spec:
+            raise ValueError(
+                f"normalization must explicitly declare '{required}' (e.g. {required}: limits)"
+            )
+    return spec
+
+
+def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
+    """Build a ``LinearNormalizer`` from a dataset and the resolved normalization spec.
+
+    ``identity`` fields register no params.  ``action:auto`` keeps the current
+    ``action`` / ``action_ee`` / ``use_aux_ee`` semantics via the existing
+    ``build_mixed_action_normalizer`` or ``limits``.  All other fields use full
+    dataset statistics (single-chunk ``fit_field`` fast path, or streaming
+    ``fit_field_chunks`` for multi-chunk datasets).
+    """
+    normalizer = LinearNormalizer()
+
+    for key, mode in spec.items():
+        if mode == "identity":
+            continue
+
+        if key == "action" and mode == "auto":
+            action = np.concatenate(list(dataset.iter_normalization_data("action")), axis=0)
+            if action_key == "action_ee":
+                normalizer["action"] = build_mixed_action_normalizer(action)
+            else:
+                normalizer.fit_field("action", action, mode="limits")
+            continue
+
+        chunks = list(dataset.iter_normalization_data(key))
+        if len(chunks) == 1:
+            normalizer.fit_field(key, chunks[0], mode=mode)
+        else:
+            normalizer.fit_field_chunks(key, chunks, mode=mode)
+
+    return normalizer
+
+
+def attach_normalization_spec(model, cfg) -> None:
+    """Attach the resolved semantic normalization spec to a model (and its EMA twin)."""
+    model.normalization_spec = resolve_normalization_spec(cfg)
 
 
 def build_dataset_and_normalizer(cfg):
-    """Instantiate dataset and extract its normalizer.
+    """Instantiate the dataset and build the normalizer from the config-driven spec.
 
     The caller is responsible for resolving OmegaConf interpolations before
     calling this function (DDP paths call ``OmegaConf.resolve(cfg)`` in the
     parent process before ``mp.spawn``).
     """
+    spec = resolve_normalization_spec(cfg)
     dataset = hydra.utils.instantiate(cfg.dataset)
-    normalizer = dataset.get_normalizer()
-    if hasattr(dataset, "normalizer_mode") and dataset.normalizer_mode == "per_task":
-        raise NotImplementedError(
-            "normalizer_mode='per_task' requires per-task normalizer loading, "
-            "which is not yet integrated into the standard training entry. "
-            "Use normalizer_mode='shared' or call get_normalizer(task_name=...) manually."
-        )
+    normalizer = build_normalizer(dataset, spec, cfg.action_key)
+    validate_normalizer_state(normalizer, spec)
     return dataset, normalizer
 
 
@@ -84,6 +173,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
     model = hydra.utils.instantiate(cfg.agent)
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
+    attach_normalization_spec(model, cfg)
     model.to(device)
 
     if cfg.training.use_ema:
@@ -98,6 +188,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
         ema_model = hydra.utils.instantiate(cfg.agent)
         ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.action_key = model.action_key
+        attach_normalization_spec(ema_model, cfg)
         ema_model.to(device)
         ema_model.load_state_dict(model.state_dict())
         ema_model.eval()
@@ -243,6 +334,44 @@ def _validate_aux_config(cfg):
             raise ValueError("use_aux_ee=true requires joint_dim and ee_dim in config.")
 
 
+def _validate_normalization_config(cfg):
+    """Validate the feature-level normalization spec and its sensor-modality coverage."""
+    spec = resolve_normalization_spec(cfg)
+
+    dataset = cfg.get("dataset", {})
+    sensor_modalities = dataset.get("sensor_modalities")
+    if sensor_modalities is not None:
+        modality_lists = [sensor_modalities]
+    else:
+        child_datasets = dataset.get("datasets")
+        modality_lists = (
+            [] if child_datasets is None
+            else [child.get("sensor_modalities", []) for child in child_datasets]
+        )
+
+    declared = set()
+    for mods in modality_lists:
+        for modality in mods:
+            if modality in _NON_NUMERIC_OBS_FIELDS:
+                continue
+            declared.add(modality)
+
+    missing = declared - set(spec.keys())
+    if missing:
+        raise ValueError(
+            f"dataset sensor modalities {sorted(missing)} are not declared in "
+            "config.normalization; every numeric observation feature needs an "
+            "explicit normalization mode."
+        )
+
+    agent_target = str(cfg.get("agent", {}).get("_target_", ""))
+    if agent_target.endswith(".SATAgent") and spec.get("point_cloud") != "identity":
+        raise ValueError(
+            "SAT requires normalization.point_cloud: identity "
+            "(PointNeXT fixed-radius neighborhoods need metric-space coordinates)."
+        )
+
+
 def validate_config(cfg):
     """Validate common training config constraints.
 
@@ -279,6 +408,7 @@ def validate_config(cfg):
 
     _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)
+    _validate_normalization_config(cfg)
     validate_action_key_consistency(cfg)
 
     print("Config validation passed")

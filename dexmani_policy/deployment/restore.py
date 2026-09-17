@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from dexmani_policy.common.checkpoint_io import NORMALIZATION_CONTRACT_VERSION
+from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.deployment.contract import (
     DeploymentContractError,
     DeploymentSpec,
@@ -100,6 +102,30 @@ def deterministic_observation(
     return result
 
 
+def _extract_normalization_spec(inference: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract the plain ``{field: mode}`` spec from the versioned contract.
+
+    Fails fast on a missing/mismatched contract so a future or corrupt
+    ``normalization`` block is never silently interpreted as version 1.
+    """
+    normalization = inference.get("normalization")
+    if type(normalization) is not dict:
+        raise DeploymentRestoreError(
+            "artifact is missing the normalization semantic contract"
+        )
+    if normalization.get("version") != NORMALIZATION_CONTRACT_VERSION:
+        raise DeploymentRestoreError(
+            "unsupported normalization contract version "
+            f"{normalization.get('version')!r} (expected {NORMALIZATION_CONTRACT_VERSION})"
+        )
+    fields = normalization.get("fields")
+    if type(fields) is not dict or not fields:
+        raise DeploymentRestoreError(
+            "artifact normalization contract has no fields"
+        )
+    return dict(fields)
+
+
 def restore_deployment_agent(
     payload: Mapping[str, Any], *, device: torch.device | str = "cpu"
 ) -> RestoredDeployment:
@@ -120,6 +146,8 @@ def restore_deployment_agent(
         agent.eval()
         _validate_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
+        agent.normalization_spec = _extract_normalization_spec(inference)
+        validate_normalizer_state(agent.normalizer, agent.normalization_spec)
         _validate_consumed_observation_fields(agent, spec)
         _validate_rgb_processor(agent, spec)
     except DeploymentRestoreError:

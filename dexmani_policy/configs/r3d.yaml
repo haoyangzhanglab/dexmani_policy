@@ -26,6 +26,12 @@ joint_dim: 19                         # joint action dims
 ee_dim: 9                             # wrist pose dims: pos(3) + rot6d(6), from action_ee[:9]
 action_dim: ${eval:'${joint_dim} + ${ee_dim} if ${use_aux_ee} else (21 if ${eq:${action_key},action_ee} else ${joint_dim})'}
 
+# ── Normalization ──
+normalization:
+  joint_state: limits
+  action: auto
+  point_cloud: limits
+
 # ── Dataloader ──
 # NOTE: R3D ViT encoder is memory-intensive (512 patch tokens × N samples).
 # Single-GPU: batch_size=128; DDP: 32/GPU × 4 (see ddp/r3d.yaml).

@@ -11,6 +11,13 @@ import torch
 
 TRAIN_CHECKPOINT_FORMAT = "simple.v3"
 
+NORMALIZATION_CONTRACT_VERSION = 1
+
+
+def make_normalization_contract(spec) -> Dict[str, Any]:
+    """Build the versioned semantic normalization contract (types only, no numbers)."""
+    return {"version": NORMALIZATION_CONTRACT_VERSION, "fields": dict(spec)}
+
 
 @dataclass
 class TrainCheckpoint:
@@ -40,6 +47,7 @@ def build_agent_contract(model) -> Dict[str, Any]:
         "hand_dim": getattr(model, "hand_dim", None),
         "control_action_dim": model.control_action_dim,
         "use_aux_ee": bool(getattr(model, "use_aux_ee", False)),
+        "normalization": make_normalization_contract(getattr(model, "normalization_spec", {})),
     }
 
 

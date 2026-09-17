@@ -17,6 +17,12 @@ n_action_steps: 8
 action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
+# ── Normalization ──
+normalization:
+  joint_state: limits
+  action: auto
+  rgb: identity
+
 # ── Dataloader ──
 dataloader:
   batch_size: 64
@@ -32,7 +38,6 @@ dataset:
   _target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
   seed: ${training.seed}
   sampling_strategy: balanced          # proportional | balanced | weighted
-  normalizer_mode: shared              # shared | per_task
   action_key: ${action_key}
 
   # Joint-state augmentation — mild Gaussian noise, 50% trigger rate.

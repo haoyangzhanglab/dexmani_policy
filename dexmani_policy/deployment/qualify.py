@@ -21,6 +21,7 @@ from typing import Any
 import torch
 from omegaconf import OmegaConf
 
+from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.deployment import export as exporter
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
@@ -155,6 +156,13 @@ def restore_direct_policy(
         agent.eval()
         _validate_direct_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
+        normalization = cfg_plain.get("normalization")
+        if type(normalization) is not dict or not normalization:
+            raise PolicyParityError(
+                "resolved config must declare top-level normalization"
+            )
+        agent.normalization_spec = dict(normalization)
+        validate_normalizer_state(agent.normalizer, agent.normalization_spec)
         _validate_rgb_processor(agent, spec)
     except DeploymentRestoreError:
         raise

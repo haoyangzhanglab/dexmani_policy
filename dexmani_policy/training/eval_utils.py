@@ -23,7 +23,9 @@ from dexmani_policy.common.checkpoint_io import (
     validate_resume_contract,
 )
 from dexmani_policy.common.config import validate_action_key_consistency
+from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import fix_state_dict
+from dexmani_policy.training.build_utils import attach_normalization_spec
 
 
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
@@ -96,6 +98,7 @@ def build_eval_components(
     """
     agent = hydra.utils.instantiate(cfg.agent)
     agent.action_key = cfg.action_key
+    attach_normalization_spec(agent, cfg)
 
     env_runner = hydra.utils.instantiate(cfg.env_runner)
 
@@ -152,10 +155,7 @@ def load_ckpt_for_inference(
         strict=True,
     )
 
-    if not agent.normalizer.is_fitted(required_keys=["action"]):
-        raise RuntimeError(
-            "Normalizer is missing required key 'action' after loading checkpoint."
-        )
+    validate_normalizer_state(agent.normalizer, agent.normalization_spec)
 
 
 # ---------------------------------------------------------------------------

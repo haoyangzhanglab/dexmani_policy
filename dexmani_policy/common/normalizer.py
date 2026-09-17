@@ -69,35 +69,25 @@ class DictOfTensorMixin(nn.Module):
                 unexpected_keys.append(state_prefix + k)
 
 
-def fit_params(
-    data: Union[torch.Tensor, np.ndarray, zarr.Array],
-    last_n_dims=1,
-    dtype=torch.float32,
-    mode="limits",
-    output_max=1.0,
-    output_min=-1.0,
-    range_eps=1e-4,
-    fit_offset=True,
+def _params_from_stats(
+    input_min,
+    input_max,
+    input_mean,
+    input_std,
+    *,
+    mode,
+    output_max,
+    output_min,
+    range_eps,
+    fit_offset,
     label=None,
 ):
-    assert mode in ["limits", "gaussian"] and last_n_dims >= 0 and output_max > output_min
+    """Build scale/offset from aggregated statistics (shared by fit_params / fit_field_chunks).
 
-    if isinstance(data, zarr.Array):
-        data = data[:]
-    if isinstance(data, np.ndarray):
-        data = torch.from_numpy(data)
-    if dtype is not None:
-        data = data.type(dtype)
-
-    dim = 1
-    if last_n_dims > 0:
-        dim = np.prod(data.shape[-last_n_dims:])
-    data = data.reshape(-1, dim)
-
-    input_min, _ = data.min(axis=0)
-    input_max, _ = data.max(axis=0)
-    input_mean = data.mean(axis=0)
-    input_std = data.std(axis=0)
+    This is the single source of truth for the affine semantics so that the
+    streaming chunk fit and the one-shot fit produce identical results.
+    """
+    assert mode in ["limits", "gaussian"]
 
     if mode == "limits":
         if fit_offset:
@@ -153,6 +143,50 @@ def fit_params(
         "std": input_std,
     }
     return this_params, input_stats
+
+
+def fit_params(
+    data: Union[torch.Tensor, np.ndarray, zarr.Array],
+    last_n_dims=1,
+    dtype=torch.float32,
+    mode="limits",
+    output_max=1.0,
+    output_min=-1.0,
+    range_eps=1e-4,
+    fit_offset=True,
+    label=None,
+):
+    assert mode in ["limits", "gaussian"] and last_n_dims >= 0 and output_max > output_min
+
+    if isinstance(data, zarr.Array):
+        data = data[:]
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if dtype is not None:
+        data = data.type(dtype)
+
+    dim = 1
+    if last_n_dims > 0:
+        dim = np.prod(data.shape[-last_n_dims:])
+    data = data.reshape(-1, dim)
+
+    input_min, _ = data.min(axis=0)
+    input_max, _ = data.max(axis=0)
+    input_mean = data.mean(axis=0)
+    input_std = data.std(axis=0)
+
+    return _params_from_stats(
+        input_min,
+        input_max,
+        input_mean,
+        input_std,
+        mode=mode,
+        output_max=output_max,
+        output_min=output_min,
+        range_eps=range_eps,
+        fit_offset=fit_offset,
+        label=label,
+    )
 
 
 def normalize_tensor(x, params, forward=True):
@@ -305,20 +339,142 @@ class LinearNormalizer(DictOfTensorMixin):
             )
         self._field_views.clear()
 
-    @classmethod
-    def fit_obs_action(cls, joint_state, action, action_key, mode="limits"):
-        """Factory: fit a ``LinearNormalizer`` from joint_state and action arrays.
+    @torch.no_grad()
+    def fit_field(
+        self,
+        key: str,
+        data: Union[torch.Tensor, np.ndarray, zarr.Array],
+        last_n_dims=1,
+        dtype=torch.float32,
+        mode="limits",
+        output_max=1.0,
+        output_min=-1.0,
+        range_eps=1e-4,
+        fit_offset=True,
+    ):
+        """Fit a single field from one (full) array using the existing one-shot math."""
+        params, stats = fit_params(
+            data,
+            last_n_dims=last_n_dims,
+            dtype=dtype,
+            mode=mode,
+            output_max=output_max,
+            output_min=output_min,
+            range_eps=range_eps,
+            fit_offset=fit_offset,
+            label=key,
+        )
+        if not hasattr(self, "input_stats"):
+            self.input_stats = {}
+        self.params_dict[key] = params
+        self.input_stats[key] = stats
+        self._field_views.clear()
 
-        Handles the ``action_ee`` special case where the normalizer is fitted on
-        joint_state only and the action normalizer is built from fixed ranges.
+    @torch.no_grad()
+    def fit_field_chunks(
+        self,
+        key: str,
+        chunks,
+        last_n_dims=1,
+        dtype=torch.float32,
+        mode="limits",
+        output_max=1.0,
+        output_min=-1.0,
+        range_eps=1e-4,
+        fit_offset=True,
+    ):
+        """Fit a single field from multiple arrays via streaming Welford merge.
+
+        Never concatenates the (potentially huge) observation arrays.  ``last_n_dims``
+        must be consistent across chunks; the resulting scale/offset are identical to
+        ``fit_field`` on the concatenated array up to floating-point accumulation error.
         """
-        normalizer = cls()
-        if action_key == "action_ee":
-            normalizer.fit(data={"joint_state": joint_state}, last_n_dims=1, mode=mode)
-            normalizer["action"] = build_mixed_action_normalizer(action)
-        else:
-            normalizer.fit(data={"joint_state": joint_state, "action": action}, last_n_dims=1, mode=mode)
-        return normalizer
+        assert mode in ["limits", "gaussian"]
+
+        # float64 is used ONLY for the streaming accumulator; the stored
+        # scale/offset/input_stats must match the one-shot fit_params dtype
+        # (float32 by default).  dtype=None collapses to the float32 default so a
+        # no-op `.to(None)` can never leak float64 into the persisted params.
+        if dtype is None:
+            dtype = torch.float32
+
+        def _as_float64_array(arr):
+            if isinstance(arr, zarr.Array):
+                arr = arr[:]
+            if isinstance(arr, np.ndarray):
+                arr = torch.from_numpy(arr)
+            return arr.to(torch.float64)
+
+        chunks = list(chunks)
+        if not chunks:
+            raise ValueError("fit_field_chunks requires at least one chunk")
+
+        first = _as_float64_array(chunks[0])
+        dim = int(np.prod(first.shape[-last_n_dims:])) if last_n_dims > 0 else 1
+
+        count = 0
+        mean = torch.zeros(dim, dtype=torch.float64)
+        m2 = torch.zeros(dim, dtype=torch.float64)
+        running_min = None
+        running_max = None
+
+        for chunk in chunks:
+            arr = _as_float64_array(chunk)
+            c_dim = int(np.prod(arr.shape[-last_n_dims:])) if last_n_dims > 0 else 1
+            if c_dim != dim:
+                raise ValueError(
+                    f"fit_field_chunks: inconsistent last-dim for '{key}' "
+                    f"(expected {dim}, got {c_dim})"
+                )
+            c = arr.reshape(-1, dim)
+            n = c.shape[0]
+            if n == 0:
+                continue
+            c_min = c.min(dim=0).values
+            c_max = c.max(dim=0).values
+            running_min = c_min if running_min is None else torch.minimum(running_min, c_min)
+            running_max = c_max if running_max is None else torch.maximum(running_max, c_max)
+
+            # Welford batch merge.
+            delta = c - mean
+            new_count = count + n
+            mean = mean + delta.sum(dim=0) / new_count
+            delta2 = c - mean
+            m2 = m2 + (delta * delta2).sum(dim=0)
+            count = new_count
+
+        if running_min is None:
+            raise ValueError(f"fit_field_chunks: no non-empty chunks for '{key}'")
+
+        if mode == "gaussian" and count < 2:
+            raise ValueError(
+                f"fit_field_chunks: gaussian mode requires at least 2 samples for "
+                f"'{key}', got {count}"
+            )
+
+        input_min = running_min.to(dtype)
+        input_max = running_max.to(dtype)
+        input_mean = mean.to(dtype)
+        variance = m2 / max(count - 1, 1)
+        input_std = variance.sqrt().to(dtype)
+
+        params, stats = _params_from_stats(
+            input_min,
+            input_max,
+            input_mean,
+            input_std,
+            mode=mode,
+            output_max=output_max,
+            output_min=output_min,
+            range_eps=range_eps,
+            fit_offset=fit_offset,
+            label=key,
+        )
+        if not hasattr(self, "input_stats"):
+            self.input_stats = {}
+        self.params_dict[key] = params
+        self.input_stats[key] = stats
+        self._field_views.clear()
 
     def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
         return self.normalize(x)
@@ -404,3 +560,49 @@ def build_mixed_action_normalizer(action_data, ee_dim=9):
         )
 
     return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stats)
+
+
+def validate_normalizer_state(normalizer: "LinearNormalizer", normalization_spec: dict) -> None:
+    """Validate fitted normalizer params against the semantic normalization spec.
+
+    - ``identity`` fields must have no params entry;
+    - ``limits`` / ``gaussian`` fields (and the resolved ``action`` field) must have a
+      finite, non-degenerate (scale != 0) ``scale``/``offset`` entry;
+    - no unexpected fields may be present.
+
+    Used by training build, eval restore and deployment restore as the single validator.
+    """
+    params = getattr(normalizer, "params_dict", None)
+    if params is None:
+        raise ValueError("normalizer has no params_dict")
+
+    actual = set(params.keys())
+    expected = {k for k, mode in normalization_spec.items() if mode != "identity"}
+    if actual != expected:
+        raise ValueError(
+            "Normalizer state does not match normalization spec: "
+            f"spec fields={sorted(expected)}, params fields={sorted(actual)}. "
+            f"Identity fields must have no params entry."
+        )
+
+    for key in expected:
+        entry = params[key]
+        if "scale" not in entry or "offset" not in entry:
+            raise ValueError(
+                f"Normalizer state for '{key}' is incomplete (missing scale/offset)"
+            )
+        scale = entry["scale"]
+        offset = entry["offset"]
+        if (
+            not torch.is_tensor(scale)
+            or not torch.is_tensor(offset)
+            or scale.numel() == 0
+            or offset.numel() == 0
+            or not bool(torch.isfinite(scale).all())
+            or not bool(torch.isfinite(offset).all())
+            or bool(torch.any(scale == 0))
+        ):
+            raise ValueError(
+                f"Normalizer state for '{key}' is invalid "
+                "(empty, non-finite, or zero scale)"
+            )

@@ -20,7 +20,11 @@ from omegaconf import OmegaConf
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import (
     IMAGE_PROCESSOR_PRESETS,
 )
-from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
+from dexmani_policy.common.checkpoint_io import (
+    CheckpointStore,
+    TrainCheckpoint,
+    make_normalization_contract,
+)
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
 from dexmani_policy.deployment.contract import (
@@ -1010,6 +1014,11 @@ def _build_inference_config(
     train: dict[str, Any],
     selected: _SelectedInferenceSettings,
 ) -> dict[str, Any]:
+    normalization = cfg_plain.get("normalization")
+    if type(normalization) is not dict or not normalization:
+        raise InvalidExperimentError(
+            "resolved config must declare top-level normalization"
+        )
     inference = {
         "task_name": cfg_plain["task_name"],
         "action_key": train["action_key"],
@@ -1018,6 +1027,7 @@ def _build_inference_config(
         "n_obs_steps": train["n_obs_steps"],
         "n_action_steps": train["n_action_steps"],
         "use_aux_ee": train["use_aux_ee"],
+        "normalization": make_normalization_contract(normalization),
         "agent": agent_config,
         "eval": {
             "use_ema": selected.use_ema,

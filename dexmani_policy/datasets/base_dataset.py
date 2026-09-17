@@ -8,7 +8,6 @@ import torch
 import torchvision.transforms.functional as TVF
 from torchvision.transforms import InterpolationMode
 
-from dexmani_policy.common.normalizer import LinearNormalizer, build_mixed_action_normalizer
 from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
 from dexmani_policy.datasets.augmentation import (
     PointColorJitter,
@@ -296,22 +295,31 @@ class BaseDataset(torch.utils.data.Dataset):
             data["obs"][modality] = x
         return data
 
-    def _get_normalizer_data(self):
-        """Return ``(joint_state, action)`` from the replay buffer for normalizer fitting."""
-        joint_state = self.replay_buffer["joint_state"]  # numpy (N, 19)
-        action = self.replay_buffer[self.action_key]  # numpy (N, 19|21)
-        return joint_state, action
+    def _get_effective_action_data(self):
+        """Return the action representation the training target actually uses.
 
-    def get_normalizer(self, mode="limits"):
-        joint_state, action = self._get_normalizer_data()
-        normalizer = LinearNormalizer()
+        Mirrors ``sample_to_data``: primary ``action_key``, plus the EE wrist pose
+        ``action_ee[..., :9]`` when ``use_aux_ee`` is enabled.
+        """
+        parts = [self.replay_buffer[self.action_key]]
+        if self.use_aux_ee:
+            parts.append(self.replay_buffer["action_ee"][..., :9])
+        action = np.concatenate(parts, axis=-1) if len(parts) > 1 else parts[0]
+        return action
 
-        if self.action_key == "action_ee":
-            normalizer.fit(data={"joint_state": joint_state}, last_n_dims=1, mode=mode)
-            normalizer["action"] = build_mixed_action_normalizer(action)
-        else:
-            normalizer.fit(data={"joint_state": joint_state, "action": action}, last_n_dims=1, mode=mode)
-        return normalizer
+    def iter_normalization_data(self, key: str):
+        """Yield the full replay-buffer statistics source for a numeric feature.
+
+        Single-task datasets yield exactly one array; the caller aggregates across
+        multiple chunks (e.g. MultiTask).  No episode splitting or ``train_mask`` is
+        applied — normalization statistics always use the complete buffer.
+        """
+        if key == "action":
+            yield self._get_effective_action_data()
+            return
+        if key not in self.replay_buffer:
+            raise KeyError(f"Unknown normalization field '{key}' (available: {list(self.replay_buffer.keys())})")
+        yield self.replay_buffer[key]
 
 
 def example(zarr_path):
@@ -324,7 +332,6 @@ def example(zarr_path):
         val_ratio=0.05,
         sensor_modalities=["joint_state"],
     )
-    dataset.get_normalizer()
     sample = dataset[0]
     print("joint_state:", sample["obs"]["joint_state"].shape)
     print("action     :", sample["action"].shape)
