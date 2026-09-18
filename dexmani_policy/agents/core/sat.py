@@ -134,7 +134,7 @@ class SATObsEncoder(nn.Module):
 class SATAgent(BaseAgent):
     """Structural Action Transformer agent.
 
-    Inherits ``BaseAgent`` directly (not ``DiTXFlowMatchAgent``) because
+    Inherits ``BaseAgent`` directly because
     SAT uses a fundamentally different action representation:
     ``(B, Da, T)`` instead of ``(B, T, Da)``.
 
