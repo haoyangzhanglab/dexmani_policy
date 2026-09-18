@@ -1,4 +1,13 @@
-"""Canonical deployment artifact contract shared by export and runtime."""
+"""Canonical deployment artifact contract shared by export, inspect and runtime.
+
+This module is the single metadata grammar for a persisted artifact.  Payload
+validation, ``inspect_experiment``, ``load_experiment`` and
+``restore_deployment_agent`` all parse through :func:`parse_deployment_contract`,
+so a malformed artifact cannot pass inspection and then fail later during
+Hydra instantiation.  Covered here: the action/window contract, observation
+fields, RGB preprocessing, the versioned normalization contract, and the nested
+agent ``_target_`` allowlist.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +18,44 @@ from typing import Any
 
 DEPLOYMENT_FORMAT = "dexmani.deployment"
 SUPPORTED_OBSERVATION_DTYPES = frozenset({"float32", "uint8"})
+AGENT_TARGET_NAMESPACE = "dexmani_policy.agents."
 
 
 class DeploymentContractError(ValueError):
     """Raised when the persisted deployment boundary is malformed."""
+
+
+def validate_agent_targets(value: Any, path: str = "agent") -> None:
+    """Require every nested Hydra ``_target_`` to stay inside the agent namespace.
+
+    This is the single deployment target grammar.  It runs on the artifact's
+    persisted constructor mapping at the shared contract boundary, so a
+    malformed or hostile ``_target_`` is rejected by ``inspect_experiment`` and
+    payload validation alike — never first discovered by
+    ``hydra.utils.instantiate``.
+
+    Every container a persisted artifact can carry is walked: plain dicts *and*
+    other mappings (``weights_only`` unpickling keeps ``OrderedDict``-style
+    values) as well as tuples, not just lists.  Those are exactly the shapes
+    that survive ``torch.save``/``torch.load`` and are then thawed back into
+    plain containers for Hydra, so leaving any of them unwalked would let a
+    nested target escape the allowlist and still be instantiated at restore.
+    """
+    if isinstance(value, Mapping):
+        target = value.get("_target_")
+        if target is not None and (
+            type(target) is not str or not target.startswith(AGENT_TARGET_NAMESPACE)
+        ):
+            raise DeploymentContractError(
+                f"deployment target at {path} must be under {AGENT_TARGET_NAMESPACE[:-1]}"
+            )
+        for key, nested in value.items():
+            if type(key) is not str:
+                raise DeploymentContractError(f"{path} contains a non-string key")
+            validate_agent_targets(nested, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, nested in enumerate(value):
+            validate_agent_targets(nested, f"{path}[{index}]")
 
 
 @dataclass(frozen=True)
@@ -81,6 +124,8 @@ class DeploymentSpec:
     control_dt_s: float
     requires_hand: bool
     rgb_preprocessing: RgbPreprocessingSpec | None
+    normalization: FrozenMetadata
+    agent_config: FrozenMetadata
 
     @property
     def control_action_dim(self) -> int:
@@ -137,6 +182,8 @@ def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
     requires_hand = data.get("requires_hand")
     if type(requires_hand) is not bool:
         raise DeploymentContractError("data_contract.requires_hand must be bool")
+    normalization = _normalization_spec(inference.get("normalization"), fields)
+    agent_config = _agent_config(inference.get("agent"))
     return DeploymentSpec(
         action_key=action_key,
         action_dim=action_dim,
@@ -148,7 +195,52 @@ def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
         control_dt_s=control_dt_s,
         requires_hand=requires_hand,
         rgb_preprocessing=preprocessing,
+        normalization=normalization,
+        agent_config=agent_config,
     )
+
+
+def _normalization_spec(
+    value: Any, fields: tuple[ObservationFieldSpec, ...]
+) -> FrozenMetadata:
+    """Strictly parse the artifact's versioned normalization contract.
+
+    Delegates the whole grammar to the shared
+    ``parse_normalization_contract`` (exact ``{version, fields}`` keys,
+    supported version, the same mode grammar training uses, and exact coverage
+    of the artifact's own numeric observation fields), so ``export``,
+    ``inspect_experiment`` and ``restore`` can never disagree about which
+    normalization contracts are legal.
+
+    Coverage is checked against *every* declared observation field, including
+    ``rgb``: the shared grammar already requires ``rgb: identity`` rather than
+    omitting it, so excluding non-float fields here would reject valid RGB
+    artifacts.
+    """
+    from dexmani_policy.common.checkpoint_io import parse_normalization_contract
+
+    if type(value) is not dict:
+        raise DeploymentContractError(
+            "inference_config.normalization must be a plain mapping"
+        )
+    declared_fields = {field.name for field in fields}
+    try:
+        spec = parse_normalization_contract(value, observation_fields=declared_fields)
+    except ValueError as exc:
+        raise DeploymentContractError(f"invalid normalization contract: {exc}") from exc
+    return _freeze_metadata(spec)
+
+
+def _agent_config(value: Any) -> FrozenMetadata:
+    """Validate the persisted agent constructor mapping at the shared boundary."""
+    if type(value) is not dict or not value:
+        raise DeploymentContractError(
+            "inference_config.agent must be a non-empty plain mapping"
+        )
+    if type(value.get("_target_")) is not str:
+        raise DeploymentContractError("inference_config.agent requires a _target_")
+    validate_agent_targets(value)
+    return _freeze_metadata(value)
 
 
 def _observation_fields(value: Any) -> tuple[ObservationFieldSpec, ...]:
@@ -371,6 +463,20 @@ def _vector(value: Any, label: str) -> tuple[float, float, float]:
     return tuple(_finite_float(item, label) for item in value)  # type: ignore[return-value]
 
 
+def thaw_metadata(value: Any) -> Any:
+    """Recursively convert frozen contract metadata back to plain containers.
+
+    ``FrozenMetadata`` keeps parsed metadata immutable, but Hydra/OmegaConf
+    require plain ``dict``/``list`` inputs, so the constructor mapping is thawed
+    exactly once at instantiation time.
+    """
+    if isinstance(value, Mapping):
+        return {key: thaw_metadata(item) for key, item in value.items()}
+    if type(value) is tuple or type(value) is list:
+        return [thaw_metadata(item) for item in value]
+    return value
+
+
 def _freeze_metadata(value: Mapping[str, Any]) -> FrozenMetadata:
     return FrozenMetadata(
         tuple((key, _freeze_value(item)) for key, item in value.items())
@@ -386,6 +492,7 @@ def _freeze_value(value: Any) -> Any:
 
 
 __all__ = [
+    "AGENT_TARGET_NAMESPACE",
     "DEPLOYMENT_FORMAT",
     "DeploymentContractError",
     "DeploymentSpec",
@@ -394,4 +501,6 @@ __all__ = [
     "RgbPreprocessingSpec",
     "deployment_contract",
     "parse_deployment_contract",
+    "thaw_metadata",
+    "validate_agent_targets",
 ]

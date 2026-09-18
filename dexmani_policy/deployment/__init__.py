@@ -1,4 +1,8 @@
-"""Policy-native deployment artifact export."""
+"""Policy-native deployment artifact export and runtime.
+
+Import is lazy so that listing or inspecting experiments never has to load
+Torch, a checkpoint or a model.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,9 @@
-"""Strict, deterministic restore and parity helpers for deployment artifacts."""
+"""Strict, deterministic restore and parity helpers for deployment artifacts.
+
+All metadata grammar decisions are delegated to the shared contract parser in
+:mod:`dexmani_policy.deployment.contract`, so this module holds no second copy
+of the normalization or ``_target_`` grammar.
+"""
 
 from __future__ import annotations
 
@@ -12,14 +17,13 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.checkpoint_io import parse_normalization_contract
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.deployment.contract import (
     DeploymentContractError,
     DeploymentSpec,
     ObservationFieldSpec,
-    deployment_contract,
     parse_deployment_contract,
+    thaw_metadata,
 )
 
 _MAX_PARITY_TOLERANCE = 1e-5
@@ -65,7 +69,7 @@ def deployment_spec(payload: Mapping[str, Any]) -> DeploymentSpec:
     try:
         return parse_deployment_contract(payload)
     except DeploymentContractError as exc:
-        raise DeploymentRestoreError("invalid deployment contract") from exc
+        raise DeploymentRestoreError(f"invalid deployment contract: {exc}") from exc
 
 
 def deterministic_observation(
@@ -102,55 +106,32 @@ def deterministic_observation(
     return result
 
 
-def _extract_normalization_spec(
-    inference: Mapping[str, Any], *, observation_fields=None
-) -> dict[str, Any]:
-    """Strictly parse the versioned normalization contract into a plain spec.
-
-    Delegates to the shared ``parse_normalization_contract`` (exact
-    ``{version, fields}`` keys, supported version, and the same mode grammar
-    training uses) so a corrupt/future contract, an illegal mode (``banana``),
-    ``action: identity``, ``rgb: limits``, or a field set that does not exactly
-    match the artifact's declared observation fields can never be silently
-    accepted here while being rejected on the training side.
-    """
-    normalization = inference.get("normalization")
-    if type(normalization) is not dict:
-        raise DeploymentRestoreError(
-            "artifact is missing the normalization semantic contract"
-        )
-    try:
-        return parse_normalization_contract(
-            normalization, observation_fields=observation_fields
-        )
-    except ValueError as exc:
-        raise DeploymentRestoreError(f"invalid normalization contract: {exc}") from exc
-
-
 def restore_deployment_agent(
     payload: Mapping[str, Any], *, device: torch.device | str = "cpu"
 ) -> RestoredDeployment:
-    """Instantiate an explicit deployment agent and load weights strictly."""
+    """Instantiate an explicit deployment agent and load weights strictly.
+
+    Every metadata grammar decision — the agent ``_target_`` allowlist and the
+    versioned normalization contract included — is already made by
+    ``parse_deployment_contract`` via :func:`deployment_spec`, so restore keeps
+    no second copy of it and cannot accept an artifact that
+    ``inspect_experiment`` would reject.
+    """
     spec = deployment_spec(payload)
-    contract = deployment_contract(payload)
-    inference = _mapping(contract.get("inference_config"), "contract.inference_config")
-    agent_config = _mapping(inference.get("agent"), "inference_config.agent")
+    agent_config = thaw_metadata(spec.agent_config)
     selected_state = _state_dict(payload.get("weights"), "payload.weights")
 
     try:
         import hydra
 
-        agent = hydra.utils.instantiate(OmegaConf.create(dict(agent_config)))
+        agent = hydra.utils.instantiate(OmegaConf.create(agent_config))
         agent.action_key = spec.action_key
         agent.load_state_dict(selected_state, strict=True)
         agent.to(device)
         agent.eval()
         _validate_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
-        observation_field_names = {field.name for field in spec.observation_fields}
-        agent.normalization_spec = _extract_normalization_spec(
-            inference, observation_fields=observation_field_names
-        )
+        agent.normalization_spec = dict(spec.normalization)
         validate_normalizer_state(agent.normalizer, agent.normalization_spec)
         _validate_consumed_observation_fields(agent, spec)
         _validate_rgb_processor(agent, spec)
@@ -360,12 +341,6 @@ def assert_prediction_parity(
                 f"{name} parity mismatch (max_abs_error={max_abs_error:.9g}, "
                 f"atol={atol}, rtol={rtol})"
             )
-
-
-def _mapping(value: Any, label: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise DeploymentRestoreError(f"{label} must be a mapping")
-    return value
 
 
 def _state_dict(value: Any, label: str) -> dict[str, torch.Tensor]:

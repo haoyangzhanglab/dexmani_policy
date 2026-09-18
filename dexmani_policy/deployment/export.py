@@ -1,4 +1,16 @@
-"""Export a resolved Policy experiment to an explicit Real deployment artifact."""
+"""Export one selected training checkpoint to an explicit Real deployment artifact.
+
+Ownership at this boundary: the selected checkpoint owns the trained
+deployment semantics (agent constructor, action/window contract,
+normalization, dataset/preprocessing), the experiment ``config.yaml`` owns only
+identity plus the inference recipe, and the resulting artifact owns the selected
+weights and an immutable observation/action contract.
+
+The public :func:`export_deployment_artifact` always verifies — a safe
+``weights_only`` reload, a strict restore and one deterministic synthetic
+prediction — before it publishes, so no researcher-facing path can publish an
+unverified artifact.
+"""
 
 from __future__ import annotations
 
@@ -27,12 +39,12 @@ from dexmani_policy.common.checkpoint_io import (
     parse_normalization_contract,
 )
 from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.normalizer import validate_normalization_spec
 from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
     DeploymentContractError,
     parse_deployment_contract,
+    validate_agent_targets,
 )
 from dexmani_policy.deployment.restore import (
     DeploymentRestoreError,
@@ -132,8 +144,18 @@ class ArtifactVerificationError(DeploymentExportError):
 class ExportReceipt:
     checkpoint_path: Path
     selector_path: Path
-    metadata_provenance: str
     checkpoint_selector: str
+
+
+@dataclass(frozen=True)
+class _CheckpointDeploymentSource:
+    """The trained deployment semantics owned by one training checkpoint."""
+
+    agent: dict[str, Any]
+    agent_config: dict[str, Any]
+    dataset: dict[str, Any]
+    normalization_contract: dict[str, Any]
+    observation_fields: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -208,6 +230,14 @@ def _resolve_checkpoint(experiment_dir: Path, selector: str) -> Path:
 
 
 def _load_config(experiment_dir: Path) -> dict[str, Any]:
+    """Load the resolved experiment config for identity and the inference recipe.
+
+    Deployment reads only ``policy_name`` / ``task_name`` and ``eval`` from
+    here.  The ``agent`` / ``dataset`` / ``normalization`` sections are
+    deliberately *not* consulted, so editing them after training cannot change
+    what an existing checkpoint deploys as — that semantics belongs to
+    :func:`_parse_checkpoint_deployment_source`.
+    """
     config_path = experiment_dir / "config.yaml"
     if not config_path.is_file():
         raise InvalidExperimentError(
@@ -220,10 +250,8 @@ def _load_config(experiment_dir: Path) -> dict[str, Any]:
         plain = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
     except Exception as exc:
         raise InvalidExperimentError("experiment config is not fully resolved") from exc
-    if type(plain) is not dict or type(plain.get("agent")) is not dict:
-        raise InvalidExperimentError(
-            "experiment config must contain a resolved agent mapping"
-        )
+    if type(plain) is not dict:
+        raise InvalidExperimentError("experiment config must be a resolved mapping")
     return cast(dict[str, Any], plain)
 
 
@@ -259,17 +287,24 @@ def _require_finite_number(value: Any, label: str, *, positive: bool) -> float:
 
 
 def _resolve_zarr_path(
-    cfg_plain: dict[str, Any], repo_root: Path, override: Path | None
+    dataset: Mapping[str, Any], repo_root: Path, override: Path | None
 ) -> Path:
+    """Resolve the physical dataset location for observation-contract validation.
+
+    The default comes from the checkpoint-saved dataset config.  An explicit
+    ``override`` relocates the dataset only — task identity is still checked
+    against the experiment in :func:`_validate_core_zarr_attrs`.
+    """
     if override is not None:
         candidate = override.expanduser()
         if not candidate.is_absolute():
             candidate = Path.cwd() / candidate
     else:
-        raw = cfg_plain.get("zarr_path")
+        raw = dataset.get("zarr_path")
         if not isinstance(raw, str) or not raw:
             raise UnsupportedPolicyError(
-                "experiment has no single zarr_path; dynamic/multi-task datasets are unsupported"
+                "checkpoint dataset has no single zarr_path; dynamic/multi-task "
+                "datasets are unsupported"
             )
         candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
@@ -280,27 +315,18 @@ def _resolve_zarr_path(
         raise InvalidZarrError(f"Real Policy Zarr not found: {candidate}") from exc
 
 
-def _dataset_modalities(cfg_plain: dict[str, Any]) -> list[str]:
-    agent = cfg_plain.get("agent")
-    if type(agent) is not dict:
-        raise InvalidExperimentError("config.agent must be a plain mapping")
-    if any(
-        key in agent
-        for key in (
-            "text_encoder_model",
-            "task_texts",
-        )
-    ):
+def _checkpoint_observation_fields(
+    dataset: dict[str, Any], agent_config: dict[str, Any]
+) -> list[str]:
+    """Resolve the artifact's observation modalities from checkpoint-saved semantics."""
+    if any(key in agent_config for key in ("text_encoder_model", "task_texts")):
         raise UnsupportedPolicyError("dynamic task-text deployment is unsupported")
-    dataset = cfg_plain.get("dataset")
-    if type(dataset) is not dict:
-        raise UnsupportedPolicyError("a single resolved dataset config is required")
     modalities = dataset.get("sensor_modalities")
     if type(modalities) is not list or any(
         type(item) is not str for item in modalities
     ):
         raise UnsupportedPolicyError(
-            "dataset.sensor_modalities must be an explicit string list"
+            "checkpoint dataset.sensor_modalities must be an explicit string list"
         )
     if (
         not modalities
@@ -315,23 +341,7 @@ def _dataset_modalities(cfg_plain: dict[str, Any]) -> list[str]:
     return list(modalities)
 
 
-def _validate_agent_targets(value: Any, path: str = "agent") -> None:
-    if type(value) is dict:
-        target = value.get("_target_")
-        if target is not None and (
-            type(target) is not str or not target.startswith("dexmani_policy.agents.")
-        ):
-            raise UnsupportedPolicyError(
-                f"deployment target at {path} must be under dexmani_policy.agents"
-            )
-        for key, nested in value.items():
-            _validate_agent_targets(nested, f"{path}.{key}")
-    elif type(value) is list:
-        for index, nested in enumerate(value):
-            _validate_agent_targets(nested, f"{path}[{index}]")
-
-
-def _validate_required_zarr_arrays(root: Any, cfg_plain: dict[str, Any]) -> None:
+def _validate_required_zarr_arrays(root: Any, action_key: str) -> None:
     expected_dims = {"joint_state": 19, "action": 19, "action_ee": 21}
     try:
         arrays = root["data"]
@@ -354,9 +364,8 @@ def _validate_required_zarr_arrays(root: Any, cfg_plain: dict[str, Any]) -> None
         )
     ):
         raise InvalidZarrError(f"Zarr action/state dimensions are invalid: {shapes}")
-    action_key = cfg_plain.get("action_key")
     if action_key not in {"action", "action_ee"}:
-        raise InvalidZarrError(f"config action_key is invalid: {action_key!r}")
+        raise InvalidZarrError(f"checkpoint action_key is invalid: {action_key!r}")
 
 
 def _validate_json_string(value: Any, label: str) -> str:
@@ -427,18 +436,24 @@ def _validate_config_json_attr(
 
 def _build_observation_contract(
     path: Path,
-    cfg_plain: dict[str, Any],
-    observation_fields: list[str],
+    task_name: str,
+    source: _CheckpointDeploymentSource,
 ) -> dict[str, Any]:
-    """Build the observation contract from resolved config and source arrays."""
+    """Build the observation contract from checkpoint semantics and source arrays.
+
+    ``task_name`` is the *experiment* identity: an explicit ``--zarr-path``
+    override only relocates the physical dataset, so Zarr task identity must
+    still match the experiment exactly.
+    """
+    observation_fields = list(source.observation_fields)
     try:
         root = zarr.open_group(str(path), mode="r")
         attrs = dict(root.attrs)
         arrays = root["data"]
     except Exception as exc:
         raise InvalidZarrError(f"cannot open Real Policy Zarr: {path}") from exc
-    _validate_core_zarr_attrs(attrs, cfg_plain)
-    _validate_required_zarr_arrays(root, cfg_plain)
+    _validate_core_zarr_attrs(attrs, task_name, source.dataset)
+    _validate_required_zarr_arrays(root, source.agent["action_key"])
 
     fields: dict[str, dict[str, Any]] = {}
     for name in observation_fields:
@@ -457,7 +472,7 @@ def _build_observation_contract(
             )
         elif name == "point_cloud":
             (point_count, feature_dim), point_semantics = _validate_point_cloud(
-                array, attrs, cfg_plain
+                array, attrs, source.agent_config
             )
             fields[name] = _observation_field(
                 (point_count, feature_dim),
@@ -537,7 +552,7 @@ def _build_observation_contract(
                 "xhand_sdk_raw_force_fx_fy_fz_bias_corrected",
                 _validate_tactile_force(attrs),
             )
-        else:  # _dataset_modalities already rejects unknown values.
+        else:  # _checkpoint_observation_fields already rejects unknown values.
             raise InvalidZarrError(f"unsupported observation field: {name!r}")
 
     contract = {
@@ -559,7 +574,8 @@ def _build_observation_contract(
 
 def _validate_core_zarr_attrs(
     attrs: Mapping[str, Any],
-    cfg_plain: Mapping[str, Any],
+    task_name: str,
+    dataset: Mapping[str, Any],
 ) -> None:
     required = {
         "schema_name",
@@ -586,22 +602,18 @@ def _validate_core_zarr_attrs(
         or attrs["action_semantics"] != "teleop_published_joint_target"
     ):
         raise InvalidZarrError("invalid Real Policy Zarr semantics")
-    task_name = cfg_plain.get("task_name")
+    # Experiment task identity is the one config-owned fact that must still
+    # match: --zarr-path relocates the dataset, it does not re-label the task.
     if type(task_name) is not str or not task_name or attrs["task_name"] != task_name:
-        raise InvalidZarrError("Zarr task_name does not match resolved config")
+        raise InvalidZarrError("Zarr task_name does not match the experiment task_name")
     dt = _require_finite_number(attrs["dt"], "Zarr dt", positive=True)
-    dataset = cfg_plain.get("dataset")
-    for config_dt in (
-        cfg_plain.get("dt"),
-        cfg_plain.get("control_dt_s"),
-        dataset.get("dt") if type(dataset) is dict else None,
+    dataset_dt = dataset.get("dt")
+    if dataset_dt is not None and (
+        isinstance(dataset_dt, bool)
+        or not isinstance(dataset_dt, (int, float))
+        or not math.isclose(float(dataset_dt), dt, rel_tol=0.0, abs_tol=1e-9)
     ):
-        if config_dt is not None and (
-            isinstance(config_dt, bool)
-            or not isinstance(config_dt, (int, float))
-            or not math.isclose(float(config_dt), dt, rel_tol=0.0, abs_tol=1e-9)
-        ):
-            raise InvalidZarrError("Zarr dt conflicts with resolved config")
+        raise InvalidZarrError("Zarr dt conflicts with the checkpoint dataset contract")
     # Every modality uses the logical control step, never camera exposure time.
     if (
         attrs["observation_alignment"] != "control_step_latest_causal"
@@ -644,7 +656,7 @@ def _validate_observation_array(
 
 
 def _validate_point_cloud(
-    array: Any, attrs: Mapping[str, Any], cfg_plain: Mapping[str, Any]
+    array: Any, attrs: Mapping[str, Any], agent_config: Mapping[str, Any]
 ) -> tuple[tuple[int, int], dict[str, str]]:
     tail = _validate_observation_array(array, "point_cloud", None, np.dtype(np.float32))
     if len(tail) != 2 or tail[0] not in _POINT_COUNTS or tail[1] != _POINT_FEATURE_DIM:
@@ -657,14 +669,11 @@ def _validate_point_cloud(
     processing_config_json = _validate_config_json_attr(
         attrs, "processing_config_json", _PROCESSING_CONFIG_MEMBERS
     )
-    agent = cfg_plain.get("agent")
-    if type(agent) is not dict:
-        raise InvalidExperimentError("config.agent must be a plain mapping")
-    configured_count = agent.get("num_points")
+    configured_count = agent_config.get("num_points")
     if configured_count is not None and configured_count != tail[0]:
         raise InvalidZarrError("Zarr point count conflicts with agent.num_points")
-    configured_dims = [agent.get("pc_dim")]
-    pc_encoder = agent.get("pc_encoder_config")
+    configured_dims = [agent_config.get("pc_dim")]
+    pc_encoder = agent_config.get("pc_encoder_config")
     if type(pc_encoder) is dict:
         configured_dims.append(pc_encoder.get("pc_in_channels"))
     if any(value is not None and value != tail[1] for value in configured_dims):
@@ -756,112 +765,166 @@ def _observation_field(
     }
 
 
-def _expected_train_params(cfg_plain: dict[str, Any]) -> dict[str, Any]:
-    action_key = cfg_plain.get("action_key")
-    if action_key not in {"action", "action_ee"}:
-        raise InvalidExperimentError(f"unsupported action_key: {action_key!r}")
-    action_dim = _require_positive_int(cfg_plain.get("action_dim"), "action_dim")
-    use_aux_ee = cfg_plain.get("use_aux_ee", False)
-    if type(use_aux_ee) is not bool:
-        raise InvalidExperimentError("use_aux_ee must be bool")
-    agent = cfg_plain["agent"]
-    is_codebook_agent = "codebook_path" in agent
-    tcp_dim = agent.get("tcp_dim") if is_codebook_agent else None
-    hand_dim = (
-        action_dim - tcp_dim if is_codebook_agent and type(tcp_dim) is int else None
+def _parse_checkpoint_deployment_source(
+    checkpoint: TrainCheckpoint,
+) -> _CheckpointDeploymentSource:
+    """Parse one training checkpoint's own trained deployment semantics.
+
+    This is the single source of the model and data semantics an artifact is
+    built from: architecture/constructor (``resume_contract.agent_config``),
+    action/window contract (``resume_contract.agent``), normalization
+    (``resume_contract.agent.normalization``) and dataset/preprocessing
+    (``resume_contract.dataset``).  The current experiment ``config.yaml``
+    contributes only experiment identity and the inference recipe, so editing
+    it after training can no longer change what an old checkpoint deploys as.
+
+    Deleting reconciliation is not deleting validation: everything below is a
+    strict *internal* consistency parse of the checkpoint itself, which is why
+    a checkpoint whose own action/window/normalization contract is malformed
+    still fails fast instead of being blindly trusted.
+    """
+    resume = checkpoint.resume_contract
+    if type(resume) is not dict:
+        raise InvalidCheckpointError("checkpoint resume_contract must be a plain dict")
+    agent = resume.get("agent")
+    agent_config = resume.get("agent_config")
+    dataset = resume.get("dataset")
+    for label, value in (
+        ("agent", agent),
+        ("agent_config", agent_config),
+        ("dataset", dataset),
+    ):
+        if type(value) is not dict or not value:
+            raise InvalidCheckpointError(
+                f"checkpoint resume_contract.{label} must be a non-empty plain dict"
+            )
+
+    train = _parse_checkpoint_action_contract(agent)
+    observation_fields = _checkpoint_observation_fields(dataset, agent_config)
+    normalization_contract = _parse_checkpoint_normalization_contract(
+        agent, observation_fields
     )
-    control_action_dim = 19 if use_aux_ee else action_dim
-    expected = {
-        "n_obs_steps": _require_positive_int(
-            cfg_plain.get("n_obs_steps"), "n_obs_steps"
+    return _CheckpointDeploymentSource(
+        agent=_require_plain_metadata(train, "resume_contract.agent"),
+        agent_config=_require_plain_metadata(
+            agent_config, "resume_contract.agent_config"
         ),
-        "n_action_steps": _require_positive_int(
-            cfg_plain.get("n_action_steps"), "n_action_steps"
-        ),
-        "action_dim": action_dim,
-        "horizon": _require_positive_int(cfg_plain.get("horizon"), "horizon"),
+        dataset=_require_plain_metadata(dataset, "resume_contract.dataset"),
+        normalization_contract=normalization_contract,
+        observation_fields=tuple(observation_fields),
+    )
+
+
+def _parse_checkpoint_action_contract(agent: dict[str, Any]) -> dict[str, Any]:
+    """Strictly parse the checkpoint's own action/window contract for self-consistency."""
+    required = (
+        "n_obs_steps",
+        "n_action_steps",
+        "action_dim",
+        "horizon",
+        "action_key",
+        "tcp_dim",
+        "hand_dim",
+        "control_action_dim",
+        "use_aux_ee",
+    )
+    missing = sorted(name for name in required if name not in agent)
+    if missing:
+        raise InvalidCheckpointError(
+            f"checkpoint resume_contract.agent is missing {missing}"
+        )
+    action_key = agent["action_key"]
+    if action_key not in {"action", "action_ee"}:
+        raise InvalidCheckpointError(
+            f"checkpoint action_key is unsupported: {action_key!r}"
+        )
+    use_aux_ee = agent["use_aux_ee"]
+    if type(use_aux_ee) is not bool:
+        raise InvalidCheckpointError("checkpoint use_aux_ee must be bool")
+    train = {
+        name: _require_checkpoint_positive_int(agent[name], f"checkpoint {name}")
+        for name in ("n_obs_steps", "n_action_steps", "action_dim", "horizon")
+    }
+    control_action_dim = _require_checkpoint_positive_int(
+        agent["control_action_dim"], "checkpoint control_action_dim"
+    )
+    if train["n_obs_steps"] - 1 + train["n_action_steps"] > train["horizon"]:
+        raise InvalidCheckpointError(
+            "checkpoint observation/action window exceeds horizon"
+        )
+
+    expected_control = 21 if action_key == "action_ee" else 19
+    if use_aux_ee:
+        # The only supported auxiliary layout is joint19 + ee9 predicted
+        # together while control stays joint-only.
+        if action_key != "action" or train["action_dim"] != 28 or control_action_dim != 19:
+            raise InvalidCheckpointError(
+                "checkpoint use_aux_ee requires the joint19_ee9 action layout"
+            )
+    else:
+        if train["action_dim"] != expected_control:
+            raise InvalidCheckpointError(
+                "checkpoint action_dim does not match action_key"
+            )
+        if control_action_dim != train["action_dim"]:
+            raise InvalidCheckpointError(
+                "checkpoint control_action_dim must equal action_dim without use_aux_ee"
+            )
+
+    tcp_dim = agent["tcp_dim"]
+    hand_dim = agent["hand_dim"]
+    if tcp_dim is None or hand_dim is None:
+        if tcp_dim is not None or hand_dim is not None:
+            raise InvalidCheckpointError(
+                "checkpoint tcp_dim/hand_dim must both be set or both be null"
+            )
+    else:
+        tcp_dim = _require_checkpoint_positive_int(tcp_dim, "checkpoint tcp_dim")
+        hand_dim = _require_checkpoint_positive_int(hand_dim, "checkpoint hand_dim")
+        if tcp_dim + hand_dim != train["action_dim"]:
+            raise InvalidCheckpointError(
+                "checkpoint tcp_dim + hand_dim must equal action_dim"
+            )
+    return {
+        **train,
         "action_key": action_key,
         "tcp_dim": tcp_dim,
         "hand_dim": hand_dim,
         "control_action_dim": control_action_dim,
         "use_aux_ee": use_aux_ee,
     }
-    if expected["n_obs_steps"] - 1 + expected["n_action_steps"] > expected["horizon"]:
-        raise InvalidExperimentError("observation/action window exceeds horizon")
-    expected_control = 21 if action_key == "action_ee" else 19
-    if use_aux_ee:
-        if action_key != "action" or action_dim != 28 or control_action_dim != 19:
-            raise InvalidExperimentError(
-                "use_aux_ee requires joint19_ee9 action layout"
-            )
-    elif action_dim != expected_control:
-        raise InvalidExperimentError("action_dim does not match action_key")
-    return expected
 
 
-def _reconcile_train_params(
-    checkpoint: TrainCheckpoint, cfg_plain: dict[str, Any]
-) -> tuple[dict[str, Any], str, list[str]]:
-    native = checkpoint.resume_contract.get("agent")
-    if type(native) is not dict:
+def _parse_checkpoint_normalization_contract(
+    agent: dict[str, Any], observation_fields: list[str]
+) -> dict[str, Any]:
+    """Parse the checkpoint's versioned normalization contract, nothing else.
+
+    The fitted ``scale``/``offset`` in this checkpoint were produced under this
+    saved spec, so it is the only correct normalization metadata for the
+    resulting artifact.  Exact field coverage is enforced against the
+    checkpoint-derived observation fields.
+    """
+    saved_contract = agent.get("normalization")
+    if type(saved_contract) is not dict:
         raise InvalidCheckpointError(
-            "checkpoint resume_contract.agent must be a plain dict"
+            "checkpoint resume_contract.agent.normalization must be a plain dict"
         )
-    expected = _expected_train_params(cfg_plain)
-    retrofitted: list[str] = []
-    result: dict[str, Any] = {}
-    for key, expected_value in expected.items():
-        if key not in native:
-            raise InvalidCheckpointError(
-                f"checkpoint resume_contract.agent is missing {key}"
-            )
-        if native[key] != expected_value:
-            raise InvalidCheckpointError(
-                f"checkpoint resume_contract.agent.{key}={native[key]!r} "
-                f"conflicts with config={expected_value!r}"
-            )
-        result[key] = native[key]
-    provenance = "retrofitted" if retrofitted else "native"
-    return _require_plain_metadata(result, "train_params"), provenance, retrofitted
+    try:
+        saved_spec = parse_normalization_contract(
+            saved_contract, observation_fields=observation_fields
+        )
+    except ValueError as exc:
+        raise InvalidCheckpointError(
+            f"checkpoint normalization contract is invalid: {exc}"
+        ) from exc
+    return make_normalization_contract(saved_spec)
 
 
-def _validate_resolved_config_contract(
-    cfg_plain: dict[str, Any], train: dict[str, Any]
-) -> None:
-    agent = cfg_plain.get("agent")
-    if type(agent) is not dict:
-        raise InvalidExperimentError("resolved config agent must be a plain dict")
-    for field in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
-        if field not in agent:
-            raise InvalidExperimentError(
-                f"resolved config agent is missing deployment-critical field {field}"
-            )
-        agent_value = _require_positive_int(agent[field], f"agent.{field}")
-        if agent_value != train[field]:
-            raise InvalidExperimentError(
-                f"resolved config agent.{field}={agent_value!r} conflicts with "
-                f"top-level {field}={train[field]!r}"
-            )
-
-    dataset = cfg_plain.get("dataset")
-    if type(dataset) is not dict:
-        raise InvalidExperimentError("resolved config dataset must be a plain dict")
-    expected_dataset = {
-        "action_key": train["action_key"],
-        "horizon": train["horizon"],
-        "obs_horizon": train["n_obs_steps"],
-        "pad_before": train["n_obs_steps"] - 1,
-        "pad_after": train["n_action_steps"] - 1,
-        "use_aux_ee": train["use_aux_ee"],
-    }
-    for field, expected in expected_dataset.items():
-        if field in dataset and (
-            type(dataset[field]) is not type(expected) or dataset[field] != expected
-        ):
-            raise InvalidExperimentError(
-                f"resolved config dataset.{field}={dataset[field]!r} conflicts with "
-                f"deployment contract={expected!r}"
-            )
+def _require_checkpoint_positive_int(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise InvalidCheckpointError(f"{label} must be a positive integer")
+    return value
 
 
 def _canonicalize_state_dict(value: Any, label: str) -> dict[str, torch.Tensor]:
@@ -894,7 +957,10 @@ def _sanitize_agent_config(
 ) -> dict[str, Any]:
     sanitized = _require_plain_metadata(agent_config, "agent config")
     sanitized = json.loads(_canonical_json(sanitized))
-    _validate_agent_targets(sanitized)
+    try:
+        validate_agent_targets(sanitized)
+    except DeploymentContractError as exc:
+        raise UnsupportedPolicyError(str(exc)) from exc
     if "codebook_path" in sanitized:
         required_suffixes = (
             "codebook_manager.sorted_hand_poses",
@@ -1010,84 +1076,27 @@ def _sanitize_agent_config(
     return sanitized
 
 
-def _reconcile_normalization_contract(
-    checkpoint: TrainCheckpoint,
-    cfg_plain: dict[str, Any],
-    observation_fields: list[str],
-) -> dict[str, Any]:
-    """Prove the checkpoint's fitted normalizer state and the resolved config agree
-    on normalization *semantics* before either is used to build a deployment artifact.
-
-    The checkpoint's ``scale``/``offset`` are fitted under whatever normalization
-    spec was active when training saved this checkpoint
-    (``resume_contract.agent.normalization``). If the resolved config's live
-    ``normalization:`` block has since drifted (e.g. ``point_cloud: limits`` ->
-    ``gaussian``), the weights and any artifact metadata built from the *current*
-    config would silently disagree — and because every mode shares the same
-    ``scale``/``offset`` key hierarchy, no state_dict shape/key check can catch
-    this. This is the single source of truth for that agreement; callers must use
-    its returned canonical contract as the artifact's normalization metadata
-    rather than independently re-deriving one from ``cfg_plain``.
-    """
-    native = checkpoint.resume_contract.get("agent")
-    if type(native) is not dict:
-        raise InvalidCheckpointError(
-            "checkpoint resume_contract.agent must be a plain dict"
-        )
-    saved_contract = native.get("normalization")
-    if type(saved_contract) is not dict:
-        raise InvalidCheckpointError(
-            "checkpoint resume_contract.agent.normalization must be a plain dict"
-        )
-    try:
-        saved_spec = parse_normalization_contract(
-            saved_contract, observation_fields=observation_fields
-        )
-    except ValueError as exc:
-        raise InvalidCheckpointError(
-            f"checkpoint normalization contract is invalid: {exc}"
-        ) from exc
-
-    current_raw = cfg_plain.get("normalization")
-    if type(current_raw) is not dict or not current_raw:
-        raise InvalidExperimentError(
-            "resolved config must declare top-level normalization"
-        )
-    try:
-        current_spec = validate_normalization_spec(
-            current_raw, observation_fields=observation_fields
-        )
-    except ValueError as exc:
-        raise InvalidExperimentError(
-            f"resolved config normalization is invalid: {exc}"
-        ) from exc
-
-    saved_canonical = make_normalization_contract(saved_spec)
-    current_canonical = make_normalization_contract(current_spec)
-    if saved_canonical != current_canonical:
-        raise InvalidCheckpointError(
-            "checkpoint saved normalization contract conflicts with the resolved "
-            f"config: checkpoint={saved_canonical!r}, config={current_canonical!r}"
-        )
-    return saved_canonical
-
-
 def _build_inference_config(
-    cfg_plain: dict[str, Any],
+    task_name: str,
     agent_config: dict[str, Any],
-    train: dict[str, Any],
+    source: _CheckpointDeploymentSource,
     selected: _SelectedInferenceSettings,
-    normalization_contract: dict[str, Any],
 ) -> dict[str, Any]:
+    """Assemble the artifact inference config from checkpoint-owned semantics.
+
+    Only ``task_name`` and the selected inference recipe come from outside the
+    checkpoint; everything model-facing is ``source``.
+    """
+    train = source.agent
     inference = {
-        "task_name": cfg_plain["task_name"],
+        "task_name": task_name,
         "action_key": train["action_key"],
         "action_dim": train["action_dim"],
         "horizon": train["horizon"],
         "n_obs_steps": train["n_obs_steps"],
         "n_action_steps": train["n_action_steps"],
         "use_aux_ee": train["use_aux_ee"],
-        "normalization": normalization_contract,
+        "normalization": source.normalization_contract,
         "agent": agent_config,
         "eval": {
             "use_ema": selected.use_ema,
@@ -1102,7 +1111,15 @@ def _resolve_selected_inference_settings(
     checkpoint_selector: str,
     cfg_plain: Mapping[str, Any],
 ) -> _SelectedInferenceSettings:
-    """Resolve the selected checkpoint's exact Policy-owned inference settings."""
+    """Resolve the selected checkpoint's inference recipe.
+
+    The recipe is the one piece of model-facing configuration the experiment
+    config still owns: ``best_ckpt.json["inference"]`` for the ``best``
+    selector, otherwise the current ``config.eval`` (the live inference recipe
+    a researcher is tuning).  Everything else deployment needs comes from the
+    checkpoint.  ``denoise_steps`` is an ablation knob, not architecture, so
+    overriding it per run stays legitimate.
+    """
     if checkpoint_selector == "best":
         from dexmani_policy.training.eval_utils import read_best_ckpt_json
 
@@ -1136,31 +1153,33 @@ def _resolve_selected_inference_settings(
     return _SelectedInferenceSettings(use_ema, denoise_steps)
 
 
-def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
-    """Record the exact validation-spatial and ImageProcessor RGB chain."""
-    if type(agent) is not dict or type(dataset) is not dict:
-        raise InvalidExperimentError(
-            "resolved agent and dataset config are required for RGB deployment"
-        )
+def _rgb_preprocessing(source: _CheckpointDeploymentSource) -> dict[str, Any]:
+    """Record the exact validation-spatial and ImageProcessor RGB chain.
+
+    Both stages are read from checkpoint-saved semantics, so later edits to the
+    experiment's dataset/agent RGB settings cannot change an old artifact.
+    """
+    agent = source.agent_config
+    dataset = source.dataset
     if dataset.get("_target_") != "dexmani_policy.datasets.rgb_dataset.RGBDataset":
         raise UnsupportedPolicyError(
             "RGB deployment requires the current RGBDataset validation contract"
         )
     if "rgb_preprocess_size" not in dataset or "rgb_random_crop_size" not in dataset:
-        raise InvalidExperimentError(
-            "RGB export requires explicit resolved validation preprocessing"
+        raise InvalidCheckpointError(
+            "RGB export requires explicit checkpoint validation preprocessing"
         )
     resize_hw = _optional_hw(dataset["rgb_preprocess_size"], "rgb_preprocess_size")
     center_crop_hw = _optional_hw(
         dataset["rgb_random_crop_size"], "rgb_random_crop_size"
     )
     if resize_hw is None and center_crop_hw is not None:
-        raise InvalidExperimentError(
+        raise InvalidCheckpointError(
             "dataset.rgb_random_crop_size requires rgb_preprocess_size"
         )
     keep_uint8 = dataset.get("rgb_keep_uint8", DEFAULT_RGB_KEEP_UINT8)
     if type(keep_uint8) is not bool:
-        raise InvalidExperimentError("dataset.rgb_keep_uint8 must be bool")
+        raise InvalidCheckpointError("dataset.rgb_keep_uint8 must be bool")
     validation_keeps_uint8 = (
         resize_hw is not None and keep_uint8 and dataset.get("rgb_color_aug") is None
     )
@@ -1172,7 +1191,7 @@ def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
     if backbone_config is None:
         backbone_config = {}
     if type(backbone_config) is not dict:
-        raise InvalidExperimentError("agent.rgb_backbone_config must be a mapping")
+        raise InvalidCheckpointError("agent.rgb_backbone_config must be a mapping")
     if any(
         key in backbone_config
         for key in ("center_crop_size", "image_mean", "image_std")
@@ -1198,7 +1217,7 @@ def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
     if type(interpolation) is str:
         interpolation = interpolation.lower()
     if interpolation not in {"nearest", "bilinear", "bicubic"}:
-        raise InvalidExperimentError("agent RGB interpolation is unsupported")
+        raise InvalidCheckpointError("agent RGB interpolation is unsupported")
     mean = _processor_rgb_vector(preset.get("image_mean"), "image_mean")
     std = _processor_rgb_vector(preset.get("image_std"), "image_std")
 
@@ -1239,99 +1258,6 @@ def _rgb_preprocessing(agent: Any, dataset: Any) -> dict[str, Any]:
     }
 
 
-def _validate_normalizer_state(
-    state_dict: dict[str, torch.Tensor],
-    observation_fields: Mapping[str, Any],
-    action_dim: int,
-    normalization_spec: Mapping[str, str],
-) -> None:
-    """Validate checkpoint normalizer state against the semantic normalization spec.
-
-    Fully spec-driven: which fields must carry fitted ``scale``/``offset`` (and
-    which must not) is decided entirely by ``normalization_spec``, never by
-    hard-coding that ``joint_state``/``action`` always have params or that
-    ``rgb`` is always excluded — those are just what the current 7 default
-    configs happen to declare.
-    """
-    if type(observation_fields) is not dict:
-        raise InvalidCheckpointError("observation_fields must be a plain mapping")
-    keys = ["action", *observation_fields]
-    expected_param_fields = {
-        key for key, mode in normalization_spec.items() if mode != "identity"
-    }
-    parameter_names = _normalizer_parameter_names(state_dict)
-    unknown = sorted(set(parameter_names) - set(keys))
-    if unknown:
-        raise InvalidCheckpointError(
-            "checkpoint normalizer contains fields outside the artifact "
-            f"contract: {unknown}"
-        )
-    for key in keys:
-        names = parameter_names.get(key, frozenset())
-        if names not in {frozenset(), frozenset({"scale", "offset"})}:
-            raise InvalidCheckpointError(
-                f"checkpoint has incomplete normalizer state for {key!r}"
-            )
-        if key not in expected_param_fields:
-            if names:
-                raise InvalidCheckpointError(
-                    f"checkpoint normalizer state for identity field {key!r} must "
-                    "have no scale/offset params"
-                )
-            continue
-        if not names:
-            raise InvalidCheckpointError(
-                f"checkpoint is missing required normalizer state for {key!r}"
-            )
-        scale = state_dict[f"normalizer.params_dict.{key}.scale"]
-        offset = state_dict[f"normalizer.params_dict.{key}.offset"]
-        expected_dim = (
-            action_dim
-            if key == "action"
-            else _normalizer_feature_dim(observation_fields[key], key)
-        )
-        if (
-            scale.numel() != expected_dim
-            or offset.numel() != expected_dim
-            or not bool(torch.isfinite(scale).all())
-            or not bool(torch.isfinite(offset).all())
-            or bool(torch.any(scale == 0))
-        ):
-            raise InvalidCheckpointError(
-                f"checkpoint normalizer state is invalid for {key!r}"
-            )
-    if "action" not in parameter_names and "action" in expected_param_fields:
-        raise InvalidCheckpointError("checkpoint is missing action normalizer state")
-
-
-def _normalizer_parameter_names(
-    state_dict: Mapping[str, torch.Tensor],
-) -> dict[str, frozenset[str]]:
-    """Enumerate only canonical top-level normalizer affine parameters."""
-    prefix = "normalizer.params_dict."
-    result: dict[str, set[str]] = {}
-    for state_key in state_dict:
-        if not state_key.startswith(prefix):
-            continue
-        parts = state_key[len(prefix) :].split(".")
-        if len(parts) != 2 or not parts[0] or parts[1] not in {"scale", "offset"}:
-            raise InvalidCheckpointError(
-                "checkpoint normalizer keys must use "
-                "normalizer.params_dict.<key>.(scale|offset)"
-            )
-        result.setdefault(parts[0], set()).add(parts[1])
-    return {key: frozenset(names) for key, names in result.items()}
-
-
-def _normalizer_feature_dim(field: Any, key: str) -> int:
-    if type(field) is not dict:
-        raise InvalidCheckpointError(f"observation field {key!r} is invalid")
-    shape = field.get("shape")
-    if type(shape) is not list or not shape or type(shape[-1]) is not int:
-        raise InvalidCheckpointError(f"observation field {key!r} has invalid shape")
-    return shape[-1]
-
-
 def _processor_hw(value: Any, label: str) -> tuple[int, int] | None:
     if value is None:
         return None
@@ -1349,7 +1275,7 @@ def _processor_hw(value: Any, label: str) -> tuple[int, int] | None:
         and all(type(item) is int and item > 0 for item in value)
     ):
         return value[0], value[1]
-    raise InvalidExperimentError(f"agent RGB {label} must be positive [H, W] or null")
+    raise InvalidCheckpointError(f"agent RGB {label} must be positive [H, W] or null")
 
 
 def _processor_rgb_vector(value: Any, label: str) -> tuple[float, float, float]:
@@ -1361,10 +1287,10 @@ def _processor_rgb_vector(value: Any, label: str) -> tuple[float, float, float]:
             for item in value
         )
     ):
-        raise InvalidExperimentError(f"agent RGB {label} must be three finite numbers")
+        raise InvalidCheckpointError(f"agent RGB {label} must be three finite numbers")
     result = tuple(float(item) for item in value)
     if not all(math.isfinite(item) for item in result):
-        raise InvalidExperimentError(f"agent RGB {label} must be three finite numbers")
+        raise InvalidCheckpointError(f"agent RGB {label} must be three finite numbers")
     return result  # type: ignore[return-value]
 
 
@@ -1376,7 +1302,7 @@ def _optional_hw(value: Any, label: str) -> tuple[int, int] | None:
         or len(value) != 2
         or any(type(item) is not int or item <= 0 for item in value)
     ):
-        raise InvalidExperimentError(f"dataset.{label} must be [H, W] or null")
+        raise InvalidCheckpointError(f"dataset.{label} must be [H, W] or null")
     return value[0], value[1]
 
 
@@ -1534,119 +1460,121 @@ def _verify_published_selector(selector_path: Path, checkpoint_path: Path) -> No
     _load_deployment_payload(checkpoint_path)
 
 
+def _selector_points_at(selector_path: Path, checkpoint_path: Path) -> bool:
+    """Whether the live selector already names this artifact."""
+    return (
+        selector_path.is_symlink()
+        and os.readlink(selector_path) == checkpoint_path.name
+    )
+
+
 def publish_deployment_selector(
     selector_path: Path,
     checkpoint_path: Path,
 ) -> None:
-    """Atomically publish one already-qualified canonical artifact."""
+    """Atomically publish one already-qualified canonical artifact.
+
+    On any failure the previous selector is restored, so the caller can treat a
+    raised publish as "nothing changed" and safely delete the candidate it built.
+    Whether a rollback is needed is decided from the *observable* selector state,
+    never from a flag set when a helper returns: the symlink swap is live the
+    moment ``os.replace`` succeeds, and the durability fsync that follows can
+    still raise.  Using a return-time flag there would skip the rollback and let
+    the caller delete the very artifact the selector had just been pointed at.
+    """
     old_selector = _capture_selector(selector_path)
-    selector_published = False
     try:
         _replace_relative_symlink(selector_path, checkpoint_path.name)
-        selector_published = True
         _verify_published_selector(selector_path, checkpoint_path)
     except BaseException:
-        if selector_published:
+        if _selector_points_at(selector_path, checkpoint_path):
             _rollback_selector(selector_path, old_selector)
         raise
 
 
 def cleanup_candidate_artifact(checkpoint_path: Path) -> None:
-    """Remove one unpublished candidate artifact after failed qualification."""
+    """Remove one unpublished candidate artifact so a same-name retry succeeds.
+
+    The removal is durable (the directory entry is fsynced) and never silent: a
+    cleanup that itself fails raises ``ArtifactPublicationError`` because the
+    leftover candidate would otherwise block the obvious retry with a confusing
+    ``FileExistsError``, and the operator needs to know the artifact directory
+    may require manual inspection.
+    """
     try:
         if checkpoint_path.is_symlink() or checkpoint_path.exists():
             checkpoint_path.unlink()
-    except OSError:
-        pass
+            _fsync_directory(checkpoint_path.parent)
+    except OSError as exc:
+        raise ArtifactPublicationError(
+            "failed to remove the unpublished deployment candidate "
+            f"{checkpoint_path}; inspect the checkpoint directory manually before "
+            "retrying"
+        ) from exc
 
 
-def export_deployment_artifact(
-    experiment_dir: Path,
-    checkpoint_selector: str = "best",
-    output_path: Path | None = None,
-    verify: bool = True,
-    zarr_path: Path | None = None,
-    publish: bool = True,
-) -> ExportReceipt:
-    """Export one selected checkpoint as a canonical deployment artifact.
+def _build_deployment_payload(
+    experiment: Path,
+    checkpoint_selector: str,
+    zarr_path: Path | None,
+) -> tuple[dict[str, Any], Path]:
+    """Build one complete, validated deployment payload from a selected checkpoint.
 
-    When ``publish=True`` (default) the ``deployment_latest.pt`` selector is
-    atomically swapped to point at the new artifact.  When ``publish=False`` the
-    artifact is written but the selector is left untouched — used by
-    ``qualify_policy_parity`` so the selector is committed only after direct/
-    deployment parity passes.
+    Ownership is explicit here: ``source`` (the checkpoint) owns architecture,
+    action/window, normalization and dataset/preprocessing semantics, while the
+    experiment ``config.yaml`` contributes only identity (``task_name``) and the
+    inference recipe (``eval.use_ema`` / ``eval.denoise_steps``, or
+    ``best_ckpt.json`` for the ``best`` selector).
     """
     repo_root = Path(__file__).resolve().parents[2]
-    try:
-        experiment = Path(experiment_dir).expanduser().resolve(strict=True)
-    except OSError as exc:
-        raise InvalidExperimentError(
-            f"experiment directory not found: {experiment_dir}"
-        ) from exc
-    if not experiment.is_dir():
-        raise InvalidExperimentError(
-            f"experiment path is not a directory: {experiment}"
-        )
     selected_path = _resolve_checkpoint(experiment, checkpoint_selector)
     cfg_plain = _load_config(experiment)
+    task_name = cfg_plain.get("task_name")
+    if type(task_name) is not str or not task_name:
+        raise InvalidExperimentError("experiment config task_name must be a non-empty string")
     selected_inference = _resolve_selected_inference_settings(
         experiment, checkpoint_selector, cfg_plain
     )
-    observation_fields = _dataset_modalities(cfg_plain)
-    resolved_zarr = _resolve_zarr_path(cfg_plain, repo_root, zarr_path)
     checkpoint = _load_training_checkpoint(selected_path)
-    train, metadata_provenance, retrofitted = _reconcile_train_params(
-        checkpoint, cfg_plain
+    source = _parse_checkpoint_deployment_source(checkpoint)
+
+    # Selected weights first: decide raw vs EMA, then canonicalize, validate and
+    # sanitize exactly one state.  The unselected state is never processed.
+    selected_weights = "ema_model" if selected_inference.use_ema else "model"
+    selected_raw = (
+        checkpoint.ema_model_state
+        if selected_inference.use_ema
+        else checkpoint.model_state
     )
-    _validate_resolved_config_contract(cfg_plain, train)
-    model_state = _canonicalize_state_dict(checkpoint.model_state, "weights.model")
-    ema_state = (
-        None
-        if checkpoint.ema_model_state is None
-        else _canonicalize_state_dict(checkpoint.ema_model_state, "weights.ema_model")
+    if selected_raw is None:
+        raise InvalidCheckpointError(
+            f"eval.use_ema={selected_inference.use_ema!r} requires checkpoint "
+            f"{selected_weights} weights"
+        )
+    selected_state = _canonicalize_state_dict(
+        selected_raw, f"weights.{selected_weights}"
     )
-    agent_config = _sanitize_agent_config(cfg_plain["agent"], model_state, train)
-    normalization_contract = _reconcile_normalization_contract(
-        checkpoint, cfg_plain, observation_fields
+
+    resolved_zarr = _resolve_zarr_path(source.dataset, repo_root, zarr_path)
+    agent_config = _sanitize_agent_config(
+        source.agent_config, selected_state, source.agent
     )
     inference = _build_inference_config(
-        cfg_plain, agent_config, train, selected_inference, normalization_contract
+        task_name, agent_config, source, selected_inference
     )
-    if inference["eval"]["use_ema"] and ema_state is None:
-        raise InvalidCheckpointError(
-            "eval.use_ema=true requires checkpoint EMA weights"
-        )
-    if inference["eval"]["use_ema"] and "codebook_path" in cfg_plain["agent"]:
-        assert ema_state is not None
-        _sanitize_agent_config(cfg_plain["agent"], ema_state, train)
-    zarr_contract = _build_observation_contract(
-        resolved_zarr, cfg_plain, observation_fields
-    )
-    if "rgb" in observation_fields:
-        inference["rgb_preprocessing"] = _rgb_preprocessing(
-            cfg_plain["agent"], cfg_plain["dataset"]
-        )
-    selected_weights = "ema_model" if inference["eval"]["use_ema"] else "model"
-    selected_state = ema_state if selected_weights == "ema_model" else model_state
-    assert selected_state is not None
-    _validate_normalizer_state(
-        selected_state,
-        zarr_contract["observation_fields"],
-        train["action_dim"],
-        normalization_contract["fields"],
-    )
-    data_contract = zarr_contract
+    data_contract = _build_observation_contract(resolved_zarr, task_name, source)
+    if "rgb" in source.observation_fields:
+        inference["rgb_preprocessing"] = _rgb_preprocessing(source)
     producer = {
-        "metadata_provenance": metadata_provenance,
-        "retrofitted_train_params_fields": retrofitted,
         "source_checkpoint": selected_path.name,
         "selected_weights": selected_weights,
     }
+    source_commit = _source_commit(repo_root)
+    if source_commit is not None:
+        producer["source_commit"] = source_commit
     deployment_inference = {
         **inference,
-        "eval": {
-            "denoise_steps": inference["eval"]["denoise_steps"],
-        },
+        "eval": {"denoise_steps": inference["eval"]["denoise_steps"]},
     }
     payload = {
         "_format": DEPLOYMENT_FORMAT,
@@ -1658,7 +1586,51 @@ def export_deployment_artifact(
         "weights": selected_state,
     }
     _validate_payload(payload)
+    return payload, selected_path
 
+
+def _source_commit(repo_root: Path) -> str | None:
+    """Best-effort git HEAD for paper-experiment traceability only.
+
+    This is never a runtime compatibility gate; an unavailable revision simply
+    omits the field rather than blocking an export.
+
+    ``git -C <dir> rev-parse HEAD`` resolves the *nearest enclosing* repository,
+    so a copied or installed package tree could otherwise record an unrelated
+    outer repository's commit — indistinguishable from a correct sha, and worse
+    than no provenance at all.  The revision is therefore accepted only when the
+    package root is itself the repository top level.
+    """
+    import subprocess
+
+    def _git(*arguments: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repo_root), *arguments],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    if _git("rev-parse", "--show-toplevel") != str(repo_root):
+        return None
+    commit = _git("rev-parse", "HEAD")
+    if commit is None or len(commit) != 40:
+        return None
+    if any(char not in "0123456789abcdef" for char in commit):
+        return None
+    return commit
+
+
+def _resolve_artifact_paths(
+    experiment: Path, selected_path: Path, output_path: Path | None
+) -> tuple[Path, Path, Path]:
     checkpoint_dir = experiment / "checkpoints"
     if output_path is None:
         final_path = checkpoint_dir / f"{selected_path.stem}-deployment.pt"
@@ -1675,38 +1647,112 @@ def export_deployment_artifact(
         raise ArtifactPublicationError(
             "output_path must be a .pt file in experiment/checkpoints"
         )
-    selector_path = checkpoint_dir / "deployment_latest.pt"
+    return checkpoint_dir, final_path, checkpoint_dir / "deployment_latest.pt"
+
+
+def _export_candidate(
+    experiment_dir: Path,
+    checkpoint_selector: str = "best",
+    output_path: Path | None = None,
+    zarr_path: Path | None = None,
+) -> ExportReceipt:
+    """Write one unpublished, unverified candidate artifact.
+
+    Private on purpose.  The only caller that legitimately wants a candidate
+    without the public verify+publish sequence is ``qualify_policy_parity``,
+    which runs its own restore/parity and publishes last.  Keeping this private
+    means no researcher-facing path can publish an unverified artifact.
+    """
+    experiment = _require_experiment_directory(experiment_dir)
+    payload, selected_path = _build_deployment_payload(
+        experiment, checkpoint_selector, zarr_path
+    )
+    checkpoint_dir, final_path, selector_path = _resolve_artifact_paths(
+        experiment, selected_path, output_path
+    )
     if final_path.exists() or final_path.is_symlink():
         raise FileExistsError(
             f"refusing to overwrite deployment artifact: {final_path}"
         )
     checkpoint_temp: Path | None = None
+    renamed = False
     try:
         checkpoint_temp = _write_checkpoint_temp(checkpoint_dir, payload)
         os.replace(checkpoint_temp, final_path)
         checkpoint_temp = None
+        renamed = True
         _fsync_directory(checkpoint_dir)
-        reloaded_payload = _load_deployment_payload(final_path)
-        if verify:
-            _verify_exported_model(reloaded_payload)
-        if publish:
-            publish_deployment_selector(selector_path, final_path)
     except BaseException as exc:
+        if checkpoint_temp is not None:
+            checkpoint_temp.unlink(missing_ok=True)
+        if renamed:
+            # The candidate already carries its final name, so the temp path is
+            # gone and only final_path can be removed.  Without this the failed
+            # candidate survives and blocks the identical retry.
+            try:
+                cleanup_candidate_artifact(final_path)
+            except ArtifactPublicationError as cleanup_exc:
+                raise cleanup_exc from exc
         if isinstance(exc, DeploymentExportError):
             raise
         raise ArtifactPublicationError(
-            "deployment artifact publication failed"
+            "deployment candidate artifact write failed"
         ) from exc
-    finally:
-        if checkpoint_temp is not None:
-            checkpoint_temp.unlink(missing_ok=True)
-
     return ExportReceipt(
         checkpoint_path=final_path,
         selector_path=selector_path,
-        metadata_provenance=metadata_provenance,
         checkpoint_selector=checkpoint_selector,
     )
+
+
+def _require_experiment_directory(experiment_dir: Path) -> Path:
+    try:
+        experiment = Path(experiment_dir).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise InvalidExperimentError(
+            f"experiment directory not found: {experiment_dir}"
+        ) from exc
+    if not experiment.is_dir():
+        raise InvalidExperimentError(
+            f"experiment path is not a directory: {experiment}"
+        )
+    return experiment
+
+
+def export_deployment_artifact(
+    experiment_dir: Path,
+    checkpoint_selector: str = "best",
+    output_path: Path | None = None,
+    zarr_path: Path | None = None,
+) -> ExportReceipt:
+    """Export one selected checkpoint as a verified, published deployment artifact.
+
+    There is deliberately no way to publish an unverified artifact.  Every
+    successful call has completed, in order::
+
+        build payload -> validate payload -> write candidate
+            -> safe weights_only reload -> strict restore
+            -> deterministic synthetic prediction -> publish selector
+
+    Any failure before the selector swap removes the candidate this call
+    created, durably fsyncs the checkpoint directory, leaves the previous
+    ``deployment_latest.pt`` untouched, and therefore leaves the identical
+    command directly retryable.  ``zarr_path`` overrides only the physical
+    dataset location; the Zarr's task identity must still match the experiment.
+    """
+    receipt = _export_candidate(
+        experiment_dir,
+        checkpoint_selector=checkpoint_selector,
+        output_path=output_path,
+        zarr_path=zarr_path,
+    )
+    try:
+        _verify_exported_model(_load_deployment_payload(receipt.checkpoint_path))
+        publish_deployment_selector(receipt.selector_path, receipt.checkpoint_path)
+    except BaseException:
+        cleanup_candidate_artifact(receipt.checkpoint_path)
+        raise
+    return receipt
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1714,12 +1760,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("experiment_dir", type=Path)
     parser.add_argument("--checkpoint", default="best")
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--zarr-path", type=Path, default=None)
     parser.add_argument(
-        "--verify",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="strict-restore and run one deterministic synthetic prediction (default: true)",
+        "--zarr-path",
+        type=Path,
+        default=None,
+        help="override only the physical dataset location (task identity still checked)",
     )
     return parser.parse_args()
 
@@ -1730,7 +1775,6 @@ def main() -> None:
         args.experiment_dir,
         checkpoint_selector=args.checkpoint,
         output_path=args.output,
-        verify=args.verify,
         zarr_path=args.zarr_path,
     )
     print(
@@ -1738,7 +1782,6 @@ def main() -> None:
             {
                 "checkpoint_path": str(receipt.checkpoint_path),
                 "selector_path": str(receipt.selector_path),
-                "metadata_provenance": receipt.metadata_provenance,
                 "checkpoint_selector": receipt.checkpoint_selector,
             }
         )

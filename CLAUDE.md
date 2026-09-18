@@ -38,6 +38,12 @@ bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>
 bash scripts/training/train.sh <config_name> \
   'task_name=<task>' \
   '+resume_from=/absolute/path/to/experiment_or_checkpoint'
+
+# Deployment export（研究者日常路径；run_policy 位于 dexmani_real）
+python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
+
+# Deployment integrity tests
+conda run --no-capture-output -n policy python -m pytest tests/ -q
 ```
 
 本地 `scripts/training/` 启动器通过 `conda run --no-capture-output -n policy` 和 `python -u` 自动选择环境并实时输出日志，无需提前激活；要求 `conda` 在 `PATH` 中可用。不要在启用 `set -u` 的 shell 中直接执行 Conda 激活钩子，以免触发未定义变量错误。
@@ -82,6 +88,12 @@ syntax/import
 ```
 
 不要自动启动完整训练、DDP、长评测或视频。环境限制导致的未执行项明确报告为 NOT VERIFIED。
+
+## Deployment
+
+Deployment 的 model/data semantics 属于 **selected checkpoint**（`resume_contract.agent` / `agent_config` / `dataset` / `agent.normalization`），不属于当前 `config.yaml`。`config.yaml` 只为 deployment 提供 experiment identity 与 inference recipe。完整规则见 `AGENTS.md` 的 “Deployment Boundary”。
+
+改 deployment 时不要：从当前 config 重新推导 agent/dataset/normalization 语义、恢复 config↔checkpoint reconciliation、在 `contract.py` 之外另写一套 metadata grammar、重新引入 `verify` / `publish` 公开开关。`deployment/contract.py` 是唯一 artifact metadata parser。
 
 ## Repository Map
 

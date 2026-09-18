@@ -1,9 +1,20 @@
 """Direct/export inference parity qualification for deployment artifacts.
 
-The direct branch deliberately constructs only the resolved experiment's
-``agent``.  In particular, it never constructs the training dataset, an
-environment runner, or anything from ``dexmani_sim``.  This makes the command a
-useful deployment boundary check even on a machine with no simulator install.
+This is a developer/release regression tool, not a routine researcher entry
+point: the paper workflow stays ``export -> run_policy``.
+
+Both branches start from the *checkpoint-saved* ``agent_config`` and the same
+selected raw/EMA state.  The direct branch constructs it unsanitized; the
+exported branch additionally applies deployment sanitization and serialization
+and then restores through the artifact.  Parity therefore measures what
+deployment actually adds — constructor sanitization, serialization and strict
+restore — instead of letting two branches agree on the same current-config
+mistake.
+
+The direct branch deliberately constructs only the agent.  In particular, it
+never constructs the training dataset, an environment runner, or anything from
+``dexmani_sim``.  This makes the command a useful deployment boundary check
+even on a machine with no simulator install.
 """
 
 from __future__ import annotations
@@ -98,46 +109,35 @@ def restore_direct_policy(
     device: torch.device | str = "cpu",
     data_contract: Mapping[str, Any] | None = None,
 ) -> DirectRestoredPolicy:
-    """Strictly restore the selected model or EMA from an experiment.
+    """Strictly restore the selected model or EMA using checkpoint-saved semantics.
 
-    The resolved ``config.yaml`` is the constructor source of truth.  This
-    intentionally does *not* use the dataset or environment portions of that
-    config; only ``agent`` is handed to Hydra.
+    The constructor source is the checkpoint's own
+    ``resume_contract.agent_config`` — the same mapping the exporter starts
+    from — but *unsanitized*, and it is loaded with the same selected raw/EMA
+    state.  Parity therefore measures exactly what deployment adds: constructor
+    sanitization, serialization and strict artifact restore.  It is no longer a
+    comparison where both branches could agree on the same stale current-config
+    semantics.
     """
     experiment = _resolve_experiment(experiment_dir)
     selected_path = exporter._resolve_checkpoint(experiment, checkpoint_selector)
     cfg_plain = exporter._load_config(experiment)
+    task_name = cfg_plain.get("task_name")
+    if type(task_name) is not str or not task_name:
+        raise PolicyParityError("experiment config task_name must be a non-empty string")
     selected_inference = exporter._resolve_selected_inference_settings(
         experiment, checkpoint_selector, cfg_plain
     )
     checkpoint = exporter._load_training_checkpoint(selected_path)
-    train, _, _ = exporter._reconcile_train_params(checkpoint, cfg_plain)
-    exporter._validate_resolved_config_contract(cfg_plain, train)
+    source = exporter._parse_checkpoint_deployment_source(checkpoint)
 
-    # Same checkpoint/config normalization reconciliation the exporter enforces —
-    # the direct branch must not use an independently-derived (and potentially
-    # stale) normalization spec for the same checkpoint weights, or direct/export
-    # parity could pass while both branches silently share the same wrong metadata.
-    dataset_modalities = exporter._dataset_modalities(cfg_plain)
-    normalization_contract = exporter._reconcile_normalization_contract(
-        checkpoint, cfg_plain, dataset_modalities
-    )
-
-    # Reuse the exporter's resolved-eval checks, but retain the original agent
-    # mapping below: direct qualification must represent the experiment itself,
-    # not the deployment constructor sanitization.
-    inference = exporter._build_inference_config(
-        cfg_plain, cfg_plain["agent"], train, selected_inference, normalization_contract
-    )
-    agent_config = cfg_plain["agent"]
-    exporter._validate_agent_targets(agent_config)
-    use_ema = inference["eval"]["use_ema"]
-    if type(use_ema) is not bool:
-        raise PolicyParityError("resolved eval.use_ema must be bool")
+    use_ema = selected_inference.use_ema
     selected_weights = "ema_model" if use_ema else "model"
     selected_raw = checkpoint.ema_model_state if use_ema else checkpoint.model_state
     if selected_raw is None:
-        raise PolicyParityError("eval.use_ema=true requires checkpoint EMA weights")
+        raise PolicyParityError(
+            f"eval.use_ema={use_ema!r} requires checkpoint {selected_weights} weights"
+        )
 
     # This is the same canonical key normalization the exporter applies before
     # strict loading.  It preserves the selected model/EMA tensors while making
@@ -145,27 +145,31 @@ def restore_direct_policy(
     selected_state = exporter._canonicalize_state_dict(
         selected_raw, f"weights.{selected_weights}"
     )
+    agent_config = dict(source.agent_config)
+    inference = exporter._build_inference_config(
+        task_name, agent_config, source, selected_inference
+    )
     if data_contract is None:
-        data_contract = _validated_observation_contract(experiment, None)
+        data_contract = _validated_observation_contract(
+            experiment, None, checkpoint_selector=checkpoint_selector
+        )
     observation_fields = data_contract.get("observation_fields")
     if isinstance(observation_fields, Mapping) and "rgb" in observation_fields:
-        inference["rgb_preprocessing"] = exporter._rgb_preprocessing(
-            cfg_plain["agent"], cfg_plain["dataset"]
-        )
+        inference["rgb_preprocessing"] = exporter._rgb_preprocessing(source)
     spec = _direct_spec(inference, data_contract)
     try:
         import hydra
 
         # Resolve constructor-time relative assets from the repository root.
         with _repository_cwd():
-            agent = hydra.utils.instantiate(OmegaConf.create(dict(agent_config)))
+            agent = hydra.utils.instantiate(OmegaConf.create(agent_config))
         agent.action_key = spec.action_key
         agent.load_state_dict(selected_state, strict=True)
         agent.to(device)
         agent.eval()
         _validate_direct_agent_dimensions(agent, spec)
         validate_deployment_normalizer(agent, spec)
-        agent.normalization_spec = dict(normalization_contract["fields"])
+        agent.normalization_spec = dict(spec.normalization)
         validate_normalizer_state(agent.normalizer, agent.normalization_spec)
         _validate_rgb_processor(agent, spec)
     except DeploymentRestoreError:
@@ -239,7 +243,9 @@ def qualify_policy_parity(
     _validate_tolerance(rtol, "rtol")
     _require_tolerance_reason(atol, rtol, tolerance_reason)
     experiment = _resolve_experiment(experiment_dir)
-    data_contract = _validated_observation_contract(experiment, zarr_path)
+    data_contract = _validated_observation_contract(
+        experiment, zarr_path, checkpoint_selector=checkpoint_selector
+    )
     direct = restore_direct_policy(
         experiment,
         checkpoint_selector=checkpoint_selector,
@@ -247,17 +253,20 @@ def qualify_policy_parity(
         data_contract=data_contract,
     )
 
-    receipt = exporter.export_deployment_artifact(
+    receipt = exporter._export_candidate(
         direct.experiment_dir,
         checkpoint_selector=checkpoint_selector,
         output_path=output_path,
-        verify=False,
         zarr_path=zarr_path,
-        publish=False,
     )
-    # This is intentionally the safe artifact reload owned by the exporter,
-    # rather than retaining the in-memory publication payload.
+    # Everything that can still fail — restore, parity, report construction and
+    # the publish itself — happens inside this guard.  Any failure drops the
+    # candidate and leaves deployment_latest.pt at its previous value (publish
+    # rolls the selector back on failure), so the identical command can be
+    # retried directly.
     try:
+        # This is intentionally the safe artifact reload owned by the exporter,
+        # rather than retaining the in-memory publication payload.
         payload = exporter._load_deployment_payload(receipt.checkpoint_path)
         deployment = restore_deployment_agent(payload, device=device)
         _require_matching_specs(direct.spec, deployment.spec)
@@ -272,18 +281,33 @@ def qualify_policy_parity(
         assert_prediction_parity(
             direct_snapshot, deployment_snapshot, atol=atol, rtol=rtol
         )
+        report = _build_parity_report(
+            direct, receipt, direct_snapshot, deployment_snapshot, atol=atol, rtol=rtol
+        )
+        # The selector swap is the last external state change this function
+        # makes; nothing that can raise runs after it.
+        exporter.publish_deployment_selector(
+            receipt.selector_path, receipt.checkpoint_path
+        )
     except DeploymentRestoreError as exc:
-        # Drop the candidate, keep the selector unchanged, and re-raise so a
-        # same-name retry is idempotent.
         exporter.cleanup_candidate_artifact(receipt.checkpoint_path)
         raise PolicyParityError("direct/export prediction parity failed") from exc
-    except Exception:
+    except BaseException:
         exporter.cleanup_candidate_artifact(receipt.checkpoint_path)
         raise
+    return report
 
-    # Parity passed — commit the selector exactly once.
-    exporter.publish_deployment_selector(receipt.selector_path, receipt.checkpoint_path)
 
+def _build_parity_report(
+    direct: DirectRestoredPolicy,
+    receipt: Any,
+    direct_snapshot: PredictionSnapshot,
+    deployment_snapshot: PredictionSnapshot,
+    *,
+    atol: float,
+    rtol: float,
+) -> ParityReport:
+    """Compute every reported difference before any selector mutation."""
     pred_max = _max_abs_diff(
         direct_snapshot.pred_action, deployment_snapshot.pred_action
     )
@@ -358,14 +382,27 @@ def _direct_spec(
 
 
 def _validated_observation_contract(
-    experiment: Path, zarr_override: Path | None
+    experiment: Path,
+    zarr_override: Path | None,
+    *,
+    checkpoint_selector: str = "best",
 ) -> dict[str, Any]:
-    """Read the exporter's validated Zarr contract without constructing a dataset."""
+    """Read the exporter's validated Zarr contract without constructing a dataset.
+
+    Modalities and the default dataset location come from the same
+    checkpoint-saved semantics the exporter uses; only the experiment
+    ``task_name`` identity check is config-owned.
+    """
     cfg_plain = exporter._load_config(experiment)
-    modalities = exporter._dataset_modalities(cfg_plain)
+    task_name = cfg_plain.get("task_name")
+    if type(task_name) is not str or not task_name:
+        raise PolicyParityError("experiment config task_name must be a non-empty string")
+    selected_path = exporter._resolve_checkpoint(experiment, checkpoint_selector)
+    checkpoint = exporter._load_training_checkpoint(selected_path)
+    source = exporter._parse_checkpoint_deployment_source(checkpoint)
     repo_root = Path(__file__).resolve().parents[2]
-    zarr_path = exporter._resolve_zarr_path(cfg_plain, repo_root, zarr_override)
-    return exporter._build_observation_contract(zarr_path, cfg_plain, modalities)
+    zarr_path = exporter._resolve_zarr_path(source.dataset, repo_root, zarr_override)
+    return exporter._build_observation_contract(zarr_path, task_name, source)
 
 
 def _require_matching_specs(
@@ -382,6 +419,7 @@ def _require_matching_specs(
         "control_dt_s",
         "requires_hand",
         "rgb_preprocessing",
+        "normalization",
     ):
         if getattr(reference, name) != getattr(candidate, name):
             raise PolicyParityError(
@@ -404,7 +442,7 @@ def _validate_direct_agent_dimensions(agent: Any, spec: DeploymentSpec) -> None:
         if actual is not None and actual != wanted:
             raise PolicyParityError(
                 f"restored direct agent.{name}={actual!r} conflicts with "
-                f"resolved config={wanted!r}"
+                f"checkpoint contract={wanted!r}"
             )
 
 

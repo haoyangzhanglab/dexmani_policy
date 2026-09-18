@@ -149,6 +149,15 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact、observation contract 和 runtime restore 的具体语义以实现和 `docs/项目架构.md` 为准；README 不复制其内部 schema。
 
+```bash
+# 研究者日常路径：export -> run_policy（run_policy 位于 dexmani_real）
+python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
+```
+
+Export 使用 **selected checkpoint 自己保存的** agent/dataset/normalization 语义，`config.yaml` 只提供 experiment identity 与 inference recipe，因此训练后修改 config 不会改变旧 checkpoint 的 deployment 行为。成功 export 意味着已通过 safe reload + strict restore + deterministic synthetic prediction；没有跳过验证的开关。
+
+运行时 `--inference-steps N` 是显式 override（NFE ablation），不需要重新 export。`qualify.py` 是 developer/release regression 工具，不属于日常流程。
+
 ## 仓库结构
 
 ```text

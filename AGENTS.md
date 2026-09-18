@@ -6,7 +6,7 @@
 
 按任务类型使用以下事实来源：
 
-1. **已有实验**：优先读取实验目录保存的 resolved `config.yaml` 和 checkpoint contract。
+1. **已有实验**：优先读取实验目录保存的 resolved `config.yaml` 和 checkpoint contract。Deployment 是例外：其模型/数据语义以 selected checkpoint 的 `resume_contract` 为准，见 “Deployment Boundary”。
 2. **当前 Policy**：读取 `dexmani_policy/configs/<config>.yaml`，再沿 `agent._target_` 进入实际 Python 实现。
 3. **运行时接口**：以 `validate_config`、Agent/runtime 校验、训练/评测入口代码为准。
 4. `README.md`、`CLAUDE.md` 和 `docs/` 用于导航与背景，不应作为当前 Policy 架构、超参数或 tensor shape 的最终依据。
@@ -55,6 +55,32 @@ config
 - `scripts/training/`、`scripts/eval/`、`scripts/remote/`：操作入口。
 
 `docs/` 当前视为冻结背景文档；除非用户明确要求，不要修改。
+
+## Deployment Boundary
+
+Deployment 的 trained semantics 属于 **selected checkpoint**，不属于当前 experiment `config.yaml`：
+
+```text
+Checkpoint owns:   resume_contract.agent / agent_config / dataset / agent.normalization
+                   （architecture、action/window、normalization、dataset/preprocessing 语义）
+config.yaml owns:  experiment identity（policy_name / task_name）
+                   + inference recipe（eval.use_ema / eval.denoise_steps；
+                     best selector 用 best_ckpt.json["inference"]）
+Artifact owns:     selected weights（raw 或 EMA，只存选中的一套）、
+                   immutable observation/action contract、default denoise_steps
+Runtime owns:      显式 --inference-steps override（NFE ablation）
+```
+
+规则：
+
+- 不要为 deployment 从当前 config 重新推导 agent/dataset/normalization 语义，也不要恢复 config↔checkpoint 的 reconciliation。修改 `config.yaml.agent/dataset/normalization` 不得改变旧 checkpoint 的 deployment 行为。
+- 删除 reconciliation **不等于**删除 validation：checkpoint 自身的 action/window/normalization contract 仍必须 strict parse、fail-fast，不允许 blind trust。
+- `deployment/contract.py` 是 artifact metadata 的唯一 grammar（action/window、observation fields、RGB preprocessing、normalization、nested `_target_` allowlist）。export / inspect / restore 不得各写一套；新增校验应加在该 parser 上，让 malformed artifact 在 `inspect_experiment()` 阶段就失败。
+- Public export 永远 verify（safe reload -> strict restore -> deterministic synthetic prediction）后才 publish，不存在跳过验证的开关；如果某条 developer 路径确实需要 candidate-only 行为，走 private primitive，不要重新暴露 `verify` / `publish` boolean mode。
+- publish 前任何失败必须删除本次 candidate、fsync checkpoint 目录、保持旧 `deployment_latest.pt`，使同名命令可直接 retry；candidate cleanup 失败必须显式报错，不得 silent swallow。
+- `--zarr-path` 只改 physical dataset location，不改 task identity；无论是否 override，Zarr `task_name` 必须等于 experiment `task_name`。
+- 保持 `simple.v3`，不做旧 checkpoint migration / legacy compatibility；不要为 deployment 引入 hashing、signature、flock 或 code-version gate。
+- `qualify.py` 是 developer/release regression 工具；研究者日常路径是 `export -> run_policy`。
 
 ## Environment and Safety
 
