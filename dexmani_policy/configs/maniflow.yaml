@@ -2,7 +2,7 @@
 # Encoder:  PointNetDense (per-point features, 1024 points, 128d, xyz+rgb)
 # Decoder:  DiTX (cross-attention conditioning) + Euler ODE integration
 # Modality: point_cloud + joint_state → action
-# Key:      use_ema_teacher_for_consistency=true, target_t=0 for rectified flow
+# Key:      EMA consistency targets with target_t-conditioned DiT-X
 
 policy_name: maniflow
 
@@ -96,7 +96,7 @@ agent:
   target_t_embed_dim: 128
 
   # Flow matching
-  denoise_timesteps: 10
+  num_inference_steps: 10
   flow_batch_ratio: 0.75
   t_sample_mode_for_flow: beta
   t_sample_mode_for_consistency: discrete
@@ -130,7 +130,6 @@ training:
   use_bfloat16: true
   use_compile: true
   use_ema: true
-  use_ema_teacher_for_consistency: true   # required: inference uses target_t=dt>0
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
