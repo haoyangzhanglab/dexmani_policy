@@ -988,13 +988,16 @@ def _replace_relative_symlink(selector_path: Path, target: str) -> None:
         temp.unlink(missing_ok=True)
 
 
-def publish_deployment_selector(
+def _publish_deployment_selector(
     selector_path: Path,
     checkpoint_path: Path,
 ) -> None:
     """Atomically point ``deployment_latest.pt`` at one already-verified artifact.
 
-    A temporary symlink plus POSIX ``os.replace`` is all the durability a
+    Internal to ``export_deployment_artifact``, which completes safe reload,
+    strict restore and the synthetic prediction before calling this; the swap
+    itself performs no verification and is not a researcher-facing API.  A
+    temporary symlink plus POSIX ``os.replace`` is all the durability a
     single-user research workflow needs.  Nothing may run after the swap, so
     the caller treats a returned publish as final.
     """
@@ -1234,7 +1237,7 @@ def export_deployment_artifact(
         ) from exc
     try:
         _verify_exported_model(_load_deployment_payload(final_path))
-        publish_deployment_selector(selector_path, final_path)
+        _publish_deployment_selector(selector_path, final_path)
     except BaseException:
         # The candidate already carries its final name; without this cleanup
         # the failed candidate would survive and block the identical retry.

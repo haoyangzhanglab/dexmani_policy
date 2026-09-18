@@ -282,10 +282,7 @@ def build_real_policy_data_semantics(
         "contact_force_source": attrs["contact_force_source"],
         "action_semantics": attrs["action_semantics"],
         "action_ee_frame": attrs["action_ee_frame"],
-        # Optional capture: schema v13 research data predates the attr, while
-        # the current producer always writes it.  The key is always present so
-        # missing-vs-declared is itself a detectable semantic difference.
-        "action_ee_components": attrs.get("action_ee_components"),
+        "action_ee_components": attrs["action_ee_components"],
         "observation_fields": captured,
     }
 
@@ -371,6 +368,7 @@ def _validate_core_zarr_attrs(attrs: Mapping[str, Any], task_name: str) -> None:
         "contact_force_source",
         "action_semantics",
         "action_ee_frame",
+        "action_ee_components",
     }
     missing = sorted(required - set(attrs))
     if missing:
@@ -388,10 +386,7 @@ def _validate_core_zarr_attrs(attrs: Mapping[str, Any], task_name: str) -> None:
         or attrs["action_ee_frame"] != _ACTION_EE_FRAME
     ):
         raise RealPolicyContractError("invalid Real Policy Zarr semantics")
-    # action_ee_components is optional capture (see build_real_policy_data_
-    # semantics); when the producer declares it, it must be the canonical one.
-    components = attrs.get("action_ee_components")
-    if components is not None and components != _ACTION_EE_COMPONENTS:
+    if attrs["action_ee_components"] != _ACTION_EE_COMPONENTS:
         raise RealPolicyContractError("Zarr action_ee_components is invalid")
     # Task identity is checkpoint-owned: a relocated Zarr proves equivalence,
     # it never re-labels the task.

@@ -304,6 +304,44 @@ def test_none_semantics_checkpoint_fails_as_unsupported(experiment, zarr_path):
         )
 
 
+def test_real_policy_contract_requires_action_ee_components(tmp_path):
+    """The shared extractor itself gates the canonical EE action layout.
+
+    A Real Zarr that does not declare ``action_ee_components`` — or declares a
+    different layout — fails at the training-snapshot stage, before any
+    checkpoint exists, not only later at the export equality check.
+    """
+    from dexmani_policy.datasets.real_policy_contract import (
+        RealPolicyContractError,
+        build_real_policy_data_semantics,
+    )
+
+    kwargs = dict(
+        task_name=TASK_NAME,
+        observation_fields=["joint_state"],
+        agent_config=agent_config(),
+        action_key="action",
+    )
+    missing = write_zarr(
+        tmp_path / "missing.zarr", drop_attrs=["action_ee_components"]
+    )
+    with pytest.raises(RealPolicyContractError, match="action_ee_components"):
+        build_real_policy_data_semantics(missing, **kwargs)
+
+    wrong = write_zarr(
+        tmp_path / "wrong.zarr",
+        attrs_override={"action_ee_components": "eef_position_m(3)+eef_rot6d(6)"},
+    )
+    with pytest.raises(
+        RealPolicyContractError, match="action_ee_components is invalid"
+    ):
+        build_real_policy_data_semantics(wrong, **kwargs)
+
+    canonical = write_zarr(tmp_path / "canonical.zarr")
+    semantics = build_real_policy_data_semantics(canonical, **kwargs)
+    assert semantics["action_ee_components"] == ACTION_EE_COMPONENTS
+
+
 # ---------------------------------------------------------------------------
 # 2c. --zarr-path is semantic-equivalent relocation only
 # ---------------------------------------------------------------------------
@@ -748,6 +786,19 @@ def test_verification_failure_keeps_previous_selector_and_allows_retry(
         experiment, checkpoint_selector="second.pt", zarr_path=zarr_path
     )
     assert selector.resolve() == retried.checkpoint_path.resolve()
+
+
+def test_selector_publication_is_not_package_public_api():
+    """Selector publication is an internal step of ``export_deployment_artifact``.
+
+    The swap helper performs no reload/restore/prediction, so the package
+    facade must not expose it as a researcher-facing publication API.
+    """
+    import dexmani_policy.deployment as deployment
+
+    assert "publish_deployment_selector" not in deployment.__all__
+    assert "publish_deployment_selector" not in deployment._EXPORT_NAMES
+    assert not hasattr(deployment, "publish_deployment_selector")
 
 
 # ---------------------------------------------------------------------------

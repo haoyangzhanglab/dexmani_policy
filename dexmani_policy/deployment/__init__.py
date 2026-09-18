@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from dexmani_policy.deployment.export import (
         ExportReceipt,
         export_deployment_artifact,
-        publish_deployment_selector,
     )
     from dexmani_policy.deployment.runtime import (
         ExperimentInfo,
@@ -33,14 +32,12 @@ __all__ = [
     "inspect_experiment",
     "list_experiments",
     "load_experiment",
-    "publish_deployment_selector",
     "resolve_experiment",
 ]
 
 _EXPORT_NAMES = {
     "ExportReceipt",
     "export_deployment_artifact",
-    "publish_deployment_selector",
 }
 _RUNTIME_NAMES = {
     "ExperimentInfo",
