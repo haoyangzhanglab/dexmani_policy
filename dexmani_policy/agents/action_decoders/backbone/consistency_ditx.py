@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops.layers.torch import Rearrange
-from timm.models.vision_transformer import Mlp, RmsNorm, use_fused_attn
-from torch.jit import Final
+from timm.models.vision_transformer import Mlp, RmsNorm
 
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
@@ -137,8 +135,6 @@ class ConsistencyDiTX(nn.Module):
           into a single conditioning vector.
         - ``AdaLNZero`` modulation in ``DiTXBlock`` for stable training
           initialization.
-        - Optional token compression (``TokenCompressor``) to reduce
-          observation token count.
     """
 
     def __init__(
