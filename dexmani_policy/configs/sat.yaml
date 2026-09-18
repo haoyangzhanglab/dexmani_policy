@@ -108,7 +108,7 @@ agent:
   shuffle_action_tokens: true
 
   # Flow matching (standard CFM, no consistency training)
-  denoise_timesteps: 10
+  num_inference_steps: 10
   t_sample_mode_for_flow: beta
 
   modality_dropout_probs:
@@ -138,7 +138,6 @@ training:
   use_bfloat16: true
   use_compile: true              # SATAgent overrides to mode='default' (no cudagraphs)
   use_ema: true
-  use_ema_teacher_for_consistency: false   # SAT uses standard CFM only
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
