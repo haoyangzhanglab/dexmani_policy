@@ -1,12 +1,18 @@
 """Canonical deployment artifact contract shared by export, inspect and runtime.
 
-This module is the single metadata grammar for a persisted artifact.  Payload
-validation, ``inspect_experiment``, ``load_experiment`` and
+This module is the shared grammar for persisted deployment **metadata**.
+Payload validation, ``inspect_experiment``, ``load_experiment`` and
 ``restore_deployment_agent`` all parse through :func:`parse_deployment_contract`,
 so a malformed artifact cannot pass inspection and then fail later during
 Hydra instantiation.  Covered here: the action/window contract, observation
 fields, RGB preprocessing, the versioned normalization contract, and the nested
 agent ``_target_`` allowlist.
+
+Not covered here, by design: state-dict tensor/key grammar, Real physics data
+semantics (owned by ``datasets.real_policy_contract`` and the checkpoint
+snapshot), filesystem publication, and decoder-specific inference-step limits.
+Weight correctness is enforced at the strict restore/load boundary, not at
+inspection.
 """
 
 from __future__ import annotations
@@ -130,11 +136,6 @@ class DeploymentSpec:
     @property
     def control_action_dim(self) -> int:
         return 21 if self.action_key == "action_ee" else 19
-
-    @property
-    def chunk_size(self) -> int:
-        """Number of canonical future actions; never persisted separately."""
-        return self.horizon - self.n_obs_steps + 1
 
 
 def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:

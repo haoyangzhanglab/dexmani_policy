@@ -2,14 +2,22 @@
 
 Ownership at this boundary: the selected checkpoint owns the trained
 deployment semantics (agent constructor, action/window contract,
-normalization, dataset/preprocessing), the experiment ``config.yaml`` owns only
-identity plus the inference recipe, and the resulting artifact owns the selected
-weights and an immutable observation/action contract.
+normalization, dataset constructor config **and the actual training data
+semantic snapshot** ``resume_contract.deployment_data_semantics``), the
+experiment ``config.yaml`` owns only identity plus the inference recipe, and
+the resulting artifact owns the selected weights and an immutable
+observation/action contract.
+
+The selected — or ``--zarr-path`` relocated — Zarr is only a physical
+location: the shared Real Policy semantic extractor re-parses it and the
+result must exactly match the checkpoint snapshot, so the artifact's
+model-facing data semantics always come from the checkpoint, never from the
+export-time store.
 
 The public :func:`export_deployment_artifact` always verifies — a safe
 ``weights_only`` reload, a strict restore and one deterministic synthetic
-prediction — before it publishes, so no researcher-facing path can publish an
-unverified artifact.
+prediction — before it atomically swaps the ``deployment_latest.pt``
+selector, so no researcher-facing path can publish an unverified artifact.
 """
 
 from __future__ import annotations
@@ -24,9 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import numpy as np
 import torch
-import zarr  # type: ignore[import-untyped]
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.obs_encoder.rgb.image_processor import (
@@ -40,6 +46,12 @@ from dexmani_policy.common.checkpoint_io import (
 )
 from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
+from dexmani_policy.datasets.real_policy_contract import (
+    RealPolicyContractError,
+    build_real_policy_data_semantics,
+    semantics_mismatch,
+    validate_observation_field_list,
+)
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
     DeploymentContractError,
@@ -50,67 +62,6 @@ from dexmani_policy.deployment.restore import (
     DeploymentRestoreError,
     verify_deployment_prediction,
 )
-
-_SUPPORTED_OBSERVATION_FIELDS = frozenset(
-    {
-        "joint_state",
-        "point_cloud",
-        "rgb",
-        "contact_force",
-        "fingertip_points",
-        "eef_pose",
-        "tactile_force",
-    }
-)
-_POINT_COUNTS = frozenset({1024, 2048, 4096, 8192})
-_POINT_FEATURE_DIM = 6
-_POINT_SEMANTICS = {
-    "point_cloud_frame": "xarm_base",
-    "point_cloud_color_source": "mean_rgb_of_aligned_depth_pixels_per_voxel",
-    "point_cloud_policy_id": "depth_to_color_orthogonal_edge_table_voxel_radius_graph_v9",
-    "point_cloud_sampling": "deterministic_coarse_voxel_stratified_hash_or_cyclic_pad",
-    "point_cloud_transform": (
-        "depth_gate_and_cardinal_edge_support;depth_to_color_deprojection;"
-        "table_plane_height_hysteresis_crop_in_color_frame_before_deprojection;"
-        "xarm_base_transform;workspace_crop;mean_voxel_xyz_and_rgb;"
-        "single_radius_graph_density_and_component_outlier;spatial_candidate_cap;"
-        "coarse_voxel_stratified_hash_or_cyclic_pad"
-    ),
-}
-
-_FINGERTIP_SEMANTICS = {
-    "fingertip_points_frame": "xarm_base",
-    "fingertip_points_unit": "m",
-    "fingertip_points_derivation": "fk_from_processed_joint_state",
-    "fingertip_points_policy_id": "arm_hand_fk_from_joint_state_v1",
-}
-# Canonical EEF observation identity; deploy-time FK must resolve to the same
-# derivation and algorithm so a silent frame/FK drift cannot change the values.
-_EEF_POSE_SEMANTICS = {
-    "eef_pose_frame": "xarm_base",
-    "eef_pose_components": "position_m(3)+rot6d(6)",
-    "eef_pose_derivation": "canonical_arm_fk_from_aligned_qpos",
-    "eef_pose_algorithm_id": "xarm7_custom_eef_pinocchio_fk_v1",
-}
-# Dense tactile ordering/axis identity; unit honesty is checked separately
-# because XHand SDK native values are not proven to be Newtons.
-_TACTILE_FORCE_SEMANTICS = {
-    "tactile_force_representation": "xhand_sdk_raw_force_fx_fy_fz_bias_corrected",
-    "tactile_force_finger_order": "thumb_index_mid_ring_pinky",
-    "tactile_force_sensor_order": "xhand_sdk_sensor_data_order",
-    "tactile_force_point_order": "xhand_sdk_sensor_data_raw_force_order",
-    "tactile_force_axis_labels": "fx_fy_fz",
-}
-# Members the Real producer guarantees inside each canonical config JSON attr.
-_PROCESSING_CONFIG_MEMBERS = frozenset({"pointcloud", "table_plane_abcd"})
-_FINGERTIP_CONFIG_MEMBERS = frozenset(
-    {
-        "fingertip_link_names",
-        "handbase_position_eef_m",
-        "handbase_quat_eef_wxyz",
-    }
-)
-
 
 class DeploymentExportError(RuntimeError):
     """Base error for an invalid or failed deployment export."""
@@ -156,6 +107,7 @@ class _CheckpointDeploymentSource:
     dataset: dict[str, Any]
     normalization_contract: dict[str, Any]
     observation_fields: tuple[str, ...]
+    deployment_data_semantics: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -275,25 +227,15 @@ def _require_positive_int(value: Any, label: str) -> int:
     return value
 
 
-def _require_finite_number(value: Any, label: str, *, positive: bool) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise InvalidZarrError(f"{label} must be a finite number")
-    number = float(value)
-    if not math.isfinite(number) or (positive and number <= 0.0):
-        raise InvalidZarrError(
-            f"{label} must be {'positive and ' if positive else ''}finite"
-        )
-    return number
-
-
 def _resolve_zarr_path(
     dataset: Mapping[str, Any], repo_root: Path, override: Path | None
 ) -> Path:
-    """Resolve the physical dataset location for observation-contract validation.
+    """Resolve the physical dataset location for semantic-equivalence proof.
 
     The default comes from the checkpoint-saved dataset config.  An explicit
-    ``override`` relocates the dataset only — task identity is still checked
-    against the experiment in :func:`_validate_core_zarr_attrs`.
+    ``override`` relocates the dataset only — the located store must still
+    match the checkpoint's saved training data semantics exactly in
+    :func:`_build_data_contract`.
     """
     if override is not None:
         candidate = override.expanduser()
@@ -328,441 +270,51 @@ def _checkpoint_observation_fields(
         raise UnsupportedPolicyError(
             "checkpoint dataset.sensor_modalities must be an explicit string list"
         )
-    if (
-        not modalities
-        or len(set(modalities)) != len(modalities)
-        or "joint_state" not in modalities
-        or set(modalities) - _SUPPORTED_OBSERVATION_FIELDS
-    ):
-        raise UnsupportedPolicyError(
-            "deployment observation fields must be unique supported names and include "
-            "joint_state"
-        )
-    return list(modalities)
-
-
-def _validate_required_zarr_arrays(root: Any, action_key: str) -> None:
-    expected_dims = {"joint_state": 19, "action": 19, "action_ee": 21}
     try:
-        arrays = root["data"]
-        shapes = {
-            key: tuple(int(value) for value in arrays[key].shape)
-            for key in expected_dims
-        }
-    except Exception as exc:
-        raise InvalidZarrError(
-            "Zarr must contain joint_state, action, and action_ee arrays"
-        ) from exc
-    lengths = {shape[0] for shape in shapes.values() if len(shape) == 2}
-    if (
-        len(lengths) != 1
-        or not lengths
-        or next(iter(lengths)) <= 0
-        or any(
-            len(shapes[key]) != 2 or shapes[key][1] != dim
-            for key, dim in expected_dims.items()
-        )
-    ):
-        raise InvalidZarrError(f"Zarr action/state dimensions are invalid: {shapes}")
-    if action_key not in {"action", "action_ee"}:
-        raise InvalidZarrError(f"checkpoint action_key is invalid: {action_key!r}")
+        return validate_observation_field_list(modalities)
+    except RealPolicyContractError as exc:
+        raise UnsupportedPolicyError(str(exc)) from exc
 
 
-def _validate_json_string(value: Any, label: str) -> str:
-    if type(value) is not str or not value:
-        raise InvalidZarrError(f"{label} must be a non-empty JSON string")
-    try:
-        parsed = json.loads(
-            value, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token))
-        )
-        json.dumps(parsed, allow_nan=False)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise InvalidZarrError(f"{label} must contain finite JSON") from exc
-    return value
-
-
-def _validate_table_plane(value: Any) -> str:
-    encoded = _validate_json_string(value, "point_cloud_table_plane_abcd_json")
-    plane = json.loads(encoded)
-    if plane is None:
-        if encoded != "null":
-            raise InvalidZarrError("point-cloud table plane JSON must be canonical")
-        return encoded
-    if (
-        type(plane) is not list
-        or len(plane) != 4
-        or any(
-            isinstance(item, bool) or not isinstance(item, (int, float))
-            for item in plane
-        )
-        or any(not math.isfinite(float(item)) for item in plane)
-    ):
-        raise InvalidZarrError(
-            "point-cloud table plane must be null or four finite numbers"
-        )
-    normal_norm = math.sqrt(sum(float(item) ** 2 for item in plane[:3]))
-    if normal_norm <= 0.0 or float(plane[2]) / normal_norm <= 0.0:
-        raise InvalidZarrError("point-cloud table plane normal must point upward")
-    canonical = json.dumps(plane, allow_nan=False, separators=(",", ":"))
-    if encoded != canonical:
-        raise InvalidZarrError("point-cloud table plane JSON must be canonical")
-    return encoded
-
-
-def _validate_config_json_attr(
-    attrs: Mapping[str, Any], key: str, required_members: frozenset[str]
-) -> str:
-    """Require one producer-owned numeric config JSON and keep it verbatim.
-
-    The Real producer owns the numeric contract; this side only proves the
-    attr is a non-empty JSON object carrying the required members, then
-    propagates the original string so the Real deployment runtime can
-    exact-compare the full physics-changing configuration.
-    """
-    encoded = attrs.get(key)
-    if type(encoded) is not str or not encoded:
-        raise InvalidZarrError(f"Zarr {key} must be a non-empty string")
-    try:
-        parsed = json.loads(encoded)
-    except json.JSONDecodeError as exc:
-        raise InvalidZarrError(f"Zarr {key} is not valid JSON") from exc
-    if type(parsed) is not dict or not required_members <= set(parsed):
-        raise InvalidZarrError(
-            f"Zarr {key} must encode an object containing "
-            f"{sorted(required_members)}"
-        )
-    return encoded
-
-
-def _build_observation_contract(
+def _build_data_contract(
     path: Path,
     task_name: str,
     source: _CheckpointDeploymentSource,
 ) -> dict[str, Any]:
-    """Build the observation contract from checkpoint semantics and source arrays.
+    """Freeze the checkpoint-owned data semantics into the artifact contract.
 
-    ``task_name`` is the *experiment* identity: an explicit ``--zarr-path``
-    override only relocates the physical dataset, so Zarr task identity must
-    still match the experiment exactly.
+    The checkpoint's ``deployment_data_semantics`` snapshot — captured from
+    the actual training Zarr — is the only semantic source of truth.  The
+    physical Zarr (default location or ``--zarr-path`` relocation) is
+    re-parsed with the same shared extractor and must match the snapshot
+    exactly; only the informational ``schema_version`` is taken from the
+    physical store.  ``task_name`` is the *experiment* identity: an explicit
+    ``--zarr-path`` override only relocates the physical dataset, so Zarr task
+    identity must still match the experiment exactly.
     """
-    observation_fields = list(source.observation_fields)
+    expected = source.deployment_data_semantics
     try:
-        root = zarr.open_group(str(path), mode="r")
-        attrs = dict(root.attrs)
-        arrays = root["data"]
-    except Exception as exc:
-        raise InvalidZarrError(f"cannot open Real Policy Zarr: {path}") from exc
-    _validate_core_zarr_attrs(attrs, task_name, source.dataset)
-    _validate_required_zarr_arrays(root, source.agent["action_key"])
-
-    fields: dict[str, dict[str, Any]] = {}
-    for name in observation_fields:
-        array = _observation_array(arrays, name)
-        if name == "joint_state":
-            _validate_observation_array(array, name, (19,), np.dtype(np.float32))
-            fields[name] = _observation_field(
-                (19,),
-                "float32",
-                "joint_position",
-                {
-                    "frame": "robot_joint",
-                    "units": "rad",
-                    "joint_order": "xarm7_xhand12",
-                },
-            )
-        elif name == "point_cloud":
-            (point_count, feature_dim), point_semantics = _validate_point_cloud(
-                array, attrs, source.agent_config
-            )
-            fields[name] = _observation_field(
-                (point_count, feature_dim),
-                "float32",
-                "xyzrgb",
-                point_semantics,
-            )
-        elif name == "rgb":
-            tail = _validate_observation_array(array, name, None, np.dtype(np.uint8))
-            if len(tail) != 3 or tail[-1] != 3:
-                raise InvalidZarrError("Zarr rgb must have shape [T, H, W, 3]")
-            if (
-                attrs.get("camera_extrinsic_semantics")
-                != "T_xarm_base_from_color;native_color_optical_to_xarm_base"
-            ):
-                raise InvalidZarrError("Zarr RGB camera semantics are invalid")
-            fields[name] = _observation_field(
-                tail,
-                "uint8",
-                "raw_image",
-                {
-                    "color_order": "rgb",
-                    "value_range": [0, 255],
-                    "layout": "HWC",
-                },
-            )
-        elif name == "contact_force":
-            _validate_observation_array(array, name, (5, 3), np.dtype(np.float32))
-            unit = attrs.get("contact_force_unit")
-            if unit != "xhand_sdk_native_unknown_si":
-                raise InvalidZarrError(
-                    "Zarr contact_force_unit must be 'xhand_sdk_native_unknown_si'"
-                )
-            if (
-                attrs.get("contact_force_frame")
-                != "xhand_sensor_native_axes_per_finger"
-            ):
-                raise InvalidZarrError("Zarr contact_force_frame is invalid")
-            si_verified = attrs.get("contact_force_si_verified")
-            if si_verified is not False:
-                raise InvalidZarrError("Zarr contact_force_si_verified must be false")
-            fields[name] = _observation_field(
-                (5, 3),
-                "float32",
-                "per_finger_sensor_axes",
-                {
-                    "frame": "xhand_sensor_native_axes_per_finger",
-                    "units": unit,
-                    "si_verified": si_verified,
-                    "finger_order": "thumb_index_mid_ring_pinky",
-                },
-            )
-        elif name == "fingertip_points":
-            _validate_observation_array(array, name, (5, 3), np.dtype(np.float32))
-            fingertip_semantics = _validate_fingertip_points(attrs)
-            fields[name] = _observation_field(
-                (5, 3),
-                "float32",
-                "point_xyz",
-                fingertip_semantics,
-            )
-        elif name == "eef_pose":
-            _validate_observation_array(array, name, (9,), np.dtype(np.float32))
-            fields[name] = _observation_field(
-                (9,),
-                "float32",
-                "position_m_rot6d",
-                _validate_eef_pose(attrs),
-            )
-        elif name == "tactile_force":
-            _validate_observation_array(
-                array, name, (5, 120, 3), np.dtype(np.float32)
-            )
-            fields[name] = _observation_field(
-                (5, 120, 3),
-                "float32",
-                "xhand_sdk_raw_force_fx_fy_fz_bias_corrected",
-                _validate_tactile_force(attrs),
-            )
-        else:  # _checkpoint_observation_fields already rejects unknown values.
-            raise InvalidZarrError(f"unsupported observation field: {name!r}")
-
+        actual = build_real_policy_data_semantics(
+            path,
+            task_name=task_name,
+            observation_fields=source.observation_fields,
+            agent_config=source.agent_config,
+            action_key=source.agent["action_key"],
+        )
+    except RealPolicyContractError as exc:
+        raise InvalidZarrError(str(exc)) from exc
+    differing = semantics_mismatch(expected, actual)
+    if differing:
+        raise InvalidZarrError(
+            "selected Zarr does not match the training data semantics saved in "
+            f"the checkpoint; differing keys: {differing[:8]}"
+        )
     contract = {
-        "schema_name": attrs["schema_name"],
-        "schema_version": attrs["schema_version"],
-        "domain": attrs["domain"],
-        "task_name": attrs["task_name"],
-        "dt": attrs["dt"],
-        "obs_alignment": attrs["obs_alignment"],
-        "observation_alignment": attrs["observation_alignment"],
-        "state_alignment": attrs["state_alignment"],
-        "contact_force_source": attrs["contact_force_source"],
-        "action_semantics": attrs["action_semantics"],
+        **expected,
+        "schema_version": actual["schema_version"],
         "requires_hand": True,
-        "observation_fields": fields,
     }
     return _require_plain_metadata(contract, "data_contract")
-
-
-def _validate_core_zarr_attrs(
-    attrs: Mapping[str, Any],
-    task_name: str,
-    dataset: Mapping[str, Any],
-) -> None:
-    required = {
-        "schema_name",
-        "schema_version",
-        "domain",
-        "task_name",
-        "dt",
-        "obs_alignment",
-        "observation_alignment",
-        "state_alignment",
-        "contact_force_source",
-        "action_semantics",
-    }
-    missing = sorted(required - set(attrs))
-    if missing:
-        raise InvalidZarrError(f"Real Policy Zarr is missing semantic attrs: {missing}")
-    # schema_version is informational metadata (provenance / human tracking),
-    # not a compatibility gate: a dataset with compatible keys, shapes, dtypes,
-    # and semantics is accepted regardless of its exact version integer.
-    if (
-        attrs["schema_name"] != "dexmani-real-policy-zarr"
-        or attrs["domain"] != "real"
-        or attrs["obs_alignment"] != "obs[t]_before_action[t]"
-        or attrs["action_semantics"] != "teleop_published_joint_target"
-    ):
-        raise InvalidZarrError("invalid Real Policy Zarr semantics")
-    # Experiment task identity is the one config-owned fact that must still
-    # match: --zarr-path relocates the dataset, it does not re-label the task.
-    if type(task_name) is not str or not task_name or attrs["task_name"] != task_name:
-        raise InvalidZarrError("Zarr task_name does not match the experiment task_name")
-    dt = _require_finite_number(attrs["dt"], "Zarr dt", positive=True)
-    dataset_dt = dataset.get("dt")
-    if dataset_dt is not None and (
-        isinstance(dataset_dt, bool)
-        or not isinstance(dataset_dt, (int, float))
-        or not math.isclose(float(dataset_dt), dt, rel_tol=0.0, abs_tol=1e-9)
-    ):
-        raise InvalidZarrError("Zarr dt conflicts with the checkpoint dataset contract")
-    # Every modality uses the logical control step, never camera exposure time.
-    if (
-        attrs["observation_alignment"] != "control_step_latest_causal"
-        or attrs["state_alignment"] != "control_step"
-        or attrs["contact_force_source"] != "raw_hand_contact_control_step"
-    ):
-        raise InvalidZarrError(
-            "Zarr observation timing/source must use the control-step contract"
-        )
-
-
-def _observation_array(arrays: Any, name: str) -> Any:
-    try:
-        return arrays[name]
-    except Exception as exc:
-        raise InvalidZarrError(f"Zarr data/{name} is missing") from exc
-
-
-def _validate_observation_array(
-    array: Any,
-    name: str,
-    expected_tail: tuple[int, ...] | None,
-    expected_dtype: np.dtype[Any],
-) -> tuple[int, ...]:
-    try:
-        shape = tuple(int(value) for value in array.shape)
-        dtype = np.dtype(array.dtype)
-    except Exception as exc:
-        raise InvalidZarrError(f"Zarr data/{name} is not a valid array") from exc
-    if (
-        len(shape) < 2
-        or shape[0] < 1
-        or dtype != expected_dtype
-        or (expected_tail is not None and shape[1:] != expected_tail)
-    ):
-        raise InvalidZarrError(
-            f"Zarr data/{name} shape/dtype does not match the observation contract"
-        )
-    return shape[1:]
-
-
-def _validate_point_cloud(
-    array: Any, attrs: Mapping[str, Any], agent_config: Mapping[str, Any]
-) -> tuple[tuple[int, int], dict[str, str]]:
-    tail = _validate_observation_array(array, "point_cloud", None, np.dtype(np.float32))
-    if len(tail) != 2 or tail[0] not in _POINT_COUNTS or tail[1] != _POINT_FEATURE_DIM:
-        raise InvalidZarrError("unsupported point-cloud shape")
-    if any(attrs.get(key) != value for key, value in _POINT_SEMANTICS.items()):
-        raise InvalidZarrError("invalid Real point-cloud semantics")
-    table_plane_abcd_json = _validate_table_plane(
-        attrs.get("point_cloud_table_plane_abcd_json")
-    )
-    processing_config_json = _validate_config_json_attr(
-        attrs, "processing_config_json", _PROCESSING_CONFIG_MEMBERS
-    )
-    configured_count = agent_config.get("num_points")
-    if configured_count is not None and configured_count != tail[0]:
-        raise InvalidZarrError("Zarr point count conflicts with agent.num_points")
-    configured_dims = [agent_config.get("pc_dim")]
-    pc_encoder = agent_config.get("pc_encoder_config")
-    if type(pc_encoder) is dict:
-        configured_dims.append(pc_encoder.get("pc_in_channels"))
-    if any(value is not None and value != tail[1] for value in configured_dims):
-        raise InvalidZarrError("Zarr point feature dim conflicts with agent config")
-    return tail, {
-        "frame": str(attrs["point_cloud_frame"]),
-        "position_units": "m",
-        "color_order": "rgb",
-        "color_source": str(attrs["point_cloud_color_source"]),
-        "policy_id": str(attrs["point_cloud_policy_id"]),
-        "table_plane_abcd_json": table_plane_abcd_json,
-        "processing_config_json": processing_config_json,
-        "sampling": str(attrs["point_cloud_sampling"]),
-        "transform": str(attrs["point_cloud_transform"]),
-    }
-
-
-def _validate_fingertip_points(attrs: Mapping[str, Any]) -> dict[str, str]:
-    for key, expected in _FINGERTIP_SEMANTICS.items():
-        if attrs.get(key) != expected:
-            raise InvalidZarrError(f"Zarr {key} is invalid")
-    fingertip_config_json = _validate_config_json_attr(
-        attrs, "fingertip_config_json", _FINGERTIP_CONFIG_MEMBERS
-    )
-    return {
-        "frame": str(attrs["fingertip_points_frame"]),
-        "units": str(attrs["fingertip_points_unit"]),
-        "finger_order": "thumb_index_mid_ring_pinky",
-        "derivation": str(attrs["fingertip_points_derivation"]),
-        "policy_id": str(attrs["fingertip_points_policy_id"]),
-        "fingertip_config_json": fingertip_config_json,
-    }
-
-
-def _validate_eef_pose(attrs: Mapping[str, Any]) -> dict[str, str]:
-    for key, expected in _EEF_POSE_SEMANTICS.items():
-        if attrs.get(key) != expected:
-            raise InvalidZarrError(f"Zarr {key} is invalid")
-    return {
-        "frame": str(attrs["eef_pose_frame"]),
-        "position_units": "m",
-        "rotation_representation": "rot6d",
-        "derivation": str(attrs["eef_pose_derivation"]),
-        "algorithm_id": str(attrs["eef_pose_algorithm_id"]),
-    }
-
-
-def _validate_tactile_force(attrs: Mapping[str, Any]) -> dict[str, Any]:
-    for key, expected in _TACTILE_FORCE_SEMANTICS.items():
-        if attrs.get(key) != expected:
-            raise InvalidZarrError(f"Zarr {key} is invalid")
-    unit = attrs.get("tactile_force_unit")
-    if unit != "xhand_sdk_native_unknown_si":
-        raise InvalidZarrError(
-            "Zarr tactile_force_unit must be 'xhand_sdk_native_unknown_si'"
-        )
-    si_verified = attrs.get("tactile_force_si_verified")
-    if si_verified is not False:
-        raise InvalidZarrError("Zarr tactile_force_si_verified must be false")
-    spatial_verified = attrs.get("tactile_force_spatial_geometry_verified")
-    if spatial_verified is not False:
-        raise InvalidZarrError(
-            "Zarr tactile_force_spatial_geometry_verified must be false"
-        )
-    return {
-        "finger_order": str(attrs["tactile_force_finger_order"]),
-        "sensor_order": str(attrs["tactile_force_sensor_order"]),
-        "point_order": str(attrs["tactile_force_point_order"]),
-        "axis_labels": str(attrs["tactile_force_axis_labels"]),
-        "unit": unit,
-        "si_verified": si_verified,
-        "spatial_geometry_verified": spatial_verified,
-    }
-
-
-def _observation_field(
-    shape: tuple[int, ...],
-    dtype: str,
-    numeric_representation: str,
-    semantics: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "shape": list(shape),
-        "dtype": dtype,
-        "semantics": {
-            "representation": numeric_representation,
-            **semantics,
-        },
-    }
 
 
 def _parse_checkpoint_deployment_source(
@@ -773,10 +325,12 @@ def _parse_checkpoint_deployment_source(
     This is the single source of the model and data semantics an artifact is
     built from: architecture/constructor (``resume_contract.agent_config``),
     action/window contract (``resume_contract.agent``), normalization
-    (``resume_contract.agent.normalization``) and dataset/preprocessing
-    (``resume_contract.dataset``).  The current experiment ``config.yaml``
-    contributes only experiment identity and the inference recipe, so editing
-    it after training can no longer change what an old checkpoint deploys as.
+    (``resume_contract.agent.normalization``), dataset constructor config
+    (``resume_contract.dataset``) and the actual training data semantic
+    snapshot (``resume_contract.deployment_data_semantics``).  The current
+    experiment ``config.yaml`` contributes only experiment identity and the
+    inference recipe, so editing it after training can no longer change what
+    an old checkpoint deploys as.
 
     Deleting reconciliation is not deleting validation: everything below is a
     strict *internal* consistency parse of the checkpoint itself, which is why
@@ -798,12 +352,29 @@ def _parse_checkpoint_deployment_source(
             raise InvalidCheckpointError(
                 f"checkpoint resume_contract.{label} must be a non-empty plain dict"
             )
-
     train = _parse_checkpoint_action_contract(agent)
     observation_fields = _checkpoint_observation_fields(dataset, agent_config)
     normalization_contract = _parse_checkpoint_normalization_contract(
         agent, observation_fields
     )
+    # The data semantic snapshot gate comes after the checkpoint's own contract
+    # parse, so a malformed contract still fails with its specific diagnosis.
+    if "deployment_data_semantics" not in resume:
+        raise InvalidCheckpointError(
+            "checkpoint predates deployment_data_semantics and cannot be safely "
+            "exported for Real deployment"
+        )
+    data_semantics = resume["deployment_data_semantics"]
+    if data_semantics is None:
+        raise UnsupportedPolicyError(
+            "checkpoint dataset has no single zarr_path; dynamic/multi-task "
+            "datasets are unsupported"
+        )
+    if type(data_semantics) is not dict or not data_semantics:
+        raise InvalidCheckpointError(
+            "checkpoint resume_contract.deployment_data_semantics must be a "
+            "non-empty plain dict"
+        )
     return _CheckpointDeploymentSource(
         agent=_require_plain_metadata(train, "resume_contract.agent"),
         agent_config=_require_plain_metadata(
@@ -812,6 +383,9 @@ def _parse_checkpoint_deployment_source(
         dataset=_require_plain_metadata(dataset, "resume_contract.dataset"),
         normalization_contract=normalization_contract,
         observation_fields=tuple(observation_fields),
+        deployment_data_semantics=_require_plain_metadata(
+            data_semantics, "resume_contract.deployment_data_semantics"
+        ),
     )
 
 
@@ -1383,20 +957,10 @@ def _write_checkpoint_temp(directory: Path, payload: dict[str, Any]) -> Path:
     try:
         with os.fdopen(descriptor, "wb") as stream:
             torch.save(payload, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
         return path
     except BaseException:
         path.unlink(missing_ok=True)
         raise
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _load_deployment_payload(path: Path) -> dict[str, Any]:
@@ -1410,16 +974,6 @@ def _load_deployment_payload(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _capture_selector(selector_path: Path) -> tuple[bool, str | None]:
-    if selector_path.is_symlink():
-        return True, os.readlink(selector_path)
-    if selector_path.exists():
-        raise ArtifactPublicationError(
-            "refusing to replace a non-symlink deployment_latest.pt selector"
-        )
-    return False, None
-
-
 def _replace_relative_symlink(selector_path: Path, target: str) -> None:
     descriptor, raw_path = tempfile.mkstemp(
         prefix=".deployment-selector-", dir=selector_path.parent
@@ -1430,81 +984,39 @@ def _replace_relative_symlink(selector_path: Path, target: str) -> None:
     try:
         temp.symlink_to(target)
         os.replace(temp, selector_path)
-        _fsync_directory(selector_path.parent)
     finally:
         temp.unlink(missing_ok=True)
-
-
-def _rollback_selector(selector_path: Path, old: tuple[bool, str | None]) -> None:
-    existed, target = old
-    if existed:
-        assert target is not None
-        _replace_relative_symlink(selector_path, target)
-    elif selector_path.is_symlink() or selector_path.exists():
-        selector_path.unlink()
-        _fsync_directory(selector_path.parent)
-
-
-def _verify_published_selector(selector_path: Path, checkpoint_path: Path) -> None:
-    if (
-        not selector_path.is_symlink()
-        or os.readlink(selector_path) != checkpoint_path.name
-    ):
-        raise ArtifactVerificationError(
-            "deployment selector is not the expected relative symlink"
-        )
-    if selector_path.resolve(strict=True) != checkpoint_path.resolve(strict=True):
-        raise ArtifactVerificationError(
-            "deployment selector resolves to the wrong checkpoint"
-        )
-    _load_deployment_payload(checkpoint_path)
-
-
-def _selector_points_at(selector_path: Path, checkpoint_path: Path) -> bool:
-    """Whether the live selector already names this artifact."""
-    return (
-        selector_path.is_symlink()
-        and os.readlink(selector_path) == checkpoint_path.name
-    )
 
 
 def publish_deployment_selector(
     selector_path: Path,
     checkpoint_path: Path,
 ) -> None:
-    """Atomically publish one already-qualified canonical artifact.
+    """Atomically point ``deployment_latest.pt`` at one already-verified artifact.
 
-    On any failure the previous selector is restored, so the caller can treat a
-    raised publish as "nothing changed" and safely delete the candidate it built.
-    Whether a rollback is needed is decided from the *observable* selector state,
-    never from a flag set when a helper returns: the symlink swap is live the
-    moment ``os.replace`` succeeds, and the durability fsync that follows can
-    still raise.  Using a return-time flag there would skip the rollback and let
-    the caller delete the very artifact the selector had just been pointed at.
+    A temporary symlink plus POSIX ``os.replace`` is all the durability a
+    single-user research workflow needs.  Nothing may run after the swap, so
+    the caller treats a returned publish as final.
     """
-    old_selector = _capture_selector(selector_path)
-    try:
-        _replace_relative_symlink(selector_path, checkpoint_path.name)
-        _verify_published_selector(selector_path, checkpoint_path)
-    except BaseException:
-        if _selector_points_at(selector_path, checkpoint_path):
-            _rollback_selector(selector_path, old_selector)
-        raise
+    if selector_path.exists() and not selector_path.is_symlink():
+        raise ArtifactPublicationError(
+            "refusing to replace a non-symlink deployment_latest.pt selector"
+        )
+    _replace_relative_symlink(selector_path, checkpoint_path.name)
 
 
 def cleanup_candidate_artifact(checkpoint_path: Path) -> None:
     """Remove one unpublished candidate artifact so a same-name retry succeeds.
 
-    The removal is durable (the directory entry is fsynced) and never silent: a
-    cleanup that itself fails raises ``ArtifactPublicationError`` because the
-    leftover candidate would otherwise block the obvious retry with a confusing
-    ``FileExistsError``, and the operator needs to know the artifact directory
-    may require manual inspection.
+    Never silent: a cleanup that itself fails raises
+    ``ArtifactPublicationError`` because the leftover candidate would otherwise
+    block the obvious retry with a confusing ``FileExistsError``, and the
+    operator needs to know the artifact directory may require manual
+    inspection.
     """
     try:
         if checkpoint_path.is_symlink() or checkpoint_path.exists():
             checkpoint_path.unlink()
-            _fsync_directory(checkpoint_path.parent)
     except OSError as exc:
         raise ArtifactPublicationError(
             "failed to remove the unpublished deployment candidate "
@@ -1521,10 +1033,11 @@ def _build_deployment_payload(
     """Build one complete, validated deployment payload from a selected checkpoint.
 
     Ownership is explicit here: ``source`` (the checkpoint) owns architecture,
-    action/window, normalization and dataset/preprocessing semantics, while the
-    experiment ``config.yaml`` contributes only identity (``task_name``) and the
-    inference recipe (``eval.use_ema`` / ``eval.denoise_steps``, or
-    ``best_ckpt.json`` for the ``best`` selector).
+    action/window, normalization, dataset constructor config and the actual
+    training data semantic snapshot, while the experiment ``config.yaml``
+    contributes only identity (``task_name``) and the inference recipe
+    (``eval.use_ema`` / ``eval.denoise_steps``, or ``best_ckpt.json`` for the
+    ``best`` selector).
     """
     repo_root = Path(__file__).resolve().parents[2]
     selected_path = _resolve_checkpoint(experiment, checkpoint_selector)
@@ -1537,6 +1050,13 @@ def _build_deployment_payload(
     )
     checkpoint = _load_training_checkpoint(selected_path)
     source = _parse_checkpoint_deployment_source(checkpoint)
+    # Task identity is config-owned but must agree with the trained snapshot:
+    # neither a config edit nor a Zarr relocation may re-label the task.
+    if source.deployment_data_semantics.get("task_name") != task_name:
+        raise InvalidExperimentError(
+            "experiment config task_name does not match the checkpoint's "
+            "training task identity"
+        )
 
     # Selected weights first: decide raw vs EMA, then canonicalize, validate and
     # sanitize exactly one state.  The unselected state is never processed.
@@ -1562,7 +1082,7 @@ def _build_deployment_payload(
     inference = _build_inference_config(
         task_name, agent_config, source, selected_inference
     )
-    data_contract = _build_observation_contract(resolved_zarr, task_name, source)
+    data_contract = _build_data_contract(resolved_zarr, task_name, source)
     if "rgb" in source.observation_fields:
         inference["rgb_preprocessing"] = _rgb_preprocessing(source)
     producer = {
@@ -1650,61 +1170,6 @@ def _resolve_artifact_paths(
     return checkpoint_dir, final_path, checkpoint_dir / "deployment_latest.pt"
 
 
-def _export_candidate(
-    experiment_dir: Path,
-    checkpoint_selector: str = "best",
-    output_path: Path | None = None,
-    zarr_path: Path | None = None,
-) -> ExportReceipt:
-    """Write one unpublished, unverified candidate artifact.
-
-    Private on purpose.  The only caller that legitimately wants a candidate
-    without the public verify+publish sequence is ``qualify_policy_parity``,
-    which runs its own restore/parity and publishes last.  Keeping this private
-    means no researcher-facing path can publish an unverified artifact.
-    """
-    experiment = _require_experiment_directory(experiment_dir)
-    payload, selected_path = _build_deployment_payload(
-        experiment, checkpoint_selector, zarr_path
-    )
-    checkpoint_dir, final_path, selector_path = _resolve_artifact_paths(
-        experiment, selected_path, output_path
-    )
-    if final_path.exists() or final_path.is_symlink():
-        raise FileExistsError(
-            f"refusing to overwrite deployment artifact: {final_path}"
-        )
-    checkpoint_temp: Path | None = None
-    renamed = False
-    try:
-        checkpoint_temp = _write_checkpoint_temp(checkpoint_dir, payload)
-        os.replace(checkpoint_temp, final_path)
-        checkpoint_temp = None
-        renamed = True
-        _fsync_directory(checkpoint_dir)
-    except BaseException as exc:
-        if checkpoint_temp is not None:
-            checkpoint_temp.unlink(missing_ok=True)
-        if renamed:
-            # The candidate already carries its final name, so the temp path is
-            # gone and only final_path can be removed.  Without this the failed
-            # candidate survives and blocks the identical retry.
-            try:
-                cleanup_candidate_artifact(final_path)
-            except ArtifactPublicationError as cleanup_exc:
-                raise cleanup_exc from exc
-        if isinstance(exc, DeploymentExportError):
-            raise
-        raise ArtifactPublicationError(
-            "deployment candidate artifact write failed"
-        ) from exc
-    return ExportReceipt(
-        checkpoint_path=final_path,
-        selector_path=selector_path,
-        checkpoint_selector=checkpoint_selector,
-    )
-
-
 def _require_experiment_directory(experiment_dir: Path) -> Path:
     try:
         experiment = Path(experiment_dir).expanduser().resolve(strict=True)
@@ -1730,29 +1195,56 @@ def export_deployment_artifact(
     There is deliberately no way to publish an unverified artifact.  Every
     successful call has completed, in order::
 
-        build payload -> validate payload -> write candidate
+        build payload -> validate payload -> write temp
+            -> os.replace to the immutable artifact
             -> safe weights_only reload -> strict restore
-            -> deterministic synthetic prediction -> publish selector
+            -> deterministic synthetic prediction
+            -> atomic deployment_latest.pt selector swap
 
-    Any failure before the selector swap removes the candidate this call
-    created, durably fsyncs the checkpoint directory, leaves the previous
-    ``deployment_latest.pt`` untouched, and therefore leaves the identical
-    command directly retryable.  ``zarr_path`` overrides only the physical
-    dataset location; the Zarr's task identity must still match the experiment.
+    Nothing runs after the selector swap.  Any earlier failure removes the
+    candidate this call created, leaves the previous ``deployment_latest.pt``
+    untouched, and therefore leaves the identical command directly retryable.
+    ``zarr_path`` overrides only the physical dataset location; the located
+    Zarr's semantics must exactly match the checkpoint's saved training data
+    snapshot.
     """
-    receipt = _export_candidate(
-        experiment_dir,
-        checkpoint_selector=checkpoint_selector,
-        output_path=output_path,
-        zarr_path=zarr_path,
+    experiment = _require_experiment_directory(experiment_dir)
+    payload, selected_path = _build_deployment_payload(
+        experiment, checkpoint_selector, zarr_path
     )
+    checkpoint_dir, final_path, selector_path = _resolve_artifact_paths(
+        experiment, selected_path, output_path
+    )
+    if final_path.exists() or final_path.is_symlink():
+        raise FileExistsError(
+            f"refusing to overwrite deployment artifact: {final_path}"
+        )
+    checkpoint_temp: Path | None = None
     try:
-        _verify_exported_model(_load_deployment_payload(receipt.checkpoint_path))
-        publish_deployment_selector(receipt.selector_path, receipt.checkpoint_path)
+        checkpoint_temp = _write_checkpoint_temp(checkpoint_dir, payload)
+        os.replace(checkpoint_temp, final_path)
+        checkpoint_temp = None
+    except BaseException as exc:
+        if checkpoint_temp is not None:
+            checkpoint_temp.unlink(missing_ok=True)
+        if isinstance(exc, DeploymentExportError):
+            raise
+        raise ArtifactPublicationError(
+            "deployment candidate artifact write failed"
+        ) from exc
+    try:
+        _verify_exported_model(_load_deployment_payload(final_path))
+        publish_deployment_selector(selector_path, final_path)
     except BaseException:
-        cleanup_candidate_artifact(receipt.checkpoint_path)
+        # The candidate already carries its final name; without this cleanup
+        # the failed candidate would survive and block the identical retry.
+        cleanup_candidate_artifact(final_path)
         raise
-    return receipt
+    return ExportReceipt(
+        checkpoint_path=final_path,
+        selector_path=selector_path,
+        checkpoint_selector=checkpoint_selector,
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1764,7 +1256,8 @@ def _parse_args() -> argparse.Namespace:
         "--zarr-path",
         type=Path,
         default=None,
-        help="override only the physical dataset location (task identity still checked)",
+        help="relocate the physical dataset only; its semantics must exactly "
+        "match the checkpoint's saved training data snapshot",
     )
     return parser.parse_args()
 

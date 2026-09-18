@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -101,6 +102,9 @@ class BaseDataset(torch.utils.data.Dataset):
         if sensor_modalities is None:
             sensor_modalities = self.DEFAULT_MODALITIES
 
+        # Resolved physical location actually loaded below; training checkpoints
+        # read this to snapshot the real data semantics (deployment contract).
+        self.zarr_path = str(Path(zarr_path).expanduser().resolve())
         self.action_key = action_key
         self.use_aux_ee = use_aux_ee
         self.obs_horizon = obs_horizon

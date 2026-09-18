@@ -147,16 +147,18 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 ## Deployment
 
-Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact、observation contract 和 runtime restore 的具体语义以实现和 `docs/项目架构.md` 为准；README 不复制其内部 schema。
+Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact、observation contract 和 runtime restore 的具体语义以实现为准；README 不复制其内部 schema。
 
 ```bash
 # 研究者日常路径：export -> run_policy（run_policy 位于 dexmani_real）
 python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
 ```
 
-Export 使用 **selected checkpoint 自己保存的** agent/dataset/normalization 语义，`config.yaml` 只提供 experiment identity 与 inference recipe，因此训练后修改 config 不会改变旧 checkpoint 的 deployment 行为。成功 export 意味着已通过 safe reload + strict restore + deterministic synthetic prediction；没有跳过验证的开关。
-
-运行时 `--inference-steps N` 是显式 override（NFE ablation），不需要重新 export。`qualify.py` 是 developer/release regression 工具，不属于日常流程。
+- 训练 checkpoint 保存**实际训练 Zarr 的数据语义快照**（`resume_contract.deployment_data_semantics`：dt、对齐、point-cloud 预处理/表格平面、action EE frame/components、各 observation field 的 raw shape/dtype/semantics）。快照之前的旧 checkpoint 不能 export（load/离线分析不受影响），不做 retrofit。
+- Export 使用 **selected checkpoint 自己保存的** agent/dataset/normalization 语义与数据语义快照，`config.yaml` 只提供 experiment identity 与 inference recipe，因此训练后修改 config 不会改变旧 checkpoint 的 deployment 行为。
+- `--zarr-path` 只用于 **semantic-equivalent relocation**（跨机器/磁盘移动数据）：该 Zarr 会用与训练相同的共享 extractor 重新解析，并与 checkpoint 快照 strict equality 比较，任何 dt/预处理/action 语义/shape/dtype/task 漂移都会 export fail。
+- 成功 export 意味着已通过 safe reload + strict restore + deterministic synthetic prediction；没有跳过验证的开关。`deployment_latest.pt` 是最近一次成功 export 的 atomic selector，指向 immutable 的 `<checkpoint>-deployment.pt`；真机 session 可以 pin 该 resolved filename。
+- 运行时 `--inference-steps N` 是显式 override（NFE ablation），不需要重新 export。
 
 ## 仓库结构
 

@@ -8,6 +8,9 @@ from dexmani_policy.common.checkpoint_io import (
     build_agent_contract, validate_ema_resume_state, validate_resume_contract,
 )
 from dexmani_policy.common.pytorch_util import fix_state_dict, optimizer_to, set_rng_state, worker_init_fn
+from dexmani_policy.datasets.real_policy_contract import (
+    build_real_policy_data_semantics, is_real_policy_zarr,
+)
 from dexmani_policy.datasets.resumable_sampler import ResumableDistributedSampler
 
 
@@ -31,6 +34,27 @@ def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
                       worker_init_fn=worker_init_fn, **options)
 
 
+def _deployment_data_semantics(train_dataset, model, cfg):
+    """Snapshot the actual training Zarr's deployment-relevant semantics.
+
+    Reads only the instantiated dataset's physical store — never the current
+    experiment config — so a training checkpoint freezes the data semantics it
+    was really trained on.  Datasets without a single Real Policy Zarr
+    (dynamic/multi-task/sim-only) snapshot ``None``; Real deployment export
+    refuses such checkpoints instead of guessing.
+    """
+    zarr_path = getattr(train_dataset, "zarr_path", None)
+    if zarr_path is None or not is_real_policy_zarr(zarr_path):
+        return None
+    return build_real_policy_data_semantics(
+        zarr_path,
+        task_name=cfg.task_name,
+        observation_fields=list(train_dataset.sensor_modalities),
+        agent_config=OmegaConf.to_container(cfg.agent, resolve=True),
+        action_key=model.action_key,
+    )
+
+
 def build_resume_contract(cfg, model, train_loader, *, world_size=1):
     def plain(section):
         return OmegaConf.to_container(section, resolve=True)
@@ -46,6 +70,9 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
         "agent": build_agent_contract(model),
         "agent_config": plain(cfg.agent),
         "dataset": plain(cfg.dataset),
+        "deployment_data_semantics": _deployment_data_semantics(
+            train_loader.dataset, model, cfg
+        ),
         "loader": {key: loader_options(cfg).get(key, False)
                    for key in ("batch_size", "shuffle", "drop_last")},
         "dataset_length": len(train_loader.dataset),

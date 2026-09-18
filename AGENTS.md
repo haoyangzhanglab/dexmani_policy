@@ -62,25 +62,31 @@ Deployment 的 trained semantics 属于 **selected checkpoint**，不属于当�
 
 ```text
 Checkpoint owns:   resume_contract.agent / agent_config / dataset / agent.normalization
-                   （architecture、action/window、normalization、dataset/preprocessing 语义）
+                   + deployment_data_semantics
+                   （architecture、action/window、normalization、dataset constructor
+                     config，以及从训练实际使用的 Zarr 捕获的数据语义快照）
 config.yaml owns:  experiment identity（policy_name / task_name）
                    + inference recipe（eval.use_ema / eval.denoise_steps；
                      best selector 用 best_ckpt.json["inference"]）
 Artifact owns:     selected weights（raw 或 EMA，只存选中的一套）、
-                   immutable observation/action contract、default denoise_steps
+                   checkpoint-owned observation/action/data semantics、
+                   default denoise_steps
 Runtime owns:      显式 --inference-steps override（NFE ablation）
+
+Export:            build -> save -> safe reload -> strict restore
+                   -> synthetic predict -> atomic deployment_latest.pt selector swap
 ```
 
 规则：
 
 - 不要为 deployment 从当前 config 重新推导 agent/dataset/normalization 语义，也不要恢复 config↔checkpoint 的 reconciliation。修改 `config.yaml.agent/dataset/normalization` 不得改变旧 checkpoint 的 deployment 行为。
 - 删除 reconciliation **不等于**删除 validation：checkpoint 自身的 action/window/normalization contract 仍必须 strict parse、fail-fast，不允许 blind trust。
-- `deployment/contract.py` 是 artifact metadata 的唯一 grammar（action/window、observation fields、RGB preprocessing、normalization、nested `_target_` allowlist）。export / inspect / restore 不得各写一套；新增校验应加在该 parser 上，让 malformed artifact 在 `inspect_experiment()` 阶段就失败。
-- Public export 永远 verify（safe reload -> strict restore -> deterministic synthetic prediction）后才 publish，不存在跳过验证的开关；如果某条 developer 路径确实需要 candidate-only 行为，走 private primitive，不要重新暴露 `verify` / `publish` boolean mode。
-- publish 前任何失败必须删除本次 candidate、fsync checkpoint 目录、保持旧 `deployment_latest.pt`，使同名命令可直接 retry；candidate cleanup 失败必须显式报错，不得 silent swallow。
-- `--zarr-path` 只改 physical dataset location，不改 task identity；无论是否 override，Zarr `task_name` 必须等于 experiment `task_name`。
-- 保持 `simple.v3`，不做旧 checkpoint migration / legacy compatibility；不要为 deployment 引入 hashing、signature、flock 或 code-version gate。
-- `qualify.py` 是 developer/release regression 工具；研究者日常路径是 `export -> run_policy`。
+- Real Policy Zarr 数据语义的唯一 extractor 是 `datasets/real_policy_contract.py`，由 training（写 checkpoint 快照）与 deployment export（解析 selected/override Zarr）共用；不要维护第二套同义解析逻辑。
+- `--zarr-path` 只允许 **semantic-equivalent relocation**：export-time Zarr 的语义必须与 checkpoint `deployment_data_semantics` strict equality（dt、point-cloud 预处理/table plane、action EE frame/components、raw shape/dtype、task identity 等任何漂移都 fail）。Artifact 数据语义的 source of truth 永远是 checkpoint snapshot；`schema_version` 仅为 informational，可取自实际 Zarr。
+- 旧 checkpoint 缺少 `deployment_data_semantics` 时：`CheckpointStore.load()` 与 offline analysis 照常，Real deployment export 明确 fail；不做 retrofit / migration / legacy 分支。
+- Public export 永远 verify（safe reload -> strict restore -> deterministic synthetic prediction）后才 atomic swap `deployment_latest.pt` selector，不存在跳过验证的开关；selector swap 成功后不要再执行可能失败的操作。verify 阶段任何失败必须删除本次 candidate、保持旧 selector，使同名命令可直接 retry；candidate cleanup 失败必须显式报错，不得 silent swallow。不使用 fsync / rollback / double-fault transaction machinery。
+- `deployment/contract.py` 是 persisted deployment **metadata** 的 shared grammar（action/window、observation fields、RGB preprocessing、normalization、nested `_target_` allowlist），export / inspect / restore 不得各写一套。它不负责 state-dict grammar、Real physics 语义、publication 或 decoder-specific NFE 限制；`inspect_experiment()` 保证 metadata 可读/合法，weights 由 `load_experiment` 的 strict restore 验证。
+- 保持 `simple.v3`，不要为 deployment 引入 hashing、signature、flock 或 code-version gate；没有 qualify/release subsystem，研究者日常路径是 `export -> run_policy`。
 
 ## Environment and Safety
 

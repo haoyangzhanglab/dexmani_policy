@@ -1,25 +1,34 @@
 """Deployment integrity regression suite.
 
-Covers the invariants of the checkpoint-owned deployment contract: the selected
-checkpoint owns architecture, action/window, normalization and
-dataset/preprocessing semantics; the artifact owns selected weights plus an
-immutable observation/action contract; and no researcher-facing path can publish
-an unverified artifact.
+Covers the research-correctness invariants of the checkpoint-owned deployment
+contract: the selected checkpoint owns architecture, action/window,
+normalization, dataset constructor config and the frozen training data
+semantic snapshot (``deployment_data_semantics``); a Zarr — default or
+``--zarr-path`` relocation — must match that snapshot exactly; the artifact
+owns selected weights plus an immutable observation/action contract; exported
+restores predict identically to direct checkpoint restores; and no
+researcher-facing path can publish an unverified artifact.
 """
 
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
 from conftest import (
+    ACTION_EE_COMPONENTS,
     CHECKPOINT_N_HEAD,
+    CONTROL_DT,
     DRIFTED_N_HEAD,
     NORMALIZATION_FIELDS,
+    NUM_POINTS,
     TASK_NAME,
+    add_rgb,
     agent_config,
     agent_contract,
     dataset_config,
@@ -126,6 +135,7 @@ def test_zarr_override_must_still_match_experiment_task_identity(tmp_path, exper
 
 def test_rgb_preprocessing_reads_checkpoint_dataset(experiment, zarr_path):
     """RGB preprocessing is derived from checkpoint semantics, not current config."""
+    add_rgb(zarr_path)
     checkpoint_dataset = dataset_config(
         _target_="dexmani_policy.datasets.rgb_dataset.RGBDataset",
         sensor_modalities=["joint_state", "rgb"],
@@ -145,6 +155,7 @@ def test_rgb_preprocessing_reads_checkpoint_dataset(experiment, zarr_path):
                 "rgb": "identity",
             }
         ),
+        zarr_file=zarr_path,
     )
     # The current config now declares completely different RGB preprocessing.
     write_config(
@@ -168,6 +179,7 @@ def test_rgb_preprocessing_reads_checkpoint_dataset(experiment, zarr_path):
 
 def test_rgb_checkpoint_without_validation_preprocessing_fails(experiment, zarr_path):
     """A checkpoint whose own RGB dataset omits preprocessing must fail fast."""
+    add_rgb(zarr_path)
     checkpoint_path, _ = write_checkpoint(
         experiment,
         filename="rgb.pt",
@@ -184,6 +196,7 @@ def test_rgb_checkpoint_without_validation_preprocessing_fails(experiment, zarr_
                 "rgb": "identity",
             }
         ),
+        zarr_file=zarr_path,
     )
 
     source = exporter._parse_checkpoint_deployment_source(
@@ -191,6 +204,212 @@ def test_rgb_checkpoint_without_validation_preprocessing_fails(experiment, zarr_
     )
     with pytest.raises(InvalidCheckpointError, match="preprocessing"):
         exporter._rgb_preprocessing(source)
+
+
+# ---------------------------------------------------------------------------
+# 2b. checkpoint freezes the actual training data semantics
+# ---------------------------------------------------------------------------
+
+
+def _snapshot(experiment: Path, checkpoint_name: str = "latest.pt") -> dict:
+    checkpoint = exporter._load_training_checkpoint(
+        experiment / "checkpoints" / checkpoint_name
+    )
+    return checkpoint.resume_contract["deployment_data_semantics"]
+
+
+def test_checkpoint_freezes_actual_training_zarr_semantics(experiment, zarr_path):
+    """The snapshot must capture the real Zarr's timing/preprocessing/action facts."""
+    semantics = _snapshot(experiment)
+
+    assert semantics["task_name"] == TASK_NAME
+    assert semantics["dt"] == CONTROL_DT
+    assert semantics["obs_alignment"] == "obs[t]_before_action[t]"
+    assert semantics["observation_alignment"] == "control_step_latest_causal"
+    assert semantics["state_alignment"] == "control_step"
+    assert semantics["action_semantics"] == "teleop_published_joint_target"
+    assert semantics["action_ee_frame"] == "xarm_base"
+    assert semantics["action_ee_components"] == ACTION_EE_COMPONENTS
+    joint = semantics["observation_fields"]["joint_state"]
+    assert joint["shape"] == [19]
+    assert joint["dtype"] == "float32"
+    points = semantics["observation_fields"]["point_cloud"]
+    assert points["shape"] == [NUM_POINTS, 6]
+    assert points["dtype"] == "float32"
+    assert points["semantics"]["policy_id"]
+    assert points["semantics"]["sampling"]
+    assert points["semantics"]["transform"]
+    assert json.loads(points["semantics"]["processing_config_json"])["pointcloud"]
+    assert json.loads(points["semantics"]["table_plane_abcd_json"]) == [
+        0.0,
+        0.0,
+        1.0,
+        -0.02,
+    ]
+
+
+def test_snapshot_is_owned_by_the_checkpoint_not_the_current_config(
+    experiment, zarr_path
+):
+    """Post-training config drift cannot rewrite the frozen snapshot."""
+    before = _snapshot(experiment)
+    write_config(
+        experiment,
+        dataset_cfg=dataset_config(
+            zarr_path="robot_data/gone.zarr",
+            sensor_modalities=["joint_state"],
+        ),
+    )
+
+    assert _snapshot(experiment) == before
+
+    # Export still uses the checkpoint-owned snapshot, not the drifted config.
+    receipt = _export(experiment, zarr_path)
+    data = _contract(receipt.checkpoint_path)["data_contract"]
+    assert data["dt"] == CONTROL_DT
+    assert sorted(data["observation_fields"]) == ["joint_state", "point_cloud"]
+    assert data["action_ee_frame"] == "xarm_base"
+    assert data["action_ee_components"] == ACTION_EE_COMPONENTS
+    assert data["requires_hand"] is True
+
+
+def test_legacy_checkpoint_still_loads_but_cannot_export(experiment, zarr_path):
+    """A pre-snapshot checkpoint loads for analysis; Real export refuses it."""
+    path, _ = write_checkpoint(
+        experiment,
+        filename="legacy.pt",
+        zarr_file=zarr_path,
+        deployment_data_semantics="absent",
+    )
+
+    checkpoint = exporter._load_training_checkpoint(path)
+    assert "deployment_data_semantics" not in checkpoint.resume_contract
+
+    with pytest.raises(
+        InvalidCheckpointError, match="predates deployment_data_semantics"
+    ):
+        export_deployment_artifact(
+            experiment, checkpoint_selector="legacy.pt", zarr_path=zarr_path
+        )
+    assert not list((experiment / "checkpoints").glob("*deployment*.pt"))
+
+
+def test_none_semantics_checkpoint_fails_as_unsupported(experiment, zarr_path):
+    """A checkpoint trained without a single Real Zarr is unsupported, not legacy."""
+    write_checkpoint(experiment, filename="sim.pt", deployment_data_semantics=None)
+
+    with pytest.raises(UnsupportedPolicyError, match="dynamic/multi-task"):
+        export_deployment_artifact(
+            experiment, checkpoint_selector="sim.pt", zarr_path=zarr_path
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2c. --zarr-path is semantic-equivalent relocation only
+# ---------------------------------------------------------------------------
+
+
+def test_semantic_equivalent_relocation_passes(tmp_path, experiment, zarr_path):
+    """A different physical path with identical semantics is a valid relocation."""
+    relocated = write_zarr(tmp_path / "relocated.zarr")
+
+    receipt = _export(experiment, relocated)
+
+    data = _contract(receipt.checkpoint_path)["data_contract"]
+    assert data["dt"] == CONTROL_DT
+    assert data["task_name"] == TASK_NAME
+
+
+def test_schema_version_difference_is_informational(tmp_path, experiment, zarr_path):
+    """A producer version bump alone is not drift; the artifact records the actual."""
+    relocated = write_zarr(
+        tmp_path / "reversioned.zarr", attrs_override={"schema_version": 14}
+    )
+
+    receipt = _export(experiment, relocated)
+
+    data = _contract(receipt.checkpoint_path)["data_contract"]
+    assert data["schema_version"] == 14
+    assert data["dt"] == CONTROL_DT
+
+
+def test_export_fails_on_dt_drift(tmp_path, experiment, zarr_path):
+    """The training control rate is frozen; a re-timed store cannot replace it."""
+    drifted = write_zarr(tmp_path / "drifted.zarr", dt=CONTROL_DT * 0.625)
+
+    with pytest.raises(exporter.InvalidZarrError, match="dt"):
+        _export(experiment, drifted)
+
+
+def test_export_fails_on_point_cloud_processing_drift(tmp_path, experiment, zarr_path):
+    """Point-cloud preprocessing is physics-facing: any config drift fails export."""
+    drifted = write_zarr(
+        tmp_path / "drifted.zarr",
+        attrs_override={
+            "processing_config_json": json.dumps(
+                {"pointcloud": {"depth_max_m": 2.0}, "table_plane_abcd": None}
+            )
+        },
+    )
+
+    with pytest.raises(exporter.InvalidZarrError, match="processing_config_json"):
+        _export(experiment, drifted)
+
+
+def test_export_fails_on_table_plane_drift(tmp_path, experiment, zarr_path):
+    """A moved table plane changes what the crop keeps, so it is drift."""
+    drifted = write_zarr(
+        tmp_path / "drifted.zarr",
+        attrs_override={
+            "point_cloud_table_plane_abcd_json": json.dumps(
+                [0.0, 0.0, 1.0, -0.05], separators=(",", ":")
+            )
+        },
+    )
+
+    with pytest.raises(exporter.InvalidZarrError, match="table_plane_abcd_json"):
+        _export(experiment, drifted)
+
+
+def test_export_fails_on_point_cloud_transform_drift(tmp_path, experiment, zarr_path):
+    drifted = write_zarr(
+        tmp_path / "drifted.zarr",
+        attrs_override={"point_cloud_transform": "depth_to_color_deprojection"},
+    )
+
+    with pytest.raises(exporter.InvalidZarrError, match="point-cloud semantics"):
+        _export(experiment, drifted)
+
+
+def test_export_fails_on_action_ee_frame_drift(tmp_path, experiment, zarr_path):
+    drifted = write_zarr(
+        tmp_path / "drifted.zarr", attrs_override={"action_ee_frame": "color_optical"}
+    )
+
+    with pytest.raises(exporter.InvalidZarrError, match="semantics"):
+        _export(experiment, drifted)
+
+
+def test_export_fails_on_action_ee_components_drift(tmp_path, experiment, zarr_path):
+    """A store that stops declaring the EE action layout is not the same data."""
+    drifted = write_zarr(tmp_path / "drifted.zarr", drop_attrs=["action_ee_components"])
+
+    with pytest.raises(exporter.InvalidZarrError, match="action_ee_components"):
+        _export(experiment, drifted)
+
+
+def test_export_fails_on_raw_point_cloud_shape_drift(tmp_path, experiment, zarr_path):
+    drifted = write_zarr(tmp_path / "drifted.zarr", point_count=2 * NUM_POINTS)
+
+    with pytest.raises(exporter.InvalidZarrError, match="point count"):
+        _export(experiment, drifted)
+
+
+def test_export_fails_on_raw_dtype_drift(tmp_path, experiment, zarr_path):
+    drifted = write_zarr(tmp_path / "drifted.zarr", state_dtype=np.float64)
+
+    with pytest.raises(exporter.InvalidZarrError, match="shape/dtype"):
+        _export(experiment, drifted)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +445,7 @@ def test_checkpoint_normalization_field_mismatch_fails_fast(experiment, zarr_pat
                 "action": "auto",
             }
         ),
+        zarr_file=zarr_path,
     )
 
     with pytest.raises(InvalidCheckpointError, match="normalization"):
@@ -246,6 +466,7 @@ def test_checkpoint_normalization_illegal_mode_fails_fast(experiment, zarr_path)
                 "point_cloud": "limits",
             }
         ),
+        zarr_file=zarr_path,
     )
 
     with pytest.raises(InvalidCheckpointError, match="normalization"):
@@ -350,7 +571,9 @@ def test_hostile_target_fails_at_inspect_boundary(experiment, zarr_path):
 
 def test_export_rejects_checkpoint_with_hostile_agent_target(experiment, zarr_path):
     """The exporter's own sanitize step applies the shared target grammar."""
-    checkpoint_path, _ = write_checkpoint(experiment, filename="hostile.pt")
+    checkpoint_path, _ = write_checkpoint(
+        experiment, filename="hostile.pt", zarr_file=zarr_path
+    )
     store = exporter.CheckpointStore(checkpoint_path.parent)
     checkpoint = store.load(checkpoint_path)
     checkpoint.resume_contract["agent_config"]["pc_encoder_config"] = {
@@ -371,7 +594,9 @@ def test_export_rejects_checkpoint_with_hostile_agent_target(experiment, zarr_pa
 
 def test_raw_selected_does_not_require_ema(experiment, zarr_path):
     """Selecting raw weights must not care that EMA is absent."""
-    write_checkpoint(experiment, filename="raw_only.pt", with_ema=False)
+    write_checkpoint(
+        experiment, filename="raw_only.pt", with_ema=False, zarr_file=zarr_path
+    )
     write_config(experiment, use_ema=False)
 
     receipt = export_deployment_artifact(
@@ -385,7 +610,9 @@ def test_raw_selected_does_not_require_ema(experiment, zarr_path):
 
 def test_ema_selected_without_ema_weights_fails(experiment, zarr_path):
     """Selecting EMA must fail loudly when the checkpoint has none."""
-    write_checkpoint(experiment, filename="raw_only.pt", with_ema=False)
+    write_checkpoint(
+        experiment, filename="raw_only.pt", with_ema=False, zarr_file=zarr_path
+    )
     write_config(experiment, use_ema=True)
 
     with pytest.raises(InvalidCheckpointError, match="ema_model"):
@@ -397,7 +624,9 @@ def test_ema_selected_without_ema_weights_fails(experiment, zarr_path):
 
 def test_selected_weights_match_the_stored_state(experiment, zarr_path):
     """``producer.selected_weights`` must name the state actually serialized."""
-    write_checkpoint(experiment, filename="both.pt", with_ema=True)
+    write_checkpoint(
+        experiment, filename="both.pt", with_ema=True, zarr_file=zarr_path
+    )
     write_config(experiment, use_ema=True)
 
     receipt = export_deployment_artifact(
@@ -416,7 +645,9 @@ def test_selected_weights_match_the_stored_state(experiment, zarr_path):
 
 def test_unselected_state_is_never_processed(experiment, zarr_path):
     """A corrupt unselected state cannot break an export that does not use it."""
-    write_checkpoint(experiment, filename="corrupt_ema.pt", with_ema=True)
+    write_checkpoint(
+        experiment, filename="corrupt_ema.pt", with_ema=True, zarr_file=zarr_path
+    )
     checkpoint_path = experiment / "checkpoints" / "corrupt_ema.pt"
     store = exporter.CheckpointStore(checkpoint_path.parent)
     checkpoint = store.load(checkpoint_path)
@@ -467,7 +698,7 @@ def test_public_export_publishes_selector(experiment, zarr_path):
 
 def test_export_failure_is_reported_before_publishing(experiment, zarr_path, monkeypatch):
     """A strict-restore failure must not publish and must leave no candidate."""
-    write_checkpoint(experiment, filename="ok.pt")
+    write_checkpoint(experiment, filename="ok.pt", zarr_file=zarr_path)
     selector = experiment / "checkpoints" / "deployment_latest.pt"
 
     def _fail(_payload):
@@ -488,8 +719,8 @@ def test_verification_failure_keeps_previous_selector_and_allows_retry(
     experiment, zarr_path, monkeypatch
 ):
     """Failure must leave the old selector intact and the same command retryable."""
-    write_checkpoint(experiment, filename="first.pt")
-    write_checkpoint(experiment, filename="second.pt")
+    write_checkpoint(experiment, filename="first.pt", zarr_file=zarr_path)
+    write_checkpoint(experiment, filename="second.pt", zarr_file=zarr_path)
     first = export_deployment_artifact(
         experiment, checkpoint_selector="first.pt", zarr_path=zarr_path
     )
@@ -533,7 +764,7 @@ def test_cleanup_failure_is_not_silently_swallowed(tmp_path):
         exporter.cleanup_candidate_artifact(candidate)
 
 
-def test_cleanup_removes_candidate_and_fsyncs(tmp_path):
+def test_cleanup_removes_candidate(tmp_path):
     candidate = tmp_path / "candidate.pt"
     candidate.write_bytes(b"x")
 
@@ -668,66 +899,17 @@ def test_dqrise_deployment_constructor_matches_validated_state():
     assert differences == {"codebook_path"}
 
 
-# ---------------------------------------------------------------------------
-# 10. qualify publication order
-# ---------------------------------------------------------------------------
+def test_sanitize_disables_constructor_pretrained_loading():
+    """Export must never re-run constructor-time pretrained weight loading."""
+    from dexmani_policy.deployment.export import _sanitize_agent_config
 
+    cfg = agent_config()
+    cfg["pc_encoder_config"]["use_pretrained_weights"] = True
+    cfg["pc_encoder_config"]["pretrained_path"] = "robot_data/pretrained/pc.pt"
 
-def test_qualify_publish_is_the_last_side_effect(experiment, zarr_path, monkeypatch):
-    """A parity failure must leave the selector untouched and drop the candidate."""
-    from dexmani_policy.deployment import qualify
-    from dexmani_policy.deployment.restore import PredictionParityError
+    sanitized = _sanitize_agent_config(cfg, {"probe": torch.ones(1)}, {})
 
-    # An already-published artifact from a different checkpoint, so the selector
-    # has a previous value and qualify writes a distinct candidate path.
-    write_checkpoint(experiment, filename="published.pt")
-    receipt = export_deployment_artifact(
-        experiment, checkpoint_selector="published.pt", zarr_path=zarr_path
-    )
-    selector = receipt.selector_path
-    previous_target = selector.resolve()
-
-    def _fail_parity(*args, **kwargs):
-        raise PredictionParityError("synthetic parity failure")
-
-    monkeypatch.setattr(qualify, "assert_prediction_parity", _fail_parity)
-    write_config(experiment, use_ema=False)
-
-    with pytest.raises(qualify.PolicyParityError, match="parity"):
-        qualify.qualify_policy_parity(
-            experiment, checkpoint_selector="latest.pt", zarr_path=zarr_path
-        )
-
-    assert selector.resolve() == previous_target
-    assert not (experiment / "checkpoints" / "latest-deployment.pt").exists()
-
-
-def test_qualify_report_failure_leaves_selector_unchanged(
-    experiment, zarr_path, monkeypatch
-):
-    """Even a failure while building the report must not have published."""
-    from dexmani_policy.deployment import qualify
-
-    write_checkpoint(experiment, filename="published.pt")
-    receipt = export_deployment_artifact(
-        experiment, checkpoint_selector="published.pt", zarr_path=zarr_path
-    )
-    selector = receipt.selector_path
-    previous_target = selector.resolve()
-
-    def _fail_report(*args, **kwargs):
-        raise RuntimeError("synthetic report failure")
-
-    monkeypatch.setattr(qualify, "_build_parity_report", _fail_report)
-    write_config(experiment, use_ema=False)
-
-    with pytest.raises(RuntimeError, match="synthetic report failure"):
-        qualify.qualify_policy_parity(
-            experiment, checkpoint_selector="latest.pt", zarr_path=zarr_path
-        )
-
-    assert selector.resolve() == previous_target
-    assert not (experiment / "checkpoints" / "latest-deployment.pt").exists()
+    assert sanitized["pc_encoder_config"]["use_pretrained_weights"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -737,8 +919,6 @@ def test_qualify_report_failure_leaves_selector_unchanged(
 
 def test_loaded_policy_predict_contract_is_unchanged(experiment, zarr_path):
     """``LoadedPolicy.predict`` still returns [n_action_steps, control_action_dim]."""
-    import numpy as np
-
     from dexmani_policy.deployment.runtime import load_experiment
 
     _export(experiment, zarr_path)
@@ -770,57 +950,80 @@ def test_loaded_policy_reports_artifact_identity(experiment, zarr_path):
     try:
         assert info.task_name == TASK_NAME
         assert info.checkpoint_name == receipt.checkpoint_path.name
+        assert info.checkpoint_name.endswith("-deployment.pt")
         assert policy.spec.action_dim == 19
         assert policy.spec.control_action_dim == 19
         assert policy.spec.default_inference_steps == 2
     finally:
         policy.close()
 
+    # inspect resolves the selector to the immutable filename; a Real session
+    # pins exactly that resolved name for its own load.
+    pinned = load_experiment(experiment, device="cpu", artifact=info.checkpoint_name)
+    pinned.close()
 
-def test_qualify_uses_checkpoint_constructor_under_config_drift(experiment, zarr_path):
-    """Qualify must compare checkpoint-saved semantics, not drifted current config."""
-    from dexmani_policy.deployment import qualify
 
-    # The current config's agent is now a different architecture entirely.
-    write_config(
-        experiment,
-        agent_cfg=agent_config(n_head=DRIFTED_N_HEAD),
-        use_ema=False,
+# ---------------------------------------------------------------------------
+# targeted parity: direct checkpoint restore == exported artifact restore
+# ---------------------------------------------------------------------------
+
+
+def _direct_prediction_snapshot(
+    agent_config: dict, action_key: str, payload: dict, state: dict
+):
+    """One seeded prediction from a directly restored constructor plus state.
+
+    The DeploymentSpec comes from the artifact payload: it is checkpoint-owned
+    metadata, which is exactly the invariant under test — the direct restore
+    and the artifact restore must agree when both run the same contract.
+    """
+    import hydra
+    from omegaconf import OmegaConf
+
+    from dexmani_policy.deployment.restore import (
+        RestoredDeployment,
+        deployment_spec,
+        prediction_snapshot,
     )
 
-    report = qualify.qualify_policy_parity(
-        experiment, checkpoint_selector="latest.pt", zarr_path=zarr_path
+    agent = hydra.utils.instantiate(OmegaConf.create(agent_config))
+    agent.load_state_dict(state, strict=True)
+    agent.action_key = action_key
+    agent.eval()
+    spec = deployment_spec(payload)
+    return prediction_snapshot(RestoredDeployment(agent=agent, spec=spec), seed=0)
+
+
+def test_exported_restore_prediction_matches_direct_checkpoint_restore(
+    experiment, zarr_path
+):
+    """Research parity: the exported artifact predicts exactly like the checkpoint."""
+    from dexmani_policy.deployment.restore import (
+        assert_prediction_parity,
+        prediction_snapshot,
+        restore_deployment_agent,
     )
 
-    assert report.selected_weights == "model"
-    assert report.max_abs_diff == 0.0
-    assert report.action_dim == 19
-    assert report.horizon == 4
-    assert report.n_action_steps == 2
-    # Qualify published the selector as its final step.
-    selector = experiment / "checkpoints" / "deployment_latest.pt"
-    assert selector.resolve() == Path(report.deployment_checkpoint).resolve()
+    receipt = _export(experiment, zarr_path)
+    payload = torch.load(receipt.checkpoint_path, map_location="cpu", weights_only=True)
+    artifact = prediction_snapshot(restore_deployment_agent(payload), seed=0)
 
-
-def test_qualify_direct_and_export_share_selected_state(experiment, zarr_path):
-    """Both qualify branches must use the same checkpoint-selected weights."""
-    from dexmani_policy.deployment import qualify
-
-    write_config(experiment, use_ema=True)
-
-    report = qualify.qualify_policy_parity(
-        experiment, checkpoint_selector="latest.pt", zarr_path=zarr_path
+    checkpoint = exporter._load_training_checkpoint(
+        experiment / "checkpoints" / "latest.pt"
+    )
+    resume = checkpoint.resume_contract
+    direct = _direct_prediction_snapshot(
+        resume["agent_config"],
+        resume["agent"]["action_key"],
+        payload,
+        checkpoint.model_state,
     )
 
-    assert report.use_ema is True
-    assert report.selected_weights == "ema_model"
-    assert report.max_abs_diff == 0.0
+    assert_prediction_parity(artifact, direct)
 
 
 def test_rgb_artifact_round_trips_through_frozen_contract(tmp_path, experiment):
     """A full RGB export/restore keeps nested constructor data intact."""
-    import numpy as np
-    from conftest import add_rgb
     from dexmani_policy.deployment.runtime import load_experiment
 
     zarr_file = tmp_path / "rgb_task.zarr"
@@ -928,7 +1131,6 @@ DQ_RISE_FULL_AGENT_CONFIG = {
 
 def test_dqrise_full_export_round_trip(tmp_path):
     """A DQ-RISE checkpoint exports, verifies and restores with its codebook inside."""
-    import numpy as np
     from conftest import build_agent
     from dexmani_policy.deployment.runtime import load_experiment
 
@@ -1013,6 +1215,21 @@ def test_dqrise_full_export_round_trip(tmp_path):
     finally:
         policy.close()
 
+    # Targeted parity: the sanitized codebook-free constructor plus the
+    # persistent codebook state predicts exactly like the artifact restore.
+    from dexmani_policy.deployment.restore import (
+        assert_prediction_parity,
+        prediction_snapshot,
+        restore_deployment_agent,
+    )
+
+    sanitized_cfg = exporter._sanitize_agent_config(
+        dict(DQ_RISE_FULL_AGENT_CONFIG), state, dict(DQ_RISE_TRAIN)
+    )
+    direct = _direct_prediction_snapshot(sanitized_cfg, "action_ee", payload, state)
+    artifact = prediction_snapshot(restore_deployment_agent(payload), seed=0)
+    assert_prediction_parity(artifact, direct)
+
 
 # ---------------------------------------------------------------------------
 # checkpoint-internal validation (deleting reconciliation != deleting validation)
@@ -1057,11 +1274,22 @@ def test_dqrise_full_export_round_trip(tmp_path):
     ],
 )
 def test_checkpoint_internal_contract_is_strictly_parsed(
-    experiment, label, overrides, message
+    experiment, zarr_path, label, overrides, message
 ):
     """A checkpoint whose own action/window contract is inconsistent must fail."""
+    # An invalid action_key cannot seed a real snapshot; the export must fail
+    # on the checkpoint's own contract before the snapshot gate is reached.
+    semantics = (
+        "auto"
+        if overrides.get("action_key", "action") in {"action", "action_ee"}
+        else None
+    )
     path, _ = write_checkpoint(
-        experiment, filename="bad.pt", contract=agent_contract(**overrides)
+        experiment,
+        filename="bad.pt",
+        contract=agent_contract(**overrides),
+        zarr_file=zarr_path,
+        deployment_data_semantics=semantics,
     )
 
     with pytest.raises(InvalidCheckpointError, match=message):
@@ -1070,11 +1298,13 @@ def test_checkpoint_internal_contract_is_strictly_parsed(
         )
 
 
-def test_checkpoint_missing_normalization_contract_fails(experiment):
+def test_checkpoint_missing_normalization_contract_fails(experiment, zarr_path):
     """A checkpoint without a versioned normalization contract cannot deploy."""
     contract = agent_contract()
     del contract["normalization"]
-    path, _ = write_checkpoint(experiment, filename="no_norm.pt", contract=contract)
+    path, _ = write_checkpoint(
+        experiment, filename="no_norm.pt", contract=contract, zarr_file=zarr_path
+    )
 
     with pytest.raises(InvalidCheckpointError, match="normalization"):
         exporter._parse_checkpoint_deployment_source(
@@ -1082,11 +1312,13 @@ def test_checkpoint_missing_normalization_contract_fails(experiment):
         )
 
 
-def test_checkpoint_missing_required_action_field_fails(experiment):
+def test_checkpoint_missing_required_action_field_fails(experiment, zarr_path):
     """Every action/window field is mandatory in the saved contract."""
     contract = agent_contract()
     del contract["control_action_dim"]
-    path, _ = write_checkpoint(experiment, filename="short.pt", contract=contract)
+    path, _ = write_checkpoint(
+        experiment, filename="short.pt", contract=contract, zarr_file=zarr_path
+    )
 
     with pytest.raises(InvalidCheckpointError, match="control_action_dim"):
         exporter._parse_checkpoint_deployment_source(
@@ -1094,9 +1326,9 @@ def test_checkpoint_missing_required_action_field_fails(experiment):
         )
 
 
-def test_checkpoint_missing_dataset_contract_fails(experiment):
+def test_checkpoint_missing_dataset_contract_fails(experiment, zarr_path):
     """A checkpoint with no saved dataset semantics cannot deploy."""
-    path, _ = write_checkpoint(experiment, filename="no_ds.pt")
+    path, _ = write_checkpoint(experiment, filename="no_ds.pt", zarr_file=zarr_path)
     store = exporter.CheckpointStore(path.parent)
     checkpoint = store.load(path)
     del checkpoint.resume_contract["dataset"]
@@ -1126,112 +1358,34 @@ def test_source_commit_is_optional(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# publish / publication-failure transaction
+# publication: atomic selector, explicit refusal, retryable failures
 # ---------------------------------------------------------------------------
 
 
-def test_publish_failure_after_swap_rolls_back_and_keeps_selector_valid(
-    experiment, zarr_path, monkeypatch
-):
-    """A failure *after* the symlink swap must restore the previous selector.
-
-    The swap is live the moment ``os.replace`` succeeds, but the durability
-    fsync that follows can still raise.  If that case is not rolled back, the
-    caller deletes the artifact the selector now names and leaves
-    ``deployment_latest.pt`` dangling.
-    """
-    write_checkpoint(experiment, filename="first.pt")
-    write_checkpoint(experiment, filename="second.pt")
+def test_publish_refuses_to_replace_a_regular_file_selector(experiment, zarr_path):
+    """A non-symlink ``deployment_latest.pt`` must not be clobbered or leaked."""
     first = export_deployment_artifact(
-        experiment, checkpoint_selector="first.pt", zarr_path=zarr_path
+        experiment, checkpoint_selector="latest.pt", zarr_path=zarr_path
     )
     selector = first.selector_path
+    # Materialize the selector as a regular file, which publish refuses to replace.
+    selector.unlink()
+    selector.write_bytes(b"not a symlink")
+    write_checkpoint(experiment, filename="second.pt", zarr_file=zarr_path)
 
-    real_fsync = exporter._fsync_directory
-    # The publish path fsyncs the same directory as the candidate write, so the
-    # fault has to be aimed at the call count: #1 is the candidate write, #2 is
-    # the post-swap durability fsync we want to fail.
-    state = {"armed": False, "calls": 0}
-
-    def _fail_after_swap(path):
-        if state["armed"] and Path(path) == selector.parent:
-            state["calls"] += 1
-            if state["calls"] == 2:
-                raise OSError(5, "synthetic directory fsync failure")
-        return real_fsync(path)
-
-    monkeypatch.setattr(exporter, "_fsync_directory", _fail_after_swap)
-    state["armed"] = True
-    with pytest.raises(OSError):
+    with pytest.raises(ArtifactPublicationError, match="non-symlink"):
         export_deployment_artifact(
             experiment, checkpoint_selector="second.pt", zarr_path=zarr_path
         )
-    state["armed"] = False
-    monkeypatch.setattr(exporter, "_fsync_directory", real_fsync)
-    # Call 2 was the post-swap durability fsync; the later calls are the
-    # rollback and candidate-cleanup fsyncs that followed it.
-    assert state["calls"] >= 2
-
-    # The selector must still resolve, and still name the first artifact.
-    assert selector.is_symlink()
-    assert selector.resolve() == first.checkpoint_path.resolve()
-    from dexmani_policy.deployment.runtime import inspect_experiment
-
-    assert inspect_experiment(experiment).checkpoint_name == first.checkpoint_path.name
-
-
-def test_candidate_is_removed_when_the_post_rename_fsync_fails(
-    experiment, zarr_path, monkeypatch
-):
-    """A failure after the candidate rename must not block the identical retry."""
-    from dexmani_policy.deployment.export import _export_candidate
-
-    write_checkpoint(experiment, filename="ok.pt")
-    real_fsync = exporter._fsync_directory
-
-    def _fail(path):
-        raise OSError(5, "synthetic directory fsync failure")
-
-    monkeypatch.setattr(exporter, "_fsync_directory", _fail)
-    with pytest.raises(ArtifactPublicationError):
-        _export_candidate(
-            experiment, checkpoint_selector="ok.pt", zarr_path=zarr_path
-        )
-    monkeypatch.setattr(exporter, "_fsync_directory", real_fsync)
-
-    assert not (experiment / "checkpoints" / "ok-deployment.pt").exists()
-    # The identical command now succeeds.
-    receipt = export_deployment_artifact(
-        experiment, checkpoint_selector="ok.pt", zarr_path=zarr_path
-    )
-    assert receipt.checkpoint_path.is_file()
-
-
-def test_qualify_publish_failure_drops_candidate_and_allows_retry(experiment, zarr_path):
-    """A definite publish failure (non-symlink selector) must not leak a candidate."""
-    from dexmani_policy.deployment import qualify
-
-    write_checkpoint(experiment, filename="published.pt")
-    export_deployment_artifact(
-        experiment, checkpoint_selector="published.pt", zarr_path=zarr_path
-    )
-    # Materialize the selector as a regular file, which publish refuses to replace.
-    selector = experiment / "checkpoints" / "deployment_latest.pt"
-    selector.unlink()
-    selector.write_bytes(b"not a symlink")
-
-    with pytest.raises(ArtifactPublicationError, match="non-symlink"):
-        qualify.qualify_policy_parity(
-            experiment, checkpoint_selector="latest.pt", zarr_path=zarr_path
-        )
 
     # No leaked candidate: removing the bad selector is enough to retry cleanly.
-    assert not (experiment / "checkpoints" / "latest-deployment.pt").exists()
+    assert not (experiment / "checkpoints" / "second-deployment.pt").exists()
     selector.unlink()
-    report = qualify.qualify_policy_parity(
-        experiment, checkpoint_selector="latest.pt", zarr_path=zarr_path
+    retried = export_deployment_artifact(
+        experiment, checkpoint_selector="second.pt", zarr_path=zarr_path
     )
-    assert report.max_abs_diff == 0.0
+    assert retried.selector_path.is_symlink()
+    assert retried.selector_path.resolve() == retried.checkpoint_path.resolve()
 
 
 # ---------------------------------------------------------------------------

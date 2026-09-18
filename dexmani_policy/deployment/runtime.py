@@ -57,11 +57,6 @@ class PolicySpec:
     default_inference_steps: int
     rgb_preprocessing: RgbPreprocessingSpec | None = None
 
-    @property
-    def chunk_size(self) -> int:
-        """Number of future actions, including the normal query interval."""
-        return self.horizon - self.n_obs_steps + 1
-
     def __post_init__(self) -> None:
         if self.action_key not in {"action", "action_ee"}:
             raise ValueError("action_key must be 'action' or 'action_ee'")
@@ -326,27 +321,6 @@ class LoadedPolicy:
                 "Policy prediction is not a finite float64 control-action chunk"
             )
         return control_action
-
-    def predict_action_chunk(
-        self, observation: Mapping[str, np.ndarray]
-    ) -> np.ndarray:
-        """Return a finite float64 ownership copy ``[chunk_size, control_action_dim]``.
-
-        Uses the canonical future prediction starting at ``n_obs_steps - 1``.
-        Its first ``n_action_steps`` rows are the same sample's control actions.
-        """
-        import torch
-
-        snapshot = self._predict_snapshot(observation)
-        chunk = snapshot.pred_action[
-            0, self.spec.n_obs_steps - 1 :, : self.spec.control_action_dim
-        ].to(dtype=torch.float64).numpy().copy()
-        if (
-            chunk.shape != (self.spec.chunk_size, self.spec.control_action_dim)
-            or not np.isfinite(chunk).all()
-        ):
-            raise RuntimeError("Policy prediction is not a finite float64 future chunk")
-        return chunk
 
     def _predict_snapshot(
         self, observation: Mapping[str, np.ndarray]
