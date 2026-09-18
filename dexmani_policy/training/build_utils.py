@@ -392,8 +392,6 @@ def validate_config(cfg):
 
     Called by all entry points before training or evaluation.
     """
-    training_cfg = cfg.get("training", {})
-
     if cfg.n_obs_steps > cfg.horizon:
         raise ValueError(
             f"n_obs_steps ({cfg.n_obs_steps}) cannot exceed horizon ({cfg.horizon})"
