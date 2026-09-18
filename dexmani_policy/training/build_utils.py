@@ -141,8 +141,9 @@ def _validate_ema_batchnorm_compatibility(model) -> None:
 def build_model_and_ema(cfg, device, normalizer, rank=0):
     """Instantiate the agent model and, if configured, its EMA twin.
 
-    ``rank`` gates whether a local EMA is built: only rank 0 (or every rank when
-    the EMA teacher feeds the consistency loss) needs a full EMA copy. Non-rank-0
+    ``rank`` gates whether a local EMA is built: rank 0 always owns the evaluation
+    EMA, while every rank owns one when the model declares an EMA-dependent loss.
+    Non-rank-0
     workers receive ``ema_model=None`` — the Trainer guards every EMA site with
     ``self.use_ema = (ema_model is not None)``, so this is safe end-to-end.
     """
@@ -152,13 +153,19 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
     attach_normalization_spec(model, cfg)
     model.to(device)
 
+    requires_ema_for_loss = model.requires_ema_for_loss
+    if requires_ema_for_loss and not cfg.training.use_ema:
+        raise ValueError(
+            f"{type(model.action_decoder).__name__} requires training.use_ema=true"
+        )
+
     if cfg.training.use_ema:
         _validate_ema_batchnorm_compatibility(model)
 
     ema_model = None
     ema_updater = None
     need_local_ema = cfg.training.use_ema and (
-        rank == 0 or cfg.training.get("use_ema_teacher_for_consistency", False)
+        rank == 0 or requires_ema_for_loss
     )
     if need_local_ema:
         ema_model = hydra.utils.instantiate(cfg.agent)
@@ -386,12 +393,6 @@ def validate_config(cfg):
     Called by all entry points before training or evaluation.
     """
     training_cfg = cfg.get("training", {})
-    if training_cfg.get(
-        "use_ema_teacher_for_consistency", False
-    ) and not training_cfg.get("use_ema", False):
-        raise ValueError(
-            "use_ema_teacher_for_consistency=true requires training.use_ema=true"
-        )
 
     if cfg.n_obs_steps > cfg.horizon:
         raise ValueError(
