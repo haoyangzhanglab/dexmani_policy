@@ -145,7 +145,6 @@ class ConsistencyDiTX(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        n_obs_steps: int,
         num_obs_tokens: int,
         obs_token_dim: int,
         timestep_embed_dim: int = 128,
