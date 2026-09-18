@@ -66,7 +66,6 @@ class Trainer:
         train_loader,
         workspace: Optional[TrainWorkspace],
         train_loop_cfg: TrainLoopConfig,
-        use_ema_teacher_for_consistency: bool,
         num_training_steps: int,
         resume_contract: dict,
         max_grad_norm: float = 1.0,
@@ -98,9 +97,6 @@ class Trainer:
         self._last_clip_ratio: float | None = None
 
         self.use_ema = self.ema_model is not None
-        self.use_ema_teacher_for_consistency = (
-            use_ema_teacher_for_consistency and self.use_ema
-        )
 
         self.use_bfloat16 = use_bfloat16
         self.use_compile = use_compile
@@ -294,11 +290,7 @@ class Trainer:
                 group.
         """
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-        loss_kwargs = (
-            {"ema_backbone": self.ema_model.action_decoder.model}
-            if self.use_ema_teacher_for_consistency
-            else {}
-        )
+        loss_kwargs = self.raw_model.get_training_loss_kwargs(self.ema_model)
         with torch.amp.autocast(
             device_type=self.amp_device_type,
             dtype=torch.bfloat16,
