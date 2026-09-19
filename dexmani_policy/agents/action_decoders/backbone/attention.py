@@ -59,6 +59,7 @@ class CrossAttention(nn.Module):
         q, k = self.q_norm(q), self.k_norm(k)
 
         attn_mask = None
+        valid_rows = None
         if mask is not None:
             if mask.shape != (batch_size, context_len):
                 raise ValueError(
@@ -68,6 +69,10 @@ class CrossAttention(nn.Module):
             attn_mask = mask.to(torch.bool).reshape(
                 batch_size, 1, 1, context_len
             ).expand(-1, -1, query_len, -1)
+            valid_rows = attn_mask.any(dim=-1, keepdim=True)
+            # Avoid all -inf softmax rows in both SDPA and the manual path.
+            # Empty rows attend temporarily to all keys, then contribute zero.
+            attn_mask = attn_mask | ~valid_rows
 
         if self.fused_attn:
             out = F.scaled_dot_product_attention(
@@ -90,6 +95,8 @@ class CrossAttention(nn.Module):
                 weights = self.attn_drop(weights)
             out = weights @ v
 
+        if valid_rows is not None:
+            out = out.masked_fill(~valid_rows, 0.0)
         out = out.permute(0, 2, 1, 3).reshape(batch_size, query_len, dim)
         out = self.proj(out)
         return self.proj_drop(out)

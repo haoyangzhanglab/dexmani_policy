@@ -45,7 +45,7 @@ def test_ditx_rms_context_mask_and_backward():
     )
 
     out = model(x, t, context, context_mask=mask)
-    loss = out.square().mean()
+    loss = (out - torch.ones_like(out)).square().mean()
     loss.backward()
 
     assert torch.isfinite(loss)
@@ -66,3 +66,49 @@ def test_ditx_rms_rejects_wrong_action_shape():
         assert "incompatible" in str(exc)
     else:
         raise AssertionError("wrong horizon must fail")
+
+
+def test_zero_initialization_starts_learning_and_optimizer_covers_parameters():
+    torch.manual_seed(7)
+    model = _make_model()
+    groups = model.get_optim_groups(weight_decay=0.0)
+    grouped = [p for group in groups for p in group["params"]]
+    assert len(grouped) == len({id(p) for p in grouped})
+    assert {id(p) for p in grouped} == {
+        id(p) for p in model.parameters() if p.requires_grad
+    }
+    optimizer = torch.optim.AdamW(groups, lr=1e-3)
+    x, t, context = torch.randn(2, 4, 3), torch.rand(2), torch.randn(2, 7, 6)
+    target = torch.randn_like(x)
+    original = {name: p.detach().clone() for name, p in model.named_parameters()}
+    reached = set()
+    for step in range(5):
+        optimizer.zero_grad(set_to_none=True)
+        loss = (model(x, t, context) - target).square().mean()
+        loss.backward()
+        for name, p in model.named_parameters():
+            assert p.grad is not None, name
+            assert torch.isfinite(p.grad).all(), name
+            if p.grad.abs().max() > 0:
+                reached.add(name)
+            if step == 0 and not name.startswith("final_proj."):
+                assert torch.count_nonzero(p.grad) == 0, name
+        optimizer.step()
+    assert reached == set(original), set(original) - reached
+    for name, p in model.named_parameters():
+        assert not torch.equal(p, original[name]), name
+
+
+def test_context_permutation_invariance_after_learning():
+    model = _make_model().eval()
+    # Activate all residual branches and final output so this is not vacuous.
+    with torch.no_grad():
+        torch.nn.init.normal_(model.final_proj.weight, std=0.1)
+        for block in model.blocks:
+            block.modulation[-1].bias.fill_(0.2)
+    x, context = torch.randn(2, 4, 3), torch.randn(2, 9, 6)
+    permutation = torch.randperm(9)
+    mask = torch.rand(2, 9) > 0.3
+    a = model(x, 0.5, context, mask)
+    b = model(x, torch.tensor(0.5), context[:, permutation], mask[:, permutation])
+    torch.testing.assert_close(a, b, atol=2e-6, rtol=2e-5)

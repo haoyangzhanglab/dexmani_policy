@@ -118,7 +118,7 @@ def agent_config(*, n_head: int = CHECKPOINT_N_HEAD) -> dict[str, Any]:
         "p_drop_attn": 0.0,
         "timestep_embed_dim": 8,
         "target_t_embed_dim": 8,
-        "denoise_timesteps": 2,
+        "num_inference_steps": 2,
     }
 
 
