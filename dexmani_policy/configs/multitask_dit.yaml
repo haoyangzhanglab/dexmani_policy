@@ -138,14 +138,14 @@ agent:
   attn_drop: 0.1
   proj_drop: 0.1
 
-  action_decoder_type: diffusion     # diffusion | flowmatch
+  action_decoder_type: diffusion     # diffusion | rectified_flow
 
   # Diffusion
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
 
-  # FlowMatch (only active when action_decoder_type=flowmatch)
+  # Rectified Flow (only active when action_decoder_type=rectified_flow)
   flow_num_inference_steps: 10
   flow_t_sample_mode: beta
   flow_beta_alpha: 1.0
@@ -181,7 +181,6 @@ training:
   use_bfloat16: true
   use_compile: true
   use_ema: true
-  use_ema_teacher_for_consistency: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0

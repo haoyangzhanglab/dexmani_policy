@@ -1,9 +1,17 @@
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.core.base import DiTXFlowMatchAgent
+from dexmani_policy.agents.action_decoders.backbone.consistency_ditx import (
+    ConsistencyDiTX,
+)
+from dexmani_policy.agents.action_decoders.consistency_flow import (
+    ConsistencyFlowMatch,
+)
+from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_patch_tokenizer
+from dexmani_policy.agents.obs_encoder.pointcloud.registry import (
+    build_pc_patch_tokenizer,
+)
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
@@ -20,22 +28,22 @@ class ManiFlowObsEncoder(nn.Module):
         num_points: int,
         n_obs_steps: int,
         state_out_dim: int = 64,
-        pc_encoder_config: dict = None,
-        fps_random_config: dict = None,
+        pc_encoder_config: dict | None = None,
+        fps_random_config: dict | None = None,
     ):
         super().__init__()
         pc_encoder_config = dict(pc_encoder_config or {})
         pc_encoder_config.setdefault("fps_random_config", fps_random_config)
-        self.pc_encoder = build_pc_patch_tokenizer(encoder_type, pc_dim, pc_encoder_config)
+        self.pc_encoder = build_pc_patch_tokenizer(
+            encoder_type, pc_dim, pc_encoder_config
+        )
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
+
         token_seq_len, pc_out_dim = self.pc_encoder.out_shape
-        # Per-point encoders (e.g. PointNetPerPoint) treat every point as a
-        # token with no separate global token.  Patch tokenizers (e.g.
-        # PointNeXT) produce patch tokens plus one global/CLS token.
         if getattr(self.pc_encoder, "supports_global_token", True):
             self.num_obs_tokens = (token_seq_len + 1) * n_obs_steps
         else:
@@ -56,18 +64,19 @@ class ManiFlowObsEncoder(nn.Module):
             patch_token, _, global_token = pc_outputs[0], pc_outputs[1], pc_outputs[2]
             pc_feat = torch.cat([global_token, patch_token], dim=1)
         else:
-            pc_feat = self.pc_encoder(pc)  # (B*T, N, out_channels)
+            pc_feat = self.pc_encoder(pc)
 
         state_feat = self.state_mlp(obs["joint_state"])
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
-        feat = torch.cat([pc_feat, state_feat], dim=-1)  # (B*T, K, obs_token_dim)
+        feat = torch.cat([pc_feat, state_feat], dim=-1)
 
-        B = feat.shape[0] // self.n_obs_steps
-        # DiTX uses token-based condition: (B*T, K, D) → (B, T*K, D)
-        return feat.reshape(B, -1, self.obs_token_dim), {}
+        batch_size = feat.shape[0] // self.n_obs_steps
+        return feat.reshape(batch_size, -1, self.obs_token_dim), {}
 
 
-class ManiFlowAgent(DiTXFlowMatchAgent):
+class ManiFlowAgent(BaseAgent):
+    """ManiFlow policy using ConsistencyDiTX + ConsistencyFlowMatch."""
+
     def __init__(
         self,
         horizon: int,
@@ -79,29 +88,71 @@ class ManiFlowAgent(DiTXFlowMatchAgent):
         state_dim: int,
         num_points: int,
         state_out_dim: int = 64,
-        pc_encoder_config: dict = None,
-        fps_random_config: dict = None,
-        **kwargs,
+        pc_encoder_config: dict | None = None,
+        fps_random_config: dict | None = None,
+        timestep_embed_dim: int = 128,
+        target_t_embed_dim: int = 128,
+        n_layers: int = 12,
+        hidden_dim: int = 768,
+        n_head: int = 8,
+        mlp_ratio: float = 4.0,
+        p_drop_attn: float = 0.1,
+        qkv_bias: bool = True,
+        qk_norm: bool = True,
+        pre_norm_modality: bool = False,
+        num_inference_steps: int = 10,
+        flow_batch_ratio: float = 0.75,
+        t_sample_mode_for_flow: str = "beta",
+        t_sample_mode_for_consistency: str = "discrete",
+        dt_sample_mode_for_consistency: str = "uniform",
+        target_t_sample_mode: str = "relative",
+        modality_dropout_probs: dict | None = None,
     ):
         obs_encoder = ManiFlowObsEncoder(
-            encoder_type,
-            pc_dim,
-            state_dim,
-            num_points,
-            n_obs_steps,
-            state_out_dim,
-            pc_encoder_config,
+            encoder_type=encoder_type,
+            pc_dim=pc_dim,
+            state_dim=state_dim,
+            num_points=num_points,
+            n_obs_steps=n_obs_steps,
+            state_out_dim=state_out_dim,
+            pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
         )
-        super().__init__(
-            obs_encoder,
+
+        backbone = ConsistencyDiTX(
+            horizon=horizon,
+            action_dim=action_dim,
             num_obs_tokens=obs_encoder.num_obs_tokens,
             obs_token_dim=obs_encoder.obs_token_dim,
+            timestep_embed_dim=timestep_embed_dim,
+            target_t_embed_dim=target_t_embed_dim,
+            n_layers=n_layers,
+            hidden_dim=hidden_dim,
+            n_head=n_head,
+            mlp_ratio=mlp_ratio,
+            p_drop_attn=p_drop_attn,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            pre_norm_modality=pre_norm_modality,
+        )
+        action_decoder = ConsistencyFlowMatch(
+            model=backbone,
+            num_inference_steps=num_inference_steps,
+            flow_batch_ratio=flow_batch_ratio,
+            t_sample_mode_for_flow=t_sample_mode_for_flow,
+            t_sample_mode_for_consistency=t_sample_mode_for_consistency,
+            dt_sample_mode_for_consistency=dt_sample_mode_for_consistency,
+            target_t_sample_mode=target_t_sample_mode,
+        )
+
+        super().__init__(
+            obs_encoder=obs_encoder,
+            action_decoder=action_decoder,
             horizon=horizon,
             n_obs_steps=n_obs_steps,
             n_action_steps=n_action_steps,
             action_dim=action_dim,
-            **kwargs,
+            modality_dropout_probs=modality_dropout_probs,
         )
 
 
@@ -130,7 +181,7 @@ def example():
         p_drop_attn=0.0,
         timestep_embed_dim=64,
         target_t_embed_dim=64,
-        denoise_timesteps=5,
+        num_inference_steps=5,
     ).to(device)
 
     obs = {
@@ -139,20 +190,16 @@ def example():
     }
     action = torch.randn(B, H, A, device=device)
 
-    print("=== ManiFlowAgent smoke test ===")
-    print(f"obs point_cloud:  {obs['point_cloud'].shape}")
-    print(f"obs joint_state:  {obs['joint_state'].shape}")
-    print(f"action:           {action.shape}")
-
-    cond, _ = agent.obs_encoder(obs)
-    print(
-        f"cond (tokens):    {cond.shape}  [B, T*K, obs_token_dim] = [{B}, {cond.shape[1]}, {cond.shape[2]}]"
-    )
-
     from dexmani_policy.common.normalizer import LinearNormalizer
 
     normalizer = LinearNormalizer()
-    normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")
+    normalizer.fit(
+        {
+            "action": action,
+            "joint_state": obs["joint_state"].reshape(B, T, A),
+        },
+        mode="limits",
+    )
     agent.load_normalizer_from_dataset(normalizer)
 
     batch = {
@@ -162,22 +209,17 @@ def example():
         },
         "action": action,
     }
-    # compute_loss requires an EMA teacher; smoke test uses the agent itself as a stand-in
+
     import copy
 
     ema_agent = copy.deepcopy(agent)
-    loss, loss_dict = agent.compute_loss(batch, ema_backbone=ema_agent.action_decoder.model)
-    print(f"loss:             {loss.item():.4f}  keys={list(loss_dict.keys())}")
+    loss_kwargs = agent.get_training_loss_kwargs(ema_agent)
+    loss, loss_dict = agent.compute_loss(batch, **loss_kwargs)
+    print(f"loss: {loss.item():.4f}  keys={list(loss_dict.keys())}")
 
-    result = agent.predict_action(
-        {
-            "point_cloud": obs["point_cloud"].reshape(B, T, N, 3),
-            "joint_state": obs["joint_state"].reshape(B, T, A),
-        }
-    )
-    print(f"pred_action:      {result['pred_action'].shape}")
-    print(f"control_action:   {result['control_action'].shape}")
-    print("=== PASSED ===")
+    result = agent.predict_action(batch["obs"])
+    print(f"pred_action: {result['pred_action'].shape}")
+    print(f"control_action: {result['control_action'].shape}")
 
 
 if __name__ == "__main__":

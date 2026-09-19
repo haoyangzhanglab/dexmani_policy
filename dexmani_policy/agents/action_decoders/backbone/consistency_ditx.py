@@ -1,13 +1,12 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops.layers.torch import Rearrange
-from timm.models.vision_transformer import Mlp, RmsNorm, use_fused_attn
-from torch.jit import Final
+from timm.models.vision_transformer import Mlp, RmsNorm
 
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
+from .attention import CrossAttention
 from .dit import Attention, _approx_gelu, modulate
 
 WEIGHT_INIT_STD = 0.02
@@ -32,68 +31,6 @@ class AdaLNZero(nn.Module):
         x = self.norm(x)
         gamma, beta = self.cond_modulation(cond).chunk(2, dim=-1)
         x = x * gamma + beta
-        return x
-
-
-class CrossAttention(nn.Module):
-    fused_attn: Final[bool]
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        qkv_bias: bool = False,
-        qk_norm: bool = False,
-        attn_drop: float = 0,
-        proj_drop: float = 0,
-        norm_layer: nn.Module = nn.LayerNorm,
-    ):
-        super().__init__()
-
-        assert dim % num_heads == 0, "dim should be divisible by num_heads"
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim**-0.5
-        self.fused_attn = use_fused_attn()
-
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x, c, mask=None):
-        B, N, C = x.shape
-        _, L, _ = c.shape
-        q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        kv = self.kv(c).reshape(B, L, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        k, v = kv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
-
-        if mask is not None:
-            mask = mask.reshape(B, 1, 1, L)
-            mask = mask.expand(-1, -1, N, -1)
-
-        if self.fused_attn:
-            x = F.scaled_dot_product_attention(
-                query=q, key=k, value=v, dropout_p=self.attn_drop.p if self.training else 0.0, attn_mask=mask
-            )
-        else:
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
-            if mask is not None:
-                attn = attn.masked_fill_(mask.logical_not(), float("-inf"))
-            attn = attn.softmax(dim=-1)
-            if self.attn_drop.p > 0:
-                attn = self.attn_drop(attn)
-            x = attn @ v
-
-        x = x.permute(0, 2, 1, 3).reshape(B, N, C)
-        x = self.proj(x)
-        if self.proj_drop.p > 0:
-            x = self.proj_drop(x)
         return x
 
 
@@ -185,8 +122,8 @@ class FinalLayer(nn.Module):
         return x
 
 
-class DiTXFlowMatch(nn.Module):
-    """DiT-X backbone for Flow Matching (ManiFlow).
+class ConsistencyDiTX(nn.Module):
+    """DiT-X backbone for ManiFlow consistency flow matching.
 
     Extends the DiT architecture with cross-attention blocks where observation
     tokens attend to action tokens, and dual timestep embeddings for flow
@@ -198,15 +135,12 @@ class DiTXFlowMatch(nn.Module):
           into a single conditioning vector.
         - ``AdaLNZero`` modulation in ``DiTXBlock`` for stable training
           initialization.
-        - Optional token compression (``TokenCompressor``) to reduce
-          observation token count.
     """
 
     def __init__(
         self,
         horizon: int,
         action_dim: int,
-        n_obs_steps: int,
         num_obs_tokens: int,
         obs_token_dim: int,
         timestep_embed_dim: int = 128,

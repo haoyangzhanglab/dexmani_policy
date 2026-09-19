@@ -27,6 +27,7 @@ import json
 import math
 import os
 import tempfile
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -502,8 +503,10 @@ def _require_checkpoint_positive_int(value: Any, label: str) -> int:
 
 
 def _canonicalize_state_dict(value: Any, label: str) -> dict[str, torch.Tensor]:
-    if type(value) is not dict or not value:
-        raise InvalidCheckpointError(f"{label} must be a non-empty plain state_dict")
+    # Eager nn.Module.state_dict() returns OrderedDict; compiled/DDP key
+    # canonicalization may produce dict. Both are current training outputs.
+    if type(value) not in (dict, OrderedDict) or not value:
+        raise InvalidCheckpointError(f"{label} must be a non-empty state_dict")
     result: dict[str, torch.Tensor] = {}
     for raw_key, tensor in value.items():
         if type(raw_key) is not str or not raw_key or type(tensor) is not torch.Tensor:

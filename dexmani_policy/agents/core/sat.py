@@ -7,7 +7,7 @@ so that each Transformer token represents one joint's full future trajectory.
 The agent wraps:
 - ``SATObsEncoder``: PointNeXT patch tokenizer + StateMLP (same as ManiFlow)
 - ``SATBackbone``: structural-centric DiT with MultiModalAttention and EJC
-- ``SATFlowMatch``: Flow Matching decoder with shuffle support
+- ``RectifiedFlow``: Flow Matching decoder with shuffle support
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 from dexmani_policy.agents.action_decoders.backbone.sat import SATBackbone
-from dexmani_policy.agents.action_decoders.sat_flowmatch import SATFlowMatch
+from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_patch_tokenizer
@@ -134,7 +134,7 @@ class SATObsEncoder(nn.Module):
 class SATAgent(BaseAgent):
     """Structural Action Transformer agent.
 
-    Inherits ``BaseAgent`` directly (not ``DiTXFlowMatchAgent``) because
+    Inherits ``BaseAgent`` directly because
     SAT uses a fundamentally different action representation:
     ``(B, Da, T)`` instead of ``(B, T, Da)``.
 
@@ -174,7 +174,7 @@ class SATAgent(BaseAgent):
         # Structural tokens
         shuffle_action_tokens: bool = True,
         # Flow matching
-        denoise_timesteps: int = 10,
+        num_inference_steps: int = 10,
         t_sample_mode_for_flow: str = "beta",
         beta_s: float = 0.999,
         beta_alpha: float = 1.0,
@@ -215,10 +215,10 @@ class SATAgent(BaseAgent):
             ejc_axis_dim=ejc_axis_dim,
         )
 
-        # 3. SATFlowMatch decoder (passes shuffle to backbone)
-        action_decoder = SATFlowMatch(
+        # 3. RectifiedFlow decoder (passes shuffle to backbone)
+        action_decoder = RectifiedFlow(
             model=backbone,
-            num_inference_steps=denoise_timesteps,
+            num_inference_steps=num_inference_steps,
             t_sample_mode=t_sample_mode_for_flow,
             beta_s=beta_s,
             beta_alpha=beta_alpha,
@@ -267,7 +267,9 @@ class SATAgent(BaseAgent):
         action_loss, loss_dict = self.action_decoder.compute_loss(
             cond,
             normed_actions,
-            shuffle=self.training and self.shuffle_action_tokens,
+            model_kwargs={
+                "shuffle": self.training and self.shuffle_action_tokens,
+            },
         )
         return self._merge_aux_loss(action_loss, loss_dict, aux)
 
@@ -292,6 +294,8 @@ class SATAgent(BaseAgent):
         )
 
         pred = self.action_decoder.predict_action(cond, template, denoise_timesteps)
+        if not torch.isfinite(pred).all():
+            raise RuntimeError("Non-finite SAT action prediction")
         # pred is (B, Da, T)
 
         # Transpose back: (B, Da, T) → (B, T, Da)

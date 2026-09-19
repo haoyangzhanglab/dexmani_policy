@@ -227,12 +227,7 @@ def smoke_test(config_name: str):
     batch = next(iter(train_loader))
     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-    use_ema_teacher = cfg.training.use_ema_teacher_for_consistency
-    loss_kwargs = (
-        {"ema_backbone": ema_model.action_decoder.model}
-        if use_ema_teacher and ema_model
-        else {}
-    )
+    loss_kwargs = model.get_training_loss_kwargs(ema_model)
     model.train()
     raw_loss, loss_dict = model.compute_loss(batch, **loss_kwargs)
     raw_loss.backward()

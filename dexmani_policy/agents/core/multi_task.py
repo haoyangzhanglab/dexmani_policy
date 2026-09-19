@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from dexmani_policy.agents.action_decoders.backbone.dit import DiTDiffusion
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.action_decoders.flowmatch import FlowMatch
+from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.core.dp import DPObsEncoder
 from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
@@ -39,7 +39,7 @@ class MultiTaskAgent(BaseAgent):
         attn_drop: float = 0.1,
         proj_drop: float = 0.1,
         # action decoder type
-        action_decoder_type: str = "diffusion",  # "diffusion" | "flowmatch"
+        action_decoder_type: str = "diffusion",  # "diffusion" | "rectified_flow"
         # action decoder (Diffusion)
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
@@ -62,8 +62,9 @@ class MultiTaskAgent(BaseAgent):
         assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip", "r3m"), (
             f"rgb_backbone_name must be one of resnet/clip/dino/siglip/r3m, got {rgb_backbone_name}"
         )
-        assert action_decoder_type in ("diffusion", "flowmatch"), (
-            f"action_decoder_type must be 'diffusion' or 'flowmatch', got {action_decoder_type}"
+        assert action_decoder_type in ("diffusion", "rectified_flow"), (
+            "action_decoder_type must be 'diffusion' or 'rectified_flow', "
+            f"got {action_decoder_type}"
         )
 
         text_encoder = CLIPTextEncoder(model_name=text_encoder_model)
@@ -98,8 +99,8 @@ class MultiTaskAgent(BaseAgent):
                 num_inference_steps=num_inference_steps,
                 prediction_type=prediction_type,
             )
-        elif action_decoder_type == "flowmatch":
-            action_decoder = FlowMatch(
+        elif action_decoder_type == "rectified_flow":
+            action_decoder = RectifiedFlow(
                 backbone,
                 num_inference_steps=flow_num_inference_steps,
                 t_sample_mode=flow_t_sample_mode,

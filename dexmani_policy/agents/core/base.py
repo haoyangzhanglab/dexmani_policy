@@ -6,10 +6,8 @@ from typing import Dict
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.action_decoders.backbone.ditx import DiTXFlowMatch
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.action_decoders.flowmatch import FlowMatchWithConsistency
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.common.normalizer import LinearNormalizer
 
@@ -37,6 +35,21 @@ class BaseAgent(nn.Module):
 
     def load_normalizer_from_dataset(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
+
+    @property
+    def requires_ema_for_loss(self) -> bool:
+        """Whether the action decoder needs a local EMA copy to build targets."""
+        return bool(getattr(self.action_decoder, "requires_ema_for_loss", False))
+
+    def get_training_loss_kwargs(self, ema_agent=None) -> dict:
+        """Return decoder-specific training dependencies in a generic form."""
+        if not self.requires_ema_for_loss:
+            return {}
+        if ema_agent is None:
+            raise RuntimeError(
+                f"{type(self.action_decoder).__name__} requires an EMA model for training"
+            )
+        return {"ema_decoder": ema_agent.action_decoder}
 
     # ------------------------------------------------------------------
     # Shape validation
@@ -323,67 +336,3 @@ class UNetDiffusionAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-
-class DiTXFlowMatchAgent(BaseAgent):
-    def __init__(
-        self,
-        obs_encoder: nn.Module,
-        num_obs_tokens: int,
-        obs_token_dim: int,
-        horizon: int,
-        n_obs_steps: int,
-        n_action_steps: int,
-        action_dim: int,
-        timestep_embed_dim: int = 128,
-        target_t_embed_dim: int = 128,
-        n_layers: int = 12,
-        hidden_dim: int = 768,
-        n_head: int = 8,
-        mlp_ratio: float = 4.0,
-        p_drop_attn: float = 0.1,
-        qkv_bias: bool = True,
-        qk_norm: bool = True,
-        pre_norm_modality: bool = False,
-        denoise_timesteps: int = 10,
-        flow_batch_ratio: float = 0.75,
-        t_sample_mode_for_flow: str = "beta",
-        t_sample_mode_for_consistency: str = "discrete",
-        dt_sample_mode_for_consistency: str = "uniform",
-        target_t_sample_mode: str = "relative",
-        modality_dropout_probs: dict = None,
-    ):
-        backbone = DiTXFlowMatch(
-            horizon=horizon,
-            action_dim=action_dim,
-            n_obs_steps=n_obs_steps,
-            num_obs_tokens=num_obs_tokens,
-            obs_token_dim=obs_token_dim,
-            timestep_embed_dim=timestep_embed_dim,
-            target_t_embed_dim=target_t_embed_dim,
-            n_layers=n_layers,
-            hidden_dim=hidden_dim,
-            n_head=n_head,
-            mlp_ratio=mlp_ratio,
-            p_drop_attn=p_drop_attn,
-            qkv_bias=qkv_bias,
-            qk_norm=qk_norm,
-            pre_norm_modality=pre_norm_modality,
-        )
-        action_decoder = FlowMatchWithConsistency(
-            model=backbone,
-            denoise_timesteps=denoise_timesteps,
-            flow_batch_ratio=flow_batch_ratio,
-            t_sample_mode_for_flow=t_sample_mode_for_flow,
-            t_sample_mode_for_consistency=t_sample_mode_for_consistency,
-            dt_sample_mode_for_consistency=dt_sample_mode_for_consistency,
-            target_t_sample_mode=target_t_sample_mode,
-        )
-        super().__init__(
-            obs_encoder,
-            action_decoder,
-            horizon,
-            n_obs_steps,
-            n_action_steps,
-            action_dim,
-            modality_dropout_probs=modality_dropout_probs,
-        )
