@@ -31,7 +31,6 @@ from dexmani_policy.training.build_utils import (
     validate_config,
     validate_gradient_accumulation,
 )
-from dexmani_policy.training.lr_scheduler import compute_num_training_steps
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 from dexmani_policy.training.resume import (
     build_train_loader, build_resume_contract, restore_training_state, validate_gpu_ids,
@@ -104,7 +103,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         workspace = None
         checkpoint_store = CheckpointStore(checkpoint_dir)
 
-    total_steps = compute_num_training_steps(cfg)
     scheduler = build_scheduler(cfg, optimizer)
     resume_contract = build_resume_contract(cfg, model, train_loader, world_size=world_size)
     resume_state = (0, 0, 0)
@@ -151,7 +149,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         is_main_process=(rank == 0),
         distributed=True,
         train_sampler=train_sampler,
-        num_training_steps=total_steps,
         resume_contract=resume_contract,
     )
 

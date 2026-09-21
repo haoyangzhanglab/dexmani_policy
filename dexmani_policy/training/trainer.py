@@ -66,7 +66,6 @@ class Trainer:
         train_loader,
         workspace: Optional[TrainWorkspace],
         train_loop_cfg: TrainLoopConfig,
-        num_training_steps: int,
         resume_contract: dict,
         max_grad_norm: float = 1.0,
         fast_grad_finite_check: bool = False,
@@ -117,7 +116,6 @@ class Trainer:
         self.next_micro_step = 0
         self.current_epoch = 0
         self.global_step = 0
-        self.num_training_steps = num_training_steps
 
         self._interrupted = False
         self._stop_requested = False

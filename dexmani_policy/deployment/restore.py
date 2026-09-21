@@ -1,4 +1,4 @@
-"""Strict, deterministic restore and parity helpers for deployment artifacts.
+"""Strict restore and deterministic prediction verification helpers for deployment artifacts.
 
 All metadata grammar decisions are delegated to the shared contract parser in
 :mod:`dexmani_policy.deployment.contract`, so this module holds no second copy
@@ -26,15 +26,8 @@ from dexmani_policy.deployment.contract import (
     thaw_metadata,
 )
 
-_MAX_PARITY_TOLERANCE = 1e-5
-
-
 class DeploymentRestoreError(RuntimeError):
     """Raised when a deployment artifact cannot be restored safely."""
-
-
-class PredictionParityError(DeploymentRestoreError):
-    """Raised when two deterministic deployment predictions differ."""
 
 
 @dataclass(frozen=True)
@@ -296,53 +289,6 @@ def validate_prediction(
     )
 
 
-def assert_prediction_parity(
-    reference: PredictionSnapshot,
-    candidate: PredictionSnapshot,
-    *,
-    atol: float = 0.0,
-    rtol: float = 0.0,
-) -> None:
-    """Compare both deployment outputs with exact-by-default narrow tolerance."""
-    _validate_tolerance(atol, "atol")
-    _validate_tolerance(rtol, "rtol")
-    for name in ("pred_action", "control_action"):
-        reference_tensor = getattr(reference, name)
-        candidate_tensor = getattr(candidate, name)
-        if not torch.is_tensor(reference_tensor) or not torch.is_tensor(
-            candidate_tensor
-        ):
-            raise TypeError("prediction snapshots must contain tensors")
-        if tuple(reference_tensor.shape) != tuple(candidate_tensor.shape):
-            raise PredictionParityError(
-                f"{name} shape mismatch: {tuple(reference_tensor.shape)} != "
-                f"{tuple(candidate_tensor.shape)}"
-            )
-        if reference_tensor.dtype != candidate_tensor.dtype:
-            raise PredictionParityError(
-                f"{name} dtype mismatch: {reference_tensor.dtype} != "
-                f"{candidate_tensor.dtype}"
-            )
-        if not bool(torch.isfinite(reference_tensor).all()) or not bool(
-            torch.isfinite(candidate_tensor).all()
-        ):
-            raise PredictionParityError(f"{name} contains NaN/Inf")
-        if atol == 0.0 and rtol == 0.0:
-            matches = torch.equal(reference_tensor, candidate_tensor)
-        else:
-            matches = torch.allclose(
-                reference_tensor, candidate_tensor, atol=atol, rtol=rtol
-            )
-        if not matches:
-            max_abs_error = torch.max(
-                torch.abs(reference_tensor - candidate_tensor)
-            ).item()
-            raise PredictionParityError(
-                f"{name} parity mismatch (max_abs_error={max_abs_error:.9g}, "
-                f"atol={atol}, rtol={rtol})"
-            )
-
-
 def _state_dict(value: Any, label: str) -> dict[str, torch.Tensor]:
     if type(value) is not dict or not value:
         raise DeploymentRestoreError(f"{label} must be a non-empty plain state_dict")
@@ -524,13 +470,3 @@ def _bounded_nonzero_values(
     return (
         values.mul(17).add(1).remainder(97).add(0.5).div(49.0).sub(1.0).reshape(shape)
     )
-
-
-def _validate_tolerance(value: float, label: str) -> None:
-    if type(value) not in {int, float} or not math.isfinite(value) or value < 0:
-        raise ValueError(f"{label} must be a finite non-negative number")
-    if value > _MAX_PARITY_TOLERANCE:
-        raise ValueError(
-            f"{label}={value} exceeds the narrow deployment parity limit "
-            f"({_MAX_PARITY_TOLERANCE})"
-        )

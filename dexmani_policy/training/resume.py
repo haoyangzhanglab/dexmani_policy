@@ -65,6 +65,7 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
     training["loop"].pop("log_interval_steps", None)
     training["loop"].setdefault("gradient_accumulation_steps", 1)
     training.setdefault("lr_min_ratio", 0.1)
+    # Persisted simple.v3 compatibility alias; Trainer uses loop.total_train_steps.
     training["num_training_steps"] = training["loop"]["total_train_steps"]
     return {
         "agent": build_agent_contract(model),
