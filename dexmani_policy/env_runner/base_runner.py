@@ -183,6 +183,7 @@ class BaseRunner:
         """
         import shutil
         import subprocess
+        import tempfile
 
         if shutil.which("ffmpeg"):
             T, H, W, C = frames.shape
@@ -209,26 +210,34 @@ class BaseRunner:
                 "23",
                 str(path),
             ]
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            try:
-                for frame in frames:
-                    proc.stdin.write(frame.astype(np.uint8).tobytes())
-                proc.stdin.close()
-                proc.wait(timeout=60)
-            finally:
-                # Reap a hung/zombie ffmpeg on BrokenPipeError / TimeoutExpired so
-                # a failed encode never leaks a subprocess.
-                if proc.poll() is None:
-                    try:
-                        proc.stdin.close()
-                    except Exception:
-                        pass
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
+            # A file avoids deadlocking the streaming stdin writer on a full
+            # stderr pipe. Only a bounded tail is included in failure messages.
+            with tempfile.TemporaryFile() as stderr:
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr)
+                try:
+                    for frame in frames:
+                        proc.stdin.write(frame.astype(np.uint8).tobytes())
+                    proc.stdin.close()
+                    returncode = proc.wait(timeout=60)
+                    if returncode != 0:
+                        stderr.seek(0, 2)
+                        stderr.seek(max(0, stderr.tell() - 4096))
+                        detail = stderr.read().decode("utf-8", errors="replace").strip()
+                        raise RuntimeError(f"ffmpeg exited with status {returncode}: {detail}")
+                finally:
+                    # Reap a hung/zombie ffmpeg on BrokenPipeError / TimeoutExpired so
+                    # a failed encode never leaks a subprocess.
+                    if proc.poll() is None:
+                        try:
+                            proc.stdin.close()
+                        except Exception:
+                            pass
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
         else:
             imageio.mimsave(str(path), frames.astype(np.uint8), fps=fps)
 

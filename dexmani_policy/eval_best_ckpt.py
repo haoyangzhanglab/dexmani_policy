@@ -39,6 +39,7 @@ import argparse
 import json
 import random
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -69,6 +70,26 @@ register_resolvers()
 # ---------------------------------------------------------------------------
 # Shared helpers (used by both single-value and sweep paths)
 # ---------------------------------------------------------------------------
+
+
+def _prepare_result_dir(exp_dir: Path, result_save_dir: Path | None) -> Path:
+    """Allocate a unique run directory; explicit directories must be empty."""
+    if result_save_dir is None:
+        root = exp_dir / "eval_dexsim"
+        root.mkdir(parents=True, exist_ok=True)
+        prefix = datetime.now().strftime("%Y%m%d_%H%M%S_")
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+    result_save_dir = Path(result_save_dir)
+    result_save_dir.mkdir(parents=True, exist_ok=True)
+    if any(result_save_dir.iterdir()):
+        raise FileExistsError(f"Evaluation output directory must be empty: {result_save_dir}")
+    return result_save_dir
+
+
+def _write_result(path: Path, text: str) -> None:
+    """Never replace an artifact from a previous invocation."""
+    with path.open("x", encoding="utf-8") as file:
+        file.write(text)
 
 
 def _setup_eval(
@@ -165,6 +186,9 @@ def _run_one_timestep(
     Returns a dict with keys: ``success_rate`` (micro), ``macro_success_rate``,
     ``avg_steps``, ``n_success``, ``n_total``, ``per_seed_details``.
     """
+    for name in ("_result.txt", "result_details.json"):
+        if (result_save_dir / name).exists():
+            raise FileExistsError(f"Evaluation result already exists: {result_save_dir / name}")
     n_seeds = len(eval_seeds)
     env_runner.eval_seeds = eval_seeds
     result = env_runner.run(
@@ -197,8 +221,8 @@ def _run_one_timestep(
     )
 
     result_save_dir.mkdir(parents=True, exist_ok=True)
-    (result_save_dir / "_result.txt").write_text(f"{success_rate}\n")
-    (result_save_dir / "result_details.json").write_text(
+    _write_result(result_save_dir / "_result.txt", f"{success_rate}\n")
+    _write_result(result_save_dir / "result_details.json",
         json.dumps(
             {
                 "ckpt_tag": ckpt_tag_or_path,
@@ -268,7 +292,7 @@ def evaluate_checkpoint_robotwin(
     -------
     (success_rate, avg_steps, n_success, n_total)
     """
-    result_save_dir = result_save_dir or exp_dir / "eval_dexsim"
+    result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
         _setup_eval(
             cfg,
@@ -350,15 +374,10 @@ def evaluate_checkpoint_sweep(
     *result_save_dir* (or ``exp_dir/eval_dexsim/<timestamp>/``), plus an
     aggregate ``eval_summary.json``.
     """
-    if not denoise_timesteps_list:
-        raise ValueError("denoise_timesteps_list must be non-empty")
-    if result_save_dir is None:
-        if video_save_dir is not None:
-            result_save_dir = video_save_dir
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            result_save_dir = exp_dir / "eval_dexsim" / timestamp
-    result_save_dir.mkdir(parents=True, exist_ok=True)
+    validate_denoise_steps(denoise_timesteps_list)
+    if len(set(denoise_timesteps_list)) != len(denoise_timesteps_list):
+        raise ValueError("Sweep denoise steps must be distinct to preserve per-value results")
+    result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
@@ -439,7 +458,7 @@ def _save_sweep_summary(
             for r in sweep_results
         },
     }
-    (save_dir / "eval_summary.json").write_text(
+    _write_result(save_dir / "eval_summary.json",
         json.dumps(summary, indent=2, ensure_ascii=False)
     )
 
@@ -656,23 +675,12 @@ def main() -> None:
 
     do_sweep = len(denoise_timesteps_list) > 1
 
-    # Video saving — configurable via eval.video.enabled, overridable via --no-videos.
-    # Single-value: results use exp_dir/eval_dexsim/; videos use a timestamped child.
-    # Sweep: result subdirectories always use a timestamped root; video output
-    # shares those subdirectories only when recording is enabled.
+    # Every invocation owns a new run directory, with or without videos.
     video_enabled = _get_eval_param(cfg, "enabled", "video", default=True)
     record_video = video_enabled and not args.no_videos
-    eval_save_dir = exp_dir / "eval_dexsim"
-    if do_sweep:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_save_dir = eval_save_dir / timestamp
-        video_save_dir = result_save_dir if record_video else None
-    else:
-        result_save_dir = eval_save_dir
-        video_save_dir = None
-        if record_video:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            video_save_dir = eval_save_dir / timestamp
+    result_save_dir = _prepare_result_dir(exp_dir, None)
+    video_save_dir = result_save_dir if record_video else None
+    cprint(f"Results directory: {result_save_dir}", "cyan")
 
     if video_save_dir is not None:
         video_save_dir.mkdir(parents=True, exist_ok=True)
