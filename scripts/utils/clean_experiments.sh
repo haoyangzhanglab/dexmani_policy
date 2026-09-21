@@ -175,7 +175,7 @@ while IFS= read -r -d '' checkpoints_dir; do
         INCOMPLETE+=("$exp_dir")
         INCOMPLETE_REASON["$exp_dir"]="no checkpoints (training crashed before first checkpoint)"
         TOTAL_INCOMPLETE_SIZE=$((TOTAL_INCOMPLETE_SIZE + size))
-    elif [[ -n "$total_steps" ]] && [[ $max_step -lt $((total_steps - 1)) ]]; then
+    elif [[ -n "$total_steps" ]] && [[ $max_step -lt $total_steps ]]; then
         # Class A: did not finish
         INCOMPLETE+=("$exp_dir")
         INCOMPLETE_REASON["$exp_dir"]="only step $max_step/$total_steps completed"

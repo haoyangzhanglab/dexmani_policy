@@ -572,6 +572,8 @@ class Trainer:
                         group_metric_count = 0
                         global_step += 1
                         self.global_step = global_step
+                        if self.is_main_process and self._step_pbar is not None:
+                            self._step_pbar.update(global_step - self._step_pbar.n)
                         self.next_micro_step = micro_step + 1
                         if self.next_micro_step == num_batches:
                             self.current_epoch = epoch + 1
@@ -606,7 +608,6 @@ class Trainer:
                             )
 
                             if self.is_main_process and self._step_pbar is not None:
-                                self._step_pbar.update(self.log_interval_steps)
                                 if hasattr(self._step_pbar, "set_postfix"):
                                     self._step_pbar.set_postfix(
                                         loss=f"{step_metrics['train/loss']:.5f}",
