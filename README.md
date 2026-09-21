@@ -8,6 +8,8 @@ Policy 的**当前实现事实以 Hydra config 和源码为准**。README 只维
 
 ### 环境
 
+使用 Python 3.10+ 和已配置好依赖的 Conda 环境 `policy`：
+
 ```bash
 conda activate policy
 pip install -e .
@@ -20,6 +22,8 @@ pip install -e /path/to/dexmani_sim
 ```
 
 训练数据默认由 config 中的 `zarr_path` 指向仓库根目录下的 `robot_data/<task>.zarr`。
+
+以下命令默认从仓库根目录执行。直接运行 Python 前先激活 `policy`；非交互 shell 可使用 `conda run --no-capture-output -n policy <command>`。完整 smoke、训练和大多数评测需要 CUDA/GPU 及对应数据、权重；仿真评测还需要 `dexmani_sim` 和可用的显示环境。
 
 ### 发现可用配置
 
@@ -35,13 +39,11 @@ DDP overlay：
 ls dexmani_policy/configs/ddp/*.yaml
 ```
 
-不要从 README/CLAUDE 的静态列表推断当前 Policy 集合；配置目录是当前入口。
+可用 Policy 以配置目录为准。
 
 ## 训练
 
-本地训练脚本要求 `conda` 命令在 `PATH` 中可用，并已配置好 `policy` 环境。脚本通过 `conda run --no-capture-output -n policy` 启动 `python -u`，无需提前手动激活环境，日志实时输出。命令参数保持不变，脚本会自动切换到仓库根目录。
-
-Conda 激活钩子由 `conda run` 执行，避免在训练脚本的 `set -u` 下读取未定义变量而退出（例如 GCC 激活脚本中的 `SYS_SYSROOT: 未绑定的变量`）。
+本地训练脚本要求 `conda` 在 `PATH` 中可用，并已配置好 `policy` 环境。脚本自动切换到仓库根目录，通过 `conda run --no-capture-output -n policy` 启动 `python -u`，无需手动激活环境，日志实时输出。
 
 ```bash
 # 单卡
@@ -65,7 +67,7 @@ bash scripts/training/train.sh --help
 bash scripts/training/train_ddp.sh --help
 ```
 
-这两个帮助命令无需调用 Conda，成功返回退出码 0；缺少 config 参数时显示用法并返回非零退出码。需要仅预览 Hydra 解析后的配置时，可在单卡或 DDP 训练命令末尾追加 `--cfg job --resolve`；这不会开始训练，也不替代下文的 config validation。
+这两个帮助命令无需调用 Conda。需要仅预览 Hydra 解析后的配置时，可在单卡或 DDP 训练命令末尾追加 `--cfg job --resolve`；这不会开始训练，也不替代下文的 config validation。
 
 ### VQ 手部预训练
 
@@ -104,32 +106,7 @@ python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name>
 ```
 
-完整 smoke test 覆盖 dataset/normalizer、model/EMA、optimizer/scheduler、forward/backward、inference 和 checkpoint roundtrip。共享模块改动应再选择实际依赖该模块的其他 config 做回归。
-
-## Policy 开发入口
-
-处理某个 Policy 时，从 config 动态追踪，而不是依赖文档中的架构快照：
-
-```text
-resolved Hydra config
-→ agent._target_
-→ Agent construction
-→ obs_encoder
-→ backbone / action_decoder
-→ compute_loss
-→ predict_action
-→ control_action
-```
-
-重点分别确认：
-
-- Observation Representation
-- Policy Architecture
-- Action Representation
-- Training Objective
-- Inference Algorithm
-
-具体 layer 数、hidden dim、encoder、optimizer、NFE、tensor shape 等都应从当前 config 与实现读取。
+完整 smoke test 覆盖 dataset/normalizer、model/EMA、optimizer/scheduler、forward/backward、inference 和 checkpoint roundtrip。Policy 开发流程及按改动范围选择验证的要求见 [AGENTS.md](AGENTS.md)。
 
 ## 评测
 
@@ -143,9 +120,11 @@ bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name>
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 ```
 
+流水线最后会录制 demo。追加 `--no-videos` 只关闭 held-out eval 阶段的视频，最后的 demo 仍会录制；只需评测时使用分步入口。
+
 `<exp_name>` 是 `experiments/<policy>/<task>/` 下的实验目录名。历史模型的构造参数及 action/window/normalization 语义来自所选 checkpoint；实验 config 提供环境与评测 protocol。评测拒绝 `agent.*` override，EMA/raw、NFE、episodes、seed 与视频等评测控制仍可按入口参数覆盖。
 
-最终评测每次写入独立的 `eval_dexsim/<run-id>/`，CLI 会打印准确路径；checkpoint、推理设置、seeds 和指标保存在该目录的 `result_details.json`。详细规则见 [仿真评测机制](docs/仿真评测机制.md)。
+最终评测每次写入独立的 `eval_dexsim/<run-id>/`，CLI 会打印准确路径；checkpoint、推理设置、seeds 和指标保存在该目录的 `result_details.json`。背景说明见 [仿真评测机制](docs/仿真评测机制.md)，当前参数与行为以入口帮助和源码为准。
 
 ## Deployment
 
@@ -153,14 +132,22 @@ Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact�
 
 ```bash
 # 研究者日常路径：export -> run_policy（run_policy 位于 dexmani_real）
+bash scripts/deployment/export.sh <experiment_dir>  # 默认 latest，使用 Conda policy 环境
+bash scripts/deployment/export.sh <experiment_dir> --checkpoint 80pct
+bash scripts/deployment/export.sh <experiment_dir> --zarr-path /data/task.zarr --output deployment-v2.pt
+
+# 原 Python CLI 保持默认 best；best 必须有有效的 best_ckpt.json，不自动回退
 python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
 ```
 
-- 训练 checkpoint 保存**实际训练 Zarr 的数据语义快照**（`resume_contract.deployment_data_semantics`：dt、对齐、point-cloud 预处理/表格平面、action EE frame/components、各 observation field 的 raw shape/dtype/semantics）。快照之前的旧 checkpoint 不能 export（load/离线分析不受影响），不做 retrofit。
-- Export 使用 **selected checkpoint 自己保存的** agent/dataset/normalization 语义与数据语义快照，`config.yaml` 只提供 experiment identity 与 inference recipe，因此训练后修改 config 不会改变旧 checkpoint 的 deployment 行为。
-- `--zarr-path` 只用于 **semantic-equivalent relocation**（跨机器/磁盘移动数据）：该 Zarr 会用与训练相同的共享 extractor 重新解析，并与 checkpoint 快照 strict equality 比较，任何 dt/预处理/action 语义/shape/dtype/task 漂移都会 export fail。
-- 成功 export 意味着已通过 safe reload + strict restore + deterministic synthetic prediction；没有跳过验证的开关。`deployment_latest.pt` 是最近一次成功 export 的 atomic selector，指向 immutable 的 `<checkpoint>-deployment.pt`；真机 session 可以 pin 该 resolved filename。
+脚本可从任意工作目录调用（仓库外请使用脚本的绝对路径）。相对实验目录和显式 `--zarr-path` 相对于调用目录解析；相对 checkpoint 文件路径和 `--output` 相对于实验的 `checkpoints/` 解析。产物只能写入该目录，已有文件拒绝覆盖；再次导出可指定新的 `--output`。使用 `bash scripts/deployment/export.sh --help` 查看参数说明，成功时输出 exporter 的 JSON 回执。
+
+- Export 使用 **selected checkpoint 保存的**模型、归一化与训练数据语义；`config.yaml` 只提供实验身份和推理设置。缺少训练数据语义快照的旧 checkpoint 无法 export，load/离线分析不受影响。
+- `--zarr-path` 只用于跨机器/磁盘迁移数据位置；新位置的数据语义必须与 checkpoint 快照严格一致，dt、预处理、action、shape/dtype 或任务语义变化都会导致失败。
+- 每次 export 都必须通过 safe reload、strict restore 和 deterministic synthetic prediction，之后才原子更新 `deployment_latest.pt`。它指向本次不可覆盖的 artifact（默认 `<checkpoint>-deployment.pt`）；真机 session 可以固定使用解析后的文件名。
 - 运行时 `--inference-steps N` 是显式 override（NFE ablation），不需要重新 export。
+
+开发和修改 deployment 时的完整约束见 [AGENTS.md 的 Deployment Boundary](AGENTS.md#deployment-boundary)。
 
 ## 仓库结构
 
@@ -180,16 +167,16 @@ dexmani_policy/
 scripts/
   training/
   eval/
+  deployment/
   remote/
 ```
 
 ## 文档与 AI 编码入口
 
-- `AGENTS.md`：项目级 coding contract，Codex 的主要入口。
-- `CLAUDE.md`：精简、独立可用的 AI 工作速查。
-- `.agents/skills/`：新增 Policy、PR review、训练数值问题的过程性 workflow。
-- `docs/项目架构.md`：架构背景。
-- `docs/仿真评测机制.md`：仿真评测链路。
-- `docs/SSH服务器训练部署.md`：服务器训练与同步。
+- [AGENTS.md](AGENTS.md)：Codex 与 Claude 共用的完整工程规范，包含事实来源、开发流程、验证要求和 deployment 边界。
+- [CLAUDE.md](CLAUDE.md)：Claude 的加载入口，通过 `@AGENTS.md` 导入同一份规范。
+- [项目 Skills](AGENTS.md#project-skills)：新增 Policy、review 和训练数值问题的共享流程；工具未自动发现时可按链接读取。
 
-全局文档不维护 Policy-specific 超参数、当前 Policy 数量或实验结论；这些信息属于 config、代码、实验快照和局部测试。
+交替使用 Codex 与 Claude 时，共享工程规则只需修改 `AGENTS.md`；操作命令维护在 README，`CLAUDE.md` 不维护规则副本。模型、权限和子代理等工具专属设置留在各自配置文件。
+
+背景文档：[项目架构](docs/项目架构.md)、[仿真评测机制](docs/仿真评测机制.md)、[SSH 服务器训练部署](docs/SSH服务器训练部署.md)。这些文档可能滞后，当前实现与实验语义以 config、源码和 checkpoint 为准。
