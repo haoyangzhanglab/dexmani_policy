@@ -490,7 +490,7 @@ def resolve_checkpoint_path(
             raise FileNotFoundError(
                 f"No {target_pct}% milestone checkpoint. Available: {available}"
             )
-        return match[0].path, match[0].label
+        return match[0].path.resolve(), match[0].label
 
     if ckpt_tag_or_path == "best":
         best_info = read_best_ckpt_json(exp_dir)
@@ -505,11 +505,14 @@ def resolve_checkpoint_path(
         return ckpt_path, label
 
     if ckpt_tag_or_path == "latest":
-        ckpt_path = checkpoint_store.resolve_path("latest")
+        # Freeze the selected file before loading/recording provenance; latest
+        # is a mutable training selector and may point elsewhere on a later run.
+        ckpt_path = checkpoint_store.resolve_path("latest").resolve()
         return ckpt_path, f"latest ({ckpt_path.name})"
 
     # Treat as a path
     ckpt_path = Path(ckpt_tag_or_path)
     if not ckpt_path.is_absolute():
         ckpt_path = exp_dir / "checkpoints" / ckpt_path
+    ckpt_path = ckpt_path.resolve()
     return ckpt_path, str(ckpt_path)
