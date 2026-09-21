@@ -25,7 +25,7 @@ class ViTEncoder(nn.Module):
 
     Subclasses must set ``self.backbone``, ``self.patch_size``,
     ``self.hidden_dim``, ``self.num_prefix_tokens``, ``self.out_dim``,
-    and ``self.proj`` before calling ``super().__init__()``.
+    and ``self.proj`` after calling ``super().__init__()``.
 
     Subclasses must implement:
       - ``get_global_token(outputs, patch_tokens)``

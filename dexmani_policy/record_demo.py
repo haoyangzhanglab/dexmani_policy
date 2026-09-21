@@ -12,7 +12,7 @@ Key differences from ``eval_best_ckpt.py``:
   XWayland. The viewer window will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
 - With ``--ckpt-tag best``, reuses the strict selection record's EMA choice,
-  denoising step count, and temporal-ensemble coefficient. Explicit
+  denoising step count, and episode-seeded policy sampling mode. Explicit
   ``--ema``/``--no-ema`` and ``--denoise-steps`` override the selected policy.
 
 Usage
@@ -61,7 +61,6 @@ from dexmani_policy.training.eval_utils import (
     read_best_ckpt_json,
     resolve_checkpoint_path,
     resolve_eval_seed,
-    validate_eval_config,
 )
 
 ROOT_DIR = set_project_root()
@@ -211,7 +210,6 @@ def main() -> None:
     # ── 2. Load config ────────────────────────────────────────────────────
     cfg = OmegaConf.load(cfg_path)
     cfg._exp_dir = str(exp_dir)
-    validate_eval_config(cfg)
 
     eval_seed = resolve_eval_seed(cfg)
     set_seed(eval_seed)
@@ -227,8 +225,8 @@ def main() -> None:
         cli_denoise_steps=args.denoise_steps,
     )
 
-    # ── 3. Build agent and env_runner ─────────────────────────────────────
-    agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
+    # ── 3. Build env_runner and checkpoint store ─────────────────────────────────────
+    env_runner, checkpoint_store = build_eval_components(cfg)
 
     # Apply viewer resolution from CLI or config
     _demo_resolution = args.resolution
@@ -270,7 +268,7 @@ def main() -> None:
     do_sweep = len(denoise_timesteps_list) > 1
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
-    load_ckpt_for_inference(agent, checkpoint_store, ckpt_path, use_ema)
+    agent = load_ckpt_for_inference(checkpoint_store, ckpt_path, use_ema, cfg=cfg)
     agent.to(device)
     agent.eval()
     cprint("✅ Checkpoint loaded\n", "green")

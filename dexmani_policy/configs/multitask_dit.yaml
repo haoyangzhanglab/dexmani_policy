@@ -1,5 +1,5 @@
 # MultiTask DiT — Multi-task policy with text-conditioned DiT backbone
-# Encoder:  CLIP ViT-B/16 text encoder (frozen) + R3M ResNet-18 vision backbone
+# Encoder:  CLIP ViT-B/16 text encoder (frozen) + regular ResNet-18 vision backbone (resnet preset, scratch + GroupNorm)
 # Decoder:  DiT Diffusion (self-attention + AdaLN conditioning)
 # Modality: RGB + joint_state + task_text → action
 # Tasks:    pick_bottle, open_box
@@ -40,7 +40,7 @@ dataset:
   sampling_strategy: balanced          # proportional | balanced | weighted
   action_key: ${action_key}
 
-  # Joint-state augmentation — mild Gaussian noise, 50% trigger rate.
+  # Joint-state augmentation — mild Gaussian noise, always-on (prob: 1.0).
   augmentation_cfg:
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}

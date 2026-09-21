@@ -1,12 +1,13 @@
 """Shared evaluation utilities used by the eval entry points.
 
-Extracted from ``select_best_ckpt.py`` and ``eval_best_ckpt.py`` to eliminate
-duplicated config validation, component construction, and checkpoint loading
-logic across the evaluation pipeline.
+Checkpoint state owns Agent construction, action/window and normalization
+semantics. Current config supplies the environment and evaluation controls for
+``select_best_ckpt.py``, ``eval_best_ckpt.py`` and ``record_demo.py``.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass
@@ -15,17 +16,21 @@ from typing import Any
 
 import hydra
 import torch
+from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.common.checkpoint_io import (
     CheckpointStore,
     build_agent_contract,
+    parse_normalization_contract,
     validate_resume_contract,
 )
-from dexmani_policy.common.config import validate_action_key_consistency
-from dexmani_policy.common.normalizer import validate_normalizer_state
+from dexmani_policy.common.config import validate_action_key_consistency, validate_window_contract
+from dexmani_policy.common.normalizer import (
+    NON_NUMERIC_OBSERVATION_FIELDS,
+    validate_normalizer_state,
+)
 from dexmani_policy.common.pytorch_util import fix_state_dict
-from dexmani_policy.training.build_utils import attach_normalization_spec
 
 
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
@@ -41,29 +46,35 @@ def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 1. Config validation (was quadruplicated across 4 files)
+# 1. Saved model contract and evaluation override validation
 # ---------------------------------------------------------------------------
 
 
-def validate_eval_config(cfg) -> None:
-    """Validate the minimal config invariants required for evaluation.
+def validate_eval_config(cfg, agent_contract: dict) -> None:
+    """Validate saved model windows against the current evaluation environment."""
+    validate_window_contract(
+        agent_contract.get("horizon"),
+        agent_contract.get("n_obs_steps"),
+        agent_contract.get("n_action_steps"),
+    )
+    # Dataset/model fields in current config are not historical model semantics.
+    validate_action_key_consistency({
+        "action_key": agent_contract.get("action_key"),
+        "env_runner": cfg.env_runner,
+    })
 
-    Replaces the duplicated copies across eval entry points,
-    ``select_best_ckpt.py``, ``eval_best_ckpt.py``, and the trainer.
-    """
-    validate_action_key_consistency(cfg)
 
-    if not (cfg.n_obs_steps >= 1 and cfg.n_action_steps >= 1):
-        raise ValueError(
-            f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} must be >= 1"
-        )
-    if cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon:
-        raise ValueError(
-            f"n_obs_steps-1+n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) "
-            f"exceeds horizon ({cfg.horizon}). The control_action slice "
-            f"pred[:, {cfg.n_obs_steps - 1}:{cfg.n_obs_steps - 1 + cfg.n_action_steps}] "
-            f"would be out of bounds."
-        )
+def parse_eval_overrides(overrides: list[str]):
+    """Only evaluation/inference controls may override checkpoint evaluation."""
+    for override in overrides:
+        key = override.split("=", 1)[0].lstrip("+~")
+        if key == "agent" or key.startswith(("agent.", "agent[")):
+            raise ValueError(
+                "agent.* overrides are forbidden for checkpoint evaluation; "
+                "the checkpoint owns constructor semantics. Use eval.* or "
+                "explicit EMA/NFE options for inference ablations."
+            )
+    return OmegaConf.from_dotlist(overrides)
 
 
 def validate_denoise_steps(denoise_timesteps_list) -> None:
@@ -82,31 +93,15 @@ def validate_denoise_steps(denoise_timesteps_list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. Agent / env_runner construction
+# 2. Evaluation environment and checkpoint store construction
 # ---------------------------------------------------------------------------
 
 
-def build_eval_components(
-    cfg, device: torch.device
-) -> tuple[Any, Any, CheckpointStore]:
-    """Instantiate agent, env_runner, and checkpoint_store from an OmegaConf config.
-
-    Parameters
-    ----------
-    cfg : OmegaConf config with ``_exp_dir`` set to the experiment directory.
-    device : torch.device (unused by construction but kept for caller convenience).
-    """
-    agent = hydra.utils.instantiate(cfg.agent)
-    agent.action_key = cfg.action_key
-    attach_normalization_spec(agent, cfg)
-
+def build_eval_components(cfg) -> tuple[Any, CheckpointStore]:
+    """Build the current evaluation environment and experiment checkpoint store."""
     env_runner = hydra.utils.instantiate(cfg.env_runner)
-
-    exp_dir = Path(cfg._exp_dir) if hasattr(cfg, "_exp_dir") else None
-    ckpt_dir = exp_dir / "checkpoints" if exp_dir else None
-    checkpoint_store = CheckpointStore(ckpt_dir)
-
-    return agent, env_runner, checkpoint_store
+    checkpoint_store = CheckpointStore(Path(cfg._exp_dir) / "checkpoints")
+    return env_runner, checkpoint_store
 
 
 def iter_leaf_env_runners(env_runner):
@@ -122,24 +117,29 @@ def iter_leaf_env_runners(env_runner):
 
 
 def load_ckpt_for_inference(
-    agent,
     checkpoint_store: CheckpointStore,
     ckpt_path: Path,
     use_ema: bool,
-) -> None:
-    """Load a checkpoint into *agent* for inference, with validation.
+    *,
+    cfg,
+):
+    """Construct and strictly restore an Agent using only checkpoint semantics.
 
-    Validates the complete agent resume contract, EMA selection, and normalizer
-    integrity.
+    Current config supplies the evaluation environment, never the constructor
+    or normalization recipe. Each candidate in checkpoint selection is restored
+    independently, including behavior-only options absent from its state dict.
     """
     checkpoint = checkpoint_store.load(ckpt_path)
-
     agent_contract = checkpoint.resume_contract.get("agent")
-    if type(agent_contract) is not dict:
-        raise RuntimeError("Checkpoint resume_contract.agent must be a plain dict")
-    validate_resume_contract(
-        {"agent": agent_contract}, {"agent": build_agent_contract(agent)}
-    )
+    agent_config = checkpoint.resume_contract.get("agent_config")
+    if type(agent_contract) is not dict or not agent_contract:
+        raise RuntimeError("Checkpoint resume_contract.agent must be a non-empty plain dict")
+    if type(agent_config) is not dict or not agent_config:
+        raise RuntimeError("Checkpoint resume_contract.agent_config must be a non-empty plain dict")
+    if not isinstance(agent_config.get("_target_"), str):
+        raise RuntimeError("Checkpoint agent_config must declare an Agent _target_")
+    validate_eval_config(cfg, agent_contract)
+    normalization_spec = parse_normalization_contract(agent_contract.get("normalization"))
 
     raw_state = checkpoint.model_state
     if use_ema:
@@ -150,12 +150,37 @@ def load_ckpt_for_inference(
             )
         raw_state = checkpoint.ema_model_state
 
-    agent.load_state_dict(
-        fix_state_dict(raw_state, is_current_ddp=False),
-        strict=True,
+    constructor = copy.deepcopy(agent_config)
+    is_dqrise = constructor["_target_"] == "dexmani_policy.agents.core.dqrise.DQRISEAgent"
+    if is_dqrise:
+        # Persistent buffers, not the training-time external NPZ, own this state.
+        constructor["codebook_path"] = None
+    agent = hydra.utils.instantiate(OmegaConf.create(constructor))
+    agent.action_key = agent_contract["action_key"]
+    numeric_fields = set(agent.obs_encoder.consumed_observation_fields) - NON_NUMERIC_OBSERVATION_FIELDS
+    agent.normalization_spec = parse_normalization_contract(
+        agent_contract["normalization"], observation_fields=numeric_fields
     )
-
-    validate_normalizer_state(agent.normalizer, agent.normalization_spec)
+    validate_resume_contract(
+        {"agent": agent_contract}, {"agent": build_agent_contract(agent)}
+    )
+    agent.load_state_dict(fix_state_dict(raw_state, is_current_ddp=False), strict=True)
+    validate_normalizer_state(agent.normalizer, normalization_spec)
+    if is_dqrise:
+        manager = agent.codebook_manager
+        if (
+            not manager.is_loaded
+            or not manager.has_hand_normalizer
+            or manager.hand_dim != agent.hand_dim
+            or manager.num_groups != agent.codebook_num_groups
+            or manager.codebook_size != agent.codebook_size
+        ):
+            raise RuntimeError("DQ-RISE checkpoint has incomplete or inconsistent persistent codebook state")
+        agent._validate_codebook_normalizer()
+    validate_resume_contract(
+        {"agent": agent_contract}, {"agent": build_agent_contract(agent)}
+    )
+    return agent
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +475,7 @@ def resolve_checkpoint_path(
     """Resolve a checkpoint tag to an absolute path and human-readable label.
 
     Supported tags:
-    - ``"best"`` — reads the strict v2 ``best_ckpt.json`` selection record
+    - ``"best"`` — reads the strict ``best_ckpt.json`` selection record
     - ``"latest"`` — ``checkpoint_store.resolve_path("latest")``
     - ``"20pct".."100pct"`` — matched against milestone checkpoints
     - any other string — treated as a filename inside ``checkpoints/``
@@ -465,7 +490,7 @@ def resolve_checkpoint_path(
             raise FileNotFoundError(
                 f"No {target_pct}% milestone checkpoint. Available: {available}"
             )
-        return match[0].path, match[0].label
+        return match[0].path.resolve(), match[0].label
 
     if ckpt_tag_or_path == "best":
         best_info = read_best_ckpt_json(exp_dir)
@@ -480,11 +505,14 @@ def resolve_checkpoint_path(
         return ckpt_path, label
 
     if ckpt_tag_or_path == "latest":
-        ckpt_path = checkpoint_store.resolve_path("latest")
+        # Freeze the selected file before loading/recording provenance; latest
+        # is a mutable training selector and may point elsewhere on a later run.
+        ckpt_path = checkpoint_store.resolve_path("latest").resolve()
         return ckpt_path, f"latest ({ckpt_path.name})"
 
     # Treat as a path
     ckpt_path = Path(ckpt_tag_or_path)
     if not ckpt_path.is_absolute():
         ckpt_path = exp_dir / "checkpoints" / ckpt_path
+    ckpt_path = ckpt_path.resolve()
     return ckpt_path, str(ckpt_path)

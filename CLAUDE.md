@@ -4,7 +4,7 @@
 
 ## Source of Truth
 
-- 已有实验：读取实验目录保存的 resolved `config.yaml` 和 checkpoint contract。
+- 已有实验：读取实验目录保存的 resolved `config.yaml` 和 checkpoint contract。离线评测的模型构造、action/window/normalization 属于 selected checkpoint；当前 config 提供环境与评测 protocol。
 - 当前 Policy：读取 Hydra config，并沿 `agent._target_` 进入实际实现。
 - 当前架构、超参数、tensor shape、训练目标和推理算法：以 config + Python 代码为准。
 - README / CLAUDE / docs 只做导航和背景，不维护当前 Policy 列表或参数矩阵。
@@ -42,8 +42,8 @@ bash scripts/training/train.sh <config_name> \
 # Deployment export（研究者日常路径；run_policy 位于 dexmani_real）
 python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
 
-# Deployment integrity tests
-conda run --no-capture-output -n policy python -m pytest tests/ -q
+# Python 语法检查
+conda run --no-capture-output -n policy python -m compileall dexmani_policy
 ```
 
 本地 `scripts/training/` 启动器通过 `conda run --no-capture-output -n policy` 和 `python -u` 自动选择环境并实时输出日志，无需提前激活；要求 `conda` 在 `PATH` 中可用。不要在启用 `set -u` 的 shell 中直接执行 Conda 激活钩子，以免触发未定义变量错误。
@@ -88,6 +88,8 @@ syntax/import
 ```
 
 不要自动启动完整训练、DDP、长评测或视频。环境限制导致的未执行项明确报告为 NOT VERIFIED。
+
+仓库有意不保留 `tests/`；使用现有 smoke 入口与临时定向回归验证，不为检查恢复测试目录。语法和 config-only 检查不能代替 checkpoint strict restore 或实际 inference 验证。
 
 ## Deployment
 

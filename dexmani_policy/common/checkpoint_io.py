@@ -66,7 +66,7 @@ class TrainCheckpoint:
     ema_model_state: Optional[Dict[str, Any]]
     optimizer_state: Dict[str, Any]
     scheduler_state: Dict[str, Any]
-    monitor: Dict[str, Any]
+    monitor: Dict[str, Any]  # Persisted simple.v3 compatibility field.
     resume_contract: Dict[str, Any]
     ema_updater_step: Optional[int]
     ema_decay: Optional[float]

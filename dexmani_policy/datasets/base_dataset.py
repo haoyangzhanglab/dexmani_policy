@@ -10,6 +10,7 @@ import torchvision.transforms.functional as TVF
 from torchvision.transforms import InterpolationMode
 
 from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
+from dexmani_policy.common.config import validate_max_train_episodes, validate_val_ratio
 from dexmani_policy.datasets.augmentation import (
     PointColorJitter,
     PointColorNoiseAug,
@@ -98,6 +99,9 @@ class BaseDataset(torch.utils.data.Dataset):
         rgb_keep_uint8: bool = DEFAULT_RGB_KEEP_UINT8,
     ) -> None:
         super().__init__()
+
+        validate_val_ratio(val_ratio)
+        validate_max_train_episodes(max_train_episodes)
 
         if sensor_modalities is None:
             sensor_modalities = self.DEFAULT_MODALITIES
@@ -344,4 +348,4 @@ def example(zarr_path):
 
 
 if __name__ == "__main__":
-    example("robot_data/sim/pick_apple_messy.zarr")
+    example("robot_data/pick_apple_messy.zarr")

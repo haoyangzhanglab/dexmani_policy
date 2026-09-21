@@ -22,7 +22,6 @@ from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
-    compute_num_training_steps,
     print_training_recipe,
     validate_config,
 )
@@ -47,7 +46,6 @@ class TrainingComponents:
     scheduler: Any
     train_loader: DataLoader
     workspace: Any
-    num_training_steps: int
 
 
 def build_train_components(cfg):
@@ -65,7 +63,6 @@ def build_train_components(cfg):
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
     print_training_recipe(cfg, world_size=1, batches_per_epoch=batches_per_epoch)
-    num_training_steps = compute_num_training_steps(cfg)
 
     workspace = hydra.utils.instantiate(cfg.workspace)
 
@@ -78,7 +75,6 @@ def build_train_components(cfg):
         scheduler=scheduler,
         train_loader=train_loader,
         workspace=workspace,
-        num_training_steps=num_training_steps,
     )
 
 
@@ -107,7 +103,6 @@ def main(cfg):
         use_bfloat16=cfg.training.get("use_bfloat16", False),
         use_compile=cfg.training.get("use_compile", False),
         compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),
-        num_training_steps=comp.num_training_steps,
         resume_contract=build_resume_contract(cfg, comp.model, comp.train_loader),
     )
     # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>`.

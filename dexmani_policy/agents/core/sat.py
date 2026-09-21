@@ -5,7 +5,7 @@ Implements the structural-centric action representation from the SAT paper
 so that each Transformer token represents one joint's full future trajectory.
 
 The agent wraps:
-- ``SATObsEncoder``: PointNeXT patch tokenizer + StateMLP (same as ManiFlow)
+- ``SATObsEncoder``: PointNeXT patch tokenizer + StateMLP with temporal feature fusion
 - ``SATBackbone``: structural-centric DiT with MultiModalAttention and EJC
 - ``RectifiedFlow``: Flow Matching decoder with shuffle support
 """
@@ -24,10 +24,6 @@ from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
 class SATObsEncoder(nn.Module):
-    @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return ("joint_state", "point_cloud")
-
     """Observation encoder for SAT — paper §4.2 temporal fusion in feature dim.
 
     Encodes raw point clouds and joint state into a sequence of observation
@@ -42,6 +38,10 @@ class SATObsEncoder(nn.Module):
     ``num_obs_tokens = num_patches + 1`` and
     ``obs_token_dim = n_obs_steps * (pc_out_dim + state_out_dim)``.
     """
+
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return ("joint_state", "point_cloud")
 
     def __init__(
         self,
@@ -198,7 +198,6 @@ class SATAgent(BaseAgent):
         backbone = SATBackbone(
             horizon=horizon,
             action_dim=action_dim,
-            num_obs_tokens=obs_encoder.num_obs_tokens,
             obs_token_dim=obs_encoder.obs_token_dim,
             hidden_dim=hidden_dim,
             n_layers=n_layers,

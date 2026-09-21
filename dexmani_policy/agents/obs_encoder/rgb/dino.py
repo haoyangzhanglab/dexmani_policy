@@ -144,6 +144,7 @@ def example() -> None:
     except Exception as error:
         print("dino example failed.")
         print(error)
+        raise
 
 
 if __name__ == "__main__":

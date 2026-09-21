@@ -44,7 +44,7 @@ class MultiTaskAgent(BaseAgent):
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
-        # action decoder (FlowMatch)
+        # action decoder (RectifiedFlow)
         flow_num_inference_steps: int = 10,
         flow_t_sample_mode: str = "beta",
         flow_beta_s: float = 0.999,

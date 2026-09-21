@@ -42,16 +42,16 @@ class BaseRunner:
 
     Manages the evaluation loop for a single task:
 
-    - Maintains an observation deque and stacks the last ``n_obs_steps``
-      frames for the agent's observation window.
+    - Maintains numeric observation ring buffers and stacks the last
+      ``n_obs_steps`` frames for the agent's observation window.
     - Runs ``num_episodes`` trials, each starting from ``env.reset()`` and
-      stepping until termination or ``max_steps``.
+      stepping until the environment reports termination or truncation.
     - Collects video frames and success/failure outcomes per episode.
     - Fails fast on model/env/OOM errors (raises ``EvalEpisodeError`` → non-zero
       exit); records genuine ``success=False`` task outcomes normally.
 
-    Subclasses override ``run()`` to adapt to specific environment types
-    (single-task sim, multi-task sim, real robot, etc.).
+    Subclasses provide ``make_env()`` and ``get_seed_list()`` and may customize
+    action preparation. Multi-task evaluation composes single-task runners.
     """
 
     def __init__(
@@ -113,8 +113,9 @@ class BaseRunner:
     def get_stacked_obs(self) -> Dict[str, Any]:
         """Return a time-ordered stack of the last n_obs_steps frames.
 
-        Uses pre-allocated circular buffer -- zero per-call allocation in the
-        common case (count >= n_obs_steps).
+        Numeric storage is reused on writes. Reading uses padding or advanced
+        indexing to produce chronological copies, including when the buffer
+        is full.
         """
         if self._obs_count == 0:
             raise RuntimeError("No observation in buffer")
@@ -183,6 +184,7 @@ class BaseRunner:
         """
         import shutil
         import subprocess
+        import tempfile
 
         if shutil.which("ffmpeg"):
             T, H, W, C = frames.shape
@@ -209,26 +211,34 @@ class BaseRunner:
                 "23",
                 str(path),
             ]
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            try:
-                for frame in frames:
-                    proc.stdin.write(frame.astype(np.uint8).tobytes())
-                proc.stdin.close()
-                proc.wait(timeout=60)
-            finally:
-                # Reap a hung/zombie ffmpeg on BrokenPipeError / TimeoutExpired so
-                # a failed encode never leaks a subprocess.
-                if proc.poll() is None:
-                    try:
-                        proc.stdin.close()
-                    except Exception:
-                        pass
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
+            # A file avoids deadlocking the streaming stdin writer on a full
+            # stderr pipe. Only a bounded tail is included in failure messages.
+            with tempfile.TemporaryFile() as stderr:
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr)
+                try:
+                    for frame in frames:
+                        proc.stdin.write(frame.astype(np.uint8).tobytes())
+                    proc.stdin.close()
+                    returncode = proc.wait(timeout=60)
+                    if returncode != 0:
+                        stderr.seek(0, 2)
+                        stderr.seek(max(0, stderr.tell() - 4096))
+                        detail = stderr.read().decode("utf-8", errors="replace").strip()
+                        raise RuntimeError(f"ffmpeg exited with status {returncode}: {detail}")
+                finally:
+                    # Reap a hung/zombie ffmpeg on BrokenPipeError / TimeoutExpired so
+                    # a failed encode never leaks a subprocess.
+                    if proc.poll() is None:
+                        try:
+                            proc.stdin.close()
+                        except Exception:
+                            pass
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
         else:
             imageio.mimsave(str(path), frames.astype(np.uint8), fps=fps)
 

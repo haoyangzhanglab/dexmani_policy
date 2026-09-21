@@ -272,7 +272,7 @@ class SATBlock(nn.Module):
 class SATBackbone(nn.Module):
     """SAT backbone: structural-centric action Transformer.
 
-    Forward signature matches ``FlowMatch`` protocol:
+    Forward signature matches the ``RectifiedFlow`` action-decoder interface:
     ``forward(x, timestep, context) -> (B, Da, T)``
 
     Actions are processed as ``(B, Da, T)`` internally — each token
@@ -283,7 +283,6 @@ class SATBackbone(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        num_obs_tokens: int,
         obs_token_dim: int,
         hidden_dim: int = 768,
         n_layers: int = 12,

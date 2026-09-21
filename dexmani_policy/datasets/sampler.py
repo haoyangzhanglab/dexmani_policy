@@ -4,6 +4,7 @@ import numba
 import numpy as np
 
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
+from dexmani_policy.common.config import validate_max_train_episodes, validate_val_ratio
 
 
 @numba.jit(nopython=True)
@@ -58,6 +59,7 @@ def create_indices(
 
 
 def get_val_mask(n_episodes, val_ratio, seed=0):
+    validate_val_ratio(val_ratio)
     val_mask = np.zeros(n_episodes, dtype=bool)
     if val_ratio <= 0:
         return val_mask
@@ -70,6 +72,7 @@ def get_val_mask(n_episodes, val_ratio, seed=0):
 
 
 def downsample_mask(mask, max_n, seed=0):
+    validate_max_train_episodes(max_n)
     train_mask = mask
 
     if (max_n is not None) and (np.sum(train_mask) > max_n):

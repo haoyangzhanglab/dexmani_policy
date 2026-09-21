@@ -575,9 +575,8 @@ def validate_normalization_spec(
 
     This is the single shared grammar for ``normalization: {field: mode}`` used by
     training config validation, the versioned checkpoint/deployment contract
-    parser (``parse_normalization_contract``), and checkpoint/config
-    reconciliation — so training and deployment can never diverge on normalization
-    semantics.
+    parser (``parse_normalization_contract``), and checkpoint-owned evaluation
+    restore. All paths validate normalization modes with the same grammar.
 
     Rules:
     - ``spec`` must be a plain mapping of non-empty string keys to string modes;

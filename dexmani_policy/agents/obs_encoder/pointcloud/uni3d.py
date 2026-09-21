@@ -51,7 +51,7 @@ class KNNGrouper(nn.Module):
         self.centralize_features = centralize_features
         self.fps_random_config = fps_random_config or {}
 
-    def forward(self, xyz, features, use_fps=True):
+    def forward(self, xyz, features):
         B, N, _ = xyz.shape
         with torch.no_grad():
             fps_config = resolve_fps_random_config(self.fps_random_config, self.training)

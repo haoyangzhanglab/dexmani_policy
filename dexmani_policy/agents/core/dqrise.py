@@ -1,4 +1,4 @@
-"""DQRISEAgent — quantised hand state + joint arm/index diffusion."""
+"""DQRISEAgent — quantised hand state + TCP/index diffusion."""
 
 from __future__ import annotations
 
@@ -252,36 +252,24 @@ def example() -> None:
     """Minimal construction example; project dependencies are still required."""
     import tempfile
 
-    import numpy as np
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    _batch_size, obs_steps, horizon, action_dim, points = 2, 2, 16, 19, 256
-    hand_dim = action_dim - 7
-    codebook = np.random.uniform(0, 65535, (16, hand_dim)).astype(np.float32)
+    obs_steps, horizon, action_dim, points = 2, 16, 21, 256
+    tcp_dim = 9
+    manager = CodebookManager(hand_dim=action_dim - tcp_dim)
+    manager.sorted_hand_poses = torch.linspace(0, 65535, 16).unsqueeze(1).repeat(1, manager.hand_dim)
+    manager.pca_permutation = torch.arange(16)
+    manager.layer_weights = torch.full((manager.num_groups,), 1.0 / manager.num_groups)
+    manager.set_hand_normalizer(torch.ones(manager.hand_dim), torch.zeros(manager.hand_dim))
 
-    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as file:
-        np.savez(
-            file,
-            format_version=3,
-            pose_space="affine_raw",
-            sorted_hand_poses=codebook,
-            pca_permutation=np.arange(16),
-            hand_dim=hand_dim,
-            num_groups=2,
-            codebook_size=4,
-            hand_min=0.0,
-            hand_max=65535.0,
-            metadata_json="{}",
-        )
-        path = file.name
-
-    try:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "codebook.npz"
+        manager.save(path)
         agent = DQRISEAgent(
             horizon=horizon,
             n_obs_steps=obs_steps,
             n_action_steps=8,
             action_dim=action_dim,
-            tcp_dim=7,
+            tcp_dim=tcp_dim,
             codebook_path=path,
             encoder_type="idp3",
             pc_dim=3,
@@ -294,8 +282,6 @@ def example() -> None:
             num_inference_steps=3,
         ).to(device)
         print(agent)
-    finally:
-        Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

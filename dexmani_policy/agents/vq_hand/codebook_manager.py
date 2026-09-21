@@ -159,27 +159,66 @@ class CodebookManager(nn.Module):
             error_msgs,
         )
 
-        # Keep plain-Python metadata in sync with the loaded buffers (mirrors
-        # what the .npz load() path does at lines 455-456).  Without this,
-        # self.num_groups / self.codebook_size would stay at their constructor
-        # defaults even after a checkpoint written by a different
-        # configuration is loaded.
-        if self.is_loaded:
-            n_poses = self.sorted_hand_poses.shape[0]
-            self.hand_dim = self.sorted_hand_poses.shape[1]
-            # For the DQ-RISE 2-group coding, the only supported decomposition
-            # is codebook_size ** num_groups = n_poses with num_groups = 2.
-            self.num_groups = 2
-            self.codebook_size = int(round(n_poses ** (1.0 / self.num_groups)))
-            self.total_combinations = n_poses
+        # The persistent weights identify the group count; pose count alone
+        # admits multiple decompositions. Recover the size with integer search
+        # so only an exact power is accepted, without float-root rounding.
+        poses = self.sorted_hand_poses
+        weights = self.layer_weights
+        if poses.numel() or weights.numel():
+            if any(
+                prefix + name not in state_dict
+                for name in ("sorted_hand_poses", "layer_weights", "pca_permutation")
+            ):
+                # Even strict=False must not infer structure from stale buffers
+                # left in a previously populated destination manager.
+                error_msgs.append("codebook restore requires complete persistent structural state")
+            elif (
+                poses.ndim != 2 or min(poses.shape) < 1
+                or weights.ndim != 1 or weights.numel() < 1
+                or not bool(torch.isfinite(poses).all())
+                or not bool(torch.isfinite(weights).all())
+            ):
+                error_msgs.append("codebook poses and layer_weights must be non-empty, finite 2D/1D tensors")
+            else:
+                n_poses, hand_dim = poses.shape
+                num_groups = weights.numel()
+                low, high = 1, n_poses
+                while low < high:
+                    middle = (low + high) // 2
+                    if middle ** num_groups < n_poses:
+                        low = middle + 1
+                    else:
+                        high = middle
+                if low ** num_groups != n_poses:
+                    error_msgs.append(
+                        f"codebook pose count {n_poses} is not codebook_size ** "
+                        f"num_groups for {num_groups} persistent layer weights"
+                    )
+                else:
+                    self.hand_dim = hand_dim
+                    self.num_groups = num_groups
+                    self.codebook_size = low
+                    self.total_combinations = n_poses
+
+                permutation = self.pca_permutation
+                if (
+                    permutation.ndim != 1 or permutation.numel() != n_poses
+                    or permutation.dtype != torch.long
+                    or not torch.equal(
+                        permutation.sort().values,
+                        torch.arange(n_poses, device=permutation.device),
+                    )
+                ):
+                    error_msgs.append("codebook pca_permutation must enumerate every pose exactly once")
 
         if (
-            not torch.isfinite(self.hand_min)
-            or not torch.isfinite(self.hand_max)
-            or self.hand_max <= self.hand_min
+            self.hand_min.numel() != 1 or self.hand_max.numel() != 1
+            or not bool(torch.isfinite(self.hand_min).all())
+            or not bool(torch.isfinite(self.hand_max).all())
+            or not bool((self.hand_max > self.hand_min).all())
         ):
             error_msgs.append(
-                "codebook hand_min/hand_max must be finite and satisfy hand_max > hand_min"
+                "codebook hand_min/hand_max must be finite scalars and satisfy hand_max > hand_min"
             )
 
     # ------------------------------------------------------------------

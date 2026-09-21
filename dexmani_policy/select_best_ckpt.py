@@ -1,8 +1,8 @@
 """Offline best-checkpoint selector via fixed-seed two-stage evaluation.
 
 Discovers milestone checkpoints from an experiment directory, runs a
-deterministic two-stage evaluation to identify the single best checkpoint,
-and writes its strict v2 selection record.
+two-stage evaluation on deterministically selected paired seeds,
+and writes its strict selection record.
 
 Algorithm
 ---------
@@ -31,7 +31,9 @@ Seed management
 The full seed list is deterministically shuffled with the eval seed (same
 convention as ``eval_best_ckpt``); ``all_seeds[:initial_episodes]`` are Stage 1
 and the next ``batch_size`` are Stage 2.  ``BaseRunner.run_one_episode`` re-seeds
-the policy RNG per episode so ``(checkpoint, seed)`` is reproducible.
+the policy RNG per episode. This makes seed selection and RNG initialization
+repeatable; it does not guarantee bitwise-identical trajectories across
+GPU/driver/kernel environments.
 
 Usage
 -----
@@ -68,12 +70,12 @@ from dexmani_policy.training.eval_utils import (
     MilestoneCheckpoint,
     _get_eval_param,
     build_eval_components,
+    parse_eval_overrides,
     collect_episode_details,
     discover_milestone_checkpoints,
     iter_leaf_env_runners,
     load_ckpt_for_inference,
     resolve_eval_seed,
-    validate_eval_config,
 )
 
 ROOT_DIR = set_project_root()
@@ -134,7 +136,7 @@ class CkptEvalAccum:
 
 @torch.no_grad()
 def evaluate_checkpoint(
-    agent,
+    cfg,
     env_runner,
     checkpoint_store: CheckpointStore,
     ckpt: MilestoneCheckpoint,
@@ -146,7 +148,7 @@ def evaluate_checkpoint(
 ) -> Dict[str, Any]:
     """Run *len(seeds)* episodes for one checkpoint.  Returns env_runner result dict."""
 
-    load_ckpt_for_inference(agent, checkpoint_store, ckpt.path, use_ema)
+    agent = load_ckpt_for_inference(checkpoint_store, ckpt.path, use_ema, cfg=cfg)
     agent.to(device)
     agent.eval()
 
@@ -208,8 +210,8 @@ def select_best_checkpoint(
 
     Parameters
     ----------
-    cfg : OmegaConf config, already loaded and validated, with
-        ``_exp_dir`` set to the experiment directory path.
+    cfg : loaded evaluation config with ``_exp_dir`` set to the experiment
+        directory. Each candidate's saved Agent contract is validated on load.
 
     Returns
     -------
@@ -217,9 +219,7 @@ def select_best_checkpoint(
         The winning checkpoint and the full accumulator list (for reporting).
     """
 
-    # ── 1. Validate config ────────────────────────────────────────────
-    validate_eval_config(cfg)
-
+    # ── 1. Resolve evaluation seed ────────────────────────────────────
     seed = resolve_eval_seed(cfg, cli_seed=eval_seed)
     set_seed(seed)
 
@@ -232,7 +232,7 @@ def select_best_checkpoint(
         cprint(f"  {mc.label}", "cyan")
 
     # ── 3. Build components ───────────────────────────────────────────
-    agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
+    env_runner, checkpoint_store = build_eval_components(cfg)
     eval_root_dir = exp_dir / "eval_ckpt_selector"
 
     # A malformed seed source must not cause duplicate environment episodes or
@@ -253,7 +253,7 @@ def select_best_checkpoint(
     rng.shuffle(all_seeds)
 
     # Fixed, deterministic seed slices — identical for every checkpoint, so
-    # equal-denominator comparisons and reproducible results hold.
+    # equal-denominator comparisons and repeatable seed pairing hold.
     phase1_seeds = all_seeds[:initial_episodes]
     tie_seeds = all_seeds[
         initial_episodes : min(initial_episodes + batch_size, max_episodes)
@@ -272,7 +272,7 @@ def select_best_checkpoint(
         # No try/except: a load/model/CUDA failure is fatal and aborts the run
         # (an errored checkpoint must not be silently treated as 0%).
         result = evaluate_checkpoint(
-            agent,
+            cfg,
             env_runner,
             checkpoint_store,
             mc,
@@ -306,7 +306,7 @@ def select_best_checkpoint(
         for acc in tied:
             cprint(f"    Evaluating {acc.ckpt.label} ...", "cyan")
             result = evaluate_checkpoint(
-                agent,
+                cfg,
                 env_runner,
                 checkpoint_store,
                 acc.ckpt,
@@ -525,7 +525,7 @@ def main() -> None:
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Optional OmegaConf dot-list overrides (merged onto config.yaml).",
+        help="Evaluation/environment dot-list overrides; agent.* is forbidden (checkpoint-owned).",
     )
     args = parser.parse_args()
 
@@ -545,7 +545,7 @@ def main() -> None:
         cprint(f"Error: experiment directory not found: {exp_dir}", "red")
         sys.exit(1)
 
-    # ── Load and validate config once ─────────────────────────────────
+    # ── Load evaluation config; saved Agent contracts are checked per candidate ──
     cfg_path = exp_dir / "config.yaml"
     if not cfg_path.is_file():
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")
@@ -553,7 +553,7 @@ def main() -> None:
 
     cfg = OmegaConf.load(cfg_path)
     if args.overrides:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+        cfg = OmegaConf.merge(cfg, parse_eval_overrides(args.overrides))
     # Stash exp_dir so build_eval_components can build paths
     cfg._exp_dir = str(exp_dir)
 

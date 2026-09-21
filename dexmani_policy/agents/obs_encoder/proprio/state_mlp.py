@@ -36,9 +36,9 @@ def create_state_mlp(
     state_out_dim: int = 64,
     **kwargs,
 ) -> StateMLP:
-    """Create the standard StateMLP used by all observation encoders.
+    """Create the shared StateMLP for observation encoders.
 
-    Every encoder (DP, DP3, ManiFlow, MultiTask, R3D) embeds the
+    Policy observation encoders using this helper embed the
     robot's joint state through this MLP before concatenating it with
     vision / point-cloud features.  This factory centralises the
     project-wide default so that a change to the state-encoding

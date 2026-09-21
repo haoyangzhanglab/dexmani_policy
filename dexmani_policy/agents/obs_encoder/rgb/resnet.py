@@ -269,6 +269,7 @@ def example() -> None:
     except Exception as error:
         print("resnet example failed.")
         print(error)
+        raise
 
 
 if __name__ == "__main__":

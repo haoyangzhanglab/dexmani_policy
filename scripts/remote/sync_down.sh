@@ -48,7 +48,7 @@ done
 
 # Validate SUBPATH: clean relative path (no absolute, .., empty, or bad components).
 if [[ -n "$SUBPATH" ]]; then
-    if [[ ! "$SUBPATH" =~ ^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*$ ]] || [[ "$SUBPATH" =~ (^|/)\.\.(/|$) ]]; then
+    if [[ ! "$SUBPATH" =~ ^[a-zA-Z0-9_.-]+(\+[a-zA-Z0-9_.-]+)*(/[a-zA-Z0-9_.-]+(\+[a-zA-Z0-9_.-]+)*)*$ ]] || [[ "$SUBPATH" =~ (^|/)\.\.?(/|$) ]]; then
         echo "Error: invalid SUBPATH '$SUBPATH' (must be a clean relative path like 'dp3/pour')" >&2
         exit 1
     fi
