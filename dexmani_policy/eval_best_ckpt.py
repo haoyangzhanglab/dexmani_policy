@@ -52,6 +52,7 @@ from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
     _get_eval_param,
     build_eval_components,
+    parse_eval_overrides,
     collect_episode_details,
     compute_eval_stats,
     iter_leaf_env_runners,
@@ -60,7 +61,6 @@ from dexmani_policy.training.eval_utils import (
     resolve_checkpoint_path,
     resolve_eval_seed,
     validate_denoise_steps,
-    validate_eval_config,
 )
 
 ROOT_DIR = set_project_root()
@@ -85,12 +85,11 @@ def _setup_eval(
     -------
     (agent, env_runner, ckpt_path, ckpt_label, eval_seed)
     """
-    validate_eval_config(cfg)
     eval_seed = resolve_eval_seed(cfg)
     set_seed(eval_seed)
 
     device = torch.device(cfg.training.device)
-    agent, env_runner, checkpoint_store = build_eval_components(cfg, device)
+    env_runner, checkpoint_store = build_eval_components(cfg)
 
     for leaf_runner in iter_leaf_env_runners(env_runner):
         leaf_runner.record_video = video_save_dir is not None
@@ -100,7 +99,7 @@ def _setup_eval(
     )
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
-    load_ckpt_for_inference(agent, checkpoint_store, ckpt_path, use_ema)
+    agent = load_ckpt_for_inference(checkpoint_store, ckpt_path, use_ema, cfg=cfg)
     agent.to(device)
     agent.eval()
     cprint("✅ Checkpoint loaded\n", "green")
@@ -485,7 +484,7 @@ def _resolve_final_eval_request(
     cli_denoise_steps: int | None = None,
 ):
     """Resolve final-eval inference with CLI > dotlist > record > config."""
-    override_cfg = OmegaConf.from_dotlist(dotlist_overrides)
+    override_cfg = parse_eval_overrides(dotlist_overrides)
     merged_cfg = OmegaConf.merge(cfg, override_cfg)
 
     config_use_ema = _get_eval_param(cfg, "use_ema", "offline", default=True)
@@ -611,7 +610,7 @@ def main() -> None:
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Optional OmegaConf dot-list overrides.",
+        help="Evaluation/environment dot-list overrides; agent.* is forbidden (checkpoint-owned).",
     )
     args = parser.parse_args()
 
