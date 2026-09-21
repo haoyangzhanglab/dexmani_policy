@@ -165,7 +165,14 @@ class CodebookManager(nn.Module):
         poses = self.sorted_hand_poses
         weights = self.layer_weights
         if poses.numel() or weights.numel():
-            if (
+            if any(
+                prefix + name not in state_dict
+                for name in ("sorted_hand_poses", "layer_weights", "pca_permutation")
+            ):
+                # Even strict=False must not infer structure from stale buffers
+                # left in a previously populated destination manager.
+                error_msgs.append("codebook restore requires complete persistent structural state")
+            elif (
                 poses.ndim != 2 or min(poses.shape) < 1
                 or weights.ndim != 1 or weights.numel() < 1
                 or not bool(torch.isfinite(poses).all())
