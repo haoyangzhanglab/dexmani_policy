@@ -63,7 +63,7 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  # Obs encoder (same as ManiFlow)
+  # Obs encoder: PointNeXT patch tokens with temporal feature fusion
   encoder_type: pointnext_tokenizer
   pc_dim: 6
   state_dim: 19

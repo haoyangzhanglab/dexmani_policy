@@ -1,10 +1,10 @@
-# DQ-RISE — VQ-VAE Hand Quantisation + Joint Diffusion
-# Encoder:  iDP3 / PointNeXT point cloud encoder (same as DP3)
+# DQ-RISE — VQ-VAE Hand Quantisation + TCP/Index Diffusion
+# Encoder:  iDP3 point cloud encoder (configured by encoder_type)
 # Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
 #           ↓ output dim reduced: tcp_dim + 1 (VQ index) instead of full action
 # Hand:     VQ-VAE codebook lookup (discrete hand poses, PCA-sorted)
 
-# Modality: point_cloud(6d, xyz+rgb) + joint_state → [arm(7) + vq_index(1)]
+# Modality: point_cloud(6d, xyz+rgb) + joint_state → [TCP EE pose(9) + vq_index(1)] (default action_ee: 10 reduced dims)
 
 policy_name: dqrise
 

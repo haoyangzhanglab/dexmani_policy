@@ -56,7 +56,7 @@ Local checkpoint selection / evaluation
 4. 远端存在脚本配置的 Python/Conda environment；
 5. `dexmani_policy` 能在该远端环境中 import；
 6. 需要远端 simulator 操作时，`dexmani_sim` 也已在对应环境中安装；
-7. 训练数据最终位于 `train_remote.sh` 检查的数据 root，并能通过 repository-relative `robot_data/...` 路径访问。
+7. 训练数据位于 resolved dataset 路径；repository-relative `robot_data/...` 通过项目 symlink 访问 persistent data，pre-flight 检查同一实际路径。
 
 推荐只在本机 `~/.ssh/config` 保存真实 HostName / User / Port，不把基础设施 identity 写进仓库文档。
 
@@ -389,7 +389,7 @@ bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/<config> <task> [override
 # 第一次上机时同时同步数据
 bash scripts/remote/train_remote.sh --sync-data <config> <task> [overrides...]
 
-# 只预览 command + code sync
+# 只预览 training command、dataset resolution command 与 code sync
 bash scripts/remote/train_remote.sh --dry-run <config> <task> [overrides...]
 ```
 
@@ -401,6 +401,19 @@ bash scripts/remote/train_remote.sh --dry-run <config> <task> [overrides...]
 ls dexmani_policy/configs/*.yaml
 ls dexmani_policy/configs/ddp/*.yaml
 ```
+
+Composite task identity 使用普通 task component 以 `+` 连接；`train_remote.sh`、`tail_log.sh`、`sync_down.sh` 均支持仓库生成的 `pick_bottle+open_box`：
+
+```bash
+bash scripts/remote/train_remote.sh multitask_dit pick_bottle+open_box
+bash scripts/remote/tail_log.sh multitask_dit pick_bottle+open_box
+bash scripts/remote/sync_down.sh multitask_dit/pick_bottle+open_box --dry-run
+# 本地只解析配置，不访问远端、不加载数据：
+conda run -n policy python -m dexmani_policy.tools.resolve_remote_datasets \
+  --config-name multitask_dit 'task_name=pick_bottle+open_box'
+```
+
+config/experiment identifiers 必须是干净相对路径，禁止绝对路径、`.`/`..` component、空 component、空白和 shell metacharacters。task 的 `+` 两侧必须是合法且非空的 task component。source/data/experiment 的 ownership 与同步边界保持不变。
 
 ### 6.2 Hydra Overrides
 
@@ -614,7 +627,7 @@ ssh "$SERVER" 'echo ok'
 
 ### 10.2 Dataset Missing
 
-`train_remote.sh` 会在启动前检查对应 task 的 Zarr directory。
+`train_remote.sh` 在 code/data sync 后，用远端训练 executable、项目 cwd、相同 Hydra config + overrides 解析实际 dataset。single-task 读取 `dataset.zarr_path`；MultiTask 读取每个 `dataset.datasets[*].zarr_path`。检查所有目录并一次列出全部 missing paths，失败时不启动训练；不实例化 dataset，也不读取 array 数据。
 
 处理顺序：
 
@@ -623,7 +636,7 @@ bash scripts/remote/sync_data.sh robot_data --dry-run
 bash scripts/remote/sync_data.sh robot_data
 ```
 
-如果任务数据命名与 Hydra `task_name` 不一致，应修 config/data contract，而不是跳过 pre-flight。
+dataset 路径以 resolved config 为准，不要求与 `task_name` 同名；`dataset.zarr_path` override 会直接改变 pre-flight 目标。MultiTask `pick_bottle+open_box` 检查两个 child Zarr，不检查拼接任务名对应的虚构 Zarr。相对路径沿远端项目的 persistent-data symlink 解析；显式绝对 dataset 路径作为字面路径检查，不作为 shell code。
 
 如果数据已在 persistent root 但训练仍找不到，还要检查 remote project 的 `robot_data` symlink 是否正确。
 

@@ -475,7 +475,7 @@ def resolve_checkpoint_path(
     """Resolve a checkpoint tag to an absolute path and human-readable label.
 
     Supported tags:
-    - ``"best"`` — reads the strict v2 ``best_ckpt.json`` selection record
+    - ``"best"`` — reads the strict ``best_ckpt.json`` selection record
     - ``"latest"`` — ``checkpoint_store.resolve_path("latest")``
     - ``"20pct".."100pct"`` — matched against milestone checkpoints
     - any other string — treated as a filename inside ``checkpoints/``

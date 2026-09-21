@@ -1,8 +1,8 @@
 """Offline best-checkpoint selector via fixed-seed two-stage evaluation.
 
 Discovers milestone checkpoints from an experiment directory, runs a
-deterministic two-stage evaluation to identify the single best checkpoint,
-and writes its strict v2 selection record.
+two-stage evaluation on deterministically selected paired seeds,
+and writes its strict selection record.
 
 Algorithm
 ---------
@@ -217,8 +217,7 @@ def select_best_checkpoint(
         The winning checkpoint and the full accumulator list (for reporting).
     """
 
-    # ── 1. Validate config ────────────────────────────────────────────
-
+    # ── 1. Resolve evaluation seed ────────────────────────────────────
     seed = resolve_eval_seed(cfg, cli_seed=eval_seed)
     set_seed(seed)
 
@@ -252,7 +251,7 @@ def select_best_checkpoint(
     rng.shuffle(all_seeds)
 
     # Fixed, deterministic seed slices — identical for every checkpoint, so
-    # equal-denominator comparisons and reproducible results hold.
+    # equal-denominator comparisons and repeatable seed pairing hold.
     phase1_seeds = all_seeds[:initial_episodes]
     tie_seeds = all_seeds[
         initial_episodes : min(initial_episodes + batch_size, max_episodes)

@@ -7,7 +7,7 @@
 # Auxiliary loss: use_aux_ee predicts wrist pose (pos3+rot6d6=9dim) from
 # action_ee[:9] alongside the primary joint action.  Matches official
 # R3D-Policy use_target_ee design.
-# Control always uses joint-only (19-dim) at inference.
+# With use_aux_ee, control slices the primary joint dims; otherwise it follows action_key.
 
 policy_name: r3d
 

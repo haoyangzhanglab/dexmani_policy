@@ -8,13 +8,12 @@ Methodology (1:1 RoboTwin ``eval_policy.py``)
 ----------------------------------------------
 
 1. Load the specified checkpoint with explicitly resolved EMA/raw weights.
-2. Use ``training.seed`` from the experiment config — same seed the
-   model was trained with.
+2. Resolve the evaluation seed as current config ``training.seed + 1024``.
 3. Read the evaluation seed pool (~100 seeds from ``eval_seeds/<task>.txt``
    or ``range(100)``), then exclude ``best_ckpt.json`` selection seeds for
    final ``best`` evaluation.
-4. Run one episode per seed (deterministic env + policy: re-running
-   the same seed produces identical results).
+4. Run one episode per seed with environment/policy RNG reseeding. This
+   does not guarantee bitwise-identical trajectories across GPU/driver/kernels.
 5. Output: ``success_rate = n_success / n_total`` and avg steps.
 
 No bootstrap.  No confidence intervals.  No statistics beyond counting.
@@ -371,7 +370,7 @@ def evaluate_checkpoint_sweep(
     is apples-to-apples.
 
     Results are saved into ``denoise_timesteps<N>/`` subdirectories under
-    *result_save_dir* (or ``exp_dir/eval_dexsim/<timestamp>/``), plus an
+    *result_save_dir* (or ``exp_dir/eval_dexsim/<run-id>/``), plus an
     aggregate ``eval_summary.json``.
     """
     validate_denoise_steps(denoise_timesteps_list)
@@ -587,7 +586,7 @@ def main() -> None:
         "--ckpt-tag",
         type=str,
         default="best",
-        help="Checkpoint: best (strict v2 best_ckpt.json), latest, 20pct..100pct (default: best).",
+        help="Checkpoint: best (strict best_ckpt.json), latest, 20pct..100pct (default: best).",
     )
     parser.add_argument(
         "--ckpt-path",
