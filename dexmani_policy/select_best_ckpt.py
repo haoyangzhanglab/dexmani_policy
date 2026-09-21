@@ -31,7 +31,9 @@ Seed management
 The full seed list is deterministically shuffled with the eval seed (same
 convention as ``eval_best_ckpt``); ``all_seeds[:initial_episodes]`` are Stage 1
 and the next ``batch_size`` are Stage 2.  ``BaseRunner.run_one_episode`` re-seeds
-the policy RNG per episode so ``(checkpoint, seed)`` is reproducible.
+the policy RNG per episode. This makes seed selection and RNG initialization
+repeatable; it does not guarantee bitwise-identical trajectories across
+GPU/driver/kernel environments.
 
 Usage
 -----
@@ -208,8 +210,8 @@ def select_best_checkpoint(
 
     Parameters
     ----------
-    cfg : OmegaConf config, already loaded and validated, with
-        ``_exp_dir`` set to the experiment directory path.
+    cfg : loaded evaluation config with ``_exp_dir`` set to the experiment
+        directory. Each candidate's saved Agent contract is validated on load.
 
     Returns
     -------
@@ -543,7 +545,7 @@ def main() -> None:
         cprint(f"Error: experiment directory not found: {exp_dir}", "red")
         sys.exit(1)
 
-    # ── Load and validate config once ─────────────────────────────────
+    # ── Load evaluation config; saved Agent contracts are checked per candidate ──
     cfg_path = exp_dir / "config.yaml"
     if not cfg_path.is_file():
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")

@@ -6,7 +6,7 @@
 
 按任务类型使用以下事实来源：
 
-1. **已有实验**：优先读取实验目录保存的 resolved `config.yaml` 和 checkpoint contract。Deployment 是例外：其模型/数据语义以 selected checkpoint 的 `resume_contract` 为准，见 “Deployment Boundary”。
+1. **已有实验**：优先读取实验目录保存的 resolved `config.yaml` 和 checkpoint contract。离线评测的模型构造、action/window/normalization 语义以 selected checkpoint 的 `resume_contract` 为准；当前 config 提供环境与评测 protocol。Deployment 的模型/数据语义也属于 selected checkpoint，见 “Deployment Boundary”。
 2. **当前 Policy**：读取 `dexmani_policy/configs/<config>.yaml`，再沿 `agent._target_` 进入实际 Python 实现。
 3. **运行时接口**：以 `validate_config`、Agent/runtime 校验、训练/评测入口代码为准。
 4. `README.md`、`CLAUDE.md` 和 `docs/` 用于导航与背景，不应作为当前 Policy 架构、超参数或 tensor shape 的最终依据。

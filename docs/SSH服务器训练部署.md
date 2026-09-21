@@ -450,7 +450,7 @@ bash scripts/remote/train_remote.sh --gpus 0 <config> <task> \
 SSH reachable
 → code sync
 → optional data sync
-→ task dataset exists
+→ resolve Hydra config + overrides and check every dataset directory
 → GPU query / requested GPU validation
 → disk-space query
 ```

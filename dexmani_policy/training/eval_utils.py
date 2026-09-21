@@ -1,8 +1,8 @@
 """Shared evaluation utilities used by the eval entry points.
 
-Extracted from ``select_best_ckpt.py`` and ``eval_best_ckpt.py`` to eliminate
-duplicated config validation, component construction, and checkpoint loading
-logic across the evaluation pipeline.
+Checkpoint state owns Agent construction, action/window and normalization
+semantics. Current config supplies the environment and evaluation controls for
+``select_best_ckpt.py``, ``eval_best_ckpt.py`` and ``record_demo.py``.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 1. Config validation (was quadruplicated across 4 files)
+# 1. Saved model contract and evaluation override validation
 # ---------------------------------------------------------------------------
 
 
@@ -93,7 +93,7 @@ def validate_denoise_steps(denoise_timesteps_list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. Agent / env_runner construction
+# 2. Evaluation environment and checkpoint store construction
 # ---------------------------------------------------------------------------
 
 

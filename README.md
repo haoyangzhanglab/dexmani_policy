@@ -143,7 +143,9 @@ bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name>
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 ```
 
-`<exp_name>` 是 `experiments/<policy>/<task>/` 下的实验目录名。评测具体参数以实验保存的 config、CLI override 和对应评测代码为准。
+`<exp_name>` 是 `experiments/<policy>/<task>/` 下的实验目录名。历史模型的构造参数及 action/window/normalization 语义来自所选 checkpoint；实验 config 提供环境与评测 protocol。评测拒绝 `agent.*` override，EMA/raw、NFE、episodes、seed 与视频等评测控制仍可按入口参数覆盖。
+
+最终评测每次写入独立的 `eval_dexsim/<run-id>/`，CLI 会打印准确路径；checkpoint、推理设置、seeds 和指标保存在该目录的 `result_details.json`。详细规则见 [仿真评测机制](docs/仿真评测机制.md)。
 
 ## Deployment
 

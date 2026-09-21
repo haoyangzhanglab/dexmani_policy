@@ -1,24 +1,23 @@
-"""RoboTwin-style checkpoint evaluation — simple, reproducible, no fluff.
+"""Checkpoint-owned evaluation on deterministically selected seeds.
 
 Loads a checkpoint and runs it on deterministic evaluation seeds. For ``best``,
 the seeds used to select the checkpoint are excluded.
-Output is a single success rate, matching RoboTwin's ``_result.txt`` format.
+Each invocation writes success metrics and provenance to its own result
+directory, including a scalar success rate in ``_result.txt``.
 
-Methodology (1:1 RoboTwin ``eval_policy.py``)
-----------------------------------------------
+Evaluation protocol
+-------------------
 
 1. Load the specified checkpoint with explicitly resolved EMA/raw weights.
 2. Resolve the evaluation seed as current config ``training.seed + 1024``.
-3. Read the evaluation seed pool (~100 seeds from ``eval_seeds/<task>.txt``
-   or ``range(100)``), then exclude ``best_ckpt.json`` selection seeds for
-   final ``best`` evaluation.
+3. Read the current runner's evaluation seed pool, then exclude
+   ``best_ckpt.json`` selection seeds for final ``best`` evaluation.
 4. Run one episode per seed with environment/policy RNG reseeding. This
    does not guarantee bitwise-identical trajectories across GPU/driver/kernels.
 5. Output: ``success_rate = n_success / n_total`` and avg steps.
 
-No bootstrap.  No confidence intervals.  No statistics beyond counting.
-This is exactly what RoboTwin's ``eval_policy.py`` does — the paper's
-bootstrap CIs are computed separately with the Rliable library.
+The reported metrics are empirical success rates and step averages;
+this entry point does not compute confidence intervals.
 
 Usage
 -----
@@ -99,7 +98,7 @@ def _setup_eval(
     *,
     video_save_dir: Path | None = None,
 ):
-    """Validate config, build components, load checkpoint (shared setup).
+    """Build the current environment and strictly restore the saved Agent.
 
     Returns
     -------
