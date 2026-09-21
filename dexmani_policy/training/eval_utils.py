@@ -22,7 +22,7 @@ from dexmani_policy.common.checkpoint_io import (
     build_agent_contract,
     validate_resume_contract,
 )
-from dexmani_policy.common.config import validate_action_key_consistency
+from dexmani_policy.common.config import validate_action_key_consistency, validate_window_contract
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import fix_state_dict
 from dexmani_policy.training.build_utils import attach_normalization_spec
@@ -53,17 +53,7 @@ def validate_eval_config(cfg) -> None:
     """
     validate_action_key_consistency(cfg)
 
-    if not (cfg.n_obs_steps >= 1 and cfg.n_action_steps >= 1):
-        raise ValueError(
-            f"n_obs_steps={cfg.n_obs_steps}, n_action_steps={cfg.n_action_steps} must be >= 1"
-        )
-    if cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon:
-        raise ValueError(
-            f"n_obs_steps-1+n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) "
-            f"exceeds horizon ({cfg.horizon}). The control_action slice "
-            f"pred[:, {cfg.n_obs_steps - 1}:{cfg.n_obs_steps - 1 + cfg.n_action_steps}] "
-            f"would be out of bounds."
-        )
+    validate_window_contract(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
 
 
 def validate_denoise_steps(denoise_timesteps_list) -> None:

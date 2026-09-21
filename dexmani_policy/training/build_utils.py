@@ -5,7 +5,11 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from torch.nn.modules.batchnorm import _BatchNorm
 
-from dexmani_policy.common.config import validate_action_key_consistency
+from dexmani_policy.common.config import (
+    validate_action_key_consistency,
+    validate_dataset_splits,
+    validate_window_contract,
+)
 from dexmani_policy.common.normalizer import (
     LinearNormalizer,
     NON_NUMERIC_OBSERVATION_FIELDS,
@@ -390,21 +394,10 @@ def _validate_normalization_config(cfg):
 def validate_config(cfg):
     """Validate common training config constraints.
 
-    Called by all entry points before training or evaluation.
+    Called by training and config-only smoke entry points.
     """
-    if cfg.n_obs_steps > cfg.horizon:
-        raise ValueError(
-            f"n_obs_steps ({cfg.n_obs_steps}) cannot exceed horizon ({cfg.horizon})"
-        )
-    if cfg.n_action_steps > cfg.horizon:
-        raise ValueError(
-            f"n_action_steps ({cfg.n_action_steps}) cannot exceed horizon ({cfg.horizon})"
-        )
-    if cfg.n_obs_steps - 1 + cfg.n_action_steps > cfg.horizon:
-        raise ValueError(
-            f"n_obs_steps-1 + n_action_steps ({cfg.n_obs_steps - 1 + cfg.n_action_steps}) "
-            f"exceeds horizon ({cfg.horizon})"
-        )
+    validate_window_contract(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
+    validate_dataset_splits(cfg.dataset)
 
     if cfg.optimizer.get("obs_lr") is not None:
         if cfg.optimizer.obs_lr < 0:
