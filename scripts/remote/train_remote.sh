@@ -21,7 +21,7 @@
 # Pre-flight checks (fail-fast):
 #   1. Server reachable
 #   2. Code synced (sync_code.sh)
-#   3. robot_data exists for this task
+#   3. Every Zarr in the resolved dataset config exists
 #   4. GPU status available
 #   5. Disk space on /data_ssd
 # ============================================================================
@@ -33,7 +33,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ---- Config ----
 SERVER="${DEX_SERVER:-dexserver}"
 SERVER_PROJ='$HOME/ZHY/dexmani_policy'
-SERVER_DATA="/data_ssd/ZHY"
 CONDA_PYTHON='$HOME/.conda/envs/dex_policy/bin/python'
 # ---- End Config ----
 
@@ -74,15 +73,15 @@ CONFIG="${1:?Error: specify config name (e.g., dp3, ddp/maniflow)}"
 TASK="${2:?Error: specify task name (e.g., pour)}"
 shift 2
 
-# Validate config name: alphanumeric, /, _, -, . only
-if [[ ! "$CONFIG" =~ ^[a-zA-Z0-9_/.-]+$ ]]; then
+# Validate config name as a clean relative Hydra config path.
+if [[ ! "$CONFIG" =~ ^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*$ ]] || [[ "$CONFIG" =~ (^|/)\.\.?(/|$) ]]; then
     echo "Error: invalid config name '$CONFIG' (allowed: a-z, A-Z, 0-9, /, _, -, .)" >&2
     exit 1
 fi
 
-# Validate task name: alphanumeric, _, - only
-if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "Error: invalid task name '$TASK' (allowed: a-z, A-Z, 0-9, _, -)" >&2
+# Canonical composite tasks join ordinary task components with +.
+if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+(\+[a-zA-Z0-9_-]+)*$ ]]; then
+    echo "Error: invalid task name '$TASK' (allowed: task components joined by +; letters, digits, _, -)" >&2
     exit 1
 fi
 
@@ -102,6 +101,12 @@ REMOTE_ARGS=("$ENTRY" "--config-name=$CONFIG" "task_name=$TASK" "$@")
 for remote_arg in "${REMOTE_ARGS[@]}"; do
     printf -v remote_arg_q '%q' "$remote_arg"
     REMOTE_CMD+=" $remote_arg_q"
+done
+# Resolve/check exactly the same config and overrides, in the same remote cwd.
+PREFLIGHT_CMD="cd \"$SERVER_PROJ\" && \"$CONDA_PYTHON\" -m dexmani_policy.tools.resolve_remote_datasets --check"
+for remote_arg in "${REMOTE_ARGS[@]:1}"; do
+    printf -v remote_arg_q '%q' "$remote_arg"
+    PREFLIGHT_CMD+=" $remote_arg_q"
 done
 if [[ -n "$GPU_IDS" ]]; then
     printf -v gpu_ids_q '%q' "$GPU_IDS"
@@ -145,6 +150,7 @@ if $DRY_RUN; then
     printf "\n"
     echo "GPU:       ${GPU_IDS:-auto}"
     echo "Command:   $REMOTE_CMD"
+    echo "Datasets:  $PREFLIGHT_CMD"
     echo ""
     bash "$SCRIPT_DIR/sync_code.sh" --dry-run
     exit 0
@@ -180,12 +186,11 @@ if $SYNC_DATA; then
     echo "OK"
 fi
 
-# 3. robot_data exists
-echo -n "[3/5] Dataset $TASK.zarr ... "
-if ! ssh "$SERVER" "test -d $SERVER_DATA/robot_data/${TASK}.zarr"; then
-    echo "MISSING"
-    echo "ERROR: ${TASK}.zarr not found on server." >&2
-    echo "  Run: bash scripts/remote/sync_data.sh robot_data" >&2
+# 3. Resolve dataset semantics after code/data sync; do not infer from task_name.
+echo "[3/5] Resolved dataset directories ..."
+if ! ssh "$SERVER" "$(remote_bash_invocation "$PREFLIGHT_CMD")"; then
+    echo "ERROR: dataset pre-flight failed; training was not launched." >&2
+    echo "  Check config overrides, persistent-data symlinks, or sync_data.sh robot_data." >&2
     exit 1
 fi
 echo "OK"

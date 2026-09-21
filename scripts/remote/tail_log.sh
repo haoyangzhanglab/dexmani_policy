@@ -29,7 +29,7 @@ if [[ ! "$POLICY" =~ ^(ddp/)?(dp|dp3|dqrise|maniflow|multitask_dit|r3d|sat)$ ]];
     echo "Error: unknown policy '$POLICY'" >&2
     exit 1
 fi
-if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+(\+[a-zA-Z0-9_-]+)*$ ]]; then
     echo "Error: invalid task '$TASK'" >&2
     exit 1
 fi
