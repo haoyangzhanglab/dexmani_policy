@@ -1,4 +1,4 @@
-"""DQRISEAgent — quantised hand state + joint arm/index diffusion."""
+"""DQRISEAgent — quantised hand state + TCP/index diffusion."""
 
 from __future__ import annotations
 
