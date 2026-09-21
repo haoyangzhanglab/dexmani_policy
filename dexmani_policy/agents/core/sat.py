@@ -198,7 +198,6 @@ class SATAgent(BaseAgent):
         backbone = SATBackbone(
             horizon=horizon,
             action_dim=action_dim,
-            num_obs_tokens=obs_encoder.num_obs_tokens,
             obs_token_dim=obs_encoder.obs_token_dim,
             hidden_dim=hidden_dim,
             n_layers=n_layers,

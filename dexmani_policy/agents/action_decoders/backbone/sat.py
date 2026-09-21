@@ -283,7 +283,6 @@ class SATBackbone(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        num_obs_tokens: int,
         obs_token_dim: int,
         hidden_dim: int = 768,
         n_layers: int = 12,

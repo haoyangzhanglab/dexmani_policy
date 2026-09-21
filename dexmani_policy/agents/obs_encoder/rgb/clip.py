@@ -130,6 +130,7 @@ def example() -> None:
     except Exception as error:
         print("clip example failed.")
         print(error)
+        raise
 
 
 if __name__ == "__main__":

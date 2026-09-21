@@ -348,4 +348,4 @@ def example(zarr_path):
 
 
 if __name__ == "__main__":
-    example("robot_data/sim/pick_apple_messy.zarr")
+    example("robot_data/pick_apple_messy.zarr")
