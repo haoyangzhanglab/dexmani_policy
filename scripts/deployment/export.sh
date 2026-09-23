@@ -10,7 +10,6 @@ Export a Real deployment artifact using the Conda environment 'policy'.
 
 Options (forwarded to dexmani_policy.deployment.export):
   --checkpoint SELECTOR  latest (default), best, 80pct, or a checkpoint filename/path
-  --zarr-path PATH       Relocate data; semantics must match the checkpoint snapshot
   --output PATH          New .pt artifact inside the experiment's checkpoints/ directory
   -h, --help             Show this help
 
@@ -21,7 +20,8 @@ Paths:
 
 Existing artifacts are never overwritten; choose a new --output for another export.
 The 'best' selector requires best_ckpt.json and never falls back to 'latest'.
-Every export verifies the artifact before updating deployment_latest.pt.
+Every export validates metadata and safely reloads before updating deployment_latest.pt.
+Runtime strictly restores the model and normalizer before warmup.
 Success prints the exporter's JSON receipt; failures preserve its exit status.
 The underlying Python CLI still defaults to 'best'; this script defaults to 'latest'.
 
@@ -29,7 +29,7 @@ Examples:
   bash scripts/deployment/export.sh experiments/policy/task/run
   bash scripts/deployment/export.sh experiments/policy/task/run --checkpoint 80pct
   bash scripts/deployment/export.sh /data/experiment --checkpoint best
-  bash scripts/deployment/export.sh /data/experiment --zarr-path /data/task.zarr --output deployment-v2.pt
+  bash scripts/deployment/export.sh /data/experiment --output deployment-v2.pt
 EOF
 }
 

@@ -1,96 +1,109 @@
-"""Canonical deployment artifact contract shared by export, inspect and runtime.
-
-This module is the shared grammar for persisted deployment **metadata**.
-Payload validation, ``inspect_experiment``, ``load_experiment`` and
-``restore_deployment_agent`` all parse through :func:`parse_deployment_contract`,
-so a malformed artifact cannot pass inspection and then fail later during
-Hydra instantiation.  Covered here: the action/window contract, observation
-fields, RGB preprocessing, the versioned normalization contract, and the nested
-agent ``_target_`` allowlist.
-
-Not covered here, by design: state-dict tensor/key grammar, Real physics data
-semantics (owned by ``datasets.real_policy_contract`` and the checkpoint
-snapshot), filesystem publication, and decoder-specific inference-step limits.
-Weight correctness is enforced at the strict restore/load boundary, not at
-inspection.
-"""
+"""Plain deployment metadata: public raw tensors and private model restore inputs."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-DEPLOYMENT_FORMAT = "dexmani.deployment"
-SUPPORTED_OBSERVATION_DTYPES = frozenset({"float32", "uint8"})
-AGENT_TARGET_NAMESPACE = "dexmani_policy.agents."
+DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
 
 
 class DeploymentContractError(ValueError):
     """Raised when the persisted deployment boundary is malformed."""
 
 
-def validate_agent_targets(value: Any, path: str = "agent") -> None:
-    """Require every nested Hydra ``_target_`` to stay inside the agent namespace.
-
-    This is the single deployment target grammar.  It runs on the artifact's
-    persisted constructor mapping at the shared contract boundary, so a
-    malformed or hostile ``_target_`` is rejected by ``inspect_experiment`` and
-    payload validation alike — never first discovered by
-    ``hydra.utils.instantiate``.
-
-    Every container a persisted artifact can carry is walked: plain dicts *and*
-    other mappings (``weights_only`` unpickling keeps ``OrderedDict``-style
-    values) as well as tuples, not just lists.  Those are exactly the shapes
-    that survive ``torch.save``/``torch.load`` and are then thawed back into
-    plain containers for Hydra, so leaving any of them unwalked would let a
-    nested target escape the allowlist and still be instantiated at restore.
-    """
-    if isinstance(value, Mapping):
-        target = value.get("_target_")
-        if target is not None and (
-            type(target) is not str or not target.startswith(AGENT_TARGET_NAMESPACE)
-        ):
-            raise DeploymentContractError(
-                f"deployment target at {path} must be under {AGENT_TARGET_NAMESPACE[:-1]}"
-            )
-        for key, nested in value.items():
-            if type(key) is not str:
-                raise DeploymentContractError(f"{path} contains a non-string key")
-            validate_agent_targets(nested, f"{path}.{key}")
-    elif isinstance(value, (list, tuple)):
-        for index, nested in enumerate(value):
-            validate_agent_targets(nested, f"{path}[{index}]")
-
-
-@dataclass(frozen=True)
-class FrozenMetadata(Mapping[str, Any]):
-    """Recursively immutable, pickle-safe field metadata."""
-
-    entries: tuple[tuple[str, Any], ...]
-
-    def __getitem__(self, key: str) -> Any:
-        for candidate, value in self.entries:
-            if candidate == key:
-                return value
-        raise KeyError(key)
-
-    def __iter__(self):
-        return (key for key, _ in self.entries)
-
-    def __len__(self) -> int:
-        return len(self.entries)
-
-
 @dataclass(frozen=True)
 class ObservationFieldSpec:
-    """One raw model input before Policy-owned preprocessing."""
+    """Raw per-step array and concrete axis ordering."""
 
     name: str
-    shape: tuple[int, ...]
+    shape: tuple[int | None, ...]
     dtype: str
-    semantics: Mapping[str, Any]
+    ordering: dict[str, tuple] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PolicySpec:
+    """Raw observation and physical action boundary exposed to Real."""
+
+    observation_fields: tuple[ObservationFieldSpec, ...]
+    n_obs_steps: int
+    n_action_steps: int
+    control_dt_s: float
+    action_mode: str
+    joint_names: tuple[str, ...]
+    pointcloud_config: dict[str, Any] | None = None
+
+    def __post_init__(self):
+        _positive_int(self.n_obs_steps, "n_obs_steps")
+        _positive_int(self.n_action_steps, "n_action_steps")
+        _positive_float(self.control_dt_s, "control_dt_s")
+        if self.action_mode not in {"joint", "eef"}:
+            raise DeploymentContractError("action_mode must be joint or eef")
+        if (
+            len(self.joint_names) != 19
+            or any(type(n) is not str or not n for n in self.joint_names)
+            or len(set(self.joint_names)) != 19
+        ):
+            raise DeploymentContractError(
+                "joint_names must contain 19 unique ordered names"
+            )
+        names = [f.name for f in self.observation_fields]
+        if not names or len(set(names)) != len(names) or "joint_state" not in names:
+            raise DeploymentContractError(
+                "observations must be unique and include joint_state"
+            )
+        if ("point_cloud" in names) != (self.pointcloud_config is not None):
+            raise DeploymentContractError(
+                "point_cloud requires its trained algorithm config"
+            )
+        if self.pointcloud_config is not None:
+            config = _mapping(self.pointcloud_config, "pointcloud_config")
+            cloud = next(f for f in self.observation_fields if f.name == "point_cloud")
+            if (
+                type(config.get("remove_table")) is not bool
+                or _positive_int(config.get("num_points"), "num_points")
+                != cloud.shape[0]
+            ):
+                raise DeploymentContractError(
+                    "pointcloud config conflicts with the raw tensor"
+                )
+
+    @classmethod
+    def from_dict(cls, value):
+        value = _mapping(value, "policy_spec")
+        names = value.get("joint_names")
+        if not isinstance(names, list):
+            raise DeploymentContractError("joint_names must be a list")
+        return cls(
+            observation_fields=_observation_fields(value.get("observations")),
+            n_obs_steps=value.get("n_obs_steps"),
+            n_action_steps=value.get("n_action_steps"),
+            control_dt_s=value.get("control_dt_s"),
+            action_mode=value.get("action_mode"),
+            joint_names=tuple(names),
+            pointcloud_config=value.get("pointcloud_config"),
+        )
+
+    def to_dict(self):
+        return {
+            "observations": {
+                f.name: {
+                    "shape": list(f.shape),
+                    "dtype": f.dtype,
+                    "ordering": {k: list(v) for k, v in f.ordering.items()},
+                }
+                for f in self.observation_fields
+            },
+            "n_obs_steps": self.n_obs_steps,
+            "n_action_steps": self.n_action_steps,
+            "control_dt_s": self.control_dt_s,
+            "action_mode": self.action_mode,
+            "joint_names": list(self.joint_names),
+            "pointcloud_config": self.pointcloud_config,
+        }
 
 
 @dataclass(frozen=True)
@@ -118,39 +131,43 @@ class RgbPreprocessingSpec:
 
 @dataclass(frozen=True)
 class DeploymentSpec:
-    """Parsed inference and observation contract for one artifact."""
+    """Policy-private model restoration and preprocessing inputs."""
 
+    policy_spec: PolicySpec
     action_key: str
     action_dim: int
     horizon: int
-    n_obs_steps: int
-    n_action_steps: int
     denoise_steps: int
-    observation_fields: tuple[ObservationFieldSpec, ...]
-    control_dt_s: float
-    requires_hand: bool
     rgb_preprocessing: RgbPreprocessingSpec | None
-    normalization: FrozenMetadata
-    agent_config: FrozenMetadata
+    normalization: dict[str, Any]
+    agent_config: dict[str, Any]
+    warmup_rgb_hw: tuple[int, int] | None
 
     @property
-    def control_action_dim(self) -> int:
-        return 21 if self.action_key == "action_ee" else 19
+    def control_action_dim(self):
+        return 21 if self.policy_spec.action_mode == "eef" else 19
+
+    @property
+    def observation_fields(self):
+        return self.policy_spec.observation_fields
+
+    @property
+    def n_obs_steps(self):
+        return self.policy_spec.n_obs_steps
+
+    @property
+    def n_action_steps(self):
+        return self.policy_spec.n_action_steps
 
 
 def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return the sole persisted contract of one canonical artifact."""
     root = _mapping(payload, "deployment payload")
     if root.get("_format") != DEPLOYMENT_FORMAT:
         raise DeploymentContractError(
             f"unsupported deployment format: {root.get('_format')!r}"
         )
-    if set(root) != {"_format", "contract", "weights"}:
-        raise DeploymentContractError(
-            "deployment payload must contain format, contract, and weights"
-        )
     contract = _mapping(root.get("contract"), "payload.contract")
-    for name in ("inference_config", "data_contract", "producer"):
+    for name in ("inference_config", "policy_spec", "producer"):
         _mapping(contract.get(name), f"contract.{name}")
     if not _mapping(root.get("weights"), "payload.weights"):
         raise DeploymentContractError("deployment weights must not be empty")
@@ -158,66 +175,44 @@ def deployment_contract(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
-    """Parse the model-facing portion of one canonical contract."""
     contract = deployment_contract(payload)
-    inference = _mapping(contract.get("inference_config"), "contract.inference_config")
-    data = _mapping(contract.get("data_contract"), "contract.data_contract")
-    eval_config = _mapping(inference.get("eval"), "inference_config.eval")
-
+    public = PolicySpec.from_dict(contract["policy_spec"])
+    inference = contract["inference_config"]
     action_key = inference.get("action_key")
-    if action_key not in {"action", "action_ee"}:
-        raise DeploymentContractError("action_key must be 'action' or 'action_ee'")
+    expected_key = "action_ee" if public.action_mode == "eef" else "action"
+    if action_key != expected_key:
+        raise DeploymentContractError(
+            "private action layout conflicts with physical action_mode"
+        )
     action_dim = _positive_int(inference.get("action_dim"), "action_dim")
     horizon = _positive_int(inference.get("horizon"), "horizon")
-    n_obs_steps = _positive_int(inference.get("n_obs_steps"), "n_obs_steps")
-    n_action_steps = _positive_int(inference.get("n_action_steps"), "n_action_steps")
-    if n_obs_steps - 1 + n_action_steps > horizon:
+    if public.n_obs_steps - 1 + public.n_action_steps > horizon:
         raise DeploymentContractError("observation/action window exceeds horizon")
-    control_dim = 21 if action_key == "action_ee" else 19
-    if action_dim < control_dim:
-        raise DeploymentContractError("action_dim is smaller than the control action")
-
-    fields = _observation_fields(data.get("observation_fields"))
+    if action_dim < (21 if public.action_mode == "eef" else 19):
+        raise DeploymentContractError("action_dim is smaller than physical action")
+    fields = public.observation_fields
     preprocessing = _rgb_preprocessing(inference.get("rgb_preprocessing"), fields)
-    control_dt_s = _positive_float(data.get("dt"), "data_contract.dt")
-    requires_hand = data.get("requires_hand")
-    if type(requires_hand) is not bool:
-        raise DeploymentContractError("data_contract.requires_hand must be bool")
-    normalization = _normalization_spec(inference.get("normalization"), fields)
-    agent_config = _agent_config(inference.get("agent"))
+    warmup_hw = _optional_hw(inference.get("warmup_rgb_hw"), "warmup_rgb_hw")
+    if preprocessing is not None and warmup_hw is None:
+        raise DeploymentContractError("RGB warmup requires sample dimensions")
     return DeploymentSpec(
+        policy_spec=public,
         action_key=action_key,
         action_dim=action_dim,
         horizon=horizon,
-        n_obs_steps=n_obs_steps,
-        n_action_steps=n_action_steps,
-        denoise_steps=_positive_int(eval_config.get("denoise_steps"), "denoise_steps"),
-        observation_fields=fields,
-        control_dt_s=control_dt_s,
-        requires_hand=requires_hand,
+        denoise_steps=_positive_int(
+            inference.get("eval", {}).get("denoise_steps"), "denoise_steps"
+        ),
         rgb_preprocessing=preprocessing,
-        normalization=normalization,
-        agent_config=agent_config,
+        normalization=_normalization_spec(inference.get("normalization"), fields),
+        agent_config=_agent_config(inference.get("agent")),
+        warmup_rgb_hw=warmup_hw,
     )
 
 
 def _normalization_spec(
     value: Any, fields: tuple[ObservationFieldSpec, ...]
-) -> FrozenMetadata:
-    """Strictly parse the artifact's versioned normalization contract.
-
-    Delegates the whole grammar to the shared
-    ``parse_normalization_contract`` (exact ``{version, fields}`` keys,
-    supported version, the same mode grammar training uses, and exact coverage
-    of the artifact's own numeric observation fields), so ``export``,
-    ``inspect_experiment`` and ``restore`` can never disagree about which
-    normalization contracts are legal.
-
-    Coverage is checked against *every* declared observation field, including
-    ``rgb``: the shared grammar already requires ``rgb: identity`` rather than
-    omitting it, so excluding non-float fields here would reject valid RGB
-    artifacts.
-    """
+) -> dict[str, Any]:
     from dexmani_policy.common.checkpoint_io import parse_normalization_contract
 
     if type(value) is not dict:
@@ -229,53 +224,51 @@ def _normalization_spec(
         spec = parse_normalization_contract(value, observation_fields=declared_fields)
     except ValueError as exc:
         raise DeploymentContractError(f"invalid normalization contract: {exc}") from exc
-    return _freeze_metadata(spec)
+    return spec
 
 
-def _agent_config(value: Any) -> FrozenMetadata:
-    """Validate the persisted agent constructor mapping at the shared boundary."""
+def _agent_config(value: Any) -> dict[str, Any]:
     if type(value) is not dict or not value:
         raise DeploymentContractError(
             "inference_config.agent must be a non-empty plain mapping"
         )
     if type(value.get("_target_")) is not str:
         raise DeploymentContractError("inference_config.agent requires a _target_")
-    validate_agent_targets(value)
-    return _freeze_metadata(value)
+    return value
 
 
 def _observation_fields(value: Any) -> tuple[ObservationFieldSpec, ...]:
-    fields = _mapping(value, "data_contract.observation_fields")
-    if not fields:
-        raise DeploymentContractError("observation_fields must not be empty")
-    result: list[ObservationFieldSpec] = []
+    fields = _mapping(value, "observations")
+    result = []
     for name, value in fields.items():
-        if type(name) is not str or not name:
-            raise DeploymentContractError("observation field names must be non-empty")
-        field = _mapping(value, f"observation_fields.{name}")
-        shape = field.get("shape")
-        if (
-            type(shape) is not list
+        _string(name, "observation name")
+        value = _mapping(value, name)
+        shape, dtype = value.get("shape"), value.get("dtype")
+        if name == "rgb":
+            if shape != [None, None, 3] or dtype != "uint8":
+                raise DeploymentContractError(
+                    "raw rgb must be uint8 HWC with variable H/W"
+                )
+        elif (
+            not isinstance(shape, list)
             or not shape
-            or any(type(item) is not int or item <= 0 for item in shape)
+            or any(type(n) is not int or n <= 0 for n in shape)
+            or dtype != "float32"
+        ):
+            raise DeploymentContractError(f"invalid fixed numerical observation {name}")
+        ordering = _mapping(value.get("ordering", {}), f"{name}.ordering")
+        if any(
+            not isinstance(v, list)
+            or not v
+            or any(type(x) not in (str, int) for x in v)
+            for v in ordering.values()
         ):
             raise DeploymentContractError(
-                f"observation_fields.{name}.shape must contain positive ints"
+                f"{name}.ordering must contain concrete lists"
             )
-        dtype = field.get("dtype")
-        if dtype not in SUPPORTED_OBSERVATION_DTYPES:
-            raise DeploymentContractError(
-                f"unsupported observation dtype for {name!r}: {dtype!r}"
-            )
-        semantics = field.get("semantics", {})
         result.append(
             ObservationFieldSpec(
-                name=name,
-                shape=tuple(shape),
-                dtype=dtype,
-                semantics=_freeze_metadata(
-                    _mapping(semantics, f"observation_fields.{name}.semantics")
-                ),
+                name, tuple(shape), dtype, {k: tuple(v) for k, v in ordering.items()}
             )
         )
     return tuple(result)
@@ -349,7 +342,6 @@ def _rgb_preprocessing(
 def _validate_rgb_chain(
     preprocessing: RgbPreprocessingSpec, field: ObservationFieldSpec
 ) -> None:
-    semantics = field.semantics
     if (
         field.dtype != "uint8"
         or len(field.shape) != 3
@@ -359,9 +351,6 @@ def _validate_rgb_chain(
         or preprocessing.input_color_order != "rgb"
         or preprocessing.input_value_range != (0.0, 255.0)
         or preprocessing.execution_device != "cpu"
-        or semantics.get("layout") != preprocessing.input_layout
-        or semantics.get("color_order") != preprocessing.input_color_order
-        or semantics.get("value_range") != preprocessing.input_value_range
     ):
         raise DeploymentContractError(
             "rgb_preprocessing input semantics conflict with the rgb field"
@@ -464,44 +453,13 @@ def _vector(value: Any, label: str) -> tuple[float, float, float]:
     return tuple(_finite_float(item, label) for item in value)  # type: ignore[return-value]
 
 
-def thaw_metadata(value: Any) -> Any:
-    """Recursively convert frozen contract metadata back to plain containers.
-
-    ``FrozenMetadata`` keeps parsed metadata immutable, but Hydra/OmegaConf
-    require plain ``dict``/``list`` inputs, so the constructor mapping is thawed
-    exactly once at instantiation time.
-    """
-    if isinstance(value, Mapping):
-        return {key: thaw_metadata(item) for key, item in value.items()}
-    if type(value) is tuple or type(value) is list:
-        return [thaw_metadata(item) for item in value]
-    return value
-
-
-def _freeze_metadata(value: Mapping[str, Any]) -> FrozenMetadata:
-    return FrozenMetadata(
-        tuple((key, _freeze_value(item)) for key, item in value.items())
-    )
-
-
-def _freeze_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return _freeze_metadata(value)
-    if type(value) is list:
-        return tuple(_freeze_value(item) for item in value)
-    return value
-
-
 __all__ = [
-    "AGENT_TARGET_NAMESPACE",
     "DEPLOYMENT_FORMAT",
     "DeploymentContractError",
     "DeploymentSpec",
-    "FrozenMetadata",
+    "PolicySpec",
     "ObservationFieldSpec",
     "RgbPreprocessingSpec",
     "deployment_contract",
     "parse_deployment_contract",
-    "thaw_metadata",
-    "validate_agent_targets",
 ]

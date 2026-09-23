@@ -1,9 +1,4 @@
-"""Strict restore and deterministic prediction verification helpers for deployment artifacts.
-
-All metadata grammar decisions are delegated to the shared contract parser in
-:mod:`dexmani_policy.deployment.contract`, so this module holds no second copy
-of the normalization or ``_target_`` grammar.
-"""
+"""Strict model and normalizer restore, Policy preprocessing and physical predictions."""
 
 from __future__ import annotations
 
@@ -23,8 +18,8 @@ from dexmani_policy.deployment.contract import (
     DeploymentSpec,
     ObservationFieldSpec,
     parse_deployment_contract,
-    thaw_metadata,
 )
+
 
 class DeploymentRestoreError(RuntimeError):
     """Raised when a deployment artifact cannot be restored safely."""
@@ -36,14 +31,6 @@ class RestoredDeployment:
 
     agent: Any
     spec: DeploymentSpec
-
-
-@dataclass(frozen=True)
-class PredictionSnapshot:
-    """Immutable CPU copies of the two deployment contract outputs."""
-
-    pred_action: torch.Tensor
-    control_action: torch.Tensor
 
 
 def reset_inference_seed(seed: int) -> None:
@@ -82,7 +69,8 @@ def deterministic_observation(
         raise ValueError("batch_size must be a positive int")
     result: dict[str, torch.Tensor] = {}
     for field in spec.observation_fields:
-        shape = (batch_size, spec.n_obs_steps, *field.shape)
+        raw_shape = (*spec.warmup_rgb_hw, 3) if field.name == "rgb" else field.shape
+        shape = (batch_size, spec.n_obs_steps, *raw_shape)
         if field.dtype == "float32":
             result[field.name] = _bounded_nonzero_values(
                 shape, device=device, dtype=torch.float32
@@ -102,16 +90,9 @@ def deterministic_observation(
 def restore_deployment_agent(
     payload: Mapping[str, Any], *, device: torch.device | str = "cpu"
 ) -> RestoredDeployment:
-    """Instantiate an explicit deployment agent and load weights strictly.
-
-    Every metadata grammar decision — the agent ``_target_`` allowlist and the
-    versioned normalization contract included — is already made by
-    ``parse_deployment_contract`` via :func:`deployment_spec`, so restore keeps
-    no second copy of it and cannot accept an artifact that
-    ``inspect_experiment`` would reject.
-    """
+    """Instantiate the saved model and strictly restore its weights and normalizer."""
     spec = deployment_spec(payload)
-    agent_config = thaw_metadata(spec.agent_config)
+    agent_config = spec.agent_config
     selected_state = _state_dict(payload.get("weights"), "payload.weights")
 
     try:
@@ -135,48 +116,6 @@ def restore_deployment_agent(
     return RestoredDeployment(agent=agent, spec=spec)
 
 
-def prediction_snapshot(
-    restored: RestoredDeployment,
-    *,
-    seed: int = 0,
-    observation: Mapping[str, torch.Tensor] | None = None,
-) -> PredictionSnapshot:
-    """Run one seeded prediction and validate the complete output contract."""
-    agent_device = _agent_device(restored.agent)
-    obs = (
-        deterministic_observation(restored.spec, device=agent_device)
-        if observation is None
-        else dict(observation)
-    )
-    model_observation = prepare_deployment_observation(obs, restored.spec)
-    model_observation = {
-        name: value.to(device=agent_device) for name, value in model_observation.items()
-    }
-    reset_inference_seed(seed)
-    try:
-        with torch.inference_mode():
-            result = restored.agent.predict_action(
-                model_observation, denoise_timesteps=restored.spec.denoise_steps
-            )
-    except Exception as exc:
-        raise DeploymentRestoreError("deployment agent prediction failed") from exc
-    batch_size = next(iter(obs.values())).shape[0]
-    return validate_prediction(result, restored.spec, batch_size=batch_size)
-
-
-def _agent_device(agent: Any) -> torch.device:
-    """Return the current execution device of a restored agent."""
-    try:
-        return next(agent.parameters()).device
-    except StopIteration:
-        try:
-            return next(agent.buffers()).device
-        except StopIteration as exc:
-            raise DeploymentRestoreError(
-                "deployment agent has no parameter or buffer device"
-            ) from exc
-
-
 def prepare_deployment_observation(
     observation: Mapping[str, torch.Tensor], spec: DeploymentSpec
 ) -> dict[str, torch.Tensor]:
@@ -195,13 +134,6 @@ def prepare_deployment_observation(
             keep_uint8=preprocessing.output_dtype == "uint8",
         ).to(input_device)
     return raw
-
-
-def verify_deployment_prediction(
-    payload: Mapping[str, Any], *, seed: int = 0
-) -> PredictionSnapshot:
-    """Strictly restore an explicit deployment artifact and run one prediction."""
-    return prediction_snapshot(restore_deployment_agent(payload), seed=seed)
 
 
 def validate_deployment_normalizer(agent: Any, spec: DeploymentSpec) -> None:
@@ -248,7 +180,7 @@ def validate_deployment_normalizer(agent: Any, spec: DeploymentSpec) -> None:
 
 def validate_prediction(
     result: Mapping[str, Any], spec: DeploymentSpec, *, batch_size: int
-) -> PredictionSnapshot:
+) -> torch.Tensor:
     """Validate tensor shape, finiteness, and the canonical control slice."""
     if not isinstance(result, Mapping):
         raise DeploymentRestoreError("predict_action must return a mapping")
@@ -258,6 +190,8 @@ def validate_prediction(
         raise DeploymentRestoreError(
             "predict_action must return tensor pred_action and control_action"
         )
+    if not pred.is_floating_point() or not control.is_floating_point():
+        raise DeploymentRestoreError("predictions must be real floating-point tensors")
     expected_pred = (batch_size, spec.horizon, spec.action_dim)
     expected_control = (
         batch_size,
@@ -283,10 +217,7 @@ def validate_prediction(
         raise DeploymentRestoreError(
             "control_action is not the exact canonical pred_action slice"
         )
-    return PredictionSnapshot(
-        pred_action=pred.detach().cpu().clone(),
-        control_action=control.detach().cpu().clone(),
-    )
+    return control.detach()
 
 
 def _state_dict(value: Any, label: str) -> dict[str, torch.Tensor]:
@@ -365,7 +296,10 @@ def _validate_observation(
         elif current_batch != batch_size:
             raise DeploymentRestoreError("deployment observation batch sizes differ")
         expected_shape = (current_batch, spec.n_obs_steps, *field.shape)
-        if tuple(value.shape) != expected_shape:
+        if value.ndim != len(expected_shape) or any(
+            actual <= 0 or (expected is not None and actual != expected)
+            for actual, expected in zip(value.shape, expected_shape)
+        ):
             raise DeploymentRestoreError(
                 f"deployment observation {field.name!r} shape mismatch: "
                 f"got {tuple(value.shape)}, expected {expected_shape}"

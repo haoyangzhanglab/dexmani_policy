@@ -134,18 +134,20 @@ Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact�
 # 研究者日常路径：export -> run_policy（run_policy 位于 dexmani_real）
 bash scripts/deployment/export.sh <experiment_dir>  # 默认 latest，使用 Conda policy 环境
 bash scripts/deployment/export.sh <experiment_dir> --checkpoint 80pct
-bash scripts/deployment/export.sh <experiment_dir> --zarr-path /data/task.zarr --output deployment-v2.pt
+bash scripts/deployment/export.sh <experiment_dir> --output deployment-v2.pt
 
 # 原 Python CLI 保持默认 best；best 必须有有效的 best_ckpt.json，不自动回退
 python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
 ```
 
-脚本可从任意工作目录调用（仓库外请使用脚本的绝对路径）。相对实验目录和显式 `--zarr-path` 相对于调用目录解析；相对 checkpoint 文件路径和 `--output` 相对于实验的 `checkpoints/` 解析。产物只能写入该目录，已有文件拒绝覆盖；再次导出可指定新的 `--output`。使用 `bash scripts/deployment/export.sh --help` 查看参数说明，成功时输出 exporter 的 JSON 回执。
+脚本可从任意工作目录调用（仓库外请使用脚本的绝对路径）。相对实验目录相对于调用目录解析；相对 checkpoint 文件路径和 `--output` 相对于实验的 `checkpoints/` 解析。产物只能写入该目录，已有文件拒绝覆盖；再次导出可指定新的 `--output`。使用 `bash scripts/deployment/export.sh --help` 查看参数说明，成功时输出 exporter 的 JSON 回执。
 
 - Export 使用 **selected checkpoint 保存的**模型、归一化与训练数据语义；`config.yaml` 只提供实验身份和推理设置。缺少训练数据语义快照的旧 checkpoint 无法 export，load/离线分析不受影响。
-- `--zarr-path` 只用于跨机器/磁盘迁移数据位置；新位置的数据语义必须与 checkpoint 快照严格一致，dt、预处理、action、shape/dtype 或任务语义变化都会导致失败。
-- 每次 export 都必须通过 safe reload、strict restore 和 deterministic synthetic prediction，之后才原子更新 `deployment_latest.pt`。它指向本次不可覆盖的 artifact（默认 `<checkpoint>-deployment.pt`）；真机 session 可以固定使用解析后的文件名。
+- Export 不再打开训练 Zarr。Checkpoint 必须保存有序 joint_names 和所需的 PointCloudConfig；缺失时明确拒绝，不猜测旧格式。
+- Export 通过结构检查和 weights-only reload 后原子更新 `deployment_latest.pt`；运行时严格恢复模型、normalizer 并 warmup 后才就绪。它指向本次不可覆盖的 artifact（默认 `<checkpoint>-deployment.pt`）；真机 session 可以固定使用解析后的文件名。
 - 运行时 `--inference-steps N` 是显式 override（NFE ablation），不需要重新 export。
+- Real 使用当前相机、桌面和手安装标定；重新标定不使旧 policy 失效。点云算法配置和去桌面开关来自 artifact，RGB resize/crop/normalization 由 Policy 执行。
+- 离线跨仓库回归：`python -m dexmani_policy.deployment.smoke_test`（需安装 dexmani_real）。
 
 开发和修改 deployment 时的完整约束见 [AGENTS.md 的 Deployment Boundary](AGENTS.md#deployment-boundary)。
 

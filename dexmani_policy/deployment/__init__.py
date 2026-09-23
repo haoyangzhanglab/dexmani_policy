@@ -1,7 +1,7 @@
 """Policy-native deployment artifact export and runtime.
 
-Import is lazy so that listing or inspecting experiments never has to load
-Torch, a checkpoint or a model.
+Listing imports no model runtime. Inspection reads saved metadata without
+constructing a model.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from dexmani_policy.deployment.contract import ObservationFieldSpec
     from dexmani_policy.deployment.export import (
         ExportReceipt,
         export_deployment_artifact,
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "ObservationFieldSpec",
     "ExperimentInfo",
     "ExportReceipt",
     "LoadedPolicy",
@@ -51,6 +53,10 @@ _RUNTIME_NAMES = {
 
 
 def __getattr__(name: str) -> Any:
+    if name == "ObservationFieldSpec":
+        from dexmani_policy.deployment.contract import ObservationFieldSpec
+
+        return ObservationFieldSpec
     if name in _EXPORT_NAMES:
         from dexmani_policy.deployment import export
 

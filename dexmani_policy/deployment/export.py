@@ -1,23 +1,9 @@
-"""Export one selected training checkpoint to an explicit Real deployment artifact.
+"""Export a selected checkpoint as a self-contained deployment artifact.
 
-Ownership at this boundary: the selected checkpoint owns the trained
-deployment semantics (agent constructor, action/window contract,
-normalization, dataset constructor config **and the actual training data
-semantic snapshot** ``resume_contract.deployment_data_semantics``), the
-experiment ``config.yaml`` owns only identity plus the inference recipe, and
-the resulting artifact owns the selected weights and an immutable
-observation/action contract.
-
-The selected — or ``--zarr-path`` relocated — Zarr is only a physical
-location: the shared Real Policy semantic extractor re-parses it and the
-result must exactly match the checkpoint snapshot, so the artifact's
-model-facing data semantics always come from the checkpoint, never from the
-export-time store.
-
-The public :func:`export_deployment_artifact` always verifies — a safe
-``weights_only`` reload, a strict restore and one deterministic synthetic
-prediction — before it atomically swaps the ``deployment_latest.pt``
-selector, so no researcher-facing path can publish an unverified artifact.
+The checkpoint owns model construction, preprocessing, normalization and tensor
+ordering. Experiment configuration supplies identity and inference defaults.
+Export validates plain metadata and reloads safely before atomic publication;
+model restoration and warmup belong to the deployment runtime.
 """
 
 from __future__ import annotations
@@ -49,20 +35,14 @@ from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
 from dexmani_policy.datasets.real_policy_contract import (
     RealPolicyContractError,
-    build_real_policy_data_semantics,
-    semantics_mismatch,
     validate_observation_field_list,
 )
 from dexmani_policy.deployment.contract import (
     DEPLOYMENT_FORMAT,
     DeploymentContractError,
     parse_deployment_contract,
-    validate_agent_targets,
 )
-from dexmani_policy.deployment.restore import (
-    DeploymentRestoreError,
-    verify_deployment_prediction,
-)
+
 
 class DeploymentExportError(RuntimeError):
     """Base error for an invalid or failed deployment export."""
@@ -77,10 +57,6 @@ class InvalidCheckpointError(DeploymentExportError):
 
 
 class UnsupportedPolicyError(DeploymentExportError):
-    pass
-
-
-class InvalidZarrError(DeploymentExportError):
     pass
 
 
@@ -228,36 +204,6 @@ def _require_positive_int(value: Any, label: str) -> int:
     return value
 
 
-def _resolve_zarr_path(
-    dataset: Mapping[str, Any], repo_root: Path, override: Path | None
-) -> Path:
-    """Resolve the physical dataset location for semantic-equivalence proof.
-
-    The default comes from the checkpoint-saved dataset config.  An explicit
-    ``override`` relocates the dataset only — the located store must still
-    match the checkpoint's saved training data semantics exactly in
-    :func:`_build_data_contract`.
-    """
-    if override is not None:
-        candidate = override.expanduser()
-        if not candidate.is_absolute():
-            candidate = Path.cwd() / candidate
-    else:
-        raw = dataset.get("zarr_path")
-        if not isinstance(raw, str) or not raw:
-            raise UnsupportedPolicyError(
-                "checkpoint dataset has no single zarr_path; dynamic/multi-task "
-                "datasets are unsupported"
-            )
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = repo_root / candidate
-    try:
-        return candidate.resolve(strict=True)
-    except OSError as exc:
-        raise InvalidZarrError(f"Real Policy Zarr not found: {candidate}") from exc
-
-
 def _checkpoint_observation_fields(
     dataset: dict[str, Any], agent_config: dict[str, Any]
 ) -> list[str]:
@@ -277,67 +223,33 @@ def _checkpoint_observation_fields(
         raise UnsupportedPolicyError(str(exc)) from exc
 
 
-def _build_data_contract(
-    path: Path,
-    task_name: str,
-    source: _CheckpointDeploymentSource,
-) -> dict[str, Any]:
-    """Freeze the checkpoint-owned data semantics into the artifact contract.
+def _build_policy_spec(source: _CheckpointDeploymentSource) -> dict[str, Any]:
+    from dexmani_policy.deployment.contract import PolicySpec
 
-    The checkpoint's ``deployment_data_semantics`` snapshot — captured from
-    the actual training Zarr — is the only semantic source of truth.  The
-    physical Zarr (default location or ``--zarr-path`` relocation) is
-    re-parsed with the same shared extractor and must match the snapshot
-    exactly; only the informational ``schema_version`` is taken from the
-    physical store.  ``task_name`` is the *experiment* identity: an explicit
-    ``--zarr-path`` override only relocates the physical dataset, so Zarr task
-    identity must still match the experiment exactly.
-    """
-    expected = source.deployment_data_semantics
-    try:
-        actual = build_real_policy_data_semantics(
-            path,
-            task_name=task_name,
-            observation_fields=source.observation_fields,
-            agent_config=source.agent_config,
-            action_key=source.agent["action_key"],
-        )
-    except RealPolicyContractError as exc:
-        raise InvalidZarrError(str(exc)) from exc
-    differing = semantics_mismatch(expected, actual)
-    if differing:
-        raise InvalidZarrError(
-            "selected Zarr does not match the training data semantics saved in "
-            f"the checkpoint; differing keys: {differing[:8]}"
-        )
-    contract = {
-        **expected,
-        "schema_version": actual["schema_version"],
-        "requires_hand": True,
+    saved = source.deployment_data_semantics
+    observations = {}
+    for name in source.observation_fields:
+        field = saved["observation_fields"][name]
+        observations[name] = {
+            "shape": [None, None, 3] if name == "rgb" else field["shape"],
+            "dtype": field["dtype"],
+            "ordering": field.get("ordering", {}),
+        }
+    public = {
+        "observations": observations,
+        "joint_names": saved.get("joint_names"),
+        "pointcloud_config": saved.get("pointcloud_config"),
+        "n_obs_steps": source.agent["n_obs_steps"],
+        "n_action_steps": source.agent["n_action_steps"],
+        "control_dt_s": saved["dt"],
+        "action_mode": "eef" if source.agent["action_key"] == "action_ee" else "joint",
     }
-    return _require_plain_metadata(contract, "data_contract")
+    return PolicySpec.from_dict(public).to_dict()
 
 
 def _parse_checkpoint_deployment_source(
     checkpoint: TrainCheckpoint,
 ) -> _CheckpointDeploymentSource:
-    """Parse one training checkpoint's own trained deployment semantics.
-
-    This is the single source of the model and data semantics an artifact is
-    built from: architecture/constructor (``resume_contract.agent_config``),
-    action/window contract (``resume_contract.agent``), normalization
-    (``resume_contract.agent.normalization``), dataset constructor config
-    (``resume_contract.dataset``) and the actual training data semantic
-    snapshot (``resume_contract.deployment_data_semantics``).  The current
-    experiment ``config.yaml`` contributes only experiment identity and the
-    inference recipe, so editing it after training can no longer change what
-    an old checkpoint deploys as.
-
-    Deleting reconciliation is not deleting validation: everything below is a
-    strict *internal* consistency parse of the checkpoint itself, which is why
-    a checkpoint whose own action/window/normalization contract is malformed
-    still fails fast instead of being blindly trusted.
-    """
     resume = checkpoint.resume_contract
     if type(resume) is not dict:
         raise InvalidCheckpointError("checkpoint resume_contract must be a plain dict")
@@ -358,8 +270,6 @@ def _parse_checkpoint_deployment_source(
     normalization_contract = _parse_checkpoint_normalization_contract(
         agent, observation_fields
     )
-    # The data semantic snapshot gate comes after the checkpoint's own contract
-    # parse, so a malformed contract still fails with its specific diagnosis.
     if "deployment_data_semantics" not in resume:
         raise InvalidCheckpointError(
             "checkpoint predates deployment_data_semantics and cannot be safely "
@@ -432,7 +342,11 @@ def _parse_checkpoint_action_contract(agent: dict[str, Any]) -> dict[str, Any]:
     if use_aux_ee:
         # The only supported auxiliary layout is joint19 + ee9 predicted
         # together while control stays joint-only.
-        if action_key != "action" or train["action_dim"] != 28 or control_action_dim != 19:
+        if (
+            action_key != "action"
+            or train["action_dim"] != 28
+            or control_action_dim != 19
+        ):
             raise InvalidCheckpointError(
                 "checkpoint use_aux_ee requires the joint19_ee9 action layout"
             )
@@ -533,11 +447,6 @@ def _sanitize_agent_config(
     train: dict[str, Any],
 ) -> dict[str, Any]:
     sanitized = _require_plain_metadata(agent_config, "agent config")
-    sanitized = json.loads(_canonical_json(sanitized))
-    try:
-        validate_agent_targets(sanitized)
-    except DeploymentContractError as exc:
-        raise UnsupportedPolicyError(str(exc)) from exc
     if "codebook_path" in sanitized:
         required_suffixes = (
             "codebook_manager.sorted_hand_poses",
@@ -670,8 +579,6 @@ def _build_inference_config(
         "action_key": train["action_key"],
         "action_dim": train["action_dim"],
         "horizon": train["horizon"],
-        "n_obs_steps": train["n_obs_steps"],
-        "n_action_steps": train["n_action_steps"],
         "use_aux_ee": train["use_aux_ee"],
         "normalization": source.normalization_contract,
         "agent": agent_config,
@@ -918,38 +825,12 @@ def _canonical_json(value: Any) -> str:
 
 
 def _validate_payload(payload: Any) -> None:
-    if type(payload) is not dict or set(payload) != {"_format", "contract", "weights"}:
-        raise ArtifactVerificationError("deployment checkpoint payload schema mismatch")
-    if payload["_format"] != DEPLOYMENT_FORMAT:
-        raise ArtifactVerificationError("deployment checkpoint format mismatch")
-    contract = payload["contract"]
-    weights = payload["weights"]
-    if type(contract) is not dict or set(contract) != {
-        "inference_config",
-        "data_contract",
-        "producer",
-    }:
-        raise ArtifactVerificationError("deployment contract schema mismatch")
-    _canonicalize_state_dict(weights, "weights")
-    for name in ("inference_config", "data_contract", "producer"):
-        _require_plain_metadata(contract[name], f"contract.{name}")
     try:
         parse_deployment_contract(payload)
-    except DeploymentContractError as exc:
+    except (DeploymentContractError, TypeError, KeyError) as exc:
         raise ArtifactVerificationError("invalid deployment metadata") from exc
-
-
-def _verify_exported_model(payload: dict[str, Any]) -> None:
-    try:
-        verify_deployment_prediction(payload, seed=0)
-    except DeploymentRestoreError as exc:
-        raise ArtifactVerificationError(
-            "deployment agent strict restore/prediction failed"
-        ) from exc
-    except Exception as exc:
-        raise ArtifactVerificationError(
-            "deployment agent strict restore/prediction failed"
-        ) from exc
+    _canonicalize_state_dict(payload["weights"], "weights")
+    _require_plain_metadata(payload["contract"], "contract")
 
 
 def _write_checkpoint_temp(directory: Path, payload: dict[str, Any]) -> Path:
@@ -995,15 +876,6 @@ def _publish_deployment_selector(
     selector_path: Path,
     checkpoint_path: Path,
 ) -> None:
-    """Atomically point ``deployment_latest.pt`` at one already-verified artifact.
-
-    Internal to ``export_deployment_artifact``, which completes safe reload,
-    strict restore and the synthetic prediction before calling this; the swap
-    itself performs no verification and is not a researcher-facing API.  A
-    temporary symlink plus POSIX ``os.replace`` is all the durability a
-    single-user research workflow needs.  Nothing may run after the swap, so
-    the caller treats a returned publish as final.
-    """
     if selector_path.exists() and not selector_path.is_symlink():
         raise ArtifactPublicationError(
             "refusing to replace a non-symlink deployment_latest.pt selector"
@@ -1034,30 +906,21 @@ def cleanup_candidate_artifact(checkpoint_path: Path) -> None:
 def _build_deployment_payload(
     experiment: Path,
     checkpoint_selector: str,
-    zarr_path: Path | None,
 ) -> tuple[dict[str, Any], Path]:
-    """Build one complete, validated deployment payload from a selected checkpoint.
-
-    Ownership is explicit here: ``source`` (the checkpoint) owns architecture,
-    action/window, normalization, dataset constructor config and the actual
-    training data semantic snapshot, while the experiment ``config.yaml``
-    contributes only identity (``task_name``) and the inference recipe
-    (``eval.use_ema`` / ``eval.denoise_steps``, or ``best_ckpt.json`` for the
-    ``best`` selector).
-    """
     repo_root = Path(__file__).resolve().parents[2]
     selected_path = _resolve_checkpoint(experiment, checkpoint_selector)
     cfg_plain = _load_config(experiment)
     task_name = cfg_plain.get("task_name")
     if type(task_name) is not str or not task_name:
-        raise InvalidExperimentError("experiment config task_name must be a non-empty string")
+        raise InvalidExperimentError(
+            "experiment config task_name must be a non-empty string"
+        )
     selected_inference = _resolve_selected_inference_settings(
         experiment, checkpoint_selector, cfg_plain
     )
     checkpoint = _load_training_checkpoint(selected_path)
     source = _parse_checkpoint_deployment_source(checkpoint)
-    # Task identity is config-owned but must agree with the trained snapshot:
-    # neither a config edit nor a Zarr relocation may re-label the task.
+    # A config edit must not re-label the training task.
     if source.deployment_data_semantics.get("task_name") != task_name:
         raise InvalidExperimentError(
             "experiment config task_name does not match the checkpoint's "
@@ -1081,16 +944,18 @@ def _build_deployment_payload(
         selected_raw, f"weights.{selected_weights}"
     )
 
-    resolved_zarr = _resolve_zarr_path(source.dataset, repo_root, zarr_path)
     agent_config = _sanitize_agent_config(
         source.agent_config, selected_state, source.agent
     )
     inference = _build_inference_config(
         task_name, agent_config, source, selected_inference
     )
-    data_contract = _build_data_contract(resolved_zarr, task_name, source)
+    public_spec = _build_policy_spec(source)
     if "rgb" in source.observation_fields:
         inference["rgb_preprocessing"] = _rgb_preprocessing(source)
+        inference["warmup_rgb_hw"] = source.deployment_data_semantics[
+            "observation_fields"
+        ]["rgb"]["shape"][:2]
     producer = {
         "source_checkpoint": selected_path.name,
         "selected_weights": selected_weights,
@@ -1106,7 +971,7 @@ def _build_deployment_payload(
         "_format": DEPLOYMENT_FORMAT,
         "contract": {
             "inference_config": deployment_inference,
-            "data_contract": data_contract,
+            "policy_spec": public_spec,
             "producer": producer,
         },
         "weights": selected_state,
@@ -1194,30 +1059,14 @@ def export_deployment_artifact(
     experiment_dir: Path,
     checkpoint_selector: str = "best",
     output_path: Path | None = None,
-    zarr_path: Path | None = None,
 ) -> ExportReceipt:
-    """Export one selected checkpoint as a verified, published deployment artifact.
+    """Validate and safely reload metadata, then atomically publish the artifact.
 
-    There is deliberately no way to publish an unverified artifact.  Every
-    successful call has completed, in order::
-
-        build payload -> validate payload -> write temp
-            -> os.replace to the immutable artifact
-            -> safe weights_only reload -> strict restore
-            -> deterministic synthetic prediction
-            -> atomic deployment_latest.pt selector swap
-
-    Nothing runs after the selector swap.  Any earlier failure removes the
-    candidate this call created, leaves the previous ``deployment_latest.pt``
-    untouched, and therefore leaves the identical command directly retryable.
-    ``zarr_path`` overrides only the physical dataset location; the located
-    Zarr's semantics must exactly match the checkpoint's saved training data
-    snapshot.
+    Failed publication removes this call's candidate and preserves the previous
+    selector. Strict model restoration and warmup run before Real policy_ready.
     """
     experiment = _require_experiment_directory(experiment_dir)
-    payload, selected_path = _build_deployment_payload(
-        experiment, checkpoint_selector, zarr_path
-    )
+    payload, selected_path = _build_deployment_payload(experiment, checkpoint_selector)
     checkpoint_dir, final_path, selector_path = _resolve_artifact_paths(
         experiment, selected_path, output_path
     )
@@ -1239,7 +1088,7 @@ def export_deployment_artifact(
             "deployment candidate artifact write failed"
         ) from exc
     try:
-        _verify_exported_model(_load_deployment_payload(final_path))
+        _load_deployment_payload(final_path)
         _publish_deployment_selector(selector_path, final_path)
     except BaseException:
         # The candidate already carries its final name; without this cleanup
@@ -1258,13 +1107,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("experiment_dir", type=Path)
     parser.add_argument("--checkpoint", default="best")
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument(
-        "--zarr-path",
-        type=Path,
-        default=None,
-        help="relocate the physical dataset only; its semantics must exactly "
-        "match the checkpoint's saved training data snapshot",
-    )
     return parser.parse_args()
 
 
@@ -1274,7 +1116,6 @@ def main() -> None:
         args.experiment_dir,
         checkpoint_selector=args.checkpoint,
         output_path=args.output,
-        zarr_path=args.zarr_path,
     )
     print(
         _canonical_json(

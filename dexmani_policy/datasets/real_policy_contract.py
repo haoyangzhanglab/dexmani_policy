@@ -1,19 +1,8 @@
-"""Real Policy Zarr data semantics shared by training checkpoints and export.
+"""Capture concrete Real training inputs in the existing resume metadata snapshot.
 
-This module is the single extractor of the deployment-relevant semantics of one
-Real Policy Zarr.  Training freezes its output into
-``resume_contract.deployment_data_semantics``; deployment export re-runs the
-same extractor on the selected (or relocated) Zarr and requires exact equality
-with the checkpoint snapshot, so no model-facing physical semantic — ``dt``,
-observation/state alignment, point-cloud processing, table plane, action EE
-frame/components, fingertip/EEF/tactile identity, raw observation shape/dtype —
-can silently drift between training and export.
-
-The extractor reads metadata only (root attrs plus array shapes/dtypes), never
-array data, so it is cheap and deterministic across DDP ranks.  It validates
-the Real producer contract but owns no deployment runtime concern; errors are
-plain :class:`RealPolicyContractError` (a ``ValueError``) that callers map to
-their own boundary error types.
+Training resume compares this snapshot strictly. Deployment projects only raw
+tensor ordering, timing and algorithm parameters from the saved checkpoint;
+it never opens the dataset or compares historical calibration with Real.
 """
 
 from __future__ import annotations
@@ -38,11 +27,6 @@ SUPPORTED_OBSERVATION_FIELDS = frozenset(
         "tactile_force",
     }
 )
-
-# Keys captured for provenance but excluded from semantic equality: a dataset
-# with identical physics-facing semantics is the same dataset regardless of the
-# producer's version integer.
-INFORMATIONAL_SEMANTIC_KEYS = frozenset({"schema_version"})
 
 _SCHEMA_NAME = "dexmani-real-policy-zarr"
 _DOMAIN = "real"
@@ -71,8 +55,6 @@ _FINGERTIP_SEMANTICS = {
     "fingertip_points_derivation": "fk_from_processed_joint_state",
     "fingertip_points_policy_id": "arm_hand_fk_from_joint_state_v1",
 }
-# Canonical EEF observation identity; deploy-time FK must resolve to the same
-# derivation and algorithm so a silent frame/FK drift cannot change the values.
 _EEF_POSE_SEMANTICS = {
     "eef_pose_frame": "xarm_base",
     "eef_pose_components": "position_m(3)+rot6d(6)",
@@ -89,7 +71,7 @@ _TACTILE_FORCE_SEMANTICS = {
     "tactile_force_axis_labels": "fx_fy_fz",
 }
 # Members the Real producer guarantees inside each canonical config JSON attr.
-_PROCESSING_CONFIG_MEMBERS = frozenset({"pointcloud", "table_plane_abcd"})
+_POINTCLOUD_CONFIG_MEMBERS = frozenset({"num_points", "remove_table"})
 _FINGERTIP_CONFIG_MEMBERS = frozenset(
     {
         "fingertip_link_names",
@@ -116,7 +98,7 @@ def is_real_policy_zarr(zarr_path: str | Path) -> bool:
 
 
 def validate_observation_field_list(observation_fields: Sequence[str]) -> list[str]:
-    """Validate one deployment observation-field selection; return it as a list."""
+    """Validate the selected canonical training observations."""
     fields = list(observation_fields)
     if (
         not fields
@@ -139,18 +121,7 @@ def build_real_policy_data_semantics(
     agent_config: Mapping[str, Any],
     action_key: str,
 ) -> dict[str, Any]:
-    """Extract the deployment-relevant semantics of one Real Policy Zarr.
-
-    The result is a plain JSON-safe dict: every value the Real producer's
-    physics/preprocessing contract exposes (core timing/alignment attrs, action
-    EE identity, and per-observation-field raw shape/dtype/semantics), frozen so
-    training checkpoints and deployment export can be compared for exact
-    equality.  ``schema_version`` is captured but informational (see
-    :data:`INFORMATIONAL_SEMANTIC_KEYS`).
-
-    ``task_name`` is the identity the Zarr must carry; it is checkpoint-owned
-    at export time, so a relocated Zarr can never re-label the task.
-    """
+    """Snapshot training metadata, array shapes and dtypes without reading samples."""
     fields = validate_observation_field_list(observation_fields)
     path = Path(zarr_path)
     try:
@@ -158,9 +129,7 @@ def build_real_policy_data_semantics(
         attrs = dict(root.attrs)
         arrays = root["data"]
     except Exception as exc:
-        raise RealPolicyContractError(
-            f"cannot open Real Policy Zarr: {path}"
-        ) from exc
+        raise RealPolicyContractError(f"cannot open Real Policy Zarr: {path}") from exc
     _validate_core_zarr_attrs(attrs, task_name)
     time_length = _validate_required_zarr_arrays(root, action_key)
 
@@ -258,9 +227,7 @@ def build_real_policy_data_semantics(
                 _validate_eef_pose(attrs),
             )
         elif name == "tactile_force":
-            _validate_observation_array(
-                array, name, (5, 120, 3), np.dtype(np.float32)
-            )
+            _validate_observation_array(array, name, (5, 120, 3), np.dtype(np.float32))
             captured[name] = _observation_field(
                 (5, 120, 3),
                 "float32",
@@ -270,7 +237,48 @@ def build_real_policy_data_semantics(
         else:  # validate_observation_field_list already rejects unknown values.
             raise RealPolicyContractError(f"unsupported observation field: {name!r}")
 
+    joint_names = attrs.get("joint_names")
+    if (
+        not isinstance(joint_names, list)
+        or len(joint_names) != 19
+        or any(not isinstance(name, str) or not name for name in joint_names)
+        or len(set(joint_names)) != 19
+    ):
+        raise RealPolicyContractError(
+            "Real Zarr requires 19 unique ordered joint_names"
+        )
+    for name, field in captured.items():
+        ordering = {}
+        if name == "point_cloud":
+            ordering["features"] = attrs.get("point_cloud_features")
+        if name == "rgb":
+            ordering["channels"] = attrs.get("rgb_channels")
+        if name in {"contact_force", "tactile_force", "fingertip_points"}:
+            ordering["fingers"] = attrs.get("finger_names")
+        if name in {"contact_force", "tactile_force"}:
+            ordering["sensors"] = attrs.get("tactile_sensor_ids")
+            ordering["axes"] = attrs.get("tactile_axis_names")
+        if name == "tactile_force":
+            ordering["points"] = attrs.get("tactile_point_indices")
+        if any(not isinstance(value, list) or not value for value in ordering.values()):
+            raise RealPolicyContractError(
+                f"missing concrete tensor ordering for {name}"
+            )
+        field["ordering"] = ordering
+    pointcloud_config = None
+    if "point_cloud" in fields:
+        pointcloud_config = json.loads(attrs["pointcloud_config_json"])
+        if type(pointcloud_config.get("remove_table")) is not bool:
+            raise RealPolicyContractError(
+                "pointcloud config requires explicit remove_table"
+            )
+        if pointcloud_config.get("num_points") != captured["point_cloud"]["shape"][0]:
+            raise RealPolicyContractError(
+                "pointcloud config num_points disagrees with stored array"
+            )
     return {
+        "joint_names": joint_names,
+        "pointcloud_config": pointcloud_config,
         "schema_name": attrs["schema_name"],
         "schema_version": attrs["schema_version"],
         "domain": attrs["domain"],
@@ -285,63 +293,6 @@ def build_real_policy_data_semantics(
         "action_ee_components": attrs["action_ee_components"],
         "observation_fields": captured,
     }
-
-
-def semantics_mismatch(
-    expected: Mapping[str, Any], actual: Mapping[str, Any]
-) -> list[str]:
-    """Return the differing semantic key paths; ``[]`` means equivalent.
-
-    Strict by design: any model-facing difference — including a key present on
-    one side only, or ``None`` versus a declared value — is drift.  Only
-    :data:`INFORMATIONAL_SEMANTIC_KEYS` are ignored.  This is a targeted
-    two-level comparison (top level plus observation fields), not a general
-    diff framework.
-    """
-    differing: list[str] = []
-    for key in sorted(set(expected) | set(actual)):
-        if key in INFORMATIONAL_SEMANTIC_KEYS:
-            continue
-        if key not in expected or key not in actual:
-            differing.append(key)
-        elif key == "observation_fields":
-            differing.extend(
-                _observation_fields_mismatch(expected[key], actual[key])
-            )
-        elif expected[key] != actual[key]:
-            differing.append(key)
-    return differing
-
-
-def _observation_fields_mismatch(expected: Any, actual: Any) -> list[str]:
-    if type(expected) is not dict or type(actual) is not dict:
-        return ["observation_fields"]
-    differing: list[str] = []
-    for name in sorted(set(expected) | set(actual)):
-        if name not in expected or name not in actual:
-            differing.append(f"observation_fields.{name}")
-            continue
-        expected_field, actual_field = expected[name], actual[name]
-        if type(expected_field) is not dict or type(actual_field) is not dict:
-            differing.append(f"observation_fields.{name}")
-            continue
-        for sub in sorted(set(expected_field) | set(actual_field)):
-            expected_value, actual_value = expected_field.get(sub), actual_field.get(sub)
-            if expected_value == actual_value:
-                continue
-            if sub == "semantics" and (
-                type(expected_value) is dict and type(actual_value) is dict
-            ):
-                # One more level, so the error names the drifted semantic
-                # (e.g. ...semantics.processing_config_json), not just the field.
-                for key in sorted(set(expected_value) | set(actual_value)):
-                    if expected_value.get(key) != actual_value.get(key):
-                        differing.append(
-                            f"observation_fields.{name}.semantics.{key}"
-                        )
-            else:
-                differing.append(f"observation_fields.{name}.{sub}")
-    return differing
 
 
 def _require_finite_number(value: Any, label: str, *, positive: bool) -> float:
@@ -388,8 +339,7 @@ def _validate_core_zarr_attrs(attrs: Mapping[str, Any], task_name: str) -> None:
         raise RealPolicyContractError("invalid Real Policy Zarr semantics")
     if attrs["action_ee_components"] != _ACTION_EE_COMPONENTS:
         raise RealPolicyContractError("Zarr action_ee_components is invalid")
-    # Task identity is checkpoint-owned: a relocated Zarr proves equivalence,
-    # it never re-labels the task.
+    # The actual training dataset must have the configured task identity.
     if type(task_name) is not str or not task_name or attrs["task_name"] != task_name:
         raise RealPolicyContractError(
             "Zarr task_name does not match the experiment task_name"
@@ -433,7 +383,9 @@ def _validate_required_zarr_arrays(root: Any, action_key: str) -> int:
             f"Zarr action/state dimensions are invalid: {shapes}"
         )
     if action_key not in {"action", "action_ee"}:
-        raise RealPolicyContractError(f"checkpoint action_key is invalid: {action_key!r}")
+        raise RealPolicyContractError(
+            f"checkpoint action_key is invalid: {action_key!r}"
+        )
     return next(iter(lengths))
 
 
@@ -448,9 +400,7 @@ def _time_length(array: Any, name: str) -> int:
     try:
         shape = tuple(int(value) for value in array.shape)
     except Exception as exc:
-        raise RealPolicyContractError(
-            f"Zarr data/{name} is not a valid array"
-        ) from exc
+        raise RealPolicyContractError(f"Zarr data/{name} is not a valid array") from exc
     if len(shape) < 2 or shape[0] < 1:
         raise RealPolicyContractError(
             f"Zarr data/{name} shape/dtype does not match the observation contract"
@@ -468,9 +418,7 @@ def _validate_observation_array(
         shape = tuple(int(value) for value in array.shape)
         dtype = np.dtype(array.dtype)
     except Exception as exc:
-        raise RealPolicyContractError(
-            f"Zarr data/{name} is not a valid array"
-        ) from exc
+        raise RealPolicyContractError(f"Zarr data/{name} is not a valid array") from exc
     if (
         len(shape) < 2
         or shape[0] < 1
@@ -524,22 +472,14 @@ def _validate_table_plane(value: Any) -> str:
         )
     canonical = json.dumps(plane, allow_nan=False, separators=(",", ":"))
     if encoded != canonical:
-        raise RealPolicyContractError(
-            "point-cloud table plane JSON must be canonical"
-        )
+        raise RealPolicyContractError("point-cloud table plane JSON must be canonical")
     return encoded
 
 
 def _validate_config_json_attr(
     attrs: Mapping[str, Any], key: str, required_members: frozenset[str]
 ) -> str:
-    """Require one producer-owned numeric config JSON and keep it verbatim.
-
-    The Real producer owns the numeric contract; this side only proves the
-    attr is a non-empty JSON object carrying the required members, then
-    propagates the original string so the Real deployment runtime can
-    exact-compare the full physics-changing configuration.
-    """
+    """Read producer configuration for checkpoint capture and strict training resume."""
     encoded = attrs.get(key)
     if type(encoded) is not str or not encoded:
         raise RealPolicyContractError(f"Zarr {key} must be a non-empty string")
@@ -549,8 +489,7 @@ def _validate_config_json_attr(
         raise RealPolicyContractError(f"Zarr {key} is not valid JSON") from exc
     if type(parsed) is not dict or not required_members <= set(parsed):
         raise RealPolicyContractError(
-            f"Zarr {key} must encode an object containing "
-            f"{sorted(required_members)}"
+            f"Zarr {key} must encode an object containing {sorted(required_members)}"
         )
     return encoded
 
@@ -566,20 +505,24 @@ def _validate_point_cloud(
     table_plane_abcd_json = _validate_table_plane(
         attrs.get("point_cloud_table_plane_abcd_json")
     )
-    processing_config_json = _validate_config_json_attr(
-        attrs, "processing_config_json", _PROCESSING_CONFIG_MEMBERS
+    _validate_config_json_attr(
+        attrs, "pointcloud_config_json", _POINTCLOUD_CONFIG_MEMBERS
     )
     # Optional by design: not every point-cloud agent declares num_points or
     # pc_dim at the top level (r3d carries only pc_encoder_config.pc_in_channels).
     configured_count = agent_config.get("num_points")
     if configured_count is not None and configured_count != tail[0]:
-        raise RealPolicyContractError("Zarr point count conflicts with agent.num_points")
+        raise RealPolicyContractError(
+            "Zarr point count conflicts with agent.num_points"
+        )
     configured_dims = [agent_config.get("pc_dim")]
     pc_encoder = agent_config.get("pc_encoder_config")
     if type(pc_encoder) is dict:
         configured_dims.append(pc_encoder.get("pc_in_channels"))
     if any(value is not None and value != tail[1] for value in configured_dims):
-        raise RealPolicyContractError("Zarr point feature dim conflicts with agent config")
+        raise RealPolicyContractError(
+            "Zarr point feature dim conflicts with agent config"
+        )
     return tail, {
         "frame": str(attrs["point_cloud_frame"]),
         "position_units": "m",
@@ -587,7 +530,6 @@ def _validate_point_cloud(
         "color_source": str(attrs["point_cloud_color_source"]),
         "policy_id": str(attrs["point_cloud_policy_id"]),
         "table_plane_abcd_json": table_plane_abcd_json,
-        "processing_config_json": processing_config_json,
         "sampling": str(attrs["point_cloud_sampling"]),
         "transform": str(attrs["point_cloud_transform"]),
     }

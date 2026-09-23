@@ -18,14 +18,13 @@ from typing import TYPE_CHECKING, Any, final
 
 import numpy as np
 
+from dexmani_policy.deployment.contract import PolicySpec
+
 if TYPE_CHECKING:
     from dexmani_policy.deployment.contract import (
         DeploymentSpec,
-        ObservationFieldSpec,
-        RgbPreprocessingSpec,
     )
     from dexmani_policy.deployment.restore import (
-        PredictionSnapshot,
         RestoredDeployment,
     )
 
@@ -36,68 +35,8 @@ _DEPLOYMENT_SELECTOR = Path("checkpoints/deployment_latest.pt")
 
 
 @dataclass(frozen=True)
-class PolicySpec:
-    """Policy-owned model and observation contract exposed to runtimes.
-
-    ``default_inference_steps`` is the artifact's persisted ``denoise_steps``
-    value: the default number of denoising steps used when a
-    runtime does not override it.  It never changes architecture, weights, or
-    the observation contract.
-    """
-
-    action_key: str
-    action_dim: int
-    control_action_dim: int
-    horizon: int
-    n_obs_steps: int
-    n_action_steps: int
-    observation_fields: tuple[ObservationFieldSpec, ...]
-    control_dt_s: float
-    requires_hand: bool
-    default_inference_steps: int
-    rgb_preprocessing: RgbPreprocessingSpec | None = None
-
-    def __post_init__(self) -> None:
-        if self.action_key not in {"action", "action_ee"}:
-            raise ValueError("action_key must be 'action' or 'action_ee'")
-        for name in (
-            "action_dim",
-            "control_action_dim",
-            "horizon",
-            "n_obs_steps",
-            "n_action_steps",
-            "default_inference_steps",
-        ):
-            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be a positive int")
-        expected_control_dim = 21 if self.action_key == "action_ee" else 19
-        if self.control_action_dim != expected_control_dim:
-            raise ValueError(
-                "control_action_dim does not match the selected action space"
-            )
-        if self.action_dim < self.control_action_dim:
-            raise ValueError("action_dim must not be smaller than control_action_dim")
-        if self.n_obs_steps - 1 + self.n_action_steps > self.horizon:
-            raise ValueError("observation/action window exceeds horizon")
-        names = tuple(field.name for field in self.observation_fields)
-        if not names or len(set(names)) != len(names):
-            raise ValueError("observation_fields must be non-empty and unique")
-        if (
-            isinstance(self.control_dt_s, bool)
-            or not isinstance(self.control_dt_s, (int, float))
-            or not np.isfinite(float(self.control_dt_s))
-            or self.control_dt_s <= 0.0
-        ):
-            raise ValueError("control_dt_s must be a positive finite number")
-        if type(self.requires_hand) is not bool:
-            raise ValueError("requires_hand must be bool")
-        if ("rgb" in names) != (self.rgb_preprocessing is not None):
-            raise ValueError("RGB preprocessing must match the rgb observation field")
-
-
-@dataclass(frozen=True)
 class ExperimentInfo:
-    """Resolved experiment identity and immutable deployment contract."""
+    """Resolved experiment identity, public spec and inference default."""
 
     selector: str
     experiment_dir: Path
@@ -106,6 +45,7 @@ class ExperimentInfo:
     checkpoint_path: Path
     checkpoint_name: str
     spec: PolicySpec
+    default_inference_steps: int
 
 
 def resolve_experiment(selector: str | os.PathLike[str]) -> Path:
@@ -206,7 +146,7 @@ def load_experiment(
     artifacts between inspection and load.
 
     ``inference_steps`` overrides the artifact's default inference steps
-    (``PolicySpec.default_inference_steps``) for this runtime only; ``None``
+    (``ExperimentInfo.default_inference_steps``) for this runtime only; ``None``
     keeps the artifact default.  Warmup and every prediction use the same
     effective value.
     """
@@ -306,26 +246,6 @@ class LoadedPolicy:
 
     def predict(self, observation: Mapping[str, np.ndarray]) -> np.ndarray:
         """Return a finite float64 copy ``[n_action_steps, control_action_dim]``."""
-        import torch
-
-        snapshot = self._predict_snapshot(observation)
-        control_action = (
-            snapshot.control_action.squeeze(0).to(dtype=torch.float64).numpy().copy()
-        )
-        expected_shape = (self.spec.n_action_steps, self.spec.control_action_dim)
-        if (
-            control_action.shape != expected_shape
-            or not np.isfinite(control_action).all()
-        ):
-            raise RuntimeError(
-                "Policy prediction is not a finite float64 control-action chunk"
-            )
-        return control_action
-
-    def _predict_snapshot(
-        self, observation: Mapping[str, np.ndarray]
-    ) -> PredictionSnapshot:
-        """Run one inference through the shared deployment validation boundary."""
         restored = self._require_open()
         tensors = self._observation_tensors(observation)
 
@@ -337,7 +257,8 @@ class LoadedPolicy:
             result = restored.agent.predict_action(
                 tensors, denoise_timesteps=self._inference_steps
             )
-        return validate_prediction(result, restored.spec, batch_size=1)
+        control = validate_prediction(result, restored.spec, batch_size=1)
+        return control.squeeze(0).to(device="cpu", dtype=torch.float64).numpy().copy()
 
     def reset_episode(self) -> None:
         """Reset Policy-owned stochastic and optional episode-local model state."""
@@ -399,7 +320,10 @@ class LoadedPolicy:
             if not isinstance(value, np.ndarray):
                 raise TypeError(f"observation[{field.name!r}] must be a NumPy array")
             expected_shape = (self.spec.n_obs_steps, *field.shape)
-            if value.shape != expected_shape:
+            if len(value.shape) != len(expected_shape) or any(
+                actual <= 0 or (expected is not None and actual != expected)
+                for actual, expected in zip(value.shape, expected_shape)
+            ):
                 raise ValueError(
                     f"observation[{field.name!r}] shape mismatch: got {value.shape}, "
                     f"expected {expected_shape}"
@@ -414,8 +338,6 @@ class LoadedPolicy:
                 raise ValueError(
                     f"observation[{field.name!r}] must contain finite real numbers"
                 )
-            if field.name == "rgb":
-                _validate_rgb_value_range(value, field.semantics)
             contiguous_value = np.ascontiguousarray(value)
             if not contiguous_value.flags.writeable:
                 contiguous_value = contiguous_value.copy()
@@ -435,18 +357,6 @@ def _numpy_dtype(name: str) -> np.dtype[Any]:
     if dtype not in {np.dtype(np.float32), np.dtype(np.uint8)}:
         raise RuntimeError(f"unsupported deployment dtype: {name!r}")
     return dtype
-
-
-def _validate_rgb_value_range(value: np.ndarray, metadata: Mapping[str, Any]) -> None:
-    raw_range = metadata.get("value_range")
-    if (
-        type(raw_range) not in {list, tuple}
-        or len(raw_range) != 2
-        or tuple(raw_range) != (0, 255)
-        or value.min(initial=0) < 0
-        or value.max(initial=0) > 255
-    ):
-        raise ValueError("observation['rgb'] violates the RGB value range")
 
 
 def _visible_directories(directory: Path) -> tuple[Path, ...]:
@@ -518,7 +428,7 @@ def _experiment_info(
     payload: Mapping[str, Any],
 ) -> ExperimentInfo:
     policy_name, configured_task = _experiment_identity(experiment_dir)
-    spec, artifact_task = _policy_spec(payload)
+    spec, artifact_task, default_steps = _policy_spec(payload)
     if configured_task != artifact_task:
         raise RuntimeError(
             f"experiment task_name={configured_task!r} conflicts with "
@@ -532,6 +442,7 @@ def _experiment_info(
         checkpoint_path=checkpoint_path,
         checkpoint_name=checkpoint_path.name,
         spec=spec,
+        default_inference_steps=default_steps,
     )
 
 
@@ -553,7 +464,7 @@ def _experiment_identity(experiment_dir: Path) -> tuple[str, str]:
     return policy_name, task_name
 
 
-def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
+def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str, int]:
     from dexmani_policy.deployment.contract import deployment_contract
     from dexmani_policy.deployment.restore import deployment_spec
 
@@ -564,22 +475,7 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str]:
     task_name = inference.get("task_name")
     if type(task_name) is not str or not task_name:
         raise RuntimeError("inference_config.task_name must be a non-empty string")
-    return (
-        PolicySpec(
-            action_key=deployment.action_key,
-            action_dim=deployment.action_dim,
-            control_action_dim=deployment.control_action_dim,
-            horizon=deployment.horizon,
-            n_obs_steps=deployment.n_obs_steps,
-            n_action_steps=deployment.n_action_steps,
-            observation_fields=deployment.observation_fields,
-            control_dt_s=deployment.control_dt_s,
-            requires_hand=deployment.requires_hand,
-            default_inference_steps=deployment.denoise_steps,
-            rgb_preprocessing=deployment.rgb_preprocessing,
-        ),
-        task_name,
-    )
+    return deployment.policy_spec, task_name, deployment.denoise_steps
 
 
 def _short_selector(experiment_dir: Path) -> str:
