@@ -33,33 +33,15 @@ _DOMAIN = "real"
 _ACTION_EE_FRAME = "xarm_base"
 _ACTION_EE_COMPONENTS = "eef_position_m(3)+eef_rot6d(6)+xhand_target_rad(12)"
 
-_POINT_COUNTS = frozenset({1024, 2048, 4096, 8192})
 _POINT_FEATURE_DIM = 6
-_POINT_SEMANTICS = {
-    "point_cloud_frame": "xarm_base",
-    "point_cloud_color_source": "mean_rgb_of_aligned_depth_pixels_per_voxel",
-    "point_cloud_policy_id": "depth_to_color_orthogonal_edge_table_voxel_radius_graph_v9",
-    "point_cloud_sampling": "deterministic_coarse_voxel_stratified_hash_or_cyclic_pad",
-    "point_cloud_transform": (
-        "depth_gate_and_cardinal_edge_support;depth_to_color_deprojection;"
-        "table_plane_height_hysteresis_crop_in_color_frame_before_deprojection;"
-        "xarm_base_transform;workspace_crop;mean_voxel_xyz_and_rgb;"
-        "single_radius_graph_density_and_component_outlier;spatial_candidate_cap;"
-        "coarse_voxel_stratified_hash_or_cyclic_pad"
-    ),
-}
 
 _FINGERTIP_SEMANTICS = {
     "fingertip_points_frame": "xarm_base",
     "fingertip_points_unit": "m",
-    "fingertip_points_derivation": "fk_from_processed_joint_state",
-    "fingertip_points_policy_id": "arm_hand_fk_from_joint_state_v1",
 }
 _EEF_POSE_SEMANTICS = {
     "eef_pose_frame": "xarm_base",
     "eef_pose_components": "position_m(3)+rot6d(6)",
-    "eef_pose_derivation": "canonical_arm_fk_from_aligned_qpos",
-    "eef_pose_algorithm_id": "xarm7_custom_eef_pinocchio_fk_v1",
 }
 # Dense tactile ordering/axis identity; unit honesty is checked separately
 # because XHand SDK native values are not proven to be Newtons.
@@ -75,8 +57,6 @@ _POINTCLOUD_CONFIG_MEMBERS = frozenset({"num_points", "remove_table"})
 _FINGERTIP_CONFIG_MEMBERS = frozenset(
     {
         "fingertip_link_names",
-        "handbase_position_eef_m",
-        "handbase_quat_eef_wxyz",
     }
 )
 
@@ -166,11 +146,6 @@ def build_real_policy_data_semantics(
             tail = _validate_observation_array(array, name, None, np.dtype(np.uint8))
             if len(tail) != 3 or tail[-1] != 3:
                 raise RealPolicyContractError("Zarr rgb must have shape [T, H, W, 3]")
-            if (
-                attrs.get("camera_extrinsic_semantics")
-                != "T_xarm_base_from_color;native_color_optical_to_xarm_base"
-            ):
-                raise RealPolicyContractError("Zarr RGB camera semantics are invalid")
             captured[name] = _observation_field(
                 tail,
                 "uint8",
@@ -193,11 +168,6 @@ def build_real_policy_data_semantics(
                 != "xhand_sensor_native_axes_per_finger"
             ):
                 raise RealPolicyContractError("Zarr contact_force_frame is invalid")
-            si_verified = attrs.get("contact_force_si_verified")
-            if si_verified is not False:
-                raise RealPolicyContractError(
-                    "Zarr contact_force_si_verified must be false"
-                )
             captured[name] = _observation_field(
                 (5, 3),
                 "float32",
@@ -205,7 +175,6 @@ def build_real_policy_data_semantics(
                 {
                     "frame": "xhand_sensor_native_axes_per_finger",
                     "units": unit,
-                    "si_verified": si_verified,
                     "finger_order": "thumb_index_mid_ring_pinky",
                 },
             )
@@ -272,7 +241,10 @@ def build_real_policy_data_semantics(
             raise RealPolicyContractError(
                 "pointcloud config requires explicit remove_table"
             )
-        if pointcloud_config.get("num_points") != captured["point_cloud"]["shape"][0]:
+        if (
+            type(pointcloud_config.get("num_points")) is not int
+            or pointcloud_config["num_points"] != captured["point_cloud"]["shape"][0]
+        ):
             raise RealPolicyContractError(
                 "pointcloud config num_points disagrees with stored array"
             )
@@ -280,14 +252,12 @@ def build_real_policy_data_semantics(
         "joint_names": joint_names,
         "pointcloud_config": pointcloud_config,
         "schema_name": attrs["schema_name"],
-        "schema_version": attrs["schema_version"],
         "domain": attrs["domain"],
         "task_name": attrs["task_name"],
         "dt": attrs["dt"],
         "obs_alignment": attrs["obs_alignment"],
         "observation_alignment": attrs["observation_alignment"],
         "state_alignment": attrs["state_alignment"],
-        "contact_force_source": attrs["contact_force_source"],
         "action_semantics": attrs["action_semantics"],
         "action_ee_frame": attrs["action_ee_frame"],
         "action_ee_components": attrs["action_ee_components"],
@@ -309,14 +279,12 @@ def _require_finite_number(value: Any, label: str, *, positive: bool) -> float:
 def _validate_core_zarr_attrs(attrs: Mapping[str, Any], task_name: str) -> None:
     required = {
         "schema_name",
-        "schema_version",
         "domain",
         "task_name",
         "dt",
         "obs_alignment",
         "observation_alignment",
         "state_alignment",
-        "contact_force_source",
         "action_semantics",
         "action_ee_frame",
         "action_ee_components",
@@ -326,9 +294,6 @@ def _validate_core_zarr_attrs(attrs: Mapping[str, Any], task_name: str) -> None:
         raise RealPolicyContractError(
             f"Real Policy Zarr is missing semantic attrs: {missing}"
         )
-    # schema_version is informational metadata (provenance / human tracking),
-    # not a compatibility gate: a dataset with compatible keys, shapes, dtypes,
-    # and semantics is accepted regardless of its exact version integer.
     if (
         attrs["schema_name"] != _SCHEMA_NAME
         or attrs["domain"] != _DOMAIN
@@ -349,10 +314,9 @@ def _validate_core_zarr_attrs(attrs: Mapping[str, Any], task_name: str) -> None:
     if (
         attrs["observation_alignment"] != "control_step_latest_causal"
         or attrs["state_alignment"] != "control_step"
-        or attrs["contact_force_source"] != "raw_hand_contact_control_step"
     ):
         raise RealPolicyContractError(
-            "Zarr observation timing/source must use the control-step contract"
+            "Zarr observation timing must use the control-step contract"
         )
 
 
@@ -431,51 +395,6 @@ def _validate_observation_array(
     return shape[1:]
 
 
-def _validate_json_string(value: Any, label: str) -> str:
-    if type(value) is not str or not value:
-        raise RealPolicyContractError(f"{label} must be a non-empty JSON string")
-    try:
-        parsed = json.loads(
-            value, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token))
-        )
-        json.dumps(parsed, allow_nan=False)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RealPolicyContractError(f"{label} must contain finite JSON") from exc
-    return value
-
-
-def _validate_table_plane(value: Any) -> str:
-    encoded = _validate_json_string(value, "point_cloud_table_plane_abcd_json")
-    plane = json.loads(encoded)
-    if plane is None:
-        if encoded != "null":
-            raise RealPolicyContractError(
-                "point-cloud table plane JSON must be canonical"
-            )
-        return encoded
-    if (
-        type(plane) is not list
-        or len(plane) != 4
-        or any(
-            isinstance(item, bool) or not isinstance(item, (int, float))
-            for item in plane
-        )
-        or any(not math.isfinite(float(item)) for item in plane)
-    ):
-        raise RealPolicyContractError(
-            "point-cloud table plane must be null or four finite numbers"
-        )
-    normal_norm = math.sqrt(sum(float(item) ** 2 for item in plane[:3]))
-    if normal_norm <= 0.0 or float(plane[2]) / normal_norm <= 0.0:
-        raise RealPolicyContractError(
-            "point-cloud table plane normal must point upward"
-        )
-    canonical = json.dumps(plane, allow_nan=False, separators=(",", ":"))
-    if encoded != canonical:
-        raise RealPolicyContractError("point-cloud table plane JSON must be canonical")
-    return encoded
-
-
 def _validate_config_json_attr(
     attrs: Mapping[str, Any], key: str, required_members: frozenset[str]
 ) -> str:
@@ -498,27 +417,30 @@ def _validate_point_cloud(
     array: Any, attrs: Mapping[str, Any], agent_config: Mapping[str, Any]
 ) -> tuple[tuple[int, int], dict[str, str]]:
     tail = _validate_observation_array(array, "point_cloud", None, np.dtype(np.float32))
-    if len(tail) != 2 or tail[0] not in _POINT_COUNTS or tail[1] != _POINT_FEATURE_DIM:
+    if len(tail) != 2 or tail[0] <= 0 or tail[1] != _POINT_FEATURE_DIM:
         raise RealPolicyContractError("unsupported point-cloud shape")
-    if any(attrs.get(key) != value for key, value in _POINT_SEMANTICS.items()):
-        raise RealPolicyContractError("invalid Real point-cloud semantics")
-    table_plane_abcd_json = _validate_table_plane(
-        attrs.get("point_cloud_table_plane_abcd_json")
-    )
+    if attrs.get("point_cloud_frame") != "xarm_base":
+        raise RealPolicyContractError("invalid Real point-cloud frame")
+    if attrs.get("point_cloud_features") != ["x", "y", "z", "r", "g", "b"]:
+        raise RealPolicyContractError(
+            "point-cloud features must be ordered x, y, z, r, g, b"
+        )
     _validate_config_json_attr(
         attrs, "pointcloud_config_json", _POINTCLOUD_CONFIG_MEMBERS
     )
     # Optional by design: not every point-cloud agent declares num_points or
     # pc_dim at the top level (r3d carries only pc_encoder_config.pc_in_channels).
-    configured_count = agent_config.get("num_points")
-    if configured_count is not None and configured_count != tail[0]:
-        raise RealPolicyContractError(
-            "Zarr point count conflicts with agent.num_points"
-        )
+    configured_counts = {"agent.num_points": agent_config.get("num_points")}
     configured_dims = [agent_config.get("pc_dim")]
     pc_encoder = agent_config.get("pc_encoder_config")
-    if type(pc_encoder) is dict:
+    if isinstance(pc_encoder, Mapping):
+        configured_counts["agent.pc_encoder_config.num_points"] = pc_encoder.get(
+            "num_points"
+        )
         configured_dims.append(pc_encoder.get("pc_in_channels"))
+    for label, count in configured_counts.items():
+        if count is not None and (type(count) is not int or count != tail[0]):
+            raise RealPolicyContractError(f"Zarr point count conflicts with {label}")
     if any(value is not None and value != tail[1] for value in configured_dims):
         raise RealPolicyContractError(
             "Zarr point feature dim conflicts with agent config"
@@ -527,28 +449,31 @@ def _validate_point_cloud(
         "frame": str(attrs["point_cloud_frame"]),
         "position_units": "m",
         "color_order": "rgb",
-        "color_source": str(attrs["point_cloud_color_source"]),
-        "policy_id": str(attrs["point_cloud_policy_id"]),
-        "table_plane_abcd_json": table_plane_abcd_json,
-        "sampling": str(attrs["point_cloud_sampling"]),
-        "transform": str(attrs["point_cloud_transform"]),
     }
 
 
-def _validate_fingertip_points(attrs: Mapping[str, Any]) -> dict[str, str]:
+def _validate_fingertip_points(attrs: Mapping[str, Any]) -> dict[str, Any]:
     for key, expected in _FINGERTIP_SEMANTICS.items():
         if attrs.get(key) != expected:
             raise RealPolicyContractError(f"Zarr {key} is invalid")
     fingertip_config_json = _validate_config_json_attr(
         attrs, "fingertip_config_json", _FINGERTIP_CONFIG_MEMBERS
     )
+    links = json.loads(fingertip_config_json)["fingertip_link_names"]
+    if (
+        not isinstance(links, list)
+        or len(links) != 5
+        or any(not isinstance(link, str) or not link for link in links)
+        or len(set(links)) != 5
+    ):
+        raise RealPolicyContractError(
+            "fingertip config requires five ordered link names"
+        )
     return {
         "frame": str(attrs["fingertip_points_frame"]),
         "units": str(attrs["fingertip_points_unit"]),
         "finger_order": "thumb_index_mid_ring_pinky",
-        "derivation": str(attrs["fingertip_points_derivation"]),
-        "policy_id": str(attrs["fingertip_points_policy_id"]),
-        "fingertip_config_json": fingertip_config_json,
+        "fingertip_link_names": links,
     }
 
 
@@ -560,8 +485,6 @@ def _validate_eef_pose(attrs: Mapping[str, Any]) -> dict[str, str]:
         "frame": str(attrs["eef_pose_frame"]),
         "position_units": "m",
         "rotation_representation": "rot6d",
-        "derivation": str(attrs["eef_pose_derivation"]),
-        "algorithm_id": str(attrs["eef_pose_algorithm_id"]),
     }
 
 
@@ -574,22 +497,12 @@ def _validate_tactile_force(attrs: Mapping[str, Any]) -> dict[str, Any]:
         raise RealPolicyContractError(
             "Zarr tactile_force_unit must be 'xhand_sdk_native_unknown_si'"
         )
-    si_verified = attrs.get("tactile_force_si_verified")
-    if si_verified is not False:
-        raise RealPolicyContractError("Zarr tactile_force_si_verified must be false")
-    spatial_verified = attrs.get("tactile_force_spatial_geometry_verified")
-    if spatial_verified is not False:
-        raise RealPolicyContractError(
-            "Zarr tactile_force_spatial_geometry_verified must be false"
-        )
     return {
         "finger_order": str(attrs["tactile_force_finger_order"]),
         "sensor_order": str(attrs["tactile_force_sensor_order"]),
         "point_order": str(attrs["tactile_force_point_order"]),
         "axis_labels": str(attrs["tactile_force_axis_labels"]),
         "unit": unit,
-        "si_verified": si_verified,
-        "spatial_geometry_verified": spatial_verified,
     }
 
 

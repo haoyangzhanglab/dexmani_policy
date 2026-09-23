@@ -360,5 +360,207 @@ class PolicyDeploymentSmoke(unittest.TestCase):
                 policy.close()
 
 
+class RealTrainingContractSmoke(unittest.TestCase):
+    def setUp(self):
+        import zarr
+        from dexmani_real.deployment.smoke_test import export_fixture
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = export_fixture(self.temp.name)
+        self.root = zarr.open_group(str(self.path), mode="a")
+
+    def semantics(self, agent_config=None):
+        from dexmani_policy.datasets.real_policy_contract import (
+            build_real_policy_data_semantics,
+        )
+
+        return build_real_policy_data_semantics(
+            self.path,
+            task_name="smoke",
+            observation_fields=[
+                "joint_state",
+                "point_cloud",
+                "rgb",
+                "contact_force",
+                "fingertip_points",
+                "eef_pose",
+                "tactile_force",
+            ],
+            agent_config={} if agent_config is None else agent_config,
+            action_key="action",
+        )
+
+    def cloud(self, count, *, features=6, dtype="float32"):
+        import json
+
+        self.root["data"].create_dataset(
+            "point_cloud", shape=(4, count, features), dtype=dtype, overwrite=True
+        )
+        config = json.loads(self.root.attrs["pointcloud_config_json"])
+        config["num_points"] = count
+        self.root.attrs["pointcloud_config_json"] = json.dumps(config)
+
+    def assert_compatible(self, before, after):
+        from dexmani_policy.common.checkpoint_io import validate_resume_contract
+
+        validate_resume_contract(
+            {"deployment_data_semantics": before},
+            {"deployment_data_semantics": after},
+        )
+
+    def test_arbitrary_positive_point_counts(self):
+        for count in (1, 1536, 3072):
+            with self.subTest(count=count):
+                self.cloud(count)
+                semantics = self.semantics(
+                    {
+                        "num_points": count,
+                        "pc_dim": 6,
+                        "pc_encoder_config": {"num_points": count, "pc_in_channels": 6},
+                    }
+                )
+                self.assertEqual(
+                    semantics["observation_fields"]["point_cloud"]["shape"], [count, 6]
+                )
+                self.assertEqual(semantics["pointcloud_config"]["num_points"], count)
+                self.semantics()  # Agents need not declare a point count.
+
+    def test_cloud_dimensions_and_order_remain_strict(self):
+        import json
+
+        from dexmani_policy.datasets.real_policy_contract import RealPolicyContractError
+
+        for count, features, dtype in (
+            (0, 6, "float32"),
+            (1536, 5, "float32"),
+            (1536, 6, "float64"),
+        ):
+            with self.subTest(count=count, features=features, dtype=dtype):
+                self.cloud(count, features=features, dtype=dtype)
+                with self.assertRaises(RealPolicyContractError):
+                    self.semantics()
+        self.cloud(1536)
+        for config in (
+            {"num_points": 1024},
+            {"pc_dim": 3},
+            {"pc_encoder_config": {"num_points": 1024}},
+            {"pc_encoder_config": {"pc_in_channels": 3}},
+        ):
+            with self.subTest(agent_config=config):
+                with self.assertRaises(RealPolicyContractError):
+                    self.semantics(config)
+        self.root.attrs["point_cloud_features"] = ["z", "y", "x", "r", "g", "b"]
+        with self.assertRaises(RealPolicyContractError):
+            self.semantics()
+        self.root.attrs["point_cloud_features"] = ["x", "y", "z", "r", "g", "b"]
+        for count, configured in ((1536, 1024), (1536, 1536.0), (1, True)):
+            self.cloud(count)
+            config = json.loads(self.root.attrs["pointcloud_config_json"])
+            config["num_points"] = configured
+            self.root.attrs["pointcloud_config_json"] = json.dumps(config)
+            with self.subTest(configured=configured):
+                with self.assertRaises(RealPolicyContractError):
+                    self.semantics()
+
+    def test_descriptive_metadata_does_not_gate_resume(self):
+        before = self.semantics()
+        changes = {
+            "point_cloud_policy_id": "another implementation label",
+            "point_cloud_transform": "reworded pipeline description",
+            "point_cloud_sampling": "reworded sampling description",
+            "point_cloud_color_source": "reworded color aggregation description",
+            "fingertip_points_derivation": "reworded FK description",
+            "fingertip_points_policy_id": "another FK version label",
+            "eef_pose_derivation": "reworded EEF description",
+            "eef_pose_algorithm_id": "another EEF version label",
+            "camera_extrinsic_semantics": "reworded camera provenance",
+            "contact_force_source": "reworded acquisition description",
+            "schema_version": 999,
+            "contact_force_si_verified": True,
+            "tactile_force_si_verified": True,
+            "tactile_force_spatial_geometry_verified": True,
+        }
+        self.root.attrs.update(changes)
+        self.assert_compatible(before, self.semantics())
+        for key in changes:
+            del self.root.attrs[key]
+        self.assert_compatible(before, self.semantics())
+
+    def test_calibration_provenance_does_not_gate_resume(self):
+        import json
+
+        before = self.semantics()
+        fingertip = json.loads(self.root.attrs["fingertip_config_json"])
+        fingertip["handbase_position_eef_m"] = [0.05, 0.02, 0.10]
+        fingertip["handbase_quat_eef_wxyz"] = [0.0, 0.0, 0.0, 1.0]
+        transform = np.eye(4)
+        transform[0, 3] = 0.25
+        self.root.attrs.update(
+            {
+                "camera_extrinsic": transform.tolist(),
+                "camera_intrinsic": [120.0, 0.0, 20.0, 0.0, 110.0, 16.0, 0.0, 0.0, 1.0],
+                "camera_serial": "recalibrated-camera",
+                "depth_scale_m_per_unit": 0.002,
+                "point_cloud_table_plane_abcd_json": "[0.0,0.0,1.0,-0.2]",
+                "fingertip_config_json": json.dumps(fingertip),
+            }
+        )
+        geometry = self.root.attrs["camera_geometry"]
+        geometry["color"]["fx"] += 10.0
+        self.root.attrs["camera_geometry"] = geometry
+        self.assert_compatible(before, self.semantics())
+        del self.root.attrs["point_cloud_table_plane_abcd_json"]
+        self.assert_compatible(before, self.semantics())
+
+    def test_numeric_training_changes_still_fail(self):
+        import json
+
+        from dexmani_policy.datasets.real_policy_contract import RealPolicyContractError
+
+        before = self.semantics()
+        attrs = dict(self.root.attrs)
+        changes = {
+            "dt": attrs["dt"] * 2,
+            "joint_names": list(reversed(attrs["joint_names"])),
+            "finger_names": list(reversed(attrs["finger_names"])),
+            "rgb_channels": ["b", "g", "r"],
+            "tactile_sensor_ids": list(reversed(attrs["tactile_sensor_ids"])),
+            "tactile_axis_names": ["fz", "fy", "fx"],
+            "tactile_point_indices": list(reversed(attrs["tactile_point_indices"])),
+        }
+        config = json.loads(attrs["pointcloud_config_json"])
+        config["voxel_size_m"] *= 2
+        changes["pointcloud_config_json"] = json.dumps(config)
+        fingertip = json.loads(attrs["fingertip_config_json"])
+        fingertip["fingertip_link_names"] = list(
+            reversed(fingertip["fingertip_link_names"])
+        )
+        changes["fingertip_config_json"] = json.dumps(fingertip)
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                self.root.attrs.put(attrs)
+                self.root.attrs[key] = value
+                with self.assertRaises(ValueError):
+                    self.assert_compatible(before, self.semantics())
+        for key, value in {
+            "fingertip_points_unit": "mm",
+            "fingertip_points_frame": "hand",
+            "eef_pose_frame": "world",
+            "eef_pose_components": "position+quaternion",
+            "contact_force_unit": "N",
+            "tactile_force_unit": "N",
+            "action_ee_frame": "world",
+            "action_ee_components": "position+quaternion",
+            "obs_alignment": "obs_after_action",
+            "state_alignment": "camera_frame",
+        }.items():
+            with self.subTest(key=key):
+                self.root.attrs.put(attrs)
+                self.root.attrs[key] = value
+                with self.assertRaises(RealPolicyContractError):
+                    self.semantics()
+
+
 if __name__ == "__main__":
     unittest.main()

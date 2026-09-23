@@ -100,7 +100,7 @@ config
 - Current camera calibration, serial, intrinsics, depth scale, table plane and hand mounting come from Real at deployment time. They are never compared with training calibration.
 - Export reads only checkpoint-owned training facts; it does not reopen training Zarr. Missing concrete joint/config facts fail clearly, with no legacy guessing.
 - Artifact metadata is plain. Export performs structural validation and weights-only reload before atomic selector publication. `load_experiment` strictly restores model and normalizer; Real warms up before `policy_ready`.
-- Keep training checkpoint `simple.v3` and strict training-resume checks. Dataset extraction occurs at training time; historical geometry remains part of the training snapshot where it affects training inputs.
+- Keep training checkpoint `simple.v3` and strict training-resume checks. Dataset extraction occurs at training time; strict resume captures tensor definitions and trained preprocessing, while historical calibration and implementation descriptions remain provenance in Real raw/Zarr metadata.
 - Run `python -m dexmani_policy.deployment.smoke_test` for offline deployment regression coverage with both repositories installed. Do not create a `tests/` directory.
 
 ## Project Skills
