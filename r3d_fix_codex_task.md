@@ -2,331 +2,644 @@
 
 ## 1. 任务目标
 
-在 **不扩大研究范围、不引入生产级工程化机制、不改变其他 baseline 方法语义** 的前提下，修复当前 `dexmani_policy` 中已确认会影响博士论文实验正确性或公平性的 R3D / point-cloud augmentation 问题。
+本任务面向 PhD thesis experimental codebase。目标不是做生产级防御，而是保证：
 
-本任务只解决以下三类事项：
+1. R3D baseline 的有效模型结构与官方 released implementation 一致；
+2. thesis 中不同 point-cloud policies 在清晰、可解释的 R3D-derived augmentation protocol 下比较；
+3. 保留各 policy 的 architecture-native sampling、tokenization 和 decoder 语义；
+4. 对官方论文与官方代码发生 source drift 的地方做显式决策，不把论文文字或代码 quirks 机械覆盖到实验实现。
 
-1. **R3D 方法本体修正**：恢复官方 R3D 有效计算图中的 proprio/state latent width。
-2. **论文主实验的公共 point-cloud sensor augmentation 对齐**：统一 XYZ / RGB BCS / proprio noise recipe，并移除不属于 R3D recipe 的 hue jitter。
-3. **R3D fidelity 修正**：R3D 对 normalization 后的完整 XYZRGB point cloud 做官方一致的范围 clamp。
+本任务只处理经过官方 R3D 最新论文与当前公开代码共同审查后确认的事项：
 
-任务定位是 **PhD thesis experimental codebase**。优先保证方法语义、实验可解释性和比较公平性；不要为未来错误配置增加额外 guardrail、assertion、registry、测试框架或抽象层。
+- R3D-01：R3D proprio/state latent width 由错误的 64 恢复为 256；
+- AUG-01：所有 thesis 主 point-cloud configs 移除非 R3D recipe 的 hue jitter；
+- AUG-02：将 R3D 的完整增强思想迁移到适合的 point-cloud baselines：
+  - 所有策略共享 XYZ noise、RGB brightness/contrast/saturation、proprio noise；
+  - FPS randomization 仅作用于实际存在的 FPS sampling site；
+  - DP3、DQ-RISE、SAT 增加官方语义的 R3D point dropout；
+  - R3D 继续使用内部官方 point dropout，避免 double-drop；
+  - ManiFlow 明确不启用 point dropout，作为当前 dense-token 架构的结构性例外；
+- R3D-02：R3D 对 normalization 后完整 XYZRGB tensor 做官方一致的 clamp。
 
----
-
-## 2. 当前事实与参考基线
-
-执行前先读取当前仓库实际代码，不要仅依赖本文。本文制定方案时核对的基线为：
-
-- DexMani Policy: `haoyangzhanglab/dexmani_policy@497c49dc816dd05ae22cd147a6ff0abd56ce9d46`
-- R3D official: `Wushr-Lance/R3D-Policy@e637c0148376ddc4b5e667fa8f8e108cb8ff7a85`
-- SAT official: `XiaohanLei/SAT@cd7c0a8877d6090a9a85ebee0ceca961830b3654`
-- ManiFlow official: `geyan21/ManiFlow_Policy@ef2f116f1f90163ed36e657b8c5503740bb468af`
-- DP3 official: `YanjieZe/3D-Diffusion-Policy@47385d9d6f5bde3f2ebdf2400ecb8261cc9e6b97`
-
-关键已确认事实：
-
-- 官方 R3D 的有效 `DP3Encoder` 路径会把 state MLP 改为 `(64, pointcloud_encoder_cfg['embed_dim'])`；当前 R3D `embed_dim=256`，因此 state branch 应为 `state_dim -> 64 -> 256`。
-- DexMani 当前 R3D config / R3D 专属构造器默认值仍为 `state_out_dim=64`，这是模型结构偏差，不是 embodiment adaptation。
-- 官方 R3D color augmentation 为 brightness / contrast / saturation，不包含 hue。
-- 官方 R3D 在 normalization 后对完整 point-cloud tensor 做 `[-1-1e-6, 1+1e-6]` clamp；DexMani 当前仅 clamp XYZ。
-- SAT 官方方法本身将 local patch tokens 视为 unordered set，存在独立 FPS / local-token random shuffle 后再进行 temporal feature fusion；**不要把 lack of cross-frame patch correspondence 当作本任务 bug 修复**。
-- ManiFlow 的 visual token 数本身是 task-dependent hyperparameter；**不要在本任务中修改当前 DexMani ManiFlow 的 1024-token setting**。
-- R3D point dropout 与 FPS 属于 architecture/method-specific mechanism，不属于本任务需要强制统一的公共 sensor augmentation。
+不要扩大到 optimizer、training budget、EMA、normalizer、recording/Zarr、生产式 assertion 或大规模测试框架。
 
 ---
 
-## 3. 最终实验协议
+## 2. Source of Truth 与版本优先级
 
-论文主实验中，以下 **continuous sensor-level augmentation** 对所有单任务 point-cloud policies 保持一致：
+执行前仍应读取当前仓库实际调用链。本文审查时采用以下参考：
 
-```text
-XYZ noise:
-    Gaussian std = 0.002
-    clip = ±0.004
-    prob = 1.0
+- DexMani Policy baseline before implementation:
+  haoyangzhanglab/dexmani_policy@497c49dc816dd05ae22cd147a6ff0abd56ce9d46
+- Current task-document baseline:
+  haoyangzhanglab/dexmani_policy@a0849031431be0575859a9ba129c185bcb08f66b
+- R3D official code:
+  Wushr-Lance/R3D-Policy@e637c0148376ddc4b5e667fa8f8e108cb8ff7a85
+- R3D latest paper:
+  arXiv:2604.15281 v2, revised 2026-09-20
+- R3D project page:
+  https://r3d-policy.github.io/
+- SAT official:
+  XiaohanLei/SAT@cd7c0a8877d6090a9a85ebee0ceca961830b3654
+- ManiFlow official:
+  geyan21/ManiFlow_Policy@ef2f116f1f90163ed36e657b8c5503740bb468af
+- DP3 official:
+  YanjieZe/3D-Diffusion-Policy@47385d9d6f5bde3f2ebdf2400ecb8261cc9e6b97
 
-joint/proprio noise:
-    Gaussian std = 0.0002
-    clip = ±0.0004
-    prob = 1.0
+### 2.1 优先级
 
-point-cloud RGB:
-    brightness = 0.125
-    contrast = 0.5
-    saturation = 0.5
-    hue = 0.0
-    prob = 1.0
-```
+遇到 R3D source drift 时使用：
 
-适用 configs：
+1. 最新 arXiv v2：用于解释论文的科学结论、augmentation ablation、作者当前方法表述；
+2. 官方 released GitHub code/config：用于确定当前可执行 baseline 的真实计算图和具体实现语义；
+3. project page / README：用于概览，不覆盖前两者。
 
-- `r3d.yaml`
-- `dp3.yaml`
-- `dqrise.yaml`
-- `sat.yaml`
-- `maniflow.yaml`
-
-注意：
-
-- 这里统一的是 **sensor-level recipe**，不是要求所有模型拥有完全相同的 sampling / tokenization / point-dropout。
-- R3D 保留其官方 encoder-level random point dropout。
-- DP3 / DQ-RISE / SAT / ManiFlow **不要新增 dataset-level R3D point dropout**。
-- FPS 只在模型实际存在 sampling site 时生效；不要人为执行 `1024 -> 1024` FPS。
-- 现有 train-random / eval-deterministic FPS 语义保持不变。
+原因：project page 当前仍保留部分 v1 叙述，而 GitHub main HEAD 早于 2026-09-20 的 v2 论文修订。
 
 ---
 
-## 4. 必须修改
+## 3. 本轮审查确认的官方事实
+
+### 3.1 R3D state branch
+
+官方 DP3Encoder 虽然函数形参仍写有 state_mlp_size=(64, 64)，但有效初始化路径立即覆盖为：
+
+    state_mlp_size = (64, pointcloud_encoder_cfg["embed_dim"])
+
+官方 R3D config 的 embed_dim=256，因此实际 proprio/state branch 为：
+
+    state_dim -> 64 -> 256
+
+DexMani 当前 R3D 的 state_out_dim=64 是真实结构偏差，不是 19-DoF embodiment adaptation。
+
+### 3.2 R3D augmentation：最新 v2 的结论
+
+R3D v2 将以下五类 augmentation 作为系统性研究对象：
+
+1. FPS randomization；
+2. point-cloud RGB color jitter；
+3. point-cloud XYZ Gaussian noise；
+4. robot/proprio state Gaussian noise；
+5. random point dropout。
+
+v2 的结论是：单独每一种 augmentation 都有帮助，组合全部 augmentation 整体最好，困难任务收益尤其明显。
+
+论文 Appendix A.2 给出的关键参数：
+
+    FPS randomization:
+        randomize the FPS input/order during training
+
+    RGB color jitter:
+        brightness = [-0.125, 0.125]
+        contrast   = [0.5, 1.5]
+        saturation = [0.5, 1.5]
+        no hue augmentation
+
+    XYZ noise:
+        Gaussian sigma = 0.002
+
+    robot/proprio noise:
+        Gaussian sigma = 0.0002
+
+    point dropout:
+        r ~ Uniform(0, 0.8) for each training sample
+
+官方 released code进一步给出了 fixed-length point-dropout realization：
+
+    dropout_ratio = rand() * 0.8
+    drop_mask = rand(N) <= dropout_ratio
+    dropped_points = first_point
+
+即：
+
+- 每个 sample 独立采样 r ~ U(0, 0.8)；
+- 每个 point 独立 Bernoulli drop；
+- 被 drop 的完整 XYZRGB point 用该 sample 的第一个 point 替换；
+- 不是固定比例 drop；
+- 不是从 kept points 随机重采样。
+
+### 3.3 R3D color recipe
+
+官方 dataset 的 apply_color_jitter 仅包含：
+
+- additive brightness；
+- contrast around flattened RGB mean；
+- BT.601 saturation；
+- final RGB clip to [0, 1]。
+
+官方 R3D config 没有 hue 参数。
+
+因此 thesis 主 point-cloud recipe 统一 hue=0.0。
+
+PointColorJitter 组件本身可以继续保留 hue 能力供其他 recipe 使用。
+
+### 3.4 R3D full point-cloud clamp
+
+官方 R3D policy 在 normalizer 之后、encoder 之前对完整 normalized point-cloud tensor执行：
+
+    torch.clamp(point_cloud, min=-1-1e-6, max=1+1e-6)
+
+不是只 clamp XYZ。
+
+DexMani 只需要在 R3D path 恢复该语义；不把它重新提升成所有 policy 的全局 BaseAgent 行为。
+
+### 3.5 FPS randomization
+
+官方 released code包括：
+
+- random start；
+- random_noise_scale=0；
+- sampled-index output shuffle；
+- 真正有 subset sampling 时改变 selected points。
+
+DexMani 继续采用：
+
+    train: randomized FPS
+    eval: deterministic FPS
+
+这是 thesis evaluation 的有意适配；不要为了逐行复制官方 code 而恢复 stochastic eval。
+
+不要把 preprocess_point_cloud 中 N > K 的条件改成 N >= K。
+
+当 N == K 时 FPS 只会选回全部点，最多改变顺序，不构成有效 subset augmentation。
+
+---
+
+## 4. 必须显式保留的 paper–code source drift
+
+这些是审查结论，但不是本任务要求修改的代码。
+
+### SRC-01 — proprio tokenization
+
+R3D v2 Sec. 4.5 用三类 token 描述 decoder：
+
+- geometric tokens；
+- independent proprioception tokens；
+- action tokens。
+
+但当前 released GitHub config 明确使用：
+
+    cat_on_token: false
+
+当前 released code 在该配置下会：
+
+    point token 256
+    + broadcast proprio feature 256
+    = 512-d observation feature per spatial token
+
+而不是把 proprio 作为独立 sequence token。
+
+本任务决策：继续跟随官方当前可执行 config/code，保持 cat_on_token=false 的现有 DexMani 语义。
+
+理由：
+
+- 这是当前 released reproduction config 的真实有效路径；
+- v2 论文发布时间晚于当前 main code；
+- 直接切换到 separate proprio tokens 会改变 baseline architecture；
+- 当前官方 cat_on_token=true 分支未经本任务验证，不能根据论文文字静默替换已发布 baseline。
+
+如果 thesis 最终需要声称严格实现 v2 文本中的三类 token，应作为单独实验/任务处理，不混入本轮 fidelity fix。
+
+### SRC-02 — BatchNorm / EMA revision
+
+R3D v2 已修正早期结论：
+
+- 问题并不是 BatchNorm 本身无法 scaling；
+- 根因是 EMA rollout model 没有同步 BN running buffers；
+- 官方最新 code 的 EMAModel 已对 BatchNorm buffers/params 做同步；
+- 修复后 BN 与 LN 可达到相近表现；
+- R3D 主配置仍使用 LayerNorm，主要因为 pretrained Point-SAM / transformer encoder 本身采用 LN。
+
+本任务决策：不修改 DexMani EMA。
+
+原因：
+
+- 当前 R3D 主 baseline 是 LayerNorm；
+- BN running-stat EMA问题在默认路径不 active；
+- 如果未来复现 R3D BN/LN ablation，再单独实现 BN-buffer sync。
+
+任务书和后续论文叙述不得继续写成“R3D 证明 BN 本身导致 scaling failure”。
+
+---
+
+## 5. Thesis 主实验的最终 R3D-Aug protocol
+
+对于以下主 point-cloud policies：
+
+- R3D
+- DP3
+- DQ-RISE
+- SAT
+- ManiFlow
+
+统一定义公共 sensor augmentation：
+
+    XYZ noise:
+        Gaussian std = 0.002
+        clip = ±0.004
+        prob = 1.0
+
+    joint/proprio noise:
+        Gaussian std = 0.0002
+        clip = ±0.0004
+        prob = 1.0
+
+    RGB:
+        brightness = 0.125
+        contrast   = 0.5
+        saturation = 0.5
+        hue        = 0.0
+        prob       = 1.0
+
+architecture-sensitive augmentation matrix：
+
+| Policy | R3D-style point dropout | FPS randomization |
+| --- | --- | --- |
+| R3D | Yes — existing encoder-level official path | Yes — internal 1024→512 |
+| DP3 | Yes — dataset-level exact R3D semantics | only when an actual FPS/downsampling site exists |
+| DQ-RISE | Yes — dataset-level exact R3D semantics | only when an actual FPS/downsampling site exists |
+| SAT | Yes — dataset-level exact R3D semantics | Yes — actual patch FPS |
+| ManiFlow | No — intentional architecture-aware exception | only when N_raw > num_points; current 1024→1024 path is inactive |
+
+### 5.1 为什么 ManiFlow 是例外
+
+当前 DexMani ManiFlow 是：
+
+    1024 points
+    -> PointNetDense
+    -> 1024 dense context tokens
+    -> DiTX cross-attention
+
+当前 stored point count 与 num_points 都为 1024，因此没有真实的 pre-token FPS bottleneck。
+
+如果机械复制官方 R3D anchor-replacement dropout，最高约 80% dense tokens 可能变成同一首点 token。对 softmax cross-attention，重复 identical K/V 会改变 token multiplicity / attention measure，不等价于简单删除观测点。
+
+因此：
+
+    ManiFlow:
+        common sensor augmentation
+        + architecture-native FPS if active
+        + NO R3D point dropout
+
+这是本 thesis benchmark 的显式结构适配，不声称是 ManiFlow 官方 recipe。
+
+### 5.2 为什么 DP3 / DQ-RISE / SAT 可以使用 R3D point dropout
+
+- DP3：PointNet-style pointwise encoding + global max aggregation；重复点 multiplicity 不会像 dense attention 那样线性放大 softmax mass。
+- DQ-RISE 默认 iDP3 / MultiStagePointNet：同样以 pointwise transforms + global max aggregation为主。
+- SAT：dropout 后还有真实 FPS / local grouping；与 R3D 的 dropout -> FPS -> local patches 结构更接近。
+
+这是将 R3D v2 的完整 augmentation lesson 用作统一 thesis training recipe，而不是声称这些 baseline 的原论文默认使用该 dropout。
+
+论文表述应类似：
+
+All point-cloud baselines are trained under our unified R3D-derived augmentation protocol, with architecture-aware exceptions where a transform changes token semantics.
+
+不要写成“完全复现每个 baseline 的 native training augmentation”。
+
+---
+
+## 6. 必须修改
 
 ### R3D-01 — 恢复 R3D state latent width = 256
 
 修改：
 
-- `dexmani_policy/configs/r3d.yaml`
-- `dexmani_policy/agents/core/r3d.py`
-- `dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py`
+- dexmani_policy/configs/r3d.yaml
+- dexmani_policy/agents/core/r3d.py
+- dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py
 
 要求：
 
-1. `r3d.yaml`
-   ```yaml
-   state_out_dim: 256
-   ```
+    # r3d.yaml
+    state_out_dim: 256
 
-2. `R3DAgent.__init__` 的 R3D-specific 默认值：
-   ```python
-   state_out_dim: int = 256
-   ```
+    # R3DAgent.__init__
+    state_out_dim: int = 256
 
-3. `R3DObsEncoder.__init__` 的 R3D-specific 默认值：
-   ```python
-   state_out_dim: int = 256
-   ```
+    # R3DObsEncoder.__init__
+    state_out_dim: int = 256
 
-不要修改共享 `create_state_mlp` 的默认值，也不要改 DP3 / SAT / ManiFlow / DQ-RISE 的 state width。
+不要修改共享 create_state_mlp 默认值，也不要改变其他 policies 的 state width。
 
-预期 R3D 主实验有效结构：
+预期有效结构：
 
-```text
-joint_state 19
-    -> Linear(19, 64)
-    -> activation
-    -> Linear(64, 256)
+    joint_state 19
+        -> Linear(19, 64)
+        -> activation
+        -> Linear(64, 256)
 
-point token 256 + state 256 = obs feature 512
-512 + pc spatial PE 256 = R3D obs token storage dim 768
+    point feature 256 + broadcast state 256 = 512
+    pc spatial PE 256 remains separate in current R3D backbone contract
 
-OneWayTransformer 对 feature / PE 按现有实现继续处理；
-不要借此重构 token layout。
-```
+注意：保持当前 released-code-equivalent cat_on_token=false 语义，不把 state 改为独立 token。
 
----
-
-### AUG-01 / AUG-02 — 统一公共 sensor augmentation，关闭 hue
+### AUG-01 — 所有主 point-cloud configs 关闭 hue
 
 修改：
 
-- `dexmani_policy/configs/r3d.yaml`
-- `dexmani_policy/configs/dp3.yaml`
-- `dexmani_policy/configs/dqrise.yaml`
-- `dexmani_policy/configs/sat.yaml`
+- dexmani_policy/configs/r3d.yaml
+- dexmani_policy/configs/dp3.yaml
+- dexmani_policy/configs/dqrise.yaml
+- dexmani_policy/configs/sat.yaml
 
-将：
+将 hue: 0.08 改为 hue: 0.0。
 
-```yaml
-hue: 0.08
-```
+maniflow.yaml 当前已经 hue: 0.0，保持。
 
-改为：
+五个 config 的 common sensor values 应保持：
 
-```yaml
-hue: 0.0
-```
+    augmentation_cfg:
+      pc:
+        coord_noise: {noise_std: 0.002, prob: 1.0}
+        color: {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+      state:
+        noise: {noise_std: 0.0002, prob: 1.0}
 
-`maniflow.yaml` 当前已经是 `hue: 0.0`，保持不变。
+不要为此新增 Hydra inheritance/registry abstraction。
 
-同时核对上述五个 point-cloud configs 的公共 sensor augmentation 数值均为：
+### AUG-02 — 恢复官方语义的 R3D point dropout，并用于 DP3 / DQ-RISE / SAT
 
-```yaml
-pc:
-  coord_noise: {noise_std: 0.002, prob: 1.0}
-  color: {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
-state:
-  noise: {noise_std: 0.0002, prob: 1.0}
-```
+修改：
 
-若数值已经一致，不要为了“共享配置”进行 Hydra 抽象或重构；直接保持显式 config，方便论文实验阅读和 override。
+- dexmani_policy/datasets/augmentation.py
+- dexmani_policy/configs/dp3.yaml
+- dexmani_policy/configs/dqrise.yaml
+- dexmani_policy/configs/sat.yaml
 
-更新与新语义冲突的局部注释，例如 R3D config 中不应继续描述 `contrast/saturation/hue` 为官方 R3D color recipe。
+#### 6.2.1 修改 generic PointDropout
 
----
+当前 generic PointDropout：
+
+- fixed dropout_ratio=0.3；
+- 精确 drop int(N * ratio)；
+- dropped positions 从 kept points 随机 resample。
+
+这不是官方 R3D point-dropout semantics，而且当前仓库没有主 config 使用它。
+
+改为简洁的官方语义：
+
+    class PointDropout(Aug):
+        __slots__ = ("max_dropout_ratio",)
+
+        def __init__(self, max_dropout_ratio=0.8, prob=1.0):
+            if not 0 <= max_dropout_ratio <= 1:
+                raise ValueError("max_dropout_ratio must be between 0 and 1")
+            super().__init__(prob=prob)
+            self.max_dropout_ratio = float(max_dropout_ratio)
+
+        def _augment(self, x):
+            if self.max_dropout_ratio <= 0:
+                return
+
+            T, N = x.shape[:2]
+            if N == 0:
+                return
+
+            for t in range(T):
+                ratio = np.random.uniform(0.0, self.max_dropout_ratio)
+                drop_mask = np.random.random(N) <= ratio
+                if np.any(drop_mask):
+                    anchor = x[t, 0].copy()
+                    x[t, drop_mask] = anchor
+
+语义要求：
+
+- 每个 observation frame/sample 独立采样 ratio；
+- ratio 位于 [0, 0.8]；
+- per-point Bernoulli mask；
+- replacement 是完整首点 XYZRGB；
+- 不做 zero fill；
+- 不做 resample-kept；
+- 不要求精确 drop 固定数量。
+
+BaseDataset 先切到 obs_horizon 再做 augmentation；T-frame 独立处理等价于官方 encoder 将 B*To flatten 后逐 sample dropout 的语义。
+
+dataset-level dropout 在 normalization 前执行。由于该操作只是复制完整 point vector，channel-wise affine normalization 与 point-copy 可交换，因此无需把 DP3 / DQ-RISE / SAT 的 dropout逻辑分别塞进 encoder。
+
+#### 6.2.2 DP3 / DQ-RISE / SAT config
+
+在这三个 config 的 augmentation_cfg.pc 中加入：
+
+    dropout: {max_dropout_ratio: 0.8, prob: 1.0}
+
+保持 registry 原有顺序即可：
+
+    coord noise
+    -> color jitter
+    -> optional color noise
+    -> point dropout
+    -> normalization later
+
+官方 R3D 也是 sensor augmentation 后、encoder 内再 point dropout，因此该顺序语义一致。
+
+#### 6.2.3 R3D 不添加 dataset dropout
+
+r3d.yaml 不得添加 augmentation_cfg.pc.dropout。
+
+R3D 已在 Uni3DPointcloudEncoder.forward 中：
+
+    if training:
+        random_point_dropout(..., max_dropout_ratio=0.8)
+
+保留该路径，避免 double augmentation。
+
+#### 6.2.4 ManiFlow 不添加 dropout
+
+maniflow.yaml 保持没有 augmentation_cfg.pc.dropout。
+
+不要为 ManiFlow 发明 resample-kept / mask-attention 等新机制；如果以后专门研究 dense-token dropout，再作为独立 ablation。
 
 ### R3D-02 — R3D 对 normalization 后完整 XYZRGB 做 clamp
 
 修改：
 
-- `dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py`
+- dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py
 
-当前语义：
+从：
 
-```python
-pc = pc.clone()
-pc[..., :3].clamp_(min=-1 - 1e-6, max=1 + 1e-6)
-```
+    pc = pc.clone()
+    pc[..., :3].clamp_(min=-1 - 1e-6, max=1 + 1e-6)
 
-改为官方 R3D 一致的完整 normalized point cloud clamp：
+改为：
 
-```python
-pc = pc.clone()
-pc.clamp_(min=-1 - 1e-6, max=1 + 1e-6)
-```
+    pc = pc.clone()
+    pc.clamp_(min=-1 - 1e-6, max=1 + 1e-6)
 
-同时更新附近注释，准确表达：
+注释应准确说明：
 
-- 此处输入已经经过 policy normalizer；
-- clamp 作用于 normalized XYZRGB；
-- RGB raw 值通常来自 `[0,1]`，正常 normalization 后位于 `[-1,1]` 时 clamp 是恒等操作；
-- 该 clamp 只保留在 R3D encoder boundary，不要重新提升为所有 point-cloud policy 的全局行为。
+- 输入已由 policy normalizer normalize；
+- official R3D released policy clamp 的是完整 normalized point cloud；
+- raw RGB 通常在 [0,1]，正常 normalized RGB 已处于 [-1,1] 时该操作是恒等；
+- clamp 只保留在 R3D path，不重新放回 shared BaseAgent。
 
-保持 `clone()`，避免原地修改调用方持有的 normalized observation tensor。
+保持 clone。
 
----
-
-### Existing smoke assertion — 只同步已有测试的过时实验假设
+### Existing smoke — 只同步现有实验断言
 
 修改：
 
-- `dexmani_policy/agents/core/maniflow_smoke_test.py`
+- dexmani_policy/agents/core/maniflow_smoke_test.py
 
-只调整现有 `AugmentationTest.test_shared_policy_dataset_augmentation` 中关于 hue 的旧断言：
+更新 AugmentationTest.test_shared_policy_dataset_augmentation：
 
-- 五个 configs 都应断言 `hue == 0.0`。
-- ManiFlow 继续断言没有 dataset-level `dropout`。
-- **不要新增一套 R3D fidelity test framework。**
+- 五个主 PC configs：hue == 0.0；
+- dp3、dqrise、sat：
+  - 存在 dataset dropout；
+  - max_dropout_ratio == 0.8；
+- r3d、maniflow：
+  - dataset config 中没有 dropout；
+- R3D internal dropout 不需要在这里复制一套 framework 验证。
 
-保留 `PointColorJitter` 对 hue 功能本身的单元检查（`test_hue_and_clipping_remain_available`）；组件可以支持 hue，只是 thesis point-cloud main recipe 不使用 hue。
+现有 PointColorJitter hue-component test 保留，因为组件仍支持其它 recipe。
 
----
+对 PointDropout 的修改属于算法语义变化，可在现有 AugmentationTest 内增加一个很小的定向检查，确认：
 
-## 5. 明确禁止修改
+- sampled ratio不是固定 0.3；
+- dropped rows使用 first-point replacement；
+- XYZRGB整行一起 replacement。
 
-本任务不得顺带处理以下事项：
-
-- 不给 DP3 / DQ-RISE / SAT / ManiFlow 增加 R3D point dropout。
-- 不修改 `datasets/augmentation.py::PointDropout` 的 API 或语义。
-- 不做 SAT temporal patch matching / Hungarian matching / shared FPS centers。
-- 不关闭 SAT 的 `use_shuffle_output` 或 `use_random_start`。
-- 不改变 R3D / SAT / PointNext 的现有 FPS randomization。
-- 不把 `preprocess_point_cloud` 的条件从 `N > K` 改成 `N >= K`。
-- 不强制 DP3 / DQ-RISE / ManiFlow 执行无效的 `1024 -> 1024` FPS。
-- 不修改 ManiFlow `num_points=1024` / dense-token budget。
-- 不修改 optimizer、gradient clipping、batch size、训练步数、LR scheduler、EMA。
-- 不修改 shared normalizer 的 near-constant-dimension 公式。
-- 不修改 auxiliary EE 路径。
-- 不新增 config fail-fast assertion、pretrained key coverage gate、schema constraint 等生产级防御机制。
-- 不修改 recording / Zarr schema。
-- 不新增 `tests/` 目录。
-- 不重构 augmentation registry / dataset pipeline。
-- 不修改 README / AGENTS / docs，除非任务执行中发现本次改动导致现有局部说明直接错误；即使如此优先只修局部代码注释。
+不要新建 tests 目录，不要创建新的测试框架。
 
 ---
 
-## 6. 推荐执行顺序
+## 7. 明确保持不变
 
-按下面顺序执行，避免无关探索和重复运行：
+本任务不得顺带修改：
 
-1. 阅读：
-   - `AGENTS.md`
-   - 五个 point-cloud configs
-   - `agents/core/r3d.py`
-   - `agents/obs_encoder/pointcloud/r3d_obs_encoder.py`
-   - `agents/core/maniflow_smoke_test.py::AugmentationTest`
-2. 检查工作区现有改动，绝不覆盖用户未提交修改。
+- cat_on_token=false 的当前 R3D released-code-equivalent 语义；
+- SAT temporal patch matching；
+- SAT use_shuffle_output / use_random_start；
+- R3D / SAT / PointNext 当前真实 FPS sites；
+- eval deterministic FPS；
+- preprocess_point_cloud 的 N > K 条件；
+- DP3 / DQ-RISE / ManiFlow 的无效 1024 -> 1024 FPS；
+- ManiFlow num_points=1024 / dense-token budget；
+- ManiFlow point dropout；
+- optimizer / grad clipping / batch size / total train steps / scheduler；
+- EMA implementation；
+- BN/LN ablation；
+- shared normalizer near-constant branch；
+- auxiliary EE；
+- recording / raw episode / Zarr schema；
+- pretrained key coverage gate；
+- config fail-fast production assertions；
+- README / AGENTS / frozen docs；
+- augmentation architecture abstraction / Hydra refactor。
+
+也不要根据 R3D v2 的 separate proprio-token 文字直接改 architecture。
+
+---
+
+## 8. 推荐执行顺序
+
+1. 读取 AGENTS.md 与当前 diff，保护用户已有改动。
+2. 核对当前五个 PC configs。
 3. 完成 R3D-01。
-4. 完成 AUG-01 / AUG-02。
-5. 完成 R3D-02。
-6. 同步已有 augmentation smoke assertion。
-7. 查看最终 diff；若出现本任务之外的文件，先判断并撤销无关改动。
-8. 运行最小验证，不启动训练或 rollout。
-
-不要在实施前重新设计整个 point-cloud pipeline；本文中的方法决策已经完成。
-
----
-
-## 7. 最小验证
-
-遵循 `AGENTS.md`，只执行与本任务直接相关的低成本验证。
-
-### 7.1 静态检查
-
-```bash
-git diff --check
-
-conda run --no-capture-output -n policy python -m py_compile \
-  dexmani_policy/agents/core/r3d.py \
-  dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py \
-  dexmani_policy/agents/core/maniflow_smoke_test.py
-```
-
-### 7.2 受影响 config resolve
-
-```bash
-for cfg in r3d dp3 dqrise sat maniflow; do
-  conda run --no-capture-output -n policy \
-    python dexmani_policy/smoke_test.py --config-only "$cfg" || exit 1
-done
-```
-
-### 7.3 现有 augmentation 定向 smoke
-
-```bash
-conda run --no-capture-output -n policy \
-  python -m unittest \
-  dexmani_policy.agents.core.maniflow_smoke_test.AugmentationTest
-```
-
-### 7.4 R3D model smoke
-
-由于修改了 R3D encoder / constructor，在环境具备依赖时再运行：
-
-```bash
-conda run --no-capture-output -n policy \
-  python dexmani_policy/smoke_test.py r3d
-```
-
-如果因 GPU、数据、Uni3D 权重或外部环境缺失无法执行，明确报告 **NOT VERIFIED**；不要为了让 smoke 通过而改变模型逻辑。
-
-不要启动完整训练、DDP、仿真 rollout 或视频评测。
+4. 完成 AUG-01。
+5. 将 generic PointDropout 改成 official R3D semantics。
+6. 给 DP3 / DQ-RISE / SAT 增加 dataset dropout；确认 R3D / ManiFlow 不加。
+7. 完成 R3D-02。
+8. 同步现有 AugmentationTest。
+9. 查看最终 diff，撤销 scope 外改动。
+10. 只做最小验证，不启动完整训练、DDP、rollout、视频。
 
 ---
 
-## 8. 验收标准
+## 9. 最小验证
 
-完成后必须同时满足：
+遵循 AGENTS.md。
 
-1. `r3d.yaml` 的 `state_out_dim == 256`。
-2. `R3DAgent` 与 `R3DObsEncoder` 的 R3D-specific 默认 `state_out_dim == 256`。
-3. `r3d/dp3/dqrise/sat/maniflow` 五个主 point-cloud configs 的公共 sensor augmentation 数值一致，且 `hue == 0.0`。
-4. R3D 仍只有官方 encoder-level point dropout；其他四个主 baseline 没有因本任务新增 dataset-level point dropout。
-5. R3D encoder 对 normalization 后的完整 point cloud tensor 做 `[-1-1e-6, 1+1e-6]` clamp。
-6. clamp 仍是 R3D-local 行为，没有泄漏到 shared BaseAgent / shared point-cloud preprocessing。
-7. SAT FPS / patch shuffle / temporal fusion 未改。
-8. ManiFlow token count / FPS behavior 未改。
-9. shared normalizer、optimizer、training protocol、recording/Zarr 均未改。
-10. 已有 augmentation smoke 的 hue expectation 与新主实验协议一致。
-11. 所有实际执行的验证结果在最终汇报中逐项标为 PASS / FAIL / NOT VERIFIED。
-12. 最终 diff 小而完整，除必要配置、R3D 专属实现和现有 smoke assertion 外不包含无关重构。
+### 9.1 静态检查
+
+    git diff --check
+
+    conda run --no-capture-output -n policy python -m py_compile       dexmani_policy/datasets/augmentation.py       dexmani_policy/agents/core/r3d.py       dexmani_policy/agents/obs_encoder/pointcloud/r3d_obs_encoder.py       dexmani_policy/agents/core/maniflow_smoke_test.py
+
+### 9.2 Config resolve
+
+    for cfg in r3d dp3 dqrise sat maniflow; do
+      conda run --no-capture-output -n policy         python dexmani_policy/smoke_test.py --config-only "$cfg" || exit 1
+    done
+
+### 9.3 现有 augmentation 定向 smoke
+
+    conda run --no-capture-output -n policy       python -m unittest       dexmani_policy.agents.core.maniflow_smoke_test.AugmentationTest
+
+### 9.4 R3D model smoke
+
+环境具备数据、权重和 GPU 时：
+
+    conda run --no-capture-output -n policy       python dexmani_policy/smoke_test.py r3d
+
+因环境缺失无法运行则报告 NOT VERIFIED；不要为通过 smoke 改模型。
 
 ---
 
-## 9. 最终汇报格式
+## 10. 验收标准
 
-实施完成后只需简洁汇报：
+实施后必须满足：
 
-1. **Changed**：按文件列出实际修改。
-2. **Preserved intentionally**：明确 point dropout、SAT FPS/shuffle、ManiFlow token budget、training protocol 未改。
-3. **Validation**：列出实际运行命令及 PASS / FAIL / NOT VERIFIED。
-4. **Remaining issues**：只有发现真实阻塞或与本文事实冲突时才列出；不要把已明确排除的工程化事项重新加入问题列表。
+1. r3d.yaml：state_out_dim == 256。
+2. R3DAgent / R3DObsEncoder R3D-specific default：state_out_dim == 256。
+3. 五个主 PC configs common sensor recipe 一致，全部 hue == 0.0。
+4. PointDropout 使用：
+   - max_dropout_ratio=0.8；
+   - per-sample/frame r ~ U(0, 0.8)；
+   - per-point Bernoulli mask；
+   - first-point full-row replacement。
+5. DP3 / DQ-RISE / SAT dataset config 启用该 dropout。
+6. R3D dataset config 无 dropout，继续只用现有 internal official dropout。
+7. ManiFlow dataset config 无 dropout。
+8. R3D normalized XYZRGB 全 tensor clamp 到 [-1-1e-6, 1+1e-6]。
+9. cat_on_token / SAT temporal semantics / FPS / ManiFlow token budget 未改。
+10. EMA / BN-LN / normalizer / optimizer / training protocol / recording-Zarr 未改。
+11. Existing augmentation smoke 与上述 protocol 一致。
+12. 最终 diff 不包含生产式 guardrails 或无关重构。
 
-如果当前代码已发生变化导致本文某个前提不再成立，优先以实际调用链为准，并在修改前确认该变化是否会改变论文实验语义；不要机械套用旧行号或旧注释。
+---
+
+## 11. 论文实验解释边界
+
+实施后，主实验应被描述为：
+
+Unified R3D-derived augmentation benchmark for point-cloud policies.
+
+不是：
+
+exact native training recipe reproduction for every baseline.
+
+需要明确：
+
+- R3D 是最接近 official full recipe 的 baseline；
+- DP3 / DQ-RISE / SAT 使用同一 R3D-derived augmentation，以减少 augmentation confound；
+- ManiFlow 对 point dropout 做 architecture-aware exception，因为当前 DexMani realization 直接保留 1024 dense context tokens；
+- FPS randomization 只在真正使用 FPS 采样的结构中有意义。
+
+如果 thesis 后续需要证明 point dropout 的迁移收益，可单独做小规模 ablation：
+
+    DP3 + common sensor aug
+    vs
+    DP3 + common sensor aug + R3D point dropout
+
+以及：
+
+    R3D full
+    vs
+    R3D without point dropout
+
+这些 ablation 不属于本次 Codex implementation task。
+
+---
+
+## 12. 最终汇报格式
+
+完成后简洁汇报：
+
+1. Changed：按文件列出实际改动；
+2. Protocol：列出五个 PC policies 最终 augmentation matrix；
+3. Preserved intentionally：明确 cat_on_token=false、SAT FPS/shuffle、ManiFlow no-dropout、EMA/training protocol 未改；
+4. Validation：所有实际命令标 PASS / FAIL / NOT VERIFIED；
+5. Remaining：只有真实阻塞或新的 paper/code contradiction 才列出。
+
+不要把已明确排除的工程化事项重新加入问题列表。
