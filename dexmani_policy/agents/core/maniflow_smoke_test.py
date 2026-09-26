@@ -10,7 +10,7 @@ import copy
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import numpy as np
 import hydra
@@ -26,7 +26,7 @@ from dexmani_policy.agents.position_encodings import NeRFSinusoidalPosEmb3D
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
 from dexmani_policy.common.pytorch_util import get_rng_state
-from dexmani_policy.datasets.augmentation import PointColorJitter
+from dexmani_policy.datasets.augmentation import PointColorJitter, PointDropout
 from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.smoke_test import load_config
 from dexmani_policy.training.build_utils import (
@@ -362,6 +362,23 @@ class AugmentationTest(unittest.TestCase):
             self.assertTrue(np.isfinite(pc).all())
             self.assertTrue(((pc[..., 3:] >= 0) & (pc[..., 3:] <= 1)).all())
 
+    def test_point_dropout_per_frame_first_point_replacement(self):
+        pc = np.arange(2 * 5 * 6, dtype=np.float32).reshape(2, 5, 6)
+        expected = pc.copy()
+        expected[0, [0, 1]] = pc[0, 0]
+        expected[1, [2, 3, 4]] = pc[1, 0]
+        with (
+            patch("numpy.random.uniform", side_effect=[0.2, 0.7]) as ratios,
+            patch("numpy.random.random", side_effect=[
+                np.array([0.1, 0.2, 0.25, 0.6, 0.95]),
+                np.array([0.9, 0.8, 0.7, 0.6, 0.5]),
+            ]) as masks,
+        ):
+            PointDropout()._augment(pc)
+        self.assertEqual(ratios.call_args_list, [call(0.0, 0.8), call(0.0, 0.8)])
+        self.assertEqual(masks.call_args_list, [call(5), call(5)])
+        np.testing.assert_array_equal(pc, expected)
+
     def test_shared_policy_dataset_augmentation(self):
         for name in ("maniflow", "dp3", "r3d", "sat", "dqrise"):
             with self.subTest(policy=name):
@@ -381,15 +398,22 @@ class AugmentationTest(unittest.TestCase):
                 self.assertFalse(np.shares_memory(pc, actual["point_cloud"]))
                 self.assertEqual(actual["point_cloud"].shape, pc.shape)
                 self.assertTrue(np.isfinite(actual["point_cloud"]).all())
-                self.assertLessEqual(np.abs(actual["point_cloud"][..., :3] - pc[..., :3]).max(), 0.004001)
+                xyz_reference = pc[..., :3]
+                if name in ("dp3", "dqrise", "sat"):
+                    # Dropout copies the augmented first row, including its XYZ noise.
+                    copied = (actual["point_cloud"] == actual["point_cloud"][:, :1]).all(axis=-1)
+                    xyz_reference = np.where(copied[..., None], pc[:, :1, :3], xyz_reference)
+                self.assertLessEqual(np.abs(actual["point_cloud"][..., :3] - xyz_reference).max(), 0.004001)
                 self.assertLessEqual(np.abs(actual["joint_state"]).max(), 0.000401)
                 self.assertGreater(np.abs(actual["point_cloud"][..., 3:] - pc[..., 3:]).max(), 1e-4)
                 self.assertTrue(((actual["point_cloud"][..., 3:] >= 0) & (actual["point_cloud"][..., 3:] <= 1)).all())
-                if name == "maniflow":
-                    self.assertEqual(cfg.dataset.augmentation_cfg.pc.color.hue, 0.0)
-                    self.assertNotIn("dropout", cfg.dataset.augmentation_cfg.pc)
+                self.assertEqual(cfg.dataset.augmentation_cfg.pc.color.hue, 0.0)
+                if name in ("dp3", "dqrise", "sat"):
+                    self.assertEqual(dict(cfg.dataset.augmentation_cfg.pc.dropout),
+                                     dict(max_dropout_ratio=0.8, prob=1.0))
+                    self.assertTrue(any(isinstance(a, PointDropout) for a in dataset.augmentors["point_cloud"]))
                 else:
-                    self.assertEqual(cfg.dataset.augmentation_cfg.pc.color.hue, 0.08)
+                    self.assertNotIn("dropout", cfg.dataset.augmentation_cfg.pc)
 
 
 class IntegrationTest(unittest.TestCase):

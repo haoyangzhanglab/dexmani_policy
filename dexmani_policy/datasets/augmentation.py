@@ -30,7 +30,7 @@ class Aug:
 
 
 class PointColorJitter(Aug):
-    """HSV color jitter for point cloud RGB channels (last 3 dims).
+    """RGB color jitter with optional HSV hue shifts (last 3 channels).
 
     Brightness is **additive** (R3D-Policy, 2026): ``rgb += delta`` where
     delta ∈ [-brightness, +brightness]. Contrast is centered on the current
@@ -66,7 +66,7 @@ class PointColorJitter(Aug):
         if x.shape[-1] < 6:
             return
 
-        # Only touch the RGB channels — (T,N,C) → flat (−1,3) for batch HSV.
+        # Flatten RGB across frames and points for shared color transforms.
         rgb = x[..., -3:].reshape(-1, 3)
 
         self._apply_brightness_ip(rgb)
@@ -170,44 +170,36 @@ class PointColorJitter(Aug):
 
 
 class PointDropout(Aug):
-    """Random point dropout with replacement — simulates sparse or partial scans.
+    """R3D point dropout with first-point full-row replacement.
 
-    Dropped points are replaced by randomly sampling from the *kept* points,
-    creating natural duplicate density variations that are harder for the
-    encoder to exploit than zero-filling or single-anchor replacement (R3D, 2026).
-
-    Each T frame gets an independent dropout mask.  Modifies the array
-    **in-place** on a pre-copied input.
+    Each frame independently samples a ratio uniformly in [0, max_dropout_ratio]
+    and drops points with independent Bernoulli draws. Dropped XYZRGB rows are
+    replaced by that frame's first point, preserving the point count. Modifies
+    the array **in-place** on a pre-copied input.
     """
 
-    __slots__ = ("dropout_ratio",)
+    __slots__ = ("max_dropout_ratio",)
 
-    def __init__(self, dropout_ratio=0.3, prob=1.0):
-        if not 0 <= dropout_ratio <= 1:
-            raise ValueError("dropout_ratio must be between 0 and 1")
+    def __init__(self, max_dropout_ratio=0.8, prob=1.0):
+        if not 0 <= max_dropout_ratio <= 1:
+            raise ValueError("max_dropout_ratio must be between 0 and 1")
         super().__init__(prob=prob)
-        self.dropout_ratio = dropout_ratio
+        self.max_dropout_ratio = float(max_dropout_ratio)
 
     def _augment(self, x):
-        # x: (T, N, C) — guaranteed to be a detached copy
-        if self.dropout_ratio == 0:
+        if self.max_dropout_ratio <= 0:
             return
+
         T, N = x.shape[:2]
-        if N <= 1:
-            return  # can't dropout from a point cloud with ≤ 1 point
-        n_drop = max(1, min(int(N * self.dropout_ratio), N - 1))
+        if N == 0:
+            return
 
-        # Boolean mask instead of np.setdiff1d (O(N) vs O(N log N)).
-        all_idx = np.arange(N)
         for t in range(T):
-            drop_idx = np.random.choice(all_idx, size=n_drop, replace=False)
-
-            keep_mask = np.ones(N, dtype=bool)
-            keep_mask[drop_idx] = False
-            keep_idx = all_idx[keep_mask]  # O(N) — no sort
-
-            fill_idx = np.random.choice(keep_idx, size=n_drop, replace=True)
-            x[t, drop_idx] = x[t, fill_idx]
+            ratio = np.random.uniform(0.0, self.max_dropout_ratio)
+            drop_mask = np.random.random(N) <= ratio
+            if np.any(drop_mask):
+                anchor = x[t, 0].copy()
+                x[t, drop_mask] = anchor
 
 
 class PointCoordNoiseAug(Aug):
@@ -218,8 +210,8 @@ class PointCoordNoiseAug(Aug):
     Noise is applied to **all** points (not a subset), matching the official
     R3D ``add_noise()`` behaviour.
 
-    The noise is clipped to ±clip_range (default 2σ) to guard against extreme
-    outliers that would push normalised coordinates outside [-1, 1].
+    Noise is clipped to ±clip_range (default 2σ) in raw coordinate units,
+    before policy normalization. This does not bound normalized coordinates.
 
     Modifies the first 3 channels **in-place** on a pre-copied input.
     """
@@ -247,10 +239,8 @@ class PointCoordNoiseAug(Aug):
 class PointColorNoiseAug(Aug):
     """Per-channel independent Gaussian noise on point cloud RGB.
 
-    Models camera sensor noise (per-pixel, per-channel), complementary to
-    ``PointColorJitter`` which models scene lighting changes (global HSV
-    transform).  Both are applied in R3D-Policy (2026) as independent
-    augmentation stages.
+    Optional sensor noise, separate from ``PointColorJitter`` lighting changes.
+    The thesis R3D-derived recipe leaves this augmentation disabled.
 
     Noise is clipped to ``±clip_range`` (default 2σ) and the result is
     clamped to [0, 1] to keep RGB values valid.
@@ -279,16 +269,9 @@ class PointColorNoiseAug(Aug):
 class StateNoiseAug(Aug):
     """Clipped Gaussian noise on proprioceptive state.
 
-    Noise is clipped to ``±clip_range`` (default 2σ) to guard against extreme
-    outliers that would push normalised state outside [-1, 1].
-
-    Reference: R3D-Policy (2026) ``add_noise()`` — all modalities
-    (xyz/rgb/agent_pos) use ``clip_range = 2 * noise_std``.
-
-    NOTE: This is data augmentation — it generates plausible sensor readings
-    by adding noise. It is NOT the same as modality dropout (``modality_dropout_probs``
-    in agent config), which zeros out the entire modality to force multi-modal
-    robustness.
+    Noise is clipped to ``±clip_range`` (default 2σ) in raw state units,
+    before policy normalization. This does not bound normalized state.
+    Agent-level modality dropout is a separate operation.
 
     Modifies the array **in-place** on a pre-copied input.
     """

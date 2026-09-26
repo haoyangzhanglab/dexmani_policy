@@ -49,8 +49,8 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # R3D-style XYZ/RGB/state augmentation; point dropout and hue jitter disabled.
-  # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
+  # Shared R3D-derived sensor recipe; no point dropout because repeated dense
+  # tokens change cross-attention weights through their multiplicity.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}

@@ -59,16 +59,11 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Data augmentation aligned to official R3D-Policy (r3d_maniskill.yaml).
-  # - XYZ noise: all points, always (prob=1.0), std=0.002, clip=2σ.
-  # - Color jitter: additive brightness + multiplicative contrast/saturation/hue, always.
-  # - RGB noise: disabled (official uses pc_rgb_noise_std=0).
-  # - Dataset-level point dropout: removed (official only does encoder-level random_point_dropout).
-  # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
+  # Shared R3D-derived sensor recipe; point dropout runs only in the encoder.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
-      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
@@ -86,7 +81,7 @@ agent:
 
   # Uni3D encoder
   state_dim: 19                      # joint_state from zarr is always 19-dim
-  state_out_dim: 64
+  state_out_dim: 256
 
   pc_encoder_config:
     pc_model: eva02_tiny_patch14_224

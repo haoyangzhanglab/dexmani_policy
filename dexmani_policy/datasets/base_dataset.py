@@ -22,11 +22,8 @@ from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import SequenceSampler, downsample_mask, get_val_mask
 
 # (yaml_section, augmentor_class, yaml_key, output_modality)
-# Note: RGB augmentation is intentionally NOT registered here.  It is applied
-# separately in _preprocess_rgb_cpu via the rgb_color_aug torchvision transform
-# (on torch.Tensor), not via numpy-based apply_augmentation.  Adding an 'rgb'
-# entry here would pass np.ndarray to a torch.Tensor-based augmentor and cause
-# an AttributeError on ``x.device`` access.
+# Point-cloud/state transforms run on NumPy arrays in this order.
+# Image augmentation runs separately on tensors in _preprocess_rgb_cpu.
 AUGMENTOR_REGISTRY = [
     ("pc", PointCoordNoiseAug, "coord_noise", "point_cloud"),
     ("pc", PointColorJitter, "color", "point_cloud"),
@@ -281,11 +278,10 @@ class BaseDataset(torch.utils.data.Dataset):
     def apply_augmentation(self, data):
         """Apply configured augmentors to the sample dict.
 
-        When multiple augmentors target the same modality (e.g. coord_noise +
-        dropout + color jitter on point_cloud), only the first one that triggers
-        makes a defensive ``.copy()`` — subsequent triggers modify the same copy
-        in-place.  This saves 1-2 redundant full-array copies per augmented
-        sample compared to the old per-augmentor copy pattern.
+        Augmentors run in registry order: coordinate noise, color jitter,
+        optional color noise, then point dropout. Each modality is copied once,
+        when its first augmentor triggers; subsequent transforms modify that
+        copy in-place. Policy normalization happens later in the Agent.
         """
         if self.augmentation_cfg is None:
             return data

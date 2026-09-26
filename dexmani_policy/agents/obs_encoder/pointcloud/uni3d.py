@@ -27,7 +27,11 @@ def knn_points(query, key, k, sorted=False):
 
 
 def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
-    """Randomly drop up to max_dropout_ratio of points, replacing with first point."""
+    """Sample a uniform dropout probability per cloud, then Bernoulli-drop points.
+
+    Dropped full rows are replaced with that cloud's first point. The maximum
+    bounds the sampled probability, not the realized fraction of dropped points.
+    """
     B, N, _ = batch_pc.shape
     result = torch.clone(batch_pc)
     for b in range(B):

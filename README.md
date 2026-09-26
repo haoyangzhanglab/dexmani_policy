@@ -120,6 +120,14 @@ python -m dexmani_policy.deployment.inference_smoke_test
 
 ManiFlow 回归使用合成数据，覆盖点排列不变性、训练时间网格与推理步数独立性、增强语义、EMA、strict resume/inference restore，以及 BF16/compile。CUDA 专项在 CUDA 不可用时跳过；跳过不代表 GPU 验证通过。
 
+仅验证共享点云增强时，可单独运行现有测试类：
+
+```bash
+python -m unittest dexmani_policy.agents.core.maniflow_smoke_test.AugmentationTest
+```
+
+它检查主点云配置的增强约定、dataset defensive copy、噪声范围、颜色变换和逐帧首点替换 dropout，无需 CUDA、外部数据或权重；不替代模型 smoke。增强的执行边界见[项目架构](docs/项目架构.md#31-dataset-contract)，具体参数以 config 为准。
+
 ## 评测
 
 ```bash

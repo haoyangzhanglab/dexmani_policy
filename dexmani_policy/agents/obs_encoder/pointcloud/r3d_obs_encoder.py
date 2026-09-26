@@ -1,8 +1,9 @@
 """R3D observation encoder: Uni3D + StateMLP + spatial PE concatenation.
 
-pc_pe is concatenated along the feature dimension. The backbone splits it
-from obs features and adds it to key positional encoding after projection,
-exactly matching the R3D reference implementation.
+State features are broadcast to every spatial token and concatenated along
+the feature dimension, matching the released R3D cat_on_token=false path.
+pc_pe is appended separately; the backbone splits it from observation features
+and adds it to key positional encoding after projection.
 """
 
 import torch
@@ -28,7 +29,7 @@ class R3DObsEncoder(nn.Module):
         state_dim: int,
         n_obs_steps: int,
         pc_encoder_config: dict = None,
-        state_out_dim: int = 64,
+        state_out_dim: int = 256,
         fps_random_config: dict = None,
     ):
         super().__init__()
@@ -61,11 +62,11 @@ class R3DObsEncoder(nn.Module):
         if pc.dtype != torch.float32:
             pc = pc.float()
 
-        # Uni3D's PositionEmbeddingRandom requires XYZ in [-1, 1]. Clamp only the
-        # XYZ channels (never RGB) at the encoder boundary. This was previously a
-        # global BaseAgent clamp that leaked to every point-cloud policy.
+        # The policy normalizer has already normalized this input. Official R3D
+        # clamps the complete XYZRGB tensor; raw RGB in [0, 1] normally maps to
+        # [-1, 1], where this is an identity. Keep the clamp local to R3D.
         pc = pc.clone()
-        pc[..., :3].clamp_(min=-1 - 1e-6, max=1 + 1e-6)
+        pc.clamp_(min=-1 - 1e-6, max=1 + 1e-6)
 
         patch_tokens, pc_pe = self.pc_encoder(pc, inference_mode=not self.training)
 

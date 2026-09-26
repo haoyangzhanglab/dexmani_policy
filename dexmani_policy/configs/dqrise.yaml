@@ -59,10 +59,12 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
+  # Shared R3D-derived sensor recipe with dataset-level first-point dropout.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
-      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+      dropout:     {max_dropout_ratio: 0.8, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 

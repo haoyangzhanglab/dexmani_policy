@@ -28,7 +28,7 @@ class R3DAgent(BaseAgent):
         action_dim: int,
         state_dim: int,
         pc_encoder_config: dict = None,
-        state_out_dim: int = 64,
+        state_out_dim: int = 256,
         fps_random_config: dict = None,
         # Backbone params
         timestep_embed_dim: int = 128,
