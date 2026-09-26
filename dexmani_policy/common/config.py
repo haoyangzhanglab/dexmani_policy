@@ -6,6 +6,24 @@ from numbers import Integral, Real
 
 from omegaconf import DictConfig, OmegaConf
 
+from dexmani_policy.common.inference import normalize_inference_settings
+
+
+def normalize_eval_config(cfg):
+    """Normalize legacy eval names before merging configuration layers.
+
+    Preserve lazy interpolation and the caller's config; only eval ingress
+    owns legacy aliases. Model construction and checkpoint contracts are untouched.
+    """
+    plain = OmegaConf.to_container(cfg, resolve=False) if OmegaConf.is_config(cfg) else dict(cfg)
+    if "eval" in plain:
+        evaluation = normalize_inference_settings(plain["eval"])
+        for section in ("select_best", "offline", "demo"):
+            if evaluation.get(section) is not None:
+                evaluation[section] = normalize_inference_settings(evaluation[section])
+        plain["eval"] = evaluation
+    return OmegaConf.create(plain)
+
 
 def register_resolvers():
     with warnings.catch_warnings():

@@ -83,7 +83,6 @@ agent:
   # PointNetDense encoder — per-point MLP, no pooling
   pc_encoder_config:
     out_channels: 128
-    num_points: 1024
 
   xyz_pe_num_frequencies: 8       # 48D continuous XYZ PE projected to 128D and added
 
@@ -181,8 +180,8 @@ env_runner:
 
 # ── Eval ──
 eval:
-  denoise_steps: 4               # inference NFE only; leaves the training grid unchanged
-  denoise_timesteps_list: null
+  inference_steps: 4               # inference NFE only; leaves the training grid unchanged
+  inference_steps_list: null
   use_ema: true
 
   select_best:

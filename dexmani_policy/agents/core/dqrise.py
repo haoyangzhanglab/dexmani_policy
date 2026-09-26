@@ -202,14 +202,14 @@ class DQRISEAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def predict_action(self, obs_dict: Dict, denoise_timesteps=None) -> Dict:
+    def predict_action(self, obs_dict: Dict, inference_steps: int | None = None) -> Dict:
         self._validate_obs_dict(obs_dict)
         self._require_codebook()
         cond, _ = self._build_cond(obs_dict)
-        return self.predict_action_from_cond(cond, denoise_timesteps)
+        return self.predict_action_from_cond(cond, inference_steps=inference_steps)
 
     @torch.no_grad()
-    def predict_action_from_cond(self, cond, denoise_timesteps=None) -> Dict:
+    def predict_action_from_cond(self, cond, inference_steps: int | None = None) -> Dict:
         self._require_codebook()
         batch_size = cond.shape[0]
         template = torch.zeros(
@@ -219,7 +219,7 @@ class DQRISEAgent(BaseAgent):
             device=cond.device,
             dtype=cond.dtype,
         )
-        reduced_action = self.action_decoder.predict_action(cond, template, denoise_timesteps)
+        reduced_action = self.action_decoder.predict_action(cond, template, inference_steps=inference_steps)
 
         tcp_pred = reduced_action[..., : self.tcp_dim]
         idx_pred = reduced_action[..., -1]

@@ -113,6 +113,9 @@ PointNet 与 ManiFlow 的定向回归可独立运行，无需外部训练数据�
 ```bash
 python -m dexmani_policy.agents.obs_encoder.pointcloud.smoke_test
 python -m dexmani_policy.agents.core.maniflow_smoke_test
+python -m dexmani_policy.agents.core.inference_smoke_test
+python -m dexmani_policy.training.eval_smoke_test
+python -m dexmani_policy.deployment.inference_smoke_test
 ```
 
 ManiFlow 回归使用合成数据，覆盖点排列不变性、训练时间网格与推理步数独立性、增强语义、EMA、strict resume/inference restore，以及 BF16/compile。CUDA 专项在 CUDA 不可用时跳过；跳过不代表 GPU 验证通过。
@@ -135,7 +138,11 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 最终评测每次写入独立的 `eval_dexsim/<run-id>/`，CLI 会打印准确路径；checkpoint、推理设置、seeds 和指标保存在该目录的 `result_details.json`。背景说明见 [仿真评测机制](docs/仿真评测机制.md)，当前参数与行为以入口帮助和源码为准。
 
+推理步数统一通过 `--inference-steps N` 或 `eval.inference_steps` 设置；sweep 使用 `eval.inference_steps_list`。旧 CLI `--denoise-steps` 和旧 eval 字段仅在输入边界兼容，新旧同层配置冲突会报错，两个 CLI flag 不能同时使用。Python Agent/decoder/runner 接口只接受 `inference_steps`。ManiFlow 的 `denoise_timesteps` 与 RectifiedFlow 的 `num_flow_train_timesteps` 只定义训练网格，`num_inference_steps` 定义 decoder 默认 NFE。
+
 ## Deployment
+
+新 deployment artifact 使用 `dexmani.deployment.v3`，不读取旧版本；训练 checkpoint 保持 `simple.v3` 和严格 resume 校验，不提供旧构造配置迁移。
 
 Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact、observation contract 和 runtime restore 的具体语义以实现为准；README 不复制其内部 schema。
 
@@ -143,7 +150,7 @@ Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact�
 # 研究者日常路径：export -> run_policy（run_policy 位于 dexmani_real）
 bash scripts/deployment/export.sh <experiment_dir>  # 默认 latest，使用 Conda policy 环境
 bash scripts/deployment/export.sh <experiment_dir> --checkpoint 80pct
-bash scripts/deployment/export.sh <experiment_dir> --output deployment-v2.pt
+bash scripts/deployment/export.sh <experiment_dir> --output deployment-v3.pt
 
 # 原 Python CLI 保持默认 best；best 必须有有效的 best_ckpt.json，不自动回退
 python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best

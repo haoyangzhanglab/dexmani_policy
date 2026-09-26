@@ -200,10 +200,10 @@ class BaseAgent(nn.Module):
         return total, loss_dict
 
     @torch.no_grad()
-    def predict_action(self, obs_dict: Dict, denoise_timesteps=None) -> Dict:
+    def predict_action(self, obs_dict: Dict, inference_steps: int | None = None) -> Dict:
         self._validate_obs_dict(obs_dict)
         cond, _ = self._build_cond(obs_dict)
-        return self.predict_action_from_cond(cond, denoise_timesteps)
+        return self.predict_action_from_cond(cond, inference_steps=inference_steps)
 
     @property
     def control_action_dim(self):
@@ -215,7 +215,7 @@ class BaseAgent(nn.Module):
         return self.action_dim
 
     @torch.no_grad()
-    def predict_action_from_cond(self, cond, denoise_timesteps=None):
+    def predict_action_from_cond(self, cond, inference_steps: int | None = None):
         template = torch.zeros(
             cond.shape[0],
             self.horizon,
@@ -223,7 +223,7 @@ class BaseAgent(nn.Module):
             device=cond.device,
             dtype=cond.dtype,
         )
-        pred = self.action_decoder.predict_action(cond, template, denoise_timesteps)
+        pred = self.action_decoder.predict_action(cond, template, inference_steps=inference_steps)
         pred = self.normalizer["action"].unnormalize(pred)
 
         start = self.n_obs_steps - 1

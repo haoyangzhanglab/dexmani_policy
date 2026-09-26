@@ -49,7 +49,7 @@ def tiny_config(name, zarr_path, directory):
     cfg.agent.n_groups = 4
     cfg.agent.num_training_steps = 4
     cfg.agent.num_inference_steps = 1
-    cfg.eval.denoise_steps = 1
+    cfg.eval.inference_steps = 1
     cfg.eval.use_ema = False
     if name == "dp":
         cfg.agent.rgb_backbone_name = "resnet"

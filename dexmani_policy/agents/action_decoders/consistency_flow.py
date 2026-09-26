@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from einops import reduce
 
 from dexmani_policy.agents.action_decoders.time_sampler import TimeSampler
+from dexmani_policy.common.inference import positive_int, resolve_inference_steps
 
 
 class ConsistencyFlowMatch(nn.Module):
@@ -35,8 +36,7 @@ class ConsistencyFlowMatch(nn.Module):
         super().__init__()
         if type(denoise_timesteps) is not int or denoise_timesteps <= 0:
             raise ValueError("denoise_timesteps must be a positive integer")
-        if num_inference_steps <= 0:
-            raise ValueError("num_inference_steps must be greater than 0")
+        positive_int(num_inference_steps, "num_inference_steps")
         if not 0 < flow_batch_ratio < 1:
             raise ValueError("flow_batch_ratio must be between 0 and 1")
         if target_t_sample_mode not in {"relative", "absolute"}:
@@ -132,7 +132,7 @@ class ConsistencyFlowMatch(nn.Module):
             target_t_next = dt
             target_t = dt
         else:
-            target_t_next = torch.clamp(t_next + dt, max=1.0)
+            target_t_next = t_next + dt
             target_t = t_next
 
         t_view = t.view(batch_size, *([1] * (actions.ndim - 1)))
@@ -270,8 +270,7 @@ class ConsistencyFlowMatch(nn.Module):
         num_steps: int,
         cond: torch.Tensor,
     ) -> torch.Tensor:
-        if num_steps <= 0:
-            raise ValueError("inference steps must be greater than 0")
+        positive_int(num_steps, "inference_steps")
 
         batch_size = x0.shape[0]
         x = x0
@@ -292,7 +291,7 @@ class ConsistencyFlowMatch(nn.Module):
                     dtype=x.dtype,
                 )
                 if self.target_t_sample_mode == "relative"
-                else torch.clamp(t + dt, max=1.0)
+                else t + dt
             )
             velocity = self.model(
                 x=x,
@@ -309,13 +308,9 @@ class ConsistencyFlowMatch(nn.Module):
         self,
         cond: torch.Tensor,
         action_template: torch.Tensor,
-        denoise_timesteps: int | None = None,
+        inference_steps: int | None = None,
     ) -> torch.Tensor:
-        """Sample actions; the historical ``denoise_timesteps`` argument overrides NFE only."""
-        num_steps = (
-            self.num_inference_steps
-            if denoise_timesteps is None
-            else int(denoise_timesteps)
-        )
+        """Sample actions with a per-call NFE override; training grid is unchanged."""
+        num_steps = resolve_inference_steps(self.num_inference_steps, inference_steps)
         noise = torch.randn_like(action_template)
         return self.sample_ode(noise, num_steps, cond)

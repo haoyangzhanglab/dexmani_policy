@@ -26,6 +26,8 @@ from dexmani_policy.common.checkpoint_io import (
     validate_resume_contract,
 )
 from dexmani_policy.common.config import validate_action_key_consistency, validate_window_contract
+from dexmani_policy.common.config import normalize_eval_config
+from dexmani_policy.common.inference import normalize_inference_settings, positive_int
 from dexmani_policy.common.normalizer import (
     NON_NUMERIC_OBSERVATION_FIELDS,
     validate_normalizer_state,
@@ -74,22 +76,32 @@ def parse_eval_overrides(overrides: list[str]):
                 "the checkpoint owns constructor semantics. Use eval.* or "
                 "explicit EMA/NFE options for inference ablations."
             )
-    return OmegaConf.from_dotlist(overrides)
+    return normalize_eval_config(OmegaConf.from_dotlist(overrides))
 
 
-def validate_denoise_steps(denoise_timesteps_list) -> None:
-    """Pre-episode NFE validation for the CLI ``--denoise-steps`` override.
+def validate_inference_steps(inference_steps_list) -> None:
+    """Pre-episode NFE validation for the CLI ``--inference-steps`` override.
 
     Fails at startup on an invalid NFE (non-integer or non-positive) instead of
     being swallowed by the per-episode exception layer after ``env.reset``.
     """
-    if not denoise_timesteps_list:
-        raise ValueError("denoise_timesteps_list must be non-empty")
-    for nfe in denoise_timesteps_list:
-        if isinstance(nfe, bool) or not isinstance(nfe, int):
-            raise ValueError(f"denoise step must be an integer, got {nfe!r}")
-        if nfe <= 0:
-            raise ValueError(f"denoise step must be positive, got {nfe}")
+    if not inference_steps_list:
+        raise ValueError("inference_steps_list must be non-empty")
+    for nfe in inference_steps_list:
+        positive_int(nfe, "inference_steps")
+
+
+def add_inference_steps_argument(parser) -> None:
+    """Keep the old CLI flag only at argparse ingress; never silently override."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--inference-steps", type=int, default=None,
+        help="DDIM/Euler inference steps (best: selection record; otherwise config).",
+    )
+    group.add_argument(
+        "--denoise-steps", dest="inference_steps", type=int,
+        help="Compatibility alias for --inference-steps.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -222,18 +234,20 @@ def read_best_ckpt_json(exp_dir: Path) -> dict:
     inference = best_info["inference"]
     if not isinstance(inference, dict):
         raise ValueError("best_ckpt.json inference must be an object")
-    if set(inference) != {"use_ema", "denoise_steps", "policy_seed_mode"}:
+    inference = normalize_inference_settings(inference)
+    best_info["inference"] = inference
+    if set(inference) != {"use_ema", "inference_steps", "policy_seed_mode"}:
         raise ValueError("best_ckpt.json does not match current schema")
     if not isinstance(inference["use_ema"], bool):
         raise ValueError("best_ckpt.json inference.use_ema must be boolean")
-    denoise_steps = inference["denoise_steps"]
+    inference_steps = inference["inference_steps"]
     if (
-        isinstance(denoise_steps, bool)
-        or not isinstance(denoise_steps, int)
-        or denoise_steps <= 0
+        isinstance(inference_steps, bool)
+        or not isinstance(inference_steps, int)
+        or inference_steps <= 0
     ):
         raise ValueError(
-            "best_ckpt.json inference.denoise_steps must be a positive integer"
+            "best_ckpt.json inference.inference_steps must be a positive integer"
         )
     if inference["policy_seed_mode"] != "episode_seed":
         raise ValueError(

@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from dexmani_policy.common.inference import positive_int, resolve_inference_steps
+
 from dexmani_policy.agents.action_decoders.time_sampler import (
     TimeSampler,
     shift_time_to_noise,
@@ -13,7 +15,11 @@ from dexmani_policy.agents.action_decoders.time_sampler import (
 
 
 class RectifiedFlow(nn.Module):
-    """Standard conditional rectified flow with fixed-step Euler inference."""
+    """Standard conditional rectified flow with fixed-step Euler inference.
+
+    ``num_flow_train_timesteps`` controls discrete training sampling only;
+    ``num_inference_steps`` is the independent default Euler NFE.
+    """
 
     requires_ema_for_loss = False
 
@@ -26,19 +32,21 @@ class RectifiedFlow(nn.Module):
         beta_alpha: float = 1.0,
         beta_beta: float = 1.5,
         time_shift_alpha: float = 1.0,
+        num_flow_train_timesteps: int = 4,
     ) -> None:
         super().__init__()
-        if num_inference_steps <= 0:
-            raise ValueError("num_inference_steps must be greater than 0")
+        positive_int(num_inference_steps, "num_inference_steps")
+        positive_int(num_flow_train_timesteps, "num_flow_train_timesteps")
         if time_shift_alpha < 1.0:
             raise ValueError("time_shift_alpha must be >= 1")
 
         self.model = model
         self.num_inference_steps = num_inference_steps
+        self.num_flow_train_timesteps = num_flow_train_timesteps
         self.t_sample_mode = t_sample_mode
         self.time_shift_alpha = float(time_shift_alpha)
         self.time_sampler = TimeSampler(
-            num_steps=num_inference_steps,
+            num_steps=num_flow_train_timesteps,
             beta_s=beta_s,
             beta_alpha=beta_alpha,
             beta_beta=beta_beta,
@@ -91,15 +99,9 @@ class RectifiedFlow(nn.Module):
         self,
         cond: torch.Tensor,
         action_template: torch.Tensor,
-        denoise_timesteps: int | None = None,
+        inference_steps: int | None = None,
     ) -> torch.Tensor:
-        num_steps = (
-            self.num_inference_steps
-            if denoise_timesteps is None
-            else int(denoise_timesteps)
-        )
-        if num_steps <= 0:
-            raise ValueError("inference steps must be greater than 0")
+        num_steps = resolve_inference_steps(self.num_inference_steps, inference_steps)
 
         batch_size = action_template.shape[0]
         x = torch.randn_like(action_template)

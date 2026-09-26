@@ -32,6 +32,7 @@ from dexmani_policy.common.checkpoint_io import (
     parse_normalization_contract,
 )
 from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.common.inference import normalize_inference_settings
 from dexmani_policy.datasets.base_dataset import DEFAULT_RGB_KEEP_UINT8
 from dexmani_policy.datasets.real_policy_contract import (
     RealPolicyContractError,
@@ -90,7 +91,7 @@ class _CheckpointDeploymentSource:
 @dataclass(frozen=True)
 class _SelectedInferenceSettings:
     use_ema: bool
-    denoise_steps: int
+    inference_steps: int
 
 
 def _require_checkpoint_under_directory(candidate: Path, checkpoint_dir: Path) -> Path:
@@ -584,7 +585,7 @@ def _build_inference_config(
         "agent": agent_config,
         "eval": {
             "use_ema": selected.use_ema,
-            "denoise_steps": selected.denoise_steps,
+            "inference_steps": selected.inference_steps,
         },
     }
     return _require_plain_metadata(inference, "inference_config")
@@ -601,7 +602,7 @@ def _resolve_selected_inference_settings(
     config still owns: ``best_ckpt.json["inference"]`` for the ``best``
     selector, otherwise the current ``config.eval`` (the live inference recipe
     a researcher is tuning).  Everything else deployment needs comes from the
-    checkpoint.  ``denoise_steps`` is an ablation knob, not architecture, so
+    checkpoint.  ``inference_steps`` is an ablation knob, not architecture, so
     overriding it per run stays legitimate.
     """
     if checkpoint_selector == "best":
@@ -618,23 +619,24 @@ def _resolve_selected_inference_settings(
         eval_config = cfg_plain.get("eval")
         if type(eval_config) is not dict:
             raise InvalidExperimentError("config.eval must be a mapping")
-        if eval_config.get("denoise_timesteps_list") is not None:
+        eval_config = normalize_inference_settings(eval_config)
+        if eval_config.get("inference_steps_list") is not None:
             raise UnsupportedPolicyError(
-                "eval.denoise_timesteps_list is unsupported for deployment"
+                "eval.inference_steps_list is unsupported for deployment"
             )
         inference = {
             "use_ema": eval_config.get("use_ema"),
-            "denoise_steps": eval_config.get("denoise_steps"),
+            "inference_steps": eval_config.get("inference_steps"),
         }
         prefix = "config"
 
     use_ema = inference["use_ema"]
     if type(use_ema) is not bool:
         raise InvalidExperimentError(f"{prefix}.use_ema must be bool")
-    denoise_steps = _require_positive_int(
-        inference["denoise_steps"], f"{prefix}.denoise_steps"
+    inference_steps = _require_positive_int(
+        inference["inference_steps"], f"{prefix}.inference_steps"
     )
-    return _SelectedInferenceSettings(use_ema, denoise_steps)
+    return _SelectedInferenceSettings(use_ema, inference_steps)
 
 
 def _rgb_preprocessing(source: _CheckpointDeploymentSource) -> dict[str, Any]:
@@ -965,7 +967,7 @@ def _build_deployment_payload(
         producer["source_commit"] = source_commit
     deployment_inference = {
         **inference,
-        "eval": {"denoise_steps": inference["eval"]["denoise_steps"]},
+        "eval": {"inference_steps": inference["eval"]["inference_steps"]},
     }
     payload = {
         "_format": DEPLOYMENT_FORMAT,

@@ -147,6 +147,7 @@ agent:
 
   # Rectified Flow (only active when action_decoder_type=rectified_flow)
   flow_num_inference_steps: 10
+  num_flow_train_timesteps: 10
   flow_t_sample_mode: beta
   flow_beta_alpha: 1.0
   flow_beta_beta: 1.5
@@ -240,8 +241,8 @@ env_runner:
 
 # ── Eval ──
 eval:
-  denoise_steps: 10
-  denoise_timesteps_list: null
+  inference_steps: 10
+  inference_steps_list: null
   use_ema: true
 
   select_best:

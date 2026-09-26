@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, final
 import numpy as np
 
 from dexmani_policy.deployment.contract import PolicySpec
+from dexmani_policy.common.inference import positive_int, resolve_inference_steps
 
 if TYPE_CHECKING:
     from dexmani_policy.deployment.contract import (
@@ -176,10 +177,8 @@ def load_experiment(
 
 
 def _validate_inference_steps(inference_steps: int | None) -> None:
-    if inference_steps is not None and (
-        type(inference_steps) is not int or inference_steps < 1
-    ):
-        raise ValueError("inference_steps must be a positive int or None")
+    if inference_steps is not None:
+        positive_int(inference_steps, "inference_steps")
 
 
 @final
@@ -201,9 +200,7 @@ class LoadedPolicy:
         self._restored: RestoredDeployment | None = restored
         self._device = device
         self._seed = seed
-        self._inference_steps = (
-            restored.spec.denoise_steps if inference_steps is None else inference_steps
-        )
+        self._inference_steps = resolve_inference_steps(restored.spec.inference_steps, inference_steps)
 
     def warmup(self, *, samples: int) -> tuple[float, ...]:
         """Run deterministic synthetic samples and return durations in seconds.
@@ -255,7 +252,7 @@ class LoadedPolicy:
 
         with torch.inference_mode():
             result = restored.agent.predict_action(
-                tensors, denoise_timesteps=self._inference_steps
+                tensors, inference_steps=self._inference_steps
             )
         control = validate_prediction(result, restored.spec, batch_size=1)
         return control.squeeze(0).to(device="cpu", dtype=torch.float64).numpy().copy()
@@ -475,7 +472,7 @@ def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str, int]:
     task_name = inference.get("task_name")
     if type(task_name) is not str or not task_name:
         raise RuntimeError("inference_config.task_name must be a non-empty string")
-    return deployment.policy_spec, task_name, deployment.denoise_steps
+    return deployment.policy_spec, task_name, deployment.inference_steps
 
 
 def _short_selector(experiment_dir: Path) -> str:

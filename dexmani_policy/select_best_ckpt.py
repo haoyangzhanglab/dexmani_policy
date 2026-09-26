@@ -63,10 +63,12 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.common.checkpoint_io import CheckpointStore
-from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.common.config import normalize_eval_config, register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
+    add_inference_steps_argument,
+    validate_inference_steps,
     MilestoneCheckpoint,
     _get_eval_param,
     build_eval_components,
@@ -142,7 +144,7 @@ def evaluate_checkpoint(
     ckpt: MilestoneCheckpoint,
     seeds: List[int],
     use_ema: bool,
-    denoise_steps: int,
+    inference_steps: int,
     device: torch.device,
     video_save_dir: Path | None = None,
 ) -> Dict[str, Any]:
@@ -157,7 +159,7 @@ def evaluate_checkpoint(
         leaf_runner.record_video = video_save_dir is not None
     return env_runner.run(
         agent,
-        denoise_timesteps=denoise_steps,
+        inference_steps=inference_steps,
         eval_episodes=len(seeds),
         video_save_dir=video_save_dir,
     )
@@ -201,7 +203,7 @@ def select_best_checkpoint(
     initial_episodes: int = 25,
     batch_size: int = 5,
     max_episodes: int = 100,
-    denoise_steps: int = 10,
+    inference_steps: int = 10,
     use_ema: bool = True,
     eval_seed: int | None = None,
     video_save_dir: Path | None = None,
@@ -219,6 +221,7 @@ def select_best_checkpoint(
         The winning checkpoint and the full accumulator list (for reporting).
     """
 
+    validate_inference_steps([inference_steps])
     # ── 1. Resolve evaluation seed ────────────────────────────────────
     seed = resolve_eval_seed(cfg, cli_seed=eval_seed)
     set_seed(seed)
@@ -278,7 +281,7 @@ def select_best_checkpoint(
             mc,
             phase1_seeds,
             use_ema,
-            denoise_steps,
+            inference_steps,
             device,
             video_save_dir=video_save_dir,
         )
@@ -312,7 +315,7 @@ def select_best_checkpoint(
                 acc.ckpt,
                 tie_seeds,
                 use_ema,
-                denoise_steps,
+                inference_steps,
                 device,
                 video_save_dir=video_save_dir,
             )
@@ -422,7 +425,7 @@ def select_best_checkpoint(
         "n_episodes": best.n_episodes,
         "inference": {
             "use_ema": bool(use_ema),
-            "denoise_steps": int(denoise_steps),
+            "inference_steps": int(inference_steps),
             "policy_seed_mode": "episode_seed",
         },
         "selection": {
@@ -491,12 +494,7 @@ def main() -> None:
             "(default: from config)."
         ),
     )
-    parser.add_argument(
-        "--denoise-steps",
-        type=int,
-        default=None,
-        help="DDIM / Euler denoising steps at inference (default: from config).",
-    )
+    add_inference_steps_argument(parser)
     parser.add_argument(
         "--ema",
         dest="use_ema",
@@ -551,7 +549,7 @@ def main() -> None:
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")
         sys.exit(1)
 
-    cfg = OmegaConf.load(cfg_path)
+    cfg = normalize_eval_config(OmegaConf.load(cfg_path))
     if args.overrides:
         cfg = OmegaConf.merge(cfg, parse_eval_overrides(args.overrides))
     # Stash exp_dir so build_eval_components can build paths
@@ -572,10 +570,10 @@ def main() -> None:
         if args.max_episodes is not None
         else _sb.get("max_episodes", 100)
     )
-    denoise_steps = (
-        args.denoise_steps
-        if args.denoise_steps is not None
-        else _get_eval_param(cfg, "denoise_steps", "select_best", default=10)
+    inference_steps = (
+        args.inference_steps
+        if args.inference_steps is not None
+        else _get_eval_param(cfg, "inference_steps", "select_best", default=10)
     )
     use_ema = (
         args.use_ema
@@ -608,7 +606,7 @@ def main() -> None:
             initial_episodes=initial_episodes,
             batch_size=batch_size,
             max_episodes=max_episodes,
-            denoise_steps=denoise_steps,
+            inference_steps=inference_steps,
             use_ema=use_ema,
             eval_seed=args.seed,
             video_save_dir=video_save_dir,

@@ -45,10 +45,11 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.common.config import normalize_eval_config, register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
+    add_inference_steps_argument,
     _get_eval_param,
     build_eval_components,
     parse_eval_overrides,
@@ -59,7 +60,7 @@ from dexmani_policy.training.eval_utils import (
     read_best_ckpt_json,
     resolve_checkpoint_path,
     resolve_eval_seed,
-    validate_denoise_steps,
+    validate_inference_steps,
 )
 
 ROOT_DIR = set_project_root()
@@ -162,11 +163,11 @@ def _select_eval_seeds(
     return eval_seeds
 
 
-def _run_one_timestep(
+def _run_one_inference_setting(
     agent,
     env_runner,
     eval_seeds: list[int],
-    denoise_steps: int,
+    inference_steps: int,
     video_save_dir: Path | None,
     *,
     result_save_dir: Path,
@@ -177,7 +178,7 @@ def _run_one_timestep(
     heldout_from_selection: bool,
     use_ema: bool,
 ) -> dict:
-    """Run eval at a single denoise step count; save per-value results.
+    """Run eval at a single inference step count; save per-value results.
 
     Saves ``_result.txt`` + ``result_details.json`` into *result_save_dir*.
 
@@ -191,7 +192,7 @@ def _run_one_timestep(
     env_runner.eval_seeds = eval_seeds
     result = env_runner.run(
         agent,
-        denoise_timesteps=denoise_steps,
+        inference_steps=inference_steps,
         eval_episodes=n_seeds,
         video_save_dir=video_save_dir,
     )
@@ -236,7 +237,7 @@ def _run_one_timestep(
                 "selection_seeds_excluded": selection_seeds_excluded,
                 "heldout_from_selection": heldout_from_selection,
                 "use_ema": use_ema,
-                "denoise_steps": denoise_steps,
+                "inference_steps": inference_steps,
                 "per_seed_details": per_seed_details,
             },
             indent=2,
@@ -270,7 +271,7 @@ def evaluate_checkpoint_robotwin(
     *,
     ckpt_tag_or_path: str = "best",
     episodes: int = 100,
-    denoise_steps: int = 10,
+    inference_steps: int = 10,
     use_ema: bool = True,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
@@ -283,13 +284,14 @@ def evaluate_checkpoint_robotwin(
     ckpt_tag_or_path : ``"best"``, ``"latest"``, ``"20pct"``, or a path.
         ``"best"`` requires the strict record written by ``select_best_ckpt.py``.
     episodes : number of seeds to evaluate (default: 100).
-    denoise_steps : DDIM/Euler inference steps.
+    inference_steps : DDIM/Euler inference steps.
     use_ema : select EMA weights; missing EMA weights are an error.
 
     Returns
     -------
     (success_rate, avg_steps, n_success, n_total)
     """
+    validate_inference_steps([inference_steps])
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
         _setup_eval(
@@ -300,18 +302,17 @@ def evaluate_checkpoint_robotwin(
             video_save_dir=video_save_dir,
         )
     )
-    validate_denoise_steps([denoise_steps])
     best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
     selection_seeds = best_info["selection"]["seeds"] if best_info else []
     eval_seeds = _select_eval_seeds(
         env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
     )
 
-    info = _run_one_timestep(
+    info = _run_one_inference_setting(
         agent,
         env_runner,
         eval_seeds,
-        denoise_steps,
+        inference_steps,
         video_save_dir=video_save_dir,
         result_save_dir=result_save_dir,
         ckpt_tag_or_path=ckpt_tag_or_path,
@@ -327,7 +328,7 @@ def evaluate_checkpoint_robotwin(
     cprint(f"\n{'=' * 50}", "cyan")
     cprint(f"  Checkpoint   : {ckpt_label}", "cyan")
     cprint(f"  Episodes     : {info['n_total']}", "cyan")
-    cprint(f"  Denoise steps: {denoise_steps}", "cyan")
+    cprint(f"  Inference steps: {inference_steps}", "cyan")
     cprint(
         f"  Success rate : {info['n_success']}/{info['n_total']} = {info['success_rate']:.1%}",
         "green",
@@ -357,24 +358,24 @@ def evaluate_checkpoint_sweep(
     *,
     ckpt_tag_or_path: str = "best",
     episodes: int = 100,
-    denoise_timesteps_list: list[int],
+    inference_steps_list: list[int],
     use_ema: bool = True,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
 ) -> list[dict]:
-    """Evaluate a checkpoint at multiple denoising step counts.
+    """Evaluate a checkpoint at multiple inference step counts.
 
-    The checkpoint is **loaded once** and reused across all denoise values.
+    The checkpoint is **loaded once** and reused across all inference step counts.
     The **same evaluation seeds** are used for every value so the comparison
     is apples-to-apples.
 
-    Results are saved into ``denoise_timesteps<N>/`` subdirectories under
+    Results are saved into ``inference_steps<N>/`` subdirectories under
     *result_save_dir* (or ``exp_dir/eval_dexsim/<run-id>/``), plus an
     aggregate ``eval_summary.json``.
     """
-    validate_denoise_steps(denoise_timesteps_list)
-    if len(set(denoise_timesteps_list)) != len(denoise_timesteps_list):
-        raise ValueError("Sweep denoise steps must be distinct to preserve per-value results")
+    validate_inference_steps(inference_steps_list)
+    if len(set(inference_steps_list)) != len(inference_steps_list):
+        raise ValueError("Sweep inference steps must be distinct to preserve per-value results")
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
@@ -387,32 +388,30 @@ def evaluate_checkpoint_sweep(
             video_save_dir=video_save_dir,
         )
     )
-    validate_denoise_steps(denoise_timesteps_list)
-
-    # ── 2. Same seeds for all denoise values (fair comparison) ──────────
+    # ── 2. Same seeds for all inference step counts (fair comparison) ──────────
     best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
     selection_seeds = best_info["selection"]["seeds"] if best_info else []
     eval_seeds = _select_eval_seeds(
         env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
     )
 
-    # ── 3. Sweep over denoise timesteps ─────────────────────────────────
+    # ── 3. Sweep over inference steps ─────────────────────────────────
     sweep_results: list[dict] = []
 
-    for dt in denoise_timesteps_list:
-        cprint(f"\n--- denoise_timesteps={dt} ---", "cyan", attrs=["bold"])
+    for inference_steps in inference_steps_list:
+        cprint(f"\n--- inference_steps={inference_steps} ---", "cyan", attrs=["bold"])
 
-        result_sub_dir = result_save_dir / f"denoise_timesteps{dt}"
+        result_sub_dir = result_save_dir / f"inference_steps{inference_steps}"
         video_sub_dir = (
-            video_save_dir / f"denoise_timesteps{dt}"
+            video_save_dir / f"inference_steps{inference_steps}"
             if video_save_dir is not None
             else None
         )
-        info = _run_one_timestep(
+        info = _run_one_inference_setting(
             agent,
             env_runner,
             eval_seeds,
-            dt,
+            inference_steps,
             video_save_dir=video_sub_dir,
             result_save_dir=result_sub_dir,
             ckpt_tag_or_path=ckpt_tag_or_path,
@@ -430,7 +429,7 @@ def evaluate_checkpoint_sweep(
             "green" if info["success_rate"] >= 0.5 else "red",
         )
 
-        sweep_results.append({"denoise_timesteps": dt, **info})
+        sweep_results.append({"inference_steps": inference_steps, **info})
 
     # ── 4. Aggregate summary ───────────────────────────────────────────
     _save_sweep_summary(result_save_dir, sweep_results, ckpt_label)
@@ -447,7 +446,7 @@ def _save_sweep_summary(
     summary = {
         "checkpoint": ckpt_label,
         "results": {
-            f"denoise_timesteps{r['denoise_timesteps']}": {
+            f"inference_steps{r['inference_steps']}": {
                 "success_rate": r["success_rate"],
                 "avg_steps": r["avg_steps"],
                 "n_success": r["n_success"],
@@ -462,16 +461,16 @@ def _save_sweep_summary(
 
     # ── Terminal comparison table ──────────────────────────────────────
     cprint(f"\n{'=' * 60}", "cyan", attrs=["bold"])
-    cprint("  Denoise Timesteps Sweep Summary", "cyan", attrs=["bold"])
+    cprint("  Inference Steps Sweep Summary", "cyan", attrs=["bold"])
     cprint(f"  Checkpoint: {ckpt_label}", "cyan")
-    cprint(f"  {'Denoise Steps':<16} {'Success Rate':<18} {'Avg Steps':<12}", "cyan")
+    cprint(f"  {'Inference Steps':<16} {'Success Rate':<18} {'Avg Steps':<12}", "cyan")
     cprint("  " + "-" * 46, "cyan")
     for r in sweep_results:
-        dt = r["denoise_timesteps"]
+        inference_steps = r["inference_steps"]
         sr = f"{r['n_success']}/{r['n_total']} ({r['success_rate']:.1%})"
         avg = f"{r['avg_steps']:.1f}" if r["avg_steps"] is not None else "N/A"
         cprint(
-            f"  {dt:<16} {sr:<18} {avg:<12}",
+            f"  {inference_steps:<16} {sr:<18} {avg:<12}",
             "green" if r["success_rate"] >= 0.5 else "red",
         )
     cprint(f"{'=' * 60}\n", "cyan", attrs=["bold"])
@@ -498,21 +497,22 @@ def _resolve_final_eval_request(
     dotlist_overrides: list[str],
     *,
     cli_use_ema: bool | None = None,
-    cli_denoise_steps: int | None = None,
+    cli_inference_steps: int | None = None,
 ):
     """Resolve final-eval inference with CLI > dotlist > record > config."""
+    cfg = normalize_eval_config(cfg)
     override_cfg = parse_eval_overrides(dotlist_overrides)
     merged_cfg = OmegaConf.merge(cfg, override_cfg)
 
     config_use_ema = _get_eval_param(cfg, "use_ema", "offline", default=True)
-    config_dt_list = _get_eval_param(
-        cfg, "denoise_timesteps_list", "offline", default=None
+    configured_steps = _get_eval_param(
+        cfg, "inference_steps_list", "offline", default=None
     )
-    if config_dt_list is not None:
-        denoise_timesteps_list = list(config_dt_list)
+    if configured_steps is not None:
+        inference_steps_list = list(configured_steps)
     else:
-        denoise_timesteps_list = [
-            _get_eval_param(cfg, "denoise_steps", "offline", default=10)
+        inference_steps_list = [
+            _get_eval_param(cfg, "inference_steps", "offline", default=10)
         ]
     use_ema = config_use_ema
 
@@ -521,7 +521,7 @@ def _resolve_final_eval_request(
         best_info = read_best_ckpt_json(exp_dir)
         inference = best_info["inference"]
         use_ema = inference["use_ema"]
-        denoise_timesteps_list = [inference["denoise_steps"]]
+        inference_steps_list = [inference["inference_steps"]]
 
     present, value = _present_config_value(
         override_cfg, ["eval.offline.use_ema", "eval.use_ema"]
@@ -531,28 +531,29 @@ def _resolve_final_eval_request(
 
     list_present, list_value = _present_config_value(
         override_cfg,
-        ["eval.offline.denoise_timesteps_list", "eval.denoise_timesteps_list"],
+        ["eval.offline.inference_steps_list", "eval.inference_steps_list"],
     )
     step_present, step_value = _present_config_value(
-        override_cfg, ["eval.offline.denoise_steps", "eval.denoise_steps"]
+        override_cfg, ["eval.offline.inference_steps", "eval.inference_steps"]
     )
     if list_present and list_value is not None:
-        denoise_timesteps_list = list(list_value)
+        inference_steps_list = list(list_value)
     elif step_present:
-        denoise_timesteps_list = [step_value]
+        inference_steps_list = [step_value]
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema
-    if cli_denoise_steps is not None:
-        denoise_timesteps_list = [cli_denoise_steps]
+    if cli_inference_steps is not None:
+        inference_steps_list = [cli_inference_steps]
     if not isinstance(use_ema, bool):
         raise ValueError(f"use_ema must resolve to boolean, got {use_ema!r}")
     if "env_runner" not in merged_cfg:
         raise ValueError("Evaluation config is missing env_runner")
+    validate_inference_steps(inference_steps_list)
     return (
         merged_cfg,
         use_ema,
-        denoise_timesteps_list,
+        inference_steps_list,
         best_info,
     )
 
@@ -599,12 +600,7 @@ def main() -> None:
         default=None,
         help="Number of seeds to evaluate (default: from config eval.offline).",
     )
-    parser.add_argument(
-        "--denoise-steps",
-        type=int,
-        default=None,
-        help="DDIM / Euler denoising steps (best: selection record; otherwise config).",
-    )
+    add_inference_steps_argument(parser)
     parser.add_argument(
         "--ema",
         dest="use_ema",
@@ -653,13 +649,13 @@ def main() -> None:
         sys.exit(1)
 
     ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
-    cfg, use_ema, denoise_timesteps_list, _ = _resolve_final_eval_request(
+    cfg, use_ema, inference_steps_list, _ = _resolve_final_eval_request(
         OmegaConf.load(cfg_path),
         exp_dir,
         ckpt_tag_or_path,
         args.overrides,
         cli_use_ema=args.use_ema,
-        cli_denoise_steps=args.denoise_steps,
+        cli_inference_steps=args.inference_steps,
     )
     cfg._exp_dir = str(exp_dir)
 
@@ -671,7 +667,7 @@ def main() -> None:
     if episodes <= 0:
         raise ValueError(f"episodes must be positive, got {episodes}")
 
-    do_sweep = len(denoise_timesteps_list) > 1
+    do_sweep = len(inference_steps_list) > 1
 
     # Every invocation owns a new run directory, with or without videos.
     video_enabled = _get_eval_param(cfg, "enabled", "video", default=True)
@@ -687,7 +683,7 @@ def main() -> None:
     try:
         if do_sweep:
             cprint(
-                f"\n🔁 Denoise timesteps sweep: {denoise_timesteps_list}",
+                f"\n🔁 Inference steps sweep: {inference_steps_list}",
                 "cyan",
                 attrs=["bold"],
             )
@@ -696,7 +692,7 @@ def main() -> None:
                 cfg,
                 ckpt_tag_or_path=ckpt_tag_or_path,
                 episodes=episodes,
-                denoise_timesteps_list=denoise_timesteps_list,
+                inference_steps_list=inference_steps_list,
                 use_ema=use_ema,
                 video_save_dir=video_save_dir,
                 result_save_dir=result_save_dir,
@@ -707,7 +703,7 @@ def main() -> None:
                 cfg,
                 ckpt_tag_or_path=ckpt_tag_or_path,
                 episodes=episodes,
-                denoise_steps=denoise_timesteps_list[0],
+                inference_steps=inference_steps_list[0],
                 use_ema=use_ema,
                 video_save_dir=video_save_dir,
                 result_save_dir=result_save_dir,

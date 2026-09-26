@@ -9,6 +9,7 @@ import torch
 from termcolor import cprint
 
 from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
+from dexmani_policy.common.inference import positive_int
 from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
 
 
@@ -171,8 +172,10 @@ class BaseRunner:
         self._obs_count = 0
 
     @torch.no_grad()
-    def get_action_chunk(self, obs_batch, agent, denoise_timesteps: int = None) -> np.ndarray:
-        result = agent.predict_action(obs_dict=obs_batch, denoise_timesteps=denoise_timesteps)
+    def get_action_chunk(self, obs_batch, agent, inference_steps: int | None = None) -> np.ndarray:
+        if inference_steps is not None:
+            positive_int(inference_steps, "inference_steps")
+        result = agent.predict_action(obs_dict=obs_batch, inference_steps=inference_steps)
 
         return result["control_action"].detach().cpu().numpy().squeeze(0)
 
@@ -242,7 +245,7 @@ class BaseRunner:
         else:
             imageio.mimsave(str(path), frames.astype(np.uint8), fps=fps)
 
-    def run_one_episode(self, agent, env, episode_seed, denoise_timesteps: int = None, **kwargs):
+    def run_one_episode(self, agent, env, episode_seed, inference_steps: int | None = None, *, options=None):
         """Run a single evaluation episode.
 
         Environment contract (required for accurate ``avg_steps`` metrics):
@@ -256,7 +259,9 @@ class BaseRunner:
         If ``success_condition`` or ``action_cnt`` is missing, ``task_done_step``
         will be ``None`` and ``avg_steps`` will be reported as ``N/A``.
         """
-        obs, info = env.reset(seed=episode_seed, options=kwargs.get("options", None))
+        if inference_steps is not None:
+            positive_int(inference_steps, "inference_steps")
+        obs, info = env.reset(seed=episode_seed, options=options)
         self.reset()
         self.update_obs(obs)
 
@@ -274,7 +279,7 @@ class BaseRunner:
 
         while not (done or truncated):
             obs_batch = self.get_obs_batch(device=device)
-            action_chunk = self.get_action_chunk(obs_batch, agent, denoise_timesteps=denoise_timesteps)
+            action_chunk = self.get_action_chunk(obs_batch, agent, inference_steps=inference_steps)
             for i in range(action_chunk.shape[0]):
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
                 self.update_obs(obs)
@@ -294,7 +299,7 @@ class BaseRunner:
     def run(
         self,
         agent,
-        denoise_timesteps: int = None,
+        inference_steps: int | None = None,
         eval_episodes: int = None,
         video_save_dir: Optional[Path] = None,
     ):
@@ -311,6 +316,8 @@ class BaseRunner:
         3. **Video encoding** (``_encode_video``) — best-effort, warning
            printed — never corrupts the episode result.
         """
+        if inference_steps is not None:
+            positive_int(inference_steps, "inference_steps")
         success_list = []
         task_done_step_list = []
         episode_video_list = []
@@ -349,7 +356,7 @@ class BaseRunner:
 
                 try:
                     episode_success, task_done_step = self.run_one_episode(
-                        agent, env, eval_seed, denoise_timesteps
+                        agent, env, eval_seed, inference_steps=inference_steps
                     )
                     episode_completed = True
                 except EvalEpisodeError:

@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-DEPLOYMENT_FORMAT = "dexmani.deployment.v2"
+DEPLOYMENT_FORMAT = "dexmani.deployment.v3"
 
 
 class DeploymentContractError(ValueError):
@@ -137,7 +137,7 @@ class DeploymentSpec:
     action_key: str
     action_dim: int
     horizon: int
-    denoise_steps: int
+    inference_steps: int
     rgb_preprocessing: RgbPreprocessingSpec | None
     normalization: dict[str, Any]
     agent_config: dict[str, Any]
@@ -200,8 +200,8 @@ def parse_deployment_contract(payload: Mapping[str, Any]) -> DeploymentSpec:
         action_key=action_key,
         action_dim=action_dim,
         horizon=horizon,
-        denoise_steps=_positive_int(
-            inference.get("eval", {}).get("denoise_steps"), "denoise_steps"
+        inference_steps=_positive_int(
+            inference.get("eval", {}).get("inference_steps"), "inference_steps"
         ),
         rgb_preprocessing=preprocessing,
         normalization=_normalization_spec(inference.get("normalization"), fields),

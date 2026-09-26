@@ -46,7 +46,14 @@ class ManiFlowObsEncoder(nn.Module):
         if n_obs_steps <= 0:
             raise ValueError("n_obs_steps must be greater than 0")
         pc_encoder_config = dict(pc_encoder_config or {})
-        pc_encoder_config.setdefault("num_points", num_points)
+        legacy_num_points = pc_encoder_config.pop("num_points", None)
+        if legacy_num_points is not None and legacy_num_points != num_points:
+            raise ValueError(
+                "Conflicting ManiFlow point counts: "
+                "agent.num_points is authoritative and must match legacy "
+                "pc_encoder_config.num_points"
+            )
+        pc_encoder_config["num_points"] = num_points
         self.pc_encoder = build_pc_patch_tokenizer(
             encoder_type, pc_dim, pc_encoder_config
         )
@@ -110,8 +117,8 @@ class ManiFlowAgent(BaseAgent):
         n_head: int = 8,
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.1,
-        qkv_bias: bool = True,
-        qk_norm: bool = True,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
         pre_norm_modality: bool = False,
         num_inference_steps: int = 10,
         denoise_timesteps: int = 10,

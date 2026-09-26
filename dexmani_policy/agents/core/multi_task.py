@@ -58,6 +58,7 @@ class MultiTaskAgent(BaseAgent):
         modality_dropout_probs: dict = None,
         # text embedding cache (optional)
         task_texts: list = None,
+        num_flow_train_timesteps: int = 10,
     ):
         assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip", "r3m"), (
             f"rgb_backbone_name must be one of resnet/clip/dino/siglip/r3m, got {rgb_backbone_name}"
@@ -103,6 +104,7 @@ class MultiTaskAgent(BaseAgent):
             action_decoder = RectifiedFlow(
                 backbone,
                 num_inference_steps=flow_num_inference_steps,
+                num_flow_train_timesteps=num_flow_train_timesteps,
                 t_sample_mode=flow_t_sample_mode,
                 beta_s=flow_beta_s,
                 beta_alpha=flow_beta_alpha,

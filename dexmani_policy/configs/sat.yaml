@@ -109,6 +109,7 @@ agent:
 
   # Flow matching (standard CFM, no consistency training)
   num_inference_steps: 10
+  num_flow_train_timesteps: 10
   t_sample_mode_for_flow: beta
 
   modality_dropout_probs:
@@ -176,8 +177,8 @@ env_runner:
 
 # ── Eval ──
 eval:
-  denoise_steps: 10
-  denoise_timesteps_list: null
+  inference_steps: 10
+  inference_steps_list: null
   use_ema: true
 
   select_best:

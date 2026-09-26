@@ -18,7 +18,8 @@ import torch
 import torch.nn as nn
 import zarr
 
-from dexmani_policy.agents.core.maniflow import ManiFlowObsEncoder
+from dexmani_policy.agents.core.maniflow import ManiFlowAgent, ManiFlowObsEncoder
+from dexmani_policy.agents.action_decoders.backbone.consistency_ditx import ConsistencyDiTX
 from dexmani_policy.agents.action_decoders.consistency_flow import ConsistencyFlowMatch
 from dexmani_policy.agents.obs_encoder.pointcloud import ops
 from dexmani_policy.agents.position_encodings import NeRFSinusoidalPosEmb3D
@@ -38,7 +39,6 @@ from dexmani_policy.training.resume import build_resume_contract, build_train_lo
 def small_config():
     cfg = load_config("maniflow")
     cfg.agent.num_points = 32
-    cfg.agent.pc_encoder_config.num_points = 32
     cfg.agent.hidden_dim = 32
     cfg.agent.n_layers = 2
     cfg.agent.n_head = 4
@@ -69,6 +69,23 @@ def make_models():
 class XYZEncodingTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(12)
+
+    def test_authoritative_point_count(self):
+        for nested in ({}, {"num_points": 32}, {"num_points": 64}):
+            with self.subTest(config=nested):
+                original = dict(nested)
+                kwargs = dict(
+                    encoder_type="pointnet_dense", pc_dim=6, state_dim=19,
+                    num_points=32, n_obs_steps=2, pc_encoder_config=nested,
+                )
+                if nested.get("num_points") == 64:
+                    with self.assertRaisesRegex(ValueError, "agent.num_points is authoritative"):
+                        ManiFlowObsEncoder(**kwargs)
+                else:
+                    encoder = ManiFlowObsEncoder(**kwargs)
+                    self.assertEqual(encoder.pc_encoder.out_shape[0], 32)
+                self.assertEqual(nested, original)
+        self.assertNotIn("num_points", load_config("maniflow").agent.pc_encoder_config)
 
     def test_nerf_formula_dtype_and_equivariance(self):
         for device in (["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]):
@@ -170,6 +187,26 @@ class AttentionTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(31)
 
+    def test_direct_constructor_defaults(self):
+        backbone = ConsistencyDiTX(
+            horizon=16, action_dim=19, n_obs_steps=2, obs_token_dim=192,
+            hidden_dim=32, n_layers=2, n_head=4,
+        )
+        agent = ManiFlowAgent(
+            horizon=16, action_dim=19, n_obs_steps=2, n_action_steps=8,
+            encoder_type="pointnet_dense", pc_dim=6, state_dim=19,
+            num_points=32, hidden_dim=32, n_layers=2, n_head=4,
+        )
+        for model in (backbone, agent.action_decoder.model):
+            for block in model.ditx_blocks:
+                self.assertIsInstance(block.self_attn, nn.MultiheadAttention)
+                self.assertIsNotNone(block.self_attn.in_proj_bias)
+                self.assertIsNotNone(block.self_attn.out_proj.bias)
+                self.assertIsNone(block.cross_attn.q.bias)
+                self.assertIsNone(block.cross_attn.kv.bias)
+                self.assertIsInstance(block.cross_attn.q_norm, nn.Identity)
+                self.assertIsInstance(block.cross_attn.k_norm, nn.Identity)
+
     def test_mha_and_cross_attention(self):
         _, _, agent, _, _ = make_models()
         model = agent.action_decoder.model
@@ -218,6 +255,40 @@ class ConstantVelocity(nn.Module):
 
 
 class TimeGridTest(unittest.TestCase):
+    def test_absolute_inference_euler_targets(self):
+        decoder = ConsistencyFlowMatch(ConstantVelocity(), target_t_sample_mode="absolute")
+        with patch.object(decoder.model, "forward", wraps=decoder.model.forward) as forward:
+            decoder.predict_action(torch.zeros(2, 8, 192), torch.zeros(2, 16, 19), inference_steps=4)
+        for step, call in enumerate(forward.call_args_list):
+            torch.testing.assert_close(call.kwargs["timestep"], torch.full((2,), step / 4))
+            torch.testing.assert_close(call.kwargs["target_t"], torch.full((2,), (step + 1) / 4))
+
+    def test_absolute_and_relative_teacher_targets(self):
+        actions = torch.randn(2, 16, 19)
+        cond = torch.randn(2, 8, 192)
+        t, dt = torch.full((2,), 0.9), torch.full((2,), 0.3)
+        for mode in ("absolute", "relative"):
+            with self.subTest(mode=mode):
+                decoder = ConsistencyFlowMatch(ConstantVelocity(), target_t_sample_mode=mode)
+                teacher = ConstantVelocity()
+                with (
+                    patch.object(decoder.time_sampler, "sample", side_effect=[t, dt]),
+                    patch.object(teacher, "forward", wraps=teacher.forward) as forward,
+                ):
+                    targets = decoder.get_consistency_velocity(actions, cond, teacher)
+                kwargs = forward.call_args.kwargs
+                torch.testing.assert_close(kwargs["timestep"], torch.ones_like(t))
+                torch.testing.assert_close(
+                    kwargs["target_t"], torch.full_like(t, 1.3) if mode == "absolute" else dt,
+                )
+                torch.testing.assert_close(
+                    targets["target_t"], torch.ones_like(t) if mode == "absolute" else dt,
+                )
+                torch.testing.assert_close(kwargs["x"], actions)
+                torch.testing.assert_close(
+                    targets["vt_target"], (actions - targets["xt"]) / (1 - t[:, None, None]),
+                )
+
     def test_grid_and_targets_independent_of_inference_nfe(self):
         actions = torch.randn(10, 16, 19)
         cond = torch.randn(10, 8, 192)
@@ -252,12 +323,13 @@ class TimeGridTest(unittest.TestCase):
             # Runtime override changes only the number of Euler evaluations.
             with patch.object(decoder.model, "forward", wraps=decoder.model.forward) as forward:
                 torch.manual_seed(54)
-                result = decoder.predict_action(cond, actions, denoise_timesteps=4)
+                result = decoder.predict_action(cond, actions, inference_steps=4)
                 self.assertEqual(forward.call_count, 4)
             torch.manual_seed(54)
             torch.testing.assert_close(result, torch.randn_like(actions) + 0.25)
             self.assertEqual(decoder.time_sampler.num_steps, 10)
             self.assertEqual(decoder.num_inference_steps, nfe)
+            self.assertEqual(decoder.denoise_timesteps, 10)
         for steps in (0, -1, 1.5, True):
             with self.assertRaisesRegex(ValueError, "denoise_timesteps"):
                 ConsistencyFlowMatch(ConstantVelocity(), denoise_timesteps=steps)
@@ -340,7 +412,7 @@ class IntegrationTest(unittest.TestCase):
         for key, value in expected.items():
             self.assertEqual(cfg.agent[key], value, key)
         self.assertNotIn("hidden_dims", cfg.agent.pc_encoder_config)
-        self.assertEqual(cfg.eval.denoise_steps, 4)
+        self.assertEqual(cfg.eval.inference_steps, 4)
         self.assertTrue(cfg.training.use_compile)
         self.assertTrue(cfg.training.use_bfloat16)
         self.assertEqual(cfg.training.max_grad_norm, 1.0)
@@ -411,7 +483,7 @@ class IntegrationTest(unittest.TestCase):
             cond, _ = agent._build_cond(batch["obs"])
             self.assertEqual(cond.shape, (4, 64, 192))
             torch.manual_seed(63)
-            result = agent.predict_action(batch["obs"], denoise_timesteps=cfg.eval.denoise_steps)
+            result = agent.predict_action(batch["obs"], inference_steps=cfg.eval.inference_steps)
             self.assertEqual(result["pred_action"].shape, (4, 16, 19))
             self.assertEqual(result["control_action"].shape, (4, 8, 19))
             torch.testing.assert_close(result["control_action"], result["pred_action"][:, 1:9], rtol=0, atol=0)
@@ -439,15 +511,24 @@ class IntegrationTest(unittest.TestCase):
                 for key, tensor in source.state_dict().items():
                     torch.testing.assert_close(target.state_dict()[key], tensor, rtol=0, atol=0)
             self.assertEqual(restored_updater.optimization_step, updater.optimization_step)
+            changed_contract = copy.deepcopy(contract)
+            changed_contract["agent_config"]["denoise_timesteps"] = 4
+            with self.assertRaisesRegex(ValueError, "denoise_timesteps"):
+                restore_training_state(
+                    loaded, resume_contract=changed_contract, model=restored,
+                    ema_model=restored_ema, ema_updater=restored_updater,
+                    optimizer=restored_optimizer, scheduler=restored_scheduler,
+                    device=torch.device("cpu"),
+                )
             # The checkpoint constructor, including training grid, owns evaluation.
             cfg.agent.denoise_timesteps = 3
             for use_ema, source in ((False, agent), (True, ema)):
                 inference = load_ckpt_for_inference(store, checkpoint_path, use_ema, cfg=cfg).eval()
                 self.assertEqual(inference.action_decoder.time_sampler.num_steps, 10)
                 torch.manual_seed(64)
-                expected = source.predict_action(batch["obs"], denoise_timesteps=4)
+                expected = source.predict_action(batch["obs"], inference_steps=4)
                 torch.manual_seed(64)
-                actual = inference.predict_action(batch["obs"], denoise_timesteps=4)
+                actual = inference.predict_action(batch["obs"], inference_steps=4)
                 torch.testing.assert_close(actual["pred_action"], expected["pred_action"], rtol=0, atol=0)
 
 
@@ -536,8 +617,8 @@ class RuntimeTest(unittest.TestCase):
         updater.step(agent)
         agent.eval()
         with torch.no_grad():
-            result = agent.predict_action(batch["obs"], denoise_timesteps=4)
-            ema_result = ema.predict_action(batch["obs"], denoise_timesteps=4)
+            result = agent.predict_action(batch["obs"], inference_steps=4)
+            ema_result = ema.predict_action(batch["obs"], inference_steps=4)
         for prediction in (result, ema_result):
             self.assertEqual(prediction["control_action"].shape, (4, 8, 19))
             self.assertTrue(torch.isfinite(prediction["pred_action"]).all())

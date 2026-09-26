@@ -33,7 +33,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  --initial-episodes N   Episodes per ckpt in Phase 1 (default: 25)"
     echo "  --batch-size N         Episodes in the optional exact-tie batch (default: 5)"
     echo "  --max-episodes N       Cap for initial stage plus tie batch (default: 100)"
-    echo "  --denoise-steps N      Inference denoising steps (default: from config)"
+    echo "  --inference-steps N      Inference steps (default: from config)"
     echo "  --no-ema               Use raw weights instead of EMA"
     echo "  --seed N               Eval seed override"
     echo ""

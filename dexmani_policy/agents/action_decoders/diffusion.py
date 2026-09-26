@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
+from dexmani_policy.common.inference import positive_int, resolve_inference_steps
+
 
 class Diffusion(nn.Module):
     """Denoising diffusion probabilistic model for action prediction.
@@ -35,6 +37,7 @@ class Diffusion(nn.Module):
         aux_loss_weight: float = 1.0,
     ) -> None:
         super().__init__()
+        positive_int(num_inference_steps, "num_inference_steps")
 
         self.model = model
         self.aux_loss_weight = aux_loss_weight
@@ -123,13 +126,11 @@ class Diffusion(nn.Module):
         self,
         cond: torch.Tensor,
         action_template: torch.Tensor,
-        denoise_timesteps: int | None = None,
+        inference_steps: int | None = None,
     ) -> torch.Tensor:
+        num_steps = resolve_inference_steps(self.num_inference_steps, inference_steps)
         sample = torch.randn_like(action_template, device=action_template.device)
-        if denoise_timesteps is None:
-            denoise_timesteps = self.num_inference_steps
-
-        self.noise_scheduler.set_timesteps(denoise_timesteps, device=sample.device)
+        self.noise_scheduler.set_timesteps(num_steps, device=sample.device)
         for t in self.noise_scheduler.timesteps:
             output = self.model(x=sample, timestep=t, context=cond)
             sample = self.noise_scheduler.step(output, t, sample).prev_sample

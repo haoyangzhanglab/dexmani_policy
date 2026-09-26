@@ -13,7 +13,7 @@ Key differences from ``eval_best_ckpt.py``:
 - Defaults to a small number of episodes (5), suitable for demo clips.
 - With ``--ckpt-tag best``, reuses the strict selection record's EMA choice,
   denoising step count, and episode-seeded policy sampling mode. Explicit
-  ``--ema``/``--no-ema`` and ``--denoise-steps`` override the selected policy.
+  ``--ema``/``--no-ema`` and ``--inference-steps`` override the selected policy.
 
 Usage
 -----
@@ -50,9 +50,11 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.common.config import normalize_eval_config, register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.training.eval_utils import (
+    add_inference_steps_argument,
+    validate_inference_steps,
     _get_eval_param,
     build_eval_components,
     collect_episode_details,
@@ -73,7 +75,7 @@ def _resolve_demo_inference(
     ckpt_tag: str,
     *,
     cli_use_ema: bool | None,
-    cli_denoise_steps: int | None,
+    cli_inference_steps: int | None,
 ) -> tuple[bool, list[int]]:
     """Resolve the policy settings used for a demo recording.
 
@@ -81,28 +83,30 @@ def _resolve_demo_inference(
     override is supplied. Other checkpoint tags retain ``eval.demo`` config
     behavior.
     """
+    cfg = normalize_eval_config(cfg)
     if ckpt_tag == "best":
         inference = read_best_ckpt_json(exp_dir)["inference"]
         use_ema = inference["use_ema"]
-        denoise_timesteps_list = [inference["denoise_steps"]]
+        inference_steps_list = [inference["inference_steps"]]
     else:
         use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
         configured_steps = _get_eval_param(
-            cfg, "denoise_timesteps_list", "demo", default=None
+            cfg, "inference_steps_list", "demo", default=None
         )
-        if configured_steps:
-            denoise_timesteps_list = list(configured_steps)
+        if configured_steps is not None:
+            inference_steps_list = list(configured_steps)
         else:
-            denoise_timesteps_list = [
-                _get_eval_param(cfg, "denoise_steps", "demo", default=10)
+            inference_steps_list = [
+                _get_eval_param(cfg, "inference_steps", "demo", default=10)
             ]
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema
-    if cli_denoise_steps is not None:
-        denoise_timesteps_list = [cli_denoise_steps]
+    if cli_inference_steps is not None:
+        inference_steps_list = [cli_inference_steps]
 
-    return use_ema, denoise_timesteps_list
+    validate_inference_steps(inference_steps_list)
+    return use_ema, inference_steps_list
 
 
 def main() -> None:
@@ -149,12 +153,7 @@ def main() -> None:
         "Overrides --episodes. Useful for re-recording specific episodes "
         "from a prior eval run (see result_details.json).",
     )
-    parser.add_argument(
-        "--denoise-steps",
-        type=int,
-        default=None,
-        help="DDIM/Euler denoising steps (best: selection record; otherwise config).",
-    )
+    add_inference_steps_argument(parser)
     parser.add_argument(
         "--ema",
         dest="use_ema",
@@ -208,7 +207,7 @@ def main() -> None:
         sys.exit(1)
 
     # ── 2. Load config ────────────────────────────────────────────────────
-    cfg = OmegaConf.load(cfg_path)
+    cfg = normalize_eval_config(OmegaConf.load(cfg_path))
     cfg._exp_dir = str(exp_dir)
 
     eval_seed = resolve_eval_seed(cfg)
@@ -217,12 +216,12 @@ def main() -> None:
     device = torch.device(cfg.training.device)
     cprint(f"Device: {device}", "cyan")
 
-    use_ema, denoise_timesteps_list = _resolve_demo_inference(
+    use_ema, inference_steps_list = _resolve_demo_inference(
         cfg,
         exp_dir,
         args.ckpt_tag,
         cli_use_ema=args.use_ema,
-        cli_denoise_steps=args.denoise_steps,
+        cli_inference_steps=args.inference_steps,
     )
 
     # ── 3. Build env_runner and checkpoint store ─────────────────────────────────────
@@ -265,7 +264,7 @@ def main() -> None:
         args.episodes if args.episodes is not None else _get_eval_param(cfg, "episodes", "demo", default=5)
     )
 
-    do_sweep = len(denoise_timesteps_list) > 1
+    do_sweep = len(inference_steps_list) > 1
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
     agent = load_ckpt_for_inference(checkpoint_store, ckpt_path, use_ema, cfg=cfg)
@@ -275,14 +274,14 @@ def main() -> None:
 
     # ── 7. Print recording config ─────────────────────────────────────────
     resolution_str = f"{resolved_resolution[0]}×{resolved_resolution[1]}"
-    dt_str = ", ".join(str(d) for d in denoise_timesteps_list) if do_sweep else str(denoise_timesteps_list[0])
+    steps_str = ", ".join(str(d) for d in inference_steps_list) if do_sweep else str(inference_steps_list[0])
     cprint(f"{'=' * 60}", "cyan")
     cprint("  Demo Video Recording", "cyan")
     cprint(f"  Policy       : {args.policy_name}", "cyan")
     cprint(f"  Task         : {args.task_name}", "cyan")
     cprint(f"  Checkpoint   : {ckpt_label}", "cyan")
     cprint(f"  Episodes     : {demo_episodes}", "cyan")
-    cprint(f"  Denoise steps: {dt_str}" + (" (sweep)" if do_sweep else ""), "cyan")
+    cprint(f"  Inference steps: {steps_str}" + (" (sweep)" if do_sweep else ""), "cyan")
     cprint(f"  Resolution   : {resolution_str}", "cyan")
     cprint(f"  Output dir   : {video_save_dir}", "cyan")
     cprint(f"{'=' * 60}\n", "cyan")
@@ -307,17 +306,17 @@ def main() -> None:
     # ── 9. Run episodes (sweep or single) ─────────────────────────────────
     demo_results: list[dict] = []
 
-    for dt in denoise_timesteps_list:
+    for inference_steps in inference_steps_list:
         if do_sweep:
-            sub_dir = video_save_dir / f"denoise_timesteps{dt}"
+            sub_dir = video_save_dir / f"inference_steps{inference_steps}"
             sub_dir.mkdir(parents=True, exist_ok=True)
-            cprint(f"\n--- denoise_timesteps={dt} ---", "cyan", attrs=["bold"])
+            cprint(f"\n--- inference_steps={inference_steps} ---", "cyan", attrs=["bold"])
         else:
             sub_dir = video_save_dir
 
         result = env_runner.run(
             agent,
-            denoise_timesteps=dt,
+            inference_steps=inference_steps,
             eval_episodes=demo_episodes,
             video_save_dir=sub_dir,
         )
@@ -332,19 +331,19 @@ def main() -> None:
                 f"  Success: {n_success}/{n_total} = {sr:.1%}",
                 "green" if sr >= 0.5 else "red",
             )
-            demo_results.append({"denoise_timesteps": dt, "n_success": n_success,
+            demo_results.append({"inference_steps": inference_steps, "n_success": n_success,
                                  "n_total": n_total, "success_rate": sr})
 
     # ── 10. Report ────────────────────────────────────────────────────────
     if do_sweep and demo_results:
         cprint(f"\n{'=' * 60}", "green")
-        cprint("  Denoise Timesteps Sweep Summary", "green")
-        cprint(f"  {'Denoise Steps':<16} {'Success Rate':<18}", "green")
+        cprint("  Inference Steps Sweep Summary", "green")
+        cprint(f"  {'Inference Steps':<16} {'Success Rate':<18}", "green")
         cprint("  " + "-" * 34, "green")
         for r in demo_results:
-            dt = r["denoise_timesteps"]
+            inference_steps = r["inference_steps"]
             sr = f"{r['n_success']}/{r['n_total']} ({r['success_rate']:.1%})"
-            cprint(f"  {dt:<16} {sr:<18}", "green" if r["success_rate"] >= 0.5 else "red")
+            cprint(f"  {inference_steps:<16} {sr:<18}", "green" if r["success_rate"] >= 0.5 else "red")
         cprint(f"{'=' * 60}\n", "green")
 
     cprint(f"\n{'=' * 60}", "green")

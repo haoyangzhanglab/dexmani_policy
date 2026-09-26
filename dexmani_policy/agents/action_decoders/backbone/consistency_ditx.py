@@ -147,8 +147,8 @@ class ConsistencyDiTX(nn.Module):
         n_head: int = 8,
         mlp_ratio: float = 4.0,
         p_drop_attn: float = 0.1,
-        qkv_bias: bool = True,
-        qk_norm: bool = True,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
         pre_norm_modality: bool = False,
     ):
         super().__init__()

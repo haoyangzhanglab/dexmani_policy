@@ -10,6 +10,7 @@ from termcolor import cprint
 from dexmani_policy.common.pytorch_util import format_success_rate
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError, _classify_eval_exception
 from dexmani_policy.env_runner.sim_runner import SimRunner
+from dexmani_policy.common.inference import positive_int
 
 
 class TaskTextSimRunner(SimRunner):
@@ -18,9 +19,9 @@ class TaskTextSimRunner(SimRunner):
         self.task_text = task_text
 
     @torch.no_grad()
-    def get_action_chunk(self, obs_batch, agent, denoise_timesteps: int = None) -> np.ndarray:
+    def get_action_chunk(self, obs_batch, agent, inference_steps: int | None = None) -> np.ndarray:
         obs_batch["task_text"] = [self.task_text]
-        return super().get_action_chunk(obs_batch, agent, denoise_timesteps)
+        return super().get_action_chunk(obs_batch, agent, inference_steps=inference_steps)
 
 
 class MultiTaskSimRunner:
@@ -168,11 +169,12 @@ class MultiTaskSimRunner:
     def run(
         self,
         agent,
-        denoise_timesteps: int = None,
+        inference_steps: int | None = None,
         eval_episodes: int = None,
         video_save_dir=None,
     ) -> Dict[str, Any]:
-
+        if inference_steps is not None:
+            positive_int(inference_steps, "inference_steps")
         per_task: Dict[str, Any] = {}
         all_videos = []
         failed_tasks = []
@@ -195,7 +197,7 @@ class MultiTaskSimRunner:
             try:
                 result = runner.run(
                     agent,
-                    denoise_timesteps=denoise_timesteps,
+                    inference_steps=inference_steps,
                     eval_episodes=eval_episodes,
                     video_save_dir=task_video_dir,
                 )

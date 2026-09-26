@@ -181,6 +181,7 @@ class SATAgent(BaseAgent):
         beta_beta: float = 1.5,
         # BaseAgent
         modality_dropout_probs: dict | None = None,
+        num_flow_train_timesteps: int = 10,
     ):
         # 1. Observation encoder
         obs_encoder = SATObsEncoder(
@@ -218,6 +219,7 @@ class SATAgent(BaseAgent):
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
+            num_flow_train_timesteps=num_flow_train_timesteps,
             t_sample_mode=t_sample_mode_for_flow,
             beta_s=beta_s,
             beta_alpha=beta_alpha,
@@ -277,7 +279,7 @@ class SATAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def predict_action_from_cond(self, cond, denoise_timesteps=None):
+    def predict_action_from_cond(self, cond, inference_steps: int | None = None):
         """Inference from pre-built condition tensor.
 
         Uses structural-centric ``(B, Da, T)`` template matching the SAT
@@ -292,7 +294,7 @@ class SATAgent(BaseAgent):
             dtype=cond.dtype,
         )
 
-        pred = self.action_decoder.predict_action(cond, template, denoise_timesteps)
+        pred = self.action_decoder.predict_action(cond, template, inference_steps=inference_steps)
         if not torch.isfinite(pred).all():
             raise RuntimeError("Non-finite SAT action prediction")
         # pred is (B, Da, T)
