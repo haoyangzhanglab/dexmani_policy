@@ -33,8 +33,9 @@ class PointColorJitter(Aug):
     """HSV color jitter for point cloud RGB channels (last 3 dims).
 
     Brightness is **additive** (R3D-Policy, 2026): ``rgb += delta`` where
-    delta ∈ [-brightness, +brightness].  Contrast, saturation, and hue follow
-    the standard multiplicative formulation used by both R3D and ManiFlow.
+    delta ∈ [-brightness, +brightness]. Contrast is centered on the current
+    flattened RGB global mean; saturation uses BT.601 luma. Optional hue
+    shifts are retained for recipes beyond the R3D brightness/contrast/saturation trio.
 
     Input ``(T,N,C) float32, C>=6``.  Modifies the RGB channels **in-place**
     on a pre-copied array.
@@ -89,9 +90,10 @@ class PointColorJitter(Aug):
         if self.contrast[0] == self.contrast[1]:
             return
         factor = np.random.uniform(*self.contrast)
-        rgb -= 0.5
+        mean = rgb.mean()
+        rgb -= mean
         rgb *= factor
-        rgb += 0.5
+        rgb += mean
 
     def _apply_saturation_ip(self, rgb):
         if self.saturation[0] == self.saturation[1]:

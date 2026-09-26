@@ -13,7 +13,11 @@ from dexmani_policy.agents.action_decoders.time_sampler import TimeSampler
 
 
 class ConsistencyFlowMatch(nn.Module):
-    """Rectified flow plus the ManiFlow EMA consistency-training protocol."""
+    """Rectified flow plus the ManiFlow EMA consistency-training protocol.
+
+    ``denoise_timesteps`` sets the training grid; ``num_inference_steps``
+    sets only the default Euler inference NFE.
+    """
 
     requires_ema_for_loss = True
 
@@ -21,6 +25,7 @@ class ConsistencyFlowMatch(nn.Module):
         self,
         model: nn.Module,
         num_inference_steps: int = 10,
+        denoise_timesteps: int = 10,
         flow_batch_ratio: float = 0.75,
         t_sample_mode_for_flow: str = "beta",
         t_sample_mode_for_consistency: str = "discrete",
@@ -28,6 +33,8 @@ class ConsistencyFlowMatch(nn.Module):
         target_t_sample_mode: str = "relative",
     ) -> None:
         super().__init__()
+        if type(denoise_timesteps) is not int or denoise_timesteps <= 0:
+            raise ValueError("denoise_timesteps must be a positive integer")
         if num_inference_steps <= 0:
             raise ValueError("num_inference_steps must be greater than 0")
         if not 0 < flow_batch_ratio < 1:
@@ -39,12 +46,14 @@ class ConsistencyFlowMatch(nn.Module):
 
         self.model = model
         self.num_inference_steps = num_inference_steps
+        self.denoise_timesteps = denoise_timesteps
         self.flow_batch_ratio = flow_batch_ratio
         self.t_sample_mode_for_flow = t_sample_mode_for_flow
         self.t_sample_mode_for_consistency = t_sample_mode_for_consistency
         self.dt_sample_mode_for_consistency = dt_sample_mode_for_consistency
         self.target_t_sample_mode = target_t_sample_mode
-        self.time_sampler = TimeSampler(num_steps=num_inference_steps)
+        # Training grid resolution is independent of the Euler inference NFE.
+        self.time_sampler = TimeSampler(num_steps=denoise_timesteps)
 
     @staticmethod
     def linear_interpolate(
@@ -143,9 +152,7 @@ class ConsistencyFlowMatch(nn.Module):
             )
 
         pred_x1 = xt_next + v_to_target * (1.0 - t_next_view)
-        denominator = (1.0 - t_view).clamp(
-            min=max(1.0 / self.num_inference_steps, 1e-3)
-        )
+        denominator = (1.0 - t_view).clamp_min(1e-6)
         vt_target = (pred_x1 - xt) / denominator
 
         return {
@@ -304,6 +311,7 @@ class ConsistencyFlowMatch(nn.Module):
         action_template: torch.Tensor,
         denoise_timesteps: int | None = None,
     ) -> torch.Tensor:
+        """Sample actions; the historical ``denoise_timesteps`` argument overrides NFE only."""
         num_steps = (
             self.num_inference_steps
             if denoise_timesteps is None

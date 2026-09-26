@@ -17,8 +17,8 @@ class PointNetDense(nn.Module):
     Parameters:
         input_channels: Point cloud channels (3 for xyz, 6 for xyz+rgb).
         out_channels: Output feature dimension per point.
-        num_points: Number of points per frame (after FPS downsampling).
-        hidden_dims: MLP hidden layer sizes.
+        num_points: Expected point count for out_shape metadata; sampling is
+            performed by the caller.
     """
 
     supports_global_token = False
@@ -28,11 +28,10 @@ class PointNetDense(nn.Module):
         input_channels: int = 3,
         out_channels: int = 128,
         num_points: int = 256,
-        hidden_dims: tuple[int, ...] = (64, 128, 256),
     ):
         super().__init__()
-        if input_channels < 3:
-            raise ValueError("input_channels must be at least 3 because xyz is required")
+        if input_channels not in (3, 6):
+            raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")
 
         self.input_channels = input_channels
         self._out_channels = out_channels
@@ -40,11 +39,15 @@ class PointNetDense(nn.Module):
 
         layers = []
         in_dim = input_channels
-        for h in hidden_dims:
+        for h in (64, 128, 256):
             layers.append(nn.Linear(in_dim, h))
             layers.append(nn.LayerNorm(h))
             layers.append(nn.ReLU())
             in_dim = h
+        if input_channels == 6:
+            # Official RGB branch: no norm/activation before final projection.
+            layers.append(nn.Linear(256, 512))
+            in_dim = 512
         self.mlp = nn.Sequential(*layers)
 
         self.final_proj = nn.Sequential(
@@ -52,12 +55,11 @@ class PointNetDense(nn.Module):
             nn.LayerNorm(out_channels),
         )
 
-    def forward(self, pointcloud: torch.Tensor, return_global_token: bool = False, **kwargs):
+    def forward(self, pointcloud: torch.Tensor):
         """Encode point cloud into per-point features.
 
         Args:
             pointcloud: ``(B, N, C)`` tensor.
-            return_global_token: Unused (accepted for interface compat).
 
         Returns:
             ``(B, N, out_channels)`` per-point feature tensor.

@@ -13,9 +13,17 @@ from dexmani_policy.agents.obs_encoder.pointcloud.registry import (
     build_pc_patch_tokenizer,
 )
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+from dexmani_policy.agents.position_encodings import NeRFSinusoidalPosEmb3D
 
 
 class ManiFlowObsEncoder(nn.Module):
+    """Dense point features plus projected XYZ PE and broadcast state.
+
+    Inputs are augmented and normalized upstream. Sampling here supplies the
+    same points to PointNet and XYZ PE. Flattening preserves frame-major order:
+    all points of frame 0, then all points of frame 1, and so on.
+    """
+
     @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
         return ("joint_state", "point_cloud")
@@ -30,10 +38,15 @@ class ManiFlowObsEncoder(nn.Module):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
+        xyz_pe_num_frequencies: int = 8,
     ):
         super().__init__()
+        if encoder_type != "pointnet_dense":
+            raise ValueError("ManiFlow requires pointnet_dense for point-aligned XYZ PE")
+        if n_obs_steps <= 0:
+            raise ValueError("n_obs_steps must be greater than 0")
         pc_encoder_config = dict(pc_encoder_config or {})
-        pc_encoder_config.setdefault("fps_random_config", fps_random_config)
+        pc_encoder_config.setdefault("num_points", num_points)
         self.pc_encoder = build_pc_patch_tokenizer(
             encoder_type, pc_dim, pc_encoder_config
         )
@@ -43,11 +56,12 @@ class ManiFlowObsEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
 
-        token_seq_len, pc_out_dim = self.pc_encoder.out_shape
-        if getattr(self.pc_encoder, "supports_global_token", True):
-            self.num_obs_tokens = (token_seq_len + 1) * n_obs_steps
-        else:
-            self.num_obs_tokens = token_seq_len * n_obs_steps
+        pc_out_dim = self.pc_encoder.out_dim
+        self.xyz_pe = NeRFSinusoidalPosEmb3D(xyz_pe_num_frequencies)
+        self.xyz_pe_proj = nn.Sequential(
+            nn.Linear(self.xyz_pe.out_dim, pc_out_dim),
+            nn.LayerNorm(pc_out_dim),
+        )
         self.obs_token_dim = pc_out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
@@ -59,17 +73,15 @@ class ManiFlowObsEncoder(nn.Module):
             training=self.training,
         )
 
-        if getattr(self.pc_encoder, "supports_global_token", True):
-            pc_outputs = self.pc_encoder(pc, return_global_token=True)
-            patch_token, _, global_token = pc_outputs[0], pc_outputs[1], pc_outputs[2]
-            pc_feat = torch.cat([global_token, patch_token], dim=1)
-        else:
-            pc_feat = self.pc_encoder(pc)
+        # Both branches see the same augmented, normalized, sampled points.
+        pc_feat = self.pc_encoder(pc) + self.xyz_pe_proj(self.xyz_pe(pc[..., :3]))
 
         state_feat = self.state_mlp(obs["joint_state"])
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
         feat = torch.cat([pc_feat, state_feat], dim=-1)
 
+        if feat.shape[0] % self.n_obs_steps != 0:
+            raise ValueError("observation batch must be divisible by n_obs_steps")
         batch_size = feat.shape[0] // self.n_obs_steps
         return feat.reshape(batch_size, -1, self.obs_token_dim), {}
 
@@ -90,6 +102,7 @@ class ManiFlowAgent(BaseAgent):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
+        xyz_pe_num_frequencies: int = 8,
         timestep_embed_dim: int = 128,
         target_t_embed_dim: int = 128,
         n_layers: int = 12,
@@ -101,6 +114,7 @@ class ManiFlowAgent(BaseAgent):
         qk_norm: bool = True,
         pre_norm_modality: bool = False,
         num_inference_steps: int = 10,
+        denoise_timesteps: int = 10,
         flow_batch_ratio: float = 0.75,
         t_sample_mode_for_flow: str = "beta",
         t_sample_mode_for_consistency: str = "discrete",
@@ -117,12 +131,13 @@ class ManiFlowAgent(BaseAgent):
             state_out_dim=state_out_dim,
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
+            xyz_pe_num_frequencies=xyz_pe_num_frequencies,
         )
 
         backbone = ConsistencyDiTX(
             horizon=horizon,
             action_dim=action_dim,
-            num_obs_tokens=obs_encoder.num_obs_tokens,
+            n_obs_steps=n_obs_steps,
             obs_token_dim=obs_encoder.obs_token_dim,
             timestep_embed_dim=timestep_embed_dim,
             target_t_embed_dim=target_t_embed_dim,
@@ -138,6 +153,7 @@ class ManiFlowAgent(BaseAgent):
         action_decoder = ConsistencyFlowMatch(
             model=backbone,
             num_inference_steps=num_inference_steps,
+            denoise_timesteps=denoise_timesteps,
             flow_batch_ratio=flow_batch_ratio,
             t_sample_mode_for_flow=t_sample_mode_for_flow,
             t_sample_mode_for_consistency=t_sample_mode_for_consistency,
@@ -154,73 +170,3 @@ class ManiFlowAgent(BaseAgent):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-
-
-def example():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    B, T, H, A, N = 2, 2, 16, 19, 256
-
-    agent = ManiFlowAgent(
-        horizon=H,
-        n_obs_steps=T,
-        n_action_steps=8,
-        action_dim=A,
-        encoder_type="pointnet_dense",
-        pc_dim=3,
-        state_dim=A,
-        num_points=N,
-        pc_encoder_config={
-            "out_channels": 128,
-            "num_points": N,
-            "hidden_dims": (64, 128, 256),
-        },
-        n_layers=2,
-        hidden_dim=128,
-        n_head=4,
-        mlp_ratio=2.0,
-        p_drop_attn=0.0,
-        timestep_embed_dim=64,
-        target_t_embed_dim=64,
-        num_inference_steps=5,
-    ).to(device)
-
-    obs = {
-        "point_cloud": torch.randn(B * T, N, 3, device=device),
-        "joint_state": torch.randn(B * T, A, device=device),
-    }
-    action = torch.randn(B, H, A, device=device)
-
-    from dexmani_policy.common.normalizer import LinearNormalizer
-
-    normalizer = LinearNormalizer()
-    normalizer.fit(
-        {
-            "action": action,
-            "joint_state": obs["joint_state"].reshape(B, T, A),
-        },
-        mode="limits",
-    )
-    agent.load_normalizer_from_dataset(normalizer)
-
-    batch = {
-        "obs": {
-            "point_cloud": obs["point_cloud"].reshape(B, T, N, 3),
-            "joint_state": obs["joint_state"].reshape(B, T, A),
-        },
-        "action": action,
-    }
-
-    import copy
-
-    ema_agent = copy.deepcopy(agent)
-    loss_kwargs = agent.get_training_loss_kwargs(ema_agent)
-    loss, loss_dict = agent.compute_loss(batch, **loss_kwargs)
-    print(f"loss: {loss.item():.4f}  keys={list(loss_dict.keys())}")
-
-    result = agent.predict_action(batch["obs"])
-    print(f"pred_action: {result['pred_action'].shape}")
-    print(f"control_action: {result['control_action'].shape}")
-
-
-if __name__ == "__main__":
-    example()

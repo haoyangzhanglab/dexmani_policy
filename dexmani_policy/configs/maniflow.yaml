@@ -1,5 +1,6 @@
 # ManiFlow — Flow Matching with rectified flow + consistency training
-# Encoder:  PointNetDense (per-point features, 1024 points, 128d, xyz+rgb)
+# Encoder:  PointNetDense XYZRGB + projected NeRF XYZ PE + broadcast state
+# Context: 192d dense tokens; DiTX adds frame-only PE after projection
 # Decoder:  DiTX (cross-attention conditioning) + Euler ODE integration
 # Modality: point_cloud + joint_state → action
 # Key:      EMA consistency targets with target_t-conditioned DiT-X
@@ -48,12 +49,12 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Data augmentation aligned to official R3D-Policy.
+  # R3D-style XYZ/RGB/state augmentation; point dropout and hue jitter disabled.
   # See AUGMENTOR_REGISTRY in base_dataset.py for supported keys.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
-      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.08, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
@@ -68,8 +69,11 @@ agent:
   encoder_type: pointnet_dense
   pc_dim: 6                       # xyz+rgb
   state_dim: 19
+  state_out_dim: 64
   num_points: 1024                # per-point token count per frame
 
+  # FPS runs only for N_raw > num_points. Current stored DexMani clouds
+  # already contain 1024 points, so this random FPS path is inactive for them.
   fps_random_config:
     use_random: true
     use_random_start: true
@@ -80,7 +84,8 @@ agent:
   pc_encoder_config:
     out_channels: 128
     num_points: 1024
-    hidden_dims: [64, 128, 256]
+
+  xyz_pe_num_frequencies: 8       # 48D continuous XYZ PE projected to 128D and added
 
   # DiTX backbone
   n_layers: 12
@@ -88,15 +93,16 @@ agent:
   n_head: 8
   mlp_ratio: 4.0
   p_drop_attn: 0.1
-  qkv_bias: false
-  qk_norm: false
+  qkv_bias: false                # cross-attention only; self-attention uses biased MHA
+  qk_norm: false                 # cross-attention only; MHA has no QK normalization
   pre_norm_modality: false
 
   timestep_embed_dim: 128
   target_t_embed_dim: 128
 
   # Flow matching
-  num_inference_steps: 10
+  denoise_timesteps: 10          # consistency training discrete grid
+  num_inference_steps: 10        # default Euler inference NFE
   flow_batch_ratio: 0.75
   t_sample_mode_for_flow: beta
   t_sample_mode_for_consistency: discrete
@@ -104,15 +110,15 @@ agent:
   target_t_sample_mode: relative
 
   modality_dropout_probs:
-    joint_state: 0.0                # modality dropout disabled (reserved)
+    joint_state: 0.0                # modality dropout disabled
 
 # ── Optimizer ──
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-3            # DiT backbone: high wd is standard for transformers (vs 1e-6 for UNet)
-  betas: [0.9, 0.95]              # lower β1 = shorter gradient EMA, common for flow matching
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.95]
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6        # PC encoder: lighter regularization than DiT backbone
+  obs_weight_decay: 1.0e-6        # observation encoder (PointNet, XYZ PE projection and state MLP)
 
 # ── EMA ──
 ema:
@@ -175,7 +181,7 @@ env_runner:
 
 # ── Eval ──
 eval:
-  denoise_steps: 4
+  denoise_steps: 4               # inference NFE only; leaves the training grid unchanged
   denoise_timesteps_list: null
   use_ema: true
 

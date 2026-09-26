@@ -7,7 +7,7 @@ from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
 from .attention import CrossAttention
-from .dit import Attention, _approx_gelu, modulate
+from .dit import _approx_gelu, modulate
 
 WEIGHT_INIT_STD = 0.02
 
@@ -43,18 +43,16 @@ class DiTXBlock(nn.Module):
         p_drop_attn=0.0,
         qkv_bias=False,
         qk_norm=False,
-        **block_kwargs,
     ):
         super().__init__()
 
-        self.hidden_size = hidden_size
-
-        self.self_attn = Attention(
-            dim=hidden_size,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_norm=qk_norm,
-            attn_drop=p_drop_attn,
+        # Official ManiFlow self-attention always has QKV bias, without QK norm.
+        # qkv_bias/qk_norm configure only the custom cross-attention below.
+        self.self_attn = nn.MultiheadAttention(
+            hidden_size,
+            num_heads,
+            batch_first=True,
+            dropout=p_drop_attn,
         )
 
         self.cross_attn = CrossAttention(
@@ -63,7 +61,6 @@ class DiTXBlock(nn.Module):
             qkv_bias=qkv_bias,
             qk_norm=qk_norm,
             norm_layer=nn.LayerNorm,
-            **block_kwargs,
         )
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -88,7 +85,9 @@ class DiTXBlock(nn.Module):
         shift_mlp, scale_mlp, gate_mlp = chunks[6], chunks[7], chunks[8]
 
         normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        self_attn_output = self.self_attn(normed_x, attn_mask=attn_mask)
+        self_attn_output = self.self_attn(
+            normed_x, normed_x, normed_x, attn_mask=attn_mask, need_weights=False
+        )[0]
         x = x + gate_msa.unsqueeze(1) * self_attn_output
 
         normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)
@@ -125,23 +124,21 @@ class FinalLayer(nn.Module):
 class ConsistencyDiTX(nn.Module):
     """DiT-X backbone for ManiFlow consistency flow matching.
 
-    Extends the DiT architecture with cross-attention blocks where observation
-    tokens attend to action tokens, and dual timestep embeddings for flow
-    matching (timestep + target_t fused via linear layer).
+    Each action token contains the full action vector for one timestep.
+    Blocks apply temporal self-attention, action-to-observation cross-attention
+    and an MLP, conditioned by fused timestep/target_t embeddings via AdaLN-Zero.
 
-    Key differences from ``DiTDiffusion``:
-        - Action tokens attend to observation tokens via ``CrossAttention``.
-        - Dual ``SinusoidalPosEmb`` encoders for (timestep, target_t) fused
-          into a single conditioning vector.
-        - ``AdaLNZero`` modulation in ``DiTXBlock`` for stable training
-          initialization.
+    Context must contain equally sized frames in frame-major order. Projected
+    tokens share a learned position embedding within each observation frame;
+    point indices have no positional identity. ``qkv_bias`` and ``qk_norm``
+    configure only cross-attention; self-attention uses biased PyTorch MHA.
     """
 
     def __init__(
         self,
         horizon: int,
         action_dim: int,
-        num_obs_tokens: int,
+        n_obs_steps: int,
         obs_token_dim: int,
         timestep_embed_dim: int = 128,
         target_t_embed_dim: int = 128,
@@ -155,8 +152,11 @@ class ConsistencyDiTX(nn.Module):
         pre_norm_modality: bool = False,
     ):
         super().__init__()
+        if n_obs_steps <= 0:
+            raise ValueError("n_obs_steps must be greater than 0")
 
         self.horizon = horizon
+        self.n_obs_steps = n_obs_steps
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
 
@@ -166,7 +166,7 @@ class ConsistencyDiTX(nn.Module):
         self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
 
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
-        self.context_pos_embed = nn.Parameter(torch.zeros(1, num_obs_tokens, hidden_dim))
+        self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
         if self.pre_norm_modality:
             self.context_norm = AdaLNZero(dim=hidden_dim, cond_dim=hidden_dim)
 
@@ -195,12 +195,12 @@ class ConsistencyDiTX(nn.Module):
     def initialize_weights(self):
 
         for block in self.ditx_blocks:
-            nn.init.xavier_uniform_(block.self_attn.qkv.weight)
-            if block.self_attn.qkv.bias is not None:
-                nn.init.zeros_(block.self_attn.qkv.bias)
-            nn.init.xavier_uniform_(block.self_attn.proj.weight)
-            if block.self_attn.proj.bias is not None:
-                nn.init.zeros_(block.self_attn.proj.bias)
+            nn.init.xavier_uniform_(block.self_attn.in_proj_weight)
+            if block.self_attn.in_proj_bias is not None:
+                nn.init.zeros_(block.self_attn.in_proj_bias)
+            nn.init.xavier_uniform_(block.self_attn.out_proj.weight)
+            if block.self_attn.out_proj.bias is not None:
+                nn.init.zeros_(block.self_attn.out_proj.bias)
 
         def init_fn(module):
             if isinstance(module, nn.Linear):
@@ -223,7 +223,7 @@ class ConsistencyDiTX(nn.Module):
 
         nn.init.normal_(self.context_embedder.weight, std=WEIGHT_INIT_STD)
         nn.init.constant_(self.context_embedder.bias, 0) if self.context_embedder.bias is not None else None
-        nn.init.normal_(self.context_pos_embed, std=WEIGHT_INIT_STD)
+        nn.init.zeros_(self.context_frame_pos_embed)
 
         for layer in self.timestep_embedder.net:
             if isinstance(layer, nn.Linear):
@@ -247,7 +247,7 @@ class ConsistencyDiTX(nn.Module):
         return get_optim_group_with_no_decay(
             self,
             weight_decay=weight_decay,
-            no_decay_names=["input_pos_embed", "context_pos_embed"],
+            no_decay_names=["input_pos_embed", "context_frame_pos_embed"],
             extra_blacklist=(RmsNorm,),
         )
 
@@ -270,9 +270,14 @@ class ConsistencyDiTX(nn.Module):
 
         time_c = self.timestep_and_target_t_fusion(torch.cat([timestep_embed, target_t_embed], dim=-1))
 
-        context_c = self.context_embedder(context) + self.context_pos_embed[:, : context.shape[1]].to(
-            dtype=context.dtype
+        if context.shape[1] == 0 or context.shape[1] % self.n_obs_steps != 0:
+            raise ValueError("context token count must be nonzero and divisible by n_obs_steps")
+        context_c = self.context_embedder(context)
+        # Flattening is frame-major: every point in a frame shares its PE.
+        frame_pe = self.context_frame_pos_embed.repeat_interleave(
+            context.shape[1] // self.n_obs_steps, dim=1
         )
+        context_c = context_c + frame_pe.to(dtype=context_c.dtype)
         if self.pre_norm_modality:
             context_c = self.context_norm(context_c, time_c)
 

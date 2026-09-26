@@ -41,7 +41,6 @@ PATCH_TOKENIZER_CONFIGS: Dict[str, Dict] = {
     "pointnet_dense": {
         "out_channels": 128,
         "num_points": 256,
-        "hidden_dims": (64, 128, 256),
     },
 }
 
@@ -123,9 +122,10 @@ def build_pc_patch_tokenizer(
         )
 
     if tokenizer_type == "pointnet_dense":
+        if "hidden_dims" in cfg:
+            raise ValueError("pointnet_dense has a fixed topology; remove hidden_dims")
         return PointNetDense(
             input_channels=pc_dim,
             out_channels=cfg["out_channels"],
             num_points=cfg["num_points"],
-            hidden_dims=cfg["hidden_dims"],
         )

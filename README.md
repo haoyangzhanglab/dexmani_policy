@@ -108,6 +108,15 @@ python dexmani_policy/smoke_test.py <config_name>
 
 完整 smoke test 覆盖 dataset/normalizer、model/EMA、optimizer/scheduler、forward/backward、inference 和 checkpoint roundtrip。Policy 开发流程及按改动范围选择验证的要求见 [AGENTS.md](AGENTS.md)。
 
+PointNet 与 ManiFlow 的定向回归可独立运行，无需外部训练数据、预训练权重或仿真环境：
+
+```bash
+python -m dexmani_policy.agents.obs_encoder.pointcloud.smoke_test
+python -m dexmani_policy.agents.core.maniflow_smoke_test
+```
+
+ManiFlow 回归使用合成数据，覆盖点排列不变性、训练时间网格与推理步数独立性、增强语义、EMA、strict resume/inference restore，以及 BF16/compile。CUDA 专项在 CUDA 不可用时跳过；跳过不代表 GPU 验证通过。
+
 ## 评测
 
 ```bash
