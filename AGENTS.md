@@ -48,7 +48,7 @@ config
 
 ### 文档维护
 
-- 正常的 Policy architecture / hyperparameter 修改，或新增一个不改变公共接口的 Policy，**不需要同步修改 README、AGENTS、CLAUDE 或 Skills**。只有公共 CLI、仓库级接口、通用工作流或环境契约变化时才修改对应全局文件。
+- 正常的 Policy architecture / hyperparameter 修改，或新增一个不改变公共接口的 Policy，**不需要同步修改 README、AGENTS 或 CLAUDE**。只有公共 CLI、仓库级接口、通用工作流或环境契约变化时才修改对应全局文件。
 - 不要把 layer 数、hidden dim、LR/WD、NFE、batch size、参数量、当前 Policy 列表或实验结论加入全局 AI 文档。易变的研究 recipe 留在 config、实现、实验快照或局部验证附近。
 - `docs/` 视为冻结背景文档；除非用户明确要求，不要修改。
 
@@ -101,16 +101,4 @@ config
 - Export reads only checkpoint-owned training facts; it does not reopen training Zarr. Missing concrete joint/config facts fail clearly, with no legacy guessing.
 - Artifact metadata is plain. Export performs structural validation and weights-only reload before atomic selector publication. `load_experiment` strictly restores model and normalizer; Real warms up before `policy_ready`.
 - Keep training checkpoint `simple.v3` and strict training-resume checks. Dataset extraction occurs at training time; strict resume captures tensor definitions and trained preprocessing, while historical calibration and implementation descriptions remain provenance in Real raw/Zarr metadata.
-- Run `python -m dexmani_policy.deployment.smoke_test` for offline deployment regression coverage with both repositories installed. Do not create a `tests/` directory.
-
-## Project Skills
-
-按任务读取对应流程；如果当前工具没有自动发现该 skill，直接打开下面链接的 `SKILL.md` 并遵循其流程，无需复制到另一工具的目录。
-
-| 任务 | 共享流程 |
-| --- | --- |
-| 新增 Policy、架构替换或 action representation 等重大变更 | [dexmani-agent-integration](.agents/skills/dexmani-agent-integration/SKILL.md) |
-| Review、审计或 PR 前 correctness 检查 | [dexmani-pr-check](.agents/skills/dexmani-pr-check/SKILL.md) |
-| 训练 NaN/Inf 等数值失败诊断 | [dexmani-training-debug](.agents/skills/dexmani-training-debug/SKILL.md) |
-
-Skill 只定义过程，不拥有当前 Policy 事实。当前实现始终回到 resolved config 和源码确认。
+- Do not create a `tests/` directory.

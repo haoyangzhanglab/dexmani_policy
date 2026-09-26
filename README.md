@@ -108,26 +108,6 @@ python dexmani_policy/smoke_test.py <config_name>
 
 完整 smoke test 覆盖 dataset/normalizer、model/EMA、optimizer/scheduler、forward/backward、inference 和 checkpoint roundtrip。Policy 开发流程及按改动范围选择验证的要求见 [AGENTS.md](AGENTS.md)。
 
-PointNet 与 ManiFlow 的定向回归可独立运行，无需外部训练数据、预训练权重或仿真环境：
-
-```bash
-python -m dexmani_policy.agents.obs_encoder.pointcloud.smoke_test
-python -m dexmani_policy.agents.core.maniflow_smoke_test
-python -m dexmani_policy.agents.core.inference_smoke_test
-python -m dexmani_policy.training.eval_smoke_test
-python -m dexmani_policy.deployment.inference_smoke_test
-```
-
-ManiFlow 回归使用合成数据，覆盖点排列不变性、训练时间网格与推理步数独立性、增强语义、EMA、strict resume/inference restore，以及 BF16/compile。CUDA 专项在 CUDA 不可用时跳过；跳过不代表 GPU 验证通过。
-
-仅验证共享点云增强时，可单独运行现有测试类：
-
-```bash
-python -m unittest dexmani_policy.agents.core.maniflow_smoke_test.AugmentationTest
-```
-
-它检查主点云配置的增强约定、dataset defensive copy、噪声范围、颜色变换和逐帧首点替换 dropout，无需 CUDA、外部数据或权重；不替代模型 smoke。增强的执行边界见[项目架构](docs/项目架构.md#31-dataset-contract)，具体参数以 config 为准。
-
 ## 评测
 
 ```bash
@@ -171,7 +151,6 @@ python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
 - Export 通过结构检查和 weights-only reload 后原子更新 `deployment_latest.pt`；运行时严格恢复模型、normalizer 并 warmup 后才就绪。它指向本次不可覆盖的 artifact（默认 `<checkpoint>-deployment.pt`）；真机 session 可以固定使用解析后的文件名。
 - 运行时 `--inference-steps N` 是显式 override（NFE ablation），不需要重新 export。
 - Real 使用当前相机、桌面和手安装标定；重新标定不使旧 policy 失效。点云算法配置和去桌面开关来自 artifact，RGB resize/crop/normalization 由 Policy 执行。
-- 离线跨仓库回归：`python -m dexmani_policy.deployment.smoke_test`（需安装 dexmani_real）。
 
 开发和修改 deployment 时的完整约束见 [AGENTS.md 的 Deployment Boundary](AGENTS.md#deployment-boundary)。
 
