@@ -3,31 +3,35 @@ from typing import Dict
 import torch
 import torch.nn as nn
 
-from dexmani_policy.common.pytorch_util import create_mlp
-
 
 class PointNet(nn.Module):
     def __init__(
         self,
         input_channels: int = 3,
         output_channels: int = 256,
-        norm_before_activation: bool = False,
     ):
         super().__init__()
-        if input_channels < 3:
-            raise ValueError("input_channels must be at least 3 because xyz is required")
+        if input_channels not in (3, 6):
+            raise ValueError(f"input_channels must be 3 (XYZ) or 6 (XYZRGB), but got {input_channels}")
 
         self.input_channels = input_channels
         self.output_channels = output_channels
 
-        hidden_channels = [64, 128, 256, 512] if input_channels > 3 else [64, 128, 256]
-        self.mlp = create_mlp(
-            input_channels, hidden_channels,
-            use_norm=True,
-            norm_before_activation=norm_before_activation,
+        self.mlp = nn.Sequential(
+            nn.Linear(input_channels, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Linear(128, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
         )
+        if input_channels == 6:
+            self.mlp.append(nn.Linear(256, 512))
         self.output_projection = nn.Sequential(
-            nn.Linear(hidden_channels[-1], output_channels),
+            nn.Linear(512 if input_channels == 6 else 256, output_channels),
             nn.LayerNorm(output_channels),
         )
 
