@@ -118,14 +118,6 @@ _SEMANTICS = {
         "grid": "aligned_color",
         "alignment": "control_step_latest_causal_before_action",
     },
-    "point_cloud": {
-        "semantic_id": "dexmani.point_cloud.xyzrgb.xarm_base",
-        "frame": "xarm_base",
-        "features": ["x", "y", "z", "r", "g", "b"],
-        "xyz_unit": "m",
-        "rgb_range": [0, 1],
-        "alignment": "control_step_latest_causal_before_action",
-    },
     "action": {
         "semantic_id": "dexmani.action.joint_absolute_published",
         "unit": "rad",
@@ -149,13 +141,27 @@ _SEMANTICS = {
 
 
 def validate_modality_contract(name, attrs):
-    """Validate a selected representation and retain only its runtime contract."""
-    if name not in _SEMANTICS:
+    """Retain cloud parameters; validate semantic contracts for other modalities."""
+    if name not in _SEMANTICS and name != "point_cloud":
         raise ValueError(
             f"Required modality {name!r} has no supported Real representation"
         )
     if not isinstance(attrs, dict):
-        raise ValueError(f"Required modality {name!r} needs a semantic contract")
+        raise ValueError(f"Required modality {name!r} needs metadata")
+    if name == "point_cloud":
+        recipe = attrs.get("recipe")
+        if (
+            not isinstance(recipe, dict)
+            or type(recipe.get("num_points")) is not int
+            or recipe["num_points"] <= 0
+            or type(recipe.get("remove_table")) is not bool
+        ):
+            raise ValueError(
+                "Required modality 'point_cloud' needs valid numerical parameters"
+            )
+        json.dumps(recipe, allow_nan=False)
+        return {"recipe": dict(recipe)}
+
     contract = {}
     for key, expected in _SEMANTICS[name].items():
         if attrs.get(key) != expected:
@@ -163,48 +169,28 @@ def validate_modality_contract(name, attrs):
                 f"Required modality {name!r} has incompatible {key}: expected {expected!r}, got {attrs.get(key)!r}"
             )
         contract[key] = expected
-    if name in {"point_cloud", "fingertip_points"}:
+    if name == "fingertip_points":
         recipe = attrs.get("recipe")
         if not isinstance(recipe, dict):
             raise ValueError(
                 f"Required modality {name!r} is missing its representation recipe"
             )
-        if name == "point_cloud":
-            if (
-                type(recipe.get("num_points")) is not int
-                or recipe["num_points"] <= 0
-                or type(recipe.get("remove_table")) is not bool
-            ):
-                raise ValueError(
-                    "Required modality 'point_cloud' has an invalid numerical recipe"
-                )
-            derivation = attrs.get("derivation")
-            if not isinstance(derivation, dict) or any(
-                not isinstance(derivation.get(key), str) or not derivation[key]
-                for key in ("transform", "color_source", "sampling")
-            ):
-                raise ValueError(
-                    "Required modality 'point_cloud' is missing derivation semantics"
-                )
-            contract["derivation"] = derivation
-        else:
-            links = recipe.get("fingertip_link_names")
-            model = recipe.get("kinematic_model")
-            if (
-                not isinstance(model, str)
-                or not model
-                or "/" in model
-                or "\\" in model
-                or recipe.get("mount_source") != "raw_episode"
-                or not isinstance(links, list)
-                or len(links) != 5
-                or any(not isinstance(link, str) or not link for link in links)
-                or len(set(links)) != 5
-            ):
-                raise ValueError(
-                    "Required modality 'fingertip_points' has an invalid FK recipe"
-                )
-        # Preserve the actual training representation; never the historical table plane.
+        links = recipe.get("fingertip_link_names")
+        model = recipe.get("kinematic_model")
+        if (
+            not isinstance(model, str)
+            or not model
+            or "/" in model
+            or "\\" in model
+            or recipe.get("mount_source") != "raw_episode"
+            or not isinstance(links, list)
+            or len(links) != 5
+            or any(not isinstance(link, str) or not link for link in links)
+            or len(set(links)) != 5
+        ):
+            raise ValueError(
+                "Required modality 'fingertip_points' has an invalid FK recipe"
+            )
         json.dumps(recipe, allow_nan=False)
         contract["recipe"] = recipe
     if name == "depth":
