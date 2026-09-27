@@ -62,7 +62,7 @@ class PolicyInfo:
     n_action_steps: int
     action_mode: str
     control_dt_s: float | None
-    pointcloud_config: dict | None
+    modality_contracts: dict[str, dict]
     weights: str
     inference_steps: int
 
@@ -98,6 +98,38 @@ def inspect_policy(
     fields = tuple(cfg["dataset"].get("sensor_modalities", ()))
     if len(set(fields)) != len(fields):
         raise ValueError("Observation fields must be unique")
+    contracts = {}
+    if recipe is not None:
+        from dexmani_policy.datasets.real_policy_contract import (
+            validate_modality_contract,
+        )
+
+        live = {
+            "joint_state",
+            "rgb",
+            "point_cloud",
+            "eef_pose",
+            "fingertip_points",
+            "contact_force",
+            "tactile_force",
+        }
+        unsupported = set(fields) - live
+        if unsupported:
+            raise ValueError(
+                f"Real deployment has no live producer for requested modalities: {sorted(unsupported)}"
+            )
+        saved_contracts = recipe.get("modality_contracts")
+        if not isinstance(saved_contracts, dict):
+            raise ValueError(
+                "Saved real_runtime lacks modality_contracts; use an experiment trained on regenerated canonical Raw-derived data"
+            )
+        required = set(fields) | {cfg["action_key"]}
+        if cfg["dataset"].get("use_aux_ee", False):
+            required.add("action_ee")
+        for name in sorted(required):
+            contracts[name] = validate_modality_contract(
+                name, saved_contracts.get(name)
+            )
     return PolicyInfo(
         directory,
         path,
@@ -108,7 +140,7 @@ def inspect_policy(
         positive_int(cfg["agent"]["n_action_steps"], "n_action_steps"),
         action_modes[cfg["action_key"]],
         recipe.get("control_dt_s") if recipe is not None else None,
-        recipe.get("pointcloud") if recipe is not None else None,
+        contracts,
         weights,
         steps,
     )
@@ -207,7 +239,12 @@ class LoadedPolicy:
                 shape, dtype = (*rgb_hw, 3), np.uint8
             elif name == "point_cloud":
                 shape, dtype = (
-                    (self.info.pointcloud_config["num_points"], 6),
+                    (
+                        self.info.modality_contracts["point_cloud"]["recipe"][
+                            "num_points"
+                        ],
+                        6,
+                    ),
                     np.float32,
                 )
             else:

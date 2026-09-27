@@ -141,7 +141,7 @@ conda run --no-capture-output -n real_robot python examples/run_policy.py <polic
 
 `best` 读取实验根目录的 `best_ckpt.json`，不存在时明确失败；`latest` 解析 `checkpoints/latest.pt`，也可指定该目录内的文件名。显式 `--weights` / `--inference-steps` 优先；`best` 的未覆盖参数读取 selection record，其他 checkpoint 读取保存的 `eval.use_ema` / `eval.inference_steps`。EMA 缺失不会自动改用 raw。Real 的 `--config` 指向现场硬件配置，不替换 Policy 实验的 `config.yaml`。
 
-训练在实际 dataset 构造后将 Real Zarr 的 `dt` 和所需数值点云 recipe 写入 config 的 `real_runtime`；非 canonical Real dataset 保存 null，不能直接用于 Real。推理不重新打开训练 Zarr，也不读取训练 resume contract 的语义。Uni3D 与 DQ-RISE 完整 checkpoint 推理无需其训练初始化文件；其他 backbone 的依赖仍由受管环境提供。
+训练读取 `format="dexmani.real.canonical"` 的多模态缓存，只加载所选 observation/action 数组。缺失能力、语义/shape/dtype 不匹配、或所选模态包含不支持的 NaN，均在 normalizer 拟合和模型构造前报错。实际 dataset 验证后，将 `dt` 和所选数组的 `modality_contracts` 写入 config 的 `real_runtime`，其中包含训练所用的点云数值 recipe、指尖模型/link 表示等；不携带历史桌面标定。非 canonical Real dataset 保存 null，不能直接用于 Real。旧 v15 缓存应从不可变 Raw 重新导出，不做原地 migration；旧实验若缺少 modality contracts，会在 Real 部署前明确拒绝。Canonical 能存储某模态不等于 live Real 支持：未实现的 live 模态会在启动前报错，指尖表示使用保存的 link 列表和当前物理安装参数。推理不重新打开训练 Zarr，也不读取训练 resume contract 的语义。Uni3D 与 DQ-RISE 完整 checkpoint 推理无需其训练初始化文件；其他 backbone 的依赖仍由受管环境提供。
 
 Real parent 只读 config 并确定点云 SHM 大小；policy worker strict restore、warmup 就绪后才启动硬件 workers。当前相机、桌面与手安装标定来自 Real，RGB deterministic resize/center crop 来自保存的 dataset config，Agent ImageProcessor 仍由 Agent 拥有。
 

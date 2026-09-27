@@ -96,11 +96,11 @@ config
 ## Deployment Boundary
 
 - The experiment directory is the evaluation artifact: saved resolved `config.yaml` plus a normal training checkpoint. Do not add a separate deployment export, contract, ABI, or compatibility path.
-- Save config after constructing the actual dataset. Its minimal `real_runtime` contains the canonical Real Zarr cadence and numerical point-cloud recipe when consumed; other datasets save null and cannot deploy to Real.
+- Save config after constructing the actual dataset. Canonical Real stores use `format="dexmani.real.canonical"`; selected array capabilities, semantics and finiteness must pass before normalizer fitting or model construction. The minimal `real_runtime` contains cadence and selected `modality_contracts`, including numerical point-cloud and fingertip representation recipes when consumed. Other datasets save null and cannot deploy to Real. Canonical is a multimodal superset; load only requested observation/action arrays. Regenerate legacy v15 caches from immutable Raw rather than migrating them.
 - Model construction, normalization modes, modalities, and deterministic RGB preprocessing come from saved config. Fitted normalizers and DQ-RISE runtime codebook buffers come from strict checkpoint restoration.
 - Training-only external initialization runs through Agent-owned initialization; complete-checkpoint inference skips Uni3D pretrained and DQ-RISE NPZ loading.
 - Shared inference restoration never validates training resume contracts. Keep strict training resume, rank RNG/cursor restoration, and raw/EMA selection; missing requested EMA is an error.
 - Real derives a small runtime PolicyInfo without loading checkpoint tensors in the parent. Policy/CUDA belongs to the policy worker; restore and warmup must succeed before hardware workers connect.
-- Current camera calibration, serial, intrinsics, depth scale, table plane and hand mounting remain Real-owned. Do not compare them with training calibration.
+- Current camera calibration, serial, intrinsics, depth scale, table plane and hand mounting remain Real-owned. Do not compare them with training calibration. Keep the historical training table plane only as export provenance, not as live deployment configuration. Restore saved fingertip representation/link choices with the current physical mount. Canonical capability does not imply a live producer: unsupported live modalities must fail before motion.
 - RGB uses saved dataset deterministic validation preprocessing before the Agent-owned ImageProcessor. Real supplies raw uint8 HWC images.
 - No committed tests directory; use existing smoke and temporary focused checks.

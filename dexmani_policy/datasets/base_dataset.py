@@ -18,6 +18,10 @@ from dexmani_policy.datasets.augmentation import (
     PointDropout,
     StateNoiseAug,
 )
+from dexmani_policy.datasets.real_policy_contract import (
+    read_real_contract,
+    validate_real_finiteness,
+)
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import (
     SequenceSampler,
@@ -125,10 +129,14 @@ class BaseDataset(torch.utils.data.Dataset):
         if use_aux_ee:
             load_keys = load_keys + ["action_ee"]
 
+        self.real_contract = read_real_contract(self.zarr_path, load_keys)
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
             keys=load_keys,
         )
+
+        if self.real_contract is not None:
+            validate_real_finiteness(self.replay_buffer)
 
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
