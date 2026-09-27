@@ -40,6 +40,16 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _get_episode_ends(buffer) -> np.ndarray:
+    if hasattr(buffer, "episode_ends"):
+        ends = buffer.episode_ends
+        ends = ends[:] if hasattr(ends, "__getitem__") else ends
+        return np.asarray(ends, dtype=np.int64)
+    if hasattr(buffer, "meta") and "episode_ends" in buffer.meta:
+        return np.asarray(buffer.meta["episode_ends"][:], dtype=np.int64)
+    raise AttributeError("ReplayBuffer does not expose episode_ends")
+
+
 def _episode_mask_to_frame_indices(
     episode_ends: np.ndarray, episode_mask: np.ndarray
 ) -> np.ndarray:
@@ -114,7 +124,7 @@ def train(args: argparse.Namespace) -> None:
             f"{hand_data.shape[1]} after tcp_dim={args.tcp_dim}"
         )
 
-    episode_ends = np.asarray(buffer.episode_ends, dtype=np.int64)
+    episode_ends = _get_episode_ends(buffer)
     val_episode_mask = get_val_mask(
         seed=args.seed,
         val_ratio=args.val_ratio,
