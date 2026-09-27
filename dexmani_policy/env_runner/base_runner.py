@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from termcolor import cprint
 
-from dexmani_policy.common.inference import positive_int
-from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
-from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
+from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.tensor import dict_apply
+from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
 
 
 class EvalEpisodeError(RuntimeError):
@@ -547,3 +547,7 @@ class BaseRunner:
 
     def get_seed_list(self) -> List[int]:
         raise NotImplementedError
+
+
+def format_success_rate(rate: float | None) -> str:
+    return "N/A" if rate is None else f"{rate * 100:.1f}%"

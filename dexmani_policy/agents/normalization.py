@@ -5,8 +5,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import zarr
+from omegaconf import DictConfig, OmegaConf
 
-from dexmani_policy.common.pytorch_util import dict_apply
+from dexmani_policy.utils.tensor import dict_apply
 
 logger = logging.getLogger(__name__)
 
@@ -718,3 +719,24 @@ def validate_normalizer_state(
                 f"Normalizer state for '{key}' is invalid "
                 "(empty, non-finite, or zero scale)"
             )
+
+
+def resolve_normalization_spec(cfg) -> dict:
+    """Extract and validate the top-level feature-level normalization spec.
+
+    Delegates the mode grammar to the shared ``validate_normalization_spec`` so
+    training and deployment can never diverge on normalization semantics.
+    Returns a plain ``{field: mode}`` mapping.
+    """
+    normalization = cfg.get("normalization")
+    if normalization is None:
+        raise ValueError(
+            "config.normalization is required: every Policy config must declare a "
+            "top-level `normalization:` mapping (e.g. {joint_state: limits, action: auto})."
+        )
+    if isinstance(normalization, DictConfig):
+        normalization = OmegaConf.to_container(normalization, resolve=True)
+    if not isinstance(normalization, dict):
+        raise ValueError("config.normalization must be a mapping of field -> mode")
+
+    return validate_normalization_spec(normalization)

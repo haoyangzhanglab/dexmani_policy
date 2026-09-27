@@ -1,10 +1,11 @@
+import math
+from numbers import Integral, Real
 from typing import Optional
 
 import numba
 import numpy as np
 
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
-from dexmani_policy.common.config import validate_max_train_episodes, validate_val_ratio
 
 
 @numba.jit(nopython=True)
@@ -172,3 +173,32 @@ class SequenceSampler:
             result[key] = data
 
         return result
+
+
+def validate_val_ratio(val_ratio) -> None:
+    if (
+        isinstance(val_ratio, bool)
+        or not isinstance(val_ratio, Real)
+        or not math.isfinite(val_ratio)
+        or not 0 <= val_ratio < 1
+    ):
+        raise ValueError(
+            f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}"
+        )
+
+
+def validate_max_train_episodes(value) -> None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, Integral) or value < 1
+    ):
+        raise ValueError(
+            f"max_train_episodes must be None or a positive integer, got {value!r}"
+        )
+
+
+def validate_dataset_splits(dataset) -> None:
+    """Validate split options without constructing datasets or reading Zarr."""
+    validate_val_ratio(dataset.get("val_ratio", 0.0))
+    validate_max_train_episodes(dataset.get("max_train_episodes"))
+    for child in dataset.get("datasets", []):
+        validate_dataset_splits(child)

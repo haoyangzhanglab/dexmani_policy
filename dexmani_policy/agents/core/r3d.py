@@ -174,7 +174,7 @@ def _run_smoke(use_aux_ee=False):
     print(f"  cond (enc):   {cond.shape}  [B, T*K, D+D_s+D]")
 
     # Fit normalizer
-    from dexmani_policy.common.normalizer import LinearNormalizer
+    from dexmani_policy.agents.normalization import LinearNormalizer
 
     normalizer = LinearNormalizer()
     normalizer.fit(

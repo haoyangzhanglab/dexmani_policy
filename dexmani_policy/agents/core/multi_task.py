@@ -198,7 +198,7 @@ def example():
     merged = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
     print(f"merged_cond shape: {merged.shape}")
 
-    from dexmani_policy.common.normalizer import LinearNormalizer
+    from dexmani_policy.agents.normalization import LinearNormalizer
 
     normalizer = LinearNormalizer()
     normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")

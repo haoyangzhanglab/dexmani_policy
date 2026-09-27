@@ -74,6 +74,10 @@ bash scripts/training/train_ddp.sh --help
 ```bash
 bash scripts/training/train_vq_hand.sh <task_name>
 bash scripts/training/train_vq_hand.sh --help
+
+# VQ codebook extraction and usage diagnostics
+python scripts/training/extract_vq_codebook.py --help
+python scripts/training/measure_vq_usage.py --help
 ```
 
 该脚本同样自动使用 `policy` 环境。首个位置参数为任务名，后续参数使用 Python CLI 的 `--option value` 格式；`-h` 和 `--help` 均转发给 Python，查看帮助需要该环境及模块依赖可用。任务和路径也可通过 `TASK_NAME`、`ZARR_PATH`、`OUTPUT_DIR` 环境变量指定；显式任务位置参数优先于 `TASK_NAME`。
@@ -143,7 +147,7 @@ conda run --no-capture-output -n real_robot python examples/run_policy.py <polic
 
 Dataset / ReplayBuffer 保持通用，只加载配置选择的 observation/action 数组。Real 的 Raw 校验和 canonical 导出负责完整模态的 shape/dtype、对齐及所有浮点训练字段的有限性；Policy 不重复扫描 Real 语义字典或全数组有限性。Normalizer 仍使用完整 ReplayBuffer，`use_aux_ee` 的拼接与归一化不变。
 
-训练构造 dataset 后，deployment metadata helper 从已加载 ReplayBuffer 的 root attrs 识别 `format="dexmani.real.canonical"`，校验 task/dt，按所选输入捕获最小 `real_runtime`：`dt`，消费点云时的完整 `pointcloud` 数值配置，消费指尖时的五个 `fingertip_link_names`。点云 N 必须匹配数据与显式配置的 Agent/encoder 点数。普通 simulation config 不添加该字段；没有单一 ReplayBuffer 的 MultiTask dataset 不直接捕获 Real metadata。保存的 resolved config 和普通 checkpoint 仍是唯一实验 artifact。
+训练构造 dataset 后，training 内部的 metadata capture 从已加载 ReplayBuffer 的 root attrs 识别 `format="dexmani.real.canonical"`，校验 task/dt，按所选输入捕获最小 `real_runtime`：`dt`，消费点云时的完整 `pointcloud` 数值配置，消费指尖时的五个 `fingertip_link_names`。点云 N 必须匹配数据与显式配置的 Agent/encoder 点数。普通 simulation config 不添加该字段；没有单一 ReplayBuffer 的 MultiTask dataset 不直接捕获 Real metadata。保存的 resolved config 和普通 checkpoint 仍是唯一实验 artifact。
 
 Canonical 的紧凑 root attrs 包含 format/task_name/dt/depth_scale_m_per_unit/pointcloud_config/fingertip_link_names；数组含义见 [Real 数据说明](https://github.com/haoyangzhanglab/dexmani_real/blob/main/README.md#数据与训练缓存)，不作为重复 runtime ABI。历史桌面平面只在 Real 的 export report 中，推理不读取报告或训练 Zarr。旧缓存从 Raw 重新导出，旧实验不提供部署兼容路径。缺少数值 metadata 或不支持的 live 模态由 Real preflight 拒绝；点云使用保存的数值参数和当前标定，指尖使用保存的 link 选择和当前 hand mount。
 
@@ -158,28 +162,28 @@ Real parent 只读 config 并确定点云 SHM 大小；policy worker strict rest
 ```text
 dexmani_policy/
   configs/           # Hydra Policy configs + DDP overlays
-  agents/            # Agent / encoder / backbone / decoder
-  datasets/          # Dataset, replay buffer, sampler
-  training/          # Build, trainer, EMA, resume, workspace
+  agents/            # Agent / encoder / backbone / decoder / loader / normalization
+  datasets/          # Dataset, replay buffer, sampler, RGB preprocessing
+  training/          # Build, trainer, checkpoint, EMA, resume, workspace
   env_runner/        # Simulation runners
-  common/            # Shared config/checkpoint/normalizer utilities
+  evaluation/        # Shared offline evaluation protocol
+  utils/             # Generic config, path, random, tensor, validation helpers
   deployment/        # Real config inspection/inference runtime
   train.py           # Single-GPU entry
   train_ddp.py       # DDP entry
   smoke_test.py      # Config + integration validation
 
 scripts/
-  training/
+  training/          # Policy launchers and VQ workflows
   eval/
-  remote/
+  remote/            # Remote launchers and dataset resolver
 ```
 
 ## 文档与 AI 编码入口
 
 - [AGENTS.md](AGENTS.md)：Codex 与 Claude 共用的完整工程规范，包含事实来源、开发流程、验证要求和 deployment 边界。
 - [CLAUDE.md](CLAUDE.md)：Claude 的加载入口，通过 `@AGENTS.md` 导入同一份规范。
-- [项目 Skills](AGENTS.md#project-skills)：新增 Policy、review 和训练数值问题的共享流程；工具未自动发现时可按链接读取。
 
 交替使用 Codex 与 Claude 时，共享工程规则只需修改 `AGENTS.md`；操作命令维护在 README，`CLAUDE.md` 不维护规则副本。模型、权限和子代理等工具专属设置留在各自配置文件。
 
-背景文档：[项目架构](docs/项目架构.md)、[仿真评测机制](docs/仿真评测机制.md)、[SSH 服务器训练部署](docs/SSH服务器训练部署.md)。这些文档可能滞后，当前实现与实验语义以 config、源码和 checkpoint 为准。
+背景文档：[项目架构](docs/项目架构.md)、[仿真评测机制](docs/仿真评测机制.md)、[SSH 服务器训练部署](docs/SSH服务器训练部署.md)。文档说明稳定机制与操作边界；当前实现以 config/code 为准，已有实验的推理配置和状态分别以保存的 resolved config 与 checkpoint 为准。

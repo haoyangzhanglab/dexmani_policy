@@ -15,16 +15,13 @@ from typing import Any
 import hydra
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.config import (
+from dexmani_policy.utils.config import (
     validate_action_key_consistency,
     validate_window_contract,
 )
-from dexmani_policy.common.inference import (
-    load_experiment_config,
-    positive_int,
-    resolve_checkpoint,
-    rgb_preprocessing_kwargs,
-)
+from dexmani_policy.agents.loader import load_experiment_config, resolve_checkpoint
+from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
+from dexmani_policy.utils.validation import positive_int
 
 
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
@@ -150,7 +147,7 @@ def load_ckpt_for_inference(
     cfg,
 ):
     """Use the shared loader with the original saved config, never eval overrides."""
-    from dexmani_policy.common.inference import restore_policy_agent
+    from dexmani_policy.agents.loader import restore_policy_agent
 
     saved = load_experiment_config(cfg._exp_dir)
     validate_eval_config(cfg, saved)

@@ -15,7 +15,7 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.config import register_resolvers
+from dexmani_policy.utils.config import register_resolvers
 
 
 _TASK_COMPONENT = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
@@ -28,7 +28,7 @@ def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
     ):
         raise ValueError(f"Invalid relative config name: {config_name!r}")
     register_resolvers()
-    config_dir = Path(__file__).resolve().parents[1] / "configs"
+    config_dir = Path(__file__).resolve().parents[2] / "dexmani_policy" / "configs"
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
         cfg = compose(config_name=config_name, overrides=overrides)
         if not isinstance(cfg.task_name, str) or not _TASK_COMPONENT.fullmatch(cfg.task_name):

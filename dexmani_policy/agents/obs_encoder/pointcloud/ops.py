@@ -154,7 +154,7 @@ def knn_point(num_neighbors: int, support_xyz: torch.Tensor, query_xyz: torch.Te
         K=min(num_neighbors, support_xyz.size(1)),
         return_sorted=False,
     )
-    return result.idx if hasattr(result, "idx") else result[1]
+    return result.idx
 
 
 def query_ball_point(
@@ -170,7 +170,7 @@ def query_ball_point(
         radius=radius,
         return_nn=False,
     )
-    neighbor_idx = result.idx if hasattr(result, "idx") else result[1]
+    neighbor_idx = result.idx
 
     if (neighbor_idx < 0).any():
         nearest_idx = knn_point(1, support_xyz, query_xyz)

@@ -3,10 +3,8 @@ ResidualVQ — residual vector quantization.
 
 Follows Algorithm 1 from https://arxiv.org/pdf/2107.03312.pdf
 
-Ported from DQ-RISE.  Simplifications vs. original:
-  - Removed: accept_image_fmap, shared_codebook, quantize_dropout,
-    GroupedResidualVQ (unused in both upstream and this project)
-  - Kept: layer_weights with softmax combination, CE loss path for training
+Ported from DQ-RISE. Supports layer weights with softmax combination and
+a cross-entropy loss path for training.
 """
 
 from __future__ import annotations

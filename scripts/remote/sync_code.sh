@@ -7,11 +7,10 @@
 #   bash scripts/remote/sync_code.sh --dry-run    # Preview what would change
 #
 # Design:
-#   - rsync -avz for text compression (3-4x ratio on .py/.yaml)
+#   - rsync -avz for source-text compression
 #   - --delete removes stale files on server that were deleted locally
 #   - Excludes data/robot_data/experiments (handled by sync_data.sh / sync_down.sh)
 #   - Excludes .git, __pycache__, wandb, outputs, and other generated dirs
-#   - ~2-3 seconds for typical code delta over LAN
 # ============================================================================
 
 set -euo pipefail

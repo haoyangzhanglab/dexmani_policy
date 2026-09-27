@@ -39,6 +39,7 @@ Local checkpoint selection / evaluation
 | `sync_data.sh` | 双向 | 同步 `robot_data/` 与 `data/` |
 | `sync_down.sh` | remote → local | 拉取 experiment artifacts，同时保护本地评测产物 |
 | `train_remote.sh` | remote execution | pre-flight + foreground/tmux 训练启动 |
+| `resolve_remote_datasets.py` | config inspection | 用相同 Hydra config/overrides 解析 dataset 路径，可检查目录存在性 |
 | `tail_log.sh` | read-only | 追踪 `metrics.jsonl` |
 | `stop_remote.sh` | control | SIGINT → wait → force kill fallback |
 
@@ -96,7 +97,7 @@ SERVER="${DEX_SERVER:-dexserver}"
 
 ```bash
 SERVER="${DEX_SERVER:-dexserver}"
-python -c 'import torch, dexmani_policy; print(torch.__version__)'
+conda run --no-capture-output -n policy python -c 'import torch, dexmani_policy; print(torch.__version__)'
 ssh "$SERVER" '<remote-python> -c '\''import torch, dexmani_policy; print(torch.__version__)'\'''
 ```
 
@@ -263,7 +264,7 @@ local data
 
 适合：
 
-- 远端 Stage 1 训练产生的 codebook/checkpoint；
+- 明确输出到 `data/` 的 codebook 或阶段性产物；
 - 服务器生成后需要本地分析或二阶段准备的 data artifact。
 
 默认 pull 同样不删除本地独有文件，但可能更新同名且被 rsync 判定为变化的本地文件；需要保护本地修改时先 dry-run。
@@ -395,6 +396,8 @@ bash scripts/remote/train_remote.sh --dry-run <config> <task> [overrides...]
 
 `--sync-data` 不能替代 Section 2.4 的 first-time directory/symlink bootstrap；它只是在 launch 前调用当前 `sync_data.sh`。
 
+`--dry-run` 打印训练与 dataset preflight 命令，并实际调用 `sync_code.sh --dry-run`。它仍需要可用的 SSH/rsync 网络连接；不会运行打印出的 dataset checker，也不会启动训练。仅需离线检查 Hydra 路径时，单独运行下面的 Python resolver。
+
 当前可用 config 不从本文枚举，使用：
 
 ```bash
@@ -409,7 +412,7 @@ bash scripts/remote/train_remote.sh multitask_dit pick_bottle+open_box
 bash scripts/remote/tail_log.sh multitask_dit pick_bottle+open_box
 bash scripts/remote/sync_down.sh multitask_dit/pick_bottle+open_box --dry-run
 # 本地只解析配置，不访问远端、不加载数据：
-conda run -n policy python -m dexmani_policy.tools.resolve_remote_datasets \
+conda run --no-capture-output -n policy python scripts/remote/resolve_remote_datasets.py \
   --config-name multitask_dit 'task_name=pick_bottle+open_box'
 ```
 
@@ -483,6 +486,8 @@ training stdout/stderr → remote logs/
 
 脚本启动成功后会打印实际 session name。后续 attach/stop 应使用该输出，不要在文档或外部脚本重新实现 session-name 规则。
 
+后台启动会先终止同名 tmux session，再创建新 session；不会自动续训。重启已有实验需要显式 `+resume_from=...` 并满足 strict resume contract。启动前应确认同名 session 不是仍需保留的训练进程。
+
 ---
 
 ## 7. Monitoring — `tail_log.sh`
@@ -548,6 +553,8 @@ bash scripts/remote/stop_remote.sh --all
 
 `--all` 只处理 remote trainer 命名空间内的 training sessions，而不是无差别终止所有 tmux 会话。
 
+当前单 session 参数的 validator 不接受 `+`，因此 composite-task session 不能直接传给 `stop_remote.sh <session-name>`。对此可用启动器打印的命令 attach 到该 tmux session 后按 Ctrl+C，再检查训练日志和 session 是否退出；不要为停止一个任务而改用会影响其他训练的 `--all`。
+
 ---
 
 ## 9. Recommended Experiment Workflow
@@ -590,25 +597,21 @@ bash scripts/eval/eval_pipeline.sh <policy> <task> <exp_name>
 
 ### 9.3 Two-stage Artifacts
 
-如果 Stage 1 在服务器产生 Stage 2 所需 artifact：
+VQ 手部预训练、codebook 提取和诊断都位于 `scripts/training/`。在运行 Stage 1 的机器上，从 repo root 执行：
 
-```text
-remote Stage 1 output
-      │
-      ▼
-sync_data.sh --pull
-      │
-      ▼
-local inspection / preparation
-      │
-      ▼
-sync_data.sh
-      │
-      ▼
-remote Stage 2 training
+```bash
+bash scripts/training/train_vq_hand.sh <task>
+conda run --no-capture-output -n policy python scripts/training/extract_vq_codebook.py \
+  --checkpoint experiments/vq_hand/<task>/vqvae_hand_best.pt \
+  --output data/<task>/hand_codebook.npz
+conda run --no-capture-output -n policy python scripts/training/measure_vq_usage.py \
+  --checkpoint experiments/vq_hand/<task>/vqvae_hand_best.pt \
+  --zarr robot_data/<task>.zarr --codebook data/<task>/hand_codebook.npz
 ```
 
-先确认产物属于 `data/` ownership 还是 `experiments/` ownership，再选择 `sync_data` 或 `sync_down`，避免把两类同步职责混用。
+`<task>` 为占位符；使用与 Stage 2 相同的 action key、TCP/hand 划分和数据。`vqvae_hand_best.pt` 按有限的 validation MSE 选择；没有有效 validation MSE 时使用 training MSE，因此文件名不代表一定做过 held-out selection。预训练 wrapper 读取 `dexmani_policy/configs/dqrise.yaml` 的 `vq_vae` 配置，后续参数是 `--option value`，不是 Hydra dotlist。远端环境名若不同，使用其实际 Python executable 直接调用 `scripts/training/train_vq_hand.py`，显式传入 config、zarr_path 和 output_dir。
+
+默认 VQ checkpoint 位于 `experiments/vq_hand/<task>/`，从服务器拉回使用 `sync_down.sh vq_hand/<task>`。上例导出的 NPZ 位于 `data/`，使用 `sync_data.sh --pull data` 拉回，或 `sync_data.sh data` 上传。先确认 ownership 再选择同步脚本，`sync_data.sh` 不同步 experiments。Stage 2 的 `agent.codebook_path` 应指向实际 NPZ；完整 Policy checkpoint 推理恢复随后不再依赖该外部 NPZ。
 
 ---
 
@@ -637,6 +640,8 @@ bash scripts/remote/sync_data.sh robot_data
 ```
 
 dataset 路径以 resolved config 为准，不要求与 `task_name` 同名；`dataset.zarr_path` override 会直接改变 pre-flight 目标。MultiTask `pick_bottle+open_box` 检查两个 child Zarr，不检查拼接任务名对应的虚构 Zarr。相对路径沿远端项目的 persistent-data symlink 解析；显式绝对 dataset 路径作为字面路径检查，不作为 shell code。
+
+resolver 从脚本位置定位 `<repo-root>/dexmani_policy/configs`，递归收集 child datasets 并去重。输出 JSON 的 `dataset_paths`；不带 `--check` 时不要求目录存在，带 `--check` 时在 JSON 输出后检查全部目录并在缺失时非零退出。相对 dataset 路径按执行 cwd 解析，因此应与正式 launcher 一样在 repo root 运行。它只检查目录存在性，不校验 Zarr 数组内容，也不替代 config-only/full smoke。
 
 如果数据已在 persistent root 但训练仍找不到，还要检查 remote project 的 `robot_data` symlink 是否正确。
 
@@ -706,6 +711,7 @@ scripts/remote/
 ├── sync_data.sh      # data/pretrained: push / pull
 ├── sync_down.sh      # experiments: remote → local
 ├── train_remote.sh   # pre-flight + launch
+├── resolve_remote_datasets.py # Hydra compose / recursive dataset paths / --check
 ├── tail_log.sh       # metrics monitor
 └── stop_remote.sh    # graceful stop / cleanup
 ```

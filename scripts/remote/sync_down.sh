@@ -10,7 +10,7 @@
 #   bash scripts/remote/sync_down.sh --list                    # List experiments on server
 #
 # Two-pass sync: Pass 1 downloads only new files and protects any existing
-# local artifact; Pass 2 updates the three small mutable training entries.
+# local artifact; Pass 2 updates explicitly selected mutable training entries.
 # Pass 1 deliberately does not retain partial transfers: --ignore-existing
 # would otherwise mistake an interrupted checkpoint for a complete one.
 # ============================================================================

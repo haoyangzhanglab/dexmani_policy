@@ -25,7 +25,7 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
         "global_token_type": "avg",
     },
     "dino": {
-        "model_name": "facebook/dinov2-base",  # shorthand: small | base
+        "model_name": "facebook/dinov2-base",
         "tune_mode": "freeze",
         "global_token_type": "avg",
     },

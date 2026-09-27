@@ -3,7 +3,6 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
-from dexmani_policy.common.pytorch_util import create_mlp
 
 
 class StateMLP(nn.Module):
@@ -46,3 +45,25 @@ def create_state_mlp(
     hidden size) only needs to be made in one place.
     """
     return StateMLP(input_channels=state_dim, output_channels=state_out_dim, **kwargs)
+
+
+def create_mlp(
+    in_channels: int,
+    hidden_channels: List[int],
+    out_channels: Optional[int] = None,
+    activation: type = nn.ReLU,
+    use_norm: bool = False,
+    norm_before_activation: bool = False,
+):
+    layers = []
+    prev = in_channels
+    for h in hidden_channels:
+        if use_norm and norm_before_activation:
+            layers.append(nn.LayerNorm(prev))
+        layers.extend([nn.Linear(prev, h), activation(inplace=True)])
+        if use_norm and not norm_before_activation:
+            layers.append(nn.LayerNorm(h))
+        prev = h
+    if out_channels is not None:
+        layers.append(nn.Linear(prev, out_channels))
+    return nn.Sequential(*layers)

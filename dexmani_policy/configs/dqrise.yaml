@@ -31,7 +31,7 @@ normalization:
 tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
 # hand_dim = action_dim - tcp_dim     # (auto-derived in agent)
 
-# VQ codebook path (output of extract_codebook.py / PCA re-indexing, stage 2).
+# VQ codebook path (output of scripts/training/extract_vq_codebook.py / PCA re-indexing, stage 2).
 # VQ-VAE pretraining config: see the vq_vae section at the bottom of this file.
 codebook_path: robot_data/sorted_hand_poses_${task_name}.npz
 
@@ -192,7 +192,7 @@ eval:
     fps: null
 
 # ── VQ-VAE pretraining (used by scripts/training/train_vq_hand.sh) ──
-# All fields are read directly by tools/train_vq_hand.py (which loads only this
+# All fields are read directly by scripts/training/train_vq_hand.py (which loads only this
 # section via config.get("vq_vae", config)). Must stay consistent with the
 # DQ-RISE agent's codebook_num_groups / codebook_size above.
 vq_vae:

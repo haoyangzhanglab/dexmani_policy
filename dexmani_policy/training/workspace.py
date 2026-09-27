@@ -6,10 +6,7 @@ from typing import Any, Dict, Optional
 
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.checkpoint_io import (
-    CheckpointStore,
-    TrainCheckpoint,
-)
+from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
 from dexmani_policy.training.logging import (
     JsonlLogger,
     WandbLogger,

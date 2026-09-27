@@ -7,10 +7,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 import torchvision.transforms.functional as TVF
-from torchvision.transforms import InterpolationMode
 
-from dexmani_policy.common.config import validate_max_train_episodes, validate_val_ratio
-from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
 from dexmani_policy.datasets.augmentation import (
     PointColorJitter,
     PointColorNoiseAug,
@@ -18,12 +15,16 @@ from dexmani_policy.datasets.augmentation import (
     PointDropout,
     StateNoiseAug,
 )
+from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import (
     SequenceSampler,
     downsample_mask,
     get_val_mask,
+    validate_max_train_episodes,
+    validate_val_ratio,
 )
+from dexmani_policy.utils.tensor import dict_apply, ensure_tensor
 
 # (yaml_section, augmentor_class, yaml_key, output_modality)
 # Point-cloud/state transforms run on NumPy arrays in this order.
@@ -37,44 +38,6 @@ AUGMENTOR_REGISTRY = [
 ]
 
 DEFAULT_RGB_KEEP_UINT8 = False
-
-
-def preprocess_validation_rgb(
-    rgb: np.ndarray | torch.Tensor,
-    *,
-    resize_hw: tuple[int, int] | None,
-    center_crop_hw: tuple[int, int] | None,
-    keep_uint8: bool,
-) -> torch.Tensor:
-    """Apply the deterministic validation RGB path to raw HWC uint8 frames."""
-    value = torch.from_numpy(rgb) if isinstance(rgb, np.ndarray) else rgb
-    if not torch.is_tensor(value):
-        raise TypeError("validation RGB must be a NumPy array or torch tensor")
-    if value.ndim < 3 or value.shape[-1] != 3 or value.dtype != torch.uint8:
-        raise ValueError(
-            "validation RGB must have shape [..., H, W, 3] and dtype uint8"
-        )
-    if resize_hw is None:
-        if center_crop_hw is not None:
-            raise ValueError("validation RGB center crop requires a resize")
-        return value.contiguous()
-
-    leading_shape = tuple(value.shape[:-3])
-    value = value.movedim(-1, -3).contiguous()
-    value = value.reshape(-1, *value.shape[-3:])
-    if not keep_uint8:
-        value = value.float().div_(255.0)
-    value = TVF.resize(
-        value,
-        list(resize_hw),
-        interpolation=InterpolationMode.BILINEAR,
-        antialias=True,
-    )
-    if center_crop_hw is not None:
-        value = TVF.center_crop(value, list(center_crop_hw))
-    if value.dtype.is_floating_point:
-        value = value.clamp_(0, 1)
-    return value.reshape(*leading_shape, *value.shape[-3:]).contiguous()
 
 
 class BaseDataset(torch.utils.data.Dataset):

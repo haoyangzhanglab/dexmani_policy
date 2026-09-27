@@ -13,20 +13,16 @@ import torch.multiprocessing as mp
 from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from dexmani_policy.common.checkpoint_io import (
-    CheckpointStore,
-)
-from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.pytorch_util import (
-    compile_models,
-    print_param_count,
-    set_project_root,
-    set_seed,
-)
+from dexmani_policy.training.checkpoint import CheckpointStore
+from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.training.logging import print_param_count
+from dexmani_policy.utils.path import set_project_root
+from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_scheduler,
+    compile_models,
     print_training_recipe,
     validate_config,
     validate_gradient_accumulation,

@@ -1,21 +1,14 @@
 """Shared loader, resume contract and state restoration for both entry points."""
 
+from typing import Any, Dict
+
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.checkpoint_io import (
-    build_agent_contract,
-    validate_ema_resume_state,
-    validate_resume_contract,
-)
-from dexmani_policy.common.pytorch_util import (
-    fix_state_dict,
-    optimizer_to,
-    set_rng_state,
-    worker_init_fn,
-)
 from dexmani_policy.datasets.resumable_sampler import ResumableDistributedSampler
+from dexmani_policy.training.checkpoint import TrainCheckpoint, fix_state_dict
+from dexmani_policy.utils.random import set_rng_state, worker_init_fn
 
 
 def loader_options(cfg):
@@ -138,3 +131,85 @@ def validate_gpu_ids(num_gpus, gpu_ids, available_gpus):
     if len(set(ids)) != len(ids):
         raise ValueError("gpu_ids must not contain duplicates")
     return ids
+
+
+def optimizer_to(
+    optimizer: torch.optim.Optimizer, device: torch.device | str
+) -> torch.optim.Optimizer:
+    """Move all tensor state in an optimizer to the given device."""
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device=device)
+    return optimizer
+
+
+NORMALIZATION_CONTRACT_VERSION = 1
+
+
+def make_normalization_contract(spec) -> Dict[str, Any]:
+    """Build the versioned semantic normalization contract (types only, no numbers)."""
+    return {"version": NORMALIZATION_CONTRACT_VERSION, "fields": dict(spec)}
+
+
+def build_agent_contract(model) -> Dict[str, Any]:
+    """Training-only facts for exact resume."""
+    return {
+        "n_obs_steps": model.n_obs_steps,
+        "n_action_steps": model.n_action_steps,
+        "action_dim": model.action_dim,
+        "horizon": model.horizon,
+        "action_key": model.action_key,
+        "tcp_dim": getattr(model, "tcp_dim", None),
+        "hand_dim": getattr(model, "hand_dim", None),
+        "control_action_dim": model.control_action_dim,
+        "use_aux_ee": bool(getattr(model, "use_aux_ee", False)),
+        "normalization": make_normalization_contract(
+            getattr(model, "normalization_spec", {})
+        ),
+    }
+
+
+def validate_resume_contract(saved, current) -> None:
+    """Report all missing, extra and changed values, including nested keys."""
+    differences = []
+
+    def compare(left, right, path):
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(left.keys() | right.keys()):
+                child = f"{path}.{key}"
+                if key not in left:
+                    differences.append(f"{child}: missing in checkpoint")
+                elif key not in right:
+                    differences.append(f"{child}: unexpected checkpoint key")
+                else:
+                    compare(left[key], right[key], child)
+        elif isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                differences.append(
+                    f"{path}: length saved={len(left)}, current={len(right)}"
+                )
+            for i, (a, b) in enumerate(zip(left, right)):
+                compare(a, b, f"{path}[{i}]")
+        elif type(left) is not type(right) or left != right:
+            differences.append(f"{path}: saved={left!r}, current={right!r}")
+
+    compare(saved, current, "resume_contract")
+    if differences:
+        raise ValueError("Resume contract mismatch:\n" + "\n".join(differences))
+
+
+def validate_ema_resume_state(
+    checkpoint: TrainCheckpoint, *, require_ema: bool
+) -> None:
+    """Require the complete EMA state needed to resume EMA training."""
+    if not require_ema:
+        return
+    if checkpoint.ema_model_state is None:
+        raise RuntimeError("Resume checkpoint is missing required ema_model_state")
+
+    step = checkpoint.ema_updater_step
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise RuntimeError(
+            "Resume checkpoint ema_updater_step must be an int (not bool) >= 0"
+        )

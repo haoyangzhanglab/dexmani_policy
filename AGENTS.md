@@ -55,9 +55,11 @@ config
 ## Repository Entry Points
 
 - `dexmani_policy/configs/`：Hydra Policy config；`ddp/` 为可选 DDP overlay。
-- `dexmani_policy/agents/`：Agent、observation encoder、backbone、action decoder。
-- `dexmani_policy/datasets/`：数据和 sampler。
-- `dexmani_policy/training/`：build、trainer、EMA、resume、workspace。
+- `dexmani_policy/agents/`：Agent、observation encoder、backbone、action decoder、loader、normalization。
+- `dexmani_policy/datasets/`：数据、sampler 和 RGB preprocessing。
+- `dexmani_policy/training/`：build、trainer、checkpoint、EMA、resume、workspace。
+- `dexmani_policy/evaluation/`：offline evaluation shared protocol。
+- `dexmani_policy/utils/`：跨 domain 的通用 config/path/random/tensor/validation helper。
 - `dexmani_policy/env_runner/`：simulation runner。
 - `dexmani_policy/deployment/`：Real config inspection/inference runtime。
 - `dexmani_policy/train.py` / `train_ddp.py`：训练入口。
@@ -96,7 +98,7 @@ config
 ## Deployment Boundary
 
 - The experiment directory is the evaluation artifact: saved resolved `config.yaml` plus a normal training checkpoint. Do not add a separate deployment export, contract, ABI, or compatibility path.
-- Save config after constructing the actual dataset. Datasets remain domain-agnostic and load only requested observation/action arrays. Strict Raw validation and canonical export in Real own training-data finiteness. Deployment metadata capture reads the loaded ReplayBuffer root attrs for `format="dexmani.real.canonical"`, validates task/dt and selected numerical requirements, and saves only `dt`, optional complete `pointcloud` config and optional `fingertip_link_names` in `real_runtime`. Ordinary datasets omit this field; MultiTask without a single ReplayBuffer has no direct Real capture. Do not duplicate semantic dictionaries or reopen Zarr for capture. Regenerate obsolete caches from Raw and retrain experiments rather than adding compatibility branches.
+- Save config after constructing the actual dataset. Datasets remain domain-agnostic and load only requested observation/action arrays. Strict Raw validation and canonical export in Real own training-data finiteness. Training-private metadata capture reads the loaded ReplayBuffer root attrs for `format="dexmani.real.canonical"`, validates task/dt and selected numerical requirements, and saves only `dt`, optional complete `pointcloud` config and optional `fingertip_link_names` in `real_runtime`. Ordinary datasets omit this field; MultiTask without a single ReplayBuffer has no direct Real capture. Do not duplicate semantic dictionaries or reopen Zarr for capture. Regenerate obsolete caches from Raw and retrain experiments rather than adding compatibility branches.
 - Model construction, normalization modes, modalities, and deterministic RGB preprocessing come from saved config. Fitted normalizers and DQ-RISE runtime codebook buffers come from strict checkpoint restoration.
 - Training-only external initialization runs through Agent-owned initialization; complete-checkpoint inference skips Uni3D pretrained and DQ-RISE NPZ loading.
 - Shared inference restoration never validates training resume contracts. Keep strict training resume, rank RNG/cursor restoration, and raw/EMA selection; missing requested EMA is an error.

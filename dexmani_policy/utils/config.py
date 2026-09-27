@@ -1,8 +1,7 @@
-"""Hydra config resolvers and validation shared by train / eval entry points."""
+"""Shared Hydra resolvers and action/window config validation."""
 
-import math
 import warnings
-from numbers import Integral, Real
+from numbers import Integral
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -30,35 +29,6 @@ def validate_window_contract(horizon, n_obs_steps, n_action_steps) -> None:
             f"n_obs_steps - 1 + n_action_steps ({n_obs_steps - 1 + n_action_steps}) "
             f"exceeds horizon ({horizon})"
         )
-
-
-def validate_val_ratio(val_ratio) -> None:
-    if (
-        isinstance(val_ratio, bool)
-        or not isinstance(val_ratio, Real)
-        or not math.isfinite(val_ratio)
-        or not 0 <= val_ratio < 1
-    ):
-        raise ValueError(
-            f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}"
-        )
-
-
-def validate_max_train_episodes(value) -> None:
-    if value is not None and (
-        isinstance(value, bool) or not isinstance(value, Integral) or value < 1
-    ):
-        raise ValueError(
-            f"max_train_episodes must be None or a positive integer, got {value!r}"
-        )
-
-
-def validate_dataset_splits(dataset) -> None:
-    """Validate split options without constructing datasets or reading Zarr."""
-    validate_val_ratio(dataset.get("val_ratio", 0.0))
-    validate_max_train_episodes(dataset.get("max_train_episodes"))
-    for child in dataset.get("datasets", []):
-        validate_dataset_splits(child)
 
 
 def validate_action_key_consistency(cfg) -> None:

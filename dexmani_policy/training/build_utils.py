@@ -1,34 +1,39 @@
-"""Shared build functions for training/eval entry points."""
+"""Dataset, model and optimizer construction for training and integration smoke."""
+
+import math
+from collections.abc import Mapping
 
 import hydra
 import numpy as np
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import open_dict
 from torch.nn.modules.batchnorm import _BatchNorm
 
-from dexmani_policy.common.config import (
-    validate_action_key_consistency,
-    validate_dataset_splits,
-    validate_window_contract,
-)
-from dexmani_policy.common.normalizer import (
+from dexmani_policy.agents.normalization import (
     NON_NUMERIC_OBSERVATION_FIELDS,
     LinearNormalizer,
     build_mixed_action_normalizer,
+    resolve_normalization_spec,
     validate_normalization_spec,
     validate_normalizer_state,
 )
-from dexmani_policy.common.pytorch_util import print_param_count
+from dexmani_policy.datasets.sampler import validate_dataset_splits
+from dexmani_policy.training.logging import print_param_count
 from dexmani_policy.training.lr_scheduler import (
     compute_num_training_steps,
     get_scheduler,
 )
+from dexmani_policy.utils.config import (
+    validate_action_key_consistency,
+    validate_window_contract,
+)
+from dexmani_policy.utils.validation import positive_int
 
 __all__ = [
     "build_dataset_and_normalizer",
     "build_normalizer",
-    "resolve_normalization_spec",
     "attach_normalization_spec",
     "build_model_and_ema",
+    "compile_models",
     "build_scheduler",
     "build_optimizer_and_scheduler",
     "validate_config",
@@ -40,27 +45,6 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Normalization spec & builder
 # ---------------------------------------------------------------------------
-
-
-def resolve_normalization_spec(cfg) -> dict:
-    """Extract and validate the top-level feature-level normalization spec.
-
-    Delegates the mode grammar to the shared ``validate_normalization_spec`` so
-    training and deployment can never diverge on normalization semantics.
-    Returns a plain ``{field: mode}`` mapping.
-    """
-    normalization = cfg.get("normalization")
-    if normalization is None:
-        raise ValueError(
-            "config.normalization is required: every Policy config must declare a "
-            "top-level `normalization:` mapping (e.g. {joint_state: limits, action: auto})."
-        )
-    if isinstance(normalization, DictConfig):
-        normalization = OmegaConf.to_container(normalization, resolve=True)
-    if not isinstance(normalization, dict):
-        raise ValueError("config.normalization must be a mapping of field -> mode")
-
-    return validate_normalization_spec(normalization)
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
@@ -111,9 +95,7 @@ def build_dataset_and_normalizer(cfg):
     """
     spec = resolve_normalization_spec(cfg)
     dataset = hydra.utils.instantiate(cfg.dataset)
-    from dexmani_policy.deployment.runtime import capture_real_runtime
-
-    runtime = capture_real_runtime(dataset, cfg)
+    runtime = _capture_real_runtime(dataset, cfg)
     with open_dict(cfg):
         if runtime is not None:
             cfg.real_runtime = runtime
@@ -430,3 +412,71 @@ def validate_config(cfg):
     validate_action_key_consistency(cfg)
 
     print("Config validation passed")
+
+
+def compile_models(model, ema_model=None, **compile_kwargs):
+    """torch.compile the backbone of *model* and optionally *ema_model*.
+
+    The shared ``compile_backbone()`` protocol is defined in
+    :class:`~dexmani_policy.agents.core.base.BaseAgent`.
+
+    Keyword arguments are forwarded to :func:`torch.compile`; defaults to
+    ``mode='reduce-overhead'``.
+    """
+    compile_kwargs.setdefault("mode", "reduce-overhead")
+    model.compile_backbone(**compile_kwargs)
+    if ema_model is not None:
+        ema_model.compile_backbone(**compile_kwargs)
+
+
+def _capture_real_runtime(dataset, cfg) -> dict | None:
+    """Capture numerical deployment inputs from the buffer actually used to train."""
+    buffer = getattr(dataset, "replay_buffer", None)
+    if buffer is None:
+        return None
+    attrs = buffer.root.get("attrs", {})
+    if attrs.get("format") != "dexmani.real.canonical":
+        if attrs.get("domain") == "real" or str(attrs.get("format", "")).startswith(
+            "dexmani.real."
+        ):
+            raise ValueError("Real training requires format='dexmani.real.canonical'")
+        return None
+    if attrs.get("task_name") != cfg.task_name:
+        raise ValueError("Real canonical task_name differs from the training task")
+    dt = attrs.get("dt")
+    if (
+        isinstance(dt, bool)
+        or not isinstance(dt, (int, float))
+        or not math.isfinite(dt)
+        or dt <= 0
+    ):
+        raise ValueError("Real canonical dt must be finite and positive")
+    runtime = {"dt": float(dt)}
+    if "point_cloud" in dataset.sensor_modalities:
+        cloud = attrs.get("pointcloud_config")
+        if not isinstance(cloud, Mapping):
+            raise ValueError("Real point_cloud requires root pointcloud_config")
+        count = positive_int(cloud.get("num_points"), "pointcloud_config.num_points")
+        shape = buffer["point_cloud"].shape
+        if len(shape) != 3 or shape[1] != count:
+            raise ValueError("Stored point count disagrees with pointcloud_config")
+        encoder = cfg.agent.get("pc_encoder_config") or {}
+        for configured in (cfg.agent.get("num_points"), encoder.get("num_points")):
+            if configured is not None and configured != count:
+                raise ValueError(
+                    "Agent point count disagrees with the actual training cloud"
+                )
+        runtime["pointcloud"] = dict(cloud)
+    if "fingertip_points" in dataset.sensor_modalities:
+        links = attrs.get("fingertip_link_names")
+        if (
+            not isinstance(links, (list, tuple))
+            or len(links) != 5
+            or any(not isinstance(link, str) or not link.strip() for link in links)
+            or len(set(links)) != 5
+        ):
+            raise ValueError(
+                "Real fingertip_points requires five distinct non-empty link names"
+            )
+        runtime["fingertip_link_names"] = list(links)
+    return runtime

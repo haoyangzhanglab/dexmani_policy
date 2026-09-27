@@ -2,7 +2,7 @@
 
 Discovers milestone checkpoints from an experiment directory, runs a
 two-stage evaluation on deterministically selected paired seeds,
-and writes its strict selection record.
+and records the selected checkpoint, inference settings and selection seeds.
 
 Algorithm
 ---------
@@ -62,10 +62,11 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.pytorch_util import set_project_root, set_seed
+from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.utils.path import set_project_root
+from dexmani_policy.utils.random import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
-from dexmani_policy.training.eval_utils import (
+from dexmani_policy.evaluation.protocol import (
     MilestoneCheckpoint,
     _get_eval_param,
     add_inference_steps_argument,

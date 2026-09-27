@@ -5,7 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-from dexmani_policy.common.inference import positive_int, resolve_inference_steps
+from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.agents.action_decoders.utils import resolve_inference_steps
 
 
 class Diffusion(nn.Module):

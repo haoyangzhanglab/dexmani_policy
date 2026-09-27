@@ -31,7 +31,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}}"
 
 # Keep Conda activation hooks outside this shell's nounset mode and stream logs.
 exec conda run --no-capture-output -n policy \
-    python -u -m dexmani_policy.tools.train_vq_hand \
+    python -u scripts/training/train_vq_hand.py \
     --config dexmani_policy/configs/dqrise.yaml \
     --zarr_path "${ZARR_PATH}" \
     --output_dir "${OUTPUT_DIR}" \

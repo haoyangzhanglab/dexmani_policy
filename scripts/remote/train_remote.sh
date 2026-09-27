@@ -103,7 +103,7 @@ for remote_arg in "${REMOTE_ARGS[@]}"; do
     REMOTE_CMD+=" $remote_arg_q"
 done
 # Resolve/check exactly the same config and overrides, in the same remote cwd.
-PREFLIGHT_CMD="cd \"$SERVER_PROJ\" && \"$CONDA_PYTHON\" -m dexmani_policy.tools.resolve_remote_datasets --check"
+PREFLIGHT_CMD="cd \"$SERVER_PROJ\" && \"$CONDA_PYTHON\" scripts/remote/resolve_remote_datasets.py --check"
 for remote_arg in "${REMOTE_ARGS[@]:1}"; do
     printf -v remote_arg_q '%q' "$remote_arg"
     PREFLIGHT_CMD+=" $remote_arg_q"

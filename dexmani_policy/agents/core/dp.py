@@ -110,7 +110,7 @@ def example():
     cond, _ = agent.obs_encoder(obs)
     print(f"cond:            {cond.shape}")
 
-    from dexmani_policy.common.normalizer import LinearNormalizer
+    from dexmani_policy.agents.normalization import LinearNormalizer
 
     normalizer = LinearNormalizer()
     normalizer.fit({"action": action, "joint_state": obs["joint_state"].reshape(B, T, A)}, mode="limits")

@@ -2,78 +2,23 @@
 
 from __future__ import annotations
 
-import math
 import os
 import random
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from dexmani_policy.common.inference import (
+from dexmani_policy.agents.loader import (
     load_experiment_config,
-    positive_int,
     read_best_ckpt_json,
     resolve_checkpoint,
-    rgb_preprocessing_kwargs,
 )
+from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
+from dexmani_policy.utils.validation import positive_int
 
 _EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
-
-
-def capture_real_runtime(dataset, cfg) -> dict | None:
-    """Capture numerical deployment inputs from the buffer actually used to train."""
-    buffer = getattr(dataset, "replay_buffer", None)
-    if buffer is None:
-        return None
-    attrs = buffer.root.get("attrs", {})
-    if attrs.get("format") != "dexmani.real.canonical":
-        if attrs.get("domain") == "real" or str(attrs.get("format", "")).startswith(
-            "dexmani.real."
-        ):
-            raise ValueError("Real training requires format='dexmani.real.canonical'")
-        return None
-    if attrs.get("task_name") != cfg.task_name:
-        raise ValueError("Real canonical task_name differs from the training task")
-    dt = attrs.get("dt")
-    if (
-        isinstance(dt, bool)
-        or not isinstance(dt, (int, float))
-        or not math.isfinite(dt)
-        or dt <= 0
-    ):
-        raise ValueError("Real canonical dt must be finite and positive")
-    runtime = {"dt": float(dt)}
-    if "point_cloud" in dataset.sensor_modalities:
-        cloud = attrs.get("pointcloud_config")
-        if not isinstance(cloud, Mapping):
-            raise ValueError("Real point_cloud requires root pointcloud_config")
-        count = positive_int(cloud.get("num_points"), "pointcloud_config.num_points")
-        shape = buffer["point_cloud"].shape
-        if len(shape) != 3 or shape[1] != count:
-            raise ValueError("Stored point count disagrees with pointcloud_config")
-        encoder = cfg.agent.get("pc_encoder_config") or {}
-        for configured in (cfg.agent.get("num_points"), encoder.get("num_points")):
-            if configured is not None and configured != count:
-                raise ValueError(
-                    "Agent point count disagrees with the actual training cloud"
-                )
-        runtime["pointcloud"] = dict(cloud)
-    if "fingertip_points" in dataset.sensor_modalities:
-        links = attrs.get("fingertip_link_names")
-        if (
-            not isinstance(links, (list, tuple))
-            or len(links) != 5
-            or any(not isinstance(link, str) or not link.strip() for link in links)
-            or len(set(links)) != 5
-        ):
-            raise ValueError(
-                "Real fingertip_points requires five distinct non-empty link names"
-            )
-        runtime["fingertip_link_names"] = list(links)
-    return runtime
 
 
 def resolve_experiment(selector):
@@ -175,7 +120,7 @@ def inspect_policy(
 
 
 def load_policy(config, info, *, device="cuda:0", seed=0):
-    from dexmani_policy.common.inference import restore_policy_agent
+    from dexmani_policy.agents.loader import restore_policy_agent
 
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
@@ -209,7 +154,7 @@ class LoadedPolicy:
     def predict(self, observation):
         import torch
 
-        from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
+        from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
 
         if self.agent is None:
             raise RuntimeError("Policy is closed")

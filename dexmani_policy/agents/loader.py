@@ -1,19 +1,7 @@
-"""Saved experiment selection, preprocessing and shared strict inference restore.
+"""Saved experiment selection and shared strict Agent restore.
 
 Heavy imports stay inside restore; parent-side inspection does not load Torch.
 """
-
-
-def positive_int(value: int, name: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    return value
-
-
-def resolve_inference_steps(default_steps: int, inference_steps: int | None) -> int:
-    if inference_steps is None:
-        return positive_int(default_steps, "num_inference_steps")
-    return positive_int(inference_steps, "inference_steps")
 
 
 def load_experiment_config(experiment_dir):
@@ -71,16 +59,6 @@ def resolve_checkpoint(experiment_dir, selector="best"):
     return path
 
 
-def rgb_preprocessing_kwargs(dataset_config):
-    """The exact deterministic BaseDataset validation recipe."""
-    return {
-        "resize_hw": dataset_config.get("rgb_preprocess_size"),
-        "center_crop_hw": dataset_config.get("rgb_random_crop_size"),
-        "keep_uint8": bool(dataset_config.get("rgb_keep_uint8", False))
-        and dataset_config.get("rgb_color_aug") is None,
-    }
-
-
 def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     """Restore inference from config and tensors, independent of resume semantics."""
     from pathlib import Path
@@ -88,11 +66,12 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     import hydra
     from omegaconf import OmegaConf
 
-    from dexmani_policy.common.checkpoint_io import CheckpointStore
-    from dexmani_policy.common.config import validate_window_contract
-    from dexmani_policy.common.normalizer import validate_normalizer_state
-    from dexmani_policy.common.pytorch_util import fix_state_dict
-    from dexmani_policy.training.build_utils import resolve_normalization_spec
+    from dexmani_policy.agents.normalization import (
+        resolve_normalization_spec,
+        validate_normalizer_state,
+    )
+    from dexmani_policy.training.checkpoint import CheckpointStore, fix_state_dict
+    from dexmani_policy.utils.config import validate_window_contract
 
     cfg = OmegaConf.create(saved_config)
     validate_window_contract(

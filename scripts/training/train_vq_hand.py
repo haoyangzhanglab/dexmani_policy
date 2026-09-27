@@ -1,13 +1,12 @@
 """Train a single-step hand-state VQ-VAE for DQ-RISE.
 
-Correctness guarantees in this version:
+Training and persistence semantics:
 * train/validation split is episode-level;
 * VQ-VAE model optimization uses only the selected training episodes;
 * hand normalization statistics are fitted on the full hand dataset so they
   match the Policy full-dataset action normalizer;
 * validation uses the held-out episode split in that shared normalized space;
 * the same ``get_val_mask``/``downsample_mask`` logic as policy training is used;
-* validation commitment loss is meaningful with the fixed VectorQuantize;
 * checkpoints contain explicit model, split, and normalizer metadata;
 * ``num_layers`` means the actual number of hidden linear layers.
 """
@@ -16,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -25,15 +23,12 @@ import torch
 import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
-_script_dir = Path(__file__).resolve().parent
-_project_root = _script_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
 from dexmani_policy.agents.vq_hand import VQVAEHand
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.agents.normalization import LinearNormalizer
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import downsample_mask, get_val_mask
+
+_project_root = Path(__file__).resolve().parents[2]
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +38,6 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def _get_episode_ends(buffer) -> np.ndarray:
-    if hasattr(buffer, "episode_ends"):
-        ends = buffer.episode_ends
-        ends = ends[:] if hasattr(ends, "__getitem__") else ends
-        return np.asarray(ends, dtype=np.int64)
-    if hasattr(buffer, "meta") and "episode_ends" in buffer.meta:
-        return np.asarray(buffer.meta["episode_ends"][:], dtype=np.int64)
-    raise AttributeError("ReplayBuffer does not expose episode_ends")
 
 
 def _episode_mask_to_frame_indices(
@@ -129,7 +114,7 @@ def train(args: argparse.Namespace) -> None:
             f"{hand_data.shape[1]} after tcp_dim={args.tcp_dim}"
         )
 
-    episode_ends = _get_episode_ends(buffer)
+    episode_ends = np.asarray(buffer.episode_ends, dtype=np.int64)
     val_episode_mask = get_val_mask(
         seed=args.seed,
         val_ratio=args.val_ratio,
@@ -155,7 +140,7 @@ def train(args: argparse.Namespace) -> None:
     )
 
     # Fit on the full hand dataset so that min/max match the policy dataset
-    # normalizer (pc_dataset.py uses all episodes).  This guarantees the VQ-VAE
+    # normalizer (BaseDataset supplies all episodes). This guarantees the VQ-VAE
     # and policy coordinate spaces agree, avoiding _validate_codebook_normalizer()
     # failures at DQ-RISE training start.
     normalizer = LinearNormalizer()

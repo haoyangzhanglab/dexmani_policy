@@ -9,7 +9,7 @@ import torch.nn as nn
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.agents.normalization import LinearNormalizer
 
 
 class BaseAgent(nn.Module):

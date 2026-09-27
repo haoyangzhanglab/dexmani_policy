@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
+import torch
 
 os.environ.setdefault("WANDB_SILENT", "true")
 
@@ -103,3 +104,42 @@ class WandbLogger:
             pass
         finally:
             self.run = None
+
+
+def to_log_scalars(metrics: Dict[str, Any]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for key, value in (metrics or {}).items():
+        if torch.is_tensor(value):
+            if value.numel() == 1:
+                out[key] = value.item()
+        else:
+            try:
+                out[key] = float(value)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def count_params(module) -> tuple[int, int]:
+    """Return (total, trainable) parameter counts for *module*."""
+    total = sum(p.numel() for p in module.parameters())
+    trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+    return total, trainable
+
+
+def print_param_count(agent) -> None:
+    """Pretty-print parameter counts grouped by immediate children."""
+    from termcolor import cprint
+
+    total, _ = count_params(agent)
+    cprint(f"[{type(agent).__name__}] Parameter Count", "cyan", attrs=["bold"])
+    cprint(f"  Total: {total / 1e6:.2f} M", "white")
+
+    for name, child in agent.named_children():
+        t, tr = count_params(child)
+        frozen = t - tr
+        color = "green" if tr > 0 else "white"
+        cprint(
+            f"  {name:<20}: {t / 1e6:.2f} M  (trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)",
+            color,
+        )

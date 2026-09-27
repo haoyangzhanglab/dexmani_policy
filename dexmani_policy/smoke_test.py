@@ -15,14 +15,14 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.checkpoint_io import CheckpointStore, TrainCheckpoint
-from dexmani_policy.common.config import register_resolvers
-from dexmani_policy.common.pytorch_util import (
-    dict_apply,
+from dexmani_policy.training.checkpoint import (
+    CheckpointStore,
+    TrainCheckpoint,
     fix_state_dict,
-    get_rng_state,
-    set_seed,
 )
+from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.utils.tensor import dict_apply
+from dexmani_policy.utils.random import get_rng_state, set_seed
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
@@ -348,7 +348,7 @@ def smoke_test(config_name: str):
 
         from unittest.mock import patch
 
-        from dexmani_policy.common.inference import (
+        from dexmani_policy.agents.loader import (
             load_experiment_config,
             restore_policy_agent,
         )

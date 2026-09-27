@@ -8,22 +8,22 @@
 #   bash scripts/remote/sync_data.sh robot_data       # Upload robot_data only
 #   bash scripts/remote/sync_data.sh --dry-run        # Preview what would transfer
 #   bash scripts/remote/sync_data.sh --prune          # Upload + delete server-only files
-#   bash scripts/remote/sync_data.sh --pull           # Download server-only files (safe)
+#   bash scripts/remote/sync_data.sh --pull           # Download data without deleting local-only files
 #   bash scripts/remote/sync_data.sh --pull --prune   # Download + delete local-only files
 #   bash scripts/remote/sync_data.sh --pull --dry-run # Preview what --pull would download
 #
 # Design:
 #   - Default: push local→server, rsync -av (size+mtime). Fast, usually sufficient.
 #     Regenerated datasets get new mtimes → correctly detected.
-#   - --checksum / -c: compare by MD5 checksum instead. Slower but catches
+#   - --checksum / -c: compare by rsync checksum instead. Slower but catches
 #     content changes even when mtimes are identical (e.g. restored from backup).
-#   - No -z: .zarr and .safetensors are already compressed.
+#   - No -z: transfer large binary assets without rsync compression overhead.
 #   - No --delete by default: safety — never delete remote data if local copy is
 #     partial. Use --prune to opt in (works in both directions).
 #   - --pull / -P: reverse direction (server→local). Downloads files that exist on
-#     the server but not locally. Safe by default — never deletes local files.
-#     Use case: two-stage training where stage 1 produces artifacts on the server
-#     (e.g. DQ-RISE VQ-VAE checkpoints, extracted codebooks) that stage 2 needs locally.
+#     the server but not locally and updates changed destination files.
+#     Never deletes local-only files by default. Only data/ and robot_data/
+#     are synced; use sync_down.sh for checkpoints saved under experiments/.
 #   - --prune / -p: enables rsync --delete. Push: deletes server files missing
 #     locally. Pull: deletes local files missing on server.
 #     ALWAYS do --dry-run first — there is no trash bin on either side.

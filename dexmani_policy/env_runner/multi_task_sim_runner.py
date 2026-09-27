@@ -7,10 +7,10 @@ import numpy as np
 import torch
 from termcolor import cprint
 
-from dexmani_policy.common.pytorch_util import format_success_rate
+from dexmani_policy.env_runner.base_runner import format_success_rate
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError, _classify_eval_exception
 from dexmani_policy.env_runner.sim_runner import SimRunner
-from dexmani_policy.common.inference import positive_int
+from dexmani_policy.utils.validation import positive_int
 
 
 class TaskTextSimRunner(SimRunner):

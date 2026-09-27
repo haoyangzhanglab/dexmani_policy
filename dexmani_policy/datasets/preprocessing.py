@@ -1,0 +1,62 @@
+"""Saved deterministic RGB validation preprocessing; Torch loads only on use."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+if TYPE_CHECKING:
+    import torch
+
+
+def rgb_preprocessing_kwargs(dataset_config):
+    """The exact deterministic BaseDataset validation recipe."""
+    return {
+        "resize_hw": dataset_config.get("rgb_preprocess_size"),
+        "center_crop_hw": dataset_config.get("rgb_random_crop_size"),
+        "keep_uint8": bool(dataset_config.get("rgb_keep_uint8", False))
+        and dataset_config.get("rgb_color_aug") is None,
+    }
+
+
+def preprocess_validation_rgb(
+    rgb: np.ndarray | torch.Tensor,
+    *,
+    resize_hw: tuple[int, int] | None,
+    center_crop_hw: tuple[int, int] | None,
+    keep_uint8: bool,
+) -> torch.Tensor:
+    """Apply the deterministic validation RGB path to raw HWC uint8 frames."""
+    import torch
+    import torchvision.transforms.functional as TVF
+    from torchvision.transforms import InterpolationMode
+
+    value = torch.from_numpy(rgb) if isinstance(rgb, np.ndarray) else rgb
+    if not torch.is_tensor(value):
+        raise TypeError("validation RGB must be a NumPy array or torch tensor")
+    if value.ndim < 3 or value.shape[-1] != 3 or value.dtype != torch.uint8:
+        raise ValueError(
+            "validation RGB must have shape [..., H, W, 3] and dtype uint8"
+        )
+    if resize_hw is None:
+        if center_crop_hw is not None:
+            raise ValueError("validation RGB center crop requires a resize")
+        return value.contiguous()
+
+    leading_shape = tuple(value.shape[:-3])
+    value = value.movedim(-1, -3).contiguous()
+    value = value.reshape(-1, *value.shape[-3:])
+    if not keep_uint8:
+        value = value.float().div_(255.0)
+    value = TVF.resize(
+        value,
+        list(resize_hw),
+        interpolation=InterpolationMode.BILINEAR,
+        antialias=True,
+    )
+    if center_crop_hw is not None:
+        value = TVF.center_crop(value, list(center_crop_hw))
+    if value.dtype.is_floating_point:
+        value = value.clamp_(0, 1)
+    return value.reshape(*leading_shape, *value.shape[-3:]).contiguous()
