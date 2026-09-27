@@ -33,6 +33,9 @@ class BaseAgent(nn.Module):
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = LinearNormalizer()
 
+    def initialize_training(self) -> None:
+        """Initialize fresh training weights; complete checkpoints skip this step."""
+
     def load_normalizer_from_dataset(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
@@ -85,7 +88,9 @@ class BaseAgent(nn.Module):
 
         self._validate_obs_dict(obs, expected_batch=B if action is not None else None)
 
-    def _validate_obs_dict(self, obs_dict: Dict, expected_batch: int | None = None) -> None:
+    def _validate_obs_dict(
+        self, obs_dict: Dict, expected_batch: int | None = None
+    ) -> None:
         """Validate observation tensor shapes.
 
         Every observation tensor must be at least 2D ``(B, T, ...)`` with
@@ -113,13 +118,19 @@ class BaseAgent(nn.Module):
                 )
 
         if len(batch_sizes) > 1:
-            shapes = {k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)}
-            raise ValueError(f"Observation batch-size mismatch across modalities: {shapes}")
+            shapes = {
+                k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)
+            }
+            raise ValueError(
+                f"Observation batch-size mismatch across modalities: {shapes}"
+            )
 
         if expected_batch is not None and batch_sizes:
             obs_b = next(iter(batch_sizes))
             if obs_b != expected_batch:
-                shapes = {k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)}
+                shapes = {
+                    k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)
+                }
                 raise ValueError(
                     f"Batch size mismatch: obs batch={obs_b}, "
                     f"action batch={expected_batch}.  Obs shapes: {shapes}"
@@ -200,7 +211,9 @@ class BaseAgent(nn.Module):
         return total, loss_dict
 
     @torch.no_grad()
-    def predict_action(self, obs_dict: Dict, inference_steps: int | None = None) -> Dict:
+    def predict_action(
+        self, obs_dict: Dict, inference_steps: int | None = None
+    ) -> Dict:
         self._validate_obs_dict(obs_dict)
         cond, _ = self._build_cond(obs_dict)
         return self.predict_action_from_cond(cond, inference_steps=inference_steps)
@@ -223,7 +236,9 @@ class BaseAgent(nn.Module):
             device=cond.device,
             dtype=cond.dtype,
         )
-        pred = self.action_decoder.predict_action(cond, template, inference_steps=inference_steps)
+        pred = self.action_decoder.predict_action(
+            cond, template, inference_steps=inference_steps
+        )
         pred = self.normalizer["action"].unnormalize(pred)
 
         start = self.n_obs_steps - 1
@@ -240,13 +255,17 @@ class BaseAgent(nn.Module):
         }
 
     def compile_backbone(self, **compile_kwargs):
-        self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
+        self.action_decoder.model = torch.compile(
+            self.action_decoder.model, **compile_kwargs
+        )
 
     def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
         action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
         for g in action_groups:
             g["lr"] = lr
-        obs_groups = get_optim_group_with_no_decay(self.obs_encoder, weight_decay=obs_wd)
+        obs_groups = get_optim_group_with_no_decay(
+            self.obs_encoder, weight_decay=obs_wd
+        )
         for g in obs_groups:
             g["lr"] = obs_lr
         return action_groups + obs_groups
@@ -265,7 +284,9 @@ class BaseAgent(nn.Module):
             param_info = []
             for p in missing_params:
                 name = next((n for n, pp in self.named_parameters() if pp is p), "?")
-                param_info.append(f"  {name}: shape={tuple(p.shape)}, device={p.device}")
+                param_info.append(
+                    f"  {name}: shape={tuple(p.shape)}, device={p.device}"
+                )
             warnings.warn(
                 f"The following {len(missing_ids)} trainable parameter(s) are NOT "
                 f"tracked by the optimizer:\n"
@@ -325,7 +346,9 @@ class UNetDiffusionAgent(BaseAgent):
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,
         )
-        action_decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type)
+        action_decoder = Diffusion(
+            backbone, num_training_steps, num_inference_steps, prediction_type
+        )
         super().__init__(
             obs_encoder,
             action_decoder,
@@ -335,4 +358,3 @@ class UNetDiffusionAgent(BaseAgent):
             action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-

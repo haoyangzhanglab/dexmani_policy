@@ -1,483 +1,241 @@
-"""Stable, NumPy-only public runtime for exported Policy experiments.
-
-The public objects in this module deliberately keep Torch and model details on
-the Policy side of the deployment boundary.  Filesystem discovery is also kept
-separate from artifact inspection so listing experiments never loads Torch, a
-checkpoint, or a model.
-"""
+"""Config-only inspection and a thin NumPy bridge to normal checkpoint inference."""
 
 from __future__ import annotations
 
 import os
 import random
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, final
 
 import numpy as np
 
-from dexmani_policy.deployment.contract import PolicySpec
-from dexmani_policy.common.inference import positive_int, resolve_inference_steps
+from dexmani_policy.common.inference import (
+    load_experiment_config,
+    positive_int,
+    read_best_ckpt_json,
+    resolve_checkpoint,
+    rgb_preprocessing_kwargs,
+)
 
-if TYPE_CHECKING:
-    from dexmani_policy.deployment.contract import (
-        DeploymentSpec,
-    )
-    from dexmani_policy.deployment.restore import (
-        RestoredDeployment,
-    )
-
-
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_EXPERIMENTS_ROOT = _REPOSITORY_ROOT / "experiments"
-_DEPLOYMENT_SELECTOR = Path("checkpoints/deployment_latest.pt")
+_EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
 
 
-@dataclass(frozen=True)
-class ExperimentInfo:
-    """Resolved experiment identity, public spec and inference default."""
-
-    selector: str
-    experiment_dir: Path
-    policy_name: str
-    task_name: str
-    checkpoint_path: Path
-    checkpoint_name: str
-    spec: PolicySpec
-    default_inference_steps: int
-
-
-def resolve_experiment(selector: str | os.PathLike[str]) -> Path:
-    """Resolve an existing directory or a ``policy/task/experiment`` selector.
-
-    Short selectors are always rooted at this repository's ``experiments``
-    directory.  There is intentionally no ``latest`` or timestamp selection.
-    """
-    raw_selector = os.fspath(selector)
-    if not raw_selector:
-        raise ValueError("experiment selector must not be empty")
-
-    candidate = Path(raw_selector).expanduser()
-    if candidate.is_dir():
-        return candidate.resolve(strict=True)
-
-    parts = raw_selector.split("/")
-    if (
-        candidate.is_absolute()
-        or len(parts) != 3
-        or any(not part or part in {".", ".."} for part in parts)
-    ):
-        raise ValueError(
-            "experiment selector must be an existing directory or "
-            "policy/task/experiment"
-        )
-    experiment_dir = _EXPERIMENTS_ROOT.joinpath(*parts)
-    try:
-        resolved = experiment_dir.resolve(strict=True)
-    except OSError as exc:
-        raise FileNotFoundError(f"experiment not found: {raw_selector}") from exc
+def resolve_experiment(selector):
+    candidate = Path(selector).expanduser()
+    if not candidate.is_dir():
+        parts = os.fspath(selector).split("/")
+        if (
+            candidate.is_absolute()
+            or len(parts) != 3
+            or any(p in {"", ".", ".."} for p in parts)
+        ):
+            raise ValueError(
+                "Expected an experiment directory or policy/task/run selector"
+            )
+        candidate = _EXPERIMENTS_ROOT.joinpath(*parts)
+    resolved = candidate.resolve(strict=True)
     if not resolved.is_dir():
-        raise FileNotFoundError(f"experiment is not a directory: {resolved}")
+        raise ValueError("Experiment must be a directory")
     return resolved
 
 
-def list_experiments(filter: str | None = None) -> tuple[str, ...]:
-    """List deployable short selectors without loading Torch or checkpoints.
-
-    When provided, ``filter`` is a case-insensitive substring matched against
-    the complete ``policy/task/experiment`` selector.
-    """
-    if filter is not None and (not isinstance(filter, str) or not filter):
-        raise ValueError("filter must be a non-empty string or None")
-    if not _EXPERIMENTS_ROOT.is_dir():
-        return ()
-
-    needle = filter.casefold() if filter is not None else None
-    selectors: list[str] = []
-    for policy_dir in _visible_directories(_EXPERIMENTS_ROOT):
-        for task_dir in _visible_directories(policy_dir):
-            for experiment_dir in _visible_directories(task_dir):
-                selector = "/".join(
-                    (policy_dir.name, task_dir.name, experiment_dir.name)
-                )
-                if needle is not None and needle not in selector.casefold():
-                    continue
-                if not (experiment_dir / "config.yaml").is_file():
-                    continue
-                if not (experiment_dir / _DEPLOYMENT_SELECTOR).is_file():
-                    continue
-                selectors.append(selector)
-    return tuple(sorted(selectors))
-
-
-def inspect_experiment(
-    selector: str | os.PathLike[str],
-    *,
-    artifact: str | None = None,
-) -> ExperimentInfo:
-    """Read one experiment's deployment metadata without constructing a model.
-
-    ``artifact=None`` follows the ``checkpoints/deployment_latest.pt``
-    selector; an explicit ``artifact`` must be a plain filename inside the
-    experiment's ``checkpoints/`` directory.  ``ExperimentInfo.checkpoint_name``
-    is always the resolved real filename (symlinks followed), so a caller can
-    pin the exact artifact for a later :func:`load_experiment`.
-    """
-    experiment_dir = resolve_experiment(selector)
-    checkpoint_path = _resolve_deployment_checkpoint(experiment_dir, artifact=artifact)
-    payload = _read_deployment_payload(checkpoint_path, map_location="meta")
-    return _experiment_info(experiment_dir, checkpoint_path, payload)
-
-
-def load_experiment(
-    selector: str | os.PathLike[str],
-    device: str = "cuda:0",
-    seed: int = 0,
-    *,
-    artifact: str | None = None,
-    inference_steps: int | None = None,
-) -> LoadedPolicy:
-    """Strictly restore the selected deployment artifact as a NumPy runtime.
-
-    ``artifact`` selects the deployment file exactly as in
-    :func:`inspect_experiment`; pass the previously resolved
-    ``ExperimentInfo.checkpoint_name`` so one session cannot silently switch
-    artifacts between inspection and load.
-
-    ``inference_steps`` overrides the artifact's default inference steps
-    (``ExperimentInfo.default_inference_steps``) for this runtime only; ``None``
-    keeps the artifact default.  Warmup and every prediction use the same
-    effective value.
-    """
-    if type(device) is not str or not device:
-        raise ValueError("device must be a non-empty string")
-    if type(seed) is not int or seed < 0:
-        raise ValueError("seed must be a non-negative int")
-    _validate_inference_steps(inference_steps)
-
-    experiment_dir = resolve_experiment(selector)
-    checkpoint_path = _resolve_deployment_checkpoint(experiment_dir, artifact=artifact)
-    payload = _read_deployment_payload(checkpoint_path, map_location="cpu")
-    info = _experiment_info(experiment_dir, checkpoint_path, payload)
-
-    from dexmani_policy.deployment.restore import restore_deployment_agent
-
-    restored = restore_deployment_agent(payload, device=device)
-    runtime = LoadedPolicy(
-        info,
-        restored,
-        device=device,
-        seed=seed,
-        inference_steps=inference_steps,
+def list_experiments(filter=None):
+    return tuple(
+        sorted(
+            str(path.parent.relative_to(_EXPERIMENTS_ROOT))
+            for path in _EXPERIMENTS_ROOT.glob("*/*/*/config.yaml")
+            if (path.parent / "checkpoints/latest.pt").is_file()
+            and (filter is None or filter.casefold() in str(path.parent).casefold())
+        )
     )
-    runtime.reset_episode()
-    return runtime
 
 
-def _validate_inference_steps(inference_steps: int | None) -> None:
-    if inference_steps is not None:
-        positive_int(inference_steps, "inference_steps")
+@dataclass(frozen=True)
+class PolicyInfo:
+    experiment_dir: Path
+    checkpoint_path: Path
+    policy_name: str
+    task_name: str
+    observation_fields: tuple[str, ...]
+    n_obs_steps: int
+    n_action_steps: int
+    action_mode: str
+    control_dt_s: float | None
+    pointcloud_config: dict | None
+    weights: str
+    inference_steps: int
 
 
-@final
+def inspect_policy(
+    experiment, *, config=None, checkpoint="best", weights=None, inference_steps=None
+):
+    directory = resolve_experiment(experiment)
+    cfg = load_experiment_config(directory) if config is None else config
+    path = resolve_checkpoint(directory, checkpoint)
+    defaults = cfg["eval"]
+    if checkpoint == "best":
+        defaults = read_best_ckpt_json(directory)["inference"]
+    if weights is None:
+        if type(defaults.get("use_ema")) is not bool:
+            raise ValueError("Inference defaults require boolean use_ema")
+        weights = "ema" if defaults["use_ema"] else "raw"
+    if weights not in {"ema", "raw"}:
+        raise ValueError("weights must be ema or raw")
+    steps = positive_int(
+        defaults.get("inference_steps") if inference_steps is None else inference_steps,
+        "inference_steps",
+    )
+    action_modes = {"action": "joint", "action_ee": "eef"}
+    if cfg["action_key"] not in action_modes:
+        raise ValueError("action_key must be action or action_ee")
+    recipe = cfg["real_runtime"]
+    if recipe is not None and not isinstance(recipe, dict):
+        raise ValueError("real_runtime must be a mapping or null")
+    fields = tuple(cfg["dataset"].get("sensor_modalities", ()))
+    if len(set(fields)) != len(fields):
+        raise ValueError("Observation fields must be unique")
+    return PolicyInfo(
+        directory,
+        path,
+        cfg["policy_name"],
+        cfg["task_name"],
+        fields,
+        positive_int(cfg["agent"]["n_obs_steps"], "n_obs_steps"),
+        positive_int(cfg["agent"]["n_action_steps"], "n_action_steps"),
+        action_modes[cfg["action_key"]],
+        recipe.get("control_dt_s") if recipe is not None else None,
+        recipe.get("pointcloud") if recipe is not None else None,
+        weights,
+        steps,
+    )
+
+
+def load_policy(config, info, *, device="cuda:0", seed=0):
+    from dexmani_policy.common.inference import restore_policy_agent
+
+    if type(seed) is not int or seed < 0:
+        raise ValueError("seed must be a non-negative integer")
+    agent = restore_policy_agent(
+        config, info.checkpoint_path, use_ema=info.weights == "ema", device=device
+    )
+    return LoadedPolicy(agent, config, info, device=device, seed=seed)
+
+
 class LoadedPolicy:
-    """One restored Policy model with a NumPy-only inference surface."""
-
-    def __init__(
-        self,
-        info: ExperimentInfo,
-        restored: RestoredDeployment,
-        *,
-        device: str,
-        seed: int,
-        inference_steps: int | None = None,
-    ) -> None:
-        _validate_inference_steps(inference_steps)
+    def __init__(self, agent, config, info, *, device, seed):
+        self.agent = agent
         self.info = info
-        self.spec = info.spec
-        self._restored: RestoredDeployment | None = restored
+        self._rgb = rgb_preprocessing_kwargs(config["dataset"])
         self._device = device
         self._seed = seed
-        self._inference_steps = resolve_inference_steps(restored.spec.inference_steps, inference_steps)
+        self.reset_episode()
 
-    def warmup(self, *, samples: int) -> tuple[float, ...]:
-        """Run deterministic synthetic samples and return durations in seconds.
-
-        Global Python, NumPy, Torch, and already-initialized CUDA RNG states are
-        restored so warmup does not consume the episode's inference stream.
-        """
-        if type(samples) is not int or samples < 1:
-            raise ValueError("samples must be a positive int")
-        self._require_open()
-
+    def reset_episode(self):
         import torch
 
-        from dexmani_policy.deployment.restore import deterministic_observation
+        random.seed(self._seed)
+        np.random.seed(self._seed)
+        torch.manual_seed(self._seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self._seed)
+        reset = getattr(self.agent, "reset_episode", None)
+        if reset is not None:
+            reset()
 
-        python_state = random.getstate()
-        numpy_state = np.random.get_state()
-        torch_state = torch.random.get_rng_state()
-        cuda_states = (
-            torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    def predict(self, observation):
+        import torch
+
+        from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
+
+        if self.agent is None:
+            raise RuntimeError("Policy is closed")
+        missing = set(self.info.observation_fields) - observation.keys()
+        if missing:
+            raise ValueError(f"Missing policy observations: {sorted(missing)}")
+        tensors = {}
+        for name in self.info.observation_fields:
+            value = np.asarray(observation[name])
+            if name == "rgb":
+                tensor = preprocess_validation_rgb(value, **self._rgb)
+            else:
+                tensor = torch.from_numpy(np.array(value, copy=True, order="C"))
+            tensors[name] = tensor.unsqueeze(0).to(self._device)
+        with torch.inference_mode():
+            result = self.agent.predict_action(
+                tensors, inference_steps=self.info.inference_steps
+            )
+        control = result.get("control_action")
+        dimensions = 19 if self.info.action_mode == "joint" else 21
+        expected = (1, self.info.n_action_steps, dimensions)
+        if (
+            not torch.is_tensor(control)
+            or tuple(control.shape) != expected
+            or not control.is_floating_point()
+            or not torch.isfinite(control).all()
+        ):
+            raise ValueError(
+                f"Policy control_action must be finite floating point {expected}"
+            )
+        return (
+            control.detach()
+            .squeeze(0)
+            .to(device="cpu", dtype=torch.float64)
+            .numpy()
+            .copy()
         )
-        deployment_spec = self._deployment_spec()
-        synthetic_tensors = deterministic_observation(deployment_spec)
-        observation = {
-            name: value.squeeze(0).numpy() for name, value in synthetic_tensors.items()
+
+    def warmup(self, *, samples=5, rgb_hw=None):
+        positive_int(samples, "samples")
+        shapes = {
+            "joint_state": (19,),
+            "eef_pose": (9,),
+            "contact_force": (5, 3),
+            "fingertip_points": (5, 3),
+            "tactile_force": (5, 120, 3),
         }
-        durations: list[float] = []
+        observation = {}
+        for name in self.info.observation_fields:
+            if name == "rgb":
+                if rgb_hw is None:
+                    raise ValueError(
+                        "RGB warmup requires the current raw camera height/width"
+                    )
+                shape, dtype = (*rgb_hw, 3), np.uint8
+            elif name == "point_cloud":
+                shape, dtype = (
+                    (self.info.pointcloud_config["num_points"], 6),
+                    np.float32,
+                )
+            else:
+                shape, dtype = shapes[name], np.float32
+            shape = (self.info.n_obs_steps, *shape)
+            values = np.arange(np.prod(shape)).reshape(shape)
+            observation[name] = (
+                (values % 251 + 1).astype(dtype)
+                if dtype == np.uint8
+                else ((values % 101) / 100.0 - 0.5).astype(dtype)
+            )
+        durations = []
+        self.reset_episode()
         try:
             for _ in range(samples):
-                started = time.perf_counter()
+                start = time.perf_counter()
                 self.predict(observation)
-                durations.append(time.perf_counter() - started)
+                durations.append(time.perf_counter() - start)
         finally:
-            random.setstate(python_state)
-            np.random.set_state(numpy_state)
-            torch.random.set_rng_state(torch_state)
-            if cuda_states is not None:
-                torch.cuda.set_rng_state_all(cuda_states)
+            self.reset_episode()
         return tuple(durations)
 
-    def predict(self, observation: Mapping[str, np.ndarray]) -> np.ndarray:
-        """Return a finite float64 copy ``[n_action_steps, control_action_dim]``."""
-        restored = self._require_open()
-        tensors = self._observation_tensors(observation)
-
-        import torch
-
-        from dexmani_policy.deployment.restore import validate_prediction
-
-        with torch.inference_mode():
-            result = restored.agent.predict_action(
-                tensors, inference_steps=self._inference_steps
-            )
-        control = validate_prediction(result, restored.spec, batch_size=1)
-        return control.squeeze(0).to(device="cpu", dtype=torch.float64).numpy().copy()
-
-    def reset_episode(self) -> None:
-        """Reset Policy-owned stochastic and optional episode-local model state."""
-        restored = self._require_open()
-
-        from dexmani_policy.deployment.restore import reset_inference_seed
-
-        reset_inference_seed(self._seed)
-        reset_method = getattr(restored.agent, "reset_episode", None)
-        if reset_method is not None:
-            if not callable(reset_method):
-                raise RuntimeError("agent.reset_episode is not callable")
-            reset_method()
-
-    def close(self) -> None:
-        """Release model resources.  Repeated calls are harmless."""
-        restored = self._restored
-        if restored is None:
+    def close(self):
+        if self.agent is None:
             return
-        self._restored = None
-        close_method = getattr(restored.agent, "close", None)
-        if close_method is not None:
-            if not callable(close_method):
-                raise RuntimeError("agent.close is not callable")
-            close_method()
-        restored.agent.to("cpu")
-        if self._device.startswith("cuda"):
+        agent, self.agent = self.agent, None
+        close = getattr(agent, "close", None)
+        if close is not None:
+            close()
+        agent.to("cpu")
+        if str(self._device).startswith("cuda"):
             import torch
 
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    def _deployment_spec(self) -> DeploymentSpec:
-        return self._require_open().spec
-
-    def _require_open(self) -> RestoredDeployment:
-        if self._restored is None:
-            raise RuntimeError("Policy runtime is closed")
-        return self._restored
-
-    def _observation_tensors(
-        self, observation: Mapping[str, np.ndarray]
-    ) -> dict[str, Any]:
-        if not isinstance(observation, Mapping):
-            raise TypeError("observation must be a mapping of NumPy arrays")
-        required = {field.name for field in self.spec.observation_fields}
-        actual = set(observation)
-        if actual != required:
-            raise ValueError(
-                f"observation modalities mismatch: got {sorted(actual)}, "
-                f"expected {sorted(required)}"
-            )
-
-        import torch
-
-        tensors: dict[str, Any] = {}
-        for field in self.spec.observation_fields:
-            value = observation[field.name]
-            if not isinstance(value, np.ndarray):
-                raise TypeError(f"observation[{field.name!r}] must be a NumPy array")
-            expected_shape = (self.spec.n_obs_steps, *field.shape)
-            if len(value.shape) != len(expected_shape) or any(
-                actual <= 0 or (expected is not None and actual != expected)
-                for actual, expected in zip(value.shape, expected_shape)
-            ):
-                raise ValueError(
-                    f"observation[{field.name!r}] shape mismatch: got {value.shape}, "
-                    f"expected {expected_shape}"
-                )
-            expected_dtype = _numpy_dtype(field.dtype)
-            if value.dtype != expected_dtype:
-                raise TypeError(
-                    f"observation[{field.name!r}] dtype mismatch: got {value.dtype}, "
-                    f"expected {expected_dtype}"
-                )
-            if field.dtype == "float32" and not np.isfinite(value).all():
-                raise ValueError(
-                    f"observation[{field.name!r}] must contain finite real numbers"
-                )
-            contiguous_value = np.ascontiguousarray(value)
-            if not contiguous_value.flags.writeable:
-                contiguous_value = contiguous_value.copy()
-            tensor = torch.from_numpy(contiguous_value).unsqueeze(0)
-            tensors[field.name] = tensor
-        from dexmani_policy.deployment.restore import prepare_deployment_observation
-
-        prepared = prepare_deployment_observation(tensors, self._deployment_spec())
-        return {name: value.to(self._device) for name, value in prepared.items()}
-
-
-def _numpy_dtype(name: str) -> np.dtype[Any]:
-    try:
-        dtype = np.dtype(name)
-    except TypeError as exc:
-        raise RuntimeError(f"unsupported deployment dtype: {name!r}") from exc
-    if dtype not in {np.dtype(np.float32), np.dtype(np.uint8)}:
-        raise RuntimeError(f"unsupported deployment dtype: {name!r}")
-    return dtype
-
-
-def _visible_directories(directory: Path) -> tuple[Path, ...]:
-    try:
-        return tuple(
-            child
-            for child in directory.iterdir()
-            if child.is_dir() and not child.name.startswith(".")
-        )
-    except OSError:
-        return ()
-
-
-def _resolve_deployment_checkpoint(
-    experiment_dir: Path,
-    *,
-    artifact: str | None = None,
-) -> Path:
-    """Resolve one deployment artifact inside ``experiment/checkpoints``.
-
-    ``artifact=None`` follows the ``deployment_latest.pt`` selector (possibly a
-    symlink) to its real target.  An explicit artifact must be a plain
-    filename; path traversal, absolute paths, and symlinks escaping
-    ``checkpoints/`` are rejected so the Policy package stays the sole owner
-    of checkpoint filesystem layout.
-    """
-    checkpoint_dir = experiment_dir / "checkpoints"
-    if artifact is None:
-        selector_path = experiment_dir / _DEPLOYMENT_SELECTOR
-    else:
-        if type(artifact) is not str or not artifact:
-            raise ValueError("artifact must be a non-empty filename or None")
-        if Path(artifact).is_absolute() or Path(artifact).name != artifact:
-            raise ValueError(
-                "artifact must be a plain filename inside the experiment's "
-                f"checkpoints/ directory: {artifact!r}"
-            )
-        selector_path = checkpoint_dir / artifact
-    try:
-        resolved_dir = checkpoint_dir.resolve(strict=True)
-        checkpoint_path = selector_path.resolve(strict=True)
-        checkpoint_path.relative_to(resolved_dir)
-    except (OSError, ValueError) as exc:
-        raise FileNotFoundError(
-            f"valid deployment checkpoint not found: {selector_path}"
-        ) from exc
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(
-            f"deployment checkpoint is not a file: {checkpoint_path}"
-        )
-    return checkpoint_path
-
-
-def _read_deployment_payload(path: Path, *, map_location: str) -> Mapping[str, Any]:
-    import torch
-
-    try:
-        payload = torch.load(path, map_location=map_location, weights_only=True)
-    except Exception as exc:
-        raise RuntimeError(f"cannot safely load deployment checkpoint: {path}") from exc
-    if not isinstance(payload, Mapping):
-        raise RuntimeError("deployment checkpoint payload must be a mapping")
-    return payload
-
-
-def _experiment_info(
-    experiment_dir: Path,
-    checkpoint_path: Path,
-    payload: Mapping[str, Any],
-) -> ExperimentInfo:
-    policy_name, configured_task = _experiment_identity(experiment_dir)
-    spec, artifact_task, default_steps = _policy_spec(payload)
-    if configured_task != artifact_task:
-        raise RuntimeError(
-            f"experiment task_name={configured_task!r} conflicts with "
-            f"artifact task_name={artifact_task!r}"
-        )
-    return ExperimentInfo(
-        selector=_short_selector(experiment_dir),
-        experiment_dir=experiment_dir,
-        policy_name=policy_name,
-        task_name=artifact_task,
-        checkpoint_path=checkpoint_path,
-        checkpoint_name=checkpoint_path.name,
-        spec=spec,
-        default_inference_steps=default_steps,
-    )
-
-
-def _experiment_identity(experiment_dir: Path) -> tuple[str, str]:
-    from omegaconf import OmegaConf
-
-    config_path = experiment_dir / "config.yaml"
-    if not config_path.is_file():
-        raise FileNotFoundError(f"experiment config not found: {config_path}")
-    try:
-        config = OmegaConf.load(config_path)
-        policy_name = config.get("policy_name")
-        task_name = config.get("task_name")
-    except Exception as exc:
-        raise RuntimeError(f"cannot read experiment config: {config_path}") from exc
-    for label, value in (("policy_name", policy_name), ("task_name", task_name)):
-        if type(value) is not str or not value:
-            raise RuntimeError(f"experiment config {label} must be a non-empty string")
-    return policy_name, task_name
-
-
-def _policy_spec(payload: Mapping[str, Any]) -> tuple[PolicySpec, str, int]:
-    from dexmani_policy.deployment.contract import deployment_contract
-    from dexmani_policy.deployment.restore import deployment_spec
-
-    deployment = deployment_spec(payload)
-    contract = deployment_contract(payload)
-    inference = contract["inference_config"]
-
-    task_name = inference.get("task_name")
-    if type(task_name) is not str or not task_name:
-        raise RuntimeError("inference_config.task_name must be a non-empty string")
-    return deployment.policy_spec, task_name, deployment.inference_steps
-
-
-def _short_selector(experiment_dir: Path) -> str:
-    try:
-        relative = experiment_dir.relative_to(_EXPERIMENTS_ROOT)
-    except ValueError:
-        return str(experiment_dir)
-    return relative.as_posix() if len(relative.parts) == 3 else str(experiment_dir)
+            torch.cuda.empty_cache()

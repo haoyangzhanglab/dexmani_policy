@@ -46,18 +46,18 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.common.config import normalize_eval_config, register_resolvers
+from dexmani_policy.common.inference import read_best_ckpt_json
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
-    add_inference_steps_argument,
     _get_eval_param,
-    build_eval_components,
-    parse_eval_overrides,
+    add_inference_steps_argument,
+    build_eval_runner,
     collect_episode_details,
     compute_eval_stats,
     iter_leaf_env_runners,
     load_ckpt_for_inference,
-    read_best_ckpt_json,
+    parse_eval_overrides,
     resolve_checkpoint_path,
     resolve_eval_seed,
     validate_inference_steps,
@@ -81,7 +81,9 @@ def _prepare_result_dir(exp_dir: Path, result_save_dir: Path | None) -> Path:
     result_save_dir = Path(result_save_dir)
     result_save_dir.mkdir(parents=True, exist_ok=True)
     if any(result_save_dir.iterdir()):
-        raise FileExistsError(f"Evaluation output directory must be empty: {result_save_dir}")
+        raise FileExistsError(
+            f"Evaluation output directory must be empty: {result_save_dir}"
+        )
     return result_save_dir
 
 
@@ -108,20 +110,15 @@ def _setup_eval(
     eval_seed = resolve_eval_seed(cfg)
     set_seed(eval_seed)
 
-    device = torch.device(cfg.training.device)
-    env_runner, checkpoint_store = build_eval_components(cfg)
+    env_runner = build_eval_runner(cfg)
 
     for leaf_runner in iter_leaf_env_runners(env_runner):
         leaf_runner.record_video = video_save_dir is not None
 
-    ckpt_path, ckpt_label = resolve_checkpoint_path(
-        exp_dir, ckpt_tag_or_path, checkpoint_store
-    )
+    ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, ckpt_tag_or_path)
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
-    agent = load_ckpt_for_inference(checkpoint_store, ckpt_path, use_ema, cfg=cfg)
-    agent.to(device)
-    agent.eval()
+    agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
     cprint("✅ Checkpoint loaded\n", "green")
 
     return agent, env_runner, ckpt_path, ckpt_label, eval_seed
@@ -187,7 +184,9 @@ def _run_one_inference_setting(
     """
     for name in ("_result.txt", "result_details.json"):
         if (result_save_dir / name).exists():
-            raise FileExistsError(f"Evaluation result already exists: {result_save_dir / name}")
+            raise FileExistsError(
+                f"Evaluation result already exists: {result_save_dir / name}"
+            )
     n_seeds = len(eval_seeds)
     env_runner.eval_seeds = eval_seeds
     result = env_runner.run(
@@ -221,7 +220,8 @@ def _run_one_inference_setting(
 
     result_save_dir.mkdir(parents=True, exist_ok=True)
     _write_result(result_save_dir / "_result.txt", f"{success_rate}\n")
-    _write_result(result_save_dir / "result_details.json",
+    _write_result(
+        result_save_dir / "result_details.json",
         json.dumps(
             {
                 "ckpt_tag": ckpt_tag_or_path,
@@ -242,7 +242,7 @@ def _run_one_inference_setting(
             },
             indent=2,
             ensure_ascii=False,
-        )
+        ),
     )
 
     return {
@@ -282,7 +282,7 @@ def evaluate_checkpoint_robotwin(
     ----------
     cfg : pre-loaded OmegaConf config with ``_exp_dir`` injected.
     ckpt_tag_or_path : ``"best"``, ``"latest"``, ``"20pct"``, or a path.
-        ``"best"`` requires the strict record written by ``select_best_ckpt.py``.
+        ``"best"`` requires the selection record written by ``select_best_ckpt.py``.
     episodes : number of seeds to evaluate (default: 100).
     inference_steps : DDIM/Euler inference steps.
     use_ema : select EMA weights; missing EMA weights are an error.
@@ -293,14 +293,12 @@ def evaluate_checkpoint_robotwin(
     """
     validate_inference_steps([inference_steps])
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
-        _setup_eval(
-            cfg,
-            exp_dir,
-            ckpt_tag_or_path,
-            use_ema,
-            video_save_dir=video_save_dir,
-        )
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
+        cfg,
+        exp_dir,
+        ckpt_tag_or_path,
+        use_ema,
+        video_save_dir=video_save_dir,
     )
     best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
     selection_seeds = best_info["selection"]["seeds"] if best_info else []
@@ -375,18 +373,18 @@ def evaluate_checkpoint_sweep(
     """
     validate_inference_steps(inference_steps_list)
     if len(set(inference_steps_list)) != len(inference_steps_list):
-        raise ValueError("Sweep inference steps must be distinct to preserve per-value results")
+        raise ValueError(
+            "Sweep inference steps must be distinct to preserve per-value results"
+        )
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed = (
-        _setup_eval(
-            cfg,
-            exp_dir,
-            ckpt_tag_or_path,
-            use_ema,
-            video_save_dir=video_save_dir,
-        )
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
+        cfg,
+        exp_dir,
+        ckpt_tag_or_path,
+        use_ema,
+        video_save_dir=video_save_dir,
     )
     # ── 2. Same seeds for all inference step counts (fair comparison) ──────────
     best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
@@ -455,8 +453,9 @@ def _save_sweep_summary(
             for r in sweep_results
         },
     }
-    _write_result(save_dir / "eval_summary.json",
-        json.dumps(summary, indent=2, ensure_ascii=False)
+    _write_result(
+        save_dir / "eval_summary.json",
+        json.dumps(summary, indent=2, ensure_ascii=False),
     )
 
     # ── Terminal comparison table ──────────────────────────────────────
@@ -586,7 +585,7 @@ def main() -> None:
         "--ckpt-tag",
         type=str,
         default="best",
-        help="Checkpoint: best (strict best_ckpt.json), latest, 20pct..100pct (default: best).",
+        help="Checkpoint: best (best_ckpt.json), latest, 20pct..100pct (default: best).",
     )
     parser.add_argument(
         "--ckpt-path",
@@ -623,7 +622,7 @@ def main() -> None:
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Evaluation/environment dot-list overrides; agent.* is forbidden (checkpoint-owned).",
+        help="Evaluation/environment dot-list overrides; agent.* is forbidden (saved-config-owned).",
     )
     args = parser.parse_args()
 

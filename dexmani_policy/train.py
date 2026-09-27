@@ -25,8 +25,8 @@ from dexmani_policy.training.build_utils import (
     print_training_recipe,
     validate_config,
 )
+from dexmani_policy.training.resume import build_resume_contract, build_train_loader
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
-from dexmani_policy.training.resume import build_train_loader, build_resume_contract
 
 register_resolvers()
 
@@ -58,7 +58,9 @@ def build_train_components(cfg):
 
     train_loader = build_train_loader(cfg, dataset)
 
-    model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
+    model, ema_model, ema_updater = build_model_and_ema(
+        cfg, device, normalizer, initialize_training=cfg.get("resume_from") is None
+    )
 
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
@@ -84,7 +86,6 @@ def main(cfg):
 
     set_seed(cfg.training.seed)
     comp = build_train_components(cfg)
-    comp.workspace.save_hydra_config(cfg)
 
     trainer = Trainer(
         device=comp.device,
@@ -107,7 +108,11 @@ def main(cfg):
     )
     # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>`.
     resume_from = cfg.get("resume_from", None)
-    trainer.train(resume_tag=resume_from)
+    resume_state = (
+        trainer.load_for_resume(resume_from) if resume_from is not None else None
+    )
+    comp.workspace.save_hydra_config(cfg)
+    trainer.train(resume_state=resume_state)
 
 
 if __name__ == "__main__":

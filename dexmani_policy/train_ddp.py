@@ -31,10 +31,13 @@ from dexmani_policy.training.build_utils import (
     validate_config,
     validate_gradient_accumulation,
 )
-from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 from dexmani_policy.training.resume import (
-    build_train_loader, build_resume_contract, restore_training_state, validate_gpu_ids,
+    build_resume_contract,
+    build_train_loader,
+    restore_training_state,
+    validate_gpu_ids,
 )
+from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
 set_project_root()
@@ -79,7 +82,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     train_sampler = train_loader.sampler
 
     model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, rank=rank
+        cfg, device, normalizer, rank=rank, initialize_training=resume_from is None
     )
 
     # After model init, use different seeds per rank for augmentation diversity
@@ -93,10 +96,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     optimizer = model.configure_optimizer(**cfg.optimizer)
 
     if rank == 0:
-        print_training_recipe(cfg, world_size=world_size, batches_per_epoch=batches_per_epoch)
+        print_training_recipe(
+            cfg, world_size=world_size, batches_per_epoch=batches_per_epoch
+        )
         print_param_count(model)
         workspace = hydra.utils.instantiate(cfg.workspace)
-        workspace.save_hydra_config(cfg)
         checkpoint_store = workspace.checkpoint_store
     else:
         checkpoint_dir = pathlib.Path(cfg.workspace.output_dir) / "checkpoints"
@@ -104,15 +108,26 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         checkpoint_store = CheckpointStore(checkpoint_dir)
 
     scheduler = build_scheduler(cfg, optimizer)
-    resume_contract = build_resume_contract(cfg, model, train_loader, world_size=world_size)
+    resume_contract = build_resume_contract(
+        cfg, model, train_loader, world_size=world_size
+    )
     resume_state = (0, 0, 0)
     if resume_from is not None:
         checkpoint = checkpoint_store.load(checkpoint_store.resolve_path(resume_from))
         resume_state = restore_training_state(
-            checkpoint, resume_contract=resume_contract, model=model,
-            ema_model=ema_model, ema_updater=ema_updater, optimizer=optimizer,
-            scheduler=scheduler, device=device, rank=rank,
+            checkpoint,
+            resume_contract=resume_contract,
+            model=model,
+            ema_model=ema_model,
+            ema_updater=ema_updater,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+            rank=rank,
         )
+
+    if rank == 0:
+        workspace.save_hydra_config(cfg)
 
     # torch.compile must happen before DDP wrapping and after checkpoint load.
     # Use compile_models() for unified single-GPU/DDP behavior: backbone only.

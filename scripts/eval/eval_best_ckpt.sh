@@ -2,7 +2,7 @@
 # RoboTwin-style checkpoint evaluation — simple success rate.
 #
 # Loads a checkpoint and evaluates it on deterministic seeds. For `best`, the
-# strict selection record's seeds are excluded from final evaluation.
+# selection record's seeds are excluded from final evaluation.
 # Output is the success rate (matching RoboTwin _result.txt format).
 #
 # Usage:
@@ -28,15 +28,15 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo ""
     echo "Options (eval_best_ckpt.py):"
     echo "  --ckpt-tag TAG       Checkpoint: best, latest, 20pct..100pct (default: best)"
-    echo "                         'best' requires strict best_ckpt.json written by select_best_ckpt.sh"
-    echo "  --ckpt-path PATH     Direct .pt path (overrides --ckpt-tag)"
+    echo "                         'best' requires best_ckpt.json written by select_best_ckpt.sh"
+    echo "  --ckpt-path PATH     Path inside experiment/checkpoints (overrides --ckpt-tag)"
     echo "  --episodes N         Number of seeds (default: 100)"
     echo "  --inference-steps N    Single inference step count (best: selection record; otherwise config)"
-    echo "                       To sweep multiple denoise steps, set in config:"
+    echo "                       To sweep multiple inference step counts, set in config:"
     echo "                         eval.inference_steps_list=[5,10,20]"
     echo "  --no-ema             Use raw weights instead of the selected/default EMA weights"
     echo ""
-    echo "  Dot-list overrides may change eval/environment controls; agent.* is checkpoint-owned and forbidden."
+    echo "  Dot-list overrides may change eval/environment controls; model inputs come from saved config.yaml and cannot be overridden."
     echo ""
     echo "Examples:"
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42"

@@ -152,12 +152,9 @@ def _prepare_dqrise_codebook(cfg, normalizer) -> str | None:
         -0.05, 0.05, hand_dim, dtype=torch.float32
     ).unsqueeze(0)
     normalized_poses = (positions + per_dim_offset).clamp(-1.0, 1.0)
-    manager.sorted_hand_poses = (
-        (normalized_poses + 1.0)
-        * 0.5
-        * (manager.hand_max - manager.hand_min)
-        + manager.hand_min
-    )
+    manager.sorted_hand_poses = (normalized_poses + 1.0) * 0.5 * (
+        manager.hand_max - manager.hand_min
+    ) + manager.hand_min
     manager.pca_permutation = torch.arange(total_codes, dtype=torch.long)
     manager.layer_weights = torch.full(
         (num_groups,), 1.0 / num_groups, dtype=torch.float32
@@ -199,7 +196,9 @@ def smoke_test(config_name: str):
             assert (
                 hasattr(val_dataset, "task_weights")
                 and val_dataset.task_weights is not None
-            ), "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
+            ), (
+                "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
+            )
             print(
                 "      ✓ weighted strategy validation set OK "
                 f"(task_weights={val_dataset.task_weights})"
@@ -272,7 +271,9 @@ def smoke_test(config_name: str):
 
     print("[6/6] Checkpoint save → load roundtrip ...")
     with tempfile.TemporaryDirectory() as tmpdir:
-        ckpt_dir = pathlib.Path(tmpdir)
+        experiment = pathlib.Path(tmpdir)
+        OmegaConf.save(cfg, experiment / "config.yaml", resolve=True)
+        ckpt_dir = experiment / "checkpoints"
         store = CheckpointStore(ckpt_dir)
 
         model_sd = {key: value.clone() for key, value in model.state_dict().items()}
@@ -294,9 +295,10 @@ def smoke_test(config_name: str):
             ),
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
-            monitor={"test_mean_score": 0.85},
             resume_contract=build_resume_contract(cfg, model, train_loader),
-            ema_updater_step=None,
+            ema_updater_step=ema_updater.optimization_step
+            if ema_updater is not None
+            else None,
             ema_decay=None,
             rng_states=[get_rng_state()],
         )
@@ -310,9 +312,8 @@ def smoke_test(config_name: str):
         assert loaded.epoch == 0
         assert loaded.global_step == 1
         assert loaded.next_micro_step == 0
-        assert loaded.monitor.get("test_mean_score") == 0.85
         assert (
-            loaded.resume_contract["training"]["num_training_steps"]
+            loaded.resume_contract["training"]["loop"]["total_train_steps"]
             == cfg.training.loop.total_train_steps
         )
 
@@ -328,9 +329,7 @@ def smoke_test(config_name: str):
         print("      ✓ model state dict roundtrip OK")
 
         if ema_sd is not None and loaded.ema_model_state is not None:
-            loaded_ema_sd = fix_state_dict(
-                loaded.ema_model_state, is_current_ddp=False
-            )
+            loaded_ema_sd = fix_state_dict(loaded.ema_model_state, is_current_ddp=False)
             loaded_ema_sd = {
                 key: value.to(device) for key, value in loaded_ema_sd.items()
             }
@@ -346,6 +345,84 @@ def smoke_test(config_name: str):
         assert agent_contract["n_action_steps"] == model.n_action_steps
         assert agent_contract["action_dim"] == model.action_dim
         print("      ✓ resume contract roundtrip OK")
+
+        from unittest.mock import patch
+
+        from dexmani_policy.common.inference import (
+            load_experiment_config,
+            restore_policy_agent,
+        )
+
+        saved = load_experiment_config(experiment)
+        # Complete states must bypass both training-only external asset readers.
+        with (
+            patch(
+                "dexmani_policy.agents.obs_encoder.pointcloud.uni3d.Uni3DPointcloudEncoder._load_pretrained_weights",
+                side_effect=AssertionError(
+                    "inference accessed Uni3D initialization assets"
+                ),
+            ),
+            patch(
+                "dexmani_policy.agents.vq_hand.codebook_manager.CodebookManager.load",
+                side_effect=AssertionError("inference accessed the external codebook"),
+            ),
+        ):
+            for use_ema in (False, True) if ema_model is not None else (False,):
+                restored = restore_policy_agent(
+                    saved, ckpt_path, use_ema=use_ema, device=device
+                )
+                with torch.inference_mode():
+                    prediction = restored.predict_action(obs_sample)["control_action"]
+                assert prediction.shape == (
+                    1,
+                    cfg.n_action_steps,
+                    model.control_action_dim,
+                )
+                assert torch.isfinite(prediction).all()
+                selected = ema_model if use_ema else model
+                for key, tensor in selected.state_dict().items():
+                    torch.testing.assert_close(
+                        restored.state_dict()[key], tensor, rtol=0, atol=0
+                    )
+                del restored
+
+        if saved["real_runtime"] is not None:
+            from dexmani_policy.deployment import inspect_policy, load_policy
+
+            for weights in ("raw", "ema") if ema_model is not None else ("raw",):
+                info = inspect_policy(
+                    experiment, checkpoint=ckpt_path.name, weights=weights
+                )
+                runtime = load_policy(
+                    saved, info, device=str(device), seed=cfg.training.seed
+                )
+                try:
+                    rgb_hw = (
+                        tuple(dataset.replay_buffer["rgb"].shape[1:3])
+                        if "rgb" in info.observation_fields
+                        else None
+                    )
+                    runtime.warmup(samples=1, rgb_hw=rgb_hw)
+                finally:
+                    runtime.close()
+
+        # A missing learned tensor must fail strict restoration, even though the
+        # checkpoint container and all resume-only bookkeeping remain readable.
+        bad = store.load(ckpt_path)
+        key = next(iter(dict(model.named_parameters())))
+        del bad.model_state[key]
+        bad_path = store.save("corrupt.pt", bad)
+        try:
+            restore_policy_agent(saved, bad_path, use_ema=False, device=device)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                "Corrupted model state passed strict inference restore"
+            )
+        print(
+            "      ✓ saved config → raw/EMA strict restore → predict; corruption rejected"
+        )
 
     print(f"\n✓ {config_name} smoke test PASSED\n")
     return True
@@ -363,7 +440,9 @@ def main():
             "agent target without data or GPU execution."
         ),
     )
-    parser.add_argument("config_names", nargs="+", help="Hydra config names to validate.")
+    parser.add_argument(
+        "config_names", nargs="+", help="Hydra config names to validate."
+    )
     args = parser.parse_args()
 
     runner = validate_config_only if args.config_only else smoke_test

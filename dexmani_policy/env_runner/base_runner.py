@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from termcolor import cprint
 
-from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 from dexmani_policy.common.inference import positive_int
+from dexmani_policy.common.pytorch_util import dict_apply, format_success_rate
 from dexmani_policy.datasets.base_dataset import preprocess_validation_rgb
 
 
@@ -79,8 +79,11 @@ class BaseRunner:
         self.env_video_fps = env_video_fps  # may be None → auto-detect from env
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
-        self.rgb_preprocess_size = rgb_preprocess_size
-        self.rgb_random_crop_size = rgb_random_crop_size
+        self.rgb_preprocessing = {
+            "resize_hw": rgb_preprocess_size,
+            "center_crop_hw": rgb_random_crop_size,
+            "keep_uint8": False,
+        }
 
     def update_obs(self, observation: Dict[str, Any]):
         """Write one observation frame into the circular buffer.
@@ -93,12 +96,16 @@ class BaseRunner:
                 continue
             if isinstance(v, np.ndarray):
                 if k not in self._obs_buffer:
-                    self._obs_buffer[k] = np.zeros((self.n_obs_steps,) + v.shape, dtype=v.dtype)
+                    self._obs_buffer[k] = np.zeros(
+                        (self.n_obs_steps,) + v.shape, dtype=v.dtype
+                    )
                 self._obs_buffer[k][pos] = v
             elif isinstance(v, torch.Tensor):
                 if k not in self._obs_buffer:
                     self._obs_buffer[k] = torch.zeros(
-                        (self.n_obs_steps,) + tuple(v.shape), dtype=v.dtype, device=v.device
+                        (self.n_obs_steps,) + tuple(v.shape),
+                        dtype=v.dtype,
+                        device=v.device,
                     )
                 self._obs_buffer[k][pos] = v
             elif isinstance(v, str):
@@ -125,7 +132,11 @@ class BaseRunner:
             if self._obs_count < self.n_obs_steps:
                 # Episode start: only _obs_count frames available.
                 # Pad the beginning with the first frame.
-                result = np.empty_like(buf) if isinstance(buf, np.ndarray) else torch.empty_like(buf)
+                result = (
+                    np.empty_like(buf)
+                    if isinstance(buf, np.ndarray)
+                    else torch.empty_like(buf)
+                )
                 pad_len = self.n_obs_steps - self._obs_count
                 result[:pad_len] = buf[0]
                 result[pad_len:] = buf[: self._obs_count]
@@ -147,7 +158,11 @@ class BaseRunner:
     def get_obs_batch(self, device) -> Dict[str, Any]:
         def to_torch(x, *, dtype=None, device=None):
             if isinstance(x, torch.Tensor):
-                return x.to(device=device, dtype=dtype) if dtype is not None else x.to(device=device)
+                return (
+                    x.to(device=device, dtype=dtype)
+                    if dtype is not None
+                    else x.to(device=device)
+                )
             if isinstance(x, np.ndarray):
                 return torch.as_tensor(x, device=device, dtype=dtype)
             return x
@@ -156,12 +171,12 @@ class BaseRunner:
         if "rgb" in stacked_obs:
             stacked_obs["rgb"] = preprocess_validation_rgb(
                 stacked_obs["rgb"],
-                resize_hw=self.rgb_preprocess_size,
-                center_crop_hw=self.rgb_random_crop_size,
-                keep_uint8=False,
+                **self.rgb_preprocessing,
             )
         obs_batch = dict_apply(stacked_obs, lambda x: to_torch(x, device=device))
-        obs_batch = dict_apply(obs_batch, lambda x: x.unsqueeze(0) if torch.is_tensor(x) else x)
+        obs_batch = dict_apply(
+            obs_batch, lambda x: x.unsqueeze(0) if torch.is_tensor(x) else x
+        )
 
         return obs_batch
 
@@ -172,10 +187,14 @@ class BaseRunner:
         self._obs_count = 0
 
     @torch.no_grad()
-    def get_action_chunk(self, obs_batch, agent, inference_steps: int | None = None) -> np.ndarray:
+    def get_action_chunk(
+        self, obs_batch, agent, inference_steps: int | None = None
+    ) -> np.ndarray:
         if inference_steps is not None:
             positive_int(inference_steps, "inference_steps")
-        result = agent.predict_action(obs_dict=obs_batch, inference_steps=inference_steps)
+        result = agent.predict_action(
+            obs_dict=obs_batch, inference_steps=inference_steps
+        )
 
         return result["control_action"].detach().cpu().numpy().squeeze(0)
 
@@ -227,7 +246,9 @@ class BaseRunner:
                         stderr.seek(0, 2)
                         stderr.seek(max(0, stderr.tell() - 4096))
                         detail = stderr.read().decode("utf-8", errors="replace").strip()
-                        raise RuntimeError(f"ffmpeg exited with status {returncode}: {detail}")
+                        raise RuntimeError(
+                            f"ffmpeg exited with status {returncode}: {detail}"
+                        )
                 finally:
                     # Reap a hung/zombie ffmpeg on BrokenPipeError / TimeoutExpired so
                     # a failed encode never leaks a subprocess.
@@ -245,7 +266,15 @@ class BaseRunner:
         else:
             imageio.mimsave(str(path), frames.astype(np.uint8), fps=fps)
 
-    def run_one_episode(self, agent, env, episode_seed, inference_steps: int | None = None, *, options=None):
+    def run_one_episode(
+        self,
+        agent,
+        env,
+        episode_seed,
+        inference_steps: int | None = None,
+        *,
+        options=None,
+    ):
         """Run a single evaluation episode.
 
         Environment contract (required for accurate ``avg_steps`` metrics):
@@ -279,7 +308,9 @@ class BaseRunner:
 
         while not (done or truncated):
             obs_batch = self.get_obs_batch(device=device)
-            action_chunk = self.get_action_chunk(obs_batch, agent, inference_steps=inference_steps)
+            action_chunk = self.get_action_chunk(
+                obs_batch, agent, inference_steps=inference_steps
+            )
             for i in range(action_chunk.shape[0]):
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
                 self.update_obs(obs)
@@ -337,7 +368,11 @@ class BaseRunner:
             if not eval_seeds:
                 raise RuntimeError("seed pool is empty — cannot evaluate")
 
-            eval_episodes = eval_episodes if eval_episodes is not None else self.default_eval_episodes
+            eval_episodes = (
+                eval_episodes
+                if eval_episodes is not None
+                else self.default_eval_episodes
+            )
 
             if eval_episodes > len(eval_seeds):
                 cprint(
@@ -363,7 +398,10 @@ class BaseRunner:
                     raise
                 except Exception as e:
                     category = _classify_eval_exception(e)
-                    cprint(f"Seed {eval_seed} FAILED (fatal, category={category}): {e}", "red")
+                    cprint(
+                        f"Seed {eval_seed} FAILED (fatal, category={category}): {e}",
+                        "red",
+                    )
                     # Best-effort crash video, but never let it mask the fatal error.
                     crash_video = None
                     try:
@@ -375,12 +413,16 @@ class BaseRunner:
                         crash_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
                         crash_path.parent.mkdir(parents=True, exist_ok=True)
                         try:
-                            self._encode_video(crash_path, crash_video, self.env_video_fps)
+                            self._encode_video(
+                                crash_path, crash_video, self.env_video_fps
+                            )
                             encoded = True
                         except Exception:
                             pass
                         if encoded:
-                            episode_video_list.append({f"episode_{eval_seed}_crash": str(crash_path)})
+                            episode_video_list.append(
+                                {f"episode_{eval_seed}_crash": str(crash_path)}
+                            )
                     episode_details.append(
                         {
                             "seed": eval_seed,
@@ -402,11 +444,16 @@ class BaseRunner:
                     except Exception:
                         video = None
 
-                    if self.clear_cache_freq > 0 and attempted % self.clear_cache_freq == 0:
+                    if (
+                        self.clear_cache_freq > 0
+                        and attempted % self.clear_cache_freq == 0
+                    ):
                         env = self._refresh_env(env)
 
                     status = "success" if episode_success else "fail"
-                    done_step_str = task_done_step if task_done_step is not None else "N/A"
+                    done_step_str = (
+                        task_done_step if task_done_step is not None else "N/A"
+                    )
                     cprint(
                         f"[progress {len(success_list) + 1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}",
                         "cyan",
@@ -429,9 +476,14 @@ class BaseRunner:
                         video_path.parent.mkdir(parents=True, exist_ok=True)
                         try:
                             self._encode_video(video_path, video, self.env_video_fps)
-                            episode_video_list.append({f"episode_{eval_seed}": str(video_path)})
+                            episode_video_list.append(
+                                {f"episode_{eval_seed}": str(video_path)}
+                            )
                         except Exception as e:
-                            cprint(f"  ⚠ Video encoding failed for seed {eval_seed}: {e}", "yellow")
+                            cprint(
+                                f"  ⚠ Video encoding failed for seed {eval_seed}: {e}",
+                                "yellow",
+                            )
 
             if len(success_list) < num_episodes:
                 cprint(
@@ -439,11 +491,21 @@ class BaseRunner:
                     "red",
                 )
 
-            success_rate = float(np.mean(success_list)) if len(success_list) > 0 else None
-            avg_steps = int(round(np.mean(task_done_step_list))) if len(task_done_step_list) > 0 else None
+            success_rate = (
+                float(np.mean(success_list)) if len(success_list) > 0 else None
+            )
+            avg_steps = (
+                int(round(np.mean(task_done_step_list)))
+                if len(task_done_step_list) > 0
+                else None
+            )
 
             # avg_steps_all includes all episodes (failures → full episode length)
-            all_steps = [d["total_steps"] for d in episode_details if d.get("total_steps") is not None]
+            all_steps = [
+                d["total_steps"]
+                for d in episode_details
+                if d.get("total_steps") is not None
+            ]
             avg_steps_all = int(round(np.mean(all_steps))) if all_steps else None
 
             sr_str = format_success_rate(success_rate)

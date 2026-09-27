@@ -106,7 +106,7 @@ python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name>
 ```
 
-完整 smoke test 覆盖 dataset/normalizer、model/EMA、optimizer/scheduler、forward/backward、inference 和 checkpoint roundtrip。Policy 开发流程及按改动范围选择验证的要求见 [AGENTS.md](AGENTS.md)。
+完整 smoke test 覆盖 dataset/normalizer、model/EMA、optimizer/scheduler、forward/backward，以及保存 resolved config 和普通 checkpoint 后的 raw/EMA strict restore 与推理。恢复检查会禁用 Uni3D/DQ-RISE 外部初始化读取，并验证损坏的 state_dict 被拒绝。Policy 开发流程及按改动范围选择验证的要求见 [AGENTS.md](AGENTS.md)。
 
 ## 评测
 
@@ -122,7 +122,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 流水线最后会录制 demo。追加 `--no-videos` 只关闭 held-out eval 阶段的视频，最后的 demo 仍会录制；只需评测时使用分步入口。
 
-`<exp_name>` 是 `experiments/<policy>/<task>/` 下的实验目录名。历史模型的构造参数及 action/window/normalization 语义来自所选 checkpoint；实验 config 提供环境与评测 protocol。评测拒绝 `agent.*` override，EMA/raw、NFE、episodes、seed 与视频等评测控制仍可按入口参数覆盖。
+`<exp_name>` 是 `experiments/<policy>/<task>/` 下的实验目录名。历史模型的构造参数及 action/window/normalization、输入模态与预处理来自保存的 `config.yaml`；checkpoint 提供模型/EMA 和 fitted normalizer 状态。评测拒绝改变这些模型输入语义的 override，EMA/raw、NFE、episodes、seed 与视频等评测控制仍可按入口参数覆盖。
 
 最终评测每次写入独立的 `eval_dexsim/<run-id>/`，CLI 会打印准确路径；checkpoint、推理设置、seeds 和指标保存在该目录的 `result_details.json`。背景说明见 [仿真评测机制](docs/仿真评测机制.md)，当前参数与行为以入口帮助和源码为准。
 
@@ -130,29 +130,22 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 ## Deployment
 
-新 deployment artifact 使用 `dexmani.deployment.v3`，不读取旧版本；训练 checkpoint 保持 `simple.v3` 和严格 resume 校验，不提供旧构造配置迁移。
+评测单元是完整实验目录：保存的 resolved `config.yaml` 与 `checkpoints/` 中的普通训练 checkpoint。离线与 Real 通过同一 strict loader 恢复模型；不需要导出 deployment artifact。旧 checkpoint 不提供兼容或迁移。
 
-Real deployment 入口位于 `dexmani_policy/deployment/`。Deployment artifact、observation contract 和 runtime restore 的具体语义以实现为准；README 不复制其内部 schema。
+在 dexmani_real 仓库运行（真机操作需明确授权）：
 
 ```bash
-# 研究者日常路径：export -> run_policy（run_policy 位于 dexmani_real）
-bash scripts/deployment/export.sh <experiment_dir>  # 默认 latest，使用 Conda policy 环境
-bash scripts/deployment/export.sh <experiment_dir> --checkpoint 80pct
-bash scripts/deployment/export.sh <experiment_dir> --output deployment-v3.pt
-
-# 原 Python CLI 保持默认 best；best 必须有有效的 best_ckpt.json，不自动回退
-python -m dexmani_policy.deployment.export <experiment_dir> --checkpoint best
+conda run --no-capture-output -n real_robot python examples/run_policy.py <experiment_dir> --checkpoint best
+conda run --no-capture-output -n real_robot python examples/run_policy.py <policy/task/run> --checkpoint latest --weights raw --inference-steps 10
 ```
 
-脚本可从任意工作目录调用（仓库外请使用脚本的绝对路径）。相对实验目录相对于调用目录解析；相对 checkpoint 文件路径和 `--output` 相对于实验的 `checkpoints/` 解析。产物只能写入该目录，已有文件拒绝覆盖；再次导出可指定新的 `--output`。使用 `bash scripts/deployment/export.sh --help` 查看参数说明，成功时输出 exporter 的 JSON 回执。
+`best` 读取实验根目录的 `best_ckpt.json`，不存在时明确失败；`latest` 解析 `checkpoints/latest.pt`，也可指定该目录内的文件名。显式 `--weights` / `--inference-steps` 优先；`best` 的未覆盖参数读取 selection record，其他 checkpoint 读取保存的 `eval.use_ema` / `eval.inference_steps`。EMA 缺失不会自动改用 raw。Real 的 `--config` 指向现场硬件配置，不替换 Policy 实验的 `config.yaml`。
 
-- Export 使用 **selected checkpoint 保存的**模型、归一化与训练数据语义；`config.yaml` 只提供实验身份和推理设置。缺少训练数据语义快照的旧 checkpoint 无法 export，load/离线分析不受影响。
-- Export 不再打开训练 Zarr。Checkpoint 必须保存有序 joint_names 和所需的 PointCloudConfig；缺失时明确拒绝，不猜测旧格式。
-- Export 通过结构检查和 weights-only reload 后原子更新 `deployment_latest.pt`；运行时严格恢复模型、normalizer 并 warmup 后才就绪。它指向本次不可覆盖的 artifact（默认 `<checkpoint>-deployment.pt`）；真机 session 可以固定使用解析后的文件名。
-- 运行时 `--inference-steps N` 是显式 override（NFE ablation），不需要重新 export。
-- Real 使用当前相机、桌面和手安装标定；重新标定不使旧 policy 失效。点云算法配置和去桌面开关来自 artifact，RGB resize/crop/normalization 由 Policy 执行。
+训练在实际 dataset 构造后将 Real Zarr 的 `dt` 和所需数值点云 recipe 写入 config 的 `real_runtime`；非 canonical Real dataset 保存 null，不能直接用于 Real。推理不重新打开训练 Zarr，也不读取训练 resume contract 的语义。Uni3D 与 DQ-RISE 完整 checkpoint 推理无需其训练初始化文件；其他 backbone 的依赖仍由受管环境提供。
 
-开发和修改 deployment 时的完整约束见 [AGENTS.md 的 Deployment Boundary](AGENTS.md#deployment-boundary)。
+Real parent 只读 config 并确定点云 SHM 大小；policy worker strict restore、warmup 就绪后才启动硬件 workers。当前相机、桌面与手安装标定来自 Real，RGB deterministic resize/center crop 来自保存的 dataset config，Agent ImageProcessor 仍由 Agent 拥有。
+
+开发约束见 [AGENTS.md 的 Deployment Boundary](AGENTS.md#deployment-boundary)。
 
 ## 仓库结构
 
@@ -164,7 +157,7 @@ dexmani_policy/
   training/          # Build, trainer, EMA, resume, workspace
   env_runner/        # Simulation runners
   common/            # Shared config/checkpoint/normalizer utilities
-  deployment/        # Real deployment artifact/runtime
+  deployment/        # Real config inspection/inference runtime
   train.py           # Single-GPU entry
   train_ddp.py       # DDP entry
   smoke_test.py      # Config + integration validation
@@ -172,7 +165,6 @@ dexmani_policy/
 scripts/
   training/
   eval/
-  deployment/
   remote/
 ```
 

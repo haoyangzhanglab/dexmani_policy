@@ -8,7 +8,7 @@
 
 按任务类型使用以下事实来源：
 
-1. **已有实验**：优先读取实验目录保存的 resolved `config.yaml` 和 checkpoint contract。离线评测的模型构造、action/window/normalization 语义以 selected checkpoint 的 `resume_contract` 为准；当前 config 提供环境与评测 protocol。Deployment 的模型/数据语义也属于 selected checkpoint，见 “Deployment Boundary”。
+1. **已有实验**：保存的 resolved `config.yaml` 是模型构造、action/window/normalization、输入模态和推理预处理的唯一配置来源；normal training checkpoint 提供模型/EMA/normalizer 状态。`resume_contract` 只用于严格续训，推理不读取其语义。
 2. **当前 Policy**：读取 `dexmani_policy/configs/<config>.yaml`，再沿 `agent._target_` 进入实际 Python 实现。
 3. **运行时接口**：以 `validate_config`、Agent/runtime 校验、训练/评测入口代码为准。
 4. `README.md` 提供操作说明，`docs/` 提供背景；二者均不作为当前 Policy 架构、超参数或 tensor shape 的最终依据。`CLAUDE.md` 仅负责加载本规范。
@@ -59,10 +59,10 @@ config
 - `dexmani_policy/datasets/`：数据和 sampler。
 - `dexmani_policy/training/`：build、trainer、EMA、resume、workspace。
 - `dexmani_policy/env_runner/`：simulation runner。
-- `dexmani_policy/deployment/`：Real deployment artifact/runtime。
+- `dexmani_policy/deployment/`：Real config inspection/inference runtime。
 - `dexmani_policy/train.py` / `train_ddp.py`：训练入口。
 - `dexmani_policy/smoke_test.py`：配置与集成验证。
-- `scripts/training/`、`scripts/eval/`、`scripts/deployment/`、`scripts/remote/`：操作入口。
+- `scripts/training/`、`scripts/eval/`、`scripts/remote/`：操作入口。
 
 ## Environment and Safety
 
@@ -95,10 +95,12 @@ config
 
 ## Deployment Boundary
 
-- Selected checkpoint owns architecture, action layout, normalization, validation RGB preprocessing and saved Real data facts in `resume_contract.deployment_data_semantics`. Current experiment config supplies identity and inference defaults only.
-- Public `PolicySpec` exposes raw observations, timing, physical joint/eef action mode, exact ordered joints and trained point-cloud algorithm configuration. Auxiliary outputs and model internals stay private.
-- Current camera calibration, serial, intrinsics, depth scale, table plane and hand mounting come from Real at deployment time. They are never compared with training calibration.
-- Export reads only checkpoint-owned training facts; it does not reopen training Zarr. Missing concrete joint/config facts fail clearly, with no legacy guessing.
-- Artifact metadata is plain. Export performs structural validation and weights-only reload before atomic selector publication. `load_experiment` strictly restores model and normalizer; Real warms up before `policy_ready`.
-- Keep training checkpoint `simple.v3` and strict training-resume checks. Dataset extraction occurs at training time; strict resume captures tensor definitions and trained preprocessing, while historical calibration and implementation descriptions remain provenance in Real raw/Zarr metadata.
-- Do not create a `tests/` directory.
+- The experiment directory is the evaluation artifact: saved resolved `config.yaml` plus a normal training checkpoint. Do not add a separate deployment export, contract, ABI, or compatibility path.
+- Save config after constructing the actual dataset. Its minimal `real_runtime` contains the canonical Real Zarr cadence and numerical point-cloud recipe when consumed; other datasets save null and cannot deploy to Real.
+- Model construction, normalization modes, modalities, and deterministic RGB preprocessing come from saved config. Fitted normalizers and DQ-RISE runtime codebook buffers come from strict checkpoint restoration.
+- Training-only external initialization runs through Agent-owned initialization; complete-checkpoint inference skips Uni3D pretrained and DQ-RISE NPZ loading.
+- Shared inference restoration never validates training resume contracts. Keep strict training resume, rank RNG/cursor restoration, and raw/EMA selection; missing requested EMA is an error.
+- Real derives a small runtime PolicyInfo without loading checkpoint tensors in the parent. Policy/CUDA belongs to the policy worker; restore and warmup must succeed before hardware workers connect.
+- Current camera calibration, serial, intrinsics, depth scale, table plane and hand mounting remain Real-owned. Do not compare them with training calibration.
+- RGB uses saved dataset deterministic validation preprocessing before the Agent-owned ImageProcessor. Real supplies raw uint8 HWC images.
+- No committed tests directory; use existing smoke and temporary focused checks.

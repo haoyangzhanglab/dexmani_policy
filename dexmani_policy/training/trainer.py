@@ -24,8 +24,8 @@ from dexmani_policy.common.pytorch_util import (
     to_log_scalars,
 )
 from dexmani_policy.training.build_utils import validate_gradient_accumulation
-from dexmani_policy.training.workspace import TrainWorkspace
 from dexmani_policy.training.resume import restore_training_state
+from dexmani_policy.training.workspace import TrainWorkspace
 
 
 @dataclass
@@ -111,7 +111,9 @@ class Trainer:
         self.is_main_process = is_main_process
         self.distributed = distributed
         self._ddp_backward_initialized = False
-        self.train_sampler = train_sampler if train_sampler is not None else train_loader.sampler
+        self.train_sampler = (
+            train_sampler if train_sampler is not None else train_loader.sampler
+        )
         self.resume_contract = resume_contract
         self.next_micro_step = 0
         self.current_epoch = 0
@@ -208,12 +210,17 @@ class Trainer:
             self.ema_updater.step(self.raw_model)
 
     def load_for_resume(self, tag_or_path: str):
-        """Restore the shared v3 state before compilation."""
+        """Restore training state before compilation."""
         checkpoint = self.workspace.load_checkpoint(tag_or_path)
         return restore_training_state(
-            checkpoint, resume_contract=self.resume_contract, model=self.raw_model,
-            ema_model=self.ema_model, ema_updater=self.ema_updater,
-            optimizer=self.optimizer, scheduler=self.scheduler, device=self.device,
+            checkpoint,
+            resume_contract=self.resume_contract,
+            model=self.raw_model,
+            ema_model=self.ema_model,
+            ema_updater=self.ema_updater,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            device=self.device,
             rank=dist.get_rank() if self.distributed else 0,
         )
 
@@ -374,7 +381,6 @@ class Trainer:
             ),
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
-            monitor={},
             resume_contract=self.resume_contract,
             # Persist the full training state machine: EMA decay warmup counter
             # and the process RNG stream, so resume reproduces the same schedule.
@@ -450,7 +456,9 @@ class Trainer:
         so these are approximate wall-clock measurements, not GPU kernel times.
         """
         if self.distributed:
-            local = torch.tensor([samples, elapsed], dtype=torch.float64, device=self.device)
+            local = torch.tensor(
+                [samples, elapsed], dtype=torch.float64, device=self.device
+            )
             gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]
             dist.all_gather(gathered, local)
             values = torch.stack(gathered).cpu()
@@ -470,7 +478,9 @@ class Trainer:
         elif resume_tag is None:
             global_step, start_epoch = 0, 0
         else:
-            global_step, start_epoch, self.next_micro_step = self.load_for_resume(resume_tag)
+            global_step, start_epoch, self.next_micro_step = self.load_for_resume(
+                resume_tag
+            )
 
         self.global_step = global_step
         if start_epoch > 0:
@@ -521,7 +531,9 @@ class Trainer:
                 group_samples = 0
                 # Start before iterator creation, including the epoch's first data wait.
                 group_start_time = time.perf_counter()
-                for micro_step, batch in enumerate(self.train_loader, start=self.next_micro_step):
+                for micro_step, batch in enumerate(
+                    self.train_loader, start=self.next_micro_step
+                ):
                     self.current_epoch = epoch
                     group_samples += batch["action"].shape[0]
 
@@ -542,7 +554,11 @@ class Trainer:
                     # backward trips expect_autograd_hooks_ at the boundary.
                     # Averaging the first micro-gradient early is linear and
                     # preserves the accumulated global-mean gradient.
-                    if self.distributed and not is_boundary and self._ddp_backward_initialized:
+                    if (
+                        self.distributed
+                        and not is_boundary
+                        and self._ddp_backward_initialized
+                    ):
                         sync_ctx = self.model.no_sync()
                     else:
                         sync_ctx = contextlib.nullcontext()
@@ -577,7 +593,9 @@ class Trainer:
                             self.current_epoch = epoch + 1
                             self.next_micro_step = 0
                         if self.distributed:
-                            stop = torch.tensor(int(self._stop_requested), device=self.device)
+                            stop = torch.tensor(
+                                int(self._stop_requested), device=self.device
+                            )
                             dist.all_reduce(stop, op=dist.ReduceOp.MAX)
                             self._interrupted = bool(stop.item())
                         else:
@@ -595,14 +613,17 @@ class Trainer:
                                 keys = sorted(step_metrics)
                                 packed = torch.tensor(
                                     [step_metrics[key] for key in keys],
-                                    dtype=torch.float64, device=self.device,
+                                    dtype=torch.float64,
+                                    device=self.device,
                                 )
                                 dist.all_reduce(packed, op=dist.ReduceOp.SUM)
                                 packed /= dist.get_world_size()
                                 step_metrics = dict(zip(keys, packed.cpu().tolist()))
 
                             step_metrics.update(
-                                self._step_performance_metrics(group_samples, group_elapsed)
+                                self._step_performance_metrics(
+                                    group_samples, group_elapsed
+                                )
                             )
 
                             if self.is_main_process and self._step_pbar is not None:
@@ -621,7 +642,9 @@ class Trainer:
                         # Exclude this update's logging/checkpoint work from the next one.
                         group_start_time = time.perf_counter()
 
-                    if is_boundary and (global_step >= self.total_train_steps or self._interrupted):
+                    if is_boundary and (
+                        global_step >= self.total_train_steps or self._interrupted
+                    ):
                         break
 
                 self.model.eval()

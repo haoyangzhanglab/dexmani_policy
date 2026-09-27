@@ -46,23 +46,22 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.common.config import normalize_eval_config, register_resolvers
+from dexmani_policy.common.inference import read_best_ckpt_json
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.training.eval_utils import (
-    add_inference_steps_argument,
-    validate_inference_steps,
     _get_eval_param,
-    build_eval_components,
+    add_inference_steps_argument,
+    build_eval_runner,
     collect_episode_details,
     iter_leaf_env_runners,
     load_ckpt_for_inference,
-    read_best_ckpt_json,
     resolve_checkpoint_path,
     resolve_eval_seed,
+    validate_inference_steps,
 )
 
 ROOT_DIR = set_project_root()
@@ -192,7 +191,13 @@ def main() -> None:
 
     # ── 1. Locate experiment directory ────────────────────────────────────
     exp_dir = (
-        (Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name)
+        (
+            Path(ROOT_DIR)
+            / "experiments"
+            / args.policy_name
+            / args.task_name
+            / args.exp_name
+        )
         .expanduser()
         .resolve()
     )
@@ -213,8 +218,7 @@ def main() -> None:
     eval_seed = resolve_eval_seed(cfg)
     set_seed(eval_seed)
 
-    device = torch.device(cfg.training.device)
-    cprint(f"Device: {device}", "cyan")
+    cprint(f"Device: {cfg.training.device}", "cyan")
 
     use_ema, inference_steps_list = _resolve_demo_inference(
         cfg,
@@ -224,13 +228,15 @@ def main() -> None:
         cli_inference_steps=args.inference_steps,
     )
 
-    # ── 3. Build env_runner and checkpoint store ─────────────────────────────────────
-    env_runner, checkpoint_store = build_eval_components(cfg)
+    # ── 3. Build env_runner ─────────────────────────────────────
+    env_runner = build_eval_runner(cfg)
 
     # Apply viewer resolution from CLI or config
     _demo_resolution = args.resolution
     if _demo_resolution is None:
-        _demo_resolution = _get_eval_param(cfg, "viewer_resolution", "demo", default=[1280, 960])
+        _demo_resolution = _get_eval_param(
+            cfg, "viewer_resolution", "demo", default=[1280, 960]
+        )
     resolved_resolution = tuple(_demo_resolution)
     resolved_fps = (
         args.fps
@@ -257,24 +263,28 @@ def main() -> None:
     video_save_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 5. Resolve checkpoint ─────────────────────────────────────────────
-    ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, args.ckpt_tag, checkpoint_store)
+    ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, args.ckpt_tag)
 
     # ── 6. Resolve parameters ─────────────────────────────────────────────
     demo_episodes = (
-        args.episodes if args.episodes is not None else _get_eval_param(cfg, "episodes", "demo", default=5)
+        args.episodes
+        if args.episodes is not None
+        else _get_eval_param(cfg, "episodes", "demo", default=5)
     )
 
     do_sweep = len(inference_steps_list) > 1
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
-    agent = load_ckpt_for_inference(checkpoint_store, ckpt_path, use_ema, cfg=cfg)
-    agent.to(device)
-    agent.eval()
+    agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
     cprint("✅ Checkpoint loaded\n", "green")
 
     # ── 7. Print recording config ─────────────────────────────────────────
     resolution_str = f"{resolved_resolution[0]}×{resolved_resolution[1]}"
-    steps_str = ", ".join(str(d) for d in inference_steps_list) if do_sweep else str(inference_steps_list[0])
+    steps_str = (
+        ", ".join(str(d) for d in inference_steps_list)
+        if do_sweep
+        else str(inference_steps_list[0])
+    )
     cprint(f"{'=' * 60}", "cyan")
     cprint("  Demo Video Recording", "cyan")
     cprint(f"  Policy       : {args.policy_name}", "cyan")
@@ -310,7 +320,9 @@ def main() -> None:
         if do_sweep:
             sub_dir = video_save_dir / f"inference_steps{inference_steps}"
             sub_dir.mkdir(parents=True, exist_ok=True)
-            cprint(f"\n--- inference_steps={inference_steps} ---", "cyan", attrs=["bold"])
+            cprint(
+                f"\n--- inference_steps={inference_steps} ---", "cyan", attrs=["bold"]
+            )
         else:
             sub_dir = video_save_dir
 
@@ -331,8 +343,14 @@ def main() -> None:
                 f"  Success: {n_success}/{n_total} = {sr:.1%}",
                 "green" if sr >= 0.5 else "red",
             )
-            demo_results.append({"inference_steps": inference_steps, "n_success": n_success,
-                                 "n_total": n_total, "success_rate": sr})
+            demo_results.append(
+                {
+                    "inference_steps": inference_steps,
+                    "n_success": n_success,
+                    "n_total": n_total,
+                    "success_rate": sr,
+                }
+            )
 
     # ── 10. Report ────────────────────────────────────────────────────────
     if do_sweep and demo_results:
@@ -343,7 +361,10 @@ def main() -> None:
         for r in demo_results:
             inference_steps = r["inference_steps"]
             sr = f"{r['n_success']}/{r['n_total']} ({r['success_rate']:.1%})"
-            cprint(f"  {inference_steps:<16} {sr:<18}", "green" if r["success_rate"] >= 0.5 else "red")
+            cprint(
+                f"  {inference_steps:<16} {sr:<18}",
+                "green" if r["success_rate"] >= 0.5 else "red",
+            )
         cprint(f"{'=' * 60}\n", "green")
 
     cprint(f"\n{'=' * 60}", "green")
@@ -351,7 +372,12 @@ def main() -> None:
     if not do_sweep:
         n_success = sum(1 for d in per_seed_details if d.get("success"))
         n_total = len(per_seed_details)
-        cprint(f"  Success rate : {n_success}/{n_total} = {n_success / n_total:.1%}" if n_total else "", "green")
+        cprint(
+            f"  Success rate : {n_success}/{n_total} = {n_success / n_total:.1%}"
+            if n_total
+            else "",
+            "green",
+        )
     cprint(f"  Videos saved : {video_save_dir}", "green")
 
     video_count = len(list(video_save_dir.rglob("*.mp4")))

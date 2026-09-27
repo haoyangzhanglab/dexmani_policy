@@ -9,8 +9,8 @@ import torch
 import torchvision.transforms.functional as TVF
 from torchvision.transforms import InterpolationMode
 
-from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
 from dexmani_policy.common.config import validate_max_train_episodes, validate_val_ratio
+from dexmani_policy.common.pytorch_util import dict_apply, ensure_tensor
 from dexmani_policy.datasets.augmentation import (
     PointColorJitter,
     PointColorNoiseAug,
@@ -19,7 +19,11 @@ from dexmani_policy.datasets.augmentation import (
     StateNoiseAug,
 )
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.sampler import SequenceSampler, downsample_mask, get_val_mask
+from dexmani_policy.datasets.sampler import (
+    SequenceSampler,
+    downsample_mask,
+    get_val_mask,
+)
 
 # (yaml_section, augmentor_class, yaml_key, output_modality)
 # Point-cloud/state transforms run on NumPy arrays in this order.
@@ -103,8 +107,7 @@ class BaseDataset(torch.utils.data.Dataset):
         if sensor_modalities is None:
             sensor_modalities = self.DEFAULT_MODALITIES
 
-        # Resolved physical location actually loaded below; training checkpoints
-        # read this to snapshot the real data semantics (deployment contract).
+        # Snapshot the numerical Real recipe from the physical store actually loaded.
         self.zarr_path = str(Path(zarr_path).expanduser().resolve())
         self.action_key = action_key
         self.use_aux_ee = use_aux_ee
@@ -113,7 +116,9 @@ class BaseDataset(torch.utils.data.Dataset):
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
         self.rgb_keep_uint8 = rgb_keep_uint8
-        self._is_val = False  # validation set flag — overridden by get_validation_dataset()
+        self._is_val = (
+            False  # validation set flag — overridden by get_validation_dataset()
+        )
 
         # When EE auxiliary loss is enabled, load action_ee for wrist pose (pos3+rot6d6).
         load_keys = sensor_modalities + [action_key]
@@ -137,7 +142,9 @@ class BaseDataset(torch.utils.data.Dataset):
             n_episodes=self.replay_buffer.n_episodes,
         )
         train_mask = ~val_mask
-        train_mask = downsample_mask(seed=seed, mask=train_mask, max_n=max_train_episodes)
+        train_mask = downsample_mask(
+            seed=seed, mask=train_mask, max_n=max_train_episodes
+        )
         self.val_mask = val_mask
         self.train_mask = train_mask
 
@@ -219,8 +226,12 @@ class BaseDataset(torch.utils.data.Dataset):
                 else:
                     rgb = TVF.crop(
                         rgb,
-                        top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
-                        left=torch.randint(0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)).item(),
+                        top=torch.randint(
+                            0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)
+                        ).item(),
+                        left=torch.randint(
+                            0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)
+                        ).item(),
                         height=self.rgb_random_crop_size[0],
                         width=self.rgb_random_crop_size[1],
                     )
@@ -239,8 +250,12 @@ class BaseDataset(torch.utils.data.Dataset):
             else:
                 rgb = TVF.crop(
                     rgb,
-                    top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
-                    left=torch.randint(0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)).item(),
+                    top=torch.randint(
+                        0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)
+                    ).item(),
+                    left=torch.randint(
+                        0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)
+                    ).item(),
                     height=self.rgb_random_crop_size[0],
                     width=self.rgb_random_crop_size[1],
                 )
@@ -322,7 +337,9 @@ class BaseDataset(torch.utils.data.Dataset):
             yield self._get_effective_action_data()
             return
         if key not in self.replay_buffer:
-            raise KeyError(f"Unknown normalization field '{key}' (available: {list(self.replay_buffer.keys())})")
+            raise KeyError(
+                f"Unknown normalization field '{key}' (available: {list(self.replay_buffer.keys())})"
+            )
         yield self.replay_buffer[key]
 
 

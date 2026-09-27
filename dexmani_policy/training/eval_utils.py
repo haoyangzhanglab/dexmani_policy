@@ -1,38 +1,31 @@
 """Shared evaluation utilities used by the eval entry points.
 
-Checkpoint state owns Agent construction, action/window and normalization
-semantics. Current config supplies the environment and evaluation controls for
+Saved experiment config owns Agent construction and model-facing semantics.
+Evaluation overrides supply environment and protocol controls for
 ``select_best_ckpt.py``, ``eval_best_ckpt.py`` and ``record_demo.py``.
 """
 
 from __future__ import annotations
 
-import copy
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import hydra
-import torch
 from omegaconf import OmegaConf
-from termcolor import cprint
 
-from dexmani_policy.common.checkpoint_io import (
-    CheckpointStore,
-    build_agent_contract,
-    parse_normalization_contract,
-    validate_resume_contract,
+from dexmani_policy.common.config import (
+    normalize_eval_config,
+    validate_action_key_consistency,
+    validate_window_contract,
 )
-from dexmani_policy.common.config import validate_action_key_consistency, validate_window_contract
-from dexmani_policy.common.config import normalize_eval_config
-from dexmani_policy.common.inference import normalize_inference_settings, positive_int
-from dexmani_policy.common.normalizer import (
-    NON_NUMERIC_OBSERVATION_FIELDS,
-    validate_normalizer_state,
+from dexmani_policy.common.inference import (
+    load_experiment_config,
+    positive_int,
+    resolve_checkpoint,
+    rgb_preprocessing_kwargs,
 )
-from dexmani_policy.common.pytorch_util import fix_state_dict
 
 
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
@@ -48,34 +41,48 @@ def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 1. Saved model contract and evaluation override validation
+# Saved model inputs and evaluation overrides
 # ---------------------------------------------------------------------------
 
 
-def validate_eval_config(cfg, agent_contract: dict) -> None:
+def validate_eval_config(cfg, saved: dict) -> None:
     """Validate saved model windows against the current evaluation environment."""
     validate_window_contract(
-        agent_contract.get("horizon"),
-        agent_contract.get("n_obs_steps"),
-        agent_contract.get("n_action_steps"),
+        saved["agent"]["horizon"],
+        saved["agent"]["n_obs_steps"],
+        saved["agent"]["n_action_steps"],
     )
     # Dataset/model fields in current config are not historical model semantics.
-    validate_action_key_consistency({
-        "action_key": agent_contract.get("action_key"),
-        "env_runner": cfg.env_runner,
-    })
+    validate_action_key_consistency(
+        {
+            "action_key": saved["action_key"],
+            "env_runner": cfg.env_runner,
+        }
+    )
 
 
 def parse_eval_overrides(overrides: list[str]):
     """Only evaluation/inference controls may override checkpoint evaluation."""
     for override in overrides:
         key = override.split("=", 1)[0].lstrip("+~")
-        if key == "agent" or key.startswith(("agent.", "agent[")):
+        if not (
+            key.startswith(("eval.", "env_runner."))
+            or key in {"training.device", "training.seed"}
+        ):
             raise ValueError(
-                "agent.* overrides are forbidden for checkpoint evaluation; "
-                "the checkpoint owns constructor semantics. Use eval.* or "
-                "explicit EMA/NFE options for inference ablations."
+                f"Evaluation override cannot redefine saved inference config: {key}"
             )
+        if any(
+            part in key.split(".")
+            for part in (
+                "n_obs_steps",
+                "sensor_modalities",
+                "rgb_preprocess_size",
+                "rgb_random_crop_size",
+                "rgb_keep_uint8",
+            )
+        ):
+            raise ValueError(f"Model inputs come from saved dataset config: {key}")
     return normalize_eval_config(OmegaConf.from_dotlist(overrides))
 
 
@@ -95,25 +102,37 @@ def add_inference_steps_argument(parser) -> None:
     """Keep the old CLI flag only at argparse ingress; never silently override."""
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
-        "--inference-steps", type=int, default=None,
+        "--inference-steps",
+        type=int,
+        default=None,
         help="DDIM/Euler inference steps (best: selection record; otherwise config).",
     )
     group.add_argument(
-        "--denoise-steps", dest="inference_steps", type=int,
+        "--denoise-steps",
+        dest="inference_steps",
+        type=int,
         help="Compatibility alias for --inference-steps.",
     )
 
 
 # ---------------------------------------------------------------------------
-# 2. Evaluation environment and checkpoint store construction
+# Evaluation environment
 # ---------------------------------------------------------------------------
 
 
-def build_eval_components(cfg) -> tuple[Any, CheckpointStore]:
-    """Build the current evaluation environment and experiment checkpoint store."""
+def build_eval_runner(cfg):
+    """Build the evaluation environment with the saved model input recipe."""
+    saved = load_experiment_config(cfg._exp_dir)
+    validate_eval_config(cfg, saved)
     env_runner = hydra.utils.instantiate(cfg.env_runner)
-    checkpoint_store = CheckpointStore(Path(cfg._exp_dir) / "checkpoints")
-    return env_runner, checkpoint_store
+    dataset = saved["dataset"]
+    children = dict(zip(dataset.get("task_names", ()), dataset.get("datasets", ())))
+    for runner in iter_leaf_env_runners(env_runner):
+        inputs = children[runner.task_name] if children else dataset
+        runner.n_obs_steps = saved["agent"]["n_obs_steps"]
+        runner.sensor_modalities = list(inputs["sensor_modalities"])
+        runner.rgb_preprocessing = rgb_preprocessing_kwargs(inputs)
+    return env_runner
 
 
 def iter_leaf_env_runners(env_runner):
@@ -124,181 +143,28 @@ def iter_leaf_env_runners(env_runner):
 
 
 # ---------------------------------------------------------------------------
-# 3. Checkpoint loading for inference (shared across eval entry points)
+# Checkpoint loading for inference
 # ---------------------------------------------------------------------------
 
 
 def load_ckpt_for_inference(
-    checkpoint_store: CheckpointStore,
     ckpt_path: Path,
     use_ema: bool,
     *,
     cfg,
 ):
-    """Construct and strictly restore an Agent using only checkpoint semantics.
+    """Use the shared loader with the original saved config, never eval overrides."""
+    from dexmani_policy.common.inference import restore_policy_agent
 
-    Current config supplies the evaluation environment, never the constructor
-    or normalization recipe. Each candidate in checkpoint selection is restored
-    independently, including behavior-only options absent from its state dict.
-    """
-    checkpoint = checkpoint_store.load(ckpt_path)
-    agent_contract = checkpoint.resume_contract.get("agent")
-    agent_config = checkpoint.resume_contract.get("agent_config")
-    if type(agent_contract) is not dict or not agent_contract:
-        raise RuntimeError("Checkpoint resume_contract.agent must be a non-empty plain dict")
-    if type(agent_config) is not dict or not agent_config:
-        raise RuntimeError("Checkpoint resume_contract.agent_config must be a non-empty plain dict")
-    if not isinstance(agent_config.get("_target_"), str):
-        raise RuntimeError("Checkpoint agent_config must declare an Agent _target_")
-    validate_eval_config(cfg, agent_contract)
-    normalization_spec = parse_normalization_contract(agent_contract.get("normalization"))
-
-    raw_state = checkpoint.model_state
-    if use_ema:
-        if checkpoint.ema_model_state is None:
-            raise RuntimeError(
-                f"EMA weights were requested, but checkpoint {ckpt_path} has no EMA state. "
-                "Use use_ema=False (or --no-ema) to explicitly load raw model weights."
-            )
-        raw_state = checkpoint.ema_model_state
-
-    constructor = copy.deepcopy(agent_config)
-    is_dqrise = constructor["_target_"] == "dexmani_policy.agents.core.dqrise.DQRISEAgent"
-    if is_dqrise:
-        # Persistent buffers, not the training-time external NPZ, own this state.
-        constructor["codebook_path"] = None
-    agent = hydra.utils.instantiate(OmegaConf.create(constructor))
-    agent.action_key = agent_contract["action_key"]
-    numeric_fields = set(agent.obs_encoder.consumed_observation_fields) - NON_NUMERIC_OBSERVATION_FIELDS
-    agent.normalization_spec = parse_normalization_contract(
-        agent_contract["normalization"], observation_fields=numeric_fields
+    saved = load_experiment_config(cfg._exp_dir)
+    validate_eval_config(cfg, saved)
+    return restore_policy_agent(
+        saved, ckpt_path, use_ema=use_ema, device=cfg.training.device
     )
-    validate_resume_contract(
-        {"agent": agent_contract}, {"agent": build_agent_contract(agent)}
-    )
-    agent.load_state_dict(fix_state_dict(raw_state, is_current_ddp=False), strict=True)
-    validate_normalizer_state(agent.normalizer, normalization_spec)
-    if is_dqrise:
-        manager = agent.codebook_manager
-        if (
-            not manager.is_loaded
-            or not manager.has_hand_normalizer
-            or manager.hand_dim != agent.hand_dim
-            or manager.num_groups != agent.codebook_num_groups
-            or manager.codebook_size != agent.codebook_size
-        ):
-            raise RuntimeError("DQ-RISE checkpoint has incomplete or inconsistent persistent codebook state")
-        agent._validate_codebook_normalizer()
-    validate_resume_contract(
-        {"agent": agent_contract}, {"agent": build_agent_contract(agent)}
-    )
-    return agent
 
 
 # ---------------------------------------------------------------------------
-# 4. best_ckpt.json reading (shared across eval entry points)
-# ---------------------------------------------------------------------------
-
-
-def read_best_ckpt_json(exp_dir: Path) -> dict:
-    """Read and validate the strict selection record in *exp_dir*."""
-    best_json = exp_dir / "best_ckpt.json"
-    if not best_json.is_file():
-        raise FileNotFoundError(
-            f"Selection record not found: {best_json}. Run select_best_ckpt.py "
-            "before evaluating 'best', or explicitly select latest/milestone/path."
-        )
-    try:
-        best_info = json.loads(best_json.read_text())
-    except json.JSONDecodeError as e:
-        raise ValueError(f"best_ckpt.json is malformed JSON: {e}") from e
-    except OSError as e:
-        raise OSError(f"best_ckpt.json is unreadable: {e}") from e
-
-    if not isinstance(best_info, dict):
-        raise ValueError("best_ckpt.json must contain a JSON object")
-
-    expected_top = {
-        "ckpt_relpath",
-        "pct",
-        "global_step",
-        "success_rate",
-        "avg_steps",
-        "n_episodes",
-        "inference",
-        "selection",
-    }
-    if set(best_info) != expected_top:
-        raise ValueError("best_ckpt.json does not match current schema")
-
-    inference = best_info["inference"]
-    if not isinstance(inference, dict):
-        raise ValueError("best_ckpt.json inference must be an object")
-    inference = normalize_inference_settings(inference)
-    best_info["inference"] = inference
-    if set(inference) != {"use_ema", "inference_steps", "policy_seed_mode"}:
-        raise ValueError("best_ckpt.json does not match current schema")
-    if not isinstance(inference["use_ema"], bool):
-        raise ValueError("best_ckpt.json inference.use_ema must be boolean")
-    inference_steps = inference["inference_steps"]
-    if (
-        isinstance(inference_steps, bool)
-        or not isinstance(inference_steps, int)
-        or inference_steps <= 0
-    ):
-        raise ValueError(
-            "best_ckpt.json inference.inference_steps must be a positive integer"
-        )
-    if inference["policy_seed_mode"] != "episode_seed":
-        raise ValueError(
-            "best_ckpt.json inference.policy_seed_mode must be 'episode_seed'"
-        )
-
-    selection = best_info["selection"]
-    if not isinstance(selection, dict):
-        raise ValueError("best_ckpt.json selection must be an object")
-    if set(selection) != {
-        "shuffle_seed",
-        "seeds",
-        "initial_episodes",
-        "tie_break_used",
-    }:
-        raise ValueError("best_ckpt.json does not match current schema")
-    seeds = selection["seeds"]
-    if (
-        not isinstance(seeds, list)
-        or not seeds
-        or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds)
-        or len(seeds) != len(set(seeds))
-    ):
-        raise ValueError(
-            "best_ckpt.json selection.seeds must be a non-empty list of unique integers"
-        )
-
-    ckpt_relpath = best_info["ckpt_relpath"]
-    if not isinstance(ckpt_relpath, str) or not ckpt_relpath:
-        raise ValueError("best_ckpt.json ckpt_relpath must be a non-empty string")
-    relative_path = Path(ckpt_relpath)
-    if relative_path.is_absolute() or ".." in relative_path.parts:
-        raise ValueError(
-            "best_ckpt.json ckpt_relpath must be relative to the experiment directory"
-        )
-
-    ckpt_path = (exp_dir / relative_path).resolve()
-    resolved_exp_dir = exp_dir.resolve()
-    if not ckpt_path.is_relative_to(resolved_exp_dir):
-        raise ValueError(
-            "best_ckpt.json ckpt_relpath resolves outside the experiment directory"
-        )
-    if not ckpt_path.is_file():
-        raise FileNotFoundError(
-            f"Checkpoint recorded by best_ckpt.json does not exist: {ckpt_path}"
-        )
-    return best_info
-
-
-# ---------------------------------------------------------------------------
-# 5. Episode detail extraction for single-task and multi-task result dicts
+# Episode details and statistics
 # ---------------------------------------------------------------------------
 
 
@@ -387,7 +253,7 @@ def compute_eval_stats(result: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 7. Eval config field access
+# Eval config field access
 # ---------------------------------------------------------------------------
 
 
@@ -421,7 +287,7 @@ def _get_eval_param(
 
 
 # ---------------------------------------------------------------------------
-# 8. Milestone checkpoint discovery
+# Milestone checkpoint discovery
 # ---------------------------------------------------------------------------
 
 _MILESTONE_RE = re.compile(
@@ -448,7 +314,7 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
     if not ckpt_dir.is_dir():
         raise FileNotFoundError(
             f"Checkpoint directory not found: {ckpt_dir}\n"
-            f"Make sure the experiment was run with the new step-driven "
+            f"Make sure the experiment was run with the step-driven "
             f"training loop (total_train_steps in config)."
         )
 
@@ -469,7 +335,7 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
         raise FileNotFoundError(
             f"No milestone checkpoints found in {ckpt_dir}.\n"
             f"Expected filenames like: epoch=*-step=*-milestone=20pct.pt\n"
-            f"Run training with the new step-driven loop first."
+            f"Run training with the step-driven loop first."
         )
 
     found.sort(key=lambda c: c.pct)
@@ -477,23 +343,22 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
 
 
 # ---------------------------------------------------------------------------
-# 9. Unified checkpoint path resolution
+# Checkpoint path resolution
 # ---------------------------------------------------------------------------
 
 
 def resolve_checkpoint_path(
     exp_dir: Path,
     ckpt_tag_or_path: str,
-    checkpoint_store: CheckpointStore,
 ) -> tuple[Path, str]:
     """Resolve a checkpoint tag to an absolute path and human-readable label.
 
     Supported tags:
-    - ``"best"`` — reads the strict ``best_ckpt.json`` selection record
-    - ``"latest"`` — ``checkpoint_store.resolve_path("latest")``
+    - ``"best"`` — reads the ``best_ckpt.json`` selection record
+    - ``"latest"`` — ``checkpoints/latest.pt``
     - ``"20pct".."100pct"`` — matched against milestone checkpoints
     - any other string — treated as a filename inside ``checkpoints/``
-      (relative) or an absolute path
+      (relative) or an absolute path inside the same directory
     """
     if ckpt_tag_or_path.endswith("pct"):
         milestones = discover_milestone_checkpoints(exp_dir)
@@ -506,27 +371,5 @@ def resolve_checkpoint_path(
             )
         return match[0].path.resolve(), match[0].label
 
-    if ckpt_tag_or_path == "best":
-        best_info = read_best_ckpt_json(exp_dir)
-        ckpt_path = (exp_dir / best_info["ckpt_relpath"]).resolve()
-        label = f"best -> {best_info['pct']}% (step={best_info['global_step']})"
-        cprint(
-            f"  Auto-loaded best checkpoint: {best_info['pct']}% "
-            f"(success_rate={best_info['success_rate']:.1%}, "
-            f"n_episodes={best_info['n_episodes']})",
-            "cyan",
-        )
-        return ckpt_path, label
-
-    if ckpt_tag_or_path == "latest":
-        # Freeze the selected file before loading/recording provenance; latest
-        # is a mutable training selector and may point elsewhere on a later run.
-        ckpt_path = checkpoint_store.resolve_path("latest").resolve()
-        return ckpt_path, f"latest ({ckpt_path.name})"
-
-    # Treat as a path
-    ckpt_path = Path(ckpt_tag_or_path)
-    if not ckpt_path.is_absolute():
-        ckpt_path = exp_dir / "checkpoints" / ckpt_path
-    ckpt_path = ckpt_path.resolve()
-    return ckpt_path, str(ckpt_path)
+    path = resolve_checkpoint(exp_dir, ckpt_tag_or_path)
+    return path, f"{ckpt_tag_or_path} ({path.name})"

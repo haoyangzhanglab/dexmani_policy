@@ -19,44 +19,6 @@ def make_normalization_contract(spec) -> Dict[str, Any]:
     return {"version": NORMALIZATION_CONTRACT_VERSION, "fields": dict(spec)}
 
 
-def parse_normalization_contract(
-    contract,
-    *,
-    observation_fields=None,
-) -> Dict[str, str]:
-    """Strictly parse a versioned normalization contract into a canonical spec.
-
-    Pairs with ``make_normalization_contract`` to form the single closed loop used
-    by training checkpoints and deployment artifacts alike:
-
-        validated spec -> make_normalization_contract -> persisted contract
-            -> parse_normalization_contract -> validated spec
-
-    Requires ``contract`` to be a plain mapping with exactly the keys
-    ``{"version", "fields"}``, ``version == NORMALIZATION_CONTRACT_VERSION``, and
-    ``fields`` accepted by ``validate_normalization_spec``. Returns the canonical
-    plain ``{field: mode}`` mapping.
-    """
-    from dexmani_policy.common.normalizer import validate_normalization_spec
-
-    if type(contract) is not dict:
-        raise ValueError("normalization contract must be a plain mapping")
-    if set(contract) != {"version", "fields"}:
-        raise ValueError(
-            f"normalization contract must have exactly keys "
-            f"{{'version', 'fields'}}, got {sorted(contract)}"
-        )
-    if contract["version"] != NORMALIZATION_CONTRACT_VERSION:
-        raise ValueError(
-            f"unsupported normalization contract version {contract['version']!r} "
-            f"(expected {NORMALIZATION_CONTRACT_VERSION})"
-        )
-    fields = contract["fields"]
-    if type(fields) is not dict:
-        raise ValueError("normalization contract 'fields' must be a plain mapping")
-    return validate_normalization_spec(fields, observation_fields=observation_fields)
-
-
 @dataclass
 class TrainCheckpoint:
     epoch: int
@@ -66,7 +28,6 @@ class TrainCheckpoint:
     ema_model_state: Optional[Dict[str, Any]]
     optimizer_state: Dict[str, Any]
     scheduler_state: Dict[str, Any]
-    monitor: Dict[str, Any]  # Persisted simple.v3 compatibility field.
     resume_contract: Dict[str, Any]
     ema_updater_step: Optional[int]
     ema_decay: Optional[float]
@@ -74,7 +35,7 @@ class TrainCheckpoint:
 
 
 def build_agent_contract(model) -> Dict[str, Any]:
-    """Agent metadata shared by training, evaluation and deployment export."""
+    """Training-only facts for exact resume."""
     return {
         "n_obs_steps": model.n_obs_steps,
         "n_action_steps": model.n_action_steps,
@@ -85,7 +46,9 @@ def build_agent_contract(model) -> Dict[str, Any]:
         "hand_dim": getattr(model, "hand_dim", None),
         "control_action_dim": model.control_action_dim,
         "use_aux_ee": bool(getattr(model, "use_aux_ee", False)),
-        "normalization": make_normalization_contract(getattr(model, "normalization_spec", {})),
+        "normalization": make_normalization_contract(
+            getattr(model, "normalization_spec", {})
+        ),
     }
 
 
@@ -105,7 +68,9 @@ def validate_resume_contract(saved, current) -> None:
                     compare(left[key], right[key], child)
         elif isinstance(left, list) and isinstance(right, list):
             if len(left) != len(right):
-                differences.append(f"{path}: length saved={len(left)}, current={len(right)}")
+                differences.append(
+                    f"{path}: length saved={len(left)}, current={len(right)}"
+                )
             for i, (a, b) in enumerate(zip(left, right)):
                 compare(a, b, f"{path}[{i}]")
         elif type(left) is not type(right) or left != right:
@@ -135,9 +100,9 @@ def validate_ema_resume_state(
 class CheckpointStore:
     def __init__(self, checkpoint_dir: Path):
         self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def save(self, filename: str, checkpoint: TrainCheckpoint) -> Path:
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         path = self.checkpoint_dir / filename
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         payload = {
@@ -145,7 +110,6 @@ class CheckpointStore:
                 "epoch": int(checkpoint.epoch),
                 "global_step": int(checkpoint.global_step),
                 "next_micro_step": checkpoint.next_micro_step,
-                "monitor": checkpoint.monitor,
                 "resume_contract": checkpoint.resume_contract,
                 "ema_updater_step": checkpoint.ema_updater_step,
                 "ema_decay": checkpoint.ema_decay,
@@ -180,7 +144,6 @@ class CheckpointStore:
             "epoch",
             "global_step",
             "next_micro_step",
-            "monitor",
             "resume_contract",
             "ema_updater_step",
             "ema_decay",
@@ -197,12 +160,13 @@ class CheckpointStore:
         if not isinstance(state["resume_contract"], dict):
             raise ValueError("Checkpoint resume_contract must be a dict")
         if not isinstance(state["rng_states"], list) or not state["rng_states"]:
-            raise ValueError("Checkpoint rng_states must be a nonempty rank-ordered list")
+            raise ValueError(
+                "Checkpoint rng_states must be a nonempty rank-ordered list"
+            )
         return TrainCheckpoint(
             epoch=int(state["epoch"]),
             global_step=int(state["global_step"]),
             next_micro_step=state["next_micro_step"],
-            monitor=state["monitor"],
             resume_contract=state["resume_contract"],
             ema_updater_step=state["ema_updater_step"],
             ema_decay=state["ema_decay"],

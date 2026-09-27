@@ -26,7 +26,9 @@ def load_param_dict(state_dict: dict, prefix: str) -> nn.ParameterDict:
         value: torch.Tensor
         if key.startswith(prefix):
             suffix = key[len(prefix) :]
-            assert suffix.startswith("."), f"prefix '{prefix}' missing trailing dot in key '{key}'"
+            assert suffix.startswith("."), (
+                f"prefix '{prefix}' missing trailing dot in key '{key}'"
+            )
             param_keys = suffix.split(".")[1:]
             if param_keys:
                 dfs_add(out_dict, param_keys, value.clone())
@@ -49,7 +51,14 @@ class DictOfTensorMixin(nn.Module):
             raise RuntimeError("Normalizer has no parameters; call fit() first")
 
     def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
     ):
         old_keys = set(self.params_dict.state_dict().keys())
         self.params_dict = load_param_dict(state_dict, prefix + "params_dict")
@@ -62,7 +71,9 @@ class DictOfTensorMixin(nn.Module):
         # load_normalizer_from_dataset.
         if len(old_keys) > 0:
             state_prefix = prefix + "params_dict."
-            state_keys = {k[len(state_prefix) :] for k in state_dict if k.startswith(state_prefix)}
+            state_keys = {
+                k[len(state_prefix) :] for k in state_dict if k.startswith(state_prefix)
+            }
             for k in sorted(old_keys - state_keys):
                 missing_keys.append(state_prefix + k)
             for k in sorted(state_keys - old_keys):
@@ -156,7 +167,9 @@ def fit_params(
     fit_offset=True,
     label=None,
 ):
-    assert mode in ["limits", "gaussian"] and last_n_dims >= 0 and output_max > output_min
+    assert (
+        mode in ["limits", "gaussian"] and last_n_dims >= 0 and output_max > output_min
+    )
 
     if isinstance(data, zarr.Array):
         data = data[:]
@@ -432,8 +445,12 @@ class LinearNormalizer(DictOfTensorMixin):
                 continue
             c_min = c.min(dim=0).values
             c_max = c.max(dim=0).values
-            running_min = c_min if running_min is None else torch.minimum(running_min, c_min)
-            running_max = c_max if running_max is None else torch.maximum(running_max, c_max)
+            running_min = (
+                c_min if running_min is None else torch.minimum(running_min, c_min)
+            )
+            running_max = (
+                c_max if running_max is None else torch.maximum(running_max, c_max)
+            )
 
             # Welford batch merge.
             delta = c - mean
@@ -559,7 +576,9 @@ def build_mixed_action_normalizer(action_data, ee_dim=9):
             ]
         )
 
-    return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stats)
+    return SingleFieldLinearNormalizer.create_manual(
+        scale=scale, offset=offset, input_stats_dict=stats
+    )
 
 
 ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
@@ -574,9 +593,8 @@ def validate_normalization_spec(
     """Validate one feature-level normalization spec; return a canonical plain mapping.
 
     This is the single shared grammar for ``normalization: {field: mode}`` used by
-    training config validation, the versioned checkpoint/deployment contract
-    parser (``parse_normalization_contract``), and checkpoint-owned evaluation
-    restore. All paths validate normalization modes with the same grammar.
+    training config validation and saved-config inference restore. All paths
+    validate normalization modes with the same grammar.
 
     Rules:
     - ``spec`` must be a plain mapping of non-empty string keys to string modes;
@@ -601,7 +619,9 @@ def validate_normalization_spec(
     result: dict = {}
     for key, mode in spec.items():
         if type(key) is not str or not key:
-            raise ValueError(f"normalization keys must be non-empty strings, got {key!r}")
+            raise ValueError(
+                f"normalization keys must be non-empty strings, got {key!r}"
+            )
         if key in NON_NUMERIC_OBSERVATION_FIELDS:
             raise ValueError(
                 f"normalization must not declare non-numeric field {key!r} "
@@ -652,7 +672,9 @@ def validate_normalization_spec(
     return result
 
 
-def validate_normalizer_state(normalizer: "LinearNormalizer", normalization_spec: dict) -> None:
+def validate_normalizer_state(
+    normalizer: "LinearNormalizer", normalization_spec: dict
+) -> None:
     """Validate fitted normalizer params against the semantic normalization spec.
 
     - ``identity`` fields must have no params entry;

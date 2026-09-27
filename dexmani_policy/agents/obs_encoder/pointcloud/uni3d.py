@@ -36,7 +36,9 @@ def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
     result = torch.clone(batch_pc)
     for b in range(B):
         dropout_ratio = torch.rand(1).item() * max_dropout_ratio
-        drop_idx = torch.where(torch.rand(N, device=batch_pc.device) <= dropout_ratio)[0]
+        drop_idx = torch.where(torch.rand(N, device=batch_pc.device) <= dropout_ratio)[
+            0
+        ]
         if len(drop_idx) > 0:
             result[b, drop_idx, :] = batch_pc[b, 0, :].unsqueeze(0)
     return result
@@ -46,7 +48,12 @@ class KNNGrouper(nn.Module):
     """FPS → K centers, k-NN → K groups of relative xyz + features."""
 
     def __init__(
-        self, num_groups, group_size, radius=None, centralize_features=False, fps_random_config=None
+        self,
+        num_groups,
+        group_size,
+        radius=None,
+        centralize_features=False,
+        fps_random_config=None,
     ):
         super().__init__()
         self.num_groups = num_groups
@@ -58,8 +65,12 @@ class KNNGrouper(nn.Module):
     def forward(self, xyz, features):
         B, N, _ = xyz.shape
         with torch.no_grad():
-            fps_config = resolve_fps_random_config(self.fps_random_config, self.training)
-            centers, _ = farthest_point_sample(xyz, num_samples=self.num_groups, **fps_config)
+            fps_config = resolve_fps_random_config(
+                self.fps_random_config, self.training
+            )
+            centers, _ = farthest_point_sample(
+                xyz, num_samples=self.num_groups, **fps_config
+            )
             _, knn_idx = knn_points(centers, xyz, self.group_size)
 
         batch_offset = torch.arange(B, device=xyz.device) * N
@@ -73,7 +84,9 @@ class KNNGrouper(nn.Module):
             nbr_xyz = nbr_xyz / self.radius
 
         nbr_feats = features.reshape(-1, features.shape[-1])[knn_idx_flat]
-        nbr_feats = nbr_feats.reshape(B, self.num_groups, self.group_size, features.shape[-1])
+        nbr_feats = nbr_feats.reshape(
+            B, self.num_groups, self.group_size, features.shape[-1]
+        )
 
         group_feats = torch.cat([nbr_xyz, nbr_feats], dim=-1)
         return {"features": group_feats, "centers": centers, "knn_idx": knn_idx}
@@ -220,7 +233,9 @@ class Uni3DPointcloudEncoder(nn.Module):
 
         import timm
 
-        self.transformer = timm.create_model(pc_model, pretrained=False, drop_path_rate=drop_path_rate)
+        self.transformer = timm.create_model(
+            pc_model, pretrained=False, drop_path_rate=drop_path_rate
+        )
         self.transformer_dim = self.transformer.embed_dim
         self.embed_dim = embed_dim
         self.num_group = num_group
@@ -240,7 +255,9 @@ class Uni3DPointcloudEncoder(nn.Module):
             nn.Linear(128, self.transformer_dim),
         )
 
-        self.patch_proj = nn.Linear(self.patch_embed.patch_encoder.out_channels, self.transformer_dim)
+        self.patch_proj = nn.Linear(
+            self.patch_embed.patch_encoder.out_channels, self.transformer_dim
+        )
         self.out_proj = nn.Linear(self.transformer_dim, embed_dim)
         self.pe_layer = PositionEmbeddingRandom(embed_dim // 2)
 
@@ -262,12 +279,23 @@ class Uni3DPointcloudEncoder(nn.Module):
             if name in ("cls_token", "pos_embed") or name.startswith("patch_embed."):
                 p.requires_grad_(False)
 
-        if use_pretrained_weights:
-            self._load_pretrained_weights(pretrained_weights_path, allow_random_init)
-        else:
-            logger.info("[Uni3DPointcloudEncoder] Random initialization (training from scratch)")
+        self.use_pretrained_weights = use_pretrained_weights
+        self.pretrained_weights_path = pretrained_weights_path
+        self.allow_random_init = allow_random_init
 
-    def _load_pretrained_weights(self, pretrained_weights_path, allow_random_init=False):
+    def initialize_training(self):
+        if self.use_pretrained_weights:
+            self._load_pretrained_weights(
+                self.pretrained_weights_path, self.allow_random_init
+            )
+        else:
+            logger.info(
+                "[Uni3DPointcloudEncoder] Random initialization (training from scratch)"
+            )
+
+    def _load_pretrained_weights(
+        self, pretrained_weights_path, allow_random_init=False
+    ):
         """Selectively load pretrained weights from safetensors (strict=False).
 
         If the local file is missing, attempts to auto-download from HuggingFace Hub
@@ -292,9 +320,15 @@ class Uni3DPointcloudEncoder(nn.Module):
         # dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py, so 5 levels up).
         if not os.path.isabs(pretrained_weights_path):
             _project_root = os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+                os.path.dirname(
+                    os.path.dirname(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    )
+                )
             )
-            pretrained_weights_path = os.path.join(_project_root, pretrained_weights_path)
+            pretrained_weights_path = os.path.join(
+                _project_root, pretrained_weights_path
+            )
 
         safetensors_path = os.path.join(pretrained_weights_path, "model.safetensors")
         if not os.path.exists(safetensors_path):
@@ -336,7 +370,9 @@ class Uni3DPointcloudEncoder(nn.Module):
                 new_key = key.replace("pc_encoder.", "")
                 processed_state_dict[new_key] = checkpoint[key]
 
-        missing_keys, unexpected_keys = self.load_state_dict(processed_state_dict, strict=False)
+        missing_keys, unexpected_keys = self.load_state_dict(
+            processed_state_dict, strict=False
+        )
 
         total_expected = len(self.state_dict())
         loaded = total_expected - len(missing_keys)
@@ -357,7 +393,8 @@ class Uni3DPointcloudEncoder(nn.Module):
             )
             if allow_random_init:
                 logger.warning(
-                    "%s Continuing with partial/random init (allow_random_init=True).", msg
+                    "%s Continuing with partial/random init (allow_random_init=True).",
+                    msg,
                 )
                 return
             raise ValueError(msg)

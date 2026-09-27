@@ -62,22 +62,21 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.checkpoint_io import CheckpointStore
 from dexmani_policy.common.config import normalize_eval_config, register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
-    add_inference_steps_argument,
-    validate_inference_steps,
     MilestoneCheckpoint,
     _get_eval_param,
-    build_eval_components,
-    parse_eval_overrides,
+    add_inference_steps_argument,
+    build_eval_runner,
     collect_episode_details,
     discover_milestone_checkpoints,
     iter_leaf_env_runners,
     load_ckpt_for_inference,
+    parse_eval_overrides,
     resolve_eval_seed,
+    validate_inference_steps,
 )
 
 ROOT_DIR = set_project_root()
@@ -140,19 +139,15 @@ class CkptEvalAccum:
 def evaluate_checkpoint(
     cfg,
     env_runner,
-    checkpoint_store: CheckpointStore,
     ckpt: MilestoneCheckpoint,
     seeds: List[int],
     use_ema: bool,
     inference_steps: int,
-    device: torch.device,
     video_save_dir: Path | None = None,
 ) -> Dict[str, Any]:
     """Run *len(seeds)* episodes for one checkpoint.  Returns env_runner result dict."""
 
-    agent = load_ckpt_for_inference(checkpoint_store, ckpt.path, use_ema, cfg=cfg)
-    agent.to(device)
-    agent.eval()
+    agent = load_ckpt_for_inference(ckpt.path, use_ema, cfg=cfg)
 
     env_runner.eval_seeds = list(seeds)
     for leaf_runner in iter_leaf_env_runners(env_runner):
@@ -226,8 +221,6 @@ def select_best_checkpoint(
     seed = resolve_eval_seed(cfg, cli_seed=eval_seed)
     set_seed(seed)
 
-    device = torch.device(cfg.training.device)
-
     # ── 2. Discover checkpoints ───────────────────────────────────────
     milestones = discover_milestone_checkpoints(exp_dir)
     cprint(f"\nDiscovered {len(milestones)} milestone checkpoint(s):", "cyan")
@@ -235,7 +228,7 @@ def select_best_checkpoint(
         cprint(f"  {mc.label}", "cyan")
 
     # ── 3. Build components ───────────────────────────────────────────
-    env_runner, checkpoint_store = build_eval_components(cfg)
+    env_runner = build_eval_runner(cfg)
     eval_root_dir = exp_dir / "eval_ckpt_selector"
 
     # A malformed seed source must not cause duplicate environment episodes or
@@ -277,12 +270,10 @@ def select_best_checkpoint(
         result = evaluate_checkpoint(
             cfg,
             env_runner,
-            checkpoint_store,
             mc,
             phase1_seeds,
             use_ema,
             inference_steps,
-            device,
             video_save_dir=video_save_dir,
         )
         acc = CkptEvalAccum(ckpt=mc)
@@ -311,12 +302,10 @@ def select_best_checkpoint(
             result = evaluate_checkpoint(
                 cfg,
                 env_runner,
-                checkpoint_store,
                 acc.ckpt,
                 tie_seeds,
                 use_ema,
                 inference_steps,
-                device,
                 video_save_dir=video_save_dir,
             )
             acc.merge(result)
@@ -523,7 +512,7 @@ def main() -> None:
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Evaluation/environment dot-list overrides; agent.* is forbidden (checkpoint-owned).",
+        help="Evaluation/environment dot-list overrides; agent.* is forbidden (saved-config-owned).",
     )
     args = parser.parse_args()
 
@@ -543,7 +532,7 @@ def main() -> None:
         cprint(f"Error: experiment directory not found: {exp_dir}", "red")
         sys.exit(1)
 
-    # ── Load evaluation config; saved Agent contracts are checked per candidate ──
+    # ── Load evaluation config; saved Agent configuration is used for every candidate ──
     cfg_path = exp_dir / "config.yaml"
     if not cfg_path.is_file():
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")
@@ -552,7 +541,7 @@ def main() -> None:
     cfg = normalize_eval_config(OmegaConf.load(cfg_path))
     if args.overrides:
         cfg = OmegaConf.merge(cfg, parse_eval_overrides(args.overrides))
-    # Stash exp_dir so build_eval_components can build paths
+    # Keep the experiment path available to saved-config restoration
     cfg._exp_dir = str(exp_dir)
 
     # ── Resolve parameters: CLI > config > defaults ───────────────────────
@@ -617,6 +606,7 @@ def main() -> None:
     except (ValueError, RuntimeError, OSError, FileNotFoundError) as e:
         cprint(f"Selection failed: {type(e).__name__}: {e}", "red")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

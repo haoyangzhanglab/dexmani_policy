@@ -5,11 +5,15 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint_io import (
-    build_agent_contract, validate_ema_resume_state, validate_resume_contract,
+    build_agent_contract,
+    validate_ema_resume_state,
+    validate_resume_contract,
 )
-from dexmani_policy.common.pytorch_util import fix_state_dict, optimizer_to, set_rng_state, worker_init_fn
-from dexmani_policy.datasets.real_policy_contract import (
-    build_real_policy_data_semantics, is_real_policy_zarr,
+from dexmani_policy.common.pytorch_util import (
+    fix_state_dict,
+    optimizer_to,
+    set_rng_state,
+    worker_init_fn,
 )
 from dexmani_policy.datasets.resumable_sampler import ResumableDistributedSampler
 
@@ -25,33 +29,21 @@ def loader_options(cfg):
 def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
     options = loader_options(cfg)
     sampler = ResumableDistributedSampler(
-        dataset, batch_size=options["batch_size"], num_replicas=world_size,
-        rank=rank, shuffle=options.pop("shuffle", False), seed=cfg.training.seed,
+        dataset,
+        batch_size=options["batch_size"],
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=options.pop("shuffle", False),
+        seed=cfg.training.seed,
         drop_last=False,
     )
     generator = torch.Generator().manual_seed(cfg.training.seed + rank)
-    return DataLoader(dataset, sampler=sampler, generator=generator,
-                      worker_init_fn=worker_init_fn, **options)
-
-
-def _deployment_data_semantics(train_dataset, model, cfg):
-    """Snapshot the actual training Zarr's deployment-relevant semantics.
-
-    Reads only the instantiated dataset's physical store — never the current
-    experiment config — so a training checkpoint freezes the data semantics it
-    was really trained on.  Datasets without a single Real Policy Zarr
-    (dynamic/multi-task/sim-only) snapshot ``None``; Real deployment export
-    refuses such checkpoints instead of guessing.
-    """
-    zarr_path = getattr(train_dataset, "zarr_path", None)
-    if zarr_path is None or not is_real_policy_zarr(zarr_path):
-        return None
-    return build_real_policy_data_semantics(
-        zarr_path,
-        task_name=cfg.task_name,
-        observation_fields=list(train_dataset.sensor_modalities),
-        agent_config=OmegaConf.to_container(cfg.agent, resolve=True),
-        action_key=model.action_key,
+    return DataLoader(
+        dataset,
+        sampler=sampler,
+        generator=generator,
+        worker_init_fn=worker_init_fn,
+        **options,
     )
 
 
@@ -60,22 +52,26 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
         return OmegaConf.to_container(section, resolve=True)
 
     training = plain(cfg.training)
-    for key in ("device", "gpu_ids", "num_gpus", "use_compile", "compile_mode", "fast_grad_finite_check"):
+    for key in (
+        "device",
+        "gpu_ids",
+        "num_gpus",
+        "use_compile",
+        "compile_mode",
+        "fast_grad_finite_check",
+    ):
         training.pop(key, None)
     training["loop"].pop("log_interval_steps", None)
     training["loop"].setdefault("gradient_accumulation_steps", 1)
     training.setdefault("lr_min_ratio", 0.1)
-    # Persisted simple.v3 compatibility alias; Trainer uses loop.total_train_steps.
-    training["num_training_steps"] = training["loop"]["total_train_steps"]
     return {
         "agent": build_agent_contract(model),
         "agent_config": plain(cfg.agent),
         "dataset": plain(cfg.dataset),
-        "deployment_data_semantics": _deployment_data_semantics(
-            train_loader.dataset, model, cfg
-        ),
-        "loader": {key: loader_options(cfg).get(key, False)
-                   for key in ("batch_size", "shuffle", "drop_last")},
+        "loader": {
+            key: loader_options(cfg).get(key, False)
+            for key in ("batch_size", "shuffle", "drop_last")
+        },
         "dataset_length": len(train_loader.dataset),
         "batches_per_epoch": len(train_loader),
         "world_size": world_size,
@@ -85,8 +81,18 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
     }
 
 
-def restore_training_state(checkpoint, *, resume_contract, model, ema_model,
-                           ema_updater, optimizer, scheduler, device, rank=0):
+def restore_training_state(
+    checkpoint,
+    *,
+    resume_contract,
+    model,
+    ema_model,
+    ema_updater,
+    optimizer,
+    scheduler,
+    device,
+    rank=0,
+):
     """Restore before compile/DDP; return the next unconsumed batch cursor."""
     validate_resume_contract(checkpoint.resume_contract, resume_contract)
     validate_ema_resume_state(checkpoint, require_ema=ema_model is not None)
@@ -97,14 +103,18 @@ def restore_training_state(checkpoint, *, resume_contract, model, ema_model,
     accum = resume_contract["training"]["loop"]["gradient_accumulation_steps"]
     cursor = checkpoint.next_micro_step
     if not 0 <= cursor < batches or cursor % accum:
-        raise ValueError("Checkpoint next_micro_step is not a normalized accumulation boundary")
+        raise ValueError(
+            "Checkpoint next_micro_step is not a normalized accumulation boundary"
+        )
     model.load_state_dict(fix_state_dict(checkpoint.model_state, False), strict=True)
     # Normalizers reconstruct their ParameterDict from checkpoint tensors.
     # A CPU-loaded checkpoint must not leave these parameters on CPU before
     # DDP wraps the restored model or broadcasts normalization state.
     model.to(device)
     if ema_model is not None:
-        ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, False), strict=True)
+        ema_model.load_state_dict(
+            fix_state_dict(checkpoint.ema_model_state, False), strict=True
+        )
         ema_model.to(device)
     optimizer.load_state_dict(checkpoint.optimizer_state)
     optimizer_to(optimizer, device)

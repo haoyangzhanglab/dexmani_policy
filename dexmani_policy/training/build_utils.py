@@ -2,7 +2,7 @@
 
 import hydra
 import numpy as np
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.nn.modules.batchnorm import _BatchNorm
 
 from dexmani_policy.common.config import (
@@ -11,8 +11,8 @@ from dexmani_policy.common.config import (
     validate_window_contract,
 )
 from dexmani_policy.common.normalizer import (
-    LinearNormalizer,
     NON_NUMERIC_OBSERVATION_FIELDS,
+    LinearNormalizer,
     build_mixed_action_normalizer,
     validate_normalization_spec,
     validate_normalizer_state,
@@ -40,6 +40,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Normalization spec & builder
 # ---------------------------------------------------------------------------
+
 
 def resolve_normalization_spec(cfg) -> dict:
     """Extract and validate the top-level feature-level normalization spec.
@@ -78,7 +79,9 @@ def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
             continue
 
         if key == "action" and mode == "auto":
-            action = np.concatenate(list(dataset.iter_normalization_data("action")), axis=0)
+            action = np.concatenate(
+                list(dataset.iter_normalization_data("action")), axis=0
+            )
             if action_key == "action_ee":
                 normalizer["action"] = build_mixed_action_normalizer(action)
             else:
@@ -108,6 +111,28 @@ def build_dataset_and_normalizer(cfg):
     """
     spec = resolve_normalization_spec(cfg)
     dataset = hydra.utils.instantiate(cfg.dataset)
+    from dexmani_policy.datasets.real_policy_contract import extract_real_runtime
+
+    def snapshot_defaults(dataset_cfg, actual):
+        with open_dict(dataset_cfg):
+            if hasattr(actual, "sensor_modalities"):
+                dataset_cfg.sensor_modalities = list(actual.sensor_modalities)
+            if "rgb" in getattr(actual, "sensor_modalities", ()):
+                for key in (
+                    "rgb_preprocess_size",
+                    "rgb_random_crop_size",
+                    "rgb_keep_uint8",
+                    "rgb_color_aug",
+                ):
+                    dataset_cfg[key] = getattr(actual, key)
+        for child_cfg, child in zip(
+            dataset_cfg.get("datasets", ()), getattr(actual, "datasets", ())
+        ):
+            snapshot_defaults(child_cfg, child)
+
+    snapshot_defaults(cfg.dataset, dataset)
+    with open_dict(cfg):
+        cfg.real_runtime = extract_real_runtime(dataset, cfg)
     normalizer = build_normalizer(dataset, spec, cfg.action_key)
     validate_normalizer_state(normalizer, spec)
     return dataset, normalizer
@@ -142,7 +167,7 @@ def _validate_ema_batchnorm_compatibility(model) -> None:
         )
 
 
-def build_model_and_ema(cfg, device, normalizer, rank=0):
+def build_model_and_ema(cfg, device, normalizer, rank=0, *, initialize_training=True):
     """Instantiate the agent model and, if configured, its EMA twin.
 
     ``rank`` gates whether a local EMA is built: rank 0 always owns the evaluation
@@ -152,6 +177,8 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
     ``self.use_ema = (ema_model is not None)``, so this is safe end-to-end.
     """
     model = hydra.utils.instantiate(cfg.agent)
+    if initialize_training:
+        model.initialize_training()
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
     attach_normalization_spec(model, cfg)
@@ -168,16 +195,15 @@ def build_model_and_ema(cfg, device, normalizer, rank=0):
 
     ema_model = None
     ema_updater = None
-    need_local_ema = cfg.training.use_ema and (
-        rank == 0 or requires_ema_for_loss
-    )
+    need_local_ema = cfg.training.use_ema and (rank == 0 or requires_ema_for_loss)
     if need_local_ema:
         ema_model = hydra.utils.instantiate(cfg.agent)
         ema_model.load_normalizer_from_dataset(normalizer)
         ema_model.action_key = model.action_key
         attach_normalization_spec(ema_model, cfg)
         ema_model.to(device)
-        ema_model.load_state_dict(model.state_dict())
+        if initialize_training:
+            ema_model.load_state_dict(model.state_dict())
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
@@ -348,7 +374,10 @@ def _resolve_numeric_observation_fields(cfg) -> set:
     if child_datasets is None:
         return set()
 
-    child_sets = [_numeric_modalities(child.get("sensor_modalities", [])) for child in child_datasets]
+    child_sets = [
+        _numeric_modalities(child.get("sensor_modalities", []))
+        for child in child_datasets
+    ]
     distinct = {frozenset(s) for s in child_sets}
     if len(distinct) > 1:
         raise ValueError(
@@ -373,7 +402,10 @@ def _validate_encoder_normalization_contract(cfg, spec) -> None:
     """
     agent = cfg.get("agent", {})
     encoder_type = agent.get("encoder_type")
-    if encoder_type in _METRIC_POINTNEXT_ENCODER_TYPES and spec.get("point_cloud") != "identity":
+    if (
+        encoder_type in _METRIC_POINTNEXT_ENCODER_TYPES
+        and spec.get("point_cloud") != "identity"
+    ):
         raise ValueError(
             f"agent.encoder_type={encoder_type!r} requires normalization.point_cloud: "
             "identity (PointNeXT FPS/ball-query radii need metric-space coordinates; "

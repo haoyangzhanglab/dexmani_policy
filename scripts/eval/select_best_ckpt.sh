@@ -37,7 +37,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  --no-ema               Use raw weights instead of EMA"
     echo "  --seed N               Eval seed override"
     echo ""
-    echo "  Dot-list overrides may change eval/environment controls; agent.* is checkpoint-owned and forbidden."
+    echo "  Dot-list overrides may change eval/environment controls; model inputs come from saved config.yaml and cannot be overridden."
     echo ""
     echo "Examples:"
     echo "  bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35"

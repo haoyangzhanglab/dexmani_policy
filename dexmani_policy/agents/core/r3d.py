@@ -2,7 +2,9 @@
 
 import torch
 
-from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import OneWayTransformerBackbone
+from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import (
+    OneWayTransformerBackbone,
+)
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.r3d_obs_encoder import R3DObsEncoder
@@ -98,9 +100,8 @@ class R3DAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    # ------------------------------------------------------------------
-    # Per-head loss groups (overrides BaseAgent._get_dim_groups)
-    # ------------------------------------------------------------------
+    def initialize_training(self):
+        self.obs_encoder.pc_encoder.initialize_training()
 
     def _get_dim_groups(self):
         if not self.use_aux_ee:
