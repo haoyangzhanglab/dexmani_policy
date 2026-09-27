@@ -145,7 +145,7 @@ Dataset / ReplayBuffer 保持通用，只加载配置选择的 observation/actio
 
 训练构造 dataset 后，deployment metadata helper 从已加载 ReplayBuffer 的 root attrs 识别 `format="dexmani.real.canonical"`，校验 task/dt，按所选输入捕获最小 `real_runtime`：`dt`，消费点云时的完整 `pointcloud` 数值配置，消费指尖时的五个 `fingertip_link_names`。点云 N 必须匹配数据与显式配置的 Agent/encoder 点数。普通 simulation config 不添加该字段；没有单一 ReplayBuffer 的 MultiTask dataset 不直接捕获 Real metadata。保存的 resolved config 和普通 checkpoint 仍是唯一实验 artifact。
 
-Canonical 的紧凑 root attrs 包含 format/task_name/dt/depth_scale_m_per_unit/pointcloud_config/fingertip_link_names；数组含义见 [Real 数据说明](../dexmani_real/README.md#数据与训练缓存)，不作为重复 runtime ABI。历史桌面平面只在 Real 的 export report 中，推理不读取报告或训练 Zarr。旧缓存从 Raw 重新导出，旧实验不提供部署兼容路径。缺少数值 metadata 或不支持的 live 模态由 Real preflight 拒绝；点云使用保存的数值参数和当前标定，指尖使用保存的 link 选择和当前 hand mount。
+Canonical 的紧凑 root attrs 包含 format/task_name/dt/depth_scale_m_per_unit/pointcloud_config/fingertip_link_names；数组含义见 [Real 数据说明](https://github.com/haoyangzhanglab/dexmani_real/blob/main/README.md#数据与训练缓存)，不作为重复 runtime ABI。历史桌面平面只在 Real 的 export report 中，推理不读取报告或训练 Zarr。旧缓存从 Raw 重新导出，旧实验不提供部署兼容路径。缺少数值 metadata 或不支持的 live 模态由 Real preflight 拒绝；点云使用保存的数值参数和当前标定，指尖使用保存的 link 选择和当前 hand mount。
 
 推理不读取训练 resume contract 的语义。Uni3D 与 DQ-RISE 完整 checkpoint 推理无需其训练初始化文件；其他 backbone 的依赖仍由受管环境提供。
 

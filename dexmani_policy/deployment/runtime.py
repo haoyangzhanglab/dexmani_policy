@@ -54,7 +54,7 @@ def capture_real_runtime(dataset, cfg) -> dict | None:
         shape = buffer["point_cloud"].shape
         if len(shape) != 3 or shape[1] != count:
             raise ValueError("Stored point count disagrees with pointcloud_config")
-        encoder = cfg.agent.get("pc_encoder_config", {})
+        encoder = cfg.agent.get("pc_encoder_config") or {}
         for configured in (cfg.agent.get("num_points"), encoder.get("num_points")):
             if configured is not None and configured != count:
                 raise ValueError(
