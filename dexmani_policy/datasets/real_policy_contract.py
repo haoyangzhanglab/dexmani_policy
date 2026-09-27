@@ -227,10 +227,6 @@ def read_real_contract(path, requested):
     root = zarr.open_group(str(path), mode="r")
     attrs = dict(root.attrs)
     if attrs.get("format") != _CANONICAL_FORMAT:
-        if attrs.get("schema_name") == "dexmani-real-policy-zarr":
-            raise ValueError(
-                "Legacy Real Policy Zarr is derived data: regenerate it from Raw; do not migrate it in place"
-            )
         has_real_semantics = any(
             f"data/{name}" in root
             and str(root[f"data/{name}"].attrs.get("semantic_id", "")).startswith(
