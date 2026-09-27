@@ -126,7 +126,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 最终评测每次写入独立的 `eval_dexsim/<run-id>/`，CLI 会打印准确路径；checkpoint、推理设置、seeds 和指标保存在该目录的 `result_details.json`。背景说明见 [仿真评测机制](docs/仿真评测机制.md)，当前参数与行为以入口帮助和源码为准。
 
-推理步数统一通过 `--inference-steps N` 或 `eval.inference_steps` 设置；sweep 使用 `eval.inference_steps_list`。旧 CLI `--denoise-steps` 和旧 eval 字段仅在输入边界兼容，新旧同层配置冲突会报错，两个 CLI flag 不能同时使用。Python Agent/decoder/runner 接口只接受 `inference_steps`。ManiFlow 的 `denoise_timesteps` 与 RectifiedFlow 的 `num_flow_train_timesteps` 只定义训练网格，`num_inference_steps` 定义 decoder 默认 NFE。
+推理步数统一通过 `--inference-steps N` 或 `eval.inference_steps` 设置；sweep 使用 `eval.inference_steps_list`。CLI 不提供旧别名，eval 配置不转换旧字段名。Python Agent/decoder/runner 接口只接受 `inference_steps`。ManiFlow 的 `denoise_timesteps` 与 RectifiedFlow 的 `num_flow_train_timesteps` 只定义训练网格，`num_inference_steps` 定义 decoder 默认 NFE。
 
 ## Deployment
 
@@ -141,7 +141,13 @@ conda run --no-capture-output -n real_robot python examples/run_policy.py <polic
 
 `best` 读取实验根目录的 `best_ckpt.json`，不存在时明确失败；`latest` 解析 `checkpoints/latest.pt`，也可指定该目录内的文件名。显式 `--weights` / `--inference-steps` 优先；`best` 的未覆盖参数读取 selection record，其他 checkpoint 读取保存的 `eval.use_ema` / `eval.inference_steps`。EMA 缺失不会自动改用 raw。Real 的 `--config` 指向现场硬件配置，不替换 Policy 实验的 `config.yaml`。
 
-训练读取 `format="dexmani.real.canonical"` 的多模态缓存，只加载所选 observation/action 数组。缺失能力、shape/dtype 不匹配、或所选模态包含不支持的 NaN，均在 normalizer 拟合和模型构造前报错；除点云外的模态还检查语义。点云只传递数值 recipe，不校验 semantic ID 或 derivation 说明，仍检查点数和数值参数。实际 dataset 验证后，将 `dt` 和所选数组的 `modality_contracts` 写入 config 的 `real_runtime`，其中包含训练所用的点云数值 recipe、指尖模型/link 表示等；不携带历史桌面标定。非 canonical Real dataset 保存 null，不能直接用于 Real。只支持当前 `format="dexmani.real.canonical"` 和包含完整 `modality_contracts` 的当前 Real 实验；旧缓存重新导出，旧实验不保留部署兼容路径。Canonical 能存储某模态不等于 live Real 支持：未实现的 live 模态会在启动前报错，指尖表示使用保存的 link 列表和当前物理安装参数。推理不重新打开训练 Zarr，也不读取训练 resume contract 的语义。Uni3D 与 DQ-RISE 完整 checkpoint 推理无需其训练初始化文件；其他 backbone 的依赖仍由受管环境提供。
+Dataset / ReplayBuffer 保持通用，只加载配置选择的 observation/action 数组。Real 的 Raw 校验和 canonical 导出负责完整模态的 shape/dtype、对齐及所有浮点训练字段的有限性；Policy 不重复扫描 Real 语义字典或全数组有限性。Normalizer 仍使用完整 ReplayBuffer，`use_aux_ee` 的拼接与归一化不变。
+
+训练构造 dataset 后，deployment metadata helper 从已加载 ReplayBuffer 的 root attrs 识别 `format="dexmani.real.canonical"`，校验 task/dt，按所选输入捕获最小 `real_runtime`：`dt`，消费点云时的完整 `pointcloud` 数值配置，消费指尖时的五个 `fingertip_link_names`。点云 N 必须匹配数据与显式配置的 Agent/encoder 点数。普通 simulation config 不添加该字段；没有单一 ReplayBuffer 的 MultiTask dataset 不直接捕获 Real metadata。保存的 resolved config 和普通 checkpoint 仍是唯一实验 artifact。
+
+Canonical 的紧凑 root attrs 包含 format/task_name/dt/depth_scale_m_per_unit/pointcloud_config/fingertip_link_names；数组含义见 [Real 数据说明](../dexmani_real/README.md#数据与训练缓存)，不作为重复 runtime ABI。历史桌面平面只在 Real 的 export report 中，推理不读取报告或训练 Zarr。旧缓存从 Raw 重新导出，旧实验不提供部署兼容路径。缺少数值 metadata 或不支持的 live 模态由 Real preflight 拒绝；点云使用保存的数值参数和当前标定，指尖使用保存的 link 选择和当前 hand mount。
+
+推理不读取训练 resume contract 的语义。Uni3D 与 DQ-RISE 完整 checkpoint 推理无需其训练初始化文件；其他 backbone 的依赖仍由受管环境提供。
 
 Real parent 只读 config 并确定点云 SHM 大小；policy worker strict restore、warmup 就绪后才启动硬件 workers。当前相机、桌面与手安装标定来自 Real，RGB deterministic resize/center crop 来自保存的 dataset config，Agent ImageProcessor 仍由 Agent 拥有。
 

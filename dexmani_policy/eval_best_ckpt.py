@@ -45,7 +45,7 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config import normalize_eval_config, register_resolvers
+from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.inference import read_best_ckpt_json
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
@@ -516,7 +516,6 @@ def _resolve_final_eval_request(
     cli_inference_steps: int | None = None,
 ):
     """Resolve final-eval inference with CLI > dotlist > record > config."""
-    cfg = normalize_eval_config(cfg)
     override_cfg = parse_eval_overrides(dotlist_overrides)
     merged_cfg = OmegaConf.merge(cfg, override_cfg)
 

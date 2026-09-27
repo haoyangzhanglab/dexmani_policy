@@ -3,8 +3,6 @@
 Heavy imports stay inside restore; parent-side inspection does not load Torch.
 """
 
-from collections.abc import Mapping
-
 
 def positive_int(value: int, name: str) -> int:
     if type(value) is not int or value <= 0:
@@ -18,23 +16,6 @@ def resolve_inference_steps(default_steps: int, inference_steps: int | None) -> 
     return positive_int(inference_steps, "inference_steps")
 
 
-def normalize_inference_settings(settings: Mapping) -> dict:
-    """Normalize one config/selection ingress mapping without mutating it."""
-    result = dict(settings)
-    for legacy, canonical in (
-        ("denoise_steps", "inference_steps"),
-        ("denoise_timesteps_list", "inference_steps_list"),
-    ):
-        if legacy in result:
-            value = result.pop(legacy)
-            if canonical in result and (
-                type(result[canonical]) is not type(value) or result[canonical] != value
-            ):
-                raise ValueError(f"Conflicting {canonical} and legacy {legacy}")
-            result[canonical] = value
-    return result
-
-
 def load_experiment_config(experiment_dir):
     """Read the resolved snapshot without composing current repository YAML."""
     from pathlib import Path
@@ -44,10 +25,8 @@ def load_experiment_config(experiment_dir):
     cfg = OmegaConf.to_container(
         OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True
     )
-    if not isinstance(cfg, dict) or "real_runtime" not in cfg:
-        raise ValueError(
-            "Expected a saved experiment config with real_runtime (possibly null)"
-        )
+    if not isinstance(cfg, dict):
+        raise ValueError("Expected a saved experiment config mapping")
     return cfg
 
 

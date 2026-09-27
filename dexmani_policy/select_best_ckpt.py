@@ -62,7 +62,7 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config import normalize_eval_config, register_resolvers
+from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.training.eval_utils import (
@@ -538,7 +538,7 @@ def main() -> None:
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")
         sys.exit(1)
 
-    cfg = normalize_eval_config(OmegaConf.load(cfg_path))
+    cfg = OmegaConf.load(cfg_path)
     if args.overrides:
         cfg = OmegaConf.merge(cfg, parse_eval_overrides(args.overrides))
     # Keep the experiment path available to saved-config restoration

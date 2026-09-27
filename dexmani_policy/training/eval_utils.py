@@ -16,7 +16,6 @@ import hydra
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import (
-    normalize_eval_config,
     validate_action_key_consistency,
     validate_window_contract,
 )
@@ -65,6 +64,10 @@ def parse_eval_overrides(overrides: list[str]):
     """Only evaluation/inference controls may override checkpoint evaluation."""
     for override in overrides:
         key = override.split("=", 1)[0].lstrip("+~")
+        if key.split(".")[-1] in {"denoise_steps", "denoise_timesteps_list"}:
+            raise ValueError(
+                "Use inference_steps or inference_steps_list for evaluation"
+            )
         if not (
             key.startswith(("eval.", "env_runner."))
             or key in {"training.device", "training.seed"}
@@ -83,7 +86,7 @@ def parse_eval_overrides(overrides: list[str]):
             )
         ):
             raise ValueError(f"Model inputs come from saved dataset config: {key}")
-    return normalize_eval_config(OmegaConf.from_dotlist(overrides))
+    return OmegaConf.from_dotlist(overrides)
 
 
 def validate_inference_steps(inference_steps_list) -> None:
@@ -99,19 +102,12 @@ def validate_inference_steps(inference_steps_list) -> None:
 
 
 def add_inference_steps_argument(parser) -> None:
-    """Keep the old CLI flag only at argparse ingress; never silently override."""
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
+    """Add the shared inference-step override to evaluation CLIs."""
+    parser.add_argument(
         "--inference-steps",
         type=int,
         default=None,
         help="DDIM/Euler inference steps (best: selection record; otherwise config).",
-    )
-    group.add_argument(
-        "--denoise-steps",
-        dest="inference_steps",
-        type=int,
-        help="Compatibility alias for --inference-steps.",
     )
 
 

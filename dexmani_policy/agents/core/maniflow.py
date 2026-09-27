@@ -42,16 +42,15 @@ class ManiFlowObsEncoder(nn.Module):
     ):
         super().__init__()
         if encoder_type != "pointnet_dense":
-            raise ValueError("ManiFlow requires pointnet_dense for point-aligned XYZ PE")
+            raise ValueError(
+                "ManiFlow requires pointnet_dense for point-aligned XYZ PE"
+            )
         if n_obs_steps <= 0:
             raise ValueError("n_obs_steps must be greater than 0")
         pc_encoder_config = dict(pc_encoder_config or {})
-        legacy_num_points = pc_encoder_config.pop("num_points", None)
-        if legacy_num_points is not None and legacy_num_points != num_points:
+        if "num_points" in pc_encoder_config:
             raise ValueError(
-                "Conflicting ManiFlow point counts: "
-                "agent.num_points is authoritative and must match legacy "
-                "pc_encoder_config.num_points"
+                "Configure ManiFlow point count only through agent.num_points"
             )
         pc_encoder_config["num_points"] = num_points
         self.pc_encoder = build_pc_patch_tokenizer(

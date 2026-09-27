@@ -386,7 +386,7 @@ def smoke_test(config_name: str):
                     )
                 del restored
 
-        if saved["real_runtime"] is not None:
+        if saved.get("real_runtime") is not None:
             from dexmani_policy.deployment import inspect_policy, load_policy
 
             for weights in ("raw", "ema") if ema_model is not None else ("raw",):

@@ -49,7 +49,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.common.config import normalize_eval_config, register_resolvers
+from dexmani_policy.common.config import register_resolvers
 from dexmani_policy.common.inference import read_best_ckpt_json
 from dexmani_policy.common.pytorch_util import set_project_root, set_seed
 from dexmani_policy.training.eval_utils import (
@@ -77,7 +77,6 @@ def _resolve_demo_inference(
     cli_inference_steps: int | None,
 ) -> tuple[bool, list[int]]:
     """Resolve demo inference with CLI > best record > saved eval defaults."""
-    cfg = normalize_eval_config(cfg)
     use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
     configured_steps = _get_eval_param(
         cfg, "inference_steps_list", "demo", default=None
@@ -212,7 +211,7 @@ def main() -> None:
         sys.exit(1)
 
     # ── 2. Load config ────────────────────────────────────────────────────
-    cfg = normalize_eval_config(OmegaConf.load(cfg_path))
+    cfg = OmegaConf.load(cfg_path)
     cfg._exp_dir = str(exp_dir)
 
     eval_seed = resolve_eval_seed(cfg)

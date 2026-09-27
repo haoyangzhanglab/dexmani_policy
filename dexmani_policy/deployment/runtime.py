@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,59 @@ from dexmani_policy.common.inference import (
 )
 
 _EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
+
+
+def capture_real_runtime(dataset, cfg) -> dict | None:
+    """Capture numerical deployment inputs from the buffer actually used to train."""
+    buffer = getattr(dataset, "replay_buffer", None)
+    if buffer is None:
+        return None
+    attrs = buffer.root.get("attrs", {})
+    if attrs.get("format") != "dexmani.real.canonical":
+        if attrs.get("domain") == "real" or str(attrs.get("format", "")).startswith(
+            "dexmani.real."
+        ):
+            raise ValueError("Real training requires format='dexmani.real.canonical'")
+        return None
+    if attrs.get("task_name") != cfg.task_name:
+        raise ValueError("Real canonical task_name differs from the training task")
+    dt = attrs.get("dt")
+    if (
+        isinstance(dt, bool)
+        or not isinstance(dt, (int, float))
+        or not math.isfinite(dt)
+        or dt <= 0
+    ):
+        raise ValueError("Real canonical dt must be finite and positive")
+    runtime = {"dt": float(dt)}
+    if "point_cloud" in dataset.sensor_modalities:
+        cloud = attrs.get("pointcloud_config")
+        if not isinstance(cloud, Mapping):
+            raise ValueError("Real point_cloud requires root pointcloud_config")
+        count = positive_int(cloud.get("num_points"), "pointcloud_config.num_points")
+        shape = buffer["point_cloud"].shape
+        if len(shape) != 3 or shape[1] != count:
+            raise ValueError("Stored point count disagrees with pointcloud_config")
+        encoder = cfg.agent.get("pc_encoder_config", {})
+        for configured in (cfg.agent.get("num_points"), encoder.get("num_points")):
+            if configured is not None and configured != count:
+                raise ValueError(
+                    "Agent point count disagrees with the actual training cloud"
+                )
+        runtime["pointcloud"] = dict(cloud)
+    if "fingertip_points" in dataset.sensor_modalities:
+        links = attrs.get("fingertip_link_names")
+        if (
+            not isinstance(links, (list, tuple))
+            or len(links) != 5
+            or any(not isinstance(link, str) or not link.strip() for link in links)
+            or len(set(links)) != 5
+        ):
+            raise ValueError(
+                "Real fingertip_points requires five distinct non-empty link names"
+            )
+        runtime["fingertip_link_names"] = list(links)
+    return runtime
 
 
 def resolve_experiment(selector):
@@ -62,7 +117,8 @@ class PolicyInfo:
     n_action_steps: int
     action_mode: str
     control_dt_s: float | None
-    modality_contracts: dict[str, dict]
+    pointcloud_config: dict | None
+    fingertip_link_names: tuple[str, ...] | None
     weights: str
     inference_steps: int
 
@@ -92,42 +148,15 @@ def inspect_policy(
     action_modes = {"action": "joint", "action_ee": "eef"}
     if cfg["action_key"] not in action_modes:
         raise ValueError("action_key must be action or action_ee")
-    recipe = cfg["real_runtime"]
+    recipe = cfg.get("real_runtime")
     if recipe is not None and not isinstance(recipe, dict):
         raise ValueError("real_runtime must be a mapping or null")
     fields = tuple(cfg["dataset"].get("sensor_modalities", ()))
     if len(set(fields)) != len(fields):
         raise ValueError("Observation fields must be unique")
-    contracts = {}
-    if recipe is not None:
-        from dexmani_policy.datasets.real_policy_contract import (
-            validate_modality_contract,
-        )
-
-        live = {
-            "joint_state",
-            "rgb",
-            "point_cloud",
-            "eef_pose",
-            "fingertip_points",
-            "contact_force",
-            "tactile_force",
-        }
-        unsupported = set(fields) - live
-        if unsupported:
-            raise ValueError(
-                f"Real deployment has no live producer for requested modalities: {sorted(unsupported)}"
-            )
-        saved_contracts = recipe.get("modality_contracts")
-        if not isinstance(saved_contracts, dict):
-            raise ValueError("Saved real_runtime must contain modality_contracts")
-        required = set(fields) | {cfg["action_key"]}
-        if cfg["dataset"].get("use_aux_ee", False):
-            required.add("action_ee")
-        for name in sorted(required):
-            contracts[name] = validate_modality_contract(
-                name, saved_contracts.get(name)
-            )
+    links = recipe.get("fingertip_link_names") if recipe is not None else None
+    if links is not None and not isinstance(links, (list, tuple)):
+        raise ValueError("Saved fingertip_link_names must be a list of link names")
     return PolicyInfo(
         directory,
         path,
@@ -137,8 +166,9 @@ def inspect_policy(
         positive_int(cfg["agent"]["n_obs_steps"], "n_obs_steps"),
         positive_int(cfg["agent"]["n_action_steps"], "n_action_steps"),
         action_modes[cfg["action_key"]],
-        recipe.get("control_dt_s") if recipe is not None else None,
-        contracts,
+        recipe.get("dt") if recipe is not None else None,
+        recipe.get("pointcloud") if recipe is not None else None,
+        tuple(links) if links is not None else None,
         weights,
         steps,
     )
@@ -238,9 +268,7 @@ class LoadedPolicy:
             elif name == "point_cloud":
                 shape, dtype = (
                     (
-                        self.info.modality_contracts["point_cloud"]["recipe"][
-                            "num_points"
-                        ],
+                        self.info.pointcloud_config["num_points"],
                         6,
                     ),
                     np.float32,

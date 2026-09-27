@@ -6,24 +6,6 @@ from numbers import Integral, Real
 
 from omegaconf import DictConfig, OmegaConf
 
-from dexmani_policy.common.inference import normalize_inference_settings
-
-
-def normalize_eval_config(cfg):
-    """Normalize legacy eval names before merging configuration layers.
-
-    Preserve lazy interpolation and the caller's config; only eval ingress
-    owns legacy aliases. Model construction and checkpoint contracts are untouched.
-    """
-    plain = OmegaConf.to_container(cfg, resolve=False) if OmegaConf.is_config(cfg) else dict(cfg)
-    if "eval" in plain:
-        evaluation = normalize_inference_settings(plain["eval"])
-        for section in ("select_best", "offline", "demo"):
-            if evaluation.get(section) is not None:
-                evaluation[section] = normalize_inference_settings(evaluation[section])
-        plain["eval"] = evaluation
-    return OmegaConf.create(plain)
-
 
 def register_resolvers():
     with warnings.catch_warnings():
@@ -57,14 +39,18 @@ def validate_val_ratio(val_ratio) -> None:
         or not math.isfinite(val_ratio)
         or not 0 <= val_ratio < 1
     ):
-        raise ValueError(f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}")
+        raise ValueError(
+            f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}"
+        )
 
 
 def validate_max_train_episodes(value) -> None:
     if value is not None and (
         isinstance(value, bool) or not isinstance(value, Integral) or value < 1
     ):
-        raise ValueError(f"max_train_episodes must be None or a positive integer, got {value!r}")
+        raise ValueError(
+            f"max_train_episodes must be None or a positive integer, got {value!r}"
+        )
 
 
 def validate_dataset_splits(dataset) -> None:

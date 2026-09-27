@@ -111,10 +111,14 @@ def build_dataset_and_normalizer(cfg):
     """
     spec = resolve_normalization_spec(cfg)
     dataset = hydra.utils.instantiate(cfg.dataset)
-    from dexmani_policy.datasets.real_policy_contract import extract_real_runtime
+    from dexmani_policy.deployment.runtime import capture_real_runtime
 
+    runtime = capture_real_runtime(dataset, cfg)
     with open_dict(cfg):
-        cfg.real_runtime = extract_real_runtime(dataset, cfg)
+        if runtime is not None:
+            cfg.real_runtime = runtime
+        else:
+            cfg.pop("real_runtime", None)
     normalizer = build_normalizer(dataset, spec, cfg.action_key)
     validate_normalizer_state(normalizer, spec)
     return dataset, normalizer
