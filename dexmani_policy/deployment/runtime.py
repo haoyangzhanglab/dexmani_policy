@@ -73,9 +73,12 @@ def inspect_policy(
     directory = resolve_experiment(experiment)
     cfg = load_experiment_config(directory) if config is None else config
     path = resolve_checkpoint(directory, checkpoint)
-    defaults = cfg["eval"]
+    defaults = dict(cfg["eval"])
     if checkpoint == "best":
-        defaults = read_best_ckpt_json(directory)["inference"]
+        inference = read_best_ckpt_json(directory).get("inference", {})
+        if not isinstance(inference, dict):
+            raise ValueError("Best inference settings must be an object")
+        defaults.update(inference)
     if weights is None:
         if type(defaults.get("use_ema")) is not bool:
             raise ValueError("Inference defaults require boolean use_ema")

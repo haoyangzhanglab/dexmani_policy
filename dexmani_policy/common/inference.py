@@ -69,24 +69,6 @@ def read_best_ckpt_json(experiment_dir):
     resolved = (root / path).resolve(strict=True)
     if not resolved.is_relative_to(root / "checkpoints") or not resolved.is_file():
         raise ValueError("Best checkpoint must be a file inside experiment/checkpoints")
-    if "inference" in info:
-        inference = info["inference"]
-        if (
-            not isinstance(inference, dict)
-            or type(inference.get("use_ema")) is not bool
-        ):
-            raise ValueError("Best inference settings require boolean use_ema")
-        positive_int(inference.get("inference_steps"), "best inference_steps")
-    if "selection" in info:
-        selection = info["selection"]
-        seeds = selection.get("seeds") if isinstance(selection, dict) else None
-        if (
-            not isinstance(seeds, list)
-            or not seeds
-            or any(type(seed) is not int for seed in seeds)
-            or len(set(seeds)) != len(seeds)
-        ):
-            raise ValueError("Best selection.seeds must contain unique integer seeds")
     return info
 
 

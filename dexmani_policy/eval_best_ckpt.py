@@ -124,6 +124,23 @@ def _setup_eval(
     return agent, env_runner, ckpt_path, ckpt_label, eval_seed
 
 
+def _selection_seeds(best_info) -> list[int]:
+    """Require selection seeds so final evaluation can exclude them."""
+    selection = best_info.get("selection")
+    seeds = selection.get("seeds") if isinstance(selection, dict) else None
+    if (
+        not isinstance(seeds, list)
+        or not seeds
+        or any(type(seed) is not int for seed in seeds)
+        or len(set(seeds)) != len(seeds)
+    ):
+        raise ValueError(
+            "Held-out best evaluation requires non-empty unique integer "
+            "selection.seeds in best_ckpt.json to exclude checkpoint-selection seeds"
+        )
+    return seeds
+
+
 def _select_eval_seeds(
     env_runner,
     eval_seed: int,
@@ -292,6 +309,8 @@ def evaluate_checkpoint_robotwin(
     (success_rate, avg_steps, n_success, n_total)
     """
     validate_inference_steps([inference_steps])
+    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
+    selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
         cfg,
@@ -300,8 +319,6 @@ def evaluate_checkpoint_robotwin(
         use_ema,
         video_save_dir=video_save_dir,
     )
-    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
-    selection_seeds = best_info["selection"]["seeds"] if best_info else []
     eval_seeds = _select_eval_seeds(
         env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
     )
@@ -376,6 +393,8 @@ def evaluate_checkpoint_sweep(
         raise ValueError(
             "Sweep inference steps must be distinct to preserve per-value results"
         )
+    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
+    selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
@@ -387,8 +406,6 @@ def evaluate_checkpoint_sweep(
         video_save_dir=video_save_dir,
     )
     # ── 2. Same seeds for all inference step counts (fair comparison) ──────────
-    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
-    selection_seeds = best_info["selection"]["seeds"] if best_info else []
     eval_seeds = _select_eval_seeds(
         env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
     )
@@ -518,9 +535,12 @@ def _resolve_final_eval_request(
     best_info = None
     if ckpt_tag_or_path == "best":
         best_info = read_best_ckpt_json(exp_dir)
-        inference = best_info["inference"]
-        use_ema = inference["use_ema"]
-        inference_steps_list = [inference["inference_steps"]]
+        inference = best_info.get("inference", {})
+        if not isinstance(inference, dict):
+            raise ValueError("Best inference settings must be an object")
+        use_ema = inference.get("use_ema", use_ema)
+        if "inference_steps" in inference:
+            inference_steps_list = [inference["inference_steps"]]
 
     present, value = _present_config_value(
         override_cfg, ["eval.offline.use_ema", "eval.use_ema"]

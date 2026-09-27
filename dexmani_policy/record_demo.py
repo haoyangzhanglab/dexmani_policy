@@ -11,9 +11,9 @@ Key differences from ``eval_best_ckpt.py``:
 - Designed for machines with an X11 ``DISPLAY``. Wayland sessions require
   XWayland. The viewer window will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
-- With ``--ckpt-tag best``, reuses the strict selection record's EMA choice,
-  denoising step count, and episode-seeded policy sampling mode. Explicit
-  ``--ema``/``--no-ema`` and ``--inference-steps`` override the selected policy.
+- With ``--ckpt-tag best``, uses the record's EMA choice and inference step count
+  when present, falling back to saved config defaults. Explicit
+  ``--ema``/``--no-ema`` and ``--inference-steps`` override these settings.
 
 Usage
 -----
@@ -76,34 +76,34 @@ def _resolve_demo_inference(
     cli_use_ema: bool | None,
     cli_inference_steps: int | None,
 ) -> tuple[bool, list[int]]:
-    """Resolve the policy settings used for a demo recording.
-
-    ``best`` replays the strict selection record unless an EMA or NFE CLI
-    override is supplied. Other checkpoint tags retain ``eval.demo`` config
-    behavior.
-    """
+    """Resolve demo inference with CLI > best record > saved eval defaults."""
     cfg = normalize_eval_config(cfg)
-    if ckpt_tag == "best":
-        inference = read_best_ckpt_json(exp_dir)["inference"]
-        use_ema = inference["use_ema"]
-        inference_steps_list = [inference["inference_steps"]]
+    use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
+    configured_steps = _get_eval_param(
+        cfg, "inference_steps_list", "demo", default=None
+    )
+    if configured_steps is not None:
+        inference_steps_list = list(configured_steps)
     else:
-        use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
-        configured_steps = _get_eval_param(
-            cfg, "inference_steps_list", "demo", default=None
-        )
-        if configured_steps is not None:
-            inference_steps_list = list(configured_steps)
-        else:
-            inference_steps_list = [
-                _get_eval_param(cfg, "inference_steps", "demo", default=10)
-            ]
+        inference_steps_list = [
+            _get_eval_param(cfg, "inference_steps", "demo", default=10)
+        ]
+
+    if ckpt_tag == "best":
+        inference = read_best_ckpt_json(exp_dir).get("inference", {})
+        if not isinstance(inference, dict):
+            raise ValueError("Best inference settings must be an object")
+        use_ema = inference.get("use_ema", use_ema)
+        if "inference_steps" in inference:
+            inference_steps_list = [inference["inference_steps"]]
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema
     if cli_inference_steps is not None:
         inference_steps_list = [cli_inference_steps]
 
+    if type(use_ema) is not bool:
+        raise ValueError(f"use_ema must resolve to boolean, got {use_ema!r}")
     validate_inference_steps(inference_steps_list)
     return use_ema, inference_steps_list
 

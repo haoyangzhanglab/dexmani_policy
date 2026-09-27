@@ -113,24 +113,6 @@ def build_dataset_and_normalizer(cfg):
     dataset = hydra.utils.instantiate(cfg.dataset)
     from dexmani_policy.datasets.real_policy_contract import extract_real_runtime
 
-    def snapshot_defaults(dataset_cfg, actual):
-        with open_dict(dataset_cfg):
-            if hasattr(actual, "sensor_modalities"):
-                dataset_cfg.sensor_modalities = list(actual.sensor_modalities)
-            if "rgb" in getattr(actual, "sensor_modalities", ()):
-                for key in (
-                    "rgb_preprocess_size",
-                    "rgb_random_crop_size",
-                    "rgb_keep_uint8",
-                    "rgb_color_aug",
-                ):
-                    dataset_cfg[key] = getattr(actual, key)
-        for child_cfg, child in zip(
-            dataset_cfg.get("datasets", ()), getattr(actual, "datasets", ())
-        ):
-            snapshot_defaults(child_cfg, child)
-
-    snapshot_defaults(cfg.dataset, dataset)
     with open_dict(cfg):
         cfg.real_runtime = extract_real_runtime(dataset, cfg)
     normalizer = build_normalizer(dataset, spec, cfg.action_key)
