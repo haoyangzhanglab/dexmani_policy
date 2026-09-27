@@ -120,9 +120,7 @@ def inspect_policy(
             )
         saved_contracts = recipe.get("modality_contracts")
         if not isinstance(saved_contracts, dict):
-            raise ValueError(
-                "Saved real_runtime lacks modality_contracts; use an experiment trained on regenerated canonical Raw-derived data"
-            )
+            raise ValueError("Saved real_runtime must contain modality_contracts")
         required = set(fields) | {cfg["action_key"]}
         if cfg["dataset"].get("use_aux_ee", False):
             required.add("action_ee")
