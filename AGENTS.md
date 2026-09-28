@@ -2,63 +2,66 @@
 
 本仓库是**个人机器人学习研究仓库**。AI coding 的目标是帮助研究想法快速、可靠地落地和验证，而不是把代码库建设成通用框架或企业级软件。
 
-文档、解释和任务总结默认使用中文；代码标识符、配置键、命令、库名以及已经形成约定的技术术语保持原样，不做生硬翻译。
+文档、解释和任务总结默认使用中文；代码标识符、配置键、命令、库名及已有技术术语保持原样，不做生硬翻译。
 
-## 1. 工作优先级
+## 1. 核心原则
 
 遇到设计选择时，按以下顺序判断：
 
-1. 研究问题是否清楚，主要实验变量是什么。
-2. config、code、data 的真实行为是否正确。
-3. 实现是否足够简单，便于快速修改和做对照实验。
-4. 实验是否可复现、可解释。
-5. 工程抽象与代码美化只做到当前研究真正需要的程度。
+1. 研究问题是否清楚，真正要验证的变量是什么。
+2. 当前 config、code、data 与实验产物的真实行为是否已经确认。
+3. 修改是否足够小，能形成可解释的对照实验。
+4. 实现是否简单、完整，便于下一轮继续变化。
+5. 结果是否可复现、可追溯。
+6. 工程抽象与代码美化只做到当前研究真正需要的程度。
 
 不要为了“更通用”或“以后可能复用”主动引入 registry、factory、plugin system、兼容层、大型基类或跨目录重构。
 
 ## 2. 事实来源
 
-- **当前 Policy**：读取 `dexmani_policy/configs/*.yaml`，再沿 `agent._target_` 进入实际 Python 实现。
-- **已有实验**：以实验目录中保存的 resolved `config.yaml` 和 checkpoint 为准，不用当前默认 config 推测历史实验。
-- **运行行为**：以实际 training / evaluation / loader / runtime 代码及其校验为准。
-- `README.md` 与 `docs/` 负责导航和背景说明，不替代 config/code。
+- **当前实现**：以当前 config、入口代码和实际 Python 实现为准。
+- **已有实验**：以实验目录中保存的 resolved `config.yaml`、checkpoint 及对应产物为准，不用当前默认配置推测历史实验。
+- **运行行为**：以真实训练、评测、恢复和 runtime 路径及其校验为准。
+- `README.md` 和 `docs/` 用于导航与背景说明，不替代当前实现。
 
-不要假设 config 名、Python 文件名和 Agent 类名一一对应。
+配置名、文件名、类名和内部模块结构都可能随研究变化，不要依赖命名猜测语义。
 
-## 3. 开始编码前
+## 3. 开始修改前
 
-处理 Policy 新增、修改或 review 时，先沿真实调用链阅读：
+不要预设模型必须由某些固定模块组成。先根据当前任务找到**真实执行路径**：
 
 ```text
-config
-→ agent._target_
-→ Agent
-→ observation encoder
-→ backbone / action decoder
-→ compute_loss
-→ predict_action
+用户目标 / 实验目标
+        ↓
+当前配置与运行入口
+        ↓
+实际调用链与数据流
+        ↓
+需要保持不变的行为
+        ↓
+本次真正要改变的研究变量
 ```
 
-先明确这次修改主要属于哪一层：
+至少确认：
 
-- observation / representation
-- policy architecture
-- action representation
-- training objective
-- inference algorithm
+- 当前输入、输出和关键数据从哪里来；
+- 目标行为由哪些代码实际决定；
+- 训练、评测、推理或恢复中哪些路径会受到影响；
+- 哪些变量属于本次实验，哪些应作为控制变量保持不变。
 
-如果一次实验同时改变很多层，应先判断是否能拆成更小的可解释实验。
+如果一次改动同时改变多个核心假设，优先判断能否拆成更小、更容易解释的实验。
 
 ## 4. 实现原则
 
-- **最小但完整**：优先做能端到端运行的最小修改，不留下半套新旧逻辑。
-- **控制变量**：与研究问题无关的行为尽量保持不变，避免顺手改超参数、命名或邻近模块。
-- **语义复用**：已有组件语义一致时直接复用；语义不同则保持新逻辑局部化，不为了形式统一强行共用。
-- **少做抽象**：单个实验使用的小机制可以直接放在最自然的位置，不必为它创建新的公共层。
-- **先读再改**：修改共享组件前先搜索真实调用者，确认影响范围。
-- **不因非关键细节停滞**：研究想法已足够明确但局部实现细节未指定时，选择最简单合理方案并在结果中说明。
+- **最小但完整**：做能端到端运行的最小修改，不留下半套新旧逻辑。
+- **控制变量**：与研究问题无关的行为尽量保持不变，不顺手改超参数、命名和邻近模块。
+- **语义优先**：已有实现语义一致时直接复用；语义不同则保持新逻辑局部化，不为形式统一强行抽象。
+- **少做抽象**：单个实验需要的小机制放在最自然的位置即可，不必先创建公共 framework。
+- **先读再改**：修改共享代码前先搜索真实调用者，确认影响范围。
+- **主动推进**：研究目标已清楚但非关键实现细节未指定时，选择最简单合理方案，并在总结中说明。
+- **面向变化**：仓库结构和模型设计都可能演进；规则与 skill 应描述工作方法，而不是复制当前模型结构。
 
-不要把单次模型宽度、学习率、batch size、NFE、训练时长或实验结论写进全局 AI 文档。
+单次模型结构、输入模态、动作表示、优化器、学习率、batch size、NFE、训练时长或实验结论，都不应写成仓库级 AI 长期规则。
 
 ## 5. 验证策略
 
@@ -66,56 +69,67 @@ config
 
 1. **纯文档**：检查 diff、路径、链接和命令是否与仓库一致。
 2. **Python 局部修改**：语法 / import / 最小定向检查。
-3. **Config 或 Policy 修改**：
+3. **配置或研究实现修改**：若当前 smoke 入口适用，优先运行
 
    ```bash
    python dexmani_policy/smoke_test.py --config-only <config_name>
    ```
 
-4. **涉及 dataset / model / forward / inference 链路**：在环境允许时运行
+4. **进入实际数据 / 训练 / 推理路径**：在环境允许且能覆盖当前风险时运行
 
    ```bash
    python dexmani_policy/smoke_test.py <config_name>
    ```
 
-5. **完整训练、DDP、长时间评测、视频录制**：只有用户明确要求，或它确实是验证当前问题所必需时才启动。
+5. **完整训练、DDP、长时间评测、视频录制**：只有用户明确要求，或确实是验证当前问题所必需时才启动。
 
-只把真正执行过的检查报告为 `PASS`。受 GPU、数据、权重、仿真环境等限制的项目明确写 `NOT VERIFIED`，不要为了让检查通过而改变算法语义或降低校验标准。
+验证命令本身也可能随仓库演进；如果现有入口发生变化，应先读取当前 README、脚本与源码，而不是机械执行旧规则。
+
+只把真正执行过的检查报告为 `PASS`。受 GPU、数据、权重、仿真环境等限制的项目明确写 `NOT VERIFIED`，不要为了让检查通过而改变研究语义或降低校验标准。
 
 ## 6. 实验与产物
 
 - 不删除或覆盖与当前任务无关的 `robot_data/`、`experiments/`、checkpoint、视频、W&B 日志和预训练权重。
-- 已有实验恢复时，始终尊重该实验保存的 resolved config 与 checkpoint。
+- 恢复已有实验时，始终尊重该实验保存的配置与状态。
 - 不自动启动真机运动；Real robot motion 必须由用户明确要求。
 - 除非任务明确要求，不主动进行大规模训练、批量评测或生成大量实验产物。
 
 ## 7. 文档职责
 
-- `README.md`：给人看的稳定入口、常用命令和仓库地图。
-- `AGENTS.md`：AI coding 的研究协作原则与工作方法。
-- `CLAUDE.md`：Claude Code 的加载入口，只引用共享规则。
-- `docs/`：较长的背景、机制和运维说明。
+- **README.md**：怎么使用这个研究仓库；维护稳定入口、常用命令和仓库地图。
+- **AGENTS.md**：AI 应该怎样和用户一起做研究；维护跨模型、跨实验都成立的协作原则。
+- **CLAUDE.md**：Claude 去哪里读取规则；只作为加载入口，不复制共享规范。
+- **docs/**：较长的背景、机制与运维说明。
 
-普通 Policy 实验不需要同步修改这些全局文档；只有稳定入口、仓库结构、通用工作流或长期约定发生变化时再更新。
+普通研究实验不需要同步修改这些全局文档；只有稳定入口、仓库结构、通用工作流或长期约定发生变化时再更新。
 
 ## 8. 常用入口
 
-- `dexmani_policy/configs/`：Hydra Policy configs
-- `dexmani_policy/agents/`：Agent / encoders / backbones / decoders
-- `dexmani_policy/datasets/`：datasets / replay buffer / preprocessing
-- `dexmani_policy/training/`：training / checkpoint / resume / EMA
-- `dexmani_policy/evaluation/`：offline evaluation
-- `dexmani_policy/env_runner/`：simulation runners
-- `dexmani_policy/deployment/`：saved-policy / Real runtime
-- `dexmani_policy/train.py`、`train_ddp.py`、`smoke_test.py`：根入口
+- `dexmani_policy/configs/`：当前实验与运行配置
+- `dexmani_policy/agents/`：策略与研究实现
+- `dexmani_policy/datasets/`：数据读取、采样与预处理
+- `dexmani_policy/training/`：训练、状态保存与恢复
+- `dexmani_policy/evaluation/`：离线评测
+- `dexmani_policy/env_runner/`：仿真执行
+- `dexmani_policy/deployment/`：已保存策略 / Real runtime
+- `dexmani_policy/train.py`、`train_ddp.py`、`smoke_test.py`：当前根入口
 - `scripts/training/`、`scripts/eval/`、`scripts/remote/`、`scripts/utils/`：用户工作流
+
+这些是当前仓库导航，不是永久架构约束；实际结构变化后应以代码为准。
 
 ## 9. 项目级 Skills
 
-任务匹配时优先使用短 workflow skill：
+Skill 必须保持**模型无关、机制无关**：描述“如何研究”，而不是描述“当前模型长什么样”。
 
-- `research-iterate`：把研究假设转成最小实现，并完成定向验证和下一步实验命令。
-- `preflight-experiment`：昂贵训练或评测前检查 config、模态、shape、normalization、checkpoint 与 inference 设置。
+- `research-iterate`：研究假设 → 找到真实改动面 → 最小实现 → 定向验证 → 下一步实验。
+- `preflight-experiment`：昂贵运行前确认配置、数据、依赖、产物、恢复状态和运行条件是否一致。
 
-Skill 是工作流提示，不是新的工程抽象层；不要为了 skill 再建立 supporting framework。
+Skill 中不要写死：
+
+- encoder / backbone / decoder 等特定模块分层；
+- 当前 observation、action 或 modality 列表；
+- 某一种 diffusion / flow / transformer 等算法范式；
+- 当前 checkpoint 字段、特定超参数名或某个具体 Policy。
+
+如果未来模型或训练范式改变，skill 应仍然可以直接使用。
 

@@ -1,39 +1,36 @@
 ---
 name: preflight-experiment
-description: 在消耗 GPU 时间前，对 DexMani 的训练、续训或评测配置做一次简洁的高价值预检查。
+description: 在消耗大量计算或实验时间前，检查当前运行所依赖的配置、数据、实现、产物与环境是否相互一致；不绑定特定模型结构。
 ---
 
 # 实验预检查
 
-适用于准备启动较贵的训练 / 评测，或当前命令、config、checkpoint 看起来可能存在不一致时。
+用于训练、续训、评测、推理或其他昂贵运行之前的 sanity check。检查对象来自**当前仓库和当前实验**，而不是 skill 内预设的一套模型契约。
 
-## 检查内容
+## 流程
 
-1. 解析目标 config 与 overrides，确认实际 `agent._target_`。
-2. 核对 observation keys / modalities、history / window / horizon、action dimension 和明显的 shape contract。
-3. 核对 normalization，以及 observation encoder → backbone → action decoder 的接口是否一致。
-4. 核对容易静默漂移的训练 / 推理设置，尤其是 checkpoint、raw / EMA 选择和 `inference_steps`。
-5. 核对 dataset / task 路径，以及请求的模态是否真实存在。
-6. 对 resume / evaluation，确认实验的 resolved config 与 checkpoint 属于同一语义，并且恢复方式有效。
-
-## 验证
-
-适用时优先运行：
-
-```bash
-python dexmani_policy/smoke_test.py --config-only <config_name>
-```
-
-只有当完整 smoke 能实际覆盖当前风险、且所需 GPU / 数据环境可用时，才继续运行 full smoke。
-
-预检查本身不启动正式训练或长时间评测，除非用户明确要求。
+1. **确认目标**：明确准备运行什么、使用哪个实验 / 配置 / checkpoint / 数据，以及期望得到什么产物。
+2. **解析当前入口**：读取当前命令、配置和源码，确认真实执行路径与最终生效的参数。
+3. **检查输入输出**：核对当前实现真正需要的数据、shape / dtype / key / 路径等契约；只检查实际存在的契约，不假设固定模态或动作格式。
+4. **检查组件一致性**：沿真实调用链确认相邻组件的接口、维度、状态与配置彼此兼容，不预设组件名称或层次结构。
+5. **检查实验产物**：对 resume / evaluation / inference，确认配置、checkpoint、normalizer、缓存或其他必需产物来自兼容的实验状态。
+6. **检查运行条件**：确认所需依赖、设备、数据、权重、环境服务和资源是否可用。
+7. **执行最低成本验证**：优先使用当前仓库已有的轻量检查；只有能显著降低风险时才继续更昂贵的 smoke / dry-run。
 
 ## 输出
 
-结果保持简短，至少包含：
+结果保持简短：
 
-- `通过`：已经实际验证，可以进入下一步；
-- `阻塞`：需要先修复的具体问题；
-- `未验证`：因 GPU / 数据 / 权重 / 环境限制无法确认的项目；
-- 建议执行的完整命令。
+- `通过`：已实际验证，可以进入下一步；
+- `阻塞`：启动前必须修复的具体问题；
+- `未验证`：因环境、数据、设备或权限限制无法确认的项目；
+- 建议执行的完整下一步命令。
+
+## 原则
+
+- 不写死 observation、action、modality、模型分层或算法范式。
+- 不写死当前 checkpoint 字段、NFE、EMA 等具体实现；只有当前代码实际使用时才检查。
+- 不假设某个固定 config key 永久存在；先读取当前配置和入口。
+- 预检查不改变研究设定来“让它通过”。
+- 除非用户明确要求，预检查本身不启动正式长时间运行。
 
