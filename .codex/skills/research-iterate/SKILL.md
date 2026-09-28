@@ -1,33 +1,33 @@
 ---
 name: research-iterate
-description: Implement or modify a DexMani robot-policy research idea with the smallest coherent code/config change and a fast validation loop.
+description: 将 DexMani 的机器人策略研究想法以最小、完整的代码或配置改动落地，并完成快速验证闭环。
 ---
 
-# Research Iterate
+# 研究迭代
 
-Use this when prototyping a new representation, encoder, backbone, decoder, conditioning mechanism, objective, or closely related Policy idea.
+适用于新增或修改 representation、encoder、backbone、action decoder、conditioning、objective 等 Policy 研究机制。
 
-## Workflow
+## 流程
 
-1. State the research hypothesis in one sentence and identify the main experimental variable.
-2. Open the relevant Hydra config and follow `agent._target_` to the real implementation before editing.
-3. Find the smallest end-to-end change surface. Reuse existing components when their semantics already match.
-4. Implement the idea completely enough to run; keep experiment-specific logic local.
-5. Run the cheapest relevant validation:
-   - config/doc only → inspect diff / config-only smoke;
-   - model/data path changed → targeted check or full smoke if the environment supports it.
-6. Finish with:
-   - what scientific variable changed;
-   - files changed;
-   - expected behavioral effect;
-   - one exact command for the next experiment;
-   - anything not verified.
+1. 用一句话写清研究假设，并指出这次实验真正改变的主要变量。
+2. 打开对应 Hydra config，沿 `agent._target_` 追到实际实现，不根据文件名猜模型。
+3. 找到最小的端到端修改范围；已有组件语义一致时直接复用。
+4. 完成可运行实现，研究特有逻辑尽量留在局部，不顺带重构无关代码。
+5. 做最低成本且足够的验证：
+   - 只改 config / 文档：检查 diff 或运行 config-only smoke；
+   - 改到 model / data 链路：做定向检查，必要且环境允许时再跑完整 smoke。
+6. 最终说明：
+   - 改变了哪个研究变量；
+   - 修改了哪些文件；
+   - 预期会影响什么行为；
+   - 下一条可直接执行的实验命令；
+   - 哪些内容尚未验证。
 
-## Keep It Vibe-Friendly
+## 原则
 
-- Prefer a direct working implementation over a reusable framework.
-- Do not add compatibility layers, registries, factories, or broad refactors unless the task truly needs them.
-- Do not rewrite global docs for ordinary hyperparameter or architecture experiments.
-- Do not launch long training or evaluation unless explicitly requested.
-- If a non-critical design detail is underspecified, choose the simplest reasonable option and proceed.
+- 优先得到一个清楚、可运行、可比较的实现，而不是先建立可复用框架。
+- 不主动增加兼容层、registry、factory 或大范围重构。
+- 普通超参数和局部架构实验不修改全局文档。
+- 除非用户明确要求，不启动长时间训练或评测。
+- 非关键实现细节没有指定时，采用最简单合理方案并继续推进。
 
