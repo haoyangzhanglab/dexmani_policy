@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from timm.models.vision_transformer import Mlp, RmsNorm
 
@@ -34,6 +35,33 @@ class AdaLNZero(nn.Module):
         return x
 
 
+class ManiFlowCrossAttention(CrossAttention):
+    def prepare_kv(self, context):
+        batch, length, _ = context.shape
+        kv = (
+            self.kv(context)
+            .reshape(batch, length, 2, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        k, v = kv.unbind(0)
+        return self.k_norm(k), v
+
+    def forward(self, x, context, *, context_kv=None):
+        if context_kv is None:
+            return super().forward(x, context)
+        batch, length, dim = x.shape
+        q = self.q(x).reshape(batch, length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        q = self.q_norm(q)
+        k, v = context_kv
+        if self.fused_attn:
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        else:
+            weights = ((q * self.scale) @ k.transpose(-2, -1)).softmax(dim=-1)
+            out = weights @ v
+        out = out.permute(0, 2, 1, 3).reshape(batch, length, dim)
+        return self.proj_drop(self.proj(out))
+
+
 class DiTXBlock(nn.Module):
     def __init__(
         self,
@@ -55,7 +83,7 @@ class DiTXBlock(nn.Module):
             dropout=p_drop_attn,
         )
 
-        self.cross_attn = CrossAttention(
+        self.cross_attn = ManiFlowCrossAttention(
             dim=hidden_size,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
@@ -76,7 +104,7 @@ class DiTXBlock(nn.Module):
         modulation_size = 9 * hidden_size
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, modulation_size, bias=True))
 
-    def forward(self, x, time_c, context_c, attn_mask=None):
+    def forward(self, x, time_c, context_c, attn_mask=None, *, context_kv=None):
         modulation = self.adaLN_modulation(time_c)
 
         chunks = modulation.chunk(9, dim=-1)
@@ -91,7 +119,7 @@ class DiTXBlock(nn.Module):
         x = x + gate_msa.unsqueeze(1) * self_attn_output
 
         normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)
-        cross_attn_output = self.cross_attn(normed_x_cross, context_c, mask=None)
+        cross_attn_output = self.cross_attn(normed_x_cross, context_c, context_kv=context_kv)
         x = x + gate_cross.unsqueeze(1) * cross_attn_output
 
         normed_x_mlp = modulate(self.norm3(x), shift_mlp, scale_mlp)
@@ -251,7 +279,26 @@ class ConsistencyDiTX(nn.Module):
             extra_blacklist=(RmsNorm,),
         )
 
-    def forward(self, x, timestep, target_t, context):
+    def _embed_context(self, context):
+        if context.shape[1] == 0 or context.shape[1] % self.n_obs_steps != 0:
+            raise ValueError("context token count must be nonzero and divisible by n_obs_steps")
+        context_c = self.context_embedder(context)
+        # Flattening is frame-major: every point in a frame shares its PE.
+        frame_pe = self.context_frame_pos_embed.repeat_interleave(
+            context.shape[1] // self.n_obs_steps, dim=1
+        )
+        context_c = context_c + frame_pe.to(dtype=context_c.dtype)
+        return context_c
+
+    def prepare_context_kv(self, context):
+        # Only eval context without time-dependent AdaLN is constant across ODE steps.
+        # The caller owns this cache for one sample; no tensors persist on the module.
+        if self.training or self.pre_norm_modality:
+            return None
+        context_c = self._embed_context(context)
+        return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
+
+    def forward(self, x, timestep, target_t, context, *, context_kv=None):
         x = self.input_embedder(x) + self.input_pos_embed.to(dtype=x.dtype)
 
         if not torch.is_tensor(timestep):
@@ -270,19 +317,17 @@ class ConsistencyDiTX(nn.Module):
 
         time_c = self.timestep_and_target_t_fusion(torch.cat([timestep_embed, target_t_embed], dim=-1))
 
-        if context.shape[1] == 0 or context.shape[1] % self.n_obs_steps != 0:
-            raise ValueError("context token count must be nonzero and divisible by n_obs_steps")
-        context_c = self.context_embedder(context)
-        # Flattening is frame-major: every point in a frame shares its PE.
-        frame_pe = self.context_frame_pos_embed.repeat_interleave(
-            context.shape[1] // self.n_obs_steps, dim=1
-        )
-        context_c = context_c + frame_pe.to(dtype=context_c.dtype)
+        context_c = self._embed_context(context) if context_kv is None else None
         if self.pre_norm_modality:
             context_c = self.context_norm(context_c, time_c)
 
-        for block in self.ditx_blocks:
-            x = block(x, time_c, context_c)
+        for index, block in enumerate(self.ditx_blocks):
+            x = block(
+                x,
+                time_c,
+                context_c,
+                context_kv=None if context_kv is None else context_kv[index],
+            )
 
         x = self.final_layer(x)
 

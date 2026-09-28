@@ -276,6 +276,7 @@ class ConsistencyFlowMatch(nn.Module):
         batch_size = x0.shape[0]
         x = x0
         dt = 1.0 / num_steps
+        context_kv = self.model.prepare_context_kv(cond)
 
         for step in range(num_steps):
             t = torch.full(
@@ -299,6 +300,7 @@ class ConsistencyFlowMatch(nn.Module):
                 timestep=t,
                 target_t=target_t,
                 context=cond,
+                context_kv=context_kv,
             )
             x = x + dt * velocity
 
