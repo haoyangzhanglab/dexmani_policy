@@ -1,108 +1,101 @@
 # AGENTS.md — DexMani_Policy
 
-本文件是 **Codex 与 Claude 共用的项目工程规范**。Codex 直接读取本文件，Claude 通过根目录 `CLAUDE.md` 的原生导入加载同一份内容。共享规则只在此维护；操作命令见 [README.md](README.md)。工具专属的模型、权限和子代理设置留在各自配置文件。
+这是一个**个人机器人学习研究仓库**。AI coding 的首要目标是帮助快速、可靠地验证研究想法，而不是追求企业级抽象、兼容层或文档完备度。
 
-**当前 Policy 事实来自 config/code，本文只维护稳定的工程规则和工作方法。**
+## Priorities
+
+按以下顺序做判断：
+
+1. 研究问题与实验变量是否清楚。
+2. 当前 config / code / data 的真实行为是否正确。
+3. 实现是否足够简单，能快速修改和比较。
+4. 结果是否可复现、可解释。
+5. 工程美化只做到当前研究所需程度。
+
+避免为了“更通用”“更优雅”主动引入 framework、registry、factory、兼容层或大范围重构。
 
 ## Source of Truth
 
-按任务类型使用以下事实来源：
+- **当前 Policy**：`dexmani_policy/configs/*.yaml` + `agent._target_` 指向的实际源码。
+- **已有实验**：实验目录中保存的 resolved `config.yaml` + checkpoint。
+- **运行行为**：实际训练、评测、loader、runtime 校验代码。
+- `README.md` 和 `docs/` 用于导航与背景，不替代 config/code。
 
-1. **已有实验**：保存的 resolved `config.yaml` 是模型构造、action/window/normalization、输入模态和推理预处理的唯一配置来源；normal training checkpoint 提供模型/EMA/normalizer 状态。`resume_contract` 只用于严格续训，推理不读取其语义。
-2. **当前 Policy**：读取 `dexmani_policy/configs/<config>.yaml`，再沿 `agent._target_` 进入实际 Python 实现。
-3. **运行时接口**：以 `validate_config`、Agent/runtime 校验、训练/评测入口代码为准。
-4. `README.md` 提供操作说明，`docs/` 提供背景；二者均不作为当前 Policy 架构、超参数或 tensor shape 的最终依据。`CLAUDE.md` 仅负责加载本规范。
+不要假设 config 名、文件名和 Agent 类名一一对应。
 
-不要假设 config 名、Python 文件名和 Agent 类名相同。Hydra `_target_` 是实现入口；仓库没有需要同步维护的 Policy registry。
+## Working Style
 
-## Working Method
+- 先打开相关 config 和真实调用链，再改代码；不要对没读过的实现做推断。
+- 优先最小、完整的 diff。修当前问题，不顺带整理邻近代码。
+- 能复用现有组件就复用；只有研究语义确实不同才新建组件。
+- 研究特有机制尽量局部化，不把一次实验抽象成全仓基础设施。
+- 保持数据、observation、action、normalization、objective、inference 的语义边界清楚。
+- 遇到粗略研究想法时，补齐最简单合理的实现细节并推进；不要因为非关键选择阻塞工作。
+- 不为单次超参数、模型宽度、NFE、batch size 或实验结论修改全局文档。
 
-- 先读实际调用链，再修改；优先修根因，改动保持小而完整，不顺带重构无关模块。
-- 修改共享基类/组件前，通过 config/import 搜索真实依赖者和影响范围，再选择定向回归。
-- 对特殊 conditioning、scheduler、cache 等看起来奇怪的实现，先检查局部代码、验证场景和调用者；不要依赖历史文档断言它一定是 intentional design。
+## Policy Changes
 
-### Policy 工作路径
-
-处理 Policy 新增、修改或 review 时，从 resolved config 开始追踪：
+处理一个 Policy idea 时优先沿这条路径：
 
 ```text
 config
 → agent._target_
-→ Agent.__init__
-→ obs_encoder
-→ backbone / action_decoder
+→ Agent
+→ observation encoder
+→ backbone / action decoder
 → compute_loss
 → predict_action
-→ environment-facing control_action
 ```
 
-明确区分并核对：
+明确当前改动属于哪一层：
 
-- Observation Representation
-- Policy Architecture
-- Action Representation
-- Training Objective
-- Inference Algorithm
+- observation / representation
+- policy architecture
+- action representation
+- training objective
+- inference algorithm
 
-不要从其他 Policy 机械复制实现。优先复用语义真正一致的共享组件；Policy 特有逻辑保持局部化。
+一次实验尽量只改变少数层，便于解释结果。
 
-### 文档维护
+## Validation
 
-- 正常的 Policy architecture / hyperparameter 修改，或新增一个不改变公共接口的 Policy，**不需要同步修改 README、AGENTS 或 CLAUDE**。只有公共 CLI、仓库级接口、通用工作流或环境契约变化时才修改对应全局文件。
-- 不要把 layer 数、hidden dim、LR/WD、NFE、batch size、参数量、当前 Policy 列表或实验结论加入全局 AI 文档。易变的研究 recipe 留在 config、实现、实验快照或局部验证附近。
-- `docs/` 视为冻结背景文档；除非用户明确要求，不要修改。
+验证遵循“便宜优先”：
 
-## Repository Entry Points
+1. 文档改动：检查 diff、路径和命令是否真实。
+2. Python 改动：语法 / import / targeted check。
+3. Config 或 Policy 改动：
+   `python dexmani_policy/smoke_test.py --config-only <config_name>`
+4. 改到 model/data/forward 链路时，再考虑：
+   `python dexmani_policy/smoke_test.py <config_name>`
+5. 完整训练、DDP、长时间评测或视频录制，只在用户明确要求或验证确实需要时启动。
 
-- `dexmani_policy/configs/`：Hydra Policy config；`ddp/` 为可选 DDP overlay。
-- `dexmani_policy/agents/`：Agent、observation encoder、backbone、action decoder、loader、normalization。
-- `dexmani_policy/datasets/`：数据、sampler 和 RGB preprocessing。
-- `dexmani_policy/training/`：build、trainer、checkpoint、EMA、resume、workspace。
-- `dexmani_policy/evaluation/`：offline evaluation shared protocol。
-- `dexmani_policy/utils/`：跨 domain 的通用 config/path/random/tensor/validation helper。
-- `dexmani_policy/env_runner/`：simulation runner。
-- `dexmani_policy/deployment/`：Real config inspection/inference runtime。
-- `dexmani_policy/train.py` / `train_ddp.py`：训练入口。
-- `dexmani_policy/smoke_test.py`：配置与集成验证。
-- `scripts/training/`、`scripts/eval/`、`scripts/remote/`：操作入口。
+只把真正执行过的检查报告为 PASS；受 GPU、数据、权重、仿真环境限制的项目写明 `NOT VERIFIED`。
 
-## Environment and Safety
+## Research Artifacts and Safety
 
-- 使用 Python 3.10+ 和 Conda 环境 `policy`；非交互 shell 优先使用 `conda run --no-capture-output -n policy <command>`。
-- `pip install -e .` 只覆盖项目声明的核心依赖；完整 Policy 依赖由受管环境提供。仿真评测需要安装 `dexmani_sim`。
-- Shell 启动器通过 `conda run` 选择环境；不要在启用 `set -u` 的 shell 中直接执行 Conda 激活钩子。
-- 训练数据路径来自 config，通常为仓库根目录下 `robot_data/<task>.zarr`。
-- 完整 smoke、训练和大多数评测依赖 CUDA/GPU。环境缺少 GPU、数据、权重、显示服务或 `dexmani_sim` 时，报告限制，不要为了让检查通过而改核心逻辑。
-- 不修改或提交 `robot_data/`、`experiments/`、checkpoint、视频、W&B 日志、预训练权重等生成物；不覆盖与当前任务无关的用户改动。
-- 除非用户明确要求，不自动启动完整训练、DDP、长时间评测或视频录制。
-- 续训必须显式指定 `resume_from` 并满足 strict resume contract；重复训练命令不会自动续训。
+- 不删除或覆盖与当前任务无关的 `robot_data/`、`experiments/`、checkpoint、视频、W&B 日志、预训练权重。
+- 不为了通过检查修改算法语义或降低验证标准。
+- 不自动启动真机运动。Real robot motion 必须由用户明确要求。
+- 已有实验恢复时尊重保存的 resolved config 与 checkpoint；不要凭当前默认 config 猜历史模型。
 
-## Validation Ladder
+## Stable Entry Points
 
-按改动范围选择验证，成本从低到高：
+- `dexmani_policy/configs/` — Policy configs
+- `dexmani_policy/agents/` — Agent / encoders / backbones / decoders
+- `dexmani_policy/datasets/` — datasets and preprocessing
+- `dexmani_policy/training/` — training / checkpoint / resume
+- `dexmani_policy/evaluation/` — offline evaluation
+- `dexmani_policy/env_runner/` — simulation
+- `dexmani_policy/deployment/` — saved-policy / Real runtime
+- `dexmani_policy/train.py`, `train_ddp.py`, `smoke_test.py` — root entry points
+- `scripts/training/`, `scripts/eval/`, `scripts/remote/` — user workflows
 
-1. Python 改动：语法/导入检查。
-2. Config 改动或新增 Policy：
-   `conda run --no-capture-output -n policy python dexmani_policy/smoke_test.py --config-only <config_name>`
-3. Agent/encoder/backbone/decoder/config 改动：
-   `conda run --no-capture-output -n policy python dexmani_policy/smoke_test.py <config_name>`
-4. 共享模块改动：搜索实际依赖者，对代表性受影响 config 增加 targeted smoke。
-5. 训练/评测行为改动：使用最小可证明场景；只有用户明确要求时再扩大到完整运行。
+## Skills
 
-`--config-only` 负责 Hydra resolve、公共 config validation、target module 检查和 `agent._target_` import；它不实例化 env runner。full smoke 才验证 dataset/normalizer → model/EMA → optimizer/scheduler → forward/backward → inference → checkpoint roundtrip。语法和 config-only 检查不能代替 checkpoint strict restore 或实际 inference 验证。
+当任务匹配时优先使用仓库内的短 workflow skill：
 
-仓库有意不保留 `tests/`；使用现有 smoke 入口与临时定向回归验证，不为检查恢复测试目录。纯文档改动检查链接、命令与源码的一致性及 diff，不要求运行模型 smoke。
+- `research-iterate`：研究想法 → 最小实现 → targeted validation → 可运行实验命令。
+- `preflight-experiment`：训练/评测前检查 config、模态、shape、normalization、checkpoint 与 inference 设置。
 
-只有实际执行的检查才能报告 PASS。环境限制或未执行的相关验证明确标为 **NOT VERIFIED**，尤其是 GPU/数据相关验证。
+这些 skill 是工作流提示，不是新的工程层；不要为了 skill 再新增 supporting framework。
 
-## Deployment Boundary
-
-- The experiment directory is the evaluation artifact: saved resolved `config.yaml` plus a normal training checkpoint. Do not add a separate deployment export, contract, ABI, or compatibility path.
-- Save config after constructing the actual dataset. Datasets remain domain-agnostic and load only requested observation/action arrays. Strict Raw validation and canonical export in Real own training-data finiteness. Training-private metadata capture reads the loaded ReplayBuffer root attrs for `format="dexmani.real.canonical"`, validates task/dt and selected numerical requirements, and saves only `dt`, optional complete `pointcloud` config and optional `fingertip_link_names` in `real_runtime`. Ordinary datasets omit this field; MultiTask without a single ReplayBuffer has no direct Real capture. Do not duplicate semantic dictionaries or reopen Zarr for capture. Regenerate obsolete caches from Raw and retrain experiments rather than adding compatibility branches.
-- Model construction, normalization modes, modalities, and deterministic RGB preprocessing come from saved config. Fitted normalizers and DQ-RISE runtime codebook buffers come from strict checkpoint restoration.
-- Training-only external initialization runs through Agent-owned initialization; complete-checkpoint inference skips Uni3D pretrained and DQ-RISE NPZ loading.
-- Shared inference restoration never validates training resume contracts. Keep strict training resume, rank RNG/cursor restoration, and raw/EMA selection; missing requested EMA is an error.
-- Real derives a small runtime PolicyInfo without loading checkpoint tensors in the parent. Policy/CUDA belongs to the policy worker; restore and warmup must succeed before hardware workers connect.
-- Current camera calibration, serial, intrinsics, depth scale, table plane and hand mounting remain Real-owned. Do not compare them with training calibration. Keep the historical training table plane only as export provenance, not as live deployment configuration. Restore saved fingertip link choices with the current physical mount. Canonical capability does not imply a live producer: unsupported live modalities must fail before motion.
-- RGB uses saved dataset deterministic validation preprocessing before the Agent-owned ImageProcessor. Real supplies raw uint8 HWC images.
-- No committed tests directory; use existing smoke and temporary focused checks.

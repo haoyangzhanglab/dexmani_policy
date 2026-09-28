@@ -2,5 +2,6 @@
 
 @AGENTS.md
 
-AGENTS.md 是 Codex 与 Claude 共用的项目工程规范。
-共享规则只在 AGENTS.md 中维护；使用命令见 [README.md](README.md)。
+仓库级规则只维护在 `AGENTS.md`。可复用研究工作流位于 `.claude/skills/`。
+保持修改简洁、研究导向、可验证；不要把个人研究仓库过度工程化。
+
