@@ -1,8 +1,8 @@
 # DexMani Policy 基础设施修复任务书
 
-状态：**方案已复查，等待实现**。本文不是“代码已修复”或“GPU 验收已通过”的声明。
+状态：**历史任务书，已实施并补充验收**。当前改动、测试结果与环境限制见 [基础设施修复报告](docs/infra_fix_report.md)。下文保留原审查问题和验收要求，用于追溯，不代表这些缺陷目前仍然存在，也不代表 GPU 验收通过。
 
-审查基线：[`141b0337c148d4f2dd09ade11f4db660a8ab9c4d`](https://github.com/haoyangzhanglab/dexmani_policy/tree/141b0337c148d4f2dd09ade11f4db660a8ab9c4d)。发布任务书前已确认 GitHub `main` 的实现仍为此版本。执行时以本地实际 HEAD 和工作区为准，先检查差异，**不要 reset 到审查基线**。
+最初审查基线：[`141b0337c148d4f2dd09ade11f4db660a8ab9c4d`](https://github.com/haoyangzhanglab/dexmani_policy/tree/141b0337c148d4f2dd09ade11f4db660a8ab9c4d)。发布任务书前已确认 GitHub `main` 的实现仍为此版本。执行时以本地实际 HEAD 和工作区为准，先检查差异，**不要 reset 到审查基线**。
 
 目标：服务个人机器人学习论文研究，让训练、恢复、数据读取、选点和评测**简单、正确、高效、好用**。完成下列局部修复，保持已有正确的算法与研究变量，不建设通用框架。
 

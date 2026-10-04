@@ -87,11 +87,7 @@ def parse_eval_overrides(overrides: list[str]):
 
 
 def validate_inference_steps(inference_steps_list) -> None:
-    """Pre-episode NFE validation for the CLI ``--inference-steps`` override.
-
-    Fails at startup on an invalid NFE (non-integer or non-positive) instead of
-    being swallowed by the per-episode exception layer after ``env.reset``.
-    """
+    """Reject an empty list or non-positive/non-integer NFE before rollout."""
     if not inference_steps_list:
         raise ValueError("inference_steps_list must be non-empty")
     for nfe in inference_steps_list:
@@ -406,6 +402,14 @@ def validate_heldout(runner, best_info, seeds):
     for task, requested in mapped_task_seeds(runner, seeds).items():
         if set(requested) & set(excluded.get(task, [])):
             raise ValueError(f"Held-out task/seed overlap for {task}; rerun selection")
+
+
+def selection_provenance(best_info):
+    """Keep selection evidence separate from the actual inference overrides."""
+    if best_info is None:
+        return {}
+    return {key: best_info.get(key) for key in
+            ("selection_id", "selection_summary", "selection")}
 
 
 def artifact_reference(path, exp_dir):

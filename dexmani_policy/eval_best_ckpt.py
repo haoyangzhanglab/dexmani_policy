@@ -8,13 +8,17 @@ directory, including a scalar success rate in ``_result.txt``.
 Evaluation protocol
 -------------------
 
-1. Load the specified checkpoint with explicitly resolved EMA/raw weights.
-2. Resolve the evaluation seed from ``--seed`` or saved ``training.seed + 1024``.
-3. Read the current runner's evaluation seed pool, then exclude
-   ``best_ckpt.json`` selection seeds for final ``best`` evaluation.
-4. Run one episode per seed with environment/policy RNG reseeding. This
-   does not guarantee bitwise-identical trajectories across GPU/driver/kernels.
-5. Output: ``success_rate = n_success / n_total`` and avg steps.
+1. Resolve ``best`` once to its selection record and concrete checkpoint path.
+   Explicit inference overrides take precedence over that record and config.
+2. Resolve the shuffle seed from effective ``training.seed + 1024``; the final
+   evaluation CLI accepts ``training.seed=...`` dotlist overrides, not ``--seed``.
+3. Restore the saved Agent from the concrete checkpoint with the resolved
+   EMA/raw choice.
+4. Read the runner's seed pool, exclude the pinned selection seeds, and validate
+   held-out task/seed identities before rollout.
+5. Run each seed with environment/policy RNG reseeding and save statistics and
+   provenance. This does not guarantee identical trajectories across
+   GPU/driver/kernels.
 
 The reported metrics are empirical success rates and step averages;
 per-task statistics include 95% Wilson intervals.
@@ -46,13 +50,13 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.agents.loader import read_best_ckpt_json
+from dexmani_policy.agents.loader import resolve_best_checkpoint
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param,
-    save_eval_snapshot, mapped_task_seeds, validate_heldout, artifact_reference,
+    save_eval_snapshot, mapped_task_seeds, validate_heldout, artifact_reference, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
     collect_episode_details,
@@ -296,8 +300,9 @@ def evaluate_checkpoint_robotwin(
     *,
     ckpt_tag_or_path: str = "best",
     episodes: int = 100,
-    inference_steps: int = 10,
-    use_ema: bool = True,
+    inference_steps: int | None = None,
+    use_ema: bool | None = None,
+    resolved_best: tuple[dict, Path] | None = None,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
 ) -> tuple[float, float | None, int, int]:
@@ -309,21 +314,29 @@ def evaluate_checkpoint_robotwin(
     ckpt_tag_or_path : ``"best"``, ``"latest"``, ``"20pct"``, or a path.
         ``"best"`` requires the selection record written by ``select_best_ckpt.py``.
     episodes : number of seeds to evaluate (default: 100).
-    inference_steps : DDIM/Euler inference steps.
-    use_ema : select EMA weights; missing EMA weights are an error.
+    inference_steps : DDIM/Euler inference steps; None uses best/config defaults.
+    use_ema : None uses best/config defaults; missing requested EMA is an error.
+    resolved_best : optional (record, concrete path) already resolved by the caller.
+        Preserves best held-out semantics even with a concrete ckpt_tag_or_path.
 
     Returns
     -------
     (success_rate, avg_steps, n_success, n_total)
     """
-    validate_inference_steps([inference_steps])
-    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
+    cfg, use_ema, steps, resolved_best = _resolve_final_eval_request(
+        cfg, exp_dir, ckpt_tag_or_path, [], cli_use_ema=use_ema,
+        cli_inference_steps=inference_steps, resolved_best=resolved_best,
+    )
+    if len(steps) != 1:
+        raise ValueError("Single evaluation requires one NFE; use evaluate_checkpoint_sweep")
+    inference_steps = steps[0]
+    best_info = resolved_best[0] if resolved_best is not None else None
     selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
         cfg,
         exp_dir,
-        str((exp_dir / best_info["ckpt_relpath"]).resolve()) if best_info is not None else ckpt_tag_or_path,
+        str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
         use_ema,
         video_save_dir=video_save_dir,
     )
@@ -339,6 +352,7 @@ def evaluate_checkpoint_robotwin(
         inference_steps_list=[inference_steps], episodes=episodes, shuffle_seed=eval_seed,
         policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
         selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
+        **selection_provenance(best_info),
     )
 
     info = _run_one_inference_setting(
@@ -393,7 +407,8 @@ def evaluate_checkpoint_sweep(
     ckpt_tag_or_path: str = "best",
     episodes: int = 100,
     inference_steps_list: list[int],
-    use_ema: bool = True,
+    use_ema: bool | None = None,
+    resolved_best: tuple[dict, Path] | None = None,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
 ) -> list[dict]:
@@ -412,7 +427,11 @@ def evaluate_checkpoint_sweep(
         raise ValueError(
             "Sweep inference steps must be distinct to preserve per-value results"
         )
-    best_info = read_best_ckpt_json(exp_dir) if ckpt_tag_or_path == "best" else None
+    cfg, use_ema, inference_steps_list, resolved_best = _resolve_final_eval_request(
+        cfg, exp_dir, ckpt_tag_or_path, [], cli_use_ema=use_ema,
+        cli_inference_steps_list=inference_steps_list, resolved_best=resolved_best,
+    )
+    best_info = resolved_best[0] if resolved_best is not None else None
     selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
@@ -420,7 +439,7 @@ def evaluate_checkpoint_sweep(
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
         cfg,
         exp_dir,
-        str((exp_dir / best_info["ckpt_relpath"]).resolve()) if best_info is not None else ckpt_tag_or_path,
+        str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
         use_ema,
         video_save_dir=video_save_dir,
     )
@@ -437,6 +456,7 @@ def evaluate_checkpoint_sweep(
         inference_steps_list=inference_steps_list, episodes=episodes, shuffle_seed=eval_seed,
         policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
         selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
+        **selection_provenance(best_info),
     )
 
     # ── 3. Sweep over inference steps ─────────────────────────────────
@@ -544,8 +564,14 @@ def _resolve_final_eval_request(
     *,
     cli_use_ema: bool | None = None,
     cli_inference_steps: int | None = None,
+    cli_inference_steps_list: list[int] | None = None,
+    resolved_best: tuple[dict, Path] | None = None,
 ):
-    """Resolve final-eval inference with CLI > dotlist > record > config."""
+    """Resolve explicit call/CLI arguments > dotlist > pinned record > config.
+
+    Return (effective config, EMA choice, NFE list, resolved best or None).
+    Callers pass the resolved pair onward without rereading the best alias.
+    """
     override_cfg = parse_eval_overrides(dotlist_overrides)
     merged_cfg = OmegaConf.merge(cfg, override_cfg)
 
@@ -561,9 +587,10 @@ def _resolve_final_eval_request(
         ]
     use_ema = config_use_ema
 
-    best_info = None
-    if ckpt_tag_or_path == "best":
-        best_info = read_best_ckpt_json(exp_dir)
+    if resolved_best is None and ckpt_tag_or_path == "best":
+        resolved_best = resolve_best_checkpoint(exp_dir)
+    if resolved_best is not None:
+        best_info = resolved_best[0]
         inference = best_info.get("inference", {})
         if not isinstance(inference, dict):
             raise ValueError("Best inference settings must be an object")
@@ -591,6 +618,8 @@ def _resolve_final_eval_request(
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema
+    if cli_inference_steps_list is not None:
+        inference_steps_list = list(cli_inference_steps_list)
     if cli_inference_steps is not None:
         inference_steps_list = [cli_inference_steps]
     if not isinstance(use_ema, bool):
@@ -602,7 +631,7 @@ def _resolve_final_eval_request(
         merged_cfg,
         use_ema,
         inference_steps_list,
-        best_info,
+        resolved_best,
     )
 
 
@@ -697,7 +726,7 @@ def main() -> None:
         sys.exit(1)
 
     ckpt_tag_or_path = args.ckpt_path if args.ckpt_path else args.ckpt_tag
-    cfg, use_ema, inference_steps_list, _ = _resolve_final_eval_request(
+    cfg, use_ema, inference_steps_list, resolved_best = _resolve_final_eval_request(
         OmegaConf.load(cfg_path),
         exp_dir,
         ckpt_tag_or_path,
@@ -739,6 +768,7 @@ def main() -> None:
                 exp_dir,
                 cfg,
                 ckpt_tag_or_path=ckpt_tag_or_path,
+                resolved_best=resolved_best,
                 episodes=episodes,
                 inference_steps_list=inference_steps_list,
                 use_ema=use_ema,
@@ -750,6 +780,7 @@ def main() -> None:
                 exp_dir,
                 cfg,
                 ckpt_tag_or_path=ckpt_tag_or_path,
+                resolved_best=resolved_best,
                 episodes=episodes,
                 inference_steps=inference_steps_list[0],
                 use_ema=use_ema,

@@ -1,4 +1,5 @@
 import json
+import sys
 import os
 import re
 import subprocess
@@ -10,10 +11,12 @@ from unittest.mock import patch
 
 from omegaconf import OmegaConf
 from dexmani_policy.evaluation.protocol import (wilson_interval,validate_heldout,
-    mapped_task_seeds,compute_eval_stats,atomic_json,build_eval_runner,save_eval_snapshot)
-from dexmani_policy.agents.loader import read_best_ckpt_json
+    mapped_task_seeds,atomic_json,build_eval_runner,save_eval_snapshot)
+from dexmani_policy.agents.loader import read_best_ckpt_json, resolve_best_checkpoint
 from dexmani_policy import select_best_ckpt as selector
 from dexmani_policy import eval_best_ckpt as evaluator
+from dexmani_policy import record_demo as demo
+from dexmani_policy.deployment import runtime
 
 # The mapping methods need no simulator. Supply only the package constant if
 # the optional simulator is absent, then import the actual runner implementation.
@@ -47,6 +50,25 @@ def experiment(tmp):
     return root,cfg
 
 
+def publish_best(root, step):
+    record = {
+        'ckpt_relpath': f'checkpoints/epoch=0000-step={step:08d}-milestone={step}pct.pt',
+        'global_step': step, 'pct': step,
+        'selection_id': f'selection-{step}',
+        'selection_summary': f'selection-{step}.json',
+        'inference': {'use_ema': step == 20, 'inference_steps': 10 if step == 20 else 3},
+        'selection': {'seeds': [0, 1] if step == 20 else [2, 3],
+                      'task_seeds': {'a': [0, 1] if step == 20 else [2, 3]}},
+    }
+    atomic_json(root / record['selection_summary'], {
+        'status': 'success', 'selection_id': record['selection_id'],
+        'best_checkpoint': {k: record[k] for k in ('ckpt_relpath', 'global_step', 'pct')},
+        'selection': record['selection'],
+    })
+    atomic_json(root / 'best_ckpt.json', record)
+    return record
+
+
 class EvaluationInfraTests(unittest.TestCase):
     def test_wilson(self):
         self.assertIsNone(wilson_interval(0,0))
@@ -73,10 +95,15 @@ class EvaluationInfraTests(unittest.TestCase):
             self.assertTrue(snapshot.runner_inputs[cfg.task_name].env_kwargs.randomize_table_height)
             self.assertTrue(snapshot.runner_inputs[cfg.task_name].env_kwargs.randomize_model_id)
             best={'inference':{'use_ema':True,'inference_steps':10}}
-            with patch.object(evaluator,'read_best_ckpt_json',return_value=best):
+            with patch.object(evaluator,'resolve_best_checkpoint',return_value=(best, root/'checkpoints/a.pt')):
                 _,ema,steps,_=evaluator._resolve_final_eval_request(cfg,root,'best',
                     ['eval.inference_steps=4'],cli_use_ema=False,cli_inference_steps=7)
                 self.assertFalse(ema); self.assertEqual(steps,[7])
+                best['inference']['inference_steps'] = 0
+                _, ema, steps, _ = evaluator._resolve_final_eval_request(
+                    cfg, root, 'best', [], cli_use_ema=False,
+                    cli_inference_steps_list=[2, 5])
+                self.assertFalse(ema); self.assertEqual(steps, [2, 5])
 
     def test_real_multitask_mapping(self):
         runner=MultiTaskSimRunner.__new__(MultiTaskSimRunner)
@@ -130,6 +157,114 @@ class EvaluationInfraTests(unittest.TestCase):
             self.assertEqual(before,(root/'best_ckpt.json').read_bytes())
             (root/third['selection_summary']).unlink()
             with self.assertRaises(FileNotFoundError): read_best_ckpt_json(root)
+
+    def test_best_is_pinned_across_publication(self):
+        # Each entry runs real parameter resolution, concrete-path loading and
+        # snapshot/result persistence; only the Agent and simulator are replaced.
+        cases = [
+            ('eval', [], True, [10]),
+            ('eval', ['eval.inference_steps_list=[2,5]', 'eval.use_ema=false'], False, [2, 5]),
+            ('eval', ['--ema', '--inference-steps', '7', 'eval.use_ema=false',
+                      'eval.inference_steps=4'], True, [7]),
+            ('demo', [], True, [10]),
+            ('demo', ['--no-ema', '--inference-steps', '7'], False, [7]),
+            ('direct', [], True, [10]),
+            ('direct_override', [], False, [7]),
+            ('direct_sweep', [], False, [2, 5]),
+        ]
+        for entry, extra, expected_ema, expected_steps in cases:
+            with self.subTest(entry=entry, extra=extra), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp)
+                root = project / 'experiments/dp/t/run'
+                root.mkdir(parents=True)
+                root, cfg = experiment(root)
+                first = publish_best(root, 20)
+                runner = Runner()
+                module = demo if entry == 'demo' else evaluator
+                def read_then_publish(directory):
+                    resolved = resolve_best_checkpoint(directory)
+                    publish_best(root, 40)
+                    return resolved
+                def load(path, use_ema, **kwargs):
+                    self.assertEqual(path, root / first['ckpt_relpath'])
+                    self.assertEqual(use_ema, expected_ema)
+                    return types.SimpleNamespace(_checkpoint_global_step=20)
+                argv = ['test', '--policy-name', 'dp', '--task-name', 't',
+                        '--exp-name', 'run', '--episodes', '20']
+                if entry == 'eval': argv += ['--no-videos']
+                with patch.object(module, 'ROOT_DIR', project), \
+                     patch.object(module, 'resolve_best_checkpoint', side_effect=read_then_publish) as read, \
+                     patch.object(module, 'build_eval_runner', return_value=runner), \
+                     patch.object(module, 'load_ckpt_for_inference', side_effect=load) as restore, \
+                     patch.object(sys, 'argv', argv + extra):
+                    if entry == 'direct':
+                        evaluator.evaluate_checkpoint_robotwin(root, cfg, episodes=20)
+                    elif entry == 'direct_override':
+                        # A concrete path plus its record must retain best held-out semantics.
+                        resolved = module.resolve_best_checkpoint(root)
+                        evaluator.evaluate_checkpoint_robotwin(root, cfg, episodes=20,
+                            ckpt_tag_or_path=str(resolved[1]), resolved_best=resolved,
+                            use_ema=False, inference_steps=7)
+                    elif entry == 'direct_sweep':
+                        evaluator.evaluate_checkpoint_sweep(root, cfg, episodes=20,
+                            use_ema=False, inference_steps_list=[2, 5])
+                    else:
+                        module.main()
+                    self.assertEqual(read.call_count, 1)
+                    self.assertEqual(restore.call_count, 1)
+                self.assertEqual([call[1]['inference_steps'] for call in runner.calls], expected_steps)
+                for seeds, _ in runner.calls:
+                    if entry != 'demo':
+                        self.assertEqual(set(seeds), set(range(2, 20)))
+                snapshots = list(root.rglob('eval_config.yaml'))
+                self.assertEqual(len(snapshots), 1)
+                saved = OmegaConf.load(snapshots[0]).request
+                self.assertEqual(saved.selection_id, first['selection_id'])
+                self.assertEqual(saved.selection_summary, first['selection_summary'])
+                self.assertEqual(OmegaConf.to_container(saved.selection), first['selection'])
+                self.assertEqual(saved.checkpoint, first['ckpt_relpath'])
+                self.assertEqual(saved.global_step, 20)
+                self.assertEqual(saved.use_ema, expected_ema)
+                self.assertEqual(list(saved.inference_steps_list), expected_steps)
+                self.assertEqual(saved.heldout_from_selection, entry != 'demo')
+                self.assertEqual(list(saved.task_seeds.a), runner.calls[0][0])
+                if entry != 'demo': self.assertEqual(list(saved.selection_seeds_excluded), [0, 1])
+                results = list(root.rglob('result_details.json'))
+                self.assertEqual(len(results), len(expected_steps))
+                for result in results:
+                    info = json.loads(result.read_text())
+                    self.assertEqual(info['global_step'], 20)
+                    self.assertEqual(info['use_ema'], expected_ema)
+                    self.assertTrue((root / info['eval_config']).is_file())
+
+    def test_inspection_pins_best_and_historical_boundaries(self):
+        from dexmani_policy.smoke_test import load_config
+        with tempfile.TemporaryDirectory() as tmp:
+            root, cfg = experiment(tmp)
+            OmegaConf.save(load_config('dp3'), root / 'config.yaml')
+            first = publish_best(root, 20)
+            def read_then_publish(directory):
+                resolved = resolve_best_checkpoint(directory)
+                publish_best(root, 40)
+                return resolved
+            with patch.object(runtime, 'resolve_best_checkpoint', side_effect=read_then_publish) as read:
+                info = runtime.inspect_policy(root)
+                self.assertEqual(read.call_count, 1)
+            self.assertEqual(info.checkpoint_path, root / first['ckpt_relpath'])
+            self.assertEqual((info.weights, info.inference_steps), ('ema', 10))
+            old = {k: v for k, v in first.items() if k not in ('selection_id', 'selection_summary')}
+            atomic_json(root / 'best_ckpt.json', old)
+            with self.assertWarnsRegex(UserWarning, 'Historical best'):
+                resolved = resolve_best_checkpoint(root)
+            self.assertEqual(resolved[0], old)
+            with patch.object(evaluator, 'build_eval_runner', return_value=Runner()), \
+                 patch.object(evaluator, 'load_ckpt_for_inference', return_value=types.SimpleNamespace(_checkpoint_global_step=20)):
+                evaluator.evaluate_checkpoint_robotwin(root, cfg, resolved_best=resolved, episodes=2)
+            multi = MultiTaskSimRunner.__new__(MultiTaskSimRunner)
+            multi.runners = {'a': None, 'b': None}
+            multi._task_seed_pools = {'a': [0,1,2,3], 'b': [100,101,102,103]}
+            with self.assertRaisesRegex(ValueError, 'identity'):
+                validate_heldout(multi, old, [2,3])
 
     def test_actual_rsync_options_two_rounds(self):
         script=Path('scripts/remote/sync_down.sh').read_text()

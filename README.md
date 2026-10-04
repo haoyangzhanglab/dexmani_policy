@@ -29,7 +29,7 @@ python -m pip check
 python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit
 ```
 
-已在独立 venv 中复用现有 `policy` 软件包验证安装、依赖检查和默认 DP/DP3 CPU 构造；从零下载安装尚未验证，验证环境和复验命令见 [基础设施修复报告](docs/infra_fix_report.md)。
+已在不继承系统 site-packages 的全新 venv 中完成 Python 3.10.20、Torch 2.4.1+cpu / torchvision 0.19.1+cpu 的安装、依赖导入、13 个配置解析和默认 DP/DP3 构造（使用已有权重缓存，保留 LoRA）。CUDA 扩展与 GPU 执行仍未验证；具体命令和边界见 [基础设施修复报告](docs/infra_fix_report.md)。
 
 新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
 
@@ -137,9 +137,9 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 每次 selection、final eval 和 demo 都保存独立目录及 `eval_config.yaml`，包括实际推理参数、环境、task/seed 和代码版本；候选明细可重算选点指标。selection 默认不录像，显式加 `--videos` 才记录候选/阶段隔离的视频。demo 保存各 NFE 的结果明细，但不属于 held-out 评测。
 
-`best_ckpt.json` 指向最近一次**成功发布**的 selection；失败保留旧 best，并以非零状态结束。新 best 的 summary 或权重尚未同步时会报缺失，不替换为其他权重。多任务 held-out 校验任务顺序、seed 池身份与真实 `(task, seed)` 无交集；旧多任务记录缺证据需重新选点，普通权重推理仍允许。
+`best_ckpt.json` 指向最近一次**成功发布**的 selection；失败保留旧 best，并以非零状态结束。评测、demo 和 policy inspection 在一次调用中固定同一份 best 记录与具体权重；显式覆盖 EMA/NFE 时，仍保留该 selection 的来源证据。新 best 的 summary 或权重尚未同步时会报缺失，不替换为其他权重。多任务 held-out 校验任务顺序、seed 池身份与真实 `(task, seed)` 无交集；旧多任务记录缺证据需重新选点，普通权重推理仍允许。
 
-远程启动使用独立 session/log，不自动终止旧会话。停止时使用启动输出中的 `stop_remote.sh <SESSION>`。`sync_down.sh` 对小型评测 JSON/YAML 使用 checksum 更新，checkpoint 继续增量下载。
+远程启动需要本地可用的 `python3` 或 `python`，通过标准库生成独立 session/log 名，不依赖本地 `/proc`，不自动终止旧会话。停止时使用启动输出中的 `stop_remote.sh <SESSION>`。`sync_down.sh` 对小型评测 JSON/YAML 使用 checksum 更新，checkpoint 继续增量下载。
 
 ## 其他工作流
 

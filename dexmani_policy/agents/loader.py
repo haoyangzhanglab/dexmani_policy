@@ -18,8 +18,8 @@ def load_experiment_config(experiment_dir):
     return cfg
 
 
-def read_best_ckpt_json(experiment_dir):
-    """Read selection essentials; extra reporting fields are not a schema."""
+def resolve_best_checkpoint(experiment_dir):
+    """Read one best record and return it with its validated concrete weight path."""
     import json
     from pathlib import Path
 
@@ -57,7 +57,12 @@ def read_best_ckpt_json(experiment_dir):
     else:
         import warnings
         warnings.warn("Historical best has no selection identity/summary; provenance is unverified", stacklevel=2)
-    return info
+    return info, resolved
+
+
+def read_best_ckpt_json(experiment_dir):
+    """Read selection essentials; retain the historical dictionary interface."""
+    return resolve_best_checkpoint(experiment_dir)[0]
 
 
 def resolve_checkpoint(experiment_dir, selector="best"):
@@ -65,7 +70,7 @@ def resolve_checkpoint(experiment_dir, selector="best"):
 
     root = Path(experiment_dir).resolve()
     if selector == "best":
-        path = root / read_best_ckpt_json(root)["ckpt_relpath"]
+        return resolve_best_checkpoint(root)[1]
     elif selector == "latest":
         path = root / "checkpoints/latest.pt"
     else:

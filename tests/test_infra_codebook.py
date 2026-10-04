@@ -61,6 +61,60 @@ class CodebookInfraTests(unittest.TestCase):
                 for name,tensor in before.items(): torch.testing.assert_close(tensor,m.state_dict()[name],rtol=0,atol=0)
                 self.assertEqual(m.artifact_metadata,metadata)
 
+    def test_runtime_dtype_validation_is_atomic(self):
+        m = manager()
+        m.artifact_metadata = {'source': 'unchanged'}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'candidate.npz'
+            m.save(path)
+            with np.load(path) as data:
+                good = {key: data[key].copy() for key in data.files}
+            candidates = [
+                {'hand_min': np.array(1., dtype=np.float64),
+                 'hand_max': np.array(1. + 1e-9, dtype=np.float64)},
+                {'hand_normalizer_scale': np.full(3, 1e-50, dtype=np.float64)},
+                {'hand_min': np.array(-3e38, dtype=np.float64),
+                 'hand_max': np.array(3e38, dtype=np.float64)},
+            ]
+            for entry in ('npz', 'state_dict'):
+                for candidate in candidates:
+                    before = copy.deepcopy(m.state_dict())
+                    attrs = copy.deepcopy((m.hand_dim, m.num_groups, m.codebook_size,
+                                           m.total_combinations, m.artifact_metadata,
+                                           m._group_sorted_poses))
+                    with self.subTest(entry=entry, fields=list(candidate)):
+                        with self.assertRaises((ValueError, RuntimeError)):
+                            if entry == 'npz':
+                                np.savez(path, **dict(good, **candidate))
+                                m.load(path)
+                            else:
+                                state = copy.deepcopy(before)
+                                state.update({k: torch.from_numpy(v) for k, v in candidate.items()})
+                                m.load_state_dict(state)
+                        for key, tensor in before.items():
+                            torch.testing.assert_close(tensor, m.state_dict()[key], rtol=0, atol=0)
+                        self.assertEqual(attrs, (m.hand_dim, m.num_groups, m.codebook_size,
+                                                m.total_combinations, m.artifact_metadata,
+                                                m._group_sorted_poses))
+            # The same values are valid in a double target: no float32 coercion.
+            double = copy.deepcopy(m).double()
+            state = copy.deepcopy(double.state_dict())
+            state.update({k: torch.from_numpy(v) for k, v in candidates[0].items()})
+            double.load_state_dict(state)
+            self.assertGreater(float(double.hand_max - double.hand_min), 0)
+            np.savez(path, **dict(good, **candidates[1]))
+            double.load(path)
+            self.assertTrue((double.hand_normalizer_scale != 0).all())
+            # Conversely, a half target must check its own narrower range.
+            half = copy.deepcopy(m).half()
+            with self.assertRaises(RuntimeError):
+                half.load_state_dict(m.state_dict())
+
+    def test_constructor_runtime_range(self):
+        for low, high in ((1., 1. + 1e-9), (-3e38, 3e38)):
+            with self.subTest(low=low, high=high), self.assertRaises(ValueError):
+                CodebookManager(3, hand_min=low, hand_max=high)
+
     def test_state_dict_preconversion_validation(self):
         m=manager()
         for key,value in [('pca_permutation',torch.arange(4).float()),

@@ -11,8 +11,9 @@ Key differences from ``eval_best_ckpt.py``:
 - Designed for machines with an X11 ``DISPLAY``. Wayland sessions require
   XWayland. The viewer window will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
-- With ``--ckpt-tag best``, uses the record's EMA choice and inference step count
-  when present, falling back to saved config defaults. Explicit
+- With ``--ckpt-tag best``, pins one record and its concrete checkpoint path,
+  using its EMA choice and inference step count when present and saved config
+  defaults otherwise. Explicit
   ``--ema``/``--no-ema`` and ``--inference-steps`` override these settings.
 
 Usage
@@ -54,12 +55,12 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.agents.loader import read_best_ckpt_json
+from dexmani_policy.agents.loader import resolve_best_checkpoint
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param,
-    save_eval_snapshot, mapped_task_seeds, artifact_reference, atomic_json, compute_eval_stats,
+    save_eval_snapshot, mapped_task_seeds, artifact_reference, atomic_json, compute_eval_stats, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
     collect_episode_details,
@@ -81,8 +82,8 @@ def _resolve_demo_inference(
     *,
     cli_use_ema: bool | None,
     cli_inference_steps: int | None,
-) -> tuple[bool, list[int]]:
-    """Resolve demo inference with CLI > best record > saved eval defaults."""
+) -> tuple[bool, list[int], tuple[dict, Path] | None]:
+    """Return EMA/NFE and a pinned best pair; CLI > record > saved defaults."""
     use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
     configured_steps = _get_eval_param(
         cfg, "inference_steps_list", "demo", default=None
@@ -94,8 +95,9 @@ def _resolve_demo_inference(
             _get_eval_param(cfg, "inference_steps", "demo", default=10)
         ]
 
-    if ckpt_tag == "best":
-        inference = read_best_ckpt_json(exp_dir).get("inference", {})
+    resolved_best = resolve_best_checkpoint(exp_dir) if ckpt_tag == "best" else None
+    if resolved_best is not None:
+        inference = resolved_best[0].get("inference", {})
         if not isinstance(inference, dict):
             raise ValueError("Best inference settings must be an object")
         use_ema = inference.get("use_ema", use_ema)
@@ -110,7 +112,7 @@ def _resolve_demo_inference(
     if type(use_ema) is not bool:
         raise ValueError(f"use_ema must resolve to boolean, got {use_ema!r}")
     validate_inference_steps(inference_steps_list)
-    return use_ema, inference_steps_list
+    return use_ema, inference_steps_list, resolved_best
 
 
 def main() -> None:
@@ -225,7 +227,7 @@ def main() -> None:
 
     cprint(f"Device: {cfg.training.device}", "cyan")
 
-    use_ema, inference_steps_list = _resolve_demo_inference(
+    use_ema, inference_steps_list, resolved_best = _resolve_demo_inference(
         cfg,
         exp_dir,
         args.ckpt_tag,
@@ -267,8 +269,11 @@ def main() -> None:
     output_base.mkdir(parents=True, exist_ok=True)
     video_save_dir = Path(tempfile.mkdtemp(prefix=timestamp+"_", dir=output_base))
 
-    # ── 5. Resolve checkpoint ─────────────────────────────────────────────
-    ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, args.ckpt_tag)
+    # ── 5. Use the pinned best path or resolve a non-best selector ─────────
+    ckpt_path, ckpt_label = resolve_checkpoint_path(
+        exp_dir, str(resolved_best[1]) if resolved_best is not None else args.ckpt_tag
+    )
+    best_info = resolved_best[0] if resolved_best is not None else None
 
     # ── 6. Resolve parameters ─────────────────────────────────────────────
     demo_episodes = (
@@ -281,6 +286,8 @@ def main() -> None:
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
     agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
+    if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+        raise ValueError("Best record global_step disagrees with actual checkpoint state")
     cprint("✅ Checkpoint loaded\n", "green")
 
     # ── 7. Print recording config ─────────────────────────────────────────
@@ -325,6 +332,7 @@ def main() -> None:
         task_seeds=mapped_task_seeds(env_runner, eval_seeds),
         viewer_resolution=list(resolved_resolution), env_video_fps=resolved_fps,
         heldout_from_selection=False,
+        **selection_provenance(best_info),
     )
 
     # ── 9. Run episodes (sweep or single) ─────────────────────────────────

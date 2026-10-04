@@ -11,7 +11,7 @@ import numpy as np
 
 from dexmani_policy.agents.loader import (
     load_experiment_config,
-    read_best_ckpt_json,
+    resolve_best_checkpoint,
     resolve_checkpoint,
 )
 from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
@@ -70,10 +70,11 @@ def inspect_policy(
 ):
     directory = resolve_experiment(experiment)
     cfg = load_experiment_config(directory) if config is None else config
-    path = resolve_checkpoint(directory, checkpoint)
+    resolved_best = resolve_best_checkpoint(directory) if checkpoint == "best" else None
+    path = resolved_best[1] if resolved_best is not None else resolve_checkpoint(directory, checkpoint)
     defaults = dict(cfg["eval"])
-    if checkpoint == "best":
-        inference = read_best_ckpt_json(directory).get("inference", {})
+    if resolved_best is not None:
+        inference = resolved_best[0].get("inference", {})
         if not isinstance(inference, dict):
             raise ValueError("Best inference settings must be an object")
         defaults.update(inference)

@@ -86,6 +86,8 @@ SERVER="${DEX_SERVER:-dexserver}"
 
 ### 2.2 本地与远端 Python 环境
 
+启动客户端需要本地可用的 `python3` 或 `python`，仅用标准库 `uuid.uuid4().hex` 生成 session 后缀；两者均不可用时明确报错，dry-run 同样需要此步骤。本地不需要安装训练依赖，也不依赖 `/proc` UUID 节点。
+
 本地 README 约定的研究环境与远端训练脚本使用的 Python executable 不要求同名。远端实际 executable 由 `train_remote.sh` 配置区的 `CONDA_PYTHON` 决定。
 
 不要根据环境名推断依赖一致性；需要确认时：
@@ -486,7 +488,7 @@ training stdout/stderr → remote logs/
 
 训练进程退出后 tmux session 自动结束；日志文件保留 crash traceback / exit status。
 
-每次启动的 session 与日志带唯一后缀；启动脚本不 kill 旧 session，日志采用独占创建。最终名字冲突会失败，停止旧实验须显式调用 `stop_remote.sh <SESSION>`。
+每次启动的 session 与日志带由本地 Python 生成的独立 UUID 后缀；启动脚本不 kill 旧 session，日志采用独占创建。最终名字冲突会失败，停止旧实验须显式调用 `stop_remote.sh <SESSION>`。
 
 脚本启动成功后会打印实际 session name。后续 attach/stop 应使用该输出，不要在文档或外部脚本重新实现 session-name 规则。
 

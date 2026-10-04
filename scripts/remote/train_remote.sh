@@ -119,7 +119,21 @@ remote_bash_invocation() {
     printf "bash -lc '%s'" "$escaped_script"
 }
 
-SESSION="dex_${CONFIG//\//_}_${TASK//+/_}_$(date +%Y%m%d_%H%M%S)_$(cat /proc/sys/kernel/random/uuid)"
+# This runs on the client; CONDA_PYTHON names an interpreter on the server.
+launch_uuid=""
+for local_python in python3 python; do
+    if command -v "$local_python" >/dev/null 2>&1 && \
+       launch_uuid=$("$local_python" -c 'import uuid; print(uuid.uuid4().hex)' 2>/dev/null) && \
+       [[ "$launch_uuid" =~ ^[0-9a-f]{32}$ ]]; then
+        break
+    fi
+    launch_uuid=""
+done
+if [[ -z "$launch_uuid" ]]; then
+    echo "Error: a working local python3 or python with the standard-library uuid module is required to generate the session name." >&2
+    exit 1
+fi
+SESSION="dex_${CONFIG//\//_}_${TASK//+/_}_$(date +%Y%m%d_%H%M%S)_${launch_uuid}"
 
 # Append an explicit seed for readability; the launch suffix ensures uniqueness.
 _seed=""
