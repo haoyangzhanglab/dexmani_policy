@@ -18,7 +18,7 @@ from dexmani_policy.training.build_utils import (
 )
 from dexmani_policy.training.checkpoint import TrainCheckpoint, fix_state_dict
 from dexmani_policy.training.logging import to_log_scalars
-from dexmani_policy.training.resume import optimizer_to, restore_training_state
+from dexmani_policy.training.resume import optimizer_to, restore_training_state, load_resume_source_config
 from dexmani_policy.training.workspace import TrainWorkspace
 from dexmani_policy.utils.random import get_rng_state
 from dexmani_policy.utils.tensor import dict_apply
@@ -64,7 +64,6 @@ class Trainer:
         train_loop_cfg: TrainLoopConfig,
         resume_contract: dict,
         max_grad_norm: float = 1.0,
-        fast_grad_finite_check: bool = False,
         use_bfloat16: bool = False,
         use_compile: bool = False,
         compile_mode: str = "reduce-overhead",
@@ -87,7 +86,6 @@ class Trainer:
         self.total_train_steps = train_loop_cfg.total_train_steps
         self.log_interval_steps = train_loop_cfg.log_interval_steps
         self.max_grad_norm = max_grad_norm
-        self.fast_grad_finite_check = fast_grad_finite_check
         self._last_grad_norm: float | None = None
         self._last_clip_ratio: float | None = None
 
@@ -136,7 +134,7 @@ class Trainer:
         return model
 
     def _find_nonfinite_gradients(self) -> list:
-        """Return the names of parameters whose ``.grad`` is non-finite (or None)."""
+        """Return parameter names with non-finite gradients; ignore absent gradients."""
         return [
             name
             for name, param in self.raw_model.named_parameters()
@@ -147,38 +145,21 @@ class Trainer:
         grad_norm = None
         grad_nan_params = []
 
-        # Fast path fuses the norm computation into clip_grad_norm_ via
-        # error_if_nonfinite=True, which raises before touching any parameter when
-        # a gradient is non-finite. On the happy path this skips the per-parameter
-        # torch.isfinite loop + GPU→CPU sync below. Only meaningful when we clip.
-        use_fast = self.fast_grad_finite_check and self.max_grad_norm > 0
-
-        if use_fast:
+        if self.max_grad_norm > 0:
             try:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.raw_model.parameters(),
-                    max_norm=self.max_grad_norm,
+                    self.raw_model.parameters(), max_norm=self.max_grad_norm,
                     error_if_nonfinite=True,
                 )
             except RuntimeError:
-                # error_if_nonfinite raises RuntimeError for non-finite grads,
-                # but a bare except also swallows unrelated errors (device
-                # mismatch, internal clip failure).  Only treat it as a
-                # non-finite-gradient case when non-finite params are confirmed;
-                # otherwise re-raise the original error.
-                grad_nan_params = self._find_nonfinite_gradients()
-                if not grad_nan_params:
-                    raise
+                # Diagnostics only on failure. Re-raise even when every element
+                # is finite: the aggregate norm itself can overflow.
+                bad = self._find_nonfinite_gradients()
+                self.optimizer.zero_grad(set_to_none=True)
+                if bad:
+                    print(f"Non-finite gradients at step={self.global_step}: {bad[:5]}")
+                raise
         else:
-            if self.max_grad_norm > 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.raw_model.parameters(), max_norm=self.max_grad_norm
-                )
-
-            # Layer 2 NaN protection: detect gradient NaN/Inf before optimizer.step().
-            # Loss NaN (layer 1) is caught in train_one_step(), but a gradient NaN
-            # could slip through clip_grad_norm_ and silently corrupt optimizer state.
-            # Catch it explicitly so optimizer state is never updated from non-finite gradients.
             grad_nan_params = self._find_nonfinite_gradients()
 
         if grad_nan_params:
@@ -189,8 +170,7 @@ class Trainer:
                 f"{'...' if len(grad_nan_params) > 5 else ''}"
             )
 
-        # Record grad-norm diagnostics for logging (§8.8): total norm and how far
-        # it exceeded the clip threshold (clip_ratio ≥ 1 means clipping engaged).
+        # Record the pre-clipping norm and its ratio to the threshold.
         if grad_norm is not None:
             self._last_grad_norm = float(grad_norm)
             self._last_clip_ratio = float(grad_norm) / float(self.max_grad_norm)
@@ -207,7 +187,8 @@ class Trainer:
 
     def load_for_resume(self, tag_or_path: str):
         """Restore training state before compilation."""
-        checkpoint = self.workspace.load_checkpoint(tag_or_path)
+        source_path = self.workspace.resolve_checkpoint_path(tag_or_path)
+        checkpoint = self.workspace.load_checkpoint(str(source_path))
         return restore_training_state(
             checkpoint,
             resume_contract=self.resume_contract,
@@ -218,6 +199,7 @@ class Trainer:
             scheduler=self.scheduler,
             device=self.device,
             rank=dist.get_rank() if self.distributed else 0,
+            source_config=load_resume_source_config(source_path),
         )
 
     def _save_nan_debug(self, raw_loss, nan_rank=None):
@@ -354,9 +336,9 @@ class Trainer:
             if self.global_step / self.total_train_steps >= ratio
         }
 
-    def _save_checkpoint(self, epoch: int, global_step: int, tag_suffix: str):
+    def _save_checkpoint(self, global_step: int, tag_suffix: str):
         """Save a checkpoint with the given tag suffix and point ``latest.pt`` at it."""
-        rng_states = [get_rng_state()]
+        rng_states = [get_rng_state(self.device)]
         if self.distributed:
             local_rng = rng_states[0]
             rng_states = [None] * dist.get_world_size()
@@ -396,18 +378,15 @@ class Trainer:
         checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
         self.workspace.save_latest(checkpoint_path)
 
-    def _save_milestone_checkpoint(self, epoch: int, global_step: int, ratio: float):
-        """Save a milestone checkpoint and point ``latest.pt`` at it.
-
-        No score, no TopK tracking — we only care about progress milestones.
-        """
+    def _save_milestone_checkpoint(self, global_step: int, ratio: float):
+        """Save a milestone checkpoint and point ``latest.pt`` at it."""
         pct = int(ratio * 100)
-        self._save_checkpoint(epoch, global_step, f"milestone={pct:02d}pct")
+        self._save_checkpoint(global_step, f"milestone={pct:02d}pct")
 
-    def _save_interrupt_checkpoint(self, epoch: int, global_step: int):
+    def _save_interrupt_checkpoint(self, global_step: int):
         """Save a checkpoint on signal-triggered interruption."""
         print(f"\nSaving interrupt checkpoint at step {global_step}...", flush=True)
-        self._save_checkpoint(epoch, global_step, "interrupt")
+        self._save_checkpoint(global_step, "interrupt")
 
     def _signal_handler(self, signum, frame):
         """Minimal signal handler: set flag on first signal, force-exit on second."""
@@ -422,7 +401,7 @@ class Trainer:
         )
         self._stop_requested = True
 
-    def _check_milestone(self, epoch: int, global_step: int):
+    def _check_milestone(self, global_step: int):
         """Check and save the first un-passed milestone whose threshold is met.
 
         Called after each accumulation-boundary step.  Because
@@ -434,7 +413,7 @@ class Trainer:
             if ratio in self._passed_milestones:
                 continue
             if global_step / self.total_train_steps >= ratio:
-                self._save_milestone_checkpoint(epoch, global_step, ratio)
+                self._save_milestone_checkpoint(global_step, ratio)
                 self._passed_milestones.add(ratio)
                 break
 
@@ -633,7 +612,7 @@ class Trainer:
                                 self.workspace.log(step_metrics, step=global_step)
 
                         # Check for milestone checkpoint.
-                        self._check_milestone(epoch, global_step)
+                        self._check_milestone(global_step)
                         group_samples = 0
                         # Exclude this update's logging/checkpoint work from the next one.
                         group_start_time = time.perf_counter()
@@ -654,7 +633,7 @@ class Trainer:
                     flush=True,
                 )
                 try:
-                    self._save_interrupt_checkpoint(epoch, global_step)
+                    self._save_interrupt_checkpoint(global_step)
                 except Exception as e:
                     print(f"WARNING: interrupt checkpoint failed: {e}", flush=True)
 

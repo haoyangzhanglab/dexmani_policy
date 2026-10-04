@@ -1,12 +1,17 @@
 """Shared Hydra resolvers and action/window config validation."""
 
 import warnings
+import uuid
+from datetime import datetime
+
+_LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + "_" + uuid.uuid4().hex[:8]
 from numbers import Integral
 
 from omegaconf import DictConfig, OmegaConf
 
 
 def register_resolvers():
+    OmegaConf.register_new_resolver("run_id", lambda: _LAUNCH_ID, replace=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         OmegaConf.register_new_resolver(

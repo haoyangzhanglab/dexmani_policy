@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from omegaconf import OmegaConf
 
+from dexmani_policy.training.run_identity import claim_run, check_run_claim
 from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
 from dexmani_policy.training.logging import (
     JsonlLogger,
@@ -25,19 +26,19 @@ class WandbConfig:
 
 
 class TrainWorkspace:
-    def __init__(self, output_dir: str, wandb_cfg: WandbConfig):
+    def __init__(self, output_dir: str, wandb_cfg: WandbConfig, claim_token=None):
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if claim_token is None:
+            claim_token = claim_run(self.output_dir)
+        check_run_claim(self.output_dir, claim_token)
         self.checkpoint_dir = self.output_dir / "checkpoints"
 
         self.checkpoint_store = CheckpointStore(self.checkpoint_dir)
 
         self.json_logger = JsonlLogger(output_dir=self.output_dir)
-        # Derive the W&B id from the experiment identity (the timestamped
-        # output_dir basename) rather than the policy+task+seed triple alone.
-        # A fixed triple collides across re-runs and would re-attach a fresh
-        # run to a stale remote run under resume="allow".
-        wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}"
+        # Include the permanent claim identity: sweep basenames such as "0"
+        # repeat across launches and cannot identify a W&B run on their own.
+        wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{claim_token[:8]}"
         self.wandb_logger = WandbLogger(
             output_dir=self.output_dir,
             project=wandb_cfg.project,

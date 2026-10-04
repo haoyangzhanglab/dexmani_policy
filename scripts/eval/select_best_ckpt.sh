@@ -36,6 +36,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  --inference-steps N      Inference steps (default: from config)"
     echo "  --no-ema               Use raw weights instead of EMA"
     echo "  --seed N               Eval seed override"
+    echo "  --videos               Record isolated candidate/stage videos (default: off)"
     echo ""
     echo "  Dot-list overrides may change eval/environment controls; model inputs come from saved config.yaml and cannot be overridden."
     echo ""

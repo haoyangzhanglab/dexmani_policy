@@ -9,6 +9,19 @@ import zarr
 logger = logging.getLogger(__name__)
 
 
+def validate_episode_metadata(episode_ends, data, keys=None):
+    ends = np.asarray(episode_ends)
+    if (ends.ndim != 1 or ends.size == 0 or ends.dtype.kind not in "iu"
+            or ends[0] <= 0 or np.any(ends[1:] <= ends[:-1])):
+        raise ValueError("episode_ends must be nonempty 1D positive, strictly increasing integers (not bool)")
+    for key in data.keys() if keys is None else keys:
+        if key not in data:
+            raise ValueError(f"Missing data field: {key}")
+        shape = data[key].shape
+        if not shape or shape[0] != ends[-1]:
+            raise ValueError(f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}")
+
+
 class ReplayBuffer:
     def __init__(self, root):
         if "data" not in root or "meta" not in root:
@@ -20,12 +33,12 @@ class ReplayBuffer:
                 f"Invalid root structure: missing 'episode_ends' in meta. "
                 f"Available meta keys: {list(root['meta'].keys())}"
             )
-        for key, value in root["data"].items():
-            if value.shape[0] != root["meta"]["episode_ends"][-1]:
-                raise ValueError(
-                    f"Data shape mismatch for key '{key}': "
-                    f"shape[0]={value.shape[0]}, expected={root['meta']['episode_ends'][-1]}"
-                )
+        validate_episode_metadata(root["meta"]["episode_ends"], root["data"])
+        attrs = root.get("attrs", {}) if isinstance(root, dict) else root.attrs
+        revision = attrs.get("data_revision")
+        if "data_revision" in attrs and (not isinstance(revision, str) or not revision.strip()):
+            raise ValueError("Zarr data_revision must be a nonempty string when present")
+        self.data_revision = revision
         self.root = root
 
     @classmethod
@@ -41,6 +54,7 @@ class ReplayBuffer:
 
         if keys is None:
             keys = list(group["data"].keys())
+        validate_episode_metadata(meta["episode_ends"], group["data"], keys)
         data = {}
         for key in keys:
             arr = group["data"][key]

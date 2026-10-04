@@ -300,7 +300,7 @@ def smoke_test(config_name: str):
             if ema_updater is not None
             else None,
             ema_decay=None,
-            rng_states=[get_rng_state()],
+            rng_states=[get_rng_state(device)],
         )
         ckpt_path = store.save(
             "epoch=0000-step=00000001-score=0.8500.pt",

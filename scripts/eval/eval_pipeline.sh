@@ -11,7 +11,7 @@
 #
 # Examples:
 #   bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56
-#   bash scripts/eval/eval_pipeline.sh maniflow_8l_abl pour 2026-08-04_22-19_42 --no-videos
+#   bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42 --no-videos
 #
 set -euo pipefail
 
@@ -25,7 +25,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "One-shot evaluation pipeline: select best ckpt → held-out eval → 5 demo videos."
     echo ""
     echo "Positional args:"
-    echo "  policy_name   Policy config name (e.g. dp3, maniflow, maniflow_8l_abl)"
+    echo "  policy_name   Policy config name (e.g. dp3, maniflow, sat)"
     echo "  task_name     Task name (e.g. pour, pick_apple_messy)"
     echo "  exp_name      Experiment timestamp/name under experiments/<policy>/<task>/"
     echo ""
@@ -36,7 +36,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo ""
     echo "Examples:"
     echo "  bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56"
-    echo "  bash scripts/eval/eval_pipeline.sh maniflow_8l_abl pour 2026-08-04_22-19_42 --no-videos"
+    echo "  bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42 --no-videos"
     exit 0
 fi
 

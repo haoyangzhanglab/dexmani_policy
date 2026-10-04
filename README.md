@@ -17,12 +17,21 @@
 
 ## 快速开始
 
-项目要求 Python 3.10+，默认使用 Conda 环境 `policy`：
+项目要求 Python 3.10+，研究环境使用 `policy`。依赖以 `requirements.txt` 的实测版本为准，`pyproject.toml` 与之相容。当前已验证的本地组合为 Python 3.10.20、Torch 2.4.1+cu124、torchvision 0.19.1+cu124；CUDA 构建版本不代表 GPU 驱动已通过验证。
+
+已有 `policy` 环境时，安装顺序为：
 
 ```bash
 conda activate policy
-pip install -e .
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python -m pip check
+python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit
 ```
+
+已在独立 venv 中复用现有 `policy` 软件包验证安装、依赖检查和默认 DP/DP3 CPU 构造；从零下载安装尚未验证，验证环境和复验命令见 [基础设施修复报告](docs/infra_fix_report.md)。
+
+新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
 
 仿真评测需要另外安装 `dexmani_sim`。训练数据路径由当前 config 决定，常见位置为 `robot_data/<task>.zarr`。
 
@@ -81,6 +90,17 @@ bash scripts/training/train.sh <config_name> \
 
 需要续训时显式指定 `resume_from`；重复运行同一训练命令不会自动续训。
 
+```bash
+bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<old-run>'
+```
+
+`resume_from` 接受旧实验目录或 checkpoint 文件，展开 `~`，相对路径以**项目根目录**为基准。恢复始终写入新输出目录。默认 run 使用微秒时间和随机后缀；已有 `.training_run.json`、训练配置、metrics 或 checkpoints 的目录会拒绝认领。遇到冲突请指定新目录，不要删除旧标记来续写产物。Hydra 在进入训练前可能已写入自己的启动文件，训练认领保护不等于整个 Hydra 启动过程的事务。
+
+数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。恢复时已知 revision 改变或丢失会报错，历史身份缺失会明确提示“数据身份未验证”。revision 是生产者声明，不是内容 hash。
+
+Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。Gaussian **动作**归一化必须同时设置 `agent.clip_sample=false`；Gaussian 观测和 flow 不受此限制。历史缺失开关等价于 true，true→false 属于实验变化，不能静默严格续训。旧 Gaussian＋true 结果需用旧代码复现，修正后重新评测。
+
+
 ## 验证
 
 修改 config 或研究实现后，优先执行轻量检查：
@@ -114,6 +134,12 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 ```
 
 评测已有实验时，使用该实验保存的 resolved config 与 checkpoint 恢复其真实语义，不用当前默认配置推测历史实验。
+
+每次 selection、final eval 和 demo 都保存独立目录及 `eval_config.yaml`，包括实际推理参数、环境、task/seed 和代码版本；候选明细可重算选点指标。selection 默认不录像，显式加 `--videos` 才记录候选/阶段隔离的视频。demo 保存各 NFE 的结果明细，但不属于 held-out 评测。
+
+`best_ckpt.json` 指向最近一次**成功发布**的 selection；失败保留旧 best，并以非零状态结束。新 best 的 summary 或权重尚未同步时会报缺失，不替换为其他权重。多任务 held-out 校验任务顺序、seed 池身份与真实 `(task, seed)` 无交集；旧多任务记录缺证据需重新选点，普通权重推理仍允许。
+
+远程启动使用独立 session/log，不自动终止旧会话。停止时使用启动输出中的 `stop_remote.sh <SESSION>`。`sync_down.sh` 对小型评测 JSON/YAML 使用 checksum 更新，checkpoint 继续增量下载。
 
 ## 其他工作流
 
@@ -170,4 +196,3 @@ scripts/
 Skill 只规定研究工作方法，不写死当前模型的模块划分、输入模态、动作表示或训练算法；模型变化时无需随之重写。
 
 Codex skill 位于 `.codex/skills/`，Claude Code skill 位于 `.claude/skills/`。
-

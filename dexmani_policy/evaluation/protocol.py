@@ -229,6 +229,7 @@ def compute_eval_stats(result: dict) -> dict:
                 "success_rate": t_sr,
                 "n_success": t_success,
                 "n_valid": t_valid,
+                "wilson_95": wilson_interval(t_success, t_valid),
             }
             if t_sr is not None:
                 task_srs.append(t_sr)
@@ -240,6 +241,7 @@ def compute_eval_stats(result: dict) -> dict:
         "macro_success_rate": macro,
         "n_success": n_success,
         "n_valid_episodes": n_valid,
+        "wilson_95": wilson_interval(n_success, n_valid),
         "n_tasks": len(per_task) if per_task else 1,
         "per_task": per_task_stats,
     }
@@ -366,3 +368,120 @@ def resolve_checkpoint_path(
 
     path = resolve_checkpoint(exp_dir, ckpt_tag_or_path)
     return path, f"{ckpt_tag_or_path} ({path.name})"
+
+
+def wilson_interval(successes, n):
+    """95% binomial Wilson interval; not training-seed or macro uncertainty."""
+    import math
+    if n == 0:
+        return None
+    if not 0 <= successes <= n:
+        raise ValueError("successes must be between 0 and n")
+    z = 1.959963984540054
+    p = successes / n
+    den = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / den
+    half = z * math.sqrt(p * (1-p) / n + z*z / (4*n*n)) / den
+    return [max(0., center-half), min(1., center+half)]
+
+
+def mapped_task_seeds(runner, seeds):
+    if hasattr(runner, "map_eval_seeds"):
+        return runner.map_eval_seeds(seeds)
+    return {runner.task_name: list(seeds)}
+
+
+def validate_heldout(runner, best_info, seeds):
+    if best_info is None:
+        return
+    selection = best_info["selection"]
+    if hasattr(runner, "seed_protocol"):
+        if selection.get("seed_protocol") != runner.seed_protocol():
+            raise ValueError("Multi-task seed pool/order identity missing or changed; rerun checkpoint selection")
+        excluded = selection.get("task_seeds")
+        if not isinstance(excluded, dict) or set(excluded) != set(runner.runners):
+            raise ValueError("Multi-task selection lacks task/seed exclusions; rerun selection")
+    else:
+        excluded = selection.get("task_seeds", {runner.task_name: selection["seeds"]})
+    for task, requested in mapped_task_seeds(runner, seeds).items():
+        if set(requested) & set(excluded.get(task, [])):
+            raise ValueError(f"Held-out task/seed overlap for {task}; rerun selection")
+
+
+def artifact_reference(path, exp_dir):
+    path = Path(path).resolve()
+    try:
+        return str(path.relative_to(Path(exp_dir).resolve()))
+    except ValueError:
+        return str(path)
+
+
+def code_version(directory):
+    import subprocess
+    try:
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(directory), *args],
+                stderr=subprocess.DEVNULL, text=True).strip()
+        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": "unknown", "dirty": "unknown"}
+
+
+def save_eval_snapshot(directory, cfg, runner, **request):
+    """Persist effective runner inputs and resolved call arguments, before rollout."""
+    import importlib.util
+    import importlib.metadata
+    import sys
+    exp_dir = Path(cfg._exp_dir)
+    sim = {"commit": "unknown", "dirty": "unknown", "version": "unknown"}
+    try:
+        spec = importlib.util.find_spec("dexmani_sim")
+        if spec is not None and spec.origin:
+            sim.update(code_version(Path(spec.origin).parent))
+        sim["version"] = importlib.metadata.version("dexmani_sim")
+    except (ImportError, ValueError, importlib.metadata.PackageNotFoundError):
+        pass
+    inputs = {leaf.task_name: {
+        "n_obs_steps": leaf.n_obs_steps,
+        "sensor_modalities": list(leaf.sensor_modalities),
+        "rgb_preprocessing": leaf.rgb_preprocessing,
+        "record_video": leaf.record_video,
+        "render_mode": getattr(leaf, "render_mode", None),
+        "viewer_resolution": getattr(leaf, "viewer_resolution", None),
+        "env_video_fps": getattr(leaf, "env_video_fps", None),
+        "env_kwargs": (leaf._expand_env_kwargs(leaf.env_kwargs)
+                       if hasattr(leaf, "_expand_env_kwargs") else getattr(leaf, "env_kwargs", {})),
+    } for leaf in iter_leaf_env_runners(runner)}
+    snapshot = {
+        "model_config_source": artifact_reference(exp_dir / "config.yaml", exp_dir),
+        "effective_config": OmegaConf.to_container(cfg, resolve=True),
+        "runner_inputs": inputs,
+        "request": request,
+        "argv": list(sys.argv),
+        "policy_code": code_version(Path(__file__).resolve().parents[2]),
+        "simulator_code": sim,
+    }
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "eval_config.yaml").open("x") as stream:
+        stream.write(OmegaConf.to_yaml(OmegaConf.create(snapshot), resolve=True))
+    return artifact_reference(directory / "eval_config.yaml", exp_dir)
+
+
+def atomic_json(path, record):
+    import json
+    import os
+    import tempfile
+    path = Path(path)
+    name = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix="."+path.name,
+                                         suffix=".tmp", delete=False) as stream:
+            name = stream.name
+            json.dump(record, stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+    finally:
+        if name and os.path.exists(name):
+            os.unlink(name)

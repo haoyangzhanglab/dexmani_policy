@@ -36,10 +36,13 @@ class Diffusion(nn.Module):
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
         aux_loss_weight: float = 1.0,
+        clip_sample: bool = True,
     ) -> None:
         super().__init__()
         positive_int(num_inference_steps, "num_inference_steps")
 
+        if type(clip_sample) is not bool:
+            raise TypeError("clip_sample must be a bool")
         self.model = model
         self.aux_loss_weight = aux_loss_weight
         self.noise_scheduler = DDIMScheduler(
@@ -47,7 +50,7 @@ class Diffusion(nn.Module):
             beta_start=0.0001,
             beta_end=0.02,
             beta_schedule="squaredcos_cap_v2",
-            clip_sample=True,
+            clip_sample=clip_sample,
             set_alpha_to_one=True,
             steps_offset=0,
             prediction_type=prediction_type,

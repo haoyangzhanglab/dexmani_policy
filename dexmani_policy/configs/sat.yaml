@@ -158,7 +158,7 @@ workspace:
     _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
-    name: ${task_name}_${now:%Y-%m-%d_%H-%M}_${training.seed}
+    name: ${task_name}_${run_id:}_${training.seed}
     id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
@@ -203,7 +203,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${now:%Y-%m-%d_%H-%M}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
     subdir: ${hydra.job.num}

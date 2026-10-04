@@ -9,7 +9,7 @@ Evaluation protocol
 -------------------
 
 1. Load the specified checkpoint with explicitly resolved EMA/raw weights.
-2. Resolve the evaluation seed as current config ``training.seed + 1024``.
+2. Resolve the evaluation seed from ``--seed`` or saved ``training.seed + 1024``.
 3. Read the current runner's evaluation seed pool, then exclude
    ``best_ckpt.json`` selection seeds for final ``best`` evaluation.
 4. Run one episode per seed with environment/policy RNG reseeding. This
@@ -17,7 +17,7 @@ Evaluation protocol
 5. Output: ``success_rate = n_success / n_total`` and avg steps.
 
 The reported metrics are empirical success rates and step averages;
-this entry point does not compute confidence intervals.
+per-task statistics include 95% Wilson intervals.
 
 Usage
 -----
@@ -52,6 +52,7 @@ from dexmani_policy.utils.random import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param,
+    save_eval_snapshot, mapped_task_seeds, validate_heldout, artifact_reference,
     add_inference_steps_argument,
     build_eval_runner,
     collect_episode_details,
@@ -192,6 +193,8 @@ def _run_one_inference_setting(
     selection_seeds_excluded: list[int],
     heldout_from_selection: bool,
     use_ema: bool,
+    eval_config: str,
+    global_step: int,
 ) -> dict:
     """Run eval at a single inference step count; save per-value results.
 
@@ -243,7 +246,11 @@ def _run_one_inference_setting(
         json.dumps(
             {
                 "ckpt_tag": ckpt_tag_or_path,
-                "ckpt_path": str(ckpt_path),
+                "ckpt_path": artifact_reference(ckpt_path, ckpt_path.parent.parent),
+                "global_step": global_step,
+                "eval_config": eval_config,
+                "per_task": stats["per_task"],
+                "wilson_95": stats["wilson_95"],
                 "success_rate": success_rate,
                 "macro_success_rate": macro_success_rate,
                 "n_success": n_success,
@@ -316,12 +323,22 @@ def evaluate_checkpoint_robotwin(
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
         cfg,
         exp_dir,
-        ckpt_tag_or_path,
+        str((exp_dir / best_info["ckpt_relpath"]).resolve()) if best_info is not None else ckpt_tag_or_path,
         use_ema,
         video_save_dir=video_save_dir,
     )
     eval_seeds = _select_eval_seeds(
         env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+    )
+    if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+        raise ValueError("Best record global_step disagrees with actual checkpoint state")
+    validate_heldout(env_runner, best_info, eval_seeds)
+    snapshot_ref = save_eval_snapshot(
+        result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
+        global_step=agent._checkpoint_global_step, use_ema=use_ema,
+        inference_steps_list=[inference_steps], episodes=episodes, shuffle_seed=eval_seed,
+        policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
+        selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
     )
 
     info = _run_one_inference_setting(
@@ -337,6 +354,7 @@ def evaluate_checkpoint_robotwin(
         selection_seeds_excluded=selection_seeds,
         heldout_from_selection=best_info is not None,
         use_ema=use_ema,
+        eval_config=snapshot_ref, global_step=agent._checkpoint_global_step,
     )
 
     # ── Report ─────────────────────────────────────────────────────────
@@ -402,13 +420,23 @@ def evaluate_checkpoint_sweep(
     agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
         cfg,
         exp_dir,
-        ckpt_tag_or_path,
+        str((exp_dir / best_info["ckpt_relpath"]).resolve()) if best_info is not None else ckpt_tag_or_path,
         use_ema,
         video_save_dir=video_save_dir,
     )
     # ── 2. Same seeds for all inference step counts (fair comparison) ──────────
     eval_seeds = _select_eval_seeds(
         env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+    )
+    if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+        raise ValueError("Best record global_step disagrees with actual checkpoint state")
+    validate_heldout(env_runner, best_info, eval_seeds)
+    snapshot_ref = save_eval_snapshot(
+        result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
+        global_step=agent._checkpoint_global_step, use_ema=use_ema,
+        inference_steps_list=inference_steps_list, episodes=episodes, shuffle_seed=eval_seed,
+        policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
+        selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
     )
 
     # ── 3. Sweep over inference steps ─────────────────────────────────
@@ -436,6 +464,7 @@ def evaluate_checkpoint_sweep(
             selection_seeds_excluded=selection_seeds,
             heldout_from_selection=best_info is not None,
             use_ema=use_ema,
+            eval_config=snapshot_ref, global_step=agent._checkpoint_global_step,
         )
 
         avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"

@@ -10,6 +10,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 
 from dexmani_policy.agents.normalization import (
     NON_NUMERIC_OBSERVATION_FIELDS,
+    uses_diffusion_config, validate_action_clipping,
     LinearNormalizer,
     build_mixed_action_normalizer,
     resolve_normalization_spec,
@@ -63,14 +64,11 @@ def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
             continue
 
         if key == "action" and mode == "auto":
-            action = np.concatenate(
-                list(dataset.iter_normalization_data("action")), axis=0
-            )
             if action_key == "action_ee":
+                action = np.concatenate(list(dataset.iter_normalization_data("action")), axis=0)
                 normalizer["action"] = build_mixed_action_normalizer(action)
-            else:
-                normalizer.fit_field("action", action, mode="limits")
-            continue
+                continue
+            mode = "limits"
 
         chunks = list(dataset.iter_normalization_data(key))
         if len(chunks) == 1:
@@ -83,7 +81,7 @@ def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
 
 def attach_normalization_spec(model, cfg) -> None:
     """Attach the resolved semantic normalization spec to a model (and its EMA twin)."""
-    model.normalization_spec = resolve_normalization_spec(cfg)
+    model.set_normalization_spec(resolve_normalization_spec(cfg))
 
 
 def build_dataset_and_normalizer(cfg):
@@ -97,6 +95,7 @@ def build_dataset_and_normalizer(cfg):
     dataset = hydra.utils.instantiate(cfg.dataset)
     runtime = _capture_real_runtime(dataset, cfg)
     with open_dict(cfg):
+        cfg.data_identity = capture_data_identity(dataset)
         if runtime is not None:
             cfg.real_runtime = runtime
         else:
@@ -384,6 +383,8 @@ def _validate_encoder_normalization_contract(cfg, spec) -> None:
 def _validate_normalization_config(cfg):
     """Validate the feature-level normalization spec and its sensor-modality coverage."""
     spec = resolve_normalization_spec(cfg)
+    if uses_diffusion_config(cfg.agent):
+        validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
     numeric_fields = _resolve_numeric_observation_fields(cfg)
     # Re-validate with exact-coverage enforcement (missing AND extra fields),
     # reusing the same shared grammar `resolve_normalization_spec` already applied.
@@ -480,3 +481,11 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
             )
         runtime["fingertip_link_names"] = list(links)
     return runtime
+
+
+def capture_data_identity(dataset):
+    """Producer-declared revisions captured once while loading, never scanned at save."""
+    if hasattr(dataset, "task_names") and hasattr(dataset, "datasets"):
+        return {"tasks": {name: capture_data_identity(child)
+                          for name, child in zip(dataset.task_names, dataset.datasets)}}
+    return {"revision": getattr(dataset, "data_revision", None)}

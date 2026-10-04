@@ -166,7 +166,7 @@ case "${1:-}" in
     *)
         SESSION="$1"
         if [[ ! "$SESSION" =~ ^dex_[a-zA-Z0-9_.-]+$ ]]; then
-            echo "Error: invalid session name '$SESSION'. Expected format: dex_<config>_<task>[_s<seed>]" >&2
+            echo "Error: invalid session name '$SESSION'. Use the dex_ session printed by train_remote.sh (letters, digits, _, . and - only)." >&2
             exit 1
         fi
         ensure_server_reachable || exit 1

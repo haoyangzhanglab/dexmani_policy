@@ -10,7 +10,7 @@ import hydra
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dexmani_policy.training.checkpoint import CheckpointStore
@@ -31,8 +31,10 @@ from dexmani_policy.training.resume import (
     build_resume_contract,
     build_train_loader,
     restore_training_state,
+    load_resume_source_config,
     validate_gpu_ids,
 )
+from dexmani_policy.training.run_identity import claim_run, resolve_resume_source
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
@@ -120,6 +122,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
             scheduler=scheduler,
             device=device,
             rank=rank,
+            source_config=load_resume_source_config(resume_from),
         )
 
     if rank == 0:
@@ -154,7 +157,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
             **OmegaConf.to_container(cfg.training.loop, resolve=True)
         ),
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
-        fast_grad_finite_check=cfg.training.get("fast_grad_finite_check", False),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
         use_compile=False,  # already applied before DDP wrapping above
         is_main_process=(rank == 0),
@@ -182,6 +184,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     validate_config(cfg)
+    with open_dict(cfg):
+        cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
+        cfg.workspace.claim_token = claim_run(
+            cfg.workspace.output_dir, resume_from=cfg.resume_from
+        )
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. DDP training requires GPU.")

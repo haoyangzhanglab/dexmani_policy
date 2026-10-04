@@ -51,6 +51,7 @@ class R3DAgent(BaseAgent):
         # Auxiliary loss weight (applied to non-joint dim groups).
         # Forwarded to Diffusion; must match when use_aux_ee=True.
         aux_loss_weight: float = 1.0,
+        clip_sample: bool = True,
     ):
         self.use_aux_ee = use_aux_ee
         self.joint_dim = joint_dim
@@ -88,6 +89,7 @@ class R3DAgent(BaseAgent):
             num_inference_steps=num_inference_steps,
             prediction_type=prediction_type,
             aux_loss_weight=aux_loss_weight,
+            clip_sample=clip_sample,
         )
 
         super().__init__(

@@ -34,13 +34,17 @@ Usage
 
 Output
 ------
-Videos are saved to ``<output-dir>/<YYYYmmdd_HHMMSS>/episode_<seed>.mp4``.
+Each invocation creates ``<output-dir>/<timestamp>_<random-suffix>/`` with
+``eval_config.yaml``, ``result_details.json`` and optional episode videos.
+NFE sweeps put results/videos under ``inference_steps<N>/``; multi-task
+runners put videos in task subdirectories. Demo seeds are not held-out.
 Default output directory: ``experiments/<policy>/<task>/<exp>/demo_videos/``.
 """
 
 from __future__ import annotations
 
 import argparse
+import tempfile
 import random
 import sys
 from datetime import datetime
@@ -55,6 +59,7 @@ from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param,
+    save_eval_snapshot, mapped_task_seeds, artifact_reference, atomic_json, compute_eval_stats,
     add_inference_steps_argument,
     build_eval_runner,
     collect_episode_details,
@@ -259,8 +264,8 @@ def main() -> None:
         output_base = exp_dir / "demo_videos"
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    video_save_dir = output_base / timestamp
-    video_save_dir.mkdir(parents=True, exist_ok=True)
+    output_base.mkdir(parents=True, exist_ok=True)
+    video_save_dir = Path(tempfile.mkdtemp(prefix=timestamp+"_", dir=output_base))
 
     # ── 5. Resolve checkpoint ─────────────────────────────────────────────
     ckpt_path, ckpt_label = resolve_checkpoint_path(exp_dir, args.ckpt_tag)
@@ -312,6 +317,15 @@ def main() -> None:
         eval_seeds = all_seeds[:demo_episodes]
 
     env_runner.eval_seeds = eval_seeds
+    snapshot_ref = save_eval_snapshot(
+        video_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
+        global_step=agent._checkpoint_global_step, use_ema=use_ema,
+        inference_steps_list=inference_steps_list, episodes=demo_episodes,
+        shuffle_seed=eval_seed, policy_seed_mode="episode_seed",
+        task_seeds=mapped_task_seeds(env_runner, eval_seeds),
+        viewer_resolution=list(resolved_resolution), env_video_fps=resolved_fps,
+        heldout_from_selection=False,
+    )
 
     # ── 9. Run episodes (sweep or single) ─────────────────────────────────
     demo_results: list[dict] = []
@@ -334,6 +348,12 @@ def main() -> None:
         )
 
         per_seed_details = collect_episode_details(result)
+        atomic_json(sub_dir / "result_details.json", {
+            "eval_config": snapshot_ref, "checkpoint": artifact_reference(ckpt_path, exp_dir),
+            "global_step": agent._checkpoint_global_step, "inference_steps": inference_steps,
+            "use_ema": use_ema, "episode_details": per_seed_details,
+            "statistics": compute_eval_stats(result), "heldout_from_selection": False,
+        })
         n_success = sum(1 for d in per_seed_details if d.get("success"))
         n_total = len(per_seed_details)
         sr = n_success / n_total if n_total else 0.0

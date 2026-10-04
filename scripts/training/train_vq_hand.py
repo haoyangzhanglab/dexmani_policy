@@ -33,6 +33,23 @@ _project_root = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 
 
+@torch.no_grad()
+def evaluate_vq(vqvae, loader, device):
+    """Sample means, independent of validation batch partitioning."""
+    sums = {"enc": 0.0, "vq": 0.0, "mse": 0.0}
+    count = 0
+    for (batch,) in loader:
+        batch = batch.to(device, non_blocking=True)
+        enc, vq, _, mse = vqvae(batch)
+        n = batch.shape[0]
+        count += n
+        for key, value in (("enc", enc), ("vq", vq), ("mse", mse)):
+            sums[key] += float(value) * n
+    if not count:
+        raise ValueError("VQ validation loader is empty")
+    return {key: value / count for key, value in sums.items()}
+
+
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -260,6 +277,7 @@ def train(args: argparse.Namespace) -> None:
     for epoch in range(1, args.num_epochs + 1):
         vqvae.train()
         sums = {"enc": 0.0, "vq": 0.0, "mse": 0.0}
+        train_count = 0
         usage = torch.zeros(args.num_groups, args.codebook_size, dtype=torch.long)
 
         for (batch,) in train_loader:
@@ -278,11 +296,12 @@ def train(args: argparse.Namespace) -> None:
                         indices[:, group].detach().cpu(),
                         minlength=args.codebook_size,
                     )
-            sums["enc"] += float(enc_loss)
-            sums["vq"] += float(vq_loss)
-            sums["mse"] += float(recon_mse)
+            train_count += batch.shape[0]
+            sums["enc"] += float(enc_loss) * batch.shape[0]
+            sums["vq"] += float(vq_loss) * batch.shape[0]
+            sums["mse"] += float(recon_mse) * batch.shape[0]
 
-        train_metrics = {key: value / len(train_loader) for key, value in sums.items()}
+        train_metrics = {key: value / train_count for key, value in sums.items()}
         train_total = (
             args.enc_loss_weight * train_metrics["enc"]
             + args.vq_loss_weight * train_metrics["vq"]
@@ -292,17 +311,7 @@ def train(args: argparse.Namespace) -> None:
         val_metrics = {"enc": float("nan"), "vq": float("nan"), "mse": float("nan")}
         if val_loader is not None:
             vqvae.eval()
-            val_sums = {"enc": 0.0, "vq": 0.0, "mse": 0.0}
-            with torch.no_grad():
-                for (batch,) in val_loader:
-                    batch = batch.to(device, non_blocking=True)
-                    enc_loss, vq_loss, _, recon_mse = vqvae(batch)
-                    val_sums["enc"] += float(enc_loss)
-                    val_sums["vq"] += float(vq_loss)
-                    val_sums["mse"] += float(recon_mse)
-            val_metrics = {
-                key: value / len(val_loader) for key, value in val_sums.items()
-            }
+            val_metrics = evaluate_vq(vqvae, val_loader, device)
 
         metrics = {
             "train_enc": train_metrics["enc"],

@@ -30,6 +30,13 @@ def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
         seed=cfg.training.seed,
         drop_last=False,
     )
+    n, b = sampler.num_samples, options["batch_size"]
+    a = cfg.training.get("loop", {}).get("gradient_accumulation_steps", 1)
+    if a > 1 and not options.get("drop_last", False) and n % b and ((n + b - 1) // b) % a != 1:
+        raise ValueError(
+            f"Mixed micro-batch sizes in accumulation group: N={n}, B={b}, A={a}; "
+            "use drop_last=True or gradient_accumulation_steps=1"
+        )
     generator = torch.Generator().manual_seed(cfg.training.seed + rank)
     return DataLoader(
         dataset,
@@ -51,7 +58,7 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
         "num_gpus",
         "use_compile",
         "compile_mode",
-        "fast_grad_finite_check",
+        "fast_grad_finite_check",  # Ignored historical config field.
     ):
         training.pop(key, None)
     training["loop"].pop("log_interval_steps", None)
@@ -65,6 +72,7 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
             key: loader_options(cfg).get(key, False)
             for key in ("batch_size", "shuffle", "drop_last")
         },
+        "data_identity": plain(cfg.data_identity) if "data_identity" in cfg else {"revision": None},
         "dataset_length": len(train_loader.dataset),
         "batches_per_epoch": len(train_loader),
         "world_size": world_size,
@@ -85,6 +93,7 @@ def restore_training_state(
     scheduler,
     device,
     rank=0,
+    source_config=None,
 ):
     """Restore before compile/DDP; return the next unconsumed batch cursor."""
     validate_resume_contract(checkpoint.resume_contract, resume_contract)
@@ -116,7 +125,8 @@ def restore_training_state(
         ema_updater.optimization_step = checkpoint.ema_updater_step
         if checkpoint.ema_decay is not None:
             ema_updater.decay = float(checkpoint.ema_decay)
-    set_rng_state(checkpoint.rng_states[rank])
+    set_rng_state(checkpoint.rng_states[rank], device=device, source_config=source_config,
+                  rank=rank, world_size=world_size)
     return checkpoint.global_step, checkpoint.epoch, cursor
 
 
@@ -172,6 +182,14 @@ def build_agent_contract(model) -> Dict[str, Any]:
 
 def validate_resume_contract(saved, current) -> None:
     """Report all missing, extra and changed values, including nested keys."""
+    import copy
+    from dexmani_policy.agents.normalization import uses_diffusion_config
+    saved, current = copy.deepcopy(saved), copy.deepcopy(current)
+    for contract in (saved, current):
+        agent_cfg = contract.get("agent_config", {})
+        if uses_diffusion_config(agent_cfg):
+            agent_cfg.setdefault("clip_sample", True)
+    validate_data_identity(saved.pop("data_identity", None), current.pop("data_identity", None))
     differences = []
 
     def compare(left, right, path):
@@ -213,3 +231,29 @@ def validate_ema_resume_state(
         raise RuntimeError(
             "Resume checkpoint ema_updater_step must be an int (not bool) >= 0"
         )
+
+
+def load_resume_source_config(checkpoint_path):
+    """Historical evidence only; never substitute the destination config."""
+    from pathlib import Path
+    source = Path(checkpoint_path).resolve().parent.parent / "config.yaml"
+    return OmegaConf.to_container(OmegaConf.load(source), resolve=True) if source.is_file() else None
+
+
+def validate_data_identity(saved, current, path="data_identity"):
+    import warnings
+    if saved is None:
+        warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)
+        return
+    if "tasks" in saved:
+        current_tasks = (current or {}).get("tasks", {})
+        for task, identity in saved["tasks"].items():
+            validate_data_identity(identity, current_tasks.get(task), f"{path}.{task}")
+        return
+    previous = saved.get("revision")
+    actual = (current or {}).get("revision")
+    if previous is not None:
+        if actual != previous:
+            raise ValueError(f"{path}: data_revision changed or lost: saved={previous!r}, current={actual!r}")
+    else:
+        warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)

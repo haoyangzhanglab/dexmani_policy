@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-import pytorch3d.ops as torch3d_ops
 import torch
 import torch.nn as nn
+
+
+def _pointcloud_ops():
+    try:
+        import pytorch3d.ops
+        return pytorch3d.ops
+    except ImportError as exc:
+        raise ImportError("Point-cloud operations require pytorch3d built for the installed Torch/CUDA") from exc
 
 
 def resolve_fps_random_config(
@@ -45,6 +52,8 @@ def farthest_point_sample(
         sampled_points: (B, num_samples, C) — selected points.
         sample_idx:     (B, num_samples)    — indices into the input.
     """
+    torch3d_ops = _pointcloud_ops()
+
     if pointcloud.ndim != 3 or pointcloud.size(-1) < 3:
         raise ValueError(f"pointcloud must have shape [B, N, C>=3], but got {tuple(pointcloud.shape)}")
 
@@ -148,6 +157,7 @@ def index_points(points: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
 
 
 def knn_point(num_neighbors: int, support_xyz: torch.Tensor, query_xyz: torch.Tensor) -> torch.Tensor:
+    torch3d_ops = _pointcloud_ops()
     result = torch3d_ops.knn_points(
         p1=query_xyz,
         p2=support_xyz,
@@ -163,6 +173,7 @@ def query_ball_point(
     support_xyz: torch.Tensor,
     query_xyz: torch.Tensor,
 ):
+    torch3d_ops = _pointcloud_ops()
     result = torch3d_ops.ball_query(
         p1=query_xyz,
         p2=support_xyz,

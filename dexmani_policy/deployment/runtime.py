@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import random
 import time
 from dataclasses import dataclass
@@ -23,20 +22,18 @@ _EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
 
 def resolve_experiment(selector):
     candidate = Path(selector).expanduser()
-    if not candidate.is_dir():
-        parts = os.fspath(selector).split("/")
-        if (
-            candidate.is_absolute()
-            or len(parts) != 3
-            or any(p in {"", ".", ".."} for p in parts)
-        ):
-            raise ValueError(
-                "Expected an experiment directory or policy/task/run selector"
-            )
-        candidate = _EXPERIMENTS_ROOT.joinpath(*parts)
-    resolved = candidate.resolve(strict=True)
-    if not resolved.is_dir():
-        raise ValueError("Experiment must be a directory")
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=True)
+    else:
+        project_candidate = Path(__file__).resolve().parents[2] / candidate
+        candidate = project_candidate if project_candidate.is_dir() else _EXPERIMENTS_ROOT / candidate
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_relative_to(_EXPERIMENTS_ROOT.resolve()):
+            raise ValueError("Relative experiment selector must remain inside experiments")
+    if not resolved.is_dir() or not (resolved / "config.yaml").is_file():
+        raise ValueError(f"Experiment requires config.yaml: {resolved}")
+    if not (resolved / "checkpoints").is_dir():
+        raise ValueError(f"Experiment requires checkpoints: {resolved}")
     return resolved
 
 
@@ -44,7 +41,7 @@ def list_experiments(filter=None):
     return tuple(
         sorted(
             str(path.parent.relative_to(_EXPERIMENTS_ROOT))
-            for path in _EXPERIMENTS_ROOT.glob("*/*/*/config.yaml")
+            for path in _EXPERIMENTS_ROOT.rglob("config.yaml")
             if (path.parent / "checkpoints/latest.pt").is_file()
             and (filter is None or filter.casefold() in str(path.parent).casefold())
         )

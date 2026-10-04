@@ -43,6 +43,7 @@ class DQRISEAgent(BaseAgent):
         prediction_type: str = "sample",
         cond_predict_scale: bool = True,
         modality_dropout_probs: dict | None = None,
+        clip_sample: bool = True,
     ) -> None:
         if tcp_dim <= 0 or tcp_dim >= action_dim:
             raise ValueError(
@@ -84,6 +85,7 @@ class DQRISEAgent(BaseAgent):
             num_training_steps,
             num_inference_steps,
             prediction_type,
+            clip_sample=clip_sample,
         )
         super().__init__(
             obs_encoder=obs_encoder,

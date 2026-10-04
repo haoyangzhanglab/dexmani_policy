@@ -29,6 +29,55 @@ from sklearn.decomposition import PCA
 from torch import nn
 
 
+def _positive_integer(value, name):
+    array = np.asarray(value)
+    if array.ndim != 0 or array.dtype.kind not in 'iu' or int(array) < 1:
+        raise ValueError(f"{name} must be a positive integer (not bool)")
+    return int(array)
+
+
+def _validate_codebook(values, *, allow_empty=False, dimensions=None, groups=None):
+    """Shared validation before dtype coercion or mutation of runtime buffers."""
+    pose, weights, permutation = (values[k] for k in ('sorted_hand_poses','layer_weights','pca_permutation'))
+    low, high = values['hand_min'], values['hand_max']
+    if low.numel() != 1 or high.numel() != 1 or not torch.isfinite(low).all() or not torch.isfinite(high).all() or not (high > low).all():
+        raise ValueError('hand_min/hand_max must be finite scalars with max > min')
+    scale, offset = values['hand_normalizer_scale'], values['hand_normalizer_offset']
+    if allow_empty and all(x.numel() == 0 for x in (pose,weights,permutation,scale,offset)):
+        return None
+    if pose.ndim != 2 or min(pose.shape) < 1 or weights.ndim != 1 or weights.numel() < 1:
+        raise ValueError('codebook poses/weights must be nonempty 2D/1D tensors')
+    n, hand_dim = pose.shape
+    num_groups = weights.numel()
+    left, right = 1, n
+    while left < right:
+        middle = (left + right) // 2
+        if middle ** num_groups < n: left = middle + 1
+        else: right = middle
+    if left ** num_groups != n:
+        raise ValueError('pose count must equal codebook_size ** num_groups')
+    inferred = (hand_dim, num_groups, left)
+    if dimensions is not None and tuple(dimensions) != inferred:
+        raise ValueError(f'Codebook dimensions mismatch: expected {dimensions}, got {inferred}')
+    integer_types = (torch.uint8, torch.uint16, torch.uint32, torch.uint64, torch.int8, torch.int16, torch.int32, torch.int64)
+    if permutation.dtype not in integer_types or permutation.ndim != 1 or permutation.numel() != n:
+        raise ValueError('pca_permutation must be a 1D integer permutation (not bool or float)')
+    if not torch.equal(permutation.long().sort().values, torch.arange(n, device=permutation.device)):
+        raise ValueError('pca_permutation must cover every pose exactly once')
+    if scale.shape != (hand_dim,) or offset.shape != (hand_dim,) or (scale == 0).any():
+        raise ValueError('hand normalizer requires matching 1D scale/offset and nonzero scale')
+    for name, value in values.items():
+        if not torch.isfinite(value).all() or (value.is_floating_point() and not torch.isfinite(value.float()).all()):
+            raise ValueError(f'{name} must be finite in runtime dtype')
+    if groups is not None:
+        if len(groups) != num_groups:
+            raise ValueError('per-group poses must contain every group')
+        for group in groups:
+            if group.shape != (left, hand_dim) or not torch.isfinite(group).all():
+                raise ValueError('invalid per-group pose shape or values')
+    return inferred
+
+
 class CodebookManager(nn.Module):
     """Manage extraction, persistence, ordering, and lookup of hand prototypes."""
 
@@ -43,20 +92,12 @@ class CodebookManager(nn.Module):
         hand_max: float = 65535.0,
     ) -> None:
         super().__init__()
-        if hand_dim <= 0:
-            raise ValueError(f"hand_dim must be positive, got {hand_dim}")
-        if num_groups <= 0:
-            raise ValueError(f"num_groups must be positive, got {num_groups}")
-        if codebook_size <= 0:
-            raise ValueError(f"codebook_size must be positive, got {codebook_size}")
-        if hand_max <= hand_min:
-            raise ValueError(
-                f"hand_max ({hand_max}) must be larger than hand_min ({hand_min})"
-            )
+        self.hand_dim = _positive_integer(hand_dim, "hand_dim")
+        self.num_groups = _positive_integer(num_groups, "num_groups")
+        self.codebook_size = _positive_integer(codebook_size, "codebook_size")
+        if not np.isfinite(hand_min) or not np.isfinite(hand_max) or hand_max <= hand_min:
+            raise ValueError("hand_min/max must be finite with max > min")
 
-        self.hand_dim = int(hand_dim)
-        self.num_groups = int(num_groups)
-        self.codebook_size = int(codebook_size)
         self.total_combinations = self.codebook_size**self.num_groups
 
         # Persistent runtime state.  These buffers are included in the policy
@@ -111,115 +152,29 @@ class CodebookManager(nn.Module):
     # State-dict loading
     # ------------------------------------------------------------------
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        # Buffers are dynamically sized.  Resize them to incoming checkpoint
-        # tensors before delegating to nn.Module's copy implementation.
-        persistent_names = (
-            "hand_min",
-            "hand_max",
-            "sorted_hand_poses",
-            "pca_permutation",
-            "layer_weights",
-            "hand_normalizer_scale",
-            "hand_normalizer_offset",
-        )
-        for name in persistent_names:
-            key = prefix + name
-            if key not in state_dict:
-                continue
-            incoming = state_dict[key]
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        names = ('hand_min', 'hand_max', 'sorted_hand_poses', 'pca_permutation',
+                 'layer_weights', 'hand_normalizer_scale', 'hand_normalizer_offset')
+        if any(prefix + name not in state_dict for name in names):
+            error_msgs.append('codebook restore requires complete persistent structural state')
+            return
+        values = {name: state_dict[prefix + name] for name in names}
+        try:
+            dimensions = _validate_codebook(values, allow_empty=True)
+        except (ValueError, RuntimeError) as exc:
+            error_msgs.append(str(exc))
+            return
+        for name, incoming in values.items():
             current = getattr(self, name)
-            if tuple(current.shape) != tuple(incoming.shape):
-                setattr(
-                    self,
-                    name,
-                    torch.empty(
-                        incoming.shape,
-                        dtype=incoming.dtype,
-                        device=current.device,
-                    ),
-                )
+            if current.shape != incoming.shape:
+                setattr(self, name, torch.empty(incoming.shape, dtype=current.dtype, device=current.device))
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
+        if dimensions is not None:
+            self.hand_dim, self.num_groups, self.codebook_size = dimensions
+            self.total_combinations = self.codebook_size ** self.num_groups
 
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-
-        # The persistent weights identify the group count; pose count alone
-        # admits multiple decompositions. Recover the size with integer search
-        # so only an exact power is accepted, without float-root rounding.
-        poses = self.sorted_hand_poses
-        weights = self.layer_weights
-        if poses.numel() or weights.numel():
-            if any(
-                prefix + name not in state_dict
-                for name in ("sorted_hand_poses", "layer_weights", "pca_permutation")
-            ):
-                # Even strict=False must not infer structure from stale buffers
-                # left in a previously populated destination manager.
-                error_msgs.append("codebook restore requires complete persistent structural state")
-            elif (
-                poses.ndim != 2 or min(poses.shape) < 1
-                or weights.ndim != 1 or weights.numel() < 1
-                or not bool(torch.isfinite(poses).all())
-                or not bool(torch.isfinite(weights).all())
-            ):
-                error_msgs.append("codebook poses and layer_weights must be non-empty, finite 2D/1D tensors")
-            else:
-                n_poses, hand_dim = poses.shape
-                num_groups = weights.numel()
-                low, high = 1, n_poses
-                while low < high:
-                    middle = (low + high) // 2
-                    if middle ** num_groups < n_poses:
-                        low = middle + 1
-                    else:
-                        high = middle
-                if low ** num_groups != n_poses:
-                    error_msgs.append(
-                        f"codebook pose count {n_poses} is not codebook_size ** "
-                        f"num_groups for {num_groups} persistent layer weights"
-                    )
-                else:
-                    self.hand_dim = hand_dim
-                    self.num_groups = num_groups
-                    self.codebook_size = low
-                    self.total_combinations = n_poses
-
-                permutation = self.pca_permutation
-                if (
-                    permutation.ndim != 1 or permutation.numel() != n_poses
-                    or permutation.dtype != torch.long
-                    or not torch.equal(
-                        permutation.sort().values,
-                        torch.arange(n_poses, device=permutation.device),
-                    )
-                ):
-                    error_msgs.append("codebook pca_permutation must enumerate every pose exactly once")
-
-        if (
-            self.hand_min.numel() != 1 or self.hand_max.numel() != 1
-            or not bool(torch.isfinite(self.hand_min).all())
-            or not bool(torch.isfinite(self.hand_max).all())
-            or not bool((self.hand_max > self.hand_min).all())
-        ):
-            error_msgs.append(
-                "codebook hand_min/hand_max must be finite scalars and satisfy hand_max > hand_min"
-            )
 
     # ------------------------------------------------------------------
     # Normalised <-> affine raw conversion
@@ -266,6 +221,8 @@ class CodebookManager(nn.Module):
                 f"expected {self.hand_dim}, got scale={scale_t.numel()}, "
                 f"offset={offset_t.numel()}"
             )
+        if not torch.isfinite(scale_t).all() or not torch.isfinite(offset_t).all() or (scale_t == 0).any():
+            raise ValueError("hand normalizer scale/offset must be finite and scale nonzero")
         self.hand_normalizer_scale = scale_t
         self.hand_normalizer_offset = offset_t
 
@@ -499,7 +456,7 @@ class CodebookManager(nn.Module):
                 frozenset(required | group_keys),
             }:
                 raise ValueError("Codebook does not match the v3 schema")
-            if int(data["format_version"]) != self.FORMAT_VERSION:
+            if _positive_integer(data["format_version"], "format_version") != self.FORMAT_VERSION:
                 raise ValueError(
                     f"Codebook must use format_version={self.FORMAT_VERSION}"
                 )
@@ -509,9 +466,9 @@ class CodebookManager(nn.Module):
             poses = torch.from_numpy(
                 np.asarray(data["sorted_hand_poses"], dtype=np.float32)
             )
-            declared_hand_dim = int(data["hand_dim"])
-            declared_groups = int(data["num_groups"])
-            declared_size = int(data["codebook_size"])
+            declared_hand_dim = _positive_integer(data["hand_dim"], "hand_dim")
+            declared_groups = _positive_integer(data["num_groups"], "num_groups")
+            declared_size = _positive_integer(data["codebook_size"], "codebook_size")
             expected_codes = self.codebook_size**self.num_groups
             mismatches: list[str] = []
             if declared_hand_dim != self.hand_dim:
@@ -535,23 +492,22 @@ class CodebookManager(nn.Module):
                     f"Codebook {path} is invalid:\n  - " + "\n  - ".join(mismatches)
                 )
 
-            self.hand_min.fill_(float(data["hand_min"]))
-            self.hand_max.fill_(float(data["hand_max"]))
-            self.sorted_hand_poses = poses
-            self.pca_permutation = torch.from_numpy(data["pca_permutation"]).long()
-            self.layer_weights = torch.from_numpy(data["layer_weights"]).float()
-            self.set_hand_normalizer(
-                data["hand_normalizer_scale"], data["hand_normalizer_offset"]
-            )
-            self.artifact_metadata = json.loads(str(data["metadata_json"].item()))
-            self._group_sorted_poses = (
-                [
-                    torch.from_numpy(data[f"_group_sorted_poses_g{group}"]).float()
-                    for group in range(self.num_groups)
-                ]
-                if group_keys <= keys
-                else None
-            )
+            values = {name: torch.from_numpy(np.asarray(data[name]).copy()) for name in (
+                "hand_min", "hand_max", "sorted_hand_poses", "pca_permutation", "layer_weights",
+                "hand_normalizer_scale", "hand_normalizer_offset")}
+            groups = [torch.from_numpy(np.asarray(data[f"_group_sorted_poses_g{g}"], dtype=np.float32).copy())
+                      for g in range(self.num_groups)] if group_keys <= keys else None
+            metadata = json.loads(str(data["metadata_json"].item()))
+            if not isinstance(metadata, dict):
+                raise ValueError("codebook metadata_json must contain an object")
+            _validate_codebook(values, dimensions=(self.hand_dim, self.num_groups, self.codebook_size), groups=groups)
+            # Allocate every candidate buffer before committing any member.
+            converted = {name: value.to(device=getattr(self, name).device, dtype=getattr(self, name).dtype)
+                         for name, value in values.items()}
+            for name, value in converted.items():
+                setattr(self, name, value)
+            self.artifact_metadata = metadata
+            self._group_sorted_poses = groups
 
     # ------------------------------------------------------------------
     # Per-group experimental codebooks

@@ -21,8 +21,3 @@ class ResumableDistributedSampler(DistributedSampler):
 
     def __len__(self):
         return max(0, self.num_samples - self.next_micro_step * self.batch_size)
-
-    def full_num_batches(self, drop_last=False):
-        if drop_last:
-            return self.num_samples // self.batch_size
-        return (self.num_samples + self.batch_size - 1) // self.batch_size

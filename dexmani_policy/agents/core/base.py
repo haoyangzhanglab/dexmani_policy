@@ -33,6 +33,12 @@ class BaseAgent(nn.Module):
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = LinearNormalizer()
 
+    def set_normalization_spec(self, spec):
+        from dexmani_policy.agents.normalization import validate_action_clipping
+        if isinstance(self.action_decoder, Diffusion):
+            validate_action_clipping(spec, self.action_decoder.noise_scheduler.config.clip_sample)
+        self.normalization_spec = dict(spec)
+
     def initialize_training(self) -> None:
         """Initialize fresh training weights; complete checkpoints skip this step."""
 
@@ -336,6 +342,7 @@ class UNetDiffusionAgent(BaseAgent):
         prediction_type: str = "sample",
         modality_dropout_probs: dict = None,
         cond_predict_scale: bool = True,
+        clip_sample: bool = True,
     ):
         backbone = ConditionalUnet1D(
             input_dim=action_dim,
@@ -347,7 +354,7 @@ class UNetDiffusionAgent(BaseAgent):
             cond_predict_scale=cond_predict_scale,
         )
         action_decoder = Diffusion(
-            backbone, num_training_steps, num_inference_steps, prediction_type
+            backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample=clip_sample
         )
         super().__init__(
             obs_encoder,

@@ -9,7 +9,7 @@
 #   bash scripts/remote/sync_down.sh --dry-run                 # Preview what would transfer
 #   bash scripts/remote/sync_down.sh --list                    # List experiments on server
 #
-# Two-pass sync: Pass 1 downloads only new files and protects any existing
+# Three-pass sync: Pass 1 downloads only new files and protects any existing
 # local artifact; Pass 2 updates explicitly selected mutable training entries.
 # Pass 1 deliberately does not retain partial transfers: --ignore-existing
 # would otherwise mistake an interrupted checkpoint for a complete one.
@@ -98,7 +98,7 @@ echo ""
 # ═══════════════════════════════════════════════════════════════════
 # Do not combine --partial with --ignore-existing: a later sync would skip an
 # interrupted checkpoint merely because its partial destination file exists.
-echo "--- Pass 1/2: new files (--ignore-existing) ---"
+echo "--- Pass 1/3: new files (--ignore-existing) ---"
 
 PASS1_OPTS=(
     -av
@@ -124,7 +124,7 @@ rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
 # --existing and the file filter update only mutable training metadata.
 # This pass has no --ignore-existing, so retaining a partial transfer is safe.
 echo ""
-echo "--- Pass 2/2: mutable training files (--existing) ---"
+echo "--- Pass 2/3: mutable training files (--existing) ---"
 
 PASS2_OPTS=(
     -av
@@ -145,6 +145,24 @@ rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     else
         echo "[sync_down] Pass 2: rsync error (code $rc)" >&2
         exit $rc
+    fi
+}
+
+# Small mutable evidence needs content comparison even at equal size/mtime.
+# Checkpoints and growing metrics are intentionally excluded from this pass.
+echo "--- Pass 3/3: evaluation metadata (--checksum) ---"
+PASS3_OPTS=(
+    -av --checksum
+    "${WANDB_EXCLUDE[@]}"
+    --include='*/' --include='*.json' --include='*.yaml' --include='_result.txt'
+    --exclude='*'
+    $DRY_RUN
+)
+rsync "${PASS3_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
+    rc=$?
+    if [[ $rc -ne 24 ]]; then
+        echo "[sync_down] Pass 3: rsync error (code $rc)" >&2
+        exit "$rc"
     fi
 }
 

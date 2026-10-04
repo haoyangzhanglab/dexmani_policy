@@ -36,6 +36,27 @@ def read_best_ckpt_json(experiment_dir):
     resolved = (root / path).resolve(strict=True)
     if not resolved.is_relative_to(root / "checkpoints") or not resolved.is_file():
         raise ValueError("Best checkpoint must be a file inside experiment/checkpoints")
+    if "selection_summary" in info or "selection_id" in info:
+        if not isinstance(info.get("selection_id"), str) or not info["selection_id"]:
+            raise ValueError("New best record requires a nonempty selection_id")
+        relative_summary = info.get("selection_summary")
+        if not isinstance(relative_summary, str) or Path(relative_summary).is_absolute() or ".." in Path(relative_summary).parts:
+            raise ValueError("Selection summary must be relative to experiment")
+        summary_path = (root / relative_summary).resolve(strict=True)
+        if not summary_path.is_relative_to(root):
+            raise ValueError("Selection summary must remain inside experiment")
+        summary = json.loads(summary_path.read_text())
+        if summary.get("status") != "success" or summary.get("selection_id") != info.get("selection_id"):
+            raise ValueError("Best record must reference its successful selection")
+        selected = summary.get("best_checkpoint", {})
+        for key in ("ckpt_relpath", "global_step", "pct"):
+            if key not in selected or selected[key] != info.get(key):
+                raise ValueError(f"Best/selection mismatch: {key}")
+        if summary.get("selection") != info.get("selection"):
+            raise ValueError("Best/selection seed evidence mismatch")
+    else:
+        import warnings
+        warnings.warn("Historical best has no selection identity/summary; provenance is unverified", stacklevel=2)
     return info
 
 
@@ -84,8 +105,9 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     if state is None:
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
     agent = hydra.utils.instantiate(cfg.agent)
+    agent._checkpoint_global_step = checkpoint.global_step
     agent.action_key = cfg.action_key
-    agent.normalization_spec = resolve_normalization_spec(cfg)
+    agent.set_normalization_spec(resolve_normalization_spec(cfg))
     agent.load_state_dict(fix_state_dict(state, is_current_ddp=False), strict=True)
     validate_normalizer_state(agent.normalizer, agent.normalization_spec)
     agent.to(device)

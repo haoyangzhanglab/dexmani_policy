@@ -740,3 +740,35 @@ def resolve_normalization_spec(cfg) -> dict:
         raise ValueError("config.normalization must be a mapping of field -> mode")
 
     return validate_normalization_spec(normalization)
+
+
+def uses_diffusion_config(agent_config):
+    """Only known constructors prove config-time Diffusion semantics.
+
+    Runtime validation still inspects the actual decoder, including custom agents.
+    """
+    if not agent_config.get("_target_"):
+        return False
+    from hydra.utils import get_class
+    from dexmani_policy.agents.core.base import UNetDiffusionAgent
+    from dexmani_policy.agents.core.dqrise import DQRISEAgent
+    from dexmani_policy.agents.core.r3d import R3DAgent
+    from dexmani_policy.agents.core.multi_task import MultiTaskAgent
+    cls = get_class(agent_config["_target_"])
+    if cls is MultiTaskAgent:
+        return agent_config.get("action_decoder_type", "diffusion") == "diffusion"
+    # Subclasses may replace their decoder; defer those to the runtime check.
+    from dexmani_policy.agents.core.dp import DPAgent
+    from dexmani_policy.agents.core.dp3 import DP3Agent
+    return cls in (UNetDiffusionAgent, DPAgent, DP3Agent, DQRISEAgent, R3DAgent)
+
+
+def validate_action_clipping(spec, clip_sample):
+    if type(clip_sample) is not bool:
+        raise TypeError("agent.clip_sample must be a bool")
+    if spec.get("action") == "gaussian" and clip_sample:
+        raise ValueError(
+            "Gaussian action normalization requires agent.clip_sample=false. "
+            "Historical Gaussian+true results are not silently corrected; use the "
+            "original code to reproduce them, and reevaluate the corrected experiment."
+        )

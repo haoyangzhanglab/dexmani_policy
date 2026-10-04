@@ -317,9 +317,9 @@ bash scripts/remote/sync_down.sh --list
 bash scripts/remote/sync_down.sh --with-wandb <optional-subpath>
 ```
 
-### 5.2 Two-pass Protection Strategy
+### 5.2 Three-pass Protection Strategy
 
-`sync_down.sh` 的核心设计是**保护本地已有 artifact**。
+`sync_down.sh` 保留已有大 checkpoint，并更新允许变化的训练与评测元数据。
 
 #### Pass 1 — New files only
 
@@ -331,7 +331,7 @@ remote file already exists locally
     → leave local copy untouched
 ```
 
-这使本地生成的 evaluation/demo artifacts 不会因为之后重复 pull 而被远端覆盖。
+第一趟保留已有文件；后续趟会更新同路径的可变小文件。不同 evaluation/demo run 使用独立目录。
 
 Pass 1 不保留 partial destination，以避免下一次 `--ignore-existing` 把未完成 checkpoint 当成完整文件。
 
@@ -340,6 +340,10 @@ Pass 1 不保留 partial destination，以避免下一次 `--ignore-existing` �
 训练过程中少数文件会持续变化，因此第二趟只更新脚本显式 allowlist 中的 mutable entries。
 
 具体 allowlist 以当前 `sync_down.sh` 为准，不在文档复制文件数量，避免脚本演进后形成静态 drift。
+
+#### Pass 3 — Evaluation metadata
+
+对 JSON、YAML 和 `_result.txt` 使用 checksum 比较，保证同大小、同 mtime 的 best、summary 和有效配置也能更新。checksum 不用于大 checkpoint 或持续增长的 metrics；latest 保持 symlink，不使用 `--delete`。新 best 的目标尚未同步时读取端会报缺失。
 
 ### 5.3 rsync Exit Code 24
 
@@ -481,6 +485,8 @@ training stdout/stderr → remote logs/
 ```
 
 训练进程退出后 tmux session 自动结束；日志文件保留 crash traceback / exit status。
+
+每次启动的 session 与日志带唯一后缀；启动脚本不 kill 旧 session，日志采用独占创建。最终名字冲突会失败，停止旧实验须显式调用 `stop_remote.sh <SESSION>`。
 
 脚本启动成功后会打印实际 session name。后续 attach/stop 应使用该输出，不要在文档或外部脚本重新实现 session-name 规则。
 
@@ -707,7 +713,7 @@ bash scripts/remote/stop_remote.sh --list
 
 ### Experiment ownership
 
-`sync_down.sh` 默认保护本地已存在 artifact。不要随意把它改成通用 `rsync --delete`，否则可能覆盖/删除本地 selection、eval、demo 结果。
+`sync_down.sh` 保留已存在的大 checkpoint，但会更新同路径的可变小型元数据。不要随意把它改成通用 `rsync --delete`，否则可能覆盖/删除本地 selection、eval、demo 结果。
 
 ### Process ownership
 

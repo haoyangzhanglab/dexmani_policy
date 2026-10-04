@@ -1,3 +1,4 @@
+import os
 import hashlib
 import multiprocessing as mp
 import warnings
@@ -78,6 +79,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self._epoch = 0
         # Manager-backed Value works with both fork and spawn start methods,
         # unlike mp.Value which requires fork for cross-process visibility.
+        self._manager_pid = os.getpid()
         self._manager = mp.Manager()
         self._epoch_val = self._manager.Value("i", 0)
         self.deterministic = deterministic
@@ -111,9 +113,20 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         for dataset in self.datasets:
             yield from dataset.iter_normalization_data(key)
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_manager"] = None
+        return state
+
+    def close(self):
+        manager = getattr(self, "_manager", None)
+        if manager is not None and getattr(self, "_manager_pid", None) == os.getpid():
+            self._manager = None
+            manager.shutdown()
+
     def __del__(self):
         try:
-            self._manager.shutdown()
+            self.close()
         except Exception:
             pass
 

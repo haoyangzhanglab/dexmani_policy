@@ -124,6 +124,20 @@ class MultiTaskSimRunner:
             )
         return [task_pool[idx] for idx in indices]
 
+    def seed_protocol(self):
+        import hashlib
+        import json
+        return {
+            "task_order": list(self.runners),
+            "pools": {task: {"length": len(pool), "sha256": hashlib.sha256(
+                json.dumps(pool, separators=(",", ":")).encode()).hexdigest()}
+                for task, pool in self._task_seed_pools.items()},
+        }
+
+    def map_eval_seeds(self, reference_seeds):
+        return {task: self._map_reference_seeds(task, list(reference_seeds))
+                for task in self.runners}
+
     def print_summary(
         self,
         per_task,

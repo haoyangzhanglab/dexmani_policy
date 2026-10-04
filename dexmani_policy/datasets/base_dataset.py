@@ -92,6 +92,7 @@ class BaseDataset(torch.utils.data.Dataset):
             keys=load_keys,
         )
 
+        self.data_revision = self.replay_buffer.data_revision
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
         self.augmentors = {}

@@ -14,7 +14,7 @@ from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 
 ROOT_DIR = set_project_root()
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
@@ -24,6 +24,7 @@ from dexmani_policy.training.build_utils import (
     validate_config,
 )
 from dexmani_policy.training.resume import build_resume_contract, build_train_loader
+from dexmani_policy.training.run_identity import claim_run, resolve_resume_source
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
@@ -81,6 +82,11 @@ def build_train_components(cfg):
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     validate_config(cfg)
+    with open_dict(cfg):
+        cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
+        cfg.workspace.claim_token = claim_run(
+            cfg.workspace.output_dir, resume_from=cfg.resume_from
+        )
 
     set_seed(cfg.training.seed)
     comp = build_train_components(cfg)
@@ -98,7 +104,6 @@ def main(cfg):
             **OmegaConf.to_container(cfg.training.loop, resolve=True)
         ),
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
-        fast_grad_finite_check=cfg.training.get("fast_grad_finite_check", False),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
         use_compile=cfg.training.get("use_compile", False),
         compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),

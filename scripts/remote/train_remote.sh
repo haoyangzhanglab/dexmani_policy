@@ -119,11 +119,9 @@ remote_bash_invocation() {
     printf "bash -lc '%s'" "$escaped_script"
 }
 
-SESSION="dex_${CONFIG//\//_}_${TASK}"
+SESSION="dex_${CONFIG//\//_}_${TASK//+/_}_$(date +%Y%m%d_%H%M%S)_$(cat /proc/sys/kernel/random/uuid)"
 
-# Include seed in session name so same config+task with different seeds
-# can run concurrently without killing each other's tmux session.
-# Extract from overrides like 'training.seed=42'.
+# Append an explicit seed for readability; the launch suffix ensures uniqueness.
 _seed=""
 for _override in "$@"; do
     if [[ "$_override" == training.seed=* ]]; then
@@ -133,7 +131,7 @@ for _override in "$@"; do
 done
 if [[ -n "$_seed" ]]; then
     if [[ ! "$_seed" =~ ^[0-9]+$ ]]; then
-        echo "Error: training.seed must be a positive integer, got: $_seed" >&2
+        echo "Error: training.seed must be a nonnegative integer, got: $_seed" >&2
         exit 1
     fi
     SESSION="${SESSION}_s${_seed}"
@@ -228,24 +226,20 @@ if $FOREGROUND; then
     echo "Launching in foreground (Ctrl+C to stop)..."
     ssh -t "$SERVER" "$(remote_bash_invocation "$REMOTE_CMD")"
 else
-    # Kill existing session with same name, then create new one
     printf -v session_q '%q' "$SESSION"
-    if ! ssh "$SERVER" "$(remote_bash_invocation "tmux kill-session -t $session_q 2>/dev/null || true")"; then
-        echo "ERROR: failed to contact '$SERVER' while replacing tmux session '$SESSION'." >&2
-        exit 1
-    fi
     # Launch in a detached tmux session that self-destructs on completion.
     # stdout/stderr are redirected to logs/<session>.log (root-anchored `logs/`
     # is excluded from sync_code --delete, and .gitignore already lists it), so a
     # crash traceback survives after the session closes. No trailing `read`, so
     # once training exits — checkpoints already saved, GPU memory freed — tmux
     # destroys the session automatically.
-    REMOTE_TMUX_SCRIPT="mkdir -p \"$SERVER_PROJ/logs\" && { $REMOTE_CMD; _rc=\$?; if [[ \$_rc -eq 0 ]]; then echo \"[train_remote] $SESSION finished successfully (exit 0).\"; else echo \"[train_remote] $SESSION FAILED (exit \$_rc).\"; fi; } > \"$SERVER_PROJ/logs/${SESSION}.log\" 2>&1"
+    REMOTE_TMUX_SCRIPT="set -o noclobber; mkdir -p \"$SERVER_PROJ/logs\" && { $REMOTE_CMD; _rc=\$?; if [[ \$_rc -eq 0 ]]; then echo \"[train_remote] $SESSION finished successfully (exit 0).\"; else echo \"[train_remote] $SESSION FAILED (exit \$_rc).\"; fi; exit \$_rc; } > \"$SERVER_PROJ/logs/${SESSION}.log\" 2>&1"
     printf -v tmux_script_q '%q' "$REMOTE_TMUX_SCRIPT"
-    if ! ssh "$SERVER" "$(remote_bash_invocation "tmux new-session -d -s $session_q bash -lc $tmux_script_q")"; then
+    ssh "$SERVER" "$(remote_bash_invocation "tmux new-session -d -s $session_q bash -lc $tmux_script_q")" || {
+        rc=$?
         echo "ERROR: failed to start tmux session '$SESSION' on '$SERVER'." >&2
-        exit 1
-    fi
+        exit "$rc"
+    }
 
     echo "╔══════════════════════════════════════════╗"
     echo "║  Training started (tmux: $SESSION)"
