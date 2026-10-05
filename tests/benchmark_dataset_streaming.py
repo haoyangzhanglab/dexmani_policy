@@ -53,7 +53,11 @@ def profile_chunk_processing(metrics, worker_id=0):
 
 
 def measure_gpu_data_wait(args):
-    """Short in-memory forward/backward workload; no optimizer, EMA or artifacts."""
+    """Measure short forward/backward data wait without optimizer, EMA or artifacts.
+
+    finite_loss covers every executed batch, including warmup. Its aggregate
+    check runs after timing ends and does not add per-batch host synchronization.
+    """
     if args.order != "random":
         raise ValueError("GPU data-wait measurement requires --order random")
     register_resolvers()
@@ -93,7 +97,7 @@ def measure_gpu_data_wait(args):
     )
     begin = time.perf_counter()
     iterator = iter(loader)
-    waits, events = [], []
+    waits, events, losses = [], [], []
     warmup = 3
     for step in range(warmup + args.batches):
         if step == warmup:
@@ -116,11 +120,14 @@ def measure_gpu_data_wait(args):
             loss, _ = model.compute_loss(batch)
         loss.backward()
         end.record()
+        losses.append(loss.detach())
         if step >= warmup:
             waits.append(wait)
             events.append((start, end))
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - begin
+    # Include warmup and every measured batch, outside the timing interval.
+    finite_loss = bool(torch.isfinite(torch.stack(losses)).all())
     compute_ms = [start.elapsed_time(end) for start, end in events]
     gaps_ms = [
         events[i - 1][1].elapsed_time(events[i][0]) for i in range(1, len(events))
@@ -174,7 +181,7 @@ def measure_gpu_data_wait(args):
                 "indices_sha256": hashlib.sha256(
                     np.asarray(order, dtype="i8").tobytes()
                 ).hexdigest(),
-                "finite_loss": bool(torch.isfinite(loss)),
+                "finite_loss": finite_loss,
                 "compile": False,
                 "optimizer": False,
                 "ema": False,
