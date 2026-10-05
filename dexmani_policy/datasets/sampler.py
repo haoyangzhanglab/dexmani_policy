@@ -155,6 +155,47 @@ class SequenceSampler:
     def __len__(self):
         return len(self.indices)
 
+    def source_rows(self, indices=None):
+        """Original source rows, including repeated boundary rows used by padding."""
+        indices = self.indices if indices is None else indices
+        start, end, sample_start, _ = np.asarray(indices).T
+        return np.clip(
+            start[:, None] + np.arange(self.sequence_length) - sample_start[:, None],
+            start[:, None],
+            end[:, None] - 1,
+        )
+
+    def filter_valid(self, obs_valid, action_valid, dispatch_valid, n_obs_steps):
+        # Process bounded batches: a full RGB buffer or windows×horizon copy is unnecessary.
+        kept = []
+        counts = dict(candidate=len(self.indices), observation=0, action=0, dispatch=0)
+        obs_rows = np.zeros(len(obs_valid), dtype=bool)
+        action_rows = np.zeros(len(action_valid), dtype=bool)
+        for offset in range(0, len(self.indices), 8192):
+            indices = self.indices[offset : offset + 8192]
+            rows = self.source_rows(indices)
+            obs_ok = obs_valid[rows[:, :n_obs_steps]].all(axis=1)
+            action_ok = action_valid[rows].all(axis=1)
+            dispatch_ok = dispatch_valid[rows].all(axis=1)
+            for name, ok in (
+                ("observation", obs_ok),
+                ("action", action_ok),
+                ("dispatch", dispatch_ok),
+            ):
+                counts[name] += int((~ok).sum())
+            keep = obs_ok & action_ok & dispatch_ok
+            kept.append(indices[keep])
+            obs_rows[rows[keep, :n_obs_steps].reshape(-1)] = True
+            action_rows[rows[keep].reshape(-1)] = True
+        self.indices = np.concatenate(kept, axis=0)
+        counts["valid"] = len(self.indices)
+        self.validity_summary = counts
+        self.observation_source_rows = np.flatnonzero(obs_rows)
+        self.action_source_rows = np.flatnonzero(action_rows)
+        print(f"SequenceSampler window validity (rejections may overlap): {counts}")
+        if not len(self.indices):
+            raise ValueError(f"Zero valid training/validation windows: {counts}")
+
     def sample_sequence(self, idx):
         result = {}
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
@@ -164,7 +205,9 @@ class SequenceSampler:
             sample = input_arr[buffer_start_idx:buffer_end_idx]
             data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
-                data = np.empty(shape=(self.sequence_length,) + input_arr.shape[1:], dtype=input_arr.dtype)
+                data = np.empty(
+                    shape=(self.sequence_length,) + input_arr.shape[1:], dtype=input_arr.dtype
+                )
                 if sample_start_idx > 0:
                     data[:sample_start_idx] = sample[0]
                 if sample_end_idx < self.sequence_length:
@@ -182,18 +225,14 @@ def validate_val_ratio(val_ratio) -> None:
         or not math.isfinite(val_ratio)
         or not 0 <= val_ratio < 1
     ):
-        raise ValueError(
-            f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}"
-        )
+        raise ValueError(f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}")
 
 
 def validate_max_train_episodes(value) -> None:
     if value is not None and (
         isinstance(value, bool) or not isinstance(value, Integral) or value < 1
     ):
-        raise ValueError(
-            f"max_train_episodes must be None or a positive integer, got {value!r}"
-        )
+        raise ValueError(f"max_train_episodes must be None or a positive integer, got {value!r}")
 
 
 def validate_dataset_splits(dataset) -> None:

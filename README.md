@@ -148,6 +148,8 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 - 仓库级辅助脚本：`scripts/utils/`
 - Real policy inspection / inference：`dexmani_policy/deployment/`
 
+Real 新训练配方使用角色化有效窗口、两设备 ACCEPTED dispatch 和去重 train-only normalizer；旧 checkpoint 推理继续使用保存统计。部署桥接返回完整 future，Real 默认 sync，可选择 async 或 DDIM-adapted RTC。支持范围、数学与定向测试见 [Real 数据与 RTC](docs/rtc.md)。真机预算和运行入口由 `dexmani_real` 提供。
+
 真机运动不属于普通开发验证；只有在明确需要时才进入 Real 流程。
 
 ## 项目结构

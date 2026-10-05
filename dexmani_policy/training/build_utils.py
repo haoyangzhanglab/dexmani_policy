@@ -10,10 +10,11 @@ from torch.nn.modules.batchnorm import _BatchNorm
 
 from dexmani_policy.agents.normalization import (
     NON_NUMERIC_OBSERVATION_FIELDS,
-    uses_diffusion_config, validate_action_clipping,
     LinearNormalizer,
     build_mixed_action_normalizer,
     resolve_normalization_spec,
+    uses_diffusion_config,
+    validate_action_clipping,
     validate_normalization_spec,
     validate_normalizer_state,
 )
@@ -49,13 +50,11 @@ __all__ = [
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
-    """Build a ``LinearNormalizer`` from a dataset and the resolved normalization spec.
+    """Fit the resolved spec on unique source rows from valid training windows.
 
-    ``identity`` fields register no params.  ``action:auto`` keeps the current
-    ``action`` / ``action_ee`` / ``use_aux_ee`` semantics via the existing
-    ``build_mixed_action_normalizer`` or ``limits``.  All other fields use full
-    dataset statistics (single-chunk ``fit_field`` fast path, or streaming
-    ``fit_field_chunks`` for multi-chunk datasets).
+    ``identity`` registers no parameters. ``action:auto`` uses mixed normalization
+    for EEF actions and limits for joint actions, including enabled auxiliary
+    targets. All fitted fields use the dataset's role-specific training rows.
     """
     normalizer = LinearNormalizer()
 
@@ -96,11 +95,40 @@ def build_dataset_and_normalizer(cfg):
     runtime = _capture_real_runtime(dataset, cfg)
     with open_dict(cfg):
         cfg.data_identity = capture_data_identity(dataset)
+        children = getattr(dataset, "datasets", [dataset])
+        cfg.data_recipe = [
+            dict(
+                child.data_recipe,
+                windows=child.sampler.validity_summary,
+                observation_rows=len(child.sampler.observation_source_rows),
+                action_rows=len(child.sampler.action_source_rows),
+            )
+            for child in children
+        ]
         if runtime is not None:
             cfg.real_runtime = runtime
         else:
             cfg.pop("real_runtime", None)
-    normalizer = build_normalizer(dataset, spec, cfg.action_key)
+    if cfg.get("resume_from") is not None:
+        from pathlib import Path
+
+        from dexmani_policy.training.checkpoint import CheckpointStore, fix_state_dict
+
+        path = Path(cfg.resume_from)
+        checkpoint = CheckpointStore(path.parent).load(path)
+        state = fix_state_dict(checkpoint.model_state, is_current_ddp=False)
+        normalizer = LinearNormalizer()
+        normalizer.load_state_dict(
+            {
+                key.removeprefix("normalizer."): value
+                for key, value in state.items()
+                if key.startswith("normalizer.")
+            }
+        )
+        with open_dict(cfg):
+            cfg.normalizer_source = "saved_checkpoint"
+    else:
+        normalizer = build_normalizer(dataset, spec, cfg.action_key)
     validate_normalizer_state(normalizer, spec)
     return dataset, normalizer
 
@@ -116,9 +144,7 @@ def _validate_ema_batchnorm_compatibility(model) -> None:
     for name, module in model.named_modules():
         if not isinstance(module, _BatchNorm):
             continue
-        has_trainable_params = any(
-            p.requires_grad for p in module.parameters(recurse=False)
-        )
+        has_trainable_params = any(p.requires_grad for p in module.parameters(recurse=False))
         updates_running_stats = bool(module.training and module.track_running_stats)
         if has_trainable_params or updates_running_stats:
             unsafe.append(name or "<root>")
@@ -153,9 +179,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, initialize_training=
 
     requires_ema_for_loss = model.requires_ema_for_loss
     if requires_ema_for_loss and not cfg.training.use_ema:
-        raise ValueError(
-            f"{type(model.action_decoder).__name__} requires training.use_ema=true"
-        )
+        raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
 
     if cfg.training.use_ema:
         _validate_ema_batchnorm_compatibility(model)
@@ -206,9 +230,7 @@ def validate_gradient_accumulation(
 
 def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
     """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
-    grad_accum = (
-        cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
-    )
+    grad_accum = cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
     validate_gradient_accumulation(batches_per_epoch, grad_accum)
     optimizer = model.configure_optimizer(**cfg.optimizer)
     print_param_count(model)
@@ -319,9 +341,7 @@ _METRIC_POINTNEXT_ENCODER_TYPES = frozenset({"pointnext", "pointnext_tokenizer"}
 
 def _numeric_modalities(sensor_modalities) -> set:
     return {
-        modality
-        for modality in sensor_modalities
-        if modality not in NON_NUMERIC_OBSERVATION_FIELDS
+        modality for modality in sensor_modalities if modality not in NON_NUMERIC_OBSERVATION_FIELDS
     }
 
 
@@ -342,8 +362,7 @@ def _resolve_numeric_observation_fields(cfg) -> set:
         return set()
 
     child_sets = [
-        _numeric_modalities(child.get("sensor_modalities", []))
-        for child in child_datasets
+        _numeric_modalities(child.get("sensor_modalities", [])) for child in child_datasets
     ]
     distinct = {frozenset(s) for s in child_sets}
     if len(distinct) > 1:
@@ -369,10 +388,7 @@ def _validate_encoder_normalization_contract(cfg, spec) -> None:
     """
     agent = cfg.get("agent", {})
     encoder_type = agent.get("encoder_type")
-    if (
-        encoder_type in _METRIC_POINTNEXT_ENCODER_TYPES
-        and spec.get("point_cloud") != "identity"
-    ):
+    if encoder_type in _METRIC_POINTNEXT_ENCODER_TYPES and spec.get("point_cloud") != "identity":
         raise ValueError(
             f"agent.encoder_type={encoder_type!r} requires normalization.point_cloud: "
             "identity (PointNeXT FPS/ball-query radii need metric-space coordinates; "
@@ -403,8 +419,7 @@ def validate_config(cfg):
     if cfg.optimizer.get("obs_lr") is not None:
         if cfg.optimizer.obs_lr < 0:
             raise ValueError(
-                "optimizer.obs_lr must be non-negative "
-                "(0 freezes obs_encoder parameters)"
+                "optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)"
             )
 
     _validate_augmentation_consistency(cfg)
@@ -445,12 +460,7 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
     if attrs.get("task_name") != cfg.task_name:
         raise ValueError("Real canonical task_name differs from the training task")
     dt = attrs.get("dt")
-    if (
-        isinstance(dt, bool)
-        or not isinstance(dt, (int, float))
-        or not math.isfinite(dt)
-        or dt <= 0
-    ):
+    if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
         raise ValueError("Real canonical dt must be finite and positive")
     runtime = {"dt": float(dt)}
     if "point_cloud" in dataset.sensor_modalities:
@@ -464,9 +474,7 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
         encoder = cfg.agent.get("pc_encoder_config") or {}
         for configured in (cfg.agent.get("num_points"), encoder.get("num_points")):
             if configured is not None and configured != count:
-                raise ValueError(
-                    "Agent point count disagrees with the actual training cloud"
-                )
+                raise ValueError("Agent point count disagrees with the actual training cloud")
         runtime["pointcloud"] = dict(cloud)
     if "fingertip_points" in dataset.sensor_modalities:
         links = attrs.get("fingertip_link_names")
@@ -476,9 +484,7 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
             or any(not isinstance(link, str) or not link.strip() for link in links)
             or len(set(links)) != 5
         ):
-            raise ValueError(
-                "Real fingertip_points requires five distinct non-empty link names"
-            )
+            raise ValueError("Real fingertip_points requires five distinct non-empty link names")
         runtime["fingertip_link_names"] = list(links)
     return runtime
 
@@ -486,6 +492,10 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
 def capture_data_identity(dataset):
     """Producer-declared revisions captured once while loading, never scanned at save."""
     if hasattr(dataset, "task_names") and hasattr(dataset, "datasets"):
-        return {"tasks": {name: capture_data_identity(child)
-                          for name, child in zip(dataset.task_names, dataset.datasets)}}
+        return {
+            "tasks": {
+                name: capture_data_identity(child)
+                for name, child in zip(dataset.task_names, dataset.datasets)
+            }
+        }
     return {"revision": getattr(dataset, "data_revision", None)}

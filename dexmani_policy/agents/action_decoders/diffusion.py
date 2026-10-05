@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-from dexmani_policy.utils.validation import positive_int
 from dexmani_policy.agents.action_decoders.utils import resolve_inference_steps
+from dexmani_policy.utils.validation import positive_int
 
 
 class Diffusion(nn.Module):
@@ -131,8 +131,26 @@ class Diffusion(nn.Module):
         cond: torch.Tensor,
         action_template: torch.Tensor,
         inference_steps: int | None = None,
+        *,
+        rtc_prefix=None,
+        delay_steps=0,
+        history_offset=0,
+        rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
         num_steps = resolve_inference_steps(self.num_inference_steps, inference_steps)
+        if rtc_prefix is not None and rtc_prefix.shape[-2] and rtc_guidance_cap != 0:
+            from dexmani_policy.agents.action_decoders.rtc import predict_rtc
+
+            return predict_rtc(
+                self,
+                cond,
+                action_template,
+                rtc_prefix,
+                delay=delay_steps,
+                offset=history_offset,
+                beta=rtc_guidance_cap,
+                steps=num_steps,
+            )
         sample = torch.randn_like(action_template, device=action_template.device)
         self.noise_scheduler.set_timesteps(num_steps, device=sample.device)
         for t in self.noise_scheduler.timesteps:

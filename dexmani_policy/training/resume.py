@@ -68,6 +68,7 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
         "agent": build_agent_contract(model),
         "agent_config": plain(cfg.agent),
         "dataset": plain(cfg.dataset),
+        "data_recipe": plain(cfg.data_recipe) if "data_recipe" in cfg else None,
         "loader": {
             key: loader_options(cfg).get(key, False)
             for key in ("batch_size", "shuffle", "drop_last")
@@ -105,18 +106,14 @@ def restore_training_state(
     accum = resume_contract["training"]["loop"]["gradient_accumulation_steps"]
     cursor = checkpoint.next_micro_step
     if not 0 <= cursor < batches or cursor % accum:
-        raise ValueError(
-            "Checkpoint next_micro_step is not a normalized accumulation boundary"
-        )
+        raise ValueError("Checkpoint next_micro_step is not a normalized accumulation boundary")
     model.load_state_dict(fix_state_dict(checkpoint.model_state, False), strict=True)
     # Normalizers reconstruct their ParameterDict from checkpoint tensors.
     # A CPU-loaded checkpoint must not leave these parameters on CPU before
     # DDP wraps the restored model or broadcasts normalization state.
     model.to(device)
     if ema_model is not None:
-        ema_model.load_state_dict(
-            fix_state_dict(checkpoint.ema_model_state, False), strict=True
-        )
+        ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, False), strict=True)
         ema_model.to(device)
     optimizer.load_state_dict(checkpoint.optimizer_state)
     optimizer_to(optimizer, device)
@@ -125,8 +122,13 @@ def restore_training_state(
         ema_updater.optimization_step = checkpoint.ema_updater_step
         if checkpoint.ema_decay is not None:
             ema_updater.decay = float(checkpoint.ema_decay)
-    set_rng_state(checkpoint.rng_states[rank], device=device, source_config=source_config,
-                  rank=rank, world_size=world_size)
+    set_rng_state(
+        checkpoint.rng_states[rank],
+        device=device,
+        source_config=source_config,
+        rank=rank,
+        world_size=world_size,
+    )
     return checkpoint.global_step, checkpoint.epoch, cursor
 
 
@@ -174,16 +176,16 @@ def build_agent_contract(model) -> Dict[str, Any]:
         "hand_dim": getattr(model, "hand_dim", None),
         "control_action_dim": model.control_action_dim,
         "use_aux_ee": bool(getattr(model, "use_aux_ee", False)),
-        "normalization": make_normalization_contract(
-            getattr(model, "normalization_spec", {})
-        ),
+        "normalization": make_normalization_contract(getattr(model, "normalization_spec", {})),
     }
 
 
 def validate_resume_contract(saved, current) -> None:
     """Report all missing, extra and changed values, including nested keys."""
     import copy
+
     from dexmani_policy.agents.normalization import uses_diffusion_config
+
     saved, current = copy.deepcopy(saved), copy.deepcopy(current)
     for contract in (saved, current):
         agent_cfg = contract.get("agent_config", {})
@@ -204,9 +206,7 @@ def validate_resume_contract(saved, current) -> None:
                     compare(left[key], right[key], child)
         elif isinstance(left, list) and isinstance(right, list):
             if len(left) != len(right):
-                differences.append(
-                    f"{path}: length saved={len(left)}, current={len(right)}"
-                )
+                differences.append(f"{path}: length saved={len(left)}, current={len(right)}")
             for i, (a, b) in enumerate(zip(left, right)):
                 compare(a, b, f"{path}[{i}]")
         elif type(left) is not type(right) or left != right:
@@ -217,9 +217,7 @@ def validate_resume_contract(saved, current) -> None:
         raise ValueError("Resume contract mismatch:\n" + "\n".join(differences))
 
 
-def validate_ema_resume_state(
-    checkpoint: TrainCheckpoint, *, require_ema: bool
-) -> None:
+def validate_ema_resume_state(checkpoint: TrainCheckpoint, *, require_ema: bool) -> None:
     """Require the complete EMA state needed to resume EMA training."""
     if not require_ema:
         return
@@ -228,20 +226,22 @@ def validate_ema_resume_state(
 
     step = checkpoint.ema_updater_step
     if isinstance(step, bool) or not isinstance(step, int) or step < 0:
-        raise RuntimeError(
-            "Resume checkpoint ema_updater_step must be an int (not bool) >= 0"
-        )
+        raise RuntimeError("Resume checkpoint ema_updater_step must be an int (not bool) >= 0")
 
 
 def load_resume_source_config(checkpoint_path):
     """Historical evidence only; never substitute the destination config."""
     from pathlib import Path
+
     source = Path(checkpoint_path).resolve().parent.parent / "config.yaml"
-    return OmegaConf.to_container(OmegaConf.load(source), resolve=True) if source.is_file() else None
+    return (
+        OmegaConf.to_container(OmegaConf.load(source), resolve=True) if source.is_file() else None
+    )
 
 
 def validate_data_identity(saved, current, path="data_identity"):
     import warnings
+
     if saved is None:
         warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)
         return
@@ -254,6 +254,8 @@ def validate_data_identity(saved, current, path="data_identity"):
     actual = (current or {}).get("revision")
     if previous is not None:
         if actual != previous:
-            raise ValueError(f"{path}: data_revision changed or lost: saved={previous!r}, current={actual!r}")
+            raise ValueError(
+                f"{path}: data_revision changed or lost: saved={previous!r}, current={actual!r}"
+            )
     else:
         warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)

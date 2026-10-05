@@ -8,8 +8,8 @@ import torch.nn as nn
 
 from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.normalization import LinearNormalizer
+from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 
 
 class BaseAgent(nn.Module):
@@ -35,6 +35,7 @@ class BaseAgent(nn.Module):
 
     def set_normalization_spec(self, spec):
         from dexmani_policy.agents.normalization import validate_action_clipping
+
         if isinstance(self.action_decoder, Diffusion):
             validate_action_clipping(spec, self.action_decoder.noise_scheduler.config.clip_sample)
         self.normalization_spec = dict(spec)
@@ -94,9 +95,7 @@ class BaseAgent(nn.Module):
 
         self._validate_obs_dict(obs, expected_batch=B if action is not None else None)
 
-    def _validate_obs_dict(
-        self, obs_dict: Dict, expected_batch: int | None = None
-    ) -> None:
+    def _validate_obs_dict(self, obs_dict: Dict, expected_batch: int | None = None) -> None:
         """Validate observation tensor shapes.
 
         Every observation tensor must be at least 2D ``(B, T, ...)`` with
@@ -124,19 +123,13 @@ class BaseAgent(nn.Module):
                 )
 
         if len(batch_sizes) > 1:
-            shapes = {
-                k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)
-            }
-            raise ValueError(
-                f"Observation batch-size mismatch across modalities: {shapes}"
-            )
+            shapes = {k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)}
+            raise ValueError(f"Observation batch-size mismatch across modalities: {shapes}")
 
         if expected_batch is not None and batch_sizes:
             obs_b = next(iter(batch_sizes))
             if obs_b != expected_batch:
-                shapes = {
-                    k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)
-                }
+                shapes = {k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)}
                 raise ValueError(
                     f"Batch size mismatch: obs batch={obs_b}, "
                     f"action batch={expected_batch}.  Obs shapes: {shapes}"
@@ -218,11 +211,27 @@ class BaseAgent(nn.Module):
 
     @torch.no_grad()
     def predict_action(
-        self, obs_dict: Dict, inference_steps: int | None = None
+        self,
+        obs_dict: Dict,
+        inference_steps: int | None = None,
+        *,
+        rtc_prefix=None,
+        delay_steps=0,
+        rtc_guidance_cap=0.0,
     ) -> Dict:
         self._validate_obs_dict(obs_dict)
         cond, _ = self._build_cond(obs_dict)
-        return self.predict_action_from_cond(cond, inference_steps=inference_steps)
+        if rtc_prefix is None or rtc_guidance_cap == 0:
+            return self.predict_action_from_cond(cond, inference_steps=inference_steps)
+        if type(self).predict_action_from_cond is not BaseAgent.predict_action_from_cond:
+            raise NotImplementedError("RTC requires the continuous BaseAgent DDIM path")
+        return self.predict_action_from_cond(
+            cond,
+            inference_steps=inference_steps,
+            rtc_prefix=rtc_prefix,
+            delay_steps=delay_steps,
+            rtc_guidance_cap=rtc_guidance_cap,
+        )
 
     @property
     def control_action_dim(self):
@@ -234,7 +243,15 @@ class BaseAgent(nn.Module):
         return self.action_dim
 
     @torch.no_grad()
-    def predict_action_from_cond(self, cond, inference_steps: int | None = None):
+    def predict_action_from_cond(
+        self,
+        cond,
+        inference_steps: int | None = None,
+        *,
+        rtc_prefix=None,
+        delay_steps=0,
+        rtc_guidance_cap=0.0,
+    ):
         template = torch.zeros(
             cond.shape[0],
             self.horizon,
@@ -242,8 +259,25 @@ class BaseAgent(nn.Module):
             device=cond.device,
             dtype=cond.dtype,
         )
+        kwargs = {}
+        if rtc_prefix is not None and rtc_guidance_cap != 0:
+            if not isinstance(self.action_decoder, Diffusion):
+                raise NotImplementedError("RTC requires the DDIM decoder")
+            # Saved affine statistics are sliced to the actual control subspace.
+            params = self.normalizer["action"].params_dict
+            c = self.control_action_dim
+            scale, offset = params["scale"], params["offset"]
+            scale = scale if scale.numel() == 1 else scale[:c]
+            offset = offset if offset.numel() == 1 else offset[:c]
+            normalized = rtc_prefix.to(template) * scale + offset
+            kwargs = dict(
+                rtc_prefix=normalized,
+                delay_steps=delay_steps,
+                history_offset=self.n_obs_steps - 1,
+                rtc_guidance_cap=rtc_guidance_cap,
+            )
         pred = self.action_decoder.predict_action(
-            cond, template, inference_steps=inference_steps
+            cond, template, inference_steps=inference_steps, **kwargs
         )
         pred = self.normalizer["action"].unnormalize(pred)
 
@@ -261,17 +295,13 @@ class BaseAgent(nn.Module):
         }
 
     def compile_backbone(self, **compile_kwargs):
-        self.action_decoder.model = torch.compile(
-            self.action_decoder.model, **compile_kwargs
-        )
+        self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
 
     def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
         action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
         for g in action_groups:
             g["lr"] = lr
-        obs_groups = get_optim_group_with_no_decay(
-            self.obs_encoder, weight_decay=obs_wd
-        )
+        obs_groups = get_optim_group_with_no_decay(self.obs_encoder, weight_decay=obs_wd)
         for g in obs_groups:
             g["lr"] = obs_lr
         return action_groups + obs_groups
@@ -290,9 +320,7 @@ class BaseAgent(nn.Module):
             param_info = []
             for p in missing_params:
                 name = next((n for n, pp in self.named_parameters() if pp is p), "?")
-                param_info.append(
-                    f"  {name}: shape={tuple(p.shape)}, device={p.device}"
-                )
+                param_info.append(f"  {name}: shape={tuple(p.shape)}, device={p.device}")
             warnings.warn(
                 f"The following {len(missing_ids)} trainable parameter(s) are NOT "
                 f"tracked by the optimizer:\n"
@@ -354,7 +382,11 @@ class UNetDiffusionAgent(BaseAgent):
             cond_predict_scale=cond_predict_scale,
         )
         action_decoder = Diffusion(
-            backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample=clip_sample
+            backbone,
+            num_training_steps,
+            num_inference_steps,
+            prediction_type,
+            clip_sample=clip_sample,
         )
         super().__init__(
             obs_encoder,

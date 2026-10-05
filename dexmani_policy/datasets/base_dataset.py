@@ -73,14 +73,14 @@ class BaseDataset(torch.utils.data.Dataset):
         self.zarr_path = str(Path(zarr_path).expanduser().resolve())
         self.action_key = action_key
         self.use_aux_ee = use_aux_ee
-        self.obs_horizon = obs_horizon
+        self.obs_horizon = horizon if obs_horizon is None else obs_horizon
+        if not 1 <= self.obs_horizon <= horizon:
+            raise ValueError("obs_horizon must satisfy 1 <= N <= horizon")
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
         self.rgb_keep_uint8 = rgb_keep_uint8
-        self._is_val = (
-            False  # validation set flag — overridden by get_validation_dataset()
-        )
+        self._is_val = False  # validation set flag — overridden by get_validation_dataset()
 
         # When EE auxiliary loss is enabled, load action_ee for wrist pose (pos3+rot6d6).
         load_keys = list(sensor_modalities) + [action_key]
@@ -93,6 +93,34 @@ class BaseDataset(torch.utils.data.Dataset):
         )
 
         self.data_revision = self.replay_buffer.data_revision
+        n_rows = int(self.replay_buffer.episode_ends[-1])
+
+        def finite_rows(values):
+            if np.issubdtype(values.dtype, np.floating):
+                return np.isfinite(values).reshape(n_rows, -1).all(axis=1)
+            return np.ones(n_rows, dtype=bool)
+
+        self._obs_valid = np.ones(n_rows, dtype=bool)
+        for key in sensor_modalities:
+            self._obs_valid &= finite_rows(self.replay_buffer[key])
+        self._action_valid = finite_rows(self.replay_buffer[action_key])
+        if use_aux_ee:
+            self._action_valid &= finite_rows(self.replay_buffer["action_ee"][..., :9])
+        self._dispatch_valid = np.ones(n_rows, dtype=bool)
+        attrs = self.replay_buffer.root["attrs"]
+        is_real = attrs.get("format") == "dexmani.real.canonical" or attrs.get("domain") == "real"
+        if is_real:
+            status = self.replay_buffer.row_info.get("dispatch_status")
+            if status is None:
+                raise ValueError(
+                    "Real accepted-only recipe requires row_info/dispatch_status; re-export Raw"
+                )
+            self._dispatch_valid = (status == 1).all(axis=1)
+        self.data_recipe = {
+            "window_validity": "role_finite_v1",
+            "dispatch": "both_accepted" if is_real else "not_applicable",
+            "normalization": "unique_train_source_rows",
+        }
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
         self.augmentors = {}
@@ -105,9 +133,7 @@ class BaseDataset(torch.utils.data.Dataset):
             n_episodes=self.replay_buffer.n_episodes,
         )
         train_mask = ~val_mask
-        train_mask = downsample_mask(
-            seed=seed, mask=train_mask, max_n=max_train_episodes
-        )
+        train_mask = downsample_mask(seed=seed, mask=train_mask, max_n=max_train_episodes)
         self.val_mask = val_mask
         self.train_mask = train_mask
 
@@ -118,11 +144,21 @@ class BaseDataset(torch.utils.data.Dataset):
             pad_after=pad_after,
             episode_mask=train_mask,
         )
+        self._filter_sampler(self.sampler)
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+        self._validation_dataset = None
+        self._validation_dataset = self.get_validation_dataset()
+
+    def _filter_sampler(self, sampler):
+        sampler.filter_valid(
+            self._obs_valid, self._action_valid, self._dispatch_valid, self.obs_horizon
+        )
 
     def get_validation_dataset(self):
+        if self._validation_dataset is not None:
+            return self._validation_dataset
         if not self.val_mask.any():
             return None
 
@@ -135,6 +171,7 @@ class BaseDataset(torch.utils.data.Dataset):
             pad_after=self.pad_after,
             episode_mask=self.val_mask,
         )
+        self._filter_sampler(val_set.sampler)
         # Validation set disables randomness: no augmentation, random crop → center crop
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
@@ -152,10 +189,7 @@ class BaseDataset(torch.utils.data.Dataset):
             parts.append(sample["action_ee"][..., :9])
         action = np.concatenate(parts, axis=-1) if len(parts) > 1 else parts[0]
         return {
-            "obs": {
-                m: sample[m][: self.obs_horizon] if self.obs_horizon else sample[m]
-                for m in self.sensor_modalities
-            },
+            "obs": {m: sample[m][: self.obs_horizon] for m in self.sensor_modalities},
             "action": action,
         }
 
@@ -184,33 +218,6 @@ class BaseDataset(torch.utils.data.Dataset):
             rgb = rgb.permute(0, 3, 1, 2).contiguous()  # (T, 3, H, W) uint8
             rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
             if self.rgb_random_crop_size is not None:
-                if self._is_val:
-                    rgb = TVF.center_crop(rgb, list(self.rgb_random_crop_size))
-                else:
-                    rgb = TVF.crop(
-                        rgb,
-                        top=torch.randint(
-                            0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)
-                        ).item(),
-                        left=torch.randint(
-                            0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)
-                        ).item(),
-                        height=self.rgb_random_crop_size[0],
-                        width=self.rgb_random_crop_size[1],
-                    )
-            return rgb.contiguous()  # uint8
-
-        # --- float32 path: current behavior (needed for color augmentation) ---
-        # Two-step contiguous+float is faster than a single float() on a strided
-        # permute view (contiguous uint8 memcpy + fast float conversion beats
-        # strided element-by-element float conversion).
-        rgb = rgb.permute(0, 3, 1, 2).contiguous()  # (T, 3, H, W) uint8
-        rgb = rgb.float().div_(255.0)  # (T, 3, H, W) float32 [0,1]
-        rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
-        if self.rgb_random_crop_size is not None:
-            if self._is_val:
-                rgb = TVF.center_crop(rgb, list(self.rgb_random_crop_size))
-            else:
                 rgb = TVF.crop(
                     rgb,
                     top=torch.randint(
@@ -222,7 +229,23 @@ class BaseDataset(torch.utils.data.Dataset):
                     height=self.rgb_random_crop_size[0],
                     width=self.rgb_random_crop_size[1],
                 )
-        if self.rgb_color_aug is not None and not self._is_val:
+            return rgb.contiguous()  # uint8
+
+        # Convert contiguous channel-first data before float color augmentation.
+        rgb = rgb.permute(0, 3, 1, 2).contiguous()  # (T, 3, H, W) uint8
+        rgb = rgb.float().div_(255.0)  # (T, 3, H, W) float32 [0,1]
+        rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)
+        if self.rgb_random_crop_size is not None:
+            rgb = TVF.crop(
+                rgb,
+                top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
+                left=torch.randint(
+                    0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)
+                ).item(),
+                height=self.rgb_random_crop_size[0],
+                width=self.rgb_random_crop_size[1],
+            )
+        if self.rgb_color_aug is not None:
             rgb = self.rgb_color_aug(rgb)  # (T, 3, H_dst, W_dst) float32 [0,1]
         # clamp_ is in-place (resize/crop/aug already own their output);
         # the result is already contiguous from the prior op, skip extra copy.
@@ -277,33 +300,22 @@ class BaseDataset(torch.utils.data.Dataset):
             data["obs"][modality] = x
         return data
 
-    def _get_effective_action_data(self):
-        """Return the action representation the training target actually uses.
-
-        Mirrors ``sample_to_data``: primary ``action_key``, plus the EE wrist pose
-        ``action_ee[..., :9]`` when ``use_aux_ee`` is enabled.
-        """
-        parts = [self.replay_buffer[self.action_key]]
-        if self.use_aux_ee:
-            parts.append(self.replay_buffer["action_ee"][..., :9])
-        action = np.concatenate(parts, axis=-1) if len(parts) > 1 else parts[0]
-        return action
-
     def iter_normalization_data(self, key: str):
-        """Yield the full replay-buffer statistics source for a numeric feature.
-
-        Single-task datasets yield exactly one array; the caller aggregates across
-        multiple chunks (e.g. MultiTask).  No episode splitting or ``train_mask`` is
-        applied — normalization statistics always use the complete buffer.
-        """
+        """Fit only unique source rows referenced by valid training windows, by role."""
+        if self._is_val:
+            raise ValueError("Validation must reuse the training normalizer")
         if key == "action":
-            yield self._get_effective_action_data()
+            rows = self.sampler.action_source_rows
+            action = self.replay_buffer[self.action_key][rows]
+            if self.use_aux_ee:
+                action = np.concatenate(
+                    (action, self.replay_buffer["action_ee"][..., :9][rows]), axis=-1
+                )
+            yield action
             return
-        if key not in self.replay_buffer:
-            raise KeyError(
-                f"Unknown normalization field '{key}' (available: {list(self.replay_buffer.keys())})"
-            )
-        yield self.replay_buffer[key]
+        if key not in self.sensor_modalities:
+            raise KeyError(f"Not an enabled observation field: {key}")
+        yield self.replay_buffer[key][self.sampler.observation_source_rows]
 
 
 def example(zarr_path):

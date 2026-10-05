@@ -26,7 +26,9 @@ def resolve_experiment(selector):
         resolved = candidate.resolve(strict=True)
     else:
         project_candidate = Path(__file__).resolve().parents[2] / candidate
-        candidate = project_candidate if project_candidate.is_dir() else _EXPERIMENTS_ROOT / candidate
+        candidate = (
+            project_candidate if project_candidate.is_dir() else _EXPERIMENTS_ROOT / candidate
+        )
         resolved = candidate.resolve(strict=True)
         if not resolved.is_relative_to(_EXPERIMENTS_ROOT.resolve()):
             raise ValueError("Relative experiment selector must remain inside experiments")
@@ -57,6 +59,7 @@ class PolicyInfo:
     observation_fields: tuple[str, ...]
     n_obs_steps: int
     n_action_steps: int
+    horizon: int
     action_mode: str
     control_dt_s: float | None
     pointcloud_config: dict | None
@@ -71,7 +74,9 @@ def inspect_policy(
     directory = resolve_experiment(experiment)
     cfg = load_experiment_config(directory) if config is None else config
     resolved_best = resolve_best_checkpoint(directory) if checkpoint == "best" else None
-    path = resolved_best[1] if resolved_best is not None else resolve_checkpoint(directory, checkpoint)
+    path = (
+        resolved_best[1] if resolved_best is not None else resolve_checkpoint(directory, checkpoint)
+    )
     defaults = dict(cfg["eval"])
     if resolved_best is not None:
         inference = resolved_best[0].get("inference", {})
@@ -108,6 +113,7 @@ def inspect_policy(
         fields,
         positive_int(cfg["agent"]["n_obs_steps"], "n_obs_steps"),
         positive_int(cfg["agent"]["n_action_steps"], "n_action_steps"),
+        positive_int(cfg["agent"]["horizon"], "horizon"),
         action_modes[cfg["action_key"]],
         recipe.get("dt") if recipe is not None else None,
         recipe.get("pointcloud") if recipe is not None else None,
@@ -135,6 +141,7 @@ class LoadedPolicy:
         self._rgb = rgb_preprocessing_kwargs(config["dataset"])
         self._device = device
         self._seed = seed
+        self.rtc_guidance_cap = 0.0
         self.reset_episode()
 
     def reset_episode(self):
@@ -149,7 +156,36 @@ class LoadedPolicy:
         if reset is not None:
             reset()
 
-    def predict(self, observation):
+    def configure_execution(self, mode, guidance_cap=None, *, warmup=False, rgb_hw=None):
+        if mode == "rtc":
+            self.configure_rtc(guidance_cap)
+        elif mode in {"sync", "async"}:
+            self.rtc_guidance_cap = 0.0
+        else:
+            raise ValueError("Unsupported execution mode")
+        if warmup:
+            return self.warmup(samples=1, rgb_hw=rgb_hw, rtc_delay=1 if mode == "rtc" else 0)
+
+    def configure_rtc(self, guidance_cap):
+        from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+        from dexmani_policy.agents.action_decoders.rtc import validate_scheduler
+        from dexmani_policy.agents.core.base import BaseAgent
+        from dexmani_policy.agents.normalization import SingleFieldLinearNormalizer
+
+        if (
+            type(self.agent).predict_action is not BaseAgent.predict_action
+            or type(self.agent).predict_action_from_cond is not BaseAgent.predict_action_from_cond
+            or not isinstance(self.agent.action_decoder, Diffusion)
+        ):
+            raise NotImplementedError("RTC supports continuous BaseAgent DDIM agents only")
+        if not isinstance(self.agent.normalizer["action"], SingleFieldLinearNormalizer):
+            raise NotImplementedError("RTC requires an affine action normalizer")
+        validate_scheduler(
+            self.agent.action_decoder.noise_scheduler, self.info.inference_steps, guidance_cap
+        )
+        self.rtc_guidance_cap = guidance_cap
+
+    def predict(self, observation, *, rtc_prefix=None, delay_steps=0):
         import torch
 
         from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
@@ -165,33 +201,45 @@ class LoadedPolicy:
             if name == "rgb":
                 tensor = preprocess_validation_rgb(value, **self._rgb)
             else:
-                tensor = torch.from_numpy(np.array(value, copy=True, order="C"))
+                tensor = torch.from_numpy(np.ascontiguousarray(value))
             tensors[name] = tensor.unsqueeze(0).to(self._device)
+        dimensions = 19 if self.info.action_mode == "joint" else 21
+        kwargs = {}
+        if rtc_prefix is not None:
+            prefix = np.asarray(rtc_prefix)
+            if (
+                prefix.ndim != 2
+                or prefix.shape[1] != dimensions
+                or not np.isfinite(prefix).all()
+                or not 0
+                <= delay_steps
+                <= len(prefix)
+                <= self.info.horizon - self.info.n_obs_steps + 1
+            ):
+                raise ValueError("Invalid physical RTC prefix")
+            kwargs = dict(
+                rtc_prefix=torch.as_tensor(prefix, device=self._device).unsqueeze(0),
+                delay_steps=delay_steps,
+                rtc_guidance_cap=self.rtc_guidance_cap,
+            )
+        elif delay_steps:
+            raise ValueError("No prefix requires delay_steps=0")
         with torch.inference_mode():
             result = self.agent.predict_action(
-                tensors, inference_steps=self.info.inference_steps
+                tensors, inference_steps=self.info.inference_steps, **kwargs
             )
-        control = result.get("control_action")
-        dimensions = 19 if self.info.action_mode == "joint" else 21
-        expected = (1, self.info.n_action_steps, dimensions)
+        # Core callers keep their A-step control_action convention. Real needs P.
+        control = result["pred_action"][:, self.info.n_obs_steps - 1 :, :dimensions]
+        expected = (1, self.info.horizon - self.info.n_obs_steps + 1, dimensions)
         if (
             not torch.is_tensor(control)
             or tuple(control.shape) != expected
             or not control.is_floating_point()
-            or not torch.isfinite(control).all()
         ):
-            raise ValueError(
-                f"Policy control_action must be finite floating point {expected}"
-            )
-        return (
-            control.detach()
-            .squeeze(0)
-            .to(device="cpu", dtype=torch.float64)
-            .numpy()
-            .copy()
-        )
+            raise ValueError(f"Policy future must be floating point {expected}")
+        return control.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
 
-    def warmup(self, *, samples=5, rgb_hw=None):
+    def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0):
         positive_int(samples, "samples")
         shapes = {
             "joint_state": (19,),
@@ -204,9 +252,7 @@ class LoadedPolicy:
         for name in self.info.observation_fields:
             if name == "rgb":
                 if rgb_hw is None:
-                    raise ValueError(
-                        "RGB warmup requires the current raw camera height/width"
-                    )
+                    raise ValueError("RGB warmup requires the current raw camera height/width")
                 shape, dtype = (*rgb_hw, 3), np.uint8
             elif name == "point_cloud":
                 shape, dtype = (
@@ -229,9 +275,12 @@ class LoadedPolicy:
         self.reset_episode()
         try:
             for _ in range(samples):
+                prefix = self.predict(observation) if rtc_delay else None
                 start = time.perf_counter()
-                self.predict(observation)
+                future = self.predict(observation, rtc_prefix=prefix, delay_steps=rtc_delay)
                 durations.append(time.perf_counter() - start)
+                if not np.isfinite(future).all():
+                    raise ValueError("Nonfinite warmup future")
         finally:
             self.reset_episode()
         return tuple(durations)
