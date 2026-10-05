@@ -599,19 +599,21 @@ bash scripts/eval/eval_pipeline.sh <policy> <task> <exp_name>
 
 ### 9.3 Two-stage Artifacts
 
-VQ workflow 已迁到 `scripts/training/`，从 repo root 执行（`<task>` 替换为实际任务）：
+VQ 入口位于 `scripts/training/`，从仓库根目录执行（`<task>` 替换为实际任务）：
 
 ```bash
-conda run --no-capture-output -n policy python scripts/training/train_vq_hand.py \
-  --config dexmani_policy/configs/dqrise.yaml \
-  --zarr_path robot_data/<task>.zarr --output_dir experiments/vq_hand/<task>
-conda run --no-capture-output -n policy python scripts/training/extract_vq_codebook.py \
+conda run --no-capture-output -n policy python -m scripts.training.train_vq_hand \
+  --policy-config dexmani_policy/configs/dqrise.yaml \
+  --policy-override task_name=<task> --output_dir experiments/vq_hand/<task>
+conda run --no-capture-output -n policy python -m scripts.training.extract_vq_codebook \
   --checkpoint experiments/vq_hand/<task>/vqvae_hand_best.pt \
   --output data/<task>/hand_codebook.npz
-conda run --no-capture-output -n policy python scripts/training/measure_vq_usage.py \
+conda run --no-capture-output -n policy python -m scripts.training.measure_vq_usage \
   --checkpoint experiments/vq_hand/<task>/vqvae_hand_best.pt \
   --zarr robot_data/<task>.zarr --codebook data/<task>/hand_codebook.npz
 ```
+
+Stage 2 例如 `bash scripts/training/train.sh dqrise task_name=<task> codebook_path=data/<task>/hand_codebook.npz`；额外的数据/窗口覆盖必须与 `--policy-override` 一致。不要用旧独立 VQ 的全量统计配方替代这个入口。
 
 如果 Stage 1 在服务器产生 Stage 2 所需 artifact：
 

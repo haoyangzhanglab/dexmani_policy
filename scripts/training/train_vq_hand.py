@@ -1,15 +1,8 @@
 """Train a single-step hand-state VQ-VAE for DQ-RISE.
 
-Training and persistence semantics:
-* train/validation split is episode-level;
-* VQ-VAE model optimization uses only the selected training episodes;
-* hand normalization statistics are fitted on the full hand dataset;
-  Policy instead fits unique source rows from valid training windows, so
-  codebook/Policy normalizer compatibility must still be checked;
-* validation uses the held-out episode split in that shared normalized space;
-* the same ``get_val_mask``/``downsample_mask`` logic as policy training is used;
-* checkpoints contain explicit model, split, and normalizer metadata;
-* ``num_layers`` means the actual number of hidden linear layers.
+Use --policy-config for DQ-RISE: the target Policy Dataset decides splits,
+valid windows and unique source rows; its action normalizer supplies hand stats.
+Without this option the historical independent recipe (full-data stats) is kept.
 """
 
 from __future__ import annotations
@@ -18,16 +11,25 @@ import argparse
 import logging
 from pathlib import Path
 
+import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.normalization import LinearNormalizer
+from dexmani_policy.agents.normalization import (
+    LinearNormalizer,
+    SingleFieldLinearNormalizer,
+    resolve_normalization_spec,
+)
 from dexmani_policy.agents.vq_hand import VQVAEHand
+from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import downsample_mask, get_val_mask
+from dexmani_policy.training.build_utils import build_normalizer
+from dexmani_policy.utils.config import register_resolvers
 
 _project_root = Path(__file__).resolve().parents[2]
 
@@ -119,10 +121,7 @@ def _save_checkpoint(
     logger.info("checkpoint saved: %s", path)
 
 
-def train(args: argparse.Namespace) -> None:
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    set_seed(args.seed)
-
+def prepare_standalone_data(args):
     buffer = ReplayBuffer.open(args.zarr_path, keys=[args.action_key])
     all_actions = buffer.read(args.action_key, slice(None))
     hand_data = all_actions[:, args.tcp_dim :]
@@ -182,6 +181,130 @@ def train(args: argparse.Namespace) -> None:
         if len(val_indices) > 0
         else np.empty((0, args.hand_dim), dtype=np.float32)
     )
+
+    split_metadata = {
+        "episode_ends": episode_ends.tolist(),
+        "train_episode_ids": np.flatnonzero(train_episode_mask).tolist(),
+        "val_episode_ids": np.flatnonzero(val_episode_mask).tolist(),
+        "train_frame_count": len(train_indices),
+        "val_frame_count": len(val_indices),
+    }
+    return train_norm, val_norm, normalizer, split_metadata
+
+
+def load_policy_config(path, overrides=()):
+    """Compose the target config without constructing a model or runtime."""
+    register_resolvers()
+    path = Path(path).expanduser().resolve()
+    with hydra.initialize_config_dir(config_dir=str(path.parent), version_base=None):
+        return hydra.compose(config_name=path.stem, overrides=list(overrides))
+
+
+def build_policy_dataset(cfg):
+    """Reuse Policy's actual Dataset, including observation/window qualification."""
+    if cfg.agent._target_ != "dexmani_policy.agents.core.dqrise.DQRISEAgent":
+        raise ValueError("--policy-config requires a DQRISEAgent configuration")
+    if cfg.dataset.get("use_aux_ee", False):
+        raise ValueError(
+            "DQ-RISE VQ preparation does not support auxiliary action layouts"
+        )
+    layout = {"action": (7, 19), "action_ee": (9, 21)}.get(cfg.action_key)
+    if layout is None or (cfg.agent.tcp_dim, cfg.agent.action_dim) != layout:
+        raise ValueError("Supported DQ-RISE layouts are action=7+12 or action_ee=9+12")
+    if cfg.dataset.action_key != cfg.action_key:
+        raise ValueError("Policy and Dataset action_key must match")
+    if cfg.get("resume_from") is not None:
+        raise ValueError(
+            "Prepare a new codebook from a fresh Policy config, not resume_from"
+        )
+    dataset = hydra.utils.instantiate(cfg.dataset)
+    if not isinstance(dataset, BaseDataset):
+        raise TypeError("DQ-RISE VQ preparation requires a single BaseDataset")
+    if dataset.replay_buffer[dataset.action_key].shape[1:] != (layout[1],):
+        raise ValueError("Dataset action shape does not match the Policy layout")
+    return dataset
+
+
+def policy_hand_rows(dataset, tcp_dim):
+    """Read each split's already-qualified unique action rows, without augmentation."""
+    if dataset is None:
+        return np.empty((0, 12), dtype=np.float32)
+    rows = dataset.sampler.action_source_rows
+    buffer = dataset.replay_buffer
+    blocks = []
+    step = buffer.chunk_rows(dataset.action_key)
+    for start in range(0, int(buffer.episode_ends[-1]), step):
+        selected = (
+            rows[np.searchsorted(rows, start) : np.searchsorted(rows, start + step)]
+            - start
+        )
+        if len(selected):
+            blocks.append(
+                buffer.read(
+                    dataset.action_key,
+                    slice(start, start + step),
+                    columns=slice(tcp_dim, tcp_dim + 12),
+                )[selected]
+            )
+    return np.concatenate(blocks) if blocks else np.empty((0, 12), dtype=np.float32)
+
+
+def prepare_policy_data(cfg):
+    dataset = build_policy_dataset(cfg)
+    spec = resolve_normalization_spec(cfg)
+    if spec.get("action", "identity") == "identity":
+        raise ValueError("DQ-RISE codebooks require a fitted action normalizer")
+    action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)[
+        "action"
+    ]
+    hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))
+    normalizer = LinearNormalizer()
+    normalizer["hand"] = SingleFieldLinearNormalizer.create_manual(
+        action.params_dict["scale"][hand_slice].clone(),
+        action.params_dict["offset"][hand_slice].clone(),
+        {key: value[hand_slice].clone() for key, value in action.input_stats.items()},
+    )
+    val = dataset.get_validation_dataset()
+    train_hand = policy_hand_rows(dataset, cfg.agent.tcp_dim)
+    val_hand = policy_hand_rows(val, cfg.agent.tcp_dim)
+    metadata = {
+        "normalization_scope": "unique_valid_policy_train_action_source_rows",
+        "policy_config": OmegaConf.to_container(cfg, resolve=False),
+        "resolved_dataset": OmegaConf.to_container(cfg.dataset, resolve=True),
+        "normalization_spec": spec,
+        "data_recipe": dataset.data_recipe,
+        "data_revision": dataset.data_revision,
+        "episode_ends": dataset.replay_buffer.episode_ends.tolist(),
+        "train_episode_ids": np.flatnonzero(dataset.train_mask).tolist(),
+        "val_episode_ids": np.flatnonzero(dataset.val_mask).tolist(),
+        "train_source_rows": dataset.sampler.action_source_rows.tolist(),
+        "val_source_rows": val.sampler.action_source_rows.tolist()
+        if val is not None
+        else [],
+        "train_frame_count": len(train_hand),
+        "val_frame_count": len(val_hand),
+        "train_windows": dataset.sampler.validity_summary,
+        "val_windows": val.sampler.validity_summary if val is not None else None,
+    }
+    metadata["resolved_dataset"]["zarr_path"] = dataset.zarr_path
+    # Only low-dimensional hand samples are materialized for the existing VQ trainer.
+    return (
+        normalizer["hand"].normalize(train_hand).numpy(),
+        normalizer["hand"].normalize(val_hand).numpy(),
+        normalizer,
+        metadata,
+    )
+
+
+def train(args: argparse.Namespace, *, policy_cfg) -> None:
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    set_seed(args.seed)
+    if policy_cfg is not None:
+        train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(
+            policy_cfg
+        )
+    else:
+        train_norm, val_norm, normalizer, split_metadata = prepare_standalone_data(args)
 
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
@@ -253,13 +376,6 @@ def train(args: argparse.Namespace) -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    split_metadata = {
-        "episode_ends": episode_ends.tolist(),
-        "train_episode_ids": np.flatnonzero(train_episode_mask).tolist(),
-        "val_episode_ids": np.flatnonzero(val_episode_mask).tolist(),
-        "train_frame_count": len(train_indices),
-        "val_frame_count": len(val_indices),
-    }
 
     train_history: list[float] = []
     best_val_mse = float("inf")
@@ -413,6 +529,17 @@ def _load_yaml_config(path: str) -> dict:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--policy-config",
+        default=None,
+        help="Target Policy YAML; overrides independent data/split options",
+    )
+    parser.add_argument(
+        "--policy-override",
+        action="append",
+        default=[],
+        help="Hydra override for the target Policy (repeatable)",
+    )
     parser.add_argument("--zarr_path", default=None)
     parser.add_argument("--action_key", default=None)
     parser.add_argument("--tcp_dim", type=int, default=None)
@@ -456,13 +583,40 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_arg_parser()
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", default=None)
+    config_parser.add_argument("--policy-config", default=None)
+    config_parser.add_argument("--policy-override", action="append", default=[])
     config_args, remaining = config_parser.parse_known_args(argv)
     if config_args.config:
         config_path = Path(config_args.config)
         if not config_path.is_absolute():
             config_path = _project_root / config_path
         parser.set_defaults(**_load_yaml_config(str(config_path)))
+    policy_cfg = None
+    if config_args.policy_config:
+        policy_cfg = load_policy_config(
+            config_args.policy_config, config_args.policy_override
+        )
+        if not config_args.config:
+            parser.set_defaults(
+                **OmegaConf.to_container(policy_cfg.vq_vae, resolve=True)
+            )
+    parser.set_defaults(
+        policy_config=config_args.policy_config,
+        policy_override=config_args.policy_override,
+    )
     args = parser.parse_args(remaining)
+    if policy_cfg is not None:
+        args.zarr_path = str(policy_cfg.dataset.zarr_path)
+        args.action_key = policy_cfg.action_key
+        args.tcp_dim = int(policy_cfg.agent.tcp_dim)
+        args.hand_dim = int(policy_cfg.agent.action_dim) - args.tcp_dim
+        args.val_ratio = policy_cfg.dataset.get("val_ratio", 0.0)
+        args.max_train_episodes = policy_cfg.dataset.get("max_train_episodes")
+        if (args.num_groups, args.codebook_size) != (
+            policy_cfg.agent.codebook_num_groups,
+            policy_cfg.agent.codebook_size,
+        ):
+            parser.error("VQ num_groups/codebook_size must match the target Policy")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -478,7 +632,7 @@ def main(argv: list[str] | None = None) -> None:
         args.hand_dim = int(buffer[args.action_key].shape[-1] - args.tcp_dim)
     if args.loss_weight is None:
         args.loss_weight = [1.0] * args.hand_dim
-    train(args)
+    train(args, policy_cfg=policy_cfg)
 
 
 if __name__ == "__main__":

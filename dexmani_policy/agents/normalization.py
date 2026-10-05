@@ -497,6 +497,12 @@ class LinearNormalizer(DictOfTensorMixin):
 
     def __setitem__(self, key: str, value: "SingleFieldLinearNormalizer"):
         self.params_dict[key] = value.params_dict
+        if not hasattr(self, "input_stats"):
+            self.input_stats = {}
+        if hasattr(value, "input_stats"):
+            self.input_stats[key] = value.input_stats
+        else:
+            self.input_stats.pop(key, None)
         self._field_views.pop(key, None)
 
     def is_fitted(self, required_keys=None):

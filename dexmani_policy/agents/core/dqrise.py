@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import torch
 
@@ -157,8 +157,8 @@ class DQRISEAgent(BaseAgent):
             raise ValueError(
                 "The policy action normalizer and VQ codebook hand normalizer "
                 "do not match. Training/inference would use incompatible hand "
-                "coordinates. Rebuild both from the same episode subset and "
-                "dataset."
+                "coordinates. Rebuild the codebook with train_vq_hand.py "
+                "--policy-config using this Policy's data recipe and normalization."
             ) from exc
         self._normalizer_checked = True
 
@@ -176,7 +176,7 @@ class DQRISEAgent(BaseAgent):
     # Training
     # ------------------------------------------------------------------
 
-    def compute_loss(self, batch: Dict[str, Any], **kwargs):
+    def compute_loss(self, batch: dict[str, Any], **kwargs):
         self._validate_batch(batch)
         self._require_codebook()
         cond, aux = self._build_cond(batch["obs"])
@@ -220,8 +220,8 @@ class DQRISEAgent(BaseAgent):
 
     @torch.no_grad()
     def predict_action(
-        self, obs_dict: Dict, inference_steps: int | None = None
-    ) -> Dict:
+        self, obs_dict: dict, inference_steps: int | None = None
+    ) -> dict:
         self._validate_obs_dict(obs_dict)
         self._require_codebook()
         cond, _ = self._build_cond(obs_dict)
@@ -230,7 +230,7 @@ class DQRISEAgent(BaseAgent):
     @torch.no_grad()
     def predict_action_from_cond(
         self, cond, inference_steps: int | None = None
-    ) -> Dict:
+    ) -> dict:
         self._require_codebook()
         batch_size = cond.shape[0]
         template = torch.zeros(

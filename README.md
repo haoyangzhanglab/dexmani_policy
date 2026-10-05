@@ -100,6 +100,28 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<old-run
 
 Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。Gaussian **动作**归一化必须同时设置 `agent.clip_sample=false`；Gaussian 观测和 flow 不受此限制。历史缺失开关等价于 true，true→false 属于实验变化，不能静默严格续训。旧 Gaussian＋true 结果需用旧代码复现，修正后重新评测。
 
+### DQ-RISE 码本与 Policy 对齐
+
+从仓库根目录，在 `policy` 环境中执行。先确定目标 Policy 配置，所有数据与窗口覆盖在两个训练入口保持一致：
+
+```bash
+python -m scripts.training.train_vq_hand \
+  --policy-config dexmani_policy/configs/dqrise.yaml \
+  --policy-override task_name=pick_apple_messy \
+  --output_dir experiments/vq_hand/pick_apple_messy
+python -m scripts.training.extract_vq_codebook \
+  --checkpoint experiments/vq_hand/pick_apple_messy/vqvae_hand_best.pt \
+  --output robot_data/sorted_hand_poses_pick_apple_messy.npz
+python -m scripts.training.measure_vq_usage \
+  --checkpoint experiments/vq_hand/pick_apple_messy/vqvae_hand_best.pt \
+  --zarr robot_data/pick_apple_messy.zarr \
+  --codebook robot_data/sorted_hand_poses_pick_apple_messy.npz
+bash scripts/training/train.sh dqrise task_name=pick_apple_messy
+```
+
+`--policy-config` 使用目标 Dataset 的 split、有效窗口与唯一 action 源行，码本和 Policy 共用训练统计，验证集不参与拟合。支持 joint `7+12` 和 EEF `9+12`，不支持辅助 action 布局。VQ 的 `--seed` 只控制优化随机性；数据配方以 Policy 配置为准。额外覆盖通过重复的 `--policy-override` 传入，并在 Policy 训练时传入相同覆盖。
+
+使用率工具对新 checkpoint 默认测训练源行；有验证 split 时可加 `--split validation`。checkpoint 保存目标配置、实际 Dataset 配置、统计范围和源行；码本沿用严格 affine 兼容校验。旧 `--config` 独立调用和 `train_vq_hand.sh` 保留全量 hand 统计配方，不保证与目标 Policy 兼容；旧 checkpoint 不会被静默重拟合。
 
 ## 验证
 

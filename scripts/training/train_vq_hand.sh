@@ -1,5 +1,7 @@
 #!/bin/bash
-# VQ-VAE hand-pose pretraining launcher.
+# Legacy independent VQ recipe (full-data statistics).
+# New DQ-RISE codebooks: python -m scripts.training.train_vq_hand --policy-config ...
+# See README for the Policy-aligned workflow.
 #
 # Usage:
 #   bash scripts/training/train_vq_hand.sh [task_name] [cli_overrides...]

@@ -32,7 +32,8 @@ tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
 # hand_dim = action_dim - tcp_dim     # (auto-derived in agent)
 
 # VQ codebook path (output of scripts/training/extract_vq_codebook.py / PCA re-indexing, stage 2).
-# VQ-VAE pretraining config: see the vq_vae section at the bottom of this file.
+# New codebooks: train_vq_hand.py --policy-config dexmani_policy/configs/dqrise.yaml
+# VQ optimizer/model defaults are in vq_vae below; data comes from dataset above.
 codebook_path: robot_data/sorted_hand_poses_${task_name}.npz
 
 # ── Dataloader ──
@@ -193,8 +194,8 @@ eval:
     fps: null
 
 # ── VQ-VAE pretraining (used by scripts/training/train_vq_hand.sh) ──
-# All fields are read directly by scripts/training/train_vq_hand.py (which loads only this
-# section via config.get("vq_vae", config)). Must stay consistent with the
+# --policy-config uses this section for VQ optimizer/model defaults only.
+# Legacy --config reads only this section. Must stay consistent with the
 # DQ-RISE agent's codebook_num_groups / codebook_size above.
 vq_vae:
   # ── Data ──
@@ -229,6 +230,8 @@ vq_vae:
   vq_loss_weight: 5.0          # VQ commitment multiplier
   max_grad_norm: 1.0
   warmup_steps: 150
+  # Legacy independent mode only; --policy-config uses dataset split/seed and
+  # qualified unique source rows above, with the Policy action normalizer.
   # VQ-VAE train/validation split controls only which episodes optimize/evaluate
   # the VQ model. Hand normalization statistics are fitted on the full hand
   # dataset. Policy uses unique valid training-window source rows instead;

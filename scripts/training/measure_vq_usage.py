@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 from dexmani_policy.agents.vq_hand import CodebookManager, VQVAEHand
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
+from dexmani_policy.utils.config import register_resolvers
+from scripts.training.train_vq_hand import build_policy_dataset, policy_hand_rows
 
 
 def _args_dict(checkpoint: dict) -> dict:
@@ -42,6 +46,7 @@ def measure(
     tcp_dim: int | None = None,
     sample_size: int = 5000,
     seed: int = 0,
+    split: str = "train",
 ) -> dict:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = _args_dict(checkpoint)
@@ -49,9 +54,38 @@ def measure(
     tcp_dim = int(tcp_dim if tcp_dim is not None else args["tcp_dim"])
 
     model = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu").eval()
-    buffer = ReplayBuffer.open(zarr_path, keys=[action_key])
-    actions = buffer.read(action_key, slice(None))
-    hand = actions[:, tcp_dim:]
+    metadata = checkpoint["split_metadata"]
+    if "policy_config" in metadata:
+        register_resolvers()
+        cfg = OmegaConf.create(metadata["policy_config"])
+        # The resolved data recipe is retained even if top-level interpolations change.
+        cfg.dataset = OmegaConf.create(metadata["resolved_dataset"])
+        if Path(zarr_path).resolve() != Path(cfg.dataset.zarr_path).resolve():
+            raise ValueError("Policy-aligned usage requires the saved dataset path")
+        if action_key != cfg.action_key or tcp_dim != int(cfg.agent.tcp_dim):
+            raise ValueError("Usage action layout must match the saved Policy")
+        dataset = build_policy_dataset(cfg)
+        if split == "validation":
+            dataset = dataset.get_validation_dataset()
+        elif split != "train":
+            raise ValueError("split must be train or validation")
+        hand = policy_hand_rows(dataset, tcp_dim)
+        expected = metadata[
+            "val_source_rows" if split == "validation" else "train_source_rows"
+        ]
+        actual = (
+            dataset.sampler.action_source_rows.tolist() if dataset is not None else []
+        )
+        if actual != expected:
+            raise ValueError(
+                "Dataset qualified source rows changed since VQ preparation"
+            )
+    else:
+        buffer = ReplayBuffer.open(zarr_path, keys=[action_key])
+        actions = buffer.read(action_key, slice(None))
+        hand = actions[:, tcp_dim:]
+    if not len(hand):
+        raise ValueError("No qualified VQ usage samples in the selected split")
     if hand.shape[1] != model.hand_dim:
         raise ValueError(
             f"Data hand_dim={hand.shape[1]} does not match checkpoint {model.hand_dim}"
@@ -60,12 +94,12 @@ def measure(
     scale, offset = _normalizer_from_checkpoint(checkpoint)
     hand_norm = _normalize(hand, scale, offset)
 
-    manager = CodebookManager(
-        hand_dim=model.hand_dim,
-        num_groups=model.num_groups,
-        codebook_size=model.codebook_size,
-    )
     if codebook_path:
+        manager = CodebookManager(
+            hand_dim=model.hand_dim,
+            num_groups=model.num_groups,
+            codebook_size=model.codebook_size,
+        )
         manager.load(codebook_path)
         if manager.has_hand_normalizer:
             torch.testing.assert_close(manager.hand_normalizer_scale, scale)
@@ -143,6 +177,12 @@ def main() -> None:
         default=None,
         help="Exact .npz used by the policy. Strongly recommended.",
     )
+    parser.add_argument(
+        "--split",
+        choices=["train", "validation"],
+        default="train",
+        help="Policy-aligned checkpoints only; legacy checkpoints use all rows",
+    )
     parser.add_argument("--action_key", default=None)
     parser.add_argument("--tcp_dim", type=int, default=None)
     args = parser.parse_args()
@@ -152,6 +192,7 @@ def main() -> None:
         codebook_path=args.codebook,
         action_key=args.action_key,
         tcp_dim=args.tcp_dim,
+        split=args.split,
     )
     for key, value in result.items():
         print(f"{key}: {value}")
