@@ -156,7 +156,9 @@ class LoadedPolicy:
         if reset is not None:
             reset()
 
-    def configure_execution(self, mode, guidance_cap=None, *, warmup=False, rgb_hw=None):
+    def configure_execution(
+        self, mode, guidance_cap=None, *, warmup=False, rgb_hw=None, rtc_delay=0
+    ):
         if mode == "rtc":
             self.configure_rtc(guidance_cap)
         elif mode in {"sync", "async"}:
@@ -164,7 +166,9 @@ class LoadedPolicy:
         else:
             raise ValueError("Unsupported execution mode")
         if warmup:
-            return self.warmup(samples=1, rgb_hw=rgb_hw, rtc_delay=1 if mode == "rtc" else 0)
+            return self.warmup(
+                samples=1, rgb_hw=rgb_hw, rtc_delay=rtc_delay if mode == "rtc" else 0
+            )
 
     def configure_rtc(self, guidance_cap):
         from dexmani_policy.agents.action_decoders.diffusion import Diffusion

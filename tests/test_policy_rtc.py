@@ -326,3 +326,42 @@ def test_eef_bridge_mixed_affine_prefix():
     assert output.shape == (7, 21) and np.isfinite(output).all()
     np.testing.assert_allclose(seen[0][0, :, 3:9], prefix[:, 3:9])
     np.testing.assert_allclose(seen[0][0], normalizer["action"].normalize(prefix).numpy())
+
+
+@pytest.mark.parametrize("mode", ["sync", "async", "rtc"])
+def test_execution_warmup_uses_requested_rtc_delay(mode):
+    agent = AuxAgent(
+        Encoder(),
+        Diffusion(Coupled(), num_training_steps=20, num_inference_steps=2),
+        horizon=8,
+        n_obs_steps=2,
+        n_action_steps=3,
+        action_dim=28,
+    ).eval()
+    normalizer = LinearNormalizer()
+    normalizer["action"] = SingleFieldLinearNormalizer.create_identity()
+    normalizer["joint_state"] = SingleFieldLinearNormalizer.create_identity()
+    agent.load_normalizer_from_dataset(normalizer)
+    info = SimpleNamespace(
+        observation_fields=("joint_state",),
+        inference_steps=2,
+        action_mode="joint",
+        n_obs_steps=2,
+        n_action_steps=3,
+        horizon=8,
+    )
+    policy = LoadedPolicy(agent, {"dataset": {}}, info, device="cpu", seed=0)
+    calls = []
+    original = policy.predict
+
+    def observe_call(observation, *, rtc_prefix=None, delay_steps=0):
+        calls.append((rtc_prefix is not None, delay_steps))
+        return original(observation, rtc_prefix=rtc_prefix, delay_steps=delay_steps)
+
+    policy.predict = observe_call
+    durations = policy.configure_execution(
+        mode, 2.0 if mode == "rtc" else None, warmup=True, rtc_delay=3
+    )
+    assert len(durations) == 1 and np.isfinite(durations[0]) and durations[0] >= 0
+    assert calls == ([(False, 0), (True, 3)] if mode == "rtc" else [(False, 0)])
+    assert all(p.grad is None for p in agent.parameters())
