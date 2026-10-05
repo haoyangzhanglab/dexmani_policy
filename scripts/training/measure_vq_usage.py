@@ -49,8 +49,8 @@ def measure(
     tcp_dim = int(tcp_dim if tcp_dim is not None else args["tcp_dim"])
 
     model = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu").eval()
-    buffer = ReplayBuffer.copy_from_path(zarr_path, keys=[action_key])
-    actions = np.asarray(buffer[action_key])
+    buffer = ReplayBuffer.open(zarr_path, keys=[action_key])
+    actions = buffer.read(action_key, slice(None))
     hand = actions[:, tcp_dim:]
     if hand.shape[1] != model.hand_dim:
         raise ValueError(

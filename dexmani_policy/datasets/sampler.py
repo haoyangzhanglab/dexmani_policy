@@ -1,6 +1,5 @@
 import math
 from numbers import Integral, Real
-from typing import Optional
 
 import numba
 import numpy as np
@@ -52,8 +51,12 @@ def create_indices(
             sample_end_idx = sequence_length - end_offset
             assert start_offset >= 0
             assert end_offset >= 0
-            assert (sample_end_idx - sample_start_idx) == (buffer_end_idx - buffer_start_idx)
-            indices.append([buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx])
+            assert (sample_end_idx - sample_start_idx) == (
+                buffer_end_idx - buffer_start_idx
+            )
+            indices.append(
+                [buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx]
+            )
 
     indices = np.array(indices)
     return indices
@@ -96,7 +99,7 @@ class SequenceSampler:
         sequence_length: int,
         pad_before: int = 0,
         pad_after: int = 0,
-        episode_mask: Optional[np.ndarray] = None,
+        episode_mask: np.ndarray | None = None,
     ):
         super().__init__()
 
@@ -168,7 +171,12 @@ class SequenceSampler:
     def filter_valid(self, obs_valid, action_valid, dispatch_valid, n_obs_steps):
         # Process bounded batches: a full RGB buffer or windows×horizon copy is unnecessary.
         kept = []
-        counts = dict(candidate=len(self.indices), observation=0, action=0, dispatch=0)
+        counts = {
+            "candidate": len(self.indices),
+            "observation": 0,
+            "action": 0,
+            "dispatch": 0,
+        }
         obs_rows = np.zeros(len(obs_valid), dtype=bool)
         action_rows = np.zeros(len(action_valid), dtype=bool)
         for offset in range(0, len(self.indices), 8192):
@@ -196,25 +204,15 @@ class SequenceSampler:
         if not len(self.indices):
             raise ValueError(f"Zero valid training/validation windows: {counts}")
 
-    def sample_sequence(self, idx):
+    def sample_sequence(self, idx, *, key_lengths=None):
         result = {}
-        buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
-
+        source = self.source_rows(self.indices[idx : idx + 1])[0]
         for key in self.keys:
-            input_arr = self.replay_buffer[key]
-            sample = input_arr[buffer_start_idx:buffer_end_idx]
-            data = sample
-            if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
-                data = np.empty(
-                    shape=(self.sequence_length,) + input_arr.shape[1:], dtype=input_arr.dtype
-                )
-                if sample_start_idx > 0:
-                    data[:sample_start_idx] = sample[0]
-                if sample_end_idx < self.sequence_length:
-                    data[sample_end_idx:] = sample[-1]
-                data[sample_start_idx:sample_end_idx] = sample
-            result[key] = data
-
+            length = self.sequence_length if key_lengths is None else key_lengths[key]
+            rows = source[:length]
+            start, end = int(rows[0]), int(rows[-1]) + 1
+            values = self.replay_buffer.read(key, slice(start, end))
+            result[key] = values[rows - start]
         return result
 
 
@@ -225,14 +223,18 @@ def validate_val_ratio(val_ratio) -> None:
         or not math.isfinite(val_ratio)
         or not 0 <= val_ratio < 1
     ):
-        raise ValueError(f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}")
+        raise ValueError(
+            f"val_ratio must satisfy 0 <= val_ratio < 1, got {val_ratio!r}"
+        )
 
 
 def validate_max_train_episodes(value) -> None:
     if value is not None and (
         isinstance(value, bool) or not isinstance(value, Integral) or value < 1
     ):
-        raise ValueError(f"max_train_episodes must be None or a positive integer, got {value!r}")
+        raise ValueError(
+            f"max_train_episodes must be None or a positive integer, got {value!r}"
+        )
 
 
 def validate_dataset_splits(dataset) -> None:

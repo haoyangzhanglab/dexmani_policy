@@ -15,6 +15,10 @@ obs_valid[r[:N]].all() & action_valid[r[:H]].all() & dispatch_valid[r[:H]].all()
 
 部署从 checkpoint 恢复 normalizer，不读取训练数据拟合。训练恢复也直接读取保存统计；数据配方加入现有续训一致性检查，新配方不是旧实验的无缝续训。精确复现旧训练请使用其源版本；不迁移旧缓存、不覆盖历史模型。推理式 async/rtc 不要求为了算法本身重新训练。
 
+Dataset 的窗口仍按实际记录行索引（recorded_rows）构造，缺失与不规则时间不自动修补。该说明不新增持久化 `data_recipe` 键，也不改变旧 checkpoint 的恢复合同。
+
+Zarr reader 按进程重开句柄，只保留选中字段和每字段一个有界当前 chunk；训练期间不得替换当前读取的缓存。normalizer 单遍合并统计，mixed action 的 xyz/hand 使用 limits、rot6d 保持 identity，辅助 EE 切片与唯一训练源行权重不变。deterministic 多任务采样不启动 Manager；随机采样保留跨 worker 的 epoch 同步。
+
 ## 推理接口
 
 `PolicyInfo.horizon` 提供 H，N=n_obs_steps，P=H-N+1。LoadedPolicy.predict(observation, *, rtc_prefix=None, delay_steps=0) 返回物理控制子空间的 (P,C) NumPy 数组，起点是模型索引 N-1，C 为 joint19 或 EEF21。内部 Agent 的 pred_action/control_action/tail 约定不变，不额外运行网络获取 tail。
@@ -48,7 +52,8 @@ W 只乘一次。虽然辅助维没有 endpoint 目标，网络耦合产生的�
 
 ```bash
 python -m pytest -q tests/test_policy_windows.py tests/test_policy_rtc.py \
-  tests/test_infra_training.py tests/test_infra_resume.py tests/test_infra_evaluation.py
+  tests/test_streaming_dataset.py tests/test_infra_training.py \
+  tests/test_infra_resume.py tests/test_infra_evaluation.py
 python dexmani_policy/smoke_test.py --config-only dp dp3 r3d sat dqrise maniflow
 ```
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -41,7 +41,7 @@ DEFAULT_RGB_KEEP_UINT8 = False
 
 
 class BaseDataset(torch.utils.data.Dataset):
-    DEFAULT_MODALITIES = ["joint_state"]
+    DEFAULT_MODALITIES: ClassVar[list[str]] = ["joint_state"]
 
     def __init__(
         self,
@@ -56,9 +56,9 @@ class BaseDataset(torch.utils.data.Dataset):
         augmentation_cfg: dict | None = None,
         action_key: str = "action",
         use_aux_ee: bool = False,
-        obs_horizon: Optional[int] = None,
-        rgb_preprocess_size: Optional[Tuple[int, int]] = None,
-        rgb_random_crop_size: Optional[Tuple[int, int]] = None,
+        obs_horizon: int | None = None,
+        rgb_preprocess_size: tuple[int, int] | None = None,
+        rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: dict | None = None,
         rgb_keep_uint8: bool = DEFAULT_RGB_KEEP_UINT8,
     ) -> None:
@@ -80,14 +80,14 @@ class BaseDataset(torch.utils.data.Dataset):
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
         self.rgb_keep_uint8 = rgb_keep_uint8
-        self._is_val = False  # validation set flag — overridden by get_validation_dataset()
+        self._is_val = False
 
         # When EE auxiliary loss is enabled, load action_ee for wrist pose (pos3+rot6d6).
         load_keys = list(sensor_modalities) + [action_key]
         if use_aux_ee:
             load_keys = load_keys + ["action_ee"]
 
-        self.replay_buffer = ReplayBuffer.copy_from_path(
+        self.replay_buffer = ReplayBuffer.open(
             self.zarr_path,
             keys=load_keys,
         )
@@ -95,20 +95,33 @@ class BaseDataset(torch.utils.data.Dataset):
         self.data_revision = self.replay_buffer.data_revision
         n_rows = int(self.replay_buffer.episode_ends[-1])
 
-        def finite_rows(values):
-            if np.issubdtype(values.dtype, np.floating):
-                return np.isfinite(values).reshape(n_rows, -1).all(axis=1)
-            return np.ones(n_rows, dtype=bool)
+        def finite_rows(key, columns=None):
+            valid = np.ones(n_rows, dtype=bool)
+            if np.issubdtype(self.replay_buffer[key].dtype, np.floating):
+                for start, values in self.replay_buffer.iter_chunks(
+                    key, columns=columns
+                ):
+                    valid[start : start + len(values)] = (
+                        np.isfinite(values).reshape(len(values), -1).all(axis=1)
+                    )
+            return valid
 
         self._obs_valid = np.ones(n_rows, dtype=bool)
         for key in sensor_modalities:
-            self._obs_valid &= finite_rows(self.replay_buffer[key])
-        self._action_valid = finite_rows(self.replay_buffer[action_key])
+            self._obs_valid &= finite_rows(key)
+        self._action_valid = finite_rows(action_key)
         if use_aux_ee:
-            self._action_valid &= finite_rows(self.replay_buffer["action_ee"][..., :9])
+            self._action_valid &= finite_rows("action_ee", slice(0, 9))
+        self._role_lengths = {key: self.obs_horizon for key in sensor_modalities}
+        self._role_lengths[action_key] = horizon
+        if use_aux_ee:
+            self._role_lengths["action_ee"] = horizon
         self._dispatch_valid = np.ones(n_rows, dtype=bool)
-        attrs = self.replay_buffer.root["attrs"]
-        is_real = attrs.get("format") == "dexmani.real.canonical" or attrs.get("domain") == "real"
+        attrs = self.replay_buffer.attrs
+        is_real = (
+            attrs.get("format") == "dexmani.real.canonical"
+            or attrs.get("domain") == "real"
+        )
         if is_real:
             status = self.replay_buffer.row_info.get("dispatch_status")
             if status is None:
@@ -133,7 +146,9 @@ class BaseDataset(torch.utils.data.Dataset):
             n_episodes=self.replay_buffer.n_episodes,
         )
         train_mask = ~val_mask
-        train_mask = downsample_mask(seed=seed, mask=train_mask, max_n=max_train_episodes)
+        train_mask = downsample_mask(
+            seed=seed, mask=train_mask, max_n=max_train_episodes
+        )
         self.val_mask = val_mask
         self.train_mask = train_mask
 
@@ -238,7 +253,9 @@ class BaseDataset(torch.utils.data.Dataset):
         if self.rgb_random_crop_size is not None:
             rgb = TVF.crop(
                 rgb,
-                top=torch.randint(0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)).item(),
+                top=torch.randint(
+                    0, rgb.shape[-2] - self.rgb_random_crop_size[0] + 1, (1,)
+                ).item(),
                 left=torch.randint(
                     0, rgb.shape[-1] - self.rgb_random_crop_size[1] + 1, (1,)
                 ).item(),
@@ -252,7 +269,7 @@ class BaseDataset(torch.utils.data.Dataset):
         return rgb.clamp_(0, 1)
 
     def __getitem__(self, idx):
-        sample = self.sampler.sample_sequence(idx)
+        sample = self.sampler.sample_sequence(idx, key_lengths=self._role_lengths)
         data = self.sample_to_data(sample)
         data = self.apply_augmentation(data)
 
@@ -304,36 +321,29 @@ class BaseDataset(torch.utils.data.Dataset):
         """Fit only unique source rows referenced by valid training windows, by role."""
         if self._is_val:
             raise ValueError("Validation must reuse the training normalizer")
-        if key == "action":
-            rows = self.sampler.action_source_rows
-            action = self.replay_buffer[self.action_key][rows]
-            if self.use_aux_ee:
-                action = np.concatenate(
-                    (action, self.replay_buffer["action_ee"][..., :9][rows]), axis=-1
-                )
-            yield action
-            return
-        if key not in self.sensor_modalities:
+        if key != "action" and key not in self.sensor_modalities:
             raise KeyError(f"Not an enabled observation field: {key}")
-        yield self.replay_buffer[key][self.sampler.observation_source_rows]
-
-
-def example(zarr_path):
-    dataset = BaseDataset(
-        zarr_path=zarr_path,
-        seed=42,
-        horizon=16,
-        pad_before=1,
-        pad_after=7,
-        val_ratio=0.05,
-        sensor_modalities=["joint_state"],
-    )
-    sample = dataset[0]
-    print("joint_state:", sample["obs"]["joint_state"].shape)
-    print("action     :", sample["action"].shape)
-    val_set = dataset.get_validation_dataset()
-    print(f"train size: {len(dataset)}  val size: {len(val_set)}")
-
-
-if __name__ == "__main__":
-    example("robot_data/pick_apple_messy.zarr")
+        action = key == "action"
+        field = self.action_key if action else key
+        rows = (
+            self.sampler.action_source_rows
+            if action
+            else self.sampler.observation_source_rows
+        )
+        step = self.replay_buffer.chunk_rows(field)
+        if action and self.use_aux_ee:
+            step = min(step, self.replay_buffer.chunk_rows("action_ee"))
+        for start in range(0, int(self.replay_buffer.episode_ends[-1]), step):
+            end = min(start + step, int(self.replay_buffer.episode_ends[-1]))
+            selected = (
+                rows[np.searchsorted(rows, start) : np.searchsorted(rows, end)] - start
+            )
+            if not len(selected):
+                continue
+            values = self.replay_buffer.read(field, slice(start, end))[selected]
+            if action and self.use_aux_ee:
+                aux = self.replay_buffer.read(
+                    "action_ee", slice(start, end), columns=slice(0, 9)
+                )[selected]
+                values = np.concatenate((values, aux), axis=-1)
+            yield values

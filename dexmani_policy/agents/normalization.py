@@ -1,11 +1,10 @@
 import logging
-from typing import Dict, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
 import zarr
 from omegaconf import DictConfig, OmegaConf
+from torch import nn
 
 from dexmani_policy.utils.tensor import dict_apply
 
@@ -97,7 +96,8 @@ def _params_from_stats(
     """Build scale/offset from aggregated statistics (shared by fit_params / fit_field_chunks).
 
     This is the single source of truth for the affine semantics so that the
-    streaming chunk fit and the one-shot fit produce identical results.
+    chunk and one-shot fits use the same mapping from statistics to parameters;
+    their floating-point reductions may differ slightly.
     """
     assert mode in ["limits", "gaussian"]
 
@@ -158,7 +158,7 @@ def _params_from_stats(
 
 
 def fit_params(
-    data: Union[torch.Tensor, np.ndarray, zarr.Array],
+    data: torch.Tensor | np.ndarray | zarr.Array,
     last_n_dims=1,
     dtype=torch.float32,
     mode="limits",
@@ -244,7 +244,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     @torch.no_grad()
     def fit(
         self,
-        data: Union[torch.Tensor, np.ndarray, zarr.Array],
+        data: torch.Tensor | np.ndarray | zarr.Array,
         last_n_dims=1,
         dtype=torch.float32,
         mode="limits",
@@ -267,9 +267,9 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     @classmethod
     def create_manual(
         cls,
-        scale: Union[torch.Tensor, np.ndarray],
-        offset: Union[torch.Tensor, np.ndarray],
-        input_stats_dict: Dict[str, Union[torch.Tensor, np.ndarray]] = None,
+        scale: torch.Tensor | np.ndarray,
+        offset: torch.Tensor | np.ndarray,
+        input_stats_dict: dict[str, torch.Tensor | np.ndarray] | None = None,
     ):
         def to_tensor(x):
             if not isinstance(x, torch.Tensor):
@@ -301,13 +301,13 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         }
         return cls.create_manual(scale, offset, input_stats_dict)
 
-    def normalize(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+    def normalize(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
         return normalize_tensor(x, self.params_dict, forward=True)
 
-    def unnormalize(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+    def unnormalize(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
         return normalize_tensor(x, self.params_dict, forward=False)
 
-    def __call__(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
         return self.normalize(x)
 
 
@@ -315,7 +315,7 @@ class LinearNormalizer(DictOfTensorMixin):
     @torch.no_grad()
     def fit(
         self,
-        data: Union[Dict, torch.Tensor, np.ndarray, zarr.Array],
+        data: dict | torch.Tensor | np.ndarray | zarr.Array,
         last_n_dims=1,
         dtype=torch.float32,
         mode="limits",
@@ -357,7 +357,7 @@ class LinearNormalizer(DictOfTensorMixin):
     def fit_field(
         self,
         key: str,
-        data: Union[torch.Tensor, np.ndarray, zarr.Array],
+        data: torch.Tensor | np.ndarray | zarr.Array,
         last_n_dims=1,
         dtype=torch.float32,
         mode="limits",
@@ -405,10 +405,8 @@ class LinearNormalizer(DictOfTensorMixin):
         """
         assert mode in ["limits", "gaussian"]
 
-        # float64 is used ONLY for the streaming accumulator; the stored
-        # scale/offset/input_stats must match the one-shot fit_params dtype
-        # (float32 by default).  dtype=None collapses to the float32 default so a
-        # no-op `.to(None)` can never leak float64 into the persisted params.
+        # Each current chunk and the accumulators use float64; persisted
+        # parameters/stats use the requested dtype (float32 also for None).
         if dtype is None:
             dtype = torch.float32
 
@@ -419,47 +417,39 @@ class LinearNormalizer(DictOfTensorMixin):
                 arr = torch.from_numpy(arr)
             return arr.to(torch.float64)
 
-        chunks = list(chunks)
-        if not chunks:
-            raise ValueError("fit_field_chunks requires at least one chunk")
-
-        first = _as_float64_array(chunks[0])
-        dim = int(np.prod(first.shape[-last_n_dims:])) if last_n_dims > 0 else 1
-
         count = 0
-        mean = torch.zeros(dim, dtype=torch.float64)
-        m2 = torch.zeros(dim, dtype=torch.float64)
-        running_min = None
-        running_max = None
-
+        dim = None
+        mean = m2 = running_min = running_max = None
         for chunk in chunks:
             arr = _as_float64_array(chunk)
             c_dim = int(np.prod(arr.shape[-last_n_dims:])) if last_n_dims > 0 else 1
-            if c_dim != dim:
+            if arr.numel() == 0:
+                continue
+            if dim is None:
+                dim = c_dim
+                mean = torch.zeros(dim, dtype=torch.float64, device=arr.device)
+                m2 = torch.zeros_like(mean)
+            elif c_dim != dim:
                 raise ValueError(
-                    f"fit_field_chunks: inconsistent last-dim for '{key}' "
-                    f"(expected {dim}, got {c_dim})"
+                    f"fit_field_chunks: inconsistent last-dim for '{key}' (expected {dim}, got {c_dim})"
                 )
             c = arr.reshape(-1, dim)
             n = c.shape[0]
-            if n == 0:
-                continue
-            c_min = c.min(dim=0).values
-            c_max = c.max(dim=0).values
+            c_min, c_max = c.min(dim=0).values, c.max(dim=0).values
             running_min = (
                 c_min if running_min is None else torch.minimum(running_min, c_min)
             )
             running_max = (
                 c_max if running_max is None else torch.maximum(running_max, c_max)
             )
-
-            # Welford batch merge.
-            delta = c - mean
+            batch_mean = c.mean(dim=0)
+            batch_m2 = ((c - batch_mean) ** 2).sum(dim=0)
+            delta = batch_mean - mean
             new_count = count + n
-            mean = mean + delta.sum(dim=0) / new_count
-            delta2 = c - mean
-            m2 = m2 + (delta * delta2).sum(dim=0)
+            m2 = m2 + batch_m2 + delta.square() * (count * n / new_count)
+            mean = mean + delta * (n / new_count)
             count = new_count
+            del arr, c, chunk
 
         if running_min is None:
             raise ValueError(f"fit_field_chunks: no non-empty chunks for '{key}'")
@@ -494,7 +484,7 @@ class LinearNormalizer(DictOfTensorMixin):
         self.input_stats[key] = stats
         self._field_views.clear()
 
-    def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
+    def __call__(self, x: dict | torch.Tensor | np.ndarray) -> torch.Tensor:
         return self.normalize(x)
 
     def __getitem__(self, key: str):
@@ -532,10 +522,10 @@ class LinearNormalizer(DictOfTensorMixin):
             params = self.params_dict["_default"]
             return normalize_tensor(x, params, forward=forward)
 
-    def normalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
+    def normalize(self, x: dict | torch.Tensor | np.ndarray) -> torch.Tensor:
         return self._normalize_impl(x, forward=True)
 
-    def unnormalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
+    def unnormalize(self, x: dict | torch.Tensor | np.ndarray) -> torch.Tensor:
         return self._normalize_impl(x, forward=False)
 
 
@@ -544,25 +534,25 @@ def build_mixed_action_normalizer(action_data, ee_dim=9):
 
     xyz and hand → limits [-1, 1] (min-max); rot6d → identity (scale=1, offset=0).
     """
-    assert action_data.shape[1] > ee_dim, (
-        f"action_ee dim ({action_data.shape[1]}) must be > ee_dim ({ee_dim})"
-    )
-    tmp = LinearNormalizer()
-    tmp.fit(
-        data={
-            "xyz": action_data[:, :3],
-            "hand": action_data[:, ee_dim:],
-        },
-        last_n_dims=1,
-        mode="limits",
-    )
+    return build_mixed_action_normalizer_chunks(iter((action_data,)), ee_dim=ee_dim)
 
-    xyz_scale = tmp["xyz"].params_dict["scale"]
-    xyz_offset = tmp["xyz"].params_dict["offset"]
-    xyz_stats = tmp["xyz"].input_stats
-    hand_scale = tmp["hand"].params_dict["scale"]
-    hand_offset = tmp["hand"].params_dict["offset"]
-    hand_stats = tmp["hand"].input_stats
+
+def build_mixed_action_normalizer_chunks(chunks, ee_dim=9):
+    tmp = LinearNormalizer()
+    tmp.fit_field_chunks("action", chunks, mode="limits")
+    fitted = tmp["action"]
+    if fitted.params_dict["scale"].numel() <= ee_dim:
+        raise ValueError(f"action_ee dimension must exceed {ee_dim}")
+    xyz_scale, hand_scale = (
+        fitted.params_dict["scale"][:3],
+        fitted.params_dict["scale"][ee_dim:],
+    )
+    xyz_offset, hand_offset = (
+        fitted.params_dict["offset"][:3],
+        fitted.params_dict["offset"][ee_dim:],
+    )
+    xyz_stats = {k: v[:3] for k, v in fitted.input_stats.items()}
+    hand_stats = {k: v[ee_dim:] for k, v in fitted.input_stats.items()}
 
     rot6d_dim = ee_dim - 3
     scale = torch.cat([xyz_scale, torch.ones(rot6d_dim), hand_scale])
@@ -737,7 +727,7 @@ def resolve_normalization_spec(cfg) -> dict:
     if isinstance(normalization, DictConfig):
         normalization = OmegaConf.to_container(normalization, resolve=True)
     if not isinstance(normalization, dict):
-        raise ValueError("config.normalization must be a mapping of field -> mode")
+        raise TypeError("config.normalization must be a mapping of field -> mode")
 
     return validate_normalization_spec(normalization)
 
@@ -750,16 +740,19 @@ def uses_diffusion_config(agent_config):
     if not agent_config.get("_target_"):
         return False
     from hydra.utils import get_class
+
     from dexmani_policy.agents.core.base import UNetDiffusionAgent
     from dexmani_policy.agents.core.dqrise import DQRISEAgent
-    from dexmani_policy.agents.core.r3d import R3DAgent
     from dexmani_policy.agents.core.multi_task import MultiTaskAgent
+    from dexmani_policy.agents.core.r3d import R3DAgent
+
     cls = get_class(agent_config["_target_"])
     if cls is MultiTaskAgent:
         return agent_config.get("action_decoder_type", "diffusion") == "diffusion"
     # Subclasses may replace their decoder; defer those to the runtime check.
     from dexmani_policy.agents.core.dp import DPAgent
     from dexmani_policy.agents.core.dp3 import DP3Agent
+
     return cls in (UNetDiffusionAgent, DPAgent, DP3Agent, DQRISEAgent, R3DAgent)
 
 

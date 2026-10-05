@@ -1,8 +1,8 @@
-import os
 import hashlib
+import logging
 import multiprocessing as mp
+import os
 import warnings
-from typing import List, Optional
 
 import numpy as np
 import torch
@@ -11,13 +11,13 @@ import torch
 class MultiTaskDataset(torch.utils.data.Dataset):
     def __init__(
         self,
-        datasets: List,
-        task_names: List[str],
+        datasets: list,
+        task_names: list[str],
         sampling_strategy: str = "balanced",
-        task_weights: Optional[List[float]] = None,
+        task_weights: list[float] | None = None,
         seed: int = 42,
         deterministic: bool = False,
-        task_texts: Optional[List[str]] = None,
+        task_texts: list[str] | None = None,
         augmentation_cfg=None,
         action_key: str = "action",
     ):
@@ -77,12 +77,10 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self.total_length = sum(self.task_lengths)
 
         self._epoch = 0
-        # Manager-backed Value works with both fork and spawn start methods,
-        # unlike mp.Value which requires fork for cross-process visibility.
-        self._manager_pid = os.getpid()
-        self._manager = mp.Manager()
-        self._epoch_val = self._manager.Value("i", 0)
         self.deterministic = deterministic
+        self._manager_pid = os.getpid()
+        self._manager = None if deterministic else mp.Manager()
+        self._epoch_val = None if deterministic else self._manager.Value("i", 0)
 
         if sampling_strategy == "proportional":
             self.sample_probs = np.array(self.task_lengths) / self.total_length
@@ -127,8 +125,10 @@ class MultiTaskDataset(torch.utils.data.Dataset):
     def __del__(self):
         try:
             self.close()
-        except Exception:
-            pass
+        except (OSError, EOFError):
+            logging.getLogger(__name__).warning(
+                "dataset Manager shutdown failed", exc_info=True
+            )
 
     def _make_rng(self, *seed_parts: str):
         """Derive a reproducible ``np.random.Generator`` from seed components."""
@@ -204,7 +204,8 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         # sync epoch from shared memory (visible to persistent_workers)
-        self._epoch = self._epoch_val.value
+        if not self.deterministic:
+            self._epoch = self._epoch_val.value
 
         if self.deterministic:
             task_idx, local_idx = self.fixed_indices[idx]
@@ -224,7 +225,8 @@ class MultiTaskDataset(torch.utils.data.Dataset):
 
     def set_epoch(self, epoch: int):
         self._epoch = epoch
-        self._epoch_val.value = epoch
+        if not self.deterministic:
+            self._epoch_val.value = epoch
 
     def get_validation_dataset(self):
         val_datasets = [d.get_validation_dataset() for d in self.datasets]
@@ -238,7 +240,9 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         val_ds, val_names, val_texts = zip(*valid_triples)
 
         if self.task_weights is not None:
-            val_weights = [self.task_weights[self.task_names.index(name)] for name in val_names]
+            val_weights = [
+                self.task_weights[self.task_names.index(name)] for name in val_names
+            ]
         else:
             val_weights = None
 

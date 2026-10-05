@@ -3,8 +3,9 @@
 Training and persistence semantics:
 * train/validation split is episode-level;
 * VQ-VAE model optimization uses only the selected training episodes;
-* hand normalization statistics are fitted on the full hand dataset so they
-  match the Policy full-dataset action normalizer;
+* hand normalization statistics are fitted on the full hand dataset;
+  Policy instead fits unique source rows from valid training windows, so
+  codebook/Policy normalizer compatibility must still be checked;
 * validation uses the held-out episode split in that shared normalized space;
 * the same ``get_val_mask``/``downsample_mask`` logic as policy training is used;
 * checkpoints contain explicit model, split, and normalizer metadata;
@@ -23,8 +24,8 @@ import torch
 import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.vq_hand import VQVAEHand
 from dexmani_policy.agents.normalization import LinearNormalizer
+from dexmani_policy.agents.vq_hand import VQVAEHand
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import downsample_mask, get_val_mask
 
@@ -55,16 +56,6 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def _get_episode_ends(buffer) -> np.ndarray:
-    if hasattr(buffer, "episode_ends"):
-        ends = buffer.episode_ends
-        ends = ends[:] if hasattr(ends, "__getitem__") else ends
-        return np.asarray(ends, dtype=np.int64)
-    if hasattr(buffer, "meta") and "episode_ends" in buffer.meta:
-        return np.asarray(buffer.meta["episode_ends"][:], dtype=np.int64)
-    raise AttributeError("ReplayBuffer does not expose episode_ends")
 
 
 def _episode_mask_to_frame_indices(
@@ -132,8 +123,8 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
 
-    buffer = ReplayBuffer.copy_from_path(args.zarr_path, keys=[args.action_key])
-    all_actions = np.asarray(buffer[args.action_key])
+    buffer = ReplayBuffer.open(args.zarr_path, keys=[args.action_key])
+    all_actions = buffer.read(args.action_key, slice(None))
     hand_data = all_actions[:, args.tcp_dim :]
     if hand_data.shape[1] != args.hand_dim:
         raise ValueError(
@@ -141,7 +132,7 @@ def train(args: argparse.Namespace) -> None:
             f"{hand_data.shape[1]} after tcp_dim={args.tcp_dim}"
         )
 
-    episode_ends = _get_episode_ends(buffer)
+    episode_ends = np.asarray(buffer.episode_ends, dtype=np.int64)
     val_episode_mask = get_val_mask(
         seed=args.seed,
         val_ratio=args.val_ratio,
@@ -166,10 +157,9 @@ def train(args: argparse.Namespace) -> None:
         len(val_indices),
     )
 
-    # Fit on the full hand dataset so that min/max match the policy dataset
-    # normalizer (BaseDataset supplies all episodes). This guarantees the VQ-VAE
-    # and policy coordinate spaces agree, avoiding _validate_codebook_normalizer()
-    # failures at DQ-RISE training start.
+    # Preserve this VQ recipe: full-dataset hand statistics, including validation.
+    # Policy uses valid train-window source rows and checks codebook compatibility;
+    # matching dataset paths alone does not guarantee equal affine parameters.
     normalizer = LinearNormalizer()
     normalizer.fit(
         data={"hand": hand_data},
@@ -267,8 +257,8 @@ def train(args: argparse.Namespace) -> None:
         "episode_ends": episode_ends.tolist(),
         "train_episode_ids": np.flatnonzero(train_episode_mask).tolist(),
         "val_episode_ids": np.flatnonzero(val_episode_mask).tolist(),
-        "train_frame_count": int(len(train_indices)),
-        "val_frame_count": int(len(val_indices)),
+        "train_frame_count": len(train_indices),
+        "val_frame_count": len(val_indices),
     }
 
     train_history: list[float] = []
@@ -416,7 +406,7 @@ def _load_yaml_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
     if not isinstance(config, dict):
-        raise ValueError("YAML config must be a mapping")
+        raise TypeError("YAML config must be a mapping")
     return dict(config.get("vq_vae", config))
 
 
@@ -484,10 +474,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.output_dir is None:
         parser.error("--output_dir is required")
     if args.hand_dim is None or args.hand_dim <= 0:
-        buffer = ReplayBuffer.copy_from_path(args.zarr_path, keys=[args.action_key])
-        args.hand_dim = int(
-            np.asarray(buffer[args.action_key]).shape[-1] - args.tcp_dim
-        )
+        buffer = ReplayBuffer.open(args.zarr_path, keys=[args.action_key])
+        args.hand_dim = int(buffer[args.action_key].shape[-1] - args.tcp_dim)
     if args.loss_weight is None:
         args.loss_weight = [1.0] * args.hand_dim
     train(args)
