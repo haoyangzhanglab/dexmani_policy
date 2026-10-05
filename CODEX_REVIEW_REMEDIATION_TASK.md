@@ -1,12 +1,35 @@
 # DexMani Policy 全量审查整改任务书（Codex CLI）
 
-状态：**方案已复审；本文是待执行任务，不是实现或测试通过报告。**
+状态：**按最新实现更新的增量任务书。已完成项见第 0 节和第 15 节；只执行剩余范围，不重复整改。本文不是全量运行验收通过报告。**
 
-审查日期：2026-10-05。代码基线：[`650f1e3cfc63c64678b5bb69e7258b548800d053`](https://github.com/haoyangzhanglab/dexmani_policy/tree/650f1e3cfc63c64678b5bb69e7258b548800d053)。发布前重新核对了目标仓库和五个参考项目的 HEAD。执行时以实际 HEAD、保存的实验配置及工作区为准，**不要 reset 到此基线**。
+更新日期：2026-10-06（北京时间）。本轮代码基线：[`49bd810736c1f6d3aabb347f1cd3b67f530a7232`](https://github.com/haoyangzhanglab/dexmani_policy/tree/49bd810736c1f6d3aabb347f1cd3b67f530a7232)；原审查基线为 `650f1e3`，任务书初次发布为 `7120084`。本轮复核任务书初次发布之后的 3 个实现提交及其 22 个变动文件，参考项目沿用第 16 节固定版本，未重新追踪上游 HEAD。执行时以实际 HEAD、保存的实验配置及工作区为准，**不要 reset 到任一审查基线**。
 
 目标：以最少机制完成真实缺陷修复、降低可证实的资源开销、保持论文实验可解释。覆盖前面各轮归并后的 **62 个编号**；这不表示存在 62 个待修 bug。本文自包含，不依赖聊天记录、外部审查报告或审查者的临时探针。
 
 `CODEX_INFRA_TASKS.md` 是已实施的历史任务书，本轮不重新执行其 F/G 清单；其中过时的事实不覆盖当前代码。先读 `AGENTS.md` 及改动目录适用的指令。本文是一次性任务，不把模型配方写入 `AGENTS.md`、`CLAUDE.md` 或项目级 skill。
+
+## 0. 最新进展与本轮入口
+
+先读本节，再按第 15 节的“当前状态”决定是否实施。处置类型保留原 62 项的归并关系，不表示每一项仍需改代码。原 22 个 FIX 中，**B10、E03 已实施，剩余 20 项仍需闭合，其中 R08 已有部分验证进展**。`ALREADY_FIXED` 表示源码和仓库已有定向检查支持这一结论，不代表本次独立复跑了全部测试。
+
+| 新提交 | 源码核对结论 | 提交说明中的验证记录（非本次复跑） |
+|---|---|---|
+| [`c66ca75`](https://github.com/haoyangzhanglab/dexmani_policy/commit/c66ca759f2382ea82bab8eba84cdd7b779a32469) | 选中 Zarr 字段按需读取；按进程管理句柄和每字段当前块缓存；按角色缩短观测读取；normalizer 单遍分块统计；deterministic 多任务不再创建 Manager。 | 81 tests / 28 subtests，明确不含 CUDA/DDP；另有 config-only、native dataset、编译和 lint 记录。 |
+| [`d93eff2`](https://github.com/haoyangzhanglab/dexmani_policy/commit/d93eff2a4622f57ff9c84e4ba19dd1243685fc43) | 新 `--policy-config` 入口复用目标 Policy split、有效 action 源行和 hand affine；增加 VQ 保存/导出/真实 DQ agent 加载检查与数据等待基准。 | 92 tests / 28 subtests、CPU benchmark smoke；说明曾测 GPU 对比后保留 streaming，但本轮未取得完整测量原始产物，不填写速度提升数值。 |
+| [`49bd810`](https://github.com/haoyangzhanglab/dexmani_policy/commit/49bd810736c1f6d3aabb347f1cd3b67f530a7232) | benchmark 对 warmup 和全部 measured batch 的 detached loss 在计时区间外统一检查有限性，不只检查最后一批。 | 6 项受控 CPU tensor 回归；明确未重测 CUDA overlap。 |
+
+上述测试数量可能有重叠，**不得相加当成互不重复的通过用例数**。本次任务书更新做了源码差异、Git blob、引用/命令路径和 Python AST 检查；当前审查环境没有 Torch/Zarr/Hydra/pytest，未独立执行模型、训练或 CUDA 检查。
+
+| 编号 | 当前状态 | 下一步 |
+|---|---|---|
+| B10 | ALREADY_FIXED：目标 Policy 对齐入口已存在。 | 保留 `load_policy_config → build_policy_dataset → prepare_policy_data` 及共享 split/affine；不再新建内部 VQ holdout、不重写准备链。端到端训练/预测余项归 R08。 |
+| E03 | ALREADY_FIXED：iterator 不再整条 list/concat；mixed action 也单遍合并。 | 保留当前流式实现、角色读取和所有权/进程测试；邻近修改时回归，不再恢复 eager reader。 |
+| E02 | PARTIAL：高维 payload 已不再每 rank 整库常驻；各 rank 仍各自扫描/拟合。 | 剩余仅按实测决定是否 rank 0 fit 再分发小状态。不是重新设计 Zarr reader 或共享内存系统。 |
+| S01 | PARTIAL：deterministic 路径已移除 Manager。 | 只分析仍需 epoch 同步的随机训练路径；有收益和序列/恢复证据才继续改。 |
+| R08 | PARTIAL：已有 streaming、VQ 对齐、benchmark finite-loss 定向检查。 | 补真实训练/预测/恢复及必要生产 DDP 缺口；不把加载测试或受控 CPU benchmark 测试说成完整 GPU 训练通过。 |
+| B01 / B03 / E06 | OPEN：虽位于新提交改过的文件，原失败机制仍在。 | 优先修 VQ 目录覆盖、非有限验证值回退，以及全量 usage 距离/索引中间量。 |
+
+当前 `docs/review_remediation_report.md` 尚未出现在该基线中；后续执行创建报告并引用已有证据，不补写虚构的历史 PASS。除上述改变，完整 compare 未改动其它问题的核心实现；第 15 节保留它们的待办/条件/保留状态，执行前仍须核对实际 HEAD。
 
 ## 1. 执行范围与优先级
 
@@ -21,7 +44,7 @@
 
 | 类型 | 本轮要求 |
 |---|---|
-| FIX | 必做最小修复/机制简化；已修复则保留。不能因为默认配置暂未触发就跳过已明确的小型边界缺陷。 |
+| FIX | 只实施状态为 OPEN/PARTIAL 的剩余修复；ALREADY_FIXED 保留。不能因为默认配置暂未触发就跳过已明确的小型边界缺陷。 |
 | CHECK | 必做调用路径与证据检查；环境可用且路径相关时做有界诊断/基准。只有正确性、适用性和收益证据充分才落地优化；否则记录暂缓原因，不加入新开关占位。 |
 | USE | 只有当前工作流确有该用途才实现；没有需求或缺少必要实物条件时记录不适用/暂缓，继续主线。 |
 | DOC | 必做事实披露及后续实验设计；本轮不自动改变模型或运行论文实验。 |
@@ -30,14 +53,14 @@
 
 P1 优先消除产物覆盖、DQ 数据空间不一致、无效选模与消融不生效，并建立论文比较的可靠入口。P2 完成边界正确性与低成本资源简化。P3 完成较外围的小修复；可选研究和发布功能不挤占主线。
 
-推荐顺序：**W01 的 B10 + W02 → W03 的 B06 → W08 → W03/W04/W05/W06/W07 的剩余 FIX → W01 的 E03 → CHECK/USE → W11 与最终报告**。W05 的恢复整理与任何训练入口改动一起核对；R08 的验证贯穿相关批次。W 编号仅为归并索引，不要求创建 11 个 PR。
+推荐顺序：**W02 的 B01/B03（并顺路完成 E06）→ W03 的 B06 → W08 → W03/W04/W05/W06/W07/W10 的剩余 FIX → 尚有必要的 CHECK/USE → W11 与最终报告**。B10/E03 不再列为待实现。W05 的恢复整理与任何训练入口改动一起核对；R08 补验贯穿相关批次。W 编号仅为归并索引，不要求创建 11 个 PR。
 
 ## 2. 本次复审对上一版方案的调整
 
-- **VQ 对齐数据合同，不强制统一训练/验证比例。** 策略的有效训练行和 hand affine 是权威来源；允许 VQ 在其内部保留用于选点的小 holdout，但必须标明其不是整条 pipeline 的独立测试集。不得为“统一”把 policy 默认 `val_ratio=0` 改成 0.05。
+- **接受已落地的共享 Policy split。** 新 `--policy-config` 已统一有效行、split 和 hand affine，比再加 VQ 内部划分更简单。本轮取消原方案的内部 holdout 要求；Policy 默认 `val_ratio=0` 时，VQ 也是无验证集模式，不为保留旧 VQ 的 0.05 比例改变 Policy 预算。旧 `--config`/shell 独立配方仅作已说明的 legacy 入口保留，不能默认用于新 Policy 码本。
 - **`discrete_pow` 小批次先拒绝不支持的组合。** 独立同分布地采指数是新训练分布，本轮不把它包装成等价修复。
 - **精度调整先做数值诊断。** BF16 可训练参数/EMA 是风险证据，不是任务失败的实验证据。取消无条件把所有可训练 backbone 和 EMA 切成 FP32 的要求；优先检查实际 LoRA 配方和更新损失。
-- **优化按真实瓶颈落地。** foreach、KNN、日志同步、RTC、FPS 和多任务 sampler 均有数值/时序/随机性边界。已有实现足够时不增加缓存层、共享内存系统或兼容框架。
+- **优化按真实瓶颈落地。** 保留已实现的按需 Zarr、进程局部有界缓存及单遍统计，不依据旧方案撤回它们。foreach、KNN、日志同步、RTC、FPS 和随机多任务 sampler 仍按数值/时序/随机性及收益证据决定；不增加新的缓存层、共享内存系统或兼容框架。
 - **代码追溯保持局部。** 保存实际源码及身份即可；不强制每个 run 新建 checkout，不以源码 hash 代替原有 resume 数学合同，也不因纯文档变化拒绝恢复。
 - **官方代码也是待判断的实现。** 保留本地已修正的 EMA 时钟、累积边界、teacher eval、DQ 索引取整、learned-weight 码本和单次采样 KV cache；不为了外观接近官方而退回缺陷。
 - **明确不做的范围。** 没有实际需求不迁移 torchrun、不引入推理产物新格式、不扩大真机支持、不实现新的时间目标或时序点匹配算法。
@@ -46,41 +69,43 @@ P1 优先消除产物覆盖、DQ 数据空间不一致、无效选模与消融�
 
 主要位置：`dexmani_policy/datasets/base_dataset.py`、`datasets/sampler.py`、`datasets/multi_task_dataset.py`、`training/build_utils.py`、`agents/normalization.py`、`scripts/training/train_vq_hand.py`、`dexmani_policy/configs/dqrise.yaml`。未写前缀的目录沿用该节明确的包路径，实施时以实际文件为准。
 
-### B10 / R01：一个有效数据口径，一份 hand affine
+### B10 / R01：已闭合的数据坐标合同，保留当前实现
 
-成因：policy 已按有效训练窗口引用的去重源行统计，VQ 仍用全量 hand 数据拟合、用独立 episode 划分取帧，且遗漏观测有效性/dispatch 过滤；两阶段不再处于相同坐标和数据预算中。R01 的旧 policy 全量统计问题已经关闭。
+旧成因：policy 已按有效训练窗口引用的去重源行统计，独立 VQ 仍全量拟合、另划 episode，导致两阶段坐标及样本口径不同。`d93eff2` 已通过新的 `--policy-config` 入口解决目标 Policy 的对齐；R01 更早修正的 policy train-only 统计继续保留。
 
-最小方案：
+当前合同：
 
-1. VQ 读取**完整目标 policy 配置**并解析现有 OmegaConf resolver，复用该 Dataset/sampler 的有效性规则、episode 选择和 action 源行。不能只读取 `vq_vae` 小节或只检查 hand 是否有限；观测无效可能使某些动作不再可用于训练。
-2. 令 `P` 为 policy 有效训练窗口引用的**唯一 action 源行集合**。VQ 优化样本必须取自 `P`；不是简单的所有训练 episode 全部帧，也不要求按 policy 窗口重复频次采样。
-3. hand normalizer 直接取 policy action normalizer 对应 hand 维度的 affine 参数及统计；在 VQ 中保存为现有 hand 字段。禁止再次独立 fit、重新推测 min/max 或绕过 codebook 一致性检查。当前支持的 `action`/`action_ee` 分解分别核对；不支持的 normalizer/动作组合提前说明并拒绝，勿自动退回 limits。
-4. 保留 VQ 内部验证的明确用途：若其验证比例大于零，在 `P` 所属训练 episode 内按既定 seed 做 episode 级内部 holdout，先划 episode 再取各自的有效行；VQ 训练行与内部验证行不交叉。policy 的验证/测试 episode 不进入 VQ 优化或归一化。不要二次无意降低 `max_train_episodes`；policy cap 定义可用池，内部 holdout 只再分配该池。
-5. hand affine 为与 policy 一致而使用整个 `P`，故上述内部验证共享该 affine，且其 episode 以后可用于 policy 训练。明确命名/记录为 **VQ 内部选点诊断**，不能宣称整个策略都未见过它。若论文需要全流程严格 held-out，由外层数据协议划分，不能偷偷缩减默认 policy 训练预算。
-6. 显式 `val_ratio=0` 才使用无验证集模式。要求非零验证比例却无法产生非空训练/验证集合时，在训练前报错。记录 policy eligible pool、VQ train/val 的 episode/行数、数据 identity/revision、有效性配方和 normalizer 来源。
-7. 使用已有配置加载能力和一个明确入口。可保留现有 argparse wrapper，但对共享字段的覆盖必须先作用于目标 policy 配置再统一解析；冲突的 `action_key/tcp_dim/hand_dim/seed` 不能各自生效。VQ 优化器 seed 与 policy 数据划分 seed 的角色分清。删除不再有独立语义的重复字段，保留确属 VQ 的模型/优化/内部验证参数；不要同时维护两套默认配方。
+1. `load_policy_config` 使用 Hydra 和现有 resolver；`build_policy_dataset` 构造真实 Dataset，检查 DQRISEAgent、joint `7+12` / EEF `9+12` 及不支持的 auxiliary 布局，不先构造模型。
+2. `prepare_policy_data` 复用训练/验证 Dataset 各自合格的唯一 action 源行，并从 policy action normalizer 精确切出 hand 的 scale/offset/stats；验证行不参与 fit，dispatch/观测有限性/窗口过滤由原 sampler 决定。
+3. 采用目标 Policy **同一 split**，不另加内部 VQ holdout，不二次 cap。默认 `dataset.val_ratio=0` 时没有验证集，B03 应固定为 train_mse；非零 split 则用该验证集。不要为“完成旧任务书”把它改回独立划分。
+4. `--policy-override` 决定目标数据/动作配方；VQ `--seed` 只决定优化随机性。当前已明确 Policy 配置覆盖独立数据参数，并有 CLI 回归；不得重新让两组字段各自生效。保存的 resolved dataset、源行、revision、统计范围和 affine 继续使用。
+5. 已明确标为 legacy 的 `--config`/`train_vq_hand.sh` 保留历史全量 hand 统计；它不保证新 Policy 的坐标一致，不静默重拟合旧 checkpoint。新代码本工作流以 README 的 `python -m scripts.training.train_vq_hand --policy-config ...` 为入口。本轮不扩建 legacy 兼容系统。
 
-验收：小型多 episode 数据中放置验证极值、无效观测、dispatch、NaN 和被窗口过滤的行；断言各集合、hand affine 与 policy 完全对应。走一次 **VQ 小步训练 → checkpoint → codebook 导出 → DQ agent 加载/预测** 的真实链路，不用手工伪造匹配参数替代。原有正常码本继续严格校验；旧不匹配码本明确要求新 run 重训，不静默改写。
+`tests/test_policy_vq_alignment.py` 已覆盖验证极值、有效窗口/dispatch、两种动作布局、normalizer 保存恢复、导出及真实 DQ agent 的 affine 接受/拒绝。该测试中的 VQ 模型尚未执行优化步，agent 检查没有完整 predict；因此保留 B10 的已修复结论，将剩余小步训练→导出→预测验收集中在 R08，不重建另一套准备流程。
 
-### E03：真正分块的统计输入（FIX）
+### E03：流式统计已实现（ALREADY_FIXED）
 
-沿现有 iterator 做小改动：BaseDataset 按 source-row 索引分块读取；MultiTask 逐块 yield；`build_normalizer` 和 `fit_field_chunks` 不把整条 iterator 转为 list，不在 `action:auto` 上全量 concatenate。用一套 count/min/max/mean/M2 累积生成原 affine，避免另造 normalizer 类。保持样本标准差 `ddof=1`、原 `range_eps`、常量维退化处理、mixed action 的 rot6d 恒等与 aux 切片语义。
+BaseDataset 按 role 的有效源行分块索引，MultiTask 逐块 yield；`build_normalizer` 直接消费 iterator；`fit_field_chunks` 单遍累积 count/min/max/mean/M2；`build_mixed_action_normalizer_chunks` 保持 xyz/hand limits、rot6d identity。当前不存在旧的整条 iterator list/全量 action 拼接。保留样本标准差、range_eps、常量维、aux 切片和现有 state_dict 行为。
 
-验收：空块、单样本限制、常量列、不同 chunk 大小、多任务及 action_ee 与原统计在合理浮点容差内一致；不能要求 FP64 归约重排后 bitwise 一致。用小型内存检查证明无 O(全部选中行) 的额外拼接；大数据 RSS/启动时间只报告实际测量值。这不能消除底层 replay buffer 本身的全量内存。
+ReplayBuffer 已从 eager 全字段复制迁移到只读 `open/read/iter_chunks`，并按进程重开句柄、按字段缓存当前块；观测只读 obs_horizon，动作保持完整 horizon。`read` 返回独立副本，不能为省复制让增强修改共享缓存。保留 pickle/fork/spawn 及窗口边界语义，不恢复已删 `copy_from_path` 或依赖 `replay_buffer.root` 的旧代码。
 
-### E02：DDP 只拟合一次（CHECK）
+既有 `tests/test_streaming_dataset.py` 覆盖单遍消费、chunk 不被保留、limits/gaussian、mixed/aux、短角色读取、非别名及进程句柄。后续只按修改影响回归。高维 payload 有界不表示总 RAM 与数据量无关：资格 mask/源行索引仍 O(N)，各 worker 有缓存与预取，底层物理 chunk 解码也计入实际峰值。低维 hand 样本为 VQ 训练物化不自动构成 E03 回归。
 
-先区分全 rank 读数据、重复 fit、构造模型及广播各自的成本。若重复拟合值得优化，fresh run 在 rank 0 fit，构造 agent 前分发小型 normalizer state；resume 直接用保存状态，不重拟合。沿现有 DDP 初始化和广播机制完成，确保当前 CUDA device、rank 生命周期和失败传播正确；rank 0 拟合失败时，其余 rank 不得永远等待新的 collective。单卡入口不依赖 distributed 初始化。
+### E02：只剩多 rank 重复统计的条件优化（PARTIAL / CHECK）
 
-每 rank 仍会读数据，不能宣称实现了数据共享。mmap、lazy Zarr、跨进程缓存不在本轮默认范围。任何改动都验证各 rank affine 一致、fresh/resume 正确和失败无挂起；性能环境不可用时只记录候选方案。
+当前所有 rank 仍调用 `build_dataset_and_normalizer`，fresh run 会各自扫描并 fit，之后才广播。已不存在旧版每 rank 将所有选中高维字段整库常驻的同样机制；不要把它继续列为未修复事实。
+
+先分开测当前 lazy reader 的启动扫描、fit 和广播。只有重复 fit 成为实际瓶颈时，fresh run 在 rank 0 fit，构造 agent 前分发小型 state；resume 直接用保存 normalizer。沿已有初始化/广播完成，核对 device、RNG、single-rank 和异常传播；rank 0 失败不能让其它 rank 永久等待。该改动不等于消除所有 rank 的窗口资格扫描，也不等于共享数据。
+
+本轮不再提出从零开发 lazy Zarr/mmap/shared cache。缺测量或没有净收益则保留当前 reader 和 fit 路径，记录剩余候选，继续其它 FIX。
 
 ## 4. W02：VQ 产物、选点与 usage
 
 位置：`scripts/training/train_vq_hand.py`、`train_vq_hand.sh`、`extract_vq_codebook.py`、`measure_vq_usage.py`、`dexmani_policy/training/run_identity.py`、`dexmani_policy/agents/vq_hand/`。
 
-- **B01（FIX）**：默认输出改为任务下独立 run 目录，并复用已有原子 run 认领。当前 `claim_run` 只查 policy 产物，VQ 接入前须拒绝已存在的旧 `vqvae_hand_*.pt`/同名 VQ 产物，不能把已有目录误当空目录。临时文件 replace 只保证完整写入，不保证实验隔离。保留 shell 显式输出路径的可用性，但已有 run 要报冲突。导出码本记录源 checkpoint、split、normalizer 身份，推荐输出到该 run；指定已存在的导出目标需明确的覆盖意图，否则拒绝。不要为此新建完整 VQ resume 功能。
-- **B03（FIX）**：训练开始前固定选点指标，有内部验证集用 `val_mse`，无验证集才用 `train_mse`。被选指标为 NaN/Inf 时保留旧 best 并明确失败，不回退到另一个指标混排；best 变量/保存 metadata 使用真实指标名。保持已经修正的按样本数归约，不能退回 batch 均值等权。
-- **E06（FIX）**：nearest-prototype usage 与 encoder tuple usage 分块计算，累计 count/距离统计，不构造全量 `N×K×D` 差值或收集全量 indices。先保留原平方差表达式、原型排序和 argmin tie 规则；不要为了公式看起来简短改成有抵消误差的新距离表达式。
+- **B01（OPEN / FIX）**：新 `--policy-config` 和 legacy 模式仍共用允许已存在目录的 `train()`，README 也仍使用固定输出路径；只改旧 shell 不够。默认输出改为任务下独立 run 目录，并复用已有原子 run 认领。当前 `claim_run` 只查 policy 产物，VQ 接入前须拒绝已存在的旧 `vqvae_hand_*.pt`/同名 VQ 产物，不能把已有目录误当空目录。临时文件 replace 只保证完整写入，不保证实验隔离。保留 Python/shell 显式输出路径的可用性，但已有 run 要报冲突；同步新 Policy 对齐工作流的 README 示例，避免指向可覆盖的公共码本路径。导出码本记录源 checkpoint、split、normalizer 身份，推荐输出到该 run；指定已存在的导出目标需明确的覆盖意图，否则拒绝。不要为此新建完整 VQ resume 功能。
+- **B03（OPEN / FIX）**：当前 `selection_mse` 仍按 `isfinite(val_mse)` 回退，尚未修复。训练开始前固定选点指标，有目标模式的验证集用 `val_mse`，无验证集才用 `train_mse`。Policy 对齐模式按实际 Policy split 判断，legacy 按自身 split 判断。被选指标为 NaN/Inf 时保留旧 best 并明确失败，不回退到另一个指标混排；best 变量/保存 metadata 使用真实指标名。保持已经修正的按样本数归约，不能退回 batch 均值等权。
+- **E06（OPEN / FIX）**：usage 已复用对齐的 split/源行，但仍对全部 `hand_norm` 调最近 prototype、拼接全部 tuple indices，并构造 `N×K×D` 差值。对这三处做分块累计，保留 B10 已正确的数据选择及原平方差、原型排序、argmin tie。保留当前 `nn_l2_mean/p95/p99` 输出：精确 quantile 可以保留长度 N 的一维最近距离，不能为宣称严格 O(chunk) 而悄悄改近似分位数/删指标。目标是消除 O(N×K×D) 中间量和多余全量 tuple，而非强制重写整个 VQ 训练数据载入。固定抽样 seed/子集口径不顺手改变。
 - **A08/U01/U02/D06（KEEP）**：保留 learned softmax layer weights、encoder tuple 与 runtime 最近 prototype 两种 usage 的区分、模型内缓存码本，以及按 `K−1` 缩放后的 half-up/clamp。上游等权导出、每 query 读 NPZ 和直接整数截断的条件缺陷不属于当前待修本地缺陷。
 
 验收：新 run/重复 run/旧式目录冲突；有限/非有限验证与无验证三种选点；257 样本等尾批反例；非等权码本导出重建一致；所有码字往返及边界；usage 在重复原型、近 tie 和多个 chunk 大小时与原式一致。覆盖真实保存/导出/加载路径，旧产物字节不变。
@@ -125,7 +150,7 @@ MultiTask 检查每个 child 的实际 action key 与共享动作合同，不能
 - **S08（FIX）**：每进程只读取一次完整 TrainCheckpoint，共用对象提取 normalizer 并调用既有恢复逻辑；恢复完成后释放不再需要的 CPU 载荷，不把完整对象挂到 Trainer 跨训练持有。不把全 optimizer checkpoint 改成 rank 0 object broadcast。还原 optimizer、scheduler、EMA updater、RNG 和 sampler 消费游标的顺序不变；不因函数签名简化去掉校验。
 - **B12（FIX）**：里程碑预先按百分比 p 用整数式 `(p * total_steps + 99) // 100` 映射到 step，碰撞保留最大百分比；最后 step 必有 100pct，每 step 最多保存一份大 checkpoint。使用 global_step 判断已过里程碑，不扫描目录猜进度。恢复跨过的标签不补写到旧 run；历史已完成短 run 不自动改写。selector 已按实际发现文件工作，核验 `100pct` 查询和候选发现能接纳去重后的集合，不为凑五个候选重复同一权重。
 - **E01（CHECK）**：日志诊断先累积 detached device tensor，到真实日志边界统一转 host；DQ 的额外诊断按日志需要计算。保持当前平均口径和尾组处理，不保留计算图。不删除 loss/gradient finite、总范数和全 rank 协调，不能用日志“懒求值”延迟必要的失败处置。实测日志同步占比后改动，低成本标量已被安全检查需要时不造第二套绕过路径。
-- **R08（FIX：验证缺口）**：扩充现有 smoke/定向测试，验证实际受影响策略的一批 forward/backward/predict、raw/EMA 保存恢复，以及当前生产 DDP flags。没有指定本轮论文策略时，按实际修改到的默认配置选最小代表，不扩展成所有 encoder×decoder×模式矩阵。已有真实 RTC CPU input-VJP 测试保留；不能再称仓库没有真实模型测试。
+- **R08（PARTIAL / FIX：剩余验证缺口）**：复用新增 streaming/VQ/benchmark 检查，再补其未覆盖的实际策略 forward/backward/predict、raw/EMA 保存恢复及生产 DDP flags。`test_vq_checkpoint_export_and_actual_policy_load` 当前只保存未优化的 tiny VQ、导出和加载 affine；补最小真实优化/预测即可，不复制整套 fixture。该用例的 `horizon=3, down_dims=(16,32)` 未经过 forward；B05 加长度约束后，应把 fixture 改为合法 horizon 并保留 affine 断言，不能为旧加载测试撤掉正确的形状检查。没有指定本轮论文策略时，按实际修改到的默认配置选最小代表，不扩展成所有 encoder×decoder×模式矩阵。已有真实 RTC CPU input-VJP 测试保留；不能再称仓库没有真实模型测试。
 - **D03/D04/D05/D09（KEEP）**：teacher 始终 eval；EMA 权重与更新时钟共同恢复；optimizer/scheduler/EMA 按 optimizer step 前进；实际尾组缩放；ManiFlow B=1 的 flow-only 和其余样本的余数分配保持。不把上游独立 floor 分流、首 micro-batch 提前 update、按 micro-batch EMA 或 epoch 后 teacher.train() 移植回来。
 
 验收：总步数 1/2/3/4/5 和常规里程碑；连续训练 vs 中断恢复的小模型；原始样本顺序、在线/EMA 权重、Adam/LR/时钟/游标一致；每进程 checkpoint load 次数为 1。精确恢复检查使用可控随机性，不承诺任意 persistent-worker 随机增强都能逐位恢复。DDP 用生产 `static_graph` 等实际组合做必要的最短验证，并检查一 rank 失败不会留下其它 rank 挂起。
@@ -187,7 +212,7 @@ selector 成功时直接交出该次不可变 summary/selection_id，例如写�
 
 位置：`dexmani_policy/datasets/multi_task_dataset.py`、`resumable_sampler.py`、`training/resume.py`、`agents/core/multi_task.py`、`agents/obs_encoder/text/clip.py`、`deployment/runtime.py`。
 
-- **S01（CHECK）**：先确认每样本 Manager 访问在实际数据开销中的比例。有净收益才将每 epoch `(task_idx, local_idx)` 映射移到父进程的现有 sampler 流程，让 Dataset 只取样。必须保留原配额、无放回轮次、全局随机顺序、DistributedSampler rank 分片/补齐/drop_last 及消费游标；不能双重 shuffle，不能直接换 WeightedRandomSampler。证明旧新全局/各 rank 序列及恢复边界一致后再删除 Manager；persistent worker、validation/smoke 的调用一起闭合。不为优化新增 sampler 抽象层。
+- **S01（PARTIAL / CHECK）**：`deterministic=True` 已无 Manager，保留其实现及 `test_deterministic_never_creates_manager`。默认随机训练仍需共享 epoch；只测该分支的每样本 Manager 访问在当前流式数据开销中的比例。有净收益才将每 epoch `(task_idx, local_idx)` 映射移到父进程的现有 sampler 流程，让 Dataset 只取样。必须保留原配额、无放回轮次、全局随机顺序、DistributedSampler rank 分片/补齐/drop_last 及消费游标；不能双重 shuffle，不能直接换 WeightedRandomSampler。证明旧新全局/各 rank 序列及恢复边界一致后再删除 Manager；persistent worker、validation/smoke 的调用一起闭合。不为优化新增 sampler 抽象层。
 - **S05（USE）**：固定任务集合的实际发布需求出现时，可导出 task→embedding 表并在未知任务明确报错；此时才允许删除产物中的 encoder/tokenizer。当前训练和开放语言输入保留现有冻结 encoder 与缓存 fallback。查表不是开放语言泛化。
 - **A04（KEEP）**：当前 Real runtime 只支持具备必要 metadata 的策略，并未承诺任意 MultiTask/仿真 checkpoint 都能部署。保持明确入口报错和支持说明；本轮不自动增加 task_text/传感器接入，不宣称外部 dexmani_real 或真机已验证。
 
@@ -207,7 +232,7 @@ selector 成功时直接交出该次不可变 summary/selection_id，例如写�
 | 编号 | 已核对的差异/边界 | 本轮最佳处置 |
 |---|---|---|
 | C01 | 本地 SAT 使用 PointNext patch/learned global token、有序状态 MLP、不同 token 数/宽度；不能等同官方完整结构。EJC 字段求和思想并非因此错误。 | DOC：说明 structured-action 思想的适配。若后续证明 EJC 效果，在相同感知/动作/容量下只改 EJC；不先重写整套 SAT。 |
-| C02 | 本地 DQ 是 iDP3＋状态/多帧观测适配，非官方 RISE 感知；12 维手部使用 16 原型是否不足，源码不能判定。 | DOC：先修 B10/B03；以后固定感知、动作与预算，对比连续手部和量化手部，结合 held-out 重建误差、码字 usage/跳变和闭环成功率判断。不要自动扩大码本。 |
+| C02 | 本地 DQ 是 iDP3＋状态/多帧观测适配，非官方 RISE 感知；12 维手部使用 16 原型是否不足，源码不能判定。 | DOC：保留 B10 的修复并先修 B03；以后固定感知、动作与预算，对比连续手部和量化手部，结合 held-out 重建误差、码字 usage/跳变和闭环成功率判断。不要自动扩大码本。 |
 | C04 | SAT 时间分布、ManiFlow slot PE/通用或 Dex 配方、DP3 宽度/模态、R3D 评测 FPS 等存在明确适配。上游当前未锁定依赖不能代表论文历史环境。 | DOC：逐项披露实际配置，不一律回退。只有支撑论文因果主张的差异才设计单变量对照。 |
 | D07 | DQ VQ 的 kmeans/dead code/实际 hidden 层数、policy AdamW/EMA 与官方有差异；VQ 字典 EMA 与 policy EMA 是不同机制。 | DOC：固定活跃配方再比较。官方未使用的内部 Adam 不是训练循环优化器；不要据参数名误判层数。 |
 | R02 | 本地 SAT 跨帧按 patch 序号拼接，上游也逐帧采样；不保证物理点对应，但不能从中直接推出无效。 | DEFER：共享锚点/匹配是新方法，影响可见性和覆盖，不作为普通修复。 |
@@ -223,12 +248,13 @@ selector 成功时直接交出该次不可变 summary/selection_id，例如写�
 
 ### 验证顺序
 
-先复用现有测试，补能复现失败且调用真实实现的最少反例。不要把方案中的 NumPy/公式验证当成修改后 PyTorch 模型已通过，也不要为了简单改动写大型参数矩阵或全套新框架。
+先复用现有测试（包括最新 3 个提交新增的用例），补能复现失败且调用真实实现的最少反例。不要把方案中的 NumPy/公式验证当成修改后 PyTorch 模型已通过，也不要为了简单改动写大型参数矩阵或全套新框架。
 
 当前基线确有以下入口；执行前核对当前源码。按改动面选取，不要求每一批重复运行全部命令：
 
 ```bash
 python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise sat maniflow r3d multitask_dit
+python -m pytest -q tests/test_streaming_dataset.py tests/test_policy_vq_alignment.py tests/test_benchmark_dataset_streaming.py
 python -m pytest -q tests/test_policy_windows.py tests/test_policy_rtc.py tests/test_infra_codebook.py
 python -m pytest -q tests/test_infra_training.py tests/test_infra_resume.py tests/test_infra_evaluation.py tests/test_infra_launch.py
 bash -n scripts/training/train_vq_hand.sh scripts/eval/eval_pipeline.sh scripts/remote/stop_remote.sh
@@ -239,19 +265,27 @@ git diff --check
 
 涉及真实模型路径时，在数据、权重和设备具备的环境运行相应 `python dexmani_policy/smoke_test.py <config_name>`，并补它未覆盖的 raw/EMA/恢复或生产 DDP 风险。缺数据/GPU/权重/仿真时标 **NOT VERIFIED**，写明缺什么和复验命令；继续其余工作，不改默认模型绕过限制。
 
+### 最新基准的使用边界
+
+复用 `tests/benchmark_dataset_streaming.py`，不要另写同类基准。其 CPU 路径用于数据等待/内存/解码检查；`--gpu-config` 路径是 opt-in 的短 forward/backward 数据等待测量，**不执行 optimizer、EMA、checkpoint 恢复或闭环**，不能替代生产 Trainer/DDP 验收。需要 teacher/codebook 等额外条件的策略，先确认该基准实际支持，不把通用参数名当作已覆盖所有模型。
+
+`49bd810` 已让 `finite_loss` 汇总 warmup 和全部实测 batch 的 detached scalar，并在计时完成后检查；保留这一修复，不退回只看最后 loss，也不把每批 `.item()` 插入计时热路径。`tests/test_benchmark_dataset_streaming.py` 使用原生 CPU tensor，但替换了 CUDA timing/transfer 和模型/数据构造，只能证明控制逻辑，不能证明 CUDA overlap 或完整模型集成。更新的有限性检查没有自动生成新的 GPU 性能结论。
+
+性能测量使用同一真实数据、窗口/source rows、order hash、normalizer 和当前配置。此轮只是更新文档，不重跑或估算提交说明中的 GPU 数据；后续需要性能结论时保存实际测量参数/输出到整改报告。
+
 ### 性能项目的接受条件
 
 - 先有相同 shape、dtype、配置和输入的基线，warmup 后重复测量；使用正确 CUDA 同步/计时，报告统计而非单次数字。
 - 分别记录所改部分和整次训练 step/预测的时延、CPU RSS/峰值 CUDA 内存等实际相关指标。不要因为 kernel 更少、理论中间量更小就宣称端到端已提速。
 - 行为等价的改动做数值/恢复对照；改变 RNG 消耗但只保证分布、或改变等距邻居选择的改动单独披露，不宣称旧实验逐位可续训。需要严格复现旧随机流的 run 使用保存的原代码版本；不得仅凭 resume 结构校验通过就承诺等价。若本轮必须保持该路径精确续训且无法兼顾，暂缓优化，不造长期双路径。无收益、精度不符或明显增加复杂度时撤回候选实现，不留下永久开关。
-- E03/E06/S08 是明确消除整块中间量/重复读取的局部简化，可以用小型定向证据完成实现；实际大模型速度仍需真实测量，不能造结论。
+- E03 的局部简化已完成，不重复实现。剩余 E06/S08 可以用小型定向证据完成，实际大模型速度仍需真实测量；E06 的精确分位数允许 O(N) 标量缓存，不冒称整个脚本已变成严格常量内存。
 
 ### 最终交付
 
-创建 `docs/review_remediation_report.md`（这是执行本任务后的报告，不要预填成功），至少包括：
+创建 `docs/review_remediation_report.md`（当前基线尚无该文件；若执行时已存在则增量更新，不覆盖他人结论），至少包括：
 
 1. 实际起始 HEAD、工作区边界、变更摘要及与本文方案不同的必要调整。
-2. 第 15 节全部 62 个编号的最终状态：`IMPLEMENTED / ALREADY_FIXED / PRESERVED / DEFERRED / NOT_APPLICABLE / BLOCKED`，并给实现/调用路径或暂缓原因。FIX 未修复不能写成已完成；CHECK 无环境或证据不足可以明确暂缓。研究项处置完成不等于研究假设被证实。
+2. 第 15 节全部 62 个编号的最终状态：`IMPLEMENTED / ALREADY_FIXED / PARTIAL / PRESERVED / DEFERRED / NOT_APPLICABLE / BLOCKED`，并给实现/调用路径或暂缓原因。B10/E03 从本轮开始按 ALREADY_FIXED 记录，E02/S01/R08 的已完成子项不得抹掉。FIX 未修复不能写成已完成；CHECK 无环境或证据不足可以明确暂缓。研究项处置完成不等于研究假设被证实。
 3. 真实执行的命令、`PASS / FAIL / NOT VERIFIED`、关键结果及环境；实现状态与验证状态分开。失败未解决、环境未验收的部分如实列出。
 4. 新的 VQ 训练/导出/加载操作、输出冲突行为、配置错误提示、论文 seed 清单使用、selection 交接及代码追溯的最短示例；只为真实改变的用户入口更新 README/现有文档。
 5. 性能测量和采用/撤回理由；需要新 run、重训或保持旧版本恢复的具体边界；参考方法配方表与暂缓实验，不填写虚构成功率。
@@ -260,76 +294,78 @@ git diff --check
 
 ## 15. 全部 62 项处置索引
 
-每个编号只在下面的覆盖表中出现一次；编号链接指向审查固定版本的主要证据，正文给出完整方案及约束。表中“保留”也属于完成处置，不生成重复修复提交。
+每个编号在覆盖表中出现一次。**当前状态决定是否还有实施工作**：ALREADY_FIXED/PRESERVED 保留，OPEN 继续修复，PARTIAL 只处理正文所列余项；CHECK_PENDING/USE_PENDING/DOC_PENDING 按对应类型处置，DEFERRED 暂缓。
 
-| 编号 / 固定证据 | 批次 | 优先级 | 处置 | 复审后的结论 |
-|---|---|---|---|---|
-| [B10](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/datasets/base_dataset.py#L303-L318) | W01 | P1 | FIX | 复用有效训练源行与hand affine；内部VQ holdout不改变policy预算 |
-| [R01](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/datasets/base_dataset.py#L90-L147) | W01 | — | KEEP | policy训练行统计已修正，保持现有角色合同 |
-| [E03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/datasets/base_dataset.py#L303-L318) | W01 | P2 | FIX | 分块索引与单次流式统计，去掉list/全量拼接 |
-| [E02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/datasets/replay_buffer.py#L45-L76) | W01 | P2 | CHECK | 先量化重复fit成本，再决定rank0拟合与小状态广播 |
-| [B01](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/training/train_vq_hand.sh#L29-L37) | W02 | P1 | FIX | 独立VQ run及旧式产物冲突保护；不新增VQ恢复系统 |
-| [B03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/training/train_vq_hand.py#L311-L324) | W02 | P1 | FIX | 预先固定选点指标，非有限值不能回退混排 |
-| [E06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/vq_hand/codebook_manager.py#L605-L622) | W02 | P2 | FIX | usage分块归约，保留距离和tie规则 |
-| [A08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/vq_hand/vqvae.py) | W02 | — | KEEP | 保留加权RVQ及两种usage的不同含义 |
-| [U01](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/eval_vqvae.py#L88-L114) | W02 | — | KEEP | 本地已按真实learned weights导出，不引入上游等权假设 |
-| [U02](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/eval_rise_vae_2cam.py#L230-L240) | W02 | — | KEEP | 本地码本已缓存，不重复读取NPZ |
-| [D06](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/train_dqrise.py#L155-L163) | W02 | — | KEEP | 本地half-up/clamp已规避上游截断错误 |
-| [B06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/registry.py#L48-L131) | W03 | P1 | FIX | 配置键必须生效或报错；逐child核对动作合同 |
-| [B05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/backbone/unet1d.py#L10-L36) | W03 | P2 | FIX | 补n_groups和当前UNet的明确形状约束 |
-| [B08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/time_sampler.py#L40-L57) | W03 | P2 | FIX | 拒绝过小discrete_pow子批次，不默认更换分布 |
-| [B09](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/datasets/augmentation.py#L46-L62) | W03 | P3 | FIX | 定值非恒等颜色变换必须执行 |
-| [B13](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/build_utils.py#L222-L250) | W03 | P2 | FIX | 在实际入口严格校验整数控制量 |
-| [A02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/backbone/attention.py#L43-L102) | W03 | P3 | FIX | 全无效attention在最终投影后清零 |
-| [A03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/geometry_processor.py#L91-L106) | W03 | P3 | FIX | 无效深度用where处理，空patch不能标有效 |
-| [B02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/dino.py#L25-L48) | W04 | P2 | FIX | 所有ViT投影分支显式匹配输入和权重dtype |
-| [R04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/base.py#L67-L90) | W04 | P1 | CHECK | 诊断BF16参数/EMA更新；新精度配方须证据与恢复边界 |
-| [E04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/ema_model.py#L17-L36) | W04 | P2 | CHECK | 先测已有foreach，勿预先加入参数缓存或删buffer更新 |
-| [E05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/utils.py#L35-L54) | W04 | P2 | CHECK | 常量缓存与可证明的边界校验；不删除外部float检查 |
-| [A09](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/r3m.py) | W04 | — | KEEP | R3M的GN是既定适配，披露即可 |
-| [S08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/build_utils.py#L112-L132) | W05 | P2 | FIX | 每进程读取一次checkpoint并及时释放恢复载荷 |
-| [D03](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/model/diffusion/ema_model.py#L30-L42) | W05 | — | KEEP | 保留本地EMA teacher的eval模式 |
-| [D04](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/workspace/train_maniflow_dex_workspace.py#L105-L152) | W05 | — | KEEP | 保留本地EMA权重与更新时钟共同恢复 |
-| [D05](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/train.py#L217-L230) | W05 | — | KEEP | 保留optimizer-step累积边界、尾组和EMA语义 |
-| [D09](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/policy/maniflow_pointcloud_policy.py#L506-L552) | W05 | — | KEEP | 保留ManiFlow小batch分流与样本守恒 |
-| [B12](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/trainer.py#L27-L47) | W05 | P2 | FIX | 合并碰撞里程碑，确保最终100pct且不重复存大权重 |
-| [R08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/tests/test_policy_rtc.py) | W05 | P2 | FIX | 补真实受影响策略及生产DDP的最小验证，诚实记录环境缺口 |
-| [E01](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/trainer.py#L173-L186) | W05 | P2 | CHECK | 日志边界再转host；必要非有限检查与rank协调保留 |
-| [B07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py#L151-L178) | W06 | P2 | FIX | patch dropout同步选择token、center与位置编码 |
-| [E09](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py#L19-L26) | W06 | P2 | CHECK | 评估已有KNN后端，核对固定K、tie、显存及端到端收益 |
-| [E07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py#L29-L44) | W06 | P2 | CHECK | 批量first-point dropout；披露随机流变化 |
-| [A01](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/ops.py#L73-L128) | W06 | P3 | CHECK | 原生FPS仅在语义边界和收益证实后替换 |
-| [A06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py) | W06 | P3 | USE | 需要整理时冻结未用head；不是默认DDP崩溃修复 |
-| [B11](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/deployment/runtime.py#L159-L171) | W07 | P2 | FIX | 零延迟RTC也热身真实引导分支 |
-| [E08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/rtc.py#L40-L76) | W07 | P2 | CHECK | 减少RTC标量同步与索引开销，保留VJP及scheduler语义 |
-| [R03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/evaluation/protocol.py#L27-L36) | W08 | P1 | FIX | 显式固定论文selection/tie/test清单，保留旧协议可读 |
-| [R06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/remote/sync_code.sh#L33-L54) | W08 | P1 | FIX | 记录实际训练源码、身份与依赖，不建设追踪平台 |
-| [S03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/eval/eval_pipeline.sh#L81-L89) | W08 | P2 | FIX | 流水线交接selector自己的不可变结果，不重新猜best |
-| [C03](https://github.com/haoyangzhanglab/dexmani_policy/commit/650f1e3cfc63c64678b5bb69e7258b548800d053) | W08 | P1 | DOC | 披露动作、感知、容量和预算，区分系统比较与机制归因 |
-| [D08](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/eval_rise_vae_2cam.py#L191-L212) | W08 | P1 | DOC | 分开NFE、查询间隔、执行窗口和解码后ensemble |
-| [S01](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/datasets/multi_task_dataset.py#L79-L105) | W09 | P2 | CHECK | 只有序列/恢复等价且有收益才移除每样本Manager访问 |
-| [S05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/core/multi_task.py#L126-L149) | W09 | P3 | USE | 仅固定任务发布可用embedding表替代语言encoder |
-| [A04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/deployment/runtime.py) | W09 | — | KEEP | 保持Real runtime明确支持边界，不扩成任意策略部署 |
-| [B04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/pyproject.toml#L37-L39) | W10 | P3 | USE | 需要wheel时补YAML package data，不迁移构建框架 |
-| [R05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/loader.py#L108-L119) | W10 | P2 | USE | 实际离线恢复需求下保存HF构造资源并strict load |
-| [S04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/checkpoint.py#L62-L107) | W10 | P3 | USE | 实际发布需求下才导出轻量推理产物 |
-| [S02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/train_ddp.py#L44-L72) | W10 | — | KEEP | 单机mp.spawn保留，非必须迁移torchrun |
-| [S07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/text/t5.py) | W10 | P3 | USE | 确认无活跃/外部用途后删预留模块，不按删行数称提速 |
-| [A05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/remote/stop_remote.sh) | W10 | P3 | FIX | 保留远端tmux和SSH真实退出状态，用本地fixture验证 |
-| [C01](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/policy/sat.py#L90-L112) | W11 | P1 | DOC | SAT适配不等同完整官方复现；暂不重写感知 |
-| [C02](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/policy/policy.py#L12-L44) | W11 | P1 | DOC | DQ感知适配与码本容量通过后续受控实验判断 |
-| [C04](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/policy/sat.py#L90-L112) | W11 | P1 | DOC | 分项披露配方差异，不把上游默认统一强制回退 |
-| [D07](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/policy/vqvae_rise/vector_quantize_pytorch/vector_quantize_pytorch.py#L686-L718) | W11 | P1 | DOC | 区分DQ的VQ配方、policy优化器及online/EMA |
-| [R02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/core/sat.py#L78-L131) | W11 | — | DEFER | 跨帧物理对应是新研究选择，暂不做共享锚点 |
-| [R07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/consistency_flow.py#L113-L164) | W11 | — | DEFER | absolute时间外推需重审目标，不做孤立clamp |
-| [S06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/backbone/sat.py#L421-L472) | W11 | P3 | CHECK | 原SAT等变性/梯度/随机分布与收益均支持才删shuffle |
-| [D01](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/vision/obs_tokenizer.py#L18-L75) | W11 | — | KEEP | 本地有序状态MLP保留关节身份 |
-| [D02](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/vision/obs_tokenizer.py#L641-L661) | W11 | — | KEEP | 本地不引入官方无效padding mask路径 |
-| [A07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/consistency_flow.py) | W11 | — | KEEP | 保留ManiFlow单次采样内KV缓存，禁止跨观测复用 |
+已变动条目的主要证据更新至 `49bd810`；未改动条目保留原固定代码/上游引用用于追溯，不把历史行号强行套到改过的文件。处置类型的 FIX 仍有 22 项，其中 2 项已实施、20 项待闭合；全部状态数量为 ALREADY_FIXED 2、PARTIAL 3、OPEN 19、CHECK_PENDING 9、USE_PENDING 6、DOC_PENDING 6、PRESERVED 15、DEFERRED 2，共 62。
+
+| 编号 / 固定证据 | 批次 | 优先级 | 处置 | 当前状态 | 最新结论与剩余动作 |
+|---|---|---|---|---|---|
+| [B10](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/scripts/training/train_vq_hand.py#L195-L299) | W01 | P1 | FIX | ALREADY_FIXED | Policy对齐入口已实现，保留共享split/有效源行/hand affine，不新增内部holdout |
+| [R01](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/dexmani_policy/datasets/base_dataset.py#L320-L349) | W01 | — | KEEP | PRESERVED | 训练窗口唯一源行统计继续正确，验证不参与拟合 |
+| [E03](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/dexmani_policy/agents/normalization.py#L388-L482) | W01 | P2 | FIX | ALREADY_FIXED | 单遍分块统计与mixed action已实现；保留新reader和所有权/进程语义 |
+| [E02](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/dexmani_policy/train_ddp.py#L75-L84) | W01 | P2 | CHECK | PARTIAL | 已改为进程局部按需读取；剩余仅评估各rank重复扫描/fit |
+| [B01](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/scripts/training/train_vq_hand.py#L377-L381) | W02 | P1 | FIX | OPEN | 新旧VQ入口仍可覆盖产物，需在共享train入口认领run并改README示例 |
+| [B03](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/scripts/training/train_vq_hand.py#L458-L465) | W02 | P1 | FIX | OPEN | 选点仍按val是否有限回退train，固定指标和失败处理待修 |
+| [E06](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/scripts/training/measure_vq_usage.py#L112-L163) | W02 | P2 | FIX | OPEN | usage数据选择已对齐，N×K×D/tuple中间量仍待分块；精确分位数保留 |
+| [A08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/vq_hand/vqvae.py) | W02 | — | KEEP | PRESERVED | 保留加权RVQ及两种usage的不同含义 |
+| [U01](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/eval_vqvae.py#L88-L114) | W02 | — | KEEP | PRESERVED | 本地已按真实learned weights导出，不引入上游等权假设 |
+| [U02](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/eval_rise_vae_2cam.py#L230-L240) | W02 | — | KEEP | PRESERVED | 本地码本已缓存，不重复读取NPZ |
+| [D06](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/train_dqrise.py#L155-L163) | W02 | — | KEEP | PRESERVED | 本地half-up/clamp已规避上游截断错误 |
+| [B06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/registry.py#L48-L131) | W03 | P1 | FIX | OPEN | 配置键必须生效或报错；逐child核对动作合同 |
+| [B05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/backbone/unet1d.py#L10-L36) | W03 | P2 | FIX | OPEN | 补n_groups和当前UNet的明确形状约束 |
+| [B08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/time_sampler.py#L40-L57) | W03 | P2 | FIX | OPEN | 拒绝过小discrete_pow子批次，不默认更换分布 |
+| [B09](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/datasets/augmentation.py#L46-L62) | W03 | P3 | FIX | OPEN | 定值非恒等颜色变换必须执行 |
+| [B13](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/build_utils.py#L222-L250) | W03 | P2 | FIX | OPEN | 在实际入口严格校验整数控制量 |
+| [A02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/backbone/attention.py#L43-L102) | W03 | P3 | FIX | OPEN | 全无效attention在最终投影后清零 |
+| [A03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/geometry_processor.py#L91-L106) | W03 | P3 | FIX | OPEN | 无效深度用where处理，空patch不能标有效 |
+| [B02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/dino.py#L25-L48) | W04 | P2 | FIX | OPEN | 所有ViT投影分支显式匹配输入和权重dtype |
+| [R04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/base.py#L67-L90) | W04 | P1 | CHECK | CHECK_PENDING | 诊断BF16参数/EMA更新；新精度配方须证据与恢复边界 |
+| [E04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/ema_model.py#L17-L36) | W04 | P2 | CHECK | CHECK_PENDING | 先测已有foreach，勿预先加入参数缓存或删buffer更新 |
+| [E05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/utils.py#L35-L54) | W04 | P2 | CHECK | CHECK_PENDING | 常量缓存与可证明的边界校验；不删除外部float检查 |
+| [A09](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/rgb/r3m.py) | W04 | — | KEEP | PRESERVED | R3M的GN是既定适配，披露即可 |
+| [S08](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/dexmani_policy/training/build_utils.py#L108-L131) | W05 | P2 | FIX | OPEN | 恢复仍重复读完整checkpoint，需每进程读取一次并及时释放 |
+| [D03](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/model/diffusion/ema_model.py#L30-L42) | W05 | — | KEEP | PRESERVED | 保留本地EMA teacher的eval模式 |
+| [D04](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/workspace/train_maniflow_dex_workspace.py#L105-L152) | W05 | — | KEEP | PRESERVED | 保留本地EMA权重与更新时钟共同恢复 |
+| [D05](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/train.py#L217-L230) | W05 | — | KEEP | PRESERVED | 保留optimizer-step累积边界、尾组和EMA语义 |
+| [D09](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/policy/maniflow_pointcloud_policy.py#L506-L552) | W05 | — | KEEP | PRESERVED | 保留ManiFlow小batch分流与样本守恒 |
+| [B12](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/trainer.py#L27-L47) | W05 | P2 | FIX | OPEN | 合并碰撞里程碑，确保最终100pct且不重复存大权重 |
+| [R08](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/tests/test_policy_vq_alignment.py#L107-L200) | W05 | P2 | FIX | PARTIAL | 已补数据/VQ/基准检查；真实优化、predict、恢复和生产DDP继续补验 |
+| [E01](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/trainer.py#L173-L186) | W05 | P2 | CHECK | CHECK_PENDING | 日志边界再转host；必要非有限检查与rank协调保留 |
+| [B07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py#L151-L178) | W06 | P2 | FIX | OPEN | patch dropout同步选择token、center与位置编码 |
+| [E09](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py#L19-L26) | W06 | P2 | CHECK | CHECK_PENDING | 评估已有KNN后端，核对固定K、tie、显存及端到端收益 |
+| [E07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py#L29-L44) | W06 | P2 | CHECK | CHECK_PENDING | 批量first-point dropout；披露随机流变化 |
+| [A01](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/ops.py#L73-L128) | W06 | P3 | CHECK | CHECK_PENDING | 原生FPS仅在语义边界和收益证实后替换 |
+| [A06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/pointcloud/uni3d.py) | W06 | P3 | USE | USE_PENDING | 需要整理时冻结未用head；不是默认DDP崩溃修复 |
+| [B11](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/deployment/runtime.py#L159-L171) | W07 | P2 | FIX | OPEN | 零延迟RTC也热身真实引导分支 |
+| [E08](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/rtc.py#L40-L76) | W07 | P2 | CHECK | CHECK_PENDING | 减少RTC标量同步与索引开销，保留VJP及scheduler语义 |
+| [R03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/evaluation/protocol.py#L27-L36) | W08 | P1 | FIX | OPEN | 显式固定论文selection/tie/test清单，保留旧协议可读 |
+| [R06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/remote/sync_code.sh#L33-L54) | W08 | P1 | FIX | OPEN | 记录实际训练源码、身份与依赖，不建设追踪平台 |
+| [S03](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/eval/eval_pipeline.sh#L81-L89) | W08 | P2 | FIX | OPEN | 流水线交接selector自己的不可变结果，不重新猜best |
+| [C03](https://github.com/haoyangzhanglab/dexmani_policy/commit/650f1e3cfc63c64678b5bb69e7258b548800d053) | W08 | P1 | DOC | DOC_PENDING | 披露动作、感知、容量和预算，区分系统比较与机制归因 |
+| [D08](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/eval_rise_vae_2cam.py#L191-L212) | W08 | P1 | DOC | DOC_PENDING | 分开NFE、查询间隔、执行窗口和解码后ensemble |
+| [S01](https://github.com/haoyangzhanglab/dexmani_policy/blob/49bd810736c1f6d3aabb347f1cd3b67f530a7232/dexmani_policy/datasets/multi_task_dataset.py#L79-L103) | W09 | P2 | CHECK | PARTIAL | deterministic已无Manager；只评估仍有epoch同步的随机训练路径 |
+| [S05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/core/multi_task.py#L126-L149) | W09 | P3 | USE | USE_PENDING | 仅固定任务发布可用embedding表替代语言encoder |
+| [A04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/deployment/runtime.py) | W09 | — | KEEP | PRESERVED | 保持Real runtime明确支持边界，不扩成任意策略部署 |
+| [B04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/pyproject.toml#L37-L39) | W10 | P3 | USE | USE_PENDING | 需要wheel时补YAML package data，不迁移构建框架 |
+| [R05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/loader.py#L108-L119) | W10 | P2 | USE | USE_PENDING | 实际离线恢复需求下保存HF构造资源并strict load |
+| [S04](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/training/checkpoint.py#L62-L107) | W10 | P3 | USE | USE_PENDING | 实际发布需求下才导出轻量推理产物 |
+| [S02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/train_ddp.py#L44-L72) | W10 | — | KEEP | PRESERVED | 单机mp.spawn保留，非必须迁移torchrun |
+| [S07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/obs_encoder/text/t5.py) | W10 | P3 | USE | USE_PENDING | 确认无活跃/外部用途后删预留模块，不按删行数称提速 |
+| [A05](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/scripts/remote/stop_remote.sh) | W10 | P3 | FIX | OPEN | 保留远端tmux和SSH真实退出状态，用本地fixture验证 |
+| [C01](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/policy/sat.py#L90-L112) | W11 | P1 | DOC | DOC_PENDING | SAT适配不等同完整官方复现；暂不重写感知 |
+| [C02](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/policy/policy.py#L12-L44) | W11 | P1 | DOC | DOC_PENDING | DQ感知适配与码本容量通过后续受控实验判断 |
+| [C04](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/policy/sat.py#L90-L112) | W11 | P1 | DOC | DOC_PENDING | 分项披露配方差异，不把上游默认统一强制回退 |
+| [D07](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/policy/vqvae_rise/vector_quantize_pytorch/vector_quantize_pytorch.py#L686-L718) | W11 | P1 | DOC | DOC_PENDING | 区分DQ的VQ配方、policy优化器及online/EMA |
+| [R02](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/core/sat.py#L78-L131) | W11 | — | DEFER | DEFERRED | 跨帧物理对应是新研究选择，暂不做共享锚点 |
+| [R07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/consistency_flow.py#L113-L164) | W11 | — | DEFER | DEFERRED | absolute时间外推需重审目标，不做孤立clamp |
+| [S06](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/backbone/sat.py#L421-L472) | W11 | P3 | CHECK | CHECK_PENDING | 原SAT等变性/梯度/随机分布与收益均支持才删shuffle |
+| [D01](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/vision/obs_tokenizer.py#L18-L75) | W11 | — | KEEP | PRESERVED | 本地有序状态MLP保留关节身份 |
+| [D02](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/vision/obs_tokenizer.py#L641-L661) | W11 | — | KEEP | PRESERVED | 本地不引入官方无效padding mask路径 |
+| [A07](https://github.com/haoyangzhanglab/dexmani_policy/blob/650f1e3cfc63c64678b5bb69e7258b548800d053/dexmani_policy/agents/action_decoders/consistency_flow.py) | W11 | — | KEEP | PRESERVED | 保留ManiFlow单次采样内KV缓存，禁止跨观测复用 |
 
 ## 16. 固定参考版本
 
-以下版本在任务书发布前重新核对。它们用于解释机制和边界，不要求执行者为了本文升级本仓库依赖或复制上游全部实现。需要移植时阅读具体调用链并遵守原项目许可证。
+以下版本在任务书初次发布时核对；本轮更新保持这些固定参考，不宣称它们仍是上游最新 HEAD。它们用于解释机制和边界，不要求执行者为了本文升级本仓库依赖或复制上游全部实现。需要移植时阅读具体调用链并遵守原项目许可证。
 
 | 项目 | 固定提交 | 本轮使用原则 |
 |---|---|---|
