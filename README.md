@@ -146,7 +146,7 @@ python dexmani_policy/smoke_test.py <config_name>
 
 完整训练、DDP 和长时间评测不是普通代码改动后的默认验证步骤。
 
-`--config-only` 只检查配置和 target；完整 smoke 包含一次参数更新、预测及保存恢复，不等同于正式训练收敛或生产 DDP 验证。
+`--config-only` 只检查配置和 target；完整 smoke 包含一次参数更新、预测及保存恢复。它直接调用 `compute_loss`，不执行 Trainer 的 BF16 autocast / `compile_models` 路径，因此不能作为 `training.use_bfloat16` / `training.use_compile` 的运行验收，也不证明训练收敛或 DDP 可用。相关验收状态与后续检查见 [论文 recipe](docs/paper_recipes.md#验收收尾2026-10-07)。
 
 ## 仿真评测
 

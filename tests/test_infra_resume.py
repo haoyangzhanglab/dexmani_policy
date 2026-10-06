@@ -1,5 +1,8 @@
 import copy
+import importlib
 import random
+import subprocess
+import sys
 import tempfile
 import unittest
 import warnings
@@ -23,7 +26,6 @@ from dexmani_policy.training.resume import (validate_resume_contract,validate_da
 from dexmani_policy.training.build_utils import build_model_and_ema,capture_data_identity,validate_config
 from dexmani_policy.training.trainer import Trainer,TrainLoopConfig
 from dexmani_policy.training.workspace import TrainWorkspace,WandbConfig
-from dexmani_policy.training.ema_model import EMAModel
 from dexmani_policy.utils.random import get_rng_state,set_rng_state,set_seed
 from dexmani_policy.smoke_test import load_config
 
@@ -92,6 +94,13 @@ class ResumeInfraTests(unittest.TestCase):
                  'dexmani_policy.agents.core.multi_task.DPObsEncoder','dexmani_policy.agents.core.multi_task.CLIPTextEncoder']
         backbones=['dexmani_policy.agents.core.base.ConditionalUnet1D','dexmani_policy.agents.core.dqrise.ConditionalUnet1D',
                    'dexmani_policy.agents.core.r3d.OneWayTransformerBackbone','dexmani_policy.agents.core.multi_task.DiTDiffusion']
+        # Import consumers before patching their providers: a cold import inside
+        # patch would otherwise retain the provider's mock as its original value.
+        originals = {}
+        for target in targets + backbones:
+            module_name, symbol = target.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            originals[target] = (module, symbol, getattr(module, symbol))
         with ExitStack() as stack:
             for target in targets: stack.enter_context(patch(target,side_effect=lambda *a,**k:DummyEncoder()))
             for target in backbones: stack.enter_context(patch(target,side_effect=lambda *a,**k:TinyBackbone()))
@@ -111,6 +120,30 @@ class ResumeInfraTests(unittest.TestCase):
             cfg=load_config('multitask_dit'); cfg.agent.action_decoder_type='rectified_flow'
             cfg.normalization.action='gaussian'; validate_config(cfg)
             agent=hydra.utils.instantiate(cfg.agent); agent.set_normalization_spec({'action':'gaussian'})
+        for target, (module, symbol, original) in originals.items():
+            self.assertIs(getattr(module, symbol), original, target)
+
+    def test_constructor_patches_restore_after_cold_import(self):
+        # A fresh interpreter prevents test collection/order from warming imports
+        # and hiding pollution of module-level ``from ... import ...`` aliases.
+        result = subprocess.run(
+            [sys.executable, '-c', '''
+import sys
+sys.path.insert(0, 'tests')
+from test_infra_resume import ResumeInfraTests
+assert 'dexmani_policy.agents.core.dqrise' not in sys.modules
+assert 'dexmani_policy.agents.core.multi_task' not in sys.modules
+ResumeInfraTests('test_all_constructors_and_config_matrix').test_all_constructors_and_config_matrix()
+from dexmani_policy.agents.core import dp, dp3, dqrise, multi_task
+from unittest.mock import Mock
+assert dqrise.DP3ObsEncoder is dp3.DP3ObsEncoder
+assert multi_task.DPObsEncoder is dp.DPObsEncoder
+assert not isinstance(dqrise.DP3ObsEncoder, Mock)
+assert not isinstance(multi_task.DPObsEncoder, Mock)
+'''], cwd=Path(__file__).resolve().parents[1], capture_output=True,
+            text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_clip_resume_compatibility(self):
         old={'agent_config':{'_target_':'dexmani_policy.agents.core.dp.DPAgent'}}

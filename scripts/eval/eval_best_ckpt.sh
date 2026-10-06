@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# RoboTwin-style checkpoint evaluation — simple success rate.
+# Checkpoint evaluation with a fixed manifest or historical legacy protocol.
 #
-# Loads a checkpoint and evaluates it on deterministic seeds. For `best`, the
-# selection record's seeds are excluded from final evaluation.
+# A manifest fixes the complete test role, regardless of --episodes.
+# Legacy evaluation excludes the selection record's seeds from the shuffled pool.
 # Output is the success rate (matching RoboTwin _result.txt format).
 #
 # Usage:
@@ -11,7 +11,7 @@
 # Examples:
 #   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42
 #   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 20pct
-#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --episodes 50
+#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --selection-record /path/to/selection_record.json
 #
 set -euo pipefail
 
@@ -42,7 +42,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Examples:"
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42"
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 40pct"
-    echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --episodes 50"
+    echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --selection-record /path/to/selection_record.json"
     exit 0
 fi
 

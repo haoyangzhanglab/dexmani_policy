@@ -1,7 +1,8 @@
 """Checkpoint-owned evaluation on deterministically selected seeds.
 
-Loads a checkpoint and runs it on deterministic evaluation seeds. For ``best``,
-the seeds used to select the checkpoint are excluded.
+Loads a checkpoint and runs the manifest's complete held-out test role.
+Legacy records without a manifest exclude the recorded selection seeds
+from a deterministic shuffled pool.
 Each invocation writes success metrics and provenance to its own result
 directory, including a scalar success rate in ``_result.txt``.
 
@@ -29,12 +30,13 @@ Usage
 -----
 .. code-block:: bash
 
-    # After select_best_ckpt.sh:
-    bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42
+    # Pin the handoff exported by select_best_ckpt.py --result-file:
+    bash scripts/eval/eval_best_ckpt.sh dp pick_apple_messy EXP_NAME \\
+        --selection-record /absolute/path/selection_record.json
 
-    # Specific checkpoint:
-    bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 \\
-        --ckpt-tag 20pct --episodes 50
+    # Specific checkpoint; a manifest still fixes the full test role:
+    bash scripts/eval/eval_best_ckpt.sh dp pick_apple_messy EXP_NAME \\
+        --ckpt-tag 20pct
 """
 
 from __future__ import annotations
