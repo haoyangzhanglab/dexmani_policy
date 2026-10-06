@@ -92,6 +92,8 @@ timeout 180 "$PY" -u tests/benchmark_rgb_transport.py --transport float32 --warm
 
 生产 compile/AMP 组合、双卡与单 rank 故障传播、其它 RGB backbone 的真实更新、冷缓存恢复、收敛/成功率及真实闭环均 **NOT VERIFIED**；R08 保持 PARTIAL。本轮只新增 DP eager BF16 短测证据，不替代这些检查。
 
+后续已启动同一 commit、3 paired training seeds 的完整预算实验，进度见 [Closed-loop A/B 报告](rgb_transport_closed_loop_ab.md)。这是独立的后续验证；启动或早期训练正常不等于 closed-loop 验收 PASS，以上工程证据不回填为质量结果。
+
 GPU photometric augmentation、CUDA prefetch stream 均未实施。只有未来 profiling 明确 CPU ImageAug 成为瓶颈，再单独研究 GPU batched、per-sample 且 temporal-consistent augmentation，并重新验证 RNG 与训练效果；不在此次 transport 优化中混入该研究变量。
 
 ## 后续清理（2026-10-06）
