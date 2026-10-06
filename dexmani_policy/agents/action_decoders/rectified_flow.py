@@ -61,7 +61,8 @@ class RectifiedFlow(nn.Module):
         dim_groups=None,
         model_kwargs: dict | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        del dim_groups
+        if dim_groups:
+            raise ValueError("This flow decoder does not support nonempty dim_groups")
         model_kwargs = {} if model_kwargs is None else model_kwargs
 
         batch_size = actions.shape[0]

@@ -18,7 +18,7 @@ from dexmani_policy.training.build_utils import (
 )
 from dexmani_policy.training.checkpoint import TrainCheckpoint, fix_state_dict
 from dexmani_policy.training.logging import to_log_scalars
-from dexmani_policy.training.resume import optimizer_to, restore_training_state, load_resume_source_config
+from dexmani_policy.training.resume import optimizer_to
 from dexmani_policy.training.workspace import TrainWorkspace
 from dexmani_policy.utils.validation import positive_int
 from dexmani_policy.utils.random import get_rng_state
@@ -40,14 +40,14 @@ class TrainLoopConfig:
 class Trainer:
     """Step-driven training loop with milestone checkpointing.
 
-    Trains for exactly ``total_train_steps`` optimizer steps (not epochs).
+    Uses ``total_train_steps`` as the full plan; ``max_updates`` bounds one invocation.
     No online validation or simulation evaluation — just training + milestone
     checkpoint saves at 20/40/60/80/100% progress.
 
     - **Training**: ``train_one_step()`` with mixed precision (bfloat16 AMP),
       gradient clipping, and two-layer NaN protection (loss NaN, grad NaN).
     - **Checkpointing**: Milestone saves (up to 5 distinct steps) at progress thresholds;
-      ``latest.pt`` symlink tracks the most recent milestone for resume.
+      bounded and interrupted runs also save state; ``latest.pt`` tracks the latest save.
     - **EMA**: Exponential moving average of model weights, updated each step.
 
     Supports single-GPU and DDP (via ``distributed=True``). In DDP, only rank
@@ -73,6 +73,7 @@ class Trainer:
         is_main_process: bool = True,
         distributed: bool = False,
         train_sampler=None,
+        batches_per_epoch: int | None = None,
     ):
         self.device = device
 
@@ -92,8 +93,8 @@ class Trainer:
         self.total_train_steps = train_loop_cfg.total_train_steps
         self.log_interval_steps = train_loop_cfg.log_interval_steps
         self.max_grad_norm = max_grad_norm
-        self._last_grad_norm: float | None = None
-        self._last_clip_ratio: float | None = None
+        self._last_grad_norm: torch.Tensor | None = None
+        self._last_clip_ratio: torch.Tensor | None = None
 
         self.use_ema = self.ema_model is not None
 
@@ -102,8 +103,15 @@ class Trainer:
         self.compile_mode = compile_mode
 
         self.gradient_accumulation_steps = train_loop_cfg.gradient_accumulation_steps
+        # Capture the complete geometry before any resume cursor is applied.
+        if batches_per_epoch is None:
+            if getattr(train_loader.sampler, "next_micro_step", 0):
+                raise ValueError("batches_per_epoch must be supplied before applying a cursor")
+            batches_per_epoch = len(train_loader)
+        positive_int(batches_per_epoch, "batches_per_epoch")
+        self.batches_per_epoch = batches_per_epoch
         validate_gradient_accumulation(
-            len(self.train_loader), self.gradient_accumulation_steps
+            self.batches_per_epoch, self.gradient_accumulation_steps
         )
         # Pre-compute AMP device_type string to avoid repeated str.split on every step
         self.amp_device_type = str(self.device).split(":")[0]
@@ -122,6 +130,7 @@ class Trainer:
         self._interrupted = False
         self._stop_requested = False
         self._step_pbar = None
+        self._last_checkpoint_step = None
 
     @property
     def raw_model(self):
@@ -178,8 +187,8 @@ class Trainer:
 
         # Record the pre-clipping norm and its ratio to the threshold.
         if grad_norm is not None:
-            self._last_grad_norm = float(grad_norm)
-            self._last_clip_ratio = float(grad_norm) / float(self.max_grad_norm)
+            self._last_grad_norm = grad_norm.detach()
+            self._last_clip_ratio = self._last_grad_norm / self.max_grad_norm
         else:
             self._last_grad_norm = None
             self._last_clip_ratio = None
@@ -200,73 +209,6 @@ class Trainer:
 
         if self.use_ema and self.ema_updater is not None:
             self.ema_updater.step(self.raw_model)
-
-    def load_for_resume(self, tag_or_path: str, *, checkpoint=None):
-        """Restore training state before compilation."""
-        source_path = self.workspace.resolve_checkpoint_path(tag_or_path)
-        if checkpoint is None:
-            checkpoint = self.workspace.load_checkpoint(str(source_path))
-        return restore_training_state(
-            checkpoint,
-            resume_contract=self.resume_contract,
-            model=self.raw_model,
-            ema_model=self.ema_model,
-            ema_updater=self.ema_updater,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            device=self.device,
-            rank=dist.get_rank() if self.distributed else 0,
-            source_config=load_resume_source_config(source_path),
-        )
-
-    def _save_nan_debug(self, raw_loss, nan_rank=None):
-        if self.workspace is None:
-            return
-        output_dir = self.workspace.output_dir
-        if output_dir is None:
-            return
-        ckpt_dir = output_dir / "checkpoints"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"nan_debug_epoch={self.current_epoch:04d}_step={self.global_step:08d}_{ts}.pt"
-        payload = {
-            "state": {
-                "epoch": int(self.current_epoch),
-                "global_step": int(self.global_step),
-                "nan_loss": float(raw_loss),
-                "nan_rank": nan_rank,
-            },
-            "weights": {
-                "model": fix_state_dict(
-                    self.raw_model.state_dict(), is_current_ddp=False
-                ),
-                "ema_model": (
-                    fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
-                    if self.use_ema
-                    else None
-                ),
-                "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
-            },
-            "_format": "dexmani.nan-debug.v1",
-            "_saved_at": time.time(),
-        }
-        # Atomic write pattern: save to .tmp then os.replace() so a crash
-        # mid-save never produces a corrupted .pt file.
-        tmp_path = ckpt_dir / (filename + ".tmp")
-        final_path = ckpt_dir / filename
-        torch.save(payload, tmp_path)
-        tmp_path.replace(final_path)
-
-        # Keep only the last 5 NaN debug checkpoints to avoid unbounded disk usage.
-        nan_ckpts = sorted(ckpt_dir.glob("nan_debug_epoch=*.pt"))
-        for p in nan_ckpts[:-5]:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-
-        return ckpt_dir / filename
 
     def train_one_step(
         self,
@@ -299,9 +241,7 @@ class Trainer:
             raw_loss, log_dict = self.model(batch, **loss_kwargs)
 
         if self.distributed:
-            # Gather every rank's detached loss so the debug checkpoint records
-            # the rank that actually produced the non-finite loss (not rank 0's
-            # own, possibly finite, micro-batch).
+            # Retain rank-specific finite-loss diagnostics before backward.
             loss_tensor = raw_loss.detach().reshape(1)
             gathered = [
                 torch.zeros_like(loss_tensor) for _ in range(dist.get_world_size())
@@ -322,12 +262,11 @@ class Trainer:
                 if gathered_losses is not None and nan_rank is not None
                 else float(raw_loss.detach())
             )
-            debug_path = self._save_nan_debug(nan_loss, nan_rank=nan_rank)
             self.optimizer.zero_grad(set_to_none=True)
             rank_str = f"rank={nan_rank}, " if nan_rank is not None else ""
             raise RuntimeError(
                 f"Non-finite loss at epoch={self.current_epoch}, step={self.global_step} "
-                f"({rank_str}raw_loss={nan_loss}). Debug checkpoint saved to {debug_path}"
+                f"({rank_str}raw_loss={nan_loss})"
             )
 
         # Scale loss so that the *sum* of micro-batch gradients equals the
@@ -353,12 +292,15 @@ class Trainer:
 
     def _save_checkpoint(self, global_step: int, tag_suffix: str):
         """Save a checkpoint with the given tag suffix and point ``latest.pt`` at it."""
+        if self._last_checkpoint_step == global_step:
+            return
         rng_states = [get_rng_state(self.device)]
         if self.distributed:
             local_rng = rng_states[0]
             rng_states = [None] * dist.get_world_size()
             dist.all_gather_object(rng_states, local_rng)
         if self.workspace is None or not self.is_main_process:
+            self._last_checkpoint_step = global_step
             return
         checkpoint = TrainCheckpoint(
             epoch=self.current_epoch,
@@ -392,6 +334,7 @@ class Trainer:
         tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"
         checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
         self.workspace.save_latest(checkpoint_path)
+        self._last_checkpoint_step = global_step
 
     def _save_milestone_checkpoint(self, global_step: int, ratio: float):
         """Save a milestone checkpoint and point ``latest.pt`` at it."""
@@ -425,8 +368,6 @@ class Trainer:
                 break
 
     def on_epoch_start(self, epoch: int):
-        if hasattr(self.train_loader.dataset, "set_epoch"):
-            self.train_loader.dataset.set_epoch(epoch)
         if hasattr(self.raw_model, "set_epoch"):
             self.raw_model.set_epoch(epoch)
 
@@ -452,19 +393,24 @@ class Trainer:
             "train/samples_per_step": samples,
         }
 
-    def train(self, resume_tag: str | None = None, resume_state=None):
+    def train(self, *, resume_state=None, max_updates=None):
+        if max_updates is not None:
+            positive_int(max_updates, "max_updates")
         torch.set_float32_matmul_precision("high")
 
-        if resume_state is not None:
-            global_step, start_epoch, self.next_micro_step = resume_state
-        elif resume_tag is None:
-            global_step, start_epoch = 0, 0
-        else:
-            global_step, start_epoch, self.next_micro_step = self.load_for_resume(
-                resume_tag
-            )
+        global_step, start_epoch, self.next_micro_step = (
+            (0, 0, 0) if resume_state is None else resume_state
+        )
 
         self.global_step = global_step
+        stop_step = self.total_train_steps if max_updates is None else min(
+            self.total_train_steps, global_step + max_updates
+        )
+        if global_step >= self.total_train_steps:
+            self.current_epoch = start_epoch
+            if self.workspace is not None:
+                self.workspace.close()
+            return
         if start_epoch > 0:
             print(f"Resuming training from epoch {start_epoch}, step {global_step}")
 
@@ -498,7 +444,7 @@ class Trainer:
             )
 
         try:
-            while global_step < self.total_train_steps:
+            while global_step < stop_step:
                 if self.train_sampler is not None:
                     self.train_sampler.set_epoch(epoch, self.next_micro_step)
 
@@ -507,7 +453,7 @@ class Trainer:
 
                 self.optimizer.zero_grad(set_to_none=True)
 
-                num_batches = self.resume_contract["batches_per_epoch"]
+                num_batches = self.batches_per_epoch
                 group_metric_sums = {}
                 group_metric_count = 0
                 group_samples = 0
@@ -555,9 +501,17 @@ class Trainer:
                     if is_boundary:
                         group_elapsed = time.perf_counter() - group_start_time
                     self._ddp_backward_initialized = True
-                    for key, value in to_log_scalars(log_dict).items():
-                        group_metric_sums[key] = group_metric_sums.get(key, 0.0) + value
-                    group_metric_count += 1
+                    record_group = (global_step + 1) % self.log_interval_steps == 0
+                    if record_group:
+                        for key, value in log_dict.items():
+                            if torch.is_tensor(value):
+                                if value.numel() != 1:
+                                    continue
+                                value = value.detach().to(dtype=torch.float64)
+                            elif not isinstance(value, (int, float)):
+                                continue
+                            group_metric_sums[key] = group_metric_sums.get(key, 0.0) + value
+                        group_metric_count += 1
 
                     if is_boundary:
                         group_metrics = {
@@ -583,7 +537,7 @@ class Trainer:
                         else:
                             self._interrupted = self._stop_requested
 
-                        if (global_step % self.log_interval_steps) == 0:
+                        if record_group:
                             step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
                             if self._last_grad_norm is not None:
                                 step_metrics["train/grad_norm"] = self._last_grad_norm
@@ -593,14 +547,16 @@ class Trainer:
 
                             if self.distributed:
                                 keys = sorted(step_metrics)
-                                packed = torch.tensor(
-                                    [step_metrics[key] for key in keys],
-                                    dtype=torch.float64,
-                                    device=self.device,
-                                )
+                                packed = torch.stack([
+                                    torch.as_tensor(step_metrics[key], dtype=torch.float64,
+                                                    device=self.device).reshape(())
+                                    for key in keys
+                                ])
                                 dist.all_reduce(packed, op=dist.ReduceOp.SUM)
                                 packed /= dist.get_world_size()
                                 step_metrics = dict(zip(keys, packed.cpu().tolist()))
+                            else:
+                                step_metrics = to_log_scalars(step_metrics)
 
                             step_metrics.update(
                                 self._step_performance_metrics(
@@ -625,7 +581,7 @@ class Trainer:
                         group_start_time = time.perf_counter()
 
                     if is_boundary and (
-                        global_step >= self.total_train_steps or self._interrupted
+                        global_step >= stop_step or self._interrupted
                     ):
                         break
 
@@ -643,6 +599,9 @@ class Trainer:
                     self._save_interrupt_checkpoint(global_step)
                 except Exception as e:
                     print(f"WARNING: interrupt checkpoint failed: {e}", flush=True)
+            elif global_step < self.total_train_steps:
+                self._save_checkpoint(global_step, "bounded")
+                print(f"Bounded run stopped at step {global_step}/{self.total_train_steps}")
 
         finally:
             signal.signal(signal.SIGINT, prev_sigint)

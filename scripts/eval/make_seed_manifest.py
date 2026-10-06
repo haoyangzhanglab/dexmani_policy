@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 import hydra
 
 from dexmani_policy.evaluation.protocol import (
-    code_version, iter_leaf_env_runners, load_seed_manifest, mapped_task_seeds,
+    code_version, iter_leaf_env_runners, load_seed_manifest, task_seed_pools,
 )
 from dexmani_policy.utils.config import register_resolvers
 
@@ -30,19 +30,24 @@ def make_manifest(runner, *, pool_id, partition_seed=1066, selection=25, tie_bre
             raise ValueError(f"Invalid {name} count: {count!r}")
     if type(partition_seed) is not int:
         raise ValueError("partition_seed must be an integer")
-    seeds = list(runner.get_seed_list())
-    if any(type(s) is not int for s in seeds) or len(set(seeds)) != len(seeds):
-        raise ValueError("Actual runner seed pool contains invalid or duplicate seeds")
-    if len(seeds) < selection + tie_break + test:
-        raise ValueError(f"Actual paired seed pool has {len(seeds)} seeds; requested "
+    pools = task_seed_pools(runner)
+    count = min(len(pool) for pool in pools.values())
+    for seeds in pools.values():
+        if any(type(s) is not int or s < 0 for s in seeds) or len(set(seeds)) != len(seeds):
+            raise ValueError("Actual runner seed pool contains invalid or duplicate seeds")
+    if count < selection + tie_break + test:
+        raise ValueError(f"Actual common seed pool has {count} seeds; requested "
                          f"{selection}+{tie_break}+{test}. Supply a sufficient real pool.")
-    random.Random(partition_seed).shuffle(seeds)
+    # Same permutation as the previous reference list, expanded once at creation.
+    indices = list(range(count))
+    random.Random(partition_seed).shuffle(indices)
+    def plan(start, stop):
+        return {task: [pool[i] for i in indices[start:stop]] for task, pool in pools.items()}
     manifest = {"pool_id": pool_id, "partition_seed": partition_seed,
                 "pool_sources": pool_sources or {}, "simulator_revision": simulator_revision,
-                "selection": mapped_task_seeds(runner, seeds[:selection]),
-                "tie_break": mapped_task_seeds(runner, seeds[selection:selection+tie_break]),
-                "test": mapped_task_seeds(runner, seeds[selection+tie_break:selection+tie_break+test])}
-    manifest['runner_pool_sha256'] = load_seed_manifest(manifest, runner)['runner_pool_sha256']
+                "selection": plan(0, selection),
+                "tie_break": plan(selection, selection+tie_break),
+                "test": plan(selection+tie_break, selection+tie_break+test)}
     load_seed_manifest(manifest, runner)
     return manifest
 
@@ -81,9 +86,8 @@ def main():
     with args.output.open('x', encoding='utf-8') as stream:
         json.dump(manifest, stream, indent=2)
         stream.write('\n')
-    print(f"Published {args.output}: paired pool={len(runner.get_seed_list())}; "
-          f"selection/tie_break/test={args.selection}/{args.tie_break}/{args.test}; "
-          f"pool sha256={manifest['runner_pool_sha256']}")
+    print(f"Published {args.output}: task pools={ {t: len(s) for t, s in task_seed_pools(runner).items()} }; "
+          f"selection/tie_break/test={args.selection}/{args.tie_break}/{args.test}")
 
 
 if __name__ == '__main__':

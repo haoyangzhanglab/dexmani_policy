@@ -626,6 +626,8 @@ def main(argv: list[str] | None = None) -> None:
         policy_override=config_args.policy_override,
     )
     args = parser.parse_args(remaining)
+    if policy_cfg is None and not config_args.config:
+        parser.error("DQ codebooks require --policy-config; independent VQ research requires explicit --config")
     if policy_cfg is not None:
         args.zarr_path = str(policy_cfg.dataset.zarr_path)
         args.action_key = policy_cfg.action_key

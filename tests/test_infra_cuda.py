@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader,TensorDataset
 
 from dexmani_policy.training.checkpoint import CheckpointStore
 from dexmani_policy.training.ema_model import EMAModel
-from dexmani_policy.training.resume import restore_training_state
+from dexmani_policy.training.resume import restore_model_weights, restore_training_state
 from dexmani_policy.training.trainer import Trainer,TrainLoopConfig
 from dexmani_policy.training.workspace import TrainWorkspace,WandbConfig
 from dexmani_policy.utils.random import get_rng_state,set_rng_state
@@ -33,9 +33,14 @@ def ddp_worker(rank,root,phase,ids):
     try:
         torch.manual_seed(17)
         model=torch.nn.Linear(2,1).to(device); ema=copy.deepcopy(model); updater=EMAModel(ema)
+        checkpoint = None
+        if phase != 'source':
+            store = CheckpointStore(root/'source/checkpoints')
+            checkpoint = store.load(store.resolve_path('latest'))
+            restore_model_weights(checkpoint, model, ema, device)
         optimizer=torch.optim.Adam(model.parameters(),lr=.01)
         scheduler=torch.optim.lr_scheduler.StepLR(optimizer,1,.9)
-        contract={'batches_per_epoch':2,'world_size':2,'training':{'loop':{'gradient_accumulation_steps':1}}}
+        contract={'facts_format':1,'batches_per_epoch':2,'world_size':2,'training':{'loop':{'gradient_accumulation_steps':1}}}
         wrapped=DistributedDataParallel(model,device_ids=[device.index],
                                         find_unused_parameters=False, gradient_as_bucket_view=True, static_graph=True)
         ws=None
@@ -54,8 +59,6 @@ def ddp_worker(rank,root,phase,ids):
             update()
             torch.save({'model':model.state_dict(),'ema':ema.state_dict()},root/f'expected_{rank}.pt')
         else:
-            store=CheckpointStore(root/'source/checkpoints')
-            checkpoint=store.load(store.resolve_path('latest'))
             restore_training_state(checkpoint,resume_contract=contract,model=model,ema_model=ema,
                 ema_updater=updater,optimizer=optimizer,scheduler=scheduler,device=device,rank=rank)
             update()

@@ -273,7 +273,7 @@ def test_explicit_protocol_and_immutable_handoff(tmp_path, monkeypatch):
     monkeypatch.setattr(selector,'load_ckpt_for_inference',lambda *a,**kw:SimpleNamespace(_checkpoint_global_step=20))
     # Exercise actual selector protocol/publication, substitute only rollout.
     monkeypatch.setattr(selector,'evaluate_checkpoint',lambda cfg,r,mc,seeds,*a,**kw:
-                        {'episode_details':[{'seed':s,'success':True,'steps':3} for s in seeds]})
+                        {'episode_details':[{'seed':s,'success':True,'steps':3} for s in seeds['a']]})
     result=tmp_path/'handoff.json'
     selector.select_best_checkpoint(root,cfg,result_file=result)
     info,path=resolve_best_checkpoint(root,result)
@@ -282,7 +282,7 @@ def test_explicit_protocol_and_immutable_handoff(tmp_path, monkeypatch):
     selector.select_best_checkpoint(root,cfg)
     assert resolve_best_checkpoint(root,result)[0]['selection_id']==info['selection_id']
     assert result.read_bytes()==before
-    assert fixed_test_seeds(cfg,runner,info)==[3,4,5]
+    assert fixed_test_seeds(cfg,runner,info)=={'a':[3,4,5]}
     bad=copy.deepcopy(manifest); bad['test']['a']=[2]
     with pytest.raises(ValueError,match='overlap'): load_seed_manifest(bad,runner)
     bad=copy.deepcopy(manifest); bad['test']['a']=[999]
@@ -330,20 +330,22 @@ def test_resume_normalizer_uses_supplied_payload(policy_config, tmp_path, monkey
 
 def test_manifest_task_identity_and_pool_change():
     from dexmani_policy.evaluation.protocol import load_seed_manifest, fixed_test_seeds
-    class Runner:
-        def get_seed_list(self): return [0,1,2,3]
-        def map_eval_seeds(self,seeds): return {'a':list(seeds),'b':[s+1 for s in seeds]}
-    runner=Runner()
+    from test_infra_evaluation import Runner
+    a, b = Runner(), Runner()
+    a.get_seed_list = lambda: [0, 1, 2, 3]
+    b.task_name = 'b'; b.get_seed_list = lambda: [1, 2, 3, 4]
+    runner = SimpleNamespace(runners={'a': a, 'b': b})
     manifest={'pool_id':'fixture','selection':{'a':[0],'b':[1]},
               'tie_break':{'a':[1],'b':[2]},'test':{'a':[2,3],'b':[3,4]}}
-    # The same integer can be in different roles for different tasks.
     protocol=load_seed_manifest(manifest,runner)
-    assert protocol['roles']['test']==[2,3]
+    assert protocol['roles']['test']==manifest['test']
     cfg=OmegaConf.create({'eval':{}})
     best={'selection':{'seed_manifest':protocol}}
-    assert fixed_test_seeds(cfg,runner,best)==[2,3]
-    runner.get_seed_list=lambda:[0,1,2,3,4]
-    with pytest.raises(ValueError,match='differs'): fixed_test_seeds(cfg,runner,best)
+    assert fixed_test_seeds(cfg,runner,best)==manifest['test']
+    a.get_seed_list=lambda:[4,3,2,1,0]
+    assert fixed_test_seeds(cfg,runner,best)==manifest['test']
+    a.get_seed_list=lambda:[0,1,2]
+    with pytest.raises(ValueError,match='unavailable'): fixed_test_seeds(cfg,runner,best)
 
 
 def test_vq_validation_uses_sample_count_for_tail():
@@ -520,7 +522,7 @@ def test_dp_encoder_uses_trusted_float_boundary(monkeypatch):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_rgb_transport_config_and_resume_contract():
+def test_rgb_transport_config_and_resume_contract(tmp_path):
     from dexmani_policy.smoke_test import load_config
     from dexmani_policy.training.build_utils import validate_config
     from dexmani_policy.training.resume import build_resume_contract, validate_resume_contract
@@ -544,8 +546,21 @@ def test_rgb_transport_config_and_resume_contract():
             old_cfg.dataset.rgb_keep_uint8 = old_recipe
         saved = build_resume_contract(old_cfg, model, loader)
         validate_resume_contract(saved, saved)
+        # Recipe identity is now owned by the saved config, before construction.
+        from dexmani_policy.training.resume import resolve_training_config
+        run = tmp_path / str(old_recipe)
+        (run / 'checkpoints').mkdir(parents=True)
+        checkpoint = run / 'checkpoints/latest.pt'
+        checkpoint.write_bytes(b'config-only fixture')
+        OmegaConf.save(old_cfg, run / 'config.yaml')
+        incoming = copy.deepcopy(cfg)
+        from omegaconf import open_dict
+        with open_dict(incoming):
+            incoming.resume_from = str(checkpoint)
+        restored = resolve_training_config(incoming, overrides=[])
+        assert restored.dataset.get('rgb_keep_uint8') == old_recipe
         with pytest.raises(ValueError, match='dataset.rgb_keep_uint8'):
-            validate_resume_contract(saved, current)
+            resolve_training_config(incoming, overrides=['dataset.rgb_keep_uint8=true'])
     cfg = OmegaConf.create(OmegaConf.to_container(load_config('multitask_dit'), resolve=True))
     cfg.dataset.datasets[0].rgb_keep_uint8 = True
     with pytest.raises(ValueError, match='consistent rgb_keep_uint8'):

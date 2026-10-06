@@ -41,7 +41,7 @@ Local checkpoint selection / evaluation
 | `train_remote.sh` | remote execution | pre-flight + foreground/tmux 训练启动 |
 | `resolve_remote_datasets.py` | config inspection | 解析 Hydra dataset 路径 |
 | `tail_log.sh` | read-only | 追踪 `metrics.jsonl` |
-| `stop_remote.sh` | control | SIGINT → wait → force kill fallback |
+| `stop_remote.sh` | control | SIGINT → bounded wait；显式 --force 才允许强停 |
 
 ---
 
@@ -550,9 +550,8 @@ bash scripts/remote/stop_remote.sh --all
         ↓
 4. wait for session to exit
         ↓
-5. timeout → force kill tmux
-        ↓
-6. best-effort GPU-memory check
+5. timeout → report still running and exit nonzero
+   explicit --force only → kill the selected tmux session
 ```
 
 第二次 signal 或 force kill 可能绕过完整的 graceful save。当前 Trainer 只在 interrupted 且 `global_step > 0` 时尝试 interrupt checkpoint，因此“收到 SIGINT”本身不保证一定产生 checkpoint。
@@ -589,7 +588,7 @@ bash scripts/eval/eval_pipeline.sh <policy> <task> <exp_name>
 
 这里 `<config>` 是 Hydra config path；`<policy>` 是 experiment `policy_name` 路径。DDP overlay 可以让二者都带 `ddp/...`，最终以保存的 `config.yaml` 与实际 `experiments/...` 目录为准。
 
-`eval_pipeline.sh --no-videos` 只关闭 Step 2 final-eval 的视频；Step 3 demo 仍然录制视频。如果需要完全不录 demo，应分步运行 selection/eval，而不是依赖该 flag。
+`eval_pipeline.sh` 只执行 selection 与不录视频的 final eval，不再接受多余的 `--no-videos` 参数。Demo 使用独立的 `record_demo.sh` 命令。
 
 ### 9.2 Multi-seed / Ablation Runs
 

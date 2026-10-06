@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import argparse
 import tempfile
-import random
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -62,7 +61,7 @@ from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param,
-    save_eval_snapshot, mapped_task_seeds, artifact_reference, atomic_json, compute_eval_stats, selection_provenance,
+    save_eval_snapshot, run_eval_plan, plan_size, task_seed_pools, artifact_reference, atomic_json, compute_eval_stats, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
     collect_episode_details,
@@ -166,7 +165,7 @@ def main() -> None:
         type=int,
         nargs="*",
         default=None,
-        help="Specific seed numbers to record (e.g. --seeds 5 12 33). "
+        help="Physical seed numbers for every task (e.g. --seeds 5 12 33); no ordinal remapping. "
         "Overrides --episodes. Useful for re-recording specific episodes "
         "from a prior eval run (see result_details.json).",
     )
@@ -326,17 +325,16 @@ def main() -> None:
     # ── 8. Select seeds ────────────────────────────────────────────────────
     # Match evaluation and selection seed ordering when seeds are not explicit.
     if args.seeds:
-        eval_seeds = args.seeds
-        demo_episodes = len(eval_seeds)
+        eval_seeds = {task: list(args.seeds) for task in task_seed_pools(env_runner)}
+        demo_episodes = len(args.seeds)
         cprint(
             f"  Using {demo_episodes} specified seeds: {eval_seeds}",
             "cyan",
         )
     else:
-        all_seeds = list(env_runner.get_seed_list())
-        rng = random.Random(eval_seed)
-        rng.shuffle(all_seeds)
-        eval_seeds = all_seeds[:demo_episodes]
+        from dexmani_policy.eval_best_ckpt import _select_eval_seeds
+        eval_seeds = _select_eval_seeds(env_runner, eval_seed, demo_episodes)
+        demo_episodes = plan_size(eval_seeds)
 
     # Validate and snapshot the full manifest before narrowing the runner's pool.
     snapshot_ref = save_eval_snapshot(
@@ -344,12 +342,11 @@ def main() -> None:
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
         inference_steps_list=inference_steps_list, episodes=demo_episodes,
         shuffle_seed=eval_seed, policy_seed_mode="episode_seed",
-        task_seeds=mapped_task_seeds(env_runner, eval_seeds),
+        task_seeds=eval_seeds,
         viewer_resolution=list(resolved_resolution), env_video_fps=resolved_fps,
         heldout_from_selection=False,
         **selection_provenance(best_info),
     )
-    env_runner.eval_seeds = eval_seeds
 
     # ── 9. Run episodes (sweep or single) ─────────────────────────────────
     demo_results: list[dict] = []
@@ -364,10 +361,9 @@ def main() -> None:
         else:
             sub_dir = video_save_dir
 
-        result = env_runner.run(
-            agent,
+        result = run_eval_plan(
+            env_runner, agent, eval_seeds,
             inference_steps=inference_steps,
-            eval_episodes=demo_episodes,
             video_save_dir=sub_dir,
         )
 

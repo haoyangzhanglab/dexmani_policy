@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from typing import Dict
 
 import torch
@@ -307,12 +306,22 @@ class BaseAgent(nn.Module):
         return action_groups + obs_groups
 
     def _check_params_in_optimizer(self, optimizer: torch.optim.Optimizer):
-        """Verify all trainable parameters are covered by the optimizer."""
+        """Require every trainable parameter exactly once, without reordering."""
         model_param_ids = {id(p) for p in self.parameters() if p.requires_grad}
         optim_param_ids = set()
+        duplicate_ids = set()
         for group in optimizer.param_groups:
             for p in group["params"]:
+                if id(p) in optim_param_ids:
+                    duplicate_ids.add(id(p))
                 optim_param_ids.add(id(p))
+
+        if duplicate_ids:
+            names = [n for n, p in self.named_parameters() if id(p) in duplicate_ids]
+            raise ValueError(f"Duplicate optimizer parameters: {names}")
+        foreign = optim_param_ids - {id(p) for p in self.parameters()}
+        if foreign:
+            raise ValueError("Optimizer contains parameters outside this model")
 
         missing_ids = model_param_ids - optim_param_ids
         if missing_ids:
@@ -321,13 +330,12 @@ class BaseAgent(nn.Module):
             for p in missing_params:
                 name = next((n for n, pp in self.named_parameters() if pp is p), "?")
                 param_info.append(f"  {name}: shape={tuple(p.shape)}, device={p.device}")
-            warnings.warn(
+            raise ValueError(
                 f"The following {len(missing_ids)} trainable parameter(s) are NOT "
                 f"tracked by the optimizer:\n"
                 + "\n".join(param_info)
                 + "\nThis usually means get_optim_param_groups() is missing a module. "
                 "These parameters will not be updated during training.",
-                UserWarning,
             )
 
     def configure_optimizer(
@@ -343,6 +351,9 @@ class BaseAgent(nn.Module):
         if obs_lr == 0:
             self.obs_encoder.requires_grad_(False)
         groups = self.get_optim_param_groups(lr, obs_lr, weight_decay, obs_wd)
+        names = {id(p): n for n, p in self.named_parameters()}
+        for group in groups:
+            group["param_names"] = [names[id(p)] for p in group["params"]]
         optimizer = torch.optim.AdamW(
             [g for g in groups if g["params"]],
             lr=lr,

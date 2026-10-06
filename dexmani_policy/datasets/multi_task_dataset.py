@@ -1,7 +1,3 @@
-import hashlib
-import logging
-import multiprocessing as mp
-import os
 import warnings
 
 import numpy as np
@@ -96,11 +92,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self.cumsum_lengths = np.cumsum([0] + self.task_lengths)
         self.total_length = sum(self.task_lengths)
 
-        self._epoch = 0
         self.deterministic = deterministic
-        self._manager_pid = os.getpid()
-        self._manager = None if deterministic else mp.Manager()
-        self._epoch_val = None if deterministic else self._manager.Value("i", 0)
 
         if sampling_strategy == "proportional":
             self.sample_probs = np.array(self.task_lengths) / self.total_length
@@ -116,12 +108,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                 f"Set sampling_strategy='weighted' to use task weights."
             )
 
-        if self.deterministic:
-            self.fixed_indices = self.generate_fixed_indices()
-        else:
-            self.epoch_indices = None
-            self.current_epoch = -1
-
     def iter_normalization_data(self, key: str):
         """Yield the normalization statistics source for every child dataset.
 
@@ -131,109 +117,16 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         for dataset in self.datasets:
             yield from dataset.iter_normalization_data(key)
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state["_manager"] = None
-        return state
-
-    def close(self):
-        manager = getattr(self, "_manager", None)
-        if manager is not None and getattr(self, "_manager_pid", None) == os.getpid():
-            self._manager = None
-            manager.shutdown()
-
-    def __del__(self):
-        try:
-            self.close()
-        except (OSError, EOFError):
-            logging.getLogger(__name__).warning(
-                "dataset Manager shutdown failed", exc_info=True
-            )
-
-    def _make_rng(self, *seed_parts: str):
-        """Derive a reproducible ``np.random.Generator`` from seed components."""
-        raw = "_".join(str(p) for p in seed_parts)
-        seed = int(hashlib.md5(raw.encode()).hexdigest(), 16) % (2**32)
-        return np.random.default_rng(seed)
-
-    def _build_stratified_indices(self, rng):
-        """Core index construction shared by fixed and epoch-based generation."""
-        target_counts = self.compute_target_counts(rng=rng)
-        indices = []
-        for task_idx in range(self.num_tasks):
-            n_samples = target_counts[task_idx]
-            if n_samples == 0:
-                continue
-            local_indices = self.sample_task_indices(task_idx, n_samples, rng)
-            indices.extend((task_idx, int(idx)) for idx in local_indices)
-        rng.shuffle(indices)
-        return indices
-
-    def generate_fixed_indices(self):
-        if self.sampling_strategy == "proportional":
-            indices = []
-            for task_idx, task_length in enumerate(self.task_lengths):
-                for local_idx in range(task_length):
-                    indices.append((task_idx, local_idx))
-            rng = self._make_rng(self.seed, "fixed")
-            rng.shuffle(indices)
-            return indices
-
-        rng = self._make_rng(self.seed, "fixed")
-        return self._build_stratified_indices(rng)
-
-    def compute_target_counts(self, rng=None):
-        target_counts = np.round(self.sample_probs * self.total_length).astype(int)
-        diff = self.total_length - target_counts.sum()
-        if diff != 0:
-            if rng is None:
-                rng = self._make_rng(self.seed, self._epoch, "diff")
-            if diff > 0:
-                idx = rng.choice(self.num_tasks, p=self.sample_probs)
-                target_counts[idx] += diff
-            else:
-                while diff < 0:
-                    valid = np.where(target_counts > 0)[0]
-                    if len(valid) == 0:
-                        break
-                    idx = valid[rng.choice(len(valid))]
-                    target_counts[idx] -= 1
-                    diff += 1
-        return target_counts
-
-    def sample_task_indices(self, task_idx, n_samples, rng):
-        task_length = self.task_lengths[task_idx]
-
-        if n_samples <= task_length:
-            return rng.permutation(task_length)[:n_samples]
-
-        n_full_passes = n_samples // task_length
-        n_remainder = n_samples % task_length
-
-        local_indices = [rng.permutation(task_length) for _ in range(n_full_passes)]
-        if n_remainder > 0:
-            local_indices.append(rng.permutation(task_length)[:n_remainder])
-        return np.concatenate(local_indices)
-
-    def generate_epoch_indices(self):
-        rng = self._make_rng(self.seed, self._epoch)
-        return self._build_stratified_indices(rng)
-
     def __len__(self):
         return self.total_length
 
     def __getitem__(self, idx):
-        # sync epoch from shared memory (visible to persistent_workers)
-        if not self.deterministic:
-            self._epoch = self._epoch_val.value
-
-        if self.deterministic:
-            task_idx, local_idx = self.fixed_indices[idx]
-        else:
-            if self.epoch_indices is None or self.current_epoch != self._epoch:
-                self.epoch_indices = self.generate_epoch_indices()
-                self.current_epoch = self._epoch
-            task_idx, local_idx = self.epoch_indices[idx]
+        if idx < 0:
+            idx += self.total_length
+        if not 0 <= idx < self.total_length:
+            raise IndexError(idx)
+        task_idx = int(np.searchsorted(self.cumsum_lengths, idx, side="right") - 1)
+        local_idx = int(idx - self.cumsum_lengths[task_idx])
 
         sample = self.datasets[task_idx][local_idx]
 
@@ -242,11 +135,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         sample["obs"]["task_name"] = self.task_names[task_idx]
 
         return sample
-
-    def set_epoch(self, epoch: int):
-        self._epoch = epoch
-        if not self.deterministic:
-            self._epoch_val.value = epoch
 
     def get_validation_dataset(self):
         val_datasets = [d.get_validation_dataset() for d in self.datasets]

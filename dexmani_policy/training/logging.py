@@ -135,7 +135,7 @@ def print_param_count(agent) -> None:
     observation = getattr(agent, "obs_encoder", None)
     if observation is not None:
         fields = getattr(observation, "consumed_observation_fields", ())
-        cprint(f"  Actual observation fields: {tuple(fields)}", "white")
+        cprint(f"  Declared observation fields: {tuple(fields)}", "white")
         pointcloud = getattr(observation, "pc_encoder", None)
         if pointcloud is not None:
             values = {key: getattr(pointcloud, key) for key in (

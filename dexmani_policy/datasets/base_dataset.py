@@ -60,6 +60,7 @@ class BaseDataset(torch.utils.data.Dataset):
         rgb_color_aug: dict | None = None,
         rgb_keep_uint8: bool = False,
         split_manifest: str | None = None,
+        saved_split: dict | None = None,
     ) -> None:
         super().__init__()
 
@@ -139,20 +140,25 @@ class BaseDataset(torch.utils.data.Dataset):
         if augmentation_cfg is not None:
             self._build_augmentors()
 
-        if split_manifest is None:
+        if saved_split is not None:
+            from dexmani_policy.datasets.split import restore_split
+            train_mask, val_mask, manifest, digest = restore_split(
+                saved_split, self.replay_buffer.attrs, self.replay_buffer.n_episodes
+            )
+        elif split_manifest is None:
             val_mask = get_val_mask(
                 seed=seed, val_ratio=val_ratio, n_episodes=self.replay_buffer.n_episodes
             )
-            train_mask = ~val_mask
+            train_mask = downsample_mask(seed=seed, mask=~val_mask, max_n=max_train_episodes)
         else:
+            if max_train_episodes is not None or val_ratio != 0:
+                raise ValueError("Explicit split_manifest defines final IDs: set max_train_episodes=null "
+                                 "and val_ratio=0; prepare a subset manifest for a smaller budget")
             from dexmani_policy.datasets.split import load_split_manifest
 
             train_mask, val_mask, manifest, digest = load_split_manifest(
                 split_manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes
             )
-        train_mask = downsample_mask(
-            seed=seed, mask=train_mask, max_n=max_train_episodes
-        )
         self.val_mask = val_mask
         self.train_mask = train_mask
 
@@ -169,7 +175,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.pad_after = pad_after
         self._validation_dataset = None
         self._validation_dataset = self.get_validation_dataset()
-        if split_manifest is not None:
+        if split_manifest is not None or saved_split is not None:
             ids, trials = manifest["episode_ids"], manifest["trial_ids"]
             actual_train = [ids[i] for i in np.flatnonzero(train_mask)]
             self.data_recipe["split_manifest"] = {

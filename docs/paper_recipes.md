@@ -1,8 +1,8 @@
 # 论文实验 recipe 与六项修正记录
 
-更新日期：2026-10-07。当前配方已实现于 `4c97cfbdb4ea9761a2fe03907d0a28c10c4f1a42`；后续测试隔离修正不改变模型或实验配方。任务来源：[六项任务书](../CODEX_PAPER_READINESS_TASKS.md)。这是实现与低成本验证记录，不是策略质量验收或论文结果表。
+更新日期：2026-10-07。当前机制说明已随简化整改更新；带日期的实施记录对应 `4c97cfbdb4ea9761a2fe03907d0a28c10c4f1a42` 及随后验收版本。历史任务来源：[六项任务书](../CODEX_PAPER_READINESS_TASKS.md)。这是实现与低成本验证记录，不是策略质量验收或论文结果表。
 
-最新状态见[验收收尾](#验收收尾2026-10-07)：测试隔离、单任务真实清单与 SAT 原生 CPU 检查通过；多任务真实清单待发布，CUDA Trainer BF16/compile 尚未验证。下文带日期的实施记录保留当时结果，不能视为当前全部验收通过。
+历史阶段状态见[验收收尾](#验收收尾2026-10-07)：测试隔离、单任务真实清单与 SAT 原生 CPU 检查通过；多任务真实清单待发布，CUDA Trainer BF16/compile 尚未验证。下文带日期的实施记录保留当时结果，不能视为当前全部验收通过。
 
 ## 当前方法机制与本地适配
 
@@ -14,15 +14,15 @@
 | [DP3](../dexmani_policy/configs/dp3.yaml) | XYZRGB 1024 点 + state；全局 PointNet 128d + state MLP；同 DP 的 UNet | 100-step diffusion，`sample` MSE | [DP3Agent](../dexmani_policy/agents/core/dp3.py) → [PointNet registry](../dexmani_policy/agents/obs_encoder/pointcloud/registry.py)；scratch/full，本地点云颜色和数据适配；上游精确 revision 未核实 |
 | [DQ-RISE](../dexmani_policy/configs/dqrise.yaml) | XYZRGB 1024 点 + state；`idp3` MultiStagePointNet 128d；UNet `[256,512]` | 100-step diffusion，`epsilon` MSE；内部预测 TCP 9 + 一个连续 code index，最后恢复 hand 12 | [DQRISEAgent](../dexmani_policy/agents/core/dqrise.py) 的控制输出为 21d；本地 VQ/PCA 排序 codebook（2 groups × 4），必须匹配 policy 数据窗口/归一化。scratch encoder，codebook 来自 `robot_data/sorted_hand_poses_${task_name}.npz`；上游精确 revision 未核实 |
 | [ManiFlow](../dexmani_policy/configs/maniflow.yaml) | XYZRGB 1024 点 + state；dense PointNet 128d、8-frequency XYZ PE 投影、state 广播；两帧沿 token 维展开；12-layer / 768d ConsistencyDiTX | [ConsistencyFlowMatch](../dexmani_policy/agents/action_decoders/consistency_flow.py)：flow velocity MSE + EMA consistency MSE；batch 分配 .75/.25，两项均值直接相加 | [本地观测编码](../dexmani_policy/agents/core/maniflow.py) 为 scratch/full；flow 时间 beta，consistency 离散网格 10、dt uniform、target time relative；agent fallback NFE 10，实际 eval 为 4。上游精确 revision 未核实 |
-| [SAT](../dexmani_policy/configs/sat.yaml) | XYZRGB 1024 点 + state；多尺度 PointNext、96 patches、256d token、4-layer patch attention、learned global prefix；8-layer / 768d SAT | [RectifiedFlow](../dexmani_policy/agents/action_decoders/rectified_flow.py) velocity MSE；训练时间 beta、网格参数 10；Euler 推理；训练 action-token shuffle | [本地 SAT](../dexmani_policy/agents/core/sat.py) 为 scratch/full；按 patch 槽位沿特征维融合两帧，state 广播进每个 token，三字段 EJC 投影求和。官方固定版本对照见下节；本轮只修无内部前缀分支 |
+| [SAT](../dexmani_policy/configs/sat.yaml) | XYZRGB 1024 点 + state；多尺度 PointNext、96 patches、256d token、4-layer patch attention、learned global prefix；8-layer / 768d SAT | [RectifiedFlow](../dexmani_policy/agents/action_decoders/rectified_flow.py) velocity MSE；训练时间连续 beta，不使用离散训练网格；Euler 推理；训练 action-token shuffle | [本地 SAT](../dexmani_policy/agents/core/sat.py) 为 scratch/full；按 patch 槽位沿特征维融合两帧，state 广播进每个 token，三字段 EJC 投影求和。官方固定版本对照见下节；本轮只修无内部前缀分支 |
 | [R3D](../dexmani_policy/configs/r3d.yaml) | XYZRGB + state；Uni3D `eva02_tiny_patch14_224`，512 groups × 32 points、PointSAM feature；256d / 4-layer OneWay backbone | 100-step diffusion，`sample` MSE | [R3DAgent](../dexmani_policy/agents/core/r3d.py) 默认 `use_aux_ee=false`，19d joint 控制；可选辅助 EEF 9d 是额外预测，控制仍取 joint 19。预训练读取 `data/pretrained/uni3d/model.safetensors`，代码下载源 `eddie-cui/r3d-weights`；选择性加载 `pc_encoder.*`，活跃路径 full tuning、无用 timm 参数冻结；上游/权重 revision 未核实 |
-| [Multi-task DiT](../dexmani_policy/configs/multitask_dit.yaml) | RGB + state + task text；scratch ResNet18 + GroupNorm/full；冻结 CLIP text `openai/clip-vit-base-patch16`，缓存 task embeddings + trainable text projection；8-layer / 512d DiT | 默认 diffusion、100-step、`sample` MSE；配置中的 flow 参数在当前 diffusion 分支不生效 | [MultiTaskAgent](../dexmani_policy/agents/core/multi_task.py)；任务为 pick_bottle/open_box，文本为 “pick up the bottle” / “open the box”；不使用 RGB 通用默认 DINO 预训练。该组合为本地基线，上游精确对应未核实 |
+| [Multi-task DiT](../dexmani_policy/configs/multitask_dit.yaml) | RGB + state + task text；scratch ResNet18 + GroupNorm/full；首次初始化用冻结 CLIP text `openai/clip-vit-base-patch16` 生成固定任务 embedding 表，训练仅保留表与 trainable text projection；8-layer / 512d DiT | 默认 diffusion、100-step、`sample` MSE；当前配置不暴露未使用的 flow 参数 | [MultiTaskAgent](../dexmani_policy/agents/core/multi_task.py)；任务为 pick_bottle/open_box，文本为 “pick up the bottle” / “open the box”；不使用 RGB 通用默认 DINO 预训练。该组合为本地基线，上游精确对应未核实 |
 
 动作和损失消费者分别为 [BaseAgent](../dexmani_policy/agents/core/base.py)、[Diffusion](../dexmani_policy/agents/action_decoders/diffusion.py) 及上表各 agent。默认 `action` 为 19 = arm joint 7 + hand 12；DQ-RISE 的 `action_ee` 为 21 = xyz 3 + rot6d 6 + hand 12。所有当前默认 `H / observation horizon / action chunk = 16 / 2 / 8`，执行片段从 `n_obs_steps - 1` 开始。字段维度描述不替代数据中的实际排列校验。
 
 ## 当前训练与评测配方
 
-所有行都使用 100000 **optimizer updates**，候选为 20000/40000/60000/80000/100000；accumulation=1，`drop_last=true`，seed 默认 42，gradient clip=1，cosine scheduler，末端 LR ratio 的实现默认值为 .1。EMA 每个 optimizer update 更新一次：after=0、inv_gamma=1、power=.75、max=.9999，当前 `foreach` 缺省为 false。配置均启用 BF16 autocast 与 compile；这不表示参数以 BF16 存储，也不表示本轮验证了 CUDA/compile。
+所有行都使用 100000 **optimizer updates**，候选为 20000/40000/60000/80000/100000；accumulation=1，`drop_last=true`，seed 默认 42，gradient clip=1，标准 cosine scheduler，不使用 `lr_min_ratio`；该参数只用于 `cosine_min_lr`。EMA 每个 optimizer update 更新一次：after=0、inv_gamma=1、power=.75、max=.9999，当前 `foreach` 缺省为 false。配置均启用 BF16 autocast 与 compile；这不表示参数以 BF16 存储，也不表示本轮验证了 CUDA/compile。
 
 精度 **P**：冻结 DINO BF16，LoRA 参数/对应 AdamW `exp_avg`、`exp_avg_sq`/EMA shadow FP32；其他可训练模块保持 FP32。精度 **F**：按当前构造路径，参数及相应 AdamW 动量、EMA shadow 为 FP32；没有 LoRA，Multi-task 的冻结 text backbone 也是 FP32。F 是源码存储配方，未为所有完整模型加载权重运行验收。
 
@@ -50,7 +50,7 @@
 
 [BaseDataset](../dexmani_policy/datasets/base_dataset.py) 先做 episode split/downsample，再按真实数据有效窗口采样；padding 为 before=1、after=7，obs_horizon=2。[MultiTaskDataset](../dexmani_policy/datasets/multi_task_dataset.py) 聚合各 child 的统计源。[normalizer 构造](../dexmani_policy/training/build_utils.py) 仅使用有效训练窗口涉及的唯一源行：joint state 为 limits，joint action 的 auto 为 limits；EEF action 的 xyz/hand 为 limits、rot6d 为 identity。DP3/DQ-RISE/ManiFlow/R3D 点云为 limits，SAT 点云为 identity。RGB 的配置归一化为 identity，实际 image processor 仍执行各 backbone 的像素预处理。
 
-所有方法的 state Gaussian noise std=.0002、prob=1。点云方法 XYZ noise std=.002，color brightness=.125/contrast=.5/saturation=.5/hue=0，prob=1；DP3/DQ-RISE/SAT 另有 max dropout ratio=.8，ManiFlow/R3D 无此项。FPS 训练允许 random start/output shuffle，noise scale=0，eval 强制 deterministic。SAT 的 FPS 输出随机顺序与官方 attention 前独立 patch shuffle 是不同机制。
+所有方法的 state Gaussian noise std=.0002、prob=1。点云方法 XYZ noise std=.002，color brightness=.125/contrast=.5/saturation=.5/hue=0，prob=1；DP3/DQ-RISE/SAT 另有 max dropout ratio=.8，ManiFlow/R3D 无此项。FPS 训练保留 random start，noise scale=0，eval 强制 deterministic。DP3/DQ-RISE 的全局 PointNet 配方关闭同一已选点集的 output shuffle，改变新 run 的 RNG 消耗；其他点云配方保留各自 shuffle 设置。SAT 的 FPS 输出随机顺序与官方 attention 前独立 patch shuffle 是不同机制。
 
 DP/Multi-task：resize 240×240、训练随机 crop 224×224、eval center crop；颜色增强 brightness=.3/contrast=.2/saturation=.2/hue=.05/grayscale=.1，prob=.25，noise/blur=0。新 DP `rgb_keep_uint8=true`，Multi-task child 未配置该字段，按 BaseDataset 缺省 false。像素 transport 与 LoRA 参数存储精度是独立变量。
 
@@ -60,12 +60,12 @@ DP/Multi-task：resize 240×240、训练随机 crop 224×224、eval center crop�
 
 - manifest canonical SHA256：`44362705d1bd5575dc766b4b98e7953e8b6ec770a357d0000b42df82c6ed4a3a`。
 - 完整 paired runner pool SHA256：`5ac859dd04b29670ce5ad3bd309dc4c148e12040be5ea0469484247aa9c32f91`。
-- hash 沿用 `json.dumps(..., sort_keys=True)` 的既有算法；不是文件原始字节 hash。pool hash 只涵盖完整 task→ordered physical seeds mapping，不含路径或时间。
+- hash 沿用 `json.dumps(..., sort_keys=True)` 的既有算法；不是文件原始字节 hash。上述 pool hash 是发布时的来源快照，当前执行只依赖清单实际 task→seeds，不再校验未使用成员或全池顺序。
 - 已只读比较 A/B 原 manifest：三个角色的 seed 和顺序均相同；新清单有自己的 metadata/hash，没有覆盖 A/B 清单或改变其协议。
 
-**M** 为默认 task-set `pick_bottle+open_box` 对应路径。本机两个任务均无实际 seed 文件，真实 runner 各 fallback 100，生成器实际拒绝 25+5+100；**真实清单待发布 / NOT VERIFIED**，没有提交占位 JSON。必须准备足够实际 paired seeds 后一次发布；若事先决定更小 test，应显式生成另一份协议、记录新计数，不能自动截断。若以后比较单/多任务同一任务，需核对各角色的 physical seeds 完全一致；当前 paired mapping 无法表达的配对不能宣称成立。
+**M** 为默认 task-set `pick_bottle+open_box` 对应路径。本机两个任务均无实际 seed 文件，真实 runner 各 fallback 100，生成器实际拒绝 25+5+100；**真实清单待发布 / NOT VERIFIED**，没有提交占位 JSON。必须准备足够实际 paired seeds 后一次发布；若事先决定更小 test，应显式生成另一份协议、记录新计数，不能自动截断。若以后比较单/多任务同一任务，需核对各角色的 physical seeds 完全一致；当前 runner 直接执行这些实际列表，各任务预算仍须相等。
 
-新 selection 必须指定有效 manifest，完整预留 tie seeds；选点后 pinned eval/demo 使用不可变记录中的内嵌内容，原路径删除或修改不影响默认 handoff。显式 `eval.seed_manifest=...` 必须与记录 canonical hash 相同，显式 null 也不能解除合同；初次选点和后续评测都核对完整池身份。demo 仍按原规则挑可视化 seeds，不计入 held-out 指标。历史无 manifest 的记录只沿 legacy 路径复现，不能贴上新协议冒充重新选点。
+新 selection 必须指定有效 manifest，完整预留 tie seeds；选点后 pinned eval/demo 使用不可变记录中的内嵌内容，原路径删除或修改不影响默认 handoff。显式 `eval.seed_manifest=...` 必须与记录 canonical hash 相同，显式 null 也不能解除合同；初次选点和后续评测检查所用 seed 可用、角色互斥及完成列表。demo 根据各任务池选择可视化 seeds，显式 `--seeds` 表示物理数字，不计入 held-out 指标。历史无 manifest 的记录只沿 legacy 路径复现，不能贴上新协议冒充重新选点。
 
 完整正常的全零 selection 使用原排序（成功率、成功步数、较大 global_step），发布 `selection.selection_all_zero=true` 和流程 `status=success`，然后进行完整 test；空结果、episode 缺失/重复/错误、技术异常失败并保留旧成功指针。旧记录缺此字段表示“未记录”，不推断非全零。
 
@@ -123,7 +123,7 @@ python dexmani_policy/eval_best_ckpt.py \
   --selection-record "$SELECTION_RECORD_PATH" --no-videos
 ```
 
-显式协议决定完整角色 seed，`initial_episodes` / `batch_size` 只作为请求记录，不截断 manifest；`max_episodes` 仍是 selection 加预留 tie-break 的硬上限，不足则运行前拒绝。快照另存 `effective_episode_counts`。final eval 完整运行 test，数量与请求不同时提示，并记录 `effective_episodes`。Python eval/sweep 的 `dotlist_overrides` 可传显式协议声明；普通 cfg 中的路径仅是默认来源。shell pipeline 保持 `SEED_MANIFEST` 只传 selector、后两步传 `--selection-record`；demo 无 dot-list 参数。解读结果时区分流程成功、策略成功率、训练 seed 波动及协议是否 legacy。
+显式协议决定完整角色 seed，已删除无效的 `initial_episodes` / `batch_size` 请求参数，旧 CLI 参数会报错；`max_episodes` 仍是 selection 加预留 tie-break 的硬上限，不足则运行前拒绝。快照另存 `effective_episode_counts`。final eval 完整运行 test，数量与请求不同时提示，并记录 `effective_episodes`。Python eval/sweep 的 `dotlist_overrides` 可传显式协议声明；普通 cfg 中的路径仅是默认来源。shell pipeline 保持 `SEED_MANIFEST` 只传 selector、final eval 传 `--selection-record`；demo 独立执行，无 dot-list 参数。解读结果时区分流程成功、策略成功率、训练 seed 波动及协议是否 legacy。
 
 ## 实施与实际验证记录
 

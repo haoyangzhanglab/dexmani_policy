@@ -17,19 +17,14 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.training.checkpoint import (
     CheckpointStore,
-    TrainCheckpoint,
     fix_state_dict,
 )
 from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.tensor import dict_apply
-from dexmani_policy.utils.random import get_rng_state, set_seed
+from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
-    build_dataset_and_normalizer,
-    build_model_and_ema,
-    build_optimizer_and_scheduler,
     validate_config,
 )
-from dexmani_policy.training.resume import build_resume_contract, build_train_loader
 
 register_resolvers()
 
@@ -123,318 +118,94 @@ def validate_config_only(config_name: str):
     return True
 
 
-def _prepare_dqrise_codebook(cfg, normalizer) -> str | None:
-    """Create a schema-valid DQ-RISE codebook matching the smoke dataset normalizer."""
-    agent_target = str(cfg.get("agent", {}).get("_target_", ""))
-    if not agent_target.endswith(".DQRISEAgent"):
-        return None
+def smoke_test(config_name: str, *, max_updates=4):
+    """Run the production single-device Trainer with an execution-only budget."""
+    from dexmani_policy.train import build_train_components, build_trainer
+    from dexmani_policy.agents.loader import load_experiment_config, restore_policy_agent
+    from dexmani_policy.training.resume import optimizer_to
+    from dexmani_policy.utils.validation import positive_int
 
-    from dexmani_policy.agents.vq_hand.codebook_manager import CodebookManager
-
-    action_dim = int(cfg.agent.action_dim)
-    tcp_dim = int(cfg.agent.tcp_dim)
-    hand_dim = action_dim - tcp_dim
-    num_groups = int(cfg.agent.get("codebook_num_groups", 2))
-    codebook_size = int(cfg.agent.get("codebook_size", 4))
-    total_codes = codebook_size**num_groups
-
-    manager = CodebookManager(
-        hand_dim=hand_dim,
-        num_groups=num_groups,
-        codebook_size=codebook_size,
-    )
-
-    # Deterministic synthetic prototypes are enough to exercise DQ-RISE's
-    # integration path. Persist them through CodebookManager.save() so the
-    # fixture always follows the runtime artifact schema instead of duplicating it.
-    positions = torch.linspace(-1.0, 1.0, total_codes, dtype=torch.float32).unsqueeze(1)
-    per_dim_offset = torch.linspace(
-        -0.05, 0.05, hand_dim, dtype=torch.float32
-    ).unsqueeze(0)
-    normalized_poses = (positions + per_dim_offset).clamp(-1.0, 1.0)
-    manager.sorted_hand_poses = (normalized_poses + 1.0) * 0.5 * (
-        manager.hand_max - manager.hand_min
-    ) + manager.hand_min
-    manager.pca_permutation = torch.arange(total_codes, dtype=torch.long)
-    manager.layer_weights = torch.full(
-        (num_groups,), 1.0 / num_groups, dtype=torch.float32
-    )
-
-    action_params = normalizer["action"].params_dict
-    manager.set_hand_normalizer(
-        action_params["scale"][-hand_dim:],
-        action_params["offset"][-hand_dim:],
-    )
-
-    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as file:
-        tmp_path = file.name
-    manager.save(tmp_path)
-    return tmp_path
-
-
-def smoke_test(config_name: str):
-    print(f"\n{'=' * 60}")
-    print(f"Smoke test: {config_name}")
-    print(f"{'=' * 60}")
-
+    positive_int(max_updates, "max_updates")
     cfg = load_config(config_name)
     validate_config(cfg)
+    if cfg.training.get("num_gpus", 1) > 1:
+        raise RuntimeError("NOT VERIFIED: multi-rank configs require a bounded train_ddp run")
+    if not torch.cuda.is_available():
+        raise RuntimeError("NOT VERIFIED: original training configuration requires CUDA")
     set_seed(cfg.training.seed)
-
-    print("[1/6] Building dataset & normalizer ...")
-    dataset, normalizer = build_dataset_and_normalizer(cfg)
-    train_loader = build_train_loader(cfg, dataset)
-    print(f"      dataset size: {len(dataset)}, batches/epoch: {len(train_loader)}")
-
-    val_dataset = dataset.get_validation_dataset()
-    if val_dataset is not None:
-        print(f"      val dataset size: {len(val_dataset)}")
-        if (
-            hasattr(dataset, "sampling_strategy")
-            and dataset.sampling_strategy == "weighted"
-        ):
-            assert (
-                hasattr(val_dataset, "task_weights")
-                and val_dataset.task_weights is not None
-            ), (
-                "MultiTaskDataset validation set must preserve task_weights for weighted strategy"
-            )
-            print(
-                "      ✓ weighted strategy validation set OK "
-                f"(task_weights={val_dataset.task_weights})"
-            )
-    else:
-        print("      no validation set (val_ratio=0)")
-
-    codebook_tmp = _prepare_dqrise_codebook(cfg, normalizer)
-    if codebook_tmp is not None:
-        cfg.agent.codebook_path = codebook_tmp
-        print(f"      [dqrise] temporary codebook → {codebook_tmp}")
-
-    print("[2/6] Building model & EMA ...")
-    device = torch.device(cfg.training.device)
-    try:
-        model, ema_model, ema_updater = build_model_and_ema(cfg, device, normalizer)
-    finally:
-        if codebook_tmp is not None:
-            pathlib.Path(codebook_tmp).unlink(missing_ok=True)
-
-    print("[3/6] Building optimizer & scheduler ...")
-    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, len(train_loader))
-
-    print("[4/6] Running forward + backward ...")
-    batch = next(iter(train_loader))
-    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-
-    loss_kwargs = model.get_training_loss_kwargs(ema_model)
-    model.train()
-    raw_loss, loss_dict = model.compute_loss(batch, **loss_kwargs)
-    raw_loss.backward()
-
-    assert torch.isfinite(raw_loss), f"Non-finite loss: {raw_loss.item()}"
-    print(f"      loss: {raw_loss.item():.4f}  keys: {list(loss_dict.keys())}")
-
-    unreached = [
-        name
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad and parameter.grad is None
-    ]
-    if unreached:
-        print(
-            f"      ⚠ {len(unreached)} trainable params received no gradient in this batch "
-            "(verify static usage across DDP batches):"
-        )
-        for name in unreached[:10]:
-            print(f"        - {name}")
-        if len(unreached) > 10:
-            print(f"        ... and {len(unreached) - 10} more")
-    else:
-        print("      ✓ all trainable params received gradients")
-
-    # One real optimizer/scheduler/EMA update, before save/restore checks.
-    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.get("max_grad_norm", 1.0),
-                                   error_if_nonfinite=True)
-    optimizer.step()
-    scheduler.step()
-    optimizer.zero_grad(set_to_none=True)
-    if ema_updater is not None:
-        ema_updater.step(model)
-    print("      ✓ one optimizer/scheduler/EMA update completed")
-
-    print("[5/6] Running predict_action ...")
-    model.eval()
-    with torch.no_grad():
-        obs_sample = {key: value[:1] for key, value in batch["obs"].items()}
-        result = model.predict_action(obs_sample)
-        pred_shape = tuple(result["pred_action"].shape)
-        ctrl_shape = tuple(result["control_action"].shape)
-        expected_ctrl_dim = model.control_action_dim
-        assert ctrl_shape == (
-            1,
-            cfg.n_action_steps,
-            expected_ctrl_dim,
-        ), (
-            f"control_action shape {ctrl_shape} != "
-            f"(1, {cfg.n_action_steps}, {expected_ctrl_dim})"
-        )
-        print(f"      pred_action: {pred_shape}  control_action: {ctrl_shape}")
-
-    print("[6/6] Checkpoint save → load roundtrip ...")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        experiment = pathlib.Path(tmpdir)
-        OmegaConf.save(cfg, experiment / "config.yaml", resolve=True)
-        ckpt_dir = experiment / "checkpoints"
-        store = CheckpointStore(ckpt_dir)
-
-        model_sd = {key: value.clone() for key, value in model.state_dict().items()}
-        ema_sd = (
-            {key: value.clone() for key, value in ema_model.state_dict().items()}
-            if ema_model is not None
-            else None
-        )
-
-        ckpt = TrainCheckpoint(
-            epoch=0,
-            global_step=1,
-            next_micro_step=0,
-            model_state=fix_state_dict(model_sd, is_current_ddp=False),
-            ema_model_state=(
-                fix_state_dict(ema_sd, is_current_ddp=False)
-                if ema_sd is not None
-                else None
-            ),
-            optimizer_state=optimizer.state_dict(),
-            scheduler_state=scheduler.state_dict(),
-            resume_contract=build_resume_contract(cfg, model, train_loader),
-            ema_updater_step=ema_updater.optimization_step
-            if ema_updater is not None
-            else None,
-            ema_decay=None,
-            rng_states=[get_rng_state(device)],
-        )
-        ckpt_path = store.save(
-            "epoch=0000-step=00000001-score=0.8500.pt",
-            ckpt,
-        )
-        print(f"      saved checkpoint: {ckpt_path.name}")
-
-        loaded = store.load(ckpt_path)
-        assert loaded.epoch == 0
-        assert loaded.global_step == 1
-        assert loaded.next_micro_step == 0
-        assert (
-            loaded.resume_contract["training"]["loop"]["total_train_steps"]
-            == cfg.training.loop.total_train_steps
-        )
-
-        loaded_model_sd = fix_state_dict(loaded.model_state, is_current_ddp=False)
-        loaded_model_sd = {
-            key: value.to(device) for key, value in loaded_model_sd.items()
-        }
-        for key in model_sd:
-            if not torch.equal(model_sd[key], loaded_model_sd[key]):
-                raise AssertionError(
-                    f"Model state dict mismatch for key '{key}' after roundtrip"
-                )
-        print("      ✓ model state dict roundtrip OK")
-
-        if ema_sd is not None and loaded.ema_model_state is not None:
-            loaded_ema_sd = fix_state_dict(loaded.ema_model_state, is_current_ddp=False)
-            loaded_ema_sd = {
-                key: value.to(device) for key, value in loaded_ema_sd.items()
-            }
-            for key in ema_sd:
-                if not torch.equal(ema_sd[key], loaded_ema_sd[key]):
-                    raise AssertionError(
-                        f"EMA state dict mismatch for key '{key}' after roundtrip"
-                    )
-            print("      ✓ EMA state dict roundtrip OK")
-
-        agent_contract = loaded.resume_contract["agent"]
-        assert agent_contract["n_obs_steps"] == model.n_obs_steps
-        assert agent_contract["n_action_steps"] == model.n_action_steps
-        assert agent_contract["action_dim"] == model.action_dim
-        print("      ✓ resume contract roundtrip OK")
-
-        from unittest.mock import patch
-
-        from dexmani_policy.agents.loader import (
-            load_experiment_config,
-            restore_policy_agent,
-        )
-
-        saved = load_experiment_config(experiment)
-        # Complete states must bypass both training-only external asset readers.
-        with (
-            patch(
-                "dexmani_policy.agents.obs_encoder.pointcloud.uni3d.Uni3DPointcloudEncoder._load_pretrained_weights",
-                side_effect=AssertionError(
-                    "inference accessed Uni3D initialization assets"
-                ),
-            ),
-            patch(
-                "dexmani_policy.agents.vq_hand.codebook_manager.CodebookManager.load",
-                side_effect=AssertionError("inference accessed the external codebook"),
-            ),
-        ):
-            for use_ema in (False, True) if ema_model is not None else (False,):
-                restored = restore_policy_agent(
-                    saved, ckpt_path, use_ema=use_ema, device=device
-                )
-                with torch.inference_mode():
-                    prediction = restored.predict_action(obs_sample)["control_action"]
-                assert prediction.shape == (
-                    1,
-                    cfg.n_action_steps,
-                    model.control_action_dim,
-                )
-                assert torch.isfinite(prediction).all()
-                selected = ema_model if use_ema else model
-                for key, tensor in selected.state_dict().items():
-                    torch.testing.assert_close(
-                        restored.state_dict()[key], tensor, rtol=0, atol=0
-                    )
-                del restored
-
-        if saved.get("real_runtime") is not None:
-            from dexmani_policy.deployment import inspect_policy, load_policy
-
-            for weights in ("raw", "ema") if ema_model is not None else ("raw",):
-                info = inspect_policy(
-                    experiment, checkpoint=ckpt_path.name, weights=weights
-                )
-                runtime = load_policy(
-                    saved, info, device=str(device), seed=cfg.training.seed
-                )
-                try:
-                    rgb_hw = (
-                        tuple(dataset.replay_buffer["rgb"].shape[1:3])
-                        if "rgb" in info.observation_fields
-                        else None
-                    )
-                    runtime.warmup(samples=1, rgb_hw=rgb_hw)
-                finally:
-                    runtime.close()
-
-        # A missing learned tensor must fail strict restoration, even though the
-        # checkpoint container and all resume-only bookkeeping remain readable.
-        bad = store.load(ckpt_path)
-        key = next(iter(dict(model.named_parameters())))
-        del bad.model_state[key]
-        bad_path = store.save("corrupt.pt", bad)
+    with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as tmpdir:
+        cfg.workspace.output_dir = tmpdir
+        cfg.workspace.wandb_cfg = None
+        comp = build_train_components(cfg)
+        trainer = build_trainer(cfg, comp)
         try:
-            restore_policy_agent(saved, bad_path, use_ema=False, device=device)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError(
-                "Corrupted model state passed strict inference restore"
-            )
-        print(
-            "      ✓ saved config → raw/EMA strict restore → predict; corruption rejected"
-        )
+            comp.workspace.save_hydra_config(cfg)
+            before = {name: p.detach().cpu().clone()
+                      for name, p in comp.model.named_parameters()
+                      if p.requires_grad and p.is_floating_point()}
+            trainer.train(max_updates=max_updates)
+            changed = []
+            for name, p in comp.model.named_parameters():
+                # compile wraps submodules; checkpoint naming removes the wrapper.
+                name = name.replace("._orig_mod.", ".")
+                if name in before:
+                    current = p.detach().cpu()
+                    if not torch.isfinite(current).all():
+                        raise AssertionError(f"Non-finite learned parameter: {name}")
+                    if not torch.equal(before[name], current):
+                        changed.append(name)
+            del before
+            if not changed:
+                raise AssertionError("No finite learning-parameter update observed within the smoke budget")
+            print(f"Observed parameter update: {changed[0]} (step={trainer.global_step})")
 
-    print(f"\n✓ {config_name} smoke test PASSED\n")
+            path = comp.workspace.resolve_checkpoint_path("latest")
+            checkpoint = CheckpointStore(path.parent).load(path)
+            assert checkpoint.global_step == trainer.global_step
+            assert checkpoint.epoch == trainer.current_epoch
+            assert checkpoint.next_micro_step == trainer.next_micro_step
+            assert comp.scheduler.state_dict() == checkpoint.scheduler_state
+            assert checkpoint.resume_contract["training"]["loop"]["total_train_steps"] == cfg.training.loop.total_train_steps
+            if comp.ema_updater is not None:
+                assert checkpoint.ema_updater_step == comp.ema_updater.optimization_step
+            for selected, state in ((comp.model, checkpoint.model_state),
+                                    (comp.ema_model, checkpoint.ema_model_state)):
+                if selected is not None:
+                    actual = fix_state_dict(selected.state_dict(), False)
+                    assert actual.keys() == state.keys()
+                    for key, tensor in actual.items():
+                        torch.testing.assert_close(tensor.detach().cpu(), state[key], rtol=0, atol=0)
+            del checkpoint
+
+            # One real batch, unchanged preprocessing; inference uses one observation.
+            comp.train_loader.sampler.set_epoch(trainer.current_epoch, 0)
+            batch = next(iter(comp.train_loader))
+            obs = dict_apply({k: v[:1] for k, v in batch["obs"].items()},
+                             lambda x: x.to(comp.device))
+            predictions = {}
+            for use_ema, selected in ((False, comp.model), (True, comp.ema_model)):
+                if selected is None:
+                    continue
+                selected.eval()
+                set_seed(cfg.training.seed)
+                with torch.inference_mode():
+                    pred = selected.predict_action(obs)["control_action"]
+                assert pred.shape == (1, cfg.n_action_steps, selected.control_action_dim)
+                assert torch.isfinite(pred).all()
+                predictions[use_ema] = pred.cpu()
+                selected.to("cpu")
+            optimizer_to(comp.optimizer, "cpu")
+            saved = load_experiment_config(tmpdir)
+            for use_ema, expected in predictions.items():
+                restored = restore_policy_agent(saved, path, use_ema=use_ema, device=comp.device)
+                set_seed(cfg.training.seed)
+                with torch.inference_mode():
+                    actual = restored.predict_action(obs)["control_action"].cpu()
+                torch.testing.assert_close(actual, expected)
+                del restored
+        finally:
+            comp.workspace.close()
+    print(f"✓ {config_name}: Trainer updates, prediction and raw/EMA roundtrip PASSED")
     return True
 
 
@@ -453,12 +224,15 @@ def main():
     parser.add_argument(
         "config_names", nargs="+", help="Hydra config names to validate."
     )
+    parser.add_argument("--max-updates", type=int, default=4, help="Execution-only optimizer-update budget (default: 4).")
     args = parser.parse_args()
 
-    runner = validate_config_only if args.config_only else smoke_test
     for config_name in args.config_names:
         try:
-            runner(config_name)
+            if args.config_only:
+                validate_config_only(config_name)
+            else:
+                smoke_test(config_name, max_updates=args.max_updates)
         except Exception as exc:
             mode = "config check" if args.config_only else "smoke test"
             print(f"\n✗ {config_name} {mode} FAILED: {exc}\n")

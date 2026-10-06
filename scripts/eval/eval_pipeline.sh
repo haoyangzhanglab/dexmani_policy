@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# One-shot evaluation pipeline: select_best_ckpt → eval_best_ckpt → record_demo.
+# One-shot evaluation pipeline: select_best_ckpt → eval_best_ckpt.
 #
-# Runs the full three-stage evaluation workflow with sensible defaults:
+# Runs selection and numerical held-out evaluation:
 #   1. Select the best checkpoint with a fixed initial stage and optional tie batch.
-#   2. Evaluate the best checkpoint on disjoint held-out seeds (with videos by default).
-#   3. Record 5 high-resolution demo videos using the selected best policy.
+#   2. Evaluate the best checkpoint on disjoint held-out seeds, without videos.
+# Demo recording is a separate explicit record_demo.sh command.
 #
 # Usage:
-#   bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]
+#   bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>
 #   A valid manifest is required; SEED_MANIFEST overrides the saved config path.
 #   All stages share this invocation's selection record.
 #
 # Examples:
 #   bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56
-#   bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42 --no-videos
+#   bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42
 #
 set -euo pipefail
 
@@ -22,9 +22,9 @@ cd "$ROOT_DIR"
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]"
+    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>"
     echo ""
-    echo "One-shot evaluation pipeline: select best ckpt → held-out eval → 5 demo videos."
+    echo "One-shot evaluation pipeline: select best ckpt → numerical held-out eval."
     echo "A valid manifest is required; set SEED_MANIFEST to override its saved path."
     echo ""
     echo "Positional args:"
@@ -32,19 +32,16 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  task_name     Task name (e.g. pour, pick_apple_messy)"
     echo "  exp_name      Experiment timestamp/name under experiments/<policy>/<task>/"
     echo ""
-    echo "Options:"
-    echo "  --no-videos   Disable video recording in Step 2 (eval_best_ckpt)."
-    echo "                Step 1 (select_best) never records videos."
-    echo "                Step 3 (record_demo) always records videos."
+    echo "  Demo recording is separate: scripts/eval/record_demo.sh"
     echo ""
     echo "Examples:"
     echo "  bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56"
-    echo "  bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42 --no-videos"
+    echo "  bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42"
     exit 0
 fi
 
 if [[ $# -lt 3 ]]; then
-    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]" >&2
+    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>" >&2
     exit 1
 fi
 
@@ -53,17 +50,8 @@ TASK="$2"
 EXP_NAME="$3"
 shift 3
 
-# ── Optional --no-videos ─────────────────────────────────────────────────────
-NO_VIDEOS=""
-if [[ "${1:-}" == "--no-videos" ]]; then
-    NO_VIDEOS="--no-videos"
-    shift
-fi
-
-# Reject extra positional args (only 3 positionals + --no-videos accepted)
 if [[ $# -gt 0 ]]; then
-    echo "Error: unexpected argument: $1" >&2
-    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]" >&2
+    echo "Error: unexpected argument: $1. Pipeline always runs without videos; use record_demo.sh separately." >&2
     exit 1
 fi
 
@@ -92,11 +80,11 @@ if ! flock -n 9; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 1/3: Select Best Checkpoint (fixed two-stage selection, no videos)
+# Step 1/2: Select Best Checkpoint (fixed two-stage selection, no videos)
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
-echo "  Step 1/3: Select Best Checkpoint"
+echo "  Step 1/2: Select Best Checkpoint"
 echo "  (fixed initial stage plus optional exact-tie batch, no videos)"
 echo "============================================================"
 echo ""
@@ -115,11 +103,11 @@ conda run --no-capture-output -n policy python dexmani_policy/select_best_ckpt.p
     --no-videos "${MANIFEST_ARGS[@]}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 2/3: Evaluate Best Checkpoint (held-out seeds)
+# Step 2/2: Evaluate Best Checkpoint (held-out seeds)
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
-echo "  Step 2/3: Evaluate Best Checkpoint (held-out seeds)"
+echo "  Step 2/2: Evaluate Best Checkpoint (held-out seeds)"
 echo "============================================================"
 echo ""
 
@@ -129,26 +117,7 @@ conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py 
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
     --selection-record="$SELECTION_RECORD" \
-    $NO_VIDEOS
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Step 3/3: Record Demo Videos (5 episodes)
-# ═══════════════════════════════════════════════════════════════════════════════
-echo ""
-echo "============================================================"
-echo "  Step 3/3: Record Demo Videos (5 episodes, default 1280×960)"
-echo "============================================================"
-echo ""
-
-conda run --no-capture-output -n policy python dexmani_policy/record_demo.py \
-    --policy-name="$POLICY" \
-    --task-name="$TASK" \
-    --exp-name="$EXP_NAME" \
-    --selection-record="$SELECTION_RECORD" \
-    || {
-        echo "ERROR: demo recording failed; checkpoint selection and held-out evaluation completed." >&2
-        exit 1
-    }
+    --no-videos
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Summary
@@ -160,5 +129,4 @@ echo "============================================================"
 echo "  Experiment  : ${EXP_DIR}"
 echo "  Selection   : ${SELECTION_RECORD}"
 echo "  Eval result : ${EXP_DIR}/eval_dexsim/<run-id>/_result.txt (exact path printed in Step 2)"
-echo "  Demo videos : ${EXP_DIR}/demo_videos/"
 echo "============================================================"

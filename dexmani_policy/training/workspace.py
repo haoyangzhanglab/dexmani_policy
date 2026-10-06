@@ -26,7 +26,7 @@ class WandbConfig:
 
 
 class TrainWorkspace:
-    def __init__(self, output_dir: str, wandb_cfg: WandbConfig, claim_token=None):
+    def __init__(self, output_dir: str, wandb_cfg: WandbConfig | None = None, claim_token=None):
         self.output_dir = Path(output_dir)
         if claim_token is None:
             claim_token = claim_run(self.output_dir)
@@ -40,17 +40,19 @@ class TrainWorkspace:
         self.json_logger = JsonlLogger(output_dir=self.output_dir)
         # Include the permanent claim identity: sweep basenames such as "0"
         # repeat across launches and cannot identify a W&B run on their own.
-        wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{claim_token[:8]}"
-        self.wandb_logger = WandbLogger(
-            output_dir=self.output_dir,
-            project=wandb_cfg.project,
-            name=wandb_cfg.name,
-            group=wandb_cfg.group,
-            id=wandb_id,
-            resume=wandb_cfg.resume,
-            mode=wandb_cfg.mode,
-            video_fps=wandb_cfg.video_fps,
-        )
+        self.wandb_logger = None
+        if wandb_cfg is not None:
+            wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{claim_token[:8]}"
+            self.wandb_logger = WandbLogger(
+                output_dir=self.output_dir,
+                project=wandb_cfg.project,
+                name=wandb_cfg.name,
+                group=wandb_cfg.group,
+                id=wandb_id,
+                resume=wandb_cfg.resume,
+                mode=wandb_cfg.mode,
+                video_fps=wandb_cfg.video_fps,
+            )
 
         self._closed = False
         atexit.register(self.close)
@@ -58,14 +60,16 @@ class TrainWorkspace:
     def save_hydra_config(self, hydra_config):
         OmegaConf.save(hydra_config, self.output_dir / "config.yaml", resolve=True)
         cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
-        self.wandb_logger.log_config(cfg_dict, self.output_dir)
+        if self.wandb_logger is not None:
+            self.wandb_logger.log_config(cfg_dict, self.output_dir)
 
     def resolve_checkpoint_path(self, tag_or_path: str) -> Path:
         return self.checkpoint_store.resolve_path(tag_or_path)
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
         self.json_logger.log(data, step=step)
-        self.wandb_logger.log(data, step=step)
+        if self.wandb_logger is not None:
+            self.wandb_logger.log(data, step=step)
 
     def save_checkpoint(self, tag: str, checkpoint: TrainCheckpoint) -> Path:
         filename = tag if str(tag).endswith(".pt") else f"{tag}.pt"
@@ -80,14 +84,10 @@ class TrainWorkspace:
         os.replace(tmp_path, latest_path)
         return latest_path
 
-    def load_checkpoint(self, tag_or_path: str) -> TrainCheckpoint:
-        path = self.resolve_checkpoint_path(tag_or_path)
-        print("Loading checkpoint from:", path)
-        return self.checkpoint_store.load(path)
-
     def close(self):
         if self._closed:
             return
         self._closed = True
         self.json_logger.close()
-        self.wandb_logger.close()
+        if self.wandb_logger is not None:
+            self.wandb_logger.close()

@@ -8,7 +8,7 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.training.ema_model import EMAModel
-from dexmani_policy.training.resume import validate_resume_contract, restore_training_state
+from dexmani_policy.training.resume import resolve_training_config, restore_training_state
 from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
 from dexmani_policy.utils.random import get_rng_state, set_rng_state
 
@@ -43,12 +43,13 @@ def test_lora_storage_training_resume(tiny_dino, tmp_path, precision):
                     'lr_warmup_steps':0, 'loop':{'total_train_steps':10}}
     cfg.ema = {'_target_':'dexmani_policy.training.ema_model.EMAModel'}
     cfg.optimizer = {'lr':1e-3,'weight_decay':1e-6}
-    def build(config=cfg):
+    def build(config=cfg, checkpoint=None):
         from dexmani_policy.training.build_utils import build_model_and_ema, build_optimizer_and_scheduler
         from dexmani_policy.agents.normalization import LinearNormalizer
         normalizer = LinearNormalizer()
         normalizer.fit_field('action', torch.tensor([[-1.,-1.],[1.,1.]]), mode='limits')
-        model, ema, update = build_model_and_ema(config, 'cpu', normalizer)
+        model, ema, update = build_model_and_ema(config, 'cpu', normalizer,
+            checkpoint=checkpoint)
         opt, sch = build_optimizer_and_scheduler(config, model, 4)
         return model, ema, update, opt, sch
     model, ema, update, opt, sch = build()
@@ -73,7 +74,7 @@ def test_lora_storage_training_resume(tiny_dino, tmp_path, precision):
         assert opt.state[p]['exp_avg_sq'].dtype == expected
     for n,p in model.named_parameters():
         if n in frozen: assert torch.equal(p, frozen[n])
-    contract = {'agent_config':OmegaConf.to_container(cfg.agent), 'data_identity':{'revision':'tiny'},
+    contract = {'facts_format':1, 'data_identity':{'revision':'tiny'},
                 'world_size':1, 'batches_per_epoch':4,
                 'training':{'loop':{'gradient_accumulation_steps':1}}}
     checkpoint = TrainCheckpoint(0,3,3,model.state_dict(),ema.state_dict(),opt.state_dict(),
@@ -81,6 +82,9 @@ def test_lora_storage_training_resume(tiny_dino, tmp_path, precision):
     store = CheckpointStore(tmp_path/'checkpoints')
     path = store.save('latest.pt',checkpoint)
     checkpoint = store.load(path)
+    # This is a tiny local HF fixture, not a production cache. New snapshots own structure.
+    import shutil
+    shutil.rmtree(tiny_dino)
     for use_ema in (False,True):
         restored = restore_policy_agent(OmegaConf.to_container(cfg),path,use_ema=use_ema,device='cpu')
         wanted = ema if use_ema else model
@@ -89,9 +93,8 @@ def test_lora_storage_training_resume(tiny_dino, tmp_path, precision):
         assert {p.dtype for p in adapter_params(restored).values()} == {expected}
     target_cfg = copy.deepcopy(cfg)
     if precision is None: target_cfg.agent.rgb_backbone_config.lora_dtype = 'backbone'
-    resumed = build(target_cfg)
+    resumed = build(target_cfg, checkpoint=checkpoint)
     target_contract = copy.deepcopy(contract)
-    target_contract['agent_config'] = OmegaConf.to_container(target_cfg.agent)
     m,e,u,o,s = resumed
     restore_training_state(checkpoint,resume_contract=target_contract,model=m,ema_model=e,
         ema_updater=u,optimizer=o,scheduler=s,device='cpu')
@@ -100,9 +103,9 @@ def test_lora_storage_training_resume(tiny_dino, tmp_path, precision):
     for left,right in ((model,m),(ema,e)):
         for a,b in zip(left.parameters(),right.parameters()): assert torch.equal(a,b)
     bad = copy.deepcopy(target_contract)
-    bad['agent_config']['rgb_backbone_config']['lora_dtype'] = 'backbone' if precision == 'float32' else 'float32'
+    bad['world_size'] = 2
     before = copy.deepcopy((m.state_dict(),e.state_dict(),o.state_dict(),s.state_dict()))
-    with pytest.raises(ValueError,match='lora_dtype'):
+    with pytest.raises(ValueError,match='world_size'):
         restore_training_state(checkpoint,resume_contract=bad,model=m,ema_model=e,
             ema_updater=u,optimizer=o,scheduler=s,device='cpu')
     assert_tree_equal(before,(m.state_dict(),e.state_dict(),o.state_dict(),s.state_dict()))
@@ -133,13 +136,23 @@ def test_lora_variants_and_contract(tiny_dino,tmp_path):
         for dtype in ['backbone','float32']:
             enc=encoder(str(path),tune_mode='lora',lora_dtype=dtype)
             assert {p.dtype for p in adapter_params(enc).values()} == {torch.float32 if dtype=='float32' else torch.bfloat16}
-    for name in ['dino','clip','siglip']:
-        old={'agent_config':{'rgb_backbone_name':name,'rgb_backbone_config':{'tune_mode':'lora'}},'data_identity':{'revision':'tiny'}}
-        new=copy.deepcopy(old); new['agent_config']['rgb_backbone_config']['lora_dtype']='backbone'
-        validate_resume_contract(old,new)
-        assert 'lora_dtype' not in old['agent_config']['rgb_backbone_config']
-    old['agent_config']['rgb_backbone_name']='resnet'; new['agent_config']['rgb_backbone_name']='resnet'
-    with pytest.raises(ValueError,match='lora_dtype'): validate_resume_contract(old,new)
+    for name in ['dino', 'clip', 'siglip']:
+        root = tmp_path / ('saved-' + name)
+        (root / 'checkpoints').mkdir(parents=True)
+        checkpoint = root / 'checkpoints/latest.pt'
+        checkpoint.write_bytes(b'config-only fixture')
+        saved = OmegaConf.create({'agent': {'rgb_backbone_name': name,
+            'rgb_backbone_config': {'tune_mode': 'lora'}},
+            'workspace': {'output_dir': str(root)}})
+        OmegaConf.save(saved, root / 'config.yaml')
+        incoming = copy.deepcopy(saved)
+        incoming.resume_from = str(checkpoint)
+        incoming.workspace.output_dir = str(tmp_path / 'new-run')
+        restored = resolve_training_config(incoming, overrides=[])
+        assert 'lora_dtype' not in restored.agent.rgb_backbone_config
+        with pytest.raises(ValueError, match='lora_dtype'):
+            resolve_training_config(incoming, overrides=['agent.rgb_backbone_config.lora_dtype=float32'])
+
 
 
 @pytest.mark.parametrize('foreach',[False,True])

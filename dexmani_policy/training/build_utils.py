@@ -1,6 +1,7 @@
 """Dataset, model and optimizer construction for training and integration smoke."""
 
 import math
+import copy
 from collections.abc import Mapping
 
 import hydra
@@ -89,7 +90,17 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     parent process before ``mp.spawn``).
     """
     spec = resolve_normalization_spec(cfg)
-    dataset = hydra.utils.instantiate(cfg.dataset)
+    dataset_cfg = copy.deepcopy(cfg.dataset)
+    saved_recipes = getattr(resume_checkpoint, "resume_contract", {}).get("data_recipe")
+    if saved_recipes is not None:
+        children = dataset_cfg.get("datasets", [dataset_cfg])
+        if len(children) != len(saved_recipes):
+            raise ValueError("Saved data_recipe task count does not match dataset")
+        for child, recipe in zip(children, saved_recipes):
+            if "split_manifest" in recipe:
+                with open_dict(child):
+                    child.saved_split = recipe["split_manifest"]
+    dataset = hydra.utils.instantiate(dataset_cfg)
     runtime = _capture_real_runtime(dataset, cfg)
     with open_dict(cfg):
         cfg.data_identity = capture_data_identity(dataset)
@@ -160,7 +171,7 @@ def _validate_ema_batchnorm_compatibility(model) -> None:
         )
 
 
-def build_model_and_ema(cfg, device, normalizer, rank=0, *, initialize_training=True):
+def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     """Instantiate the agent model and, if configured, its EMA twin.
 
     ``rank`` gates whether a local EMA is built: rank 0 always owns the evaluation
@@ -169,8 +180,25 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, initialize_training=
     workers receive ``ema_model=None`` — the Trainer guards every EMA site with
     ``self.use_ema = (ema_model is not None)``, so this is safe end-to-end.
     """
-    model = hydra.utils.instantiate(cfg.agent)
-    if initialize_training:
+    model_cfg = cfg
+    if checkpoint is not None:
+        from dexmani_policy.agents.loader import checkpoint_agent_config
+        from dexmani_policy.training.checkpoint import fix_state_dict
+        model_cfg, _ = checkpoint_agent_config(
+            cfg, fix_state_dict(checkpoint.model_state, False), for_resume=True
+        )
+    model = hydra.utils.instantiate(model_cfg.agent)
+    # Store local HF architecture and closed-text dimensions in the owning config.
+    rgb = getattr(getattr(model, "obs_encoder", None), "backbone", None)
+    with open_dict(cfg.agent):
+        if hasattr(rgb, "architecture"):
+            if cfg.agent.get("rgb_backbone_config") is None:
+                cfg.agent.rgb_backbone_config = {}
+            with open_dict(cfg.agent.rgb_backbone_config):
+                cfg.agent.rgb_backbone_config.architecture = rgb.architecture
+        if getattr(model, "task_emb_table", None) is not None:
+            cfg.agent.text_embed_dim = model.text_embed_dim
+    if checkpoint is None:
         model.initialize_training()
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
@@ -190,15 +218,15 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, initialize_training=
     ema_updater = None
     need_local_ema = cfg.training.use_ema and (rank == 0 or requires_ema_for_loss)
     if need_local_ema:
-        ema_model = hydra.utils.instantiate(cfg.agent)
-        ema_model.load_normalizer_from_dataset(normalizer)
-        ema_model.action_key = model.action_key
-        attach_normalization_spec(ema_model, cfg)
-        ema_model.to(device)
-        if initialize_training:
-            ema_model.load_state_dict(model.state_dict())
+        # Copy the already constructed, initialized model before compile/DDP.
+        # A checkpoint supplies raw and historical EMA weights independently below.
+        ema_model = copy.deepcopy(model)
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
+
+    if checkpoint is not None:
+        from dexmani_policy.training.resume import restore_model_weights
+        restore_model_weights(checkpoint, model, ema_model, device)
 
     if rank == 0:
         from dexmani_policy.training.logging import print_storage_dtypes
@@ -220,7 +248,8 @@ def build_scheduler(cfg, optimizer, last_epoch=-1):
         num_warmup_steps=cfg.training.lr_warmup_steps,
         num_training_steps=total_steps,
         last_epoch=last_epoch,
-        lr_min_ratio=cfg.training.get("lr_min_ratio", 0.1),
+        **({"lr_min_ratio": cfg.training.get("lr_min_ratio", 0.1)}
+           if cfg.training.lr_scheduler == "cosine_min_lr" else {}),
     )
 
 
@@ -232,14 +261,15 @@ def validate_gradient_accumulation(
     positive_int(gradient_accumulation_steps, "gradient_accumulation_steps")
 
 
-def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
+def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1, *, verbose=True):
     """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
     grad_accum = (
         cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
     )
     validate_gradient_accumulation(batches_per_epoch, grad_accum)
     optimizer = model.configure_optimizer(**cfg.optimizer)
-    print_param_count(model)
+    if verbose:
+        print_param_count(model)
     scheduler = build_scheduler(cfg, optimizer, last_epoch)
     return optimizer, scheduler
 
@@ -441,6 +471,8 @@ def validate_config(cfg):
 
     Called by training and config-only smoke entry points.
     """
+    if cfg.get("max_updates") is not None:
+        positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
         value = cfg.training.get("loop", {}).get(name, 100 if name == "log_interval_steps" else 1)
         positive_int(value, name)

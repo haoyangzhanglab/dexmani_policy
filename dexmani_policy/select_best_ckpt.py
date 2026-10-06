@@ -73,7 +73,7 @@ from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
     MilestoneCheckpoint,
     _get_eval_param,
-    save_eval_snapshot, mapped_task_seeds, artifact_reference, atomic_json, compute_eval_stats,
+    save_eval_snapshot, run_eval_plan, plan_size, artifact_reference, atomic_json, compute_eval_stats,
     add_inference_steps_argument,
     build_eval_runner,
     collect_episode_details,
@@ -98,42 +98,30 @@ class CkptEvalAccum:
     """Accumulated evaluation results for a single checkpoint."""
 
     ckpt: MilestoneCheckpoint
-    success_list: list[bool] = field(default_factory=list)
     episode_details: list[dict] = field(default_factory=list)
-    task_done_steps: list[int] = field(default_factory=list)
 
     # ---- derived ----
 
     @property
     def success_rate(self) -> float:
-        if not self.success_list:
-            return 0.0
-        return float(np.mean(self.success_list))
+        return self.success_count / self.n_episodes if self.n_episodes else 0.0
 
     @property
     def n_episodes(self) -> int:
-        return len(self.success_list)
+        return len(self.episode_details)
 
     @property
     def avg_steps(self) -> float | None:
-        if not self.task_done_steps:
-            return None
-        return float(np.mean(self.task_done_steps))
+        steps = [d["steps"] for d in self.episode_details if d["success"] and d["steps"] is not None]
+        return float(np.mean(steps)) if steps else None
 
     @property
     def success_count(self) -> int:
-        return sum(self.success_list)
+        return sum(bool(d["success"]) for d in self.episode_details)
 
     def merge(self, result: Dict[str, Any]) -> None:
         """Absorb per-episode results from one ``env_runner.run()`` call."""
-        details: List[dict] = collect_episode_details(result)
-        for d in details:
-            self.episode_details.append(d)
-            success = bool(d.get("success", False))
-            self.success_list.append(success)
-            steps = d.get("steps")
-            if success and steps is not None:
-                self.task_done_steps.append(steps)
+        self.episode_details.extend(collect_episode_details(result))
 
 
 # ---------------------------------------------------------------------------
@@ -146,24 +134,22 @@ def evaluate_checkpoint(
     cfg,
     env_runner,
     ckpt: MilestoneCheckpoint,
-    seeds: List[int],
+    seeds: Dict[str, List[int]],
     use_ema: bool,
     inference_steps: int,
     video_save_dir: Path | None = None,
 ) -> Dict[str, Any]:
-    """Run *len(seeds)* episodes for one checkpoint.  Returns env_runner result dict."""
+    """Evaluate one checkpoint on the complete physical task/seed plan."""
 
     agent = load_ckpt_for_inference(ckpt.path, use_ema, cfg=cfg)
     if agent._checkpoint_global_step != ckpt.global_step:
         raise ValueError("Checkpoint filename/global_step disagrees with saved training state")
 
-    env_runner.eval_seeds = list(seeds)
     for leaf_runner in iter_leaf_env_runners(env_runner):
         leaf_runner.record_video = video_save_dir is not None
-    return env_runner.run(
-        agent,
+    return run_eval_plan(
+        env_runner, agent, seeds,
         inference_steps=inference_steps,
-        eval_episodes=len(seeds),
         video_save_dir=video_save_dir,
     )
 
@@ -200,7 +186,7 @@ def _rank_key(a: CkptEvalAccum) -> tuple[float, float, int]:
 
 
 def select_best_checkpoint(
-    exp_dir: Path, cfg, *, initial_episodes=25, batch_size=5, max_episodes=100,
+    exp_dir: Path, cfg, *, max_episodes=100,
     inference_steps=10, use_ema=True, eval_seed=None, video_save_dir=None,
     result_file=None,
 ) -> tuple[MilestoneCheckpoint, list[CkptEvalAccum]]:
@@ -210,8 +196,8 @@ def select_best_checkpoint(
     if result_file is not None and Path(result_file).exists():
         raise FileExistsError(f"Selection result already exists: {result_file}")
     validate_inference_steps([inference_steps])
-    if initial_episodes <= 0 or max_episodes <= 0 or batch_size < 0:
-        raise ValueError("initial/max episodes must be positive; batch_size must be nonnegative")
+    if type(max_episodes) is not int or max_episodes <= 0:
+        raise ValueError("max_episodes must be a positive integer")
     exp_dir = Path(exp_dir).resolve()
     root = exp_dir / "eval_ckpt_selector"
     root.mkdir(parents=True, exist_ok=True)
@@ -227,7 +213,7 @@ def select_best_checkpoint(
         runner = build_eval_runner(cfg)
         for leaf in iter_leaf_env_runners(runner):
             leaf.record_video = video_save_dir is not None
-        requested = {"initial_episodes": initial_episodes, "batch_size": batch_size, "max_episodes": max_episodes}
+        requested = {"max_episodes": max_episodes}
         manifest_source = cfg.get("eval", {}).get("seed_manifest")
         if manifest_source is None:
             raise ValueError("New selection requires eval.seed_manifest; generate it with "
@@ -241,39 +227,35 @@ def select_best_checkpoint(
             ) from exc
         phase1_seeds = protocol["roles"]["selection"]
         tie_seeds = protocol["roles"]["tie_break"]
-        initial_episodes = len(phase1_seeds)
-        if initial_episodes + len(tie_seeds) > max_episodes:
+        initial_count = plan_size(phase1_seeds)
+        if initial_count + plan_size(tie_seeds) > max_episodes:
             raise ValueError(
                 f"max_episodes={max_episodes} is below the manifest selection + reserved "
-                f"tie-break count ({initial_episodes}+{len(tie_seeds)}); increase the cap"
+                f"tie-break count ({initial_count}+{plan_size(tie_seeds)}); increase the cap"
             )
         record["eval_config"] = save_eval_snapshot(
             run_dir, cfg, runner, use_ema=use_ema, inference_steps=inference_steps,
             shuffle_seed=seed, policy_seed_mode="episode_seed", **requested,
-            effective_episode_counts={role: len(seeds) for role, seeds in protocol["roles"].items()},
-            phase1_task_seeds=mapped_task_seeds(runner, phase1_seeds),
-            possible_tie_task_seeds=mapped_task_seeds(runner, tie_seeds),
+            effective_episode_counts={role: plan_size(seeds) for role, seeds in protocol["roles"].items()},
+            phase1_task_seeds=phase1_seeds,
+            possible_tie_task_seeds=tie_seeds,
             checkpoints=[{"path": artifact_reference(m.path, exp_dir), "global_step": m.global_step} for m in milestones],
         )
-        selection = {"shuffle_seed": seed, "seeds": [], "task_seeds": {},
-                     "initial_episodes": initial_episodes, "tie_break_used": False}
-        if hasattr(runner, "seed_protocol"):
-            selection["seed_protocol"] = runner.seed_protocol()
+        selection = {"shuffle_seed": seed, "task_seeds": {},
+                     "tie_break_used": False}
         selection["protocol"] = "explicit"
         selection["seed_manifest"] = protocol
         record["selection"] = selection
 
         def dispatch(mc, seeds, phase):
-            mapping = mapped_task_seeds(runner, seeds)
-            for s in seeds:
-                if s not in selection["seeds"]: selection["seeds"].append(s)
+            mapping = seeds
             for task, values in mapping.items():
                 selection["task_seeds"].setdefault(task, [])
                 selection["task_seeds"][task] = list(dict.fromkeys(selection["task_seeds"][task] + values))
             video = None
             if video_save_dir is not None:
                 video = Path(video_save_dir) / run_dir.name / mc.path.stem / phase
-                if not hasattr(runner, "map_eval_seeds"):
+                if not hasattr(runner, "runners"):
                     video = video / runner.task_name
             stage = {"checkpoint": artifact_reference(mc.path, exp_dir), "global_step": mc.global_step,
                      "phase": phase, "requested_task_seeds": mapping, "status": "requested",
@@ -309,7 +291,7 @@ def select_best_checkpoint(
             accumulators.append(acc)
         best_rate = max(a.success_rate for a in accumulators)
         tied = [a for a in accumulators if a.success_rate == best_rate]
-        selection["tie_break_used"] = len(tied) > 1 and bool(tie_seeds)
+        selection["tie_break_used"] = len(tied) > 1 and plan_size(tie_seeds) > 0
         if selection["tie_break_used"]:
             for acc in tied:
                 acc.merge(dispatch(acc.ckpt, tie_seeds, "tie_break"))
@@ -333,12 +315,16 @@ def select_best_checkpoint(
                          inference={"use_ema": use_ema, "inference_steps": inference_steps,
                                     "policy_seed_mode": "episode_seed"}, selection=selection)
         # Immutable per-selection record is also the pipeline handoff.
-        atomic_json(run_dir / "selection_result.json", best_info)
+        best_info.update(_format="selection.v2", status="success",
+                         all_results=record["all_results"], stages=record["stages"])
+        result_path = run_dir / "selection_result.json"
+        atomic_json(result_path, best_info)
+        reference = {"selection_result": artifact_reference(result_path, exp_dir)}
         if result_file is not None:
             import json
             with Path(result_file).open("x") as stream:
-                json.dump(best_info, stream, indent=2)
-        atomic_json(exp_dir / "best_ckpt.json", best_info)
+                json.dump(reference, stream, indent=2)
+        atomic_json(exp_dir / "best_ckpt.json", reference)
         published = True
         _print_table(accumulators, "Selection results:")
         cprint(f"Published best: {best.ckpt.label}, selection={run_dir.name}", "green")
@@ -380,18 +366,8 @@ def main() -> None:
         required=True,
         help="Experiment timestamp/name under experiments/<policy>/<task>/.",
     )
-    parser.add_argument(
-        "--initial-episodes",
-        type=int,
-        default=None,
-        help="Historical episode budget (recorded only); manifest fixes the selection seeds.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=None,
-        help="Historical episode budget (recorded only); manifest fixes the tie-break seeds.",
-    )
+    parser.add_argument("--initial-episodes", "--batch-size", dest="removed_budget",
+                        action="append", help=argparse.SUPPRESS)
     parser.add_argument(
         "--max-episodes",
         type=int,
@@ -434,6 +410,8 @@ def main() -> None:
     parser.add_argument("--videos", action="store_true", help="Explicitly record selection candidate videos")
     parser.add_argument("--result-file", default=None)
     args = parser.parse_args()
+    if args.removed_budget is not None:
+        parser.error("--initial-episodes/--batch-size were removed; episode lists come from eval.seed_manifest")
 
     exp_dir = (
         (
@@ -465,14 +443,6 @@ def main() -> None:
 
     # ── Resolve parameters: CLI > config > defaults ───────────────────────
     _sb = cfg.eval.get("select_best", {}) if hasattr(cfg, "eval") else {}
-    initial_episodes = (
-        args.initial_episodes
-        if args.initial_episodes is not None
-        else _sb.get("initial_episodes", 25)
-    )
-    batch_size = (
-        args.batch_size if args.batch_size is not None else _sb.get("batch_size", 5)
-    )
     max_episodes = (
         args.max_episodes
         if args.max_episodes is not None
@@ -492,20 +462,11 @@ def main() -> None:
     # Selection videos are opt-in; each run/candidate/stage owns its path.
     video_save_dir = exp_dir / "eval_ckpt_selector" / "videos" if args.videos and not args.no_videos else None
 
-    if initial_episodes <= 0 or max_episodes <= 0 or batch_size < 0:
-        cprint(
-            "Error: initial/max episodes must be positive and batch size non-negative "
-            f"(got {initial_episodes}/{max_episodes}/{batch_size})",
-            "red",
-        )
-        sys.exit(1)
 
     try:
         select_best_checkpoint(
             exp_dir,
             cfg,
-            initial_episodes=initial_episodes,
-            batch_size=batch_size,
             max_episodes=max_episodes,
             inference_steps=inference_steps,
             use_ema=use_ema,

@@ -5,7 +5,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import warnings
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -13,7 +12,7 @@ from unittest.mock import patch
 import hydra
 import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from torch import nn
 from torch.utils.data import Dataset
 
@@ -22,7 +21,7 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.normalization import LinearNormalizer
 from dexmani_policy.agents.loader import restore_policy_agent
 from dexmani_policy.training.resume import (validate_resume_contract,validate_data_identity,
-    build_train_loader,build_resume_contract)
+    build_train_loader,build_resume_contract,restore_training_state)
 from dexmani_policy.training.build_utils import build_model_and_ema,capture_data_identity,validate_config
 from dexmani_policy.training.trainer import Trainer,TrainLoopConfig
 from dexmani_policy.training.workspace import TrainWorkspace,WandbConfig
@@ -145,16 +144,25 @@ assert not isinstance(multi_task.DPObsEncoder, Mock)
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_clip_resume_compatibility(self):
-        old={'agent_config':{'_target_':'dexmani_policy.agents.core.dp.DPAgent'}}
-        current=copy.deepcopy(old); current['agent_config']['clip_sample']=True
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore'); validate_resume_contract(old,current)
-        self.assertNotIn('clip_sample',old['agent_config'])
-        current['agent_config']['clip_sample']=False
-        with self.assertRaisesRegex(ValueError,'clip_sample'): validate_resume_contract(old,current)
-        current=copy.deepcopy(old); current['other']=1
-        with self.assertRaisesRegex(ValueError,'other'): validate_resume_contract(old,current)
+    def test_historical_contract_projects_only_runtime_facts(self):
+        from torch.utils.data import DataLoader
+        cfg = load_config('dp3')
+        with open_dict(cfg):
+            cfg.data_identity = {'revision': 'fixture-v1'}
+        current = build_resume_contract(cfg, TinyPolicy(), DataLoader(Data(), batch_size=2))
+        old = copy.deepcopy(current)
+        del old['facts_format']
+        old.update(agent_config={'clip_sample': True}, dataset={'path': 'old'}, optimizer={'lr': 1.})
+        old['training']['loop']['log_interval_steps'] = 100
+        before = copy.deepcopy(old)
+        validate_resume_contract(old, current)
+        self.assertEqual(old, before)
+        changed = copy.deepcopy(current)
+        changed['loader']['batch_size'] += 1
+        with self.assertRaisesRegex(ValueError, 'batch_size'):
+            validate_resume_contract(old, changed)
+        with self.assertRaisesRegex(ValueError, 'facts format'):
+            validate_resume_contract(old, dict(current, facts_format=2))
 
     def test_rng_device_and_revision(self):
         state=get_rng_state('cpu')
@@ -188,9 +196,10 @@ assert not isinstance(multi_task.DPObsEncoder, Mock)
              'dataloader':{'batch_size':2,'shuffle':True,'drop_last':False,'num_workers':0},
              'training':{'seed':123,'use_ema':True,'loop':{'total_train_steps':6,'gradient_accumulation_steps':2}},
              'optimizer':{},'ema':{'_target_':'dexmani_policy.training.ema_model.EMAModel'}})
-        def build(path):
+        def build(path, checkpoint=None):
             norm=LinearNormalizer(); norm.fit_field('action',np.arange(12,dtype='float32').reshape(-1,1),mode='limits')
-            model,ema,updater=build_model_and_ema(cfg,'cpu',norm)
+            model,ema,updater=build_model_and_ema(cfg,'cpu',norm,
+                checkpoint=checkpoint)
             loader=build_train_loader(cfg,Data()); opt=torch.optim.Adam(model.parameters(),lr=.01)
             scheduler=torch.optim.lr_scheduler.StepLR(opt,1,.95)
             contract = build_resume_contract(cfg, model, loader)
@@ -213,10 +222,12 @@ assert not isinstance(multi_task.DPObsEncoder, Mock)
             first.apply_gradient_step=interrupt; first.train()
             source=(root/'first/checkpoints/latest.pt').resolve()
             old_bytes={str(p):p.read_bytes() for p in (root/'first').rglob('*') if p.is_file()}
-            resumed=build(root/'resumed')
-            checkpoint = resumed.workspace.load_checkpoint(str(source))
-            with patch.object(resumed.workspace, 'load_checkpoint', side_effect=AssertionError('second read')):
-                state=resumed.load_for_resume(str(source), checkpoint=checkpoint)
+            checkpoint = first.workspace.checkpoint_store.load(source)
+            resumed=build(root/'resumed', checkpoint=checkpoint)
+            with patch.object(resumed.workspace.checkpoint_store, 'load', side_effect=AssertionError('second read')):
+                state=restore_training_state(checkpoint, resume_contract=resumed.resume_contract,
+                    model=resumed.raw_model, ema_model=resumed.ema_model, ema_updater=resumed.ema_updater,
+                    optimizer=resumed.optimizer, scheduler=resumed.scheduler, device='cpu')
             del checkpoint
             resumed.train(resume_state=state)
             self.assertEqual(first.raw_model.seen+resumed.raw_model.seen,full.raw_model.seen)

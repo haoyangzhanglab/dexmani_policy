@@ -55,18 +55,33 @@ class CheckpointStore:
         }
         torch.save(payload, tmp_path)
         tmp_path.replace(path)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         return path
 
-    def load(self, path: Path) -> TrainCheckpoint:
+    def load_payload(self, path: Path) -> dict:
+        """Read one .pt container; purpose-specific readers validate required fields."""
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
-        if set(payload) != {"state", "weights", "_format", "_saved_at"}:
-            raise RuntimeError("Checkpoint root does not match the training schema")
-        if payload.get("_format") != TRAIN_CHECKPOINT_FORMAT:
-            raise RuntimeError(
-                f"Unsupported checkpoint format: {payload.get('_format')!r}"
-            )
+        if not isinstance(payload, dict) or payload.get("_format") != TRAIN_CHECKPOINT_FORMAT:
+            raise RuntimeError("Unsupported checkpoint format")
+        if not isinstance(payload.get("weights"), dict) or not isinstance(payload.get("state"), dict):
+            raise RuntimeError("Checkpoint requires state and weights mappings")
+        return payload
+
+    def load_inference(self, path: Path, *, use_ema: bool):
+        payload = self.load_payload(path)
+        state = payload["weights"].get("ema_model" if use_ema else "model")
+        if state is None and use_ema:
+            raise ValueError("Requested EMA weights are absent; select raw explicitly")
+        if not isinstance(state, dict) or not state or any(
+            not isinstance(k, str) or not isinstance(v, torch.Tensor) for k, v in state.items()
+        ):
+            raise RuntimeError("Inference requires a nonempty tensor state_dict")
+        step = payload["state"].get("global_step")
+        if type(step) is not int or step < 0:
+            raise ValueError("Checkpoint global_step must be an int >= 0")
+        return state, step
+
+    def load(self, path: Path) -> TrainCheckpoint:
+        payload = self.load_payload(path)
         state = payload["state"]
         weights = payload["weights"]
         expected_state = {
@@ -79,7 +94,7 @@ class CheckpointStore:
             "rng_states",
         }
         expected_weights = {"model", "ema_model", "optimizer", "scheduler"}
-        if set(state) != expected_state or set(weights) != expected_weights:
+        if not expected_state <= state.keys() or not expected_weights <= weights.keys():
             raise RuntimeError(
                 f"Checkpoint does not match the {TRAIN_CHECKPOINT_FORMAT} schema"
             )
@@ -92,6 +107,11 @@ class CheckpointStore:
             raise ValueError(
                 "Checkpoint rng_states must be a nonempty rank-ordered list"
             )
+        for key in ("model", "optimizer", "scheduler"):
+            if not isinstance(weights[key], dict):
+                raise ValueError(f"Resume requires {key} state mapping")
+        if weights["ema_model"] is not None and not isinstance(weights["ema_model"], dict):
+            raise ValueError("ema_model must be a state mapping or None")
         return TrainCheckpoint(
             epoch=int(state["epoch"]),
             global_step=int(state["global_step"]),

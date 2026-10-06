@@ -75,7 +75,7 @@ agent:
     use_random: true
     use_random_start: true
     random_noise_scale: 0.0
-    use_shuffle_output: true
+    use_shuffle_output: ${eval:"'${agent.encoder_type}' not in ('dp3', 'idp3')"}  # PointNet only; new RNG consumption
 
   # Diffusion backbone
   diffusion_step_embed_dim: 128
@@ -166,8 +166,6 @@ eval:
   use_ema: true
 
   select_best:
-    initial_episodes: 25
-    batch_size: 5
     max_episodes: 100
 
   offline:

@@ -1,4 +1,3 @@
-import datetime
 import os
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -15,17 +14,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dexmani_policy.training.checkpoint import CheckpointStore
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.training.logging import print_param_count
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
-    build_scheduler,
+    build_optimizer_and_scheduler,
     compile_models,
     print_training_recipe,
     validate_config,
-    validate_gradient_accumulation,
 )
 from dexmani_policy.training.resume import (
     build_resume_contract,
@@ -42,25 +39,12 @@ set_project_root()
 
 
 def setup_ddp(rank: int, world_size: int):
-    """Initialise the NCCL process group with a 30-minute timeout.
-
-    Without an explicit timeout, the default is effectively unbounded — a
-    hung or crashed rank causes all other ranks to hang indefinitely on
-    the next collective (all_reduce, broadcast, barrier).  Thirty minutes
-    is long enough to survive transient NCCL stalls under heavy I/O but
-    short enough to avoid wasting cluster time on a truly dead rank.
-
-    The timeout covers **every** collective in this process group:
-    ``dist.all_gather`` in the NaN sentinel,
-    ``dist.broadcast`` in normalizer sync, and the implicit
-    barrier inside DDP backward.
-    """
+    """Initialise NCCL with the installed PyTorch default timeout."""
     dist.init_process_group(
         backend="nccl",
         init_method="env://",
         world_size=world_size,
         rank=rank,
-        timeout=datetime.timedelta(minutes=30),
     )
 
 
@@ -81,29 +65,25 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     train_sampler = train_loader.sampler
 
     model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, rank=rank, initialize_training=resume_from is None
+        cfg, device, normalizer, rank=rank, checkpoint=checkpoint
     )
 
     # After model init, use different seeds per rank for augmentation diversity
     set_seed(cfg.training.seed + rank)
 
     batches_per_epoch = len(train_loader)
-    validate_gradient_accumulation(
-        batches_per_epoch,
-        cfg.training.get("loop", {}).get("gradient_accumulation_steps", 1),
+    optimizer, scheduler = build_optimizer_and_scheduler(
+        cfg, model, batches_per_epoch, verbose=rank == 0
     )
-    optimizer = model.configure_optimizer(**cfg.optimizer)
 
     if rank == 0:
         print_training_recipe(
             cfg, world_size=world_size, batches_per_epoch=batches_per_epoch
         )
-        print_param_count(model)
         workspace = hydra.utils.instantiate(cfg.workspace)
     else:
         workspace = None
 
-    scheduler = build_scheduler(cfg, optimizer)
     resume_contract = build_resume_contract(
         cfg, model, train_loader, world_size=world_size
     )
@@ -142,6 +122,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         static_graph=True,
     )
 
+    if resume_from is None and ema_model is not None:
+        # DDP synchronizes raw state only. Fresh EMA starts from that state;
+        # never overwrite the separately restored historical EMA on resume.
+        ema_model.load_state_dict(model.state_dict(), strict=True)
+
     trainer = Trainer(
         device=device,
         model=ddp_model,
@@ -161,18 +146,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         distributed=True,
         train_sampler=train_sampler,
         resume_contract=resume_contract,
+        batches_per_epoch=batches_per_epoch,
     )
 
-    # Broadcast normalizer state from rank 0 to all ranks
-    norm_state = model.normalizer.state_dict()
-    for key in norm_state:
-        if isinstance(norm_state[key], torch.Tensor):
-            dist.broadcast(norm_state[key], src=0)
-    if rank != 0:
-        model.normalizer.load_state_dict(norm_state)
-
     try:
-        trainer.train(resume_state=resume_state)
+        trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
     finally:
         # Safe even after a collective timeout — destroy_process_group()
         # performs only local cleanup (no communication).
@@ -181,6 +159,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
 
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
+    from dexmani_policy.training.resume import resolve_training_config
+    cfg = resolve_training_config(cfg)
     validate_config(cfg)
     with open_dict(cfg):
         cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))

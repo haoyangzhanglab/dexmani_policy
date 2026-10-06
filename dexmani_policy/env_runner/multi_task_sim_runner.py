@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import traceback
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -39,15 +40,12 @@ class MultiTaskSimRunner:
 
         self.is_multi_task = True
         self.env_video_fps = env_video_fps
-        # Eval entry points select from the first task's pool as a reference.
-        # ``run`` maps those selected reference seeds by ordinal position into
-        # each task's own seed pool, preserving paired checkpoint comparisons
-        # without forcing different tasks to share the same numeric seeds.
-        self.eval_seeds: Optional[List[int]] = None
         self.runners: Dict[str, TaskTextSimRunner] = {}
 
         for cfg in task_configs:
             task_name = cfg["task_name"]
+            if task_name in self.runners:
+                raise ValueError(f"Duplicate task: {task_name}")
             task_text = cfg.get("task_text")
             if task_text is None:
                 task_text = task_name
@@ -75,68 +73,6 @@ class MultiTaskSimRunner:
                 rgb_preprocess_size=cfg.get("rgb_preprocess_size"),
                 rgb_random_crop_size=cfg.get("rgb_random_crop_size"),
             )
-
-        # Capture each task's default pool before eval entry points inject any
-        # selected subset into ``runner.eval_seeds``. Deduplicate while keeping
-        # file order, matching the selector's seed handling.
-        self._task_seed_pools: Dict[str, List[int]] = {
-            task_name: list(dict.fromkeys(runner.get_seed_list()))
-            for task_name, runner in self.runners.items()
-        }
-
-    def get_seed_list(self) -> List[int]:
-        """Return the reference seed pool used by shared eval entry points.
-
-        The first task provides reference seed identities. ``run`` maps each
-        selected reference seed to the same ordinal position in every task's
-        own task-specific seed pool. The reference pool is truncated to the
-        shortest task pool so every selected position is valid for all tasks.
-        """
-        if self.eval_seeds is not None:
-            return list(self.eval_seeds)
-
-        reference_task = next(iter(self.runners))
-        common_count = min(len(pool) for pool in self._task_seed_pools.values())
-        return list(self._task_seed_pools[reference_task][:common_count])
-
-    def _map_reference_seeds(self, task_name: str, reference_seeds: List[int]) -> List[int]:
-        """Map selected reference seeds to a task-specific pool by position.
-
-        Eval entry points always select from ``get_seed_list()``, so normal
-        selection/final-eval calls take the positional mapping path. If a caller
-        explicitly supplies arbitrary numeric ``eval_seeds`` that are not from
-        the reference pool, preserve the historical override semantics and pass
-        those numbers through unchanged.
-        """
-        reference_task = next(iter(self.runners))
-        reference_pool = self._task_seed_pools[reference_task]
-        task_pool = self._task_seed_pools[task_name]
-        reference_indices = {seed: idx for idx, seed in enumerate(reference_pool)}
-
-        if any(seed not in reference_indices for seed in reference_seeds):
-            return list(reference_seeds)
-
-        indices = [reference_indices[seed] for seed in reference_seeds]
-        if indices and max(indices) >= len(task_pool):
-            raise ValueError(
-                f"Task '{task_name}' seed pool has {len(task_pool)} seeds, "
-                f"but selected reference position {max(indices)} is out of range."
-            )
-        return [task_pool[idx] for idx in indices]
-
-    def seed_protocol(self):
-        import hashlib
-        import json
-        return {
-            "task_order": list(self.runners),
-            "pools": {task: {"length": len(pool), "sha256": hashlib.sha256(
-                json.dumps(pool, separators=(",", ":")).encode()).hexdigest()}
-                for task, pool in self._task_seed_pools.items()},
-        }
-
-    def map_eval_seeds(self, reference_seeds):
-        return {task: self._map_reference_seeds(task, list(reference_seeds))
-                for task in self.runners}
 
     def print_summary(
         self,
@@ -186,6 +122,8 @@ class MultiTaskSimRunner:
         inference_steps: int | None = None,
         eval_episodes: int = None,
         video_save_dir=None,
+        *,
+        task_seeds: Dict[str, List[int]],
     ) -> Dict[str, Any]:
         if inference_steps is not None:
             positive_int(inference_steps, "inference_steps")
@@ -193,15 +131,14 @@ class MultiTaskSimRunner:
         all_videos = []
         failed_tasks = []
 
-        # Entry points select a subset from the reference task. Map that subset
-        # into each task's own seed pool by ordinal position. Without a parent
-        # subset, leave each child on its own default task-specific pool.
-        parent_seeds = getattr(self, "eval_seeds", None)
+        from dexmani_policy.evaluation.protocol import validate_task_seeds, plan_size
+        validate_task_seeds(task_seeds, self.runners)
+        count = plan_size(task_seeds)
+        if eval_episodes is not None and eval_episodes != count:
+            raise ValueError("eval_episodes disagrees with explicit task seed plan")
+        eval_episodes = count
         for task_name, runner in self.runners.items():
-            if parent_seeds is not None:
-                runner.eval_seeds = self._map_reference_seeds(task_name, list(parent_seeds))
-            else:
-                runner.eval_seeds = None
+            runner.eval_seeds = list(task_seeds[task_name])
             cprint(f"\n{'=' * 40} Evaluating task: {task_name} (text={runner.task_text}) {'=' * 40}", "cyan")
             # Each task gets its own sub-directory for videos
             task_video_dir = None
@@ -215,6 +152,10 @@ class MultiTaskSimRunner:
                     eval_episodes=eval_episodes,
                     video_save_dir=task_video_dir,
                 )
+                details = result.get("episode_details", [])
+                if (Counter(d.get("seed") for d in details) != Counter(task_seeds[task_name])
+                        or any("error" in d or "error_category" in d for d in details)):
+                    raise RuntimeError(f"{task_name}: completed episodes differ from the requested task/seed plan")
                 per_task[task_name] = result
                 for v in result.get("videos", []):
                     for k, arr_or_path in v.items():

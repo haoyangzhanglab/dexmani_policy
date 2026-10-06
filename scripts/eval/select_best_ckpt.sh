@@ -30,8 +30,6 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Extra args are forwarded to select_best_ckpt.py."
     echo ""
     echo "Options (select_best_ckpt.py):"
-    echo "  --initial-episodes N   Requested Phase 1 count (metadata); manifest determines actual count"
-    echo "  --batch-size N         Requested tie count (metadata); manifest determines actual count"
     echo "  --max-episodes N       Hard cap for selection + reserved tie-break seeds (default: 100)"
     echo "  --inference-steps N      Inference steps (default: from config)"
     echo "  --no-ema               Use raw weights instead of EMA"

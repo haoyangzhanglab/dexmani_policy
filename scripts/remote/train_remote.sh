@@ -209,7 +209,7 @@ echo "OK"
 
 # 4. GPU check
 echo "[4/5] GPU status:"
-ssh "$SERVER" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader" 2>/dev/null || echo "  (could not query GPUs)"
+ssh "$SERVER" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader" 2>/dev/null || echo "  UNKNOWN: could not query GPUs"
 
 # Validate requested GPU ids are in range (best-effort).
 if [[ -n "$GPU_IDS" ]]; then
@@ -227,10 +227,10 @@ fi
 
 # 5. Disk space
 echo -n "[5/5] Disk space /data_ssd ... "
-ssh "$SERVER" "df -h /data_ssd | tail -1 | awk '{print \$4 \" available of \" \$2}'" 2>/dev/null || echo "  (could not query disk)"
+ssh "$SERVER" "df -h /data_ssd" 2>/dev/null || echo "  UNKNOWN: could not query disk"
 
 echo ""
-echo "=== Pre-flight OK ==="
+echo "Connection and dataset checks completed; GPU/disk output is informational, not a training validation."
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════
@@ -256,7 +256,7 @@ else
     }
 
     echo "╔══════════════════════════════════════════╗"
-    echo "║  Training started (tmux: $SESSION)"
+    echo "║  Launch submitted (tmux: $SESSION)"
     echo "╠══════════════════════════════════════════╣"
     echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION'"
     echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"

@@ -234,7 +234,6 @@ def test_deterministic_never_creates_manager(tmp_path, monkeypatch):
     monkeypatch.setattr(mp, "Manager", forbidden)
     multi = MultiTaskDataset([ds], ["one"], deterministic=True)
     before = [multi[i]["action"] for i in range(len(multi))]
-    multi.set_epoch(9)
     restored = pickle.loads(pickle.dumps(multi))
     for i, value in enumerate(before):
         torch.testing.assert_close(restored[i]["action"], value)
@@ -243,7 +242,6 @@ def test_deterministic_never_creates_manager(tmp_path, monkeypatch):
     torch.testing.assert_close(
         norm["action"].params_dict["scale"], reference["action"].params_dict["scale"]
     )
-    multi.close()
 
 
 @pytest.mark.parametrize('keep_uint8', [False, True])

@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 from omegaconf import OmegaConf
 from dexmani_policy.evaluation.protocol import (wilson_interval,validate_heldout,
-    mapped_task_seeds,atomic_json,build_eval_runner,save_eval_snapshot)
-from dexmani_policy.agents.loader import read_best_ckpt_json, resolve_best_checkpoint
+    atomic_json,build_eval_runner,save_eval_snapshot)
+from dexmani_policy.agents.loader import resolve_best_checkpoint
 from dexmani_policy import select_best_ckpt as selector
 from dexmani_policy import eval_best_ckpt as evaluator
 from dexmani_policy import record_demo as demo
@@ -106,16 +106,21 @@ class EvaluationInfraTests(unittest.TestCase):
                     cli_inference_steps_list=[2, 5])
                 self.assertFalse(ema); self.assertEqual(steps, [2, 5])
 
-    def test_real_multitask_mapping(self):
-        runner=MultiTaskSimRunner.__new__(MultiTaskSimRunner)
-        runner.runners={'a':None,'b':None}; runner._task_seed_pools={'a':[0,1,2,3],'b':[100,101,102,103]}
-        best={'selection':{'seeds':[0,1],'seed_protocol':runner.seed_protocol(),'task_seeds':mapped_task_seeds(runner,[0,1])}}
-        validate_heldout(runner,best,[2,3])
-        runner._task_seed_pools['b']=[102,103,100,101]
-        with self.assertRaisesRegex(ValueError,'identity'): validate_heldout(runner,best,[2,3])
-        runner._task_seed_pools['b']=[100,101,102,103]; runner.runners={'b':None,'a':None}
-        with self.assertRaises(ValueError): validate_heldout(runner,best,[2,3])
-        validate_heldout(Runner(),{'selection':{'seeds':[0,1]}},[2,3])
+    def test_real_multitask_direct_plan(self):
+        runner = MultiTaskSimRunner.__new__(MultiTaskSimRunner)
+        a, b = Runner(), Runner()
+        b.task_name = 'b'
+        b.get_seed_list = lambda: [103, 102, 101, 100]
+        runner.runners = {'a': a, 'b': b}
+        best = {'selection': {'task_seeds': {'a': [0, 1], 'b': [100, 101]}}}
+        plan = {'a': [2, 3], 'b': [102, 103]}
+        validate_heldout(runner, best, plan)
+        # Pool order no longer controls physical requests.
+        b.get_seed_list = lambda: [100, 101, 102, 103]
+        validate_heldout(runner, best, plan)
+        with self.assertRaisesRegex(ValueError, 'overlap'):
+            validate_heldout(runner, best, {'a': [2, 3], 'b': [101, 103]})
+        validate_heldout(Runner(), {'selection': {'seeds': [0, 1]}}, {'a': [2, 3]})
 
     def test_selection_publish_failure_and_final_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,8 +128,8 @@ class EvaluationInfraTests(unittest.TestCase):
             cfg.eval.seed_manifest={'pool_id':'fixture','selection':{'a':[0,1]},
                 'tie_break':{'a':[2]},'test':{'a':[3,4]}}
             with patch.object(selector,'build_eval_runner',return_value=runner), patch.object(selector,'load_ckpt_for_inference',side_effect=lambda path,*a,**kw: types.SimpleNamespace(_checkpoint_global_step=int(re.search(r'step=(\d+)',path.name)[1]))):
-                selector.select_best_checkpoint(root,cfg,initial_episodes=2,batch_size=1,video_save_dir=root/'videos')
-                first=read_best_ckpt_json(root); before=(root/'best_ckpt.json').read_bytes()
+                selector.select_best_checkpoint(root,cfg,video_save_dir=root/'videos')
+                first=resolve_best_checkpoint(root)[0]; before=(root/'best_ckpt.json').read_bytes()
                 summary=json.loads((root/first['selection_summary']).read_text())
                 self.assertEqual(len(summary['stages']),4)
                 self.assertEqual(len(set(s['video_dir'] for s in summary['stages'])),4)
@@ -132,16 +137,16 @@ class EvaluationInfraTests(unittest.TestCase):
                     self.assertEqual(result['success_count'],sum(d['success'] for d in result['episode_details']))
                     self.assertEqual(result['n_episodes'],len(result['episode_details']))
                 runner.success=False
-                selector.select_best_checkpoint(root,cfg,initial_episodes=2,batch_size=1)
-                self.assertTrue(read_best_ckpt_json(root)['selection']['selection_all_zero'])
+                selector.select_best_checkpoint(root,cfg)
+                self.assertTrue(resolve_best_checkpoint(root)[0]['selection']['selection_all_zero'])
                 self.assertNotEqual(before,(root/'best_ckpt.json').read_bytes())
                 before=(root/'best_ckpt.json').read_bytes()
                 runner.success='error'
-                with self.assertRaisesRegex(RuntimeError,'fatal'): selector.select_best_checkpoint(root,cfg,initial_episodes=2)
+                with self.assertRaisesRegex(RuntimeError,'fatal'): selector.select_best_checkpoint(root,cfg)
                 self.assertEqual(before,(root/'best_ckpt.json').read_bytes())
                 runner.success=True
-                selector.select_best_checkpoint(root,cfg,initial_episodes=2,batch_size=1)
-                third=read_best_ckpt_json(root); self.assertNotEqual(first['selection_id'],third['selection_id'])
+                selector.select_best_checkpoint(root,cfg)
+                third=resolve_best_checkpoint(root)[0]; self.assertNotEqual(first['selection_id'],third['selection_id'])
             agent=types.SimpleNamespace(_checkpoint_global_step=40)
             with patch.object(evaluator,'build_eval_runner',return_value=runner), patch.object(evaluator,'load_ckpt_for_inference',return_value=agent):
                 evaluator.evaluate_checkpoint_sweep(root,cfg,inference_steps_list=[2,5],episodes=2,use_ema=False)
@@ -154,14 +159,18 @@ class EvaluationInfraTests(unittest.TestCase):
             for result in (root/'eval_dexsim').rglob('result_details.json'):
                 info=json.loads(result.read_text()); self.assertTrue((root/info['eval_config']).is_file())
                 self.assertEqual(info['global_step'],40)
-                self.assertFalse(set(info['evaluation_seeds']) & set(third['selection']['seeds']))
+                self.assertFalse(set(info['evaluation_seeds']['a']) & set(third['selection']['task_seeds']['a']))
             # Atomic publication interruption leaves a complete old pointer.
             before=(root/'best_ckpt.json').read_bytes()
             with patch('os.replace',side_effect=OSError('interrupted')):
                 with self.assertRaises(OSError): atomic_json(root/'best_ckpt.json',{'new':True})
             self.assertEqual(before,(root/'best_ckpt.json').read_bytes())
             (root/third['selection_summary']).unlink()
-            with self.assertRaises(FileNotFoundError): read_best_ckpt_json(root)
+            self.assertEqual(resolve_best_checkpoint(root)[0], third)
+            pointer = json.loads((root/'best_ckpt.json').read_text())
+            self.assertEqual(set(pointer), {'selection_result'})
+            (root/pointer['selection_result']).unlink()
+            with self.assertRaises(FileNotFoundError): resolve_best_checkpoint(root)[0]
 
     def test_best_is_pinned_across_publication(self):
         # Each entry runs real parameter resolution, concrete-path loading and
@@ -233,7 +242,7 @@ class EvaluationInfraTests(unittest.TestCase):
                 self.assertEqual(list(saved.inference_steps_list), expected_steps)
                 self.assertEqual(saved.heldout_from_selection, entry != 'demo')
                 self.assertEqual(list(saved.task_seeds.a), runner.calls[0][0])
-                if entry != 'demo': self.assertEqual(list(saved.selection_seeds_excluded), [0, 1])
+                if entry != 'demo': self.assertEqual(list(saved.selection_seeds_excluded.a), [0, 1])
                 results = list(root.rglob('result_details.json'))
                 self.assertEqual(len(results), len(expected_steps))
                 for result in results:
@@ -267,9 +276,8 @@ class EvaluationInfraTests(unittest.TestCase):
                 evaluator.evaluate_checkpoint_robotwin(root, cfg, resolved_best=resolved, episodes=2)
             multi = MultiTaskSimRunner.__new__(MultiTaskSimRunner)
             multi.runners = {'a': None, 'b': None}
-            multi._task_seed_pools = {'a': [0,1,2,3], 'b': [100,101,102,103]}
-            with self.assertRaisesRegex(ValueError, 'identity'):
-                validate_heldout(multi, old, [2,3])
+            with self.assertRaisesRegex(ValueError, 'evidence'):
+                validate_heldout(multi, old, {'a': [2,3], 'b': [102,103]})
 
     def test_actual_rsync_options_two_rounds(self):
         script=Path('scripts/remote/sync_down.sh').read_text()

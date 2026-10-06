@@ -15,7 +15,7 @@ Evaluation protocol
 2. Use the selection record's embedded manifest and complete test role; an
    explicit manifest override must match. Without a pinned protocol, use the
    configured manifest or the legacy shuffled pool (training.seed + 1024).
-3. Validate the full runner pool and held-out task/seed identities before
+3. Validate requested task/seed availability and held-out separation before
    loading weights; legacy evaluation excludes the recorded selection seeds.
 4. Restore the saved Agent from the concrete checkpoint with the resolved
    EMA/raw choice. Single evaluation and NFE sweep share this setup.
@@ -60,7 +60,7 @@ from dexmani_policy.utils.random import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param,
-    save_eval_snapshot, mapped_task_seeds, validate_heldout, artifact_reference, selection_provenance,
+    save_eval_snapshot, run_eval_plan, plan_size, task_seed_pools, validate_heldout, artifact_reference, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
     fixed_test_seeds,
@@ -113,7 +113,7 @@ def _setup_eval(
     video_save_dir: Path | None = None,
     best_info=None,
     episodes: int,
-    selection_seeds: list[int],
+    selection_seeds: dict[str, list[int]] | list[int],
 ):
     """Resolve and validate seeds on the full runner before restoring the Agent.
 
@@ -130,8 +130,8 @@ def _setup_eval(
         eval_seeds = _select_eval_seeds(
             env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
         )
-    elif len(eval_seeds) != episodes:
-        cprint(f"Requested {episodes} episodes; manifest fixes {len(eval_seeds)} test seeds "
+    elif plan_size(eval_seeds) != episodes:
+        cprint(f"Requested {episodes} episodes; manifest fixes {plan_size(eval_seeds)} test seeds "
                "per task. Evaluating the full test role.", "yellow")
     validate_heldout(env_runner, best_info, eval_seeds)
 
@@ -147,20 +147,12 @@ def _setup_eval(
     return agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds
 
 
-def _selection_seeds(best_info) -> list[int]:
+def _selection_seeds(best_info) -> dict[str, list[int]] | list[int]:
     """Require selection seeds so final evaluation can exclude them."""
-    selection = best_info.get("selection")
-    seeds = selection.get("seeds") if isinstance(selection, dict) else None
-    if (
-        not isinstance(seeds, list)
-        or not seeds
-        or any(type(seed) is not int for seed in seeds)
-        or len(set(seeds)) != len(seeds)
-    ):
-        raise ValueError(
-            "Held-out best evaluation requires non-empty unique integer "
-            "selection.seeds in best_ckpt.json to exclude checkpoint-selection seeds"
-        )
+    selection = best_info.get("selection", {})
+    seeds = selection.get("task_seeds", selection.get("seeds"))
+    if not isinstance(seeds, (dict, list)) or not seeds:
+        raise ValueError("Held-out best evaluation requires actual selection task/seed evidence")
     return seeds
 
 
@@ -168,42 +160,36 @@ def _select_eval_seeds(
     env_runner,
     eval_seed: int,
     episodes: int,
-    excluded_seeds: list[int] | None = None,
-) -> list[int]:
+    excluded_seeds: dict[str, list[int]] | list[int] | None = None,
+) -> dict[str, list[int]]:
     """Select deterministic seeds after excluding checkpoint-selection seeds."""
     if episodes <= 0:
         raise ValueError(f"episodes must be positive, got {episodes}")
 
-    all_seeds = list(dict.fromkeys(env_runner.get_seed_list()))
-    rng = random.Random(eval_seed)
-    rng.shuffle(all_seeds)
-
-    excluded = set(excluded_seeds or [])
-    eligible_seeds = [seed for seed in all_seeds if seed not in excluded]
-    if not eligible_seeds:
-        raise RuntimeError(
-            "No evaluation seeds remain after excluding checkpoint-selection seeds."
-        )
-    n_total = min(episodes, len(eligible_seeds))
-    if episodes > len(eligible_seeds):
-        cprint(
-            f"Requested {episodes} episodes, only {len(eligible_seeds)} disjoint "
-            f"held-out seeds remain; evaluating all {len(eligible_seeds)}.",
-            "yellow",
-        )
-    eval_seeds = eligible_seeds[:n_total]
-
-    cprint(
-        f"Evaluating on {n_total} seeds (eval_seed={eval_seed}, first seed={eval_seeds[0]}) ...",
-        "cyan",
-    )
-    return eval_seeds
+    pools = task_seed_pools(env_runner)
+    excluded = excluded_seeds or {}
+    if isinstance(excluded, list):
+        if len(pools) != 1:
+            raise ValueError("Historical multi-task selection lacks actual task/seed evidence")
+        excluded = {next(iter(pools)): excluded}
+    # Apply the same seeded permutation to each task's own pool. Equal lengths
+    # preserve the former paired ordering without using numeric reference seeds.
+    available = {}
+    common_count = min(len(pool) for pool in pools.values())
+    for task, pool in pools.items():
+        pool = list(dict.fromkeys(pool))[:common_count]
+        random.Random(eval_seed).shuffle(pool)
+        available[task] = [s for s in pool if s not in excluded.get(task, [])]
+    count = min(episodes, *(len(pool) for pool in available.values()))
+    if count == 0:
+        raise RuntimeError("No evaluation seeds remain after excluding checkpoint-selection seeds.")
+    return {task: pool[:count] for task, pool in available.items()}
 
 
 def _run_one_inference_setting(
     agent,
     env_runner,
-    eval_seeds: list[int],
+    eval_seeds: dict[str, list[int]],
     inference_steps: int,
     video_save_dir: Path | None,
     *,
@@ -211,7 +197,7 @@ def _run_one_inference_setting(
     ckpt_tag_or_path: str,
     ckpt_path: Path,
     eval_seed: int,
-    selection_seeds_excluded: list[int],
+    selection_seeds_excluded: dict[str, list[int]] | list[int],
     heldout_from_selection: bool,
     use_ema: bool,
     eval_config: str,
@@ -229,12 +215,10 @@ def _run_one_inference_setting(
             raise FileExistsError(
                 f"Evaluation result already exists: {result_save_dir / name}"
             )
-    n_seeds = len(eval_seeds)
-    env_runner.eval_seeds = eval_seeds
-    result = env_runner.run(
-        agent,
+    n_seeds = plan_size(eval_seeds)
+    result = run_eval_plan(
+        env_runner, agent, eval_seeds,
         inference_steps=inference_steps,
-        eval_episodes=n_seeds,
         video_save_dir=video_save_dir,
     )
 
@@ -367,8 +351,8 @@ def evaluate_checkpoint_robotwin(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
         inference_steps_list=[inference_steps], episodes=episodes,
-        effective_episodes=len(eval_seeds), shuffle_seed=eval_seed,
-        policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
+        effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,
+        policy_seed_mode="episode_seed", task_seeds=eval_seeds,
         selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
         **selection_provenance(best_info),
     )
@@ -471,8 +455,8 @@ def evaluate_checkpoint_sweep(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
         inference_steps_list=inference_steps_list, episodes=episodes,
-        effective_episodes=len(eval_seeds), shuffle_seed=eval_seed,
-        policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
+        effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,
+        policy_seed_mode="episode_seed", task_seeds=eval_seeds,
         selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
         **selection_provenance(best_info),
     )

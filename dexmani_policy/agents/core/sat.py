@@ -222,7 +222,8 @@ class SATAgent(BaseAgent):
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
-            num_flow_train_timesteps=num_flow_train_timesteps,
+            **({"num_flow_train_timesteps": num_flow_train_timesteps}
+               if t_sample_mode_for_flow in ("discrete", "discrete_pow") else {}),
             t_sample_mode=t_sample_mode_for_flow,
             beta_s=beta_s,
             beta_alpha=beta_alpha,

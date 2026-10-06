@@ -146,13 +146,6 @@ agent:
   num_inference_steps: 10
   prediction_type: sample
 
-  # Rectified Flow (only active when action_decoder_type=rectified_flow)
-  flow_num_inference_steps: 10
-  num_flow_train_timesteps: 10
-  flow_t_sample_mode: beta
-  flow_beta_alpha: 1.0
-  flow_beta_beta: 1.5
-
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
@@ -248,8 +241,6 @@ eval:
   use_ema: true
 
   select_best:
-    initial_episodes: 25
-    batch_size: 5
     max_episodes: 100
 
   offline:

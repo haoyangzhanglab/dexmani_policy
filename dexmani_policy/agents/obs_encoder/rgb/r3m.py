@@ -123,6 +123,7 @@ class R3M(nn.Module):
         norm_mode: NormMode = "group_norm",
         global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
+        load_pretrained: bool = True,
     ):
         super().__init__()
 
@@ -143,14 +144,15 @@ class R3M(nn.Module):
         backbone = resnet_fn(weights=None, norm_layer=norm_layer)
         backbone.fc = nn.Identity()
 
-        convnet_state = _load_r3m_convnet_state_dict(model_name)
-        missing, unexpected = backbone.load_state_dict(convnet_state, strict=False)
-        if missing:
-            logger.warning(
-                "R3M %s: %d missing keys (expected fc.*): %s", model_name, len(missing), missing[:5]
-            )
-        if unexpected:
-            raise RuntimeError(f"Unexpected keys in R3M {model_name} state dict: {unexpected}")
+        if load_pretrained:
+            convnet_state = _load_r3m_convnet_state_dict(model_name)
+            missing, unexpected = backbone.load_state_dict(convnet_state, strict=False)
+            if missing:
+                logger.warning(
+                    "R3M %s: %d missing keys (expected fc.*): %s", model_name, len(missing), missing[:5]
+                )
+            if unexpected:
+                raise RuntimeError(f"Unexpected keys in R3M {model_name} state dict: {unexpected}")
 
         if norm_mode == "group_norm":
             backbone = replace_batch_norm_with_group_norm(backbone)

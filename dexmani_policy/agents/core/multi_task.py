@@ -25,6 +25,7 @@ class MultiTaskAgent(BaseAgent):
         self,
         # text encoder
         text_encoder_model: str = "openai/clip-vit-base-patch16",
+        text_embed_dim: int | None = None,
         # obs encoder (RGB + state)
         rgb_backbone_name: str = "dino",
         rgb_backbone_config: dict = None,
@@ -69,7 +70,9 @@ class MultiTaskAgent(BaseAgent):
             f"got {action_decoder_type}"
         )
 
-        text_encoder = CLIPTextEncoder(model_name=text_encoder_model)
+        text_encoder = (CLIPTextEncoder(model_name=text_encoder_model)
+                        if task_texts is None or text_embed_dim is None else None)
+        text_dim = text_encoder.embed_dim if text_encoder is not None else text_embed_dim
         obs_encoder = DPObsEncoder(
             rgb_backbone_name=rgb_backbone_name,
             state_dim=state_dim,
@@ -106,7 +109,8 @@ class MultiTaskAgent(BaseAgent):
             action_decoder = RectifiedFlow(
                 backbone,
                 num_inference_steps=flow_num_inference_steps,
-                num_flow_train_timesteps=num_flow_train_timesteps,
+                **({"num_flow_train_timesteps": num_flow_train_timesteps}
+               if flow_t_sample_mode in ("discrete", "discrete_pow") else {}),
                 t_sample_mode=flow_t_sample_mode,
                 beta_s=flow_beta_s,
                 beta_alpha=flow_beta_alpha,
@@ -123,28 +127,45 @@ class MultiTaskAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-        self.text_encoder = text_encoder
-        self.text_encoder.requires_grad_(False)
-        self.text_proj = nn.Linear(text_encoder.embed_dim, n_emb)
-
-        if task_texts is not None:
-            self.init_text_cache(task_texts)
-        else:
+        self.text_embed_dim = text_dim
+        self.text_encoder_model = text_encoder_model
+        self._needs_text_initialization = text_encoder is None
+        self.text_proj = nn.Linear(text_dim, n_emb)
+        if task_texts is None:
+            # The explicit open-text interface remains online.
+            self.text_encoder = text_encoder
+            self.text_encoder.requires_grad_(False)
             self.register_buffer("task_emb_table", None)
+        else:
+            unique = list(dict.fromkeys(task_texts))
+            if not unique:
+                raise ValueError("Closed task_texts must not be empty")
+            if text_encoder is None:
+                table = torch.zeros(len(unique), text_dim)
+            else:
+                with torch.no_grad():
+                    table = torch.stack([text_encoder([t]).squeeze() for t in unique])
+            self.register_buffer("task_emb_table", table)
+            self.task_to_idx = {t: i for i, t in enumerate(unique)}
 
-    def init_text_cache(self, task_texts: list):
-        unique = list(dict.fromkeys(task_texts))
-        with torch.no_grad():
-            embs = [self.text_encoder([t]).squeeze() for t in unique]
-        self.register_buffer("task_emb_table", torch.stack(embs))
-        self.task_to_idx = {t: i for i, t in enumerate(unique)}
+    def initialize_training(self):
+        if self._needs_text_initialization:
+            encoder = CLIPTextEncoder(model_name=self.text_encoder_model)
+            if encoder.embed_dim != self.text_embed_dim:
+                raise ValueError("Saved text dimension differs from initialization model")
+            with torch.no_grad():
+                table = torch.stack([encoder([t]).squeeze() for t in self.task_to_idx])
+                self.task_emb_table.copy_(table.to(self.task_emb_table))
+            self._needs_text_initialization = False
 
     def get_text_emb(self, task_texts):
         if self.task_emb_table is not None:
-            indices = [self.task_to_idx.get(t) for t in task_texts]
-            if all(i is not None for i in indices):
-                idx = torch.tensor(indices, device=self.task_emb_table.device)
-                return self.text_proj(self.task_emb_table[idx].to(dtype=self.text_proj.weight.dtype))
+            unknown = [t for t in task_texts if t not in self.task_to_idx]
+            if unknown:
+                raise ValueError(f"Unknown closed-set task text: {unknown}")
+            idx = torch.tensor([self.task_to_idx[t] for t in task_texts],
+                               device=self.task_emb_table.device)
+            return self.text_proj(self.task_emb_table[idx].to(dtype=self.text_proj.weight.dtype))
         emb = self.text_encoder(task_texts).squeeze(1)
         return self.text_proj(emb.to(dtype=self.text_proj.weight.dtype))
 

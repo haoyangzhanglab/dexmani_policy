@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 from test_infra_evaluation import Runner, experiment
 from dexmani_policy import select_best_ckpt as selector, eval_best_ckpt as evaluator
 from dexmani_policy.agents.loader import resolve_best_checkpoint
-from dexmani_policy.evaluation.protocol import load_seed_manifest, fixed_test_seeds, bind_seed_manifest
+from dexmani_policy.evaluation.protocol import load_seed_manifest, fixed_test_seeds, bind_seed_manifest, plan_size
 from scripts.eval.make_seed_manifest import make_manifest
 
 
@@ -19,15 +19,17 @@ class Pool(Runner):
     def __init__(self, multi=False, size=200):
         super().__init__(False)
         self.multi, self.size = multi, size
+        if multi:
+            self.runners = {'a': Runner(), 'b': Runner()}
+            for offset, (task, leaf) in enumerate(self.runners.items()):
+                leaf.task_name = task
+                leaf.get_seed_list = lambda offset=offset: [s + 1000 * offset for s in range(self.size)]
     def get_seed_list(self): return list(range(self.size))
-    def map_eval_seeds(self,seeds):
-        result={'a':list(seeds)}
-        if self.multi: result['b']=[s+1000 for s in seeds]
-        return result
-    def run(self,agent,**kwargs):
-        self.calls.append((list(self.eval_seeds),kwargs))
-        return {'episode_details':[dict(task_name=t,seed=s,success=False,steps=None)
-                for t,seeds in self.map_eval_seeds(self.eval_seeds).items() for s in seeds]}
+    def run(self, agent, task_seeds=None, **kwargs):
+        plan = task_seeds if task_seeds is not None else {'a': self.eval_seeds}
+        self.calls.append((plan, kwargs))
+        return {'episode_details': [dict(task_name=t, seed=s, success=False, steps=None)
+                for t, seeds in plan.items() for s in seeds]}
 
 
 def test_manifest_generation_identity_and_validation(tmp_path):
@@ -38,10 +40,10 @@ def test_manifest_generation_identity_and_validation(tmp_path):
         path=tmp_path/'manifest.json'; path.write_text(json.dumps(m))
         p=load_seed_manifest(m,runner)
         assert p==load_seed_manifest(path,runner)==load_seed_manifest(OmegaConf.create(m),runner)
-        assert [len(p['roles'][r]) for r in ['selection','tie_break','test']]==[25,5,100]
-        assert len(set(sum(p['roles'].values(),[])))==130
+        assert [plan_size(p['roles'][r]) for r in ['selection','tie_break','test']]==[25,5,100]
+        assert len(set(sum((plan['a'] for plan in p['roles'].values()), [])))==130
         runner.size=201
-        with pytest.raises(ValueError,match='pool hash'): load_seed_manifest(m,runner)
+        assert load_seed_manifest(m,runner)['roles'] == p['roles']
         runner.size=129
         with pytest.raises(ValueError,match='129'): make_manifest(runner,pool_id='short')
         runner.size=200
@@ -116,9 +118,8 @@ def test_zero_selection_fixed_test_and_pinning(tmp_path,monkeypatch,capsys,multi
     evaluator._resolve_final_eval_request(effective,root,'best',[],resolved_best=original_record)
     pool_changed=Pool(multi,size=201)
     monkeypatch.setattr(evaluator,'build_eval_runner',lambda cfg:pool_changed)
-    with pytest.raises(ValueError,match='pool hash'):
-        evaluator.evaluate_checkpoint_robotwin(root,cfg,resolved_best=original_record)
-    assert model_load.call_count==2
+    evaluator.evaluate_checkpoint_robotwin(root,cfg,resolved_best=original_record)
+    assert model_load.call_count==3
 
 
 @pytest.mark.parametrize('fault',['empty','missing','duplicate','wrong','no_success','no_steps','error','failed_tasks'])
@@ -127,7 +128,7 @@ def test_selection_episode_failures_preserve_pointer(tmp_path,monkeypatch,fault)
     cfg.eval.seed_manifest=make_manifest(runner,pool_id='synthetic-fixture')
     monkeypatch.setattr(selector,'build_eval_runner',lambda cfg:runner)
     def result(cfg,r,mc,seeds,*a,**kw):
-        details=[dict(seed=s,success=False,steps=None) for s in seeds]
+        details=[dict(seed=s,success=False,steps=None) for s in seeds['a']]
         if fault=='empty': details=[]
         if fault=='missing': details.pop()
         if fault=='duplicate': details[-1]=details[0]
@@ -152,8 +153,8 @@ def test_selector_requires_valid_protocol_before_model(tmp_path,monkeypatch):
         cfg.eval.seed_manifest=source
         with pytest.raises((ValueError,FileNotFoundError)): selector.select_best_checkpoint(root,cfg)
     cfg.eval.seed_manifest=make_manifest(runner,pool_id='synthetic-fixture')
-    runner.size=201
-    with pytest.raises(ValueError,match='pool hash'): selector.select_best_checkpoint(root,cfg)
+    runner.size=3
+    with pytest.raises(ValueError,match='unavailable'): selector.select_best_checkpoint(root,cfg)
     assert load.call_count==0
     with pytest.raises(ValueError,match='same manifest'):
         bind_seed_manifest(cfg,{'selection':{'seeds':[0]}})
@@ -174,13 +175,13 @@ def test_selection_hard_cap_and_effective_counts(tmp_path, monkeypatch, tie_coun
     # A unique winner does not use tie seeds, but they must still fit the cap.
     def rollout(cfg, r, mc, seeds, *args, **kwargs):
         return {'episode_details': [dict(seed=s, success=mc.global_step == 40, steps=3)
-                                    for s in seeds]}
+                                    for s in seeds['a']]}
     monkeypatch.setattr(selector, 'evaluate_checkpoint', rollout)
-    selector.select_best_checkpoint(root, cfg, initial_episodes=1, batch_size=0, max_episodes=cap)
+    selector.select_best_checkpoint(root, cfg, max_episodes=cap)
     info, _ = resolve_best_checkpoint(root)
     assert not info['selection']['tie_break_used']
     snapshot = OmegaConf.load((root / info['selection_summary']).parent / 'eval_config.yaml')
-    assert snapshot.request.initial_episodes == 1 and snapshot.request.batch_size == 0
+    assert "initial_episodes" not in snapshot.request and "batch_size" not in snapshot.request
     assert snapshot.request.max_episodes == cap
     assert dict(snapshot.request.effective_episode_counts) == {
         'selection': 25, 'tie_break': tie_count, 'test': 100}
@@ -193,16 +194,16 @@ def test_ranking_and_unused_tie_reservation(tmp_path,monkeypatch,tie_success):
     cfg.eval.seed_manifest=manifest
     monkeypatch.setattr(selector,'build_eval_runner',lambda cfg:runner)
     def rollout(cfg,r,mc,seeds,*a,**kw):
-        tie=seeds==manifest['tie_break']['a']
+        tie=seeds==manifest['tie_break']
         success=(tie and mc.global_step==20) if tie_success else mc.global_step==40
-        return {'episode_details':[dict(seed=s,success=success,steps=3 if success else None) for s in seeds]}
+        return {'episode_details':[dict(seed=s,success=success,steps=3 if success else None) for s in seeds['a']]}
     monkeypatch.setattr(selector,'evaluate_checkpoint',rollout)
     selector.select_best_checkpoint(root,cfg)
     info,_=resolve_best_checkpoint(root)
     assert info['global_step']==(20 if tie_success else 40)
     assert info['selection']['tie_break_used']==tie_success
     assert info['selection']['selection_all_zero'] is False
-    assert not set(manifest['tie_break']['a']) & set(fixed_test_seeds(cfg,runner,info))
+    assert not set(manifest['tie_break']['a']) & set(fixed_test_seeds(cfg,runner,info)['a'])
 
 
 def test_manifest_cli_and_shell_handoff(tmp_path,monkeypatch):
@@ -235,10 +236,56 @@ def test_manifest_cli_and_shell_handoff(tmp_path,monkeypatch):
     conda.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CAPTURE_ARGS"\n')
     conda.chmod(0o755)
     captured=tmp_path/'args.txt'
-    subprocess.run(['bash',str(shell),'dp','task','run','--no-videos'],check=True,capture_output=True,
+    subprocess.run(['bash',str(shell),'dp','task','run'],check=True,capture_output=True,
                    env=dict(os.environ,PATH=f'{binary}:'+os.environ['PATH'],SEED_MANIFEST=str(output),CAPTURE_ARGS=str(captured)))
     lines=captured.read_text().splitlines()
-    assert len(lines)==3 and f'eval.seed_manifest={output}' in lines[0]
+    assert len(lines)==2 and f'eval.seed_manifest={output}' in lines[0]
     assert all('eval.seed_manifest=' not in line for line in lines[1:])
     handoff=next(arg.split('=',1)[1] for arg in lines[0].split() if arg.startswith('--result-file='))
     assert all(f'--selection-record={handoff}' in line for line in lines[1:])
+
+
+def test_direct_multitask_plan_preserves_physical_sequence_and_metrics():
+    from test_infra_evaluation import MultiTaskSimRunner
+    from dexmani_policy.evaluation.protocol import run_eval_plan
+    class Leaf(Runner):
+        def __init__(self, task, success):
+            super().__init__(success)
+            self.task_name = self.task_text = task
+        def run(self, agent, **kwargs):
+            result = super().run(agent, **kwargs)
+            result.update(success_rate=float(self.success), avg_steps=3 if self.success else None)
+            return result
+    runner = MultiTaskSimRunner.__new__(MultiTaskSimRunner)
+    runner.runners = {'a': Leaf('a', True), 'b': Leaf('b', False)}
+    # Independently expanded old reference positions [2, 0]. Runtime receives
+    # only the physical lists, even if task pool order subsequently changes.
+    plan = {'a': [307, 101], 'b': [14, 7]}
+    result = run_eval_plan(runner, None, plan, inference_steps=2)
+    assert runner.runners['a'].calls[0][0] == [307, 101]
+    assert runner.runners['b'].calls[0][0] == [14, 7]
+    assert result['success_rate'] == result['macro_success_rate'] == result['micro_success_rate'] == .5
+    assert (result['n_success'], result['n_valid_episodes']) == (2, 4)
+    with pytest.raises(ValueError, match='equal'):
+        run_eval_plan(runner, None, {'a': [307], 'b': [14, 7]}, inference_steps=2)
+    runner.runners['b'].run = lambda *a, **kw: dict(success_rate=0., avg_steps=None, episode_details=[])
+    with pytest.raises(RuntimeError, match='failed for tasks'):
+        runner.run(None, task_seeds=plan, inference_steps=2)
+
+
+def test_manifest_expands_old_unequal_pools_once():
+    import random
+    from dexmani_policy.evaluation.protocol import load_seed_manifest
+    a, b = Runner(), Runner()
+    a.task_name = 'a'; b.task_name = 'b'
+    old_a, old_b = [101, 203, 307, 411, 500], [7, 9, 14, 22]
+    a.get_seed_list = lambda: old_a
+    b.get_seed_list = lambda: old_b
+    runner = SimpleNamespace(runners={'a': a, 'b': b})
+    manifest = make_manifest(runner, pool_id='fixture', selection=1, tie_break=1, test=2)
+    reference = old_a[:4].copy(); random.Random(1066).shuffle(reference)
+    expected_b = [old_b[old_a.index(seed)] for seed in reference]
+    assert sum((manifest[r]['a'] for r in ('selection', 'tie_break', 'test')), []) == reference
+    assert sum((manifest[r]['b'] for r in ('selection', 'tie_break', 'test')), []) == expected_b
+    b.get_seed_list = lambda: list(reversed(old_b)) + [999]
+    assert load_seed_manifest(manifest, runner)['roles']['test'] == manifest['test']

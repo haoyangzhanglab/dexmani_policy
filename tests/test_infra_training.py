@@ -60,40 +60,29 @@ def tiny_trainer():
 
 class TrainingInfraTests(unittest.TestCase):
     def test_spawn_epoch(self):
+        from dexmani_policy.datasets.resumable_sampler import ResumableDistributedSampler
         for strategy in ("balanced", "weighted", "proportional"):
-            ds = MultiTaskDataset(
-                [TinyDataset(3), TinyDataset(7)],
-                ["a", "b"],
+            ds = MultiTaskDataset([TinyDataset(3), TinyDataset(7)], ["a", "b"],
                 sampling_strategy=strategy,
-                task_weights=[1.0, 3.0] if strategy == "weighted" else None,
-            )
-            try:
-                for workers in (0, 2):
-                    options = {"num_workers": workers, "batch_size": None}
-                    if workers:
-                        options.update(
-                            multiprocessing_context="spawn", persistent_workers=True
-                        )
-                    loader = DataLoader(ds, **options)
-                    try:
-                        for epoch in (0, 1, 0):
-                            ds.set_epoch(epoch)
-                            expected = [
-                                (ds[i]["obs"]["task_name"], ds[i]["obs"]["index"])
-                                for i in range(len(ds))
-                            ]
-                            actual = [
-                                (x["obs"]["task_name"], x["obs"]["index"])
-                                for x in loader
-                            ]
-                            self.assertEqual(expected, actual)
-                    finally:
-                        if workers and loader._iterator:
-                            loader._iterator._shutdown_workers()
-                self.assertIsNone(ds.__getstate__()["_manager"])
-            finally:
-                ds.close()
-                ds.close()
+                task_weights=[1.0, 3.0] if strategy == "weighted" else None)
+            for workers in (0, 2):
+                sampler = ResumableDistributedSampler(ds, batch_size=1, num_replicas=1,
+                                                      rank=0, shuffle=False)
+                options = {"num_workers": workers, "batch_size": None, "sampler": sampler}
+                if workers:
+                    options.update(multiprocessing_context="spawn", persistent_workers=True, timeout=10)
+                loader = DataLoader(ds, **options)
+                try:
+                    for epoch in (0, 1, 0):
+                        sampler.set_epoch(epoch)
+                        expected = [(ds[i]["obs"]["task_name"], ds[i]["obs"]["index"])
+                                    for i in sampler]
+                        actual = [(x["obs"]["task_name"], x["obs"]["index"]) for x in loader]
+                        self.assertEqual(expected, actual)
+                finally:
+                    if workers and loader._iterator:
+                        loader._iterator._shutdown_workers()
+            self.assertNotIn("_manager", vars(ds))
 
     def test_claim_and_paths(self):
         with tempfile.TemporaryDirectory() as tmp:

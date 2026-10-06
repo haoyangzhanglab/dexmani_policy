@@ -63,7 +63,6 @@ class Diffusion(nn.Module):
         cond: torch.Tensor,
         actions: torch.Tensor,
         dim_groups: dict[str, tuple[int, int]] | None = None,
-        **kwargs,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B = actions.shape[0]
 

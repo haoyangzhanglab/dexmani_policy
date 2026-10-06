@@ -10,7 +10,7 @@ BaseDataset 对实际启用的输入生成 obs_valid，对完整监督（含启�
 - episode→已确认 trial 的 `trial_ids` 映射，以及 `seed`、`group_unit`；
 - 完整、互斥的 `train_ids`、`val_ids`、`exclusions`，同 trial 不跨 train/val。
 
-清单优先于 `val_ratio`；不从目录名、暂停或 HOME 推断 trial。`max_train_episodes` 仅缩小训练侧，排除项不会进入任一侧。实际读取的完整规范化清单、SHA-256、最终 mask/子集及 episode/trial/有效窗口数量进入现有 `data_recipe` 并随 resolved config 保存；无验证侧时明确 `holdout=false`。这是训练划分，与仿真评测的 `eval.seed_manifest` 独立。
+新训练的清单直接决定最终 episode 集合，要求 `val_ratio=0`、`max_train_episodes=null`，冲突会报错；预算应在清单准备阶段落实。不从目录名、暂停或 HOME 推断 trial，排除项不会进入任一侧。旧 manifest+cap 续训读取保存的完整清单和 `actual_train_ids`，不重新抽样，外部清单文件可以不存在。实际读取的完整规范化清单、SHA-256、最终 mask/子集及 episode/trial/有效窗口数量进入现有 `data_recipe` 并随 resolved config 保存；无验证侧时明确 `holdout=false`。这是训练划分，与仿真评测的 `eval.seed_manifest` 独立。
 
 未提供清单时保留原 episode split、配置和 data_recipe 结构；默认配置不添加 `split_manifest: null`。新清单不接受 unknown revision，可从 Raw 导出到新路径后使用；不向旧缓存回填身份。修改清单内容或实际划分属于新实验，strict resume 会拒绝配方变化。
 
@@ -27,7 +27,7 @@ obs_valid[r[:N]].all() & action_valid[r[:H]].all() & dispatch_valid[r[:H]].all()
 
 Dataset 的窗口仍按实际记录行索引（recorded_rows）构造，缺失与不规则时间不自动修补。时间质量摘要不自动改变窗口资格；仅显式启用 manifest 时，才在 data_recipe 中增加相应划分记录。
 
-Zarr reader 按进程重开句柄，只保留选中字段和每字段一个有界当前 chunk；训练期间不得替换当前读取的缓存。normalizer 单遍合并统计，mixed action 的 xyz/hand 使用 limits、rot6d 保持 identity，辅助 EE 切片与唯一训练源行权重不变。deterministic 多任务采样不启动 Manager；随机采样保留跨 worker 的 epoch 同步。
+Zarr reader 按进程重开句柄，只保留选中字段和每字段一个有界当前 chunk；训练期间不得替换当前读取的缓存。normalizer 单遍合并统计，mixed action 的 xyz/hand 使用 limits、rot6d 保持 identity，辅助 EE 切片与唯一训练源行权重不变。多任务 Dataset 读取固定真实索引，训练与 deterministic validation 都由 `ResumableDistributedSampler` 产生顺序；不创建 Manager，也不在 worker 中维护 epoch 表。
 
 ## 推理接口
 

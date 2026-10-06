@@ -51,23 +51,13 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
     def plain(section):
         return OmegaConf.to_container(section, resolve=True)
 
-    training = plain(cfg.training)
-    for key in (
-        "device",
-        "gpu_ids",
-        "num_gpus",
-        "use_compile",
-        "compile_mode",
-        "fast_grad_finite_check",  # Ignored historical config field.
-    ):
-        training.pop(key, None)
-    training["loop"].pop("log_interval_steps", None)
-    training["loop"].setdefault("gradient_accumulation_steps", 1)
-    training.setdefault("lr_min_ratio", 0.1)
+    training = {"loop": {
+        "total_train_steps": int(cfg.training.loop.total_train_steps),
+        "gradient_accumulation_steps": cfg.training.loop.get("gradient_accumulation_steps", 1),
+    }}
     return {
         "agent": build_agent_contract(model),
-        "agent_config": plain(cfg.agent),
-        "dataset": plain(cfg.dataset),
+        "facts_format": 1,
         "data_recipe": plain(cfg.data_recipe) if "data_recipe" in cfg else None,
         "loader": {
             key: loader_options(cfg).get(key, False)
@@ -77,8 +67,6 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
         "dataset_length": len(train_loader.dataset),
         "batches_per_epoch": len(train_loader),
         "world_size": world_size,
-        "optimizer": plain(cfg.optimizer),
-        "ema": plain(cfg.ema),
         "training": training,
     }
 
@@ -96,7 +84,7 @@ def restore_training_state(
     rank=0,
     source_config=None,
 ):
-    """Restore before compile/DDP; return the next unconsumed batch cursor."""
+    """Restore optimizer/scheduler/EMA-updater/RNG after model weights and optimizer construction."""
     validate_resume_contract(checkpoint.resume_contract, resume_contract)
     validate_ema_resume_state(checkpoint, require_ema=ema_model is not None)
     world_size = resume_contract["world_size"]
@@ -107,15 +95,21 @@ def restore_training_state(
     cursor = checkpoint.next_micro_step
     if not 0 <= cursor < batches or cursor % accum:
         raise ValueError("Checkpoint next_micro_step is not a normalized accumulation boundary")
-    model.load_state_dict(fix_state_dict(checkpoint.model_state, False), strict=True)
-    # Normalizers reconstruct their ParameterDict from checkpoint tensors.
-    # A CPU-loaded checkpoint must not leave these parameters on CPU before
-    # DDP wraps the restored model or broadcasts normalization state.
-    model.to(device)
-    if ema_model is not None:
-        ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, False), strict=True)
-        ema_model.to(device)
+    total = resume_contract["training"]["loop"].get("total_train_steps")
+    updates_per_epoch = (batches + accum - 1) // accum
+    if checkpoint.global_step != checkpoint.epoch * updates_per_epoch + cursor // accum:
+        raise ValueError("Checkpoint step/epoch/cursor disagree with full loader geometry")
+    if total is not None and checkpoint.global_step > total:
+        raise ValueError("Checkpoint global_step exceeds the saved total plan")
+    names = {id(p): n for n, p in model.named_parameters()}
+    if any(id(p) not in names for group in optimizer.param_groups for p in group["params"]):
+        raise ValueError("Optimizer must be constructed from the restored model parameters")
+    for current, saved in zip(optimizer.param_groups, checkpoint.optimizer_state["param_groups"]):
+        if "param_names" in saved and saved["param_names"] != [names.get(id(p)) for p in current["params"]]:
+            raise ValueError("Optimizer parameter name/order mismatch")
     optimizer.load_state_dict(checkpoint.optimizer_state)
+    for group in optimizer.param_groups:
+        group["param_names"] = [names[id(p)] for p in group["params"]]
     optimizer_to(optimizer, device)
     scheduler.load_state_dict(checkpoint.scheduler_state)
     if ema_updater is not None:
@@ -130,6 +124,20 @@ def restore_training_state(
         world_size=world_size,
     )
     return checkpoint.global_step, checkpoint.epoch, cursor
+
+
+def restore_model_weights(checkpoint, model, ema_model, device):
+    state = fix_state_dict(checkpoint.model_state, False)
+    if getattr(model, "task_emb_table", None) is not None and any(k.startswith("text_encoder.") for k in state):
+        raise ValueError("Historical text_encoder optimizer layout has no named mapping evidence; full resume rejected")
+    model.load_state_dict(state, strict=True)
+    # Normalizers reconstruct their ParameterDict from checkpoint tensors.
+    # A CPU-loaded checkpoint must not leave these parameters on CPU before
+    # DDP wraps the restored model or broadcasts normalization state.
+    model.to(device)
+    if ema_model is not None:
+        ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, False), strict=True)
+        ema_model.to(device)
 
 
 def validate_gpu_ids(num_gpus, gpu_ids, available_gpus):
@@ -181,20 +189,21 @@ def build_agent_contract(model) -> Dict[str, Any]:
 
 
 def validate_resume_contract(saved, current) -> None:
-    """Report all missing, extra and changed values, including nested keys."""
+    """Compare runtime facts, projecting the one supported historical full contract."""
     import copy
 
-    from dexmani_policy.agents.normalization import uses_diffusion_config
-
     saved, current = copy.deepcopy(saved), copy.deepcopy(current)
-    for contract in (saved, current):
-        agent_cfg = contract.get("agent_config", {})
-        rgb_cfg = agent_cfg.get("rgb_backbone_config", {})
-        if (agent_cfg.get("rgb_backbone_name") in ("dino", "clip", "siglip")
-                and rgb_cfg.get("tune_mode") == "lora"):
-            rgb_cfg.setdefault("lora_dtype", "backbone")
-        if uses_diffusion_config(agent_cfg):
-            agent_cfg.setdefault("clip_sample", True)
+    if current.get("facts_format") != 1 or saved.get("facts_format") not in (None, 1):
+        raise ValueError("Unsupported resume facts format")
+    if "facts_format" not in saved:
+        # Saved config owns recipe fields; retain only the current runtime facts.
+        saved = {key: saved[key] for key in current if key in saved}
+        saved["facts_format"] = 1
+        loop = saved.get("training", {}).get("loop", {})
+        saved["training"] = {"loop": {
+            "total_train_steps": loop.get("total_train_steps"),
+            "gradient_accumulation_steps": loop.get("gradient_accumulation_steps", 1),
+        }}
     validate_data_identity(saved.pop("data_identity", None), current.pop("data_identity", None))
     differences = []
 
@@ -234,7 +243,7 @@ def validate_ema_resume_state(checkpoint: TrainCheckpoint, *, require_ema: bool)
 
 
 def load_resume_source_config(checkpoint_path):
-    """Historical evidence only; never substitute the destination config."""
+    """Read the resolved configuration belonging to the source checkpoint."""
     from pathlib import Path
 
     source = Path(checkpoint_path).resolve().parent.parent / "config.yaml"
@@ -263,3 +272,47 @@ def validate_data_identity(saved, current, path="data_identity"):
             )
     else:
         warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)
+
+
+def resolve_training_config(cfg, *, overrides=None):
+    """Select saved recipe before validation/build; apply only explicit operational overrides."""
+    import re
+    from hydra.core.hydra_config import HydraConfig
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from omegaconf import open_dict
+    from dexmani_policy.training.run_identity import resolve_resume_source
+
+    source = resolve_resume_source(cfg.get('resume_from'))
+    if source is None:
+        return cfg
+    saved = load_resume_source_config(source)
+    if saved is None:
+        raise ValueError('Full resume requires the source experiment config.yaml')
+    result = OmegaConf.create(saved)
+    if overrides is None:
+        overrides = HydraConfig.get().overrides.task
+    operational = {
+        'resume_from', 'max_updates', 'workspace.output_dir',
+        'training.device', 'training.gpu_ids', 'training.use_compile', 'training.compile_mode',
+        'training.loop.log_interval_steps', 'dataloader.num_workers',
+        'dataloader.persistent_workers', 'dataloader.prefetch_factor',
+    }
+    with open_dict(result):
+        # The destination is this invocation's new run, never the source output.
+        result.workspace.output_dir = cfg.workspace.output_dir
+        result.workspace.pop('claim_token', None)
+        result.pop('max_updates', None)
+        for override in OverridesParser.create().parse_overrides(list(overrides)):
+            key = override.key_or_group
+            if key.startswith('hydra.'):
+                continue
+            if override.is_delete() or override.is_sweep_override():
+                raise ValueError(f'Unsupported resume override: {override.input_line}')
+            data_path = re.fullmatch(r'dataset\.(?:datasets\.\d+\.)?zarr_path', key) is not None
+            if key not in operational and not key.startswith('workspace.wandb_cfg.') and not data_path:
+                raise ValueError(f'Resume recipe is owned by saved config; forbidden override: {key}')
+            if key == 'resume_from':
+                continue
+            OmegaConf.update(result, key, override.value(), merge=False, force_add=True)
+        result.resume_from = source
+    return result

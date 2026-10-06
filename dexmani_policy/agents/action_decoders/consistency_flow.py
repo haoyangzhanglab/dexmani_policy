@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -88,28 +86,6 @@ class ConsistencyFlowMatch(nn.Module):
             "vt_target": x1 - x0,
         }
 
-    def _compute_flow_only_loss(
-        self,
-        flow_targets: dict[str, torch.Tensor],
-        context: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        pred_v = self.model(
-            x=flow_targets["xt"],
-            timestep=flow_targets["t"],
-            target_t=flow_targets["target_t"],
-            context=context,
-        )
-        loss_flow = F.mse_loss(pred_v, flow_targets["vt_target"], reduction="none")
-        loss_flow = reduce(loss_flow, "b ... -> b (...)", "mean").mean()
-        return loss_flow, {
-            "loss": loss_flow,
-            "loss_action": loss_flow,
-            "loss_flow": loss_flow,
-            "loss_consistency": torch.zeros_like(loss_flow),
-            "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_v**2)),
-            "has_consistency": 0,
-        }
-
     def get_consistency_velocity(
         self,
         actions: torch.Tensor,
@@ -171,7 +147,8 @@ class ConsistencyFlowMatch(nn.Module):
         ema_decoder: nn.Module | None = None,
         dim_groups=None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        del dim_groups
+        if dim_groups:
+            raise ValueError("This flow decoder does not support nonempty dim_groups")
         if ema_decoder is None:
             raise RuntimeError(
                 "ConsistencyFlowMatch requires an EMA action decoder during training"
@@ -183,17 +160,8 @@ class ConsistencyFlowMatch(nn.Module):
         batch_size = actions.shape[0]
 
         if batch_size < 2:
-            warnings.warn(
-                "ConsistencyFlowMatch received batch_size < 2; this batch uses "
-                "flow loss only. Increase dataloader.batch_size if this occurs "
-                "during normal training.",
-                UserWarning,
-                stacklevel=2,
-            )
-            return self._compute_flow_only_loss(
-                self.get_flow_velocity(actions),
-                cond,
-            )
+            raise ValueError("ConsistencyFlowMatch requires micro-batch >= 2 for flow/consistency groups; "
+                             "gradient accumulation cannot repair this. Use RectifiedFlow for pure flow.")
 
         flow_batch_size = max(
             1,

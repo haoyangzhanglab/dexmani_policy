@@ -186,8 +186,6 @@ eval:
   use_ema: true
 
   select_best:
-    initial_episodes: 25
-    batch_size: 5
     max_episodes: 100
 
   offline:

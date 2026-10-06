@@ -61,6 +61,8 @@ def parse_eval_overrides(overrides: list[str]):
     """Only evaluation/inference controls may override checkpoint evaluation."""
     for override in overrides:
         key = override.split("=", 1)[0].lstrip("+~")
+        if key in {"eval.select_best.initial_episodes", "eval.select_best.batch_size"}:
+            raise ValueError("Selection episode lists come from eval.seed_manifest; old budget options were removed")
         if key.split(".")[-1] in {"denoise_steps", "denoise_timesteps_list"}:
             raise ValueError(
                 "Use inference_steps or inference_steps_list for evaluation"
@@ -381,26 +383,66 @@ def wilson_interval(successes, n):
     return [max(0., center-half), min(1., center+half)]
 
 
-def mapped_task_seeds(runner, seeds):
-    if hasattr(runner, "map_eval_seeds"):
-        return runner.map_eval_seeds(seeds)
-    return {runner.task_name: list(seeds)}
+def task_seed_pools(runner):
+    """Physical seeds in task execution order; no reference-task indirection."""
+    return {leaf.task_name: list(leaf.get_seed_list())
+            for leaf in iter_leaf_env_runners(runner)}
 
 
-def validate_heldout(runner, best_info, seeds):
+def plan_size(plan):
+    """Equal per-task budgets retain the existing macro/micro comparison."""
+    sizes = {len(seeds) for seeds in plan.values()}
+    if len(sizes) != 1:
+        raise ValueError("Task seed plans require equal per-task episode counts")
+    return sizes.pop()
+
+
+def validate_task_seeds(plan, tasks, *, allow_empty=False):
+    if not isinstance(plan, dict) or set(plan) != set(tasks):
+        raise ValueError("Task seed plan tasks do not match runner")
+    for task, seeds in plan.items():
+        if (not isinstance(seeds, list) or any(type(seed) is not int or seed < 0 for seed in seeds)
+                or len(set(seeds)) != len(seeds)):
+            raise ValueError(f"{task}: invalid or duplicate seeds")
+    if plan_size(plan) == 0 and not allow_empty:
+        raise ValueError("Task seed plan is empty")
+
+
+def run_eval_plan(runner, agent, plan, *, inference_steps, video_save_dir=None):
+    tasks = list(runner.runners) if hasattr(runner, "runners") else [runner.task_name]
+    validate_task_seeds(plan, tasks)
+    kwargs = dict(inference_steps=inference_steps, eval_episodes=plan_size(plan),
+                  video_save_dir=video_save_dir)
+    if hasattr(runner, "runners"):
+        result = runner.run(agent, task_seeds=plan, **kwargs)
+    else:
+        runner.eval_seeds = list(plan[runner.task_name])
+        result = runner.run(agent, **kwargs)
+    from collections import Counter
+    expected = Counter((task, seed) for task, seeds in plan.items() for seed in seeds)
+    details = collect_episode_details(result)
+    actual = Counter((d.get("task_name", getattr(runner, "task_name", None)), d.get("seed"))
+                     for d in details)
+    if result.get("failed_tasks") or actual != expected or any(
+        "error" in d or "error_category" in d for d in details
+    ):
+        raise RuntimeError("Evaluation episodes do not match the requested task/seed plan")
+    return result
+
+
+def validate_heldout(runner, best_info, plan):
     if best_info is None:
         return
     selection = best_info["selection"]
-    if hasattr(runner, "seed_protocol"):
-        if selection.get("seed_protocol") != runner.seed_protocol():
-            raise ValueError("Multi-task seed pool/order identity missing or changed; rerun checkpoint selection")
-        excluded = selection.get("task_seeds")
-        if not isinstance(excluded, dict) or set(excluded) != set(runner.runners):
-            raise ValueError("Multi-task selection lacks task/seed exclusions; rerun selection")
-    else:
-        excluded = selection.get("task_seeds", {runner.task_name: selection["seeds"]})
-    for task, requested in mapped_task_seeds(runner, seeds).items():
-        if set(requested) & set(excluded.get(task, [])):
+    excluded = selection.get("task_seeds")
+    if excluded is None and not hasattr(runner, "runners"):
+        excluded = {runner.task_name: selection.get("seeds", [])}
+    try:
+        validate_task_seeds(excluded, plan)
+    except ValueError as exc:
+        raise ValueError("Selection lacks actual task/seed evidence; rerun selection") from exc
+    for task, requested in plan.items():
+        if set(requested) & set(excluded[task]):
             raise ValueError(f"Held-out task/seed overlap for {task}; rerun selection")
 
 
@@ -513,7 +555,7 @@ def bind_seed_manifest(cfg, best_info, *, overrides=None):
 
     Saved config paths are defaults, not assertions about a pinned selection.
     This returns an in-memory copy; the experiment config remains unchanged.
-    Pool identity is checked separately, on the full runner before model loading.
+    Physical seed availability is checked on the full runner before model loading.
     """
     from omegaconf import open_dict
     cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
@@ -537,43 +579,26 @@ def bind_seed_manifest(cfg, best_info, *, overrides=None):
 
 
 def load_seed_manifest(source, runner):
-    """Validate an explicit task/seed protocol against the actual runner mapping.
+    """Read final physical task/seed lists, including existing explicit manifests.
 
-    Each role contains task -> ordered physical seeds. Multi-task manifests must
-    be representable by the runner's existing paired reference-seed protocol.
+    Historical pool hashes remain provenance only: pool ordering no longer
+    controls execution. Every requested seed must still exist for its task.
     """
     manifest = _read_seed_manifest(source)
     if not isinstance(manifest, dict) or not manifest.get("pool_id"):
         raise ValueError("Seed manifest requires pool_id")
-    available = list(dict.fromkeys(runner.get_seed_list()))
-    full = mapped_task_seeds(runner, available)
-    tasks = set(full)
+    full = task_seed_pools(runner)
     roles = {}
-    used = {task: set() for task in tasks}
+    used = {task: set() for task in full}
     for role in ("selection", "tie_break", "test"):
         mapping = manifest.get(role)
-        if not isinstance(mapping, dict) or set(mapping) != tasks:
-            raise ValueError(f"{role}: manifest tasks do not match runner")
+        validate_task_seeds(mapping, full, allow_empty=role == "tie_break")
         for task, seeds in mapping.items():
-            if (not isinstance(seeds, list) or any(type(s) is not int for s in seeds)
-                    or len(set(seeds)) != len(seeds)):
-                raise ValueError(f"{role}/{task}: invalid or duplicate seeds")
-            if role != "tie_break" and not seeds:
-                raise ValueError(f"{role}/{task}: empty pool")
             if set(seeds) - set(full[task]) or used[task] & set(seeds):
                 raise ValueError(f"{role}/{task}: unavailable seeds or cross-role overlap")
             used[task].update(seeds)
-        task = next(iter(full))
-        lookup = dict(zip(full[task], available))
-        refs = [lookup[s] for s in mapping[task]]
-        if mapped_task_seeds(runner, refs) != mapping:
-            raise ValueError(f"{role}: seeds do not match the runner's paired task mapping")
-        roles[role] = refs
-    pool_hash = _manifest_hash(full)
-    if "runner_pool_sha256" in manifest and manifest["runner_pool_sha256"] != pool_hash:
-        raise ValueError("Seed manifest runner pool hash differs from current pool")
-    return {"manifest": manifest, "sha256": _manifest_hash(manifest), "roles": roles,
-            "runner_pool_sha256": pool_hash}
+        roles[role] = {task: list(mapping[task]) for task in full}
+    return {"manifest": manifest, "sha256": _manifest_hash(manifest), "roles": roles}
 
 
 def fixed_test_seeds(cfg, runner, best_info):
@@ -583,6 +608,6 @@ def fixed_test_seeds(cfg, runner, best_info):
     if source is None:
         return None
     protocol = load_seed_manifest(source, runner)
-    if saved is not None and any(protocol[key] != saved[key] for key in ("sha256", "runner_pool_sha256")):
+    if saved is not None and protocol["sha256"] != saved["sha256"]:
         raise ValueError("Evaluation seed manifest differs from selection")
     return protocol["roles"]["test"]

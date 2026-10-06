@@ -35,31 +35,28 @@ printf "%s\n" "$output" >&2
 exit "$rc"'
 }
 
-# Return 0 when present, 1 when absent, and another status for an SSH error.
+# Resolve an exact session using a checked listing; tmux status 1 alone is ambiguous.
 has_session() {
-    local session="$1"
-    local rc
-
-    if ssh "$SERVER" "tmux has-session -t '$session' 2>/dev/null"; then
-        return 0
+    local session="$1" sessions line rc
+    if sessions=$(list_sessions); then
+        :
     else
         rc=$?
+        # Reserve 1 for a successful listing with no exact match.
+        [[ $rc -eq 1 ]] && return 2
+        return "$rc"
     fi
-
-    if [[ $rc -eq 1 ]]; then
-        return 1
-    fi
-
-    echo "ERROR: could not inspect tmux session '$session' on '$SERVER' (ssh exit $rc)." >&2
-    return "$rc"
+    while IFS= read -r line; do
+        [[ "${line%%:*}" == "$session" ]] && return 0
+    done <<< "$sessions"
+    return 1
 }
 
-# Sends SIGINT first, waits up to 30 seconds, and then force-stops if needed.
+# Sends SIGINT once; only explicit --force permits a kill after the wait.
 _graceful_stop() {
     local session="$1"
     local rc
     local waited=0
-    local procs
 
     if has_session "$session"; then
         :
@@ -73,9 +70,12 @@ _graceful_stop() {
     fi
 
     echo "  Sending Ctrl+C (SIGINT) to tmux pane..."
-    if ! ssh "$SERVER" "tmux send-keys -t '$session' C-c"; then
+    if ssh "$SERVER" "tmux send-keys -t '=$session' C-c"; then
+        :
+    else
+        rc=$?
         echo "ERROR: could not send SIGINT to '$session'." >&2
-        return 1
+        return "$rc"
     fi
 
     while [[ $waited -lt 30 ]]; do
@@ -87,17 +87,24 @@ _graceful_stop() {
             rc=$?
         fi
         if [[ $rc -eq 1 ]]; then
-            echo "  Session exited gracefully after ${waited}s."
+            echo "  Session disappeared after ${waited}s; checkpoint completeness is unverified."
             break
         fi
         return "$rc"
     done
 
     if [[ $waited -ge 30 ]]; then
-        echo "  SIGINT timeout, force-killing tmux session..."
-        if ! ssh "$SERVER" "tmux kill-session -t '$session'"; then
-            echo "ERROR: could not force-kill '$session'." >&2
+        if ! $FORCE; then
+            echo "ERROR: session still running after 30s; no force-stop requested. Use --force explicitly if needed." >&2
             return 1
+        fi
+        echo "  Explicit --force: killing the selected tmux session..."
+        if ssh "$SERVER" "tmux kill-session -t '=$session'"; then
+            :
+        else
+            rc=$?
+            echo "ERROR: could not force-kill '$session'." >&2
+            return "$rc"
         fi
         if has_session "$session"; then
             echo "ERROR: '$session' still exists after force-kill." >&2
@@ -110,23 +117,19 @@ _graceful_stop() {
         fi
     fi
 
-    echo -n "  GPU memory: "
-    if ! procs=$(ssh "$SERVER" \
-        "nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null"); then
-        echo "unavailable"
-        echo "WARNING: session exited, but GPU cleanup could not be verified." >&2
-        return 0
-    fi
-    if [[ -z "$procs" ]]; then
-        echo "clean"
-    else
-        echo ""
-        echo "  ⚠  GPU memory still allocated:"
-        echo "$procs" | sed 's/^/      /'
-        echo "  Investigate on server: nvidia-smi"
-    fi
+    echo "  Session absent; checkpoint completeness is unverified."
 }
 
+FORCE=false
+ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == --force ]]; then FORCE=true; else ARGS+=("$arg"); fi
+done
+if [[ ${#ARGS[@]} -ne 1 ]]; then
+    echo "Usage: stop_remote.sh [--force] <session_name> | --all | --list" >&2
+    exit 2
+fi
+set -- "${ARGS[@]}"
 case "${1:-}" in
     --list|-l)
         ensure_server_reachable || exit $?
@@ -157,7 +160,7 @@ case "${1:-}" in
             stopped=0
             failed=0
             for session in $sessions; do
-                [[ "$session" == dex_* ]] || continue
+                [[ "$session" =~ ^dex_[a-zA-Z0-9_.-]+$ ]] || continue
                 echo "  [$session]"
                 if _graceful_stop "$session"; then
                     stopped=$((stopped + 1))
@@ -188,8 +191,9 @@ case "${1:-}" in
         if _graceful_stop "$SESSION"; then
             echo "Stopped."
         else
+            rc=$?
             echo "ERROR: could not confirm '$SESSION' stopped." >&2
-            exit 1
+            exit "$rc"
         fi
         ;;
 esac

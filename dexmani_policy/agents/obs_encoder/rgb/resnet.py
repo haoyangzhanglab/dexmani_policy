@@ -76,6 +76,7 @@ class ResNet(nn.Module):
         global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
         weights=None,
+        load_pretrained: bool = True,
     ):
         super().__init__()
 
@@ -89,7 +90,7 @@ class ResNet(nn.Module):
             raise ValueError(f"Unsupported ResNet model: {model_name}")
 
         norm_layer = FrozenBatchNorm2d if norm_mode == "frozen_bn" else nn.BatchNorm2d
-        backbone = getattr(torchvision.models, model_name)(weights=weights, norm_layer=norm_layer)
+        backbone = getattr(torchvision.models, model_name)(weights=weights if load_pretrained else None, norm_layer=norm_layer)
 
         if norm_mode == "group_norm":
             backbone = replace_batch_norm_with_group_norm(backbone)

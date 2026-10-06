@@ -23,7 +23,9 @@ from dexmani_policy.training.build_utils import (
     print_training_recipe,
     validate_config,
 )
-from dexmani_policy.training.resume import build_resume_contract, build_train_loader
+from dexmani_policy.training.resume import (
+    build_resume_contract, build_train_loader, restore_training_state, load_resume_source_config,
+)
 from dexmani_policy.training.run_identity import claim_run, resolve_resume_source
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
@@ -45,6 +47,7 @@ class TrainingComponents:
     scheduler: Any
     train_loader: DataLoader
     workspace: Any
+    batches_per_epoch: int
     resume_checkpoint: Any = None
 
 
@@ -63,7 +66,7 @@ def build_train_components(cfg):
     train_loader = build_train_loader(cfg, dataset)
 
     model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, initialize_training=cfg.get("resume_from") is None
+        cfg, device, normalizer, checkpoint=checkpoint
     )
 
     batches_per_epoch = len(train_loader)
@@ -81,23 +84,13 @@ def build_train_components(cfg):
         scheduler=scheduler,
         train_loader=train_loader,
         workspace=workspace,
+        batches_per_epoch=batches_per_epoch,
         resume_checkpoint=checkpoint,
     )
 
 
-@hydra.main(version_base=None, config_path="configs")
-def main(cfg):
-    validate_config(cfg)
-    with open_dict(cfg):
-        cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
-        cfg.workspace.claim_token = claim_run(
-            cfg.workspace.output_dir, resume_from=cfg.resume_from
-        )
-
-    set_seed(cfg.training.seed)
-    comp = build_train_components(cfg)
-
-    trainer = Trainer(
+def build_trainer(cfg, comp):
+    return Trainer(
         device=comp.device,
         model=comp.model,
         ema_model=comp.ema_model,
@@ -114,15 +107,38 @@ def main(cfg):
         use_compile=cfg.training.get("use_compile", False),
         compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),
         resume_contract=build_resume_contract(cfg, comp.model, comp.train_loader),
+        batches_per_epoch=comp.batches_per_epoch,
     )
+
+
+@hydra.main(version_base=None, config_path="configs")
+def main(cfg):
+    from dexmani_policy.training.resume import resolve_training_config
+    cfg = resolve_training_config(cfg)
+    validate_config(cfg)
+    with open_dict(cfg):
+        cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
+        cfg.workspace.claim_token = claim_run(
+            cfg.workspace.output_dir, resume_from=cfg.resume_from
+        )
+
+    set_seed(cfg.training.seed)
+    comp = build_train_components(cfg)
+
+    trainer = build_trainer(cfg, comp)
     # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>`.
     resume_from = cfg.get("resume_from", None)
-    resume_state = (
-        trainer.load_for_resume(resume_from, checkpoint=comp.resume_checkpoint) if resume_from is not None else None
-    )
+    resume_state = None
+    if comp.resume_checkpoint is not None:
+        resume_state = restore_training_state(
+            comp.resume_checkpoint, resume_contract=trainer.resume_contract,
+            model=comp.model, ema_model=comp.ema_model, ema_updater=comp.ema_updater,
+            optimizer=comp.optimizer, scheduler=comp.scheduler, device=comp.device,
+            source_config=load_resume_source_config(resume_from),
+        )
     comp.resume_checkpoint = None
     comp.workspace.save_hydra_config(cfg)
-    trainer.train(resume_state=resume_state)
+    trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
 
 
 if __name__ == "__main__":

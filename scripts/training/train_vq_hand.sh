@@ -1,20 +1,7 @@
 #!/bin/bash
-# Legacy independent VQ recipe (full-data statistics).
-# New DQ-RISE codebooks: python -m scripts.training.train_vq_hand --policy-config ...
-# See README for the Policy-aligned workflow.
-#
-# Usage:
-#   bash scripts/training/train_vq_hand.sh [task_name] [cli_overrides...]
-#
-# Examples:
-#   bash scripts/training/train_vq_hand.sh                           # default: pick_apple_messy
-#   bash scripts/training/train_vq_hand.sh pour                      # task=pour
-#   bash scripts/training/train_vq_hand.sh pick_apple_messy --num_epochs 2000 --lr 1e-4
-#   TASK_NAME=pour bash scripts/training/train_vq_hand.sh             # env-var override
-#   ZARR_PATH=/custom/data.zarr bash scripts/training/train_vq_hand.sh
-#
-# See the vq_vae section in configs/dqrise.yaml for all configurable fields.
-#
+# Policy-aligned DQ codebook training.
+# Usage: train_vq_hand.sh [task_name] [VQ training options...]
+# Independent VQ research remains explicitly available via the Python --config CLI.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -34,7 +21,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}/$(date +%Y%m%d_%H%M%S
 # Keep Conda activation hooks outside this shell's nounset mode and stream logs.
 exec conda run --no-capture-output -n policy \
     python -u scripts/training/train_vq_hand.py \
-    --config dexmani_policy/configs/dqrise.yaml \
-    --zarr_path "${ZARR_PATH}" \
+    --policy-config dexmani_policy/configs/dqrise.yaml \
+    --policy-override "task_name=${TASK_NAME}" \
+    --policy-override "dataset.zarr_path=${ZARR_PATH}" \
     --output_dir "${OUTPUT_DIR}" \
     "$@"

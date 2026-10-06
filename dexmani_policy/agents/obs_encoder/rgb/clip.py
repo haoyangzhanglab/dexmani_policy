@@ -1,6 +1,8 @@
 import logging
 from typing import Optional
 
+from omegaconf import OmegaConf
+
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionConfig, CLIPVisionModel
@@ -20,15 +22,24 @@ class CLIP(ViTEncoder):
         global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
         lora_dtype: str = "backbone",
+        architecture: dict | None = None,
+        load_pretrained: bool = True,
     ):
         super().__init__()
 
         self.model_name = model_name
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
-        config = CLIPVisionConfig.from_pretrained(model_name)
+        if OmegaConf.is_config(architecture):
+            architecture = OmegaConf.to_container(architecture, resolve=True)
+        config = (CLIPVisionConfig.from_dict(dict(architecture)) if architecture is not None
+                  else CLIPVisionConfig.from_pretrained(model_name))
         config._attn_implementation = "sdpa"
-        self.backbone = CLIPVisionModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
+        self.architecture = config.to_dict()
+        self.backbone = (
+            CLIPVisionModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
+            if load_pretrained else CLIPVisionModel(config).to(dtype=torch.bfloat16)
+        )
 
         if not hasattr(self.backbone.config, "patch_size"):
             raise ValueError(f"{model_name} does not look like a ViT-style CLIP model.")
