@@ -356,21 +356,41 @@ def test_vq_validation_uses_sample_count_for_tail():
     assert result['mse']==pytest.approx(1.)
 
 
-@pytest.mark.parametrize('entry', ['eval','demo'])
-def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry):
+@pytest.mark.parametrize(('entry', 'with_manifest'), [
+    ('eval', False), ('demo', False), ('demo', True),
+])
+def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry, with_manifest):
     import sys
     from test_infra_evaluation import Runner, experiment, publish_best
     from dexmani_policy import eval_best_ckpt as evaluator, record_demo as demo
+    from dexmani_policy.evaluation.protocol import load_seed_manifest
+
+    class SeedOverrideRunner(Runner):
+        # Match SimRunner: recording overrides replace the visible seed pool.
+        def get_seed_list(self):
+            seeds = getattr(self, 'eval_seeds', None)
+            return seeds if seeds is not None else super().get_seed_list()
+
+    runner = SeedOverrideRunner()
     root=tmp_path/'experiments/dp/task/run'; root.mkdir(parents=True)
     root,cfg=experiment(root)
     first=publish_best(root,20)
+    if with_manifest:
+        manifest = {'pool_id': 'demo-fixture', 'selection': {'a': [0, 1]},
+                    'tie_break': {'a': [2]}, 'test': {'a': [3, 4, 5]}}
+        source = root/'seeds.json'
+        source.write_text(json.dumps(manifest))
+        cfg.eval.seed_manifest = str(source)
+        OmegaConf.save(cfg, root/'config.yaml')
+        protocol = load_seed_manifest(source, runner)
+        first['selection']['seed_manifest'] = protocol
     summary=root/first['selection_summary']
     payload=json.loads(summary.read_text()); payload['inference']=first['inference']
+    payload['selection'] = first['selection']
     summary.write_text(json.dumps(payload))
     handoff=root/'handoff.json'; handoff.write_text(json.dumps(first))
     publish_best(root,40)  # A different successful selector publishes between stages.
     module=demo if entry=='demo' else evaluator
-    runner=Runner()
     def load(path,use_ema,**kw):
         assert path==root/first['ckpt_relpath'] and use_ema is True
         return SimpleNamespace(_checkpoint_global_step=20)
@@ -380,11 +400,33 @@ def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry):
     args=['test','--policy-name','dp','--task-name','task','--exp-name','run',
           '--selection-record',str(handoff),'--episodes','2']
     if entry=='eval': args+=['--no-videos']
+    if with_manifest:
+        selected_seeds = [4, 1]  # Demo may include selection seeds; preserve order.
+        args += ['--seeds', *map(str, selected_seeds)]
     monkeypatch.setattr(sys,'argv',args)
     module.main()
     assert runner.calls[0][1]['inference_steps']==10
-    snapshot=OmegaConf.load(next(root.rglob('eval_config.yaml'))).request
-    assert snapshot.selection_id==first['selection_id']
+    snapshot=OmegaConf.load(next(root.rglob('eval_config.yaml')))
+    assert snapshot.request.selection_id==first['selection_id']
+    assert snapshot.request.global_step == 20
+    assert snapshot.request.use_ema is True
+    assert snapshot.request.checkpoint == first['ckpt_relpath']
+    if with_manifest:
+        assert OmegaConf.to_container(snapshot.seed_manifest) == protocol
+        assert OmegaConf.to_container(snapshot.request.selection.seed_manifest) == protocol
+        assert snapshot.request.task_seeds.a == selected_seeds
+        assert snapshot.request.heldout_from_selection is False
+        assert snapshot.request.inference_steps_list == [10]
+        assert runner.get_seed_list() == selected_seeds
+        assert runner.calls == [(selected_seeds, {
+            'inference_steps': 10, 'eval_episodes': 2,
+            'video_save_dir': next(root.rglob('eval_config.yaml')).parent,
+        })]
+        result = json.loads(next(root.rglob('result_details.json')).read_text())
+        assert [d['seed'] for d in result['episode_details']] == selected_seeds
+        assert result['heldout_from_selection'] is False
+        assert (result['checkpoint'], result['global_step'], result['use_ema'],
+                result['inference_steps']) == (first['ckpt_relpath'], 20, True, 10)
 
 
 def test_learned_weight_export_reconstruction_and_rounding(tmp_path):

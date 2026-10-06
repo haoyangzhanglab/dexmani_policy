@@ -336,7 +336,7 @@ def main() -> None:
         rng.shuffle(all_seeds)
         eval_seeds = all_seeds[:demo_episodes]
 
-    env_runner.eval_seeds = eval_seeds
+    # Validate and snapshot the full manifest before narrowing the runner's pool.
     snapshot_ref = save_eval_snapshot(
         video_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
@@ -347,6 +347,7 @@ def main() -> None:
         heldout_from_selection=False,
         **selection_provenance(best_info),
     )
+    env_runner.eval_seeds = eval_seeds
 
     # ── 9. Run episodes (sweep or single) ─────────────────────────────────
     demo_results: list[dict] = []

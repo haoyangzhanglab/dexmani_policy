@@ -1,0 +1,121 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_selection_record_cli_survives_new_best[demo-True] ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-zhanghaoyang/pytest-286/test_selection_record_cli_surv0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7ef88d9643a0>
+entry = 'demo', with_manifest = True
+
+    @pytest.mark.parametrize(('entry', 'with_manifest'), [
+        ('eval', False), ('demo', False), ('demo', True),
+    ])
+    def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry, with_manifest):
+        import sys
+        from test_infra_evaluation import Runner, experiment, publish_best
+        from dexmani_policy import eval_best_ckpt as evaluator, record_demo as demo
+        from dexmani_policy.evaluation.protocol import load_seed_manifest
+    
+        class SeedOverrideRunner(Runner):
+            # Match SimRunner: recording overrides replace the visible seed pool.
+            def get_seed_list(self):
+                seeds = getattr(self, 'eval_seeds', None)
+                return seeds if seeds is not None else super().get_seed_list()
+    
+        runner = SeedOverrideRunner()
+        root=tmp_path/'experiments/dp/task/run'; root.mkdir(parents=True)
+        root,cfg=experiment(root)
+        first=publish_best(root,20)
+        if with_manifest:
+            manifest = {'pool_id': 'demo-fixture', 'selection': {'a': [0, 1]},
+                        'tie_break': {'a': [2]}, 'test': {'a': [3, 4, 5]}}
+            source = root/'seeds.json'
+            source.write_text(json.dumps(manifest))
+            cfg.eval.seed_manifest = str(source)
+            OmegaConf.save(cfg, root/'config.yaml')
+            protocol = load_seed_manifest(source, runner)
+            first['selection']['seed_manifest'] = protocol
+        summary=root/first['selection_summary']
+        payload=json.loads(summary.read_text()); payload['inference']=first['inference']
+        payload['selection'] = first['selection']
+        summary.write_text(json.dumps(payload))
+        handoff=root/'handoff.json'; handoff.write_text(json.dumps(first))
+        publish_best(root,40)  # A different successful selector publishes between stages.
+        module=demo if entry=='demo' else evaluator
+        def load(path,use_ema,**kw):
+            assert path==root/first['ckpt_relpath'] and use_ema is True
+            return SimpleNamespace(_checkpoint_global_step=20)
+        monkeypatch.setattr(module,'ROOT_DIR',tmp_path)
+        monkeypatch.setattr(module,'build_eval_runner',lambda *a:runner)
+        monkeypatch.setattr(module,'load_ckpt_for_inference',load)
+        args=['test','--policy-name','dp','--task-name','task','--exp-name','run',
+              '--selection-record',str(handoff),'--episodes','2']
+        if entry=='eval': args+=['--no-videos']
+        if with_manifest:
+            selected_seeds = [4, 1]  # Demo may include selection seeds; preserve order.
+            args += ['--seeds', *map(str, selected_seeds)]
+        monkeypatch.setattr(sys,'argv',args)
+>       module.main()
+
+tests/test_review_remediation.py:407: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+dexmani_policy/record_demo.py:340: in main
+    snapshot_ref = save_eval_snapshot(
+dexmani_policy/evaluation/protocol.py:464: in save_eval_snapshot
+    "seed_manifest": (load_seed_manifest(cfg.get("eval", {}).get("seed_manifest"), runner)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+source = '/tmp/pytest-of-zhanghaoyang/pytest-286/test_selection_record_cli_surv0/experiments/dp/task/run/seeds.json'
+runner = <test_review_remediation.test_selection_record_cli_survives_new_best.<locals>.SeedOverrideRunner object at 0x7ef88d966020>
+
+    def load_seed_manifest(source, runner):
+        """Validate an explicit task/seed protocol against the actual runner mapping.
+    
+        Each role contains task -> ordered physical seeds. Multi-task manifests must
+        be representable by the runner's existing paired reference-seed protocol.
+        """
+        import hashlib
+        import json
+        manifest = json.loads(Path(source).read_text()) if isinstance(source, (str, Path)) else source
+        if not isinstance(manifest, dict) or not manifest.get("pool_id"):
+            raise ValueError("Seed manifest requires pool_id")
+        available = list(dict.fromkeys(runner.get_seed_list()))
+        full = mapped_task_seeds(runner, available)
+        tasks = set(full)
+        roles = {}
+        used = {task: set() for task in tasks}
+        for role in ("selection", "tie_break", "test"):
+            mapping = manifest.get(role)
+            if not isinstance(mapping, dict) or set(mapping) != tasks:
+                raise ValueError(f"{role}: manifest tasks do not match runner")
+            for task, seeds in mapping.items():
+                if (not isinstance(seeds, list) or any(type(s) is not int for s in seeds)
+                        or len(set(seeds)) != len(seeds)):
+                    raise ValueError(f"{role}/{task}: invalid or duplicate seeds")
+                if role != "tie_break" and not seeds:
+                    raise ValueError(f"{role}/{task}: empty pool")
+                if set(seeds) - set(full[task]) or used[task] & set(seeds):
+>                   raise ValueError(f"{role}/{task}: unavailable seeds or cross-role overlap")
+E                   ValueError: selection/a: unavailable seeds or cross-role overlap
+
+dexmani_policy/evaluation/protocol.py:524: ValueError
+----------------------------- Captured stdout call -----------------------------
+Device: cpu
+
+Loading checkpoint: /tmp/pytest-of-zhanghaoyang/pytest-286/test_selection_record_cli_surv0/experiments/dp/task/run/checkpoints/epoch=0000-step=00000020-milestone=20pct.pt (epoch=0000-step=00000020-milestone=20pct.pt) (EMA=True)
+✅ Checkpoint loaded
+
+============================================================
+  Demo Video Recording
+  Policy       : dp
+  Task         : task
+  Checkpoint   : /tmp/pytest-of-zhanghaoyang/pytest-286/test_selection_record_cli_surv0/experiments/dp/task/run/checkpoints/epoch=0000-step=00000020-milestone=20pct.pt (epoch=0000-step=00000020-milestone=20pct.pt)
+  Episodes     : 2
+  Inference steps: 10
+  Resolution   : 1280×960
+  Output dir   : /tmp/pytest-of-zhanghaoyang/pytest-286/test_selection_record_cli_surv0/experiments/dp/task/run/demo_videos/20261006_121817_fo3ctghg
+============================================================
+
+  Using 2 specified seeds: [4, 1]
+=========================== short test summary info ============================
+FAILED tests/test_review_remediation.py::test_selection_record_cli_survives_new_best[demo-True]
+1 failed in 1.92s

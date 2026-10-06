@@ -6,6 +6,8 @@
 
 后续清理：用户明确要求删除过时/无用代码后，S07 从暂缓更新为已实施，删除三组无活跃调用的预留组件，并同步入口注释与使用文档。前述“起始工作区干净”指增量整改开始时；清理在已有未提交修改上继续，未覆盖先前成果。清理验证单独列在文末，不替代下述原始运行记录。
 
+最新定向修复：以 `ad615f6100d82c635439091e48460236eba7bad7` 为审查基线，修复 demo 完整 manifest 与录制子集的校验顺序，并更正 DQ/ManiFlow 配方披露。R03/S03 已通过入口复验，R08 仍 PARTIAL；本次记录见文末。此前日志、测试数量和任务书发布基线保留，不累计为本次独立通过数。
+
 ## 验证记录与环境
 
 解释器 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python`（下文 `$PY`），Torch `2.4.1+cu124`。默认 shell 没有 `python`。沙箱内 CUDA 不可见，Manager socket 报 `PermissionError`；通过允许的沙箱外执行后实际有单张 RTX 4090 24 GiB。环境未安装/升级任何依赖。CPU 夹具仍是 CPU，沙箱外执行不使它们变成 GPU 测试。
@@ -62,7 +64,7 @@
 | D05 | PRESERVED | `training/trainer.py::train/train_one_step` | T：4/4/2 尾组、连续恢复；G：一次真实更新 | optimizer/scheduler/EMA 按 optimizer step 前进 |
 | D09 | PRESERVED | `agents/action_decoders/consistency_flow.py::compute_loss` | T：既有小 batch 测试与分流拒绝检查 | B=1 flow-only；其余样本守恒，不移植独立 floor 分流 |
 | B12 | IMPLEMENTED | `training/trainer.py::_init_milestone_state/_check_milestone` | T：总步数 1/2/3/4/5/103，最终100pct、单 step 单文件、恢复跳过；selector 回归 | ceil 整数映射，碰撞保留最大 pct；不补写历史 run、不强凑五个候选 |
-| R08 | PARTIAL | `tests/test_policy_vq_alignment.py; smoke_test.py; tests/test_infra_resume.py; tests/test_infra_cuda.py` | T：tiny VQ 优化→导出→实际 DQ 优化/预测；G：默认 DP3/DQ 单次更新/预测/raw+EMA 恢复；CPU 精确续训 | 保留原 streaming/benchmark/RTC 检查；生产 flags 已写入双卡测试，但 2 项 CUDA/DDP 测试 SKIP，仅1 GPU；单 rank 失败传播仍 NOT VERIFIED |
+| R08 | PARTIAL | `tests/test_policy_vq_alignment.py; smoke_test.py; tests/test_infra_resume.py; tests/test_infra_cuda.py` | T：tiny VQ 优化→导出→实际 DQ 优化/预测；G：默认 DP3/DQ 单次更新/预测/raw+EMA 恢复；CPU 精确续训 | 保留原 streaming/benchmark/RTC 检查；生产 flags 已写入双卡测试，但 2 项 CUDA/DDP 测试 SKIP，仅1 GPU；实际策略 AMP/compile 组合、单 rank 失败传播和真实闭环仍 NOT VERIFIED；本次 CPU demo 回归不关闭缺口 |
 | E01 | DEFERRED | `training/trainer.py::train_one_step/apply_gradient_step; agents/core/dqrise.py::compute_loss` | 源码检查：micro-batch 日志与 DQ 诊断 host 标量仍在；G 非计时 profile | 没有日志同步占比证据；不删 finite/grad norm/rank 协调；暂缓日志优化 |
 | B07 | IMPLEMENTED | `agents/obs_encoder/pointcloud/uni3d.py::PatchDropout/forward; r3d_obs_encoder.py` | T：真实 timm blocks 与可识别 centers，保留索引核对 PE；eval 不减 token | R3D 仅 pointsam；独立 Uni3D cls/max_pooling 保留；默认 dropout=0 路径不变；完整 R3D CUDA NOT VERIFIED |
 | E09 | DEFERRED | `agents/obs_encoder/pointcloud/uni3d.py::KNNGrouper/knn_points; ops.py::knn_point` | 源码检查：cdist/topk 与 PyTorch3D 后端路径；没有同输入端到端对照 | tie/固定K/真实 R3D 整步收益尚未闭合，不替换后端 |
@@ -71,11 +73,11 @@
 | A06 | NOT_APPLICABLE | `agents/obs_encoder/pointcloud/uni3d.py::__init__/forward` | 源码检查：timm head 未调用；本轮无整理 head 的用途 | 不以未用 head 宣称默认 static_graph DDP 崩溃；保留 state keys |
 | B11 | IMPLEMENTED | `deployment/runtime.py::LoadedPolicy.warmup` | T：实际 RTC CPU VJP；delay=0/3、cap=0、sync/async | 按配置后的 guidance_cap 热身，零延迟仍有 prefix；首次 CUDA 时延与真机 NOT VERIFIED |
 | E08 | DEFERRED | `agents/action_decoders/rtc.py::guided_step/predict_rtc` | T：保留现有真实 RTC VJP 数值检查；源码检查 device→int 和 mask | 没有 CUDA 首次/稳态收益对照；保持 scheduler cast/sqrt、零权重排除、detach/VJP |
-| R03 | IMPLEMENTED | `evaluation/protocol.py::load_seed_manifest/fixed_test_seeds; select_best_ckpt.py; eval_best_ckpt.py` | T：跨任务同整数、跨角色相交/缺失/池身份变化、训练 seed 改变后固定 test | 显式清单保存完整角色/内容与 runner 池 hash；多任务须能由现有 paired 映射表示；未编造生产 seed，仿真 NOT VERIFIED |
+| R03 | IMPLEMENTED | `evaluation/protocol.py::load_seed_manifest/fixed_test_seeds; select_best_ckpt.py; eval_best_ckpt.py; record_demo.py` | T：原协议检查；后续 demo 子集回归先失败后通过，完整 manifest/池身份写入快照，见文末 | demo 在完整池校验及快照保存后才设置录制子集；仍非 held-out；多任务须能由现有 paired 映射表示，真实仿真 NOT VERIFIED |
 | R06 | IMPLEMENTED | `training/source_snapshot.py; training/workspace.py; scripts/training/train_vq_hand.py` | T：未跟踪源码进入归档、排除非源码/隐藏文件、内容修改变 hash、无Git unknown | 新 run 每次保存实际源码/依赖；归档失败直接报错；不隔离 lazy import；README 禁止运行中原位 sync；不改 resume 合同 |
-| S03 | IMPLEMENTED | `select_best_ckpt.py --result-file; agents/loader.py; eval_best_ckpt.py/record_demo.py --selection-record; scripts/eval/eval_pipeline.sh` | T：另一 selector 更新 best 后旧结果不变；现有 eval/demo pinned 单次入口回归；S | 交接绑定 milestone/global_step/selection/inference/seed 清单；覆盖目标、缺证据、latest/symlink 拒绝；三阶段真实仿真 NOT VERIFIED |
-| C03 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：源码/配置披露；C；仅 DP3/DQ 有 G，不代表论文实验 | 仅完成披露/受控实验设计，未运行论文比较或声称闭环成功率 |
-| D08 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：源码/配置披露；C；仅 DP3/DQ 有 G，不代表论文实验 | 仅完成披露/受控实验设计，未运行论文比较或声称闭环成功率 |
+| S03 | IMPLEMENTED | `select_best_ckpt.py --result-file; agents/loader.py; eval_best_ckpt.py/record_demo.py --selection-record; scripts/eval/eval_pipeline.sh` | T：原 handoff 检查；文末新增完整 manifest + --seeds 子集入口回归，保留另一 selector 更新 best 的对照并通过 | checkpoint/global_step/raw/EMA/NFE 仍固定于 handoff；覆盖目标、缺证据、latest/symlink 拒绝；三阶段真实仿真 NOT VERIFIED |
+| C03 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：区分 DQ NFE20、ManiFlow 入口4/fallback10/训练网格10；本次配置解析核验 | 系统比较与机制归因分开；历史实验/选择记录按保存值，不以本次 CPU 回归冒充论文实验 |
+| D08 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：更正有效 NFE，保留 NFE/查询间隔/执行窗口/解码后 ensemble 的分别披露 | 入口值、模型 fallback 和训练网格不混用；真实查询时序/ensemble 闭环仍 NOT VERIFIED |
 | S01 | PARTIAL | `datasets/multi_task_dataset.py::_epoch_val/set_epoch` | T：deterministic 无 Manager；随机路径 spawn/persistent-worker epoch 回归 | 随机路径仍用 Manager 同步；本轮无随机多任务真实性能/精确恢复收益证据，保留 RNG/消费序列 |
 | S05 | NOT_APPLICABLE | `agents/core/multi_task.py; agents/obs_encoder/text/clip.py` | 源码检查：冻结语言 encoder 与缓存仍服务现有输入 | 无固定任务发布请求，未创建 embedding 查表产物 |
 | A04 | PRESERVED | `deployment/runtime.py::load_policy/LoadedPolicy` | T：现有 RTC/runtime 用例；真机 NOT VERIFIED | 仍只支持已声明 metadata/动作/观测合同；未扩大 MultiTask/真机接入 |
@@ -86,8 +88,8 @@
 | S07 | IMPLEMENTED | 后续用户明确要求清理后，删除无活跃调用的 `text/t5.py`、`backbone/ditx_rms.py`、`plugins/token_compressor.py` 及空 plugins 包说明 | 源码/脚本/测试/当前配置及本地 experiments YAML/JSON 未发现引用；清理复验见下节 | 先前暂缓记录由本次明确清理需求闭合；外部自定义 import/_target_ 若曾引用这些预留模块，需使用清理前源码；不提供占位兼容层，不宣称提速 |
 | A05 | IMPLEMENTED | `scripts/remote/stop_remote.sh::list_sessions/ensure_server_reachable` | T：本地 ssh/tmux fixture，--all/--list × 无session/成功/命令错误/127/255；S | 先获取 tmux 状态，再本地 cut；保留真实退出码；未连接服务器执行 stop |
 | C01 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：源码/配置披露；C；仅 DP3/DQ 有 G，不代表论文实验 | 仅完成披露/受控实验设计，未运行论文比较或声称闭环成功率 |
-| C02 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：源码/配置披露；C；仅 DP3/DQ 有 G，不代表论文实验 | 仅完成披露/受控实验设计，未运行论文比较或声称闭环成功率 |
-| C04 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：源码/配置披露；C；仅 DP3/DQ 有 G，不代表论文实验 | 仅完成披露/受控实验设计，未运行论文比较或声称闭环成功率 |
+| C02 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：核对当前 DQ epsilon、policy/obs lr=3e-4 及官方固定版本；见配方更正 | iDP3/state/多帧/12维手部/窗口/EMA 保留，以数据、normalizer、codebook、动作解码合同自洽验收；未做论文对比 |
+| C04 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：核对本地 XYZ Fourier + frame PE、R3D 派生增强与官方 token-slot PE 活动路径 | 本地 PE/增强保留；未启用首点复制 dropout；Fourier 噪声敏感性仅作可选实验，未证实 bug |
 | D07 | IMPLEMENTED | `本报告「当前配方与论文边界」；configs/*.yaml 与实际 Agent/runner` | DOC：源码/配置披露；C；仅 DP3/DQ 有 G，不代表论文实验 | 仅完成披露/受控实验设计，未运行论文比较或声称闭环成功率 |
 | R02 | DEFERRED | `agents/core/sat.py::SATObsEncoder.forward` | 源码检查：按 patch 序号跨帧拼接 | 物理点对应是新方法，未做共享锚点/匹配实验 |
 | R07 | DEFERRED | `agents/action_decoders/consistency_flow.py::get_consistency_velocity` | 源码检查：absolute target_t_next 可超过1，relative 默认 | 外推目标研究暂缓；不孤立 clamp 分母不匹配的 target |
@@ -100,16 +102,24 @@
 
 下面是当前 YAML 与源码的事实，不是历史实验配置。共同默认 `horizon=16 / n_obs_steps=2 / n_action_steps=8`，默认 100,000 optimizer updates；动作 joint 为 7+12，EEF 为 xyz+rot6d 9+12。统计遵循当前 action normalizer；历史实验须读各自保存配置，不能按本表反推。实际机器人单位与关节顺序沿用数据/runtime metadata，本次未转换。
 
-| 方法 | 当前感知/状态与容量 | 动作/目标与默认 NFE | 默认预算与比较边界 |
+| 方法 | 当前感知/状态与容量 | 动作/目标与当前默认评测 NFE | 默认预算与比较边界 |
 |---|---|---|---|
 | DP | DINOv2-small RGB LoRA、avg token、有序 state MLP；UNet [256,512,1024] | joint19；DDIM sample；10 | batch64；RGB 感知与点云方法不同，系统比较不能单独归因生成机制 |
 | DP3 | XYZRGB PointNet + state；UNet [256,512,1024]；G 实际 68.76M 总参数（obs 0.25M，decoder 68.52M，显示值有四舍五入） | joint19；DDIM sample；10 | batch128；本地宽度/模态为适配，不能等同原论文完整配方 |
-| DQ-RISE | iDP3 + state/多帧；UNet [256,512]；G 实际17.88M（obs0.27M，decoder17.61M） | 默认 EEF21 → TCP9+scalar index；16 个12维 hand prototype；DDIM sample；20 | batch128；不同于官方 RISE 感知，动作与容量也不同；不是仅把连续手部换成量化手部的单变量实验 |
+| DQ-RISE | iDP3 + state/多帧；UNet [256,512]；G 实际17.88M（obs0.27M，decoder17.61M） | 默认 EEF21 → TCP9+scalar index；16 个12维 hand prototype；DDIM epsilon；20 | batch128；policy lr=obs_lr=3e-4；感知与动作适配保留，不能视为仅替换手部表示的单变量实验 |
 | SAT | PointNext 96 patch + learned global token，token256；state 有序 MLP；跨帧按 patch 序号融合；8层×768，8 heads；patch attention 4层 | joint19；structured action/EJC 字段求和、shuffle；flow beta；10 | batch128；是 structured-action 思想适配，非完整官方感知/状态/训练复现；不保证跨帧物理点对应 |
-| ManiFlow | PointNetDense128、continuous XYZ PE；12层×768，8 heads；本地 slot PE 机制见 backbone/consistency_ditx.py | joint19；flow beta + consistency discrete、dt uniform、relative；10 | batch128；decoder AdamW lr1e-4/wd1e-3/betas(.9,.95)，obs wd1e-6；通用/Dex 配方差异须逐项控制，不自动回退 |
+| ManiFlow | PointNetDense128、连续 XYZ Fourier PE + 同帧共享 learned frame PE；12层×768，8 heads | joint19；flow beta + consistency discrete、dt uniform、relative；评测入口4，Agent fallback10，训练网格10 | batch128；decoder AdamW lr1e-4/wd1e-3/betas(.9,.95)，obs lr1e-4/wd1e-6；本地 PE 与增强保留，官方差异见下文 |
 | R3D | Uni3D EVA02 tiny、embed256、512 groups×32，预训练路径 `data/pretrained/uni3d`；OneWay depth4/embed256 | joint19；DDIM sample；10 | batch128；eval FPS 确定性是本地适配；本轮没有完整 R3D CUDA 质量/性能证据 |
 
-除 ManiFlow 上述差异外，表中默认 policy AdamW lr1e-4、wd1e-6、betas(.95,.999)，obs lr1e-4/wd1e-6；policy EMA 默认启用（power .75），训练配置 BF16 autocast 默认启用。本轮 G smoke 是单步普通精度验证，不代表生产 BF16/compile 已验收。R3M 的 BN→GN 是已有适配，仍保留；当前默认 DP 是 DINO。实际参数量只报告 G 打印过的 DP3/DQ，未以理论估算冒充其它完整模型测量。
+除 ManiFlow 上述差异与 DQ 的 policy/obs lr=3e-4 外，表中默认 policy AdamW lr1e-4、wd1e-6、betas(.95,.999)，obs lr1e-4/wd1e-6；policy EMA 默认启用（power .75），训练配置 BF16 autocast 默认启用。本轮 G smoke 是单步普通精度验证，不代表生产 BF16/compile 已验收。R3M 的 BN→GN 是已有适配，仍保留；当前默认 DP 是 DINO。实际参数量只报告 G 打印过的 DP3/DQ，未以理论估算冒充其它完整模型测量。
+
+DQ 的实际入口 [dqrise.yaml](../dexmani_policy/configs/dqrise.yaml) 指定 `prediction_type=epsilon`、`optimizer.lr=optimizer.obs_lr=3e-4`；前者经 `DQRiseAgent` 传给 diffusion scheduler，后两者经 `build_optimizer_and_scheduler → BaseAgent.configure_optimizer/get_optim_param_groups` 分别赋给 action 与 observation 参数组。官方固定版本 `2889d27` 的 [diffusion.py](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/policy/diffusion.py) 同样使用 epsilon；[train_dqrise.py](https://github.com/rise-policy/DQ-RISE/blob/2889d27fce823288e8dd12ec6e91506b52ed086a/train_dqrise.py) 默认以 3e-4 优化全部 policy 参数（官方没有单独命名的 obs_lr）。此前报告中的 sample/1e-4 是披露错误，不是训练代码需要回退。iDP3、状态输入、多帧观测、12 维手部、动作窗口和 policy EMA 是合理本地适配，继续保留；验收以数据、normalizer、codebook、动作解码合同自洽为准，不因官方差异更换 encoder、扩大码本或改变训练配方。
+
+ManiFlow 的 [maniflow.yaml](../dexmani_policy/configs/maniflow.yaml) 分别设置 `eval.inference_steps=4`、`agent.num_inference_steps=10` 和 `agent.denoise_timesteps=10`。selection/eval/demo 入口通过 `_get_eval_param` 读取 eval 参数，当前无额外覆盖的新选择使用 NFE4；直接 Agent 调用未传 `inference_steps` 时才用模型 fallback10。denoise_timesteps10 属于 consistency 训练时间网格，不决定评测 NFE。历史实验读取各自保存配置；已有 best/handoff 读取保存的 inference 值，不能按当前默认值反推或覆盖。
+
+ManiFlow 本地观测 PE：`ManiFlowObsEncoder.forward` 将连续 XYZ Fourier PE 投影后加到逐点特征；`ConsistencyDiTX._embed_context` 再加同帧所有点共享的 `context_frame_pos_embed`。动作分支独立使用沿 action horizon 的 `input_pos_embed`，它既不是 XYZ PE，也不是观测 frame PE。官方固定版本 `ef2f116` 的活动 [pointcloud policy](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/policy/maniflow_pointcloud_policy.py) 将观测特征按帧展平；[pointnet_extractor.py](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/model/vision_3d/pointnet_extractor.py) 生成 PointNet/状态特征，随后 [ditx.py](https://github.com/geyan21/ManiFlow_Policy/blob/ef2f116f1f90163ed36e657b8c5503740bb468af/ManiFlow/maniflow/model/diffusion/ditx.py) 使用按展平 token 槽位学习的 `vis_cond_pos_embed`。不能将本地“XYZ＋frame PE”归为该官方实现，也不能把本地 frame PE 误写成逐 token slot PE。
+
+当前 ManiFlow 的 R3D 派生增强只有坐标噪声、颜色扰动和状态噪声，没有配置复制首点式 point dropout。调用顺序为 `BaseDataset.apply_augmentation → BaseAgent.preprocess` 归一化 → `ManiFlowObsEncoder.forward → preprocess_point_cloud`；PointNet 与 XYZ PE 使用同一份增强、归一化、采样后的点云。FPS 仅在输入点数大于 `agent.num_points` 时执行。该机制保持不变；Fourier 频带对坐标噪声的敏感性可另做受控实验，尚不是已证实 bug，不构成本轮新增 PE 改造要求。
 
 DQ VQ 与 policy 是两阶段配方：当前 VQ latent256、hidden512、**3 个 hidden Linear 层**、2组×4码、learned softmax group weights；kmeans_init=true、iters10、dead threshold2、字典 EMA decay .8；重建 L1 按手指权重，enc×3 + commitment×5；AdamW lr3e-4/betas(.95,.999)/wd1e-6、batch256、1500 epochs、warmup150。它不同于 policy optimizer/EMA；字典 EMA 与 policy EMA 不可混称。上游库内部未被训练循环调用的 optimizer 不是 policy optimizer。Legacy VQ 全量 hand 统计与目标 Policy 对齐入口不是同一配方；后者使用实际 Policy split，默认无 validation 时按 train_mse 选点。
 
@@ -119,7 +129,7 @@ DQ VQ 与 policy 是两阶段配方：当前 VQ latent256、hidden512、**3 个 
 
 - C01/C04：固定感知、动作维度/单位、H/obs/execution window、容量、预算、训练 seeds、selection/test 清单与 NFE，只改变 EJC 或对应待证明机制。
 - C02/D07：固定 iDP3/state/动作/预算，对比 continuous hand 与 VQ hand；同时报告 held-out 重建误差、两种 usage、跳变及固定闭环清单成功率，再判断 16 个 prototype 是否不足。不自动扩大码本。
-- C03/D08：系统级表明确所有上述差异；机制归因另做控制变量表，不从系统分数直接推导机制优劣。默认 DQ NFE20 与其它 NFE10 不能隐藏成同等推理预算。
+- C03/D08：系统级表明确所有上述差异；机制归因另做控制变量表，不从系统分数直接推导机制优劣。当前评测默认 DQ NFE20、ManiFlow NFE4、表中其余方法 NFE10，不能隐藏成同等推理预算；已有实验/选择记录仍按保存值报告。
 - R02/R07：跨帧对应与 absolute 外推需先定义新目标，再做新实验；本轮显式 DEFER。
 
 ## 数值与性能证据、采用决定
@@ -198,3 +208,21 @@ SEED_MANIFEST="$MANIFEST" bash scripts/eval/eval_pipeline.sh dp3 pour "$EXP_NAME
 本次清理没有重跑真实 CUDA 训练/benchmark、仿真、远程操作或真机；这些路径的证据及未验证边界仍按前文记录。清理验收时 HEAD 为 `f55a02f6507901fcd126546789a01fc127b60996`，全部变更尚未提交。
 
 随后用户明确授权将全部改动提交并 push 至 `origin/main`。报告及引用的 9 份原始日志一并纳入版本控制；上文 HEAD 与未提交说明保留为各验证阶段的历史状态，实际提交身份以 Git 记录为准。提交同步不增加训练或评测通过证据。
+
+## demo manifest 顺序修复与配方更正（2026-10-06）
+
+起始分支 `main`，HEAD 与本次审查基线均为 `ad615f6100d82c635439091e48460236eba7bad7`，工作区干净，仅根 `AGENTS.md` 适用。使用已有 `policy` 解释器（上文 `$PY`），未安装依赖。修复验收时尚未提交、推送或合并；随后用户明确授权提交全部改动并 push 至 `origin/main`，实际提交身份以 Git 记录为准。
+
+根因：`SimRunner.get_seed_list()` 在设置 `eval_seeds` 后返回录制子集；`record_demo.main` 原先先设置子集，再由 `save_eval_snapshot → load_seed_manifest` 用该子集校验保存配置里的完整清单，误报不可用 seeds。最小修复仅将该赋值移到快照保存后、rollout 前，完整校验和错误传播保持。快照保存完整 manifest/内容 hash/runner 池 hash，request 单独保存实际录制子集；demo 仍 `heldout_from_selection=False`，handoff 的 checkpoint/global_step/raw/EMA/NFE 不变。
+
+回归在原 `test_selection_record_cli_survives_new_best` 中增加 demo manifest 参数用例，复用 `test_infra_evaluation` 的 experiment、publish_best 和 runner 基础夹具。runner 的 `get_seed_list` 随 `eval_seeds` 改变，实际 CLI、handoff 校验、manifest 校验、快照及结果写入均未替换；仅隔离模型加载、模拟器和录制。用完整清单与 `--seeds 4 1` 检查实际 rollout 的子集和顺序，且保留另一 selector 已发布新 best 的场景。
+
+| 阶段 | 实际命令/证据 | 结果与边界 |
+|---|---|---|
+| 修复前复现 | `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 timeout 60 $PY -m pytest -q 'tests/test_review_remediation.py::test_selection_record_cli_survives_new_best[demo-True]'`；[日志](review_remediation_evidence/demo_manifest_before.log) | FAIL（预期）：1 failed，`selection/a: unavailable seeds or cross-role overlap`，失败发生在真实 `load_seed_manifest`，不是夹具初始化 |
+| 修复后相关回归 | `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 timeout 90 $PY -m pytest -q tests/test_review_remediation.py tests/test_infra_evaluation.py`；[日志](review_remediation_evidence/demo_manifest_after.log) | PASS：50 passed、8 subtests passed；包含新增入口用例、原 handoff 并发更新对照及已有错误检查；CPU/fixture 验证，不是实际录制或 CUDA 验收 |
+| 配方核对 | `$PY` 调用 `smoke_test.load_config('dqrise'/'maniflow')`，读取 `_get_eval_param` 的 select_best/offline/demo 值并作断言；同时阅读活动调用链及上述固定官方文件 | PASS：DQ epsilon、policy/obs lr=3e-4；ManiFlow 入口4、fallback10、训练网格10；增强配置无 point dropout。只验证配置/源码事实，不是训练运行 |
+
+本次同步 C02/C03/C04/D08 的披露，并区分官方 token-slot PE 与本地 XYZ Fourier＋frame PE；没有改模型、增强、动作、码本或训练配方。README 定向搜索未发现同类误写，无需修改；架构文档补充入口 NFE、模型 fallback 与训练网格的区别。上述外部源码链接仅作固定版本的事实依据，不暗示移植或完整复现。
+
+R08 保持 **PARTIAL**：生产双卡、实际策略 AMP/compile 组合、单 rank 故障传播及真实闭环仍 **NOT VERIFIED**；本次没有启动正式训练、批量仿真、真机或重新运行历史 GPU 测量。完整清单在多任务下的 paired mapping 等既有边界不变。
