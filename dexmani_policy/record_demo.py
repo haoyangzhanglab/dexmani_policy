@@ -249,7 +249,11 @@ def main() -> None:
     )
 
     # ── 3. Build env_runner ─────────────────────────────────────
+    from dexmani_policy.evaluation.protocol import bind_seed_manifest, fixed_test_seeds
+    best_info = resolved_best[0] if resolved_best else None
+    cfg = bind_seed_manifest(cfg, best_info)
     env_runner = build_eval_runner(cfg)
+    fixed_test_seeds(cfg, env_runner, best_info)
 
     # Apply viewer resolution from CLI or config
     _demo_resolution = args.resolution
@@ -286,8 +290,6 @@ def main() -> None:
     ckpt_path, ckpt_label = resolve_checkpoint_path(
         exp_dir, str(resolved_best[1]) if resolved_best is not None else args.ckpt_tag
     )
-    best_info = resolved_best[0] if resolved_best is not None else None
-
     # ── 6. Resolve parameters ─────────────────────────────────────────────
     demo_episodes = (
         args.episodes

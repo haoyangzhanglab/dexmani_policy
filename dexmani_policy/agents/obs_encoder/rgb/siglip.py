@@ -16,6 +16,7 @@ class SigLIP(ViTEncoder):
         tune_mode: TuneMode = "freeze",
         global_token_type: GlobalTokenType = "pooler",
         out_dim: Optional[int] = None,
+        lora_dtype: str = "backbone",
     ):
         super().__init__()
 
@@ -41,7 +42,7 @@ class SigLIP(ViTEncoder):
         self.proj = (
             nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
         )
-        self.set_tune_mode(tune_mode)
+        self.set_tune_mode(tune_mode, lora_dtype=lora_dtype)
 
     def _extract_patch_tokens(self, outputs) -> torch.Tensor:
         # SigLIP last_hidden_state contains only patch tokens (no CLS token).

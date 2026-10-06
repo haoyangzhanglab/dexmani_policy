@@ -180,6 +180,7 @@ env_runner:
 
 # ── Eval ──
 eval:
+  seed_manifest: dexmani_policy/configs/eval_protocols/${task_name}.json
   inference_steps: 4               # inference NFE only; leaves the training grid unchanged
   inference_steps_list: null
   use_ema: true

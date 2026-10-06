@@ -19,6 +19,7 @@ class CLIP(ViTEncoder):
         tune_mode: TuneMode = "freeze",
         global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
+        lora_dtype: str = "backbone",
     ):
         super().__init__()
 
@@ -42,7 +43,7 @@ class CLIP(ViTEncoder):
         self.proj = (
             nn.Identity() if self.out_dim == self.hidden_dim else nn.Linear(self.hidden_dim, self.out_dim)
         )
-        self.set_tune_mode(tune_mode)
+        self.set_tune_mode(tune_mode, lora_dtype=lora_dtype)
 
     def _get_lora_target_modules(self) -> list[str]:
         return ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]

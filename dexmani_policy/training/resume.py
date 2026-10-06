@@ -189,6 +189,10 @@ def validate_resume_contract(saved, current) -> None:
     saved, current = copy.deepcopy(saved), copy.deepcopy(current)
     for contract in (saved, current):
         agent_cfg = contract.get("agent_config", {})
+        rgb_cfg = agent_cfg.get("rgb_backbone_config", {})
+        if (agent_cfg.get("rgb_backbone_name") in ("dino", "clip", "siglip")
+                and rgb_cfg.get("tune_mode") == "lora"):
+            rgb_cfg.setdefault("lora_dtype", "backbone")
         if uses_diffusion_config(agent_cfg):
             agent_cfg.setdefault("clip_sample", True)
     validate_data_identity(saved.pop("data_identity", None), current.pop("data_identity", None))

@@ -199,8 +199,16 @@ def load_policy_config(path, overrides=()):
     """Compose the target config without constructing a model or runtime."""
     register_resolvers()
     path = Path(path).expanduser().resolve()
-    with hydra.initialize_config_dir(config_dir=str(path.parent), version_base=None):
-        return hydra.compose(config_name=path.stem, overrides=list(overrides))
+    if not path.is_file():
+        raise FileNotFoundError(f"Policy config not found: {path}")
+    config_root = _project_root / "dexmani_policy" / "configs"
+    if path.is_relative_to(config_root):
+        config_name = path.relative_to(config_root).with_suffix("").as_posix()
+    else:
+        # External standalone YAML keeps absolute defaults relative to its own root.
+        config_root, config_name = path.parent, path.stem
+    with hydra.initialize_config_dir(config_dir=str(config_root), version_base=None):
+        return hydra.compose(config_name=config_name, overrides=list(overrides))
 
 
 def build_policy_dataset(cfg):

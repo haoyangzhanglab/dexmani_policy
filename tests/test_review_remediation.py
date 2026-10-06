@@ -359,7 +359,8 @@ def test_vq_validation_uses_sample_count_for_tail():
 @pytest.mark.parametrize(('entry', 'with_manifest'), [
     ('eval', False), ('demo', False), ('demo', True),
 ])
-def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry, with_manifest):
+@pytest.mark.parametrize('source_change', ['missing', 'modified'])
+def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry, with_manifest, source_change):
     import sys
     from test_infra_evaluation import Runner, experiment, publish_best
     from dexmani_policy import eval_best_ckpt as evaluator, record_demo as demo
@@ -390,6 +391,11 @@ def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry, wi
     summary.write_text(json.dumps(payload))
     handoff=root/'handoff.json'; handoff.write_text(json.dumps(first))
     publish_best(root,40)  # A different successful selector publishes between stages.
+    if with_manifest:
+        if source_change == 'missing':
+            source.unlink()
+        else:
+            source.write_text('{}')  # Pinned demo must use its embedded protocol.
     module=demo if entry=='demo' else evaluator
     def load(path,use_ema,**kw):
         assert path==root/first['ckpt_relpath'] and use_ema is True

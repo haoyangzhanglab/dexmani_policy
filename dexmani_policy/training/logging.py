@@ -157,3 +157,19 @@ def print_param_count(agent) -> None:
             f"  {name:<20}: {t / 1e6:.2f} M  (trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)",
             color,
         )
+
+
+def print_storage_dtypes(model, ema_model, *, autocast):
+    """Startup-only metadata; reading dtype does not synchronize tensor values."""
+    def groups(module):
+        result = {"parameters": set(), "lora": set(), "frozen_backbone": set()}
+        if module is not None:
+            for name, param in module.named_parameters():
+                result["parameters"].add(str(param.dtype))
+                if "lora_" in name:
+                    result["lora"].add(str(param.dtype))
+                elif "backbone" in name and not param.requires_grad:
+                    result["frozen_backbone"].add(str(param.dtype))
+        return {key: sorted(value) for key, value in result.items()}
+    print(f"Storage dtype: model={groups(model)}, EMA={groups(ema_model)}, "
+          f"BF16 autocast={autocast}")

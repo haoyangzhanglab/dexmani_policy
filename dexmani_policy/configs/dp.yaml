@@ -81,6 +81,7 @@ agent:
   rgb_backbone_config:
     model_name: facebook/dinov2-small  # 384d
     tune_mode: lora
+    lora_dtype: float32
     global_token_type: avg
     image_size: [224, 224]
 
@@ -164,6 +165,7 @@ env_runner:
 
 # ── Eval ──
 eval:
+  seed_manifest: dexmani_policy/configs/eval_protocols/${task_name}.json
   inference_steps: 10
   inference_steps_list: null
   use_ema: true

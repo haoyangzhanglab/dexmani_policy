@@ -66,6 +66,8 @@ ls dexmani_policy/configs/ddp/*.yaml
 
 模型层数、宽度、学习率、NFE、batch size、具体模块组合和实验结论等易变化信息，应留在 config、源码、实验目录与日志中，不写成仓库级长期约定。
 
+七种方法与六个 DDP overlay 的当前数值配方、固定评测协议及验证边界见 [论文 recipe 与实施记录](docs/paper_recipes.md)。
+
 ## 训练
 
 单卡：
@@ -172,7 +174,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 ### 固定论文评测与训练源码追溯
 
-新论文比较先从实际 runner seed 池确定同一份 task→seed JSON 清单，通过 `eval.seed_manifest=/absolute/path/seeds.json` 交给 selector。它包含 `pool_id`、`selection`、`tie_break`、`test` 四个字段，后三者均为 task→整数 seed 列表。预留 tie-break 池始终不进入 test，测试数量由清单固定。多任务清单必须匹配现有 paired runner 的映射；缺失、重复、相交或映射不一致直接报错。未指定时仍采用 legacy 协议，测试分母仍是实际完成数量。
+新论文比较先从实际 runner seed 池确定同一份 task→seed JSON 清单，通过 `eval.seed_manifest=/absolute/path/seeds.json` 交给 selector。它包含 `pool_id`、`selection`、`tie_break`、`test` 四个字段，后三者均为 task→整数 seed 列表。预留 tie-break 池始终不进入 test，测试数量由清单固定，与 `episodes` 不同时提示实际数量；`max_episodes` 必须容纳完整 selection 加预留 tie-break，否则报错。多任务清单必须匹配现有 paired runner 的映射；缺失、重复、相交或映射不一致直接报错。新 selector 必须使用有效清单；七个基础配置提供任务对应的默认路径，生成方式和已发布清单见 [论文 recipe](docs/paper_recipes.md)。后续 eval/demo 使用 selection record 内嵌的协议，显式冲突报错。历史无清单的已发布记录仍可按 legacy 协议复现。完整正常的全零 selection 仍发布并继续固定 test；空结果、缺失 episode 和技术异常失败并保留旧 best。
 
 `select_best_ckpt.py --result-file <新文件>` 导出该次选择记录；`eval_best_ckpt.py` 与 `record_demo.py` 用 `--selection-record <该文件>` 固定 checkpoint、raw/EMA、NFE 和 seed 协议。`eval_pipeline.sh` 自动使用唯一交接文件，可通过 `SEED_MANIFEST=/absolute/path/seeds.json` 指定论文清单。
 

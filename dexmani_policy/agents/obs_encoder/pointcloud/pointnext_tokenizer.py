@@ -103,7 +103,7 @@ class MultiScalePatchTokenizer(nn.Module):
             )
 
             if prepend_global_in_attn:
-                # Learnable global token (like ViT class token / SAT's global_pn).
+                # Local learned prefix; official SAT global_pn pools the input points.
                 self.global_token = nn.Parameter(torch.randn(1, 1, token_channels) * 0.02)
 
             encoder_layer = nn.TransformerEncoderLayer(
@@ -149,6 +149,8 @@ class MultiScalePatchTokenizer(nn.Module):
                 attn_global = x[:, :1, :]  # (B, 1, token_channels)
                 patch_token = x[:, 1:, :]  # (B, G, token_channels)
                 return patch_token, patch_center, attn_global
+            # Local no-prefix ablation still consumes the attention output.
+            patch_token = x
 
         return patch_token, patch_center
 

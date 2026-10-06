@@ -436,6 +436,7 @@ def save_eval_snapshot(directory, cfg, runner, **request):
     import importlib.util
     import importlib.metadata
     import sys
+    cfg = bind_seed_manifest(cfg, {"selection": request["selection"]} if "selection" in request else None)
     exp_dir = Path(cfg._exp_dir)
     sim = {"commit": "unknown", "dirty": "unknown", "version": "unknown"}
     try:
@@ -494,15 +495,54 @@ def atomic_json(path, record):
             os.unlink(name)
 
 
+def _read_seed_manifest(source):
+    import json
+    if isinstance(source, (str, Path)):
+        return json.loads(Path(source).read_text())
+    return OmegaConf.to_container(source, resolve=True) if OmegaConf.is_config(source) else source
+
+
+def _manifest_hash(manifest):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
+
+def bind_seed_manifest(cfg, best_info, *, overrides=None):
+    """Bind a pinned record's protocol, checking only explicitly supplied overrides.
+
+    Saved config paths are defaults, not assertions about a pinned selection.
+    This returns an in-memory copy; the experiment config remains unchanged.
+    Pool identity is checked separately, on the full runner before model loading.
+    """
+    from omegaconf import open_dict
+    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    saved = (best_info or {}).get("selection", {}).get("seed_manifest")
+    explicit = overrides is not None and "seed_manifest" in overrides.get("eval", {})
+    if saved is not None:
+        manifest = _read_seed_manifest(saved["manifest"])
+        if _manifest_hash(manifest) != saved["sha256"]:
+            raise ValueError("Selection seed manifest hash differs from embedded content")
+        if explicit:
+            source = overrides["eval"]["seed_manifest"]
+            if source is None or _manifest_hash(_read_seed_manifest(source)) != saved["sha256"]:
+                raise ValueError("Explicit evaluation seed manifest differs from selection")
+        with open_dict(cfg):
+            if "eval" not in cfg:
+                cfg.eval = {}
+            cfg.eval.seed_manifest = manifest
+    elif best_info is not None and cfg.get("eval", {}).get("seed_manifest") is not None:
+        raise ValueError("Explicit paper protocol requires selection with the same manifest")
+    return cfg
+
+
 def load_seed_manifest(source, runner):
     """Validate an explicit task/seed protocol against the actual runner mapping.
 
     Each role contains task -> ordered physical seeds. Multi-task manifests must
     be representable by the runner's existing paired reference-seed protocol.
     """
-    import hashlib
-    import json
-    manifest = json.loads(Path(source).read_text()) if isinstance(source, (str, Path)) else source
+    manifest = _read_seed_manifest(source)
     if not isinstance(manifest, dict) or not manifest.get("pool_id"):
         raise ValueError("Seed manifest requires pool_id")
     available = list(dict.fromkeys(runner.get_seed_list()))
@@ -529,19 +569,20 @@ def load_seed_manifest(source, runner):
         if mapped_task_seeds(runner, refs) != mapping:
             raise ValueError(f"{role}: seeds do not match the runner's paired task mapping")
         roles[role] = refs
-    identity = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
-    return {"manifest": manifest, "sha256": identity, "roles": roles,
-            "runner_pool_sha256": hashlib.sha256(json.dumps(full, sort_keys=True).encode()).hexdigest()}
+    pool_hash = _manifest_hash(full)
+    if "runner_pool_sha256" in manifest and manifest["runner_pool_sha256"] != pool_hash:
+        raise ValueError("Seed manifest runner pool hash differs from current pool")
+    return {"manifest": manifest, "sha256": _manifest_hash(manifest), "roles": roles,
+            "runner_pool_sha256": pool_hash}
 
 
 def fixed_test_seeds(cfg, runner, best_info):
+    cfg = bind_seed_manifest(cfg, best_info)
     source = cfg.get("eval", {}).get("seed_manifest")
     saved = (best_info or {}).get("selection", {}).get("seed_manifest")
-    if source is None and saved is None:
+    if source is None:
         return None
-    protocol = load_seed_manifest(source or saved["manifest"], runner)
+    protocol = load_seed_manifest(source, runner)
     if saved is not None and any(protocol[key] != saved[key] for key in ("sha256", "runner_pool_sha256")):
         raise ValueError("Evaluation seed manifest differs from selection")
-    if best_info is not None and saved is None:
-        raise ValueError("Explicit paper protocol requires selection with the same manifest")
     return protocol["roles"]["test"]

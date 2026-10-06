@@ -82,6 +82,7 @@ class EvaluationInfraTests(unittest.TestCase):
             root=Path(tmp); cfg=load_config('dp3'); OmegaConf.save(cfg,root/'config.yaml')
             cfg=OmegaConf.load(root/'config.yaml')
             cfg._exp_dir=str(root)
+            cfg.eval.seed_manifest=None  # This test exercises legacy runner/snapshot configuration.
             cfg.env_runner.env_kwargs.table_random=True
             cfg.env_runner.env_kwargs.instance_random=True
             runner=SimRunner.__new__(SimRunner)
@@ -119,6 +120,8 @@ class EvaluationInfraTests(unittest.TestCase):
     def test_selection_publish_failure_and_final_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             root,cfg=experiment(tmp); runner=Runner()
+            cfg.eval.seed_manifest={'pool_id':'fixture','selection':{'a':[0,1]},
+                'tie_break':{'a':[2]},'test':{'a':[3,4]}}
             with patch.object(selector,'build_eval_runner',return_value=runner), patch.object(selector,'load_ckpt_for_inference',side_effect=lambda path,*a,**kw: types.SimpleNamespace(_checkpoint_global_step=int(re.search(r'step=(\d+)',path.name)[1]))):
                 selector.select_best_checkpoint(root,cfg,initial_episodes=2,batch_size=1,video_save_dir=root/'videos')
                 first=read_best_ckpt_json(root); before=(root/'best_ckpt.json').read_bytes()
@@ -129,8 +132,10 @@ class EvaluationInfraTests(unittest.TestCase):
                     self.assertEqual(result['success_count'],sum(d['success'] for d in result['episode_details']))
                     self.assertEqual(result['n_episodes'],len(result['episode_details']))
                 runner.success=False
-                with self.assertRaises(RuntimeError): selector.select_best_checkpoint(root,cfg,initial_episodes=2,batch_size=1)
-                self.assertEqual(before,(root/'best_ckpt.json').read_bytes())
+                selector.select_best_checkpoint(root,cfg,initial_episodes=2,batch_size=1)
+                self.assertTrue(read_best_ckpt_json(root)['selection']['selection_all_zero'])
+                self.assertNotEqual(before,(root/'best_ckpt.json').read_bytes())
+                before=(root/'best_ckpt.json').read_bytes()
                 runner.success='error'
                 with self.assertRaisesRegex(RuntimeError,'fatal'): selector.select_best_checkpoint(root,cfg,initial_episodes=2)
                 self.assertEqual(before,(root/'best_ckpt.json').read_bytes())

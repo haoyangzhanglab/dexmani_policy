@@ -1,7 +1,7 @@
 """SATAgent — Structural Action Transformer agent for DexMani_Policy.
 
-Implements the structural-centric action representation from the SAT paper
-(CVPR 2026): actions are transposed from ``(B, T, Da)`` to ``(B, Da, T)``
+Local SAT adaptation (upstream differences: docs/paper_recipes.md).
+Actions are transposed from ``(B, T, Da)`` to ``(B, Da, T)``
 so that each Transformer token represents one joint's full future trajectory.
 
 The agent wraps:
@@ -24,7 +24,7 @@ from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
 class SATObsEncoder(nn.Module):
-    """Observation encoder for SAT — paper §4.2 temporal fusion in feature dim.
+    """Local SAT observation encoder with temporal fusion in feature dim.
 
     Encodes raw point clouds and joint state into a sequence of observation
     tokens consumed as the KV prefix by the SAT backbone.
@@ -32,7 +32,9 @@ class SATObsEncoder(nn.Module):
     Unlike the default ManiFlow pattern (time concatenated along sequence dim),
     SAT fuses observation history along the *feature* dimension so that the
     token count stays at ``num_patches + 1`` regardless of ``n_obs_steps``.
-    This keeps the obs:action token ratio balanced (§4.2).
+    State features are broadcast into point tokens here; official SAT instead
+    appends separate StateAttn tokens. Token slots do not imply physical
+    correspondence across frames.
 
     Output shape: ``(B, num_obs_tokens, obs_token_dim)`` where
     ``num_obs_tokens = num_patches + 1`` and
@@ -72,14 +74,14 @@ class SATObsEncoder(nn.Module):
         self.fps_random_config = fps_random_config or {}
 
         patch_seq_len, pc_out_dim = self.pc_encoder.out_shape
-        # Paper §4.2: time fused in feature dim → token count independent of T
+        # Local temporal feature fusion keeps token count independent of T
         self.num_obs_tokens = patch_seq_len + 1
         self.obs_token_dim = n_obs_steps * (pc_out_dim + self.state_mlp.out_dim)
 
     def forward(self, obs: dict):
-        """Encode observations with paper-style temporal feature fusion.
+        """Encode observations with local temporal feature fusion.
 
-        Paper §4.2: each frame is encoded independently, then same-position
+        Each frame is encoded independently, then same-index
         tokens across time are concatenated along the feature dimension.
         This yields ``num_patches + 1`` tokens (not ``T*(num_patches + 1)``).
 
@@ -120,7 +122,7 @@ class SATObsEncoder(nn.Module):
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
         feat = torch.cat([pc_feat, state_feat], dim=-1)  # (B*T, K+1, D_pc+D_state)
 
-        # Paper §4.2: fuse time in feature dim (not sequence dim)
+        # Fuse local state-augmented tokens along the temporal feature dimension
         B = feat.shape[0] // self.n_obs_steps
         T = self.n_obs_steps
         D = feat.shape[-1]  # pc_out_dim + state_out_dim

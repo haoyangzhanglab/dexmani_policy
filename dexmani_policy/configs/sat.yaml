@@ -1,4 +1,4 @@
-# SAT — Structural Action Transformer (CVPR 2026)
+# SAT — local Structural Action Transformer adaptation; see docs/paper_recipes.md
 # Encoder:  PointNeXT tokenizer (256d tokens, SAT-style patch self-attention)
 # Decoder:  SAT backbone (MultiModalAttention, obs-as-KV-prefix) + Flow Matching
 # Modality: point_cloud + joint_state → action
@@ -90,7 +90,7 @@ agent:
     prepend_global_in_attn: true
 
   # SAT backbone (structural-centric DiT)
-  n_layers: 8               # paper: 8 layers (vs 12 for DiTX)
+  n_layers: 8
   hidden_dim: 768
   n_head: 8
   mlp_ratio: 4.0
@@ -179,6 +179,7 @@ env_runner:
 
 # ── Eval ──
 eval:
+  seed_manifest: dexmani_policy/configs/eval_protocols/${task_name}.json
   inference_steps: 10
   inference_steps_list: null
   use_ema: true

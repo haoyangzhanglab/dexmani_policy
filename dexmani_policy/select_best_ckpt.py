@@ -8,14 +8,13 @@ Algorithm
 ---------
 
 **Stage 1 — Initial evaluation**:
-    Evaluate every discovered milestone on the manifest's selection seeds,
-    or a deterministically shuffled ``initial_episodes`` slice without a manifest.
+    Evaluate every discovered milestone on the required manifest's selection seeds.
     All candidates use the same seeds.
 
 **Stage 2 — Tie-break**:
     When two or more checkpoints share the highest success rate, run a single
-    additional batch from the manifest's tie-break seeds, or ``batch_size``
-    fresh seeds without a manifest, and merge. All tied candidates share it.
+    additional batch from the manifest's tie-break seeds and merge.
+    All tied candidates share it; unused tie-break seeds remain reserved.
 
 **Tiebreak** (when still tied after Stage 2):
     1. Higher success rate.
@@ -23,16 +22,16 @@ Algorithm
     3. Higher ``global_step`` (more training).
 
 **Fail-fast**: a load/model/CUDA error on any checkpoint aborts the run (never
-silently treated as 0%); if every checkpoint scores 0%, the run exits non-zero.
+silently treated as 0%). Complete, normal all-zero results are published with
+``selection_all_zero=true`` using the same deterministic ranking.
 Failed runs keep their own summary and leave the last successful
 ``best_ckpt.json`` unchanged.
 
 Seed management
 ---------------
 ``eval.seed_manifest`` fixes disjoint selection, tie-break and test lists.
-Without a manifest, the runner pool is deterministically shuffled with the
-eval seed; the first ``initial_episodes`` are Stage 1 and the next
-``batch_size`` are Stage 2. ``BaseRunner.run_one_episode`` re-seeds
+New selections require a valid manifest, generated once from the actual pool
+with ``scripts/eval/make_seed_manifest.py``. ``BaseRunner.run_one_episode`` re-seeds
 the policy RNG per episode. This makes seed selection and RNG initialization
 repeatable; it does not guarantee bitwise-identical trajectories across
 GPU/driver/kernel environments.
@@ -49,14 +48,14 @@ Usage
         --policy-name dp3 --task-name pour --exp-name 2026-07-29_01-53_35
 
     bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\
-        --initial-episodes 25 --max-episodes 50
+        eval.seed_manifest=dexmani_policy/configs/eval_protocols/pour.json
 """
 
 from __future__ import annotations
 
 import argparse
-import random
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -228,24 +227,30 @@ def select_best_checkpoint(
         runner = build_eval_runner(cfg)
         for leaf in iter_leaf_env_runners(runner):
             leaf.record_video = video_save_dir is not None
-        all_seeds = list(dict.fromkeys(runner.get_seed_list()))
         requested = {"initial_episodes": initial_episodes, "batch_size": batch_size, "max_episodes": max_episodes}
-        max_episodes = min(max_episodes, len(all_seeds))
-        initial_episodes = min(initial_episodes, max_episodes)
-        random.Random(seed).shuffle(all_seeds)
-        phase1_seeds = all_seeds[:initial_episodes]
-        tie_seeds = all_seeds[initial_episodes:min(initial_episodes + batch_size, max_episodes)]
         manifest_source = cfg.get("eval", {}).get("seed_manifest")
-        protocol = load_seed_manifest(manifest_source, runner) if manifest_source else None
-        if protocol is not None:
-            phase1_seeds = protocol["roles"]["selection"]
-            tie_seeds = protocol["roles"]["tie_break"]
-            initial_episodes = len(phase1_seeds)
-        if not phase1_seeds:
-            raise ValueError("Selection requires a nonempty seed pool")
+        if manifest_source is None:
+            raise ValueError("New selection requires eval.seed_manifest; generate it with "
+                             "scripts/eval/make_seed_manifest.py and pass eval.seed_manifest=<path>")
+        try:
+            protocol = load_seed_manifest(manifest_source, runner)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Seed manifest not found: {manifest_source}; generate it with "
+                "scripts/eval/make_seed_manifest.py or pass eval.seed_manifest=<path>"
+            ) from exc
+        phase1_seeds = protocol["roles"]["selection"]
+        tie_seeds = protocol["roles"]["tie_break"]
+        initial_episodes = len(phase1_seeds)
+        if initial_episodes + len(tie_seeds) > max_episodes:
+            raise ValueError(
+                f"max_episodes={max_episodes} is below the manifest selection + reserved "
+                f"tie-break count ({initial_episodes}+{len(tie_seeds)}); increase the cap"
+            )
         record["eval_config"] = save_eval_snapshot(
             run_dir, cfg, runner, use_ema=use_ema, inference_steps=inference_steps,
             shuffle_seed=seed, policy_seed_mode="episode_seed", **requested,
+            effective_episode_counts={role: len(seeds) for role, seeds in protocol["roles"].items()},
             phase1_task_seeds=mapped_task_seeds(runner, phase1_seeds),
             possible_tie_task_seeds=mapped_task_seeds(runner, tie_seeds),
             checkpoints=[{"path": artifact_reference(m.path, exp_dir), "global_step": m.global_step} for m in milestones],
@@ -254,9 +259,8 @@ def select_best_checkpoint(
                      "initial_episodes": initial_episodes, "tie_break_used": False}
         if hasattr(runner, "seed_protocol"):
             selection["seed_protocol"] = runner.seed_protocol()
-        selection["protocol"] = "explicit" if protocol else "legacy"
-        if protocol:
-            selection["seed_manifest"] = protocol
+        selection["protocol"] = "explicit"
+        selection["seed_manifest"] = protocol
         record["selection"] = selection
 
         def dispatch(mc, seeds, phase):
@@ -282,7 +286,20 @@ def select_best_checkpoint(
             details = [dict(d, checkpoint=stage["checkpoint"], phase=phase,
                             task_name=d.get("task_name", getattr(runner, "task_name", None)))
                        for d in collect_episode_details(result)]
-            stage.update(status="completed", episode_details=details, statistics=compute_eval_stats(result))
+            stage["episode_details"] = details
+            expected = Counter((task, seed) for task, values in mapping.items() for seed in values)
+            for detail in details:
+                if (type(detail.get("seed")) is not int
+                        or not isinstance(detail.get("success"), (bool, np.bool_))
+                        or "steps" not in detail
+                        or (detail["steps"] is not None and
+                            (type(detail["steps"]) is not int or detail["steps"] < 0))
+                        or "error" in detail or "error_category" in detail):
+                    raise RuntimeError(f"Invalid or exceptional selection episode: {detail}")
+            actual = Counter((d.get("task_name"), d["seed"]) for d in details)
+            if actual != expected:
+                raise RuntimeError("Selection episode details do not match requested task/seed mapping")
+            stage.update(status="completed", statistics=compute_eval_stats(result))
             atomic_json(summary_path, record)
             return {"episode_details": details}
 
@@ -305,8 +322,7 @@ def select_best_checkpoint(
                     "success_count": a.success_count, "avg_steps": a.avg_steps,
                     "n_episodes": a.n_episodes, "episode_details": a.episode_details}
         record["all_results"] = [candidate(a) for a in accumulators]
-        if best.success_count == 0:
-            raise RuntimeError("All milestone checkpoints scored 0%; best_ckpt.json not updated")
+        selection["selection_all_zero"] = all(a.success_count == 0 for a in accumulators)
         record.update(status="success", best_checkpoint=candidate(best),
                       inference={"use_ema": use_ema, "inference_steps": inference_steps,
                                  "policy_seed_mode": "episode_seed"})
@@ -368,21 +384,20 @@ def main() -> None:
         "--initial-episodes",
         type=int,
         default=None,
-        help="Phase-1 episodes per checkpoint (default: from config eval.select_best).",
+        help="Historical episode budget (recorded only); manifest fixes the selection seeds.",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
-        help="Additional episodes in the optional exact-tie stage (default: from config).",
+        help="Historical episode budget (recorded only); manifest fixes the tie-break seeds.",
     )
     parser.add_argument(
         "--max-episodes",
         type=int,
         default=None,
         help=(
-            "Hard cap covering the initial stage plus one optional tie-break batch "
-            "(default: from config)."
+            "Hard cap for manifest selection plus reserved tie-break seeds."
         ),
     )
     add_inference_steps_argument(parser)

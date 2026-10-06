@@ -8,7 +8,7 @@
 #
 # Usage:
 #   bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]
-#   Set SEED_MANIFEST to use a fixed selection/tie-break/test seed JSON.
+#   A valid manifest is required; SEED_MANIFEST overrides the saved config path.
 #   All stages share this invocation's selection record.
 #
 # Examples:
@@ -25,7 +25,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]"
     echo ""
     echo "One-shot evaluation pipeline: select best ckpt → held-out eval → 5 demo videos."
-    echo "Set SEED_MANIFEST=/absolute/path/seeds.json for fixed task/seed lists."
+    echo "A valid manifest is required; set SEED_MANIFEST to override its saved path."
     echo ""
     echo "Positional args:"
     echo "  policy_name   Policy config name (e.g. dp3, maniflow, sat)"

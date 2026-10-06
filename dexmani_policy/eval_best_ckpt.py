@@ -11,13 +11,13 @@ Evaluation protocol
 1. Resolve ``--selection-record`` or ``best`` once to a record and concrete
    checkpoint. A supplied handoff record rejects conflicting EMA/NFE overrides;
    ordinary ``best`` permits explicit inference overrides.
-2. Use the saved/explicit manifest's complete test list. Without a manifest,
-   resolve the shuffle seed from effective ``training.seed + 1024``; the CLI
-   accepts ``training.seed=...`` dotlist overrides, not ``--seed``.
-3. Restore the saved Agent from the concrete checkpoint with the resolved
-   EMA/raw choice.
-4. Validate runner pool and held-out task/seed identities. Without a manifest,
-   exclude the pinned selection seeds from the shuffled runner pool.
+2. Use the selection record's embedded manifest and complete test role; an
+   explicit manifest override must match. Without a pinned protocol, use the
+   configured manifest or the legacy shuffled pool (training.seed + 1024).
+3. Validate the full runner pool and held-out task/seed identities before
+   loading weights; legacy evaluation excludes the recorded selection seeds.
+4. Restore the saved Agent from the concrete checkpoint with the resolved
+   EMA/raw choice. Single evaluation and NFE sweep share this setup.
 5. Run each seed with environment/policy RNG reseeding and save statistics and
    provenance. This does not guarantee identical trajectories across
    GPU/driver/kernels.
@@ -61,6 +61,7 @@ from dexmani_policy.evaluation.protocol import (
     save_eval_snapshot, mapped_task_seeds, validate_heldout, artifact_reference, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
+    fixed_test_seeds,
     collect_episode_details,
     compute_eval_stats,
     iter_leaf_env_runners,
@@ -108,17 +109,29 @@ def _setup_eval(
     use_ema: bool,
     *,
     video_save_dir: Path | None = None,
+    best_info=None,
+    episodes: int,
+    selection_seeds: list[int],
 ):
-    """Build the current environment and strictly restore the saved Agent.
+    """Resolve and validate seeds on the full runner before restoring the Agent.
 
     Returns
     -------
-    (agent, env_runner, ckpt_path, ckpt_label, eval_seed)
+    (agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds)
     """
     eval_seed = resolve_eval_seed(cfg)
     set_seed(eval_seed)
 
     env_runner = build_eval_runner(cfg)
+    eval_seeds = fixed_test_seeds(cfg, env_runner, best_info)
+    if eval_seeds is None:
+        eval_seeds = _select_eval_seeds(
+            env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+        )
+    elif len(eval_seeds) != episodes:
+        cprint(f"Requested {episodes} episodes; manifest fixes {len(eval_seeds)} test seeds "
+               "per task. Evaluating the full test role.", "yellow")
+    validate_heldout(env_runner, best_info, eval_seeds)
 
     for leaf_runner in iter_leaf_env_runners(env_runner):
         leaf_runner.record_video = video_save_dir is not None
@@ -129,7 +142,7 @@ def _setup_eval(
     agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
     cprint("✅ Checkpoint loaded\n", "green")
 
-    return agent, env_runner, ckpt_path, ckpt_label, eval_seed
+    return agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds
 
 
 def _selection_seeds(best_info) -> list[int]:
@@ -307,6 +320,7 @@ def evaluate_checkpoint_robotwin(
     resolved_best: tuple[dict, Path] | None = None,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
+    dotlist_overrides: list[str] | tuple[str, ...] = (),
 ) -> tuple[float, float | None, int, int]:
     """Evaluate a checkpoint and return success rate.
 
@@ -326,7 +340,7 @@ def evaluate_checkpoint_robotwin(
     (success_rate, avg_steps, n_success, n_total)
     """
     cfg, use_ema, steps, resolved_best = _resolve_final_eval_request(
-        cfg, exp_dir, ckpt_tag_or_path, [], cli_use_ema=use_ema,
+        cfg, exp_dir, ckpt_tag_or_path, list(dotlist_overrides), cli_use_ema=use_ema,
         cli_inference_steps=inference_steps, resolved_best=resolved_best,
     )
     if len(steps) != 1:
@@ -335,26 +349,23 @@ def evaluate_checkpoint_robotwin(
     best_info = resolved_best[0] if resolved_best is not None else None
     selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds = _setup_eval(
         cfg,
         exp_dir,
         str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
         use_ema,
         video_save_dir=video_save_dir,
+        best_info=best_info,
+        episodes=episodes,
+        selection_seeds=selection_seeds,
     )
-    from dexmani_policy.evaluation.protocol import fixed_test_seeds
-    eval_seeds = fixed_test_seeds(cfg, env_runner, best_info)
-    if eval_seeds is None:
-        eval_seeds = _select_eval_seeds(
-            env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
-        )
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
-    validate_heldout(env_runner, best_info, eval_seeds)
     snapshot_ref = save_eval_snapshot(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
-        inference_steps_list=[inference_steps], episodes=episodes, shuffle_seed=eval_seed,
+        inference_steps_list=[inference_steps], episodes=episodes,
+        effective_episodes=len(eval_seeds), shuffle_seed=eval_seed,
         policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
         selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
         **selection_provenance(best_info),
@@ -416,6 +427,7 @@ def evaluate_checkpoint_sweep(
     resolved_best: tuple[dict, Path] | None = None,
     video_save_dir: Path | None = None,
     result_save_dir: Path | None = None,
+    dotlist_overrides: list[str] | tuple[str, ...] = (),
 ) -> list[dict]:
     """Evaluate a checkpoint at multiple inference step counts.
 
@@ -433,7 +445,7 @@ def evaluate_checkpoint_sweep(
             "Sweep inference steps must be distinct to preserve per-value results"
         )
     cfg, use_ema, inference_steps_list, resolved_best = _resolve_final_eval_request(
-        cfg, exp_dir, ckpt_tag_or_path, [], cli_use_ema=use_ema,
+        cfg, exp_dir, ckpt_tag_or_path, list(dotlist_overrides), cli_use_ema=use_ema,
         cli_inference_steps_list=inference_steps_list, resolved_best=resolved_best,
     )
     best_info = resolved_best[0] if resolved_best is not None else None
@@ -441,33 +453,29 @@ def evaluate_checkpoint_sweep(
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed = _setup_eval(
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds = _setup_eval(
         cfg,
         exp_dir,
         str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
         use_ema,
         video_save_dir=video_save_dir,
+        best_info=best_info,
+        episodes=episodes,
+        selection_seeds=selection_seeds,
     )
-    # ── 2. Same seeds for all inference step counts (fair comparison) ──────────
-    from dexmani_policy.evaluation.protocol import fixed_test_seeds
-    eval_seeds = fixed_test_seeds(cfg, env_runner, best_info)
-    if eval_seeds is None:
-        eval_seeds = _select_eval_seeds(
-            env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
-        )
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
-    validate_heldout(env_runner, best_info, eval_seeds)
     snapshot_ref = save_eval_snapshot(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
-        inference_steps_list=inference_steps_list, episodes=episodes, shuffle_seed=eval_seed,
+        inference_steps_list=inference_steps_list, episodes=episodes,
+        effective_episodes=len(eval_seeds), shuffle_seed=eval_seed,
         policy_seed_mode="episode_seed", task_seeds=mapped_task_seeds(env_runner, eval_seeds),
         selection_seeds_excluded=selection_seeds, heldout_from_selection=best_info is not None,
         **selection_provenance(best_info),
     )
 
-    # ── 3. Sweep over inference steps ─────────────────────────────────
+    # ── 2. Sweep over inference steps ─────────────────────────────────
     sweep_results: list[dict] = []
 
     for inference_steps in inference_steps_list:
@@ -635,6 +643,9 @@ def _resolve_final_eval_request(
     if "env_runner" not in merged_cfg:
         raise ValueError("Evaluation config is missing env_runner")
     validate_inference_steps(inference_steps_list)
+    from dexmani_policy.evaluation.protocol import bind_seed_manifest
+    merged_cfg = bind_seed_manifest(merged_cfg, resolved_best[0] if resolved_best else None,
+                                    overrides=override_cfg)
     return (
         merged_cfg,
         use_ema,

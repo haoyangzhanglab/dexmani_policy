@@ -10,7 +10,7 @@
 # Examples:
 #   bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35
 #   bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \
-#       --initial-episodes 25 --max-episodes 50
+#       eval.seed_manifest=/absolute/path/seeds.json --max-episodes 50
 # Extra args are forwarded directly to select_best_ckpt.py.
 # Run with --help for the full option list.
 #
@@ -30,22 +30,22 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Extra args are forwarded to select_best_ckpt.py."
     echo ""
     echo "Options (select_best_ckpt.py):"
-    echo "  --initial-episodes N   Episodes per ckpt in Phase 1 (default: 25)"
-    echo "  --batch-size N         Episodes in the optional exact-tie batch (default: 5)"
-    echo "  --max-episodes N       Cap for initial stage plus tie batch (default: 100)"
+    echo "  --initial-episodes N   Requested Phase 1 count (metadata); manifest determines actual count"
+    echo "  --batch-size N         Requested tie count (metadata); manifest determines actual count"
+    echo "  --max-episodes N       Hard cap for selection + reserved tie-break seeds (default: 100)"
     echo "  --inference-steps N      Inference steps (default: from config)"
     echo "  --no-ema               Use raw weights instead of EMA"
     echo "  --seed N               Eval seed override"
     echo "  --videos               Record isolated candidate/stage videos (default: off)"
     echo "  --result-file PATH     Write this selection to a new handoff file"
-    echo "  eval.seed_manifest=PATH  Fixed task/seed lists; replaces episode-count budgets"
+    echo "  eval.seed_manifest=PATH  Required fixed roles (or saved config); must fit --max-episodes"
     echo ""
     echo "  Dot-list overrides may change eval/environment controls; model inputs come from saved config.yaml and cannot be overridden."
     echo ""
     echo "Examples:"
     echo "  bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35"
     echo "  bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\"
-    echo "      --initial-episodes 25 --max-episodes 50"
+    echo "      eval.seed_manifest=/absolute/path/seeds.json --max-episodes 50"
     exit 0
 fi
 

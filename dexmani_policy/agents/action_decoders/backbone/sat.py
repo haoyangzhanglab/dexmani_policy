@@ -9,7 +9,7 @@ Implements:
 - ``SATBlock``: AdaLN-modulated block with MultiModalAttention + MLP
 - ``SATBackbone``: full backbone with axis transposition and shuffle support
 
-Reference: "Structural Action Transformer for 3D Dexterous Manipulation", CVPR 2026.
+Local adaptation of XiaohanLei/SAT; upstream differences: docs/paper_recipes.md.
 """
 
 from __future__ import annotations
@@ -35,7 +35,8 @@ from dexmani_policy.agents.position_encodings import TimestepMLP
 class EmbodiedJointCodebook(nn.Module):
     """3-field summed embedding providing per-joint structural identity.
 
-    Paper spec (Sec 3.2):
+    Local three-field parameterization (official pinned code concatenates
+    robot/joint embeddings instead):
       C_j = E_emb(embodiment_j) + E_func(function_j) + E_axis(axis_j)
 
     Each joint's identity is the sum of three separately-projected
@@ -84,7 +85,7 @@ class EmbodiedJointCodebook(nn.Module):
         emb = self.proj_emb(self.emb_emb(self.joint_embodiment))
         func = self.proj_func(self.func_emb(self.joint_function))
         axis = self.proj_axis(self.axis_emb(self.joint_axis))
-        return emb + func + axis  # sum, NOT concat (paper spec)
+        return emb + func + axis  # Local projected sum; see docs/paper_recipes.md.
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +421,7 @@ class SATBackbone(nn.Module):
             context: ``(B, N_obs, obs_token_dim)`` — observation tokens
             shuffle: if True, randomly permute the Da axis (joint
                      tokens) together with their EJC identities.
-                     Each sample gets its own independent permutation
-                     (paper §2.4: "为每个样本生成随机排列π").
+                     Each sample gets its own independent permutation during training.
 
         Returns:
             ``(B, Da, T)`` — predicted velocity field per joint
@@ -435,7 +435,7 @@ class SATBackbone(nn.Module):
         # 2. Joint identity
         ejc = self.joint_codebook()  # (Da, hidden_dim)
 
-        # 3. Per-sample random shuffle (paper §2.4, §6.3)
+        # 3. Per-sample random shuffle
         perm = None
         if shuffle and self.training:
             perm = torch.stack([torch.randperm(Da, device=x.device) for _ in range(B)], dim=0)
@@ -445,7 +445,7 @@ class SATBackbone(nn.Module):
             ejc = ejc.unsqueeze(0).expand(B, -1, -1)
             ejc = torch.gather(ejc, dim=1, index=perm.unsqueeze(-1).expand(-1, -1, ejc.shape[-1]))
 
-        # 4. Token = trajectory feature + joint identity (ADD, paper §2.3)
+        # 4. Local token fusion: trajectory feature + joint identity
         x = x + ejc  # (B, Da, hidden_dim)
 
         # 5. Embed observation context
@@ -464,7 +464,7 @@ class SATBackbone(nn.Module):
         # 9. Final projection with AdaLN: hidden_dim -> horizon (T)
         x = self.final_layer(x, time_c)  # (B, Da, T)
 
-        # 10. Unshuffle if needed (paper §2.4)
+        # 10. Restore the original joint order
         if perm is not None:
             inv_perm = torch.argsort(perm, dim=1)  # (B, Da)
             x = torch.gather(x, dim=1, index=inv_perm.unsqueeze(-1).expand(-1, -1, x.shape[-1]))

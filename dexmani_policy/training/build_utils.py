@@ -200,6 +200,9 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, initialize_training=
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
+    if rank == 0:
+        from dexmani_policy.training.logging import print_storage_dtypes
+        print_storage_dtypes(model, ema_model, autocast=cfg.training.get("use_bfloat16", False))
     return model, ema_model, ema_updater
 
 

@@ -56,7 +56,9 @@ class ViTEncoder(nn.Module):
     # Shared methods (previously duplicated in dino/clip/siglip)
     # ------------------------------------------------------------------
 
-    def set_tune_mode(self, tune_mode: str) -> None:
+    def set_tune_mode(self, tune_mode: str, lora_dtype: str = "backbone") -> None:
+        if lora_dtype not in ("backbone", "float32"):
+            raise ValueError(f"Unsupported lora_dtype: {lora_dtype!r}")
         self.tune_mode = tune_mode
 
         if tune_mode == "freeze":
@@ -73,6 +75,8 @@ class ViTEncoder(nn.Module):
 
             self.backbone.requires_grad_(False)
 
+            # Capture the frozen model dtype before PEFT inserts adapters.
+            backbone_dtype = next(self.backbone.parameters()).dtype
             lora_config = LoraConfig(
                 r=16,
                 lora_alpha=32,
@@ -83,11 +87,10 @@ class ViTEncoder(nn.Module):
             )
             self.backbone = get_peft_model(self.backbone, lora_config)
 
-            # Match LoRA dtype to backbone dtype (bfloat16).
-            backbone_dtype = next(self.backbone.parameters()).dtype
+            adapter_dtype = torch.float32 if lora_dtype == "float32" else backbone_dtype
             for name, param in self.backbone.named_parameters():
                 if "lora_" in name:
-                    param.data = param.data.to(dtype=backbone_dtype)
+                    param.data = param.data.to(dtype=adapter_dtype)
             return
 
         raise ValueError(f"Unsupported tune_mode: {tune_mode}")

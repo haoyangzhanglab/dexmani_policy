@@ -80,6 +80,7 @@ class Trainer:
         self.ema_model = ema_model
         self.ema_updater = ema_updater
 
+        self._optimizer_dtype_logged = False
         self.optimizer = optimizer
         self.scheduler = scheduler
 
@@ -184,6 +185,16 @@ class Trainer:
             self._last_clip_ratio = None
 
         self.optimizer.step()
+        if not self._optimizer_dtype_logged:
+            if self.is_main_process:
+                lora_ids = {id(p) for n, p in self.raw_model.named_parameters() if "lora_" in n}
+                for label, only_lora in (("all", False), ("LoRA", True)):
+                    dtypes = {key: sorted({str(state[key].dtype)
+                              for param, state in self.optimizer.state.items()
+                              if key in state and (not only_lora or id(param) in lora_ids)})
+                              for key in ("exp_avg", "exp_avg_sq")}
+                    print(f"AdamW state dtype ({label}): {dtypes}")
+            self._optimizer_dtype_logged = True
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
 
