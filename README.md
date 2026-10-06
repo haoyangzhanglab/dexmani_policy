@@ -100,6 +100,8 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<old-run
 
 数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。恢复时已知 revision 改变或丢失会报错，历史身份缺失会明确提示“数据身份未验证”。revision 是生产者声明，不是内容 hash。
 
+训练 Real canonical 数据可显式添加 `+dataset.split_manifest=/path/split_manifest.json`，固定 trial 分组和排除项。清单要求缓存的已知 revision，完整内容与实际划分保存在训练配置中；与仿真 `eval.seed_manifest` 分开。格式、样本资格及恢复约束见 [Real 数据配方](docs/rtc.md#数据与保存统计)。
+
 Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。Gaussian **动作**归一化必须同时设置 `agent.clip_sample=false`；Gaussian 观测和 flow 不受此限制。历史缺失开关等价于 true，true→false 属于实验变化，不能静默严格续训。旧 Gaussian＋true 结果需用旧代码复现，修正后重新评测。
 
 RGB 可通过 `dataset.rgb_keep_uint8=true` 使用 uint8 transport（要求 `normalization.rgb=identity`）；当前 DP 显式启用。配置 CPU resize 时，含 ImageAug 的 recipe 在 float resize/crop/增强后最终量化，无颜色增强的 uint8 recipe 保留 uint8 spatial 路径；视觉入口恢复 float32。缺省/false 保留原 float preprocessing；未配置 CPU resize 时仍返回原始 HWC uint8。recipe 变化不能跨越 strict resume；MultiTask 的 RGB child 必须一致。确定性评测、验证与 Real preprocessing 从保存配置恢复，详见 [RGB transport 验证报告](docs/rgb_transport_report.md)。

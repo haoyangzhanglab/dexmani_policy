@@ -37,6 +37,7 @@ AUGMENTOR_REGISTRY = [
     ("state", StateNoiseAug, "noise", "joint_state"),
 ]
 
+
 class BaseDataset(torch.utils.data.Dataset):
     DEFAULT_MODALITIES: ClassVar[list[str]] = ["joint_state"]
 
@@ -58,6 +59,7 @@ class BaseDataset(torch.utils.data.Dataset):
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: dict | None = None,
         rgb_keep_uint8: bool = False,
+        split_manifest: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -137,12 +139,17 @@ class BaseDataset(torch.utils.data.Dataset):
         if augmentation_cfg is not None:
             self._build_augmentors()
 
-        val_mask = get_val_mask(
-            seed=seed,
-            val_ratio=val_ratio,
-            n_episodes=self.replay_buffer.n_episodes,
-        )
-        train_mask = ~val_mask
+        if split_manifest is None:
+            val_mask = get_val_mask(
+                seed=seed, val_ratio=val_ratio, n_episodes=self.replay_buffer.n_episodes
+            )
+            train_mask = ~val_mask
+        else:
+            from dexmani_policy.datasets.split import load_split_manifest
+
+            train_mask, val_mask, manifest, digest = load_split_manifest(
+                split_manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes
+            )
         train_mask = downsample_mask(
             seed=seed, mask=train_mask, max_n=max_train_episodes
         )
@@ -162,6 +169,25 @@ class BaseDataset(torch.utils.data.Dataset):
         self.pad_after = pad_after
         self._validation_dataset = None
         self._validation_dataset = self.get_validation_dataset()
+        if split_manifest is not None:
+            ids, trials = manifest["episode_ids"], manifest["trial_ids"]
+            actual_train = [ids[i] for i in np.flatnonzero(train_mask)]
+            self.data_recipe["split_manifest"] = {
+                "content": manifest,
+                "sha256": digest,
+                "train_mask": train_mask.tolist(),
+                "val_mask": val_mask.tolist(),
+                "actual_train_ids": actual_train,
+                "train_episodes": len(actual_train),
+                "val_episodes": int(val_mask.sum()),
+                "train_trials": len({trials[i] for i in actual_train}),
+                "val_trials": len({trials[i] for i in manifest["val_ids"]}),
+                "train_windows": len(self),
+                "val_windows": len(self._validation_dataset)
+                if self._validation_dataset is not None
+                else 0,
+                "holdout": bool(val_mask.any()),
+            }
 
     def _filter_sampler(self, sampler):
         sampler.filter_valid(

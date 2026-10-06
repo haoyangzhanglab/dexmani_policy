@@ -4,7 +4,17 @@
 
 BaseDataset 对实际启用的输入生成 obs_valid，对完整监督（含启用的 action_ee 前九维）生成 action_valid。Real canonical 额外读取 row_info/dispatch_status，默认要求两设备均为 ACCEPTED=1；缺少 dispatch 明确报错。CRC_UNCONFIRMED=2 不是 accepted。普通仿真数据不要求硬件 row_info，辅助 NaN 和未使用模态不会自动删除整段。
 
-先 episode split、max_train_episodes，再建立 train/val 窗口。对 H 长窗口，原 sampler 的 padding 映射仍是：
+训练划分可由 `dataset.split_manifest` 显式指定。JSON 包含：
+
+- 与缓存相等且已知的 `data_revision`，以及按缓存顺序排列的 `episode_ids`；
+- episode→已确认 trial 的 `trial_ids` 映射，以及 `seed`、`group_unit`；
+- 完整、互斥的 `train_ids`、`val_ids`、`exclusions`，同 trial 不跨 train/val。
+
+清单优先于 `val_ratio`；不从目录名、暂停或 HOME 推断 trial。`max_train_episodes` 仅缩小训练侧，排除项不会进入任一侧。实际读取的完整规范化清单、SHA-256、最终 mask/子集及 episode/trial/有效窗口数量进入现有 `data_recipe` 并随 resolved config 保存；无验证侧时明确 `holdout=false`。这是训练划分，与仿真评测的 `eval.seed_manifest` 独立。
+
+未提供清单时保留原 episode split、配置和 data_recipe 结构；默认配置不添加 `split_manifest: null`。新清单不接受 unknown revision，可从 Raw 导出到新路径后使用；不向旧缓存回填身份。修改清单内容或实际划分属于新实验，strict resume 会拒绝配方变化。
+
+在划分和 max_train_episodes 后建立 train/val 窗口。对 H 长窗口，sampler 的 padding 映射是：
 
 ```text
 r = clip(buffer_start + arange(H) - sample_start, buffer_start, buffer_end - 1)
@@ -15,7 +25,7 @@ obs_valid[r[:N]].all() & action_valid[r[:H]].all() & dispatch_valid[r[:H]].all()
 
 部署从 checkpoint 恢复 normalizer，不读取训练数据拟合。训练恢复也直接读取保存统计；数据配方加入现有续训一致性检查，新配方不是旧实验的无缝续训。精确复现旧训练请使用其源版本；不迁移旧缓存、不覆盖历史模型。推理式 async/rtc 不要求为了算法本身重新训练。
 
-Dataset 的窗口仍按实际记录行索引（recorded_rows）构造，缺失与不规则时间不自动修补。该说明不新增持久化 `data_recipe` 键，也不改变旧 checkpoint 的恢复合同。
+Dataset 的窗口仍按实际记录行索引（recorded_rows）构造，缺失与不规则时间不自动修补。时间质量摘要不自动改变窗口资格；仅显式启用 manifest 时，才在 data_recipe 中增加相应划分记录。
 
 Zarr reader 按进程重开句柄，只保留选中字段和每字段一个有界当前 chunk；训练期间不得替换当前读取的缓存。normalizer 单遍合并统计，mixed action 的 xyz/hand 使用 limits、rot6d 保持 identity，辅助 EE 切片与唯一训练源行权重不变。deterministic 多任务采样不启动 Manager；随机采样保留跨 worker 的 epoch 同步。
 
@@ -51,7 +61,7 @@ W 只乘一次。虽然辅助维没有 endpoint 目标，网络耦合产生的�
 ## 离线验证
 
 ```bash
-python -m pytest -q tests/test_policy_windows.py tests/test_policy_rtc.py \
+python -m pytest -q tests/test_research_split.py tests/test_policy_windows.py tests/test_policy_rtc.py \
   tests/test_streaming_dataset.py tests/test_infra_training.py \
   tests/test_infra_resume.py tests/test_infra_evaluation.py
 python dexmani_policy/smoke_test.py --config-only dp dp3 r3d sat dqrise maniflow
