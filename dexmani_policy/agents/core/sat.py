@@ -59,7 +59,8 @@ class SATObsEncoder(nn.Module):
         pc_encoder_config.setdefault("fps_random_config", fps_random_config)
 
         self.pc_encoder = build_pc_patch_tokenizer(encoder_type, pc_dim, pc_encoder_config)
-        if not getattr(self.pc_encoder, "supports_global_token", False):
+        if (not getattr(self.pc_encoder, "supports_global_token", False)
+                or not getattr(self.pc_encoder, "include_global_token", True)):
             raise ValueError(
                 f"SAT requires a tokenizer with a global token; {encoder_type!r} "
                 "does not support one. Use pointnext_tokenizer."

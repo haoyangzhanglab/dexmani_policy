@@ -137,10 +137,17 @@ def test_vq_checkpoint_export_and_actual_policy_load(
         num_groups=1,
         codebook_size=2,
         num_layers=1,
-        kmeans_init=False,
+        kmeans_init=True,
+        kmeans_iters=2,
     )
     optimizer = torch.optim.Adam(model.parameters())
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1)
+    model.train()
+    enc, commitment, _, mse = model(torch.from_numpy(_train))
+    (enc + commitment).backward()
+    optimizer.step()
+    scheduler.step()
+    assert torch.isfinite(mse)
     checkpoint = tmp_path / "synthetic.pt"
     vq._save_checkpoint(
         checkpoint,
@@ -167,8 +174,10 @@ def test_vq_checkpoint_export_and_actual_policy_load(
     policy_normalizer = build_normalizer(
         dataset, dict(policy_config.normalization), action_key
     )
+    from dexmani_policy.agents.normalization import SingleFieldLinearNormalizer
+    policy_normalizer["point_cloud"] = SingleFieldLinearNormalizer.create_identity()
     agent = DQRISEAgent(
-        horizon=3,
+        horizon=4,
         n_obs_steps=1,
         n_action_steps=1,
         action_dim=policy_config.agent.action_dim,
@@ -185,6 +194,26 @@ def test_vq_checkpoint_export_and_actual_policy_load(
     agent.load_normalizer_from_dataset(policy_normalizer)
     agent.initialize_training()
     assert agent._normalizer_checked
+    agent.action_key = action_key
+    batch = {"obs": {"point_cloud": torch.rand(2, 1, 8, 6),
+                     "joint_state": torch.zeros(2, 1, 19)},
+             "action": torch.ones(2, 4, policy_config.agent.action_dim)}
+    opt = torch.optim.AdamW(agent.parameters(), lr=1e-4)
+    loss, _ = agent(batch)
+    loss.backward()
+    opt.step()
+    assert torch.isfinite(loss)
+    agent.eval()
+    prediction = agent.predict_action(batch["obs"], inference_steps=2)
+    assert torch.isfinite(prediction["pred_action"]).all()
+    import copy
+    restored_agent = copy.deepcopy(agent)
+    restored_agent.load_state_dict(agent.state_dict(), strict=True)
+    torch.manual_seed(42)
+    expected = agent.predict_action(batch["obs"], inference_steps=2)
+    torch.manual_seed(42)
+    actual = restored_agent.predict_action(batch["obs"], inference_steps=2)
+    torch.testing.assert_close(actual["pred_action"], expected["pred_action"])
     with torch.no_grad():
         policy_normalizer["action"].params_dict["scale"][-1] *= 1.1
     with pytest.raises(ValueError, match="do not match"):

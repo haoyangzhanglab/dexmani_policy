@@ -15,6 +15,8 @@ Key differences from ``eval_best_ckpt.py``:
   using its EMA choice and inference step count when present and saved config
   defaults otherwise. Explicit
   ``--ema``/``--no-ema`` and ``--inference-steps`` override these settings.
+- ``--selection-record`` pins a selector's own handoff file and rejects
+  conflicting checkpoint/EMA/NFE choices. Demo seeds remain non-held-out.
 
 Usage
 -----
@@ -82,6 +84,7 @@ def _resolve_demo_inference(
     *,
     cli_use_ema: bool | None,
     cli_inference_steps: int | None,
+    selection_record=None,
 ) -> tuple[bool, list[int], tuple[dict, Path] | None]:
     """Return EMA/NFE and a pinned best pair; CLI > record > saved defaults."""
     use_ema = _get_eval_param(cfg, "use_ema", "demo", default=True)
@@ -95,7 +98,8 @@ def _resolve_demo_inference(
             _get_eval_param(cfg, "inference_steps", "demo", default=10)
         ]
 
-    resolved_best = resolve_best_checkpoint(exp_dir) if ckpt_tag == "best" else None
+    resolved_best = (resolve_best_checkpoint(exp_dir, selection_record) if selection_record
+                     else resolve_best_checkpoint(exp_dir) if ckpt_tag == "best" else None)
     if resolved_best is not None:
         inference = resolved_best[0].get("inference", {})
         if not isinstance(inference, dict):
@@ -109,6 +113,13 @@ def _resolve_demo_inference(
     if cli_inference_steps is not None:
         inference_steps_list = [cli_inference_steps]
 
+    if selection_record and ckpt_tag != "best":
+        requested_path, _ = resolve_checkpoint_path(exp_dir, ckpt_tag)
+        if requested_path != resolved_best[1]:
+            raise ValueError("Checkpoint override differs from selection handoff")
+    if selection_record and (use_ema != resolved_best[0]["inference"]["use_ema"] or
+                             inference_steps_list != [resolved_best[0]["inference"]["inference_steps"]]):
+        raise ValueError("Selection handoff cannot override raw/EMA or NFE")
     if type(use_ema) is not bool:
         raise ValueError(f"use_ema must resolve to boolean, got {use_ema!r}")
     validate_inference_steps(inference_steps_list)
@@ -194,6 +205,7 @@ def main() -> None:
         help="Video FPS override (default: auto-detect from env).",
     )
 
+    parser.add_argument("--selection-record", default=None)
     args = parser.parse_args()
 
     # ── 1. Locate experiment directory ────────────────────────────────────
@@ -231,6 +243,7 @@ def main() -> None:
         cfg,
         exp_dir,
         args.ckpt_tag,
+        selection_record=args.selection_record,
         cli_use_ema=args.use_ema,
         cli_inference_steps=args.inference_steps,
     )

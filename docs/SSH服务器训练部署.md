@@ -197,6 +197,8 @@ remote source tree
 
 生成物、缓存、数据和 experiment directory 被排除。
 
+不要向正在训练的源码目录原位同步，包括会自动 sync 的 `train_remote.sh`。新 run 的 `source.zip` / `source_manifest.json` 保存启动时实际源码及身份，但不能隔离后续 lazy import；需要并行不同版本时使用不同源码目录。
+
 关键区别：
 
 - `--delete` 用于清理**远端源码树中的 stale source files**；
@@ -557,6 +559,8 @@ bash scripts/remote/stop_remote.sh --all
 
 `--all` 只处理 remote trainer 命名空间内的 training sessions，而不是无差别终止所有 tmux 会话。
 
+`--list` / `--all` 把“没有 session/server/socket”视为正常空结果；tmux 不存在、其它查询错误或 SSH 失败保留非零退出状态，不能解释成全部训练已停止。
+
 ---
 
 ## 9. Recommended Experiment Workflow
@@ -602,20 +606,22 @@ bash scripts/eval/eval_pipeline.sh <policy> <task> <exp_name>
 VQ 入口位于 `scripts/training/`，从仓库根目录执行（`<task>` 替换为实际任务）：
 
 ```bash
+VQ_RUN="experiments/vq_hand/<task>/$(date +%Y%m%d_%H%M%S)_${RANDOM}"
 conda run --no-capture-output -n policy python -m scripts.training.train_vq_hand \
   --policy-config dexmani_policy/configs/dqrise.yaml \
-  --policy-override task_name=<task> --output_dir experiments/vq_hand/<task>
+  --policy-override task_name=<task> --output_dir "$VQ_RUN"
 conda run --no-capture-output -n policy python -m scripts.training.extract_vq_codebook \
-  --checkpoint experiments/vq_hand/<task>/vqvae_hand_best.pt \
-  --output data/<task>/hand_codebook.npz
+  --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
+  --output "$VQ_RUN/codebook.npz"
 conda run --no-capture-output -n policy python -m scripts.training.measure_vq_usage \
-  --checkpoint experiments/vq_hand/<task>/vqvae_hand_best.pt \
-  --zarr robot_data/<task>.zarr --codebook data/<task>/hand_codebook.npz
+  --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
+  --zarr robot_data/<task>.zarr --codebook "$VQ_RUN/codebook.npz"
+bash scripts/training/train.sh dqrise task_name=<task> codebook_path="$VQ_RUN/codebook.npz"
 ```
 
-Stage 2 例如 `bash scripts/training/train.sh dqrise task_name=<task> codebook_path=data/<task>/hand_codebook.npz`；额外的数据/窗口覆盖必须与 `--policy-override` 一致。不要用旧独立 VQ 的全量统计配方替代这个入口。
+每次使用新 run；已有训练目录拒绝认领，已有导出文件只有显式 `--overwrite` 才可覆盖。Stage 2 额外的数据/窗口覆盖必须与 `--policy-override` 一致。不要用旧独立 VQ 的全量统计配方替代这个入口。这里的 VQ 产物归 `experiments/`，远端生成后用 `sync_down.sh vq_hand/<task>/<run>` 拉取。
 
-如果 Stage 1 在服务器产生 Stage 2 所需 artifact：
+如果另外将 Stage 1 artifact 发布到 `data/`，才使用下面的数据同步流程：
 
 ```text
 remote Stage 1 output

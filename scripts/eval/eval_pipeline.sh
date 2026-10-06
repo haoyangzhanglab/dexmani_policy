@@ -8,6 +8,8 @@
 #
 # Usage:
 #   bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]
+#   Set SEED_MANIFEST to use a fixed selection/tie-break/test seed JSON.
+#   All stages share this invocation's selection record.
 #
 # Examples:
 #   bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56
@@ -23,6 +25,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--no-videos]"
     echo ""
     echo "One-shot evaluation pipeline: select best ckpt → held-out eval → 5 demo videos."
+    echo "Set SEED_MANIFEST=/absolute/path/seeds.json for fixed task/seed lists."
     echo ""
     echo "Positional args:"
     echo "  policy_name   Policy config name (e.g. dp3, maniflow, sat)"
@@ -98,11 +101,18 @@ echo "  (fixed initial stage plus optional exact-tie batch, no videos)"
 echo "============================================================"
 echo ""
 
+HANDOFF_DIR="$(mktemp -d "${EXP_DIR}/pipeline_XXXXXXXX")"
+SELECTION_RECORD="${HANDOFF_DIR}/selection.json"
+MANIFEST_ARGS=()
+if [[ -n "${SEED_MANIFEST:-}" ]]; then
+    MANIFEST_ARGS+=("eval.seed_manifest=${SEED_MANIFEST}")
+fi
 conda run --no-capture-output -n policy python dexmani_policy/select_best_ckpt.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
-    --no-videos
+    --result-file="$SELECTION_RECORD" \
+    --no-videos "${MANIFEST_ARGS[@]}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Step 2/3: Evaluate Best Checkpoint (held-out seeds)
@@ -118,6 +128,7 @@ conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py 
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
+    --selection-record="$SELECTION_RECORD" \
     $NO_VIDEOS
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -133,6 +144,7 @@ conda run --no-capture-output -n policy python dexmani_policy/record_demo.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
+    --selection-record="$SELECTION_RECORD" \
     || {
         echo "ERROR: demo recording failed; checkpoint selection and held-out evaluation completed." >&2
         exit 1
@@ -146,7 +158,7 @@ echo "============================================================"
 echo "  ✅ Pipeline Complete!"
 echo "============================================================"
 echo "  Experiment  : ${EXP_DIR}"
-echo "  Best ckpt   : ${EXP_DIR}/best_ckpt.json"
+echo "  Selection   : ${SELECTION_RECORD}"
 echo "  Eval result : ${EXP_DIR}/eval_dexsim/<run-id>/_result.txt (exact path printed in Step 2)"
 echo "  Demo videos : ${EXP_DIR}/demo_videos/"
 echo "============================================================"

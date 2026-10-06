@@ -3,6 +3,8 @@ import math
 import torch
 from torch.distributions import Beta
 
+from dexmani_policy.utils.validation import positive_int
+
 
 def sample_logit_normal(
     batch_size: int, m: float = 0.0, s: float = 1.0, device: str = "cuda"
@@ -40,7 +42,10 @@ def sample_beta(
 def sample_discrete_pow(
     batch_size: int, num_steps: int, device: str = "cuda"
 ) -> torch.Tensor:
+    positive_int(num_steps, "num_steps")
     log2_sections = math.floor(math.log2(num_steps)) + 1
+    if batch_size < log2_sections:
+        raise ValueError(f"discrete_pow requires actual sub-batch >= {log2_sections}, got {batch_size}")
     dt_base = torch.repeat_interleave(
         torch.arange(log2_sections - 1, -1, -1, dtype=torch.long, device=device),
         batch_size // log2_sections,
@@ -85,8 +90,7 @@ class TimeSampler:
         beta_alpha: float = 1.0,
         beta_beta: float = 1.5,
     ) -> None:
-        if num_steps <= 0:
-            raise ValueError("num_steps must be greater than 0")
+        positive_int(num_steps, "num_steps")
 
         self.num_steps = num_steps
         self.lognorm_m = lognorm_m
@@ -111,9 +115,16 @@ class TimeSampler:
             "discrete_pow": lambda B, dev: sample_discrete_pow(B, K, device=dev),
         }
 
+    def validate_batch(self, batch_size, mode):
+        if mode == "discrete_pow":
+            minimum = math.floor(math.log2(self.num_steps)) + 1
+            if batch_size < minimum:
+                raise ValueError(f"discrete_pow requires actual sub-batch >= {minimum}, got {batch_size}")
+
     def sample(
         self, batch_size: int, mode: str, device: str | torch.device
     ) -> torch.Tensor:
+        self.validate_batch(batch_size, mode)
         sampler = self._samplers.get(mode)
         if sampler is None:
             raise ValueError(f"Unknown time sampling mode: {mode}")

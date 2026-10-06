@@ -38,6 +38,8 @@ class R3DObsEncoder(nn.Module):
         if fps_random_config:
             pc_encoder_config.setdefault("fps_random_config", fps_random_config)
 
+        if pc_encoder_config.get("feature_mode", "pointsam") != "pointsam":
+            raise ValueError("R3D requires Uni3D feature_mode=pointsam")
         self.pc_encoder = Uni3DPointcloudEncoder(**pc_encoder_config)
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps

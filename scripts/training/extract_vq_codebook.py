@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import torch
@@ -34,7 +36,11 @@ def extract_codebook(
     *,
     device: str = "cuda",
     include_per_group: bool = False,
+    overwrite: bool = False,
 ) -> CodebookManager:
+    output = Path(output_path)
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Codebook already exists: {output}; use --overwrite explicitly")
     checkpoint_path = str(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     vqvae = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu")
@@ -48,6 +54,9 @@ def extract_codebook(
             "source_checkpoint": str(Path(checkpoint_path).resolve()),
             "source_checkpoint_sha256": sha256_file(checkpoint_path),
             "source_epoch": int(checkpoint["epoch"]),
+            "normalizer_sha256": hashlib.sha256(
+                b"".join(t.contiguous().numpy().tobytes() for t in normalizer)
+            ).hexdigest(),
             "checkpoint_metrics": checkpoint["metrics"],
             "split_metadata": checkpoint["split_metadata"],
         }
@@ -56,7 +65,20 @@ def extract_codebook(
     poses = manager.reindex_by_pca(vqvae)
     if include_per_group:
         manager.build_per_group_codebooks(vqvae)
-    manager.save(output_path)
+    if output.suffix != ".npz":
+        raise ValueError("Codebook path must use the .npz suffix")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=output.parent, suffix=".npz", delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        manager.save(temporary)
+        if overwrite:
+            os.replace(temporary, output)
+        else:
+            # Atomic publication without replacing a concurrent writer's output.
+            os.link(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
 
     diagnostics = manager.last_export_diagnostics
     print(f"Extracted {len(poses)} prototypes with shape {poses.shape}")
@@ -76,12 +98,14 @@ def main() -> None:
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     parser.add_argument("--include_per_group", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     extract_codebook(
         args.checkpoint,
         args.output,
         device=args.device,
         include_per_group=args.include_per_group,
+        overwrite=args.overwrite,
     )
 
 

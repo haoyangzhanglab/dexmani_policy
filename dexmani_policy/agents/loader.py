@@ -18,13 +18,13 @@ def load_experiment_config(experiment_dir):
     return cfg
 
 
-def resolve_best_checkpoint(experiment_dir):
+def resolve_best_checkpoint(experiment_dir, record_path=None):
     """Read one best record and return it with its validated concrete weight path."""
     import json
     from pathlib import Path
 
     root = Path(experiment_dir).resolve()
-    info = json.loads((root / "best_ckpt.json").read_text())
+    info = json.loads((Path(record_path) if record_path else root / "best_ckpt.json").read_text())
     if not isinstance(info, dict):
         raise ValueError("best_ckpt.json must contain an object")
     relative = info.get("ckpt_relpath")
@@ -33,6 +33,8 @@ def resolve_best_checkpoint(experiment_dir):
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError("Best checkpoint must be relative to the experiment")
+    if record_path is not None and (path.name == "latest.pt" or (root / path).is_symlink()):
+        raise ValueError("Selection handoff must name an immutable milestone checkpoint")
     resolved = (root / path).resolve(strict=True)
     if not resolved.is_relative_to(root / "checkpoints") or not resolved.is_file():
         raise ValueError("Best checkpoint must be a file inside experiment/checkpoints")
@@ -52,9 +54,15 @@ def resolve_best_checkpoint(experiment_dir):
         for key in ("ckpt_relpath", "global_step", "pct"):
             if key not in selected or selected[key] != info.get(key):
                 raise ValueError(f"Best/selection mismatch: {key}")
+        if "inference" in summary and summary["inference"] != info.get("inference"):
+            raise ValueError("Best/selection inference mismatch")
+        if record_path is not None and "inference" not in summary:
+            raise ValueError("Selection handoff requires immutable inference settings")
         if summary.get("selection") != info.get("selection"):
             raise ValueError("Best/selection seed evidence mismatch")
     else:
+        if record_path is not None:
+            raise ValueError("Selection handoff requires a successful selection identity")
         import warnings
         warnings.warn("Historical best has no selection identity/summary; provenance is unverified", stacklevel=2)
     return info, resolved

@@ -157,9 +157,9 @@ class PatchDropout(nn.Module):
         self.prob = prob
         self.exclude_first_token = exclude_first_token
 
-    def forward(self, x):
+    def forward(self, x, return_indices=False):
         if not self.training or self.prob == 0.0:
-            return x
+            return (x, None) if return_indices else x
         if self.exclude_first_token:
             cls_tokens, x = x[:, :1], x[:, 1:]
         else:
@@ -175,7 +175,7 @@ class PatchDropout(nn.Module):
 
         if self.exclude_first_token:
             x = torch.cat((cls_tokens, x), dim=1)
-        return x
+        return (x, patch_indices_keep) if return_indices else x
 
 
 class PositionEmbeddingRandom(nn.Module):
@@ -227,10 +227,14 @@ class Uni3DPointcloudEncoder(nn.Module):
         pretrained_weights_path=None,
         allow_random_init=False,
         fps_random_config=None,
-        **kwargs,
+        norm="ln",
     ):
         super().__init__()
 
+        if str(norm).lower() not in ("ln", "layernorm"):
+            raise ValueError("Uni3D supports only LayerNorm (norm=ln)")
+        if feature_mode not in ("pointsam", "cls", "max_pooling"):
+            raise ValueError(f"Unsupported Uni3D feature_mode: {feature_mode}")
         import timm
 
         self.transformer = timm.create_model(
@@ -444,7 +448,12 @@ class Uni3DPointcloudEncoder(nn.Module):
         x = patch_embed + pos_embed
 
         if not inference_mode:
-            x = self.patch_dropout(x)
+            if isinstance(self.patch_dropout, PatchDropout):
+                x, keep = self.patch_dropout(x, return_indices=True)
+                if keep is not None:
+                    centers = centers[torch.arange(centers.shape[0], device=centers.device)[:, None], keep]
+            else:
+                x = self.patch_dropout(x)
             x = self.transformer.pos_drop(x)
 
         for block in self.transformer.blocks:

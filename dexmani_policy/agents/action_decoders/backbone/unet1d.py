@@ -29,6 +29,10 @@ class Conv1dBlock(nn.Module):
     def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
         super().__init__()
 
+        if type(kernel_size) is not int or kernel_size <= 0 or kernel_size % 2 == 0:
+            raise ValueError("UNet kernel_size must be a positive odd integer")
+        if type(n_groups) is not int or n_groups <= 0 or out_channels % n_groups:
+            raise ValueError("UNet channels must be divisible by positive n_groups")
         self.block = nn.Sequential(
             nn.Conv1d(inp_channels, out_channels, kernel_size, padding=kernel_size // 2),
             nn.GroupNorm(n_groups, out_channels),
@@ -122,6 +126,9 @@ class ConditionalUnet1D(nn.Module):
     ):
         super().__init__()
 
+        if not down_dims:
+            raise ValueError("UNet requires nonempty down_dims")
+        self.horizon_divisor = 2 ** (len(down_dims) - 1)
         self.cond_predict_scale = cond_predict_scale
 
         dsed = diffusion_step_embed_dim
@@ -210,7 +217,7 @@ class ConditionalUnet1D(nn.Module):
 
         start_dim = down_dims[0]
         self.final_conv = nn.Sequential(
-            Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
+            Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size, n_groups=n_groups),
             nn.Conv1d(start_dim, input_dim, 1),
         )
 
@@ -219,6 +226,8 @@ class ConditionalUnet1D(nn.Module):
 
     def forward(self, x, timestep, context):
 
+        if x.shape[1] % self.horizon_divisor:
+            raise ValueError(f"UNet horizon must be divisible by {self.horizon_divisor}, got {x.shape[1]}")
         x = einops.rearrange(x, "b h t -> b t h")
 
         if not torch.is_tensor(timestep):

@@ -13,10 +13,26 @@ trap 'echo ""; echo "Interrupted — training may still be running. Re-run stop_
 SERVER="${DEX_SERVER:-dexserver}"
 
 ensure_server_reachable() {
-    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$SERVER" "true"; then
-        echo "ERROR: cannot reach '$SERVER'. Training state is unknown." >&2
-        return 1
+    local rc
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "$SERVER" "true"; then
+        return 0
+    else
+        rc=$?
+        echo "ERROR: cannot reach '$SERVER'. Training state is unknown (exit $rc)." >&2
+        return "$rc"
     fi
+}
+
+# Preserve tmux errors before parsing, including command-not-found and SSH failure.
+list_sessions() {
+    ssh "$SERVER" 'output=$(LC_ALL=C tmux list-sessions 2>&1); rc=$?
+if [ "$rc" -eq 0 ]; then printf "%s\n" "$output"; exit 0; fi
+case "$output" in
+    "no sessions"|"no server running on "*|"error connecting to "*" (No such file or directory)")
+        if [ "$rc" -eq 1 ]; then exit 0; fi ;;
+esac
+printf "%s\n" "$output" >&2
+exit "$rc"'
 }
 
 # Return 0 when present, 1 when absent, and another status for an SSH error.
@@ -113,24 +129,22 @@ _graceful_stop() {
 
 case "${1:-}" in
     --list|-l)
-        ensure_server_reachable || exit 1
+        ensure_server_reachable || exit $?
         echo "=== Active tmux sessions on $SERVER ==="
-        if ssh "$SERVER" "tmux list-sessions 2>/dev/null"; then
+        if sessions=$(list_sessions); then
+            printf "%s\n" "${sessions:-(no active sessions)}"
             :
         else
             rc=$?
-            if [[ $rc -eq 1 ]]; then
-                echo "(no active sessions)"
-            else
-                echo "ERROR: could not list sessions on '$SERVER'." >&2
-                exit "$rc"
-            fi
+            echo "ERROR: could not list sessions on '$SERVER' (exit $rc)." >&2
+            exit "$rc"
         fi
         ;;
     --all|-a)
-        ensure_server_reachable || exit 1
+        ensure_server_reachable || exit $?
         echo "Stopping all training sessions on $SERVER..."
-        if sessions=$(ssh "$SERVER" "tmux list-sessions 2>/dev/null | cut -d: -f1"); then
+        if sessions=$(list_sessions); then
+            sessions=$(printf "%s\n" "$sessions" | cut -d: -f1)
             :
         else
             rc=$?
@@ -169,7 +183,7 @@ case "${1:-}" in
             echo "Error: invalid session name '$SESSION'. Use the dex_ session printed by train_remote.sh (letters, digits, _, . and - only)." >&2
             exit 1
         fi
-        ensure_server_reachable || exit 1
+        ensure_server_reachable || exit $?
         echo "Stopping session: $SESSION"
         if _graceful_stop "$SESSION"; then
             echo "Stopped."

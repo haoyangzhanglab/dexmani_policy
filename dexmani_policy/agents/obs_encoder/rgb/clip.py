@@ -52,7 +52,7 @@ class CLIP(ViTEncoder):
             return patch_tokens.mean(dim=1)
 
         if self.global_token_type == "cls":
-            return self.proj(outputs.last_hidden_state[:, 0])
+            return self.project_features(outputs.last_hidden_state[:, 0])
 
         if self.global_token_type == "pooler":
             pooler_output = getattr(outputs, "pooler_output", None)
@@ -60,7 +60,7 @@ class CLIP(ViTEncoder):
                 raise ValueError(
                     f"{self.model_name} does not provide pooler_output. Use global_token_type='avg' or 'cls'."
                 )
-            return self.proj(pooler_output)
+            return self.project_features(pooler_output)
 
         raise ValueError(f"Unsupported global_token_type: {self.global_token_type}")
 

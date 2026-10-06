@@ -27,6 +27,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo ""
     echo "Options (record_demo.py):"
     echo "  --ckpt-tag TAG       Checkpoint: best (strict record), latest, 20pct..100pct (default: best)"
+    echo "  --selection-record PATH  Pin a selection handoff; conflicting checkpoint/EMA/NFE rejected"
     echo "  --episodes N         Number of episodes to record (default: from config)"
     echo "  --seeds S1 S2 ...    Specific seed numbers to record (overrides --episodes)"
     echo "  --output-dir DIR     Output directory (default: exp_dir/demo_videos/)"

@@ -47,7 +47,10 @@ def measure(
     sample_size: int = 5000,
     seed: int = 0,
     split: str = "train",
+    chunk_size: int = 4096,
 ) -> dict:
+    if type(chunk_size) is not int or chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = _args_dict(checkpoint)
     action_key = action_key or args["action_key"]
@@ -109,31 +112,29 @@ def measure(
         manager.set_hand_normalizer(scale, offset)
         manager.reindex_by_pca(model)
 
-    # Nearest decoded-prototype usage: this is the label distribution actually
-    # consumed by DQ-RISE policy training.
-    continuous = manager.hand_pose_to_continuous_index(hand_norm)
+    # Preserve squared-difference arithmetic and first-index argmin ties.
     count = manager.num_codes
-    nearest_ids = torch.floor(
-        ((continuous.squeeze(-1) + 1.0) * 0.5 * (count - 1)).clamp(0, count - 1) + 0.5
-    ).long()
-    nearest_counts = torch.bincount(nearest_ids, minlength=count)
-    nearest_prob = nearest_counts.float() / nearest_counts.sum().clamp_min(1)
-
-    # Encoder tuple usage is a different diagnostic and is reported separately.
-    tuple_indices = []
-    batch_size = 4096
-    with torch.no_grad():
-        for start in range(0, len(hand_norm), batch_size):
-            tuple_indices.append(
-                model.encode_to_index(hand_norm[start : start + batch_size])
-            )
-    tuple_indices = torch.cat(tuple_indices, dim=0)
+    nearest_counts = torch.zeros(count, dtype=torch.long)
+    tuple_counts = torch.zeros(count, dtype=torch.long)
+    nearest_l2 = torch.empty(len(hand_norm))  # exact quantiles require O(N) scalars
+    prototypes_norm = manager._from_raw(manager.sorted_hand_poses.cpu())
     multipliers = torch.tensor(
-        [model.codebook_size**power for power in reversed(range(model.num_groups))],
-        dtype=torch.long,
+        [model.codebook_size**p for p in reversed(range(model.num_groups))]
     )
-    tuple_ids = (tuple_indices.long() * multipliers).sum(dim=-1)
-    tuple_counts = torch.bincount(tuple_ids, minlength=count)
+    with torch.no_grad():
+        for start in range(0, len(hand_norm), chunk_size):
+            batch = hand_norm[start:start + chunk_size]
+            distances = (batch[:, None, :] - prototypes_norm[None, :, :]).square().sum(-1)
+            values, ids = distances.min(-1)
+            continuous = manager.hand_pose_to_continuous_index(batch)
+            runtime_ids = torch.floor(
+                ((continuous.squeeze(-1) + 1) * 0.5 * (count - 1)).clamp(0, count - 1) + 0.5
+            ).long()
+            nearest_counts += torch.bincount(runtime_ids, minlength=count)
+            nearest_l2[start:start + len(batch)] = values.sqrt()
+            ids = (model.encode_to_index(batch).long() * multipliers).sum(-1)
+            tuple_counts += torch.bincount(ids, minlength=count)
+    nearest_prob = nearest_counts.float() / nearest_counts.sum().clamp_min(1)
 
     generator = torch.Generator().manual_seed(seed)
     subset_size = min(sample_size, len(hand_norm))
@@ -142,10 +143,6 @@ def measure(
     ]
     with torch.no_grad():
         enc, vq, _, mse = model(subset)
-
-    prototypes_norm = manager._from_raw(manager.sorted_hand_poses.cpu())
-    diff = hand_norm[:, None, :] - prototypes_norm[None, :, :]
-    nearest_l2 = diff.square().sum(-1).min(-1).values.sqrt()
 
     probability_nonzero = nearest_prob[nearest_prob > 0]
     entropy = -(probability_nonzero * probability_nonzero.log()).sum()
@@ -185,6 +182,7 @@ def main() -> None:
     )
     parser.add_argument("--action_key", default=None)
     parser.add_argument("--tcp_dim", type=int, default=None)
+    parser.add_argument("--chunk-size", type=int, default=4096)
     args = parser.parse_args()
     result = measure(
         args.checkpoint,
@@ -193,6 +191,7 @@ def main() -> None:
         action_key=args.action_key,
         tcp_dim=args.tcp_dim,
         split=args.split,
+        chunk_size=args.chunk_size,
     )
     for key, value in result.items():
         print(f"{key}: {value}")

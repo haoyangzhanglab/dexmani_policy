@@ -31,6 +31,8 @@ class TrainWorkspace:
         if claim_token is None:
             claim_token = claim_run(self.output_dir)
         check_run_claim(self.output_dir, claim_token)
+        from dexmani_policy.training.source_snapshot import save_source_snapshot
+        save_source_snapshot(self.output_dir)
         self.checkpoint_dir = self.output_dir / "checkpoints"
 
         self.checkpoint_store = CheckpointStore(self.checkpoint_dir)

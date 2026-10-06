@@ -1,3 +1,4 @@
+import math
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -72,9 +73,25 @@ class GeometryProcessor:
             )
             flat_camera_to_world = cam_tensor[:, :3, :] if cam_tensor.shape[-2] == 4 else cam_tensor
 
+        if not math.isfinite(depth_scale) or depth_scale <= 0:
+            raise ValueError("depth_scale must be finite and positive")
+        if not math.isfinite(min_depth) or (max_depth is not None and
+                (not math.isfinite(max_depth) or max_depth <= min_depth)):
+            raise ValueError("Invalid depth range")
+        if not torch.isfinite(flat_intrinsics).all():
+            raise ValueError("Invalid nonfinite intrinsics")
+        if flat_camera_to_world is not None and not torch.isfinite(cam_tensor).all():
+            raise ValueError("Invalid nonfinite camera_to_world")
+        if flat_camera_to_world is not None and cam_tensor.shape[-2] == 4:
+            expected = cam_tensor.new_tensor([0, 0, 0, 1]).expand_as(cam_tensor[:, 3])
+            if not torch.allclose(cam_tensor[:, 3], expected):
+                raise ValueError("Invalid homogeneous camera_to_world bottom row")
+        if flat_camera_to_world is not None:
+            if (torch.linalg.det(flat_camera_to_world[:, :, :3]).abs() < 1e-8).any():
+                raise ValueError("Invalid singular camera_to_world rotation")
         depth_metric = flat_depth / float(depth_scale)
 
-        valid_mask = depth_metric > float(min_depth)
+        valid_mask = torch.isfinite(depth_metric) & (depth_metric > float(min_depth))
         if max_depth is not None:
             valid_mask = valid_mask & (depth_metric < float(max_depth))
 
@@ -86,15 +103,14 @@ class GeometryProcessor:
         cy = flat_intrinsics[:, 1, 2].reshape(batch_size, 1, 1)
 
         eps = 1e-12
-        if torch.any(fx.abs() < eps) or torch.any(fy.abs() < eps):
-            raise ValueError("Invalid intrinsics: fx/fy must be non-zero.")
+        if torch.any(fx <= eps) or torch.any(fy <= eps):
+            raise ValueError("Invalid intrinsics: fx/fy must be positive.")
 
-        z = depth_metric[:, 0]
+        z = torch.where(valid_mask[:, 0], depth_metric[:, 0], 0.0)
         x = (u - cx) / fx * z
         y = (v - cy) / fy * z
 
-        valid_mask_float = valid_mask.to(flat_depth.dtype)
-        camera_coords = torch.stack([x, y, z], dim=1) * valid_mask_float
+        camera_coords = torch.where(valid_mask, torch.stack([x, y, z], dim=1), 0.0)
 
         coord_frame = "camera"
         coords = camera_coords
@@ -102,7 +118,7 @@ class GeometryProcessor:
             rotation = flat_camera_to_world[:, :, :3]
             translation = flat_camera_to_world[:, :, 3:].contiguous()
             coords = torch.bmm(rotation, camera_coords.reshape(batch_size, 3, -1)) + translation
-            coords = coords.reshape(batch_size, 3, image_h, image_w) * valid_mask_float
+            coords = torch.where(valid_mask, coords.reshape(batch_size, 3, image_h, image_w), 0.0)
             coord_frame = "world"
 
         return {
@@ -153,7 +169,7 @@ class GeometryProcessor:
         flat_valid_mask = flat_valid_mask.float()
 
         coord_num = F.avg_pool2d(
-            flat_coords * flat_valid_mask,
+            torch.where(flat_valid_mask.bool(), flat_coords, 0.0),
             kernel_size=(kernel_h, kernel_w),
             stride=(kernel_h, kernel_w),
         )
@@ -164,7 +180,7 @@ class GeometryProcessor:
         )
 
         coord_map = coord_num / coord_den.clamp_min(1e-6)
-        coord_valid_map = coord_den >= float(min_valid_ratio)
+        coord_valid_map = (coord_den > 0) & (coord_den >= float(min_valid_ratio))
 
         patch_coords = coord_map.flatten(2).transpose(1, 2).contiguous()
         patch_valid_mask = coord_valid_map.flatten(2).transpose(1, 2).contiguous()

@@ -38,7 +38,8 @@ def _cosine_with_min_lr(
 
 def compute_num_training_steps(cfg) -> int:
     """Return the configured number of training steps."""
-    return cfg.training.loop.total_train_steps
+    from dexmani_policy.utils.validation import positive_int
+    return positive_int(cfg.training.loop.total_train_steps, "total_train_steps")
 
 
 def get_scheduler(
@@ -48,6 +49,11 @@ def get_scheduler(
     num_training_steps: Optional[int] = None,
     **kwargs,
 ):
+    from dexmani_policy.utils.validation import positive_int
+    if num_training_steps is not None:
+        positive_int(num_training_steps, "num_training_steps")
+    if num_warmup_steps is not None and (type(num_warmup_steps) is not int or num_warmup_steps < 0):
+        raise ValueError("num_warmup_steps must be a nonnegative integer")
     lr_min_ratio = kwargs.pop("lr_min_ratio", 0.1)
 
     if name in ("cosine_min_lr",):

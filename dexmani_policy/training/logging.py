@@ -132,6 +132,20 @@ def print_param_count(agent) -> None:
     from termcolor import cprint
 
     total, _ = count_params(agent)
+    observation = getattr(agent, "obs_encoder", None)
+    if observation is not None:
+        fields = getattr(observation, "consumed_observation_fields", ())
+        cprint(f"  Actual observation fields: {tuple(fields)}", "white")
+        pointcloud = getattr(observation, "pc_encoder", None)
+        if pointcloud is not None:
+            values = {key: getattr(pointcloud, key) for key in (
+                "input_channels", "pc_in_channels", "out_dim", "hidden_channels",
+                "num_layers", "num_group", "num_patches", "include_global_token",
+                "feature_mode",
+            ) if hasattr(pointcloud, key)}
+            if hasattr(pointcloud, "stages"):
+                values["stages"] = len(pointcloud.stages)
+            cprint(f"  Actual point-cloud module: {type(pointcloud).__name__} {values}", "white")
     cprint(f"[{type(agent).__name__}] Parameter Count", "cyan", attrs=["bold"])
     cprint(f"  Total: {total / 1e6:.2f} M", "white")
 

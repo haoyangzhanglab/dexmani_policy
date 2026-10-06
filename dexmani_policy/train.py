@@ -45,6 +45,7 @@ class TrainingComponents:
     scheduler: Any
     train_loader: DataLoader
     workspace: Any
+    resume_checkpoint: Any = None
 
 
 def build_train_components(cfg):
@@ -53,7 +54,11 @@ def build_train_components(cfg):
 
     device = torch.device(cfg.training.device)
 
-    dataset, normalizer = build_dataset_and_normalizer(cfg)
+    from pathlib import Path
+    from dexmani_policy.training.checkpoint import CheckpointStore
+    source = cfg.get("resume_from")
+    checkpoint = CheckpointStore(Path(source).parent).load(source) if source else None
+    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
 
     train_loader = build_train_loader(cfg, dataset)
 
@@ -76,6 +81,7 @@ def build_train_components(cfg):
         scheduler=scheduler,
         train_loader=train_loader,
         workspace=workspace,
+        resume_checkpoint=checkpoint,
     )
 
 
@@ -112,8 +118,9 @@ def main(cfg):
     # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>`.
     resume_from = cfg.get("resume_from", None)
     resume_state = (
-        trainer.load_for_resume(resume_from) if resume_from is not None else None
+        trainer.load_for_resume(resume_from, checkpoint=comp.resume_checkpoint) if resume_from is not None else None
     )
+    comp.resume_checkpoint = None
     comp.workspace.save_hydra_config(cfg)
     trainer.train(resume_state=resume_state)
 

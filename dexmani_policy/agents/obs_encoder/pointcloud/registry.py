@@ -64,31 +64,21 @@ def build_pc_global_encoder(
         )
 
     cfg = merge_config(GLOBAL_ENCODER_CONFIGS[encoder_type], config)
-    fps_random_config = cfg.pop("fps_random_config", None)
-
     if encoder_type == "dp3":
-        return PointNet(
-            input_channels=pc_dim,
-            output_channels=cfg["output_channels"],
-        )
-
-    if encoder_type == "idp3":
-        return MultiStagePointNet(
-            input_channels=pc_dim,
-            output_channels=cfg["output_channels"],
-        )
-
-    if encoder_type == "pointnext":
-        return PointNextEncoder(
-            input_channels=pc_dim,
-            output_channels=cfg["output_channels"],
-            stage_depths=cfg["stage_depths"],
-            stage_strides=cfg["stage_strides"],
-            stage_channels=cfg["stage_channels"],
-            radii=cfg["radii"],
-            num_neighbors=cfg["num_neighbors"],
-            fps_random_config=fps_random_config,
-        )
+        allowed = {"output_channels"}
+        cls = PointNet
+    elif encoder_type == "idp3":
+        allowed = {"output_channels", "hidden_channels", "num_layers"}
+        cls = MultiStagePointNet
+    else:
+        allowed = set(GLOBAL_ENCODER_CONFIGS["pointnext"]) | {
+            "fps_random_config", "sa_layers", "expansion", "use_residual"
+        }
+        cls = PointNextEncoder
+    unknown = set(cfg) - allowed
+    if unknown:
+        raise ValueError(f"{encoder_type}: unsupported configuration keys {sorted(unknown)}")
+    return cls(input_channels=pc_dim, **cfg)
 
 
 def build_pc_patch_tokenizer(
@@ -103,29 +93,15 @@ def build_pc_patch_tokenizer(
         )
 
     cfg = merge_config(PATCH_TOKENIZER_CONFIGS[tokenizer_type], config)
-    fps_random_config = cfg.pop("fps_random_config", None)
-
     if tokenizer_type == "pointnext_tokenizer":
-        return PointNextPatchTokenizer(
-            input_channels=pc_dim,
-            stem_channels=cfg["stem_channels"],
-            token_channels=cfg["token_channels"],
-            num_patches=cfg["num_patches"],
-            patch_radii=cfg["patch_radii"],
-            patch_neighbors=cfg["patch_neighbors"],
-            fps_random_config=fps_random_config,
-            use_patch_self_attn=cfg["use_patch_self_attn"],
-            patch_attn_layers=cfg["patch_attn_layers"],
-            patch_attn_heads=cfg["patch_attn_heads"],
-            patch_attn_dropout=cfg["patch_attn_dropout"],
-            prepend_global_in_attn=cfg["prepend_global_in_attn"],
-        )
-
-    if tokenizer_type == "pointnet_dense":
-        if "hidden_dims" in cfg:
-            raise ValueError("pointnet_dense has a fixed topology; remove hidden_dims")
-        return PointNetDense(
-            input_channels=pc_dim,
-            out_channels=cfg["out_channels"],
-            num_points=cfg["num_points"],
-        )
+        allowed = set(PATCH_TOKENIZER_CONFIGS[tokenizer_type]) | {
+            "fps_random_config", "include_global_token"
+        }
+        cls = PointNextPatchTokenizer
+    else:
+        allowed = set(PATCH_TOKENIZER_CONFIGS[tokenizer_type])
+        cls = PointNetDense
+    unknown = set(cfg) - allowed
+    if unknown:
+        raise ValueError(f"{tokenizer_type}: unsupported configuration keys {sorted(unknown)}")
+    return cls(input_channels=pc_dim, **cfg)

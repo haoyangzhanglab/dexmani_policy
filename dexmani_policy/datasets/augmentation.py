@@ -82,14 +82,20 @@ class PointColorJitter(Aug):
     # ---------- in-place colour helpers ----------
     def _apply_brightness_ip(self, rgb):
         if self.brightness[0] == self.brightness[1]:
+            delta = self.brightness[0]
+        else:
+            delta = np.random.uniform(*self.brightness)
+        if delta == 0:
             return
-        delta = np.random.uniform(*self.brightness)
         rgb += delta
 
     def _apply_contrast_ip(self, rgb):
         if self.contrast[0] == self.contrast[1]:
+            factor = self.contrast[0]
+        else:
+            factor = np.random.uniform(*self.contrast)
+        if factor == 1:
             return
-        factor = np.random.uniform(*self.contrast)
         mean = rgb.mean()
         rgb -= mean
         rgb *= factor
@@ -97,8 +103,11 @@ class PointColorJitter(Aug):
 
     def _apply_saturation_ip(self, rgb):
         if self.saturation[0] == self.saturation[1]:
+            factor = self.saturation[0]
+        else:
+            factor = np.random.uniform(*self.saturation)
+        if factor == 1:
             return
-        factor = np.random.uniform(*self.saturation)
         # gray is (N,) — no [:, None] needed since we add channel-wise
         gray = np.dot(rgb, _BT601_LUMA)  # (N,)
         inv_factor = 1.0 - factor
@@ -109,8 +118,11 @@ class PointColorJitter(Aug):
 
     def _apply_hue_ip(self, rgb):
         if self.hue[0] == self.hue[1]:
+            shift = self.hue[0]
+        else:
+            shift = np.random.uniform(*self.hue)
+        if shift == 0:
             return
-        shift = np.random.uniform(*self.hue)
         if abs(shift) < 1e-6:
             return
         hsv = self._rgb_to_hsv(rgb)

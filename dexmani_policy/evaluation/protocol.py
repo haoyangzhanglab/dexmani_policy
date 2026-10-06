@@ -461,6 +461,9 @@ def save_eval_snapshot(directory, cfg, runner, **request):
         "effective_config": OmegaConf.to_container(cfg, resolve=True),
         "runner_inputs": inputs,
         "request": request,
+        "seed_manifest": (load_seed_manifest(cfg.get("eval", {}).get("seed_manifest"), runner)
+                          if cfg.get("eval", {}).get("seed_manifest") else
+                          request.get("selection", {}).get("seed_manifest")),
         "argv": list(sys.argv),
         "policy_code": code_version(Path(__file__).resolve().parents[2]),
         "simulator_code": sim,
@@ -489,3 +492,56 @@ def atomic_json(path, record):
     finally:
         if name and os.path.exists(name):
             os.unlink(name)
+
+
+def load_seed_manifest(source, runner):
+    """Validate an explicit task/seed protocol against the actual runner mapping.
+
+    Each role contains task -> ordered physical seeds. Multi-task manifests must
+    be representable by the runner's existing paired reference-seed protocol.
+    """
+    import hashlib
+    import json
+    manifest = json.loads(Path(source).read_text()) if isinstance(source, (str, Path)) else source
+    if not isinstance(manifest, dict) or not manifest.get("pool_id"):
+        raise ValueError("Seed manifest requires pool_id")
+    available = list(dict.fromkeys(runner.get_seed_list()))
+    full = mapped_task_seeds(runner, available)
+    tasks = set(full)
+    roles = {}
+    used = {task: set() for task in tasks}
+    for role in ("selection", "tie_break", "test"):
+        mapping = manifest.get(role)
+        if not isinstance(mapping, dict) or set(mapping) != tasks:
+            raise ValueError(f"{role}: manifest tasks do not match runner")
+        for task, seeds in mapping.items():
+            if (not isinstance(seeds, list) or any(type(s) is not int for s in seeds)
+                    or len(set(seeds)) != len(seeds)):
+                raise ValueError(f"{role}/{task}: invalid or duplicate seeds")
+            if role != "tie_break" and not seeds:
+                raise ValueError(f"{role}/{task}: empty pool")
+            if set(seeds) - set(full[task]) or used[task] & set(seeds):
+                raise ValueError(f"{role}/{task}: unavailable seeds or cross-role overlap")
+            used[task].update(seeds)
+        task = next(iter(full))
+        lookup = dict(zip(full[task], available))
+        refs = [lookup[s] for s in mapping[task]]
+        if mapped_task_seeds(runner, refs) != mapping:
+            raise ValueError(f"{role}: seeds do not match the runner's paired task mapping")
+        roles[role] = refs
+    identity = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    return {"manifest": manifest, "sha256": identity, "roles": roles,
+            "runner_pool_sha256": hashlib.sha256(json.dumps(full, sort_keys=True).encode()).hexdigest()}
+
+
+def fixed_test_seeds(cfg, runner, best_info):
+    source = cfg.get("eval", {}).get("seed_manifest")
+    saved = (best_info or {}).get("selection", {}).get("seed_manifest")
+    if source is None and saved is None:
+        return None
+    protocol = load_seed_manifest(source or saved["manifest"], runner)
+    if saved is not None and any(protocol[key] != saved[key] for key in ("sha256", "runner_pool_sha256")):
+        raise ValueError("Evaluation seed manifest differs from selection")
+    if best_info is not None and saved is None:
+        raise ValueError("Explicit paper protocol requires selection with the same manifest")
+    return protocol["roles"]["test"]

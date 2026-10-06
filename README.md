@@ -29,7 +29,7 @@ python -m pip check
 python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit
 ```
 
-已在不继承系统 site-packages 的全新 venv 中完成 Python 3.10.20、Torch 2.4.1+cpu / torchvision 0.19.1+cpu 的安装、依赖导入、13 个配置解析和默认 DP/DP3 构造（使用已有权重缓存，保留 LoRA）。CUDA 扩展与 GPU 执行仍未验证；具体命令和边界见 [基础设施修复报告](docs/infra_fix_report.md)。
+历史全新 venv 验证覆盖 Python 3.10.20、Torch 2.4.1+cpu / torchvision 0.19.1+cpu 的安装、依赖导入、13 个配置解析和默认 DP/DP3 构造（使用已有权重缓存，保留 LoRA），见 [基础设施修复报告](docs/infra_fix_report.md)。后续在已有 `policy` 环境的 RTX 4090 上完成 DP3/DQ 真实数据单步更新、预测及 raw/EMA 保存恢复，见 [整改报告](docs/review_remediation_report.md)。这不代表全新 CUDA 安装、全部策略或生产 AMP/compile/DDP 已验收。
 
 新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
 
@@ -105,21 +105,24 @@ Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。Gaussian **
 从仓库根目录，在 `policy` 环境中执行。先确定目标 Policy 配置，所有数据与窗口覆盖在两个训练入口保持一致：
 
 ```bash
+VQ_RUN="experiments/vq_hand/pick_apple_messy/$(date +%Y%m%d_%H%M%S)_${RANDOM}"
 python -m scripts.training.train_vq_hand \
   --policy-config dexmani_policy/configs/dqrise.yaml \
   --policy-override task_name=pick_apple_messy \
-  --output_dir experiments/vq_hand/pick_apple_messy
+  --output_dir "$VQ_RUN"
 python -m scripts.training.extract_vq_codebook \
-  --checkpoint experiments/vq_hand/pick_apple_messy/vqvae_hand_best.pt \
-  --output robot_data/sorted_hand_poses_pick_apple_messy.npz
+  --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
+  --output "$VQ_RUN/codebook.npz"
 python -m scripts.training.measure_vq_usage \
-  --checkpoint experiments/vq_hand/pick_apple_messy/vqvae_hand_best.pt \
+  --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
   --zarr robot_data/pick_apple_messy.zarr \
-  --codebook robot_data/sorted_hand_poses_pick_apple_messy.npz
-bash scripts/training/train.sh dqrise task_name=pick_apple_messy
+  --codebook "$VQ_RUN/codebook.npz"
+bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="$VQ_RUN/codebook.npz"
 ```
 
 `--policy-config` 使用目标 Dataset 的 split、有效窗口与唯一 action 源行，码本和 Policy 共用训练统计，验证集不参与拟合。支持 joint `7+12` 和 EEF `9+12`，不支持辅助 action 布局。VQ 的 `--seed` 只控制优化随机性；数据配方以 Policy 配置为准。额外覆盖通过重复的 `--policy-override` 传入，并在 Policy 训练时传入相同覆盖。
+
+省略 `--output_dir` 会自动生成任务下独立 run。新 run 原子认领；已认领目录或已有 VQ 产物均拒绝重用。导出目标存在时拒绝写入，只有显式 `--overwrite` 才允许覆盖。选点在开始时固定：有验证集为 `val_mse`，无验证集为 `train_mse`；非有限值报错，旧 best 保留。
 
 使用率工具对新 checkpoint 默认测训练源行；有验证 split 时可加 `--split validation`。checkpoint 保存目标配置、实际 Dataset 配置、统计范围和源行；码本沿用严格 affine 兼容校验。旧 `--config` 独立调用和 `train_vq_hand.sh` 保留全量 hand 统计配方，不保证与目标 Policy 兼容；旧 checkpoint 不会被静默重拟合。
 
@@ -138,6 +141,8 @@ python dexmani_policy/smoke_test.py <config_name>
 ```
 
 完整训练、DDP 和长时间评测不是普通代码改动后的默认验证步骤。
+
+`--config-only` 只检查配置和 target；完整 smoke 包含一次参数更新、预测及保存恢复，不等同于正式训练收敛或生产 DDP 验证。
 
 ## 仿真评测
 
@@ -159,9 +164,19 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 每次 selection、final eval 和 demo 都保存独立目录及 `eval_config.yaml`，包括实际推理参数、环境、task/seed 和代码版本；候选明细可重算选点指标。selection 默认不录像，显式加 `--videos` 才记录候选/阶段隔离的视频。demo 保存各 NFE 的结果明细，但不属于 held-out 评测。
 
-`best_ckpt.json` 指向最近一次**成功发布**的 selection；失败保留旧 best，并以非零状态结束。评测、demo 和 policy inspection 在一次调用中固定同一份 best 记录与具体权重；显式覆盖 EMA/NFE 时，仍保留该 selection 的来源证据。新 best 的 summary 或权重尚未同步时会报缺失，不替换为其他权重。多任务 held-out 校验任务顺序、seed 池身份与真实 `(task, seed)` 无交集；旧多任务记录缺证据需重新选点，普通权重推理仍允许。
+`best_ckpt.json` 指向最近一次**成功发布**的 selection；失败保留旧 best，并以非零状态结束。评测、demo 和 policy inspection 在一次调用中固定同一份 best 记录与具体权重。普通 best 调用允许显式覆盖 EMA/NFE 并保留来源证据；使用 `--selection-record` 的流水线交接则拒绝冲突的 checkpoint/EMA/NFE 覆盖。新 best 的 summary 或权重尚未同步时会报缺失，不替换为其他权重。多任务 held-out 校验任务顺序、seed 池身份与真实 `(task, seed)` 无交集；旧多任务记录缺证据需重新选点，普通权重推理仍允许。
 
 远程启动需要本地可用的 `python3` 或 `python`，通过标准库生成独立 session/log 名，不依赖本地 `/proc`，不自动终止旧会话。停止时使用启动输出中的 `stop_remote.sh <SESSION>`。`sync_down.sh` 对小型评测 JSON/YAML 使用 checksum 更新，checkpoint 继续增量下载。
+
+### 固定论文评测与训练源码追溯
+
+新论文比较先从实际 runner seed 池确定同一份 task→seed JSON 清单，通过 `eval.seed_manifest=/absolute/path/seeds.json` 交给 selector。它包含 `pool_id`、`selection`、`tie_break`、`test` 四个字段，后三者均为 task→整数 seed 列表。预留 tie-break 池始终不进入 test，测试数量由清单固定。多任务清单必须匹配现有 paired runner 的映射；缺失、重复、相交或映射不一致直接报错。未指定时仍采用 legacy 协议，测试分母仍是实际完成数量。
+
+`select_best_ckpt.py --result-file <新文件>` 导出该次选择记录；`eval_best_ckpt.py` 与 `record_demo.py` 用 `--selection-record <该文件>` 固定 checkpoint、raw/EMA、NFE 和 seed 协议。`eval_pipeline.sh` 自动使用唯一交接文件，可通过 `SEED_MANIFEST=/absolute/path/seeds.json` 指定论文清单。
+
+新训练 run 保存 `source.zip` 和 `source_manifest.json`，记录实际运行源码（含源码目录中的未提交/未跟踪文件）、内容 SHA256、Git 身份和关键依赖。远端没有 `.git` 时 commit 为 `unknown`，以内容归档为准。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。源码身份不纳入严格 resume 相等合同。
+
+全部整改状态、验证范围、兼容边界与复验命令见 [整改报告](docs/review_remediation_report.md)。
 
 ## 其他工作流
 

@@ -279,7 +279,7 @@ class LoadedPolicy:
         self.reset_episode()
         try:
             for _ in range(samples):
-                prefix = self.predict(observation) if rtc_delay else None
+                prefix = self.predict(observation) if self.rtc_guidance_cap > 0 else None
                 start = time.perf_counter()
                 future = self.predict(observation, rtc_prefix=prefix, delay_steps=rtc_delay)
                 durations.append(time.perf_counter() - start)

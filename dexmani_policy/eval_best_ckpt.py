@@ -8,14 +8,16 @@ directory, including a scalar success rate in ``_result.txt``.
 Evaluation protocol
 -------------------
 
-1. Resolve ``best`` once to its selection record and concrete checkpoint path.
-   Explicit inference overrides take precedence over that record and config.
-2. Resolve the shuffle seed from effective ``training.seed + 1024``; the final
-   evaluation CLI accepts ``training.seed=...`` dotlist overrides, not ``--seed``.
+1. Resolve ``--selection-record`` or ``best`` once to a record and concrete
+   checkpoint. A supplied handoff record rejects conflicting EMA/NFE overrides;
+   ordinary ``best`` permits explicit inference overrides.
+2. Use the saved/explicit manifest's complete test list. Without a manifest,
+   resolve the shuffle seed from effective ``training.seed + 1024``; the CLI
+   accepts ``training.seed=...`` dotlist overrides, not ``--seed``.
 3. Restore the saved Agent from the concrete checkpoint with the resolved
    EMA/raw choice.
-4. Read the runner's seed pool, exclude the pinned selection seeds, and validate
-   held-out task/seed identities before rollout.
+4. Validate runner pool and held-out task/seed identities. Without a manifest,
+   exclude the pinned selection seeds from the shuffled runner pool.
 5. Run each seed with environment/policy RNG reseeding and save statistics and
    provenance. This does not guarantee identical trajectories across
    GPU/driver/kernels.
@@ -340,9 +342,12 @@ def evaluate_checkpoint_robotwin(
         use_ema,
         video_save_dir=video_save_dir,
     )
-    eval_seeds = _select_eval_seeds(
-        env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
-    )
+    from dexmani_policy.evaluation.protocol import fixed_test_seeds
+    eval_seeds = fixed_test_seeds(cfg, env_runner, best_info)
+    if eval_seeds is None:
+        eval_seeds = _select_eval_seeds(
+            env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+        )
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     validate_heldout(env_runner, best_info, eval_seeds)
@@ -444,9 +449,12 @@ def evaluate_checkpoint_sweep(
         video_save_dir=video_save_dir,
     )
     # ── 2. Same seeds for all inference step counts (fair comparison) ──────────
-    eval_seeds = _select_eval_seeds(
-        env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
-    )
+    from dexmani_policy.evaluation.protocol import fixed_test_seeds
+    eval_seeds = fixed_test_seeds(cfg, env_runner, best_info)
+    if eval_seeds is None:
+        eval_seeds = _select_eval_seeds(
+            env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+        )
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     validate_heldout(env_runner, best_info, eval_seeds)
@@ -702,6 +710,7 @@ def main() -> None:
         nargs="*",
         help="Evaluation/environment dot-list overrides; agent.* is forbidden (saved-config-owned).",
     )
+    parser.add_argument("--selection-record", default=None)
     args = parser.parse_args()
 
     exp_dir = (
@@ -731,9 +740,17 @@ def main() -> None:
         exp_dir,
         ckpt_tag_or_path,
         args.overrides,
+        resolved_best=resolve_best_checkpoint(exp_dir, args.selection_record) if args.selection_record else None,
         cli_use_ema=args.use_ema,
         cli_inference_steps=args.inference_steps,
     )
+    if args.selection_record and ckpt_tag_or_path != "best":
+        requested_path, _ = resolve_checkpoint_path(exp_dir, ckpt_tag_or_path)
+        if requested_path != resolved_best[1]:
+            raise ValueError("Checkpoint override differs from selection handoff")
+    if args.selection_record and (use_ema != resolved_best[0]["inference"]["use_ema"] or
+                                  inference_steps_list != [resolved_best[0]["inference"]["inference_steps"]]):
+        raise ValueError("Selection handoff cannot override raw/EMA or NFE")
     cfg._exp_dir = str(exp_dir)
 
     episodes = (

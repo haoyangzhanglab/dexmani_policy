@@ -1,0 +1,64 @@
+
+============================================================
+Smoke test: dp3
+============================================================
+Config validation passed
+[1/6] Building dataset & normalizer ...
+SequenceSampler window validity (rejections may overlap): {'candidate': 12994, 'observation': 0, 'action': 0, 'dispatch': 0, 'valid': 12994}
+      dataset size: 12994, batches/epoch: 101
+      no validation set (val_ratio=0)
+[2/6] Building model & EMA ...
+[3/6] Building optimizer & scheduler ...
+[DP3Agent] Parameter Count
+  Total: 68.76 M
+  obs_encoder         : 0.25 M  (trainable=0.25 M  frozen=0.00 M)
+  action_decoder      : 68.52 M  (trainable=68.52 M  frozen=0.00 M)
+  normalizer          : 0.00 M  (trainable=0.00 M  frozen=0.00 M)
+[4/6] Running forward + backward ...
+      loss: 0.5922  keys: ['loss_action', 'loss']
+      ✓ all trainable params received gradients
+      ✓ one optimizer/scheduler/EMA update completed
+[5/6] Running predict_action ...
+      pred_action: (1, 16, 19)  control_action: (1, 8, 19)
+[6/6] Checkpoint save → load roundtrip ...
+      saved checkpoint: epoch=0000-step=00000001-score=0.8500.pt
+      ✓ model state dict roundtrip OK
+      ✓ EMA state dict roundtrip OK
+      ✓ resume contract roundtrip OK
+      ✓ saved config → raw/EMA strict restore → predict; corruption rejected
+
+✓ dp3 smoke test PASSED
+
+
+============================================================
+Smoke test: dqrise
+============================================================
+Config validation passed
+[1/6] Building dataset & normalizer ...
+SequenceSampler window validity (rejections may overlap): {'candidate': 12994, 'observation': 0, 'action': 0, 'dispatch': 0, 'valid': 12994}
+      dataset size: 12994, batches/epoch: 101
+      no validation set (val_ratio=0)
+      [dqrise] temporary codebook → /tmp/tmpgyjs5wcz.npz
+[2/6] Building model & EMA ...
+[3/6] Building optimizer & scheduler ...
+[DQRISEAgent] Parameter Count
+  Total: 17.88 M
+  obs_encoder         : 0.27 M  (trainable=0.27 M  frozen=0.00 M)
+  action_decoder      : 17.61 M  (trainable=17.61 M  frozen=0.00 M)
+  normalizer          : 0.00 M  (trainable=0.00 M  frozen=0.00 M)
+  codebook_manager    : 0.00 M  (trainable=0.00 M  frozen=0.00 M)
+[4/6] Running forward + backward ...
+      loss: 1.0962  keys: ['loss_action', 'loss', 'batch_nn_code_entropy', 'batch_nn_code_used_1pct']
+      ✓ all trainable params received gradients
+      ✓ one optimizer/scheduler/EMA update completed
+[5/6] Running predict_action ...
+      pred_action: (1, 16, 21)  control_action: (1, 8, 21)
+[6/6] Checkpoint save → load roundtrip ...
+      saved checkpoint: epoch=0000-step=00000001-score=0.8500.pt
+      ✓ model state dict roundtrip OK
+      ✓ EMA state dict roundtrip OK
+      ✓ resume contract roundtrip OK
+      ✓ saved config → raw/EMA strict restore → predict; corruption rejected
+
+✓ dqrise smoke test PASSED
+

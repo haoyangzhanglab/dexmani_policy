@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 import hydra
@@ -28,6 +30,7 @@ from dexmani_policy.agents.vq_hand import VQVAEHand
 from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import downsample_mask, get_val_mask
+from dexmani_policy.training.run_identity import claim_run
 from dexmani_policy.training.build_utils import build_normalizer
 from dexmani_policy.utils.config import register_resolvers
 
@@ -297,6 +300,17 @@ def prepare_policy_data(cfg):
 
 
 def train(args: argparse.Namespace, *, policy_cfg) -> None:
+    from dexmani_policy.utils.validation import positive_int
+    for name in ("num_epochs", "batch_size", "save_epochs", "codebook_report_epochs"):
+        positive_int(getattr(args, name), name)
+    if args.output_dir is None:
+        run = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+        args.output_dir = str(Path("experiments/vq_hand") / Path(args.zarr_path).stem / run)
+    output_dir = Path(args.output_dir)
+    claim_run(output_dir)
+    from dexmani_policy.training.source_snapshot import save_source_snapshot
+    save_source_snapshot(output_dir)
+    logger.info("VQ run: %s", output_dir.resolve())
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
     if policy_cfg is not None:
@@ -374,11 +388,10 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             optimizer, T_max=total_steps
         )
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    selection_metric = "val_mse" if val_loader is not None else "train_mse"
+    split_metadata["selection_metric"] = selection_metric
     train_history: list[float] = []
-    best_val_mse = float("inf")
+    best_mse = float("inf")
 
     for epoch in range(1, args.num_epochs + 1):
         vqvae.train()
@@ -455,13 +468,13 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
                 metrics=metrics,
             )
 
-        selection_mse = (
-            metrics["val_mse"]
-            if np.isfinite(metrics["val_mse"])
-            else metrics["train_mse"]
-        )
-        if selection_mse < best_val_mse:
-            best_val_mse = selection_mse
+        selection_mse = metrics[selection_metric]
+        if not np.isfinite(selection_mse):
+            raise FloatingPointError(
+                f"Non-finite {selection_metric} at epoch {epoch}; previous best preserved"
+            )
+        if selection_mse < best_mse:
+            best_mse = selection_mse
             _save_checkpoint(
                 output_dir / "vqvae_hand_best.pt",
                 epoch=epoch,
@@ -625,8 +638,6 @@ def main(argv: list[str] | None = None) -> None:
     )
     if args.zarr_path is None:
         parser.error("--zarr_path is required")
-    if args.output_dir is None:
-        parser.error("--output_dir is required")
     if args.hand_dim is None or args.hand_dim <= 0:
         buffer = ReplayBuffer.open(args.zarr_path, keys=[args.action_key])
         args.hand_dim = int(buffer[args.action_key].shape[-1] - args.tcp_dim)

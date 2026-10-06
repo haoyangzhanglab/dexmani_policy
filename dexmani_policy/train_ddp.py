@@ -74,7 +74,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     # DDP requires identical initial parameters across all ranks — use same seed
     set_seed(cfg.training.seed)
 
-    dataset, normalizer = build_dataset_and_normalizer(cfg)
+    checkpoint = CheckpointStore(pathlib.Path(resume_from).parent).load(resume_from) if resume_from else None
+    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
 
     train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
     train_sampler = train_loader.sampler
@@ -99,11 +100,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         )
         print_param_count(model)
         workspace = hydra.utils.instantiate(cfg.workspace)
-        checkpoint_store = workspace.checkpoint_store
     else:
-        checkpoint_dir = pathlib.Path(cfg.workspace.output_dir) / "checkpoints"
         workspace = None
-        checkpoint_store = CheckpointStore(checkpoint_dir)
 
     scheduler = build_scheduler(cfg, optimizer)
     resume_contract = build_resume_contract(
@@ -111,7 +109,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     )
     resume_state = (0, 0, 0)
     if resume_from is not None:
-        checkpoint = checkpoint_store.load(checkpoint_store.resolve_path(resume_from))
         resume_state = restore_training_state(
             checkpoint,
             resume_contract=resume_contract,
@@ -125,6 +122,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
             source_config=load_resume_source_config(resume_from),
         )
 
+    del checkpoint
     if rank == 0:
         workspace.save_hydra_config(cfg)
 

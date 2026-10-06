@@ -29,7 +29,7 @@ else
 fi
 
 ZARR_PATH="${ZARR_PATH:-robot_data/${TASK_NAME}.zarr}"
-OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}}"
+OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}/$(date +%Y%m%d_%H%M%S)_${RANDOM}}"
 
 # Keep Conda activation hooks outside this shell's nounset mode and stream logs.
 exec conda run --no-capture-output -n policy \

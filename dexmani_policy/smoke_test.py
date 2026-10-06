@@ -251,6 +251,16 @@ def smoke_test(config_name: str):
     else:
         print("      ✓ all trainable params received gradients")
 
+    # One real optimizer/scheduler/EMA update, before save/restore checks.
+    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.get("max_grad_norm", 1.0),
+                                   error_if_nonfinite=True)
+    optimizer.step()
+    scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
+    if ema_updater is not None:
+        ema_updater.step(model)
+    print("      ✓ one optimizer/scheduler/EMA update completed")
+
     print("[5/6] Running predict_action ...")
     model.eval()
     with torch.no_grad():

@@ -81,7 +81,7 @@ def attach_normalization_spec(model, cfg) -> None:
     model.set_normalization_spec(resolve_normalization_spec(cfg))
 
 
-def build_dataset_and_normalizer(cfg):
+def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     """Instantiate the dataset and build the normalizer from the config-driven spec.
 
     The caller is responsible for resolving OmegaConf interpolations before
@@ -113,7 +113,7 @@ def build_dataset_and_normalizer(cfg):
         from dexmani_policy.training.checkpoint import CheckpointStore, fix_state_dict
 
         path = Path(cfg.resume_from)
-        checkpoint = CheckpointStore(path.parent).load(path)
+        checkpoint = resume_checkpoint if resume_checkpoint is not None else CheckpointStore(path.parent).load(path)
         state = fix_state_dict(checkpoint.model_state, is_current_ddp=False)
         normalizer = LinearNormalizer()
         normalizer.load_state_dict(
@@ -226,8 +226,7 @@ def validate_gradient_accumulation(
 ) -> None:
     if batches_per_epoch <= 0:
         raise ValueError("train loader must contain at least one batch")
-    if gradient_accumulation_steps < 1:
-        raise ValueError("gradient_accumulation_steps must be at least 1")
+    positive_int(gradient_accumulation_steps, "gradient_accumulation_steps")
 
 
 def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1):
@@ -427,6 +426,9 @@ def validate_config(cfg):
 
     Called by training and config-only smoke entry points.
     """
+    for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
+        value = cfg.training.get("loop", {}).get(name, 100 if name == "log_interval_steps" else 1)
+        positive_int(value, name)
     validate_window_contract(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
     validate_dataset_splits(cfg.dataset)
 

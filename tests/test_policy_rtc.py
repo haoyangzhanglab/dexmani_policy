@@ -329,7 +329,8 @@ def test_eef_bridge_mixed_affine_prefix():
 
 
 @pytest.mark.parametrize("mode", ["sync", "async", "rtc"])
-def test_execution_warmup_uses_requested_rtc_delay(mode):
+@pytest.mark.parametrize("delay,cap", [(0, 2.0), (3, 2.0), (0, 0.0)])
+def test_execution_warmup_uses_requested_rtc_delay(mode, delay, cap):
     agent = AuxAgent(
         Encoder(),
         Diffusion(Coupled(), num_training_steps=20, num_inference_steps=2),
@@ -360,8 +361,8 @@ def test_execution_warmup_uses_requested_rtc_delay(mode):
 
     policy.predict = observe_call
     durations = policy.configure_execution(
-        mode, 2.0 if mode == "rtc" else None, warmup=True, rtc_delay=3
+        mode, cap if mode == "rtc" else None, warmup=True, rtc_delay=delay
     )
     assert len(durations) == 1 and np.isfinite(durations[0]) and durations[0] >= 0
-    assert calls == ([(False, 0), (True, 3)] if mode == "rtc" else [(False, 0)])
+    assert calls == ([(False, 0), (True, delay)] if mode == "rtc" and cap > 0 else [(False, 0)])
     assert all(p.grad is None for p in agent.parameters())

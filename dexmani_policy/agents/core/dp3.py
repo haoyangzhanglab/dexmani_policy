@@ -29,7 +29,7 @@ class DP3ObsEncoder(nn.Module):
             pc_dim,
             config={
                 "output_channels": pc_out_dim,
-                "fps_random_config": fps_random_config,
+                **({"fps_random_config": fps_random_config} if encoder_type == "pointnext" else {}),
             },
         )
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)

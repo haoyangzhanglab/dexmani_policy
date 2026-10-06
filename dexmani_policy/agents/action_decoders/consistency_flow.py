@@ -201,6 +201,9 @@ class ConsistencyFlowMatch(nn.Module):
         )
         consistency_batch_size = batch_size - flow_batch_size
 
+        self.time_sampler.validate_batch(flow_batch_size, self.t_sample_mode_for_flow)
+        self.time_sampler.validate_batch(consistency_batch_size, self.t_sample_mode_for_consistency)
+        self.time_sampler.validate_batch(consistency_batch_size, self.dt_sample_mode_for_consistency)
         flow_targets = self.get_flow_velocity(actions[:flow_batch_size])
         consistency_targets = self.get_consistency_velocity(
             actions[flow_batch_size:],

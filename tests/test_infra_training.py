@@ -20,6 +20,7 @@ from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 
 class TinyDataset(Dataset):
+    action_key = "action"
     def __init__(self, n=5):
         self.n = n
 

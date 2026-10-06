@@ -99,4 +99,7 @@ class CrossAttention(nn.Module):
             out = out.masked_fill(~valid_rows, 0.0)
         out = out.permute(0, 2, 1, 3).reshape(batch_size, query_len, dim)
         out = self.proj(out)
-        return self.proj_drop(out)
+        out = self.proj_drop(out)
+        if valid_rows is not None:
+            out = out.masked_fill(~valid_rows.squeeze(1), 0.0)
+        return out

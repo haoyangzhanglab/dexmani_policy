@@ -8,14 +8,14 @@ Algorithm
 ---------
 
 **Stage 1 — Initial evaluation**:
-    Run ``initial_episodes`` (default 25) on every discovered milestone
-    checkpoint, using a fixed, deterministically-shuffled seed slice that is
-    identical across checkpoints.
+    Evaluate every discovered milestone on the manifest's selection seeds,
+    or a deterministically shuffled ``initial_episodes`` slice without a manifest.
+    All candidates use the same seeds.
 
 **Stage 2 — Tie-break**:
     When two or more checkpoints share the highest success rate, run a single
-    additional batch of ``batch_size`` fresh seeds (the same slice for every
-    tied candidate) and merge.  Equal denominators guarantee a fair comparison.
+    additional batch from the manifest's tie-break seeds, or ``batch_size``
+    fresh seeds without a manifest, and merge. All tied candidates share it.
 
 **Tiebreak** (when still tied after Stage 2):
     1. Higher success rate.
@@ -29,12 +29,17 @@ Failed runs keep their own summary and leave the last successful
 
 Seed management
 ---------------
-The full seed list is deterministically shuffled with the eval seed (same
-convention as ``eval_best_ckpt``); ``all_seeds[:initial_episodes]`` are Stage 1
-and the next ``batch_size`` are Stage 2.  ``BaseRunner.run_one_episode`` re-seeds
+``eval.seed_manifest`` fixes disjoint selection, tie-break and test lists.
+Without a manifest, the runner pool is deterministically shuffled with the
+eval seed; the first ``initial_episodes`` are Stage 1 and the next
+``batch_size`` are Stage 2. ``BaseRunner.run_one_episode`` re-seeds
 the policy RNG per episode. This makes seed selection and RNG initialization
 repeatable; it does not guarantee bitwise-identical trajectories across
 GPU/driver/kernel environments.
+
+Successful selections save their own ``selection_result.json``; ``--result-file``
+also writes a new handoff file for downstream ``--selection-record`` consumers.
+``best_ckpt.json`` remains the latest successful selection alias.
 
 Usage
 -----
@@ -198,9 +203,13 @@ def _rank_key(a: CkptEvalAccum) -> tuple[float, float, int]:
 def select_best_checkpoint(
     exp_dir: Path, cfg, *, initial_episodes=25, batch_size=5, max_episodes=100,
     inference_steps=10, use_ema=True, eval_seed=None, video_save_dir=None,
+    result_file=None,
 ) -> tuple[MilestoneCheckpoint, list[CkptEvalAccum]]:
     """Fixed initial stage and one exact-tie batch, with durable run evidence."""
     import tempfile
+    from dexmani_policy.evaluation.protocol import load_seed_manifest
+    if result_file is not None and Path(result_file).exists():
+        raise FileExistsError(f"Selection result already exists: {result_file}")
     validate_inference_steps([inference_steps])
     if initial_episodes <= 0 or max_episodes <= 0 or batch_size < 0:
         raise ValueError("initial/max episodes must be positive; batch_size must be nonnegative")
@@ -226,6 +235,12 @@ def select_best_checkpoint(
         random.Random(seed).shuffle(all_seeds)
         phase1_seeds = all_seeds[:initial_episodes]
         tie_seeds = all_seeds[initial_episodes:min(initial_episodes + batch_size, max_episodes)]
+        manifest_source = cfg.get("eval", {}).get("seed_manifest")
+        protocol = load_seed_manifest(manifest_source, runner) if manifest_source else None
+        if protocol is not None:
+            phase1_seeds = protocol["roles"]["selection"]
+            tie_seeds = protocol["roles"]["tie_break"]
+            initial_episodes = len(phase1_seeds)
         if not phase1_seeds:
             raise ValueError("Selection requires a nonempty seed pool")
         record["eval_config"] = save_eval_snapshot(
@@ -239,6 +254,9 @@ def select_best_checkpoint(
                      "initial_episodes": initial_episodes, "tie_break_used": False}
         if hasattr(runner, "seed_protocol"):
             selection["seed_protocol"] = runner.seed_protocol()
+        selection["protocol"] = "explicit" if protocol else "legacy"
+        if protocol:
+            selection["seed_manifest"] = protocol
         record["selection"] = selection
 
         def dispatch(mc, seeds, phase):
@@ -289,13 +307,21 @@ def select_best_checkpoint(
         record["all_results"] = [candidate(a) for a in accumulators]
         if best.success_count == 0:
             raise RuntimeError("All milestone checkpoints scored 0%; best_ckpt.json not updated")
-        record.update(status="success", best_checkpoint=candidate(best))
+        record.update(status="success", best_checkpoint=candidate(best),
+                      inference={"use_ema": use_ema, "inference_steps": inference_steps,
+                                 "policy_seed_mode": "episode_seed"})
         atomic_json(summary_path, record)
         best_info = {k: v for k, v in candidate(best).items() if k != "episode_details"}
         best_info.update(selection_id=run_dir.name,
                          selection_summary=artifact_reference(summary_path, exp_dir),
                          inference={"use_ema": use_ema, "inference_steps": inference_steps,
                                     "policy_seed_mode": "episode_seed"}, selection=selection)
+        # Immutable per-selection record is also the pipeline handoff.
+        atomic_json(run_dir / "selection_result.json", best_info)
+        if result_file is not None:
+            import json
+            with Path(result_file).open("x") as stream:
+                json.dump(best_info, stream, indent=2)
         atomic_json(exp_dir / "best_ckpt.json", best_info)
         published = True
         _print_table(accumulators, "Selection results:")
@@ -391,6 +417,7 @@ def main() -> None:
         help="Evaluation/environment dot-list overrides; agent.* is forbidden (saved-config-owned).",
     )
     parser.add_argument("--videos", action="store_true", help="Explicitly record selection candidate videos")
+    parser.add_argument("--result-file", default=None)
     args = parser.parse_args()
 
     exp_dir = (
@@ -467,6 +494,7 @@ def main() -> None:
             max_episodes=max_episodes,
             inference_steps=inference_steps,
             use_ema=use_ema,
+            result_file=args.result_file,
             eval_seed=args.seed,
             video_save_dir=video_save_dir,
         )

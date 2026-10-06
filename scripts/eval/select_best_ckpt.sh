@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offline best-checkpoint selector via fixed two-stage evaluation.
 #
-# Runs all milestone checkpoints (20/40/60/80/100%) through a fixed initial
+# Runs discovered milestone checkpoints through a fixed initial
 # evaluation and an optional exact-tie batch to identify the single best checkpoint.
 #
 # Usage:
@@ -37,6 +37,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  --no-ema               Use raw weights instead of EMA"
     echo "  --seed N               Eval seed override"
     echo "  --videos               Record isolated candidate/stage videos (default: off)"
+    echo "  --result-file PATH     Write this selection to a new handoff file"
+    echo "  eval.seed_manifest=PATH  Fixed task/seed lists; replaces episode-count budgets"
     echo ""
     echo "  Dot-list overrides may change eval/environment controls; model inputs come from saved config.yaml and cannot be overridden."
     echo ""

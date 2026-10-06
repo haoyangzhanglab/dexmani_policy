@@ -20,6 +20,7 @@ from dexmani_policy.training.checkpoint import TrainCheckpoint, fix_state_dict
 from dexmani_policy.training.logging import to_log_scalars
 from dexmani_policy.training.resume import optimizer_to, restore_training_state, load_resume_source_config
 from dexmani_policy.training.workspace import TrainWorkspace
+from dexmani_policy.utils.validation import positive_int
 from dexmani_policy.utils.random import get_rng_state
 from dexmani_policy.utils.tensor import dict_apply
 
@@ -30,8 +31,10 @@ class TrainLoopConfig:
     log_interval_steps: int = 100
     gradient_accumulation_steps: int = 1
 
+    def __post_init__(self):
+        for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
+            positive_int(getattr(self, name), name)
 
-MILESTONE_RATIOS: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8, 1.0)
 
 
 class Trainer:
@@ -43,7 +46,7 @@ class Trainer:
 
     - **Training**: ``train_one_step()`` with mixed precision (bfloat16 AMP),
       gradient clipping, and two-layer NaN protection (loss NaN, grad NaN).
-    - **Checkpointing**: Milestone saves (5 total) at progress thresholds;
+    - **Checkpointing**: Milestone saves (up to 5 distinct steps) at progress thresholds;
       ``latest.pt`` symlink tracks the most recent milestone for resume.
     - **EMA**: Exponential moving average of model weights, updated each step.
 
@@ -83,6 +86,8 @@ class Trainer:
         self.train_loader = train_loader
         self.workspace = workspace
 
+        for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
+            positive_int(getattr(train_loop_cfg, name), name)
         self.total_train_steps = train_loop_cfg.total_train_steps
         self.log_interval_steps = train_loop_cfg.log_interval_steps
         self.max_grad_norm = max_grad_norm
@@ -185,10 +190,11 @@ class Trainer:
         if self.use_ema and self.ema_updater is not None:
             self.ema_updater.step(self.raw_model)
 
-    def load_for_resume(self, tag_or_path: str):
+    def load_for_resume(self, tag_or_path: str, *, checkpoint=None):
         """Restore training state before compilation."""
         source_path = self.workspace.resolve_checkpoint_path(tag_or_path)
-        checkpoint = self.workspace.load_checkpoint(str(source_path))
+        if checkpoint is None:
+            checkpoint = self.workspace.load_checkpoint(str(source_path))
         return restore_training_state(
             checkpoint,
             resume_contract=self.resume_contract,
@@ -330,11 +336,9 @@ class Trainer:
         cause re-saving at incorrect steps, and resumed training at exactly the
         final step correctly skips all milestones.
         """
-        return {
-            ratio
-            for ratio in MILESTONE_RATIOS
-            if self.global_step / self.total_train_steps >= ratio
-        }
+        self._milestone_steps = {(p * self.total_train_steps + 99) // 100: p / 100
+                                 for p in (20, 40, 60, 80, 100)}
+        return {ratio for step, ratio in self._milestone_steps.items() if step <= self.global_step}
 
     def _save_checkpoint(self, global_step: int, tag_suffix: str):
         """Save a checkpoint with the given tag suffix and point ``latest.pt`` at it."""
@@ -402,17 +406,9 @@ class Trainer:
         self._stop_requested = True
 
     def _check_milestone(self, global_step: int):
-        """Check and save the first un-passed milestone whose threshold is met.
-
-        Called after each accumulation-boundary step.  Because
-        ``MILESTONE_RATIOS`` are spaced 20 percentage points apart and
-        ``total_train_steps`` is typically much larger, at most one milestone
-        is crossed per step under normal operation.
-        """
-        for ratio in MILESTONE_RATIOS:
-            if ratio in self._passed_milestones:
-                continue
-            if global_step / self.total_train_steps >= ratio:
+        """Save the largest colliding percentage once, at its integer target step."""
+        for step, ratio in self._milestone_steps.items():
+            if step == global_step and ratio not in self._passed_milestones:
                 self._save_milestone_checkpoint(global_step, ratio)
                 self._passed_milestones.add(ratio)
                 break

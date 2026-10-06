@@ -58,7 +58,7 @@ class SigLIP(ViTEncoder):
         if self.global_token_type == "pooler":
             pooler_output = getattr(outputs, "pooler_output", None)
             if pooler_output is not None:
-                return self.proj(pooler_output)
+                return self.project_features(pooler_output)
             return patch_tokens.mean(dim=1)
 
         if self.global_token_type == "cls":

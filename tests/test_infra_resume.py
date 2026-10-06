@@ -180,7 +180,12 @@ class ResumeInfraTests(unittest.TestCase):
             first.apply_gradient_step=interrupt; first.train()
             source=(root/'first/checkpoints/latest.pt').resolve()
             old_bytes={str(p):p.read_bytes() for p in (root/'first').rglob('*') if p.is_file()}
-            resumed=build(root/'resumed'); state=resumed.load_for_resume(str(source)); resumed.train(resume_state=state)
+            resumed=build(root/'resumed')
+            checkpoint = resumed.workspace.load_checkpoint(str(source))
+            with patch.object(resumed.workspace, 'load_checkpoint', side_effect=AssertionError('second read')):
+                state=resumed.load_for_resume(str(source), checkpoint=checkpoint)
+            del checkpoint
+            resumed.train(resume_state=state)
             self.assertEqual(first.raw_model.seen+resumed.raw_model.seen,full.raw_model.seen)
             for left,right in [(full.raw_model.state_dict(),resumed.raw_model.state_dict()),(full.ema_model.state_dict(),resumed.ema_model.state_dict())]:
                 for k,v in left.items(): torch.testing.assert_close(v,right[k],rtol=0,atol=0)

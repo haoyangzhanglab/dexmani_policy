@@ -1,5 +1,6 @@
 """Optional, tiny actual-CUDA checks. No data, weights, W&B, or simulator."""
 import copy
+import datetime
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,14 +29,15 @@ class NullLogger:
 def ddp_worker(rank,root,phase,ids):
     root=Path(root); device=torch.device(f'cuda:{ids[rank]}')
     torch.cuda.set_device(device)
-    dist.init_process_group('nccl',rank=rank,world_size=2,init_method=(root/f'init_{phase}').as_uri())
+    dist.init_process_group('nccl',rank=rank,world_size=2,init_method=(root/f'init_{phase}').as_uri(), timeout=datetime.timedelta(seconds=30))
     try:
         torch.manual_seed(17)
         model=torch.nn.Linear(2,1).to(device); ema=copy.deepcopy(model); updater=EMAModel(ema)
         optimizer=torch.optim.Adam(model.parameters(),lr=.01)
         scheduler=torch.optim.lr_scheduler.StepLR(optimizer,1,.9)
         contract={'batches_per_epoch':2,'world_size':2,'training':{'loop':{'gradient_accumulation_steps':1}}}
-        wrapped=DistributedDataParallel(model,device_ids=[device.index])
+        wrapped=DistributedDataParallel(model,device_ids=[device.index],
+                                        find_unused_parameters=False, gradient_as_bucket_view=True, static_graph=True)
         ws=None
         if rank==0:
             with patch('dexmani_policy.training.workspace.WandbLogger',NullLogger):

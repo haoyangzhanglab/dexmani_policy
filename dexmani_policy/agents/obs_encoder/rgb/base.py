@@ -92,6 +92,11 @@ class ViTEncoder(nn.Module):
 
         raise ValueError(f"Unsupported tune_mode: {tune_mode}")
 
+    def project_features(self, features):
+        if not isinstance(self.proj, nn.Identity):
+            features = features.to(dtype=self.proj.weight.dtype)
+        return self.proj(features)
+
     def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
         if rgb.ndim < 4 or rgb.shape[-3] != 3:
             raise ValueError(f"rgb should have shape [..., 3, H, W], got {tuple(rgb.shape)}")
@@ -103,7 +108,7 @@ class ViTEncoder(nn.Module):
         outputs = self.backbone(pixel_values=flat_rgb, return_dict=True)
 
         patch_tokens = self._extract_patch_tokens(outputs)
-        patch_tokens = self.proj(patch_tokens)
+        patch_tokens = self.project_features(patch_tokens)
         global_token = self.get_global_token(outputs, patch_tokens)
 
         return {

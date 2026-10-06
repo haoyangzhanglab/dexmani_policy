@@ -51,12 +51,25 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             )
 
         for i, dataset in enumerate(datasets):
+            child_key = getattr(dataset, "action_key", None)
+            if child_key != action_key:
+                raise ValueError(
+                    f"Dataset {i} ({task_names[i]}) action_key={child_key!r} "
+                    f"does not match shared action_key={action_key!r}"
+                )
             if len(dataset) == 0:
                 raise ValueError(
                     f"Dataset {i} (task '{task_names[i]}') is empty. "
                     f"All datasets must contain at least one sample."
                 )
 
+        layouts = set()
+        for dataset in datasets:
+            if hasattr(dataset, "replay_buffer"):
+                layouts.add((tuple(dataset.replay_buffer[action_key].shape[1:]),
+                             bool(getattr(dataset, "use_aux_ee", False))))
+        if len(layouts) > 1:
+            raise ValueError("Child datasets must share the same action shape and auxiliary layout")
         self.datasets = datasets
         self.task_names = task_names
         self.action_key = action_key

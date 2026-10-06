@@ -9,9 +9,12 @@ from pathlib import Path
 def claim_run(output_dir, *, resume_from=None):
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
+    for name in ("config.yaml", "metrics.jsonl", "checkpoints", "source.zip", "source_manifest.json"):
         if (root / name).exists():
             raise FileExistsError(f"Training output already exists: {root / name}; use a new output directory")
+    for pattern in ("vqvae_hand_*.pt", "*.npz", "code_usage_*.png", "loss_curve.png"):
+        if any(root.glob(pattern)):
+            raise FileExistsError(f"VQ output already exists in {root}; use a new output directory")
     token = uuid.uuid4().hex
     marker = root / ".training_run.json"
     try:
