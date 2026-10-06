@@ -32,7 +32,11 @@ def get_interpolation(name: str) -> str:
     raise ValueError(f"Unsupported interpolation: {name}")
 
 
-def to_rgb_tensor(images: ArrayLike) -> torch.Tensor:
+def to_rgb_tensor(images: ArrayLike, *, validate_float_range: bool = True) -> torch.Tensor:
+    """Return contiguous CHW float32 RGB, scaling integer inputs by 1/255.
+
+    Skip float range validation only when the caller already guarantees [0, 1].
+    """
     images = to_tensor(images)
     if images.ndim < 3:
         raise ValueError("images should have at least 3 dims.")
@@ -46,12 +50,13 @@ def to_rgb_tensor(images: ArrayLike) -> torch.Tensor:
         images = images.to(torch.float32).div_(255.0)
     else:
         images = images.to(torch.float32)
-        image_min = float(images.amin().item())
-        image_max = float(images.amax().item())
-        if image_min < -1e-6 or image_max > 1.0 + 1e-6:
-            raise ValueError(
-                f"Float RGB images are expected to be in [0, 1], got value range [{image_min}, {image_max}]."
-            )
+        if validate_float_range:
+            image_min = float(images.amin().item())
+            image_max = float(images.amax().item())
+            if image_min < -1e-6 or image_max > 1.0 + 1e-6:
+                raise ValueError(
+                    f"Float RGB images are expected to be in [0, 1], got value range [{image_min}, {image_max}]."
+                )
 
     return images.contiguous()
 

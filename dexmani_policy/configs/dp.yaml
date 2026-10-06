@@ -48,10 +48,10 @@ dataset:
   obs_horizon: ${n_obs_steps}
   rgb_preprocess_size: [240, 240]
   rgb_random_crop_size: [224, 224]
+  rgb_keep_uint8: true           # Quantize after CPU ImageAug; float32 again at vision input.
 
-  # CPU validation preprocessing resizes then crops before the encoder's GPU path.
-  # Conservative RGB augmentation — 25% trigger rate, mild magnitudes.
-  # Reference: DexUMI uses brightness=0.6 for challenging lighting; we stay lower.
+  # Training: float resize → shared random crop → ImageAug → uint8 quantization.
+  # Validation: float resize → center crop → uint8 quantization, no ImageAug.
   rgb_color_aug:
     _target_: dexmani_policy.datasets.augmentation.ImageAug
     brightness: 0.3
@@ -59,8 +59,8 @@ dataset:
     saturation: 0.2
     hue: 0.05
     grayscale_prob: 0.1
-    noise_std: 0.0                # explicit disable — noise hurts manipulation
-    blur_prob: 0.0                # explicit disable — preserves fine gripper details
+    noise_std: 0.0
+    blur_prob: 0.0
     prob: 0.25
 
   # Joint-state augmentation — mild Gaussian noise, always-on (prob 1.0).
@@ -77,29 +77,12 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-
   rgb_backbone_name: dino
   rgb_backbone_config:
     model_name: facebook/dinov2-small  # 384d
     tune_mode: lora
     global_token_type: avg
     image_size: [224, 224]
-
-  # rgb_backbone_name: resnet
-  # rgb_backbone_config:
-  #   model_name: resnet18
-  #   weights: null               # null=scratch: GN replaces BN (RoboTwin DP: "EMA destroys performance with BN")
-  #   tune_mode: full
-  #   norm_mode: group_norm
-  #   image_size: [224, 224]
-
-  # rgb_backbone_name: r3m
-  # rgb_backbone_config:
-  #   model_name: resnet18          # 512d | resnet34(512d) | resnet50(2048d)
-  #   tune_mode: full
-  #   norm_mode: group_norm         # R3M BN stats (Ego4D) discarded; GN = EMA-safe
-  #   global_token_type: avg
-  #   image_size: [224, 224]
 
   state_dim: 19
   modality_dropout_probs:
@@ -122,7 +105,7 @@ optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
   betas: [0.95, 0.999]
-  obs_lr: 1.0e-4                      # LoRA fine-tuning needs higher LR
+  obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
 # ── EMA ──

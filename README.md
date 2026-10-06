@@ -100,6 +100,8 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<old-run
 
 Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。Gaussian **动作**归一化必须同时设置 `agent.clip_sample=false`；Gaussian 观测和 flow 不受此限制。历史缺失开关等价于 true，true→false 属于实验变化，不能静默严格续训。旧 Gaussian＋true 结果需用旧代码复现，修正后重新评测。
 
+RGB 可通过 `dataset.rgb_keep_uint8=true` 使用 uint8 transport（要求 `normalization.rgb=identity`）；当前 DP 显式启用。配置 CPU resize 时，含 ImageAug 的 recipe 在 float resize/crop/增强后最终量化，无颜色增强的 uint8 recipe 保留 uint8 spatial 路径；视觉入口恢复 float32。缺省/false 保留原 float preprocessing；未配置 CPU resize 时仍返回原始 HWC uint8。recipe 变化不能跨越 strict resume；MultiTask 的 RGB child 必须一致。确定性评测、验证与 Real preprocessing 从保存配置恢复，详见 [RGB transport 验证报告](docs/rgb_transport_report.md)。
+
 ### DQ-RISE 码本与 Policy 对齐
 
 从仓库根目录，在 `policy` 环境中执行。先确定目标 Policy 配置，所有数据与窗口覆盖在两个训练入口保持一致：

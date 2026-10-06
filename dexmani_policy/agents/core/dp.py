@@ -35,13 +35,10 @@ class DPObsEncoder(nn.Module):
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
-        rgb = obs["rgb"]  # (B*T, 3, H, W) float32 [0,1]
-        rgb = self.image_processor.process_images(rgb)["image"]
+        rgb = obs["rgb"]  # uint8 or float32 [0,1], from Dataset/saved eval preprocessing
+        rgb = self.image_processor.process_images(rgb, validate_float_range=False)["image"]
 
-        # channels_last: for CNN backbones (ResNet/R3M), convert to NHWC layout
-        # to leverage cuDNN implicit NHWC convolution kernels, yielding ~15-22%
-        # forward speedup.  ViT backbones (DINO/CLIP/SigLIP) use attention rather
-        # than convolution — skip to avoid pointless stride changes.
+        # Use channels-last memory format for CNN backbones; shape stays NCHW.
         if isinstance(self.backbone, (ResNet, R3M)):
             rgb = rgb.to(memory_format=torch.channels_last)
 

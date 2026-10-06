@@ -411,6 +411,18 @@ def _validate_encoder_normalization_contract(cfg, spec) -> None:
 
 def _validate_normalization_config(cfg):
     """Validate the feature-level normalization spec and its sensor-modality coverage."""
+    rgb_transport = set()
+    for child in cfg.dataset.get("datasets", [cfg.dataset]):
+        if "rgb" in child.get("sensor_modalities", []):
+            keep_uint8 = bool(child.get("rgb_keep_uint8", False))
+            rgb_transport.add(keep_uint8)
+            if keep_uint8 and (cfg.get("normalization") or {}).get("rgb") != "identity":
+                raise ValueError(
+                    "rgb_keep_uint8 requires normalization.rgb=identity because RGB "
+                    "must remain uint8 until the vision preprocessing boundary."
+                )
+    if len(rgb_transport) > 1:
+        raise ValueError("RGB child datasets must have consistent rgb_keep_uint8")
     spec = resolve_normalization_spec(cfg)
     if uses_diffusion_config(cfg.agent):
         validate_action_clipping(spec, cfg.agent.get("clip_sample", True))

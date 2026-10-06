@@ -1,0 +1,9 @@
+.....................................................................................................                                    [100%]
+=============================== warnings summary ===============================
+tests/test_review_remediation.py::test_rgb_transport_config_and_resume_contract
+tests/test_infra_resume.py::ResumeInfraTests::test_clip_resume_compatibility
+  /home/zhanghaoyang/Desktop/dexmani_policy/dexmani_policy/training/resume.py:194: UserWarning: data_identity: 数据身份未验证 (historical revision unavailable)
+    validate_data_identity(saved.pop("data_identity", None), current.pop("data_identity", None))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+101 passed, 2 warnings, 8 subtests passed in 17.82s

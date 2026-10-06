@@ -244,3 +244,80 @@ def test_deterministic_never_creates_manager(tmp_path, monkeypatch):
         norm["action"].params_dict["scale"], reference["action"].params_dict["scale"]
     )
     multi.close()
+
+
+@pytest.mark.parametrize('keep_uint8', [False, True])
+@pytest.mark.parametrize('color_aug', [False, True])
+def test_rgb_transport_spatial_and_augmentation(tmp_path, keep_uint8, color_aug):
+    from torchvision.transforms import functional as F
+    from dexmani_policy.datasets.augmentation import ImageAug
+    from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs, preprocess_validation_rgb
+
+    source = make_data(tmp_path)
+    augmentation = ImageAug(prob=1., grayscale_prob=0., blur_prob=0.) if color_aug else None
+    calls = []
+    def augment(value):
+        calls.append(value.clone())
+        return augmentation(value)
+    ds = BaseDataset(source.zarr_path, sensor_modalities=['joint_state', 'rgb'],
+                     horizon=3, obs_horizon=2, val_ratio=.25,
+                     rgb_preprocess_size=(7, 9), rgb_random_crop_size=(5, 6),
+                     rgb_color_aug=augment if color_aug else None, rgb_keep_uint8=keep_uint8)
+    raw = ds.sampler.sample_sequence(0)['rgb'][:2]
+    def legacy_training(rgb):
+        x = torch.from_numpy(rgb).permute(0, 3, 1, 2).contiguous()
+        if not keep_uint8 or color_aug:
+            x = x.float().div_(255.)
+        x = F.resize(x, [7, 9], antialias=True)
+        top, left = torch.randint(0, 3, (1,)).item(), torch.randint(0, 4, (1,)).item()
+        x = F.crop(x, top, left, 5, 6)
+        if color_aug:
+            x = augmentation(x)
+        return x.clamp_(0, 1) if x.is_floating_point() else x.contiguous()
+    torch.manual_seed(31)
+    expected = legacy_training(raw)
+    expected_rng = torch.get_rng_state()
+    if keep_uint8 and color_aug:
+        expected = expected.mul(255).round().clamp(0, 255).to(torch.uint8)
+    torch.manual_seed(31)
+    actual = ds[0]['obs']['rgb']
+    assert actual.dtype == (torch.uint8 if keep_uint8 else torch.float32)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    if color_aug:
+        assert len(calls) == 1 and calls[0].shape == (2, 3, 5, 6)
+        assert calls[0].dtype == torch.float32
+        assert ((calls[0] * 255) % 1 != 0).any()  # no intermediate rounding
+        calls.clear()
+        repeated = np.repeat(raw[:1], 2, axis=0)
+        result = ds._preprocess_rgb_cpu(repeated)
+        torch.testing.assert_close(result[0], result[1], rtol=0, atol=0)
+        assert len(calls) == 1
+
+    val = ds.get_validation_dataset()
+    raw_val = val.sampler.sample_sequence(0)['rgb'][:2]
+    x = torch.from_numpy(raw_val).permute(0, 3, 1, 2).contiguous()
+    if not keep_uint8 or color_aug:
+        x = x.float().div_(255.)
+    expected_val = F.center_crop(F.resize(x, [7, 9], antialias=True), [5, 6])
+    if expected_val.is_floating_point():
+        expected_val.clamp_(0, 1)
+        if keep_uint8:
+            expected_val = expected_val.mul(255).round().clamp(0, 255).to(torch.uint8)
+    recipe = dict(rgb_preprocess_size=[7, 9], rgb_random_crop_size=[5, 6],
+                  rgb_keep_uint8=keep_uint8, rgb_color_aug={} if color_aug else None)
+    rng = torch.get_rng_state()
+    for _ in range(2):
+        torch.testing.assert_close(val[0]['obs']['rgb'], expected_val, rtol=0, atol=0)
+        torch.testing.assert_close(preprocess_validation_rgb(raw_val, **rgb_preprocessing_kwargs(recipe)),
+                                   expected_val, rtol=0, atol=0)
+    assert torch.equal(torch.get_rng_state(), rng)
+
+
+def test_multitask_rejects_mixed_rgb_transport(tmp_path):
+    import copy
+    ds = make_data(tmp_path)
+    other = copy.copy(ds)
+    other.rgb_keep_uint8 = True
+    with pytest.raises(ValueError, match='consistent rgb_keep_uint8'):
+        MultiTaskDataset([ds, other], ['a', 'b'], deterministic=True)

@@ -292,3 +292,34 @@ class EvaluationInfraTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+
+def test_saved_rgb_recipe_reaches_simulation_and_real(tmp_path, monkeypatch):
+    import numpy as np
+    import torch
+    from dexmani_policy.env_runner.base_runner import BaseRunner
+    from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
+    from dexmani_policy.smoke_test import load_config
+    from dexmani_policy.deployment.runtime import LoadedPolicy
+    cfg = OmegaConf.create(OmegaConf.to_container(load_config('dp'), resolve=True))
+    cfg.dataset.rgb_preprocess_size = [7, 9]
+    cfg.dataset.rgb_random_crop_size = [5, 6]
+    cfg._exp_dir = str(tmp_path)
+    OmegaConf.save(cfg, tmp_path/'config.yaml')
+    raw = np.random.default_rng(4).integers(0, 256, (2, 4, 8, 3), dtype=np.uint8)
+    expected = preprocess_validation_rgb(raw, resize_hw=(7, 9), center_crop_hw=(5, 6),
+                                        keep_uint8=False).mul(255).round().clamp(0, 255).to(torch.uint8)
+    runner = BaseRunner.__new__(BaseRunner)
+    runner.task_name = cfg.task_name
+    monkeypatch.setattr('dexmani_policy.evaluation.protocol.hydra.utils.instantiate', lambda *a: runner)
+    runner = build_eval_runner(cfg)
+    runner.get_stacked_obs = lambda: {'rgb': raw.copy()}
+    torch.testing.assert_close(runner.get_obs_batch('cpu')['rgb'], expected[None], rtol=0, atol=0)
+    class Agent:
+        def predict_action(self, obs, **kwargs):
+            torch.testing.assert_close(obs['rgb'], expected[None], rtol=0, atol=0)
+            return {'pred_action': torch.zeros(1, 16, 19)}
+    info = types.SimpleNamespace(observation_fields=('rgb',), action_mode='joint',
+                                 n_obs_steps=2, horizon=16, inference_steps=10)
+    policy = LoadedPolicy(Agent(), OmegaConf.to_container(cfg, resolve=True), info, device='cpu', seed=0)
+    assert policy.predict({'rgb': raw}).shape == (15, 19)

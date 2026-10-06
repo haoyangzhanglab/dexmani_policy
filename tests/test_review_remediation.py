@@ -454,3 +454,99 @@ def test_learned_weight_export_reconstruction_and_rounding(tmp_path):
     torch.testing.assert_close(poses,expected,rtol=1e-5,atol=1e-6)
     _,ids=restored.continuous_index_to_hand_pose(torch.tensor([-2.,0.,2.]))
     assert ids.tolist()==[0,2,3]  # midpoint half-up and endpoint clamps
+
+
+def test_rgb_processor_transport_range_and_cache(monkeypatch):
+    import pickle
+    from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
+    from dexmani_policy.agents.obs_encoder.rgb.utils import to_rgb_tensor
+    processor = ImageProcessor(image_size=None)
+    rgb = torch.arange(2*3*5*7, dtype=torch.uint8).reshape(2, 3, 5, 7)
+    unit = rgb.float()/255
+    torch.testing.assert_close(processor.process_images(rgb)['image'],
+                               processor.process_images(unit)['image'], rtol=0, atol=0)
+    for value in (-.01, 1.01):
+        with pytest.raises(ValueError, match='expected to be in'):
+            processor.process_images(torch.full((1, 3, 5, 7), value))
+    def forbidden(*args, **kwargs):
+        raise AssertionError('trusted RGB must not reduce or synchronize')
+    with monkeypatch.context() as m:
+        for method in ('amin', 'amax', 'item'):
+            m.setattr(torch.Tensor, method, forbidden)
+        processor.process_images(unit, validate_float_range=False)
+        processor.process_images(rgb)  # integer bypasses float checks even by default
+        unchecked = to_rgb_tensor(unit + 2, validate_float_range=False)
+    torch.testing.assert_close(unchecked, unit+2)
+    assert unchecked.dtype == torch.float32 and unchecked.is_contiguous()
+    for dtype in (torch.float32, torch.float64):
+        x = unit.to(dtype)
+        expected = (x - processor.image_mean.to(dtype).view(1, 3, 1, 1)) / processor.image_std.to(dtype).view(1, 3, 1, 1)
+        torch.testing.assert_close(processor.normalize(x), expected, rtol=0, atol=0)
+        cached = processor._normalization_cache[('cpu', None, dtype)]
+        processor.normalize(x.clone())
+        assert processor._normalization_cache[('cpu', None, dtype)] is cached
+        assert all(t.numel() == 3 and not t.requires_grad for t in cached)
+    processor.normalize(torch.empty(2, 3, 5, 7, device='meta'))
+    assert processor._normalization_cache[('meta', None, torch.float32)][0].device.type == 'meta'
+    restored = pickle.loads(pickle.dumps(processor))
+    assert restored._normalization_cache == {}
+    torch.testing.assert_close(restored.process_images(rgb)['image'], processor.process_images(rgb)['image'])
+
+
+def test_dp_encoder_uses_trusted_float_boundary(monkeypatch):
+    from dexmani_policy.agents.core import dp
+    from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
+    class Backbone(nn.Module):
+        out_dim = 3
+        def forward(self, x):
+            assert x.dtype == torch.float32
+            return {'global_token': x.mean((-2, -1))}
+    processor = ImageProcessor(image_size=None)
+    monkeypatch.setattr(dp, 'build_backbone', lambda *a, **kw: (Backbone(), processor))
+    encoder = dp.DPObsEncoder('fixture', state_dim=2, n_obs_steps=2)
+    rgb = torch.randint(0, 256, (4, 3, 5, 7), dtype=torch.uint8)
+    state = torch.randn(4, 2)
+    expected = encoder({'rgb': rgb, 'joint_state': state})[0]
+    def forbidden(*a, **kw): raise AssertionError('unexpected range reduction')
+    monkeypatch.setattr(torch.Tensor, 'amin', forbidden)
+    monkeypatch.setattr(torch.Tensor, 'amax', forbidden)
+    actual = encoder({'rgb': rgb.float()/255, 'joint_state': state})[0]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_rgb_transport_config_and_resume_contract():
+    from dexmani_policy.smoke_test import load_config
+    from dexmani_policy.training.build_utils import validate_config
+    from dexmani_policy.training.resume import build_resume_contract, validate_resume_contract
+    from test_infra_resume import TinyPolicy, Data
+    from torch.utils.data import DataLoader
+    cfg = load_config('dp')
+    assert cfg.dataset.rgb_keep_uint8 is True
+    validate_config(cfg)
+    for mode in ('limits', 'gaussian'):
+        cfg.normalization.rgb = mode
+        with pytest.raises(ValueError, match='rgb_keep_uint8 requires normalization.rgb=identity'):
+            validate_config(cfg)
+    cfg.normalization.rgb = 'identity'
+    model, loader = TinyPolicy(), DataLoader(Data(), batch_size=2)
+    current = build_resume_contract(cfg, model, loader)
+    for old_recipe in (False, None):
+        old_cfg = copy.deepcopy(cfg)
+        if old_recipe is None:
+            del old_cfg.dataset.rgb_keep_uint8
+        else:
+            old_cfg.dataset.rgb_keep_uint8 = old_recipe
+        saved = build_resume_contract(old_cfg, model, loader)
+        validate_resume_contract(saved, saved)
+        with pytest.raises(ValueError, match='dataset.rgb_keep_uint8'):
+            validate_resume_contract(saved, current)
+    cfg = OmegaConf.create(OmegaConf.to_container(load_config('multitask_dit'), resolve=True))
+    cfg.dataset.datasets[0].rgb_keep_uint8 = True
+    with pytest.raises(ValueError, match='consistent rgb_keep_uint8'):
+        validate_config(cfg)
+    for child in cfg.dataset.datasets:
+        child.rgb_keep_uint8 = True
+    validate_config(cfg)
+    cfg.normalization.rgb = 'limits'
+    with pytest.raises(ValueError, match='rgb_keep_uint8 requires normalization.rgb=identity'):
+        validate_config(cfg)

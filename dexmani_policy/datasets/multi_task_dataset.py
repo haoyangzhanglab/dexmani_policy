@@ -70,6 +70,13 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                              bool(getattr(dataset, "use_aux_ee", False))))
         if len(layouts) > 1:
             raise ValueError("Child datasets must share the same action shape and auxiliary layout")
+        rgb_transport = {
+            bool(getattr(dataset, "rgb_keep_uint8", False))
+            for dataset in datasets
+            if "rgb" in getattr(dataset, "sensor_modalities", ())
+        }
+        if len(rgb_transport) > 1:
+            raise ValueError("RGB child datasets must have consistent rgb_keep_uint8")
         self.datasets = datasets
         self.task_names = task_names
         self.action_key = action_key

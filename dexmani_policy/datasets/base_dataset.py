@@ -37,9 +37,6 @@ AUGMENTOR_REGISTRY = [
     ("state", StateNoiseAug, "noise", "joint_state"),
 ]
 
-DEFAULT_RGB_KEEP_UINT8 = False
-
-
 class BaseDataset(torch.utils.data.Dataset):
     DEFAULT_MODALITIES: ClassVar[list[str]] = ["joint_state"]
 
@@ -60,7 +57,7 @@ class BaseDataset(torch.utils.data.Dataset):
         rgb_preprocess_size: tuple[int, int] | None = None,
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: dict | None = None,
-        rgb_keep_uint8: bool = DEFAULT_RGB_KEEP_UINT8,
+        rgb_keep_uint8: bool = False,
     ) -> None:
         super().__init__()
 
@@ -209,21 +206,25 @@ class BaseDataset(torch.utils.data.Dataset):
         }
 
     def _preprocess_rgb_cpu(self, rgb_np):
-        """rgb_np: (T, H, W, 3) uint8 numpy → (T, 3, H_dst, W_dst) tensor.
-        /255 + resize + optional random crop + optional color aug.
-        ImageNet normalization is left on GPU.
+        """Convert HWC uint8 frames to CHW RGB using the dataset recipe.
 
-        Two paths:
+        Training applies resize, one shared random crop, then color augmentation.
+        Validation uses deterministic resize/center crop without augmentation.
+        Backbone-specific normalization is left to the Agent's vision path.
+
+        Transport paths:
         - uint8 fast path: when ``rgb_keep_uint8=True`` and no color aug,
-          resize/crop keep uint8 output → 4× less DataLoader→GPU transfer.
-        - float32 path (default): for color augmentation.
+          resize/crop keep uint8 output (one byte per channel).
+        - float32 spatial/color path (default); with ``rgb_keep_uint8=True``,
+          quantize only the final clamped result for transport.
         """
         if self._is_val:
             return preprocess_validation_rgb(
                 rgb_np,
                 resize_hw=self.rgb_preprocess_size,
                 center_crop_hw=self.rgb_random_crop_size,
-                keep_uint8=(self.rgb_keep_uint8 and self.rgb_color_aug is None),
+                keep_uint8=self.rgb_keep_uint8,
+                float_spatial_before_uint8=self.rgb_color_aug is not None,
             )
 
         rgb = torch.from_numpy(rgb_np)  # (T, H, W, 3) uint8
@@ -264,9 +265,11 @@ class BaseDataset(torch.utils.data.Dataset):
             )
         if self.rgb_color_aug is not None:
             rgb = self.rgb_color_aug(rgb)  # (T, 3, H_dst, W_dst) float32 [0,1]
-        # clamp_ is in-place (resize/crop/aug already own their output);
-        # the result is already contiguous from the prior op, skip extra copy.
-        return rgb.clamp_(0, 1)
+        # Clamp owned float data before optional transport quantization.
+        rgb = rgb.clamp_(0, 1)
+        if self.rgb_keep_uint8:
+            rgb = rgb.mul(255).round_().clamp_(0, 255).to(torch.uint8)
+        return rgb
 
     def __getitem__(self, idx):
         sample = self.sampler.sample_sequence(idx, key_lengths=self._role_lengths)

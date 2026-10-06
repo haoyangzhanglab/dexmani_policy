@@ -8,6 +8,8 @@
 
 最新定向修复：以 `ad615f6100d82c635439091e48460236eba7bad7` 为审查基线，修复 demo 完整 manifest 与录制子集的校验顺序，并更正 DQ/ManiFlow 配方披露。R03/S03 已通过入口复验，R08 仍 PARTIAL；本次记录见文末。此前日志、测试数量和任务书发布基线保留，不累计为本次独立通过数。
 
+后续 RGB transport 优化：以 `main@9d568112fc40d9c411499d2152902d4aa2f770f5` 为起点，为显式 uint8 recipe 保留 CPU float augmentation 后再量化；可信内部 float 跳过范围同步，mean/std 增加常量 cache。E05 从暂缓更新为已实现；本轮测试、真实 CUDA smoke 和 BF16（compile=false）短时对照见 [独立报告](rgb_transport_report.md)，不并入上述历史测试计数，也不关闭 R08 的生产 AMP/compile/DDP 与真实闭环缺口。
+
 ## 验证记录与环境
 
 解释器 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python`（下文 `$PY`），Torch `2.4.1+cu124`。默认 shell 没有 `python`。沙箱内 CUDA 不可见，Manager socket 报 `PermissionError`；通过允许的沙箱外执行后实际有单张 RTX 4090 24 GiB。环境未安装/升级任何依赖。CPU 夹具仍是 CPU，沙箱外执行不使它们变成 GPU 测试。
@@ -56,7 +58,7 @@
 | B02 | IMPLEMENTED | `agents/obs_encoder/rgb/base.py::project_features; dino.py; clip.py; siglip.py` | T：三个 encoder 的受支持 patch/CLS/pooler 局部真实 Linear，无 autocast；P：DINO LoRA | Identity 不 cast；完整 CLIP/SigLIP 预训练恢复 NOT VERIFIED；不改变 backbone/EMA dtype |
 | R04 | PRESERVED | `agents/obs_encoder/rgb/base.py::set_tune_mode; review_remediation_evidence/rgb_precision_probe.py` | P：当前 DINO LoRA BF16 三步非零梯度/更新，strict restore | 未证明默认精度错误；短 encoder probe 不代表完整 policy 或长期收敛；不采用 FP32 新配方 |
 | E04 | PRESERVED | `training/ema_model.py::_step_loop/_step_foreach` | P：实际 DINO 参数一步 loop/foreach 最大绝对误差0；T：EMA 恢复 | 没有整步收益对照，不启用 foreach 默认、不缓存参数/删buffer copy |
-| E05 | DEFERRED | `agents/obs_encoder/rgb/image_processor.py; utils.py::to_rgb_tensor` | 源码检查：mean/std 按调用搬迁，float 每次范围检查；无端到端基准 | 默认 DP3/DQ 不走 RGB；常量 cache 候选暂缓，保留外部 float 校验 |
+| E05 | IMPLEMENTED | `agents/obs_encoder/rgb/image_processor.py; utils.py::to_rgb_tensor; agents/core/dp.py` | 原整改轮暂缓；后续 RGB 轮完成 device/dtype 常量 cache、外部严格/内部可信 float 边界的 CPU 回归与 CUDA profiler，见 [RGB 报告](rgb_transport_report.md) | 外部校验保留；cache 不进 checkpoint。短测仅比较 transport，不能独立归因 cache 收益；生产 compile 仍 NOT VERIFIED |
 | A09 | PRESERVED | `agents/obs_encoder/rgb/r3m.py` | 源码检查；完整 R3M 训练 NOT VERIFIED | 既定 BN→GN 适配，已在配方披露，不回退 BN |
 | S08 | IMPLEMENTED | `train.py; train_ddp.py; training/build_utils.py; trainer.py::load_for_resume` | T：提供 payload 不再读盘；连续/中断恢复逐位对照；G：保存恢复 | 每进程入口只 load 一次；恢复后清除 CPU payload 引用；生产 DDP 复验仍缺第二 GPU |
 | D03 | PRESERVED | `training/ema_model.py; training/trainer.py` | T/P/G：teacher/EMA 相关检查 | teacher 保持 eval |

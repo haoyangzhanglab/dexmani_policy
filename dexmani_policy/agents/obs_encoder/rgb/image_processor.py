@@ -55,10 +55,7 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
 
 
 class ImageProcessor:
-    """Unified image-space preprocessing for RGB observations.
-
-    Note: RGB-D support is planned but not yet implemented.
-    """
+    """Resize and normalize RGB; optionally align depth and camera intrinsics."""
 
     def __init__(
         self,
@@ -71,6 +68,11 @@ class ImageProcessor:
         self.image_mean = torch.tensor(image_mean, dtype=torch.float32)
         self.image_std = torch.tensor(image_std, dtype=torch.float32)
         self.interpolation = get_interpolation(interpolation)
+        self._normalization_cache = {}
+
+    def __getstate__(self):
+        # Device copies are disposable constants, not serialized model state.
+        return {**self.__dict__, "_normalization_cache": {}}
 
     @classmethod
     def from_preset(cls, name: str) -> "ImageProcessor":
@@ -138,16 +140,19 @@ class ImageProcessor:
         return F.interpolate(x, size=size, mode=mode, align_corners=False)
 
     def normalize(self, image_batch: torch.Tensor) -> torch.Tensor:
-        mean = self.image_mean.to(
-            device=image_batch.device, dtype=image_batch.dtype
-        ).view(1, 3, 1, 1)
-        std = self.image_std.to(
-            device=image_batch.device, dtype=image_batch.dtype
-        ).view(1, 3, 1, 1)
+        device, dtype = image_batch.device, image_batch.dtype
+        key = (device.type, device.index, dtype)
+        if key not in self._normalization_cache:
+            self._normalization_cache[key] = (
+                self.image_mean.to(device=device, dtype=dtype).view(1, 3, 1, 1),
+                self.image_std.to(device=device, dtype=dtype).view(1, 3, 1, 1),
+            )
+        mean, std = self._normalization_cache[key]
         return image_batch.sub(mean).div(std)
 
-    def process_images(self, images: ArrayLike) -> Dict[str, object]:
-        images = to_rgb_tensor(images)
+    def process_images(self, images: ArrayLike, *, validate_float_range: bool = True) -> Dict[str, object]:
+        """Normalize RGB; disable float checks only for trusted preprocessing output."""
+        images = to_rgb_tensor(images, validate_float_range=validate_float_range)
         flat_images, leading_shape = flatten_batch(images, trailing_ndim=3)
 
         flat_images, _, spatial = self.apply_spatial_transform(flat_images)

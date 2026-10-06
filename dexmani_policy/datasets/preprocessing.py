@@ -15,8 +15,8 @@ def rgb_preprocessing_kwargs(dataset_config):
     return {
         "resize_hw": dataset_config.get("rgb_preprocess_size"),
         "center_crop_hw": dataset_config.get("rgb_random_crop_size"),
-        "keep_uint8": bool(dataset_config.get("rgb_keep_uint8", False))
-        and dataset_config.get("rgb_color_aug") is None,
+        "keep_uint8": bool(dataset_config.get("rgb_keep_uint8", False)),
+        "float_spatial_before_uint8": dataset_config.get("rgb_color_aug") is not None,
     }
 
 
@@ -26,8 +26,13 @@ def preprocess_validation_rgb(
     resize_hw: tuple[int, int] | None,
     center_crop_hw: tuple[int, int] | None,
     keep_uint8: bool,
+    float_spatial_before_uint8: bool = False,
 ) -> torch.Tensor:
-    """Apply the deterministic validation RGB path to raw HWC uint8 frames."""
+    """Apply the deterministic validation RGB path to raw HWC uint8 frames.
+
+    ``float_spatial_before_uint8`` preserves the training color-augmentation
+    recipe's float interpolation, even though validation skips augmentation.
+    """
     import torch
     import torchvision.transforms.functional as TVF
     from torchvision.transforms import InterpolationMode
@@ -47,7 +52,7 @@ def preprocess_validation_rgb(
     leading_shape = tuple(value.shape[:-3])
     value = value.movedim(-1, -3).contiguous()
     value = value.reshape(-1, *value.shape[-3:])
-    if not keep_uint8:
+    if not keep_uint8 or float_spatial_before_uint8:
         value = value.float().div_(255.0)
     value = TVF.resize(
         value,
@@ -59,4 +64,6 @@ def preprocess_validation_rgb(
         value = TVF.center_crop(value, list(center_crop_hw))
     if value.dtype.is_floating_point:
         value = value.clamp_(0, 1)
+        if keep_uint8:
+            value = value.mul(255).round_().clamp_(0, 255).to(torch.uint8)
     return value.reshape(*leading_shape, *value.shape[-3:]).contiguous()
