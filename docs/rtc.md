@@ -14,7 +14,7 @@ BaseDataset 对实际启用的输入生成 obs_valid，对完整监督（含启�
 
 未提供清单时保留原 episode split、配置和 data_recipe 结构；默认配置不添加 `split_manifest: null`。新清单不接受 unknown revision，可从 Raw 导出到新路径后使用；不向旧缓存回填身份。修改清单内容或实际划分属于新实验，strict resume 会拒绝配方变化。
 
-在划分和 max_train_episodes 后建立 train/val 窗口。对 H 长窗口，sampler 的 padding 映射是：
+在划分和 max_train_episodes 后建立 train/val 窗口。对 H 长窗口，sampler 的 padding 映射及数值/dispatch 资格是（启用时间筛选时还须满足下述时间条件）：
 
 ```text
 r = clip(buffer_start + arange(H) - sample_start, buffer_start, buffer_end - 1)
@@ -25,7 +25,9 @@ obs_valid[r[:N]].all() & action_valid[r[:H]].all() & dispatch_valid[r[:H]].all()
 
 部署从 checkpoint 恢复 normalizer，不读取训练数据拟合。训练恢复也直接读取保存统计；数据配方加入现有续训一致性检查，新配方不是旧实验的无缝续训。精确复现旧训练请使用其源版本；不迁移旧缓存、不覆盖历史模型。推理式 async/rtc 不要求为了算法本身重新训练。
 
-Dataset 的窗口仍按实际记录行索引（recorded_rows）构造，缺失与不规则时间不自动修补。时间质量摘要不自动改变窗口资格；仅显式启用 manifest 时，才在 data_recipe 中增加相应划分记录。
+Dataset 的窗口仍按实际记录行索引（recorded_rows）构造，不修补时间、不压紧坏行。新 Real 训练默认 `max_time_gap_ratio=1.5`，要求 H 窗口内真实源行时间为正、相邻不同源行满足 0<Δt≤ratio×canonical 保存的 dt；H=1 同样拒绝未知时间，padding 重复源行不构成零间隔。通过 Hydra 可用 `+dataset.max_time_gap_ratio=null` 显式禁用，data_recipe 记录 unfiltered；这是一项研究资格选择，不是安全阈值或 QA 自动过滤。仿真配方不增加时间规则。
+
+恢复在 Dataset 构造前解析 checkpoint 的 data_recipe：保存的新规则直接恢复；已知 role_finite_v1/unique_train_source_rows 旧规则缺键时维持无时间筛选及原 recipe 表示，不注入新计数或默认值。证据不足拒绝 full resume，推理不受影响。normalizer 继续从 checkpoint 严格恢复。Policy-aligned VQ 与 usage 采用同一保存规则；统计改变时需重新建立对齐码本，不放宽 hand affine 一致性。旧 Raw、配置、码本与 checkpoint 均不原地改写。
 
 Zarr reader 按进程重开句柄，只保留选中字段和每字段一个有界当前 chunk；训练期间不得替换当前读取的缓存。normalizer 单遍合并统计，mixed action 的 xyz/hand 使用 limits、rot6d 保持 identity，辅助 EE 切片与唯一训练源行权重不变。多任务 Dataset 读取固定真实索引，训练与 deterministic validation 都由 `ResumableDistributedSampler` 产生顺序；不创建 Manager，也不在 worker 中维护 epoch 表。
 
@@ -33,11 +35,11 @@ Zarr reader 按进程重开句柄，只保留选中字段和每字段一个有�
 
 `PolicyInfo.horizon` 提供 H，N=n_obs_steps，P=H-N+1。LoadedPolicy.predict(observation, *, rtc_prefix=None, delay_steps=0) 返回物理控制子空间的 (P,C) NumPy 数组，起点是模型索引 N-1，C 为 joint19 或 EEF21。内部 Agent 的 pred_action/control_action/tail 约定不变，不额外运行网络获取 tail。
 
-Real 只提供物理数组和时序；Policy 负责 checkpoint affine 归一化。joint+aux 的 28 维统计只取实际 19 个控制维给前缀归一化一次，不向辅助输出填造目标。Policy 在每次 predict 已有的 CPU/float64 转换后，检查实际返回的 (P,C) 控制 future 全部有限；NaN/Inf 直接报错，不替换动作。warmup 复用此检查，Real 执行器已有检查仍保留。这不代表真机安全或闭环质量已验收。
+Real 只提供物理数组和时序；Policy 负责 checkpoint affine 归一化。joint+aux 的 28 维统计只取实际 19 个控制维给前缀归一化一次，不向辅助输出填造目标。Policy 检查 pred_action 的 tensor、batch/horizon/control 结构及浮点类型，返回完整 (P,C) CPU float64 future，包括 NaN/Inf。Real 在准入执行前拒绝非有限值，并将归属正确且未结束 attempt 的合法浮点数组留存 NPZ；严格 JSON 不保存非有限数。独立 warmup 则检查初始化、测量和测试 prefix 的所有输出，发现非有限值直接失败。这不代表真机安全或闭环质量已验收。
 
-warmup 的 `rtc_delay` 必须为非 bool 整数且满足 0≤delay≤P。`guidance_cap=0` 时不构造 prefix，内部按 delay=0 执行普通采样，不额外消耗预测或随机数；正 cap 保留引导路径。公共 predict 仍拒绝无 prefix 时传非零 delay。
+warmup 的 `rtc_delay` 必须为非 bool 整数且满足 0≤delay≤P。`guidance_cap=0` 时不构造 prefix，内部按 delay=0 执行普通采样；正 cap 使用配置 delay。bootstrap 普通路径和 steady 路径各自先初始化一次，再返回命名的少量耗时集合；sync/async/beta=0 复用同一普通测量，正 cap 的 prefix 从初始化结果取得并复用。初始化不计入测量；预热前后 reset，保证相同 seed 的首次实际推理不变。测量包含 RGB 预处理、模型及 CPU 返回，不包括 Real 观测构建、IK、owner 与 SDK。公共 predict 仍拒绝无 prefix 时传非零 delay。
 
-`configure_execution('rtc', beta)` 显式配置 RTC，未支持的 agent/decoder 报 NotImplementedError。当前为连续动作 BaseAgent + Diffusion 的 DDIM 路径；DP/DP3/R3D 的 UNet、OneWayTransformer 已有 CPU VJP 测试。SAT、DQRise、flow 等未适配路径仍可使用原有 sync/async，不会将 RTC 请求默默降级。模式调度和硬件预算由 dexmani_real 管理。
+`configure_execution(mode, guidance_cap)` 只配置推理模式；Real 串行 worker 随后独立调用 `warmup(samples=..., rgb_hw=..., rtc_delay=...)`，取得 bootstrap/steady 测量。`configure_execution('rtc', beta)` 显式配置 RTC，未支持的 agent/decoder 报 NotImplementedError。当前为连续动作 BaseAgent + Diffusion 的 DDIM 路径；DP/DP3/R3D 的 UNet、OneWayTransformer 已有 CPU VJP 测试。SAT、DQRise、flow 等未适配路径仍可使用原有 sync/async，不会将 RTC 请求默默降级。模式调度和硬件预算由 dexmani_real 管理。
 
 ## DDIM-adapted guidance
 
@@ -72,3 +74,5 @@ python dexmani_policy/smoke_test.py --config-only dp dp3 r3d sat dqrise maniflow
 测试覆盖生产 Dataset/sampler/normalizer、三种 prediction_type、RTC-off 逐元素等价与 RNG、非平凡 Jacobian 有限差分、辅助维耦合、history offset、clip/base/最终投影、28→19 维统计和实际 backbone 的 input VJP。临时 checkpoint 仅用于验证保存统计不重拟合。
 
 这些测试不使用真实设备，也不证明真实训练权重的闭环质量。实际 GPU 延迟/内存与新 sync/async/rtc 的任务收益必须使用适用 checkpoint 在同权重、seed、NFE、观察协议及预算下另行验证。
+
+单任务训练在模型构建时核对 Dataset 声明与实际 `consumed_observation_fields`；部署在模型恢复后、连接设备前复用同一核对。辅助监督与训练元数据不属于输入相等关系。MultiTask 保留 Agent 外层消费的 task_text，训练/仿真不受真机支持范围限制；当前真机尚无任务选择和 child 数值配方恢复，明确拒绝。

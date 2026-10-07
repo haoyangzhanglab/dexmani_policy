@@ -319,7 +319,7 @@ def test_resume_normalizer_uses_supplied_payload(policy_config, tmp_path, monkey
     # This fixture exercises simulation dataset metadata, not real robot deployment.
     root=zarr.open_group(policy_config.dataset.zarr_path,mode='a'); root.attrs['domain']='sim'
     _, normalizer=build_dataset_and_normalizer(policy_config)
-    payload=SimpleNamespace(model_state={'normalizer.'+k:v for k,v in normalizer.state_dict().items()})
+    payload=SimpleNamespace(resume_contract={'data_recipe': OmegaConf.to_container(policy_config.data_recipe)}, model_state={'normalizer.'+k:v for k,v in normalizer.state_dict().items()})
     policy_config.resume_from=str(tmp_path/'checkpoint.pt')
     monkeypatch.setattr(CheckpointStore,'load',lambda *a:pytest.fail('second full checkpoint read'))
     _, restored=build_dataset_and_normalizer(policy_config,resume_checkpoint=payload)

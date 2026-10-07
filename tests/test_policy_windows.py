@@ -11,6 +11,8 @@ def dataset(tmp_path, *, real=False, status=True, obs_bad=(), action_bad=(), aux
     root.create_dataset("meta/episode_ends", data=np.array([6, 12, 18, 24]))
     if real:
         root.attrs["format"] = "dexmani.real.canonical"
+        root.attrs["dt"] = 0.1
+        root.create_dataset("row_info/observation_timestamp_ns", data=(np.arange(24, dtype="i8") + 1) * 100_000_000)
     obs = np.arange(24, dtype=np.float32)[:, None]
     actions = obs.copy()
     aux = np.repeat(obs, 21, axis=1)
@@ -113,7 +115,7 @@ def test_resume_uses_saved_statistics_without_refitting(tmp_path, monkeypatch):
         None,
         {},
         {},
-        {},
+        {"data_recipe": [ds.data_recipe]},
         None,
         None,
         [{}],
@@ -142,3 +144,101 @@ def test_resume_uses_saved_statistics_without_refitting(tmp_path, monkeypatch):
     _, actual = build_dataset_and_normalizer(cfg)
     for key, value in saved.state_dict().items():
         torch.testing.assert_close(actual.state_dict()[key], value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("stamps", [
+    [100, 200, 300, 400, 100, 200, 300, 400],
+    [100, 200, 800, 900, 100, 200, 300, 400],
+    [100, 200, 150, 250, 100, 200, 300, 400],
+    [100, 0, 300, 400, 100, 200, 300, 400],
+])
+@pytest.mark.parametrize("horizon", [1, 3])
+@pytest.mark.parametrize("dtype", ["i8", "u8"])
+def test_time_rule_real_source_rows_and_padding(tmp_path, stamps, horizon, dtype):
+    path = tmp_path / "time.zarr"
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs.update(format="dexmani.real.canonical", dt=1e-7)
+    root.create_dataset("meta/episode_ends", data=np.array([4, 8]))
+    for key in ("action", "joint_state"):
+        root.create_dataset("data/" + key, data=np.arange(8, dtype="f4")[:, None])
+    root.create_dataset("row_info/dispatch_status", data=np.ones((8, 2), "u1"))
+    root.create_dataset("row_info/observation_timestamp_ns", data=np.array(stamps, dtype=dtype))
+    kwargs = {'horizon':horizon, 'obs_horizon':1, 'pad_before':horizon-1, 'pad_after':horizon-1}
+    unfiltered = BaseDataset(str(path), max_time_gap_ratio=None, **kwargs)
+    actual = BaseDataset(str(path), **kwargs)
+    expected = []
+    for row in unfiltered.sampler.source_rows():
+        unique = list(dict.fromkeys(row.tolist()))
+        if all(stamps[i] > 0 for i in unique) and all(0 < int(stamps[unique[k]])-int(stamps[unique[k-1]]) <= 150 for k in range(1,len(unique))):
+            expected.append(row)
+    np.testing.assert_array_equal(actual.sampler.source_rows(), expected)
+    assert all(len(set(row // 4)) == 1 for row in expected)
+    np.testing.assert_array_equal(actual.sampler.action_source_rows, np.unique(expected))
+    np.testing.assert_array_equal(actual.sampler.observation_source_rows, np.unique(np.array(expected)[:, :1]))
+    assert actual.sampler.validity_summary['time'] == len(unfiltered)-len(actual)
+    assert actual.data_recipe['time_filter']['max_time_gap_ratio'] == 1.5
+    assert unfiltered.data_recipe['time_filter']['status'] == 'unfiltered'
+
+
+@pytest.mark.parametrize('ratio', [True, False, 0, -1, float('nan'), float('inf')])
+def test_time_ratio_rejected(tmp_path, ratio):
+    with pytest.raises(ValueError, match='max_time_gap_ratio'):
+        dataset(tmp_path, max_time_gap_ratio=ratio)
+
+
+def test_time_metadata_is_required_only_for_enabled_real_rule(tmp_path):
+    ds = dataset(tmp_path, real=True)
+    root = zarr.open_group(ds.zarr_path, mode='a')
+    del root['row_info/observation_timestamp_ns']
+    with pytest.raises(ValueError, match='observation_timestamp_ns'):
+        BaseDataset(ds.zarr_path)
+    assert len(BaseDataset(ds.zarr_path, max_time_gap_ratio=None)) == 24
+    root.attrs['format'] = 'simulation'
+    sim = BaseDataset(ds.zarr_path)
+    assert 'time_filter' not in sim.data_recipe and 'time' not in sim.sampler.validity_summary
+    root.attrs['format'] = 'dexmani.real.canonical'
+    root.create_dataset('row_info/observation_timestamp_ns', data=np.zeros((24,1),dtype='f4'))
+    with pytest.raises(ValueError, match='1D integer'):
+        BaseDataset(ds.zarr_path)
+
+
+@pytest.mark.parametrize('rule', ['legacy', 'filtered', 'unfiltered'])
+def test_resume_time_rule_precedes_dataset_and_preserves_contract(tmp_path, monkeypatch, rule):
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+
+    from dexmani_policy.training.build_utils import build_dataset_and_normalizer
+    from dexmani_policy.training.resume import validate_resume_contract
+    ds = dataset(tmp_path, real=True)
+    root = zarr.open_group(ds.zarr_path, mode='a')
+    root.attrs.update(task_name='test', dt=.1)
+    stamps = root['row_info/observation_timestamp_ns'][:]
+    stamps[3:] += 2_000_000_000
+    root['row_info/observation_timestamp_ns'][:] = stamps
+    cfg = OmegaConf.create({'task_name':'test', 'action_key':'action',
+        'normalization':{'action':'limits','joint_state':'limits'},
+        'dataset':{'_target_':'dexmani_policy.datasets.base_dataset.BaseDataset',
+                   'zarr_path':ds.zarr_path,'horizon':4,'obs_horizon':2,'pad_before':1,'pad_after':2,
+                   'max_time_gap_ratio':1.5 if rule=='filtered' else None}})
+    initial, normalizer = build_dataset_and_normalizer(cfg)
+    saved = OmegaConf.to_container(cfg.data_recipe)
+    if rule == 'legacy':
+        del saved[0]['time_filter']
+    checkpoint = SimpleNamespace(resume_contract={'data_recipe': saved},
+        model_state={'normalizer.'+k:v for k,v in normalizer.state_dict().items()})
+    cfg.resume_from = str(tmp_path/'old.pt')
+    cfg.dataset.max_time_gap_ratio = .1  # A current default must not alter a saved rule.
+    monkeypatch.setattr('dexmani_policy.training.build_utils.build_normalizer',
+                        lambda *a: pytest.fail('refit historical statistics'))
+    restored, norm = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
+    np.testing.assert_array_equal(restored.sampler.source_rows(), initial.sampler.source_rows())
+    np.testing.assert_array_equal(restored.sampler.action_source_rows, initial.sampler.action_source_rows)
+    assert OmegaConf.to_container(cfg.data_recipe) == saved
+    validate_resume_contract({'facts_format':1,'data_recipe':saved},
+                             {'facts_format':1,'data_recipe':OmegaConf.to_container(cfg.data_recipe)})
+    for key, value in normalizer.state_dict().items():
+        np.testing.assert_array_equal(norm.state_dict()[key], value)
+    checkpoint.resume_contract = {}
+    with pytest.raises(ValueError, match='saved data_recipe'):
+        build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)

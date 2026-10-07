@@ -116,6 +116,8 @@ def policy_config(tmp_path):
     path = tmp_path / "data.zarr"
     root = zarr.open_group(str(path), mode="w")
     root.attrs["domain"] = "real"
+    root.attrs["dt"] = 0.1
+    root.create_dataset("row_info/observation_timestamp_ns", data=(np.arange(24, dtype="i8") + 1) * 100_000_000)
     root.create_dataset("meta/episode_ends", data=np.arange(6, 25, 6))
     root.create_dataset(
         "data/action",
@@ -404,3 +406,22 @@ def test_standalone_recipe_keeps_full_data_statistics(policy_config):
     _, _, normalizer, metadata = vq.prepare_standalone_data(args)
     assert normalizer["hand"].params_dict["scale"][0] == pytest.approx(2 / 23)
     assert metadata["train_frame_count"] == 18
+
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_usage_restores_time_rule_and_old_source_rows(policy_config,tmp_path,legacy):
+    from scripts.training.measure_vq_usage import measure
+    root=zarr.open_group(policy_config.dataset.zarr_path,mode='a')
+    stamps=root['row_info/observation_timestamp_ns'][:]
+    stamps[9:] += 1_000_000_000
+    root['row_info/observation_timestamp_ns'][:]=stamps
+    policy_config.dataset.max_time_gap_ratio=None if legacy else 1.5
+    checkpoint, metadata=usage_checkpoint(policy_config,tmp_path)
+    if legacy:
+        payload=torch.load(checkpoint,weights_only=False)
+        del payload['split_metadata']['data_recipe']['time_filter']
+        del payload['split_metadata']['resolved_dataset']['max_time_gap_ratio']
+        torch.save(payload,checkpoint)
+    result=measure(str(checkpoint),policy_config.dataset.zarr_path)
+    assert sum(result['nn_counts'])==len(metadata['train_source_rows'])

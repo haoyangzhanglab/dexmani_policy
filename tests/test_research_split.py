@@ -206,7 +206,7 @@ def test_training_builder_restores_saved_actual_split_without_source_file(tmp_pa
              'val_mask': [False, False, True, True, False]}
     normalizer = LinearNormalizer()
     normalizer.fit_field('action', np.array([[-2.], [7.]], dtype='float32'), mode='limits')
-    checkpoint = SimpleNamespace(resume_contract={'data_recipe': [{'split_manifest': saved}]},
+    checkpoint = SimpleNamespace(resume_contract={'data_recipe': [{'split_manifest': saved, 'window_validity': 'role_finite_v1', 'normalization': 'unique_train_source_rows'}]},
         model_state={'normalizer.' + k: v for k, v in normalizer.state_dict().items()})
     cfg = OmegaConf.create({'dataset': {'_target_': 'dexmani_policy.datasets.base_dataset.BaseDataset',
         'zarr_path': str(path), 'split_manifest': str(mp), 'max_train_episodes': 1,

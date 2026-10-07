@@ -69,6 +69,9 @@ def measure(
             raise ValueError("Policy-aligned usage requires the saved dataset path")
         if action_key != cfg.action_key or tcp_dim != int(cfg.agent.tcp_dim):
             raise ValueError("Usage action layout must match the saved Policy")
+        from dexmani_policy.datasets.base_dataset import restored_time_filter_kwargs
+        for key, value in restored_time_filter_kwargs(metadata.get("data_recipe")).items():
+            cfg.dataset[key] = value
         saved_split = metadata.get("data_recipe", {}).get("split_manifest")
         if saved_split is not None or cfg.dataset.get("split_manifest") is not None:
             required = {"content", "sha256", "actual_train_ids", "train_mask", "val_mask"}

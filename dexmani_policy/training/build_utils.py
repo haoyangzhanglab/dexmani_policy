@@ -1,7 +1,7 @@
 """Dataset, model and optimizer construction for training and integration smoke."""
 
-import math
 import copy
+import math
 from collections.abc import Mapping
 
 import hydra
@@ -89,14 +89,26 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     calling this function (DDP paths call ``OmegaConf.resolve(cfg)`` in the
     parent process before ``mp.spawn``).
     """
+    if cfg.get("resume_from") is not None and resume_checkpoint is None:
+        from pathlib import Path
+
+        from dexmani_policy.training.checkpoint import CheckpointStore
+        path = Path(cfg.resume_from)
+        resume_checkpoint = CheckpointStore(path.parent).load(path)
     spec = resolve_normalization_spec(cfg)
     dataset_cfg = copy.deepcopy(cfg.dataset)
     saved_recipes = getattr(resume_checkpoint, "resume_contract", {}).get("data_recipe")
+    if cfg.get("resume_from") is not None and saved_recipes is None:
+        raise ValueError("Full resume requires saved data_recipe evidence for time rules")
     if saved_recipes is not None:
+        from dexmani_policy.datasets.base_dataset import restored_time_filter_kwargs
         children = dataset_cfg.get("datasets", [dataset_cfg])
         if len(children) != len(saved_recipes):
             raise ValueError("Saved data_recipe task count does not match dataset")
         for child, recipe in zip(children, saved_recipes):
+            with open_dict(child):
+                for key, value in restored_time_filter_kwargs(recipe).items():
+                    child[key] = value
             if "split_manifest" in recipe:
                 with open_dict(child):
                     child.saved_split = recipe["split_manifest"]
@@ -119,13 +131,9 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
         else:
             cfg.pop("real_runtime", None)
     if cfg.get("resume_from") is not None:
-        from pathlib import Path
+        from dexmani_policy.training.checkpoint import fix_state_dict
 
-        from dexmani_policy.training.checkpoint import CheckpointStore, fix_state_dict
-
-        path = Path(cfg.resume_from)
-        checkpoint = resume_checkpoint if resume_checkpoint is not None else CheckpointStore(path.parent).load(path)
-        state = fix_state_dict(checkpoint.model_state, is_current_ddp=False)
+        state = fix_state_dict(resume_checkpoint.model_state, is_current_ddp=False)
         normalizer = LinearNormalizer()
         normalizer.load_state_dict(
             {
@@ -188,6 +196,12 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
             cfg, fix_state_dict(checkpoint.model_state, False), for_resume=True
         )
     model = hydra.utils.instantiate(model_cfg.agent)
+    from dexmani_policy.utils.validation import validate_observation_fields
+    if "datasets" in cfg.dataset:
+        for child in cfg.dataset.datasets:
+            validate_observation_fields(model, (*child.get("sensor_modalities", ("joint_state",)), "task_text"))
+    else:
+        validate_observation_fields(model, cfg.dataset.get("sensor_modalities", ("joint_state",)))
     # Store local HF architecture and closed-text dimensions in the owning config.
     rgb = getattr(getattr(model, "obs_encoder", None), "backbone", None)
     with open_dict(cfg.agent):
@@ -297,7 +311,7 @@ def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int) -> No
     rows = [
         (
             "temporal sampling",
-            "recorded_rows (no interpolation; irregular intervals retained)",
+            "recorded_rows (no interpolation; eligibility follows data_recipe)",
         ),
         ("per-device batch", per_device_batch),
         ("world size", world_size),

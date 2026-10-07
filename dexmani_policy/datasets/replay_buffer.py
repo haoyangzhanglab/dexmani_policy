@@ -78,6 +78,16 @@ class ReplayBuffer:
         buffer._data = None
         return buffer
 
+    def observation_timestamps(self):
+        """Read only the integer evidence required by the Real time recipe."""
+        root = zarr.open_group(self._path, mode="r") if self._path else None
+        if root is None or "row_info/observation_timestamp_ns" not in root:
+            raise ValueError("Time filtering requires row_info/observation_timestamp_ns; unknown Raw times cannot be reconstructed")
+        stamps = root["row_info/observation_timestamp_ns"]
+        if stamps.shape != (int(self.episode_ends[-1]),) or stamps.dtype.kind not in "iu":
+            raise ValueError("observation_timestamp_ns must be a 1D integer array with one timestamp per source row")
+        return np.asarray(stamps[:])
+
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_group"] = state["_pid"] = None

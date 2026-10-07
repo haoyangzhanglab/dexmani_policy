@@ -158,6 +158,10 @@ class MultiTaskAgent(BaseAgent):
                 self.task_emb_table.copy_(table.to(self.task_emb_table))
             self._needs_text_initialization = False
 
+    @property
+    def consumed_observation_fields(self):
+        return (*self.obs_encoder.consumed_observation_fields, "task_text")
+
     def get_text_emb(self, task_texts):
         if self.task_emb_table is not None:
             unknown = [t for t in task_texts if t not in self.task_to_idx]

@@ -44,7 +44,7 @@ def list_experiments(filter=None):
         sorted(
             str(path.parent.relative_to(_EXPERIMENTS_ROOT))
             for path in _EXPERIMENTS_ROOT.rglob("config.yaml")
-            if (path.parent / "checkpoints/latest.pt").is_file()
+            if any(p.is_file() for p in (path.parent / "checkpoints").glob("*.pt"))
             and (filter is None or filter.casefold() in str(path.parent).casefold())
         )
     )
@@ -73,11 +73,16 @@ def inspect_policy(
 ):
     directory = resolve_experiment(experiment)
     cfg = load_experiment_config(directory) if config is None else config
+    if (
+        cfg["agent"].get("_target_") == "dexmani_policy.agents.core.multi_task.MultiTaskAgent"
+        or cfg["dataset"].get("_target_") == "dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset"
+    ):
+        raise NotImplementedError("MultiTask Real deployment lacks task selection and child numerical recipe restoration")
     resolved_best = resolve_best_checkpoint(directory) if checkpoint == "best" else None
     path = (
         resolved_best[1] if resolved_best is not None else resolve_checkpoint(directory, checkpoint)
     )
-    defaults = dict(cfg["eval"])
+    defaults = dict(cfg.get("eval", {})) if weights is None or inference_steps is None else {}
     if resolved_best is not None:
         inference = resolved_best[0].get("inference", {})
         if not isinstance(inference, dict):
@@ -131,11 +136,23 @@ def load_policy(config, info, *, device="cuda:0", seed=0):
     agent = restore_policy_agent(
         config, info.checkpoint_path, use_ema=info.weights == "ema", device=device
     )
-    return LoadedPolicy(agent, config, info, device=device, seed=seed)
+    try:
+        return LoadedPolicy(agent, config, info, device=device, seed=seed)
+    except BaseException:
+        close = getattr(agent, "close", None)
+        if close is not None:
+            close()
+        agent.to("cpu")
+        raise
 
 
 class LoadedPolicy:
     def __init__(self, agent, config, info, *, device, seed):
+        from dexmani_policy.utils.validation import validate_observation_fields
+        consumed = getattr(agent, "consumed_observation_fields", ())
+        if "task_text" in consumed:
+            raise NotImplementedError("MultiTask Real deployment lacks task selection and child numerical recipe restoration")
+        validate_observation_fields(agent, info.observation_fields, require_declaration=True)
         self.agent = agent
         self.info = info
         self._rgb = rgb_preprocessing_kwargs(config["dataset"])
@@ -156,25 +173,18 @@ class LoadedPolicy:
         if reset is not None:
             reset()
 
-    def configure_execution(
-        self, mode, guidance_cap=None, *, warmup=False, rgb_hw=None, rtc_delay=0
-    ):
+    def configure_execution(self, mode, guidance_cap=None):
         if mode == "rtc":
             self.configure_rtc(guidance_cap)
         elif mode in {"sync", "async"}:
             self.rtc_guidance_cap = 0.0
         else:
             raise ValueError("Unsupported execution mode")
-        if warmup:
-            return self.warmup(
-                samples=1, rgb_hw=rgb_hw, rtc_delay=rtc_delay if mode == "rtc" else 0
-            )
 
     def configure_rtc(self, guidance_cap):
         from dexmani_policy.agents.action_decoders.diffusion import Diffusion
         from dexmani_policy.agents.action_decoders.rtc import validate_scheduler
         from dexmani_policy.agents.core.base import BaseAgent
-        from dexmani_policy.agents.normalization import SingleFieldLinearNormalizer
 
         if (
             type(self.agent).predict_action is not BaseAgent.predict_action
@@ -182,8 +192,6 @@ class LoadedPolicy:
             or not isinstance(self.agent.action_decoder, Diffusion)
         ):
             raise NotImplementedError("RTC supports continuous BaseAgent DDIM agents only")
-        if not isinstance(self.agent.normalizer["action"], SingleFieldLinearNormalizer):
-            raise NotImplementedError("RTC requires an affine action normalizer")
         validate_scheduler(
             self.agent.action_decoder.noise_scheduler, self.info.inference_steps, guidance_cap
         )
@@ -233,17 +241,18 @@ class LoadedPolicy:
                 tensors, inference_steps=self.info.inference_steps, **kwargs
             )
         # Core callers keep their A-step control_action convention. Real needs P.
-        control = result["pred_action"][:, self.info.n_obs_steps - 1 :, :dimensions]
-        expected = (1, self.info.horizon - self.info.n_obs_steps + 1, dimensions)
+        prediction = result.get("pred_action") if isinstance(result, dict) else None
         if (
-            not torch.is_tensor(control)
-            or tuple(control.shape) != expected
-            or not control.is_floating_point()
+            not torch.is_tensor(prediction) or prediction.ndim != 3
+            or tuple(prediction.shape[:2]) != (1, self.info.horizon)
+            or prediction.shape[2] < dimensions or not prediction.is_floating_point()
         ):
+            raise ValueError(f"Policy future requires floating pred_action (1, {self.info.horizon}, >= {dimensions})")
+        control = prediction[:, self.info.n_obs_steps - 1 :, :dimensions]
+        expected = (1, self.info.horizon - self.info.n_obs_steps + 1, dimensions)
+        if tuple(control.shape) != expected:
             raise ValueError(f"Policy future must be floating point {expected}")
         future = control.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
-        if not np.isfinite(future).all():
-            raise ValueError("Nonfinite policy control future")
         return future
 
     def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0):
@@ -281,17 +290,34 @@ class LoadedPolicy:
                 if dtype == np.uint8
                 else ((values % 101) / 100.0 - 0.5).astype(dtype)
             )
-        durations = []
+        def checked_predict(**kwargs):
+            output = self.predict(observation, **kwargs)
+            if not np.isfinite(output).all():
+                raise ValueError("Nonfinite policy warmup future")
+            return output
+
+        def measure(**kwargs):
+            durations = []
+            for _ in range(samples):
+                start = time.perf_counter_ns()
+                checked_predict(**kwargs)
+                durations.append((time.perf_counter_ns() - start) / 1e9)
+            return tuple(durations)
+
         self.reset_episode()
         try:
-            for _ in range(samples):
-                prefix = self.predict(observation) if self.rtc_guidance_cap > 0 else None
-                start = time.perf_counter()
-                self.predict(observation, rtc_prefix=prefix, delay_steps=rtc_delay if prefix is not None else 0)
-                durations.append(time.perf_counter() - start)
+            # Initialization is outside the measured set; its finite result is the
+            # reusable synthetic prefix in physical units for the guided path.
+            prefix = checked_predict()
+            bootstrap = measure()
+            steady = bootstrap
+            if self.rtc_guidance_cap > 0:
+                kwargs = {"rtc_prefix": prefix, "delay_steps": rtc_delay}
+                checked_predict(**kwargs)
+                steady = measure(**kwargs)
+            return {"bootstrap": bootstrap, "steady": steady}
         finally:
             self.reset_episode()
-        return tuple(durations)
 
     def close(self):
         if self.agent is None:

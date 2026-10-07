@@ -14,6 +14,7 @@ from dexmani_policy.deployment.runtime import LoadedPolicy
 
 def boundary_policy(mode='joint'):
     class Agent(nn.Module):
+        consumed_observation_fields = ("joint_state",)
         def __init__(self):
             super().__init__()
             self.value = None
@@ -35,16 +36,17 @@ def boundary_policy(mode='joint'):
 
 @pytest.mark.parametrize('mode,dimensions', [('joint',19), ('eef',21)])
 @pytest.mark.parametrize('bad', [float('nan'),float('inf'),-float('inf')])
-def test_predict_rejects_nonfinite_control_future(mode, dimensions, bad):
+def test_predict_returns_nonfinite_control_future_for_real_admission(mode, dimensions, bad):
     policy = boundary_policy(mode)
     policy.agent.value = torch.zeros(1,4,24)
     policy.agent.value[0,1,dimensions-1] = bad
-    with pytest.raises(ValueError, match='Nonfinite'):
-        policy.predict({'joint_state': np.zeros((2,19),np.float32)})
+    output = policy.predict({'joint_state': np.zeros((2,19),np.float32)})
+    assert output.dtype == np.float64 and output.shape == (3, dimensions)
+    assert np.isnan(output[0, dimensions-1]) if np.isnan(bad) else output[0, dimensions-1] == bad
 
 
 @pytest.mark.parametrize('mode,dimensions', [('joint',19), ('eef',21)])
-def test_predict_checks_only_returned_future_and_accepts_strides(mode, dimensions):
+def test_predict_slices_control_future_and_accepts_strides(mode, dimensions):
     policy = boundary_policy(mode)
     value = torch.zeros(1,24,4).transpose(1,2)
     assert not value.is_contiguous()
@@ -63,17 +65,21 @@ def test_warmup_zero_cap_uses_plain_path(cap, delay):
     policy = boundary_policy(); policy.rtc_guidance_cap = cap
     torch.manual_seed(23)
     durations = policy.warmup(samples=2, rtc_delay=delay)
-    assert len(durations) == 2 and policy.agent.resets == 2
-    assert len(policy.agent.calls) == (2 if cap == 0 else 4)
+    assert set(durations) == {'bootstrap', 'steady'} and policy.agent.resets == 2
+    assert all(len(group) == 2 for group in durations.values())
+    assert len(policy.agent.calls) == (3 if cap == 0 else 6)
     if cap == 0:
-        assert all('rtc_prefix' not in call and 'delay_steps' not in call for call in policy.agent.calls)
-        after = torch.get_rng_state()
-        outputs = policy.agent.outputs[:]
-        policy.warmup(samples=2,rtc_delay=0)
-        for left,right in zip(outputs,policy.agent.outputs[2:]): torch.testing.assert_close(left,right,rtol=0,atol=0)
-        assert torch.equal(after,torch.get_rng_state())
+        assert durations['steady'] is durations['bootstrap']
+        assert all('rtc_prefix' not in call for call in policy.agent.calls)
     else:
-        assert policy.agent.calls[1]['delay_steps'] == delay
+        assert all('rtc_prefix' not in call for call in policy.agent.calls[:3])
+        guided = policy.agent.calls[3:]
+        assert all(call['delay_steps'] == delay for call in guided)
+        torch.testing.assert_close(guided[0]['rtc_prefix'], guided[-1]['rtc_prefix'])
+    obs = {'joint_state': np.zeros((2,19),np.float32)}
+    first = policy.predict(obs)
+    policy.warmup(samples=3,rtc_delay=delay)
+    np.testing.assert_array_equal(policy.predict(obs), first)
 
 
 @pytest.mark.parametrize('delay', [-1,4,True,1.5])
@@ -201,6 +207,7 @@ def test_weights_and_constant_denoiser():
 
 
 class Encoder(nn.Module):
+    consumed_observation_fields = ("joint_state",)
     def forward(self, obs):
         return obs["joint_state"].reshape(1, -1), {}
 
@@ -339,6 +346,7 @@ def test_history_and_tail_have_no_endpoint_residual():
 
 def test_bridge_future_starts_at_n_minus_one():
     class TemporalAgent(nn.Module):
+        consumed_observation_fields = ("joint_state",)
         def predict_action(self, obs, inference_steps=None):
             return {
                 "pred_action": torch.arange(16, dtype=torch.float32)[None, :, None].expand(
@@ -434,9 +442,102 @@ def test_execution_warmup_uses_requested_rtc_delay(mode, delay, cap):
         return original(observation, rtc_prefix=rtc_prefix, delay_steps=delay_steps)
 
     policy.predict = observe_call
-    durations = policy.configure_execution(
-        mode, cap if mode == "rtc" else None, warmup=True, rtc_delay=delay
-    )
-    assert len(durations) == 1 and np.isfinite(durations[0]) and durations[0] >= 0
-    assert calls == ([(False, 0), (True, delay)] if mode == "rtc" and cap > 0 else [(False, 0)])
+    policy.configure_execution(mode, cap if mode == "rtc" else None)
+    assert not calls
+    durations = policy.warmup(samples=1, rtc_delay=delay if mode == "rtc" else 0)
+    assert all(len(group) == 1 and np.isfinite(group[0]) and group[0] >= 0 for group in durations.values())
+    assert calls == ([(False, 0)] * 2 + [(True, delay)] * 2 if mode == "rtc" and cap > 0 else [(False, 0)] * 2)
     assert all(p.grad is None for p in agent.parameters())
+
+
+@pytest.mark.parametrize('cap', [0., 2.])
+def test_warmup_initialization_excluded_and_all_outputs_checked(monkeypatch, cap):
+    policy = boundary_policy()
+    policy.rtc_guidance_cap = cap
+    clock = SimpleNamespace(now=0)
+    monkeypatch.setattr('time.perf_counter_ns', lambda: clock.now)
+    original = policy.predict
+    calls = []
+    def predict(obs, **kwargs):
+        guided = kwargs.get('rtc_prefix') is not None
+        clock.now += 1_000_000_000 if guided not in calls else 10_000_000
+        calls.append(guided)
+        return original(obs, **kwargs)
+    policy.predict = predict
+    durations = policy.warmup(samples=2, rtc_delay=2)
+    assert durations == {'bootstrap': (.01,.01), 'steady': (.01,.01)}
+    assert calls == ([False]*3 + [True]*3 if cap else [False]*3)
+    for bad_call in range(len(calls)):
+        counter = [0]
+        def bad_predict(obs, *, _counter=counter, _bad_call=bad_call, **kwargs):
+            output = original(obs, **kwargs)
+            if _counter[0] == _bad_call:
+                output[0,0] = np.nan
+            _counter[0] += 1
+            return output
+        policy.predict = bad_predict
+        with pytest.raises(ValueError, match='Nonfinite'):
+            policy.warmup(samples=2, rtc_delay=2)
+
+
+def test_loaded_input_declaration_and_structural_errors():
+    from dexmani_policy.utils.validation import validate_observation_fields
+    agent = SimpleNamespace(obs_encoder=SimpleNamespace(consumed_observation_fields=('joint_state','point_cloud')))
+    with pytest.raises(ValueError, match="missing=.*point_cloud.*unconsumed=.*tactile_force"):
+        validate_observation_fields(agent, ('joint_state','tactile_force'))
+    validate_observation_fields(agent, ('point_cloud','joint_state'), require_declaration=True)
+    with pytest.raises(ValueError, match='consumed_observation_fields'):
+        validate_observation_fields(object(), ('joint_state',), require_declaration=True)
+    policy = boundary_policy()
+    for value in (None, [], {'pred_action': None}, {'pred_action': torch.zeros(4,19)}, {'pred_action': torch.zeros(1,4,19,dtype=torch.int64)}):
+        policy.agent.predict_action = lambda *a, _value=value, **kw: _value
+        with pytest.raises(ValueError, match='Policy future'):
+            policy.predict({'joint_state':np.zeros((2,19),dtype='f4')})
+
+
+
+def test_explicit_inspection_without_eval_and_nonlatest_discovery(tmp_path, monkeypatch):
+    import yaml
+
+    from dexmani_policy.deployment import runtime
+    exp=tmp_path/'policy'/'task'/'run'
+    (exp/'checkpoints').mkdir(parents=True)
+    (exp/'checkpoints'/'epoch_1.pt').touch()
+    cfg={'policy_name':'policy','task_name':'task','action_key':'action',
+         'agent':{'horizon':4,'n_obs_steps':1,'n_action_steps':2},
+         'dataset':{'sensor_modalities':['joint_state']},'real_runtime':{'dt':.1}}
+    (exp/'config.yaml').write_text(yaml.safe_dump(cfg))
+    monkeypatch.setattr(runtime,'_EXPERIMENTS_ROOT',tmp_path)
+    assert runtime.list_experiments() == ('policy/task/run',)
+    info=runtime.inspect_policy(exp,checkpoint='epoch_1.pt',weights='raw',inference_steps=2)
+    assert info.inference_steps==2 and info.weights=='raw'
+    with pytest.raises(ValueError, match='use_ema'):
+        runtime.inspect_policy(exp,checkpoint='epoch_1.pt',inference_steps=2)
+    for section,target in [('agent','dexmani_policy.agents.core.multi_task.MultiTaskAgent'),
+                           ('dataset','dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset')]:
+        cfg[section]['_target_']=target
+        with pytest.raises(NotImplementedError, match='task selection.*child numerical'):
+            runtime.inspect_policy(exp,config=cfg,checkpoint='epoch_1.pt',weights='raw',inference_steps=2)
+        del cfg[section]['_target_']
+
+
+@pytest.mark.parametrize('declared', [('joint_state','point_cloud'), ('joint_state',), ('joint_state','point_cloud','tactile_force')])
+def test_training_model_boundary_checks_actual_inputs(monkeypatch, declared):
+    from omegaconf import OmegaConf
+    from test_infra_resume import TinyPolicy
+
+    from dexmani_policy.training.build_utils import build_model_and_ema
+    model = TinyPolicy(clip_sample=False)
+    model.obs_encoder.consumed_observation_fields = ('joint_state','point_cloud')
+    monkeypatch.setattr('hydra.utils.instantiate', lambda *a, **kw: model)
+    cfg = OmegaConf.create({'agent':{}, 'dataset':{'sensor_modalities':list(declared)},
+        'action_key':'action', 'normalization':{'action':'limits','joint_state':'identity','point_cloud':'identity'},
+        'training':{'use_ema':False}})
+    normalizer = LinearNormalizer()
+    normalizer.fit_field('action', np.array([[-1.], [1.]], dtype='f4'), mode='limits')
+    if declared != ('joint_state','point_cloud'):
+        with pytest.raises(ValueError, match='Model observation mismatch'):
+            build_model_and_ema(cfg, 'cpu', normalizer)
+    else:
+        actual, ema, _ = build_model_and_ema(cfg, 'cpu', normalizer)
+        assert actual is model and ema is None

@@ -14,7 +14,7 @@ def prefix_weights(length, delay, *, device, dtype):
     return torch.where(i < delay, torch.ones_like(i), z * torch.expm1(z) / math.expm1(1))
 
 
-def validate_scheduler(scheduler, steps, beta):
+def validate_scheduler(scheduler, steps, beta, *, device=None):
     if not isinstance(scheduler, DDIMScheduler) or scheduler.config.thresholding:
         raise NotImplementedError("RTC supports DDIM without dynamic thresholding only")
     if isinstance(beta, bool) or not math.isfinite(beta) or beta < 0:
@@ -25,6 +25,8 @@ def validate_scheduler(scheduler, steps, beta):
     alpha = scheduler.alphas_cumprod[scheduler.timesteps]
     if not bool(((alpha > 0) & (alpha < 1)).all()):
         raise NotImplementedError("RTC denoising timesteps require 0 < alpha_bar < 1")
+    if device is not None:
+        scheduler.timesteps = scheduler.timesteps.to(device=device)
 
 
 def clean_estimate(output, sample, a, b, prediction_type):
@@ -82,7 +84,7 @@ def predict_rtc(decoder, cond, template, prefix, *, delay, offset, beta, steps):
         raise ValueError("RTC prefix must be (batch, length, control_dim)")
     if not 0 <= delay <= length <= template.shape[1] - offset or control_dim > template.shape[2]:
         raise ValueError("Invalid RTC prefix horizon/control dimensions")
-    validate_scheduler(decoder.noise_scheduler, steps, beta)
+    validate_scheduler(decoder.noise_scheduler, steps, beta, device=template.device)
     with torch.inference_mode(False), torch.no_grad():
         cond = cond.detach().clone()
         sample = torch.randn_like(template, device=template.device)
@@ -93,7 +95,6 @@ def predict_rtc(decoder, cond, template, prefix, *, delay, offset, beta, steps):
             length, delay, device=sample.device, dtype=sample.dtype
         )[None, :, None]
         scheduler = decoder.noise_scheduler
-        scheduler.set_timesteps(steps, device=sample.device)
         for i, t in enumerate(scheduler.timesteps):
             sample = guided_step(
                 decoder.model,

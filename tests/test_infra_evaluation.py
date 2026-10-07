@@ -583,6 +583,7 @@ def test_saved_rgb_recipe_reaches_simulation_and_real(tmp_path, monkeypatch):
     runner.get_stacked_obs = lambda: {'rgb': raw.copy()}
     torch.testing.assert_close(runner.get_obs_batch('cpu')['rgb'], expected[None], rtol=0, atol=0)
     class Agent:
+        consumed_observation_fields = ("rgb",)
         def predict_action(self, obs, **kwargs):
             torch.testing.assert_close(obs['rgb'], expected[None], rtol=0, atol=0)
             return {'pred_action': torch.zeros(1, 16, 19)}
