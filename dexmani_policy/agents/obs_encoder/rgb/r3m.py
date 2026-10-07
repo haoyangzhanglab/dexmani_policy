@@ -138,7 +138,7 @@ class R3M(nn.Module):
         self.global_token_type = global_token_type
         self.output_stride = 32
 
-        # ── Build a standard ResNet and load R3M weights ──
+        # Build a standard ResNet and load R3M weights
         resnet_fn = getattr(torchvision.models, model_name)
         norm_layer = FrozenBatchNorm2d if norm_mode == "frozen_bn" else nn.BatchNorm2d
         backbone = resnet_fn(weights=None, norm_layer=norm_layer)
@@ -178,9 +178,7 @@ class R3M(nn.Module):
 
         self.set_tune_mode(tune_mode)
 
-    # ------------------------------------------------------------------
     # Tune mode
-    # ------------------------------------------------------------------
 
     def set_tune_mode(self, tune_mode: TuneMode) -> None:
         self.tune_mode = tune_mode
@@ -196,9 +194,7 @@ class R3M(nn.Module):
 
         raise ValueError(f"Unsupported tune_mode: {tune_mode}")
 
-    # ------------------------------------------------------------------
     # Feature extraction
-    # ------------------------------------------------------------------
 
     def get_global_token(self, feature_map: torch.Tensor) -> torch.Tensor:
         if self.global_token_type == "avg":
@@ -243,9 +239,7 @@ class R3M(nn.Module):
             "global_token": restore_batch(global_token, leading_shape),
         }
 
-    # ------------------------------------------------------------------
     # Geometry (RGB-D support — same pattern as ResNet)
-    # ------------------------------------------------------------------
 
     def backproject(
         self,
@@ -295,9 +289,7 @@ class R3M(nn.Module):
         return restore_batch(feature_map, leading_shape)
 
 
-# ------------------------------------------------------------------
 # Smoke test
-# ------------------------------------------------------------------
 
 
 def example() -> None:

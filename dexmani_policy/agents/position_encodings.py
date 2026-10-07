@@ -9,9 +9,7 @@ import torch.nn as nn
 
 POS_ENCODING_BASE = 10000.0
 
-# ---------------------------------------------------------------------------
 # 1D sinusoidal positional encoding (timestep / sequence position)
-# ---------------------------------------------------------------------------
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -50,9 +48,7 @@ class TimestepMLP(nn.Module):
         return self.net(t)
 
 
-# ---------------------------------------------------------------------------
 # 3D sinusoidal / relative positional encodings (point-cloud coordinates)
-# ---------------------------------------------------------------------------
 
 
 class NeRFSinusoidalPosEmb3D(nn.Module):

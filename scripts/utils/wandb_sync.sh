@@ -1,17 +1,8 @@
 #!/bin/bash
-# Sync offline W&B runs to the cloud.
-#
-# Usage:
-#   bash scripts/utils/wandb_sync.sh <run_dir>            # sync a single run
-#   bash scripts/utils/wandb_sync.sh --all [root_dir]     # sync all offline runs
-#   bash scripts/utils/wandb_sync.sh --dry-run --all      # list runs without syncing
-#
-# Examples:
-#   bash scripts/utils/wandb_sync.sh experiments/dp3/pour/2026-08-01_12-34-56/wandb/offline-run-20260401_111839-m6zq0mtq
-#   bash scripts/utils/wandb_sync.sh --all
-#   bash scripts/utils/wandb_sync.sh --all experiments
-#   bash scripts/utils/wandb_sync.sh --dry-run --all
-#
+# Sync offline W&B runs.
+# Usage: bash scripts/utils/wandb_sync.sh <run_dir>
+#        bash scripts/utils/wandb_sync.sh --all [root_dir] [--dry-run]
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

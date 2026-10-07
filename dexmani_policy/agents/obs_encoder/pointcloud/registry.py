@@ -31,7 +31,7 @@ PATCH_TOKENIZER_CONFIGS: Dict[str, Dict] = {
         "num_patches": 96,
         "patch_radii": (0.04, 0.08),
         "patch_neighbors": (16, 32),
-        # ── patch self-attention (disabled by default) ──
+        # patch self-attention (disabled by default)
         "use_patch_self_attn": False,
         "patch_attn_layers": 4,
         "patch_attn_heads": 4,

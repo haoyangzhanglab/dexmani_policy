@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
-# One-shot evaluation pipeline: select_best_ckpt → eval_best_ckpt.
-#
-# Runs selection and numerical held-out evaluation:
-#   1. Select the best checkpoint with a fixed initial stage and optional tie batch.
-#   2. Evaluate the best checkpoint on disjoint held-out seeds, without videos.
-# Demo recording is a separate explicit record_demo.sh command.
-#
-# Usage:
-#   bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>
-#   A valid manifest is required; SEED_MANIFEST overrides the saved config path.
-#   All stages share this invocation's selection record.
-#
-# Examples:
-#   bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56
-#   bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42
-#
+# Select a checkpoint, then evaluate disjoint held-out seeds without video.
+# Usage: bash scripts/eval/eval_pipeline.sh <policy> <task> <exp>
+# A valid manifest is required; SEED_MANIFEST overrides its saved path.
+# Both stages share this invocation's selection record; demos use record_demo.sh.
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

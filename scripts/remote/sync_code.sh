@@ -1,17 +1,7 @@
 #!/bin/bash
-# ============================================================================
-# sync_code.sh — Push source code to training server (fast, frequent)
-# ============================================================================
-# Usage:
-#   bash scripts/remote/sync_code.sh              # Sync code (default)
-#   bash scripts/remote/sync_code.sh --dry-run    # Preview what would change
-#
-# Design:
-#   - rsync -avz for source-text compression
-#   - --delete removes stale files on server that were deleted locally
-#   - Excludes data/robot_data/experiments (handled by sync_data.sh / sync_down.sh)
-#   - Excludes .git, __pycache__, wandb, outputs, and other generated dirs
-# ============================================================================
+# Sync source to the server; --delete removes stale source files.
+# Usage: bash scripts/remote/sync_code.sh [--dry-run]
+# Assets and generated files are excluded; use sync_data.sh / sync_down.sh.
 
 set -euo pipefail
 

@@ -80,7 +80,7 @@ def get_scheduler(
             final_div_factor=kwargs.get("final_div_factor", 1e4),
         )
 
-    # --- diffusers standard schedulers ---
+    # diffusers standard schedulers
     name = SchedulerType(name)
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
 

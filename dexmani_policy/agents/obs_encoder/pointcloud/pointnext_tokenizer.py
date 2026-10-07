@@ -59,7 +59,7 @@ class MultiScalePatchTokenizer(nn.Module):
         patch_radii: Tuple[float, ...],
         patch_neighbors: Tuple[int, ...],
         fps_random_config: dict | None = None,
-        # ── patch self-attention ──
+        # patch self-attention
         use_patch_self_attn: bool = False,
         patch_attn_layers: int = 4,
         patch_attn_heads: int = 4,
@@ -91,7 +91,7 @@ class MultiScalePatchTokenizer(nn.Module):
             PointMLP(token_channels, token_channels, use_activation=False),
         )
 
-        # ── patch self-attention (optional) ──
+        # patch self-attention (optional)
         if use_patch_self_attn:
             # Absolute position embedding on patch-center coordinates (additive,
             # analogous to SAT's ``mlp_global`` on FPS centers).
@@ -133,7 +133,7 @@ class MultiScalePatchTokenizer(nn.Module):
             )
         )
 
-        # ── optional self-attention over patches ──
+        # optional self-attention over patches
         if self.use_patch_self_attn:
             # Add absolute position embedding computed from patch centers.
             pos_emb = self.center_pos_embed(patch_center)  # (B, G, token_channels)
@@ -169,7 +169,7 @@ class PointNextPatchTokenizer(nn.Module):
         patch_radii: Tuple[float, ...] = (0.04, 0.08),
         patch_neighbors: Tuple[int, ...] = (16, 32),
         fps_random_config: dict | None = None,
-        # ── patch self-attention ──
+        # patch self-attention
         use_patch_self_attn: bool = False,
         patch_attn_layers: int = 4,
         patch_attn_heads: int = 4,
@@ -300,7 +300,7 @@ def example() -> None:
     rgb = torch.rand(batch_size, num_points, 3)
     pointcloud = torch.cat([xyz, rgb], dim=-1)
 
-    # ── baseline (no self-attention) ──
+    # baseline (no self-attention)
     pointnext_tokenizer = PointNextPatchTokenizer(
         input_channels=6,
         stem_channels=64,
@@ -327,7 +327,7 @@ def example() -> None:
     print("out_shape:", pointnext_tokenizer.out_shape)
     print()
 
-    # ── with self-attention + prepend global ──
+    # with self-attention + prepend global
     pointnext_attn = PointNextPatchTokenizer(
         input_channels=6,
         stem_channels=64,

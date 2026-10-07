@@ -16,10 +16,6 @@ import torch.nn.functional as F
 from einops import pack, rearrange, reduce, repeat, unpack
 from torch import einsum, nn
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
 
 def exists(val):
     return val is not None
@@ -55,9 +51,7 @@ def uniform_init(*shape):
     return t
 
 
-# ---------------------------------------------------------------------------
 # gumbel / straight-through
-# ---------------------------------------------------------------------------
 
 
 def gumbel_noise(t):
@@ -84,9 +78,7 @@ def gumbel_sample(logits, temperature=1.0, stochastic=False, straight_through=Fa
     return ind, one_hot
 
 
-# ---------------------------------------------------------------------------
 # dead-code handling
-# ---------------------------------------------------------------------------
 
 
 def laplace_smoothing(x, n_categories, eps=1e-5, dim=-1):
@@ -122,9 +114,7 @@ def batched_embedding(indices, embeds):
     return embeds.gather(2, indices)
 
 
-# ---------------------------------------------------------------------------
 # k-means initialisation (single-GPU)
-# ---------------------------------------------------------------------------
 
 
 def kmeans(samples, num_clusters, num_iters=10, use_cosine_sim=False):
@@ -159,11 +149,6 @@ def kmeans(samples, num_clusters, num_iters=10, use_cosine_sim=False):
         means = torch.where(rearrange(zero_mask, "... -> ... 1"), means, new_means)
 
     return means, bins
-
-
-# ===========================================================================
-# EuclideanCodebook — EMA-updated codebook (single-GPU, no affine)
-# ===========================================================================
 
 
 class EuclideanCodebook(nn.Module):
@@ -215,9 +200,7 @@ class EuclideanCodebook(nn.Module):
         else:
             self.register_buffer("embed", embed)
 
-    # ------------------------------------------------------------------
     # k-means init
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def init_embed_(self, data):
@@ -230,9 +213,7 @@ class EuclideanCodebook(nn.Module):
         self.cluster_size.data.copy_(cluster_size)
         self.initted.data.copy_(torch.tensor([True]))
 
-    # ------------------------------------------------------------------
     # dead-code replacement
-    # ------------------------------------------------------------------
 
     def replace(self, batch_samples, batch_mask):
         for ind, (samples, mask) in enumerate(zip(batch_samples.unbind(dim=0), batch_mask.unbind(dim=0))):
@@ -252,10 +233,6 @@ class EuclideanCodebook(nn.Module):
             return
         batch_samples = rearrange(batch_samples, "h ... d -> h (...) d")
         self.replace(batch_samples, batch_mask=expired_codes)
-
-    # ------------------------------------------------------------------
-    # forward
-    # ------------------------------------------------------------------
 
     @torch.amp.autocast("cuda", enabled=False)
     def forward(self, x, sample_codebook_temp=None, freeze_codebook=False):
@@ -321,11 +298,6 @@ class EuclideanCodebook(nn.Module):
         dist = unpack_one(dist, ps, "h * d")
 
         return quantize, embed_ind, dist
-
-
-# ===========================================================================
-# VectorQuantize — top-level wrapper with projection + commitment loss
-# ===========================================================================
 
 
 class VectorQuantize(nn.Module):
@@ -400,11 +372,9 @@ class VectorQuantize(nn.Module):
 
         return_loss = exists(indices)
 
-        # project in
         x = self.project_in(x)  # (B, N, codebook_dim)
         x = rearrange(x, "b n d -> 1 b n d")  # (1, B, N, codebook_dim)
 
-        # forward through Euclidean codebook
         quantize, embed_ind, distances = self._codebook(
             x,
             sample_codebook_temp=sample_codebook_temp,
@@ -420,7 +390,6 @@ class VectorQuantize(nn.Module):
         if self.training:
             quantize = x + (quantize - x).detach()  # straight-through
 
-        # project out
         quantize = rearrange(quantize, "1 b n d -> b n d")
         quantize = self.project_out(quantize)  # (B, N, dim)
 
@@ -428,7 +397,6 @@ class VectorQuantize(nn.Module):
             quantize = rearrange(quantize, "b 1 d -> b d")
             embed_ind = rearrange(embed_ind, "b 1 -> b")
 
-        # loss
         loss = x.new_zeros((1,))
 
         if return_loss:

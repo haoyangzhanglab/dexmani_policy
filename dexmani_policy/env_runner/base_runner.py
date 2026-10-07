@@ -39,20 +39,11 @@ def _classify_eval_exception(e: BaseException) -> str:
 
 
 class BaseRunner:
-    """Abstract environment runner for agent evaluation.
+    """Single-task evaluation with observation windows and optional video.
 
-    Manages the evaluation loop for a single task:
-
-    - Maintains numeric observation ring buffers and stacks the last
-      ``n_obs_steps`` frames for the agent's observation window.
-    - Runs ``num_episodes`` trials, each starting from ``env.reset()`` and
-      stepping until the environment reports termination or truncation.
-    - Collects video frames and success/failure outcomes per episode.
-    - Fails fast on model/env/OOM errors (raises ``EvalEpisodeError`` → non-zero
-      exit); records genuine ``success=False`` task outcomes normally.
-
-    Subclasses provide ``make_env()`` and ``get_seed_list()`` and may customize
-    action preparation. Multi-task evaluation composes single-task runners.
+    Model/env errors raise EvalEpisodeError; genuine task failures are results.
+    Subclasses provide make_env() and get_seed_list(), optionally action preparation.
+    Multi-task evaluation composes these runners.
     """
 
     def __init__(
@@ -275,18 +266,10 @@ class BaseRunner:
         *,
         options=None,
     ):
-        """Run a single evaluation episode.
+        """Run one episode and record the first raw success_condition at action_cnt.
 
-        Environment contract (required for accurate ``avg_steps`` metrics):
-            - ``info["success_condition"]`` (bool): set on the **first** step
-              where the task goal is met (raw signal, no hold delay).
-            - ``env.action_cnt`` (int): current step counter on the env.
-            - ``info["success"]`` (bool): set when the episode is considered
-              successful (may include a hold/grace delay after
-              ``success_condition``).
-
-        If ``success_condition`` or ``action_cnt`` is missing, ``task_done_step``
-        will be ``None`` and ``avg_steps`` will be reported as ``N/A``.
+        info["success"] determines episode success and may include a hold delay.
+        Missing success_condition/action_cnt leaves task_done_step=None and avg_steps=N/A.
         """
         if inference_steps is not None:
             positive_int(inference_steps, "inference_steps")
@@ -334,18 +317,10 @@ class BaseRunner:
         eval_episodes: int = None,
         video_save_dir: Optional[Path] = None,
     ):
-        """Run *eval_episodes* evaluation trials.
+        """Run eval_episodes trials; model/env/OOM/contract errors abort the run.
 
-        Exception taxonomy (fail-fast):
-
-        1. **Episode execution** (``run_one_episode``) — any model-forward /
-           env / OOM / contract exception is classified and re-raised as
-           :class:`EvalEpisodeError`, aborting the whole run with a non-zero
-           exit; a genuine ``success=False`` task outcome is recorded normally.
-        2. **Frame extraction** (``env.get_video()``) — best-effort, falls back
-           to ``None`` — never corrupts the episode result.
-        3. **Video encoding** (``_encode_video``) — best-effort, warning
-           printed — never corrupts the episode result.
+        Genuine task failures remain results. Video extraction/encoding is best-effort
+        and must not corrupt metrics or mask an episode error.
         """
         if inference_steps is not None:
             positive_int(inference_steps, "inference_steps")

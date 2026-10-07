@@ -52,17 +52,10 @@ class SimRunner(BaseRunner):
 
     @staticmethod
     def _expand_env_kwargs(env_kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """Expand high-level randomization switches into individual DexMani_Sim kwargs.
+        """Expand randomization switches; explicit kwargs take precedence.
 
-        ``texture_random`` enables scene textures, per-episode skybox, light
-        randomization, object texture perturbation, and camera pose perturbation.
-        It does NOT enable ``crazy_light`` (per-step color flashing).
-
-        ``instance_random`` enables model_id randomization.
-
-        Explicit individual kwargs take precedence over the high-level switches
-        (via ``setdefault``), so you can e.g. set ``texture_random: true`` but
-        override ``randomize_camera_pose: false``.
+        texture_random covers scene/object textures, skybox, lights and camera pose,
+        but excludes per-step crazy_light. instance_random controls model_id.
         """
         expanded = dict(env_kwargs)
 

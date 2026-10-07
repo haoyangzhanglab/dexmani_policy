@@ -314,7 +314,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
         rgb = torch.from_numpy(rgb_np)  # (T, H, W, 3) uint8
 
-        # --- uint8 fast path: skip float32 conversion, resize/crop in uint8 ---
+        # uint8 fast path: skip float32 conversion, resize/crop in uint8
         if self.rgb_keep_uint8 and self.rgb_color_aug is None:
             rgb = rgb.permute(0, 3, 1, 2).contiguous()  # (T, 3, H, W) uint8
             rgb = TVF.resize(rgb, list(self.rgb_preprocess_size), antialias=True)

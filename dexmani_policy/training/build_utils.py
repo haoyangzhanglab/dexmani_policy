@@ -230,9 +230,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     return model, ema_model, ema_updater
 
 
-# ---------------------------------------------------------------------------
 # Optimizer & Scheduler
-# ---------------------------------------------------------------------------
 
 
 def build_scheduler(cfg, optimizer, last_epoch=-1):
@@ -270,9 +268,7 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1, 
     return optimizer, scheduler
 
 
-# ---------------------------------------------------------------------------
 # Training Recipe
-# ---------------------------------------------------------------------------
 
 
 def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int) -> None:
@@ -323,9 +319,7 @@ def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int) -> No
     print("=" * 60)
 
 
-# ---------------------------------------------------------------------------
 # Config Validation
-# ---------------------------------------------------------------------------
 
 
 def _validate_augmentation_consistency(cfg):

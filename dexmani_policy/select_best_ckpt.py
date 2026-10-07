@@ -87,9 +87,7 @@ from dexmani_policy.evaluation.protocol import (
 ROOT_DIR = set_project_root()
 register_resolvers()
 
-# ---------------------------------------------------------------------------
 # Data classes
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -99,7 +97,7 @@ class CkptEvalAccum:
     ckpt: MilestoneCheckpoint
     episode_details: list[dict] = field(default_factory=list)
 
-    # ---- derived ----
+    # derived
 
     @property
     def success_rate(self) -> float:
@@ -123,9 +121,7 @@ class CkptEvalAccum:
         self.episode_details.extend(collect_episode_details(result))
 
 
-# ---------------------------------------------------------------------------
 # Single-checkpoint evaluation
-# ---------------------------------------------------------------------------
 
 
 @torch.no_grad()
@@ -153,9 +149,7 @@ def evaluate_checkpoint(
     )
 
 
-# ---------------------------------------------------------------------------
 # Core algorithm
-# ---------------------------------------------------------------------------
 
 
 def _format_rate(num: int, den: int) -> str:
@@ -412,7 +406,7 @@ def main() -> None:
         cprint(f"Error: experiment directory not found: {exp_dir}", "red")
         sys.exit(1)
 
-    # ── Load evaluation config; saved Agent configuration is used for every candidate ──
+    # Load evaluation config; saved Agent configuration is used for every candidate
     cfg_path = exp_dir / "config.yaml"
     if not cfg_path.is_file():
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")
@@ -424,7 +418,7 @@ def main() -> None:
     # Keep the experiment path available to saved-config restoration
     cfg._exp_dir = str(exp_dir)
 
-    # ── Resolve parameters: CLI > config > defaults ───────────────────────
+    # Resolve parameters: CLI > config > defaults
     _sb = cfg.eval.get("select_best", {}) if hasattr(cfg, "eval") else {}
     max_episodes = (
         args.max_episodes
@@ -444,7 +438,6 @@ def main() -> None:
 
     # Selection videos are opt-in; each run/candidate/stage owns its path.
     video_save_dir = exp_dir / "eval_ckpt_selector" / "videos" if args.videos and not args.no_videos else None
-
 
     try:
         select_best_checkpoint(

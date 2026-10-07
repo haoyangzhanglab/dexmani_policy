@@ -209,7 +209,7 @@ def main() -> None:
     parser.add_argument("--selection-record", default=None)
     args = parser.parse_args()
 
-    # ── 1. Locate experiment directory ────────────────────────────────────
+    # 1. Locate experiment directory
     exp_dir = (
         (
             Path(ROOT_DIR)
@@ -231,7 +231,7 @@ def main() -> None:
         cprint(f"Error: config.yaml not found: {cfg_path}", "red")
         sys.exit(1)
 
-    # ── 2. Load config ────────────────────────────────────────────────────
+    # 2. Load config
     cfg = OmegaConf.load(cfg_path)
     cfg._exp_dir = str(exp_dir)
 
@@ -249,7 +249,7 @@ def main() -> None:
         cli_inference_steps=args.inference_steps,
     )
 
-    # ── 3. Build env_runner ─────────────────────────────────────
+    # 3. Build env_runner
     best_info = resolved_best[0] if resolved_best else None
     env_runner = build_eval_runner(cfg)
 
@@ -274,7 +274,7 @@ def main() -> None:
         if resolved_fps is not None:
             leaf_runner.env_video_fps = resolved_fps
 
-    # ── 4. Resolve output directory ───────────────────────────────────────
+    # 4. Resolve output directory
     if args.output_dir:
         output_base = Path(args.output_dir).expanduser().resolve()
     else:
@@ -284,11 +284,11 @@ def main() -> None:
     output_base.mkdir(parents=True, exist_ok=True)
     video_save_dir = Path(tempfile.mkdtemp(prefix=timestamp+"_", dir=output_base))
 
-    # ── 5. Use the pinned best path or resolve a non-best selector ─────────
+    # 5. Use the pinned best path or resolve a non-best selector
     ckpt_path, ckpt_label = resolve_checkpoint_path(
         exp_dir, str(resolved_best[1]) if resolved_best is not None else args.ckpt_tag
     )
-    # ── 6. Resolve parameters ─────────────────────────────────────────────
+    # 6. Resolve parameters
     demo_episodes = (
         args.episodes
         if args.episodes is not None
@@ -303,7 +303,7 @@ def main() -> None:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     cprint("✅ Checkpoint loaded\n", "green")
 
-    # ── 7. Print recording config ─────────────────────────────────────────
+    # 7. Print recording config
     resolution_str = f"{resolved_resolution[0]}×{resolved_resolution[1]}"
     steps_str = (
         ", ".join(str(d) for d in inference_steps_list)
@@ -321,7 +321,7 @@ def main() -> None:
     cprint(f"  Output dir   : {video_save_dir}", "cyan")
     cprint(f"{'=' * 60}\n", "cyan")
 
-    # ── 8. Select seeds ────────────────────────────────────────────────────
+    # 8. Select seeds
     pools = task_seed_pools(env_runner)
     if args.seeds is not None:
         eval_seeds = {task: list(args.seeds) for task in pools}
@@ -351,7 +351,7 @@ def main() -> None:
         **selection_provenance(best_info),
     )
 
-    # ── 9. Run episodes (sweep or single) ─────────────────────────────────
+    # 9. Run episodes (sweep or single)
     demo_results: list[dict] = []
 
     for inference_steps in inference_steps_list:
@@ -396,7 +396,7 @@ def main() -> None:
                 }
             )
 
-    # ── 10. Report ────────────────────────────────────────────────────────
+    # 10. Report
     if do_sweep and demo_results:
         cprint(f"\n{'=' * 60}", "green")
         cprint("  Inference Steps Sweep Summary", "green")

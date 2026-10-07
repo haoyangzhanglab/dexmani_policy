@@ -1,13 +1,6 @@
-"""SATAgent — Structural Action Transformer agent for DexMani_Policy.
+"""Local SAT policy with temporal feature fusion and shuffled joint trajectories.
 
-Local SAT adaptation (upstream differences: docs/paper_recipes.md).
-Actions are transposed from ``(B, T, Da)`` to ``(B, Da, T)``
-so that each Transformer token represents one joint's full future trajectory.
-
-The agent wraps:
-- ``SATObsEncoder``: PointNeXT patch tokenizer + StateMLP with temporal feature fusion
-- ``SATBackbone``: structural-centric DiT with MultiModalAttention and EJC
-- ``RectifiedFlow``: Flow Matching decoder with shuffle support
+Actions use (B, Da, T). Upstream differences: docs/paper_recipes.md.
 """
 
 from __future__ import annotations
@@ -24,21 +17,11 @@ from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
 class SATObsEncoder(nn.Module):
-    """Local SAT observation encoder with temporal fusion in feature dim.
+    """Broadcast state into point tokens, then fuse time along the feature axis.
 
-    Encodes raw point clouds and joint state into a sequence of observation
-    tokens consumed as the KV prefix by the SAT backbone.
-
-    Unlike the default ManiFlow pattern (time concatenated along sequence dim),
-    SAT fuses observation history along the *feature* dimension so that the
-    token count stays at ``num_patches + 1`` regardless of ``n_obs_steps``.
-    State features are broadcast into point tokens here; official SAT instead
-    appends separate StateAttn tokens. Token slots do not imply physical
-    correspondence across frames.
-
-    Output shape: ``(B, num_obs_tokens, obs_token_dim)`` where
-    ``num_obs_tokens = num_patches + 1`` and
-    ``obs_token_dim = n_obs_steps * (pc_out_dim + state_out_dim)``.
+    Output: (B, K+1, T*(pc_out_dim+state_out_dim)), with K point patches.
+    Token slots do not imply physical correspondence across frames.
+    Official SAT uses separate StateAttn tokens; see docs/paper_recipes.md.
     """
 
     @property
@@ -74,7 +57,6 @@ class SATObsEncoder(nn.Module):
         self.fps_random_config = fps_random_config or {}
 
         patch_seq_len, pc_out_dim = self.pc_encoder.out_shape
-        # Local temporal feature fusion keeps token count independent of T
         self.num_obs_tokens = patch_seq_len + 1
         self.obs_token_dim = n_obs_steps * (pc_out_dim + self.state_mlp.out_dim)
 
@@ -117,12 +99,10 @@ class SATObsEncoder(nn.Module):
         # [global_token, patch_0, patch_1, ...]
         pc_feat = torch.cat([global_token, patch_token], dim=1)  # (B*T, K+1, D_pc)
 
-        # Broadcast state to every token
         state_feat = self.state_mlp(obs["joint_state"])  # (B*T, D_state)
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
         feat = torch.cat([pc_feat, state_feat], dim=-1)  # (B*T, K+1, D_pc+D_state)
 
-        # Fuse local state-augmented tokens along the temporal feature dimension
         B = feat.shape[0] // self.n_obs_steps
         T = self.n_obs_steps
         D = feat.shape[-1]  # pc_out_dim + state_out_dim
@@ -186,7 +166,6 @@ class SATAgent(BaseAgent):
         modality_dropout_probs: dict | None = None,
         num_flow_train_timesteps: int = 10,
     ):
-        # 1. Observation encoder
         obs_encoder = SATObsEncoder(
             encoder_type=encoder_type,
             pc_dim=pc_dim,
@@ -198,7 +177,6 @@ class SATAgent(BaseAgent):
             fps_random_config=fps_random_config,
         )
 
-        # 2. SAT backbone (structural-centric)
         backbone = SATBackbone(
             horizon=horizon,
             action_dim=action_dim,
@@ -218,7 +196,7 @@ class SATAgent(BaseAgent):
             ejc_axis_dim=ejc_axis_dim,
         )
 
-        # 3. RectifiedFlow decoder (passes shuffle to backbone)
+        # RectifiedFlow decoder (passes shuffle to backbone)
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
@@ -230,7 +208,6 @@ class SATAgent(BaseAgent):
             beta_beta=beta_beta,
         )
 
-        # 4. BaseAgent
         super().__init__(
             obs_encoder=obs_encoder,
             action_decoder=action_decoder,
@@ -242,10 +219,6 @@ class SATAgent(BaseAgent):
         )
 
         self.shuffle_action_tokens = shuffle_action_tokens
-
-    # ------------------------------------------------------------------
-    # Training
-    # ------------------------------------------------------------------
 
     def compute_loss(self, batch, **kwargs):
         """Compute Flow Matching loss with structural-centric actions.
@@ -277,10 +250,6 @@ class SATAgent(BaseAgent):
             },
         )
         return self._merge_aux_loss(action_loss, loss_dict, aux)
-
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def predict_action_from_cond(self, cond, inference_steps: int | None = None):
@@ -321,10 +290,6 @@ class SATAgent(BaseAgent):
             "control_action": control_action,
             "tail": tail,
         }
-
-    # ------------------------------------------------------------------
-    # Compile
-    # ------------------------------------------------------------------
 
     def compile_backbone(self, **compile_kwargs):
         """Override to use ``mode='default'`` instead of ``'reduce-overhead'``.

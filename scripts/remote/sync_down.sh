@@ -1,18 +1,8 @@
 #!/bin/bash
-# ============================================================================
-# sync_down.sh — Download immutable artifacts, then update explicit live entries
-# ============================================================================
-# Usage:
-#   bash scripts/remote/sync_down.sh                           # All experiments
-#   bash scripts/remote/sync_down.sh dp3/pour                  # Specific policy/task
-#   bash scripts/remote/sync_down.sh dp3/pour/2026-08-03_12-34 # Specific run
-#   bash scripts/remote/sync_down.sh --dry-run                 # Preview what would transfer
-#   bash scripts/remote/sync_down.sh --list                    # List experiments on server
-#
-# Existing config/source metadata conflicts abort before downloading. Pass 1
-# downloads new immutable files, pass 2 updates metrics/latest/VQ best, and pass 3 updates
-# only best/selection progress using checksum. No pass retains partial files.
-# ============================================================================
+# Download experiments; conflicting config/source metadata aborts before transfer.
+# Usage: bash scripts/remote/sync_down.sh [SUBPATH] [--dry-run|--list] [--with-wandb]
+# Passes: new immutable files; live metrics/latest/VQ best; checksummed best/selection.
+# No pass retains partial files.
 
 set -euo pipefail
 

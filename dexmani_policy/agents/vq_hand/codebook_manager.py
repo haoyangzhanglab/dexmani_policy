@@ -1,19 +1,9 @@
-"""Codebook management for DQ-RISE hand-state quantisation.
+"""PCA-ordered hand prototypes stored in the policy state_dict.
 
-This module owns the PCA-ordered hand prototypes used by DQ-RISE.  The
-manager is an ``nn.Module`` so the runtime codebook is stored inside the
-policy ``state_dict``.  A policy checkpoint is therefore self-contained and
-cannot silently change behaviour when an external ``.npz`` file is replaced.
-
-Runtime convention
-------------------
-* Callers pass and receive hand poses in the policy-normalised space.
-* ``sorted_hand_poses`` is stored in affine ``raw`` space
-  ``[hand_min, hand_max]``.
-  For XHand this is only an affine representation of normalised coordinates;
-  it is not a physical servo-unit definition.
-* Continuous code indices are represented in ``[-1, 1]`` and decoded with
-  nearest-integer (half-up) rounding followed by clamping.
+Replacing an external NPZ cannot change a restored policy's codebook.
+Callers use policy-normalised poses; sorted_hand_poses uses affine
+[hand_min, hand_max] coordinates, not physical XHand servo units.
+Continuous indices in [-1, 1] decode with half-up rounding, then clamping.
 """
 
 from __future__ import annotations
@@ -159,9 +149,7 @@ class CodebookManager(nn.Module):
         self.artifact_metadata: dict[str, object] = {}
         self.last_export_diagnostics: dict[str, float] = {}
 
-    # ------------------------------------------------------------------
     # Candidate preparation and state-dict loading
-    # ------------------------------------------------------------------
 
     def _prepare_buffers(self, values, *, allow_empty=False, dimensions=None):
         """Validate source structure and converted values without mutating buffers."""
@@ -205,10 +193,7 @@ class CodebookManager(nn.Module):
             self.hand_dim, self.num_groups, self.codebook_size = dimensions
             self.total_combinations = self.codebook_size ** self.num_groups
 
-
-    # ------------------------------------------------------------------
     # Normalised <-> affine raw conversion
-    # ------------------------------------------------------------------
 
     def _to_raw(self, normalized: torch.Tensor) -> torch.Tensor:
         return (normalized + 1.0) * 0.5 * (
@@ -255,9 +240,7 @@ class CodebookManager(nn.Module):
         self.hand_normalizer_scale = scale_t
         self.hand_normalizer_offset = offset_t
 
-    # ------------------------------------------------------------------
     # Factory and extraction
-    # ------------------------------------------------------------------
 
     @staticmethod
     def extract_from_vqvae(vqvae) -> "CodebookManager":
@@ -405,9 +388,7 @@ class CodebookManager(nn.Module):
 
         return self.sorted_hand_poses.detach().cpu().numpy()
 
-    # ------------------------------------------------------------------
     # Persistence
-    # ------------------------------------------------------------------
 
     def save(self, path: str | Path) -> None:
         if not self.is_loaded:
@@ -516,9 +497,7 @@ class CodebookManager(nn.Module):
                 setattr(self, name, value)
             self.artifact_metadata = metadata
 
-    # ------------------------------------------------------------------
     # Runtime mappings
-    # ------------------------------------------------------------------
 
     @property
     def num_codes(self) -> int:

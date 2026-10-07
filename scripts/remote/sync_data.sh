@@ -1,34 +1,10 @@
 #!/bin/bash
-# ============================================================================
-# sync_data.sh — Upload datasets & pretrained weights to server data drive
-# ============================================================================
-# Usage:
-#   bash scripts/remote/sync_data.sh                  # Upload all data (local→server)
-#   bash scripts/remote/sync_data.sh -c               # Upload (checksum compare)
-#   bash scripts/remote/sync_data.sh robot_data       # Upload robot_data only
-#   bash scripts/remote/sync_data.sh --dry-run        # Preview what would transfer
-#   bash scripts/remote/sync_data.sh --prune          # Upload + delete server-only files
-#   bash scripts/remote/sync_data.sh --pull           # Download data without deleting local-only files
-#   bash scripts/remote/sync_data.sh --pull --prune   # Download + delete local-only files
-#   bash scripts/remote/sync_data.sh --pull --dry-run # Preview what --pull would download
-#
-# Design:
-#   - Default: push local→server, rsync -av (size+mtime). Fast, usually sufficient.
-#     Regenerated datasets get new mtimes → correctly detected.
-#   - --checksum / -c: compare by rsync checksum instead. Slower but catches
-#     content changes even when mtimes are identical (e.g. restored from backup).
-#   - No -z: transfer large binary assets without rsync compression overhead.
-#   - No --delete by default: safety — never delete remote data if local copy is
-#     partial. Use --prune to opt in (works in both directions).
-#   - --pull / -P: reverse direction (server→local). Downloads files that exist on
-#     the server but not locally and updates changed destination files.
-#     Never deletes local-only files by default. Only data/ and robot_data/
-#     are synced; use sync_down.sh for checkpoints saved under experiments/.
-#   - --prune / -p: enables rsync --delete. Push: deletes server files missing
-#     locally. Pull: deletes local files missing on server.
-#     ALWAYS do --dry-run first — there is no trash bin on either side.
-#   - Targets /data_ssd/ZHY/ directly (persistent NFS, survives container rebuild).
-# ============================================================================
+# Sync data/ and robot_data/ with /data_ssd/ZHY/; checkpoints use sync_down.sh.
+# Usage: bash scripts/remote/sync_data.sh [options] [all|data|robot_data]
+# Default: push using size+mtime, without compression or destination deletions.
+# --checksum/-c compares content; --pull/-P reverses the transfer direction.
+# --prune/-p deletes destination-only files in either direction, without a trash bin.
+# Preview pruning with --dry-run first.
 
 set -euo pipefail
 

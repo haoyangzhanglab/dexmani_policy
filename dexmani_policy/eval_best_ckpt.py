@@ -77,9 +77,7 @@ from dexmani_policy.evaluation.protocol import (
 ROOT_DIR = set_project_root()
 register_resolvers()
 
-# ---------------------------------------------------------------------------
 # Shared helpers (used by both single-value and sweep paths)
-# ---------------------------------------------------------------------------
 
 
 def _prepare_result_dir(exp_dir: Path, result_save_dir: Path | None) -> Path:
@@ -291,9 +289,7 @@ def _run_one_inference_setting(
     }
 
 
-# ---------------------------------------------------------------------------
 # Single-value evaluation (RoboTwin-style)
-# ---------------------------------------------------------------------------
 
 
 @torch.no_grad()
@@ -375,7 +371,7 @@ def evaluate_checkpoint_robotwin(
         eval_config=snapshot_ref, global_step=agent._checkpoint_global_step,
     )
 
-    # ── Report ─────────────────────────────────────────────────────────
+    # Report
     avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"
     cprint(f"\n{'=' * 50}", "cyan")
     cprint(f"  Checkpoint   : {ckpt_label}", "cyan")
@@ -398,9 +394,7 @@ def evaluate_checkpoint_robotwin(
     return info["success_rate"], info["avg_steps"], info["n_success"], info["n_total"]
 
 
-# ---------------------------------------------------------------------------
 # Multi-value sweep evaluation
-# ---------------------------------------------------------------------------
 
 
 @torch.no_grad()
@@ -440,7 +434,7 @@ def evaluate_checkpoint_sweep(
     selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
-    # ── 1. Setup ONCE ──────────────────────────────────────────────────
+    # 1. Setup ONCE
     agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol = _setup_eval(
         cfg,
         exp_dir,
@@ -463,7 +457,7 @@ def evaluate_checkpoint_sweep(
         **selection_provenance(best_info),
     )
 
-    # ── 2. Sweep over inference steps ─────────────────────────────────
+    # 2. Sweep over inference steps
     sweep_results: list[dict] = []
 
     for inference_steps in inference_steps_list:
@@ -500,7 +494,7 @@ def evaluate_checkpoint_sweep(
 
         sweep_results.append({"inference_steps": inference_steps, **info})
 
-    # ── 4. Aggregate summary ───────────────────────────────────────────
+    # 4. Aggregate summary
     _save_sweep_summary(result_save_dir, sweep_results, ckpt_label)
 
     return sweep_results
@@ -529,7 +523,7 @@ def _save_sweep_summary(
         json.dumps(summary, indent=2, ensure_ascii=False),
     )
 
-    # ── Terminal comparison table ──────────────────────────────────────
+    # Terminal comparison table
     cprint(f"\n{'=' * 60}", "cyan", attrs=["bold"])
     cprint("  Inference Steps Sweep Summary", "cyan", attrs=["bold"])
     cprint(f"  Checkpoint: {ckpt_label}", "cyan")
@@ -642,9 +636,7 @@ def _resolve_final_eval_request(
     )
 
 
-# ---------------------------------------------------------------------------
 # CLI
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:

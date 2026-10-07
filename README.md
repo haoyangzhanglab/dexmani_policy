@@ -29,7 +29,7 @@ python -m pip check
 python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit
 ```
 
-历史环境安装与 GPU 验证记录见 [基础设施修复报告](docs/infra_fix_report.md) 和 [整改报告](docs/review_remediation_report.md)。这些记录对应当时的代码与环境，不代表当前生产 AMP/compile/DDP 已验收。
+剩余验收项与历史环境安装、GPU 验证记录入口见 [验证边界与历史记录](docs/paper_recipes.md#剩余验收与历史记录)。历史检查不代表当前生产 AMP/compile/DDP 已验收。
 
 新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
 
@@ -192,7 +192,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 ### 源码追溯
 
-新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。恢复行为见 [项目架构](docs/项目架构.md)，历史整改记录见 [整改报告](docs/review_remediation_report.md)。
+新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。恢复行为见 [项目架构](docs/项目架构.md)，历史整改记录见 [Git 历史入口](docs/paper_recipes.md#剩余验收与历史记录)。
 
 ## 其他工作流
 

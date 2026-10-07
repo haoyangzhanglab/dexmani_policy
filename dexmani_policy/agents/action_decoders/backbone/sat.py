@@ -1,15 +1,6 @@
-"""SAT (Structural Action Transformer) backbone.
+"""Local SAT backbone: each token encodes one joint's full trajectory.
 
-Structural-centric action representation: each Transformer token represents one
-joint's full future trajectory (Da as sequence length, T as per-token feature).
-
-Implements:
-- ``EmbodiedJointCodebook``: 3-field summed embedding for joint identity (EJC)
-- ``MultiModalAttention``: single concatenated attention with obs-as-KV-prefix mask
-- ``SATBlock``: AdaLN-modulated block with MultiModalAttention + MLP
-- ``SATBackbone``: full backbone with axis transposition and shuffle support
-
-Local adaptation of XiaohanLei/SAT; upstream differences: docs/paper_recipes.md.
+Actions use (B, Da, T). Upstream differences: docs/paper_recipes.md.
 """
 
 from __future__ import annotations
@@ -27,25 +18,12 @@ from dexmani_policy.agents.action_decoders.backbone.dit import (
 from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
-# ---------------------------------------------------------------------------
-# Embodied Joint Codebook (EJC)
-# ---------------------------------------------------------------------------
-
 
 class EmbodiedJointCodebook(nn.Module):
-    """3-field summed embedding providing per-joint structural identity.
+    """Sum separately projected embodiment, function and axis embeddings.
 
-    Local three-field parameterization (official pinned code concatenates
-    robot/joint embeddings instead):
-      C_j = E_emb(embodiment_j) + E_func(function_j) + E_axis(axis_j)
-
-    Each joint's identity is the sum of three separately-projected
-    embedding vectors, encoding *which* robot part, *what* functional
-    role, and *which* axis of motion it represents.
-
-    Defaults assign a unique function ID per joint and a single
-    embodiment/axis type, making this a learned per-joint positional
-    encoding that can be extended to cross-embodiment settings.
+    Defaults use a unique function ID per joint and one embodiment/axis type.
+    Official SAT concatenates robot/joint embeddings; see docs/paper_recipes.md.
     """
 
     def __init__(
@@ -65,12 +43,10 @@ class EmbodiedJointCodebook(nn.Module):
 
         self.hidden_dim = hidden_dim
 
-        # Three embedding tables (one per field)
         self.emb_emb = nn.Embedding(num_embodiments, embodiment_dim)
         self.func_emb = nn.Embedding(num_functions, function_dim)
         self.axis_emb = nn.Embedding(num_axes, axis_dim)
 
-        # Project each field to hidden_dim
         self.proj_emb = nn.Linear(embodiment_dim, hidden_dim)
         self.proj_func = nn.Linear(function_dim, hidden_dim)
         self.proj_axis = nn.Linear(axis_dim, hidden_dim)
@@ -88,21 +64,10 @@ class EmbodiedJointCodebook(nn.Module):
         return emb + func + axis  # Local projected sum; see docs/paper_recipes.md.
 
 
-# ---------------------------------------------------------------------------
-# MultiModalAttention — obs-as-prefix, bidirectional action
-# ---------------------------------------------------------------------------
-
-
 class MultiModalAttention(nn.Module):
-    """Single concatenated attention with observation-as-KV-prefix masking.
+    """Joint attention over [obs, action]: obs sees obs; action sees all tokens.
 
-    Obs tokens and action tokens are concatenated into one sequence.
-    The attention mask enforces:
-      - Obs tokens: attend only to other obs tokens (unidirectional prefix)
-      - Action tokens: attend to ALL tokens (bidirectional, both obs and self)
-
-    This replaces the DiTX pattern of separate self-attention + cross-attention
-    with a single attention pass.  Both obs and action tokens are updated.
+    Both streams are updated in one attention pass.
     """
 
     def __init__(
@@ -142,10 +107,8 @@ class MultiModalAttention(nn.Module):
         B, N_obs, _ = c_obs.shape
         _, Da, C = x_action.shape
 
-        # Concatenate: [obs | action]
         combined = torch.cat([c_obs, x_action], dim=1)  # (B, N_obs+Da, C)
 
-        # Single QKV projection
         qkv = (
             self.qkv(combined).reshape(B, N_obs + Da, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         )
@@ -168,21 +131,14 @@ class MultiModalAttention(nn.Module):
             dropout_p=self.attn_drop.p if self.training else 0.0,
         )
 
-        # Merge heads
         x = x.transpose(1, 2).reshape(B, total, C)
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        # Split back
         c_obs_out = x[:, :N_obs, :]
         x_action_out = x[:, N_obs:, :]
 
         return x_action_out, c_obs_out
-
-
-# ---------------------------------------------------------------------------
-# SATBlock — AdaLN-modulated block
-# ---------------------------------------------------------------------------
 
 
 class SATBlock(nn.Module):
@@ -265,11 +221,6 @@ class SATBlock(nn.Module):
         return x_action, c_obs
 
 
-# ---------------------------------------------------------------------------
-# SATBackbone — full backbone
-# ---------------------------------------------------------------------------
-
-
 class SATBackbone(nn.Module):
     """SAT backbone: structural-centric action Transformer.
 
@@ -306,14 +257,13 @@ class SATBackbone(nn.Module):
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
 
-        # ---- Trajectory embedder: T -> 64 -> hidden_dim ----
+        # Trajectory embedder: T -> 64 -> hidden_dim
         self.x_embedder = nn.Sequential(
             nn.Linear(horizon, 64),
             nn.Mish(),
             nn.Linear(64, hidden_dim),
         )
 
-        # ---- Joint identity (EJC) ----
         self.joint_codebook = EmbodiedJointCodebook(
             num_joints=action_dim,
             hidden_dim=hidden_dim,
@@ -325,19 +275,16 @@ class SATBackbone(nn.Module):
             axis_dim=ejc_axis_dim,
         )
 
-        # ---- Observation context projection ----
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
 
-        # ---- Timestep embedding ----
         self.timestep_embedder = TimestepMLP(
             pos_emb_dim=128,
             output_dim=hidden_dim,
         )
 
-        # ---- Obs pre-norm (AdaLNZero, time-conditioned) ----
+        # Obs pre-norm (AdaLNZero, time-conditioned)
         self.obs_pre_norm = _AdaLNZeroObs(dim=hidden_dim, cond_dim=hidden_dim)
 
-        # ---- Transformer blocks ----
         self.blocks = nn.ModuleList(
             [
                 SATBlock(
@@ -352,14 +299,10 @@ class SATBackbone(nn.Module):
             ]
         )
 
-        # ---- Final projection: hidden_dim -> T ----
+        # Final projection: hidden_dim -> T
         self.final_layer = _FinalLayer(hidden_dim, horizon)
 
         self.initialize_weights()
-
-    # ------------------------------------------------------------------
-    # Weight initialisation
-    # ------------------------------------------------------------------
 
     def initialize_weights(self):
         # Linear layers: Xavier uniform
@@ -403,10 +346,6 @@ class SATBackbone(nn.Module):
         # Re-apply AdaLN-Zero init destroyed by _basic_init sweep above
         self.obs_pre_norm.initialize_weights()
 
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
-
     def forward(
         self,
         x: torch.Tensor,
@@ -429,13 +368,10 @@ class SATBackbone(nn.Module):
         B, Da, T_in = x.shape
         assert T_in == self.horizon, f"horizon mismatch: {T_in} vs {self.horizon}"
 
-        # 1. Embed per-joint trajectories
         x = self.x_embedder(x)  # (B, Da, T) -> (B, Da, hidden_dim)
 
-        # 2. Joint identity
         ejc = self.joint_codebook()  # (Da, hidden_dim)
 
-        # 3. Per-sample random shuffle
         perm = None
         if shuffle and self.training:
             perm = torch.stack([torch.randperm(Da, device=x.device) for _ in range(B)], dim=0)
@@ -445,35 +381,28 @@ class SATBackbone(nn.Module):
             ejc = ejc.unsqueeze(0).expand(B, -1, -1)
             ejc = torch.gather(ejc, dim=1, index=perm.unsqueeze(-1).expand(-1, -1, ejc.shape[-1]))
 
-        # 4. Local token fusion: trajectory feature + joint identity
+        # Local token fusion: trajectory feature + joint identity
         x = x + ejc  # (B, Da, hidden_dim)
 
-        # 5. Embed observation context
         c_obs = self.context_embedder(context)  # (B, N_obs, hidden_dim)
 
-        # 6. Timestep conditioning
         time_c = self.timestep_embedder(timestep)  # (B, hidden_dim)
 
-        # 7. Time-conditioned pre-norm on obs tokens
+        # Time-conditioned pre-norm on obs tokens
         c_obs = self.obs_pre_norm(c_obs, time_c)
 
-        # 8. Transformer blocks
         for block in self.blocks:
             x, c_obs = block(x, c_obs, time_c)
 
-        # 9. Final projection with AdaLN: hidden_dim -> horizon (T)
+        # Final projection with AdaLN: hidden_dim -> horizon (T)
         x = self.final_layer(x, time_c)  # (B, Da, T)
 
-        # 10. Restore the original joint order
+        # Restore the original joint order
         if perm is not None:
             inv_perm = torch.argsort(perm, dim=1)  # (B, Da)
             x = torch.gather(x, dim=1, index=inv_perm.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
 
         return x
-
-    # ------------------------------------------------------------------
-    # Optimizer groups
-    # ------------------------------------------------------------------
 
     def get_optim_groups(self, weight_decay: float = 1e-3):
         return get_optim_group_with_no_decay(
@@ -482,11 +411,6 @@ class SATBackbone(nn.Module):
             no_decay_names=[],
             extra_blacklist=(RmsNorm, nn.LayerNorm),
         )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers (pattern-matched from ditx.py)
-# ---------------------------------------------------------------------------
 
 
 class _AdaLNZeroObs(nn.Module):

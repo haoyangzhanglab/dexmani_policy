@@ -107,9 +107,7 @@ class DQRISEAgent(BaseAgent):
         self.register_load_state_dict_post_hook(self._check_restored_codebook)
         self._normalizer_checked = False
 
-    # ------------------------------------------------------------------
     # Normalizer/codebook consistency
-    # ------------------------------------------------------------------
 
     def initialize_training(self):
         if self.codebook_path is None:
@@ -172,9 +170,7 @@ class DQRISEAgent(BaseAgent):
         if not self._normalizer_checked and self.normalizer.is_fitted(["action"]):
             self._validate_codebook_normalizer()
 
-    # ------------------------------------------------------------------
     # Training
-    # ------------------------------------------------------------------
 
     def compute_loss(self, batch: dict[str, Any], **kwargs):
         self._validate_batch(batch)
@@ -214,9 +210,7 @@ class DQRISEAgent(BaseAgent):
 
         return self._merge_aux_loss(action_loss, loss_dict, aux)
 
-    # ------------------------------------------------------------------
     # Inference
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def predict_action(

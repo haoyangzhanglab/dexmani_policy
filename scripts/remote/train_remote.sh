@@ -1,32 +1,9 @@
 #!/bin/bash
-# ============================================================================
-# train_remote.sh — One-click remote training with pre-flight checks
-# ============================================================================
-# Usage:
-#   bash scripts/remote/train_remote.sh <config> <task> [hydra_overrides...]
-#   bash scripts/remote/train_remote.sh --fg <config> <task> [...]
-#   bash scripts/remote/train_remote.sh --gpus 0,1,2,3 <config> <task> [...]
-#   bash scripts/remote/train_remote.sh --sync-data <config> <task> [...]    # incl. data upload
-#
-# Examples:
-#   bash scripts/remote/train_remote.sh dp3 pour
-#   bash scripts/remote/train_remote.sh ddp/maniflow pour
-#   bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/maniflow pour
-#   # For DDP, the number of visible GPUs must equal training.num_gpus.
-#   bash scripts/remote/train_remote.sh --gpus 0,1 ddp/maniflow pour 'training.num_gpus=2'
-#   bash scripts/remote/train_remote.sh --fg dp3 pour 'training.seed=123'
-#   bash scripts/remote/train_remote.sh dp3 pour '+resume_from=experiments/dp3/pour/<old-run>'
-#   bash scripts/remote/train_remote.sh --sync-data dp3 pour  # first run on new server
-#   bash scripts/remote/train_remote.sh --dry-run dp3 pour    # preview only
-#
-# Required pre-flight checks:
-#   1. Server reachable
-#   2. Code synced (sync_code.sh)
-#   3. Shared fresh/resume recipe resolves and every dataset directory exists
-#      On resume, <task> must exactly match the saved task identity.
-# GPU status and /data_ssd space are informational. When the GPU count is
-# available, explicitly requested GPU ids are checked against it.
-# ============================================================================
+# Launch after checking SSH, syncing code and validating fresh/resume datasets.
+# Usage: bash scripts/remote/train_remote.sh [--fg] [--dry-run] [--sync-data]
+#          [--gpus IDS] <config> <task> [hydra_overrides...]
+# DDP visible GPU count must match training.num_gpus; resume task must match saved identity.
+# GPU/space status is informational; requested GPU IDs are checked when count is available.
 
 set -euo pipefail
 

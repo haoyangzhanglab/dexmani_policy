@@ -36,9 +36,7 @@ class ViTEncoder(nn.Module):
         super().__init__()
         self.geometry_processor = GeometryProcessor()
 
-    # ------------------------------------------------------------------
     # Subclass hooks
-    # ------------------------------------------------------------------
 
     def _extract_patch_tokens(self, outputs) -> torch.Tensor:
         """Extract patch tokens from backbone output, skipping prefix tokens.
@@ -52,9 +50,7 @@ class ViTEncoder(nn.Module):
         """Return the LoRA target module names for this backbone variant."""
         raise NotImplementedError("Subclass must implement _get_lora_target_modules()")
 
-    # ------------------------------------------------------------------
     # Shared methods (previously duplicated in dino/clip/siglip)
-    # ------------------------------------------------------------------
 
     def set_tune_mode(self, tune_mode: str, lora_dtype: str = "backbone") -> None:
         if lora_dtype not in ("backbone", "float32"):

@@ -61,7 +61,7 @@ class PointColorJitter(Aug):
             return [max(0.0, center - value), center + value]
         return [value[0], value[1]]
 
-    # ---------- in-place augment ----------
+    # in-place augment
     def _augment(self, x):
         if x.shape[-1] < 6:
             return
@@ -79,7 +79,7 @@ class PointColorJitter(Aug):
         self._apply_hue_ip(rgb)
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
-    # ---------- in-place colour helpers ----------
+    # in-place colour helpers
     def _apply_brightness_ip(self, rgb):
         if self.brightness[0] == self.brightness[1]:
             delta = self.brightness[0]

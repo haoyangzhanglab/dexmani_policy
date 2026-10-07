@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# Checkpoint evaluation with a fixed manifest or historical legacy protocol.
-#
-# A manifest fixes the complete test role, regardless of --episodes.
-# Legacy evaluation excludes the selection record's seeds from the shuffled pool.
-# Output is the success rate (matching RoboTwin _result.txt format).
-#
-# Usage:
-#   bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]
-#
-# Examples:
-#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42
-#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 20pct
-#   bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --selection-record /path/to/selection_record.json
-#
+# Evaluate a checkpoint; manifests fix the full test set regardless of --episodes.
+# Legacy evaluation excludes selection seeds from the shuffled pool.
+# Usage: bash scripts/eval/eval_best_ckpt.sh <policy> <task> <exp> [args...]
+# See --help for checkpoint and pinned --selection-record options.
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

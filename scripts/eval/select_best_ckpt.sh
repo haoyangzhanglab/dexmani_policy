@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
-# Offline best-checkpoint selector via fixed two-stage evaluation.
-#
-# Runs discovered milestone checkpoints through a fixed initial
-# evaluation and an optional exact-tie batch to identify the single best checkpoint.
-#
-# Usage:
-#   bash scripts/eval/select_best_ckpt.sh <policy_name> <task_name> <exp_name> [args...]
-#
-# Examples:
-#   bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35
-#   bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \
-#       eval.seed_manifest=/absolute/path/seeds.json --max-episodes 50
-# Extra args are forwarded directly to select_best_ckpt.py.
-# Run with --help for the full option list.
-#
+# Select among milestones using fixed initial seeds and an optional exact-tie batch.
+# Usage: bash scripts/eval/select_best_ckpt.sh <policy> <task> <exp> [args...]
+# Extra arguments, including --help, go to select_best_ckpt.py.
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

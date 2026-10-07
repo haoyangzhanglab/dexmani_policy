@@ -100,7 +100,6 @@ class OneWayAttentionBlock(nn.Module):
         self.norm3 = nn.LayerNorm(embedding_dim)
 
     def forward(self, queries, keys, query_pe, key_pe, self_attn_mask=None):
-        # Self-attention on queries
         q = queries + query_pe
         queries = queries + self.self_attn(q=q, k=q, v=queries, attn_mask=self_attn_mask)
         queries = self.norm1(queries)
@@ -218,7 +217,7 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
 
         self.timestep_encoder = TimestepMLP(pos_emb_dim=timestep_embed_dim, output_dim=timestep_embed_dim)
 
-        # ── Build per-head projections (1 or 2 heads) ──
+        # Build per-head projections (1 or 2 heads)
         self.joint_dim = joint_dim
         self.ee_dim = ee_dim if use_aux_ee else None
 
@@ -226,11 +225,9 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         n_heads = 1 + int(use_aux_ee)
         n_tokens = n_heads * horizon
 
-        # Input projections
         self.joint_action_proj = nn.Linear(joint_dim, embedding_dim) if has_aux else None
         self.ee_action_proj = nn.Linear(ee_dim, embedding_dim) if use_aux_ee else None
 
-        # Output projections
         self.joint_output_proj = nn.Linear(embedding_dim, joint_dim) if has_aux else None
         self.ee_output_proj = nn.Linear(embedding_dim, ee_dim) if use_aux_ee else None
 
@@ -238,7 +235,7 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         self.action_proj = None if has_aux else nn.Linear(action_dim, embedding_dim)
         self.output_proj = None if has_aux else nn.Linear(embedding_dim, action_dim)
 
-        # ── Cascading self-attention mask ──
+        # Cascading self-attention mask
         # Joint (primary) sees only itself; EE sees joint + itself.
         if use_aux_ee:
             mask = torch.zeros(n_tokens, n_tokens)
@@ -280,7 +277,7 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         obs_feat = context[..., : self._obs_feat_dim]
         pc_pe = context[..., self._obs_feat_dim :]
 
-        # ── Action query construction (composable: 1 or 2 heads) ──
+        # Action query construction (composable: 1 or 2 heads)
         if self.action_proj is not None:
             # Standard mode: single projection
             queries = self.action_proj(x)  # (B, H, E)
@@ -290,10 +287,8 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
             # Aux mode: project each head separately
             offset = 0
             query_parts = []
-            # Head 0: joint
             query_parts.append(self.joint_action_proj(x[..., offset : offset + self.joint_dim]))
             offset += self.joint_dim
-            # Head 1: EE wrist pose
             if self.ee_action_proj is not None:
                 query_parts.append(self.ee_action_proj(x[..., offset : offset + self.ee_dim]))
                 offset += self.ee_dim
@@ -303,7 +298,7 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
             query_pe = self.temporal_pe_horizon.repeat(1, n_heads, 1).expand(B, -1, -1)
             self_attn_mask = self.self_attn_mask  # (n_heads*H, n_heads*H)
 
-        # ── Timestep encoding ──
+        # Timestep encoding
         if not torch.is_tensor(timestep):
             timestep = torch.tensor([timestep], dtype=torch.long, device=x.device)
         elif timestep.dim() == 0:
@@ -315,12 +310,12 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         global_feat = torch.cat([t_emb, obs_feat], dim=-1)
         keys = self.global_cond_proj(global_feat)
 
-        # ── Key positional encoding ──
+        # Key positional encoding
         temporal_pe = self.temporal_pe_obs[:, :T, :]
         temporal_pe = temporal_pe.repeat_interleave(K, dim=1)
         context_pe = temporal_pe + pc_pe
 
-        # ── Transformer ──
+        # Transformer
         output = self.transformer(
             context_tokens=keys,
             context_pe=context_pe,
@@ -329,14 +324,12 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
             self_attn_mask=self_attn_mask,
         )
 
-        # ── Output projection (composable: 1 or 2 heads) ──
+        # Output projection (composable: 1 or 2 heads)
         if self.output_proj is not None:
             return self.output_proj(output)
         else:
             out_parts = []
-            # Head 0: joint
             out_parts.append(self.joint_output_proj(output[:, :H, :]))
-            # Head 1: EE wrist pose
             if self.ee_output_proj is not None:
                 out_parts.append(self.ee_output_proj(output[:, H : 2 * H, :]))
             return torch.cat(out_parts, dim=-1)

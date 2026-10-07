@@ -1,13 +1,6 @@
 #!/bin/bash
-# ============================================================================
-# tail_log.sh — Stream training metrics from server in real time
-# ============================================================================
-# Usage:
-#   bash scripts/remote/tail_log.sh <policy> <task>              # Latest run for task
-#   bash scripts/remote/tail_log.sh <policy> <task> <timestamp>  # Specific run
-#
-# Also works for downloaded experiments (looks locally if server unreachable).
-# ============================================================================
+# Stream remote metrics; fall back to downloaded experiments if unreachable.
+# Usage: bash scripts/remote/tail_log.sh <policy> <task> [timestamp]
 
 set -euo pipefail
 

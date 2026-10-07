@@ -176,7 +176,7 @@ class MultiTaskSimRunner:
                     "error_category": _classify_eval_exception(e),
                 }
 
-        # ── Aggregate: macro (mean per-task SR) + micro (across all (task, seed)) ──
+        # Aggregate: macro (mean per-task SR) + micro (across all (task, seed))
         # Failed tasks carry success_rate=None here and are filtered out of
         # `rates` below; the abort after aggregation keeps a reduced macro
         # average from being silently reported.

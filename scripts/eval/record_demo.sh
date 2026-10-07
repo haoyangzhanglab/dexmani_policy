@@ -1,17 +1,8 @@
 #!/usr/bin/env bash
-# High-resolution demo video recording from a trained checkpoint.
-#
-# Uses the SAPIEN viewer (render_mode="human") to capture 1280×960 video
-# frames by default; pass --resolution WIDTH HEIGHT to override it.
-#
-# Usage:
-#   bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]
-#
-# Examples:
-#   bash scripts/eval/record_demo.sh dp3 pour 2026-08-01_12-34-56
-#   bash scripts/eval/record_demo.sh sat pour 2026-08-01_12-34-56 --ckpt-tag 100pct --episodes 10
-#   bash scripts/eval/record_demo.sh maniflow pour 2026-08-01_12-34-56 --resolution 3840 2160
-#
+# Record viewer video at 1280x960; --resolution WIDTH HEIGHT overrides it.
+# Usage: bash scripts/eval/record_demo.sh <policy> <task> <exp> [args...]
+# See --help for checkpoint, episode and output options.
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

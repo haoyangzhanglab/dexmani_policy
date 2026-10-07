@@ -36,22 +36,14 @@ class TrainLoopConfig:
             positive_int(getattr(self, name), name)
 
 
-
 class Trainer:
-    """Step-driven training loop with milestone checkpointing.
+    """Step-driven single-GPU/DDP training with AMP, clipping and finite checks.
 
-    Uses ``total_train_steps`` as the full plan; ``max_updates`` bounds one invocation.
-    No online validation or simulation evaluation — just training + milestone
-    checkpoint saves at 20/40/60/80/100% progress.
-
-    - **Training**: ``train_one_step()`` with mixed precision (bfloat16 AMP),
-      gradient clipping, and two-layer NaN protection (loss NaN, grad NaN).
-    - **Checkpointing**: Milestone saves (up to 5 distinct steps) at progress thresholds;
-      bounded and interrupted runs also save state; ``latest.pt`` tracks the latest save.
-    - **EMA**: Exponential moving average of model weights, updated each step.
-
-    Supports single-GPU and DDP (via ``distributed=True``). In DDP, only rank
-    0 performs logging and checkpointing.
+    total_train_steps defines the plan; max_updates bounds this invocation.
+    Milestones save at up to five distinct 20/40/60/80/100% steps; bounded or
+    interrupted runs also save. latest.pt tracks the latest save.
+    EMA updates per optimizer step; DDP logging/checkpointing runs on rank 0.
+    Validation and simulation evaluation are offline.
     """
 
     def __init__(
@@ -215,19 +207,9 @@ class Trainer:
         is_accumulation_boundary: bool = True,
         loss_divisor: int = 1,
     ):
-        """Forward + backward on one micro-batch.
+        """Forward/backward one micro-batch; loss_divisor is the group micro-batch count.
 
-        The epoch loop supplies the logical group's ``loss_divisor`` and defers
-        ``optimizer.step()`` / ``scheduler.step()`` / EMA until the accumulation
-        boundary (``is_accumulation_boundary=True``).
-
-        Parameters:
-            batch: Data dict from the DataLoader.
-            is_accumulation_boundary: If ``True``, apply gradient step after
-                backward.  Set to ``False`` for intermediate micro-batches
-                when accumulating gradients.
-            loss_divisor: Number of micro-batches in the logical accumulation
-                group.
+        Optimizer, scheduler and EMA update only at is_accumulation_boundary.
         """
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = self.raw_model.get_training_loss_kwargs(self.ema_model)

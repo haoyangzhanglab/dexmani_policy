@@ -37,9 +37,7 @@ def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
     return training_seed + 1024
 
 
-# ---------------------------------------------------------------------------
 # Saved model inputs and evaluation overrides
-# ---------------------------------------------------------------------------
 
 
 def validate_eval_config(cfg, saved: dict) -> None:
@@ -107,9 +105,7 @@ def add_inference_steps_argument(parser) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Evaluation environment
-# ---------------------------------------------------------------------------
 
 
 def build_eval_runner(cfg):
@@ -134,9 +130,7 @@ def iter_leaf_env_runners(env_runner):
     return (env_runner,)
 
 
-# ---------------------------------------------------------------------------
 # Checkpoint loading for inference
-# ---------------------------------------------------------------------------
 
 
 def load_ckpt_for_inference(
@@ -155,9 +149,7 @@ def load_ckpt_for_inference(
     )
 
 
-# ---------------------------------------------------------------------------
 # Episode details and statistics
-# ---------------------------------------------------------------------------
 
 
 def collect_episode_details(result: dict) -> list[dict]:
@@ -246,9 +238,7 @@ def compute_eval_stats(result: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Eval config field access
-# ---------------------------------------------------------------------------
 
 
 def _get_eval_param(
@@ -264,9 +254,7 @@ def _get_eval_param(
     return default
 
 
-# ---------------------------------------------------------------------------
 # Milestone checkpoint discovery
-# ---------------------------------------------------------------------------
 
 _MILESTONE_RE = re.compile(
     r"^epoch=\d+-step=(?P<step>\d+)-milestone=(?P<pct>\d+)pct\.pt$"
@@ -322,9 +310,7 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
     return found
 
 
-# ---------------------------------------------------------------------------
 # Checkpoint path resolution
-# ---------------------------------------------------------------------------
 
 
 def resolve_checkpoint_path(
