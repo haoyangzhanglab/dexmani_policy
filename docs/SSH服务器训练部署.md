@@ -311,7 +311,7 @@ bash scripts/remote/sync_down.sh
 bash scripts/remote/sync_down.sh <policy>/<task>
 bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 
-# 预览
+# 预览（仍访问服务器读取清单）
 bash scripts/remote/sync_down.sh --dry-run
 
 # 查看服务器实验
@@ -323,7 +323,7 @@ bash scripts/remote/sync_down.sh --with-wandb <optional-subpath>
 
 ### 5.2 Three-pass Protection Strategy
 
-`sync_down.sh` 保留已有大 checkpoint，并更新允许变化的训练与评测元数据。
+`sync_down.sh` 先比较已有 `config.yaml` 和 `source_manifest.json`；字节不同即报冲突并停止，不覆盖或自动合并，包括仅格式不同的情况。此检查不认证同名大二进制内容，也不提供跨文件事务。
 
 #### Pass 1 — New files only
 
@@ -335,27 +335,25 @@ remote file already exists locally
     → leave local copy untouched
 ```
 
-第一趟保留已有文件；后续趟会更新同路径的可变小文件。不同 evaluation/demo run 使用独立目录。
+第一趟只下载新的不可变产物，保留已有 milestone、resolved config、source.zip/source_manifest、eval_config、完成的 selection_result 和 result_details。不同 evaluation/demo run 使用独立目录。
 
-Pass 1 不保留 partial destination，以避免下一次 `--ignore-existing` 把未完成 checkpoint 当成完整文件。
+源码快照、训练配置、checkpoint、码本导出和评测快照/结果均在同目录临时文件中写完整后原子发布；同步排除这些临时文件。Pass 1 不保留 partial destination，以避免下一次 `--ignore-existing` 把未完成 checkpoint 当成完整文件。
 
-#### Pass 2 — Mutable training metadata
+#### Pass 2 — Mutable training files
 
-训练过程中少数文件会持续变化，因此第二趟只更新脚本显式 allowlist 中的 mutable entries。
+第二趟按普通 rsync 大小/mtime 比较更新 `metrics.jsonl`、`checkpoints/latest.pt` 和 VQ 训练中持续改写的 `vqvae_hand_best.pt`，不对大 checkpoint 或持续增长的日志做默认全量 checksum。latest 保留 symlink。
 
-具体 allowlist 以当前 `sync_down.sh` 为准，不在文档复制文件数量，避免脚本演进后形成静态 drift。
+#### Pass 3 — Best pointer and selection progress
 
-#### Pass 3 — Evaluation metadata
+仅对 `best_ckpt.json` 和 `eval_ckpt_selector/*/best_ckpt_selection.json` 使用 checksum，更新同大小、同 mtime 的小型可变记录。完整结果和配置不按后缀覆盖；目标先于引用下载，缺失目标的引用仍由读取端明确拒绝，不 fallback。所有同步深度均使用同一过滤规则，不使用 `--delete`。
 
-对 JSON、YAML 和 `_result.txt` 使用 checksum 比较，保证同大小、同 mtime 的 best、summary 和有效配置也能更新。checksum 不用于大 checkpoint 或持续增长的 metrics；latest 保持 symlink，不使用 `--delete`。新 best 的目标尚未同步时读取端会报缺失。
+### 5.3 Failure and empty-list behavior
 
-### 5.3 rsync Exit Code 24
-
-训练运行过程中可能出现文件在 rsync 扫描后被轮换/消失。脚本将 rsync exit code 24 视为可接受的并发变化；其他 rsync error 仍然失败。
+任何 rsync 非零状态（包括文件消失的 24）都会终止后续同步；不可变下载失败时不更新可变引用。传输使用 rsync 临时文件机制，失败不留下正式名的半文件。`--list` 保留 SSH/远程 find 的 stderr 和非零退出码，仅在查找成功且没有结果时报告空列表。
 
 ### 5.4 Offline W&B
 
-如果训练使用 W&B offline mode，需要把对应 `wandb/` artifact 拉回本地：
+默认在所有同步阶段排除 `wandb/`。如果训练使用 W&B offline mode，需要把对应 artifact 拉回本地：
 
 ```bash
 bash scripts/remote/sync_down.sh --with-wandb <optional-subpath>
@@ -722,7 +720,7 @@ bash scripts/remote/stop_remote.sh --list
 
 ### Experiment ownership
 
-`sync_down.sh` 保留已存在的大 checkpoint，但会更新同路径的可变小型元数据。不要随意把它改成通用 `rsync --delete`，否则可能覆盖/删除本地 selection、eval、demo 结果。
+`sync_down.sh` 保留已有不可变产物，只更新明确允许的训练文件和小型可变引用；已有配置/来源身份冲突会中止。不要改成通用覆盖或 `rsync --delete`，以免混合、覆盖或删除本地实验与评测证据。
 
 ### Process ownership
 

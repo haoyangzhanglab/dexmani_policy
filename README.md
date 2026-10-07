@@ -142,7 +142,7 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 
 省略 `--output_dir` 会自动生成任务下独立 run。新 run 原子认领；已认领目录或已有 VQ 产物均拒绝重用。导出目标存在时拒绝写入，只有显式 `--overwrite` 才允许覆盖。选点在开始时固定：有验证集为 `val_mse`，无验证集为 `train_mse`；非有限值报错，旧 best 保留。
 
-使用率工具对新 checkpoint 默认测训练源行；有验证 split 时可加 `--split validation`。checkpoint 保存目标配置、实际 Dataset 配置、统计范围和源行；码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 兼容；旧 checkpoint 不会被静默重拟合。
+使用率工具对 Policy-aligned checkpoint 默认测训练源行；有验证 split 时可加 `--split validation`。显式 split 从 checkpoint 内的清单、actual IDs 和 masks 恢复，不读取外部旧清单；旧 manifest+cap 保留当时子集。工具核对已知 data_revision、两侧合格源行和已保存的 episode 元数据；缺少显式 split 恢复证据会报错，历史 revision 缺失则提示“数据身份未验证”。相同 revision 仅是生产者声明。保存的动作布局和 normalizer 不变，码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 兼容；旧 checkpoint 不会被静默重拟合。
 
 ## 验证
 
@@ -180,17 +180,19 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 评测已有实验时，使用该实验保存的 resolved config 与 checkpoint 恢复其真实语义，不用当前默认配置推测历史实验。
 
-每次 selection、final eval 和 demo 都保存独立目录及 `eval_config.yaml`，包括实际推理参数、环境、task/seed 和代码版本；候选明细可重算选点指标。selection 默认不录像，显式加 `--videos` 才记录候选/阶段隔离的视频。demo 保存各 NFE 的结果明细，但不属于 held-out 评测。
+每次 selection、final eval 和 demo 都保存独立目录及 `eval_config.yaml`，包括实际推理参数、环境、task/seed 和代码版本；候选明细可重算选点指标。selection 默认不录像，显式加 `--videos` 才记录候选/阶段隔离的视频。三种入口共用 episode 字段和 task/seed 完整性检查，异常记录不能计作普通失败。demo 使用自己的有效 seeds，保存各 NFE 明细并标记 `heldout_from_selection=false`，不读取未使用的 test manifest。快照只保存已解析请求和本次验证过的协议，旧路径与 selection 证据可以保留为来源记录。
 
 `best_ckpt.json` 指向最近一次**成功发布**的 selection；失败保留旧 best，并以非零状态结束。评测、demo 和 policy inspection 在一次调用中固定同一份 best 记录与具体权重。普通 best 调用允许显式覆盖 EMA/NFE 并保留来源证据；使用 `--selection-record` 的流水线交接则拒绝冲突的 checkpoint/EMA/NFE 覆盖。新 best 的 selection result 或权重尚未同步时会报缺失，不替换为其他权重。多任务直接执行保存的 task→seeds，held-out 校验所用 seed 可用、等额预算与真实 `(task, seed)` 无交集；旧多任务记录缺证据需重新选点，普通权重推理仍允许。
 
-远程启动需要本地可用的 `python3` 或 `python`，通过标准库生成独立 session/log 名，不依赖本地 `/proc`，不自动终止旧会话。停止时使用启动输出中的 `stop_remote.sh <SESSION>`。`sync_down.sh` 对小型评测 JSON/YAML 使用 checksum 更新，checkpoint 继续增量下载。
+远程启动需要本地可用的 `python3` 或 `python`，通过标准库生成独立 session/log 名，不依赖本地 `/proc`，不自动终止旧会话。停止时使用启动输出中的 `stop_remote.sh <SESSION>`。数据预检只检查实际配方中的目录是否存在，不代表训练或仿真已通过。
+
+`sync_down.sh` 先下载新的不可变产物，保留已有 milestone、配置、源码快照和完成的评测结果；随后更新 `metrics.jsonl`、`checkpoints/latest.pt` 和 VQ 训练中持续改写的 `vqvae_hand_best.pt`，仅对 `best_ckpt.json` 和 `eval_ckpt_selector/*/best_ckpt_selection.json` 使用 checksum 更新。已有 `config.yaml` 或 `source_manifest.json` 字节不同会保守报冲突（包括仅格式变化），中止此次同步；不自动合并，也不保证检测同名大二进制的人为改写。源码快照、训练配置、checkpoint 与评测快照/结果写完临时文件后原子发布，同步排除其临时文件，传输失败不保留半文件。目标先于可变引用下载，但不承诺跨文件事务；缺失选择结果或权重仍明确报错。默认排除 W&B，`--list` 保留 SSH/find 的失败状态；`--dry-run` 仍会访问服务器获取同步清单。
 
 ### 固定论文评测与训练源码追溯
 
-新论文比较先从实际 runner seed 池确定同一份 task→seed JSON 清单，通过 `eval.seed_manifest=/absolute/path/seeds.json` 交给 selector。它包含 `pool_id`、`selection`、`tie_break`、`test` 四个字段，后三者均为 task→整数 seed 列表。预留 tie-break 池始终不进入 test，测试数量由清单固定，与 `episodes` 不同时提示实际数量；`max_episodes` 必须容纳完整 selection 加预留 tie-break，否则报错。多任务清单直接提供各任务实际 seed，角色内各任务预算必须相等；任务不匹配、成员不可用、重复或跨角色相交会报错。新 selector 必须使用有效清单；七个基础配置提供任务对应的默认路径，生成方式和已发布清单见 [论文 recipe](docs/paper_recipes.md)。后续 eval/demo 使用 selection record 内嵌的协议，显式冲突报错。历史无清单的已发布记录仍可按 legacy 协议复现。完整正常的全零 selection 仍发布并继续固定 test；空结果、缺失 episode 和技术异常失败并保留旧 best。
+新论文比较先从实际 runner seed 池确定同一份 task→seed JSON 清单，通过 `eval.seed_manifest=/absolute/path/seeds.json` 交给 selector。它包含 `pool_id`、`selection`、`tie_break`、`test` 四个字段，后三者均为 task→整数 seed 列表。预留 tie-break 池始终不进入 test，测试数量由清单固定，与 `episodes` 不同时提示实际数量；`max_episodes` 必须容纳完整 selection 加预留 tie-break，否则报错。多任务清单直接提供各任务实际 seed，角色内各任务预算必须相等；任务不匹配、成员不可用、重复或跨角色相交会报错。新 selector 必须使用有效清单；七个基础配置提供任务对应的默认路径，生成方式和已发布清单见 [论文 recipe](docs/paper_recipes.md)。后续 held-out eval 使用 selection record 内嵌的协议，显式冲突报错。历史无清单的已发布记录仍可按 legacy 协议复现。完整正常的全零 selection 仍发布并继续固定 test；空结果、缺失 episode 和技术异常失败并保留旧 best。
 
-`select_best_ckpt.py --result-file <新文件>` 写出该次不可变选择结果的相对引用；`eval_best_ckpt.py` 与 `record_demo.py` 用 `--selection-record <该文件>` 固定 checkpoint、raw/EMA、NFE 和 seed 协议。`eval_pipeline.sh` 默认只做 selection 和不录视频的数值 eval；demo 使用独立 `record_demo.sh`。流水线使用唯一交接引用，可通过 `SEED_MANIFEST=/absolute/path/seeds.json` 指定论文清单。
+`select_best_ckpt.py --result-file <新文件>` 写出该次不可变选择结果的相对引用；`eval_best_ckpt.py` 与 `record_demo.py` 用 `--selection-record <该文件>` 固定 checkpoint、raw/EMA 和 NFE。held-out eval 另外严格绑定完整 seed 协议；demo 保留选择记录校验，使用自己的 seeds。`eval_pipeline.sh` 默认只做 selection 和不录视频的数值 eval；demo 使用独立 `record_demo.sh`。流水线使用唯一交接引用，可通过 `SEED_MANIFEST=/absolute/path/seeds.json` 指定论文清单。
 
 新训练 run 保存 `source.zip` 和 `source_manifest.json`，记录实际运行源码（含源码目录中的未提交/未跟踪文件）、内容 SHA256、Git 身份和关键依赖。远端没有 `.git` 时 commit 为 `unknown`，以内容归档为准。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。源码身份不纳入严格 resume 相等合同。
 

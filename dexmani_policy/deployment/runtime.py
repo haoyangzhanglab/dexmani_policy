@@ -241,10 +241,16 @@ class LoadedPolicy:
             or not control.is_floating_point()
         ):
             raise ValueError(f"Policy future must be floating point {expected}")
-        return control.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
+        future = control.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
+        if not np.isfinite(future).all():
+            raise ValueError("Nonfinite policy control future")
+        return future
 
     def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0):
         positive_int(samples, "samples")
+        future_steps = self.info.horizon - self.info.n_obs_steps + 1
+        if type(rtc_delay) is not int or not 0 <= rtc_delay <= future_steps:
+            raise ValueError(f"rtc_delay must be an integer in [0, {future_steps}]")
         shapes = {
             "joint_state": (19,),
             "eef_pose": (9,),
@@ -281,10 +287,8 @@ class LoadedPolicy:
             for _ in range(samples):
                 prefix = self.predict(observation) if self.rtc_guidance_cap > 0 else None
                 start = time.perf_counter()
-                future = self.predict(observation, rtc_prefix=prefix, delay_steps=rtc_delay)
+                self.predict(observation, rtc_prefix=prefix, delay_steps=rtc_delay if prefix is not None else 0)
                 durations.append(time.perf_counter() - start)
-                if not np.isfinite(future).all():
-                    raise ValueError("Nonfinite warmup future")
         finally:
             self.reset_episode()
         return tuple(durations)

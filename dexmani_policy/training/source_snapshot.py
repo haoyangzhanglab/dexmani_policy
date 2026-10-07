@@ -8,6 +8,7 @@ import platform
 import subprocess
 import zipfile
 from pathlib import Path
+from dexmani_policy.utils.atomic import atomic_path
 
 
 def save_source_snapshot(output_dir, root=None):
@@ -48,8 +49,8 @@ def save_source_snapshot(output_dir, root=None):
               "dirty": status != "" if status is not None else "unknown",
               "source_sha256": hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest(),
               "files": hashes, "python": platform.python_version(), "dependencies": dependencies}
-    with (output_dir / "source.zip").open("xb") as stream:
-        stream.write(buffer.getvalue())
-    with (output_dir / "source_manifest.json").open("x") as stream:
-        json.dump(record, stream, indent=2)
+    with atomic_path(output_dir / "source.zip", overwrite=False) as temporary:
+        temporary.write_bytes(buffer.getvalue())
+    with atomic_path(output_dir / "source_manifest.json", overwrite=False) as temporary:
+        temporary.write_text(json.dumps(record, indent=2))
     return record

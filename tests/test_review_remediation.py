@@ -262,7 +262,7 @@ def test_source_snapshot_content_identity(tmp_path):
 def test_explicit_protocol_and_immutable_handoff(tmp_path, monkeypatch):
     from test_infra_evaluation import Runner, experiment
     from dexmani_policy import select_best_ckpt as selector
-    from dexmani_policy.evaluation.protocol import load_seed_manifest, fixed_test_seeds
+    from dexmani_policy.evaluation.protocol import load_seed_manifest, resolve_test_protocol
     from dexmani_policy.agents.loader import resolve_best_checkpoint
     root,cfg=experiment(tmp_path)
     runner=Runner()
@@ -270,10 +270,9 @@ def test_explicit_protocol_and_immutable_handoff(tmp_path, monkeypatch):
     source=tmp_path/'seeds.json'; source.write_text(json.dumps(manifest))
     cfg.eval.seed_manifest=str(source)
     monkeypatch.setattr(selector,'build_eval_runner',lambda cfg:runner)
-    monkeypatch.setattr(selector,'load_ckpt_for_inference',lambda *a,**kw:SimpleNamespace(_checkpoint_global_step=20))
-    # Exercise actual selector protocol/publication, substitute only rollout.
-    monkeypatch.setattr(selector,'evaluate_checkpoint',lambda cfg,r,mc,seeds,*a,**kw:
-                        {'episode_details':[{'seed':s,'success':True,'steps':3} for s in seeds['a']]})
+    monkeypatch.setattr(selector,'load_ckpt_for_inference',lambda path,*a,**kw:
+        SimpleNamespace(_checkpoint_global_step=int(path.name.split('step=')[1].split('-')[0])))
+    # The fake runner still passes through the public episode-result boundary.
     result=tmp_path/'handoff.json'
     selector.select_best_checkpoint(root,cfg,result_file=result)
     info,path=resolve_best_checkpoint(root,result)
@@ -282,7 +281,7 @@ def test_explicit_protocol_and_immutable_handoff(tmp_path, monkeypatch):
     selector.select_best_checkpoint(root,cfg)
     assert resolve_best_checkpoint(root,result)[0]['selection_id']==info['selection_id']
     assert result.read_bytes()==before
-    assert fixed_test_seeds(cfg,runner,info)=={'a':[3,4,5]}
+    assert resolve_test_protocol(cfg,runner,info)['roles']['test']=={'a':[3,4,5]}
     bad=copy.deepcopy(manifest); bad['test']['a']=[2]
     with pytest.raises(ValueError,match='overlap'): load_seed_manifest(bad,runner)
     bad=copy.deepcopy(manifest); bad['test']['a']=[999]
@@ -329,7 +328,7 @@ def test_resume_normalizer_uses_supplied_payload(policy_config, tmp_path, monkey
 
 
 def test_manifest_task_identity_and_pool_change():
-    from dexmani_policy.evaluation.protocol import load_seed_manifest, fixed_test_seeds
+    from dexmani_policy.evaluation.protocol import load_seed_manifest, resolve_test_protocol
     from test_infra_evaluation import Runner
     a, b = Runner(), Runner()
     a.get_seed_list = lambda: [0, 1, 2, 3]
@@ -341,11 +340,11 @@ def test_manifest_task_identity_and_pool_change():
     assert protocol['roles']['test']==manifest['test']
     cfg=OmegaConf.create({'eval':{}})
     best={'selection':{'seed_manifest':protocol}}
-    assert fixed_test_seeds(cfg,runner,best)==manifest['test']
+    assert resolve_test_protocol(cfg,runner,best)['roles']['test']==manifest['test']
     a.get_seed_list=lambda:[4,3,2,1,0]
-    assert fixed_test_seeds(cfg,runner,best)==manifest['test']
+    assert resolve_test_protocol(cfg,runner,best)['roles']['test']==manifest['test']
     a.get_seed_list=lambda:[0,1,2]
-    with pytest.raises(ValueError,match='unavailable'): fixed_test_seeds(cfg,runner,best)
+    with pytest.raises(ValueError,match='unavailable'): resolve_test_protocol(cfg,runner,best)
 
 
 def test_vq_validation_uses_sample_count_for_tail():
@@ -397,7 +396,7 @@ def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry, wi
         if source_change == 'missing':
             source.unlink()
         else:
-            source.write_text('{}')  # Pinned demo must use its embedded protocol.
+            source.write_text('{}')  # Demo uses its own seeds; old protocol remains provenance.
     module=demo if entry=='demo' else evaluator
     def load(path,use_ema,**kw):
         assert path==root/first['ckpt_relpath'] and use_ema is True
@@ -420,7 +419,7 @@ def test_selection_record_cli_survives_new_best(tmp_path, monkeypatch, entry, wi
     assert snapshot.request.use_ema is True
     assert snapshot.request.checkpoint == first['ckpt_relpath']
     if with_manifest:
-        assert OmegaConf.to_container(snapshot.seed_manifest) == protocol
+        assert snapshot.seed_manifest is None
         assert OmegaConf.to_container(snapshot.request.selection.seed_manifest) == protocol
         assert snapshot.request.task_seeds.a == selected_seeds
         assert snapshot.request.heldout_from_selection is False

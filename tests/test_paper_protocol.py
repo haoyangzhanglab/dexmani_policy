@@ -6,13 +6,53 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import numpy as np
 from omegaconf import OmegaConf
 
 from test_infra_evaluation import Runner, experiment
 from dexmani_policy import select_best_ckpt as selector, eval_best_ckpt as evaluator
 from dexmani_policy.agents.loader import resolve_best_checkpoint
-from dexmani_policy.evaluation.protocol import load_seed_manifest, fixed_test_seeds, bind_seed_manifest, plan_size
+from dexmani_policy.evaluation.protocol import load_seed_manifest, resolve_test_protocol, bind_seed_manifest, plan_size
 from scripts.eval.make_seed_manifest import make_manifest
+
+
+@pytest.mark.parametrize('fault', ['string_success','numeric_success','bool_seed','negative_steps','bool_steps',
+                                  'no_success','no_steps','missing','duplicate','extra','task','error','failed_tasks'])
+def test_public_eval_plan_rejects_invalid_episode(fault):
+    from dexmani_policy.evaluation.protocol import run_eval_plan
+    runner = Runner()
+    details = [dict(seed=1,success=False,steps=None),dict(seed=2,success=True,steps=0)]
+    result = dict(episode_details=details)
+    if fault == 'string_success': details[0]['success'] = 'False'
+    elif fault == 'numeric_success': details[0]['success'] = 0
+    elif fault == 'bool_seed': details[0]['seed'] = True
+    elif fault == 'negative_steps': details[0]['steps'] = -1
+    elif fault == 'bool_steps': details[0]['steps'] = True
+    elif fault == 'no_success': del details[0]['success']
+    elif fault == 'no_steps': del details[0]['steps']
+    elif fault == 'missing': details.pop()
+    elif fault == 'duplicate': details[-1] = details[0]
+    elif fault == 'extra': details.append(dict(seed=3,success=False,steps=None))
+    elif fault == 'task': details[0]['task_name'] = 'wrong'
+    elif fault == 'error': details[0]['error_category'] = 'runtime'
+    else: result['failed_tasks'] = ['a']
+    runner.run = lambda *a,**kw: result
+    with pytest.raises(RuntimeError): run_eval_plan(runner,None,{'a':[1,2]},inference_steps=2)
+
+
+def test_public_eval_plan_valid_bool_types_and_multitask_stats():
+    from dexmani_policy.evaluation.protocol import run_eval_plan, compute_eval_stats
+    runner = Pool(multi=True)
+    result = {'per_task': {'a': {'episode_details': [dict(seed=1,success=np.bool_(True),steps=4,extra='kept')]},
+                           'b': {'episode_details': [dict(seed=1001,success=False,steps=None)]}}}
+    runner.run = lambda *a,**kw: result
+    actual = run_eval_plan(runner,None,{'a':[1],'b':[1001]},inference_steps=2)
+    json.dumps(actual)
+    stats = compute_eval_stats(actual)
+    assert stats['n_success'] == 1 and stats['n_valid_episodes'] == 2
+    assert stats['macro_success_rate'] == stats['micro_success_rate'] == .5
+    result['per_task']['b']['error'] = 'task failed'
+    with pytest.raises(RuntimeError): run_eval_plan(runner,None,{'a':[1],'b':[1001]},inference_steps=2)
 
 
 class Pool(Runner):
@@ -86,7 +126,7 @@ def test_zero_selection_fixed_test_and_pinning(tmp_path,monkeypatch,capsys,multi
             summary=json.loads((root/info['selection_summary']).read_text())
             assert summary['status']=='success'
             assert all(len(c['episode_details'])==(25+tie_count)*(2 if multi else 1) for c in summary['all_results'])
-            assert fixed_test_seeds(cfg,Pool(multi),info)==load_seed_manifest(manifest,pool)['roles']['test']
+            assert resolve_test_protocol(cfg,Pool(multi),info)==load_seed_manifest(manifest,pool)
             if original_record is None: original_record=(info,path)
     source.unlink()  # Saved config now points at a nonexistent file.
     build=Mock(side_effect=lambda cfg:Pool(multi)); model_load=Mock(side_effect=load)
@@ -108,7 +148,7 @@ def test_zero_selection_fixed_test_and_pinning(tmp_path,monkeypatch,capsys,multi
     assert model_load.call_count==2
     changed=copy.deepcopy(manifest); changed['pool_id']='different'
     source.write_text(json.dumps(changed))
-    assert fixed_test_seeds(cfg,Pool(multi),original_record[0])==load_seed_manifest(manifest,Pool(multi))['roles']['test']
+    assert resolve_test_protocol(cfg,Pool(multi),original_record[0])==load_seed_manifest(manifest,Pool(multi))
     with pytest.raises(ValueError,match='differs'):
         evaluator._resolve_final_eval_request(cfg,root,'best',[f'eval.seed_manifest={source}'],resolved_best=original_record)
     # An unchanged explicit declaration is accepted and stays bound on repeated resolution.
@@ -127,8 +167,8 @@ def test_selection_episode_failures_preserve_pointer(tmp_path,monkeypatch,fault)
     root,cfg=experiment(tmp_path); runner=Pool()
     cfg.eval.seed_manifest=make_manifest(runner,pool_id='synthetic-fixture')
     monkeypatch.setattr(selector,'build_eval_runner',lambda cfg:runner)
-    def result(cfg,r,mc,seeds,*a,**kw):
-        details=[dict(seed=s,success=False,steps=None) for s in seeds['a']]
+    def result(agent,**kw):
+        details=[dict(seed=s,success=False,steps=None) for s in runner.eval_seeds]
         if fault=='empty': details=[]
         if fault=='missing': details.pop()
         if fault=='duplicate': details[-1]=details[0]
@@ -137,7 +177,9 @@ def test_selection_episode_failures_preserve_pointer(tmp_path,monkeypatch,fault)
         if fault=='no_steps': del details[0]['steps']
         if fault=='error': details[0]['error']='technical failure'
         return dict(episode_details=details,failed_tasks=['a'] if fault=='failed_tasks' else [])
-    monkeypatch.setattr(selector,'evaluate_checkpoint',result)
+    monkeypatch.setattr(runner,'run',result)
+    monkeypatch.setattr(selector,'load_ckpt_for_inference',lambda path,*a,**kw:
+        SimpleNamespace(_checkpoint_global_step=int(re.search(r'step=(\d+)',path.name)[1])))
     pointer=root/'best_ckpt.json'; pointer.write_text('previous evidence')
     handoff=root/'handoff.json'
     with pytest.raises(RuntimeError): selector.select_best_checkpoint(root,cfg,result_file=handoff)
@@ -173,10 +215,11 @@ def test_selection_hard_cap_and_effective_counts(tmp_path, monkeypatch, tie_coun
         selector.select_best_checkpoint(root, cfg, max_episodes=cap - 1)
     assert model_load.call_count == 0 and runner.calls == []
     # A unique winner does not use tie seeds, but they must still fit the cap.
-    def rollout(cfg, r, mc, seeds, *args, **kwargs):
-        return {'episode_details': [dict(seed=s, success=mc.global_step == 40, steps=3)
-                                    for s in seeds['a']]}
-    monkeypatch.setattr(selector, 'evaluate_checkpoint', rollout)
+    model_load.side_effect = lambda path,*a,**kw: SimpleNamespace(_checkpoint_global_step=int(re.search(r'step=(\d+)',path.name)[1]))
+    def rollout(agent, **kwargs):
+        return {'episode_details': [dict(seed=s, success=agent._checkpoint_global_step == 40, steps=3)
+                                    for s in runner.eval_seeds]}
+    monkeypatch.setattr(runner, 'run', rollout)
     selector.select_best_checkpoint(root, cfg, max_episodes=cap)
     info, _ = resolve_best_checkpoint(root)
     assert not info['selection']['tie_break_used']
@@ -193,17 +236,19 @@ def test_ranking_and_unused_tie_reservation(tmp_path,monkeypatch,tie_success):
     manifest=make_manifest(runner,pool_id='synthetic-fixture')
     cfg.eval.seed_manifest=manifest
     monkeypatch.setattr(selector,'build_eval_runner',lambda cfg:runner)
-    def rollout(cfg,r,mc,seeds,*a,**kw):
-        tie=seeds==manifest['tie_break']
-        success=(tie and mc.global_step==20) if tie_success else mc.global_step==40
-        return {'episode_details':[dict(seed=s,success=success,steps=3 if success else None) for s in seeds['a']]}
-    monkeypatch.setattr(selector,'evaluate_checkpoint',rollout)
+    def rollout(agent,**kw):
+        tie=runner.eval_seeds==manifest['tie_break']['a']
+        success=(tie and agent._checkpoint_global_step==20) if tie_success else agent._checkpoint_global_step==40
+        return {'episode_details':[dict(seed=s,success=success,steps=3 if success else None) for s in runner.eval_seeds]}
+    monkeypatch.setattr(runner,'run',rollout)
+    monkeypatch.setattr(selector,'load_ckpt_for_inference',lambda path,*a,**kw:
+        SimpleNamespace(_checkpoint_global_step=int(re.search(r'step=(\d+)',path.name)[1])))
     selector.select_best_checkpoint(root,cfg)
     info,_=resolve_best_checkpoint(root)
     assert info['global_step']==(20 if tie_success else 40)
     assert info['selection']['tie_break_used']==tie_success
     assert info['selection']['selection_all_zero'] is False
-    assert not set(manifest['tie_break']['a']) & set(fixed_test_seeds(cfg,runner,info)['a'])
+    assert not set(manifest['tie_break']['a']) & set(resolve_test_protocol(cfg,runner,info)['roles']['test']['a'])
 
 
 def test_manifest_cli_and_shell_handoff(tmp_path,monkeypatch):

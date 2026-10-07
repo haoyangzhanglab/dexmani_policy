@@ -1,6 +1,7 @@
 """Native synthetic Policy Dataset -> VQ -> exported codebook -> DQRISE loading."""
 
 import argparse
+import json
 
 import hydra
 import numpy as np
@@ -12,6 +13,102 @@ from omegaconf import OmegaConf
 from dexmani_policy.agents.normalization import LinearNormalizer
 from dexmani_policy.training.build_utils import build_normalizer
 from scripts.training import train_vq_hand as vq
+
+
+def usage_checkpoint(cfg, tmp_path, *, manifest=False, capped=False):
+    from dexmani_policy.agents.vq_hand import VQVAEHand
+    root = zarr.open_group(cfg.dataset.zarr_path, mode='a')
+    root.attrs.update(data_revision='saved-revision', episode_ids=['a','b','c','d'])
+    if manifest:
+        path = tmp_path/'split.json'
+        path.write_text(json.dumps({'data_revision':'saved-revision', 'episode_ids':['a','b','c','d'],
+            'train_ids':['a','b'], 'val_ids':['c'], 'exclusions':['d'],
+            'trial_ids':{k:k for k in 'abcd'}, 'seed':42, 'group_unit':'trial'}))
+        cfg.dataset.split_manifest = str(path); cfg.dataset.val_ratio = 0
+    _, _, normalizer, metadata = vq.prepare_policy_data(cfg)
+    if capped:
+        # Saved evidence from an old manifest+cap run: only b, not all manifest train IDs.
+        saved = metadata['data_recipe']['split_manifest']
+        saved['actual_train_ids'] = ['b']; saved['train_mask'] = [False,True,False,False]
+        metadata['train_episode_ids'] = [1]; metadata['train_source_rows'] = list(range(6,12))
+        metadata['resolved_dataset'].update(max_train_episodes=1, val_ratio=.8)
+    model = VQVAEHand(12, [1.] * 12, latent_dim=4, hidden_dim=8, num_groups=1,
+                      codebook_size=2, num_layers=1, kmeans_init=False)
+    optimizer = torch.optim.Adam(model.parameters())
+    checkpoint = tmp_path/'vq.pt'
+    vq._save_checkpoint(checkpoint, epoch=0, vqvae=model, optimizer=optimizer,
+        scheduler=torch.optim.lr_scheduler.StepLR(optimizer,1), normalizer=normalizer,
+        args=argparse.Namespace(vq_decay=.8,threshold_ema_dead_code=0,kmeans_iters=2,action_key='action',tcp_dim=7),
+        train_history=[], split_metadata=metadata, metrics={})
+    return checkpoint, metadata
+
+
+@pytest.mark.parametrize('capped', [False,True])
+@pytest.mark.parametrize('external', ['deleted','modified'])
+def test_usage_restores_saved_split_without_external_manifest(policy_config,tmp_path,capped,external):
+    from scripts.training.measure_vq_usage import measure
+    checkpoint,metadata = usage_checkpoint(policy_config,tmp_path,manifest=True,capped=capped)
+    path = tmp_path/'split.json'
+    if external == 'deleted': path.unlink()
+    else: path.write_text('{}')
+    before = checkpoint.read_bytes()
+    for split in ('train','validation'):
+        usage = measure(str(checkpoint),policy_config.dataset.zarr_path,split=split)
+        rows = metadata['train_source_rows' if split=='train' else 'val_source_rows']
+        assert sum(usage['nn_counts']) == len(rows)
+    assert checkpoint.read_bytes() == before
+
+
+@pytest.mark.parametrize('change', ['revision','missing_revision','observation','dispatch','rows', 'val_rows',
+                                   'digest','mask','missing_saved'])
+def test_usage_rejects_changed_identity_or_split(policy_config,tmp_path,change):
+    from scripts.training.measure_vq_usage import measure
+    explicit = change in {'digest','mask','missing_saved'}
+    checkpoint,_ = usage_checkpoint(policy_config,tmp_path,manifest=explicit)
+    root = zarr.open_group(policy_config.dataset.zarr_path, mode='a')
+    if change == 'revision': root.attrs['data_revision'] = 'changed'
+    elif change == 'missing_revision': del root.attrs['data_revision']
+    elif change == 'observation': root['data/joint_state'][8:12] = np.nan
+    elif change == 'dispatch': root['row_info/dispatch_status'][8:12] = 0
+    else:
+        payload = torch.load(checkpoint,weights_only=False)
+        metadata = payload['split_metadata']
+        if change == 'rows': metadata['train_source_rows'] = []
+        elif change == 'val_rows': metadata['val_source_rows'] = []
+        elif change == 'missing_saved': del metadata['data_recipe']['split_manifest']
+        elif change == 'digest': metadata['data_recipe']['split_manifest']['sha256'] = 'bad'
+        elif change == 'mask': metadata['data_recipe']['split_manifest']['train_mask'][0] = False
+        torch.save(payload,checkpoint)
+    with pytest.raises((ValueError,hydra.errors.InstantiationException)):
+        measure(str(checkpoint),policy_config.dataset.zarr_path)
+
+
+def test_usage_no_manifest_historical_identity_is_unverified(policy_config,tmp_path):
+    from scripts.training.measure_vq_usage import measure
+    checkpoint,metadata = usage_checkpoint(policy_config,tmp_path)
+    payload = torch.load(checkpoint,weights_only=False)
+    del payload['split_metadata']['data_revision']; torch.save(payload,checkpoint)
+    with pytest.warns(UserWarning, match='身份未验证'):
+        result = measure(str(checkpoint),policy_config.dataset.zarr_path)
+    assert sum(result['nn_counts']) == len(metadata['train_source_rows'])
+
+
+def test_codebook_export_keeps_exclusive_atomic_publication(policy_config,tmp_path,monkeypatch):
+    from scripts.training.extract_vq_codebook import extract_codebook
+    from dexmani_policy.agents.vq_hand import CodebookManager
+    checkpoint,_ = usage_checkpoint(policy_config,tmp_path)
+    output = tmp_path/'codebook.npz'
+    extract_codebook(checkpoint,output,device='cpu')
+    before = output.read_bytes()
+    with pytest.raises(FileExistsError): extract_codebook(checkpoint,output,device='cpu')
+    def fail_save(self,path):
+        assert path.name.startswith('.dexmani-publish-') and path.name.endswith('.tmp.npz')
+        path.write_bytes(b'partial export')
+        raise OSError('export interrupted')
+    monkeypatch.setattr(CodebookManager,'save',fail_save)
+    with pytest.raises(OSError): extract_codebook(checkpoint,output,device='cpu',overwrite=True)
+    assert output.read_bytes() == before
+    assert not list(tmp_path.glob('.dexmani-publish-*'))
 
 
 @pytest.fixture

@@ -1,10 +1,10 @@
 import atexit
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from omegaconf import OmegaConf
+from dexmani_policy.utils.atomic import atomic_path
 
 from dexmani_policy.training.run_identity import claim_run, check_run_claim
 from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
@@ -58,7 +58,8 @@ class TrainWorkspace:
         atexit.register(self.close)
 
     def save_hydra_config(self, hydra_config):
-        OmegaConf.save(hydra_config, self.output_dir / "config.yaml", resolve=True)
+        with atomic_path(self.output_dir / "config.yaml") as temporary:
+            OmegaConf.save(hydra_config, temporary, resolve=True)
         cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
         if self.wandb_logger is not None:
             self.wandb_logger.log_config(cfg_dict, self.output_dir)
@@ -77,11 +78,9 @@ class TrainWorkspace:
 
     def save_latest(self, checkpoint_path: Path) -> Path:
         latest_path = self.checkpoint_dir / "latest.pt"
-        tmp_path = latest_path.with_suffix(".tmp.pt")
-        if tmp_path.exists() or tmp_path.is_symlink():
-            tmp_path.unlink()
-        tmp_path.symlink_to(checkpoint_path.name)
-        os.replace(tmp_path, latest_path)
+        with atomic_path(latest_path) as temporary:
+            temporary.unlink()
+            temporary.symlink_to(checkpoint_path.name)
         return latest_path
 
     def close(self):

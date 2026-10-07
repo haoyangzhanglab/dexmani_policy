@@ -12,6 +12,80 @@ from dexmani_policy.agents.normalization import LinearNormalizer, SingleFieldLin
 from dexmani_policy.deployment.runtime import LoadedPolicy
 
 
+def boundary_policy(mode='joint'):
+    class Agent(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.value = None
+            self.calls = []
+            self.outputs = []
+            self.resets = 0
+        def reset_episode(self): self.resets += 1
+        def predict_action(self, obs, **kwargs):
+            self.calls.append(kwargs)
+            value = self.value if self.value is not None else torch.randn(1, 4, 24)
+            self.outputs.append(value.clone())
+            return {'pred_action': value}
+    info = SimpleNamespace(observation_fields=('joint_state',), inference_steps=2,
+                           action_mode=mode, n_obs_steps=2, n_action_steps=2, horizon=4)
+    policy = LoadedPolicy(Agent(), {'dataset': {}}, info, device='cpu', seed=0)
+    policy.agent.resets = 0
+    return policy
+
+
+@pytest.mark.parametrize('mode,dimensions', [('joint',19), ('eef',21)])
+@pytest.mark.parametrize('bad', [float('nan'),float('inf'),-float('inf')])
+def test_predict_rejects_nonfinite_control_future(mode, dimensions, bad):
+    policy = boundary_policy(mode)
+    policy.agent.value = torch.zeros(1,4,24)
+    policy.agent.value[0,1,dimensions-1] = bad
+    with pytest.raises(ValueError, match='Nonfinite'):
+        policy.predict({'joint_state': np.zeros((2,19),np.float32)})
+
+
+@pytest.mark.parametrize('mode,dimensions', [('joint',19), ('eef',21)])
+def test_predict_checks_only_returned_future_and_accepts_strides(mode, dimensions):
+    policy = boundary_policy(mode)
+    value = torch.zeros(1,24,4).transpose(1,2)
+    assert not value.is_contiguous()
+    value[0,0,:] = float('nan'); value[0,1:,dimensions:] = float('inf')
+    policy.agent.value = value
+    output = policy.predict({'joint_state': np.zeros((19,2),np.float32).T})
+    assert output.shape == (3,dimensions) and output.dtype == np.float64
+    assert np.isfinite(output).all()
+    policy.agent.value = torch.zeros(1,3,24)
+    with pytest.raises(ValueError, match='Policy future'):
+        policy.predict({'joint_state': np.zeros((2,19),np.float32)})
+
+
+@pytest.mark.parametrize('cap,delay', [(0,0),(0,2),(1,2)])
+def test_warmup_zero_cap_uses_plain_path(cap, delay):
+    policy = boundary_policy(); policy.rtc_guidance_cap = cap
+    torch.manual_seed(23)
+    durations = policy.warmup(samples=2, rtc_delay=delay)
+    assert len(durations) == 2 and policy.agent.resets == 2
+    assert len(policy.agent.calls) == (2 if cap == 0 else 4)
+    if cap == 0:
+        assert all('rtc_prefix' not in call and 'delay_steps' not in call for call in policy.agent.calls)
+        after = torch.get_rng_state()
+        outputs = policy.agent.outputs[:]
+        policy.warmup(samples=2,rtc_delay=0)
+        for left,right in zip(outputs,policy.agent.outputs[2:]): torch.testing.assert_close(left,right,rtol=0,atol=0)
+        assert torch.equal(after,torch.get_rng_state())
+    else:
+        assert policy.agent.calls[1]['delay_steps'] == delay
+
+
+@pytest.mark.parametrize('delay', [-1,4,True,1.5])
+def test_warmup_invalid_delay_and_failure_reset(delay):
+    policy = boundary_policy()
+    with pytest.raises(ValueError, match='rtc_delay'): policy.warmup(samples=1,rtc_delay=delay)
+    assert not policy.agent.calls
+    policy.agent.value = torch.full((1,4,24),float('nan'))
+    with pytest.raises(ValueError, match='Nonfinite'): policy.warmup(samples=1)
+    assert policy.agent.resets == 2
+
+
 class Coupled(nn.Module):
     def __init__(self):
         super().__init__()
@@ -329,7 +403,7 @@ def test_eef_bridge_mixed_affine_prefix():
 
 
 @pytest.mark.parametrize("mode", ["sync", "async", "rtc"])
-@pytest.mark.parametrize("delay,cap", [(0, 2.0), (3, 2.0), (0, 0.0)])
+@pytest.mark.parametrize("delay,cap", [(0, 2.0), (3, 2.0), (0, 0.0), (3, 0.0)])
 def test_execution_warmup_uses_requested_rtc_delay(mode, delay, cap):
     agent = AuxAgent(
         Encoder(),

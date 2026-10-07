@@ -10,7 +10,7 @@ BaseDataset 对实际启用的输入生成 obs_valid，对完整监督（含启�
 - episode→已确认 trial 的 `trial_ids` 映射，以及 `seed`、`group_unit`；
 - 完整、互斥的 `train_ids`、`val_ids`、`exclusions`，同 trial 不跨 train/val。
 
-新训练的清单直接决定最终 episode 集合，要求 `val_ratio=0`、`max_train_episodes=null`，冲突会报错；预算应在清单准备阶段落实。不从目录名、暂停或 HOME 推断 trial，排除项不会进入任一侧。旧 manifest+cap 续训读取保存的完整清单和 `actual_train_ids`，不重新抽样，外部清单文件可以不存在。实际读取的完整规范化清单、SHA-256、最终 mask/子集及 episode/trial/有效窗口数量进入现有 `data_recipe` 并随 resolved config 保存；无验证侧时明确 `holdout=false`。这是训练划分，与仿真评测的 `eval.seed_manifest` 独立。
+新训练的清单直接决定最终 episode 集合，要求 `val_ratio=0`、`max_train_episodes=null`，冲突在打开 ReplayBuffer 和扫描数据前报错；预算应在清单准备阶段落实。不从目录名、暂停或 HOME 推断 trial，排除项不会进入任一侧。旧 manifest+cap 续训读取保存的完整清单和 `actual_train_ids`，不重新抽样，外部清单文件可以不存在。实际读取的完整规范化清单、SHA-256、最终 mask/子集及 episode/trial/有效窗口数量进入现有 `data_recipe` 并随 resolved config 保存；无验证侧时明确 `holdout=false`。这是训练划分，与仿真评测的 `eval.seed_manifest` 独立。
 
 未提供清单时保留原 episode split、配置和 data_recipe 结构；默认配置不添加 `split_manifest: null`。新清单不接受 unknown revision，可从 Raw 导出到新路径后使用；不向旧缓存回填身份。修改清单内容或实际划分属于新实验，strict resume 会拒绝配方变化。
 
@@ -33,7 +33,9 @@ Zarr reader 按进程重开句柄，只保留选中字段和每字段一个有�
 
 `PolicyInfo.horizon` 提供 H，N=n_obs_steps，P=H-N+1。LoadedPolicy.predict(observation, *, rtc_prefix=None, delay_steps=0) 返回物理控制子空间的 (P,C) NumPy 数组，起点是模型索引 N-1，C 为 joint19 或 EEF21。内部 Agent 的 pred_action/control_action/tail 约定不变，不额外运行网络获取 tail。
 
-Real 只提供物理数组和时序；Policy 负责 checkpoint affine 归一化。joint+aux 的 28 维统计只取实际 19 个控制维给前缀归一化一次，不向辅助输出填造目标。完整返回 chunk 的有限性准入在 Real；Policy 保留形状/浮点 dtype 检查，独立 warmup 检查自身输出。
+Real 只提供物理数组和时序；Policy 负责 checkpoint affine 归一化。joint+aux 的 28 维统计只取实际 19 个控制维给前缀归一化一次，不向辅助输出填造目标。Policy 在每次 predict 已有的 CPU/float64 转换后，检查实际返回的 (P,C) 控制 future 全部有限；NaN/Inf 直接报错，不替换动作。warmup 复用此检查，Real 执行器已有检查仍保留。这不代表真机安全或闭环质量已验收。
+
+warmup 的 `rtc_delay` 必须为非 bool 整数且满足 0≤delay≤P。`guidance_cap=0` 时不构造 prefix，内部按 delay=0 执行普通采样，不额外消耗预测或随机数；正 cap 保留引导路径。公共 predict 仍拒绝无 prefix 时传非零 delay。
 
 `configure_execution('rtc', beta)` 显式配置 RTC，未支持的 agent/decoder 报 NotImplementedError。当前为连续动作 BaseAgent + Diffusion 的 DDIM 路径；DP/DP3/R3D 的 UNet、OneWayTransformer 已有 CPU VJP 测试。SAT、DQRise、flow 等未适配路径仍可使用原有 sync/async，不会将 RTC 请求默默降级。模式调度和硬件预算由 dexmani_real 管理。
 

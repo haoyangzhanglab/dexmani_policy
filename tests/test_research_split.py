@@ -167,8 +167,10 @@ def test_no_holdout_is_explicit(tmp_path):
 
 
 @pytest.mark.parametrize("extra", [{"val_ratio": 0.8}, {"max_train_episodes": 1}])
-def test_new_manifest_rejects_second_selection(tmp_path, extra):
+def test_new_manifest_rejects_second_selection(tmp_path, extra, monkeypatch):
+    from dexmani_policy.datasets.replay_buffer import ReplayBuffer
     path, _, manifest, _ = fixture(tmp_path)
+    monkeypatch.setattr(ReplayBuffer, 'open', lambda *a, **kw: pytest.fail('split conflict reached I/O'))
     with pytest.raises(ValueError, match="defines final IDs"):
         BaseDataset(str(path), split_manifest=str(manifest), **extra)
 

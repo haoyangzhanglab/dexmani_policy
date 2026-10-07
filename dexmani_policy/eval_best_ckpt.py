@@ -63,7 +63,7 @@ from dexmani_policy.evaluation.protocol import (
     save_eval_snapshot, run_eval_plan, plan_size, task_seed_pools, validate_heldout, artifact_reference, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
-    fixed_test_seeds,
+    resolve_test_protocol,
     collect_episode_details,
     compute_eval_stats,
     iter_leaf_env_runners,
@@ -100,8 +100,9 @@ def _prepare_result_dir(exp_dir: Path, result_save_dir: Path | None) -> Path:
 
 def _write_result(path: Path, text: str) -> None:
     """Never replace an artifact from a previous invocation."""
-    with path.open("x", encoding="utf-8") as file:
-        file.write(text)
+    from dexmani_policy.utils.atomic import atomic_path
+    with atomic_path(path, overwrite=False) as temporary:
+        temporary.write_text(text, encoding="utf-8")
 
 
 def _setup_eval(
@@ -119,13 +120,14 @@ def _setup_eval(
 
     Returns
     -------
-    (agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds)
+    (agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol)
     """
     eval_seed = resolve_eval_seed(cfg)
     set_seed(eval_seed)
 
     env_runner = build_eval_runner(cfg)
-    eval_seeds = fixed_test_seeds(cfg, env_runner, best_info)
+    protocol = resolve_test_protocol(cfg, env_runner, best_info)
+    eval_seeds = protocol['roles']['test'] if protocol is not None else None
     if eval_seeds is None:
         eval_seeds = _select_eval_seeds(
             env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
@@ -144,7 +146,7 @@ def _setup_eval(
     agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
     cprint("✅ Checkpoint loaded\n", "green")
 
-    return agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds
+    return agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol
 
 
 def _selection_seeds(best_info) -> dict[str, list[int]] | list[int]:
@@ -335,7 +337,7 @@ def evaluate_checkpoint_robotwin(
     best_info = resolved_best[0] if resolved_best is not None else None
     selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds = _setup_eval(
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol = _setup_eval(
         cfg,
         exp_dir,
         str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
@@ -348,7 +350,7 @@ def evaluate_checkpoint_robotwin(
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
-        result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
+        result_save_dir, cfg, env_runner, protocol=protocol, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
         inference_steps_list=[inference_steps], episodes=episodes,
         effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,
@@ -439,7 +441,7 @@ def evaluate_checkpoint_sweep(
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # ── 1. Setup ONCE ──────────────────────────────────────────────────
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds = _setup_eval(
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol = _setup_eval(
         cfg,
         exp_dir,
         str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
@@ -452,7 +454,7 @@ def evaluate_checkpoint_sweep(
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
-        result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
+        result_save_dir, cfg, env_runner, protocol=protocol, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
         inference_steps_list=inference_steps_list, episodes=episodes,
         effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,

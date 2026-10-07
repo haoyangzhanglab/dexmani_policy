@@ -16,7 +16,8 @@ Key differences from ``eval_best_ckpt.py``:
   defaults otherwise. Explicit
   ``--ema``/``--no-ema`` and ``--inference-steps`` override these settings.
 - ``--selection-record`` pins a selector's own handoff file and rejects
-  conflicting checkpoint/EMA/NFE choices. Demo seeds remain non-held-out.
+  conflicting checkpoint/EMA/NFE choices. Demo seeds remain non-held-out and
+  do not require the selection/test manifest to be available in the demo pool.
 
 Usage
 -----
@@ -70,6 +71,7 @@ from dexmani_policy.evaluation.protocol import (
     resolve_checkpoint_path,
     resolve_eval_seed,
     validate_inference_steps,
+    validate_task_seeds,
 )
 
 ROOT_DIR = set_project_root()
@@ -248,11 +250,8 @@ def main() -> None:
     )
 
     # ── 3. Build env_runner ─────────────────────────────────────
-    from dexmani_policy.evaluation.protocol import bind_seed_manifest, fixed_test_seeds
     best_info = resolved_best[0] if resolved_best else None
-    cfg = bind_seed_manifest(cfg, best_info)
     env_runner = build_eval_runner(cfg)
-    fixed_test_seeds(cfg, env_runner, best_info)
 
     # Apply viewer resolution from CLI or config
     _demo_resolution = args.resolution
@@ -323,9 +322,9 @@ def main() -> None:
     cprint(f"{'=' * 60}\n", "cyan")
 
     # ── 8. Select seeds ────────────────────────────────────────────────────
-    # Match evaluation and selection seed ordering when seeds are not explicit.
-    if args.seeds:
-        eval_seeds = {task: list(args.seeds) for task in task_seed_pools(env_runner)}
+    pools = task_seed_pools(env_runner)
+    if args.seeds is not None:
+        eval_seeds = {task: list(args.seeds) for task in pools}
         demo_episodes = len(args.seeds)
         cprint(
             f"  Using {demo_episodes} specified seeds: {eval_seeds}",
@@ -336,7 +335,11 @@ def main() -> None:
         eval_seeds = _select_eval_seeds(env_runner, eval_seed, demo_episodes)
         demo_episodes = plan_size(eval_seeds)
 
-    # Validate and snapshot the full manifest before narrowing the runner's pool.
+    validate_task_seeds(eval_seeds, pools)
+    for task, seeds in eval_seeds.items():
+        if set(seeds) - set(pools[task]):
+            raise ValueError(f"Unavailable demo seeds for {task}")
+    # Only the actual demo plan is used; selection evidence remains provenance.
     snapshot_ref = save_eval_snapshot(
         video_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
@@ -368,15 +371,16 @@ def main() -> None:
         )
 
         per_seed_details = collect_episode_details(result)
+        statistics = compute_eval_stats(result)
         atomic_json(sub_dir / "result_details.json", {
             "eval_config": snapshot_ref, "checkpoint": artifact_reference(ckpt_path, exp_dir),
             "global_step": agent._checkpoint_global_step, "inference_steps": inference_steps,
             "use_ema": use_ema, "episode_details": per_seed_details,
-            "statistics": compute_eval_stats(result), "heldout_from_selection": False,
+            "statistics": statistics, "heldout_from_selection": False,
         })
-        n_success = sum(1 for d in per_seed_details if d.get("success"))
-        n_total = len(per_seed_details)
-        sr = n_success / n_total if n_total else 0.0
+        n_success = statistics["n_success"]
+        n_total = statistics["n_valid_episodes"]
+        sr = statistics["micro_success_rate"]
 
         if do_sweep:
             cprint(
@@ -410,12 +414,8 @@ def main() -> None:
     cprint(f"\n{'=' * 60}", "green")
     cprint("  Recording complete!", "green")
     if not do_sweep:
-        n_success = sum(1 for d in per_seed_details if d.get("success"))
-        n_total = len(per_seed_details)
         cprint(
-            f"  Success rate : {n_success}/{n_total} = {n_success / n_total:.1%}"
-            if n_total
-            else "",
+            f"  Success rate : {n_success}/{n_total} = {sr:.1%}",
             "green",
         )
     cprint(f"  Videos saved : {video_save_dir}", "green")

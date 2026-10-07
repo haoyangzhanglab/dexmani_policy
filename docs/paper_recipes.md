@@ -65,7 +65,7 @@ DP/Multi-task：resize 240×240、训练随机 crop 224×224、eval center crop�
 
 **M** 为默认 task-set `pick_bottle+open_box` 对应路径。本机两个任务均无实际 seed 文件，真实 runner 各 fallback 100，生成器实际拒绝 25+5+100；**真实清单待发布 / NOT VERIFIED**，没有提交占位 JSON。必须准备足够实际 paired seeds 后一次发布；若事先决定更小 test，应显式生成另一份协议、记录新计数，不能自动截断。若以后比较单/多任务同一任务，需核对各角色的 physical seeds 完全一致；当前 runner 直接执行这些实际列表，各任务预算仍须相等。
 
-新 selection 必须指定有效 manifest，完整预留 tie seeds；选点后 pinned eval/demo 使用不可变记录中的内嵌内容，原路径删除或修改不影响默认 handoff。显式 `eval.seed_manifest=...` 必须与记录 canonical hash 相同，显式 null 也不能解除合同；初次选点和后续评测检查所用 seed 可用、角色互斥及完成列表。demo 根据各任务池选择可视化 seeds，显式 `--seeds` 表示物理数字，不计入 held-out 指标。历史无 manifest 的记录只沿 legacy 路径复现，不能贴上新协议冒充重新选点。
+新 selection 必须指定有效 manifest，完整预留 tie seeds；选点后 pinned held-out eval 使用不可变记录中的内嵌内容，原路径删除或修改不影响默认 handoff。显式 `eval.seed_manifest=...` 必须与记录 canonical hash 相同，显式 null 也不能解除合同；初次选点和后续 held-out 评测检查所用 seed 可用、角色互斥及完成列表。demo 的固定交接只锁定 checkpoint/EMA/NFE，仍验证选择记录；根据各任务池选择可视化 seeds，显式 `--seeds` 表示物理数字，不读取未使用的 test 清单，不计入 held-out 指标。历史无 manifest 的记录只沿 legacy 路径复现，不能贴上新协议冒充重新选点。
 
 完整正常的全零 selection 使用原排序（成功率、成功步数、较大 global_step），发布 `selection.selection_all_zero=true` 和流程 `status=success`，然后进行完整 test；空结果、episode 缺失/重复/错误、技术异常失败并保留旧成功指针。旧记录缺此字段表示“未记录”，不推断非全零。
 

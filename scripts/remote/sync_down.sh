@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# sync_down.sh — Pull experiment results from server (existence-based, robust)
+# sync_down.sh — Download immutable artifacts, then update explicit live entries
 # ============================================================================
 # Usage:
 #   bash scripts/remote/sync_down.sh                           # All experiments
@@ -9,10 +9,9 @@
 #   bash scripts/remote/sync_down.sh --dry-run                 # Preview what would transfer
 #   bash scripts/remote/sync_down.sh --list                    # List experiments on server
 #
-# Three-pass sync: Pass 1 downloads only new files and protects any existing
-# local artifact; Pass 2 updates explicitly selected mutable training entries.
-# Pass 1 deliberately does not retain partial transfers: --ignore-existing
-# would otherwise mistake an interrupted checkpoint for a complete one.
+# Existing config/source metadata conflicts abort before downloading. Pass 1
+# downloads new immutable files, pass 2 updates metrics/latest/VQ best, and pass 3 updates
+# only best/selection progress using checksum. No pass retains partial files.
 # ============================================================================
 
 set -euo pipefail
@@ -59,9 +58,15 @@ if $LIST_MODE; then
     echo "=== Experiments on server ==="
     # List run dirs by their config.yaml marker — handles both non-DDP
     # (<policy>/<task>/<ts>) and DDP (ddp/<policy>/<task>/<ts>) depths.
-    ssh "$SERVER" "find /data_ssd/ZHY/experiments -maxdepth 5 -name config.yaml -printf '%h\n' 2>/dev/null | sort" || {
-        echo "No experiments found or server unreachable."
-    }
+    if listing=$(ssh "$SERVER" "find /data_ssd/ZHY/experiments -maxdepth 5 -name config.yaml -printf '%h\n'"); then
+        if [[ -n "$listing" ]]; then
+            printf '%s\n' "$listing" | sort
+        else
+            echo "No experiments found."
+        fi
+    else
+        exit "$?"
+    fi
     exit 0
 fi
 
@@ -93,6 +98,22 @@ echo "  Remote: $REMOTE_PATH"
 echo "  Local:  $LOCAL_PATH"
 echo ""
 
+# Compare existing small immutable identity records before publishing anything.
+# Byte differences are conservatively treated as conflicts, including formatting
+# changes. This does not authenticate same-named large binary artifacts.
+if identity_changes=$(rsync -rclni --existing --out-format='%i %n' \
+    "${WANDB_EXCLUDE[@]}" --include='*/' \
+    --include='config.yaml' --include='source_manifest.json' --exclude='*' \
+    "$REMOTE_PATH" "$LOCAL_PATH"); then
+    conflicts=$(printf '%s\n' "$identity_changes" | sed -n '/^[<>ch][fL]/p')
+    if [[ -n "$conflicts" ]]; then
+        printf 'Run identity conflict; no artifacts updated:\n%s\n' "$conflicts" >&2
+        exit 1
+    fi
+else
+    exit "$?"
+fi
+
 # ═══════════════════════════════════════════════════════════════════
 # Pass 1: Download new files only
 # ═══════════════════════════════════════════════════════════════════
@@ -105,65 +126,71 @@ PASS1_OPTS=(
     --ignore-existing
     --progress
     "${WANDB_EXCLUDE[@]}"
+    --include='*/'
+    --exclude='.dexmani-publish-*.tmp'
+    --exclude='.dexmani-publish-*.tmp.npz'
+    --exclude='checkpoints/*.pt.tmp'
+    --exclude='checkpoints/latest.tmp.pt'
+    --exclude='vqvae_hand_*.pt.tmp'
+    --exclude='.best_ckpt.json*.tmp'
+    --exclude='.best_ckpt_selection.json*.tmp'
+    --exclude='.selection_result.json*.tmp'
+    --exclude='.result_details.json*.tmp'
+    --exclude='metrics.jsonl'
+    --exclude='checkpoints/latest.pt'
+    --exclude='vqvae_hand_best.pt'
+    --exclude='best_ckpt.json'
+    --exclude='eval_ckpt_selector/*/best_ckpt_selection.json'
     $DRY_RUN
 )
 
 rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     rc=$?
-    if [[ $rc -eq 24 ]]; then
-        echo "[sync_down] Pass 1: some files vanished during transfer (harmless)."
-    else
-        echo "[sync_down] Pass 1: rsync error (code $rc)" >&2
-        exit $rc
-    fi
+    echo "[sync_down] Pass 1 incomplete (code $rc); mutable references not updated." >&2
+    exit "$rc"
 }
 
 # ═══════════════════════════════════════════════════════════════════
-# Pass 2: Force-update files that change during training
+# Pass 2: Update explicitly mutable training files
 # ═══════════════════════════════════════════════════════════════════
-# --existing and the file filter update only mutable training metadata.
-# This pass has no --ignore-existing, so retaining a partial transfer is safe.
+# Default rsync temporary-file transfer preserves the old complete destination
+# on failure. Targets of latest/best are downloaded before these references.
 echo ""
-echo "--- Pass 2/3: mutable training files (--existing) ---"
+echo "--- Pass 2/3: metrics, latest checkpoint and VQ best ---"
 
 PASS2_OPTS=(
     -av
-    --existing
-    --partial
+    "${WANDB_EXCLUDE[@]}"
     --include='metrics.jsonl'
     --include='checkpoints/latest.pt'
+    --include='vqvae_hand_best.pt'
     --include='*/'
     --exclude='*'
-    "${WANDB_EXCLUDE[@]}"
     $DRY_RUN
 )
 
 rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     rc=$?
-    if [[ $rc -eq 24 ]]; then
-        echo "[sync_down] Pass 2: some files vanished during transfer (harmless)."
-    else
-        echo "[sync_down] Pass 2: rsync error (code $rc)" >&2
-        exit $rc
-    fi
+    echo "[sync_down] Pass 2: rsync error (code $rc)" >&2
+    exit "$rc"
 }
 
 # Small mutable evidence needs content comparison even at equal size/mtime.
 # Checkpoints and growing metrics are intentionally excluded from this pass.
-echo "--- Pass 3/3: evaluation metadata (--checksum) ---"
+echo "--- Pass 3/3: best pointer and selection progress (--checksum) ---"
 PASS3_OPTS=(
     -av --checksum
     "${WANDB_EXCLUDE[@]}"
-    --include='*/' --include='*.json' --include='*.yaml' --include='_result.txt'
+    --include='*/'
+    --include='best_ckpt.json'
+    --include='eval_ckpt_selector/*/best_ckpt_selection.json'
     --exclude='*'
     $DRY_RUN
 )
 rsync "${PASS3_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     rc=$?
-    if [[ $rc -ne 24 ]]; then
-        echo "[sync_down] Pass 3: rsync error (code $rc)" >&2
-        exit "$rc"
-    fi
+    echo "[sync_down] Pass 3: rsync error (code $rc)" >&2
+    exit "$rc"
 }
 
 # ---- Done ----

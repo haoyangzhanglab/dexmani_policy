@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -117,7 +116,7 @@ class CkptEvalAccum:
 
     @property
     def success_count(self) -> int:
-        return sum(bool(d["success"]) for d in self.episode_details)
+        return sum(d["success"] for d in self.episode_details)
 
     def merge(self, result: Dict[str, Any]) -> None:
         """Absorb per-episode results from one ``env_runner.run()`` call."""
@@ -234,7 +233,7 @@ def select_best_checkpoint(
                 f"tie-break count ({initial_count}+{plan_size(tie_seeds)}); increase the cap"
             )
         record["eval_config"] = save_eval_snapshot(
-            run_dir, cfg, runner, use_ema=use_ema, inference_steps=inference_steps,
+            run_dir, cfg, runner, protocol=protocol, use_ema=use_ema, inference_steps=inference_steps,
             shuffle_seed=seed, policy_seed_mode="episode_seed", **requested,
             effective_episode_counts={role: plan_size(seeds) for role, seeds in protocol["roles"].items()},
             phase1_task_seeds=phase1_seeds,
@@ -263,24 +262,10 @@ def select_best_checkpoint(
             record["stages"].append(stage)
             atomic_json(summary_path, record)
             result = evaluate_checkpoint(cfg, runner, mc, seeds, use_ema, inference_steps, video_save_dir=video)
-            if result.get("failed_tasks"):
-                raise RuntimeError(f"Candidate evaluation failed: {result['failed_tasks']}")
             details = [dict(d, checkpoint=stage["checkpoint"], phase=phase,
                             task_name=d.get("task_name", getattr(runner, "task_name", None)))
                        for d in collect_episode_details(result)]
             stage["episode_details"] = details
-            expected = Counter((task, seed) for task, values in mapping.items() for seed in values)
-            for detail in details:
-                if (type(detail.get("seed")) is not int
-                        or not isinstance(detail.get("success"), (bool, np.bool_))
-                        or "steps" not in detail
-                        or (detail["steps"] is not None and
-                            (type(detail["steps"]) is not int or detail["steps"] < 0))
-                        or "error" in detail or "error_category" in detail):
-                    raise RuntimeError(f"Invalid or exceptional selection episode: {detail}")
-            actual = Counter((d.get("task_name"), d["seed"]) for d in details)
-            if actual != expected:
-                raise RuntimeError("Selection episode details do not match requested task/seed mapping")
             stage.update(status="completed", statistics=compute_eval_stats(result))
             atomic_json(summary_path, record)
             return {"episode_details": details}
@@ -321,9 +306,7 @@ def select_best_checkpoint(
         atomic_json(result_path, best_info)
         reference = {"selection_result": artifact_reference(result_path, exp_dir)}
         if result_file is not None:
-            import json
-            with Path(result_file).open("x") as stream:
-                json.dump(reference, stream, indent=2)
+            atomic_json(result_file, reference, overwrite=False)
         atomic_json(exp_dir / "best_ckpt.json", reference)
         published = True
         _print_table(accumulators, "Selection results:")

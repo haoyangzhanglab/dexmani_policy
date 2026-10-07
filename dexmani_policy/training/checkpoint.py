@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+from dexmani_policy.utils.atomic import atomic_path
 
 TRAIN_CHECKPOINT_FORMAT = "simple.v3"
 
@@ -33,7 +34,6 @@ class CheckpointStore:
     def save(self, filename: str, checkpoint: TrainCheckpoint) -> Path:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         path = self.checkpoint_dir / filename
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
         payload = {
             "state": {
                 "epoch": int(checkpoint.epoch),
@@ -53,8 +53,8 @@ class CheckpointStore:
             "_format": TRAIN_CHECKPOINT_FORMAT,
             "_saved_at": time.time(),
         }
-        torch.save(payload, tmp_path)
-        tmp_path.replace(path)
+        with atomic_path(path) as temporary:
+            torch.save(payload, temporary)
         return path
 
     def load_payload(self, path: Path) -> dict:

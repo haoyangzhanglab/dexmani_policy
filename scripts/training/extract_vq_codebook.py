@@ -5,13 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import torch
 
 from dexmani_policy.agents.vq_hand import CodebookManager, VQVAEHand
+from dexmani_policy.utils.atomic import atomic_path
 
 
 def sha256_file(path: str | Path) -> str:
@@ -68,17 +67,8 @@ def extract_codebook(
     if output.suffix != ".npz":
         raise ValueError("Codebook path must use the .npz suffix")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=output.parent, suffix=".npz", delete=False) as stream:
-        temporary = Path(stream.name)
-    try:
+    with atomic_path(output, overwrite=overwrite, suffix=".tmp.npz") as temporary:
         manager.save(temporary)
-        if overwrite:
-            os.replace(temporary, output)
-        else:
-            # Atomic publication without replacing a concurrent writer's output.
-            os.link(temporary, output)
-    finally:
-        temporary.unlink(missing_ok=True)
 
     diagnostics = manager.last_export_diagnostics
     print(f"Extracted {len(poses)} prototypes with shape {poses.shape}")

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import traceback
-from collections import Counter
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -131,7 +130,7 @@ class MultiTaskSimRunner:
         all_videos = []
         failed_tasks = []
 
-        from dexmani_policy.evaluation.protocol import validate_task_seeds, plan_size
+        from dexmani_policy.evaluation.protocol import validate_task_seeds, plan_size, validate_episode_result
         validate_task_seeds(task_seeds, self.runners)
         count = plan_size(task_seeds)
         if eval_episodes is not None and eval_episodes != count:
@@ -152,10 +151,7 @@ class MultiTaskSimRunner:
                     eval_episodes=eval_episodes,
                     video_save_dir=task_video_dir,
                 )
-                details = result.get("episode_details", [])
-                if (Counter(d.get("seed") for d in details) != Counter(task_seeds[task_name])
-                        or any("error" in d or "error_category" in d for d in details)):
-                    raise RuntimeError(f"{task_name}: completed episodes differ from the requested task/seed plan")
+                validate_episode_result(result, {task_name: task_seeds[task_name]}, default_task=task_name)
                 per_task[task_name] = result
                 for v in result.get("videos", []):
                     for k, arr_or_path in v.items():

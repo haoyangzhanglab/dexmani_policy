@@ -15,10 +15,10 @@ class MultiTaskAgent(BaseAgent):
     ``obs_dict`` must contain a ``task_text`` key (list of strings), injected by
     ``MultiTaskDataset``.
 
-    When a ``task_texts`` list is provided, all CLIP text embeddings are
-    pre-computed in ``__init__`` and stored in a buffer.  Training/inference
-    looks up embeddings by string key; only ``text_proj`` (Linear) is trainable.
-    Uncached texts fall back to real-time CLIP encoding.
+    With ``task_texts``, embeddings are initialized for training or restored
+    from the checkpoint into a fixed buffer. Text lookup rejects unknown keys;
+    only ``text_proj`` is trainable in the text path. Explicit open-text mode
+    (``task_texts=None``) uses the frozen CLIP encoder online.
     """
 
     def __init__(

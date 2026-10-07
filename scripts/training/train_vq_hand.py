@@ -118,9 +118,9 @@ def _save_checkpoint(
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(payload, tmp)
-    tmp.replace(path)
+    from dexmani_policy.utils.atomic import atomic_path
+    with atomic_path(path) as temporary:
+        torch.save(payload, temporary)
     logger.info("checkpoint saved: %s", path)
 
 

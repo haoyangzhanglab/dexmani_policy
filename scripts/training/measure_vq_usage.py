@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,7 @@ from omegaconf import OmegaConf
 from dexmani_policy.agents.vq_hand import CodebookManager, VQVAEHand
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.training.resume import validate_data_identity
 from scripts.training.train_vq_hand import build_policy_dataset, policy_hand_rows
 
 
@@ -62,27 +64,35 @@ def measure(
         register_resolvers()
         cfg = OmegaConf.create(metadata["policy_config"])
         # The resolved data recipe is retained even if top-level interpolations change.
-        cfg.dataset = OmegaConf.create(metadata["resolved_dataset"])
+        cfg.dataset = OmegaConf.create(copy.deepcopy(metadata["resolved_dataset"]))
         if Path(zarr_path).resolve() != Path(cfg.dataset.zarr_path).resolve():
             raise ValueError("Policy-aligned usage requires the saved dataset path")
         if action_key != cfg.action_key or tcp_dim != int(cfg.agent.tcp_dim):
             raise ValueError("Usage action layout must match the saved Policy")
+        saved_split = metadata.get("data_recipe", {}).get("split_manifest")
+        if saved_split is not None or cfg.dataset.get("split_manifest") is not None:
+            required = {"content", "sha256", "actual_train_ids", "train_mask", "val_mask"}
+            if not isinstance(saved_split, dict) or not required <= saved_split.keys():
+                raise ValueError("Policy-aligned usage requires complete saved split_manifest evidence")
+            cfg.dataset.saved_split = copy.deepcopy(saved_split)
         dataset = build_policy_dataset(cfg)
-        if split == "validation":
-            dataset = dataset.get_validation_dataset()
-        elif split != "train":
+        validate_data_identity({"revision": metadata.get("data_revision")},
+                               {"revision": dataset.data_revision})
+        validation = dataset.get_validation_dataset()
+        if split not in {"train", "validation"}:
             raise ValueError("split must be train or validation")
+        if "episode_ends" in metadata and dataset.replay_buffer.episode_ends.tolist() != metadata["episode_ends"]:
+            raise ValueError("Dataset episode boundaries changed since VQ preparation")
+        for name, subset, mask in (("train", dataset, dataset.train_mask),
+                                   ("val", validation, dataset.val_mask)):
+            rows = subset.sampler.action_source_rows.tolist() if subset is not None else []
+            if rows != metadata[name + "_source_rows"]:
+                raise ValueError("Dataset qualified source rows changed since VQ preparation")
+            ids = metadata.get(name + "_episode_ids")
+            if ids is not None and np.flatnonzero(mask).tolist() != ids:
+                raise ValueError("Dataset episode IDs changed since VQ preparation")
+        dataset = validation if split == "validation" else dataset
         hand = policy_hand_rows(dataset, tcp_dim)
-        expected = metadata[
-            "val_source_rows" if split == "validation" else "train_source_rows"
-        ]
-        actual = (
-            dataset.sampler.action_source_rows.tolist() if dataset is not None else []
-        )
-        if actual != expected:
-            raise ValueError(
-                "Dataset qualified source rows changed since VQ preparation"
-            )
     else:
         buffer = ReplayBuffer.open(zarr_path, keys=[action_key])
         actions = buffer.read(action_key, slice(None))
@@ -125,7 +135,7 @@ def measure(
         for start in range(0, len(hand_norm), chunk_size):
             batch = hand_norm[start:start + chunk_size]
             distances = (batch[:, None, :] - prototypes_norm[None, :, :]).square().sum(-1)
-            values, ids = distances.min(-1)
+            values, _ = distances.min(-1)
             continuous = manager.hand_pose_to_continuous_index(batch)
             runtime_ids = torch.floor(
                 ((continuous.squeeze(-1) + 1) * 0.5 * (count - 1)).clamp(0, count - 1) + 0.5
@@ -178,7 +188,7 @@ def main() -> None:
         "--split",
         choices=["train", "validation"],
         default="train",
-        help="Policy-aligned checkpoints only; legacy checkpoints use all rows",
+        help="Policy-aligned checkpoints use saved qualified rows; standalone checkpoints use all rows",
     )
     parser.add_argument("--action_key", default=None)
     parser.add_argument("--tcp_dim", type=int, default=None)

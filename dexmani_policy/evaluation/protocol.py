@@ -22,6 +22,7 @@ from dexmani_policy.utils.config import (
 from dexmani_policy.agents.loader import load_experiment_config, resolve_checkpoint
 from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.atomic import atomic_path
 
 
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
@@ -418,16 +419,43 @@ def run_eval_plan(runner, agent, plan, *, inference_steps, video_save_dir=None):
     else:
         runner.eval_seeds = list(plan[runner.task_name])
         result = runner.run(agent, **kwargs)
-    from collections import Counter
-    expected = Counter((task, seed) for task, seeds in plan.items() for seed in seeds)
-    details = collect_episode_details(result)
-    actual = Counter((d.get("task_name", getattr(runner, "task_name", None)), d.get("seed"))
-                     for d in details)
-    if result.get("failed_tasks") or actual != expected or any(
-        "error" in d or "error_category" in d for d in details
-    ):
-        raise RuntimeError("Evaluation episodes do not match the requested task/seed plan")
+    validate_episode_result(result, plan, default_task=getattr(runner, "task_name", None))
     return result
+
+
+def validate_episode_result(result, plan, *, default_task=None):
+    """Validate completed episodes before statistics; normalize supported bools for JSON."""
+    from collections import Counter
+    import numpy as np
+
+    if not isinstance(result, dict) or result.get("failed_tasks") or any(
+        key in result for key in ("error", "error_category")
+    ):
+        raise RuntimeError("Evaluation contains failed tasks or an exceptional result")
+    if "per_task" in result:
+        per_task = result["per_task"]
+        if not isinstance(per_task, dict) or set(per_task) != set(plan):
+            raise RuntimeError("Evaluation per_task results do not match requested tasks")
+        for task, child in per_task.items():
+            validate_episode_result(child, {task: plan[task]}, default_task=task)
+    raw = result.get("episode_details", [])
+    if not isinstance(raw, list) or any(not isinstance(d, dict) for d in raw):
+        raise RuntimeError("Evaluation episode_details must be a list of objects")
+    details = collect_episode_details(result)
+    for detail in details:
+        if (type(detail.get("seed")) is not int
+                or not isinstance(detail.get("success"), (bool, np.bool_))
+                or "steps" not in detail
+                or (detail["steps"] is not None and
+                    (type(detail["steps"]) is not int or detail["steps"] < 0))
+                or not isinstance(detail.get("task_name", default_task), str)
+                or "error" in detail or "error_category" in detail):
+            raise RuntimeError(f"Invalid or exceptional evaluation episode: {detail}")
+        detail["success"] = bool(detail["success"])
+    expected = Counter((task, seed) for task, seeds in plan.items() for seed in seeds)
+    actual = Counter((d.get("task_name", default_task), d["seed"]) for d in details)
+    if actual != expected:
+        raise RuntimeError("Evaluation episodes do not match the requested task/seed plan")
 
 
 def validate_heldout(runner, best_info, plan):
@@ -473,12 +501,11 @@ def code_version(directory):
         return {"commit": "unknown", "dirty": "unknown"}
 
 
-def save_eval_snapshot(directory, cfg, runner, **request):
-    """Persist effective runner inputs and resolved call arguments, before rollout."""
+def save_eval_snapshot(directory, cfg, runner, *, protocol=None, **request):
+    """Persist resolved inputs and an already validated protocol; perform no binding/I/O to manifests."""
     import importlib.util
     import importlib.metadata
     import sys
-    cfg = bind_seed_manifest(cfg, {"selection": request["selection"]} if "selection" in request else None)
     exp_dir = Path(cfg._exp_dir)
     sim = {"commit": "unknown", "dirty": "unknown", "version": "unknown"}
     try:
@@ -504,37 +531,23 @@ def save_eval_snapshot(directory, cfg, runner, **request):
         "effective_config": OmegaConf.to_container(cfg, resolve=True),
         "runner_inputs": inputs,
         "request": request,
-        "seed_manifest": (load_seed_manifest(cfg.get("eval", {}).get("seed_manifest"), runner)
-                          if cfg.get("eval", {}).get("seed_manifest") else
-                          request.get("selection", {}).get("seed_manifest")),
+        "seed_manifest": protocol,
         "argv": list(sys.argv),
         "policy_code": code_version(Path(__file__).resolve().parents[2]),
         "simulator_code": sim,
     }
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "eval_config.yaml").open("x") as stream:
-        stream.write(OmegaConf.to_yaml(OmegaConf.create(snapshot), resolve=True))
+    with atomic_path(directory / "eval_config.yaml", overwrite=False) as temporary:
+        temporary.write_text(OmegaConf.to_yaml(OmegaConf.create(snapshot), resolve=True))
     return artifact_reference(directory / "eval_config.yaml", exp_dir)
 
 
-def atomic_json(path, record):
+def atomic_json(path, record, *, overwrite=True):
     import json
-    import os
-    import tempfile
-    path = Path(path)
-    name = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix="."+path.name,
-                                         suffix=".tmp", delete=False) as stream:
-            name = stream.name
+    with atomic_path(path, overwrite=overwrite) as temporary:
+        with temporary.open("w") as stream:
             json.dump(record, stream, indent=2, ensure_ascii=False)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    finally:
-        if name and os.path.exists(name):
-            os.unlink(name)
 
 
 def _read_seed_manifest(source):
@@ -601,7 +614,8 @@ def load_seed_manifest(source, runner):
     return {"manifest": manifest, "sha256": _manifest_hash(manifest), "roles": roles}
 
 
-def fixed_test_seeds(cfg, runner, best_info):
+def resolve_test_protocol(cfg, runner, best_info):
+    """Resolve and validate the full held-out protocol once, before restoring a model."""
     cfg = bind_seed_manifest(cfg, best_info)
     source = cfg.get("eval", {}).get("seed_manifest")
     saved = (best_info or {}).get("selection", {}).get("seed_manifest")
@@ -610,4 +624,4 @@ def fixed_test_seeds(cfg, runner, best_info):
     protocol = load_seed_manifest(source, runner)
     if saved is not None and protocol["sha256"] != saved["sha256"]:
         raise ValueError("Evaluation seed manifest differs from selection")
-    return protocol["roles"]["test"]
+    return protocol

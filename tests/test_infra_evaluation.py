@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import types
 import unittest
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,7 +19,7 @@ from dexmani_policy import eval_best_ckpt as evaluator
 from dexmani_policy import record_demo as demo
 from dexmani_policy.deployment import runtime
 
-# The mapping methods need no simulator. Supply only the package constant if
+# These runner boundary tests need no simulator. Supply only the package constant if
 # the optional simulator is absent, then import the actual runner implementation.
 try:
     from dexmani_policy.env_runner.multi_task_sim_runner import MultiTaskSimRunner
@@ -305,6 +306,259 @@ class EvaluationInfraTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+
+def local_sync_script(tmp_path):
+    """Run the real script/rsync with local trees; no SSH transport is possible."""
+    source, target = tmp_path/'remote', tmp_path/'local'
+    source.mkdir(); target.mkdir()
+    text = Path('scripts/remote/sync_down.sh').read_text()
+    text = text.replace('REMOTE_EXP="$SERVER:/data_ssd/ZHY/experiments"', f'REMOTE_EXP="{source}"')
+    text = text.replace('LOCAL_EXP="$PROJECT_ROOT/experiments"', f'LOCAL_EXP="{target}"')
+    assert '$SERVER:/data_ssd' not in text
+    script = tmp_path/'sync_down.sh'; script.write_text(text)
+    return source, target, script
+
+
+@pytest.mark.parametrize('depth', ['', 'dp/task', 'dp/task/run'])
+def test_sync_immutable_and_mutable_boundaries(tmp_path, depth):
+    source, target, script = local_sync_script(tmp_path)
+    src, dst = source/'dp/task/run', target/'dp/task/run'
+    for root in (src, dst):
+        (root/'checkpoints').mkdir(parents=True)
+        (root/'eval_ckpt_selector/selection').mkdir(parents=True)
+        (root/'config.yaml').write_text('recipe: same\n')
+    immutable = ['checkpoints/milestone.pt', 'source.zip', 'eval_config.yaml',
+                 'eval_ckpt_selector/selection/selection_result.json', 'result_details.json', '_result.txt']
+    mutable = ['best_ckpt.json', 'eval_ckpt_selector/selection/best_ckpt_selection.json']
+    for name in immutable + mutable:
+        (src/name).write_bytes(b'NEW!'); (dst/name).write_bytes(b'OLD!')
+        os.utime(src/name, (10,10)); os.utime(dst/name, (10,10))
+    (src/'checkpoints/new.pt').write_bytes(b'complete checkpoint')
+    (src/'checkpoints/latest.pt').symlink_to('new.pt')
+    (dst/'checkpoints/latest.pt').symlink_to('milestone.pt')
+    (src/'metrics.jsonl').write_text('new metrics\n'); (dst/'metrics.jsonl').write_text('old\n')
+    (src/'vqvae_hand_best.pt').write_bytes(b'new best weights'); (dst/'vqvae_hand_best.pt').write_bytes(b'old')
+    (src/'vqvae_hand_best.pt.tmp').write_bytes(b'old writer partial')
+    (src/'wandb').mkdir(); (src/'wandb/best_ckpt.json').write_text('private')
+    (src/'.dexmani-publish-inflight.tmp').write_bytes(b'incomplete')
+    (src/'.dexmani-publish-export.tmp.npz').write_bytes(b'incomplete codebook')
+    (src/'.dexmani-publish-directory.tmp').mkdir()
+    (src/'.dexmani-publish-directory.tmp/legitimate').write_text('keep directory')
+    result = subprocess.run(['bash', str(script), *([depth] if depth else [])], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    for name in immutable: assert (dst/name).read_bytes() == b'OLD!', name
+    for name in mutable: assert (dst/name).read_bytes() == b'NEW!', name
+    assert (dst/'checkpoints/latest.pt').read_bytes() == b'complete checkpoint'
+    assert (dst/'metrics.jsonl').read_text() == 'new metrics\n'
+    assert (dst/'vqvae_hand_best.pt').read_bytes() == b'new best weights'
+    assert not (dst/'vqvae_hand_best.pt.tmp').exists()
+    assert not (dst/'wandb').exists()
+    assert not (dst/'.dexmani-publish-inflight.tmp').exists()
+    assert not (dst/'.dexmani-publish-export.tmp.npz').exists()
+    assert (dst/'.dexmani-publish-directory.tmp/legitimate').exists()
+
+
+@pytest.mark.parametrize('identity', ['config.yaml', 'source_manifest.json'])
+def test_sync_rejects_existing_run_identity_conflict(tmp_path, identity):
+    source, target, script = local_sync_script(tmp_path)
+    src, dst = source/'dp/task/run', target/'dp/task/run'
+    for root in (src, dst): root.mkdir(parents=True)
+    (src/identity).write_text('NEW!'); (dst/identity).write_text('OLD!')
+    os.utime(src/identity,(10,10)); os.utime(dst/identity,(10,10))
+    (src/'best_ckpt.json').write_text('new alias')
+    (dst/'best_ckpt.json').write_text('old alias')
+    result = subprocess.run(['bash',str(script)],capture_output=True,text=True)
+    assert result.returncode != 0
+    assert 'conflict' in result.stderr.lower()
+    assert (dst/identity).read_text() == 'OLD!'
+    assert (dst/'best_ckpt.json').read_text() == 'old alias'
+
+
+@pytest.mark.parametrize('rc,listing', [(255,''), (7,''), (0,''), (0,'b\na\n')])
+def test_sync_list_preserves_errors(tmp_path, rc, listing):
+    binary = tmp_path/'ssh'
+    binary.write_text('#!/bin/sh\nprintf "%s" "$LISTING"\nif [ "$RC" != 0 ]; then echo lookup-failed >&2; fi\nexit "$RC"\n')
+    binary.chmod(0o755)
+    env = dict(os.environ,PATH=str(tmp_path)+':'+os.environ['PATH'],RC=str(rc),LISTING=listing)
+    result = subprocess.run(['bash','scripts/remote/sync_down.sh','--list'],env=env,capture_output=True,text=True)
+    assert result.returncode == rc
+    if rc: assert 'lookup-failed' in result.stderr
+    elif listing: assert result.stdout.endswith('a\nb\n')
+    else: assert 'No experiments found' in result.stdout
+
+
+@pytest.mark.parametrize('rc', [23,24])
+def test_failed_download_never_updates_references(tmp_path, rc):
+    source,target,script = local_sync_script(tmp_path)
+    binary = tmp_path/'rsync'
+    binary.write_text('#!/bin/sh\ncase " $* " in *--ignore-existing*) exit '+str(rc)+';; esac\n'
+                      'case " $* " in *--out-format*) exit 0;; esac\n'
+                      'echo unexpected-mutable-pass >&2\nexit 99\n')
+    binary.chmod(0o755)
+    (target/'best_ckpt.json').write_text('old complete pointer')
+    result = subprocess.run(['bash',str(script)],capture_output=True,text=True,
+        env=dict(os.environ,PATH=str(tmp_path)+':'+os.environ['PATH']))
+    assert result.returncode == rc
+    assert 'unexpected-mutable-pass' not in result.stderr
+    assert (target/'best_ckpt.json').read_text() == 'old complete pointer'
+    assert not list(target.glob('.dexmani-publish-*'))
+
+
+def test_atomic_publication_and_sync_during_write(tmp_path):
+    from dexmani_policy.utils.atomic import atomic_path
+    source, target, script = local_sync_script(tmp_path)
+    final = source/'source.zip'
+    with atomic_path(final, overwrite=False) as temporary:
+        temporary.write_bytes(b'first half')
+        assert not final.exists()
+        subprocess.run(['bash', str(script)], check=True, capture_output=True)
+        assert not (target/final.name).exists()
+        assert not list(target.glob('.dexmani-publish-*'))
+        temporary.write_bytes(b'complete archive')
+    subprocess.run(['bash', str(script)], check=True, capture_output=True)
+    assert (target/final.name).read_bytes() == b'complete archive'
+    with pytest.raises(FileExistsError):
+        with atomic_path(final, overwrite=False) as temporary:
+            temporary.write_bytes(b'cannot replace')
+    with pytest.raises(RuntimeError):
+        with atomic_path(final) as temporary:
+            temporary.write_bytes(b'failed write')
+            assert final.read_bytes() == b'complete archive'
+            raise RuntimeError('interrupted')
+    assert final.read_bytes() == b'complete archive'
+    assert not list(source.glob('.dexmani-publish-*'))
+
+
+def test_atomic_writers_preserve_files_on_errors(tmp_path, monkeypatch):
+    from dexmani_policy.training.source_snapshot import save_source_snapshot
+    from dexmani_policy.training.workspace import TrainWorkspace
+    (tmp_path/'dexmani_policy').mkdir()
+    (tmp_path/'dexmani_policy/a.py').write_text('valid source')
+    save_source_snapshot(tmp_path, root=tmp_path)
+    archive = (tmp_path/'source.zip').read_bytes()
+    with pytest.raises(FileExistsError): save_source_snapshot(tmp_path, root=tmp_path)
+    assert (tmp_path/'source.zip').read_bytes() == archive
+    workspace = TrainWorkspace.__new__(TrainWorkspace)
+    workspace.output_dir, workspace.wandb_logger = tmp_path, None
+    workspace.save_hydra_config(OmegaConf.create({'value': 'complete'}))
+    previous = (tmp_path/'config.yaml').read_bytes()
+    def fail_save(cfg, path, **kwargs):
+        Path(path).write_text('partial')
+        raise OSError('interrupted config')
+    monkeypatch.setattr(OmegaConf, 'save', fail_save)
+    with pytest.raises(OSError): workspace.save_hydra_config(OmegaConf.create({'value': 'new'}))
+    assert (tmp_path/'config.yaml').read_bytes() == previous
+    evaluator._write_result(tmp_path/'_result.txt', 'complete\n')
+    with pytest.raises(FileExistsError): evaluator._write_result(tmp_path/'_result.txt', 'new\n')
+    assert (tmp_path/'_result.txt').read_text() == 'complete\n'
+    assert not list(tmp_path.glob('.dexmani-publish-*'))
+
+
+def test_demo_does_not_read_unused_test_manifest(tmp_path,monkeypatch):
+    root = tmp_path/'experiments/dp/task/run'; root.mkdir(parents=True)
+    root,cfg = experiment(root)
+    cfg.eval.seed_manifest = str(tmp_path/'missing-protocol.json')
+    OmegaConf.save(cfg,root/'config.yaml')
+    runner = Runner()
+    monkeypatch.setattr(demo,'ROOT_DIR',tmp_path)
+    monkeypatch.setattr(demo,'build_eval_runner',lambda cfg: runner)
+    monkeypatch.setattr(demo,'load_ckpt_for_inference',lambda *a,**kw: types.SimpleNamespace(_checkpoint_global_step=20))
+    monkeypatch.setattr(sys,'argv',['demo','--policy-name','dp','--task-name','task',
+        '--exp-name','run','--ckpt-tag','20pct','--seeds','2','3'])
+    demo.main()
+    assert runner.calls[0][0] == [2,3]
+    snapshot = OmegaConf.load(next(root.rglob('eval_config.yaml')))
+    assert snapshot.seed_manifest is None
+    assert snapshot.request.heldout_from_selection is False
+    assert snapshot.effective_config.eval.seed_manifest == cfg.eval.seed_manifest
+    with pytest.raises(FileNotFoundError):
+        with patch.object(evaluator,'build_eval_runner',return_value=Runner()):
+            evaluator.evaluate_checkpoint_robotwin(root,cfg,ckpt_tag_or_path='20pct',episodes=2)
+
+
+@pytest.mark.parametrize('seeds', [[], ['99'], ['-1'], ['2','2']])
+def test_demo_rejects_unavailable_or_invalid_seeds(tmp_path,monkeypatch,seeds):
+    root = tmp_path/'experiments/dp/task/run'; root.mkdir(parents=True)
+    experiment(root)
+    runner = Runner()
+    monkeypatch.setattr(demo,'ROOT_DIR',tmp_path)
+    monkeypatch.setattr(demo,'build_eval_runner',lambda cfg: runner)
+    monkeypatch.setattr(demo,'load_ckpt_for_inference',lambda *a,**kw: types.SimpleNamespace(_checkpoint_global_step=20))
+    monkeypatch.setattr(sys,'argv',['demo','--policy-name','dp','--task-name','task',
+        '--exp-name','run','--ckpt-tag','20pct','--seeds',*seeds])
+    with pytest.raises(ValueError): demo.main()
+    assert not runner.calls
+
+
+def test_multitask_direct_consumer_validates_episode_fields():
+    runner = MultiTaskSimRunner.__new__(MultiTaskSimRunner)
+    child = Runner(); child.task_text = 'a'
+    child.run = lambda *a,**kw: {'success_rate':0.,'avg_steps':None,
+        'episode_details':[{'seed':1,'success':'False','steps':None}]}
+    runner.runners = {'a':child}
+    with pytest.raises(RuntimeError,match='failed for tasks'):
+        runner.run(None,task_seeds={'a':[1]},inference_steps=2)
+
+
+def test_snapshot_never_rebinds_or_reopens_protocol(tmp_path,monkeypatch):
+    from dexmani_policy.evaluation import protocol
+    root,cfg = experiment(tmp_path)
+    cfg.eval.seed_manifest = '/missing/unused.json'
+    monkeypatch.setattr(protocol,'bind_seed_manifest',lambda *a,**kw: pytest.fail('snapshot rebound protocol'))
+    monkeypatch.setattr(protocol,'load_seed_manifest',lambda *a,**kw: pytest.fail('snapshot reopened manifest'))
+    resolved = {'manifest':{'pool_id':'already-validated'},'roles':{'test':{'a':[2]}},'sha256':'evidence'}
+    save_eval_snapshot(root/'snapshot',cfg,Runner(),protocol=resolved,task_seeds={'a':[2]})
+    assert OmegaConf.to_container(OmegaConf.load(root/'snapshot/eval_config.yaml').seed_manifest) == resolved
+
+
+@pytest.mark.parametrize('interrupt', [False,True])
+def test_source_writer_sync_before_publication(tmp_path,monkeypatch,interrupt):
+    import zipfile
+    from dexmani_policy.training.source_snapshot import save_source_snapshot
+    source,target,script = local_sync_script(tmp_path)
+    code = tmp_path/'code/dexmani_policy'; code.mkdir(parents=True)
+    (code/'sample.py').write_text('complete source')
+    original = os.link
+    published = []
+    def publish(temporary, destination):
+        if destination.name == 'source.zip':
+            assert not destination.exists()
+            with zipfile.ZipFile(temporary) as archive:
+                assert archive.read('dexmani_policy/sample.py') == b'complete source'
+            subprocess.run(['bash',str(script)],check=True,capture_output=True)
+            assert not (target/'source.zip').exists()
+            if interrupt: raise OSError('publication interrupted')
+        original(temporary,destination)
+        published.append(destination.name)
+    monkeypatch.setattr(os,'link',publish)
+    if interrupt:
+        with pytest.raises(OSError): save_source_snapshot(source,root=code.parent)
+        assert not (source/'source.zip').exists()
+    else:
+        save_source_snapshot(source,root=code.parent)
+        assert published == ['source.zip','source_manifest.json']
+        subprocess.run(['bash',str(script)],check=True,capture_output=True)
+        assert (target/'source.zip').read_bytes() == (source/'source.zip').read_bytes()
+    assert not list(source.glob('.dexmani-publish-*'))
+
+
+def test_checkpoint_failed_write_cleans_only_its_temporary(tmp_path,monkeypatch):
+    import torch
+    from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
+    checkpoint = TrainCheckpoint(epoch=0,global_step=0,next_micro_step=0,model_state={},
+        ema_model_state=None,optimizer_state={},scheduler_state={},resume_contract={},
+        ema_updater_step=None,ema_decay=None,rng_states=[])
+    final = tmp_path/'milestone.pt'; final.write_bytes(b'old complete weight')
+    unrelated = tmp_path/'.dexmani-publish-other.tmp'; unrelated.write_bytes(b'other writer')
+    def fail(payload,path):
+        Path(path).write_bytes(b'partial weight')
+        assert final.read_bytes() == b'old complete weight'
+        raise OSError('serialization interrupted')
+    monkeypatch.setattr(torch,'save',fail)
+    with pytest.raises(OSError): CheckpointStore(tmp_path).save('milestone.pt',checkpoint)
+    assert final.read_bytes() == b'old complete weight'
+    assert list(tmp_path.glob('.dexmani-publish-*')) == [unrelated]
 
 
 def test_saved_rgb_recipe_reaches_simulation_and_real(tmp_path, monkeypatch):
