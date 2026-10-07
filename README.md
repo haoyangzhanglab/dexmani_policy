@@ -96,11 +96,15 @@ bash scripts/training/train.sh <config_name> \
 
 ```bash
 bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<old-run>'
+# 远程续训：<task> 必须与来源实验保存值完全一致
+bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<task>/<old-run>'
 ```
 
 `resume_from` 接受旧实验目录或 checkpoint 文件，展开 `~`，相对路径以**项目根目录**为基准。恢复始终写入新输出目录。默认 run 使用微秒时间和随机后缀；已有 `.training_run.json`、训练配置、metrics 或 checkpoints 的目录会拒绝认领。遇到冲突请指定新目录，不要删除旧标记来续写产物。Hydra 在进入训练前可能已写入自己的启动文件，训练认领保护不等于整个 Hydra 启动过程的事务。
 
-完整续训先读取来源实验的 resolved `config.yaml`，再校验和构造。仅允许显式覆盖新输出位置、W&B、等价设备定位、日志间隔、worker 参数、compile 开关/模式，以及数据目录迁移；worker/compile 覆盖沿用有界恢复承诺，不承诺增强或算子逐位相同。world_size、batch/accumulation、训练 seed、AMP/dtype、总计划和模型/数据配方不能覆盖。数据目录迁移仍校验 revision 与保存集合；相同 revision 不是内容 hash 证明。
+完整续训先读取来源实验的 resolved `config.yaml`，再校验和构造。仅允许显式覆盖新输出位置、W&B、等价设备定位、日志间隔、worker 参数、compile 开关/模式、当次执行上限 `+max_updates=N`，以及数据目录迁移；worker/compile 覆盖沿用有界恢复承诺，不承诺增强或算子逐位相同。旧 claim 和旧 `max_updates` 不继承。world_size、batch/accumulation、训练 seed、AMP/dtype、总计划和模型/数据配方不能覆盖。路径迁移使用 `dataset.zarr_path=...` 或 `dataset.datasets.<index>.zarr_path=...`，训练时仍校验 revision 与保存集合；相同 revision 不是内容 hash 证明。
+
+续训时显式 `task_name` 仅断言来源任务身份，必须与保存值完全相同（复合任务包含顺序）；冲突重复参数也会拒绝。未显式指定时使用保存任务，不受当前 YAML 默认任务影响。远程 `train_remote.sh <config> <task> +resume_from=...` 的数据预检与训练共享配方解析，检查保存的单任务/child 数据路径或显式迁移路径；`--check` 只保证目录存在，不保证数据完整或训练成功。来源配置缺失或损坏时拒绝续训，不回退到当前配方。
 
 新保存配置记录 HF 结构及闭集文本维度；完整权重恢复不重新加载初始化权重。缺少结构的历史 HF 配置仍需要原配置缓存，不承诺冷缓存恢复。固定文本仅保留任务映射、embedding 表和 projection，未知文本报错。已识别的旧 CLIP ViT-B/16、B/32 冻结文本布局且有完整 embedding 表时支持窄推理转换；旧文本 optimizer 缺乏名称映射证据，full resume 明确拒绝，不退回 weights-only。原子 `.pt` 格式不变，推理读取仍会读同文件字节，并不跳过 optimizer I/O。
 

@@ -13,7 +13,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dexmani_policy.training.checkpoint import CheckpointStore
-from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.utils.config import load_resume_source_config, register_resolvers
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
@@ -28,7 +28,6 @@ from dexmani_policy.training.resume import (
     build_resume_contract,
     build_train_loader,
     restore_training_state,
-    load_resume_source_config,
     validate_gpu_ids,
 )
 from dexmani_policy.training.run_identity import claim_run, resolve_resume_source

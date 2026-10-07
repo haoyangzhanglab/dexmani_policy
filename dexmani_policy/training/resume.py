@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from dexmani_policy.datasets.resumable_sampler import ResumableDistributedSampler
 from dexmani_policy.training.checkpoint import TrainCheckpoint, fix_state_dict
 from dexmani_policy.utils.random import set_rng_state, worker_init_fn
+from dexmani_policy.utils.config import resolve_input_recipe
 
 
 def loader_options(cfg):
@@ -242,16 +243,6 @@ def validate_ema_resume_state(checkpoint: TrainCheckpoint, *, require_ema: bool)
         raise RuntimeError("Resume checkpoint ema_updater_step must be an int (not bool) >= 0")
 
 
-def load_resume_source_config(checkpoint_path):
-    """Read the resolved configuration belonging to the source checkpoint."""
-    from pathlib import Path
-
-    source = Path(checkpoint_path).resolve().parent.parent / "config.yaml"
-    return (
-        OmegaConf.to_container(OmegaConf.load(source), resolve=True) if source.is_file() else None
-    )
-
-
 def validate_data_identity(saved, current, path="data_identity"):
     import warnings
 
@@ -275,44 +266,15 @@ def validate_data_identity(saved, current, path="data_identity"):
 
 
 def resolve_training_config(cfg, *, overrides=None):
-    """Select saved recipe before validation/build; apply only explicit operational overrides."""
-    import re
+    """Resolve the input recipe and bind this invocation's output directory."""
     from hydra.core.hydra_config import HydraConfig
-    from hydra.core.override_parser.overrides_parser import OverridesParser
     from omegaconf import open_dict
-    from dexmani_policy.training.run_identity import resolve_resume_source
 
-    source = resolve_resume_source(cfg.get('resume_from'))
-    if source is None:
-        return cfg
-    saved = load_resume_source_config(source)
-    if saved is None:
-        raise ValueError('Full resume requires the source experiment config.yaml')
-    result = OmegaConf.create(saved)
     if overrides is None:
-        overrides = HydraConfig.get().overrides.task
-    operational = {
-        'resume_from', 'max_updates', 'workspace.output_dir',
-        'training.device', 'training.gpu_ids', 'training.use_compile', 'training.compile_mode',
-        'training.loop.log_interval_steps', 'dataloader.num_workers',
-        'dataloader.persistent_workers', 'dataloader.prefetch_factor',
-    }
-    with open_dict(result):
-        # The destination is this invocation's new run, never the source output.
-        result.workspace.output_dir = cfg.workspace.output_dir
-        result.workspace.pop('claim_token', None)
-        result.pop('max_updates', None)
-        for override in OverridesParser.create().parse_overrides(list(overrides)):
-            key = override.key_or_group
-            if key.startswith('hydra.'):
-                continue
-            if override.is_delete() or override.is_sweep_override():
-                raise ValueError(f'Unsupported resume override: {override.input_line}')
-            data_path = re.fullmatch(r'dataset\.(?:datasets\.\d+\.)?zarr_path', key) is not None
-            if key not in operational and not key.startswith('workspace.wandb_cfg.') and not data_path:
-                raise ValueError(f'Resume recipe is owned by saved config; forbidden override: {key}')
-            if key == 'resume_from':
-                continue
-            OmegaConf.update(result, key, override.value(), merge=False, force_add=True)
-        result.resume_from = source
+        overrides = HydraConfig.get().overrides.task if cfg.get('resume_from') is not None else []
+    result = resolve_input_recipe(cfg, overrides=overrides)
+    if result.get('resume_from') is not None:
+        with open_dict(result):
+            # The destination is this invocation's new run, never the source output.
+            result.workspace.output_dir = cfg.workspace.output_dir
     return result

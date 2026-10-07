@@ -15,15 +15,17 @@
 #   # For DDP, the number of visible GPUs must equal training.num_gpus.
 #   bash scripts/remote/train_remote.sh --gpus 0,1 ddp/maniflow pour 'training.num_gpus=2'
 #   bash scripts/remote/train_remote.sh --fg dp3 pour 'training.seed=123'
+#   bash scripts/remote/train_remote.sh dp3 pour '+resume_from=experiments/dp3/pour/<old-run>'
 #   bash scripts/remote/train_remote.sh --sync-data dp3 pour  # first run on new server
 #   bash scripts/remote/train_remote.sh --dry-run dp3 pour    # preview only
 #
-# Pre-flight checks (fail-fast):
+# Required pre-flight checks:
 #   1. Server reachable
 #   2. Code synced (sync_code.sh)
-#   3. Every Zarr in the resolved dataset config exists
-#   4. GPU status available
-#   5. Disk space on /data_ssd
+#   3. Shared fresh/resume recipe resolves and every dataset directory exists
+#      On resume, <task> must exactly match the saved task identity.
+# GPU status and /data_ssd space are informational. When the GPU count is
+# available, explicitly requested GPU ids are checked against it.
 # ============================================================================
 
 set -euo pipefail

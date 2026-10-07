@@ -9,7 +9,7 @@ import hydra
 import torch
 from torch.utils.data import DataLoader
 
-from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.utils.config import load_resume_source_config, register_resolvers
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 
@@ -24,7 +24,7 @@ from dexmani_policy.training.build_utils import (
     validate_config,
 )
 from dexmani_policy.training.resume import (
-    build_resume_contract, build_train_loader, restore_training_state, load_resume_source_config,
+    build_resume_contract, build_train_loader, restore_training_state,
 )
 from dexmani_policy.training.run_identity import claim_run, resolve_resume_source
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig

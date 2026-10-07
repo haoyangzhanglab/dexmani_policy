@@ -1,8 +1,10 @@
 """Resolve remote training inputs without importing models or opening Zarr arrays.
 
 Run from the same project root, Python environment and with the same config name
-and Hydra overrides as training. Relative paths follow the project's existing
-persistent-data symlinks; absolute dataset overrides remain literal paths.
+and Hydra overrides as training. Fresh runs use the composed recipe; resume uses
+the source experiment's saved recipe with the shared identity/override checks.
+Dataset paths expand ~ and resolve relative to the working directory, following
+persistent-data symlinks. --check only verifies that those directories exist.
 """
 
 from __future__ import annotations
@@ -15,10 +17,7 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from dexmani_policy.utils.config import register_resolvers
-
-
-_TASK_COMPONENT = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
+from dexmani_policy.utils.config import TASK_NAME_PATTERN, register_resolvers, resolve_input_recipe
 
 
 def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
@@ -31,7 +30,8 @@ def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
     config_dir = Path(__file__).resolve().parents[2] / "dexmani_policy" / "configs"
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
         cfg = compose(config_name=config_name, overrides=overrides)
-        if not isinstance(cfg.task_name, str) or not _TASK_COMPONENT.fullmatch(cfg.task_name):
+        cfg = resolve_input_recipe(cfg, overrides=overrides)
+        if not isinstance(cfg.task_name, str) or not TASK_NAME_PATTERN.fullmatch(cfg.task_name):
             raise ValueError(f"Invalid resolved task identity: {cfg.task_name!r}")
         dataset = OmegaConf.to_container(cfg.dataset, resolve=True)
 
