@@ -50,7 +50,7 @@ def _validate_hand_normalizer(scale, offset):
         raise ValueError("hand normalizer scale/offset must be finite and scale nonzero")
 
 
-def _validate_codebook(values, *, allow_empty=False, dimensions=None, groups=None):
+def _validate_codebook(values, *, allow_empty=False, dimensions=None):
     """Validate source structure and values before dtype coercion."""
     pose, weights, permutation = (values[k] for k in ('sorted_hand_poses','layer_weights','pca_permutation'))
     low, high = values['hand_min'], values['hand_max']
@@ -83,12 +83,6 @@ def _validate_codebook(values, *, allow_empty=False, dimensions=None, groups=Non
     for name, value in values.items():
         if not torch.isfinite(value).all():
             raise ValueError(f'{name} must be finite')
-    if groups is not None:
-        if len(groups) != num_groups:
-            raise ValueError('per-group poses must contain every group')
-        for group in groups:
-            if group.shape != (left, hand_dim) or not torch.isfinite(group).all():
-                raise ValueError('invalid per-group pose shape or values')
     return inferred
 
 
@@ -164,34 +158,27 @@ class CodebookManager(nn.Module):
 
         self.artifact_metadata: dict[str, object] = {}
         self.last_export_diagnostics: dict[str, float] = {}
-        self._group_sorted_poses: list[torch.Tensor] | None = None
 
     # ------------------------------------------------------------------
     # Candidate preparation and state-dict loading
     # ------------------------------------------------------------------
 
-    def _prepare_buffers(self, values, *, allow_empty=False, dimensions=None, groups=None):
+    def _prepare_buffers(self, values, *, allow_empty=False, dimensions=None):
         """Validate source structure and converted values without mutating buffers."""
         # Validate original types first: float permutation indices must never be
         # truncated to integers before validation.
         inferred = _validate_codebook(values, allow_empty=allow_empty,
-                                      dimensions=dimensions, groups=groups)
+                                      dimensions=dimensions)
         converted = {name: value.to(device=getattr(self, name).device,
                                     dtype=getattr(self, name).dtype)
                      for name, value in values.items()}
-        converted_groups = None if groups is None else [
-            group.to(device=self.sorted_hand_poses.device, dtype=self.sorted_hand_poses.dtype)
-            for group in groups
-        ]
         for name, value in converted.items():
             if not torch.isfinite(value).all():
                 raise ValueError(f'{name} must be finite in runtime dtype')
-        if converted_groups is not None and any(not torch.isfinite(group).all() for group in converted_groups):
-            raise ValueError('per-group poses must be finite in runtime dtype')
         _validate_hand_range(converted['hand_min'], converted['hand_max'])
         _validate_hand_normalizer(converted['hand_normalizer_scale'],
                                   converted['hand_normalizer_offset'])
-        return converted, inferred, converted_groups
+        return converted, inferred
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -202,7 +189,7 @@ class CodebookManager(nn.Module):
             return
         values = {name: state_dict[prefix + name] for name in names}
         try:
-            values, dimensions, _ = self._prepare_buffers(values, allow_empty=True)
+            values, dimensions = self._prepare_buffers(values, allow_empty=True)
         except (ValueError, RuntimeError) as exc:
             error_msgs.append(str(exc))
             return
@@ -459,10 +446,6 @@ class CodebookManager(nn.Module):
         payload["hand_normalizer_offset"] = (
             self.hand_normalizer_offset.detach().cpu().numpy()
         )
-        if self._group_sorted_poses is not None:
-            for group, poses in enumerate(self._group_sorted_poses):
-                payload[f"_group_sorted_poses_g{group}"] = poses.detach().cpu().numpy()
-
         np.savez(str(path), **payload)
 
     def load(self, path: str | Path) -> None:
@@ -489,14 +472,7 @@ class CodebookManager(nn.Module):
                 "hand_normalizer_scale",
                 "hand_normalizer_offset",
             }
-            group_keys = {
-                f"_group_sorted_poses_g{group}" for group in range(self.num_groups)
-            }
-            frozen_keys = frozenset(keys)
-            if frozen_keys not in {
-                frozenset(required),
-                frozenset(required | group_keys),
-            }:
+            if keys != required:
                 raise ValueError("Codebook does not match the v3 schema")
             if _positive_integer(data["format_version"], "format_version") != self.FORMAT_VERSION:
                 raise ValueError(
@@ -529,49 +505,16 @@ class CodebookManager(nn.Module):
             values = {name: torch.from_numpy(np.asarray(data[name]).copy()) for name in (
                 "hand_min", "hand_max", "sorted_hand_poses", "pca_permutation", "layer_weights",
                 "hand_normalizer_scale", "hand_normalizer_offset")}
-            groups = [torch.from_numpy(np.asarray(data[f"_group_sorted_poses_g{g}"]).copy())
-                      for g in range(self.num_groups)] if group_keys <= keys else None
             metadata = json.loads(str(data["metadata_json"].item()))
             if not isinstance(metadata, dict):
                 raise ValueError("codebook metadata_json must contain an object")
-            converted, _, groups = self._prepare_buffers(
-                values, dimensions=(self.hand_dim, self.num_groups, self.codebook_size), groups=groups
+            converted, _ = self._prepare_buffers(
+                values, dimensions=(self.hand_dim, self.num_groups, self.codebook_size)
             )
             # Every candidate has passed validation in its actual buffer dtype.
             for name, value in converted.items():
                 setattr(self, name, value)
             self.artifact_metadata = metadata
-            self._group_sorted_poses = groups
-
-    # ------------------------------------------------------------------
-    # Per-group experimental codebooks
-    # ------------------------------------------------------------------
-
-    def build_per_group_codebooks(self, vqvae) -> None:
-        if self.codebooks.numel() == 0:
-            raise RuntimeError("No latent codebooks loaded.")
-        device = next(vqvae.parameters()).device
-        was_training = vqvae.training
-        vqvae.eval()
-        group_results: list[torch.Tensor] = []
-        try:
-            for group in range(self.num_groups):
-                poses: list[torch.Tensor] = []
-                for code_idx in range(self.codebook_size):
-                    latent = torch.zeros(vqvae.latent_dim, device=device)
-                    latent = latent + (
-                        self.layer_weights[group].to(device)
-                        * self.codebooks[group, code_idx].to(device)
-                    )
-                    hp_norm, _ = self._decode_valid_pose(vqvae, latent.unsqueeze(0))
-                    poses.append(self._to_raw(hp_norm))
-                all_group = torch.cat(poses, dim=0)
-                projection = PCA(n_components=1).fit_transform(all_group.numpy())[:, 0]
-                order = np.argsort(projection)
-                group_results.append(all_group[order])
-        finally:
-            vqvae.train(was_training)
-        self._group_sorted_poses = group_results
 
     # ------------------------------------------------------------------
     # Runtime mappings
@@ -619,34 +562,6 @@ class CodebookManager(nn.Module):
         discrete = dist2.argmin(dim=-1).float()
         num_codes = self.num_codes
         continuous = discrete / max(num_codes - 1, 1) * 2.0 - 1.0
-        return continuous.reshape(*lead_shape, 1)
-
-    def group_continuous_index_to_hand_pose(
-        self, continuous_index: torch.Tensor, group: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self._group_sorted_poses is None:
-            raise RuntimeError("Per-group codebooks have not been built or loaded.")
-        if not 0 <= group < self.num_groups:
-            raise IndexError(group)
-        poses = self._group_sorted_poses[group].to(continuous_index.device)
-        count = poses.shape[0]
-        scaled = (continuous_index.clamp(-1.0, 1.0) + 1.0) * 0.5 * (count - 1)
-        idx = self._nearest_integer_half_up(scaled).long().clamp(0, count - 1)
-        return self._from_raw(poses[idx]), idx
-
-    def hand_pose_to_group_continuous_index(
-        self, hand_pose: torch.Tensor, group: int
-    ) -> torch.Tensor:
-        if self._group_sorted_poses is None:
-            raise RuntimeError("Per-group codebooks have not been built or loaded.")
-        if not 0 <= group < self.num_groups:
-            raise IndexError(group)
-        lead_shape = hand_pose.shape[:-1]
-        flat_raw = self._to_raw(hand_pose.reshape(-1, self.hand_dim).float())
-        poses = self._group_sorted_poses[group].to(hand_pose.device)
-        dist2 = ((flat_raw[:, None, :] - poses[None, :, :]) ** 2).sum(-1)
-        idx = dist2.argmin(-1).float()
-        continuous = idx / max(poses.shape[0] - 1, 1) * 2.0 - 1.0
         return continuous.reshape(*lead_shape, 1)
 
     def __repr__(self) -> str:

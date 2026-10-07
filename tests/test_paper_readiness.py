@@ -27,6 +27,26 @@ def adapter_params(model):
     return {n: p for n, p in model.named_parameters() if 'lora_' in n}
 
 
+@pytest.mark.parametrize('norm_mode', ['batch_norm', 'frozen_bn', 'group_norm'])
+def test_r3m_pretrained_requires_complete_backbone(monkeypatch, norm_mode):
+    import torchvision
+    from dexmani_policy.agents.obs_encoder.rgb import r3m
+
+    source = torchvision.models.resnet18(weights=None)
+    source.fc = torch.nn.Identity()
+    state = source.state_dict()
+    monkeypatch.setattr(r3m, '_load_r3m_convnet_state_dict', lambda name: state)
+    model = r3m.R3M(tune_mode='freeze', norm_mode=norm_mode)
+    torch.testing.assert_close(model.backbone[0].weight, state['conv1.weight'], rtol=0, atol=0)
+    assert not model.backbone[0].weight.requires_grad
+    del model
+    for missing in ('conv1.weight', 'layer1.0.conv1.weight'):
+        partial = {key: value for key, value in state.items() if key != missing}
+        monkeypatch.setattr(r3m, '_load_r3m_convnet_state_dict', lambda name: partial)
+        with pytest.raises(RuntimeError, match=missing):
+            r3m.R3M(tune_mode='freeze', norm_mode=norm_mode)
+
+
 @pytest.mark.parametrize('precision', [None, 'backbone', 'float32'])
 def test_lora_storage_training_resume(tiny_dino, tmp_path, precision):
     from dexmani_policy.agents.loader import restore_policy_agent
@@ -39,6 +59,8 @@ def test_lora_storage_training_resume(tiny_dino, tmp_path, precision):
         n_action_steps=2, action_dim=2, state_dim=2, state_out_dim=8, rgb_backbone_name='dino',
         rgb_backbone_config=rgb, down_dims=[16,32], diffusion_step_embed_dim=16,
         num_training_steps=10, num_inference_steps=2, clip_sample=False)))
+    cfg.dataset = {'sensor_modalities': ['rgb', 'joint_state']}
+    cfg.normalization.rgb = 'identity'
     cfg.training = {'use_ema':True, 'use_bfloat16':False, 'lr_scheduler':'cosine',
                     'lr_warmup_steps':0, 'loop':{'total_train_steps':10}}
     cfg.ema = {'_target_':'dexmani_policy.training.ema_model.EMAModel'}

@@ -385,6 +385,12 @@ class BaseRunner:
 
             seed_idx = 0
             while len(success_list) < num_episodes and seed_idx < len(eval_seeds):
+                if (
+                    attempted > 0
+                    and self.clear_cache_freq > 0
+                    and attempted % self.clear_cache_freq == 0
+                ):
+                    env = self._refresh_env(env)
                 eval_seed = eval_seeds[seed_idx]
                 seed_idx += 1
                 attempted += 1
@@ -393,7 +399,6 @@ class BaseRunner:
                     episode_success, task_done_step = self.run_one_episode(
                         agent, env, eval_seed, inference_steps=inference_steps
                     )
-                    episode_completed = True
                 except EvalEpisodeError:
                     raise
                 except Exception as e:
@@ -411,8 +416,8 @@ class BaseRunner:
                     encoded = False
                     if crash_video is not None and video_save_dir is not None:
                         crash_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
-                        crash_path.parent.mkdir(parents=True, exist_ok=True)
                         try:
+                            crash_path.parent.mkdir(parents=True, exist_ok=True)
                             self._encode_video(
                                 crash_path, crash_video, self.env_video_fps
                             )
@@ -435,55 +440,48 @@ class BaseRunner:
                     )
                     raise EvalEpisodeError(category, eval_seed, str(e)) from e
 
-                if episode_completed:
-                    total_steps = getattr(env, "action_cnt", None)
+                total_steps = getattr(env, "action_cnt", None)
 
-                    # get_video() is best-effort — failures must not corrupt episode metrics
+                # get_video() is best-effort — failures must not corrupt episode metrics
+                try:
+                    video = env.get_video()
+                except Exception:
+                    video = None
+
+                status = "success" if episode_success else "fail"
+                done_step_str = (
+                    task_done_step if task_done_step is not None else "N/A"
+                )
+                cprint(
+                    f"[progress {len(success_list) + 1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}",
+                    "cyan",
+                )
+
+                success_list.append(episode_success)
+                if episode_success and task_done_step is not None:
+                    task_done_step_list.append(task_done_step)
+                episode_details.append(
+                    {
+                        "seed": eval_seed,
+                        "success": episode_success,
+                        "steps": task_done_step,
+                        "total_steps": total_steps,
+                    }
+                )
+                # Video encoding is best-effort — failures must not corrupt metrics
+                if video is not None and video_save_dir is not None:
+                    video_path = video_save_dir / f"episode_{eval_seed}.mp4"
                     try:
-                        video = env.get_video()
-                    except Exception:
-                        video = None
-
-                    if (
-                        self.clear_cache_freq > 0
-                        and attempted % self.clear_cache_freq == 0
-                    ):
-                        env = self._refresh_env(env)
-
-                    status = "success" if episode_success else "fail"
-                    done_step_str = (
-                        task_done_step if task_done_step is not None else "N/A"
-                    )
-                    cprint(
-                        f"[progress {len(success_list) + 1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}",
-                        "cyan",
-                    )
-
-                    success_list.append(episode_success)
-                    if episode_success and task_done_step is not None:
-                        task_done_step_list.append(task_done_step)
-                    episode_details.append(
-                        {
-                            "seed": eval_seed,
-                            "success": episode_success,
-                            "steps": task_done_step,
-                            "total_steps": total_steps,
-                        }
-                    )
-                    # Video encoding is best-effort — failures must not corrupt metrics
-                    if video is not None and video_save_dir is not None:
-                        video_path = video_save_dir / f"episode_{eval_seed}.mp4"
                         video_path.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            self._encode_video(video_path, video, self.env_video_fps)
-                            episode_video_list.append(
-                                {f"episode_{eval_seed}": str(video_path)}
-                            )
-                        except Exception as e:
-                            cprint(
-                                f"  ⚠ Video encoding failed for seed {eval_seed}: {e}",
-                                "yellow",
-                            )
+                        self._encode_video(video_path, video, self.env_video_fps)
+                        episode_video_list.append(
+                            {f"episode_{eval_seed}": str(video_path)}
+                        )
+                    except Exception as e:
+                        cprint(
+                            f"  ⚠ Video encoding failed for seed {eval_seed}: {e}",
+                            "yellow",
+                        )
 
             if len(success_list) < num_episodes:
                 cprint(

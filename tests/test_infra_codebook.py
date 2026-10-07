@@ -60,6 +60,12 @@ class CodebookInfraTests(unittest.TestCase):
                 with self.subTest(key=key), self.assertRaises((ValueError,RuntimeError)): m.load(path)
                 for name,tensor in before.items(): torch.testing.assert_close(tensor,m.state_dict()[name],rtol=0,atol=0)
                 self.assertEqual(m.artifact_metadata,metadata)
+            np.savez(path, **good, **{f'_group_sorted_poses_g{g}': np.zeros((2, 3)) for g in range(2)})
+            with self.assertRaisesRegex(ValueError, 'v3 schema'):
+                m.load(path)
+            for name, tensor in before.items():
+                torch.testing.assert_close(tensor, m.state_dict()[name], rtol=0, atol=0)
+            self.assertEqual(m.artifact_metadata, metadata)
 
     def test_runtime_dtype_validation_is_atomic(self):
         m = manager()
@@ -80,8 +86,7 @@ class CodebookInfraTests(unittest.TestCase):
                 for candidate in candidates:
                     before = copy.deepcopy(m.state_dict())
                     attrs = copy.deepcopy((m.hand_dim, m.num_groups, m.codebook_size,
-                                           m.total_combinations, m.artifact_metadata,
-                                           m._group_sorted_poses))
+                                           m.total_combinations, m.artifact_metadata))
                     with self.subTest(entry=entry, fields=list(candidate)):
                         with self.assertRaises((ValueError, RuntimeError)):
                             if entry == 'npz':
@@ -94,8 +99,7 @@ class CodebookInfraTests(unittest.TestCase):
                         for key, tensor in before.items():
                             torch.testing.assert_close(tensor, m.state_dict()[key], rtol=0, atol=0)
                         self.assertEqual(attrs, (m.hand_dim, m.num_groups, m.codebook_size,
-                                                m.total_combinations, m.artifact_metadata,
-                                                m._group_sorted_poses))
+                                                m.total_combinations, m.artifact_metadata))
             # The same values are valid in a double target: no float32 coercion.
             double = copy.deepcopy(m).double()
             state = copy.deepcopy(double.state_dict())

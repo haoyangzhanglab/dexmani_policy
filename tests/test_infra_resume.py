@@ -144,25 +144,28 @@ assert not isinstance(multi_task.DPObsEncoder, Mock)
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_historical_contract_projects_only_runtime_facts(self):
+    def test_resume_facts_are_compared_without_conversion_or_mutation(self):
         from torch.utils.data import DataLoader
         cfg = load_config('dp3')
         with open_dict(cfg):
             cfg.data_identity = {'revision': 'fixture-v1'}
         current = build_resume_contract(cfg, TinyPolicy(), DataLoader(Data(), batch_size=2))
-        old = copy.deepcopy(current)
-        del old['facts_format']
-        old.update(agent_config={'clip_sample': True}, dataset={'path': 'old'}, optimizer={'lr': 1.})
-        old['training']['loop']['log_interval_steps'] = 100
-        before = copy.deepcopy(old)
-        validate_resume_contract(old, current)
-        self.assertEqual(old, before)
+        saved = copy.deepcopy(current)
+        validate_resume_contract(saved, current)
+        self.assertEqual(saved, current)
         changed = copy.deepcopy(current)
         changed['loader']['batch_size'] += 1
         with self.assertRaisesRegex(ValueError, 'batch_size'):
-            validate_resume_contract(old, changed)
+            validate_resume_contract(saved, changed)
+        self.assertEqual(saved, current)
+        for version in (None, 0, 2):
+            unsupported = dict(saved, facts_format=version)
+            if version is None:
+                del unsupported['facts_format']
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'facts format'):
+                validate_resume_contract(unsupported, current)
         with self.assertRaisesRegex(ValueError, 'facts format'):
-            validate_resume_contract(old, dict(current, facts_format=2))
+            validate_resume_contract(saved, dict(current, facts_format=2))
 
     def test_rng_device_and_revision(self):
         state=get_rng_state('cpu')
@@ -175,11 +178,9 @@ assert not isinstance(multi_task.DPObsEncoder, Mock)
         with patch('torch.cuda.set_rng_state') as setter:
             set_rng_state(new,'cuda:0'); self.assertEqual(setter.call_args.kwargs['device'],torch.device('cuda:0'))
             legacy=dict(state,torch_cuda=[torch.zeros(3,dtype=torch.uint8),torch.ones(3,dtype=torch.uint8)])
-            set_rng_state(legacy,'cuda:0',source_config={'training':{'device':'cuda:1'}})
-            self.assertTrue(torch.equal(setter.call_args.args[0],torch.ones(3,dtype=torch.uint8)))
-            set_rng_state(legacy,'cuda:1',source_config={'training':{'num_gpus':2,'gpu_ids':[1,0]}},rank=0,world_size=2)
-            self.assertTrue(torch.equal(setter.call_args.args[0],torch.ones(3,dtype=torch.uint8)))
-            with self.assertRaisesRegex(ValueError,'unambiguous'): set_rng_state(legacy,'cuda:0')
+            setter.reset_mock()
+            with self.assertRaisesRegex(ValueError,'per-rank tensor'): set_rng_state(legacy,'cuda:0')
+            setter.assert_not_called()
         known={'revision':'v1'}; validate_data_identity(known,known)
         for current in ({'revision':'v2'},{'revision':None},None):
             with self.assertRaises(ValueError): validate_data_identity(known,current)

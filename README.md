@@ -106,7 +106,9 @@ bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<ta
 
 续训时显式 `task_name` 仅断言来源任务身份，必须与保存值完全相同（复合任务包含顺序）；冲突重复参数也会拒绝。未显式指定时使用保存任务，不受当前 YAML 默认任务影响。远程 `train_remote.sh <config> <task> +resume_from=...` 的数据预检与训练共享配方解析，检查保存的单任务/child 数据路径或显式迁移路径；`--check` 只保证目录存在，不保证数据完整或训练成功。来源配置缺失或损坏时拒绝续训，不回退到当前配方。
 
-新保存配置记录 HF 结构及闭集文本维度；完整权重恢复不重新加载初始化权重。缺少结构的历史 HF 配置仍需要原配置缓存，不承诺冷缓存恢复。固定文本仅保留任务映射、embedding 表和 projection，未知文本报错。已识别的旧 CLIP ViT-B/16、B/32 冻结文本布局且有完整 embedding 表时支持窄推理转换；旧文本 optimizer 缺乏名称映射证据，full resume 明确拒绝，不退回 weights-only。原子 `.pt` 格式不变，推理读取仍会读同文件字节，并不跳过 optimizer I/O。
+保存配置记录 HF 结构及闭集文本维度；完整权重恢复不重新加载初始化权重。缺少结构的历史 HF 配置仍需要原配置缓存，不承诺冷缓存恢复。固定文本仅保留任务映射、embedding 表和 projection，未知文本报错；旧闭集 checkpoint 中额外保存的 `text_encoder.*` 不再自动删除，由 strict load 拒绝。原子 `.pt` 格式不变，推理读取仍会读同文件字节，并不跳过 optimizer I/O。
+
+完整续训要求 `resume_contract.facts_format=1`，CUDA RNG 为每个 rank 的单个 Tensor；CPU RNG 的 CUDA 字段为 null。不再转换无版本的旧 contract 或根据旧设备配置推测 RNG 列表槽位。需要这些旧格式的实验使用其原源码版本恢复，当前代码不会改写历史产物或自动退回 weights-only。
 
 数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。恢复时已知 revision 改变或丢失会报错，历史身份缺失会明确提示“数据身份未验证”。revision 是生产者声明，不是内容 hash。
 
@@ -141,6 +143,8 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 `--policy-config` 使用目标 Dataset 的 split、有效窗口与唯一 action 源行，码本和 Policy 共用训练统计，验证集不参与拟合。支持 joint `7+12` 和 EEF `9+12`，不支持辅助 action 布局。VQ 的 `--seed` 只控制优化随机性；数据配方以 Policy 配置为准。额外覆盖通过重复的 `--policy-override` 传入，并在 Policy 训练时传入相同覆盖。
 
 省略 `--output_dir` 会自动生成任务下独立 run。新 run 原子认领；已认领目录或已有 VQ 产物均拒绝重用。导出目标存在时拒绝写入，只有显式 `--overwrite` 才允许覆盖。选点在开始时固定：有验证集为 `val_mse`，无验证集为 `train_mse`；非有限值报错，旧 best 保留。
+
+导出只生成 Policy 使用的完整 residual-code 组合码本。未使用的分组码本及 `--include_per_group` 已移除；含 `_group_sorted_poses_g*` 扩展字段的旧 NPZ 会被拒绝，可从原 VQ checkpoint 另行导出标准 NPZ。标准 v3 NPZ 与 Policy 内嵌码本保持不变。
 
 使用率工具对 Policy-aligned checkpoint 默认测训练源行；有验证 split 时可加 `--split validation`。显式 split 从 checkpoint 内的清单、actual IDs 和 masks 恢复，不读取外部旧清单；旧 manifest+cap 保留当时子集。工具核对已知 data_revision、两侧合格源行和已保存的 episode 元数据；缺少显式 split 恢复证据会报错，历史 revision 缺失则提示“数据身份未验证”。相同 revision 仅是生产者声明。保存的动作布局和 normalizer 不变，码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 兼容；旧 checkpoint 不会被静默重拟合。
 
@@ -178,25 +182,17 @@ bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name>
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 ```
 
-评测已有实验时，使用该实验保存的 resolved config 与 checkpoint 恢复其真实语义，不用当前默认配置推测历史实验。
+评测使用实验保存的 resolved `config.yaml` 与 checkpoint。`eval_pipeline.sh` 执行 selection 和不录视频的 held-out eval；demo 用独立的 `record_demo.sh`，不作为 held-out 结果。
 
-每次 selection、final eval 和 demo 都保存独立目录及 `eval_config.yaml`，包括实际推理参数、环境、task/seed 和代码版本；候选明细可重算选点指标。selection 默认不录像，显式加 `--videos` 才记录候选/阶段隔离的视频。三种入口共用 episode 字段和 task/seed 完整性检查，异常记录不能计作普通失败。demo 使用自己的有效 seeds，保存各 NFE 明细并标记 `heldout_from_selection=false`，不读取未使用的 test manifest。快照只保存已解析请求和本次验证过的协议，旧路径与 selection 证据可以保留为来源记录。
+新 selection 必须提供有效的 seed manifest，固定 selection、tie-break 和 test 集合。生成方式与已发布清单见 [论文 recipe](docs/paper_recipes.md)；流水线可用 `SEED_MANIFEST=/absolute/path/seeds.json` 指定清单。
 
-`best_ckpt.json` 指向最近一次**成功发布**的 selection；失败保留旧 best，并以非零状态结束。评测、demo 和 policy inspection 在一次调用中固定同一份 best 记录与具体权重。普通 best 调用允许显式覆盖 EMA/NFE 并保留来源证据；使用 `--selection-record` 的流水线交接则拒绝冲突的 checkpoint/EMA/NFE 覆盖。新 best 的 selection result 或权重尚未同步时会报缺失，不替换为其他权重。多任务直接执行保存的 task→seeds，held-out 校验所用 seed 可用、等额预算与真实 `(task, seed)` 无交集；旧多任务记录缺证据需重新选点，普通权重推理仍允许。
+`best_ckpt.json` 指向最近一次成功发布的选择结果。流水线通过 `--result-file` / `--selection-record` 固定本次 checkpoint、raw/EMA 和 NFE；冲突覆盖或未同步的产物会报错。普通 best 调用允许显式覆盖 EMA/NFE。正常全零结果仍可发布，技术异常以非零状态退出并保留旧 best。
 
-远程启动需要本地可用的 `python3` 或 `python`，通过标准库生成独立 session/log 名，不依赖本地 `/proc`，不自动终止旧会话。停止时使用启动输出中的 `stop_remote.sh <SESSION>`。数据预检只检查实际配方中的目录是否存在，不代表训练或仿真已通过。
+每次 selection、eval 和 demo 保存独立结果目录及 `eval_config.yaml`。协议、seed 隔离、旧记录支持范围和结果字段见 [仿真评测机制](docs/仿真评测机制.md)。
 
-`sync_down.sh` 先下载新的不可变产物，保留已有 milestone、配置、源码快照和完成的评测结果；随后更新 `metrics.jsonl`、`checkpoints/latest.pt` 和 VQ 训练中持续改写的 `vqvae_hand_best.pt`，仅对 `best_ckpt.json` 和 `eval_ckpt_selector/*/best_ckpt_selection.json` 使用 checksum 更新。已有 `config.yaml` 或 `source_manifest.json` 字节不同会保守报冲突（包括仅格式变化），中止此次同步；不自动合并，也不保证检测同名大二进制的人为改写。源码快照、训练配置、checkpoint 与评测快照/结果写完临时文件后原子发布，同步排除其临时文件，传输失败不保留半文件。目标先于可变引用下载，但不承诺跨文件事务；缺失选择结果或权重仍明确报错。默认排除 W&B，`--list` 保留 SSH/find 的失败状态；`--dry-run` 仍会访问服务器获取同步清单。
+### 源码追溯
 
-### 固定论文评测与训练源码追溯
-
-新论文比较先从实际 runner seed 池确定同一份 task→seed JSON 清单，通过 `eval.seed_manifest=/absolute/path/seeds.json` 交给 selector。它包含 `pool_id`、`selection`、`tie_break`、`test` 四个字段，后三者均为 task→整数 seed 列表。预留 tie-break 池始终不进入 test，测试数量由清单固定，与 `episodes` 不同时提示实际数量；`max_episodes` 必须容纳完整 selection 加预留 tie-break，否则报错。多任务清单直接提供各任务实际 seed，角色内各任务预算必须相等；任务不匹配、成员不可用、重复或跨角色相交会报错。新 selector 必须使用有效清单；七个基础配置提供任务对应的默认路径，生成方式和已发布清单见 [论文 recipe](docs/paper_recipes.md)。后续 held-out eval 使用 selection record 内嵌的协议，显式冲突报错。历史无清单的已发布记录仍可按 legacy 协议复现。完整正常的全零 selection 仍发布并继续固定 test；空结果、缺失 episode 和技术异常失败并保留旧 best。
-
-`select_best_ckpt.py --result-file <新文件>` 写出该次不可变选择结果的相对引用；`eval_best_ckpt.py` 与 `record_demo.py` 用 `--selection-record <该文件>` 固定 checkpoint、raw/EMA 和 NFE。held-out eval 另外严格绑定完整 seed 协议；demo 保留选择记录校验，使用自己的 seeds。`eval_pipeline.sh` 默认只做 selection 和不录视频的数值 eval；demo 使用独立 `record_demo.sh`。流水线使用唯一交接引用，可通过 `SEED_MANIFEST=/absolute/path/seeds.json` 指定论文清单。
-
-新训练 run 保存 `source.zip` 和 `source_manifest.json`，记录实际运行源码（含源码目录中的未提交/未跟踪文件）、内容 SHA256、Git 身份和关键依赖。远端没有 `.git` 时 commit 为 `unknown`，以内容归档为准。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。源码身份不纳入严格 resume 相等合同。
-
-此前整改的历史验证记录见 [整改报告](docs/review_remediation_report.md)；当前入口及兼容边界以本文和源码为准。
+新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。恢复行为见 [项目架构](docs/项目架构.md)，历史整改记录见 [整改报告](docs/review_remediation_report.md)。
 
 ## 其他工作流
 
@@ -205,13 +201,11 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 - 仓库级辅助脚本：`scripts/utils/`
 - Real policy inspection / inference：`dexmani_policy/deployment/`
 
-实验盘点使用 `bash scripts/utils/clean_experiments.sh`，只报告事实，不删除或移动实验；旧删除和阈值选项会报错。普通 `stop_remote.sh <SESSION>` 最多等待30秒，仍运行则非零退出；仅显式 `--force` 允许超时强停。session 消失不证明 checkpoint 完整。
+远程启动会输出独立 session 名；停止时使用 `stop_remote.sh <SESSION>`，普通停止最多等待30秒，仅显式 `--force` 允许超时强停。session 消失不证明 checkpoint 完整，数据预检也不代表训练通过。
 
-Dataset 只读打开选中 Zarr 字段，按进程管理句柄，窗口按需读取；资格按块扫描，normalizer 从有效训练窗口的唯一源行分块消费；高维 payload 由每字段当前块、窗口和 worker 预取量约束，资格 mask/源行索引仍随行数增长。时间窗口采用实际记录行索引（recorded_rows），不自动插值或把不规则间隔改成固定网格。
+`sync_down.sh` 保留已有不可变产物，只更新指定训练文件与可变引用；配置或来源身份冲突时停止。参数、同步顺序和失败处理见 [SSH 服务器训练部署](docs/SSH服务器训练部署.md)。实验盘点使用 `bash scripts/utils/clean_experiments.sh`，只报告事实，不删除或移动实验。
 
-Real 新训练默认按保存 dt 的 1.5 倍筛选连续时间窗口，显式 `+dataset.max_time_gap_ratio=null` 可禁用；同时使用角色化有效窗口、两设备 ACCEPTED dispatch 和去重 train-only normalizer。续训在构造 Dataset 前恢复保存的时间规则，已知旧配方缺键维持原样本集合；checkpoint 推理与续训均使用保存统计。部署桥接返回完整 future，Real 默认 sync，可选择 async 或 DDIM-adapted RTC。支持范围、数学与定向测试见 [Real 数据与 RTC](docs/rtc.md)。真机预算和运行入口由 `dexmani_real` 提供。
-
-真机运动不属于普通开发验证；只有在明确需要时才进入 Real 流程。
+Dataset 按需读取 Zarr 窗口，normalizer 使用有效训练窗口的唯一源行；数据与恢复合同见 [项目架构](docs/项目架构.md)。Real 的时间窗口规则、sync/async/RTC 支持范围和部署接口见 [Real 数据与 RTC](docs/rtc.md)，真机运行入口由 `dexmani_real` 提供。真机运动需明确授权。
 
 ## 项目结构
 

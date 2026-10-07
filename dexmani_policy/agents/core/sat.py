@@ -339,21 +339,3 @@ class SATAgent(BaseAgent):
 
         compile_kwargs["mode"] = "default"  # force override (setdefault won't work)
         self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
-
-    # ------------------------------------------------------------------
-    # Optimizer
-    # ------------------------------------------------------------------
-
-    def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
-        """Separate backbone and obs_encoder with different LR/WD."""
-        action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
-        for g in action_groups:
-            g["lr"] = lr
-
-        from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
-
-        obs_groups = get_optim_group_with_no_decay(self.obs_encoder, weight_decay=obs_wd)
-        for g in obs_groups:
-            g["lr"] = obs_lr
-
-        return action_groups + obs_groups

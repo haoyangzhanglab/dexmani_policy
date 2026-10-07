@@ -56,12 +56,13 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
         "total_train_steps": int(cfg.training.loop.total_train_steps),
         "gradient_accumulation_steps": cfg.training.loop.get("gradient_accumulation_steps", 1),
     }}
+    options = loader_options(cfg)
     return {
         "agent": build_agent_contract(model),
         "facts_format": 1,
         "data_recipe": plain(cfg.data_recipe) if "data_recipe" in cfg else None,
         "loader": {
-            key: loader_options(cfg).get(key, False)
+            key: options.get(key, False)
             for key in ("batch_size", "shuffle", "drop_last")
         },
         "data_identity": plain(cfg.data_identity) if "data_identity" in cfg else {"revision": None},
@@ -83,7 +84,6 @@ def restore_training_state(
     scheduler,
     device,
     rank=0,
-    source_config=None,
 ):
     """Restore optimizer/scheduler/EMA-updater/RNG after model weights and optimizer construction."""
     validate_resume_contract(checkpoint.resume_contract, resume_contract)
@@ -117,20 +117,12 @@ def restore_training_state(
         ema_updater.optimization_step = checkpoint.ema_updater_step
         if checkpoint.ema_decay is not None:
             ema_updater.decay = float(checkpoint.ema_decay)
-    set_rng_state(
-        checkpoint.rng_states[rank],
-        device=device,
-        source_config=source_config,
-        rank=rank,
-        world_size=world_size,
-    )
+    set_rng_state(checkpoint.rng_states[rank], device=device)
     return checkpoint.global_step, checkpoint.epoch, cursor
 
 
 def restore_model_weights(checkpoint, model, ema_model, device):
     state = fix_state_dict(checkpoint.model_state, False)
-    if getattr(model, "task_emb_table", None) is not None and any(k.startswith("text_encoder.") for k in state):
-        raise ValueError("Historical text_encoder optimizer layout has no named mapping evidence; full resume rejected")
     model.load_state_dict(state, strict=True)
     # Normalizers reconstruct their ParameterDict from checkpoint tensors.
     # A CPU-loaded checkpoint must not leave these parameters on CPU before
@@ -190,21 +182,10 @@ def build_agent_contract(model) -> Dict[str, Any]:
 
 
 def validate_resume_contract(saved, current) -> None:
-    """Compare runtime facts, projecting the one supported historical full contract."""
-    import copy
-
-    saved, current = copy.deepcopy(saved), copy.deepcopy(current)
-    if current.get("facts_format") != 1 or saved.get("facts_format") not in (None, 1):
-        raise ValueError("Unsupported resume facts format")
-    if "facts_format" not in saved:
-        # Saved config owns recipe fields; retain only the current runtime facts.
-        saved = {key: saved[key] for key in current if key in saved}
-        saved["facts_format"] = 1
-        loop = saved.get("training", {}).get("loop", {})
-        saved["training"] = {"loop": {
-            "total_train_steps": loop.get("total_train_steps"),
-            "gradient_accumulation_steps": loop.get("gradient_accumulation_steps", 1),
-        }}
+    """Compare saved and current runtime facts without altering either contract."""
+    saved, current = dict(saved), dict(current)
+    if current.get("facts_format") != 1 or saved.get("facts_format") != 1:
+        raise ValueError("Unsupported resume facts format; restore older formats with their original code")
     validate_data_identity(saved.pop("data_identity", None), current.pop("data_identity", None))
     differences = []
 

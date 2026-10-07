@@ -138,23 +138,23 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
         checkpoint_path, use_ema=use_ema
     )
     state = fix_state_dict(state, is_current_ddp=False)
-    cfg, state = checkpoint_agent_config(cfg, state)
+    cfg = checkpoint_agent_config(cfg, state)
     agent = hydra.utils.instantiate(cfg.agent)
     agent._checkpoint_global_step = global_step
     agent.action_key = cfg.action_key
     agent.set_normalization_spec(resolve_normalization_spec(cfg))
-    agent.load_state_dict(fix_state_dict(state, is_current_ddp=False), strict=True)
+    agent.load_state_dict(state, strict=True)
     validate_normalizer_state(agent.normalizer, agent.normalization_spec)
     agent.to(device)
     agent.eval()
     return agent
 
 
-def checkpoint_agent_config(cfg, state, *, for_resume=False):
-    """Local construction arguments and one narrowly recognized frozen-text layout."""
+def checkpoint_agent_config(cfg, state):
+    """Construct from saved weights without loading external initialization assets."""
     import copy
     import torch
-    from omegaconf import OmegaConf, open_dict
+    from omegaconf import open_dict
 
     cfg = copy.deepcopy(cfg)
     agent = cfg.agent
@@ -169,21 +169,4 @@ def checkpoint_agent_config(cfg, state, *, for_resume=False):
             if not isinstance(table, torch.Tensor) or table.ndim != 2 or table.shape[0] != len(texts):
                 raise ValueError('Closed text checkpoint requires the complete saved embedding table and task list')
             agent.text_embed_dim = table.shape[1]
-            old_keys = {k for k in state if k.startswith('text_encoder.')}
-            if old_keys:
-                if for_resume:
-                    raise ValueError('Historical text_encoder optimizer layout has no named mapping evidence; full resume rejected')
-                if agent.get('text_encoder_model', 'openai/clip-vit-base-patch16') not in (
-                    'openai/clip-vit-base-patch16', 'openai/clip-vit-base-patch32'
-                ):
-                    raise ValueError('Unrecognized historical frozen text model; conversion refused')
-                from transformers import CLIPTextConfig, CLIPTextModelWithProjection
-                with torch.device('meta'):
-                    text = CLIPTextModelWithProjection(CLIPTextConfig())
-                expected = {'text_encoder.text_backbone.' + k: v.shape for k, v in text.state_dict().items()}
-                if old_keys != expected.keys() or any(state[k].shape != shape for k, shape in expected.items()):
-                    raise ValueError('Historical frozen text key layout is not the recognized CLIP layout')
-                if table.shape[1] != text.config.projection_dim:
-                    raise ValueError('Historical text embedding dimension mismatch')
-                state = {k: v for k, v in state.items() if k not in expected}
-    return cfg, state
+    return cfg

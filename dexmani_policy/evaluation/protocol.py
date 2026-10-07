@@ -254,29 +254,13 @@ def compute_eval_stats(result: dict) -> dict:
 def _get_eval_param(
     cfg, param: str, section: str | None = None, *, default: Any = None
 ) -> Any:
-    """Read an eval config parameter with three-level fallback.
-
-    Resolution order:
-    1. ``cfg.eval.<section>.<param>``   — per-section override
-    2. ``cfg.eval.<param>``             — shared top-level
-    3. *default*
-    """
-    eval_cfg = cfg.eval if hasattr(cfg, "eval") else {}
-    _has_get = hasattr(eval_cfg, "get")
-
-    # 1. Per-section override
-    if section:
-        section_cfg = eval_cfg.get(section, {}) if _has_get else {}
-        val = section_cfg.get(param) if section_cfg else None
+    """Resolve section → shared eval → default; only None means unspecified."""
+    eval_cfg = cfg.get("eval") or {}
+    section_cfg = (eval_cfg.get(section) or {}) if section else {}
+    for source in (section_cfg, eval_cfg):
+        val = source.get(param)
         if val is not None:
             return val
-
-    # 2. Shared top-level
-    val = eval_cfg.get(param) if _has_get else None
-    if val is not None:
-        return val
-
-    # 3. Hardcoded default
     return default
 
 
@@ -303,7 +287,7 @@ class MilestoneCheckpoint:
 
 
 def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
-    """Find milestone checkpoints in *exp_dir/checkpoints/*, sorted by pct."""
+    """Find regular milestone files inside this experiment, sorted by pct."""
     ckpt_dir = exp_dir / "checkpoints"
     if not ckpt_dir.is_dir():
         raise FileNotFoundError(
@@ -317,9 +301,11 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
         m = _MILESTONE_RE.match(pt_file.name)
         if not m:
             continue
+        if pt_file.is_symlink():
+            raise ValueError(f"Milestone checkpoint must not be a symlink: {pt_file}")
         found.append(
             MilestoneCheckpoint(
-                path=pt_file,
+                path=resolve_checkpoint(exp_dir, pt_file.name),
                 pct=int(m.group("pct")),
                 global_step=int(m.group("step")),
             )
@@ -363,7 +349,7 @@ def resolve_checkpoint_path(
             raise FileNotFoundError(
                 f"No {target_pct}% milestone checkpoint. Available: {available}"
             )
-        return match[0].path.resolve(), match[0].label
+        return match[0].path, match[0].label
 
     path = resolve_checkpoint(exp_dir, ckpt_tag_or_path)
     return path, f"{ckpt_tag_or_path} ({path.name})"

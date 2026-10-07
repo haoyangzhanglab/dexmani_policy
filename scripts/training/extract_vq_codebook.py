@@ -34,7 +34,6 @@ def extract_codebook(
     output_path: str,
     *,
     device: str = "cuda",
-    include_per_group: bool = False,
     overwrite: bool = False,
 ) -> CodebookManager:
     output = Path(output_path)
@@ -62,8 +61,6 @@ def extract_codebook(
     )
 
     poses = manager.reindex_by_pca(vqvae)
-    if include_per_group:
-        manager.build_per_group_codebooks(vqvae)
     if output.suffix != ".npz":
         raise ValueError("Codebook path must use the .npz suffix")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -87,14 +84,12 @@ def main() -> None:
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
-    parser.add_argument("--include_per_group", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     extract_codebook(
         args.checkpoint,
         args.output,
         device=args.device,
-        include_per_group=args.include_per_group,
         overwrite=args.overwrite,
     )
 

@@ -298,7 +298,16 @@ def test_vq_checkpoint_export_and_actual_policy_load(
                      "joint_state": torch.zeros(2, 1, 19)},
              "action": torch.ones(2, 4, policy_config.agent.action_dim)}
     opt = torch.optim.AdamW(agent.parameters(), lr=1e-4)
-    loss, _ = agent(batch)
+    from unittest.mock import patch
+    from dexmani_policy.training.logging import to_log_scalars
+    with patch.object(torch.Tensor, 'item', side_effect=AssertionError('eager scalar conversion')):
+        loss, metrics = agent(batch)
+    for key in ('batch_nn_code_entropy', 'batch_nn_code_used_1pct'):
+        assert torch.is_tensor(metrics[key]) and not metrics[key].requires_grad
+    logged = to_log_scalars(metrics)
+    # Identical hand targets select one prototype for the entire batch.
+    assert logged['batch_nn_code_entropy'] == 0.0
+    assert logged['batch_nn_code_used_1pct'] == 1
     loss.backward()
     opt.step()
     assert torch.isfinite(loss)

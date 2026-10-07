@@ -13,7 +13,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dexmani_policy.training.checkpoint import CheckpointStore
-from dexmani_policy.utils.config import load_resume_source_config, register_resolvers
+from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
@@ -98,7 +98,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
             scheduler=scheduler,
             device=device,
             rank=rank,
-            source_config=load_resume_source_config(resume_from),
         )
 
     del checkpoint

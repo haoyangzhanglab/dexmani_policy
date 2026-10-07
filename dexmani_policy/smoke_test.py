@@ -30,10 +30,7 @@ register_resolvers()
 
 
 def load_config(config_name: str):
-    try:
-        GlobalHydra.instance().clear()
-    except (AttributeError, RuntimeError):
-        pass
+    GlobalHydra.instance().clear()
     config_dir = os.path.join(ROOT_DIR, "dexmani_policy", "configs")
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         cfg = compose(config_name=config_name)
@@ -80,7 +77,7 @@ def _validate_target_references(cfg) -> int:
         module_name, attribute = _split_target(target)
         try:
             spec = importlib.util.find_spec(module_name)
-        except (ImportError, ModuleNotFoundError) as exc:
+        except ImportError as exc:
             raise ImportError(
                 f"Failed to locate Hydra target module {module_name!r} "
                 f"for {target!r} at {path}"

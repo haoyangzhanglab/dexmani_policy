@@ -31,7 +31,6 @@ from dexmani_policy.utils.config import (
 from dexmani_policy.utils.validation import positive_int
 
 __all__ = [
-    "attach_normalization_spec",
     "build_dataset_and_normalizer",
     "build_model_and_ema",
     "build_normalizer",
@@ -43,10 +42,6 @@ __all__ = [
     "validate_config",
     "validate_gradient_accumulation",
 ]
-
-# ---------------------------------------------------------------------------
-# Normalization spec & builder
-# ---------------------------------------------------------------------------
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
@@ -75,11 +70,6 @@ def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
         )
 
     return normalizer
-
-
-def attach_normalization_spec(model, cfg) -> None:
-    """Attach the resolved semantic normalization spec to a model (and its EMA twin)."""
-    model.set_normalization_spec(resolve_normalization_spec(cfg))
 
 
 def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
@@ -150,11 +140,6 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     return dataset, normalizer
 
 
-# ---------------------------------------------------------------------------
-# Model & EMA
-# ---------------------------------------------------------------------------
-
-
 def _validate_ema_batchnorm_compatibility(model) -> None:
     """Reject BatchNorm whose parameters or running statistics can change."""
     unsafe = []
@@ -180,20 +165,17 @@ def _validate_ema_batchnorm_compatibility(model) -> None:
 
 
 def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
-    """Instantiate the agent model and, if configured, its EMA twin.
+    """Build the Agent and the local EMA required by evaluation or training loss.
 
-    ``rank`` gates whether a local EMA is built: rank 0 always owns the evaluation
-    EMA, while every rank owns one when the model declares an EMA-dependent loss.
-    Non-rank-0
-    workers receive ``ema_model=None`` — the Trainer guards every EMA site with
-    ``self.use_ema = (ema_model is not None)``, so this is safe end-to-end.
+    With EMA enabled, rank 0 owns the evaluation copy; EMA-dependent losses
+    require a copy on every rank. Resume restores raw and EMA independently.
     """
     model_cfg = cfg
     if checkpoint is not None:
         from dexmani_policy.agents.loader import checkpoint_agent_config
         from dexmani_policy.training.checkpoint import fix_state_dict
-        model_cfg, _ = checkpoint_agent_config(
-            cfg, fix_state_dict(checkpoint.model_state, False), for_resume=True
+        model_cfg = checkpoint_agent_config(
+            cfg, fix_state_dict(checkpoint.model_state, False)
         )
     model = hydra.utils.instantiate(model_cfg.agent)
     from dexmani_policy.utils.validation import validate_observation_fields
@@ -216,7 +198,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         model.initialize_training()
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
-    attach_normalization_spec(model, cfg)
+    model.set_normalization_spec(resolve_normalization_spec(cfg))
     model.to(device)
 
     requires_ema_for_loss = model.requires_ema_for_loss

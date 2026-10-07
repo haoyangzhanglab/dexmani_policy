@@ -7,7 +7,6 @@ and added to key positional encoding after projection, exactly matching R3D.
 
 from __future__ import annotations
 
-import math
 from typing import Type
 
 import torch
@@ -16,10 +15,6 @@ import torch.nn.functional as F
 
 from dexmani_policy.agents.optim_util import OptimGroupMixin
 from dexmani_policy.agents.position_encodings import TimestepMLP
-
-
-def _is_cuda_available() -> bool:
-    return torch.cuda.is_available()
 
 
 class MLPBlock(nn.Module):
@@ -36,7 +31,7 @@ class MLPBlock(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention with SDPA (Flash/Mem-Efficient) + manual fallback."""
+    """Multi-head attention using PyTorch SDPA on the input device."""
 
     def __init__(self, embedding_dim: int, num_heads: int, downsample_rate: int = 1, attn_drop: float = 0.0):
         super().__init__()
@@ -52,7 +47,6 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
 
-        self.fused_attn = _is_cuda_available()
         self.attn_drop = attn_drop
 
     def _separate_heads(self, x: torch.Tensor) -> torch.Tensor:
@@ -72,22 +66,11 @@ class Attention(nn.Module):
         k = self._separate_heads(self.k_proj(k))
         v = self._separate_heads(self.v_proj(v))
 
-        if self.fused_attn:
-            out = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                dropout_p=self.attn_drop if self.training else 0.0,
-                attn_mask=attn_mask,
-            )
-        else:
-            _, _, _, c_per_head = q.shape
-            attn = q @ k.permute(0, 1, 3, 2)
-            attn = attn / math.sqrt(c_per_head)
-            if attn_mask is not None:
-                attn = attn + attn_mask  # additive float mask (-inf = masked)
-            attn = torch.softmax(attn, dim=-1)
-            out = attn @ v
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_drop if self.training else 0.0,
+            attn_mask=attn_mask,
+        )
 
         out = self._recombine_heads(out)
         return self.out_proj(out)
@@ -259,8 +242,7 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         # Joint (primary) sees only itself; EE sees joint + itself.
         if use_aux_ee:
             mask = torch.zeros(n_tokens, n_tokens)
-            # EE (tokens H:2H) blocked from attending to joint (tokens 0:H)? No —
-            # joint blocked from EE; EE CAN see joint. So block joint from EE:
+            # Joint queries cannot attend to auxiliary EE tokens.
             mask[:horizon, horizon:] = float("-inf")
             self.register_buffer("self_attn_mask", mask, persistent=False)
         else:
@@ -287,7 +269,6 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
         T = self.n_obs_steps
         K = N // T
 
-        # Defensive: catch token misalignment early with a clear message.
         assert K * T == N, (
             f"OneWayTransformerBackbone: context tokens N={N} not divisible by n_obs_steps T={T} (K={K})."
         )

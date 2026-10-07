@@ -9,7 +9,7 @@ import hydra
 import torch
 from torch.utils.data import DataLoader
 
-from dexmani_policy.utils.config import load_resume_source_config, register_resolvers
+from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 
@@ -34,10 +34,7 @@ register_resolvers()
 
 @dataclass
 class TrainingComponents:
-    """Assembled training pipeline components (single-GPU).
-
-    Returned by :func:`build_train_components` and consumed by :func:`main`.
-    """
+    """Single-device components shared by training and integration smoke."""
 
     device: torch.device
     model: torch.nn.Module
@@ -126,15 +123,12 @@ def main(cfg):
     comp = build_train_components(cfg)
 
     trainer = build_trainer(cfg, comp)
-    # Explicit resume: `+resume_from=<experiment_dir|checkpoint.pt>`.
-    resume_from = cfg.get("resume_from", None)
     resume_state = None
     if comp.resume_checkpoint is not None:
         resume_state = restore_training_state(
             comp.resume_checkpoint, resume_contract=trainer.resume_contract,
             model=comp.model, ema_model=comp.ema_model, ema_updater=comp.ema_updater,
             optimizer=comp.optimizer, scheduler=comp.scheduler, device=comp.device,
-            source_config=load_resume_source_config(resume_from),
         )
     comp.resume_checkpoint = None
     comp.workspace.save_hydra_config(cfg)

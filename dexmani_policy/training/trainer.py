@@ -88,8 +88,6 @@ class Trainer:
         self.train_loader = train_loader
         self.workspace = workspace
 
-        for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
-            positive_int(getattr(train_loop_cfg, name), name)
         self.total_train_steps = train_loop_cfg.total_train_steps
         self.log_interval_steps = train_loop_cfg.log_interval_steps
         self.max_grad_norm = max_grad_norm
@@ -595,10 +593,7 @@ class Trainer:
                     f"Training interrupted at step {global_step}/{self.total_train_steps}",
                     flush=True,
                 )
-                try:
-                    self._save_interrupt_checkpoint(global_step)
-                except Exception as e:
-                    print(f"WARNING: interrupt checkpoint failed: {e}", flush=True)
+                self._save_interrupt_checkpoint(global_step)
             elif global_step < self.total_train_steps:
                 self._save_checkpoint(global_step, "bounded")
                 print(f"Bounded run stopped at step {global_step}/{self.total_train_steps}")

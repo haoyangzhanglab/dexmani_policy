@@ -501,6 +501,37 @@ def test_multitask_direct_consumer_validates_episode_fields():
         runner.run(None,task_seeds={'a':[1]},inference_steps=2)
 
 
+@pytest.mark.parametrize('kind', ['runtime', 'unexpected', 'interrupt', 'episode'])
+def test_multitask_errors_never_become_task_outcomes(kind):
+    from dexmani_policy.env_runner.base_runner import EvalEpisodeError
+
+    error = {
+        'runtime': RuntimeError('fixture failure'),
+        'unexpected': KeyError('fixture failure'),
+        'interrupt': KeyboardInterrupt(),
+        'episode': EvalEpisodeError('model', 1, 'fixture failure'),
+    }[kind]
+    def fail(*args, **kwargs):
+        raise error
+
+    runner = MultiTaskSimRunner.__new__(MultiTaskSimRunner)
+    runner.runners = {'a': types.SimpleNamespace(task_text='a', run=fail)}
+    with patch.object(runner, 'print_summary') as summary:
+        if kind in ('interrupt', 'episode'):
+            with pytest.raises(type(error)) as raised:
+                runner.run(None, task_seeds={'a': [1]}, inference_steps=2)
+            assert raised.value is error
+            summary.assert_not_called()
+        else:
+            with pytest.raises(RuntimeError, match='Refusing to report'):
+                runner.run(None, task_seeds={'a': [1]}, inference_steps=2)
+            record = summary.call_args.args[0]['a']
+            assert record['success_rate'] is None
+            assert record['episode_details'] == []
+            assert record['error_type'] == type(error).__name__
+            assert record['error_category'] == ('runtime_error' if kind == 'runtime' else 'KeyError')
+
+
 def test_snapshot_never_rebinds_or_reopens_protocol(tmp_path,monkeypatch):
     from dexmani_policy.evaluation import protocol
     root,cfg = experiment(tmp_path)
@@ -591,3 +622,118 @@ def test_saved_rgb_recipe_reaches_simulation_and_real(tmp_path, monkeypatch):
                                  n_obs_steps=2, horizon=16, inference_steps=10)
     policy = LoadedPolicy(Agent(), OmegaConf.to_container(cfg, resolve=True), info, device='cpu', seed=0)
     assert policy.predict({'rgb': raw}).shape == (15, 19)
+
+
+@pytest.mark.parametrize('fault', ['external_link', 'internal_link', 'broken_link', 'directory'])
+def test_milestone_paths_fail_before_selection_and_preserve_best(tmp_path, monkeypatch, fault):
+    from dexmani_policy.evaluation.protocol import discover_milestone_checkpoints, resolve_checkpoint_path
+
+    root, cfg = experiment(tmp_path)
+    valid = root / 'checkpoints/epoch=0000-step=00000020-milestone=20pct.pt'
+    invalid = root / 'checkpoints/epoch=0000-step=00000040-milestone=40pct.pt'
+    assert resolve_checkpoint_path(root, '20pct')[0] == valid
+    (root / 'checkpoints/latest.pt').symlink_to(valid.name)
+    assert resolve_checkpoint_path(root, 'latest')[0] == valid
+    invalid.unlink()
+    if fault == 'directory':
+        invalid.mkdir()
+    elif fault == 'internal_link':
+        invalid.symlink_to(valid.name)
+    else:
+        target = tmp_path / 'other_experiment/checkpoints/model.pt'
+        if fault == 'external_link':
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b'other experiment')
+        invalid.symlink_to(target)
+    previous = b'{"previous": "selection"}'
+    (root / 'best_ckpt.json').write_bytes(previous)
+    monkeypatch.setattr(selector, 'build_eval_runner', lambda cfg: pytest.fail('invalid candidate reached runner'))
+    for operation in (lambda: discover_milestone_checkpoints(root),
+                      lambda: resolve_checkpoint_path(root, '40pct'),
+                      lambda: selector.select_best_checkpoint(root, cfg)):
+        with pytest.raises(ValueError):
+            operation()
+    assert (root / 'best_ckpt.json').read_bytes() == previous
+
+
+@pytest.fixture
+def episode_runner():
+    import numpy as np
+    import torch
+    from dexmani_policy.env_runner.base_runner import BaseRunner
+
+    class Env:
+        video_fps = 15
+        def __init__(self, runner):
+            self.runner = runner
+            self.closed = 0
+        def reset(self, seed, options=None):
+            self.action_cnt = 0
+            return {'joint_state': np.zeros(1, dtype=np.float32)}, {}
+        def step(self, action):
+            if self.runner.episode_error is not None:
+                raise self.runner.episode_error
+            self.action_cnt += 1
+            return {'joint_state': np.zeros(1, dtype=np.float32)}, 0, True, False, {
+                'success': True, 'success_condition': True}
+        def get_video(self):
+            return np.zeros((1, 2, 2, 3), dtype=np.uint8)
+        def close(self):
+            self.closed += 1
+
+    class EpisodeRunner(BaseRunner):
+        def __init__(self):
+            super().__init__(1, 1, sensor_modalities=['joint_state'], clear_cache_freq=2)
+            self.envs = []
+            self.eval_seeds = [7]
+            self.episode_error = None
+        def make_env(self):
+            env = Env(self)
+            self.envs.append(env)
+            return env
+        def get_seed_list(self):
+            return self.eval_seeds
+
+    agent = torch.nn.Linear(1, 1)
+    agent.predict_action = lambda **kwargs: {'control_action': torch.zeros(1, 1, 1)}
+    return EpisodeRunner(), agent
+
+
+@pytest.mark.parametrize('fault', ['mkdir', 'encode'])
+@pytest.mark.parametrize('episode_fails', [False, True])
+def test_video_failure_preserves_episode_outcome(episode_runner, tmp_path, monkeypatch, fault, episode_fails):
+    from dexmani_policy.env_runner.base_runner import EvalEpisodeError
+
+    runner, agent = episode_runner
+    output = tmp_path / 'videos'
+    if fault == 'mkdir':
+        output.write_bytes(b'not a directory')
+
+    def encode(*args):
+        assert fault == 'encode', 'encoding must not start when mkdir fails'
+        raise OSError('encoding failed')
+
+    monkeypatch.setattr(runner, '_encode_video', encode)
+    if episode_fails:
+        runner.episode_error = ValueError('original model failure')
+        with pytest.raises(EvalEpisodeError, match='original model failure') as error:
+            runner.run(agent, video_save_dir=output)
+        assert error.value.__cause__ is runner.episode_error
+        assert error.value.seed == 7 and error.value.category == 'value_error'
+    else:
+        result = runner.run(agent, video_save_dir=output)
+        assert result['success_rate'] == 1.0 and result['episodes_collected'] == 1
+        assert result['episode_details'][0]['steps'] == 1
+        assert result['videos'] == []
+    assert all(env.closed == 1 for env in runner.envs)
+
+
+@pytest.mark.parametrize('episodes', [1, 2, 3, 4, 5])
+def test_environment_refresh_only_between_episodes(episode_runner, episodes):
+    runner, agent = episode_runner
+    runner.eval_seeds = list(range(episodes))
+    result = runner.run(agent, eval_episodes=episodes)
+    assert result['episodes_collected'] == episodes and result['success_rate'] == 1.0
+    assert [d['seed'] for d in result['episode_details']] == list(range(episodes))
+    assert len(runner.envs) == (episodes + 1) // 2
+    assert all(env.closed == 1 for env in runner.envs)

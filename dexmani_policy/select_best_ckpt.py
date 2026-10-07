@@ -460,7 +460,7 @@ def main() -> None:
     except EvalEpisodeError as e:
         cprint(f"Fatal eval error (category={e.category}, seed={e.seed}): {e}", "red")
         sys.exit(1)
-    except (ValueError, RuntimeError, OSError, FileNotFoundError) as e:
+    except (ValueError, RuntimeError, OSError) as e:
         cprint(f"Selection failed: {type(e).__name__}: {e}", "red")
         sys.exit(1)
 

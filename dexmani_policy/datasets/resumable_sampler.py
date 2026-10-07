@@ -12,7 +12,7 @@ def multitask_indices(task_lengths, sample_probs, seed, epoch, *, deterministic=
                       sampling_strategy="balanced"):
     """Original task mapping M_e, expressed as stable concatenated-dataset indices.
 
-    Preserve the legacy rounding and NumPy RNG, including the fixed proportional
+    Preserve the dataset rounding and NumPy RNG, including the fixed proportional
     branch. DistributedSampler independently supplies logical positions Q_e,r.
     """
     parts = (seed, "fixed") if deterministic else (seed, epoch)

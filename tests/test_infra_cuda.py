@@ -70,8 +70,16 @@ def ddp_worker(rank,root,phase,ids):
         dist.destroy_process_group()
 
 
-@unittest.skipUnless(torch.cuda.device_count() >= 2, 'NOT VERIFIED: requires two CUDA GPUs')
+@unittest.skipUnless(torch.cuda.is_available(), 'NOT VERIFIED: requires CUDA')
 class ActualCudaTests(unittest.TestCase):
+    def test_rng_current_device(self):
+        device = f'cuda:{torch.cuda.current_device()}'
+        state = get_rng_state(device)
+        expected = torch.rand(20, device=device)
+        set_rng_state(state, device)
+        torch.testing.assert_close(torch.rand(20, device=device), expected, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, 'NOT VERIFIED: requires two CUDA GPUs')
     def test_rng_remapping_and_nonzero_device(self):
         for source,target in ((0,1),(1,0),(1,1)):
             torch.cuda.manual_seed_all(31)
@@ -80,11 +88,8 @@ class ActualCudaTests(unittest.TestCase):
             set_rng_state(state,f'cuda:{target}')
             actual=torch.rand(20,device=f'cuda:{target}').cpu()
             torch.testing.assert_close(actual,expected,rtol=0,atol=0)
-            legacy=dict(state,torch_cuda=torch.cuda.get_rng_state_all())
-            expected=torch.rand(20,device=f'cuda:{source}').cpu()
-            set_rng_state(legacy,f'cuda:{target}',source_config={'training':{'device':f'cuda:{source}'}})
-            torch.testing.assert_close(torch.rand(20,device=f'cuda:{target}').cpu(),expected,rtol=0,atol=0)
 
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, 'NOT VERIFIED: requires two CUDA GPUs')
     def test_short_ddp_resume_gpu_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             mp.spawn(ddp_worker,args=(tmp,'source',[0,1]),nprocs=2,join=True)

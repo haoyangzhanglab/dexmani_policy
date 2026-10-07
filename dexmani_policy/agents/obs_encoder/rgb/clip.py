@@ -99,50 +99,44 @@ def example() -> None:
         camera_to_world.unsqueeze(0).unsqueeze(0).expand(images.shape[0], images.shape[1], -1, -1)
     )
 
-    try:
-        encoder = CLIP(model_name=model_name, tune_mode="freeze").to(device)
-        encoder.eval()
+    encoder = CLIP(model_name=model_name, tune_mode="freeze").to(device)
+    encoder.eval()
 
-        rgbd_batch = image_processor.process_rgbd(
-            images=images,
-            depths=depths,
+    rgbd_batch = image_processor.process_rgbd(
+        images=images,
+        depths=depths,
+        intrinsics=intrinsics,
+        camera_to_world=camera_to_world,
+    )
+
+    rgb = rgbd_batch["image"].to(device)
+    depth = rgbd_batch["depth"].to(device)
+    intrinsics = rgbd_batch["intrinsics"].to(device)
+    camera_to_world = (
+        None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
+    )
+
+    with torch.no_grad():
+        vision_out = encoder(rgb)
+        geometry_out = encoder.backproject(
+            depth=depth,
             intrinsics=intrinsics,
             camera_to_world=camera_to_world,
+            depth_scale=1000.0,
+            min_depth=0.01,
+            max_depth=3.0,
+        )
+        feature_map = encoder.patch_tokens_to_featmap(
+            vision_out["patch_tokens"],
+            image_hw=rgb.shape[-2:],
         )
 
-        rgb = rgbd_batch["image"].to(device)
-        depth = rgbd_batch["depth"].to(device)
-        intrinsics = rgbd_batch["intrinsics"].to(device)
-        camera_to_world = (
-            None if rgbd_batch["camera_to_world"] is None else rgbd_batch["camera_to_world"].to(device)
-        )
-
-        with torch.no_grad():
-            vision_out = encoder(rgb)
-            geometry_out = encoder.backproject(
-                depth=depth,
-                intrinsics=intrinsics,
-                camera_to_world=camera_to_world,
-                depth_scale=1000.0,
-                min_depth=0.01,
-                max_depth=3.0,
-            )
-            feature_map = encoder.patch_tokens_to_featmap(
-                vision_out["patch_tokens"],
-                image_hw=rgb.shape[-2:],
-            )
-
-        print("rgb             :", tuple(rgb.shape))
-        print("patch_tokens    :", tuple(vision_out["patch_tokens"].shape))
-        print("global_token    :", tuple(vision_out["global_token"].shape))
-        print("feature_map     :", tuple(feature_map.shape))
-        print("patch_coords    :", tuple(geometry_out["patch_coords"].shape))
-        print("patch_valid_mask:", tuple(geometry_out["patch_valid_mask"].shape))
-
-    except Exception as error:
-        print("clip example failed.")
-        print(error)
-        raise
+    print("rgb             :", tuple(rgb.shape))
+    print("patch_tokens    :", tuple(vision_out["patch_tokens"].shape))
+    print("global_token    :", tuple(vision_out["global_token"].shape))
+    print("feature_map     :", tuple(feature_map.shape))
+    print("patch_coords    :", tuple(geometry_out["patch_coords"].shape))
+    print("patch_valid_mask:", tuple(geometry_out["patch_valid_mask"].shape))
 
 
 if __name__ == "__main__":

@@ -146,13 +146,7 @@ class R3M(nn.Module):
 
         if load_pretrained:
             convnet_state = _load_r3m_convnet_state_dict(model_name)
-            missing, unexpected = backbone.load_state_dict(convnet_state, strict=False)
-            if missing:
-                logger.warning(
-                    "R3M %s: %d missing keys (expected fc.*): %s", model_name, len(missing), missing[:5]
-                )
-            if unexpected:
-                raise RuntimeError(f"Unexpected keys in R3M {model_name} state dict: {unexpected}")
+            backbone.load_state_dict(convnet_state, strict=True)
 
         if norm_mode == "group_norm":
             backbone = replace_batch_norm_with_group_norm(backbone)
@@ -314,32 +308,26 @@ def example() -> None:
 
     images = torch.randint(0, 256, (2, 4, 480, 640, 3), dtype=torch.uint8)
 
-    try:
-        encoder = R3M(model_name=model_name, tune_mode="freeze").to(device)
-        encoder.eval()
+    encoder = R3M(model_name=model_name, tune_mode="freeze").to(device)
+    encoder.eval()
 
-        rgb_out = image_processor.process_images(images)
-        rgb = rgb_out["image"].to(device)
+    rgb_out = image_processor.process_images(images)
+    rgb = rgb_out["image"].to(device)
 
-        with torch.no_grad():
-            vision_out = encoder(rgb)
-            feature_map = encoder.patch_tokens_to_featmap(
-                vision_out["patch_tokens"],
-                image_hw=rgb.shape[-2:],
-            )
+    with torch.no_grad():
+        vision_out = encoder(rgb)
+        feature_map = encoder.patch_tokens_to_featmap(
+            vision_out["patch_tokens"],
+            image_hw=rgb.shape[-2:],
+        )
 
-        print("rgb             :", tuple(rgb.shape))
-        print("patch_tokens    :", tuple(vision_out["patch_tokens"].shape))
-        print("global_token    :", tuple(vision_out["global_token"].shape))
-        print("feature_map     :", tuple(feature_map.shape))
-        print("out_dim         :", encoder.out_dim)
-        print("hidden_dim      :", encoder.hidden_dim)
-        print("=== R3M example PASSED ===")
-
-    except Exception as error:
-        print("R3M example failed.")
-        print(error)
-        raise
+    print("rgb             :", tuple(rgb.shape))
+    print("patch_tokens    :", tuple(vision_out["patch_tokens"].shape))
+    print("global_token    :", tuple(vision_out["global_token"].shape))
+    print("feature_map     :", tuple(feature_map.shape))
+    print("out_dim         :", encoder.out_dim)
+    print("hidden_dim      :", encoder.hidden_dim)
+    print("=== R3M example PASSED ===")
 
 
 if __name__ == "__main__":

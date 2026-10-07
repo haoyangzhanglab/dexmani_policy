@@ -161,22 +161,10 @@ class MultiTaskSimRunner:
                 raise
             except EvalEpisodeError:
                 raise
-            except (RuntimeError, ValueError, AttributeError) as e:
-                cprint(f"Task {task_name} failed: {type(e).__name__}: {e}", "red")
-                failed_tasks.append(task_name)
-                per_task[task_name] = {
-                    "success_rate": None,
-                    "avg_steps": None,
-                    "videos": [],
-                    "episode_details": [],
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "error_category": _classify_eval_exception(e),
-                }
             except Exception as e:
-                cprint(f"\n❌ Unexpected error in task {task_name}: {type(e).__name__}: {e}", "red")
-                traceback.print_exc()
-                cprint("This is an unexpected error. Please report this issue.", "red")
+                cprint(f"Task {task_name} failed: {type(e).__name__}: {e}", "red")
+                if not isinstance(e, (RuntimeError, ValueError, AttributeError)):
+                    traceback.print_exc()
                 failed_tasks.append(task_name)
                 per_task[task_name] = {
                     "success_rate": None,

@@ -60,16 +60,8 @@ class BaseAgent(nn.Module):
             )
         return {"ema_decoder": ema_agent.action_decoder}
 
-    # ------------------------------------------------------------------
-    # Shape validation
-    # ------------------------------------------------------------------
     def _validate_batch(self, batch: Dict) -> None:
-        """Validate *action* shape and *obs* batch consistency before ``compute_loss``.
-
-        Catches config-data mismatches (wrong ``action_key``, wrong
-        ``horizon``) and corrupted DataLoader outputs at the earliest
-        possible point, before normalisation or encoder forward.
-        """
+        """Check action windows and matching observation batches before normalization."""
         action = batch.get("action")
         obs = batch.get("obs", {})
 
@@ -95,12 +87,7 @@ class BaseAgent(nn.Module):
         self._validate_obs_dict(obs, expected_batch=B if action is not None else None)
 
     def _validate_obs_dict(self, obs_dict: Dict, expected_batch: int | None = None) -> None:
-        """Validate observation tensor shapes.
-
-        Every observation tensor must be at least 2D ``(B, T, ...)`` with
-        ``T >= n_obs_steps``, and all modalities must share the same batch
-        size.
-        """
+        """Require (B, T, ...) tensors with T >= n_obs_steps and a common B."""
         if not obs_dict:
             return
 
@@ -134,9 +121,6 @@ class BaseAgent(nn.Module):
                     f"action batch={expected_batch}.  Obs shapes: {shapes}"
                 )
 
-    # ------------------------------------------------------------------
-    # Core pipeline
-    # ------------------------------------------------------------------
     def preprocess(self, obs_dict: Dict) -> Dict:
         obs = self.normalizer.normalize(obs_dict)
         result = {}
@@ -184,12 +168,7 @@ class BaseAgent(nn.Module):
         return self._merge_aux_loss(action_loss, loss_dict, aux)
 
     def _merge_aux_loss(self, action_loss, loss_dict, aux):
-        """Merge auxiliary encoder losses into the total.
-
-        Subclasses may override this to add domain-specific logging or
-        warnings.  The default implementation silently returns
-        ``(action_loss, loss_dict)`` when *aux* contains no ``'loss'`` key.
-        """
+        """Add optional auxiliary loss and its scalar metrics."""
         aux_loss = aux.get("loss")
         if aux_loss is None:
             return action_loss, loss_dict

@@ -181,6 +181,36 @@ def test_nonfinite_loss_fails_without_full_state_dump(tmp_path):
     assert not list((tmp_path / 'run').rglob('*.pt'))
 
 
+@pytest.mark.parametrize('failed_operation', ['save_checkpoint', 'save_latest'])
+def test_interrupt_save_failure_propagates_and_preserves_latest(tmp_path, monkeypatch, failed_operation):
+    import signal
+
+    trainer = bounded_trainer(tmp_path / 'run', accum=1)
+    trainer._save_checkpoint(0, 'bounded')
+    latest = trainer.workspace.checkpoint_dir / 'latest.pt'
+    previous = latest.resolve()
+    previous_bytes = previous.read_bytes()
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    original_step = trainer.train_one_step
+
+    def stop_after_step(*args, **kwargs):
+        result = original_step(*args, **kwargs)
+        trainer._stop_requested = True
+        return result
+
+    def fail(*args, **kwargs):
+        raise OSError('checkpoint publication failed')
+
+    monkeypatch.setattr(trainer, 'train_one_step', stop_after_step)
+    monkeypatch.setattr(trainer.workspace, failed_operation, fail)
+    with pytest.raises(OSError, match='checkpoint publication failed'):
+        trainer.train(max_updates=1)
+    assert trainer.global_step == 1
+    assert latest.resolve() == previous and previous.read_bytes() == previous_bytes
+    assert trainer.workspace._closed
+    assert all(signal.getsignal(sig) == handler for sig, handler in handlers.items())
+
+
 # Frozen pre-migration output from 7a27b35's M_e with lengths [3, 7, 1], seed=42.
 LEGACY_MAPS = {
     'balanced': [[10,0,1,3,4,7,2,10,10,10,8], [6,1,10,5,10,3,8,2,10,10,0],
@@ -270,6 +300,7 @@ def test_ema_constructed_once_and_copied_without_aliases():
     from dexmani_policy.training.build_utils import build_model_and_ema
     from dexmani_policy.agents.normalization import LinearNormalizer
     cfg = OmegaConf.create({'agent': {'_target_': 'test_infra_resume.TinyPolicy', 'clip_sample': False},
+        'dataset': {'sensor_modalities': ['joint_state']},
         'action_key': 'action', 'normalization': {'action': 'limits', 'joint_state': 'identity'},
         'training': {'use_ema': True},
         'ema': {'_target_': 'dexmani_policy.training.ema_model.EMAModel'}})
@@ -342,6 +373,9 @@ def test_saved_hf_architecture_builds_without_initialization_assets(kind, monkey
 
 
 def test_closed_text_restoration_has_no_online_fallback(monkeypatch):
+    import hydra
+    from types import SimpleNamespace
+    from dexmani_policy.agents.loader import checkpoint_agent_config
     from dexmani_policy.agents.core import multi_task
     from test_infra_resume import DummyEncoder, TinyBackbone
     monkeypatch.setattr(multi_task, 'DPObsEncoder', lambda *a, **k: DummyEncoder())
@@ -354,6 +388,65 @@ def test_closed_text_restoration_has_no_online_fallback(monkeypatch):
     with pytest.raises(ValueError, match='Unknown'):
         model.get_text_emb(['missing'])
     torch.testing.assert_close(model.get_text_emb(['b', 'a']), model.text_proj(model.task_emb_table[[1, 0]]))
+    cfg = OmegaConf.create({'agent': {
+        '_target_': 'dexmani_policy.agents.core.multi_task.MultiTaskAgent',
+        'task_texts': ['a', 'b', 'a'], 'rgb_backbone_name': 'resnet', 'n_emb': 8,
+    }})
+    state = model.state_dict()
+    saved_cfg = checkpoint_agent_config(cfg, state)
+    assert saved_cfg.agent.text_embed_dim == 4 and 'text_embed_dim' not in cfg.agent
+    restored = hydra.utils.instantiate(saved_cfg.agent)
+    restored.load_state_dict(state, strict=True)
+    torch.testing.assert_close(restored.get_text_emb(['b', 'a']), model.get_text_emb(['b', 'a']))
+    old_state = dict(state, **{'text_encoder.text_backbone.weight': torch.ones(1)})
+    with pytest.raises(RuntimeError, match='Unexpected key'):
+        restored.load_state_dict(old_state, strict=True)
+    with pytest.raises(RuntimeError, match='Unexpected key'):
+        restore_model_weights(SimpleNamespace(model_state=old_state), restored, None, 'cpu')
+    with pytest.raises(ValueError, match='embedding table'):
+        checkpoint_agent_config(cfg, {})
+
+
+@pytest.mark.parametrize('device', ['cpu', 'cuda'])
+@pytest.mark.parametrize('mask_kind', ['none', 'additive', 'boolean'])
+def test_one_way_attention_matches_masked_attention_and_gradients(device, mask_kind):
+    import copy
+    from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import Attention
+    if device == 'cuda' and not torch.cuda.is_available():
+        pytest.skip('NOT VERIFIED: requires CUDA')
+    model = Attention(8, 2).to(device=device, dtype=torch.float64)
+    reference = copy.deepcopy(model)
+    inputs = [torch.randn(2, n, 8, device=device, dtype=torch.float64, requires_grad=True)
+              for n in (3, 5, 5)]
+    ref_inputs = [x.detach().clone().requires_grad_() for x in inputs]
+    allowed = torch.ones(3, 5, device=device, dtype=torch.bool)
+    allowed[:, -2:] = False
+    bias = torch.zeros(3, 5, device=device, dtype=torch.float64).masked_fill(~allowed, -torch.inf)
+    mask = {'none': None, 'additive': bias, 'boolean': allowed}[mask_kind]
+    output = model(*inputs, attn_mask=mask)
+    q, k, v = [layer(x).reshape(2, x.shape[1], 2, 4).transpose(1, 2)
+               for layer, x in zip((reference.q_proj, reference.k_proj, reference.v_proj), ref_inputs)]
+    logits = q @ k.transpose(-1, -2) / 2
+    if mask_kind != 'none':
+        logits = logits + bias
+    expected = reference.out_proj((logits.softmax(-1) @ v).transpose(1, 2).reshape(2, 3, 8))
+    torch.testing.assert_close(output, expected, rtol=1e-10, atol=1e-12)
+    weights = torch.randn_like(output)
+    left = torch.autograd.grad((output * weights).sum(), (*inputs, *model.parameters()))
+    right = torch.autograd.grad((expected * weights).sum(), (*ref_inputs, *reference.parameters()))
+    for actual, wanted in zip(left, right):
+        torch.testing.assert_close(actual, wanted, rtol=1e-9, atol=1e-11)
+
+
+def test_one_way_attention_dropout_obeys_training_mode():
+    from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import Attention
+    model = Attention(8, 2, attn_drop=1.)
+    tokens = torch.randn(2, 3, 8)
+    torch.testing.assert_close(model(tokens, tokens, tokens), model.out_proj.bias.expand(2, 3, 8))
+    model.eval()
+    output = model(tokens, tokens, tokens)
+    assert not torch.equal(output, model.out_proj.bias.expand_as(output))
+    torch.testing.assert_close(model(tokens, tokens, tokens), output, rtol=0, atol=0)
 
 
 def test_decoder_rejects_unsupported_semantics_and_too_small_microbatch():
@@ -401,29 +494,6 @@ def test_same_point_set_pool_output_and_gradient(kind):
     assert any(grad.abs().sum() > 0 for grad in left[1:])
     for a, b in zip(left[1:], right[1:]):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-5)
-
-
-def test_legacy_frozen_text_conversion_is_narrow_and_never_full_resume():
-    from transformers import CLIPTextConfig, CLIPTextModelWithProjection
-    from dexmani_policy.agents.loader import checkpoint_agent_config
-    with torch.device('meta'):
-        legacy_encoder = CLIPTextModelWithProjection(CLIPTextConfig())
-    frozen = {'text_encoder.text_backbone.' + k: v for k, v in legacy_encoder.state_dict().items()}
-    learned = torch.randn(4, 512)
-    table = torch.randn(2, 512)
-    state = dict(frozen, task_emb_table=table, **{'text_proj.weight': learned})
-    cfg = OmegaConf.create({'agent': {'_target_': 'dexmani_policy.agents.core.multi_task.MultiTaskAgent',
-                                      'task_texts': ['a', 'b'], 'text_encoder_model': 'openai/clip-vit-base-patch16'}})
-    converted_cfg, converted = checkpoint_agent_config(cfg, state)
-    assert converted_cfg.agent.text_embed_dim == 512
-    assert converted == {'task_emb_table': table, 'text_proj.weight': learned}
-    assert converted['text_proj.weight'] is learned and converted['task_emb_table'] is table
-    with pytest.raises(ValueError, match='full resume rejected'):
-        checkpoint_agent_config(cfg, state, for_resume=True)
-    with pytest.raises(ValueError, match='recognized CLIP'):
-        checkpoint_agent_config(cfg, dict(state, **{'text_encoder.unknown': torch.zeros(1)}))
-    with pytest.raises(ValueError, match='embedding table'):
-        checkpoint_agent_config(cfg, frozen)
 
 
 def test_pointnet_recipe_change_does_not_propagate_to_pointnext():

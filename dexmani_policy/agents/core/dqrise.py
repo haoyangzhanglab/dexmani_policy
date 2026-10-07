@@ -209,8 +209,8 @@ class DQRISEAgent(BaseAgent):
         counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
         probabilities = counts / counts.sum().clamp_min(1.0)
         entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
-        loss_dict["batch_nn_code_entropy"] = entropy.detach().item()
-        loss_dict["batch_nn_code_used_1pct"] = int((probabilities > 0.01).sum().item())
+        loss_dict["batch_nn_code_entropy"] = entropy.detach()
+        loss_dict["batch_nn_code_used_1pct"] = (probabilities > 0.01).sum().detach()
 
         return self._merge_aux_loss(action_loss, loss_dict, aux)
 

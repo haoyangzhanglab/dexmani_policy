@@ -580,7 +580,7 @@ bash scripts/remote/tail_log.sh <policy> <task>
 # 5. 训练结束后拉取 experiment
 bash scripts/remote/sync_down.sh <policy>/<task>
 
-# 6. checkpoint selection + held-out evaluation + demo
+# 6. checkpoint selection + held-out evaluation（不录视频）
 bash scripts/eval/eval_pipeline.sh <policy> <task> <exp_name>
 ```
 
