@@ -20,6 +20,7 @@ from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
+    compile_models,
     print_training_recipe,
     validate_config,
 )
@@ -101,8 +102,6 @@ def build_trainer(cfg, comp):
         ),
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
-        use_compile=cfg.training.get("use_compile", False),
-        compile_mode=cfg.training.get("compile_mode", "reduce-overhead"),
         resume_contract=build_resume_contract(cfg, comp.model, comp.train_loader),
         batches_per_epoch=comp.batches_per_epoch,
     )
@@ -132,6 +131,11 @@ def main(cfg):
         )
     comp.resume_checkpoint = None
     comp.workspace.save_hydra_config(cfg)
+    if cfg.training.get("use_compile", False):
+        compile_models(
+            comp.model, comp.ema_model,
+            mode=cfg.training.get("compile_mode", "reduce-overhead"),
+        )
     trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
 
 

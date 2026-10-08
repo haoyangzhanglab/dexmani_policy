@@ -36,12 +36,6 @@ def _cosine_with_min_lr(
     return _lrs.LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
-def compute_num_training_steps(cfg) -> int:
-    """Return the configured number of training steps."""
-    from dexmani_policy.utils.validation import positive_int
-    return positive_int(cfg.training.loop.total_train_steps, "total_train_steps")
-
-
 def get_scheduler(
     optimizer: Optimizer,
     name: Union[str, SchedulerType],

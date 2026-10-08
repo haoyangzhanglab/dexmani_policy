@@ -1,4 +1,3 @@
-import atexit
 import json
 import os
 from pathlib import Path
@@ -19,7 +18,6 @@ class JsonlLogger:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.file = open(self.output_dir / filename, "a", buffering=1, encoding="utf-8")
-        atexit.register(self.close)
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None, **kwargs):
         record = {"step": int(step) if step is not None else None}
@@ -67,8 +65,6 @@ class WandbLogger:
             mode=mode,
         )
         self.video_fps = int(video_fps)
-
-        atexit.register(self.close)
 
     def format_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(data or {})

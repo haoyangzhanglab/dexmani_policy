@@ -42,17 +42,21 @@ class TrainWorkspace:
         # repeat across launches and cannot identify a W&B run on their own.
         self.wandb_logger = None
         if wandb_cfg is not None:
-            wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{claim_token[:8]}"
-            self.wandb_logger = WandbLogger(
-                output_dir=self.output_dir,
-                project=wandb_cfg.project,
-                name=wandb_cfg.name,
-                group=wandb_cfg.group,
-                id=wandb_id,
-                resume=wandb_cfg.resume,
-                mode=wandb_cfg.mode,
-                video_fps=wandb_cfg.video_fps,
-            )
+            try:
+                wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{claim_token[:8]}"
+                self.wandb_logger = WandbLogger(
+                    output_dir=self.output_dir,
+                    project=wandb_cfg.project,
+                    name=wandb_cfg.name,
+                    group=wandb_cfg.group,
+                    id=wandb_id,
+                    resume=wandb_cfg.resume,
+                    mode=wandb_cfg.mode,
+                    video_fps=wandb_cfg.video_fps,
+                )
+            except Exception:
+                self.json_logger.close()
+                raise
 
         self._closed = False
         atexit.register(self.close)
@@ -63,9 +67,6 @@ class TrainWorkspace:
         cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
         if self.wandb_logger is not None:
             self.wandb_logger.log_config(cfg_dict, self.output_dir)
-
-    def resolve_checkpoint_path(self, tag_or_path: str) -> Path:
-        return self.checkpoint_store.resolve_path(tag_or_path)
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):
         self.json_logger.log(data, step=step)
@@ -87,6 +88,8 @@ class TrainWorkspace:
         if self._closed:
             return
         self._closed = True
-        self.json_logger.close()
-        if self.wandb_logger is not None:
-            self.wandb_logger.close()
+        try:
+            self.json_logger.close()
+        finally:
+            if self.wandb_logger is not None:
+                self.wandb_logger.close()

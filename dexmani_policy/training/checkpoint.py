@@ -126,25 +126,9 @@ class CheckpointStore:
             scheduler_state=weights["scheduler"],
         )
 
-    def resolve_path(self, tag_or_path: str) -> Path:
-        if tag_or_path == "latest":
-            path = self.checkpoint_dir / "latest.pt"
-        else:
-            path = Path(tag_or_path)
-            if path.is_absolute():
-                # An absolute experiment directory resolves to its resume
-                # checkpoint; an absolute .pt file is used directly.  This is
-                # what `resume_from=<experiment_dir|checkpoint>` relies on.
-                if path.is_dir():
-                    path = path / "checkpoints" / "latest.pt"
-            else:
-                path = self.checkpoint_dir / path
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        return path
 
-
-def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
+def fix_state_dict(state_dict: Dict) -> Dict:
+    """Remove training wrappers for loading or saving the underlying model."""
     # Strip _orig_mod. from keys wherever it appears.
     # torch.compile on a submodule produces "child._orig_mod.param";
     # torch.compile on the top-level model produces "_orig_mod.param".
@@ -155,10 +139,7 @@ def fix_state_dict(state_dict: Dict, is_current_ddp: bool) -> Dict:
     first_key = next(iter(state_dict.keys()))
     is_checkpoint_ddp = first_key.startswith("module.")
 
-    if is_checkpoint_ddp and not is_current_ddp:
+    if is_checkpoint_ddp:
         return {k.removeprefix("module."): v for k, v in state_dict.items()}
-
-    elif not is_checkpoint_ddp and is_current_ddp:
-        return {f"module.{k}": v for k, v in state_dict.items()}
 
     return state_dict

@@ -12,13 +12,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
-from dexmani_policy.training.build_utils import (
-    compile_models,
-    validate_gradient_accumulation,
-)
+from dexmani_policy.training.build_utils import validate_gradient_accumulation
 from dexmani_policy.training.checkpoint import TrainCheckpoint, fix_state_dict
 from dexmani_policy.training.logging import to_log_scalars
-from dexmani_policy.training.resume import optimizer_to
 from dexmani_policy.training.workspace import TrainWorkspace
 from dexmani_policy.utils.validation import positive_int
 from dexmani_policy.utils.random import get_rng_state
@@ -44,6 +40,7 @@ class Trainer:
     interrupted runs also save. latest.pt tracks the latest save.
     EMA updates per optimizer step; DDP logging/checkpointing runs on rank 0.
     Validation and simulation evaluation are offline.
+    Callers place model/optimizer state on device and compile before training.
     """
 
     def __init__(
@@ -60,11 +57,8 @@ class Trainer:
         resume_contract: dict,
         max_grad_norm: float = 1.0,
         use_bfloat16: bool = False,
-        use_compile: bool = False,
-        compile_mode: str = "reduce-overhead",
         is_main_process: bool = True,
         distributed: bool = False,
-        train_sampler=None,
         batches_per_epoch: int | None = None,
     ):
         self.device = device
@@ -73,7 +67,6 @@ class Trainer:
         self.ema_model = ema_model
         self.ema_updater = ema_updater
 
-        self._optimizer_dtype_logged = False
         self.optimizer = optimizer
         self.scheduler = scheduler
 
@@ -89,8 +82,6 @@ class Trainer:
         self.use_ema = self.ema_model is not None
 
         self.use_bfloat16 = use_bfloat16
-        self.use_compile = use_compile
-        self.compile_mode = compile_mode
 
         self.gradient_accumulation_steps = train_loop_cfg.gradient_accumulation_steps
         # Capture the complete geometry before any resume cursor is applied.
@@ -109,9 +100,6 @@ class Trainer:
         self.is_main_process = is_main_process
         self.distributed = distributed
         self._ddp_backward_initialized = False
-        self.train_sampler = (
-            train_sampler if train_sampler is not None else train_loader.sampler
-        )
         self.resume_contract = resume_contract
         self.next_micro_step = 0
         self.current_epoch = 0
@@ -121,6 +109,11 @@ class Trainer:
         self._stop_requested = False
         self._step_pbar = None
         self._last_checkpoint_step = None
+        # Integer targets round up; colliding steps retain the largest percentage.
+        self._milestone_steps = {
+            (pct * self.total_train_steps + 99) // 100: pct
+            for pct in (20, 40, 60, 80, 100)
+        }
 
     @property
     def raw_model(self):
@@ -184,16 +177,6 @@ class Trainer:
             self._last_clip_ratio = None
 
         self.optimizer.step()
-        if not self._optimizer_dtype_logged:
-            if self.is_main_process:
-                lora_ids = {id(p) for n, p in self.raw_model.named_parameters() if "lora_" in n}
-                for label, only_lora in (("all", False), ("LoRA", True)):
-                    dtypes = {key: sorted({str(state[key].dtype)
-                              for param, state in self.optimizer.state.items()
-                              if key in state and (not only_lora or id(param) in lora_ids)})
-                              for key in ("exp_avg", "exp_avg_sq")}
-                    print(f"AdamW state dtype ({label}): {dtypes}")
-            self._optimizer_dtype_logged = True
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -258,18 +241,6 @@ class Trainer:
 
         return batch, log_dict
 
-    def _init_milestone_state(self) -> set[float]:
-        """Derive passed milestones from ``self.global_step`` — the single source of truth.
-
-        A milestone is considered passed if its target step has been reached.
-        This is more robust than filesystem scanning: manual file deletions won't
-        cause re-saving at incorrect steps, and resumed training at exactly the
-        final step correctly skips all milestones.
-        """
-        self._milestone_steps = {(p * self.total_train_steps + 99) // 100: p / 100
-                                 for p in (20, 40, 60, 80, 100)}
-        return {ratio for step, ratio in self._milestone_steps.items() if step <= self.global_step}
-
     def _save_checkpoint(self, global_step: int, tag_suffix: str):
         """Save a checkpoint with the given tag suffix and point ``latest.pt`` at it."""
         if self._last_checkpoint_step == global_step:
@@ -286,11 +257,9 @@ class Trainer:
             epoch=self.current_epoch,
             global_step=global_step,
             next_micro_step=self.next_micro_step,
-            model_state=fix_state_dict(
-                self.raw_model.state_dict(), is_current_ddp=False
-            ),
+            model_state=fix_state_dict(self.raw_model.state_dict()),
             ema_model_state=(
-                fix_state_dict(self.ema_model.state_dict(), is_current_ddp=False)
+                fix_state_dict(self.ema_model.state_dict())
                 if self.use_ema
                 else None
             ),
@@ -316,11 +285,6 @@ class Trainer:
         self.workspace.save_latest(checkpoint_path)
         self._last_checkpoint_step = global_step
 
-    def _save_milestone_checkpoint(self, global_step: int, ratio: float):
-        """Save a milestone checkpoint and point ``latest.pt`` at it."""
-        pct = int(ratio * 100)
-        self._save_checkpoint(global_step, f"milestone={pct:02d}pct")
-
     def _save_interrupt_checkpoint(self, global_step: int):
         """Save a checkpoint on signal-triggered interruption."""
         print(f"\nSaving interrupt checkpoint at step {global_step}...", flush=True)
@@ -341,11 +305,9 @@ class Trainer:
 
     def _check_milestone(self, global_step: int):
         """Save the largest colliding percentage once, at its integer target step."""
-        for step, ratio in self._milestone_steps.items():
-            if step == global_step and ratio not in self._passed_milestones:
-                self._save_milestone_checkpoint(global_step, ratio)
-                self._passed_milestones.add(ratio)
-                break
+        pct = self._milestone_steps.get(global_step)
+        if pct is not None:
+            self._save_checkpoint(global_step, f"milestone={pct:02d}pct")
 
     def on_epoch_start(self, epoch: int):
         if hasattr(self.raw_model, "set_epoch"):
@@ -394,18 +356,8 @@ class Trainer:
         if start_epoch > 0:
             print(f"Resuming training from epoch {start_epoch}, step {global_step}")
 
-        self.model.to(self.device)
         if self.use_ema:
-            self.ema_model.to(self.device)
             self.ema_model.eval()
-
-        if self.use_compile:
-            compile_models(self.model, self.ema_model, mode=self.compile_mode)
-
-        optimizer_to(self.optimizer, self.device)
-
-        # Initialize milestone tracking AFTER global_step is established.
-        self._passed_milestones = self._init_milestone_state()
 
         self._interrupted = False
         self._stop_requested = False
@@ -425,8 +377,8 @@ class Trainer:
 
         try:
             while global_step < stop_step:
-                if self.train_sampler is not None:
-                    self.train_sampler.set_epoch(epoch, self.next_micro_step)
+                if self.train_loader.sampler is not None:
+                    self.train_loader.sampler.set_epoch(epoch, self.next_micro_step)
 
                 self.model.train()
                 self.on_epoch_start(epoch)

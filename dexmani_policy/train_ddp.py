@@ -61,7 +61,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
 
     train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
-    train_sampler = train_loader.sampler
 
     model, ema_model, ema_updater = build_model_and_ema(
         cfg, device, normalizer, rank=rank, checkpoint=checkpoint
@@ -139,10 +138,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         ),
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
-        use_compile=False,  # already applied before DDP wrapping above
         is_main_process=(rank == 0),
         distributed=True,
-        train_sampler=train_sampler,
         resume_contract=resume_contract,
         batches_per_epoch=batches_per_epoch,
     )

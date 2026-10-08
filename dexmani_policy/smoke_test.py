@@ -23,6 +23,7 @@ from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.tensor import dict_apply
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
+    compile_models,
     validate_config,
 )
 
@@ -140,6 +141,11 @@ def smoke_test(config_name: str, *, max_updates=4):
             before = {name: p.detach().cpu().clone()
                       for name, p in comp.model.named_parameters()
                       if p.requires_grad and p.is_floating_point()}
+            if cfg.training.get("use_compile", False):
+                compile_models(
+                    comp.model, comp.ema_model,
+                    mode=cfg.training.get("compile_mode", "reduce-overhead"),
+                )
             trainer.train(max_updates=max_updates)
             changed = []
             for name, p in comp.model.named_parameters():
@@ -156,7 +162,7 @@ def smoke_test(config_name: str, *, max_updates=4):
                 raise AssertionError("No finite learning-parameter update observed within the smoke budget")
             print(f"Observed parameter update: {changed[0]} (step={trainer.global_step})")
 
-            path = comp.workspace.resolve_checkpoint_path("latest")
+            path = comp.workspace.checkpoint_dir / "latest.pt"
             checkpoint = CheckpointStore(path.parent).load(path)
             assert checkpoint.global_step == trainer.global_step
             assert checkpoint.epoch == trainer.current_epoch
@@ -168,7 +174,7 @@ def smoke_test(config_name: str, *, max_updates=4):
             for selected, state in ((comp.model, checkpoint.model_state),
                                     (comp.ema_model, checkpoint.ema_model_state)):
                 if selected is not None:
-                    actual = fix_state_dict(selected.state_dict(), False)
+                    actual = fix_state_dict(selected.state_dict())
                     assert actual.keys() == state.keys()
                     for key, tensor in actual.items():
                         torch.testing.assert_close(tensor.detach().cpu(), state[key], rtol=0, atol=0)

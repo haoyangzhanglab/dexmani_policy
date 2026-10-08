@@ -137,7 +137,7 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     state, global_step = CheckpointStore(Path(checkpoint_path).parent).load_inference(
         checkpoint_path, use_ema=use_ema
     )
-    state = fix_state_dict(state, is_current_ddp=False)
+    state = fix_state_dict(state)
     cfg = checkpoint_agent_config(cfg, state)
     agent = hydra.utils.instantiate(cfg.agent)
     agent._checkpoint_global_step = global_step

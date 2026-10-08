@@ -122,14 +122,14 @@ def restore_training_state(
 
 
 def restore_model_weights(checkpoint, model, ema_model, device):
-    state = fix_state_dict(checkpoint.model_state, False)
+    state = fix_state_dict(checkpoint.model_state)
     model.load_state_dict(state, strict=True)
     # Normalizers reconstruct their ParameterDict from checkpoint tensors.
     # A CPU-loaded checkpoint must not leave these parameters on CPU before
     # DDP wraps the restored model or broadcasts normalization state.
     model.to(device)
     if ema_model is not None:
-        ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state, False), strict=True)
+        ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state), strict=True)
         ema_model.to(device)
 
 

@@ -20,10 +20,7 @@ from dexmani_policy.agents.normalization import (
 )
 from dexmani_policy.datasets.sampler import validate_dataset_splits
 from dexmani_policy.training.logging import print_param_count
-from dexmani_policy.training.lr_scheduler import (
-    compute_num_training_steps,
-    get_scheduler,
-)
+from dexmani_policy.training.lr_scheduler import get_scheduler
 from dexmani_policy.utils.config import (
     validate_action_key_consistency,
     validate_window_contract,
@@ -35,9 +32,7 @@ __all__ = [
     "build_model_and_ema",
     "build_normalizer",
     "build_optimizer_and_scheduler",
-    "build_scheduler",
     "compile_models",
-    "compute_num_training_steps",
     "print_training_recipe",
     "validate_config",
     "validate_gradient_accumulation",
@@ -123,7 +118,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     if cfg.get("resume_from") is not None:
         from dexmani_policy.training.checkpoint import fix_state_dict
 
-        state = fix_state_dict(resume_checkpoint.model_state, is_current_ddp=False)
+        state = fix_state_dict(resume_checkpoint.model_state)
         normalizer = LinearNormalizer()
         normalizer.load_state_dict(
             {
@@ -175,7 +170,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         from dexmani_policy.agents.loader import checkpoint_agent_config
         from dexmani_policy.training.checkpoint import fix_state_dict
         model_cfg = checkpoint_agent_config(
-            cfg, fix_state_dict(checkpoint.model_state, False)
+            cfg, fix_state_dict(checkpoint.model_state)
         )
     model = hydra.utils.instantiate(model_cfg.agent)
     from dexmani_policy.utils.validation import validate_observation_fields
@@ -233,20 +228,6 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
 # Optimizer & Scheduler
 
 
-def build_scheduler(cfg, optimizer, last_epoch=-1):
-    """Build the LR scheduler with the correct total step count."""
-    total_steps = compute_num_training_steps(cfg)
-    return get_scheduler(
-        optimizer=optimizer,
-        name=cfg.training.lr_scheduler,
-        num_warmup_steps=cfg.training.lr_warmup_steps,
-        num_training_steps=total_steps,
-        last_epoch=last_epoch,
-        **({"lr_min_ratio": cfg.training.get("lr_min_ratio", 0.1)}
-           if cfg.training.lr_scheduler == "cosine_min_lr" else {}),
-    )
-
-
 def validate_gradient_accumulation(
     batches_per_epoch: int, gradient_accumulation_steps: int
 ) -> None:
@@ -264,7 +245,15 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1, 
     optimizer = model.configure_optimizer(**cfg.optimizer)
     if verbose:
         print_param_count(model)
-    scheduler = build_scheduler(cfg, optimizer, last_epoch)
+    scheduler = get_scheduler(
+        optimizer=optimizer,
+        name=cfg.training.lr_scheduler,
+        num_warmup_steps=cfg.training.lr_warmup_steps,
+        num_training_steps=positive_int(cfg.training.loop.total_train_steps, "total_train_steps"),
+        last_epoch=last_epoch,
+        **({"lr_min_ratio": cfg.training.get("lr_min_ratio", 0.1)}
+           if cfg.training.lr_scheduler == "cosine_min_lr" else {}),
+    )
     return optimizer, scheduler
 
 
