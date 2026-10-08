@@ -1,4 +1,4 @@
-"""Extract a PCA-ordered runtime codebook from a trained VQ-VAE checkpoint."""
+"""Export a PCA-ordered runtime codebook from a trained VQ-VAE checkpoint."""
 
 from __future__ import annotations
 

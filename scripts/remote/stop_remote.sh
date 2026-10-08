@@ -1,4 +1,6 @@
 #!/bin/bash
+# Socket names are fixed and session arguments are validated before SSH.
+# shellcheck disable=SC2029
 # Stop remote training tmux sessions.
 #
 # Usage:
@@ -11,6 +13,8 @@ set -euo pipefail
 trap 'echo ""; echo "Interrupted — training may still be running. Re-run stop_remote.sh to ensure stop."; exit 1' INT
 
 SERVER="${DEX_SERVER:-dexserver}"
+TMUX_SOCKET=dexmani_policy
+CURRENT_SOCKET="$TMUX_SOCKET"
 
 ensure_server_reachable() {
     local rc
@@ -25,14 +29,16 @@ ensure_server_reachable() {
 
 # Preserve tmux errors before parsing, including command-not-found and SSH failure.
 list_sessions() {
-    ssh "$SERVER" 'output=$(LC_ALL=C tmux list-sessions 2>&1); rc=$?
+    ssh "$SERVER" "bash -s -- $CURRENT_SOCKET" <<'BASH'
+output=$(LC_ALL=C tmux -L "$1" list-sessions -F '#{session_name}' 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then printf "%s\n" "$output"; exit 0; fi
 case "$output" in
     "no sessions"|"no server running on "*|"error connecting to "*" (No such file or directory)")
         if [ "$rc" -eq 1 ]; then exit 0; fi ;;
 esac
 printf "%s\n" "$output" >&2
-exit "$rc"'
+exit "$rc"
+BASH
 }
 
 # Resolve an exact session using a checked listing; tmux status 1 alone is ambiguous.
@@ -47,7 +53,7 @@ has_session() {
         return "$rc"
     fi
     while IFS= read -r line; do
-        [[ "${line%%:*}" == "$session" ]] && return 0
+        [[ "$line" == "$session" ]] && return 0
     done <<< "$sessions"
     return 1
 }
@@ -70,7 +76,8 @@ _graceful_stop() {
     fi
 
     echo "  Sending Ctrl+C (SIGINT) to tmux pane..."
-    if ssh "$SERVER" "tmux send-keys -t '=$session' C-c"; then
+    # send-keys takes a target-pane: qualify the exact session with a colon.
+    if ssh "$SERVER" "tmux -L '$CURRENT_SOCKET' send-keys -t '=$session:' C-c"; then
         :
     else
         rc=$?
@@ -99,7 +106,7 @@ _graceful_stop() {
             return 1
         fi
         echo "  Explicit --force: killing the selected tmux session..."
-        if ssh "$SERVER" "tmux kill-session -t '=$session'"; then
+        if ssh "$SERVER" "tmux -L '$CURRENT_SOCKET' kill-session -t '=$session'"; then
             :
         else
             rc=$?
@@ -133,7 +140,7 @@ set -- "${ARGS[@]}"
 case "${1:-}" in
     --list|-l)
         ensure_server_reachable || exit $?
-        echo "=== Active tmux sessions on $SERVER ==="
+        echo "=== Training tmux sessions on $SERVER (socket: $TMUX_SOCKET) ==="
         if sessions=$(list_sessions); then
             printf "%s\n" "${sessions:-(no active sessions)}"
             :
@@ -145,9 +152,8 @@ case "${1:-}" in
         ;;
     --all|-a)
         ensure_server_reachable || exit $?
-        echo "Stopping all training sessions on $SERVER..."
+        echo "Stopping training sessions on $SERVER (socket: $TMUX_SOCKET)..."
         if sessions=$(list_sessions); then
-            sessions=$(printf "%s\n" "$sessions" | cut -d: -f1)
             :
         else
             rc=$?
@@ -187,6 +193,16 @@ case "${1:-}" in
             exit 1
         fi
         ensure_server_reachable || exit $?
+        # Only an explicitly named session may fall back to the old default
+        # socket. Bulk stop/list never inspect or signal that server.
+        if has_session "$SESSION"; then
+            :
+        else
+            rc=$?
+            [[ $rc -eq 1 ]] || exit "$rc"
+            CURRENT_SOCKET=default
+            echo "Checking explicitly named legacy session in the default socket."
+        fi
         echo "Stopping session: $SESSION"
         if _graceful_stop "$SESSION"; then
             echo "Stopped."

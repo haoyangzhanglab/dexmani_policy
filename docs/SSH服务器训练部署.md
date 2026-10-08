@@ -33,13 +33,13 @@ Local checkpoint selection / evaluation
 
 核心职责：
 
-| 脚本 | 方向 | 作用 |
+| 入口 | 方向 | 作用 |
 |---|---|---|
 | `sync_code.sh` | local → remote | 高频同步源码，远端保持源码镜像 |
 | `sync_data.sh` | 双向 | 同步 `robot_data/` 与 `data/` |
 | `sync_down.sh` | remote → local | 拉取 experiment artifacts，同时保护本地评测产物 |
 | `train_remote.sh` | remote execution | pre-flight + foreground/tmux 训练启动 |
-| `resolve_remote_datasets.py` | config inspection | 解析 Hydra dataset 路径 |
+| `dexmani_policy.utils.resolve_datasets` | config inspection | 解析 Hydra dataset 路径 |
 | `tail_log.sh` | read-only | 追踪 `metrics.jsonl` |
 | `stop_remote.sh` | control | SIGINT → bounded wait；显式 --force 才允许强停 |
 
@@ -107,7 +107,7 @@ ssh "$SERVER" '<remote-python> -c '\''import torch, dexmani_policy; print(torch.
 
 ### 2.3 Runtime Directory Boundary
 
-当前 remote scripts 将三类数据分开管理：
+当前 remote scripts 将源码、运行副本、持久数据和实验产物分开管理：
 
 ```text
 source tree
@@ -118,6 +118,9 @@ persistent data
 
 experiment artifacts
     = experiments/
+
+per-launch source copies
+    = outputs/remote_sources/<launch_uuid>/
 ```
 
 远端通常通过 symlink 让 repository root 下的：
@@ -174,9 +177,11 @@ Bootstrap 中的真实 path 应从当前脚本读取，不在本文维护第二�
 ```bash
 bash scripts/remote/sync_code.sh
 bash scripts/remote/sync_code.sh --dry-run
+# launcher 使用已准备的空目录；dry-run 也可预览尚不存在的目录：
+bash scripts/remote/sync_code.sh --dry-run --dest /absolute/path/to/new/source
 ```
 
-`train_remote.sh` 在正常启动前也会执行 code sync，因此手动调用主要用于：
+`train_remote.sh` 在正常启动前把 code sync 定向到本次独立副本，不更新主镜像。手动默认调用主要用于：
 
 - 独立同步代码；
 - 启动前检查 rsync diff；
@@ -197,7 +202,11 @@ remote source tree
 
 生成物、缓存、数据和 experiment directory 被排除。
 
-不要向正在训练的源码目录原位同步，包括会自动 sync 的 `train_remote.sh`。新 run 的 `source.zip` / `source_manifest.json` 保存启动时实际源码及身份，但不能隔离后续 lazy import；需要并行不同版本时使用不同源码目录。
+`train_remote.sh` 先用原子 `mkdir` 认领独立 UUID 目录，再调用 `sync_code.sh --dest`。自定义目标必须是干净绝对路径且尚未填充；非空副本拒绝再次同步。`outputs/` 已被主镜像同步排除，因此后续同步不会覆盖旧副本。
+
+独立副本通过 symlink 复用主目录下的 `robot_data/`、`data/`、`experiments/`、`pretrained_models/` 和 `logs/`。预检、单卡和 DDP 均从副本根目录用 `python -m` 执行，避免 editable install 把 import 指向主镜像。传输、链接准备或数据预检失败时不启动训练；源码副本保留，不自动清理。副本无自身 `.git` 时，快照中的 commit/dirty 为 unknown，不继承父目录 Git 信息；内容 SHA256 仍记录实际文件。
+
+默认 `sync_code.sh` 可重复更新主目录镜像，已有训练副本的源码不受影响。直接使用主目录的历史或手工训练，其后续文件读取和 lazy import 可能看到更新；`source.zip` / `source_manifest.json` 记录启动时源码，不隔离运行时读取。
 
 关键区别：
 
@@ -254,7 +263,7 @@ no --delete
 
 即：本地缺失某个远端文件不会导致远端删除。
 
-注意这只是**删除安全**：普通 rsync 仍可能根据 size/mtime 更新已存在的目标文件；如果需要先确认覆盖行为，使用 `--dry-run`。
+重复执行会根据 size/mtime 更新已有目标文件；`--checksum` 可改为比较内容，`--dry-run` 可预览变更。训练副本通过 symlink 读取这些共享数据，因此数据更新也会对已有副本可见。
 
 ### 4.3 Pull Mode
 
@@ -371,6 +380,8 @@ bash scripts/utils/wandb_sync.sh --all
 
 上传需要本地 W&B credential / network；`wandb_sync.sh` 使用本地受管 `policy` 环境。
 
+批量搜索只选 `wandb/` 下的 `offline-run-*` 根目录，并停止遍历其子目录。搜索根目录会解析为绝对路径；发现阶段失败时退出，不开始上传。现有上传参数及单 run 调用保持不变。
+
 ---
 
 ## 6. Remote Training — `train_remote.sh`
@@ -393,14 +404,14 @@ bash scripts/remote/train_remote.sh --gpus 0 <config> <task> [overrides...]
 # DDP
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/<config> <task> [overrides...]
 
-# 第一次上机时同时同步数据
+# 启动前上传或更新数据
 bash scripts/remote/train_remote.sh --sync-data <config> <task> [overrides...]
 
-# 只预览 training command、dataset resolution command 与 code sync
+# 只预览独立副本、training command、dataset resolution command 与 code sync
 bash scripts/remote/train_remote.sh --dry-run <config> <task> [overrides...]
 ```
 
-`--sync-data` 不能替代 Section 2.4 的 first-time directory/symlink bootstrap；它只是在 launch 前调用当前 `sync_data.sh`。
+`--sync-data` 每次指定都会在 launch 前调用 `sync_data.sh`，适用于首次上传和后续更新。第一次上机仍需完成 Section 2.4 的 directory/symlink bootstrap。
 
 当前可用 config 不从本文枚举，使用：
 
@@ -416,7 +427,7 @@ bash scripts/remote/train_remote.sh multitask_dit pick_bottle+open_box
 bash scripts/remote/tail_log.sh multitask_dit pick_bottle+open_box
 bash scripts/remote/sync_down.sh multitask_dit/pick_bottle+open_box --dry-run
 # 本地只解析配置，不访问远端、不加载数据：
-conda run --no-capture-output -n policy python scripts/remote/resolve_remote_datasets.py \
+conda run --no-capture-output -n policy python -m dexmani_policy.utils.resolve_datasets \
   --config-name multitask_dit 'task_name=pick_bottle+open_box'
 ```
 
@@ -488,7 +499,7 @@ training stdout/stderr → remote logs/
 
 训练进程退出后 tmux session 自动结束；日志文件保留 crash traceback / exit status。
 
-每次启动的 session 与日志带由本地 Python 生成的独立 UUID 后缀；启动脚本不 kill 旧 session，日志采用独占创建。最终名字冲突会失败，停止旧实验须显式调用 `stop_remote.sh <SESSION>`。
+每次启动的 session、源码目录与日志带由本地 Python 生成的独立 UUID；新后台任务使用项目专用 `tmux -L dexmani_policy`，打印的 attach 命令包含该 socket。启动脚本不 kill 旧 session，日志采用独占创建。最终名字或源码目录冲突会失败，停止旧实验须显式调用 `stop_remote.sh <SESSION>`。
 
 脚本启动成功后会打印实际 session name。后续 attach/stop 应使用该输出，不要在文档或外部脚本重新实现 session-name 规则。
 
@@ -500,7 +511,7 @@ training stdout/stderr → remote logs/
 
 ```bash
 bash scripts/remote/tail_log.sh <policy> <task>
-bash scripts/remote/tail_log.sh <policy> <task> <run-timestamp>
+bash scripts/remote/tail_log.sh <policy> <task> <run-name>
 ```
 
 逻辑：
@@ -515,9 +526,13 @@ server unreachable
 
 它用于看 scalar metrics，不等价于查看完整 process stdout/stderr。需要 crash traceback 时使用 `train_remote.sh` 输出的 remote log path。
 
-### 7.2 Policy Validator Note
+### 7.2 Run Selection
 
-`tail_log.sh` 当前包含显式 policy-name validator。新增 config/Policy 时，需要确认该 validator 是否同步支持新名称；不要仅因为训练入口能启动就假设 monitoring helper 一定接受新 Policy。
+Policy 参数按合法相对路径校验，run 参数按单个合法目录名校验，均不根据当前模型名单或旧 timestamp 格式推断。历史已保存实验不要求当前 config 仍存在。
+
+默认候选须包含根目录 `config.yaml` 和 `metrics.jsonl`，按 `.training_run.json` 文件 mtime 排序；无标记的历史 run 使用 `config.yaml` mtime，平局按目录名稳定排序。该顺序是默认查询依据，不证明任务正在运行。目录因评测新增文件而改变 mtime，不影响选择。
+
+远端与本地使用同一查询。只有 SSH 不可达才 fallback 到本地；查询错误保留非零退出状态。`tail -F` 按文件名跟随，支持 rsync 原子替换 metrics；显式指定的 run 目录须存在，其日志尚未创建时会等待重试。
 
 ---
 
@@ -526,7 +541,7 @@ server unreachable
 ### 8.1 Usage
 
 ```bash
-# 列出远端 tmux sessions
+# 列出项目专用 socket 中的训练 sessions
 bash scripts/remote/stop_remote.sh --list
 
 # 停指定训练 session
@@ -554,7 +569,7 @@ bash scripts/remote/stop_remote.sh --all
 
 第二次 signal 或 force kill 可能绕过完整的 graceful save。当前 Trainer 只在 interrupted 且 `global_step > 0` 时尝试 interrupt checkpoint，因此“收到 SIGINT”本身不保证一定产生 checkpoint。
 
-`--all` 只处理 remote trainer 命名空间内的 training sessions，而不是无差别终止所有 tmux 会话。
+`--all` / `--list` 只查询 `dexmani_policy` socket，不访问默认 socket 中的其他会话。具名停止先检查专用 socket；明确未找到时才按完整名称查找旧 default socket，以保留历史任务控制。查询失败不会触发这个 fallback，也不会被解释为任务已停止。
 
 `--list` / `--all` 把“没有 session/server/socket”视为正常空结果；tmux 不存在、其它查询错误或 SSH 失败保留非零退出状态，不能解释成全部训练已停止。
 
@@ -571,7 +586,7 @@ python dexmani_policy/smoke_test.py --config-only <config>
 # 2. 可选：先看 remote sync diff
 bash scripts/remote/sync_code.sh --dry-run
 
-# 3. 启动远端训练（会再次同步源码）
+# 3. 启动远端训练（同步到本次独立源码副本）
 bash scripts/remote/train_remote.sh --gpus <ids> <config> <task> [overrides...]
 
 # 4. 监控
@@ -600,19 +615,16 @@ bash scripts/eval/eval_pipeline.sh <policy> <task> <exp_name>
 
 ### 9.3 Two-stage Artifacts
 
-VQ 入口位于 `scripts/training/`，从仓库根目录执行（`<task>` 替换为实际任务）：
+VQ 训练与码本导出入口位于 `dexmani_policy` 包，Shell 包装入口保留在 `scripts/training/`。从仓库根目录执行（`<task>` 替换为实际任务）：
 
 ```bash
 VQ_RUN="experiments/vq_hand/<task>/$(date +%Y%m%d_%H%M%S)_${RANDOM}"
-conda run --no-capture-output -n policy python -m scripts.training.train_vq_hand \
+conda run --no-capture-output -n policy python -m dexmani_policy.training.train_vq_hand \
   --policy-config dexmani_policy/configs/dqrise.yaml \
   --policy-override task_name=<task> --output_dir "$VQ_RUN"
-conda run --no-capture-output -n policy python -m scripts.training.extract_vq_codebook \
+conda run --no-capture-output -n policy python -m dexmani_policy.agents.vq_hand.export_codebook \
   --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
   --output "$VQ_RUN/codebook.npz"
-conda run --no-capture-output -n policy python -m scripts.training.measure_vq_usage \
-  --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
-  --zarr robot_data/<task>.zarr --codebook "$VQ_RUN/codebook.npz"
 bash scripts/training/train.sh dqrise task_name=<task> codebook_path="$VQ_RUN/codebook.npz"
 ```
 
@@ -655,7 +667,7 @@ ssh "$SERVER" 'echo ok'
 
 ### 10.2 Dataset Missing
 
-`train_remote.sh` 在 code/data sync 后，用远端训练 executable、项目 cwd、相同 Hydra config + overrides 解析实际 dataset。single-task 读取 `dataset.zarr_path`；MultiTask 读取每个 `dataset.datasets[*].zarr_path`。检查所有目录并一次列出全部 missing paths，失败时不启动训练；不实例化 dataset，也不读取 array 数据。
+`train_remote.sh` 在独立源码准备和可选 data sync 后，用远端训练 executable、副本 cwd、相同 Hydra config + overrides 解析实际 dataset。single-task 读取 `dataset.zarr_path`；MultiTask 读取每个 `dataset.datasets[*].zarr_path`。检查所有目录并一次列出全部 missing paths，失败时不启动训练；不实例化 dataset，也不读取 array 数据。
 
 处理顺序：
 
@@ -724,7 +736,7 @@ bash scripts/remote/stop_remote.sh --list
 
 ### Process ownership
 
-`stop_remote.sh --all` 应只处理本项目 remote trainer 创建的 session namespace。
+`stop_remote.sh --all` 只处理本项目专用 tmux socket；历史默认 socket 会话通过具名停止处理。
 
 ---
 
@@ -736,10 +748,11 @@ scripts/remote/
 ├── sync_data.sh      # data/pretrained: push / pull
 ├── sync_down.sh      # experiments: remote → local
 ├── train_remote.sh   # pre-flight + launch
-├── resolve_remote_datasets.py # Hydra dataset 路径解析
 ├── tail_log.sh       # metrics monitor
 └── stop_remote.sh    # graceful stop / cleanup
 ```
+
+`train_remote.sh` 调用 `python -m dexmani_policy.utils.resolve_datasets` 解析和检查训练数据路径。
 
 当脚本行为变化时，文档只维护这些**操作 contract**，不复制容易变化的：
 

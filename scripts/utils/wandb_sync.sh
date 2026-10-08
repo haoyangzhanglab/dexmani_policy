@@ -83,6 +83,7 @@ if [[ "$SYNC_TARGET" == "--all" ]]; then
         echo "Error: directory not found: $SEARCH_ROOT" >&2
         exit 1
     fi
+    SEARCH_ROOT="$(cd -- "$SEARCH_ROOT" && pwd -P)"
 
     echo "Searching for offline W&B runs under: $SEARCH_ROOT"
     if $DRY_RUN; then
@@ -90,11 +91,18 @@ if [[ "$SYNC_TARGET" == "--all" ]]; then
     fi
     echo ""
 
+    # Complete discovery before uploading; a failed find must not look like an
+    # empty successful search. Prune each run so its children are never targets.
+    RUN_LIST="$(mktemp)"
+    trap 'rm -f -- "$RUN_LIST"' EXIT
+    find "$SEARCH_ROOT" -type d -name 'offline-run-*' \
+        -path '*/wandb/offline-run-*' -prune -print0 > "$RUN_LIST"
+
     count=0
     while IFS= read -r -d '' run_dir; do
         sync_one "$run_dir"
-        ((count++)) || true
-    done < <(find "$SEARCH_ROOT" -path "*/wandb/offline-run-*" -type d -print0 2>/dev/null || true)
+        count=$((count + 1))
+    done < "$RUN_LIST"
 
     if [[ $count -eq 0 ]]; then
         echo "No offline W&B runs found under $SEARCH_ROOT."

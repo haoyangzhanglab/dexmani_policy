@@ -33,6 +33,10 @@ def save_source_snapshot(output_dir, root=None):
             hashes[name] = hashlib.sha256(data).hexdigest()
             archive.writestr(name, data)
     def git(*args):
+        # Launch copies may live inside the main checkout's ignored outputs/.
+        # Parent-repository discovery would falsely describe another source tree.
+        if not (root / ".git").exists():
+            return None
         try:
             return subprocess.check_output(["git", "-C", str(root), *args],
                                            stderr=subprocess.DEVNULL, text=True).strip()

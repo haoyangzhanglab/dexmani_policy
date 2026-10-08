@@ -122,17 +122,13 @@ DP3/DQRISE 的 PointNet/MultiStagePointNet 配方取消同一已选点集的采�
 
 ```bash
 VQ_RUN="experiments/vq_hand/pick_apple_messy/$(date +%Y%m%d_%H%M%S)_${RANDOM}"
-python -m scripts.training.train_vq_hand \
+python -m dexmani_policy.training.train_vq_hand \
   --policy-config dexmani_policy/configs/dqrise.yaml \
   --policy-override task_name=pick_apple_messy \
   --output_dir "$VQ_RUN"
-python -m scripts.training.extract_vq_codebook \
+python -m dexmani_policy.agents.vq_hand.export_codebook \
   --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
   --output "$VQ_RUN/codebook.npz"
-python -m scripts.training.measure_vq_usage \
-  --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
-  --zarr robot_data/pick_apple_messy.zarr \
-  --codebook "$VQ_RUN/codebook.npz"
 bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="$VQ_RUN/codebook.npz"
 ```
 
@@ -142,7 +138,7 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 
 导出只生成 Policy 使用的完整 residual-code 组合码本。未使用的分组码本及 `--include_per_group` 已移除；含 `_group_sorted_poses_g*` 扩展字段的旧 NPZ 会被拒绝，可从原 VQ checkpoint 另行导出标准 NPZ。标准 v3 NPZ 与 Policy 内嵌码本保持不变。
 
-使用率工具对 Policy-aligned checkpoint 默认测训练源行；有验证 split 时可加 `--split validation`。显式 split 从 checkpoint 内的清单、actual IDs 和 masks 恢复，不读取外部旧清单；旧 manifest+cap 保留当时子集。工具核对已知 data_revision、两侧合格源行和已保存的 episode 元数据；缺少显式 split 恢复证据会报错，历史 revision 缺失则提示“数据身份未验证”。相同 revision 仅是生产者声明。保存的动作布局和 normalizer 不变，码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 兼容；旧 checkpoint 不会被静默重拟合。
+训练过程保留分组码本使用图和损失曲线，导出时报告 decoder 范围与 PCA 诊断；码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 兼容；旧 checkpoint 不会被静默重拟合。
 
 ## 验证
 
@@ -188,16 +184,20 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 ### 源码追溯
 
-新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。恢复行为见 [项目架构](docs/项目架构.md)。
+新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。远程 `train_remote.sh` 每次在 `outputs/remote_sources/<launch_uuid>/` 准备独立源码副本，以 module 方式启动，复用原有数据、权重和实验目录；后续启动不会同步到旧副本。副本保留供追溯；没有自身 `.git` 的副本记录 Git 身份为 unknown，不继承父目录的版本，实际文件身份以内容 hash 为准。恢复行为见 [项目架构](docs/项目架构.md)。
+
+远端代码和数据都可持续更新：`sync_code.sh` 默认更新主源码镜像，`sync_data.sh` 更新共享数据，`train_remote.sh --sync-data` 也可在每次启动前同步数据。独立副本只隔离源码，数据更新会对所有引用同一路径的副本可见；直接从主源码目录运行的手工任务，其后续文件读取和 lazy import 也可能看到源码更新。
 
 ## 其他工作流
 
-- 辅助训练与研究脚本：`scripts/training/`
+- 训练工作流 Shell 入口：`scripts/training/`
 - 远端训练、数据同步与日志管理：`scripts/remote/`
 - 仓库级辅助脚本：`scripts/utils/`
 - Real policy inspection / inference：`dexmani_policy/deployment/`
 
-远程启动会输出独立 session 名；停止时使用 `stop_remote.sh <SESSION>`，普通停止最多等待30秒，仅显式 `--force` 允许超时强停。session 消失不证明 checkpoint 完整，数据预检也不代表训练通过。
+远程启动会输出独立 session 名，新后台任务使用 `tmux -L dexmani_policy`。`stop_remote.sh --all` / `--list` 只管理这个 socket；具名停止仍支持旧 default socket 中的同名任务。普通停止有30秒轮询等待预算（SSH 查询耗时另计），仅显式 `--force` 允许超时强停。session 消失不证明 checkpoint 完整，数据预检也不代表训练通过。
+
+`tail_log.sh <policy> <task> [run_name]` 支持当前及自定义 run 名，不枚举 Policy。默认按 `.training_run.json` 文件时间选择，历史无标记时使用 `config.yaml` 时间；候选须有配置和 metrics。它使用 `tail -F` 跟随同步替换后的日志。W&B 批量同步只搜索 run 根目录，先完成发现再上传。
 
 `sync_down.sh` 保留已有不可变产物，只更新指定训练文件与可变引用；配置或来源身份冲突时停止。参数、同步顺序和失败处理见 [SSH 服务器训练部署](docs/SSH服务器训练部署.md)。实验盘点使用 `bash scripts/utils/clean_experiments.sh`，只报告事实，不删除或移动实验。
 
@@ -217,7 +217,7 @@ dexmani_policy/
   utils/         少量跨模块通用工具
 
 scripts/
-  training/      训练与辅助研究流程
+  training/      训练工作流 Shell 入口
   eval/          仿真评测入口
   remote/        远端训练与同步
   utils/         仓库辅助脚本

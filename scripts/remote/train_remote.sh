@@ -1,5 +1,7 @@
 #!/bin/bash
-# Launch after checking SSH, syncing code and validating fresh/resume datasets.
+# SSH commands are built locally with explicitly quoted arguments.
+# shellcheck disable=SC2029
+# Launch from a private source copy after validating fresh/resume datasets.
 # Usage: bash scripts/remote/train_remote.sh [--fg] [--dry-run] [--sync-data]
 #          [--gpus IDS] <config> <task> [hydra_overrides...]
 # DDP visible GPU count must match training.num_gpus; resume task must match saved identity.
@@ -11,8 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---- Config ----
 SERVER="${DEX_SERVER:-dexserver}"
+# HOME in these templates belongs to the remote interpreter.
+# shellcheck disable=SC2016
 SERVER_PROJ='$HOME/ZHY/dexmani_policy'
+# shellcheck disable=SC2016
 CONDA_PYTHON='$HOME/.conda/envs/dex_policy/bin/python'
+TMUX_SOCKET=dexmani_policy
 # ---- End Config ----
 
 FOREGROUND=false
@@ -66,31 +72,34 @@ fi
 
 # ---- Build remote command ----
 if [[ "$CONFIG" == ddp/* ]]; then
-    ENTRY="dexmani_policy/train_ddp.py"
+    ENTRY="dexmani_policy.train_ddp"
 else
-    ENTRY="dexmani_policy/train.py"
+    ENTRY="dexmani_policy.train"
 fi
 
 # The remote command crosses SSH and, for background jobs, tmux. Quote every
 # argument for the final remote Bash instead of concatenating user input into a
 # command string. The outer SSH transport uses POSIX single quotes, while the
 # remote interpreter is explicitly Bash so printf %q has defined semantics.
-REMOTE_CMD="cd \"$SERVER_PROJ\" && \"$CONDA_PYTHON\""
-REMOTE_ARGS=("$ENTRY" "--config-name=$CONFIG" "task_name=$TASK" "$@")
-for remote_arg in "${REMOTE_ARGS[@]}"; do
-    printf -v remote_arg_q '%q' "$remote_arg"
-    REMOTE_CMD+=" $remote_arg_q"
-done
-# Resolve/check exactly the same config and overrides, in the same remote cwd.
-PREFLIGHT_CMD="cd \"$SERVER_PROJ\" && \"$CONDA_PYTHON\" scripts/remote/resolve_remote_datasets.py --check"
-for remote_arg in "${REMOTE_ARGS[@]:1}"; do
-    printf -v remote_arg_q '%q' "$remote_arg"
-    PREFLIGHT_CMD+=" $remote_arg_q"
-done
-if [[ -n "$GPU_IDS" ]]; then
-    printf -v gpu_ids_q '%q' "$GPU_IDS"
-    REMOTE_CMD="export CUDA_VISIBLE_DEVICES=$gpu_ids_q && $REMOTE_CMD"
-fi
+REMOTE_ARGS=(-m "$ENTRY" "--config-name=$CONFIG" "task_name=$TASK" "$@")
+build_remote_commands() {
+    REMOTE_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\""
+    for remote_arg in "${REMOTE_ARGS[@]}"; do
+        printf -v remote_arg_q '%q' "$remote_arg"
+        REMOTE_CMD+=" $remote_arg_q"
+    done
+    # Module execution binds both preflight and training to this source copy,
+    # even when the environment has an editable install of the main checkout.
+    PREFLIGHT_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\" -m dexmani_policy.utils.resolve_datasets --check"
+    for remote_arg in "${REMOTE_ARGS[@]:2}"; do
+        printf -v remote_arg_q '%q' "$remote_arg"
+        PREFLIGHT_CMD+=" $remote_arg_q"
+    done
+    if [[ -n "$GPU_IDS" ]]; then
+        printf -v gpu_ids_q '%q' "$GPU_IDS"
+        REMOTE_CMD="export CUDA_VISIBLE_DEVICES=$gpu_ids_q && $REMOTE_CMD"
+    fi
+}
 
 remote_bash_invocation() {
     local remote_script="$1"
@@ -129,21 +138,29 @@ if [[ -n "$_seed" ]]; then
     fi
     SESSION="${SESSION}_s${_seed}"
 fi
+SOURCE_TEMPLATE="$SERVER_PROJ/outputs/remote_sources/$launch_uuid"
+SOURCE_DIR="$SOURCE_TEMPLATE"
 
 # ---- Dry-run mode ----
 if $DRY_RUN; then
+    # Resolve remote HOME without creating the source directory. rsync's
+    # preview and the custom-destination check are read-only too.
+    SOURCE_DIR=$(ssh "$SERVER" "$(remote_bash_invocation "printf '%s\\n' \"$SOURCE_TEMPLATE\"")")
+    build_remote_commands
     echo "=== DRY RUN ==="
     echo "Config:    $CONFIG"
     echo "Task:      $TASK"
     echo "Session:   $SESSION"
+    echo "Socket:    $TMUX_SOCKET"
+    echo "Source:    $SOURCE_DIR (new private copy; shared data/experiments)"
     printf "Overrides:"
-    printf " %q" "${REMOTE_ARGS[@]:2}"
+    printf " %q" "${REMOTE_ARGS[@]:3}"
     printf "\n"
     echo "GPU:       ${GPU_IDS:-auto}"
     echo "Command:   $REMOTE_CMD"
     echo "Datasets:  $PREFLIGHT_CMD"
     echo ""
-    bash "$SCRIPT_DIR/sync_code.sh" --dry-run
+    bash "$SCRIPT_DIR/sync_code.sh" --dry-run --dest "$SOURCE_DIR"
     exit 0
 fi
 
@@ -165,17 +182,33 @@ if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$SERVER" "echo ok" &>/dev/null; t
 fi
 echo "OK"
 
-# 2. Code sync
-echo -n "[2/5] Syncing code ... "
-bash "$SCRIPT_DIR/sync_code.sh" || { echo "FAIL"; exit 1; }
+# 2. Reserve a new copy. Never rsync over a source directory used by an old run.
+echo -n "[2/5] Preparing private source ... "
+PREPARE_SOURCE="set -e; mkdir -p \"$SERVER_PROJ/outputs/remote_sources\"; mkdir \"$SOURCE_TEMPLATE\"; cd \"$SOURCE_TEMPLATE\"; pwd -P"
+if SOURCE_DIR=$(ssh "$SERVER" "$(remote_bash_invocation "$PREPARE_SOURCE")"); then
+    :
+else
+    rc=$?
+    echo "FAIL" >&2
+    echo "ERROR: cannot reserve a new source directory; no training launched." >&2
+    exit "$rc"
+fi
+build_remote_commands
+bash "$SCRIPT_DIR/sync_code.sh" --dest "$SOURCE_DIR" || { echo "FAIL"; exit 1; }
 echo "OK"
+echo "Source: $SOURCE_DIR"
 
-# 2b. Data sync (optional, first-time)
+# 2b. Data sync (optional, initial upload or later updates)
 if $SYNC_DATA; then
-    echo -n "[2b] Syncing data (first-time) ... "
+    echo -n "[2b] Syncing data ... "
     bash "$SCRIPT_DIR/sync_data.sh" || { echo "FAIL"; exit 1; }
     echo "OK"
 fi
+
+# Relative data and resume paths keep using the existing shared storage. Weight
+# roots may be absent for policies that do not use them; their links can dangle.
+SHARED_LINKS="set -e; mkdir -p \"$SERVER_PROJ/experiments\" \"$SERVER_PROJ/logs\"; for shared in robot_data data experiments pretrained_models logs; do ln -s \"$SERVER_PROJ/\$shared\" \"$SOURCE_DIR/\$shared\"; done"
+ssh "$SERVER" "$(remote_bash_invocation "$SHARED_LINKS")"
 
 # 3. Resolve dataset semantics after code/data sync; do not infer from task_name.
 echo "[3/5] Resolved dataset directories ..."
@@ -228,7 +261,7 @@ else
     # destroys the session automatically.
     REMOTE_TMUX_SCRIPT="set -o noclobber; mkdir -p \"$SERVER_PROJ/logs\" && { $REMOTE_CMD; _rc=\$?; if [[ \$_rc -eq 0 ]]; then echo \"[train_remote] $SESSION finished successfully (exit 0).\"; else echo \"[train_remote] $SESSION FAILED (exit \$_rc).\"; fi; exit \$_rc; } > \"$SERVER_PROJ/logs/${SESSION}.log\" 2>&1"
     printf -v tmux_script_q '%q' "$REMOTE_TMUX_SCRIPT"
-    ssh "$SERVER" "$(remote_bash_invocation "tmux new-session -d -s $session_q bash -lc $tmux_script_q")" || {
+    ssh "$SERVER" "$(remote_bash_invocation "tmux -L $TMUX_SOCKET new-session -d -s $session_q bash -lc $tmux_script_q")" || {
         rc=$?
         echo "ERROR: failed to start tmux session '$SESSION' on '$SERVER'." >&2
         exit "$rc"
@@ -237,7 +270,7 @@ else
     echo "╔══════════════════════════════════════════╗"
     echo "║  Launch submitted (tmux: $SESSION)"
     echo "╠══════════════════════════════════════════╣"
-    echo "║  Attach:  ssh $SERVER -t tmux attach -t '$SESSION'"
+    echo "║  Attach:  ssh $SERVER -t tmux -L $TMUX_SOCKET attach -t '$SESSION'"
     echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"
     echo "║  Console: ssh $SERVER \"tail -f $SERVER_PROJ/logs/${SESSION}.log\""
     echo "║  Stop:    bash scripts/remote/stop_remote.sh $SESSION"

@@ -201,7 +201,7 @@ def load_policy_config(path, overrides=()):
     path = Path(path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Policy config not found: {path}")
-    config_root = _project_root / "dexmani_policy" / "configs"
+    config_root = Path(__file__).resolve().parents[1] / "configs"
     if path.is_relative_to(config_root):
         config_name = path.relative_to(config_root).with_suffix("").as_posix()
     else:

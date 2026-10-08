@@ -31,8 +31,8 @@ normalization:
 tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
 # hand_dim = action_dim - tcp_dim     # (auto-derived in agent)
 
-# VQ codebook path (output of scripts/training/extract_vq_codebook.py / PCA re-indexing, stage 2).
-# New codebooks: train_vq_hand.py --policy-config dexmani_policy/configs/dqrise.yaml
+# VQ codebook path (output of dexmani_policy.agents.vq_hand.export_codebook / PCA re-indexing, stage 2).
+# New codebooks: python -m dexmani_policy.training.train_vq_hand --policy-config dexmani_policy/configs/dqrise.yaml
 # VQ optimizer/model defaults are in vq_vae below; data comes from dataset above.
 codebook_path: robot_data/sorted_hand_poses_${task_name}.npz
 

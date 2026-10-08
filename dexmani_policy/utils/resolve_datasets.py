@@ -1,4 +1,4 @@
-"""Resolve remote training inputs without importing models or opening Zarr arrays.
+"""Resolve training dataset paths without importing models or opening Zarr arrays.
 
 Run from the same project root, Python environment and with the same config name
 and Hydra overrides as training. Fresh runs use the composed recipe; resume uses
@@ -27,7 +27,7 @@ def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
     ):
         raise ValueError(f"Invalid relative config name: {config_name!r}")
     register_resolvers()
-    config_dir = Path(__file__).resolve().parents[2] / "dexmani_policy" / "configs"
+    config_dir = Path(__file__).resolve().parents[1] / "configs"
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
         cfg = compose(config_name=config_name, overrides=overrides)
         cfg = resolve_input_recipe(cfg, overrides=overrides)

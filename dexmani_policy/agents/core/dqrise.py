@@ -155,7 +155,8 @@ class DQRISEAgent(BaseAgent):
             raise ValueError(
                 "The policy action normalizer and VQ codebook hand normalizer "
                 "do not match. Training/inference would use incompatible hand "
-                "coordinates. Rebuild the codebook with train_vq_hand.py "
+                "coordinates. Rebuild the codebook with "
+                "python -m dexmani_policy.training.train_vq_hand "
                 "--policy-config using this Policy's data recipe and normalization."
             ) from exc
         self._normalizer_checked = True
