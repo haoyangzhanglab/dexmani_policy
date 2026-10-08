@@ -70,6 +70,7 @@ from dexmani_policy.evaluation.protocol import (
     load_ckpt_for_inference,
     resolve_checkpoint_path,
     resolve_eval_seed,
+    select_eval_seeds,
     validate_inference_steps,
     validate_task_seeds,
 )
@@ -331,8 +332,7 @@ def main() -> None:
             "cyan",
         )
     else:
-        from dexmani_policy.eval_best_ckpt import _select_eval_seeds
-        eval_seeds = _select_eval_seeds(env_runner, eval_seed, demo_episodes)
+        eval_seeds = select_eval_seeds(env_runner, eval_seed, demo_episodes)
         demo_episodes = plan_size(eval_seeds)
 
     validate_task_seeds(eval_seeds, pools)

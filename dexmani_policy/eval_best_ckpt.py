@@ -1,8 +1,7 @@
 """Checkpoint-owned evaluation on deterministically selected seeds.
 
-Loads a checkpoint and runs the manifest's complete held-out test role.
-Legacy records without a manifest exclude the recorded selection seeds
-from a deterministic shuffled pool.
+Loads a checkpoint on a deterministic seed slice, excluding recorded
+checkpoint-selection seeds for held-out ``best`` evaluation.
 Each invocation writes success metrics and provenance to its own result
 directory, including a scalar success rate in ``_result.txt``.
 
@@ -12,11 +11,10 @@ Evaluation protocol
 1. Resolve ``--selection-record`` or ``best`` once to a record and concrete
    checkpoint. A supplied handoff record rejects conflicting EMA/NFE overrides;
    ordinary ``best`` permits explicit inference overrides.
-2. Use the selection record's embedded manifest and complete test role; an
-   explicit manifest override must match. Without a pinned protocol, use the
-   configured manifest or the legacy shuffled pool (training.seed + 1024).
+2. Shuffle each task's configured seed pool with training.seed + 1024, exclude
+   recorded selection seeds and take up to the requested episode count.
 3. Validate requested task/seed availability and held-out separation before
-   loading weights; legacy evaluation excludes the recorded selection seeds.
+   loading weights.
 4. Restore the saved Agent from the concrete checkpoint with the resolved
    EMA/raw choice. Single evaluation and NFE sweep share this setup.
 5. Run each seed with environment/policy RNG reseeding and save statistics and
@@ -34,16 +32,15 @@ Usage
     bash scripts/eval/eval_best_ckpt.sh dp pick_apple_messy EXP_NAME \\
         --selection-record /absolute/path/selection_record.json
 
-    # Specific checkpoint; a manifest still fixes the full test role:
+    # Specific checkpoint with a smaller evaluation budget:
     bash scripts/eval/eval_best_ckpt.sh dp pick_apple_messy EXP_NAME \\
-        --ckpt-tag 20pct
+        --ckpt-tag 20pct --episodes 10
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import random
 import sys
 import tempfile
 from datetime import datetime
@@ -60,10 +57,9 @@ from dexmani_policy.utils.random import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param,
-    save_eval_snapshot, run_eval_plan, plan_size, task_seed_pools, validate_heldout, artifact_reference, selection_provenance,
+    save_eval_snapshot, run_eval_plan, plan_size, validate_heldout, artifact_reference, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
-    resolve_test_protocol,
     collect_episode_details,
     compute_eval_stats,
     iter_leaf_env_runners,
@@ -71,6 +67,7 @@ from dexmani_policy.evaluation.protocol import (
     parse_eval_overrides,
     resolve_checkpoint_path,
     resolve_eval_seed,
+    select_eval_seeds,
     validate_inference_steps,
 )
 
@@ -118,21 +115,15 @@ def _setup_eval(
 
     Returns
     -------
-    (agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol)
+    (agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds)
     """
     eval_seed = resolve_eval_seed(cfg)
     set_seed(eval_seed)
 
     env_runner = build_eval_runner(cfg)
-    protocol = resolve_test_protocol(cfg, env_runner, best_info)
-    eval_seeds = protocol['roles']['test'] if protocol is not None else None
-    if eval_seeds is None:
-        eval_seeds = _select_eval_seeds(
-            env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
-        )
-    elif plan_size(eval_seeds) != episodes:
-        cprint(f"Requested {episodes} episodes; manifest fixes {plan_size(eval_seeds)} test seeds "
-               "per task. Evaluating the full test role.", "yellow")
+    eval_seeds = select_eval_seeds(
+        env_runner, eval_seed, episodes, excluded_seeds=selection_seeds
+    )
     validate_heldout(env_runner, best_info, eval_seeds)
 
     for leaf_runner in iter_leaf_env_runners(env_runner):
@@ -144,7 +135,7 @@ def _setup_eval(
     agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
     cprint("✅ Checkpoint loaded\n", "green")
 
-    return agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol
+    return agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds
 
 
 def _selection_seeds(best_info) -> dict[str, list[int]] | list[int]:
@@ -154,36 +145,6 @@ def _selection_seeds(best_info) -> dict[str, list[int]] | list[int]:
     if not isinstance(seeds, (dict, list)) or not seeds:
         raise ValueError("Held-out best evaluation requires actual selection task/seed evidence")
     return seeds
-
-
-def _select_eval_seeds(
-    env_runner,
-    eval_seed: int,
-    episodes: int,
-    excluded_seeds: dict[str, list[int]] | list[int] | None = None,
-) -> dict[str, list[int]]:
-    """Select deterministic seeds after excluding checkpoint-selection seeds."""
-    if episodes <= 0:
-        raise ValueError(f"episodes must be positive, got {episodes}")
-
-    pools = task_seed_pools(env_runner)
-    excluded = excluded_seeds or {}
-    if isinstance(excluded, list):
-        if len(pools) != 1:
-            raise ValueError("Historical multi-task selection lacks actual task/seed evidence")
-        excluded = {next(iter(pools)): excluded}
-    # Apply the same seeded permutation to each task's own pool. Equal lengths
-    # preserve the former paired ordering without using numeric reference seeds.
-    available = {}
-    common_count = min(len(pool) for pool in pools.values())
-    for task, pool in pools.items():
-        pool = list(dict.fromkeys(pool))[:common_count]
-        random.Random(eval_seed).shuffle(pool)
-        available[task] = [s for s in pool if s not in excluded.get(task, [])]
-    count = min(episodes, *(len(pool) for pool in available.values()))
-    if count == 0:
-        raise RuntimeError("No evaluation seeds remain after excluding checkpoint-selection seeds.")
-    return {task: pool[:count] for task, pool in available.items()}
 
 
 def _run_one_inference_setting(
@@ -333,7 +294,7 @@ def evaluate_checkpoint_robotwin(
     best_info = resolved_best[0] if resolved_best is not None else None
     selection_seeds = _selection_seeds(best_info) if best_info is not None else []
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol = _setup_eval(
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds = _setup_eval(
         cfg,
         exp_dir,
         str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
@@ -346,7 +307,7 @@ def evaluate_checkpoint_robotwin(
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
-        result_save_dir, cfg, env_runner, protocol=protocol, checkpoint=artifact_reference(ckpt_path, exp_dir),
+        result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
         inference_steps_list=[inference_steps], episodes=episodes,
         effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,
@@ -435,7 +396,7 @@ def evaluate_checkpoint_sweep(
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # 1. Setup ONCE
-    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds, protocol = _setup_eval(
+    agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds = _setup_eval(
         cfg,
         exp_dir,
         str(resolved_best[1]) if resolved_best is not None else ckpt_tag_or_path,
@@ -448,7 +409,7 @@ def evaluate_checkpoint_sweep(
     if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
-        result_save_dir, cfg, env_runner, protocol=protocol, checkpoint=artifact_reference(ckpt_path, exp_dir),
+        result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
         global_step=agent._checkpoint_global_step, use_ema=use_ema,
         inference_steps_list=inference_steps_list, episodes=episodes,
         effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,
@@ -625,9 +586,6 @@ def _resolve_final_eval_request(
     if "env_runner" not in merged_cfg:
         raise ValueError("Evaluation config is missing env_runner")
     validate_inference_steps(inference_steps_list)
-    from dexmani_policy.evaluation.protocol import bind_seed_manifest
-    merged_cfg = bind_seed_manifest(merged_cfg, resolved_best[0] if resolved_best else None,
-                                    overrides=override_cfg)
     return (
         merged_cfg,
         use_ema,

@@ -7,6 +7,7 @@ Evaluation overrides supply environment and protocol controls for
 
 from __future__ import annotations
 
+import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,8 +61,8 @@ def parse_eval_overrides(overrides: list[str]):
     """Only evaluation/inference controls may override checkpoint evaluation."""
     for override in overrides:
         key = override.split("=", 1)[0].lstrip("+~")
-        if key in {"eval.select_best.initial_episodes", "eval.select_best.batch_size"}:
-            raise ValueError("Selection episode lists come from eval.seed_manifest; old budget options were removed")
+        if key == "eval.seed_manifest":
+            raise ValueError("eval.seed_manifest was removed; use evaluation seed and episode counts")
         if key.split(".")[-1] in {"denoise_steps", "denoise_timesteps_list"}:
             raise ValueError(
                 "Use inference_steps or inference_steps_list for evaluation"
@@ -362,6 +363,29 @@ def task_seed_pools(runner):
             for leaf in iter_leaf_env_runners(runner)}
 
 
+def select_eval_seeds(runner, eval_seed, episodes, excluded_seeds=None):
+    """Shuffle each task's pool and take equal budgets, excluding selection seeds."""
+    positive_int(episodes, "episodes")
+    pools = task_seed_pools(runner)
+    excluded = excluded_seeds or {}
+    if isinstance(excluded, list):
+        if len(pools) != 1:
+            raise ValueError("Historical multi-task selection lacks actual task/seed evidence")
+        excluded = {next(iter(pools)): excluded}
+    if excluded:
+        validate_task_seeds(excluded, pools)
+    available = {}
+    common_count = min(len(pool) for pool in pools.values())
+    for task, pool in pools.items():
+        pool = list(dict.fromkeys(pool))[:common_count]
+        random.Random(eval_seed).shuffle(pool)
+        available[task] = [s for s in pool if s not in excluded.get(task, [])]
+    count = min(episodes, *(len(pool) for pool in available.values()))
+    if count == 0:
+        raise RuntimeError("No evaluation seeds remain after excluding checkpoint-selection seeds")
+    return {task: pool[:count] for task, pool in available.items()}
+
+
 def plan_size(plan):
     """Equal per-task budgets retain the existing macro/micro comparison."""
     sizes = {len(seeds) for seeds in plan.values()}
@@ -370,14 +394,14 @@ def plan_size(plan):
     return sizes.pop()
 
 
-def validate_task_seeds(plan, tasks, *, allow_empty=False):
+def validate_task_seeds(plan, tasks):
     if not isinstance(plan, dict) or set(plan) != set(tasks):
         raise ValueError("Task seed plan tasks do not match runner")
     for task, seeds in plan.items():
         if (not isinstance(seeds, list) or any(type(seed) is not int or seed < 0 for seed in seeds)
                 or len(set(seeds)) != len(seeds)):
             raise ValueError(f"{task}: invalid or duplicate seeds")
-    if plan_size(plan) == 0 and not allow_empty:
+    if plan_size(plan) == 0:
         raise ValueError("Task seed plan is empty")
 
 
@@ -473,8 +497,8 @@ def code_version(directory):
         return {"commit": "unknown", "dirty": "unknown"}
 
 
-def save_eval_snapshot(directory, cfg, runner, *, protocol=None, **request):
-    """Persist resolved inputs and an already validated protocol; perform no binding/I/O to manifests."""
+def save_eval_snapshot(directory, cfg, runner, **request):
+    """Persist resolved inputs and the actual evaluation request."""
     import importlib.util
     import importlib.metadata
     import sys
@@ -503,7 +527,6 @@ def save_eval_snapshot(directory, cfg, runner, *, protocol=None, **request):
         "effective_config": OmegaConf.to_container(cfg, resolve=True),
         "runner_inputs": inputs,
         "request": request,
-        "seed_manifest": protocol,
         "argv": list(sys.argv),
         "policy_code": code_version(Path(__file__).resolve().parents[2]),
         "simulator_code": sim,
@@ -520,80 +543,3 @@ def atomic_json(path, record, *, overwrite=True):
     with atomic_path(path, overwrite=overwrite) as temporary:
         with temporary.open("w") as stream:
             json.dump(record, stream, indent=2, ensure_ascii=False)
-
-
-def _read_seed_manifest(source):
-    import json
-    if isinstance(source, (str, Path)):
-        return json.loads(Path(source).read_text())
-    return OmegaConf.to_container(source, resolve=True) if OmegaConf.is_config(source) else source
-
-
-def _manifest_hash(manifest):
-    import hashlib
-    import json
-    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
-
-
-def bind_seed_manifest(cfg, best_info, *, overrides=None):
-    """Bind a pinned record's protocol, checking only explicitly supplied overrides.
-
-    Saved config paths are defaults, not assertions about a pinned selection.
-    This returns an in-memory copy; the experiment config remains unchanged.
-    Physical seed availability is checked on the full runner before model loading.
-    """
-    from omegaconf import open_dict
-    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
-    saved = (best_info or {}).get("selection", {}).get("seed_manifest")
-    explicit = overrides is not None and "seed_manifest" in overrides.get("eval", {})
-    if saved is not None:
-        manifest = _read_seed_manifest(saved["manifest"])
-        if _manifest_hash(manifest) != saved["sha256"]:
-            raise ValueError("Selection seed manifest hash differs from embedded content")
-        if explicit:
-            source = overrides["eval"]["seed_manifest"]
-            if source is None or _manifest_hash(_read_seed_manifest(source)) != saved["sha256"]:
-                raise ValueError("Explicit evaluation seed manifest differs from selection")
-        with open_dict(cfg):
-            if "eval" not in cfg:
-                cfg.eval = {}
-            cfg.eval.seed_manifest = manifest
-    elif best_info is not None and cfg.get("eval", {}).get("seed_manifest") is not None:
-        raise ValueError("Explicit paper protocol requires selection with the same manifest")
-    return cfg
-
-
-def load_seed_manifest(source, runner):
-    """Read final physical task/seed lists, including existing explicit manifests.
-
-    Historical pool hashes remain provenance only: pool ordering no longer
-    controls execution. Every requested seed must still exist for its task.
-    """
-    manifest = _read_seed_manifest(source)
-    if not isinstance(manifest, dict) or not manifest.get("pool_id"):
-        raise ValueError("Seed manifest requires pool_id")
-    full = task_seed_pools(runner)
-    roles = {}
-    used = {task: set() for task in full}
-    for role in ("selection", "tie_break", "test"):
-        mapping = manifest.get(role)
-        validate_task_seeds(mapping, full, allow_empty=role == "tie_break")
-        for task, seeds in mapping.items():
-            if set(seeds) - set(full[task]) or used[task] & set(seeds):
-                raise ValueError(f"{role}/{task}: unavailable seeds or cross-role overlap")
-            used[task].update(seeds)
-        roles[role] = {task: list(mapping[task]) for task in full}
-    return {"manifest": manifest, "sha256": _manifest_hash(manifest), "roles": roles}
-
-
-def resolve_test_protocol(cfg, runner, best_info):
-    """Resolve and validate the full held-out protocol once, before restoring a model."""
-    cfg = bind_seed_manifest(cfg, best_info)
-    source = cfg.get("eval", {}).get("seed_manifest")
-    saved = (best_info or {}).get("selection", {}).get("seed_manifest")
-    if source is None:
-        return None
-    protocol = load_seed_manifest(source, runner)
-    if saved is not None and protocol["sha256"] != saved["sha256"]:
-        raise ValueError("Evaluation seed manifest differs from selection")
-    return protocol

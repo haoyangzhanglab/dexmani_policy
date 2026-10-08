@@ -8,13 +8,13 @@ Algorithm
 ---------
 
 **Stage 1 — Initial evaluation**:
-    Evaluate every discovered milestone on the required manifest's selection seeds.
-    All candidates use the same seeds.
+    Evaluate every discovered milestone on ``initial_episodes`` seeds (default 25).
+    All candidates use the same deterministically shuffled seed slice.
 
 **Stage 2 — Tie-break**:
     When two or more checkpoints share the highest success rate, run a single
-    additional batch from the manifest's tie-break seeds and merge.
-    All tied candidates share it; unused tie-break seeds remain reserved.
+    additional batch of ``batch_size`` fresh seeds (default 5) and merge.
+    All tied candidates share the same batch.
 
 **Tiebreak** (when still tied after Stage 2):
     1. Higher success rate.
@@ -29,10 +29,10 @@ Failed runs keep their own summary and leave the last successful
 
 Seed management
 ---------------
-``eval.seed_manifest`` fixes disjoint selection, tie-break and test lists.
-New selections require a valid manifest, generated once from the actual pool
-with ``scripts/eval/make_seed_manifest.py``. ``BaseRunner.run_one_episode`` re-seeds
-the policy RNG per episode. This makes seed selection and RNG initialization
+Each task's seed pool is deterministically shuffled with the evaluation seed.
+The initial slice and next tie-break batch are identical across checkpoints.
+``BaseRunner.run_one_episode`` re-seeds the policy RNG per episode.
+This makes seed selection and RNG initialization
 repeatable; it does not guarantee bitwise-identical trajectories across
 GPU/driver/kernel environments.
 
@@ -48,7 +48,7 @@ Usage
         --policy-name dp3 --task-name pour --exp-name 2026-07-29_01-53_35
 
     bash scripts/eval/select_best_ckpt.sh dp3 pour 2026-07-29_01-53_35 \\
-        eval.seed_manifest=dexmani_policy/configs/eval_protocols/pour.json
+        --initial-episodes 25 --batch-size 5 --max-episodes 50
 """
 
 from __future__ import annotations
@@ -81,8 +81,10 @@ from dexmani_policy.evaluation.protocol import (
     load_ckpt_for_inference,
     parse_eval_overrides,
     resolve_eval_seed,
+    select_eval_seeds,
     validate_inference_steps,
 )
+from dexmani_policy.utils.validation import positive_int
 
 ROOT_DIR = set_project_root()
 register_resolvers()
@@ -179,18 +181,19 @@ def _rank_key(a: CkptEvalAccum) -> tuple[float, float, int]:
 
 
 def select_best_checkpoint(
-    exp_dir: Path, cfg, *, max_episodes=100,
+    exp_dir: Path, cfg, *, initial_episodes=25, batch_size=5, max_episodes=100,
     inference_steps=10, use_ema=True, eval_seed=None, video_save_dir=None,
     result_file=None,
 ) -> tuple[MilestoneCheckpoint, list[CkptEvalAccum]]:
     """Fixed initial stage and one exact-tie batch, with durable run evidence."""
     import tempfile
-    from dexmani_policy.evaluation.protocol import load_seed_manifest
     if result_file is not None and Path(result_file).exists():
         raise FileExistsError(f"Selection result already exists: {result_file}")
     validate_inference_steps([inference_steps])
-    if type(max_episodes) is not int or max_episodes <= 0:
-        raise ValueError("max_episodes must be a positive integer")
+    positive_int(initial_episodes, "initial_episodes")
+    positive_int(max_episodes, "max_episodes")
+    if type(batch_size) is not int or batch_size < 0:
+        raise ValueError("batch_size must be a non-negative integer")
     exp_dir = Path(exp_dir).resolve()
     root = exp_dir / "eval_ckpt_selector"
     root.mkdir(parents=True, exist_ok=True)
@@ -206,38 +209,21 @@ def select_best_checkpoint(
         runner = build_eval_runner(cfg)
         for leaf in iter_leaf_env_runners(runner):
             leaf.record_video = video_save_dir is not None
-        requested = {"max_episodes": max_episodes}
-        manifest_source = cfg.get("eval", {}).get("seed_manifest")
-        if manifest_source is None:
-            raise ValueError("New selection requires eval.seed_manifest; generate it with "
-                             "scripts/eval/make_seed_manifest.py and pass eval.seed_manifest=<path>")
-        try:
-            protocol = load_seed_manifest(manifest_source, runner)
-        except FileNotFoundError as exc:
-            raise FileNotFoundError(
-                f"Seed manifest not found: {manifest_source}; generate it with "
-                "scripts/eval/make_seed_manifest.py or pass eval.seed_manifest=<path>"
-            ) from exc
-        phase1_seeds = protocol["roles"]["selection"]
-        tie_seeds = protocol["roles"]["tie_break"]
-        initial_count = plan_size(phase1_seeds)
-        if initial_count + plan_size(tie_seeds) > max_episodes:
-            raise ValueError(
-                f"max_episodes={max_episodes} is below the manifest selection + reserved "
-                f"tie-break count ({initial_count}+{plan_size(tie_seeds)}); increase the cap"
-            )
+        seeds = select_eval_seeds(runner, seed, min(initial_episodes + batch_size, max_episodes))
+        initial_count = min(initial_episodes, plan_size(seeds))
+        phase1_seeds = {task: values[:initial_count] for task, values in seeds.items()}
+        tie_seeds = {task: values[initial_count:] for task, values in seeds.items()}
         record["eval_config"] = save_eval_snapshot(
-            run_dir, cfg, runner, protocol=protocol, use_ema=use_ema, inference_steps=inference_steps,
-            shuffle_seed=seed, policy_seed_mode="episode_seed", **requested,
-            effective_episode_counts={role: plan_size(seeds) for role, seeds in protocol["roles"].items()},
+            run_dir, cfg, runner, use_ema=use_ema, inference_steps=inference_steps,
+            shuffle_seed=seed, policy_seed_mode="episode_seed",
+            initial_episodes=initial_episodes, batch_size=batch_size, max_episodes=max_episodes,
+            effective_episode_counts={"selection": initial_count, "tie_break": plan_size(tie_seeds)},
             phase1_task_seeds=phase1_seeds,
             possible_tie_task_seeds=tie_seeds,
             checkpoints=[{"path": artifact_reference(m.path, exp_dir), "global_step": m.global_step} for m in milestones],
         )
-        selection = {"shuffle_seed": seed, "task_seeds": {},
+        selection = {"shuffle_seed": seed, "initial_episodes": initial_count, "task_seeds": {},
                      "tie_break_used": False}
-        selection["protocol"] = "explicit"
-        selection["seed_manifest"] = protocol
         record["selection"] = selection
 
         def dispatch(mc, seeds, phase):
@@ -343,14 +329,16 @@ def main() -> None:
         required=True,
         help="Experiment timestamp/name under experiments/<policy>/<task>/.",
     )
-    parser.add_argument("--initial-episodes", "--batch-size", dest="removed_budget",
-                        action="append", help=argparse.SUPPRESS)
+    parser.add_argument("--initial-episodes", type=int, default=None,
+                        help="Initial episodes per checkpoint/task (default: from config, or 25).")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Extra episodes per tied checkpoint/task; 0 disables the batch (default: 5).")
     parser.add_argument(
         "--max-episodes",
         type=int,
         default=None,
         help=(
-            "Hard cap for manifest selection plus reserved tie-break seeds."
+            "Maximum selection episodes per checkpoint/task (default: 100)."
         ),
     )
     add_inference_steps_argument(parser)
@@ -387,8 +375,6 @@ def main() -> None:
     parser.add_argument("--videos", action="store_true", help="Explicitly record selection candidate videos")
     parser.add_argument("--result-file", default=None)
     args = parser.parse_args()
-    if args.removed_budget is not None:
-        parser.error("--initial-episodes/--batch-size were removed; episode lists come from eval.seed_manifest")
 
     exp_dir = (
         (
@@ -420,6 +406,8 @@ def main() -> None:
 
     # Resolve parameters: CLI > config > defaults
     _sb = cfg.eval.get("select_best", {}) if hasattr(cfg, "eval") else {}
+    initial_episodes = args.initial_episodes if args.initial_episodes is not None else _sb.get("initial_episodes", 25)
+    batch_size = args.batch_size if args.batch_size is not None else _sb.get("batch_size", 5)
     max_episodes = (
         args.max_episodes
         if args.max_episodes is not None
@@ -443,6 +431,8 @@ def main() -> None:
         select_best_checkpoint(
             exp_dir,
             cfg,
+            initial_episodes=initial_episodes,
+            batch_size=batch_size,
             max_episodes=max_episodes,
             inference_steps=inference_steps,
             use_ema=use_ema,

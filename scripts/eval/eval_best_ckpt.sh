@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Evaluate a checkpoint; manifests fix the full test set regardless of --episodes.
-# Legacy evaluation excludes selection seeds from the shuffled pool.
+# Evaluate a checkpoint on up to --episodes seeds, excluding best-selection seeds.
 # Usage: bash scripts/eval/eval_best_ckpt.sh <policy> <task> <exp> [args...]
 # See --help for checkpoint and pinned --selection-record options.
 
@@ -21,8 +20,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  --ckpt-tag TAG       Checkpoint: best, latest, 20pct..100pct (default: best)"
     echo "                         'best' requires best_ckpt.json written by select_best_ckpt.sh"
     echo "  --ckpt-path PATH     Path inside experiment/checkpoints (overrides --ckpt-tag)"
-    echo "  --selection-record PATH  Pin a selection handoff; conflicting checkpoint/EMA/NFE/manifest rejected"
-    echo "  --episodes N         Requested seeds; a manifest always uses its full test role"
+    echo "  --selection-record PATH  Pin a selection handoff; conflicting checkpoint/EMA/NFE rejected"
+    echo "  --episodes N         Seeds per task to evaluate (default: from config)"
     echo "  --inference-steps N    Single inference step count (best: selection record; otherwise config)"
     echo "                       To sweep multiple inference step counts, append this dotlist override:"
     echo "                         eval.inference_steps_list=[5,10,20]"

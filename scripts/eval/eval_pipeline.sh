@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Select a checkpoint, then evaluate disjoint held-out seeds without video.
 # Usage: bash scripts/eval/eval_pipeline.sh <policy> <task> <exp>
-# A valid manifest is required; SEED_MANIFEST overrides its saved path.
 # Both stages share this invocation's selection record; demos use record_demo.sh.
 
 set -euo pipefail
@@ -14,7 +13,6 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>"
     echo ""
     echo "One-shot evaluation pipeline: select best ckpt → numerical held-out eval."
-    echo "A valid manifest is required; set SEED_MANIFEST to override its saved path."
     echo ""
     echo "Positional args:"
     echo "  policy_name   Policy config name (e.g. dp3, maniflow, sat)"
@@ -80,16 +78,12 @@ echo ""
 
 HANDOFF_DIR="$(mktemp -d "${EXP_DIR}/pipeline_XXXXXXXX")"
 SELECTION_RECORD="${HANDOFF_DIR}/selection.json"
-MANIFEST_ARGS=()
-if [[ -n "${SEED_MANIFEST:-}" ]]; then
-    MANIFEST_ARGS+=("eval.seed_manifest=${SEED_MANIFEST}")
-fi
 conda run --no-capture-output -n policy python dexmani_policy/select_best_ckpt.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
     --result-file="$SELECTION_RECORD" \
-    --no-videos "${MANIFEST_ARGS[@]}"
+    --no-videos
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Step 2/2: Evaluate Best Checkpoint (held-out seeds)

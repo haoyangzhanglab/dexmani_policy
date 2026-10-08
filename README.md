@@ -108,7 +108,7 @@ bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<ta
 
 数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。恢复时已知 revision 改变或丢失会报错，历史身份缺失会明确提示“数据身份未验证”。revision 是生产者声明，不是内容 hash。
 
-显式训练 `dataset.split_manifest` 决定最终 episode 集合，新训练须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时保留原 seed/比例/cap。旧 manifest+cap 的 checkpoint 恢复使用保存的清单内容和 actual IDs，外部清单文件可以不存在；窗口/finite/dispatch 资格筛选仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单；它与仿真 `eval.seed_manifest` 分开。
+显式训练 `dataset.split_manifest` 决定最终 episode 集合，新训练须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时保留原 seed/比例/cap。旧 manifest+cap 的 checkpoint 恢复使用保存的清单内容和 actual IDs，外部清单文件可以不存在；窗口/finite/dispatch 资格筛选仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单。
 
 Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。Gaussian **动作**归一化必须同时设置 `agent.clip_sample=false`；Gaussian 观测和 flow 不受此限制。历史缺失开关等价于 true，true→false 属于实验变化，不能静默严格续训。旧 Gaussian＋true 结果需用旧代码复现，修正后重新评测。
 
@@ -180,7 +180,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 评测使用实验保存的 resolved `config.yaml` 与 checkpoint。`eval_pipeline.sh` 执行 selection 和不录视频的 held-out eval；demo 用独立的 `record_demo.sh`，不作为 held-out 结果。
 
-新 selection 必须提供有效的 seed manifest，固定 selection、tie-break 和 test 集合。格式与校验规则见 [仿真评测机制](docs/仿真评测机制.md#42-显式论文-seed-清单)；流水线可用 `SEED_MANIFEST=/absolute/path/seeds.json` 指定清单。
+评测从 runner 的 seed 池按 evaluation seed 确定性抽样，不需要额外清单。selection 使用 `--initial-episodes`、`--batch-size` 和 `--max-episodes` 控制预算；最终评测使用 `--episodes` 控制每任务数量，并排除实际用于选点的 seeds。具体规则见 [仿真评测机制](docs/仿真评测机制.md#42-seed-池与采样预算)。
 
 `best_ckpt.json` 指向最近一次成功发布的选择结果。流水线通过 `--result-file` / `--selection-record` 固定本次 checkpoint、raw/EMA 和 NFE；冲突覆盖或未同步的产物会报错。普通 best 调用允许显式覆盖 EMA/NFE。正常全零结果仍可发布，技术异常以非零状态退出并保留旧 best。
 
