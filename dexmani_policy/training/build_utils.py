@@ -84,16 +84,12 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     dataset_cfg = copy.deepcopy(cfg.dataset)
     saved_recipes = getattr(resume_checkpoint, "resume_contract", {}).get("data_recipe")
     if cfg.get("resume_from") is not None and saved_recipes is None:
-        raise ValueError("Full resume requires saved data_recipe evidence for time rules")
+        raise ValueError("Full resume requires saved data_recipe")
     if saved_recipes is not None:
-        from dexmani_policy.datasets.base_dataset import restored_time_filter_kwargs
         children = dataset_cfg.get("datasets", [dataset_cfg])
         if len(children) != len(saved_recipes):
             raise ValueError("Saved data_recipe task count does not match dataset")
         for child, recipe in zip(children, saved_recipes):
-            with open_dict(child):
-                for key, value in restored_time_filter_kwargs(recipe).items():
-                    child[key] = value
             if "split_manifest" in recipe:
                 with open_dict(child):
                     child.saved_split = recipe["split_manifest"]

@@ -168,17 +168,14 @@ class SequenceSampler:
             end[:, None] - 1,
         )
 
-    def filter_valid(self, obs_valid, action_valid, dispatch_valid, n_obs_steps, *, time_valid=None, time_edges=None):
+    def filter_valid(self, obs_valid, action_valid, n_obs_steps):
         # Process bounded batches: a full RGB buffer or windows×horizon copy is unnecessary.
         kept = []
         counts = {
             "candidate": len(self.indices),
             "observation": 0,
             "action": 0,
-            "dispatch": 0,
         }
-        if time_valid is not None:
-            counts["time"] = 0
         obs_rows = np.zeros(len(obs_valid), dtype=bool)
         action_rows = np.zeros(len(action_valid), dtype=bool)
         for offset in range(0, len(self.indices), 8192):
@@ -186,19 +183,12 @@ class SequenceSampler:
             rows = self.source_rows(indices)
             obs_ok = obs_valid[rows[:, :n_obs_steps]].all(axis=1)
             action_ok = action_valid[rows].all(axis=1)
-            dispatch_ok = dispatch_valid[rows].all(axis=1)
             for name, ok in (
                 ("observation", obs_ok),
                 ("action", action_ok),
-                ("dispatch", dispatch_ok),
             ):
                 counts[name] += int((~ok).sum())
-            keep = obs_ok & action_ok & dispatch_ok
-            if time_valid is not None:
-                time_ok = time_valid[rows].all(axis=1)
-                time_ok &= ((rows[:, 1:] == rows[:, :-1]) | time_edges[rows[:, 1:]]).all(axis=1)
-                counts["time"] += int((~time_ok).sum())
-                keep &= time_ok
+            keep = obs_ok & action_ok
             kept.append(indices[keep])
             obs_rows[rows[keep, :n_obs_steps].reshape(-1)] = True
             action_rows[rows[keep].reshape(-1)] = True

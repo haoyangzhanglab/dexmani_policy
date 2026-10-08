@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import copy
-import math
-from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar
 
@@ -40,23 +38,6 @@ AUGMENTOR_REGISTRY = [
 ]
 
 
-def restored_time_filter_kwargs(recipe):
-    """Resolve saved rules before Dataset construction, without migrating old recipes."""
-    if not isinstance(recipe, Mapping):
-        raise TypeError("Saved data_recipe is required to determine historical time filtering")
-    if "time_filter" in recipe:
-        rule = recipe["time_filter"]
-        if not isinstance(rule, Mapping) or set(rule) != {"field", "max_time_gap_ratio", "status"}:
-            raise ValueError("Incomplete saved time_filter recipe")
-        ratio = rule["max_time_gap_ratio"]
-        if rule["field"] != "row_info/observation_timestamp_ns" or rule["status"] != ("unfiltered" if ratio is None else "filtered"):
-            raise ValueError("Unsupported saved time_filter recipe")
-        return {"max_time_gap_ratio": ratio}
-    if recipe.get("window_validity") != "role_finite_v1" or recipe.get("normalization") != "unique_train_source_rows":
-        raise ValueError("Unknown historical data_recipe; cannot infer time rules for full resume")
-    return {"max_time_gap_ratio": None, "legacy_time_filter": True}
-
-
 class BaseDataset(torch.utils.data.Dataset):
     DEFAULT_MODALITIES: ClassVar[list[str]] = ["joint_state"]
 
@@ -80,19 +61,9 @@ class BaseDataset(torch.utils.data.Dataset):
         rgb_keep_uint8: bool = False,
         split_manifest: str | None = None,
         saved_split: dict | None = None,
-        max_time_gap_ratio: float | None = 1.5,
-        legacy_time_filter: bool = False,
     ) -> None:
         super().__init__()
 
-        if max_time_gap_ratio is not None and (
-            isinstance(max_time_gap_ratio, bool)
-            or not isinstance(max_time_gap_ratio, (int, float))
-            or not math.isfinite(max_time_gap_ratio) or max_time_gap_ratio <= 0
-        ):
-            raise ValueError("max_time_gap_ratio must be finite and positive or null")
-        if legacy_time_filter and max_time_gap_ratio is not None:
-            raise ValueError("Historical unfiltered recipe cannot enable time filtering")
         validate_val_ratio(val_ratio)
         validate_max_train_episodes(max_train_episodes)
         if (saved_split is None and split_manifest
@@ -149,46 +120,10 @@ class BaseDataset(torch.utils.data.Dataset):
         self._role_lengths[action_key] = horizon
         if use_aux_ee:
             self._role_lengths["action_ee"] = horizon
-        self._dispatch_valid = np.ones(n_rows, dtype=bool)
-        attrs = self.replay_buffer.attrs
-        is_real = (
-            attrs.get("format") == "dexmani.real.canonical"
-            or attrs.get("domain") == "real"
-        )
-        if is_real:
-            status = self.replay_buffer.row_info.get("dispatch_status")
-            if status is None:
-                raise ValueError(
-                    "Real accepted-only recipe requires row_info/dispatch_status; re-export Raw"
-                )
-            self._dispatch_valid = (status == 1).all(axis=1)
         self.data_recipe = {
             "window_validity": "role_finite_v1",
-            "dispatch": "both_accepted" if is_real else "not_applicable",
             "normalization": "unique_train_source_rows",
         }
-        self._time_valid = self._time_edges = None
-        if is_real and not legacy_time_filter:
-            self.data_recipe["time_filter"] = {
-                "field": "row_info/observation_timestamp_ns",
-                "max_time_gap_ratio": max_time_gap_ratio,
-                "status": "unfiltered" if max_time_gap_ratio is None else "filtered",
-            }
-        if is_real and max_time_gap_ratio is not None:
-            dt = attrs.get("dt")
-            if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
-                raise ValueError("Time filtering requires finite positive saved canonical dt")
-            stamps = self.replay_buffer.observation_timestamps()
-            self._time_valid = stamps > 0
-            self._time_edges = np.ones(n_rows, dtype=bool)
-            increasing = (stamps[1:] > stamps[:-1]) & self._time_valid[1:] & self._time_valid[:-1]
-            # Subtract only increasing positive integers: neither uint underflow nor int overflow.
-            edge_ok = np.zeros(n_rows - 1, dtype=bool)
-            gap_limit = max_time_gap_ratio * dt * 1e9
-            if not math.isfinite(gap_limit):
-                raise ValueError("max_time_gap_ratio * saved dt exceeds representable time budget")
-            edge_ok[increasing] = (stamps[1:][increasing] - stamps[:-1][increasing]) <= int(gap_limit)
-            self._time_edges[1:] = edge_ok
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
         self.augmentors = {}
@@ -249,8 +184,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def _filter_sampler(self, sampler):
         sampler.filter_valid(
-            self._obs_valid, self._action_valid, self._dispatch_valid, self.obs_horizon,
-            time_valid=self._time_valid, time_edges=self._time_edges,
+            self._obs_valid, self._action_valid, self.obs_horizon,
         )
 
     def get_validation_dataset(self):
