@@ -1,6 +1,6 @@
 """Local SAT backbone: each token encodes one joint's full trajectory.
 
-Actions use (B, Da, T). Upstream differences: docs/paper_recipes.md.
+Actions use (B, Da, T).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ class EmbodiedJointCodebook(nn.Module):
     """Sum separately projected embodiment, function and axis embeddings.
 
     Defaults use a unique function ID per joint and one embodiment/axis type.
-    Official SAT concatenates robot/joint embeddings; see docs/paper_recipes.md.
+    Official SAT concatenates robot/joint embeddings.
     """
 
     def __init__(
@@ -61,7 +61,7 @@ class EmbodiedJointCodebook(nn.Module):
         emb = self.proj_emb(self.emb_emb(self.joint_embodiment))
         func = self.proj_func(self.func_emb(self.joint_function))
         axis = self.proj_axis(self.axis_emb(self.joint_axis))
-        return emb + func + axis  # Local projected sum; see docs/paper_recipes.md.
+        return emb + func + axis  # Local projected sum.
 
 
 class MultiModalAttention(nn.Module):

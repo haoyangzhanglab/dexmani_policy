@@ -29,8 +29,6 @@ python -m pip check
 python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit
 ```
 
-剩余验收项与历史环境安装、GPU 验证记录入口见 [验证边界与历史记录](docs/paper_recipes.md#剩余验收与历史记录)。历史检查不代表当前生产 AMP/compile/DDP 已验收。
-
 新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
 
 仿真评测需要另外安装 `dexmani_sim`。训练数据路径由当前 config 决定，常见位置为 `robot_data/<task>.zarr`。
@@ -65,8 +63,6 @@ ls dexmani_policy/configs/ddp/*.yaml
 ```
 
 模型层数、宽度、学习率、NFE、batch size、具体模块组合和实验结论等易变化信息，应留在 config、源码、实验目录与日志中，不写成仓库级长期约定。
-
-七种方法与六个 DDP overlay 的当前数值配方、固定评测协议及验证边界见 [论文 recipe 与实施记录](docs/paper_recipes.md)。
 
 仓库方法名表示本地适配实现，不意味着官方代码或论文结果的原样复现。相同 `total_train_steps` 不自动代表相同样本量、计算量或公平预算；比较时仍需固定数据集合并记录 batch/accumulation 与选择、test 协议。Wilson 区间描述 episode 抽样不确定性，不是跨训练 seed 的方差。
 
@@ -112,11 +108,11 @@ bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<ta
 
 数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。恢复时已知 revision 改变或丢失会报错，历史身份缺失会明确提示“数据身份未验证”。revision 是生产者声明，不是内容 hash。
 
-显式训练 `dataset.split_manifest` 决定最终 episode 集合，新训练须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时保留原 seed/比例/cap。旧 manifest+cap 的 checkpoint 恢复使用保存的清单内容和 actual IDs，外部清单文件可以不存在；窗口/finite/dispatch 资格筛选仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。 训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单；它与仿真 `eval.seed_manifest` 分开。格式见 [Real 数据配方](docs/rtc.md#数据与保存统计)。
+显式训练 `dataset.split_manifest` 决定最终 episode 集合，新训练须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时保留原 seed/比例/cap。旧 manifest+cap 的 checkpoint 恢复使用保存的清单内容和 actual IDs，外部清单文件可以不存在；窗口/finite/dispatch 资格筛选仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单；它与仿真 `eval.seed_manifest` 分开。
 
 Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。Gaussian **动作**归一化必须同时设置 `agent.clip_sample=false`；Gaussian 观测和 flow 不受此限制。历史缺失开关等价于 true，true→false 属于实验变化，不能静默严格续训。旧 Gaussian＋true 结果需用旧代码复现，修正后重新评测。
 
-RGB 可通过 `dataset.rgb_keep_uint8=true` 使用 uint8 transport（要求 `normalization.rgb=identity`）；当前 DP 显式启用。配置 CPU resize 时，含 ImageAug 的 recipe 在 float resize/crop/增强后最终量化，无颜色增强的 uint8 recipe 保留 uint8 spatial 路径；视觉入口恢复 float32。缺省/false 保留原 float preprocessing；未配置 CPU resize 时仍返回原始 HWC uint8。recipe 变化不能跨越 strict resume；MultiTask 的 RGB child 必须一致。确定性评测、验证与 Real preprocessing 从保存配置恢复，详见 [RGB transport 验证报告](docs/rgb_transport_report.md)。
+RGB 可通过 `dataset.rgb_keep_uint8=true` 使用 uint8 transport（要求 `normalization.rgb=identity`）；当前 DP 显式启用。配置 CPU resize 时，含 ImageAug 的 recipe 在 float resize/crop/增强后最终量化，无颜色增强的 uint8 recipe 保留 uint8 spatial 路径；视觉入口恢复 float32。缺省/false 保留原 float preprocessing；未配置 CPU resize 时仍返回原始 HWC uint8。recipe 变化不能跨越 strict resume；MultiTask 的 RGB child 必须一致。确定性评测、验证与 Real preprocessing 从保存配置恢复。
 
 DP3/DQRISE 的 PointNet/MultiStagePointNet 配方取消同一已选点集的采样后 shuffle，保留 FPS 随机起点与子集选择；新 run 会改变 RNG 消耗，后续随机轨迹不保证相同。切换为 PointNext 的配置保留 shuffle。SAT action shuffle、EJC、ManiFlow dense tokenizer、Uni3D 和 compile/static_graph 不受此结论影响。
 
@@ -184,7 +180,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 评测使用实验保存的 resolved `config.yaml` 与 checkpoint。`eval_pipeline.sh` 执行 selection 和不录视频的 held-out eval；demo 用独立的 `record_demo.sh`，不作为 held-out 结果。
 
-新 selection 必须提供有效的 seed manifest，固定 selection、tie-break 和 test 集合。生成方式与已发布清单见 [论文 recipe](docs/paper_recipes.md)；流水线可用 `SEED_MANIFEST=/absolute/path/seeds.json` 指定清单。
+新 selection 必须提供有效的 seed manifest，固定 selection、tie-break 和 test 集合。格式与校验规则见 [仿真评测机制](docs/仿真评测机制.md#42-显式论文-seed-清单)；流水线可用 `SEED_MANIFEST=/absolute/path/seeds.json` 指定清单。
 
 `best_ckpt.json` 指向最近一次成功发布的选择结果。流水线通过 `--result-file` / `--selection-record` 固定本次 checkpoint、raw/EMA 和 NFE；冲突覆盖或未同步的产物会报错。普通 best 调用允许显式覆盖 EMA/NFE。正常全零结果仍可发布，技术异常以非零状态退出并保留旧 best。
 
@@ -192,7 +188,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 ### 源码追溯
 
-新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。恢复行为见 [项目架构](docs/项目架构.md)，历史整改记录见 [Git 历史入口](docs/paper_recipes.md#剩余验收与历史记录)。
+新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。**不要向正在训练的源码目录原位运行 `sync_code.sh`**：归档不能隔离后续 lazy import。恢复行为见 [项目架构](docs/项目架构.md)。
 
 ## 其他工作流
 
@@ -205,7 +201,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 `sync_down.sh` 保留已有不可变产物，只更新指定训练文件与可变引用；配置或来源身份冲突时停止。参数、同步顺序和失败处理见 [SSH 服务器训练部署](docs/SSH服务器训练部署.md)。实验盘点使用 `bash scripts/utils/clean_experiments.sh`，只报告事实，不删除或移动实验。
 
-Dataset 按需读取 Zarr 窗口，normalizer 使用有效训练窗口的唯一源行；数据与恢复合同见 [项目架构](docs/项目架构.md)。Real 的时间窗口规则、sync/async/RTC 支持范围和部署接口见 [Real 数据与 RTC](docs/rtc.md)，真机运行入口由 `dexmani_real` 提供。真机运动需明确授权。
+Dataset 按需读取 Zarr 窗口，normalizer 使用有效训练窗口的唯一源行；数据与恢复合同见 [项目架构](docs/项目架构.md)。Real 真机运行入口由 `dexmani_real` 提供。真机运动需明确授权。
 
 ## 项目结构
 

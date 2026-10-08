@@ -1,6 +1,6 @@
 """Local SAT policy with temporal feature fusion and shuffled joint trajectories.
 
-Actions use (B, Da, T). Upstream differences: docs/paper_recipes.md.
+Actions use (B, Da, T).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ class SATObsEncoder(nn.Module):
 
     Output: (B, K+1, T*(pc_out_dim+state_out_dim)), with K point patches.
     Token slots do not imply physical correspondence across frames.
-    Official SAT uses separate StateAttn tokens; see docs/paper_recipes.md.
+    Official SAT uses separate StateAttn tokens.
     """
 
     @property

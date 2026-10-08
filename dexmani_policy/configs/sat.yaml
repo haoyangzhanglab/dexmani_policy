@@ -1,4 +1,4 @@
-# SAT — local Structural Action Transformer adaptation; see docs/paper_recipes.md
+# SAT — local Structural Action Transformer adaptation
 # Encoder:  PointNeXT tokenizer (256d tokens, SAT-style patch self-attention)
 # Decoder:  SAT backbone (MultiModalAttention, obs-as-KV-prefix) + Flow Matching
 # Modality: point_cloud + joint_state → action
