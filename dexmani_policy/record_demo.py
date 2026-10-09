@@ -11,9 +11,12 @@ Key differences from ``eval_best_ckpt.py``:
 - Designed for machines with an X11 ``DISPLAY``. Wayland sessions require
   XWayland. The viewer window will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
-- With ``--ckpt-tag best``, pins one inference snapshot and its concrete checkpoint
-  path, requiring its EMA choice and inference step count. Explicit
-  ``--ema``/``--no-ema`` and ``--inference-steps`` override these settings.
+- With ``--ckpt-tag best``, pins the resolved record and concrete checkpoint path.
+  ``best.v1`` and ``selection.v2`` require valid EMA/NFE settings. Only missing
+  EMA/NFE fields in unformatted historical flat best records may fall back to
+  saved ``eval.demo``/``eval`` settings (EMA=True, NFE=10 if absent). Explicit
+  ``--ema``/``--no-ema`` and ``--inference-steps`` take precedence over record
+  settings and saved defaults, but cannot repair invalid record fields.
 - ``--selection-record`` pins a selector's own handoff file and rejects
   conflicting checkpoint/EMA/NFE choices. Demo uses its own seed pool and
   does not claim held-out separation from selection.
