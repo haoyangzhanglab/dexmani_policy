@@ -1,15 +1,4 @@
-"""身体锚定的点云交互编码：宽域上下文与多尺度近表面读取。
-
-几何输入使用同一坐标系、单位米；eef_pose=[pos3, rot6d]，rot6d 为旋转
-矩阵前两列拼接。五指顺序为 thumb/index/middle/ring/pinky。
-
-与 PointPatchEncoder(return_intermediate=True) 配合：
-    encoder = PointPatchInteractionEncoder(token_channels=192)
-    interaction = encoder(pointcloud, patches, eef_pose, fingertip_points)
-
-输出 interaction_token [B,6,D] 与 interaction_center [B,6,3]。B 可合并
-时间维。距离仅表示锚点到已观测点的关系，不是 SDF、接触概率或接触力。
-"""
+"""基于身体锚点的 PointPatch 交互编码，几何输入使用同一坐标系的米制值。"""
 
 from __future__ import annotations
 
@@ -24,40 +13,31 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import index_points
 from dexmani_policy.agents.obs_encoder.pointcloud.scene_compressor import SceneSelfAttentionBlock
 
 
-def _rotation_from_columns_6d(rotation: torch.Tensor) -> torch.Tensor:
-    """[B,6] -> [B,3,3]；输入前后两个三维向量分别为前两列。"""
-    if rotation.ndim != 2 or rotation.shape[-1] != 6:
-        raise ValueError("rotation must have shape [B,6]")
+def rotation_from_columns_6d(rotation: torch.Tensor) -> torch.Tensor:
+    """旋转矩阵前两列拼接 [B,6] -> [B,3,3]。"""
     rotation = rotation.float()
     first, second = rotation[..., :3], rotation[..., 3:]
     if not torch.isfinite(rotation).all() or (first.norm(dim=-1) < 1e-6).any():
         raise ValueError("rotation contains invalid first columns")
     x = F.normalize(first, dim=-1)
     y = second - (second * x).sum(-1, keepdim=True) * x
-    if (y.norm(dim=-1) < 1e-6).any():
+    tolerance = 1e-6 * second.norm(dim=-1).clamp_min(1.0)
+    if (y.norm(dim=-1) < tolerance).any():
         raise ValueError("rotation columns must be linearly independent")
     y = F.normalize(y, dim=-1)
     return torch.stack((x, y, torch.cross(x, y, dim=-1)), dim=-1)
 
 
-def _nearest_patch_evidence(
+def nearest_patch_evidence(
     anchors: torch.Tensor,
     members: torch.Tensor,
     rotation: torch.Tensor,
     member_valid: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """找到每个身体锚点在每个 patch 内最近的有效观测点。
-
-    anchors: [B,Q,3]，members: [B,M,K,3]，rotation: [B,3,3]。
-    返回 eef 坐标系相对向量 [B,Q,M,3]、米制距离 [B,Q,M]、有效位。
-    无有效点时相对向量为零、距离为 inf。等距离点按输入顺序打破平局。
-    对采样表面的离散最近邻求值，不对 argmin 的选择过程求导。
-    """
-    if members.shape[2] == 0:
-        raise ValueError("patches must contain at least one member slot")
+    """最近有效成员的 eef 系相对向量、距离和有效位；无观测时距离为 inf。"""
     valid = torch.isfinite(members).all(-1)
     if member_valid is not None:
-        valid = valid & member_valid.bool()
+        valid = valid & member_valid
     safe_members = torch.where(valid[..., None], members.float(), 0.0)
     delta = safe_members[:, None] - anchors.float()[:, :, None, None]
     squared = delta.square().sum(-1).masked_fill(~valid[:, None], float("inf"))
@@ -65,14 +45,11 @@ def _nearest_patch_evidence(
     observed = torch.isfinite(squared_min)
     selected = delta.gather(3, index[..., None, None].expand(-1, -1, -1, 1, 3)).squeeze(3)
     selected = torch.where(observed[..., None], selected, 0.0)
-    # 行向量 delta @ R 等价于列向量 R^T delta。
     relative = torch.einsum("bqmc,bcd->bqmd", selected, rotation.float())
     return relative, squared_min.sqrt(), observed
 
 
 class GeometryCrossAttention(nn.Module):
-    """几何同时影响 attention logits 和 value，附带一个可学习的 null 项。"""
-
     def __init__(
         self,
         channels: int,
@@ -82,12 +59,6 @@ class GeometryCrossAttention(nn.Module):
         radius_multiple: float | None,
     ):
         super().__init__()
-        if channels <= 0 or not sigmas or channels % len(sigmas):
-            raise ValueError("channels must be divisible by the number of sigmas/heads")
-        if any(math.isnan(s) or s <= 0 for s in sigmas):
-            raise ValueError("sigmas must be positive; infinity is allowed for a global head")
-        if radius_multiple is not None and (not math.isfinite(radius_multiple) or radius_multiple <= 0):
-            raise ValueError("radius_multiple must be finite and positive")
         self.channels = channels
         self.heads = len(sigmas)
         self.head_dim = channels // self.heads
@@ -129,7 +100,7 @@ class GeometryCrossAttention(nn.Module):
         edge_value = self.edge_value(edge).reshape(batch, queries, patches, self.heads, self.head_dim)
 
         edge_bias = self.edge_bias(edge).permute(0, 1, 3, 2)
-        # 显式关闭 autocast：仅 .float() 不能阻止 einsum 被 AMP 降精度。
+        # AMP 下 logits 和 softmax 仍使用 FP32。
         with torch.autocast(device_type=query.device.type, enabled=False):
             logits = torch.einsum("bqhd,bmhd->bqhm", q.float(), k.float())
             logits = logits / math.sqrt(self.head_dim) + edge_bias.float()
@@ -151,16 +122,7 @@ class GeometryCrossAttention(nn.Module):
 
 
 class PointPatchInteractionEncoder(nn.Module):
-    """6 个查询：eef + 五指；宽域上下文 + 多尺度近表面证据。
-
-    near sigmas 默认 1.5/4 cm，各两个头；它们是未调优的初始化参数。
-    局部分支使用 3*sigma 的截断半径。宽域分支保留一个无距离衰减的头。
-    gate 表示局部分支的学习权重；null_mass 表示拒绝读取权重，二者均不
-    是接触概率或经过校准的可见性概率。
-
-    member_valid 仅标记原始采样中有效的成员；若用于去除机器人或目标分割，
-    必须同步重新生成 local_token，不能用它清除已经混入特征的手/背景信息。
-    """
+    """将 PointPatch 特征编码为 eef + 五指的交互 token [B,6,D]。"""
 
     def __init__(
         self,
@@ -179,17 +141,15 @@ class PointPatchInteractionEncoder(nn.Module):
             raise ValueError("token_channels must be positive and divisible by num_heads")
         if len(context_sigmas) != num_heads or len(near_sigmas) != num_heads:
             raise ValueError("context_sigmas and near_sigmas must have length num_heads")
-        if not math.isfinite(mlp_ratio) or int(token_channels * mlp_ratio) < 1:
-            raise ValueError("mlp_ratio must be finite and produce a positive hidden dimension")
-        if self_depth < 0:
-            raise ValueError("self_depth must be nonnegative")
         hidden_dim = int(token_channels * mlp_ratio)
-        if not math.isfinite(metric_scale) or metric_scale <= 0:
-            raise ValueError("metric_scale must be finite and positive")
-        if not math.isfinite(position_scale) or position_scale <= 0:
-            raise ValueError("position_scale must be finite and positive")
-        if not near_sigmas or any(not math.isfinite(s) or s <= 0 for s in near_sigmas):
-            raise ValueError("near_sigmas must be finite and positive")
+        if self_depth < 0 or hidden_dim < 1:
+            raise ValueError("self_depth must be nonnegative and hidden_dim positive")
+        scales = (metric_scale, position_scale, radius_multiple, *near_sigmas)
+        if any(not math.isfinite(s) or s <= 0 for s in scales):
+            raise ValueError("scales and near_sigmas must be finite and positive")
+        if any(math.isnan(s) or s <= 0 for s in context_sigmas):
+            raise ValueError("context_sigmas must be positive; infinity is allowed")
+
         self.token_channels = token_channels
         self.metric_scale = metric_scale
         self.position_scale = position_scale
@@ -197,7 +157,9 @@ class PointPatchInteractionEncoder(nn.Module):
         self.register_buffer("proximity_scales", torch.tensor(proximity_scales, dtype=torch.float32))
         self.body_identity = nn.Parameter(torch.randn(6, token_channels) * 0.02)
         self.position = nn.Sequential(
-            nn.Linear(3, token_channels), nn.GELU(), nn.Linear(token_channels, token_channels)
+            nn.Linear(3, token_channels),
+            nn.GELU(),
+            nn.Linear(token_channels, token_channels),
         )
         self.context = GeometryCrossAttention(
             token_channels, context_sigmas, metric_scale, proximity_scales, None
@@ -228,66 +190,32 @@ class PointPatchInteractionEncoder(nn.Module):
         query_context: torch.Tensor | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """输入的 batch 维度可由 [B,T] flatten 得到；所有模态必须同步。
+        """patches 来自 PointPatchEncoder(return_intermediate=True)。
 
-        pointcloud [BT,N,>=3]；eef_pose [BT,9]；fingertip_points [BT,5,3]。
-        patches 包含 patch_token/local_token [BT,M,D]、patch_center [BT,M,3]、
-        neighbor_idx [BT,M,K]。可选 query_context [BT,D] 为已有任务/状态条件。
-        return_intermediate=True 时额外返回距离、掩码、gate 和逐头 attention；
-        attention 最后一项为 null，无观测时距离为 inf。完整网络不保证 SE(3)
-        不变性，只有相对几何在同步变换坐标系时保持一致。
+        eef_pose = pos3 + rot6d；指尖顺序为 thumb/index/middle/ring/pinky。
+        member_valid 仅屏蔽几何成员；attention 最后一项为 null。
         """
         if pointcloud.ndim != 3 or pointcloud.shape[-1] < 3:
             raise ValueError("pointcloud must have shape [B,N,C>=3]")
         batch = pointcloud.shape[0]
-        if batch == 0 or pointcloud.shape[1] == 0:
-            raise ValueError("pointcloud must have nonempty batch and point dimensions")
         if eef_pose.shape != (batch, 9) or fingertip_points.shape != (batch, 5, 3):
             raise ValueError("eef_pose must be [B,9] and fingertip_points [B,5,3]")
-        for key in ("patch_token", "local_token", "patch_center", "neighbor_idx"):
-            if key not in patches:
-                raise ValueError(f"missing {key}; use PointPatchEncoder(return_intermediate=True)")
         global_memory, local_memory = patches["patch_token"], patches["local_token"]
-        if (global_memory.ndim != 3 or global_memory.shape[0] != batch
-                or global_memory.shape[2] != self.token_channels):
-            raise ValueError("patch_token must have shape [B,M,token_channels]")
-        if local_memory.shape != global_memory.shape:
-            raise ValueError("local_token and patch_token must have equal shapes")
-        if global_memory.shape[1] == 0:
-            raise ValueError("at least one patch is required")
-        tensors = (global_memory, local_memory, eef_pose, fingertip_points)
-        if any(t.device != pointcloud.device for t in tensors):
-            raise ValueError("pointcloud, patch tokens and body poses must share one device")
-        if any(not t.is_floating_point() for t in (pointcloud, *tensors)):
-            raise ValueError("coordinates and patch features must be floating-point tensors")
-        if local_memory.dtype != global_memory.dtype:
-            raise ValueError("local_token and patch_token must have equal dtypes")
-        if not torch.isfinite(global_memory).all() or not torch.isfinite(local_memory).all():
-            raise ValueError("patch features must be finite; clean invalid raw points before point_patch")
         centers, indices = patches["patch_center"], patches["neighbor_idx"]
-        if centers.device != pointcloud.device or indices.device != pointcloud.device:
-            raise ValueError("patch centers and indices must share the pointcloud device")
-        if not centers.is_floating_point():
-            raise ValueError("patch_center must be floating point")
-        if centers.shape != (*global_memory.shape[:2], 3) or indices.shape[:2] != global_memory.shape[:2]:
-            raise ValueError("patch centers and neighbor indices do not match patch tokens")
         if indices.ndim != 3 or indices.dtype != torch.long:
             raise ValueError("neighbor_idx must be a torch.long tensor with shape [B,M,K]")
         if indices.numel() == 0 or indices.min() < 0 or indices.max() >= pointcloud.shape[1]:
             raise ValueError("neighbor_idx contains empty or out-of-bounds indices")
-        if member_valid is not None and member_valid.shape != indices.shape:
-            raise ValueError("member_valid must have shape [B,M,K]")
         if member_valid is not None and (
-            member_valid.device != pointcloud.device or member_valid.dtype != torch.bool
+            member_valid.shape != indices.shape or member_valid.dtype != torch.bool
         ):
-            raise ValueError("member_valid must be a boolean mask on the pointcloud device")
+            raise ValueError("member_valid must be boolean with shape [B,M,K]")
+
         anchors = torch.cat((eef_pose[:, None, :3], fingertip_points), 1).float()
-        if not torch.isfinite(anchors).all():
-            raise ValueError("body anchors must be finite; use explicit modality validity, not zero-dropout")
         with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
-            rotation = _rotation_from_columns_6d(eef_pose[:, 3:])
+            rotation = rotation_from_columns_6d(eef_pose[:, 3:])
             members = index_points(pointcloud[..., :3], indices)
-            relative, distance, observed = _nearest_patch_evidence(
+            relative, distance, observed = nearest_patch_evidence(
                 anchors, members, rotation, member_valid
             )
             center_valid = torch.isfinite(centers).all(-1)
@@ -295,7 +223,6 @@ class PointPatchInteractionEncoder(nn.Module):
             center_delta = safe_centers[:, None] - anchors[:, :, None]
             center_relative = torch.einsum("bqmc,bcd->bqmd", center_delta, rotation)
             center_distance = center_delta.norm(dim=-1)
-            # 全空 patch 的几何和特征都不可作为证据使用。
             context_valid = center_valid[:, None] & observed
             nearest = distance.min(-1).values
             has_observation = torch.isfinite(nearest)
@@ -309,12 +236,6 @@ class PointPatchInteractionEncoder(nn.Module):
         position = (anchors / self.position_scale).to(self.position[0].weight.dtype)
         query = self.body_identity[None] + self.position(position)
         if query_context is not None:
-            if query_context.shape != (batch, self.token_channels):
-                raise ValueError("query_context must have shape [B,token_channels]")
-            if query_context.device != query.device or not query_context.is_floating_point():
-                raise ValueError("query_context must be floating point on the query device")
-            if not torch.isfinite(query_context).all():
-                raise ValueError("query_context must be finite")
             query = query + query_context[:, None].to(query.dtype)
         context, context_attention, _ = self.context(
             query, global_memory, center_relative, center_distance, context_valid
@@ -352,7 +273,6 @@ class PointPatchInteractionEncoder(nn.Module):
 
 
 def example() -> None:
-    """仅依赖 PyTorch 的合成输入前向示例，不触发 FPS 或预训练模型。"""
     torch.manual_seed(0)
     batch_size, num_points, num_patches, group_size, channels = 2, 64, 16, 8, 192
     pointcloud = torch.rand(batch_size, num_points, 3) * 0.2
