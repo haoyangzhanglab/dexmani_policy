@@ -14,6 +14,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     knn_point,
     resolve_fps_random_config,
 )
+from dexmani_policy.agents.obs_encoder.pointcloud.semantic_fusion import PointPatchSemanticFusion
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import PatchEncoder
 
 
@@ -102,7 +103,11 @@ class PointPatchBlock(nn.Module):
 
 
 class PointPatchEncoder(nn.Module):
-    """Encode XYZ[RGB] into patch_token [B, M, D] and patch_center [B, M, 3]."""
+    """Encode XYZ[RGB] into patch_token [B,M,D] and patch_center [B,M,3].
+
+    semantic_channels 启用 local_token 后的可选图像语义残差；point_uv 必须
+    对应同一输入点序列，图像特征/投影每次观测只计算一次。默认参数保留纯几何路径。
+    """
 
     supports_global_token = False
     supports_intermediate_outputs = True
@@ -120,6 +125,8 @@ class PointPatchEncoder(nn.Module):
         rope_scale: float = 1.0,
         rope_base: float = 10000.0,
         fps_random_config: dict | None = None,
+        semantic_channels: int | None = None,
+        semantic_gate_init: float = 0.1,
     ):
         super().__init__()
         if input_channels not in (3, 6):
@@ -151,16 +158,35 @@ class PointPatchEncoder(nn.Module):
             [PointPatchBlock(token_channels, num_heads, mlp_ratio) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(token_channels)
+        self.semantic_fusion = None
+        if semantic_channels is not None:
+            self.semantic_fusion = PointPatchSemanticFusion(
+                image_channels=semantic_channels,
+                token_channels=token_channels,
+                gate_init=semantic_gate_init,
+            )
 
     def forward(
         self,
         pointcloud: torch.Tensor,
         return_intermediate: bool = False,
+        *,
+        image_tokens: torch.Tensor | None = None,
+        point_uv: torch.Tensor | None = None,
+        view_weight: torch.Tensor | None = None,
+        image_hw: tuple[int, int] | None = None,
+        patch_grid_size: tuple[int, int] | None = None,
     ) -> dict[str, torch.Tensor]:
+        semantic_inputs = (image_tokens, point_uv, view_weight, image_hw, patch_grid_size)
+        use_semantics = any(value is not None for value in semantic_inputs)
+        if use_semantics and (self.semantic_fusion is None or any(value is None for value in semantic_inputs)):
+            raise ValueError("set semantic_channels and provide all five semantic inputs")
         if pointcloud.ndim != 3 or pointcloud.size(-1) < self.input_channels:
             raise ValueError(
                 f"Expected [B, N, C] with C >= {self.input_channels}, got {tuple(pointcloud.shape)}"
             )
+        if use_semantics and (point_uv.ndim != 4 or point_uv.shape[2] != pointcloud.shape[1]):
+            raise ValueError("point_uv must preserve the input point order and count: [B,V,N,2]")
         if pointcloud.size(1) < max(self.num_patches, self.group_size):
             raise ValueError("N must be at least max(num_patches, group_size)")
 
@@ -183,9 +209,15 @@ class PointPatchEncoder(nn.Module):
             patch_input = torch.cat((relative_xyz, neighbor_feature), dim=-1)
 
         local_token = self.patch_encoder(patch_input)
-        cos, sin = self.rope(patch_center)
-
         patch_token = local_token
+        semantic_outputs = None
+        if use_semantics:
+            semantic_outputs = self.semantic_fusion(
+                local_token, neighbor_idx, image_tokens, point_uv, view_weight,
+                image_hw, patch_grid_size, return_intermediate=return_intermediate,
+            )
+            patch_token = semantic_outputs["fused_token"]
+        cos, sin = self.rope(patch_center)
         for block in self.blocks:
             patch_token = block(patch_token, cos, sin)
         patch_token = self.norm(patch_token)
@@ -197,6 +229,9 @@ class PointPatchEncoder(nn.Module):
                 neighbor_idx=neighbor_idx,
                 local_token=local_token,
             )
+            if semantic_outputs is not None:
+                outputs["fused_local_token"] = semantic_outputs["fused_token"]
+                outputs.update({key: value for key, value in semantic_outputs.items() if key != "fused_token"})
         return outputs
 
     @property
