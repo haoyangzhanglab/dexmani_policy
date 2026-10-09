@@ -1,7 +1,3 @@
-"""世界坐标系下的 wrist / fingertip 空间编码，不执行坐标系变换。"""
-
-from __future__ import annotations
-
 import math
 
 import torch
@@ -11,33 +7,12 @@ import torch.nn.functional as F
 from dexmani_policy.agents.position_encodings import NeRFSinusoidalPosEmb3D
 
 
-def rotation_from_columns_6d(rotation: torch.Tensor) -> torch.Tensor:
-    """前两列依次拼接的 rot6d -> 旋转矩阵；仅用于编码腕部朝向。"""
-    rotation = rotation.float()
-    first, second = rotation[..., :3], rotation[..., 3:]
-    if not torch.isfinite(rotation).all() or (first.norm(dim=-1) < 1e-6).any():
-        raise ValueError("rotation contains invalid first columns")
-    x = F.normalize(first, dim=-1)
-    y = second - (second * x).sum(-1, keepdim=True) * x
-    tolerance = 1e-6 * second.norm(dim=-1).clamp_min(1.0)
-    if (y.norm(dim=-1) < tolerance).any():
-        raise ValueError("rotation columns must be linearly independent")
-    y = F.normalize(y, dim=-1)
-    return torch.stack((x, y, torch.cross(x, y, dim=-1)), dim=-1)
-
-
 class WristFingertipEncoder(nn.Module):
-    """位置 Fourier 特征 + 身份 + 腕部朝向 + 整体手形，输出六个 token。
+    """编码米制世界系 wrist / fingertip，输出 [B,6,D] token 与 [B,6,3] center。
 
-    输入使用同一世界坐标系、米制、未做逐轴数据归一化的观测：
-    ``eef_pose: [B,9]`` = wrist XYZ + rot6d（旋转矩阵前两列依次拼接）；
-    ``fingertip_points: [B,5,3]``，也接受仿真存储的 ``[B,15]``。
-    固定顺序为 wrist / thumb / index / middle / ring / pinky。
-
-    手形用五指到腕部的位移编码，位移仍沿世界坐标轴，不乘腕部旋转。
-    所有 token 均保留绝对世界位置；朝向和整体手形作为共享上下文。
-    ``hand_center`` 返回原始米制世界位置，可直接作为场景交互锚点。
-    ``max_wavelength`` 单位为米，默认六频率对应 0.64 至 0.02 m。
+    eef_pose [B,9] 为 XYZ + 有效 rot6d（旋转矩阵前两列依次拼接）；
+    fingertip_points 为 [B,5,3] 或 [B,15]，顺序 thumb/index/middle/ring/pinky。
+    输出按 wrist、五指排列；位置与手形位移均沿世界轴，max_wavelength 单位为米。
     """
 
     def __init__(
@@ -49,10 +24,9 @@ class WristFingertipEncoder(nn.Module):
         max_wavelength: float = 0.64,
     ):
         super().__init__()
-        if type(token_channels) is not int or token_channels <= 0:
-            raise ValueError("token_channels must be a positive integer")
-        if any(not math.isfinite(s) or s <= 0 for s in (position_scale, hand_scale, max_wavelength)):
-            raise ValueError("position_scale, hand_scale and max_wavelength must be finite and positive")
+        if min(position_scale, hand_scale, max_wavelength) <= 0:
+            raise ValueError("position_scale, hand_scale and max_wavelength must be positive")
+
         self.token_channels = token_channels
         self.position_scale = float(position_scale)
         self.hand_scale = float(hand_scale)
@@ -88,14 +62,8 @@ class WristFingertipEncoder(nn.Module):
             fingertip_points = fingertip_points.reshape(batch, 5, 3)
         if fingertip_points.shape != (batch, 5, 3):
             raise ValueError("fingertip_points must have shape [B,5,3] or [B,15]")
-        if not eef_pose.is_floating_point() or not fingertip_points.is_floating_point():
-            raise ValueError("eef_pose and fingertip_points must be floating-point tensors")
-        if eef_pose.device != fingertip_points.device:
-            raise ValueError("eef_pose and fingertip_points must be on the same device")
-        if not torch.isfinite(eef_pose).all() or not torch.isfinite(fingertip_points).all():
-            raise ValueError("eef_pose and fingertip_points must contain finite values")
 
-        # 几何和 Fourier 相位使用 FP32；只在进入可学习投影时转换精度。
+        # 几何和 Fourier 相位保持 FP32。
         with torch.autocast(device_type=eef_pose.device.type, enabled=False):
             wrist = eef_pose.float()
             fingertips = fingertip_points.float()
@@ -104,8 +72,10 @@ class WristFingertipEncoder(nn.Module):
                 (centers / self.position_scale,
                  self.position_pe(centers * (2 * math.pi / self.max_wavelength))), dim=-1
             )
-            rotation = rotation_from_columns_6d(wrist[:, 3:])
-            orientation = torch.cat((rotation[..., 0], rotation[..., 1]), dim=-1)
+            first, second = wrist[:, 3:6], wrist[:, 6:9]
+            x = F.normalize(first, dim=-1)
+            y = F.normalize(second - (second * x).sum(-1, keepdim=True) * x, dim=-1)
+            orientation = torch.cat((x, y), dim=-1)
             hand_offsets = (fingertips - wrist[:, None, :3]) / self.hand_scale
 
         dtype = self.position_embed[0].weight.dtype
