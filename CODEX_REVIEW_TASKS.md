@@ -2,7 +2,8 @@
 
 > 编写日期：2026-10-09（Asia/Shanghai）。
 > 审查基线：`haoyangzhanglab/dexmani_policy@184126352cc707b999c3eb005fb78841a6e62cd1`。
-> 状态：**待实施**。本文件是实施任务书；提交本文件不代表下列代码已经修改或验收通过。
+> 最终审查标记：`2026-10-09-final-v1`；复核 HEAD 为 `ea3de4e836aba0bbfd551eb7f556849d79c3b0d5`，该提交只新增任务书，业务代码基线未变。
+> 状态：**方案最终审查通过，代码待实施**。本文的通过结论针对方案；不代表下列代码已经修改或测试通过。
 
 ## 1. 目标与范围
 
@@ -85,7 +86,7 @@ F01 可另对照 [DP image dataset](https://github.com/real-stanford/diffusion_p
 
 **确认事实与触发条件**：训练 float/color 分支无条件 `/255`；验证已有 uint8/channel-last 检查。错误的 float raw RGB 可在训练中被再次缩放。合法 uint8 数据没有被证实存在这个问题。
 
-**实施**：在 raw RGB 进入空间变换或缩放前复用一个小型检查，放在现有 `preprocessing.py` 内即可。检查 dtype 为 uint8，最后三维为 HWC 且通道为 3；训练采样入口还应符合它实际接收的 `(T,H,W,3)`。验证/部署函数保留现有 `[...,H,W,3]` 前导维支持。NumPy/Torch 输入按原接口处理，并维持该模块按需导入 Torch 的特性。
+**实施**：在 raw RGB 进入空间变换或缩放前复用一个小型检查，放在现有 `preprocessing.py` 内即可。检查 dtype 为 uint8，最后三维为 HWC 且通道为 3；训练采样入口还应符合它实际接收的 `(T,H,W,3)`。验证/部署函数保留现有 `[...,H,W,3]` 前导维支持。NumPy/Torch 输入按原接口处理，并维持该模块按需导入 Torch 的特性。可直接抽取已有 validation 的“转 Tensor + 检查”片段供两条路径复用；训练分支和验证分支各检查一次，不在外层与被调用函数重复检查，不增加数组复制。
 
 raw 检查与模型已处理输入要分清：DP encoder 仍可接收 dataset 输出的 CHW uint8 或 float32 `[0,1]`。不把它们误判为非法 raw 数据，不加第二次缩放。保留 uint8 快路径、resize/crop/color 顺序、验证 center crop 与原有插值/量化方式；不做整图 min/max 扫描来猜输入约定。
 
@@ -103,7 +104,7 @@ raw 检查与模型已处理输入要分清：DP encoder 仍可接收 dataset �
 2. getter 保留无 holdout 返回 `None`；有 holdout 时才构造验证视图、执行现有有效窗口筛选、禁用增强并启用确定性 RGB 预处理。成功后缓存并返回同一验证视图。不能因 `copy.copy` 共用嵌套字典而反向改写训练 recipe。
 3. 显式请求的 holdout 全短/全无效时，维持明确失败；不能静默转成“无验证”，否则 VQ 的 best 选择可能从验证指标退回训练指标。未请求的无效 holdout 不阻断主训练。VQ 继续显式调用 getter；MultiTask 继续按需调用子数据集 getter。
 4. 从新生成的 `data_recipe.split_manifest` 中去掉仅用于诊断的 `val_windows`；不得为了填日志而触发 getter。VQ 已有顶层 `split_metadata.val_windows` 可记录实际验证 summary，无需新增诊断体系。
-5. 为避免仅移除诊断计数就拒绝旧 checkpoint，strict resume 比较时在副本中仅忽略确切路径 `data_recipe[*].split_manifest.val_windows`。不修改输入 contract，不改变 `facts_format`，不忽略整个 data recipe 或任意名字相似的字段。split 内容/摘要、mask、训练窗口与源行、normalizer 语义及数据身份继续按既有逻辑检查。
+5. 为避免仅移除诊断计数就拒绝旧 checkpoint，strict resume 比较时在副本中仅忽略确切路径 `data_recipe[*].split_manifest.val_windows`。不修改输入 contract，不改变 `facts_format`，不忽略整个 data recipe 或任意名字相似的字段。split 内容/摘要、mask、训练窗口统计、源行计数、normalizer 语义及数据身份继续按既有逻辑检查；恢复时不重拟合 normalizer。副本只用于比较，不把过滤后的历史 contract 写回 checkpoint。
 
 不使用 `~train_mask` 重建验证集，不改变 `actual_train_ids` 的现有语义，不把 holdout 加入 normalizer，也不在此项引入新的 split 策略。
 
@@ -112,7 +113,7 @@ raw 检查与模型已处理输入要分清：DP encoder 仍可接收 dataset �
 - 有效 train + 全短 val，以及有效 train + 全非有限窗口 val：仅构造主训练数据成功；显式请求验证明确失败。
 - 合法 val 请求两次不重复构造 sampler；验证增强关闭、RGB 确定性路径不变；无 holdout 仍返回 `None`。
 - train 与 holdout 源行隔离，normalizer 输入仍只来自合格训练窗口的唯一源行。
-- 旧 contract 只多 `val_windows` 时可通过；改变 split/mask、训练窗口或数据身份等受检语义仍失败。不要为兼容而拷贝整个旧 recipe 覆盖当前事实。
+- 旧 contract 只多 `val_windows` 时可通过，并确认比较前后两个输入均未被改写；改变 split/mask、训练窗口或数据身份等受检语义仍失败。不要为兼容而拷贝整个旧 recipe 覆盖当前事实。
 
 ### F08：R3D 分组点数下界
 
@@ -168,6 +169,7 @@ raw 检查与模型已处理输入要分清：DP encoder 仍可接收 dataset �
 
 ```json
 {
+  "_format": "best.v1",
   "ckpt_relpath": "checkpoints/<selected-milestone>.pt",
   "inference": {
     "use_ema": true,
@@ -178,12 +180,22 @@ raw 检查与模型已处理输入要分清：DP encoder 仍可接收 dataset �
 }
 ```
 
-1. **Writer 成对调整。** 原有不可变 `selection_result.json`、详细报告和 `--result-file` handoff 继续保存。成功后原子更新 `best_ckpt.json`，从同一个已完成结果复制 `ckpt_relpath` 与整个 `inference` 字典，并保留指向详细结果的引用。已有 `global_step/pct/selection_id` 可作为普通元数据保留，但不新增普通推理的过程证据要求。技术失败保持旧 best；正常全零结果的现有排名/发布语义不变。
-2. **普通 resolver 只解决如何推理。** `resolve_best_checkpoint(experiment_dir)` 从快照取得具体权重路径与 EMA/NFE，保留文件存在、目录归属以及参数类型/正整数检查。字段完整时不解引用 `selection_result/selection_summary`，不要求候选、阶段或 seed 记录。`inspect_policy` 保持现有显式 override 优先级和返回接口；加载使用实验保存配置及 checkpoint 内状态。
-3. **严格读取器归评测。** 在现有 `dexmani_policy/evaluation/protocol.py` 中提供明确的 `resolve_selection_checkpoint(experiment_dir, record_path=None)`（名称可依现有组织调整）；迁移现有 selection 证据检查，复用 loader 的小型路径解析逻辑。不要给普通加载增加 `strict/permissive/production` 模式矩阵。内部调用者一起改完，不保留两套半成品 resolver。
+`best.v1` 只是区分新快照与既有记录的一个标记，避免把缺字段的新快照误判为可回退的历史记录；不建立版本注册表、升级器或通用 schema 层。
+
+1. **Writer 成对调整。** 原有不可变 `selection_result.json`、详细报告和 `--result-file` handoff 继续保存。成功后原子更新 `best_ckpt.json`，显式写入 `_format=best.v1`，从同一个已完成结果复制 `ckpt_relpath` 与整个 `inference` 字典，并保留指向详细结果的引用；不要直接复制带 `selection.v2` 标记的整个 `best_info`。已有 `global_step/pct/selection_id` 可作为普通元数据保留，但不新增普通推理的过程证据要求。技术失败保持旧 best；正常全零结果的现有排名/发布语义不变。
+2. **普通 resolver 只解决如何推理。** `resolve_best_checkpoint(experiment_dir)` 识别 `best.v1` 后要求 `ckpt_relpath` 及完整 `inference`，其中 `use_ema` 必须为 bool、`inference_steps` 必须为正 int 且不接受 bool。保留文件存在和目录归属检查；不解引用 `selection_result/selection_summary`，也不验证候选、阶段或 seed。Writer 总是保存报告引用，但普通推理不以该引用存在/可读为前提。`inspect_policy` 保持现有显式 override 优先级和返回接口；加载使用实验保存配置及 checkpoint 内状态。
+3. **严格读取器归评测。** 在现有 `dexmani_policy/evaluation/protocol.py` 中提供明确的 `resolve_selection_checkpoint(experiment_dir, record_path=None)`（名称可依现有组织调整）；迁移现有 selection 证据检查，复用 loader 的小型路径解析逻辑。依赖方向只能是 evaluation 使用 loader：普通 loader/inspection 不反向导入 evaluation 或在模块顶层引入 Torch。不要增加 `strict/permissive/production` 模式矩阵。内部调用者一起改完，不保留两套半成品 resolver。
 4. **held-out best 也要走证据路径。** `dexmani_policy/eval_best_ckpt.py` 的普通 best 评测需要实际 selection task/seeds，不能只改显式 `--selection-record`。普通 best 评测保留原有 EMA/NFE override 能力；显式 handoff 仍拒绝冲突的 checkpoint、EMA/raw、NFE。`dexmani_policy/record_demo.py` 普通 best 可使用快照，显式 handoff 使用严格读取器。不要把只成功加载模型标成“已验证 held-out”。
-5. **快照与证据一致性。** 评测从新 best 进入详细记录时，核对二者的权重与 inference；详细记录继续检查 selection 成功状态、候选/阶段等现有事实，并检查实际 held-out seeds。不因拆分而丢失已有 global_step 对照。显式传入旧 handoff 时只跟随该 handoff，不再读当前 best 别名以替换其选择。
-6. **有限兼容。** 普通读取继续识别旧“仅引用”记录：引用可读时提取其中必要推理信息，不要求加载无关候选/阶段。旧 flat best 的既有配置 fallback 语义保留并明确提示其来源；新快照必须包含有效 inference，不得悄悄回退。只含引用且目标已丢失的旧文件无法恢复权重/推理参数，应明确报错并提示使用显式 checkpoint 和对应参数，不能猜 `latest`。不批量迁移历史实验。
+5. **快照与证据一致性。** 评测从新 best 进入详细记录时，先核对原始快照与记录的权重及 inference，再应用普通评测允许的 override；不要把合法 override 当作记录损坏。详细记录继续检查 selection 成功状态、候选/阶段等现有事实，并检查实际 held-out seeds，不丢失已有 global_step 对照。每次调用只解析一次别名，后续传递已解析的 `(info, concrete_path)`；显式 handoff 只跟随该 handoff，不再读取当前 best 替换选择。
+6. **有限兼容。** 读取已有旧格式即可，不为未发布的中间设计增加兼容分支，具体规则如下。不批量迁移历史实验。
+
+| 普通 reader 读到的记录 | 最小处理规则 |
+|---|---|
+| `_format=best.v1` | 从自身读取完整路径/EMA/NFE；缺失或非法即报错，不回退配置、不靠 CLI override 修补坏记录；不读取详细报告。 |
+| 旧“仅 selection_result 引用” | 按已有相对路径规则读取目标 `selection.v2`；要求成功状态及有效路径/EMA/NFE，但不要求 all_results/stages。目标丢失则报错，并提示显式 checkpoint + 对应参数，不能猜 `latest`。 |
+| 既有 flat `selection.v2` | 普通加载同样只检查成功状态和必要推理字段；严格评测仍执行完整证据检查。 |
+| 已有无格式标记的历史 flat best | 保留历史 fallback：只有未提供的 inference 字段可取保存配置默认值；已有字段非法仍报错，并明确提示实际来源。 |
+| 带未知 `_format` 的记录 | 明确拒绝，不伪装成无格式历史记录。 |
 
 必须保留的最小部署边界：实际 checkpoint、保存的模型/输入配置、EMA/raw、NFE、动作/观测维度和归一化。不要顺带修改 Real 的控制接口、RTC、动作长度、单位、关节映射或时序检查，也不需要改另一个机器人仓库。
 
@@ -194,12 +206,15 @@ raw 检查与模型已处理输入要分清：DP encoder 仍可接收 dataset �
 | 新 best，详细 selection 报告完整 | 与旧成功解析结果的 checkpoint、EMA、NFE 相同 |
 | 新 best，删除/不复制候选、阶段或整个详细报告 | 普通 `inspect_policy` 仍成功；需要证据的 held-out/显式 handoff 明确失败 |
 | 普通 best 显式指定 weights 或 NFE | 按现有 override 优先级生效；未覆盖部分取 best，不丢失另一项参数 |
+| `best.v1` 缺失/非法 inference，或 NFE 为 bool | 明确失败，不能走历史配置 fallback；无格式旧 flat 缺字段的既有 fallback 保留 |
 | 旧仅引用记录，目标存在 | 普通加载可取得原选择；严格评测仍执行原证据检查 |
 | 旧仅引用记录，目标不存在 | 明确失败，不猜 checkpoint、不声称可自动兼容 |
 | new best 快照与被引用选择不一致 | 评测拒绝；普通推理只按快照实际选择加载，不声称已核验证据 |
 | 显式 handoff 与 checkpoint/EMA/NFE override 冲突 | 继续拒绝；无冲突时使用同一固定选择 |
 | held-out seed 与 selection seed 重叠 | 继续拒绝；普通 best 推理不要求 seed 报告 |
 | selection 发布技术失败 | 旧 best 不变；不发布不完整快照 |
+
+另核对普通 `inspect_policy` 导入仍无需 Torch；成功解析后即使 best 别名变化，下游也继续使用已解析选择。无需并发测试框架，一次解析后替换临时文件即可检查传参是否正确。
 
 用临时实验目录、最小 JSON 和标记 checkpoint 文件可验证解析与路由；标记文件不能证明 Torch 权重恢复。确需验证权重恢复时使用小型真实 checkpoint，不运行 selection rollout 或真机。
 
@@ -235,14 +250,14 @@ agent:
 
 **选定方案：拒绝非法输入，不做隐式纠正。**
 
-1. 在 `SequenceSampler` 入口一次检查 sequence length 是正整数；两个 padding 是整数且满足 `0 <= pad < sequence_length`。沿用本文件现有 `Integral` 风格，允许 NumPy integer、拒绝 bool；不要把小数/字符串强转为整数。
+1. 在 `SequenceSampler` 入口一次检查 sequence length 是正整数；两个 padding 是整数且满足 `0 <= pad < sequence_length`。沿用本文件现有 `Integral` 风格，允许 NumPy integer、拒绝 bool；不要把小数/字符串强转为整数。通过类型与范围检查后，将这三个值统一转为 Python `int` 再做减法或传入 Numba，避免无符号整数下溢。
 2. 检查后统一用这些值计算 `min_required_length`、筛掉过短 episode、生成索引。过短 episode 的现有跳过/全空报错行为保持；不以改变短片段策略作为简化手段。
-3. 当前 `create_indices` 在仓库内仅由 `SequenceSampler` 调用。确认这一点后将其作为内部 Numba 索引内核（建议名 `_create_indices`），移除其中 padding clamp 及重复的短 episode 策略分支；它接收已验证参数和已筛选 mask，只保留索引计算与必要一致性断言。不要新增公开 wrapper 或第二套 validator 来兼容一个未在仓库使用的低层入口。
-4. 保持 Numba 内核，不把依赖 Python 类型判断的入口校验塞进 nopython 循环。除这个内部函数外，不扩大改名范围。
+3. 当前 `create_indices` 在仓库内仅由 `SequenceSampler` 调用。确认这一点后将其明确为内部 Numba 索引内核，移除其中 padding clamp 及重复的短 episode 策略分支；它接收已验证参数和已筛选 mask，只保留索引计算与必要一致性断言。保留现有函数名即可，不为本次整理另造公开 wrapper 或第二套 validator。
+4. 保持 Numba 内核，不把依赖 Python 类型判断的入口校验塞进 nopython 循环，不扩展到其他 sampler API 的整理。
 
-**验收**：H=1 的 padding 只能为 0；负值、`pad>=H`、小数、bool 明确失败；合法端点 0 和 H-1、两侧 padding、被跳过的短 episode、所有 episode 被排除的情况保持原语义。用独立窗口 oracle 验证合法输入的行序、重复边界与窗口数，不能只把旧实现复制成“期望值”。同时核对 F12 每个 key 的裁剪长度。
+**验收**：H=1 的 padding 只能为 0；负值、`pad>=H`、小数、bool 明确失败；合法端点 0 和 H-1、两侧 padding、被跳过的短 episode、所有 episode 被排除的情况保持原语义。至少包含 `np.uint64` 的 H=4、两侧 padding=3：规范化后的最短长度应为 -2，而不是下溢成巨大正数。用独立窗口 oracle 验证合法输入的行序、重复边界与窗口数，不能只把旧实现复制成“期望值”。同时核对 F12 每个 key 的裁剪长度。
 
-**收益/风险**：删除了两层对同一输入的不同解释；不承诺默认训练速度提升。低层非法参数行为有意变为明确拒绝，合法配置不变。
+**收益/风险**：删除了两层对同一输入的不同解释；不承诺默认训练速度提升。SequenceSampler 入口明确拒绝非法参数；内部索引内核只接受已校验输入，合法配置不变。
 
 ### F16：在现有文档中区分 RGB 主路径与 RGB-D 可选 API
 
@@ -270,6 +285,8 @@ agent:
 
 每次提交只说明实际完成的项目、行为变化和验证结果。不要把 F11/F16 说成 bug 修复，也不要把 F12/F38 的机制收益写成已测吞吐收益。
 
+执行时先检查工作区现状，保留用户已有改动。以本文为具体需求，按受影响调用链补查源码；无需重新遍历全仓或七个参考仓库，只有出现具体语义疑点时再读取相应固定版本文件。复用同一组小型 dataset/codebook fixtures，避免按每个 ID 重建测试设施。非关键实现选择采用最小方案并记录；某项局部验证受阻时，继续其他可独立完成的项目，不重复请求常规细节确认。
+
 ## 7. 验收方式与完成标准
 
 ### 局部检查即可证明的内容
@@ -286,13 +303,15 @@ agent:
 
 不要为单纯文档/同值 YAML 写实现镜像测试。必要回归测试应覆盖真实边界和跨层行为；若实施时仍无专用测试目录，可将这些定向检查合并到少量测试文件，例如 `tests/test_review_fixes.py`，标准库 `unittest` 已足够，无需新依赖。独立 oracle 用窗口位置的数学定义和边界重复语义生成期望值；不要要求执行者依赖本仓库以外的历史 review 临时脚本。
 
-在仓库已有运行依赖可用时，使用现有入口做配置联动检查：
+在仓库已有运行依赖可用时，优先复用现有环境，用现有入口检查直接相关配置和两个继承配置：
 
 ```bash
-python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d sat maniflow multitask_dit ddp/sat ddp/dqrise
+python dexmani_policy/smoke_test.py --config-only dp dqrise r3d sat ddp/sat ddp/dqrise
 ```
 
-这个命令导入真实目标，但不等于完整运行/训练。若定向检查已证明改动，不扩展成长时间 smoke、DDP 训练、性能 sweep 或任务成功率实验。只有具体剩余风险需要时才运行对应的小型前向/恢复检查。
+这个命令导入真实目标，但不执行训练。若改到公共配置校验或 MultiTask 调用者，再针对影响补充 `dp3/maniflow/multitask_dit`，不要无差别重复所有配置。**本轮不要运行不带 `--config-only` 的 `smoke_test.py`：当前普通 smoke 会执行优化器更新。** 前向与恢复用小张量或合成 checkpoint 定向检查，不借道完整 Trainer，也不运行 selection rollout、性能 sweep 或任务成功率实验。
+
+验证达到每项的局部验收条件后即停止追加测试。F11/F16 不需要完整模型 roundtrip；F08 不需要预训练 backbone；F38 的运行时状态可用很小的持久化代码本验证。缺依赖时优先查找已有环境，不为这轮修复搭建完整训练栈或下载预训练权重。
 
 验收不允许用通用 `except` 吞错、放宽正常训练语义或强改数据来制造通过。缺 Torch、Numba、Zarr、权重或相应硬件时，准确记录 **NOT VERIFIED**；stub 只证明它覆盖的边界，不能代替真实库数值/后端检查。GPU 性能与任务质量没有测量时明确写“未测”，不作为本轮实施的前置门槛。
 
