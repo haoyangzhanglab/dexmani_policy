@@ -203,7 +203,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 `sync_down.sh` 保留已有不可变产物，只更新指定训练文件与可变引用；配置或来源身份冲突时停止。参数、同步顺序和失败处理见 [SSH 服务器训练部署](docs/SSH服务器训练部署.md)。实验盘点使用 `bash scripts/utils/clean_experiments.sh`，只报告事实，不删除或移动实验。
 
-Dataset 按需读取 Zarr 窗口，normalizer 使用有效训练窗口的唯一源行；数据与恢复合同见 [项目架构](docs/项目架构.md)。Real 真机运行入口由 `dexmani_real` 提供。真机运动需明确授权。
+Dataset 按需读取 Zarr 窗口，normalizer 使用有效训练窗口的唯一源行；数据与恢复合同见 [项目架构](docs/项目架构.md)。Real 真机运行入口由 `dexmani_real` 提供，执行长度、预取、运行模式和预算由 Real 管理；模型配置与点云生产 recipe 的职责见 [部署边界](docs/项目架构.md#24-deployment-boundary)。真机运动需明确授权。
 
 ## 项目结构
 

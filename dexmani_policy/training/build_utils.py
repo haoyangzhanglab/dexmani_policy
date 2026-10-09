@@ -518,12 +518,8 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
         shape = buffer["point_cloud"].shape
         if len(shape) != 3 or shape[1] != count:
             raise ValueError("Stored point count disagrees with pointcloud_config")
-        encoder = cfg.agent.get("pc_encoder_config") or {}
-        for configured in (cfg.agent.get("num_points"), encoder.get("num_points")):
-            if configured is not None and configured != count:
-                raise ValueError(
-                    "Agent point count disagrees with the actual training cloud"
-                )
+        # This is the producer's saved input shape, not the encoder's FPS count.
+        # Encoder-specific channel/patch/point constraints remain in its forward path.
         runtime["pointcloud"] = dict(cloud)
     if "fingertip_points" in dataset.sensor_modalities:
         links = attrs.get("fingertip_link_names")
