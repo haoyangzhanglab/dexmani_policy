@@ -29,24 +29,26 @@ from dexmani_policy.utils.atomic import atomic_path
 def resolve_selection_checkpoint(experiment_dir, record_path=None):
     """Resolve a current selection result, snapshot, or explicit writer handoff."""
     from dexmani_policy.agents.loader import (
-        _read_record, _record_path, _validate_record_inference,
+        _read_record, _record_path, _read_selection_reference, _validate_record_inference,
     )
 
     root = Path(experiment_dir).resolve()
     info = _read_record(Path(record_path) if record_path else root / "best_ckpt.json")
-    if record_path is None and info.get("_format") != "best.v1":
-        raise ValueError("best_ckpt.json requires best.v1; rerun checkpoint selection")
+    if "_format" in info and info["_format"] not in ("best.v1", "selection.v2"):
+        raise ValueError(f"Unsupported selection record format: {info['_format']!r}")
     snapshot = info if info.get("_format") == "best.v1" else None
     if snapshot is not None:
         _validate_record_inference(snapshot)
         snapshot_path = _record_path(root, snapshot.get("ckpt_relpath"),
                                      checkpoint=True, immutable=True)
-    # Only explicit handoffs may contain a bare reference; ordinary best is best.v1.
-    if snapshot is not None or (record_path is not None and set(info) == {"selection_result"}):
-        info = _read_record(_record_path(root, info.get("selection_result")))
+    if snapshot is not None or ("_format" not in info and "selection_result" in info):
+        info = _read_selection_reference(root, info)
     if info.get("_format") != "selection.v2":
         raise ValueError("Selection evidence requires selection.v2")
     _validate_record_inference(info)
+    mode = info["inference"].get("policy_seed_mode")
+    if not isinstance(mode, str) or not mode:
+        raise ValueError("Selection evidence requires inference.policy_seed_mode")
     resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
     if snapshot is not None:
         if snapshot_path != resolved or snapshot["inference"] != info["inference"]:

@@ -13,6 +13,7 @@ from dexmani_policy.agents.loader import (
     load_experiment_config,
     resolve_best_checkpoint,
     resolve_checkpoint,
+    warn_legacy_inference_defaults,
 )
 from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.utils.validation import positive_int
@@ -84,6 +85,11 @@ def inspect_policy(
     )
     defaults = dict(cfg.get("eval", {})) if weights is None or inference_steps is None else {}
     if resolved_best is not None:
+        warn_legacy_inference_defaults(
+            resolved_best[0], source="saved config.yaml eval defaults",
+            overridden=(["use_ema"] if weights is not None else [])
+            + (["inference_steps"] if inference_steps is not None else []),
+        )
         defaults.update(resolved_best[0]["inference"])
     if weights is None:
         if type(defaults.get("use_ema")) is not bool:

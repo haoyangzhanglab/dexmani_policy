@@ -102,15 +102,15 @@ bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<ta
 
 续训时显式 `task_name` 仅断言来源任务身份，必须与保存值完全相同（复合任务包含顺序）；冲突重复参数也会拒绝。未显式指定时使用保存任务，不受当前 YAML 默认任务影响。远程 `train_remote.sh <config> <task> +resume_from=...` 的数据预检与训练共享配方解析，检查保存的单任务/child 数据路径或显式迁移路径；`--check` 只保证目录存在，不保证数据完整或训练成功。来源配置缺失或损坏时拒绝续训，不回退到当前配方。
 
-保存配置记录 HF 结构及闭集文本维度；完整权重恢复不重新加载初始化权重。HF checkpoint 必须保存 backbone architecture，缺失即拒绝恢复，不再回退配置缓存。固定文本仅保留任务映射、embedding 表和 projection，未知文本报错；旧闭集 checkpoint 中额外保存的 `text_encoder.*` 不再自动删除，由 strict load 拒绝。原子 `.pt` 格式不变，推理读取仍会读同文件字节，并不跳过 optimizer I/O。
+保存配置记录 HF 结构及闭集文本维度；完整权重恢复不重新加载初始化权重。HF 配置已有 backbone architecture 时直接使用；旧配置缺少该字段时沿用 model_name/config cache 构造结构（冷缓存不保证可恢复），仍设置 load_pretrained=False 并严格加载 checkpoint 权重。显式非法 architecture 仍报错。固定文本仅保留任务映射、embedding 表和 projection，未知文本报错；旧闭集 checkpoint 中额外保存的 `text_encoder.*` 不再自动删除，由 strict load 拒绝。原子 `.pt` 格式不变，推理读取仍会读同文件字节，并不跳过 optimizer I/O。
 
-只支持当前产物格式：训练 checkpoint `simple.v3`、VQ checkpoint/NPZ v3、best 快照 `best.v1`、selection 证据 `selection.v2`。不迁移历史 checkpoint，不从旧 best 记录回退配置默认值。显式 `--selection-record` 继续支持当前 writer 生成的结果引用文件。
+训练 checkpoint 使用 `simple.v3`，VQ checkpoint/NPZ 使用 v3。新 best writer 保存 `best.v1`；读取兼容旧 selection 引用、flat `selection.v2` 和无格式 flat best。仅无格式 flat best 缺失的 EMA/NFE 可按消费者原规则取保存配置默认值，并提示来源；显式非法字段及未知格式仍拒绝。严格评测与显式 `--selection-record` 要求完整 `selection.v2` 证据，不以配置 fallback 代替证据。历史产物不迁移、不改写。
 
 完整续训要求 `resume_contract.facts_format=1`，CUDA RNG 为每个 rank 的单个 Tensor；CPU RNG 的 CUDA 字段为 null。不再转换无版本的旧 contract 或根据旧设备配置推测 RNG 列表槽位。需要这些旧格式的实验使用其原源码版本恢复，当前代码不会改写历史产物或自动退回 weights-only。
 
-数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。恢复要求保存数据身份字段；已知 revision 改变或丢失会报错。当前未版本化 Dataset 显式保存 `revision:null`，此时提示“数据身份未验证”。revision 是生产者声明，不是内容 hash。
+数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。历史 checkpoint 缺少数据身份时警告“数据身份未验证”；已有身份仍校验，已知 revision 改变或丢失会报错。当前未版本化 Dataset 显式保存 `revision:null`，同样提示身份未验证。revision 是生产者声明，不是内容 hash。
 
-显式训练 `dataset.split_manifest` 决定最终 episode 集合，新训练须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时保留原 seed/比例/cap。恢复使用保存的清单内容，actual IDs 和 mask 必须与该清单一致，外部清单文件可以不存在；不恢复旧 manifest+cap 子集；窗口长度和所选 observation/action 的 finite 检查仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单。
+显式训练 `dataset.split_manifest` 决定最终 episode 集合，新训练须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时保留原 seed/比例/cap。恢复使用保存的清单内容，actual IDs 必须是清单训练集合的非空、唯一、canonical 顺序子集，mask 与实际集合一致，外部清单文件可以不存在；兼容旧 manifest+cap 保存的子集，不重新抽样；窗口长度和所选 observation/action 的 finite 检查仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单。
 
 Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。支持 Gaussian **动作**归一化的 diffusion 策略必须同时设置 `agent.clip_sample=false`；DQ-RISE/VQ 手部原型仅支持 `action:auto/limits`，关闭裁剪也不支持 Gaussian。Gaussian 观测和 flow 不受 diffusion 裁剪限制。true→false 属于实验变化，不能静默严格续训。
 
@@ -140,7 +140,7 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 
 导出只生成 Policy 使用的完整 residual-code 组合码本。未使用的分组码本及 `--include_per_group` 已移除；含 `_group_sorted_poses_g*` 扩展字段的旧 NPZ 会被拒绝，可从原 VQ checkpoint 另行导出标准 NPZ。标准 v3 NPZ 与 Policy 内嵌码本保持不变。
 
-训练过程保留分组码本使用图和损失曲线，导出时报告 decoder 范围与 PCA 诊断；码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。Policy 和 standalone VQ checkpoint 均保存 `split_metadata.normalization_spec`，导出缺少该字段的 checkpoint 会失败。
+训练过程保留分组码本使用图和损失曲线，导出时报告 decoder 范围与 PCA 诊断；码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。新 Policy 和 standalone VQ checkpoint 均保存 `split_metadata.normalization_spec`。旧 standalone v3 缺少该字段时沿原结构、state_dict 和 affine 校验导出，不推断或补写归一化模式；字段存在时检查结构，明确 Gaussian、identity 或非法模式在解码前拒绝。
 
 ## 验证
 

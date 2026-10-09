@@ -96,7 +96,7 @@ def validate_split_manifest(manifest, attrs, episode_count):
 
 
 def restore_split(saved, attrs, episode_count):
-    """Restore the exact saved manifest and masks."""
+    """Restore the saved actual subset, including historical manifest+cap runs."""
     from omegaconf import OmegaConf
 
     if OmegaConf.is_config(saved):
@@ -104,10 +104,17 @@ def restore_split(saved, attrs, episode_count):
     train, val, manifest, digest = validate_split_manifest(saved["content"], attrs, episode_count)
     if saved.get("sha256") != digest:
         raise ValueError("Saved split manifest digest mismatch")
-    if saved.get("actual_train_ids") != manifest["train_ids"]:
-        raise ValueError("Saved actual_train_ids must match the manifest train_ids")
-    for key, expected in (("train_mask", train.tolist()), ("val_mask", val.tolist())):
+    ids = manifest["episode_ids"]
+    actual = saved.get("actual_train_ids")
+    if (not isinstance(actual, list) or not actual or
+            any(not isinstance(i, str) for i in actual) or
+            len(set(actual)) != len(actual) or not set(actual) <= set(manifest["train_ids"])):
+        raise ValueError("Invalid saved actual_train_ids")
+    expected_train = [i in set(actual) for i in ids]
+    if actual != [i for i in ids if i in set(actual)]:
+        raise ValueError("Saved actual_train_ids must follow canonical episode order")
+    for key, expected in (("train_mask", expected_train), ("val_mask", val.tolist())):
         mask = saved.get(key)
         if not isinstance(mask, list) or any(type(v) is not bool for v in mask) or mask != expected:
-            raise ValueError(f"Saved split {key} does not match the manifest")
-    return train, val, manifest, digest
+            raise ValueError(f"Saved split {key} does not match actual IDs")
+    return np.asarray(expected_train, dtype=bool), val, manifest, digest

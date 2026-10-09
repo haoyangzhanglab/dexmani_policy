@@ -56,7 +56,7 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.agents.loader import resolve_best_checkpoint
+from dexmani_policy.agents.loader import resolve_best_checkpoint, warn_legacy_inference_defaults
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
@@ -103,8 +103,14 @@ def _resolve_demo_inference(
                      else resolve_best_checkpoint(exp_dir) if ckpt_tag == "best" else None)
     if resolved_best is not None:
         inference = resolved_best[0]["inference"]
-        use_ema = inference["use_ema"]
-        inference_steps_list = [inference["inference_steps"]]
+        warn_legacy_inference_defaults(
+            resolved_best[0], source="saved config.yaml eval.demo / eval defaults (True/10 if absent)",
+            overridden=(["use_ema"] if cli_use_ema is not None else [])
+            + (["inference_steps"] if cli_inference_steps is not None else []),
+        )
+        use_ema = inference.get("use_ema", use_ema)
+        if "inference_steps" in inference:
+            inference_steps_list = [inference["inference_steps"]]
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema

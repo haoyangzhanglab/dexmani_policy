@@ -183,10 +183,19 @@ def build_agent_contract(model) -> Dict[str, Any]:
 
 def validate_resume_contract(saved, current) -> None:
     """Compare saved and current runtime facts without altering either contract."""
-    saved, current = dict(saved), dict(current)
+    import copy
+
+    saved, current = copy.deepcopy(dict(saved)), copy.deepcopy(dict(current))
     if current.get("facts_format") != 1 or saved.get("facts_format") != 1:
         raise ValueError("Unsupported resume facts format; restore older formats with their original code")
     validate_data_identity(saved.pop("data_identity", None), current.pop("data_identity", None))
+    for contract in (saved, current):
+        recipes = contract.get("data_recipe")
+        if isinstance(recipes, list):
+            for recipe in recipes:
+                manifest = recipe.get("split_manifest") if isinstance(recipe, dict) else None
+                if isinstance(manifest, dict):
+                    manifest.pop("val_windows", None)
     differences = []
 
     def compare(left, right, path):
@@ -227,11 +236,14 @@ def validate_ema_resume_state(checkpoint: TrainCheckpoint, *, require_ema: bool)
 def validate_data_identity(saved, current, path="data_identity"):
     import warnings
 
+    if saved is None:
+        warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)
+        return
     if not isinstance(saved, dict) or not isinstance(current, dict):
         raise ValueError(f"{path}: checkpoint and current config require data identity mappings")
     if "tasks" in saved:
         current_tasks = current.get("tasks")
-        if not isinstance(current_tasks, dict) or set(saved["tasks"]) != set(current_tasks):
+        if not isinstance(saved["tasks"], dict) or not isinstance(current_tasks, dict) or set(saved["tasks"]) != set(current_tasks):
             raise ValueError(f"{path}: task identities must match")
         for task, identity in saved["tasks"].items():
             validate_data_identity(identity, current_tasks.get(task), f"{path}.{task}")

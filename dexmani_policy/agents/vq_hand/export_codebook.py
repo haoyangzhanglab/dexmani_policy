@@ -41,12 +41,24 @@ def extract_codebook(
         raise FileExistsError(f"Codebook already exists: {output}; use --overwrite explicitly")
     checkpoint_path = str(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    from dexmani_policy.agents.normalization import validate_dq_normalization
+    from dexmani_policy.agents.normalization import (
+        ALLOWED_NORMALIZATION_MODES, validate_dq_normalization,
+    )
 
-    spec = checkpoint.get("split_metadata", {}).get("normalization_spec")
-    if not isinstance(spec, dict):
-        raise ValueError("VQ checkpoint requires split_metadata.normalization_spec")
-    validate_dq_normalization(spec)
+    metadata = checkpoint["split_metadata"]
+    if not isinstance(metadata, dict):
+        raise ValueError("VQ checkpoint split_metadata must be a mapping")
+    if "normalization_spec" in metadata:
+        spec = metadata["normalization_spec"]
+        # Standalone VQ declares action only; policy specs also include observations.
+        if not isinstance(spec, dict) or any(
+            not isinstance(key, str) or not key or not isinstance(mode, str)
+            or mode not in ALLOWED_NORMALIZATION_MODES
+            or (mode == "auto" and key != "action")
+            for key, mode in spec.items()
+        ):
+            raise ValueError("VQ normalization_spec must map fields to valid modes")
+        validate_dq_normalization(spec)
     vqvae = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu")
     vqvae = vqvae.to(device).eval()
 
