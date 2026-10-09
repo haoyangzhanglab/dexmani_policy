@@ -1,4 +1,8 @@
-"""Encode normalized XHand history into five finger tokens; no modality fusion."""
+"""Encode XHand tactile history into five finger tokens.
+
+KineDex CNN: https://github.com/DinoMini00/KineDex_code
+Optional ECA: https://github.com/BangguWu/ECANet
+"""
 from __future__ import annotations
 
 from collections.abc import Mapping
