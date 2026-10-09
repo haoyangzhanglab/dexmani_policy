@@ -1,17 +1,12 @@
-"""Lightweight point-patch encoder with continuous 3D RoPE.
-
-Patch tokenization follows the Point-MAE/R3D family; 3D positional attention
-follows Sparse2Act. The module only encodes point clouds and keeps patch centers.
-"""
+"""Point-patch encoder with continuous 3D RoPE."""
 
 from __future__ import annotations
 
 import math
-from typing import Dict
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     farthest_point_sample,
@@ -22,7 +17,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import PatchEncoder
 
 
-class _RotaryPositionEncoding3D(nn.Module):
+class RotaryPositionEncoding3D(nn.Module):
     def __init__(
         self,
         head_dim: int,
@@ -52,7 +47,7 @@ class _RotaryPositionEncoding3D(nn.Module):
         return angles.cos().unsqueeze(1), angles.sin().unsqueeze(1)
 
     @staticmethod
-    def apply(
+    def apply_rotary(
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
@@ -64,7 +59,7 @@ class _RotaryPositionEncoding3D(nn.Module):
         return (x * cos + rotated * sin).to(dtype)
 
 
-class _PointPatchBlock(nn.Module):
+class PointPatchBlock(nn.Module):
     def __init__(
         self,
         channels: int,
@@ -73,6 +68,7 @@ class _PointPatchBlock(nn.Module):
     ):
         super().__init__()
         self.num_heads = num_heads
+        self.head_dim = channels // num_heads
         self.norm1 = nn.LayerNorm(channels)
         self.qkv = nn.Linear(channels, channels * 3)
         self.proj = nn.Linear(channels, channels)
@@ -92,14 +88,12 @@ class _PointPatchBlock(nn.Module):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         batch_size, num_tokens, channels = x.shape
-        head_dim = channels // self.num_heads
-
         qkv = self.qkv(self.norm1(x)).reshape(
-            batch_size, num_tokens, 3, self.num_heads, head_dim
+            batch_size, num_tokens, 3, self.num_heads, self.head_dim
         )
         q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
-        q = _RotaryPositionEncoding3D.apply(q, cos, sin)
-        k = _RotaryPositionEncoding3D.apply(k, cos, sin)
+        q = RotaryPositionEncoding3D.apply_rotary(q, cos, sin)
+        k = RotaryPositionEncoding3D.apply_rotary(k, cos, sin)
 
         context = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
         context = context.transpose(1, 2).reshape(batch_size, num_tokens, channels)
@@ -108,11 +102,7 @@ class _PointPatchBlock(nn.Module):
 
 
 class PointPatchEncoder(nn.Module):
-    """Encode a point cloud into spatial patch tokens.
-
-    XYZ must occupy the first three channels. Additional channels are treated as
-    point features. FPS/KNN operate directly in the supplied XYZ coordinate system.
-    """
+    """Encode XYZ[RGB] into patch_token [B, M, D] and patch_center [B, M, 3]."""
 
     supports_global_token = False
     supports_intermediate_outputs = True
@@ -133,17 +123,13 @@ class PointPatchEncoder(nn.Module):
     ):
         super().__init__()
         if input_channels not in (3, 6):
-            raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")
-        if num_patches <= 0 or group_size <= 0:
-            raise ValueError("num_patches and group_size must be positive")
-        if depth <= 0 or num_heads <= 0:
-            raise ValueError("depth and num_heads must be positive")
+            raise ValueError(f"input_channels must be 3 (XYZ) or 6 (XYZRGB), but got {input_channels}")
+        if min(token_channels, num_patches, group_size, depth, num_heads) <= 0:
+            raise ValueError("channels, patch sizes, depth and num_heads must be positive")
         if token_channels % num_heads != 0:
             raise ValueError("token_channels must be divisible by num_heads")
-        if (token_channels // num_heads) % 6 != 0:
-            raise ValueError("attention head dimension must be divisible by 6")
-        if not math.isfinite(mlp_ratio) or mlp_ratio <= 0:
-            raise ValueError("mlp_ratio must be finite and positive")
+        if not math.isfinite(mlp_ratio) or int(token_channels * mlp_ratio) < 1:
+            raise ValueError("mlp_ratio must be finite and produce at least one hidden channel")
 
         self.input_channels = input_channels
         self.token_channels = token_channels
@@ -156,13 +142,13 @@ class PointPatchEncoder(nn.Module):
             out_channels=token_channels,
             hidden_dims=[128, 256],
         )
-        self.rope = _RotaryPositionEncoding3D(
+        self.rope = RotaryPositionEncoding3D(
             token_channels // num_heads,
             scale=rope_scale,
             base=rope_base,
         )
         self.blocks = nn.ModuleList(
-            [_PointPatchBlock(token_channels, num_heads, mlp_ratio) for _ in range(depth)]
+            [PointPatchBlock(token_channels, num_heads, mlp_ratio) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(token_channels)
 
@@ -170,24 +156,15 @@ class PointPatchEncoder(nn.Module):
         self,
         pointcloud: torch.Tensor,
         return_intermediate: bool = False,
-    ):
-        if pointcloud.ndim != 3:
+    ) -> dict[str, torch.Tensor]:
+        if pointcloud.ndim != 3 or pointcloud.size(-1) < self.input_channels:
             raise ValueError(
-                f"pointcloud must be [B, N, C], but got shape {tuple(pointcloud.shape)}"
-            )
-        if pointcloud.size(-1) < self.input_channels:
-            raise ValueError(
-                f"pointcloud has {pointcloud.size(-1)} channels, "
-                f"but input_channels={self.input_channels}"
+                f"Expected [B, N, C] with C >= {self.input_channels}, got {tuple(pointcloud.shape)}"
             )
         if pointcloud.size(1) < max(self.num_patches, self.group_size):
-            raise ValueError(
-                "pointcloud must contain at least max(num_patches, group_size) points"
-            )
+            raise ValueError("N must be at least max(num_patches, group_size)")
 
         xyz = pointcloud[..., :3].float()
-        point_feature = pointcloud[..., 3 : self.input_channels]
-
         with torch.no_grad():
             fps_config = resolve_fps_random_config(
                 self.fps_random_config, self.training
@@ -199,11 +176,11 @@ class PointPatchEncoder(nn.Module):
 
         neighbor_xyz = index_points(xyz, neighbor_idx)
         relative_xyz = neighbor_xyz - patch_center.unsqueeze(2)
+        patch_input = relative_xyz
         if self.input_channels > 3:
+            point_feature = pointcloud[..., 3 : self.input_channels]
             neighbor_feature = index_points(point_feature, neighbor_idx)
             patch_input = torch.cat((relative_xyz, neighbor_feature), dim=-1)
-        else:
-            patch_input = relative_xyz
 
         local_token = self.patch_encoder(patch_input)
         cos, sin = self.rope(patch_center)
@@ -213,15 +190,14 @@ class PointPatchEncoder(nn.Module):
             patch_token = block(patch_token, cos, sin)
         patch_token = self.norm(patch_token)
 
-        outputs = [patch_token, patch_center]
+        outputs = {"patch_token": patch_token, "patch_center": patch_center}
         if return_intermediate:
-            intermediate_outputs: Dict[str, torch.Tensor] = {
-                "patch_center_idx": patch_center_idx,
-                "neighbor_idx": neighbor_idx,
-                "local_token": local_token,
-            }
-            outputs.append(intermediate_outputs)
-        return tuple(outputs)
+            outputs.update(
+                patch_center_idx=patch_center_idx,
+                neighbor_idx=neighbor_idx,
+                local_token=local_token,
+            )
+        return outputs
 
     @property
     def out_dim(self) -> int:
@@ -230,3 +206,28 @@ class PointPatchEncoder(nn.Module):
     @property
     def out_shape(self) -> tuple[int, int]:
         return (self.num_patches, self.token_channels)
+
+
+def example() -> None:
+    batch_size, num_points = 2, 1024
+
+    xyz = torch.empty(batch_size, num_points, 3)
+    xyz[..., 0] = torch.rand(batch_size, num_points) * 0.6 - 0.3
+    xyz[..., 1] = torch.rand(batch_size, num_points) * 0.8 - 0.4
+    xyz[..., 2] = torch.rand(batch_size, num_points) * 0.5
+    rgb = torch.rand(batch_size, num_points, 3)
+    pointcloud = torch.cat([xyz, rgb], dim=-1)
+
+    print("=== PointPatchEncoder Example ===")
+    encoder = PointPatchEncoder(input_channels=6).eval()
+    with torch.no_grad():
+        out = encoder(pointcloud, return_intermediate=True)
+    print("input:", tuple(pointcloud.shape))
+    for name, value in out.items():
+        print(f"{name}:", tuple(value.shape))
+    print("out_dim:", encoder.out_dim)
+    print("out_shape:", encoder.out_shape)
+
+
+if __name__ == "__main__":
+    example()
