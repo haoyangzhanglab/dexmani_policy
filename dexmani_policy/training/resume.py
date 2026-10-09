@@ -227,23 +227,26 @@ def validate_ema_resume_state(checkpoint: TrainCheckpoint, *, require_ema: bool)
 def validate_data_identity(saved, current, path="data_identity"):
     import warnings
 
-    if saved is None:
-        warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)
-        return
+    if not isinstance(saved, dict) or not isinstance(current, dict):
+        raise ValueError(f"{path}: checkpoint and current config require data identity mappings")
     if "tasks" in saved:
-        current_tasks = (current or {}).get("tasks", {})
+        current_tasks = current.get("tasks")
+        if not isinstance(current_tasks, dict) or set(saved["tasks"]) != set(current_tasks):
+            raise ValueError(f"{path}: task identities must match")
         for task, identity in saved["tasks"].items():
             validate_data_identity(identity, current_tasks.get(task), f"{path}.{task}")
         return
-    previous = saved.get("revision")
-    actual = (current or {}).get("revision")
+    if "revision" not in saved or "revision" not in current:
+        raise ValueError(f"{path}: data identity requires revision (null if unversioned)")
+    previous = saved["revision"]
+    actual = current["revision"]
     if previous is not None:
         if actual != previous:
             raise ValueError(
                 f"{path}: data_revision changed or lost: saved={previous!r}, current={actual!r}"
             )
     else:
-        warnings.warn(f"{path}: 数据身份未验证 (historical revision unavailable)", stacklevel=2)
+        warnings.warn(f"{path}: 数据身份未验证 (dataset has no data_revision)", stacklevel=2)
 
 
 def resolve_training_config(cfg, *, overrides=None):

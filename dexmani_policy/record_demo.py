@@ -11,13 +11,12 @@ Key differences from ``eval_best_ckpt.py``:
 - Designed for machines with an X11 ``DISPLAY``. Wayland sessions require
   XWayland. The viewer window will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
-- With ``--ckpt-tag best``, pins one record and its concrete checkpoint path,
-  using its EMA choice and inference step count when present and saved config
-  defaults otherwise. Explicit
+- With ``--ckpt-tag best``, pins one inference snapshot and its concrete checkpoint
+  path, requiring its EMA choice and inference step count. Explicit
   ``--ema``/``--no-ema`` and ``--inference-steps`` override these settings.
 - ``--selection-record`` pins a selector's own handoff file and rejects
-  conflicting checkpoint/EMA/NFE choices. Demo seeds remain non-held-out and
-  do not require the selection/test manifest to be available in the demo pool.
+  conflicting checkpoint/EMA/NFE choices. Demo uses its own seed pool and
+  does not claim held-out separation from selection.
 
 Usage
 -----
@@ -61,7 +60,7 @@ from dexmani_policy.agents.loader import resolve_best_checkpoint
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
-    _get_eval_param,
+    _get_eval_param, resolve_selection_checkpoint,
     save_eval_snapshot, run_eval_plan, plan_size, task_seed_pools, artifact_reference, atomic_json, compute_eval_stats, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
@@ -100,15 +99,12 @@ def _resolve_demo_inference(
             _get_eval_param(cfg, "inference_steps", "demo", default=10)
         ]
 
-    resolved_best = (resolve_best_checkpoint(exp_dir, selection_record) if selection_record
+    resolved_best = (resolve_selection_checkpoint(exp_dir, selection_record) if selection_record
                      else resolve_best_checkpoint(exp_dir) if ckpt_tag == "best" else None)
     if resolved_best is not None:
-        inference = resolved_best[0].get("inference", {})
-        if not isinstance(inference, dict):
-            raise ValueError("Best inference settings must be an object")
-        use_ema = inference.get("use_ema", use_ema)
-        if "inference_steps" in inference:
-            inference_steps_list = [inference["inference_steps"]]
+        inference = resolved_best[0]["inference"]
+        use_ema = inference["use_ema"]
+        inference_steps_list = [inference["inference_steps"]]
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema
@@ -178,7 +174,7 @@ def main() -> None:
         dest="use_ema",
         action="store_true",
         default=None,
-        help="Use EMA weights (best: selection record; otherwise config).",
+        help="Use EMA weights (best: inference snapshot; otherwise config).",
     )
     parser.add_argument(
         "--no-ema",
@@ -300,7 +296,7 @@ def main() -> None:
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
     agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
-    if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+    if best_info is not None and "global_step" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     cprint("✅ Checkpoint loaded\n", "green")
 

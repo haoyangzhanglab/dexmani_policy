@@ -2,6 +2,7 @@
 
 Provides ``backproject()``, ``patch_tokens_to_featmap()``, ``forward()``,
 and ``set_tune_mode()`` with a ``_get_lora_target_modules()`` hook.
+Optional backproject requires explicit depth/intrinsics; DP uses forward only.
 Subclasses only supply model-specific config/backbone loading,
 ``get_global_token()``, and LoRA target module names.
 """

@@ -15,7 +15,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.decomposition import PCA
 from torch import nn
 
 
@@ -291,6 +290,8 @@ class CodebookManager(nn.Module):
         prototype matrix, not on all demonstration frames.  Learned residual
         layer weights are used, preserving train/export consistency.
         """
+        from sklearn.decomposition import PCA
+
         if self.codebooks.numel() == 0:
             raise RuntimeError("No latent codebooks loaded; call extract_from_vqvae().")
         if self.layer_weights.numel() != self.num_groups:
@@ -517,6 +518,8 @@ class CodebookManager(nn.Module):
         if not self.is_loaded:
             raise RuntimeError("No runtime codebook loaded.")
         num_codes = self.num_codes
+        if not torch.isfinite(continuous_index).all():
+            raise ValueError("Continuous code indices must be finite before quantization")
         clipped = continuous_index.clamp(-1.0, 1.0)
         scaled = (clipped + 1.0) * 0.5 * (num_codes - 1)
         discrete_idx = (

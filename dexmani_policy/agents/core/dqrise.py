@@ -17,6 +17,12 @@ from dexmani_policy.agents.vq_hand.codebook_manager import CodebookManager
 class DQRISEAgent(BaseAgent):
     """DQ-RISE policy with a self-contained runtime hand codebook."""
 
+    def set_normalization_spec(self, spec):
+        from dexmani_policy.agents.normalization import validate_dq_normalization
+
+        validate_dq_normalization(spec)
+        super().set_normalization_spec(spec)
+
     def __init__(
         self,
         horizon: int,
@@ -53,8 +59,7 @@ class DQRISEAgent(BaseAgent):
         hand_dim = action_dim - tcp_dim
         diffusion_action_dim = tcp_dim + 1
 
-        # Construct locally first.  CodebookManager is now an nn.Module, so it
-        # must be attached only after BaseAgent/nn.Module initialisation.
+        # Attach the codebook module only after BaseAgent initialises nn.Module.
         codebook_manager = CodebookManager(
             hand_dim=hand_dim,
             num_groups=codebook_num_groups,

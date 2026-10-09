@@ -15,7 +15,7 @@ from dexmani_policy.datasets.augmentation import (
     PointDropout,
     StateNoiseAug,
 )
-from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
+from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb, raw_rgb_tensor
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import (
     SequenceSampler,
@@ -161,7 +161,6 @@ class BaseDataset(torch.utils.data.Dataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self._validation_dataset = None
-        self._validation_dataset = self.get_validation_dataset()
         if split_manifest is not None or saved_split is not None:
             ids, trials = manifest["episode_ids"], manifest["trial_ids"]
             actual_train = [ids[i] for i in np.flatnonzero(train_mask)]
@@ -176,9 +175,6 @@ class BaseDataset(torch.utils.data.Dataset):
                 "train_trials": len({trials[i] for i in actual_train}),
                 "val_trials": len({trials[i] for i in manifest["val_ids"]}),
                 "train_windows": len(self),
-                "val_windows": len(self._validation_dataset)
-                if self._validation_dataset is not None
-                else 0,
                 "holdout": bool(val_mask.any()),
             }
 
@@ -194,6 +190,7 @@ class BaseDataset(torch.utils.data.Dataset):
             return None
 
         val_set = copy.copy(self)
+        val_set.data_recipe = copy.deepcopy(self.data_recipe)
 
         val_set.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer,
@@ -207,6 +204,7 @@ class BaseDataset(torch.utils.data.Dataset):
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
         val_set._is_val = True
+        self._validation_dataset = val_set
         return val_set
 
     def __len__(self):
@@ -246,7 +244,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 float_spatial_before_uint8=self.rgb_color_aug is not None,
             )
 
-        rgb = torch.from_numpy(rgb_np)  # (T, H, W, 3) uint8
+        rgb = raw_rgb_tensor(rgb_np, ndim=4)
 
         # uint8 fast path: skip float32 conversion, resize/crop in uint8
         if self.rgb_keep_uint8 and self.rgb_color_aug is None:

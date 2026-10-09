@@ -15,7 +15,10 @@ from dexmani_policy.agents.obs_encoder.rgb.utils import (
 
 
 class GeometryProcessor:
-    """Depth back-projection and patch-level geometry pooling."""
+    """Optional depth back-projection and patch-level geometry pooling.
+
+    Called with explicit geometry inputs, not automatically by DP forward.
+    """
 
     def __init__(self):
         self.pixel_grid_cache: Dict[Tuple[int, int, str, str], Tuple[torch.Tensor, torch.Tensor]] = {}

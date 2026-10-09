@@ -41,6 +41,12 @@ def extract_codebook(
         raise FileExistsError(f"Codebook already exists: {output}; use --overwrite explicitly")
     checkpoint_path = str(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    from dexmani_policy.agents.normalization import validate_dq_normalization
+
+    spec = checkpoint.get("split_metadata", {}).get("normalization_spec")
+    if not isinstance(spec, dict):
+        raise ValueError("VQ checkpoint requires split_metadata.normalization_spec")
+    validate_dq_normalization(spec)
     vqvae = VQVAEHand.from_checkpoint(checkpoint, map_location="cpu")
     vqvae = vqvae.to(device).eval()
 

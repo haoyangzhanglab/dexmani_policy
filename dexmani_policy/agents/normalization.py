@@ -762,6 +762,12 @@ def uses_diffusion_config(agent_config):
     return cls in (UNetDiffusionAgent, DPAgent, DP3Agent, DQRISEAgent, R3DAgent)
 
 
+def validate_dq_normalization(spec):
+    """DQ/VQ hand prototypes require the existing bounded action coordinates."""
+    if spec.get("action") not in {"auto", "limits"}:
+        raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
+
+
 def validate_action_clipping(spec, clip_sample):
     if type(clip_sample) is not bool:
         raise TypeError("agent.clip_sample must be a bool")

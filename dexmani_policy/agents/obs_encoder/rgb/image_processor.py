@@ -55,7 +55,11 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
 
 
 class ImageProcessor:
-    """Resize and normalize RGB; optionally align depth and camera intrinsics."""
+    """Resize and normalize RGB through process_images for the DP policy path.
+
+    process_rgbd is an optional explicit depth/intrinsics API for geometry work;
+    DP forward does not call it. Processed RGB supports uint8 or float32 input.
+    """
 
     def __init__(
         self,

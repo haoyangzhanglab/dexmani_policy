@@ -38,7 +38,8 @@ GPU/driver/kernel environments.
 
 Successful selections save their own ``selection_result.json``; ``--result-file``
 also writes a new handoff file for downstream ``--selection-record`` consumers.
-``best_ckpt.json`` remains the latest successful selection alias.
+``best_ckpt.json`` stores the latest successful inference snapshot and a
+reference to its selection evidence.
 
 Usage
 -----
@@ -277,9 +278,8 @@ def select_best_checkpoint(
         best_info = {k: v for k, v in candidate(best).items() if k != "episode_details"}
         best_info.update(selection_id=run_dir.name,
                          selection_summary=artifact_reference(summary_path, exp_dir),
-                         inference={"use_ema": use_ema, "inference_steps": inference_steps,
-                                    "policy_seed_mode": "episode_seed"}, selection=selection)
-        # Immutable per-selection record is also the pipeline handoff.
+                         inference=dict(record["inference"]), selection=selection)
+        # The pipeline handoff references this immutable per-selection record.
         best_info.update(_format="selection.v2", status="success",
                          all_results=record["all_results"], stages=record["stages"])
         result_path = run_dir / "selection_result.json"
@@ -287,7 +287,10 @@ def select_best_checkpoint(
         reference = {"selection_result": artifact_reference(result_path, exp_dir)}
         if result_file is not None:
             atomic_json(result_file, reference, overwrite=False)
-        atomic_json(exp_dir / "best_ckpt.json", reference)
+        snapshot = dict(reference, _format="best.v1", ckpt_relpath=best_info["ckpt_relpath"],
+                        inference=dict(best_info["inference"]), global_step=best_info["global_step"],
+                        pct=best_info["pct"], selection_id=best_info["selection_id"])
+        atomic_json(exp_dir / "best_ckpt.json", snapshot)
         published = True
         _print_table(accumulators, "Selection results:")
         cprint(f"Published best: {best.ckpt.label}, selection={run_dir.name}", "green")

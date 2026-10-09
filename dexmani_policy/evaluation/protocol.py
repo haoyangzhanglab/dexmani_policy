@@ -26,6 +26,52 @@ from dexmani_policy.utils.validation import positive_int
 from dexmani_policy.utils.atomic import atomic_path
 
 
+def resolve_selection_checkpoint(experiment_dir, record_path=None):
+    """Resolve a current selection result, snapshot, or explicit writer handoff."""
+    from dexmani_policy.agents.loader import (
+        _read_record, _record_path, _validate_record_inference,
+    )
+
+    root = Path(experiment_dir).resolve()
+    info = _read_record(Path(record_path) if record_path else root / "best_ckpt.json")
+    if record_path is None and info.get("_format") != "best.v1":
+        raise ValueError("best_ckpt.json requires best.v1; rerun checkpoint selection")
+    snapshot = info if info.get("_format") == "best.v1" else None
+    if snapshot is not None:
+        _validate_record_inference(snapshot)
+        snapshot_path = _record_path(root, snapshot.get("ckpt_relpath"),
+                                     checkpoint=True, immutable=True)
+    # Only explicit handoffs may contain a bare reference; ordinary best is best.v1.
+    if snapshot is not None or (record_path is not None and set(info) == {"selection_result"}):
+        info = _read_record(_record_path(root, info.get("selection_result")))
+    if info.get("_format") != "selection.v2":
+        raise ValueError("Selection evidence requires selection.v2")
+    _validate_record_inference(info)
+    resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
+    if snapshot is not None:
+        if snapshot_path != resolved or snapshot["inference"] != info["inference"]:
+            raise ValueError("Best snapshot/selection checkpoint or inference mismatch")
+        for key in ("global_step", "pct", "selection_id"):
+            if key in snapshot and snapshot[key] != info.get(key):
+                raise ValueError(f"Best snapshot/selection mismatch: {key}")
+    stages = info.get("stages")
+    candidates = info.get("all_results")
+    if (info.get("status") != "success"
+            or not isinstance(info.get("selection_id"), str) or not info["selection_id"]
+            or not isinstance(info.get("selection"), dict)
+            or not isinstance(candidates, list) or not candidates
+            or not isinstance(stages, list) or not stages
+            or any(not isinstance(stage, dict) or stage.get("status") != "completed" for stage in stages)
+            or not any(isinstance(candidate, dict) and all(candidate.get(k) == info.get(k)
+                       for k in ("ckpt_relpath", "global_step", "pct")) for candidate in candidates)):
+        raise ValueError("Selection result lacks successful completed candidate evidence")
+    task_seeds = info["selection"].get("task_seeds")
+    if not isinstance(task_seeds, dict) or not task_seeds:
+        raise ValueError("Selection requires actual task_seeds evidence")
+    validate_task_seeds(task_seeds, task_seeds)
+    return info, resolved
+
+
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
     """Resolve the eval seed.
 
@@ -102,7 +148,7 @@ def add_inference_steps_argument(parser) -> None:
         "--inference-steps",
         type=int,
         default=None,
-        help="DDIM/Euler inference steps (best: selection record; otherwise config).",
+        help="DDIM/Euler inference steps (best: saved snapshot/selection; otherwise config).",
     )
 
 
@@ -367,11 +413,9 @@ def select_eval_seeds(runner, eval_seed, episodes, excluded_seeds=None):
     """Shuffle each task's pool and take equal budgets, excluding selection seeds."""
     positive_int(episodes, "episodes")
     pools = task_seed_pools(runner)
-    excluded = excluded_seeds or {}
-    if isinstance(excluded, list):
-        if len(pools) != 1:
-            raise ValueError("Historical multi-task selection lacks actual task/seed evidence")
-        excluded = {next(iter(pools)): excluded}
+    excluded = {} if excluded_seeds is None else excluded_seeds
+    if not isinstance(excluded, dict):
+        raise ValueError("Excluded selection seeds must be a task-to-seeds mapping")
     if excluded:
         validate_task_seeds(excluded, pools)
     available = {}
@@ -459,8 +503,6 @@ def validate_heldout(runner, best_info, plan):
         return
     selection = best_info["selection"]
     excluded = selection.get("task_seeds")
-    if excluded is None and not hasattr(runner, "runners"):
-        excluded = {runner.task_name: selection.get("seeds", [])}
     try:
         validate_task_seeds(excluded, plan)
     except ValueError as exc:

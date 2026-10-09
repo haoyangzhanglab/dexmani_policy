@@ -20,6 +20,20 @@ def rgb_preprocessing_kwargs(dataset_config):
     }
 
 
+def raw_rgb_tensor(rgb, *, ndim=None):
+    """Validate raw uint8 HWC input without copying its storage."""
+    import torch
+
+    value = torch.from_numpy(rgb) if isinstance(rgb, np.ndarray) else rgb
+    if not torch.is_tensor(value):
+        raise TypeError("raw RGB must be a NumPy array or torch tensor")
+    if (value.ndim < 3 or value.shape[-1] != 3 or value.dtype != torch.uint8
+            or (ndim is not None and value.ndim != ndim)):
+        shape = "(T, H, W, 3)" if ndim == 4 else "[..., H, W, 3]"
+        raise ValueError(f"raw RGB must have shape {shape} and dtype uint8")
+    return value
+
+
 def preprocess_validation_rgb(
     rgb: np.ndarray | torch.Tensor,
     *,
@@ -37,13 +51,7 @@ def preprocess_validation_rgb(
     import torchvision.transforms.functional as TVF
     from torchvision.transforms import InterpolationMode
 
-    value = torch.from_numpy(rgb) if isinstance(rgb, np.ndarray) else rgb
-    if not torch.is_tensor(value):
-        raise TypeError("validation RGB must be a NumPy array or torch tensor")
-    if value.ndim < 3 or value.shape[-1] != 3 or value.dtype != torch.uint8:
-        raise ValueError(
-            "validation RGB must have shape [..., H, W, 3] and dtype uint8"
-        )
+    value = raw_rgb_tensor(rgb)
     if resize_hw is None:
         if center_crop_hw is not None:
             raise ValueError("validation RGB center crop requires a resize")

@@ -112,6 +112,10 @@ agent:
   # Flow matching (standard CFM, no consistency training)
   num_inference_steps: 10
   t_sample_mode_for_flow: beta
+  # Explicit local time-sampling recipe; matches SATAgent defaults.
+  beta_s: 0.999
+  beta_alpha: 1.0
+  beta_beta: 1.5
 
   modality_dropout_probs:
     joint_state: 0.0

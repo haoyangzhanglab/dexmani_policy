@@ -15,10 +15,8 @@ def create_indices(
     pad_before: int = 0,
     pad_after: int = 0,
 ) -> np.ndarray:
-
+    # Internal Numba kernel: SequenceSampler validates parameters and filters mask.
     assert episode_mask.shape == episode_ends.shape
-    pad_before = min(max(pad_before, 0), sequence_length - 1)
-    pad_after = min(max(pad_after, 0), sequence_length - 1)
 
     indices = []
     for i in range(len(episode_ends)):
@@ -34,13 +32,7 @@ def create_indices(
         min_start = -pad_before
         max_start = episode_length - sequence_length + pad_after
 
-        if max_start < min_start:
-            min_required_length = sequence_length - pad_before - pad_after
-            raise ValueError(
-                f"Episode {i} is too short: length={episode_length}, "
-                f"min_required={min_required_length} "
-                f"(sequence_length={sequence_length} - pad_before={pad_before} - pad_after={pad_after})"
-            )
+        assert max_start >= min_start
 
         for idx in range(min_start, max_start + 1):
             buffer_start_idx = max(idx, 0) + start_idx
@@ -103,7 +95,14 @@ class SequenceSampler:
     ):
         super().__init__()
 
-        assert sequence_length >= 1
+        if (isinstance(sequence_length, bool)
+                or not isinstance(sequence_length, Integral) or sequence_length < 1):
+            raise ValueError("sequence_length must be a positive integer (not bool)")
+        for name, value in (("pad_before", pad_before), ("pad_after", pad_after)):
+            if (isinstance(value, bool) or not isinstance(value, Integral)
+                    or not 0 <= value < sequence_length):
+                raise ValueError(f"{name} must be an integer with 0 <= {name} < sequence_length")
+        sequence_length, pad_before, pad_after = map(int, (sequence_length, pad_before, pad_after))
 
         episode_ends = replay_buffer.episode_ends[:]
         if episode_mask is None:
@@ -209,7 +208,7 @@ class SequenceSampler:
             rows = source[:length]
             start, end = int(rows[0]), int(rows[-1]) + 1
             values = self.replay_buffer.read(key, slice(start, end))
-            result[key] = values[rows - start]
+            result[key] = values if end - start == len(rows) else values[rows - start]
         return result
 
 

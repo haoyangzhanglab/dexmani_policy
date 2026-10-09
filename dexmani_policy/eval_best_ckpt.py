@@ -51,12 +51,11 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.agents.loader import resolve_best_checkpoint
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
-    _get_eval_param,
+    _get_eval_param, resolve_selection_checkpoint,
     save_eval_snapshot, run_eval_plan, plan_size, validate_heldout, artifact_reference, selection_provenance,
     add_inference_steps_argument,
     build_eval_runner,
@@ -109,7 +108,7 @@ def _setup_eval(
     video_save_dir: Path | None = None,
     best_info=None,
     episodes: int,
-    selection_seeds: dict[str, list[int]] | list[int],
+    selection_seeds: dict[str, list[int]],
 ):
     """Resolve and validate seeds on the full runner before restoring the Agent.
 
@@ -138,11 +137,11 @@ def _setup_eval(
     return agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds
 
 
-def _selection_seeds(best_info) -> dict[str, list[int]] | list[int]:
+def _selection_seeds(best_info) -> dict[str, list[int]]:
     """Require selection seeds so final evaluation can exclude them."""
     selection = best_info.get("selection", {})
-    seeds = selection.get("task_seeds", selection.get("seeds"))
-    if not isinstance(seeds, (dict, list)) or not seeds:
+    seeds = selection.get("task_seeds")
+    if not isinstance(seeds, dict) or not seeds:
         raise ValueError("Held-out best evaluation requires actual selection task/seed evidence")
     return seeds
 
@@ -158,7 +157,7 @@ def _run_one_inference_setting(
     ckpt_tag_or_path: str,
     ckpt_path: Path,
     eval_seed: int,
-    selection_seeds_excluded: dict[str, list[int]] | list[int],
+    selection_seeds_excluded: dict[str, list[int]],
     heldout_from_selection: bool,
     use_ema: bool,
     eval_config: str,
@@ -292,7 +291,7 @@ def evaluate_checkpoint_robotwin(
         raise ValueError("Single evaluation requires one NFE; use evaluate_checkpoint_sweep")
     inference_steps = steps[0]
     best_info = resolved_best[0] if resolved_best is not None else None
-    selection_seeds = _selection_seeds(best_info) if best_info is not None else []
+    selection_seeds = _selection_seeds(best_info) if best_info is not None else {}
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
     agent, env_runner, ckpt_path, ckpt_label, eval_seed, eval_seeds = _setup_eval(
         cfg,
@@ -304,7 +303,7 @@ def evaluate_checkpoint_robotwin(
         episodes=episodes,
         selection_seeds=selection_seeds,
     )
-    if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+    if best_info is not None and "global_step" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
@@ -392,7 +391,7 @@ def evaluate_checkpoint_sweep(
         cli_inference_steps_list=inference_steps_list, resolved_best=resolved_best,
     )
     best_info = resolved_best[0] if resolved_best is not None else None
-    selection_seeds = _selection_seeds(best_info) if best_info is not None else []
+    selection_seeds = _selection_seeds(best_info) if best_info is not None else {}
     result_save_dir = _prepare_result_dir(exp_dir, result_save_dir)
 
     # 1. Setup ONCE
@@ -406,7 +405,7 @@ def evaluate_checkpoint_sweep(
         episodes=episodes,
         selection_seeds=selection_seeds,
     )
-    if best_info is not None and "selection_summary" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+    if best_info is not None and "global_step" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
@@ -547,15 +546,14 @@ def _resolve_final_eval_request(
     use_ema = config_use_ema
 
     if resolved_best is None and ckpt_tag_or_path == "best":
-        resolved_best = resolve_best_checkpoint(exp_dir)
+        resolved_best = resolve_selection_checkpoint(exp_dir)
     if resolved_best is not None:
         best_info = resolved_best[0]
-        inference = best_info.get("inference", {})
+        inference = best_info["inference"]
         if not isinstance(inference, dict):
             raise ValueError("Best inference settings must be an object")
-        use_ema = inference.get("use_ema", use_ema)
-        if "inference_steps" in inference:
-            inference_steps_list = [inference["inference_steps"]]
+        use_ema = inference["use_ema"]
+        inference_steps_list = [inference["inference_steps"]]
 
     present, value = _present_config_value(
         override_cfg, ["eval.offline.use_ema", "eval.use_ema"]
@@ -689,7 +687,7 @@ def main() -> None:
         exp_dir,
         ckpt_tag_or_path,
         args.overrides,
-        resolved_best=resolve_best_checkpoint(exp_dir, args.selection_record) if args.selection_record else None,
+        resolved_best=resolve_selection_checkpoint(exp_dir, args.selection_record) if args.selection_record else None,
         cli_use_ema=args.use_ema,
         cli_inference_steps=args.inference_steps,
     )

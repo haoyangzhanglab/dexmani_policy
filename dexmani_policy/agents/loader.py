@@ -1,6 +1,7 @@
-"""Saved experiment selection and shared strict Agent restore.
+"""Saved inference snapshot resolution and shared strict Agent restore.
 
 Heavy imports stay inside restore; parent-side inspection does not load Torch.
+Selection evidence is validated by evaluation.protocol.
 """
 
 
@@ -18,79 +19,56 @@ def load_experiment_config(experiment_dir):
     return cfg
 
 
-def resolve_best_checkpoint(experiment_dir, record_path=None):
-    """Read one best record and return it with its validated concrete weight path."""
+def _read_record(path):
     import json
+
+    info = json.loads(path.read_text())
+    if not isinstance(info, dict):
+        raise ValueError(f"Checkpoint record must contain an object: {path}")
+    return info
+
+
+def _record_path(root, relative, *, checkpoint=False, immutable=False):
+    from pathlib import Path
+
+    if not isinstance(relative, str) or not relative:
+        raise ValueError("Record requires a nonempty relative file path")
+    path = Path(relative)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("Record path must be relative to experiment")
+    if immutable and (path.name == "latest.pt" or (root / path).is_symlink()):
+        raise ValueError("Selection must name an immutable milestone checkpoint")
+    resolved = (root / path).resolve(strict=True)
+    directory = root / "checkpoints" if checkpoint else root
+    if not resolved.is_relative_to(directory) or not resolved.is_file():
+        raise ValueError(f"Record path must be a file inside {directory}")
+    return resolved
+
+
+def _validate_record_inference(info):
+    inference = info.get("inference")
+    if not isinstance(inference, dict):
+        raise ValueError("Record requires inference settings")
+    if type(inference.get("use_ema")) is not bool:
+        raise ValueError("inference.use_ema must be a bool")
+    steps = inference.get("inference_steps")
+    if type(steps) is not int or steps <= 0:
+        raise ValueError("inference.inference_steps must be a positive int (not bool)")
+    mode = inference.get("policy_seed_mode")
+    if not isinstance(mode, str) or not mode:
+        raise ValueError("Record requires inference.policy_seed_mode")
+
+
+def resolve_best_checkpoint(experiment_dir):
+    """Resolve a current inference snapshot without reading selection evidence."""
     from pathlib import Path
 
     root = Path(experiment_dir).resolve()
-    info = json.loads((Path(record_path) if record_path else root / "best_ckpt.json").read_text())
-    if not isinstance(info, dict):
-        raise ValueError("best_ckpt.json must contain an object")
-    if "selection_result" in info:
-        reference = info["selection_result"]
-        if not isinstance(reference, str) or not reference or Path(reference).is_absolute() or ".." in Path(reference).parts:
-            raise ValueError("Selection result must be relative to experiment")
-        result_path = (root / reference).resolve(strict=True)
-        if not result_path.is_relative_to(root) or not result_path.is_file():
-            raise ValueError("Selection result must be a file inside experiment")
-        info = json.loads(result_path.read_text())
-        if not isinstance(info, dict) or info.get("_format") != "selection.v2":
-            raise ValueError("Unsupported selection result format")
-    current_result = info.get("_format") == "selection.v2"
-    if current_result and (info.get("status") != "success" or not isinstance(info.get("all_results"), list)
-                           or not info["all_results"] or not isinstance(info.get("selection"), dict)
-                           or not isinstance(info.get("inference"), dict)):
-        raise ValueError("Selection result is incomplete or unsuccessful")
-    if current_result:
-        stages = info.get("stages")
-        inference = info["inference"]
-        if (not isinstance(info.get("selection_id"), str) or not info["selection_id"]
-                or not isinstance(stages, list) or not stages
-                or any(not isinstance(stage, dict) or stage.get("status") != "completed" for stage in stages)
-                or type(inference.get("use_ema")) is not bool
-                or type(inference.get("inference_steps")) is not int or inference["inference_steps"] <= 0
-                or not any(isinstance(candidate, dict) and all(candidate.get(k) == info.get(k)
-                    for k in ("ckpt_relpath", "global_step", "pct")) for candidate in info["all_results"])):
-            raise ValueError("Selection result lacks completed candidate or inference evidence")
-    relative = info.get("ckpt_relpath")
-    if not isinstance(relative, str) or not relative:
-        raise ValueError("best_ckpt.json requires ckpt_relpath")
-    path = Path(relative)
-    if path.is_absolute() or ".." in path.parts:
-        raise ValueError("Best checkpoint must be relative to the experiment")
-    if (record_path is not None or current_result) and (path.name == "latest.pt" or (root / path).is_symlink()):
-        raise ValueError("Selection handoff must name an immutable milestone checkpoint")
-    resolved = (root / path).resolve(strict=True)
-    if not resolved.is_relative_to(root / "checkpoints") or not resolved.is_file():
-        raise ValueError("Best checkpoint must be a file inside experiment/checkpoints")
-    if not current_result and ("selection_summary" in info or "selection_id" in info):
-        if not isinstance(info.get("selection_id"), str) or not info["selection_id"]:
-            raise ValueError("New best record requires a nonempty selection_id")
-        relative_summary = info.get("selection_summary")
-        if not isinstance(relative_summary, str) or Path(relative_summary).is_absolute() or ".." in Path(relative_summary).parts:
-            raise ValueError("Selection summary must be relative to experiment")
-        summary_path = (root / relative_summary).resolve(strict=True)
-        if not summary_path.is_relative_to(root):
-            raise ValueError("Selection summary must remain inside experiment")
-        summary = json.loads(summary_path.read_text())
-        if summary.get("status") != "success" or summary.get("selection_id") != info.get("selection_id"):
-            raise ValueError("Best record must reference its successful selection")
-        selected = summary.get("best_checkpoint", {})
-        for key in ("ckpt_relpath", "global_step", "pct"):
-            if key not in selected or selected[key] != info.get(key):
-                raise ValueError(f"Best/selection mismatch: {key}")
-        if "inference" in summary and summary["inference"] != info.get("inference"):
-            raise ValueError("Best/selection inference mismatch")
-        if record_path is not None and "inference" not in summary:
-            raise ValueError("Selection handoff requires immutable inference settings")
-        if summary.get("selection") != info.get("selection"):
-            raise ValueError("Best/selection seed evidence mismatch")
-    elif not current_result:
-        if record_path is not None:
-            raise ValueError("Selection handoff requires a successful selection identity")
-        import warnings
-        warnings.warn("Historical best has no selection identity/summary; provenance is unverified", stacklevel=2)
+    info = _read_record(root / "best_ckpt.json")
+    if info.get("_format") != "best.v1":
+        raise ValueError("best_ckpt.json requires best.v1; rerun checkpoint selection")
+    _validate_record_inference(info)
+    resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
     return info, resolved
 
 
@@ -154,13 +132,16 @@ def checkpoint_agent_config(cfg, state):
     """Construct from saved weights without loading external initialization assets."""
     import copy
     import torch
-    from omegaconf import open_dict
+    from omegaconf import DictConfig, open_dict
 
     cfg = copy.deepcopy(cfg)
     agent = cfg.agent
     with open_dict(agent):
         if agent.get('rgb_backbone_name') is not None:
             rgb = dict(agent.get('rgb_backbone_config') or {})
+            if (agent.rgb_backbone_name in {'dino', 'clip', 'siglip'}
+                    and not isinstance(rgb.get('architecture'), (dict, DictConfig))):
+                raise ValueError('RGB checkpoint requires saved backbone architecture')
             rgb['load_pretrained'] = False
             agent.rgb_backbone_config = rgb
         if agent.get('_target_') == 'dexmani_policy.agents.core.multi_task.MultiTaskAgent' and agent.get('task_texts') is not None:

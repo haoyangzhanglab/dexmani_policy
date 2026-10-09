@@ -2,7 +2,7 @@
 
 Use --policy-config for DQ-RISE: the target Policy Dataset decides splits,
 valid windows and unique source rows; its action normalizer supplies hand stats.
-Without this option the historical independent recipe (full-data stats) is kept.
+The explicit standalone option uses full-data hand statistics.
 """
 
 from __future__ import annotations
@@ -186,6 +186,7 @@ def prepare_standalone_data(args):
     )
 
     split_metadata = {
+        "normalization_spec": {"action": "limits"},
         "episode_ends": episode_ends.tolist(),
         "train_episode_ids": np.flatnonzero(train_episode_mask).tolist(),
         "val_episode_ids": np.flatnonzero(val_episode_mask).tolist(),
@@ -261,10 +262,11 @@ def policy_hand_rows(dataset, tcp_dim):
 
 
 def prepare_policy_data(cfg):
-    dataset = build_policy_dataset(cfg)
+    from dexmani_policy.agents.normalization import validate_dq_normalization
+
     spec = resolve_normalization_spec(cfg)
-    if spec.get("action", "identity") == "identity":
-        raise ValueError("DQ-RISE codebooks require a fitted action normalizer")
+    validate_dq_normalization(spec)
+    dataset = build_policy_dataset(cfg)
     action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)[
         "action"
     ]

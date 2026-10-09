@@ -64,6 +64,11 @@ class KNNGrouper(nn.Module):
 
     def forward(self, xyz, features):
         B, N, _ = xyz.shape
+        if N < max(self.num_groups, self.group_size):
+            raise ValueError(
+                f"KNNGrouper requires N >= max(num_groups, group_size): "
+                f"N={N}, num_groups={self.num_groups}, group_size={self.group_size}"
+            )
         with torch.no_grad():
             fps_config = resolve_fps_random_config(
                 self.fps_random_config, self.training

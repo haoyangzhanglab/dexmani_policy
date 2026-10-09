@@ -84,10 +84,7 @@ def inspect_policy(
     )
     defaults = dict(cfg.get("eval", {})) if weights is None or inference_steps is None else {}
     if resolved_best is not None:
-        inference = resolved_best[0].get("inference", {})
-        if not isinstance(inference, dict):
-            raise ValueError("Best inference settings must be an object")
-        defaults.update(inference)
+        defaults.update(resolved_best[0]["inference"])
     if weights is None:
         if type(defaults.get("use_ema")) is not bool:
             raise ValueError("Inference defaults require boolean use_ema")

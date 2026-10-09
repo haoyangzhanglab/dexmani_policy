@@ -15,6 +15,7 @@ from dexmani_policy.agents.normalization import (
     resolve_normalization_spec,
     uses_diffusion_config,
     validate_action_clipping,
+    validate_dq_normalization,
     validate_normalization_spec,
     validate_normalizer_state,
 )
@@ -432,6 +433,10 @@ def _validate_normalization_config(cfg):
     if len(rgb_transport) > 1:
         raise ValueError("RGB child datasets must have consistent rgb_keep_uint8")
     spec = resolve_normalization_spec(cfg)
+    from dexmani_policy.agents.core.dqrise import DQRISEAgent
+
+    if issubclass(hydra.utils.get_class(cfg.agent._target_), DQRISEAgent):
+        validate_dq_normalization(spec)
     if uses_diffusion_config(cfg.agent):
         validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
     numeric_fields = _resolve_numeric_observation_fields(cfg)
