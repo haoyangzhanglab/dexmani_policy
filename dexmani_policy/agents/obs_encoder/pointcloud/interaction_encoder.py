@@ -1,4 +1,4 @@
-"""基于身体锚点的 PointPatch 交互编码，几何输入使用同一坐标系的米制值。"""
+"""世界坐标系下的 PointPatch 交互编码，几何输入使用未归一化的米制值。"""
 
 from __future__ import annotations
 
@@ -7,34 +7,18 @@ from collections.abc import Mapping, Sequence
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import index_points
 from dexmani_policy.agents.obs_encoder.pointcloud.scene_compressor import SceneSelfAttentionBlock
-
-
-def rotation_from_columns_6d(rotation: torch.Tensor) -> torch.Tensor:
-    """旋转矩阵前两列拼接 [B,6] -> [B,3,3]。"""
-    rotation = rotation.float()
-    first, second = rotation[..., :3], rotation[..., 3:]
-    if not torch.isfinite(rotation).all() or (first.norm(dim=-1) < 1e-6).any():
-        raise ValueError("rotation contains invalid first columns")
-    x = F.normalize(first, dim=-1)
-    y = second - (second * x).sum(-1, keepdim=True) * x
-    tolerance = 1e-6 * second.norm(dim=-1).clamp_min(1.0)
-    if (y.norm(dim=-1) < tolerance).any():
-        raise ValueError("rotation columns must be linearly independent")
-    y = F.normalize(y, dim=-1)
-    return torch.stack((x, y, torch.cross(x, y, dim=-1)), dim=-1)
+from dexmani_policy.agents.obs_encoder.proprio.hand_point_encoder import WristFingertipEncoder
 
 
 def nearest_patch_evidence(
     anchors: torch.Tensor,
     members: torch.Tensor,
-    rotation: torch.Tensor,
     member_valid: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """最近有效成员的 eef 系相对向量、距离和有效位；无观测时距离为 inf。"""
+    """最近有效成员相对锚点的世界轴向量、距离和有效位；无观测距离为 inf。"""
     valid = torch.isfinite(members).all(-1)
     if member_valid is not None:
         valid = valid & member_valid
@@ -45,8 +29,7 @@ def nearest_patch_evidence(
     observed = torch.isfinite(squared_min)
     selected = delta.gather(3, index[..., None, None].expand(-1, -1, -1, 1, 3)).squeeze(3)
     selected = torch.where(observed[..., None], selected, 0.0)
-    relative = torch.einsum("bqmc,bcd->bqmd", selected, rotation.float())
-    return relative, squared_min.sqrt(), observed
+    return selected, squared_min.sqrt(), observed
 
 
 class GeometryCrossAttention(nn.Module):
@@ -122,7 +105,7 @@ class GeometryCrossAttention(nn.Module):
 
 
 class PointPatchInteractionEncoder(nn.Module):
-    """将 PointPatch 特征编码为 eef + 五指的交互 token [B,6,D]。"""
+    """将世界系 PointPatch 特征编码为 wrist + 五指的交互 token [B,6,D]。"""
 
     def __init__(
         self,
@@ -135,6 +118,8 @@ class PointPatchInteractionEncoder(nn.Module):
         num_heads: int = 4,
         mlp_ratio: float = 2.0,
         self_depth: int = 1,
+        position_num_frequencies: int = 6,
+        position_max_wavelength: float = 0.64,
     ):
         super().__init__()
         if token_channels <= 0 or num_heads <= 0 or token_channels % num_heads:
@@ -152,14 +137,14 @@ class PointPatchInteractionEncoder(nn.Module):
 
         self.token_channels = token_channels
         self.metric_scale = metric_scale
-        self.position_scale = position_scale
         proximity_scales = (min(near_sigmas), max(near_sigmas))
         self.register_buffer("proximity_scales", torch.tensor(proximity_scales, dtype=torch.float32))
-        self.body_identity = nn.Parameter(torch.randn(6, token_channels) * 0.02)
-        self.position = nn.Sequential(
-            nn.Linear(3, token_channels),
-            nn.GELU(),
-            nn.Linear(token_channels, token_channels),
+        self.hand_encoder = WristFingertipEncoder(
+            token_channels=token_channels,
+            position_scale=position_scale,
+            hand_scale=metric_scale,
+            num_frequencies=position_num_frequencies,
+            max_wavelength=position_max_wavelength,
         )
         self.context = GeometryCrossAttention(
             token_channels, context_sigmas, metric_scale, proximity_scales, None
@@ -193,13 +178,15 @@ class PointPatchInteractionEncoder(nn.Module):
         """patches 来自 PointPatchEncoder(return_intermediate=True)。
 
         eef_pose = pos3 + rot6d；指尖顺序为 thumb/index/middle/ring/pinky。
+        所有位置及相对向量均沿世界坐标轴；腕部朝向仅用于查询特征。
+        patches 必须由同一世界系 pointcloud 提取，不在此组装点云编码器。
         member_valid 仅屏蔽几何成员；attention 最后一项为 null。
         """
         if pointcloud.ndim != 3 or pointcloud.shape[-1] < 3:
             raise ValueError("pointcloud must have shape [B,N,C>=3]")
         batch = pointcloud.shape[0]
-        if eef_pose.shape != (batch, 9) or fingertip_points.shape != (batch, 5, 3):
-            raise ValueError("eef_pose must be [B,9] and fingertip_points [B,5,3]")
+        if eef_pose.shape != (batch, 9):
+            raise ValueError("eef_pose must have shape [B,9] with the pointcloud batch size")
         global_memory, local_memory = patches["patch_token"], patches["local_token"]
         centers, indices = patches["patch_center"], patches["neighbor_idx"]
         if indices.ndim != 3 or indices.dtype != torch.long:
@@ -211,17 +198,18 @@ class PointPatchInteractionEncoder(nn.Module):
         ):
             raise ValueError("member_valid must be boolean with shape [B,M,K]")
 
-        anchors = torch.cat((eef_pose[:, None, :3], fingertip_points), 1).float()
+        hand = self.hand_encoder(eef_pose, fingertip_points)
+        anchors = hand["hand_center"]
+        query = hand["hand_token"]
         with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
-            rotation = rotation_from_columns_6d(eef_pose[:, 3:])
             members = index_points(pointcloud[..., :3], indices)
             relative, distance, observed = nearest_patch_evidence(
-                anchors, members, rotation, member_valid
+                anchors, members, member_valid
             )
             center_valid = torch.isfinite(centers).all(-1)
             safe_centers = torch.where(center_valid[..., None], centers.float(), 0.0)
             center_delta = safe_centers[:, None] - anchors[:, :, None]
-            center_relative = torch.einsum("bqmc,bcd->bqmd", center_delta, rotation)
+            center_relative = center_delta
             center_distance = center_delta.norm(dim=-1)
             context_valid = center_valid[:, None] & observed
             nearest = distance.min(-1).values
@@ -233,8 +221,6 @@ class PointPatchInteractionEncoder(nn.Module):
                  proximity, has_observation[..., None].float()), dim=-1
             )
 
-        position = (anchors / self.position_scale).to(self.position[0].weight.dtype)
-        query = self.body_identity[None] + self.position(position)
         if query_context is not None:
             query = query + query_context[:, None].to(query.dtype)
         context, context_attention, _ = self.context(
@@ -257,6 +243,7 @@ class PointPatchInteractionEncoder(nn.Module):
                 context_null_mass=context_attention[..., -1],
                 near_attention=near_attention,
                 context_attention=context_attention,
+                context_relative=center_relative,
                 surface_relative=relative,
                 surface_distance=distance,
                 surface_valid=observed,
@@ -297,3 +284,4 @@ def example() -> None:
 
 if __name__ == "__main__":
     example()
+
