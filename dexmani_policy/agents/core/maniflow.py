@@ -13,14 +13,13 @@ from dexmani_policy.agents.obs_encoder.pointcloud.registry import (
     build_pc_patch_tokenizer,
 )
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
-from dexmani_policy.agents.position_encodings import NeRFSinusoidalPosEmb3D
 
 
 class ManiFlowObsEncoder(nn.Module):
-    """Dense point features plus projected XYZ PE and broadcast state.
+    """Dense point features with absolute XYZ and broadcast state.
 
-    Inputs are augmented and normalized upstream. Sampling here supplies the
-    same points to PointNet and XYZ PE. Flattening preserves frame-major order:
+    PointNet directly encodes XYZRGB; DiTX adds a shared temporal embedding
+    for each observation frame. Flattening preserves frame-major order:
     all points of frame 0, then all points of frame 1, and so on.
     """
 
@@ -38,13 +37,10 @@ class ManiFlowObsEncoder(nn.Module):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-        xyz_pe_num_frequencies: int = 8,
     ):
         super().__init__()
         if encoder_type != "pointnet_dense":
-            raise ValueError(
-                "ManiFlow requires pointnet_dense for point-aligned XYZ PE"
-            )
+            raise ValueError("ManiFlow requires pointnet_dense")
         if n_obs_steps <= 0:
             raise ValueError("n_obs_steps must be greater than 0")
         pc_encoder_config = dict(pc_encoder_config or {})
@@ -62,13 +58,7 @@ class ManiFlowObsEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
 
-        pc_out_dim = self.pc_encoder.out_dim
-        self.xyz_pe = NeRFSinusoidalPosEmb3D(xyz_pe_num_frequencies)
-        self.xyz_pe_proj = nn.Sequential(
-            nn.Linear(self.xyz_pe.out_dim, pc_out_dim),
-            nn.LayerNorm(pc_out_dim),
-        )
-        self.obs_token_dim = pc_out_dim + self.state_mlp.out_dim
+        self.obs_token_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
         pc = preprocess_point_cloud(
@@ -79,8 +69,7 @@ class ManiFlowObsEncoder(nn.Module):
             training=self.training,
         )
 
-        # Both branches see the same augmented, normalized, sampled points.
-        pc_feat = self.pc_encoder(pc) + self.xyz_pe_proj(self.xyz_pe(pc[..., :3]))
+        pc_feat = self.pc_encoder(pc)
 
         state_feat = self.state_mlp(obs["joint_state"])
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
@@ -108,7 +97,6 @@ class ManiFlowAgent(BaseAgent):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-        xyz_pe_num_frequencies: int = 8,
         timestep_embed_dim: int = 128,
         target_t_embed_dim: int = 128,
         n_layers: int = 12,
@@ -137,7 +125,6 @@ class ManiFlowAgent(BaseAgent):
             state_out_dim=state_out_dim,
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
-            xyz_pe_num_frequencies=xyz_pe_num_frequencies,
         )
 
         backbone = ConsistencyDiTX(
