@@ -45,7 +45,13 @@ class FingerModalityGate(nn.Module):
                 self.scene_norm(scene_summary.to(dtype))[:, None].expand(-1, 5, -1),
                 force.to(dtype), valid[..., None].to(dtype),
             ), dim=-1)
-            gains = 2.0 * self.gate(inputs).sigmoid()
+            logits = self.gate(inputs)
+            # Preserve small learned deviations from the unit initialization.
+            # A BF16 sigmoid rounds near-zero logits to gain=1 while still
+            # backpropagating, silently removing the actual modulation.
+            if logits.dtype in (torch.float16, torch.bfloat16):
+                logits = logits.float()
+            gains = 2.0 * logits.sigmoid()
         else:
             gains = hand_context.new_ones(batch, 5, 2)
         geometry = gains[..., :1]

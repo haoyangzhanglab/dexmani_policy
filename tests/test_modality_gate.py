@@ -38,6 +38,26 @@ class ModalityGateTests(unittest.TestCase):
         torch.testing.assert_close(gains["geometry_gain"][:, 0], torch.ones(2, 1))
         self.assertEqual(gains["tactile_gain"][:, 0].count_nonzero().item(), 0)
 
+    def test_bfloat16_preserves_small_updates_around_unit_gain(self):
+        # BF16 sigmoid rounds these learned nonzero logits to gain=1 even
+        # though backward remains nonzero. Finite-loss tests cannot catch it.
+        with torch.no_grad():
+            self.gate.gate[-1].bias.copy_(torch.tensor([0.002, -0.002]))
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            gains = self.call()
+        geometry = gains["geometry_gain"][:, 1:]
+        tactile = gains["tactile_gain"][:, 1:]
+        self.assertTrue((geometry > 1).all())
+        self.assertTrue((tactile < 1).all())
+        expected = 2 * self.gate.gate[-1].bias.to(torch.bfloat16).float().sigmoid()
+        torch.testing.assert_close(geometry, expected[0].expand_as(geometry))
+        torch.testing.assert_close(tactile, expected[1].expand_as(tactile))
+        self.assertEqual(geometry.dtype, torch.float32)
+        (geometry.sum() + tactile.sum()).backward()
+        grad = self.gate.gate[-1].bias.grad
+        self.assertTrue(torch.isfinite(grad).all())
+        self.assertTrue((grad > 0).all())
+
     def test_gate_can_use_sensor_amplitude_per_finger(self):
         with torch.no_grad():
             self.gate.gate[0].weight.zero_()
