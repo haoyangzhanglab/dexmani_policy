@@ -1,5 +1,5 @@
 # ManiFlow — Flow Matching with rectified flow + consistency training
-# Encoder:  PointNetDense XYZRGB + projected NeRF XYZ PE + broadcast state
+# Encoder:  PointNetDense XYZRGB + broadcast state; no extra spatial PE
 # Context: 192d dense tokens; DiTX adds frame-only PE after projection
 # Decoder:  DiTX (cross-attention conditioning) + Euler ODE integration
 # Modality: point_cloud + joint_state → action
@@ -23,7 +23,7 @@ action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 normalization:
   joint_state: limits
   action: auto
-  point_cloud: limits
+  point_cloud: identity             # keep physical XYZ and RGB in [0, 1]
 
 # ── Dataloader ──
 dataloader:
@@ -84,8 +84,6 @@ agent:
   pc_encoder_config:
     out_channels: 128
 
-  xyz_pe_num_frequencies: 8       # 48D continuous XYZ PE projected to 128D and added
-
   # DiTX backbone
   n_layers: 12
   hidden_dim: 768
@@ -117,7 +115,7 @@ optimizer:
   weight_decay: 1.0e-3
   betas: [0.9, 0.95]
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6        # observation encoder (PointNet, XYZ PE projection and state MLP)
+  obs_weight_decay: 1.0e-6        # observation encoder (PointNet and state MLP)
 
 # ── EMA ──
 ema:
