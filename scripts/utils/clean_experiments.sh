@@ -9,7 +9,6 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "Usage: clean_experiments.sh [--root DIRECTORY]"
             echo "Read-only: report configs, checkpoint filenames and directory sizes."
-            echo "Deletion, age/toy classification and active-run inference have been removed."
             exit 0 ;;
         *) echo "Unsupported option: $1. This command is read-only; use --help." >&2; exit 2 ;;
     esac

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Download experiments; conflicting config/source metadata aborts before transfer.
+# Download experiments; conflicting configs abort before transfer.
 # Usage: bash scripts/remote/sync_down.sh [SUBPATH] [--dry-run|--list] [--with-wandb]
 # Passes: new immutable files; live metrics/latest/VQ best; checksummed best/selection.
 # No pass retains partial files.
@@ -88,16 +88,16 @@ echo "  Remote: $REMOTE_PATH"
 echo "  Local:  $LOCAL_PATH"
 echo ""
 
-# Compare existing small immutable identity records before publishing anything.
+# Compare existing training configs before publishing anything.
 # Byte differences are conservatively treated as conflicts, including formatting
 # changes. This does not authenticate same-named large binary artifacts.
-if identity_changes=$(rsync -rclni --existing --out-format='%i %n' \
+if config_changes=$(rsync -rclni --existing --out-format='%i %n' \
     "${WANDB_EXCLUDE[@]}" --include='*/' \
-    --include='config.yaml' --include='source_manifest.json' --exclude='*' \
+    --include='config.yaml' --exclude='*' \
     "$REMOTE_PATH" "$LOCAL_PATH"); then
-    conflicts=$(printf '%s\n' "$identity_changes" | sed -n '/^[<>ch][fL]/p')
+    conflicts=$(printf '%s\n' "$config_changes" | sed -n '/^[<>ch][fL]/p')
     if [[ -n "$conflicts" ]]; then
-        printf 'Run identity conflict; no artifacts updated:\n%s\n' "$conflicts" >&2
+        printf 'Training config conflict; no artifacts updated:\n%s\n' "$conflicts" >&2
         exit 1
     fi
 else

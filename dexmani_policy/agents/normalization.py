@@ -289,18 +289,6 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
             obj.input_stats = dict_apply(input_stats_dict, to_tensor)
         return obj
 
-    @classmethod
-    def create_identity(cls, dtype=torch.float32):
-        scale = torch.tensor([1], dtype=dtype)
-        offset = torch.tensor([0], dtype=dtype)
-        input_stats_dict = {
-            "min": torch.tensor([-1], dtype=dtype),
-            "max": torch.tensor([1], dtype=dtype),
-            "mean": torch.tensor([0], dtype=dtype),
-            "std": torch.tensor([1], dtype=dtype),
-        }
-        return cls.create_manual(scale, offset, input_stats_dict)
-
     def normalize(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
         return normalize_tensor(x, self.params_dict, forward=True)
 
@@ -535,15 +523,8 @@ class LinearNormalizer(DictOfTensorMixin):
         return self._normalize_impl(x, forward=False)
 
 
-def build_mixed_action_normalizer(action_data, ee_dim=9):
-    """Build a mixed normalizer for eef_hand actions: xyz(3) + rot6d(ee_dim-3) + hand(rest).
-
-    xyz and hand → limits [-1, 1] (min-max); rot6d → identity (scale=1, offset=0).
-    """
-    return build_mixed_action_normalizer_chunks(iter((action_data,)), ee_dim=ee_dim)
-
-
 def build_mixed_action_normalizer_chunks(chunks, ee_dim=9):
+    """Fit xyz/hand limits from chunks, keeping rot6d coordinates unchanged."""
     tmp = LinearNormalizer()
     tmp.fit_field_chunks("action", chunks, mode="limits")
     fitted = tmp["action"]
@@ -773,7 +754,5 @@ def validate_action_clipping(spec, clip_sample):
         raise TypeError("agent.clip_sample must be a bool")
     if spec.get("action") == "gaussian" and clip_sample:
         raise ValueError(
-            "Gaussian action normalization requires agent.clip_sample=false. "
-            "Historical Gaussian+true results are not silently corrected; use the "
-            "original code to reproduce them, and reevaluate the corrected experiment."
+            "Gaussian action normalization requires agent.clip_sample=false."
         )

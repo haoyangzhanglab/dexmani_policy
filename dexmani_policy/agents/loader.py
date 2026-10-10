@@ -45,17 +45,17 @@ def _record_path(root, relative, *, checkpoint=False, immutable=False):
     return resolved
 
 
-def _validate_record_inference(info, *, historical=False):
-    inference = info.get("inference", {} if historical else None)
+def _validate_record_inference(info):
+    inference = info.get("inference")
     if not isinstance(inference, dict):
         raise ValueError("Record requires inference settings")
-    if (not historical or "use_ema" in inference) and type(inference.get("use_ema")) is not bool:
+    if type(inference.get("use_ema")) is not bool:
         raise ValueError("inference.use_ema must be a bool")
     steps = inference.get("inference_steps")
-    if (not historical or "inference_steps" in inference) and (type(steps) is not int or steps <= 0):
+    if type(steps) is not int or steps <= 0:
         raise ValueError("inference.inference_steps must be a positive int (not bool)")
     mode = inference.get("policy_seed_mode")
-    if (info.get("_format") == "best.v1" or "policy_seed_mode" in inference) and (not isinstance(mode, str) or not mode):
+    if not isinstance(mode, str) or not mode:
         raise ValueError("Record requires inference.policy_seed_mode")
 
 
@@ -73,36 +73,16 @@ def _read_selection_reference(root, info):
 
 
 def resolve_best_checkpoint(experiment_dir):
-    """Resolve saved inference; only unformatted flat records may omit EMA/NFE."""
+    """Resolve the best.v1 inference snapshot and its concrete checkpoint."""
     from pathlib import Path
 
     root = Path(experiment_dir).resolve()
     info = _read_record(root / "best_ckpt.json")
-    if "_format" in info and info["_format"] not in ("best.v1", "selection.v2"):
-        raise ValueError(f"Unsupported best record format: {info['_format']!r}")
-    if "_format" not in info and "selection_result" in info:
-        info = _read_selection_reference(root, info)
-    historical = "_format" not in info
-    if info.get("_format") == "selection.v2" and info.get("status") != "success":
-        raise ValueError("Selection result must be successful")
-    _validate_record_inference(info, historical=historical)
-    if historical:
-        info.setdefault("inference", {})
-    resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=not historical)
+    if info.get("_format") != "best.v1":
+        raise ValueError("best_ckpt.json requires best.v1")
+    _validate_record_inference(info)
+    resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
     return info, resolved
-
-
-def warn_legacy_inference_defaults(info, *, source, overridden=()):
-    """Identify saved-config fallback without filling or rewriting the record."""
-    import warnings
-
-    missing = {"use_ema", "inference_steps"} - info["inference"].keys() - set(overridden)
-    if missing:
-        warnings.warn(
-            f"Historical flat best: {', '.join(sorted(missing))} from {source}; "
-            "provided inference fields come from the record",
-            stacklevel=2,
-        )
 
 
 def resolve_checkpoint(experiment_dir, selector="best"):
@@ -173,15 +153,15 @@ def checkpoint_agent_config(cfg, state):
         if agent.get('rgb_backbone_name') is not None:
             rgb = dict(agent.get('rgb_backbone_config') or {})
             if (agent.rgb_backbone_name in {'dino', 'clip', 'siglip'}
-                    and 'architecture' in rgb
                     and not isinstance(rgb.get('architecture'), (dict, DictConfig))):
-                raise ValueError('Saved backbone architecture must be a mapping')
+                raise ValueError('Saved HF backbone requires an architecture mapping')
             rgb['load_pretrained'] = False
             agent.rgb_backbone_config = rgb
         if agent.get('_target_') == 'dexmani_policy.agents.core.multi_task.MultiTaskAgent' and agent.get('task_texts') is not None:
             table = state.get('task_emb_table')
             texts = list(dict.fromkeys(agent.task_texts))
-            if not isinstance(table, torch.Tensor) or table.ndim != 2 or table.shape[0] != len(texts):
-                raise ValueError('Closed text checkpoint requires the complete saved embedding table and task list')
-            agent.text_embed_dim = table.shape[1]
+            dim = agent.get('text_embed_dim')
+            if (type(dim) is not int or dim <= 0 or not isinstance(table, torch.Tensor)
+                    or table.ndim != 2 or tuple(table.shape) != (len(texts), dim)):
+                raise ValueError('Closed text checkpoint requires task_emb_table matching saved task_texts and text_embed_dim')
     return cfg

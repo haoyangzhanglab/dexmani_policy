@@ -1,12 +1,9 @@
 """
 VectorQuantize — core VQ layer with Euclidean codebook + EMA updates.
 
-Simplified from DQ-RISE's vector_quantize_pytorch:
-  - Removed: DDP distributed sync, CosineSimCodebook, affine_param,
-    accept_image_fmap, orthogonal_reg, in_place_codebook_optimizer,
-    sync_update_v, reinmax, multi-head separate_codebook_per_head
-  - Kept: EuclideanCodebook with EMA updates, kmeans init, dead code
-    expiration, learnable_codebook option, commitment loss
+Adapted from DQ-RISE's vector_quantize_pytorch. Supports EMA updates,
+kmeans initialization, dead-code expiration, learnable codebooks and
+commitment loss.
 """
 
 from __future__ import annotations

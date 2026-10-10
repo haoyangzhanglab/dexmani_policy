@@ -204,9 +204,9 @@ remote source tree
 
 `train_remote.sh` 先用原子 `mkdir` 认领独立 UUID 目录，再调用 `sync_code.sh --dest`。自定义目标必须是干净绝对路径且尚未填充；非空副本拒绝再次同步。`outputs/` 已被主镜像同步排除，因此后续同步不会覆盖旧副本。
 
-独立副本通过 symlink 复用主目录下的 `robot_data/`、`data/`、`experiments/`、`pretrained_models/` 和 `logs/`。预检、单卡和 DDP 均从副本根目录用 `python -m` 执行，避免 editable install 把 import 指向主镜像。传输、链接准备或数据预检失败时不启动训练；源码副本保留，不自动清理。副本无自身 `.git` 时，快照中的 commit/dirty 为 unknown，不继承父目录 Git 信息；内容 SHA256 仍记录实际文件。
+独立副本通过 symlink 复用主目录下的 `robot_data/`、`data/`、`experiments/`、`pretrained_models/` 和 `logs/`。预检、单卡和 DDP 均从副本根目录用 `python -m` 执行，避免 editable install 把 import 指向主镜像。传输、链接准备或数据预检失败时不启动训练；源码副本保留，不自动清理。
 
-默认 `sync_code.sh` 可重复更新主目录镜像，已有训练副本的源码不受影响。直接使用主目录的历史或手工训练，其后续文件读取和 lazy import 可能看到更新；`source.zip` / `source_manifest.json` 记录启动时源码，不隔离运行时读取。
+默认 `sync_code.sh` 可重复更新主目录镜像，已有训练副本的源码不受影响。直接使用主目录的历史或手工训练，其后续文件读取和 lazy import 可能看到更新。
 
 关键区别：
 
@@ -332,7 +332,7 @@ bash scripts/remote/sync_down.sh --with-wandb <optional-subpath>
 
 ### 5.2 Three-pass Protection Strategy
 
-`sync_down.sh` 先比较已有 `config.yaml` 和 `source_manifest.json`；字节不同即报冲突并停止，不覆盖或自动合并，包括仅格式不同的情况。此检查不认证同名大二进制内容，也不提供跨文件事务。
+`sync_down.sh` 先比较已有 `config.yaml`；字节不同即报冲突并停止，不覆盖或自动合并，包括仅格式不同的情况。此检查不认证同名大二进制内容，也不提供跨文件事务。
 
 #### Pass 1 — New files only
 
@@ -344,9 +344,9 @@ remote file already exists locally
     → leave local copy untouched
 ```
 
-第一趟只下载新的不可变产物，保留已有 milestone、resolved config、source.zip/source_manifest、eval_config、完成的 selection_result 和 result_details。不同 evaluation/demo run 使用独立目录。
+第一趟只下载新的不可变产物，保留已有 milestone、resolved config、eval_config、完成的 selection_result 和 result_details。不同 evaluation/demo run 使用独立目录。
 
-源码快照、训练配置、checkpoint、码本导出和评测快照/结果均在同目录临时文件中写完整后原子发布；同步排除这些临时文件。Pass 1 不保留 partial destination，以避免下一次 `--ignore-existing` 把未完成 checkpoint 当成完整文件。
+训练配置、checkpoint、码本导出和评测快照/结果均在同目录临时文件中写完整后原子发布；同步排除这些临时文件。Pass 1 不保留 partial destination，以避免下一次 `--ignore-existing` 把未完成 checkpoint 当成完整文件。
 
 #### Pass 2 — Mutable training files
 
@@ -530,7 +530,7 @@ server unreachable
 
 Policy 参数按合法相对路径校验，run 参数按单个合法目录名校验，均不根据当前模型名单或旧 timestamp 格式推断。历史已保存实验不要求当前 config 仍存在。
 
-默认候选须包含根目录 `config.yaml` 和 `metrics.jsonl`，按 `.training_run.json` 文件 mtime 排序；无标记的历史 run 使用 `config.yaml` mtime，平局按目录名稳定排序。该顺序是默认查询依据，不证明任务正在运行。目录因评测新增文件而改变 mtime，不影响选择。
+默认候选须包含根目录 `config.yaml` 和 `metrics.jsonl`，按 `config.yaml` 文件 mtime 排序，平局按目录名稳定排序。该顺序是默认查询依据，不证明任务正在运行。目录因评测新增文件而改变 mtime，不影响选择。
 
 远端与本地使用同一查询。只有 SSH 不可达才 fallback 到本地；查询错误保留非零退出状态。`tail -F` 按文件名跟随，支持 rsync 原子替换 metrics；显式指定的 run 目录须存在，其日志尚未创建时会等待重试。
 
@@ -569,7 +569,7 @@ bash scripts/remote/stop_remote.sh --all
 
 第二次 signal 或 force kill 可能绕过完整的 graceful save。当前 Trainer 只在 interrupted 且 `global_step > 0` 时尝试 interrupt checkpoint，因此“收到 SIGINT”本身不保证一定产生 checkpoint。
 
-`--all` / `--list` 只查询 `dexmani_policy` socket，不访问默认 socket 中的其他会话。具名停止先检查专用 socket；明确未找到时才按完整名称查找旧 default socket，以保留历史任务控制。查询失败不会触发这个 fallback，也不会被解释为任务已停止。
+`--all`、`--list` 和具名停止均只查询 `dexmani_policy` socket。具名停止按完整名称匹配；查询失败不会被解释为任务已停止。
 
 `--list` / `--all` 把“没有 session/server/socket”视为正常空结果；tmux 不存在、其它查询错误或 SSH 失败保留非零退出状态，不能解释成全部训练已停止。
 
@@ -628,7 +628,7 @@ conda run --no-capture-output -n policy python -m dexmani_policy.agents.vq_hand.
 bash scripts/training/train.sh dqrise task_name=<task> codebook_path="$VQ_RUN/codebook.npz"
 ```
 
-每次使用新 run；已有训练目录拒绝认领，已有导出文件只有显式 `--overwrite` 才可覆盖。Stage 2 额外的数据/窗口覆盖必须与 `--policy-override` 一致。不要用旧独立 VQ 的全量统计配方替代这个入口。这里的 VQ 产物归 `experiments/`，远端生成后用 `sync_down.sh vq_hand/<task>/<run>` 拉取。
+每次使用新 run；已有训练产物的目录拒绝重用，已有导出文件只有显式 `--overwrite` 才可覆盖。Stage 2 额外的数据/窗口覆盖必须与 `--policy-override` 一致。不要用旧独立 VQ 的全量统计配方替代这个入口。这里的 VQ 产物归 `experiments/`，远端生成后用 `sync_down.sh vq_hand/<task>/<run>` 拉取。
 
 如果另外将 Stage 1 artifact 发布到 `data/`，才使用下面的数据同步流程：
 
@@ -736,7 +736,7 @@ bash scripts/remote/stop_remote.sh --list
 
 ### Process ownership
 
-`stop_remote.sh --all` 只处理本项目专用 tmux socket；历史默认 socket 会话通过具名停止处理。
+`stop_remote.sh` 只处理本项目专用 `dexmani_policy` tmux socket。
 
 ---
 

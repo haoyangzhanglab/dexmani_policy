@@ -14,7 +14,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dexmani_policy.training.checkpoint import CheckpointStore
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.utils.path import set_project_root
+from dexmani_policy.utils.path import resolve_resume_source, set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
     build_dataset_and_normalizer,
@@ -30,7 +30,7 @@ from dexmani_policy.training.resume import (
     restore_training_state,
     validate_gpu_ids,
 )
-from dexmani_policy.training.run_identity import claim_run, resolve_resume_source
+from dexmani_policy.training.workspace import prepare_output_dir
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
@@ -159,9 +159,7 @@ def main(cfg):
     validate_config(cfg)
     with open_dict(cfg):
         cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
-        cfg.workspace.claim_token = claim_run(
-            cfg.workspace.output_dir, resume_from=cfg.resume_from
-        )
+    prepare_output_dir(cfg.workspace.output_dir)
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. DDP training requires GPU.")

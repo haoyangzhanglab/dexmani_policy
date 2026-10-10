@@ -41,7 +41,7 @@ def set_rng_state(state: Dict[str, Any], device="cpu") -> None:
     cuda_state = state["torch_cuda"]
     if cuda_state is not None:
         if not isinstance(cuda_state, torch.Tensor):
-            raise ValueError("Checkpoint CUDA RNG must be a per-rank tensor; restore older formats with their original code")
+            raise ValueError("Checkpoint CUDA RNG must be a per-rank tensor")
         if device.type != "cuda":
             raise ValueError("CUDA training RNG requires a CUDA target device for exact resume")
         if cuda_state.dtype != torch.uint8 or cuda_state.ndim != 1 or not cuda_state.numel():

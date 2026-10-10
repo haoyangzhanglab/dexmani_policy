@@ -1,4 +1,5 @@
 import atexit
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -6,12 +7,23 @@ from typing import Any, Dict, Optional
 from omegaconf import OmegaConf
 from dexmani_policy.utils.atomic import atomic_path
 
-from dexmani_policy.training.run_identity import claim_run, check_run_claim
 from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
 from dexmani_policy.training.logging import (
     JsonlLogger,
     WandbLogger,
 )
+
+
+def prepare_output_dir(output_dir):
+    """Create the output directory, refusing existing training artifacts."""
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
+        if (root / name).exists():
+            raise FileExistsError(f"Training output already exists: {root / name}; use a new output directory")
+    for pattern in ("vqvae_hand_*.pt", "*.npz", "code_usage_*.png", "loss_curve.png"):
+        if any(root.glob(pattern)):
+            raise FileExistsError(f"VQ output already exists in {root}; use a new output directory")
 
 
 @dataclass
@@ -26,24 +38,20 @@ class WandbConfig:
 
 
 class TrainWorkspace:
-    def __init__(self, output_dir: str, wandb_cfg: WandbConfig | None = None, claim_token=None):
+    def __init__(self, output_dir: str, wandb_cfg: WandbConfig | None = None):
         self.output_dir = Path(output_dir)
-        if claim_token is None:
-            claim_token = claim_run(self.output_dir)
-        check_run_claim(self.output_dir, claim_token)
-        from dexmani_policy.training.source_snapshot import save_source_snapshot
-        save_source_snapshot(self.output_dir)
+        prepare_output_dir(self.output_dir)
         self.checkpoint_dir = self.output_dir / "checkpoints"
 
         self.checkpoint_store = CheckpointStore(self.checkpoint_dir)
 
         self.json_logger = JsonlLogger(output_dir=self.output_dir)
-        # Include the permanent claim identity: sweep basenames such as "0"
+        # Include a random suffix: sweep basenames such as "0"
         # repeat across launches and cannot identify a W&B run on their own.
         self.wandb_logger = None
         if wandb_cfg is not None:
             try:
-                wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{claim_token[:8]}"
+                wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{uuid.uuid4().hex[:8]}"
                 self.wandb_logger = WandbLogger(
                     output_dir=self.output_dir,
                     project=wandb_cfg.project,

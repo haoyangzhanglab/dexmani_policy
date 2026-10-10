@@ -12,9 +12,7 @@ Key differences from ``eval_best_ckpt.py``:
   XWayland. The viewer window will open during recording — this is expected.
 - Defaults to a small number of episodes (5), suitable for demo clips.
 - With ``--ckpt-tag best``, pins the resolved record and concrete checkpoint path.
-  ``best.v1`` and ``selection.v2`` require valid EMA/NFE settings. Only missing
-  EMA/NFE fields in unformatted historical flat best records may fall back to
-  saved ``eval.demo``/``eval`` settings (EMA=True, NFE=10 if absent). Explicit
+  ``best_ckpt.json`` requires a ``best.v1`` snapshot with complete EMA/NFE settings. Explicit
   ``--ema``/``--no-ema`` and ``--inference-steps`` take precedence over record
   settings and saved defaults, but cannot repair invalid record fields.
 - ``--selection-record`` pins a selector's own handoff file and rejects
@@ -59,7 +57,7 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.agents.loader import resolve_best_checkpoint, warn_legacy_inference_defaults
+from dexmani_policy.agents.loader import resolve_best_checkpoint
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
@@ -106,14 +104,8 @@ def _resolve_demo_inference(
                      else resolve_best_checkpoint(exp_dir) if ckpt_tag == "best" else None)
     if resolved_best is not None:
         inference = resolved_best[0]["inference"]
-        warn_legacy_inference_defaults(
-            resolved_best[0], source="saved config.yaml eval.demo / eval defaults (True/10 if absent)",
-            overridden=(["use_ema"] if cli_use_ema is not None else [])
-            + (["inference_steps"] if cli_inference_steps is not None else []),
-        )
-        use_ema = inference.get("use_ema", use_ema)
-        if "inference_steps" in inference:
-            inference_steps_list = [inference["inference_steps"]]
+        use_ema = inference["use_ema"]
+        inference_steps_list = [inference["inference_steps"]]
 
     if cli_use_ema is not None:
         use_ema = cli_use_ema

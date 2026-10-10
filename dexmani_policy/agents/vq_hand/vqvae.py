@@ -121,14 +121,6 @@ class VQVAEHand(nn.Module):
         )
 
     @torch.no_grad()
-    def encode_to_index(self, hand_pose: torch.Tensor) -> torch.Tensor:
-        """Encode without changing EMA codebook state, even in train mode."""
-        x = hand_pose / self.act_scale
-        encoded = self.encoder(x)
-        _, indices, _ = self.vq_layer(encoded.unsqueeze(1), freeze_codebook=True)
-        return indices.squeeze(1)
-
-    @torch.no_grad()
     def decode_from_latent(self, latent: torch.Tensor) -> torch.Tensor:
         # Range validation/clamping is deliberately performed by
         # CodebookManager during prototype export so violations are reported.

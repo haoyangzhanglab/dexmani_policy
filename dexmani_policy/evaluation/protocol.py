@@ -34,21 +34,22 @@ def resolve_selection_checkpoint(experiment_dir, record_path=None):
 
     root = Path(experiment_dir).resolve()
     info = _read_record(Path(record_path) if record_path else root / "best_ckpt.json")
-    if "_format" in info and info["_format"] not in ("best.v1", "selection.v2"):
-        raise ValueError(f"Unsupported selection record format: {info['_format']!r}")
+    # Explicit handoffs written by select_best_ckpt contain only this reference.
+    if record_path is not None and set(info) == {"selection_result"}:
+        info = _read_selection_reference(root, info)
+    allowed_formats = ("best.v1", "selection.v2") if record_path is not None else ("best.v1",)
+    if info.get("_format") not in allowed_formats:
+        raise ValueError(f"Unsupported selection record format: {info.get('_format')!r}")
     snapshot = info if info.get("_format") == "best.v1" else None
     if snapshot is not None:
         _validate_record_inference(snapshot)
         snapshot_path = _record_path(root, snapshot.get("ckpt_relpath"),
                                      checkpoint=True, immutable=True)
-    if snapshot is not None or ("_format" not in info and "selection_result" in info):
+    if snapshot is not None:
         info = _read_selection_reference(root, info)
     if info.get("_format") != "selection.v2":
         raise ValueError("Selection evidence requires selection.v2")
     _validate_record_inference(info)
-    mode = info["inference"].get("policy_seed_mode")
-    if not isinstance(mode, str) or not mode:
-        raise ValueError("Selection evidence requires inference.policy_seed_mode")
     resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
     if snapshot is not None:
         if snapshot_path != resolved or snapshot["inference"] != info["inference"]:
@@ -110,7 +111,7 @@ def parse_eval_overrides(overrides: list[str]):
     for override in overrides:
         key = override.split("=", 1)[0].lstrip("+~")
         if key == "eval.seed_manifest":
-            raise ValueError("eval.seed_manifest was removed; use evaluation seed and episode counts")
+            raise ValueError("Unsupported eval.seed_manifest; use evaluation seed and episode counts")
         if key.split(".")[-1] in {"denoise_steps", "denoise_timesteps_list"}:
             raise ValueError(
                 "Use inference_steps or inference_steps_list for evaluation"

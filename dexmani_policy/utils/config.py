@@ -34,7 +34,7 @@ def resolve_input_recipe(cfg, *, overrides):
     interpolations (notably Hydra's runtime output directory) stay unevaluated.
     """
     from hydra.core.override_parser.overrides_parser import OverridesParser
-    from dexmani_policy.training.run_identity import resolve_resume_source
+    from dexmani_policy.utils.path import resolve_resume_source
 
     source = resolve_resume_source(cfg.get("resume_from"))
     if source is None:
@@ -47,9 +47,7 @@ def resolve_input_recipe(cfg, *, overrides):
         'dataloader.persistent_workers', 'dataloader.prefetch_factor',
     }
     with open_dict(result):
-        # These belong to an invocation, not the saved learning recipe.
-        if 'workspace' in result:
-            result.workspace.pop('claim_token', None)
+        # The execution limit belongs to this invocation.
         result.pop('max_updates', None)
         for override in OverridesParser.create().parse_overrides(list(overrides)):
             key = override.key_or_group

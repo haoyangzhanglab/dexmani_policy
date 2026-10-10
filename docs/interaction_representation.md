@@ -182,7 +182,7 @@ z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
 
 策略入口为 `agents/core/interaction_flow.py`，动作骨干为 `agents/action_decoders/backbone/ditx.py`。
 训练配置为 `configs/interaction_flow.yaml` 与 `configs/ddp/interaction_flow.yaml`。
-复现历史实验应使用该实验保存的配置与 source snapshot。
+复现历史实验应使用该实验保存的配置、checkpoint 和对应源码版本。
 
 ## 6. 数据与配置
 

@@ -66,7 +66,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
         validate_val_ratio(val_ratio)
         validate_max_train_episodes(max_train_episodes)
-        if (saved_split is None and split_manifest
+        if ((split_manifest is not None or saved_split is not None)
                 and (max_train_episodes is not None or val_ratio != 0)):
             raise ValueError("Explicit split_manifest defines final IDs: set max_train_episodes=null "
                              "and val_ratio=0; prepare a subset manifest for a smaller budget")

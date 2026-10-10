@@ -30,7 +30,7 @@ from dexmani_policy.agents.vq_hand import VQVAEHand
 from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.sampler import downsample_mask, get_val_mask
-from dexmani_policy.training.run_identity import claim_run
+from dexmani_policy.training.workspace import prepare_output_dir
 from dexmani_policy.training.build_utils import build_normalizer
 from dexmani_policy.utils.config import register_resolvers
 
@@ -317,9 +317,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         run = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
         args.output_dir = str(Path("experiments/vq_hand") / Path(args.zarr_path).stem / run)
     output_dir = Path(args.output_dir)
-    claim_run(output_dir)
-    from dexmani_policy.training.source_snapshot import save_source_snapshot
-    save_source_snapshot(output_dir)
+    prepare_output_dir(output_dir)
     logger.info("VQ run: %s", output_dir.resolve())
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)

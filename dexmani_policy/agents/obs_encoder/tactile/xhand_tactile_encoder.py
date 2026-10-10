@@ -3,8 +3,6 @@
 KineDex CNN: https://github.com/DinoMini00/KineDex_code
 Optional ECA: https://github.com/BangguWu/ECANet
 """
-from collections.abc import Mapping
-
 import torch
 import torch.nn as nn
 
@@ -130,10 +128,6 @@ class XHandTactileEncoder(nn.Module):
         history = frame_features.permute(0, 2, 1, 3).flatten(2)
         tokens = self.token_norm(self.history_projector(history))
         return tokens + self.finger_embedding.weight.to(tokens.dtype).unsqueeze(0)
-
-    def forward_from_flat(self, obs: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        """Accept normalized [B*T,...] from BaseAgent.preprocess()."""
-        return self(obs[self.input_key].unflatten(0, (-1, self.n_obs_steps)))
 
     @property
     def out_dim(self) -> int:

@@ -14,7 +14,6 @@ trap 'echo ""; echo "Interrupted — training may still be running. Re-run stop_
 
 SERVER="${DEX_SERVER:-dexserver}"
 TMUX_SOCKET=dexmani_policy
-CURRENT_SOCKET="$TMUX_SOCKET"
 
 ensure_server_reachable() {
     local rc
@@ -29,7 +28,7 @@ ensure_server_reachable() {
 
 # Preserve tmux errors before parsing, including command-not-found and SSH failure.
 list_sessions() {
-    ssh "$SERVER" "bash -s -- $CURRENT_SOCKET" <<'BASH'
+    ssh "$SERVER" "bash -s -- $TMUX_SOCKET" <<'BASH'
 output=$(LC_ALL=C tmux -L "$1" list-sessions -F '#{session_name}' 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then printf "%s\n" "$output"; exit 0; fi
 case "$output" in
@@ -77,7 +76,7 @@ _graceful_stop() {
 
     echo "  Sending Ctrl+C (SIGINT) to tmux pane..."
     # send-keys takes a target-pane: qualify the exact session with a colon.
-    if ssh "$SERVER" "tmux -L '$CURRENT_SOCKET' send-keys -t '=$session:' C-c"; then
+    if ssh "$SERVER" "tmux -L '$TMUX_SOCKET' send-keys -t '=$session:' C-c"; then
         :
     else
         rc=$?
@@ -106,7 +105,7 @@ _graceful_stop() {
             return 1
         fi
         echo "  Explicit --force: killing the selected tmux session..."
-        if ssh "$SERVER" "tmux -L '$CURRENT_SOCKET' kill-session -t '=$session'"; then
+        if ssh "$SERVER" "tmux -L '$TMUX_SOCKET' kill-session -t '=$session'"; then
             :
         else
             rc=$?
@@ -193,16 +192,6 @@ case "${1:-}" in
             exit 1
         fi
         ensure_server_reachable || exit $?
-        # Only an explicitly named session may fall back to the old default
-        # socket. Bulk stop/list never inspect or signal that server.
-        if has_session "$SESSION"; then
-            :
-        else
-            rc=$?
-            [[ $rc -eq 1 ]] || exit "$rc"
-            CURRENT_SOCKET=default
-            echo "Checking explicitly named legacy session in the default socket."
-        fi
         echo "Stopping session: $SESSION"
         if _graceful_stop "$SESSION"; then
             echo "Stopped."

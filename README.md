@@ -98,21 +98,21 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<old-run
 bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<task>/<old-run>'
 ```
 
-`resume_from` 接受当前格式的实验目录或 checkpoint 文件，展开 `~`，相对路径以**项目根目录**为基准。恢复始终写入新输出目录。默认 run 使用微秒时间和随机后缀；已有 `.training_run.json`、训练配置、metrics 或 checkpoints 的目录会拒绝认领。遇到冲突请指定新目录，不要删除旧标记来续写产物。Hydra 在进入训练前可能已写入自己的启动文件，训练认领保护不等于整个 Hydra 启动过程的事务。
+`resume_from` 接受当前格式的实验目录或 checkpoint 文件，展开 `~`，相对路径以**项目根目录**为基准。恢复始终写入新输出目录。默认 run 使用微秒时间和随机后缀；已有训练配置、metrics 或 checkpoints 的目录会拒绝使用。遇到冲突请指定新目录。目录检查不提供并发锁，不要让多个训练写入同一自定义目录；Hydra 在进入训练前可能已写入自己的启动文件。
 
-完整续训先读取来源实验的 resolved `config.yaml`，再校验和构造。仅允许显式覆盖新输出位置、W&B、等价设备定位、日志间隔、worker 参数、compile 开关/模式、当次执行上限 `+max_updates=N`，以及数据目录迁移；worker/compile 覆盖沿用有界恢复承诺，不承诺增强或算子逐位相同。旧 claim 和旧 `max_updates` 不继承。world_size、batch/accumulation、训练 seed、AMP/dtype、总计划和模型/数据配方不能覆盖。路径迁移使用 `dataset.zarr_path=...` 或 `dataset.datasets.<index>.zarr_path=...`，训练时仍校验 revision 与保存集合；相同 revision 不是内容 hash 证明。
+完整续训先读取来源实验的 resolved `config.yaml`，再校验和构造。仅允许显式覆盖新输出位置、W&B、等价设备定位、日志间隔、worker 参数、compile 开关/模式、当次执行上限 `+max_updates=N`，以及数据目录迁移；worker/compile 覆盖沿用有界恢复承诺，不承诺增强或算子逐位相同。`max_updates` 仅作用于当次启动，不从来源实验继承。`workspace` 使用当前字段 `_target_`、`output_dir` 和 `wandb_cfg`，不自动清理已废弃字段。world_size、batch/accumulation、训练 seed、AMP/dtype、总计划和模型/数据配方不能覆盖。路径迁移使用 `dataset.zarr_path=...` 或 `dataset.datasets.<index>.zarr_path=...`，训练时仍校验 revision 与保存集合；相同 revision 不是内容 hash 证明。
 
 续训时显式 `task_name` 仅断言来源任务身份，必须与保存值完全相同（复合任务包含顺序）；冲突重复参数也会拒绝。未显式指定时使用保存任务，不受当前 YAML 默认任务影响。远程 `train_remote.sh <config> <task> +resume_from=...` 的数据预检与训练共享配方解析，检查保存的单任务/child 数据路径或显式迁移路径；`--check` 只保证目录存在，不保证数据完整或训练成功。来源配置缺失或损坏时拒绝续训，不回退到当前配方。
 
-保存配置记录 HF 结构及闭集文本维度；完整权重恢复不重新加载初始化权重。HF 配置已有 backbone architecture 时直接使用；旧配置缺少该字段时沿用 model_name/config cache 构造结构（冷缓存不保证可恢复），仍设置 load_pretrained=False 并严格加载 checkpoint 权重。显式非法 architecture 仍报错。固定文本仅保留任务映射、embedding 表和 projection，未知文本报错；旧闭集 checkpoint 中额外保存的 `text_encoder.*` 不再自动删除，由 strict load 拒绝。原子 `.pt` 格式不变，推理读取仍会读同文件字节，并不跳过 optimizer I/O。
+保存配置记录 HF 结构及闭集文本维度；完整权重恢复要求 HF backbone 的 `architecture` 为有效映射，闭集 `text_embed_dim` 与保存的 embedding 表一致，不再加载外部初始化权重。固定文本保留任务映射、embedding 表和 projection，未知文本报错；所有 checkpoint 权重严格加载。推理读取完整 `.pt` 文件，不跳过 optimizer I/O。
 
-训练 checkpoint 使用 `simple.v3`，VQ checkpoint/NPZ 使用 v3。新 best writer 保存 `best.v1`；读取兼容旧 selection 引用、flat `selection.v2` 和无格式 flat best。仅无格式 flat best 缺失的 EMA/NFE 可按消费者原规则取保存配置默认值，并提示来源；显式非法字段及未知格式仍拒绝。严格评测与显式 `--selection-record` 要求完整 `selection.v2` 证据，不以配置 fallback 代替证据。历史产物不迁移、不改写。
+训练 checkpoint 使用 `simple.v3`，VQ checkpoint/NPZ 使用 v3。`best_ckpt.json` 只接受 `best.v1`，其中 EMA、NFE 和 policy seed mode 必须完整有效。严格评测读取完整 `selection.v2` 证据；显式 `--selection-record` 可接收当前 selector 生成的交接引用、`selection.v2` 结果或 `best.v1` 快照。未知格式和无格式 best 均拒绝，不自动迁移或改写产物。
 
-完整续训要求 `resume_contract.facts_format=1`，CUDA RNG 为每个 rank 的单个 Tensor；CPU RNG 的 CUDA 字段为 null。不再转换无版本的旧 contract 或根据旧设备配置推测 RNG 列表槽位。需要这些旧格式的实验使用其原源码版本恢复，当前代码不会改写历史产物或自动退回 weights-only。
+完整续训要求 `resume_contract.facts_format=1`，CUDA RNG 为每个 rank 的单个 Tensor；CPU RNG 的 CUDA 字段为 null。配置、contract 和状态字段必须满足当前约定，恢复失败不会自动退回 weights-only。
 
-数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。历史 checkpoint 缺少数据身份时警告“数据身份未验证”；已有身份仍校验，已知 revision 改变或丢失会报错。当前未版本化 Dataset 显式保存 `revision:null`，同样提示身份未验证。revision 是生产者声明，不是内容 hash。
+数据路径应保持不可变。重新生成数据时使用新路径和 Zarr root attrs 中新的非空字符串 `data_revision`；训练保存单任务/逐任务身份。完整续训必须包含数据身份映射；缺失映射或已知 revision 改变、丢失均报错。未版本化 Dataset 显式保存 `revision:null`，提示身份未验证。revision 是生产者声明，不是内容 hash。
 
-显式训练 `dataset.split_manifest` 决定最终 episode 集合，新训练须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时保留原 seed/比例/cap。恢复使用保存的清单内容，actual IDs 必须是清单训练集合的非空、唯一、canonical 顺序子集，mask 与实际集合一致，外部清单文件可以不存在；兼容旧 manifest+cap 保存的子集，不重新抽样；窗口长度和所选 observation/action 的 finite 检查仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单。
+显式训练 `dataset.split_manifest` 决定最终 episode 集合，训练和恢复均须设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`；更小预算应提前写入清单。无清单时使用 seed/比例/cap。恢复使用保存的清单内容，actual IDs 必须与清单训练集合及 canonical 顺序完全一致，mask 也须一致，外部清单文件可以不存在；窗口长度和所选 observation/action 的 finite 检查仍生效。多任务 Dataset 现在读取固定全局索引；通过 `ResumableDistributedSampler`（训练使用 `build_train_loader`）取得原任务配比和 epoch 顺序，validation 的 deterministic 配方也须使用该 sampler（`shuffle=False`）。索引顺序恢复不承诺多 worker 增强逐位相同。训练 Real canonical 数据可用 `+dataset.split_manifest=/path/split_manifest.json` 指定清单。
 
 Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。支持 Gaussian **动作**归一化的 diffusion 策略必须同时设置 `agent.clip_sample=false`；DQ-RISE/VQ 手部原型仅支持 `action:auto/limits`，关闭裁剪也不支持 Gaussian。Gaussian 观测和 flow 不受 diffusion 裁剪限制。true→false 属于实验变化，不能静默严格续训。
 
@@ -138,11 +138,11 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 
 `--policy-config` 使用目标 Dataset 的 split、有效窗口与唯一 action 源行，码本和 Policy 共用训练统计，验证集不参与拟合。支持 joint `7+12` 和 EEF `9+12`，不支持辅助 action 布局；动作归一化必须为 `auto/limits`。VQ 显式请求验证集，已分配 holdout 但无有效窗口时会报错。VQ 的 `--seed` 只控制优化随机性；数据配方以 Policy 配置为准。额外覆盖通过重复的 `--policy-override` 传入，并在 Policy 训练时传入相同覆盖。
 
-省略 `--output_dir` 会自动生成任务下独立 run。新 run 原子认领；已认领目录或已有 VQ 产物均拒绝重用。导出目标存在时拒绝写入，只有显式 `--overwrite` 才允许覆盖。选点在开始时固定：有验证集为 `val_mse`，无验证集为 `train_mse`；非有限值报错，旧 best 保留。
+省略 `--output_dir` 会自动生成任务下独立 run。已有训练产物的目录拒绝重用。导出目标存在时拒绝写入，只有显式 `--overwrite` 才允许覆盖。选点在开始时固定：有验证集为 `val_mse`，无验证集为 `train_mse`；非有限值报错，旧 best 保留。
 
-导出只生成 Policy 使用的完整 residual-code 组合码本。未使用的分组码本及 `--include_per_group` 已移除；含 `_group_sorted_poses_g*` 扩展字段的旧 NPZ 会被拒绝，可从原 VQ checkpoint 另行导出标准 NPZ。标准 v3 NPZ 与 Policy 内嵌码本保持不变。
+导出生成 Policy 使用的完整 residual-code 组合码本。NPZ 必须严格符合 v3 schema，额外字段会被拒绝；Policy checkpoint 同时保存推理需要的内嵌码本。
 
-训练过程保留分组码本使用图和损失曲线，导出时报告 decoder 范围与 PCA 诊断；码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。新 Policy 和 standalone VQ checkpoint 均保存 `split_metadata.normalization_spec`。旧 standalone v3 缺少该字段时沿原结构、state_dict 和 affine 校验导出，不推断或补写归一化模式；字段存在时检查结构，明确 Gaussian、identity 或非法模式在解码前拒绝。
+训练过程保留分组码本使用图和损失曲线，导出时报告 decoder 范围与 PCA 诊断；码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。Policy 和 standalone VQ checkpoint 均须保存 `split_metadata.normalization_spec`；导出前检查结构和动作归一化模式，缺失声明、Gaussian、identity 或非法模式均在解码前拒绝。
 
 ## 验证
 
@@ -190,7 +190,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 
 ### 源码追溯
 
-新训练保存 `source.zip` 和 `source_manifest.json`，记录实际源码、内容 SHA256、Git 身份和关键依赖。远程 `train_remote.sh` 每次在 `outputs/remote_sources/<launch_uuid>/` 准备独立源码副本，以 module 方式启动，复用原有数据、权重和实验目录；后续启动不会同步到旧副本。副本保留供追溯；没有自身 `.git` 的副本记录 Git 身份为 unknown，不继承父目录的版本，实际文件身份以内容 hash 为准。恢复行为见 [项目架构](docs/项目架构.md)。
+远程 `train_remote.sh` 每次在 `outputs/remote_sources/<launch_uuid>/` 准备独立源码副本，以 module 方式启动，复用原有数据、权重和实验目录；后续启动不会同步到旧副本。副本保留供追溯。恢复行为见 [项目架构](docs/项目架构.md)。
 
 远端代码和数据都可持续更新：`sync_code.sh` 默认更新主源码镜像，`sync_data.sh` 更新共享数据，`train_remote.sh --sync-data` 也可在每次启动前同步数据。独立副本只隔离源码，数据更新会对所有引用同一路径的副本可见；直接从主源码目录运行的手工任务，其后续文件读取和 lazy import 也可能看到源码更新。
 
@@ -201,9 +201,9 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 - 仓库级辅助脚本：`scripts/utils/`
 - Real policy inspection / inference：`dexmani_policy/deployment/`
 
-远程启动会输出独立 session 名，新后台任务使用 `tmux -L dexmani_policy`。`stop_remote.sh --all` / `--list` 只管理这个 socket；具名停止仍支持旧 default socket 中的同名任务。普通停止有30秒轮询等待预算（SSH 查询耗时另计），仅显式 `--force` 允许超时强停。session 消失不证明 checkpoint 完整，数据预检也不代表训练通过。
+远程启动会输出独立 session 名，后台任务使用 `tmux -L dexmani_policy`。`stop_remote.sh` 的具名停止、`--all` 和 `--list` 均只管理这个 socket。普通停止有30秒轮询等待预算（SSH 查询耗时另计），仅显式 `--force` 允许超时强停。session 消失不证明 checkpoint 完整，数据预检也不代表训练通过。
 
-`tail_log.sh <policy> <task> [run_name]` 支持当前及自定义 run 名，不枚举 Policy。默认按 `.training_run.json` 文件时间选择，历史无标记时使用 `config.yaml` 时间；候选须有配置和 metrics。它使用 `tail -F` 跟随同步替换后的日志。W&B 批量同步只搜索 run 根目录，先完成发现再上传。
+`tail_log.sh <policy> <task> [run_name]` 支持当前及自定义 run 名，不枚举 Policy。默认按 `config.yaml` 文件时间选择；候选须有配置和 metrics。它使用 `tail -F` 跟随同步替换后的日志。W&B 批量同步只搜索 run 根目录，先完成发现再上传。
 
 `sync_down.sh` 保留已有不可变产物，只更新指定训练文件与可变引用；配置或来源身份冲突时停止。参数、同步顺序和失败处理见 [SSH 服务器训练部署](docs/SSH服务器训练部署.md)。实验盘点使用 `bash scripts/utils/clean_experiments.sh`，只报告事实，不删除或移动实验。
 

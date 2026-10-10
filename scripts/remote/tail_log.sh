@@ -46,8 +46,7 @@ while IFS= read -r -d '' run; do
     name="${run##*/}"
     [[ "$name" =~ ^[a-zA-Z0-9_.+-]+$ ]] || continue
     [[ -f "$run/config.yaml" && -f "$run/metrics.jsonl" ]] || continue
-    stamp="$run/.training_run.json"
-    [[ -f "$stamp" ]] || stamp="$run/config.yaml"
+    stamp="$run/config.yaml"
     mtime="$(find -L "$stamp" -maxdepth 0 -printf '%T@')"
     printf '%s\t%s\0' "$mtime" "$name" >> "$query_dir/records"
 done < "$query_dir/candidates"

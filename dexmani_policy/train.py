@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.utils.path import set_project_root
+from dexmani_policy.utils.path import resolve_resume_source, set_project_root
 from dexmani_policy.utils.random import set_seed
 
 ROOT_DIR = set_project_root()
@@ -27,7 +27,7 @@ from dexmani_policy.training.build_utils import (
 from dexmani_policy.training.resume import (
     build_resume_contract, build_train_loader, restore_training_state,
 )
-from dexmani_policy.training.run_identity import claim_run, resolve_resume_source
+from dexmani_policy.training.workspace import prepare_output_dir
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
 register_resolvers()
@@ -114,9 +114,7 @@ def main(cfg):
     validate_config(cfg)
     with open_dict(cfg):
         cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
-        cfg.workspace.claim_token = claim_run(
-            cfg.workspace.output_dir, resume_from=cfg.resume_from
-        )
+    prepare_output_dir(cfg.workspace.output_dir)
 
     set_seed(cfg.training.seed)
     comp = build_train_components(cfg)
