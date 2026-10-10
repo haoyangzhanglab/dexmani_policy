@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from dexmani_policy.agents.obs_encoder.interaction.attention import InteractionSelfAttentionBlock
+
 
 @torch.no_grad()
 def _spatial_partition(centers: torch.Tensor, num_regions: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -31,27 +33,8 @@ def _spatial_partition(centers: torch.Tensor, num_regions: int) -> tuple[torch.T
     return anchor_idx, assignment
 
 
-class SceneSelfAttentionBlock(nn.Module):
-    def __init__(self, channels: int, heads: int, hidden_dim: int):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(channels)
-        self.attention = nn.MultiheadAttention(channels, heads, dropout=0.0, batch_first=True)
-        self.norm2 = nn.LayerNorm(channels)
-        self.ffn = nn.Sequential(
-            nn.Linear(channels, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, channels),
-        )
-
-    def forward(self, token: torch.Tensor) -> torch.Tensor:
-        normalized = self.norm1(token)
-        update, _ = self.attention(normalized, normalized, normalized, need_weights=False)
-        token = token + update
-        return token + self.ffn(self.norm2(token))
-
-
-class PointPatchSceneCompressor(nn.Module):
-    """区域汇聚与 cross/self-attention；中心使用还原归一化后的固定坐标。"""
+class SceneContextPool(nn.Module):
+    """将已编码的点云 patches 汇聚为少量场景上下文 token；中心使用米制基座/世界坐标。"""
 
     def __init__(
         self,
@@ -89,7 +72,7 @@ class PointPatchSceneCompressor(nn.Module):
             nn.Linear(hidden_dim, token_channels),
         )
         self.blocks = nn.ModuleList(
-            [SceneSelfAttentionBlock(token_channels, num_heads, hidden_dim) for _ in range(self_depth)]
+            [InteractionSelfAttentionBlock(token_channels, num_heads, hidden_dim) for _ in range(self_depth)]
         )
         self.norm = nn.LayerNorm(token_channels)
 
@@ -165,7 +148,7 @@ class PointPatchSceneCompressor(nn.Module):
 
 def example() -> None:
     torch.manual_seed(0)
-    compressor = PointPatchSceneCompressor().eval()
+    compressor = SceneContextPool().eval()
     patch_token = torch.randn(2, 128, 192)
     patch_center = torch.rand(2, 128, 3)
     with torch.no_grad():

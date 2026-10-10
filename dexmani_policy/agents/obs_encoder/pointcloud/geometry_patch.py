@@ -14,7 +14,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
     knn_point,
     resolve_fps_random_config,
 )
-from dexmani_policy.agents.obs_encoder.pointcloud.semantic_fusion import PointPatchSemanticFusion
+from dexmani_policy.agents.obs_encoder.interaction.point_image_fusion import PointImageFusion
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import PatchEncoder
 
 
@@ -102,7 +102,7 @@ class PointPatchBlock(nn.Module):
         return x + self.mlp(self.norm2(x))
 
 
-class PointPatchEncoder(nn.Module):
+class GeometryPatchEncoder(nn.Module):
     """Encode XYZ[RGB] into patch_token [B,M,D] and patch_center [B,M,3].
 
     semantic_channels 启用 local_token 后的可选图像语义残差；point_uv 必须
@@ -160,7 +160,7 @@ class PointPatchEncoder(nn.Module):
         self.norm = nn.LayerNorm(token_channels)
         self.semantic_fusion = None
         if semantic_channels is not None:
-            self.semantic_fusion = PointPatchSemanticFusion(
+            self.semantic_fusion = PointImageFusion(
                 image_channels=semantic_channels,
                 token_channels=token_channels,
                 gate_init=semantic_gate_init,
@@ -191,6 +191,8 @@ class PointPatchEncoder(nn.Module):
             raise ValueError("N must be at least max(num_patches, group_size)")
 
         xyz = pointcloud[..., :3].float()
+        if not torch.isfinite(pointcloud[..., :self.input_channels]).all():
+            raise ValueError("pointcloud must contain finite observed points before patch sampling")
         with torch.no_grad():
             fps_config = resolve_fps_random_config(
                 self.fps_random_config, self.training
@@ -253,8 +255,8 @@ def example() -> None:
     rgb = torch.rand(batch_size, num_points, 3)
     pointcloud = torch.cat([xyz, rgb], dim=-1)
 
-    print("=== PointPatchEncoder Example ===")
-    encoder = PointPatchEncoder(input_channels=6).eval()
+    print("=== GeometryPatchEncoder Example ===")
+    encoder = GeometryPatchEncoder(input_channels=6).eval()
     with torch.no_grad():
         out = encoder(pointcloud, return_intermediate=True)
     print("input:", tuple(pointcloud.shape))

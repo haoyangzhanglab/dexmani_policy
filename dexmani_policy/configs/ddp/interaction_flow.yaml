@@ -1,0 +1,15 @@
+# @package _global_
+# 每卡 32 × 4 卡 = 128，与单卡配置保持相同有效 batch size。
+defaults:
+  - /interaction_flow
+  - _self_
+
+policy_name: ddp/interaction_flow
+
+training:
+  num_gpus: 4
+  gpu_ids: null
+
+dataloader:
+  batch_size: 32
+  num_workers: 4

@@ -272,6 +272,9 @@ class LoadedPolicy:
         }
         observation = {}
         for name in self.info.observation_fields:
+            if name == "tactile_valid":
+                observation[name] = np.ones((self.info.n_obs_steps, 5), dtype=np.bool_)
+                continue
             if name == "rgb":
                 if rgb_hw is None:
                     raise ValueError("RGB warmup requires the current raw camera height/width")

@@ -4,7 +4,7 @@ import torch.nn as nn
 from dexmani_policy.agents.obs_encoder.tactile.xhand_tactile_encoder import ArrayEncoder
 
 
-class XHandFrameEncoder(nn.Module):
+class XHandTactileFrameEncoder(nn.Module):
     """Normalized [B,T,5,3] or [B,T,5,120,3] -> [B,T,5,64]."""
 
     num_tokens = 5

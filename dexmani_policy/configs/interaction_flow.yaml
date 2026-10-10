@@ -1,0 +1,196 @@
+# 手-物交互表征 + 标准 flow matching + 8 层 DiT-X。
+# 默认为 SIM schema；真机使用 eef_pose 并同步替换 sensor_modalities / normalization。
+# 同一帧：16 scene + 6 wrist/finger interaction + 1 state = 23 tokens。
+
+policy_name: interaction_flow
+
+# ── Task ──
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+
+# ── Core ──
+seed: 42
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_key: action                    # action | action_ee
+action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
+
+# ── Normalization ──
+normalization:
+  joint_state: limits
+  action: auto
+  point_cloud: identity
+  fingertip_points: identity
+  eef_pos: identity
+  eef_rot6d: identity
+  contact_force: gaussian
+
+# ── Dataloader ──
+dataloader:
+  batch_size: 128
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: true
+
+# ── Dataset ──
+dataset:
+  _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  action_key: ${action_key}
+  zarr_path: ${zarr_path}
+  seed: ${training.seed}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  val_ratio: 0.0
+  max_train_episodes: 80
+  sensor_modalities: ["joint_state", "point_cloud", "fingertip_points", "eef_pos", "eef_rot6d", "contact_force"]
+  obs_horizon: ${n_obs_steps}
+
+  # Shared R3D-derived sensor recipe; dataset dropout precedes encoder patch FPS.
+  augmentation_cfg:
+    pc:
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+      dropout:     {max_dropout_ratio: 0.8, prob: 1.0}
+    state:
+      noise:       {noise_std: 0.0002, prob: 1.0}
+
+# ── Agent ──
+agent:
+  _target_: dexmani_policy.agents.core.interaction_flow.InteractionFlowAgent
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+
+  # 直接模态编码 + 逐指几何检索 / 触觉更新。
+  pc_dim: 6
+  state_dim: 19
+  token_dim: 192
+  num_patches: 128
+  group_size: 32
+  patch_depth: 4
+  num_scene_tokens: 16
+  wrist_pose_key: split
+  edge_frame: wrist
+  tactile_input_key: contact_force
+  tactile_fusion: query          # query | late | none；固定其他配置的核心消融。
+  tactile_dropout_prob: 0.0     # 用有效性掩码丢弃触觉，不把 0 误作缺测。
+  use_tactile_valid: false      # true 时数据需提供 bool [T,5]，normalization 为 identity。
+  fps_random_config:
+    use_random: true
+    use_random_start: true
+    random_noise_scale: 0.0
+    use_shuffle_output: true
+
+  # 固定动作生成器；标准 FM 只有当前时间 t，没有 consistency target_t。
+  n_layers: 8
+  hidden_dim: 768
+  n_head: 8
+  timestep_embed_dim: 128
+  mlp_ratio: 4.0
+  p_drop_attn: 0.1
+  qkv_bias: false
+  qk_norm: false
+  num_inference_steps: 10
+  t_sample_mode: beta
+  beta_s: 0.999
+  beta_alpha: 1.0
+  beta_beta: 1.5
+  time_shift_alpha: 1.0         # >= 1；仅改变训练时间采样，保持已有标准 FM 目标。
+  num_flow_train_timesteps: 10 # 仅离散时间采样模式使用。
+
+# ── Optimizer ──
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+
+# ── EMA ──
+ema:
+  _target_: dexmani_policy.training.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+# ── Training ──
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: true
+  use_compile: true
+  use_ema: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    total_train_steps: 100000
+    log_interval_steps: 50
+    gradient_accumulation_steps: 1
+
+# ── Workspace ──
+workspace:
+  _target_: dexmani_policy.training.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+
+  wandb_cfg:
+    _target_: dexmani_policy.training.workspace.WandbConfig
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${run_id:}_${training.seed}
+    id: ${policy_name}_${task_name}_${training.seed}
+    resume: allow
+    mode: offline
+    video_fps: 15
+
+# ── Env Runner ──
+env_runner:
+  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
+  task_name: ${task_name}
+  n_obs_steps: ${n_obs_steps}
+  default_eval_episodes: 25
+  sensor_modalities: ${dataset.sensor_modalities}
+  env_kwargs:
+    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
+    texture_random: false
+    instance_random: true
+    table_random: true
+
+# ── Eval ──
+eval:
+  inference_steps: 10
+  inference_steps_list: null
+  use_ema: true
+
+  select_best:
+    initial_episodes: 25
+    batch_size: 5
+    max_episodes: 100
+
+  offline:
+    episodes: 100
+
+  demo:
+    episodes: 5
+    viewer_resolution: [1280, 960]
+
+  video:
+    enabled: true
+    fps: null
+# ── Hydra ──
+hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+    subdir: ${hydra.job.num}

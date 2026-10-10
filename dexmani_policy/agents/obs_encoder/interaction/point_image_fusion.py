@@ -149,7 +149,7 @@ def build_patch_image_weights(
         }
 
 
-class PointPatchSemanticFusion(nn.Module):
+class PointImageFusion(nn.Module):
     def __init__(
         self,
         image_channels: int,
@@ -217,7 +217,7 @@ def example() -> None:
     correspondence = project_points_to_images(
         xyz, depth, intrinsics, extrinsic, resize_crop_transform((64, 64), (32, 32))
     )
-    fusion = PointPatchSemanticFusion(image_channels=48, token_channels=24)
+    fusion = PointImageFusion(image_channels=48, token_channels=24)
     output = fusion(
         torch.randn(2, 4, 24), torch.arange(32).reshape(1, 4, 8).expand(2, -1, -1),
         torch.randn(2, 2, 16, 48), **correspondence,
