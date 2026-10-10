@@ -1,5 +1,3 @@
-"""Same-frame, same-finger tactile residuals followed by hand self-attention."""
-
 import torch
 import torch.nn as nn
 
@@ -7,18 +5,9 @@ from dexmani_policy.agents.obs_encoder.pointcloud.scene_compressor import SceneS
 
 
 class FingerAlignedFusion(nn.Module):
-    """Fuse [B,T,6,D] geometry with [B,T,5,F] tactile frame features.
+    """Fuse wrist/thumb/index/middle/ring/pinky geometry with five tactile tokens.
 
-    Geometry slots are wrist, thumb, index, middle, ring, pinky. geometry_meta
-    is [B,T,5,7]: wrist-local XYZ, visible distance, observation bit,
-    near-support bit, and mean near-null mass (not calibrated uncertainty).
-    force_features [B,T,5,3] are normalized sensor channels, not world-frame forces.
-    A valid zero reading is informative; only tactile_valid disables injection.
-
-    The output projection starts at zero, so fused_geometry initially equals
-    geometry exactly. Compare against a geometry-only model with the same hand
-    attention block. The first optimizer step updates the output projection;
-    subsequent steps also train its upstream tactile, gain and gate branches.
+    geometry_meta: wrist-local XYZ, distance, observed, near support, mean near-null mass.
     """
 
     def __init__(
@@ -26,16 +15,10 @@ class FingerAlignedFusion(nn.Module):
         token_channels: int = 192,
         frame_dim: int = 64,
         num_heads: int = 4,
-        validate_finite: bool = True,
     ) -> None:
         super().__init__()
-        if token_channels < 2 or num_heads < 1 or token_channels % num_heads:
-            raise ValueError("token_channels must be >= 2 and divisible by num_heads")
-        if frame_dim < 1:
-            raise ValueError("frame_dim must be positive")
         self.token_channels = token_channels
         self.frame_dim = frame_dim
-        self.validate_finite = validate_finite
         self.geometry_norm = nn.LayerNorm(token_channels)
         self.frame_norm = nn.LayerNorm(frame_dim)
         self.tactile_proj = nn.Linear(frame_dim, token_channels, bias=False)
@@ -69,34 +52,24 @@ class FingerAlignedFusion(nn.Module):
         *,
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
-        if geometry.ndim != 4 or geometry.shape[2:] != (6, self.token_channels):
-            raise ValueError("geometry must have shape [B,T,6,token_channels]")
+        if geometry.ndim != 4 or geometry.shape[2:] != (6, self.token_channels) or 0 in geometry.shape[:2]:
+            raise ValueError("geometry must be nonempty [B,T,6,token_channels]")
         batch_size, time_steps = geometry.shape[:2]
-        if min(batch_size, time_steps) < 1:
-            raise ValueError("batch size and time steps must be positive")
         for value, suffix, name in (
-            (geometry, (6, self.token_channels), "geometry"),
             (tactile_frames, (5, self.frame_dim), "tactile_frames"),
             (force_features, (5, 3), "force_features"),
             (geometry_meta, (5, 7), "geometry_meta"),
         ):
-            if value.shape != (batch_size, time_steps, *suffix) or value.device != geometry.device:
-                raise ValueError(f"{name}: unexpected shape or device")
-            if not value.is_floating_point():
-                raise TypeError(f"{name} must be floating point")
+            if value.shape != (batch_size, time_steps, *suffix):
+                raise ValueError(f"{name} must have shape {(batch_size, time_steps, *suffix)}")
         if tactile_valid is not None:
-            if (
-                tactile_valid.shape != (batch_size, time_steps, 5)
-                or tactile_valid.dtype != torch.bool
-                or tactile_valid.device != geometry.device
-            ):
-                raise ValueError("tactile_valid must be bool [B,T,5] on the geometry device")
+            if tactile_valid.shape != (batch_size, time_steps, 5) or tactile_valid.dtype != torch.bool:
+                raise ValueError("tactile_valid must be bool [B,T,5]")
             tactile_frames = torch.where(tactile_valid[..., None], tactile_frames, 0.0)
             force_features = torch.where(tactile_valid[..., None], force_features, 0.0)
-        if self.validate_finite:
-            for value in (geometry, tactile_frames, force_features, geometry_meta):
-                if not bool(torch.isfinite(value).all()):
-                    raise ValueError("fusion inputs must be finite after masking missing tactile")
+        inputs = (geometry, tactile_frames, force_features, geometry_meta)
+        if not torch.stack([torch.isfinite(value).all() for value in inputs]).all():
+            raise ValueError("fusion inputs must be finite after masking missing tactile")
 
         dtype = self.geometry_norm.weight.dtype
         g = self.geometry_norm(geometry[:, :, 1:].to(dtype))
@@ -111,7 +84,6 @@ class FingerAlignedFusion(nn.Module):
             alpha = alpha * tactile_valid[..., None].to(alpha.dtype)
         update = (alpha * self.out(gain * evidence)).to(geometry.dtype)
         fused = torch.cat((geometry[:, :, :1], geometry[:, :, 1:] + update), dim=2)
-        # Only the six hand slots mix here; time remains an explicit dimension.
         hand = self.hand_attention(fused.flatten(0, 1).to(dtype))
         hand = self.output_norm(hand).reshape(batch_size, time_steps, 6, self.token_channels)
         outputs = {"hand_token": hand}
