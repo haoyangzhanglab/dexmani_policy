@@ -8,9 +8,13 @@ from collections.abc import Mapping, Sequence
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.obs_encoder.interaction.attention import GeometryCrossAttention
+from dexmani_policy.agents.obs_encoder.interaction.attention import (
+    GeometryCrossAttention,
+)
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import index_points
-from dexmani_policy.agents.obs_encoder.proprio.hand_kinematics import HandKinematicsEncoder
+from dexmani_policy.agents.obs_encoder.proprio.hand_kinematics import (
+    HandKinematicsEncoder,
+)
 
 
 def nearest_patch_evidence(
@@ -30,7 +34,10 @@ def nearest_patch_evidence(
     squared = delta.square().sum(-1).masked_fill(~valid[:, None], float("inf"))
     squared_min, index = squared.min(dim=-1)
     observed = torch.isfinite(squared_min)
-    selected = delta.gather(3, index[..., None, None].expand(-1, -1, -1, 1, 3)).squeeze(3)
+    selected = delta.gather(
+        3,
+        index[..., None, None].expand(-1, -1, -1, 1, 3),
+    ).squeeze(3)
     selected = torch.where(observed[..., None], selected, 0.0)
     return selected, squared_min.sqrt(), observed
 
@@ -57,9 +64,13 @@ class HandSceneRelationEncoder(nn.Module):
     ):
         super().__init__()
         if token_channels <= 0 or num_heads <= 0 or token_channels % num_heads:
-            raise ValueError("token_channels must be positive and divisible by num_heads")
+            raise ValueError(
+                "token_channels must be positive and divisible by num_heads"
+            )
         if len(context_sigmas) != num_heads or len(near_sigmas) != num_heads:
-            raise ValueError("context_sigmas and near_sigmas must have length num_heads")
+            raise ValueError(
+                "context_sigmas and near_sigmas must have length num_heads"
+            )
         scales = (metric_scale, position_scale, radius_multiple, *near_sigmas)
         if any(not math.isfinite(s) or s <= 0 for s in scales):
             raise ValueError("scales and near_sigmas must be finite and positive")
@@ -107,35 +118,71 @@ class HandSceneRelationEncoder(nn.Module):
         query_context 接受 [B,D] 的共享状态或 [B,6,D] 的逐锚点条件。
         hand_encoding 可复用同一腕部/指尖输入的编码，避免门控与关系层重复计算。
         """
-        if pointcloud.ndim != 3 or pointcloud.shape[-1] < 3 or 0 in pointcloud.shape[:2]:
+        if (
+            pointcloud.ndim != 3
+            or pointcloud.shape[-1] < 3
+            or 0 in pointcloud.shape[:2]
+        ):
             raise ValueError("pointcloud must be nonempty [B,N,C>=3]")
         batch = pointcloud.shape[0]
         if eef_pose.shape != (batch, 9):
-            raise ValueError("eef_pose must have shape [B,9] with the pointcloud batch size")
+            raise ValueError(
+                "eef_pose must have shape [B,9] with the pointcloud batch size"
+            )
         global_memory, local_memory = patches["patch_token"], patches["local_token"]
         centers, indices = patches["patch_center"], patches["neighbor_idx"]
-        if indices.ndim != 3 or indices.dtype != torch.long or indices.shape[0] != batch:
-            raise ValueError("neighbor_idx must be a torch.long tensor with shape [B,M,K]")
-        if indices.numel() == 0 or indices.min() < 0 or indices.max() >= pointcloud.shape[1]:
+        if (
+            indices.ndim != 3
+            or indices.dtype != torch.long
+            or indices.shape[0] != batch
+        ):
+            raise ValueError(
+                "neighbor_idx must be a torch.long tensor with shape [B,M,K]"
+            )
+        if (
+            indices.numel() == 0
+            or indices.min() < 0
+            or indices.max() >= pointcloud.shape[1]
+        ):
             raise ValueError("neighbor_idx contains empty or out-of-bounds indices")
         memory_shape = (batch, indices.shape[1], self.token_channels)
         if global_memory.shape != memory_shape or local_memory.shape != memory_shape:
-            raise ValueError("patch_token and local_token must have shape [B,M,token_channels]")
+            raise ValueError(
+                "patch_token and local_token must have shape [B,M,token_channels]"
+            )
         if centers.shape != (batch, indices.shape[1], 3):
             raise ValueError("patch_center must have shape [B,M,3]")
-        if not torch.isfinite(global_memory).all() or not torch.isfinite(local_memory).all():
-            raise ValueError("patch features must be finite; member_valid only masks geometry")
+        if (
+            not torch.isfinite(global_memory).all()
+            or not torch.isfinite(local_memory).all()
+        ):
+            raise ValueError(
+                "patch features must be finite; member_valid only masks geometry"
+            )
         if member_valid is not None and (
             member_valid.shape != indices.shape or member_valid.dtype != torch.bool
         ):
             raise ValueError("member_valid must be boolean with shape [B,M,K]")
 
-        hand = self.hand_encoder(eef_pose, fingertip_points) if hand_encoding is None else hand_encoding
-        expected = {"hand_token": (batch, 6, self.token_channels),
-                    "hand_center": (batch, 6, 3), "wrist_rotation": (batch, 3, 3)}
+        hand = (
+            self.hand_encoder(eef_pose, fingertip_points)
+            if hand_encoding is None
+            else hand_encoding
+        )
+        expected = {
+            "hand_token": (batch, 6, self.token_channels),
+            "hand_center": (batch, 6, 3),
+            "wrist_rotation": (batch, 3, 3),
+        }
         for key, shape in expected.items():
-            if key not in hand or hand[key].shape != shape or not torch.isfinite(hand[key]).all():
-                raise ValueError(f"hand_encoding.{key} must be finite with shape {shape}")
+            if (
+                key not in hand
+                or hand[key].shape != shape
+                or not torch.isfinite(hand[key]).all()
+            ):
+                raise ValueError(
+                    f"hand_encoding.{key} must be finite with shape {shape}"
+                )
         anchors = hand["hand_center"]
         hand_query = hand["hand_token"]
         query = hand_query
@@ -148,9 +195,14 @@ class HandSceneRelationEncoder(nn.Module):
                 raise ValueError("query_context must be finite")
             query = query + query_context.to(query.dtype)
 
-        with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
+        with (
+            torch.no_grad(),
+            torch.autocast(device_type=pointcloud.device.type, enabled=False),
+        ):
             members = index_points(pointcloud[..., :3], indices)
-            relative, distance, observed = nearest_patch_evidence(anchors, members, member_valid)
+            relative, distance, observed = nearest_patch_evidence(
+                anchors, members, member_valid
+            )
             center_valid = torch.isfinite(centers).all(-1)
             safe_centers = torch.where(center_valid[..., None], centers.float(), 0.0)
             center_relative = safe_centers[:, None] - anchors[:, :, None]
@@ -160,12 +212,16 @@ class HandSceneRelationEncoder(nn.Module):
                 # 行向量乘 R，相当于列向量左乘 R^T：base/world -> wrist。
                 rotation = hand["wrist_rotation"]
                 relative = torch.einsum("bqmi,bij->bqmj", relative, rotation)
-                center_relative = torch.einsum("bqmi,bij->bqmj", center_relative, rotation)
+                center_relative = torch.einsum(
+                    "bqmi,bij->bqmj", center_relative, rotation
+                )
 
         context, context_attention, _ = self.context(
             query, global_memory, center_relative, center_distance, context_valid
         )
-        near, near_attention, support = self.near(query, local_memory, relative, distance, observed)
+        near, near_attention, support = self.near(
+            query, local_memory, relative, distance, observed
+        )
         # 即使 null_value/out bias 非零，没有局部观测支撑时也不能注入近场更新。
         near_update = near * support.any(-1, keepdim=True).to(near.dtype)
         outputs = {

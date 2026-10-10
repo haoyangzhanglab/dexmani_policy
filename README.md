@@ -26,12 +26,12 @@ conda activate policy
 python -m pip install -r requirements.txt
 python -m pip install -e .
 python -m pip check
-python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit
+python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit interaction_flow
 ```
 
 新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
 
-仿真评测需要另外安装 `dexmani_sim`。训练数据路径由当前 config 决定，常见位置为 `robot_data/<task>.zarr`。
+仿真评测需要另外安装 `dexmani_sim`。训练数据路径由当前 config 决定，常见位置为 `robot_data/<task>.zarr`；字段、坐标系与 SIM/Real 差异见 [数据与模态说明](docs/data_modality.md)。
 
 查看当前可用配置：
 
@@ -41,6 +41,8 @@ ls dexmani_policy/configs/ddp/*.yaml
 ```
 
 配置名只用于定位实验入口，不代表内部模型一定采用某种固定结构；理解实现时应继续进入实际源码。
+
+交互表征策略使用 `interaction_flow`，多卡配置为 `ddp/interaction_flow`。当前模型机制、模态开关与 Real 数据配方见 [逐指交互表征](docs/interaction_representation.md)。
 
 ## 推荐研究流程
 
@@ -158,7 +160,9 @@ python dexmani_policy/smoke_test.py <config_name>
 
 完整训练、DDP 和长时间评测不是普通代码改动后的默认验证步骤。
 
-`--config-only` 只检查配置和 target。完整 smoke 通过正式 Trainer 使用原资产、batch、BF16/compile/accumulation 配置，默认运行4次 optimizer 调用（可用 `--max-updates N` 设置本次上限），要求实际学习参数发生有限变化，再验证预测及 raw/EMA 保存恢复。warmup、总计划及 global_step 不变；预算内没有有效变化会失败，不提高学习率。输出使用临时目录且不创建 W&B run；此入口不验证多卡配置。正式单卡/DDP入口可用 `+max_updates=N` 做有界运行，中途停止保存真实 cursor，不伪造完成 milestone。
+`--config-only` 只检查配置和 target。完整 smoke 通过正式 Trainer 使用原资产、batch、BF16/compile/accumulation 配置，默认运行 4 次 optimizer update（可用 `--max-updates N` 设置本次上限），要求实际学习参数发生有限变化，再验证预测及 raw/EMA 保存恢复。执行预算不修改 warmup 和总训练计划，`global_step` 随实际更新增长；预算内没有有效变化会失败，不提高学习率。输出使用临时目录且不创建 W&B run；此入口不验证多卡运行。
+
+smoke 接受配置名、`--config-only` 和 `--max-updates`，不接受 `task_name=...` 等 Hydra 字段覆盖。需要修改数据配方或保留产物时，使用正式单卡/DDP 入口及 `+max_updates=N`；有界停止会保存真实训练进度和采样游标。具体命令见 [interaction 运行检查](docs/interaction_representation.md#8-运行检查)。配置检查不证明 GPU 算子、真实数据链路或闭环性能已通过。
 
 ## 仿真评测
 
@@ -236,6 +240,8 @@ scripts/
 较长的背景和机制说明放在 `docs/`：
 
 - [`docs/项目架构.md`](docs/项目架构.md)
+- [`docs/interaction_representation.md`](docs/interaction_representation.md)：逐指交互表征、模态开关与运行检查
+- [`docs/data_modality.md`](docs/data_modality.md)：Zarr schema、SIM/Real 模态语义与归一化边界
 - [`docs/仿真评测机制.md`](docs/仿真评测机制.md)
 - [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md)
 

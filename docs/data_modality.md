@@ -217,6 +217,24 @@ Sim 末端观测          (9) = concatenate(eef_pos, eef_rot6d)
 
 reshape 只能统一布局，不能统一测量含义。真机触觉值保留硬件通道的数据约定；当前 Zarr 属性没有给出其力单位与轴向标定，不能仅凭 `contact_force` 这个同名字段就将其当作 sim 世界坐标系下的力直接比较。
 
+### 5.4 触觉有效性与归一化
+
+有效零接触读数与传感器缺测不同，不能根据力值是否为零推断有效位。本文两个 Zarr 示例均未提供 `tactile_valid`；启用 interaction 的 `agent.use_tactile_valid=true` 时，数据与推理调用方必须提供 bool `[T,5]` 有效位，并在 `dataset.sensor_modalities` 和 `normalization` 中分别声明该字段和 `identity`。
+
+有效位进入 encoder 后可以屏蔽无效触觉，但当前 dataset 仍会拒绝含 NaN 的观测窗口，normalizer 也不会排除有限占位值。训练集有缺测污染时，需要处理数据过滤和统计拟合，不能只依靠 encoder mask。`tactile_dropout_prob` 在规范化后的编码路径模拟缺测，不会修复原始数据中的污染。
+
+当前 [normalizer 构建](../dexmani_policy/training/build_utils.py)使用默认 `last_n_dims=1`，因此触觉存储布局还决定统计粒度：
+
+| 原始布局 | Gaussian 统计通道 | 汇总范围 |
+| --- | --- | --- |
+| `(T,15)` | 15 个手指 × 轴通道 | 时间 / 训练源行 |
+| `(T,5,3)` | 3 个轴通道 | 训练源行和手指 |
+| `(T,5,120,3)` | 3 个轴通道 | 训练源行、手指和 taxel |
+
+因此，拟合统计前后的 reshape 不可视为等价操作；不同布局的统计不能直接替换。训练只使用有效训练窗口的唯一源行拟合，验证、推理和恢复复用该份统计。
+
+interaction 要求点云、腕部和指尖处于同一米制坐标系，几何字段使用 `identity`。Real/SIM 的字段选择、完整 normalization 替换方式及开关见 [interaction 数据与配置](./interaction_representation.md#6-数据与配置)。
+
 ## 6. 从 Zarr 到训练样本
 
 上面的表格描述的是磁盘数据。训练时，[BaseDataset](../dexmani_policy/datasets/base_dataset.py) 依据 `sensor_modalities` 选择观测字段，依据 `action_key` 选择监督目标，并在 episode 内采样时间窗口。

@@ -62,7 +62,9 @@ class DiTX(nn.Module):
         self.input_embedder = nn.Linear(action_dim, hidden_dim)
         self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
         self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
-        self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
+        self.context_frame_pos_embed = nn.Parameter(
+            torch.zeros(1, n_obs_steps, hidden_dim)
+        )
         self.timestep_embedder = TimestepMLP(timestep_embed_dim, hidden_dim)
         self.ditx_blocks = nn.ModuleList(
             DiTXBlock(
@@ -115,7 +117,9 @@ class DiTX(nn.Module):
         if context.ndim != 3 or context.shape[-1] != self.obs_token_dim:
             raise ValueError("context must have shape [B, L, obs_token_dim]")
         if context.shape[1] == 0 or context.shape[1] % self.n_obs_steps:
-            raise ValueError("context token count must be nonzero and divisible by n_obs_steps")
+            raise ValueError(
+                "context token count must be nonzero and divisible by n_obs_steps"
+            )
         context_c = self.context_embedder(context)
         frame_pe = self.context_frame_pos_embed.repeat_interleave(
             context.shape[1] // self.n_obs_steps, dim=1

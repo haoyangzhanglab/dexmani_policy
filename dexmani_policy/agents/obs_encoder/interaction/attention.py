@@ -11,7 +11,9 @@ class InteractionSelfAttentionBlock(nn.Module):
     def __init__(self, channels: int, heads: int, hidden_dim: int):
         super().__init__()
         self.norm1 = nn.LayerNorm(channels)
-        self.attention = nn.MultiheadAttention(channels, heads, dropout=0.0, batch_first=True)
+        self.attention = nn.MultiheadAttention(
+            channels, heads, dropout=0.0, batch_first=True
+        )
         self.norm2 = nn.LayerNorm(channels)
         self.ffn = nn.Sequential(
             nn.Linear(channels, hidden_dim),
@@ -21,7 +23,9 @@ class InteractionSelfAttentionBlock(nn.Module):
 
     def forward(self, token: torch.Tensor) -> torch.Tensor:
         normalized = self.norm1(token)
-        update, _ = self.attention(normalized, normalized, normalized, need_weights=False)
+        update, _ = self.attention(
+            normalized, normalized, normalized, need_weights=False
+        )
         token = token + update
         return token + self.ffn(self.norm2(token))
 
@@ -44,7 +48,9 @@ class GeometryCrossAttention(nn.Module):
         self.metric_scale = metric_scale
         self.radius_multiple = radius_multiple
         self.register_buffer("sigmas", torch.tensor(sigmas, dtype=torch.float32))
-        self.register_buffer("proximity_scales", torch.tensor(proximity_scales, dtype=torch.float32))
+        self.register_buffer(
+            "proximity_scales", torch.tensor(proximity_scales, dtype=torch.float32)
+        )
         self.query_norm = nn.LayerNorm(channels)
         self.memory_norm = nn.LayerNorm(channels)
         self.q = nn.Linear(channels, channels)
@@ -67,16 +73,22 @@ class GeometryCrossAttention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch, queries, channels = query.shape
         patches = memory.shape[1]
-        q = self.q(self.query_norm(query)).reshape(batch, queries, self.heads, self.head_dim)
+        q = self.q(self.query_norm(query)).reshape(
+            batch, queries, self.heads, self.head_dim
+        )
         memory = self.memory_norm(memory)
         k = self.k(memory).reshape(batch, patches, self.heads, self.head_dim)
         v = self.v(memory).reshape(batch, patches, self.heads, self.head_dim)
         d = torch.where(valid, distance.float(), 0.0)
         delta = torch.where(valid[..., None], relative.float(), 0.0)
         proximity = torch.exp(-0.5 * (d[..., None] / self.proximity_scales).square())
-        geometry = torch.cat((delta / self.metric_scale, d[..., None] / self.metric_scale, proximity), -1)
+        geometry = torch.cat(
+            (delta / self.metric_scale, d[..., None] / self.metric_scale, proximity), -1
+        )
         edge = self.edge(geometry.to(memory.dtype))
-        edge_value = self.edge_value(edge).reshape(batch, queries, patches, self.heads, self.head_dim)
+        edge_value = self.edge_value(edge).reshape(
+            batch, queries, patches, self.heads, self.head_dim
+        )
 
         edge_bias = self.edge_bias(edge).permute(0, 1, 3, 2)
         # AMP 下 logits 和 softmax 仍使用 FP32。
@@ -96,5 +108,7 @@ class GeometryCrossAttention(nn.Module):
         semantic = torch.einsum("bqhm,bmhd->bqhd", real_weight, v)
         relational = torch.einsum("bqhm,bqmhd->bqhd", real_weight, edge_value)
         null = attention[..., -1:].to(v.dtype) * self.null_value[None, None].to(v.dtype)
-        output = self.out((semantic + relational + null).reshape(batch, queries, channels))
+        output = self.out(
+            (semantic + relational + null).reshape(batch, queries, channels)
+        )
         return output, attention, allowed.any(-1)

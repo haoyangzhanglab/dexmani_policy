@@ -1,6 +1,6 @@
 # 逐指交互表征：研究主线与实现
 
-调研截止：2026-10-10。实现基线：`6ceb5611bfce6a5632d79465721852acfff4db06`。
+调研截止：2026-10-10。
 本文区分论文已报告机制、当前代码行为和待验证研究假设；没有闭环实验结果时不声称性能提升。
 
 ## 1. 研究问题
@@ -115,6 +115,7 @@ z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
 \]
 
 - 两个 gain 独立，范围为 0 到 2，允许两种模态同时增强。输出层零初始化，初始 gain=1，延续原融合幅度。
+- 门控 MLP 跟随 autocast；FP16/BF16 logits 转为 FP32 后计算并保留 gain，避免单位增益附近的小幅更新被舍入。仅有有限 loss 或非零梯度不足以证明前向增益实际发生变化。
 - 几何 gain 控制逐指关系更新；触觉 gain 同时控制 query 注入与直接残差。
 - 16 个 scene token 保留，腕部固定 geometry gain=1、tactile gain=0。
 - 门控不接收 relation_update、attention 或 null mass，避免 Q/L 的读取结果反过来改变残差对照。
@@ -138,7 +139,7 @@ z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
 - `near` 读取未全局混合的 local patch 特征，边使用锚点到 patch 最近可见成员的向量与距离。
 - 默认 context 各头尺度为 `0.08/0.08/0.20/∞ m`，near 为 `0.015/0.015/0.04/0.04 m`，near 截断为各尺度的三倍。这些是初始超参数，尚未验证最优。
 - 两者均有 null key/value；near 额外使用确定性的局部支撑 mask。全部无支撑时 near update 严格为零，即使 null/value/output bias 已被学习。
-- 删除原 near learned gate。距离 bias、半径支持和 null 已有明确职责，再增加门控会引入冗余条件化。
+- near 路径通过距离 bias、半径支持和 null 控制几何读取，关系更新再由逐指 geometry gain 调制。
 
 默认关系向量为 `R_wrist^T (p-c_i)`，距离仍以米表示；场景与状态继续保留基坐标系信息。
 仅旋转边向量不会使包含世界轴 patch/RoPE、绝对状态和动作头的网络整体等变。
@@ -151,42 +152,43 @@ z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
 
 有效零接触读数与传感器缺失不同。默认所有输入有效；可显式启用 bool `tactile_valid`。
 训练期 `tactile_dropout_prob` 在样本/手指层采样有效位，并在同一历史窗口共享，不通过把坐标或原始读数直接乘零来模拟缺测。
-当前 dataset 的有限值过滤仍会拒绝包含 NaN 的数据窗口；若持久化缺失传感器，使用有限占位值加显式 bool mask，不依赖 encoder 单独屏蔽 NaN 的能力绕过数据校验。
-现有 normalizer 也不会按有效位排除占位值，因此本轮不是完整的 mask-aware 缺测数据训练管线。
+当前 dataset 的有限值过滤会拒绝包含 NaN 的数据窗口；normalizer 也不会按有效位排除有限占位值。
+因此，encoder 的缺测屏蔽不能替代数据过滤与统计拟合的缺测处理，含缺测污染的数据不能直接用于当前训练链路。
 主消融优先在正常归一化后使用 `tactile_dropout_prob`，保持 Q/L 的统计与缺测分布一致。
 
 ### 动作生成
 
 保持已有标准 flow matching：`x_t=(1-t)noise+t*action`，目标速度为 `action-noise`。
 复用 `RectifiedFlow`、时间采样器和原 Euler 推理；`time_shift_alpha` 只改变训练时间采样。
-新 `DiTX` 复用已有 DiTXBlock/FinalLayer，默认且策略固定八层；去除 consistency 专用 target-time 条件。
+`DiTX` 复用已有 DiTXBlock/FinalLayer，策略固定八层，仅使用当前 flow 时间条件。
 动作布局、归一化、执行窗口沿用 BaseAgent。无未来预测辅助损失、动作角色分类、VLM 或新增动作分解。
 
 ## 5. 文件与职责
 
 以下路径相对 `dexmani_policy/agents/obs_encoder/`；已有其他基线保持各自入口。
 
-| 原文件 / 类 | 新文件 / 类 | 现在的职责 |
-|---|---|---|
-| `pointcloud/point_patch.py` / PointPatchEncoder | `pointcloud/geometry_patch.py` / GeometryPatchEncoder | 直接点云 patch 编码 |
-| `proprio/hand_point_encoder.py` / WristFingertipEncoder | `proprio/hand_kinematics.py` / HandKinematicsEncoder | 直接腕部/指尖运动学编码 |
-| `tactile/xhand_frame_encoder.py` / XHandFrameEncoder | `tactile/xhand_frame.py` / XHandTactileFrameEncoder | 直接逐帧触觉编码 |
-| `pointcloud/interaction_encoder.py` / PointPatchInteractionEncoder | `interaction/hand_scene_relation.py` / HandSceneRelationEncoder | 身体锚定的几何关系读取 |
-| `pointcloud/scene_compressor.py` / PointPatchSceneCompressor | `interaction/scene_context.py` / SceneContextPool | 保留任务相关场景上下文的汇聚路径 |
-| 分散的几何/手部 attention | `interaction/attention.py` | GeometryCrossAttention、InteractionSelfAttentionBlock |
-| `finger_aligned_fusion.py` / FingerAlignedFusion | `interaction/finger_evidence.py` / FingerEvidenceEncoder | 简化为逐指证据与有效位；移除重复 gain/gate/hand mixing |
-| 新增 | `interaction/modality_gate.py` / FingerModalityGate | 读取前计算逐指独立几何/触觉 gain；默认启用，支持单位 gain 对照 |
-| `pointcloud/semantic_fusion.py` / PointPatchSemanticFusion | `interaction/point_image_fusion.py` / PointImageFusion | 可选 RGB–point patch 融合；当前策略不启用 |
-| 无完整组装器 | `interaction/encoder.py` / InteractionObsEncoder | Q/L 控制开关、统一残差、一次手部协调、frame-major 输出 |
+| 文件 / 类 | 职责 |
+|---|---|
+| `pointcloud/geometry_patch.py` / GeometryPatchEncoder | 直接点云 patch 编码 |
+| `proprio/hand_kinematics.py` / HandKinematicsEncoder | 直接腕部/指尖运动学编码 |
+| `tactile/xhand_frame.py` / XHandTactileFrameEncoder | 直接逐帧触觉编码 |
+| `interaction/hand_scene_relation.py` / HandSceneRelationEncoder | 身体锚定的几何关系读取 |
+| `interaction/scene_context.py` / SceneContextPool | 场景上下文汇聚 |
+| `interaction/attention.py` | GeometryCrossAttention、InteractionSelfAttentionBlock |
+| `interaction/finger_evidence.py` / FingerEvidenceEncoder | 逐指触觉证据与有效位 |
+| `interaction/modality_gate.py` / FingerModalityGate | 读取前计算逐指独立几何/触觉 gain，支持单位 gain 对照 |
+| `interaction/point_image_fusion.py` / PointImageFusion | 可选 RGB–point patch 融合；当前策略不启用 |
+| `interaction/encoder.py` / InteractionObsEncoder | Q/L 开关、统一残差、手部协调、frame-major 输出 |
 
-新增策略为 `agents/core/interaction_flow.py`，动作骨干为 `agents/action_decoders/backbone/ditx.py`。
-新增配置为 `configs/interaction_flow.yaml` 与 `configs/ddp/interaction_flow.yaml`。
-未保留旧 import 别名；外部自定义脚本需按表更新。旧实验复现使用原 source snapshot，结构变化后的 checkpoint 不承诺直接兼容旧类。
+策略入口为 `agents/core/interaction_flow.py`，动作骨干为 `agents/action_decoders/backbone/ditx.py`。
+训练配置为 `configs/interaction_flow.yaml` 与 `configs/ddp/interaction_flow.yaml`。
+复现历史实验应使用该实验保存的配置与 source snapshot。
 
 ## 6. 数据与配置
 
 SIM 默认配置使用：`joint_state, point_cloud, fingertip_points, eef_pos, eef_rot6d, contact_force`。
 展平 `(15,)` 的指尖/接触数据在 encoder 入口统一成 `(5,3)`，指序为拇指、食指、中指、无名指、小指。
+normalizer 在此 reshape 之前拟合；不同触觉布局的统计粒度见 [数据与模态说明](./data_modality.md#54-触觉有效性与归一化)。
 
 Real 切换时必须一起修改：
 
@@ -218,7 +220,6 @@ normalization:
 ```bash
 PYTHONPATH=. python dexmani_policy/smoke_test.py --config-only interaction_flow
 PYTHONPATH=. python dexmani_policy/smoke_test.py --config-only ddp/interaction_flow
-OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
 ```
 
 实际训练沿用仓库 `train.py`/训练脚本入口，选择配置 `interaction_flow`。
@@ -238,7 +239,7 @@ OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
 | 同预算 latent resampler | 排除压缩容量与通用重采样的解释 | 待实现论文对照 |
 
 最重要比较是 **Q−L**，不是 Q−N。保持 demonstrations、编码器、token/参数数、骨干、动作窗口、NFE、优化器和训练种子一致。
-L 与 Q 的实现测试已验证相同直接残差和归一化顺序；这仍不等于闭环收益。
+L 与 Q 保持相同直接残差和归一化顺序，闭环收益需通过实际任务评测验证。
 分别在固定 gain 和自适应 gain 条件下比较 Q−L；分别在 Q 与 L 内比较 adaptive−unit gain。
 若需证明状态依赖超越一般幅度校正，应再加入可学习但输入无关的常数 gain 对照。
 按外部事件划分阶段，联合报告闭环效果与门值诊断；门曲线本身不足以证明模态贡献的因果性。
@@ -253,15 +254,33 @@ L 与 Q 的实现测试已验证相同直接残差和归一化顺序；这仍不
 预设最小有用效应；若 Q 相对 L 的效应上界仍小于该阈值，应采用更简单的 L 并收缩论文主张。
 若只有更多参数带来提升，或者简单逐指 pooling 已相当，不能继续以“触觉条件化几何读取”为核心创新。
 
-## 8. 验证范围
+## 8. 运行检查
 
-本轮定向测试覆盖：标准 flow loss 反向传播、DiTX Euler 推理、optimizer 覆盖、frame-major PE、
-几何腕系边变换、空邻域/成员 mask、Q/L 控制变量、触觉缺失与有效零读数、SIM/Real shape、dense tactile、
-动作执行窗口和 Real warmup bool mask。
-加入门控后 24 项 CPU 测试通过，包括非单位门值下的 Q/L 对照、单位初始化等价、缺测 NaN 隔离、双模态同时增强、原始幅度通道以及门参数梯度。
-CPU 集成测试显式替换 FPS/KNN 为小型参考实现，生产代码继续使用原 PyTorch3D backend；没有为通过测试增加采样 fallback。
-CPU bfloat16 autocast 有独立检查；GPU AMP、生产 PyTorch3D kernel、真实数据训练、真机闭环和性能收益尚待验证。
-当前默认 23 token、尺度和宽度均为可检验起点，不作为最优结果报告。
+先运行第 6 节的 config-only 命令，确认配置字段、Hydra target 与构造参数。该模式不读取真实数据，也不运行 GPU 算子。
+确认数据配方和运行环境后，使用正式 smoke 入口验证真实 batch、训练更新、动作预测与 raw/EMA 保存恢复：
 
-两个配置的独立 Hydra compose/resolve、action window、normalization 字段覆盖和构造参数检查已通过。
-完整 `smoke_test.py --config-only` 在当前临时环境导入 `libllvmlite.so` 时出现 Bus error，尚未通过；没有修改生产代码或依赖要求来绕过该检查。
+```bash
+PYTHONPATH=. python dexmani_policy/smoke_test.py interaction_flow --max-updates 4
+```
+
+smoke 使用当前配置的 batch、BF16、compile 和生产 PyTorch3D 算子；`training.use_compile` 编译 action backbone，并不代表整个 observation encoder 被编译。临时产物在退出时清理，不创建 W&B run。
+
+smoke 不接受 Hydra 字段覆盖。需要保存产物并按 episode 留出验证集时，可从仓库根目录使用正式入口运行有界训练：
+
+```bash
+PYTHONPATH=. python dexmani_policy/train.py --config-name interaction_flow \
+  dataset.val_ratio=0.2 +max_updates=50
+```
+
+这会使用独立输出目录，仅以 `max_updates` 限制本次执行，不修改学习率、warmup 或总训练计划。留出集合由 Dataset 管理，normalizer 只拟合训练源行；当前 Trainer 不自动计算验证集 loss。Real 数据须先按第 6 节替换配方，不能直接套用默认 SIM 配置。
+
+从实际保存的实验目录恢复时：
+
+```bash
+PYTHONPATH=. python dexmani_policy/train.py --config-name interaction_flow \
+  '+resume_from=experiments/interaction_flow/<task>/<run>' +max_updates=4
+```
+
+将 `<task>/<run>` 替换为真实目录。恢复使用来源实验保存的配置、模型、normalizer、optimizer、scheduler、EMA 和训练进度，结果写入新目录；多 worker 的随机增强不保证逐位复现。
+
+`ddp/interaction_flow` 可执行 config-only 检查；多卡运行需使用 `train_ddp.py` 或对应训练脚本，单卡 smoke 不验证多卡执行。短程检查只能证明相应实现链路，不能证明闭环收益或门控已学会阶段切换。

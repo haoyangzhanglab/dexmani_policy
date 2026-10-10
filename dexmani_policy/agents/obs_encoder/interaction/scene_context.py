@@ -4,15 +4,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from dexmani_policy.agents.obs_encoder.interaction.attention import InteractionSelfAttentionBlock
+from dexmani_policy.agents.obs_encoder.interaction.attention import (
+    InteractionSelfAttentionBlock,
+)
 
 
 @torch.no_grad()
-def _spatial_partition(centers: torch.Tensor, num_regions: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _spatial_partition(
+    centers: torch.Tensor, num_regions: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     xyz = centers.detach().float()
     batch_size, num_points, _ = xyz.shape
     batch = torch.arange(batch_size, device=xyz.device)
-    anchor_idx = torch.empty(batch_size, num_regions, dtype=torch.long, device=xyz.device)
+    anchor_idx = torch.empty(
+        batch_size, num_regions, dtype=torch.long, device=xyz.device
+    )
     selected = torch.zeros(batch_size, num_points, dtype=torch.bool, device=xyz.device)
     min_dist = torch.full((batch_size, num_points), float("inf"), device=xyz.device)
     farthest = (xyz - xyz.mean(dim=1, keepdim=True)).square().sum(-1).argmax(-1)
@@ -48,7 +54,9 @@ class SceneContextPool(nn.Module):
         super().__init__()
         hidden_dim = int(token_channels * mlp_ratio)
         if num_scene_tokens < 1 or self_depth < 0 or hidden_dim < 1:
-            raise ValueError("num_scene_tokens and hidden_dim must be positive; self_depth must be >= 0")
+            raise ValueError(
+                "num_scene_tokens and hidden_dim must be positive; self_depth must be >= 0"
+            )
         if not math.isfinite(position_scale) or position_scale <= 0:
             raise ValueError("position_scale must be finite and positive")
 
@@ -72,7 +80,10 @@ class SceneContextPool(nn.Module):
             nn.Linear(hidden_dim, token_channels),
         )
         self.blocks = nn.ModuleList(
-            [InteractionSelfAttentionBlock(token_channels, num_heads, hidden_dim) for _ in range(self_depth)]
+            [
+                InteractionSelfAttentionBlock(token_channels, num_heads, hidden_dim)
+                for _ in range(self_depth)
+            ]
         )
         self.norm = nn.LayerNorm(token_channels)
 
@@ -97,7 +108,8 @@ class SceneContextPool(nn.Module):
         # 关闭 autocast，低精度输入以 FP32 累积。
         with torch.autocast(device_type=patch_token.device.type, enabled=False):
             pooling_dtype = (
-                torch.float32 if patch_token.dtype in (torch.float16, torch.bfloat16)
+                torch.float32
+                if patch_token.dtype in (torch.float16, torch.bfloat16)
                 else patch_token.dtype
             )
             pooled = torch.bmm(
@@ -144,19 +156,3 @@ class SceneContextPool(nn.Module):
     @property
     def out_shape(self) -> tuple[int, int]:
         return (self.num_scene_tokens, self.token_channels)
-
-
-def example() -> None:
-    torch.manual_seed(0)
-    compressor = SceneContextPool().eval()
-    patch_token = torch.randn(2, 128, 192)
-    patch_center = torch.rand(2, 128, 3)
-    with torch.no_grad():
-        outputs = compressor(patch_token, patch_center, return_intermediate=True)
-    for name, value in outputs.items():
-        print(f"{name}: {tuple(value.shape)}")
-    print("parameters:", sum(p.numel() for p in compressor.parameters()))
-
-
-if __name__ == "__main__":
-    example()

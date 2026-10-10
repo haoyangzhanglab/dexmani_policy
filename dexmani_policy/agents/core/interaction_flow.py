@@ -38,7 +38,7 @@ class InteractionFlowAgent(BaseAgent):
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
         use_modality_gate: bool = True,
-        # 固定标准 flow matching + 8 层 DiT-X；宽度可用于低成本形状检查。
+        # 标准 flow matching，固定 8 层 DiT-X。
         n_layers: int = 8,
         hidden_dim: int = 768,
         n_head: int = 8,
@@ -57,12 +57,21 @@ class InteractionFlowAgent(BaseAgent):
         modality_dropout_probs: dict | None = None,
     ) -> None:
         if type(n_layers) is not int or n_layers != 8:
-            raise ValueError("InteractionFlowAgent fixes the action backbone to 8 DiT-X layers")
+            raise ValueError(
+                "InteractionFlowAgent fixes the action backbone to 8 DiT-X layers"
+            )
         if wrist_pose_key not in {"eef_pose", "split"}:
             raise ValueError("wrist_pose_key must be 'eef_pose' or 'split'")
-        wrist_fields = ("eef_pos", "eef_rot6d") if wrist_pose_key == "split" else ("eef_pose",)
+        wrist_fields = (
+            ("eef_pos", "eef_rot6d") if wrist_pose_key == "split" else ("eef_pose",)
+        )
         metric_fields = ("point_cloud", "fingertip_points", *wrist_fields)
-        protected_fields = {*metric_fields, "contact_force", tactile_input_key, "tactile_valid"}
+        protected_fields = {
+            *metric_fields,
+            "contact_force",
+            tactile_input_key,
+            "tactile_valid",
+        }
         for field, probability in (modality_dropout_probs or {}).items():
             if field in protected_fields and probability != 0:
                 raise ValueError(
@@ -133,5 +142,7 @@ class InteractionFlowAgent(BaseAgent):
                     "XYZ must remain in meters in the same frame and rotation-6D unscaled"
                 )
         if self.use_tactile_valid and spec.get("tactile_valid") != "identity":
-            raise ValueError("tactile_valid is a boolean mask and requires identity normalization")
+            raise ValueError(
+                "tactile_valid is a boolean mask and requires identity normalization"
+            )
         super().set_normalization_spec(spec)

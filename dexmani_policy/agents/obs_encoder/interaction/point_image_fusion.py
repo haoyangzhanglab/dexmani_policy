@@ -42,14 +42,15 @@ def project_points_to_images(
 
     with torch.autocast(device_type=point_xyz.device.type, enabled=False):
         extrinsic = world_to_camera.float()
-        camera_xyz = (
-            point_xyz.float()[:, None] @ extrinsic[..., :3, :3].transpose(-1, -2)
-            + extrinsic[..., :3, 3].unsqueeze(-2)
-        )
+        camera_xyz = point_xyz.float()[:, None] @ extrinsic[..., :3, :3].transpose(
+            -1, -2
+        ) + extrinsic[..., :3, 3].unsqueeze(-2)
         projected = camera_xyz @ intrinsics.float().transpose(-1, -2)
         denominator = projected[..., 2:3]
         finite = torch.isfinite(projected).all(-1) & torch.isfinite(camera_xyz).all(-1)
-        valid = finite & (camera_xyz[..., 2] > 1e-6) & (denominator[..., 0].abs() > 1e-6)
+        valid = (
+            finite & (camera_xyz[..., 2] > 1e-6) & (denominator[..., 0].abs() > 1e-6)
+        )
         uv = projected[..., :2] / torch.where(denominator.abs() > 1e-6, denominator, 1)
         uv = torch.nan_to_num(uv)
         u, v = uv.unbind(-1)
@@ -70,7 +71,9 @@ def project_points_to_images(
             homogeneous_uv = torch.cat((uv, torch.ones_like(uv[..., :1])), dim=-1)
             transformed = homogeneous_uv @ pixel_transform.float().transpose(-1, -2)
             divisor = transformed[..., 2:3]
-            transform_valid = torch.isfinite(transformed).all(-1) & (divisor[..., 0].abs() > 1e-6)
+            transform_valid = torch.isfinite(transformed).all(-1) & (
+                divisor[..., 0].abs() > 1e-6
+            )
             uv = transformed[..., :2] / torch.where(divisor.abs() > 1e-6, divisor, 1)
             weight = torch.where(transform_valid, weight, 0)
         outputs = {"point_uv": torch.nan_to_num(uv), "view_weight": weight}
@@ -109,7 +112,9 @@ def build_patch_image_weights(
         finite = torch.isfinite(point_uv).all(-1) & torch.isfinite(view_weight)
         uv = torch.nan_to_num(point_uv.float())
         u, v = uv.unbind(-1)
-        valid = finite & (u >= -0.5) & (u < width - 0.5) & (v >= -0.5) & (v < height - 0.5)
+        valid = (
+            finite & (u >= -0.5) & (u < width - 0.5) & (v >= -0.5) & (v < height - 0.5)
+        )
         confidence = torch.where(valid, view_weight.float().clamp(0, 1), 0)
         view_sum = confidence.sum(dim=1, keepdim=True)
         normalized = confidence / torch.where(view_sum > 0, view_sum, 1)
@@ -121,9 +126,12 @@ def build_patch_image_weights(
         x1, y1 = (x0 + 1).clamp_max(grid_w - 1), (y0 + 1).clamp_max(grid_h - 1)
         dx, dy = x - x0, y - y0
         token_idx = torch.stack(
-            (y0 * grid_w + x0, y0 * grid_w + x1, y1 * grid_w + x0, y1 * grid_w + x1), dim=-1
+            (y0 * grid_w + x0, y0 * grid_w + x1, y1 * grid_w + x0, y1 * grid_w + x1),
+            dim=-1,
         )
-        token_idx += torch.arange(num_views, device=uv.device)[None, :, None, None] * (grid_h * grid_w)
+        token_idx += torch.arange(num_views, device=uv.device)[None, :, None, None] * (
+            grid_h * grid_w
+        )
         bilinear = torch.stack(
             ((1 - dx) * (1 - dy), dx * (1 - dy), (1 - dx) * dy, dx * dy), dim=-1
         )
@@ -138,7 +146,8 @@ def build_patch_image_weights(
         pool_weight.scatter_add_(
             2,
             member_idx.reshape(batch_size, num_patches, -1),
-            member_weight.reshape(batch_size, num_patches, -1) / normalizer.unsqueeze(-1),
+            member_weight.reshape(batch_size, num_patches, -1)
+            / normalizer.unsqueeze(-1),
         )
         member_confidence = gather_members(confidence.amax(dim=1), neighbor_idx)
         return {
@@ -182,50 +191,41 @@ class PointImageFusion(nn.Module):
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
         if image_tokens.shape[2] != math.prod(patch_grid_size):
-            raise ValueError("image token count must equal Hf*Wf; remove prefix tokens first")
+            raise ValueError(
+                "image token count must equal Hf*Wf; remove prefix tokens first"
+            )
 
-        geometry = build_patch_image_weights(neighbor_idx, point_uv, view_weight, image_hw, patch_grid_size)
+        geometry = build_patch_image_weights(
+            neighbor_idx, point_uv, view_weight, image_hw, patch_grid_size
+        )
         # 池化至少以 FP32 累积，避免 autocast 降低精度。
         with torch.autocast(device_type=image_tokens.device.type, enabled=False):
-            pool_dtype = torch.float64 if image_tokens.dtype == torch.float64 else torch.float32
+            pool_dtype = (
+                torch.float64 if image_tokens.dtype == torch.float64 else torch.float32
+            )
             pooled = torch.bmm(
                 geometry["pool_weight"].to(pool_dtype),
                 image_tokens.flatten(1, 2).to(pool_dtype),
             )
         semantic = self.proj(self.image_norm(pooled.to(self.proj.weight.dtype)))
-        quality = torch.stack((geometry["semantic_coverage"], geometry["semantic_confidence"]), dim=-1)
-        gate_input = torch.cat((
-            self.geometry_norm(local_token), self.semantic_norm(semantic), quality.to(local_token.dtype)
-        ), dim=-1)
+        quality = torch.stack(
+            (geometry["semantic_coverage"], geometry["semantic_confidence"]), dim=-1
+        )
+        gate_input = torch.cat(
+            (
+                self.geometry_norm(local_token),
+                self.semantic_norm(semantic),
+                quality.to(local_token.dtype),
+            ),
+            dim=-1,
+        )
         gate = self.gate(gate_input).sigmoid()
         valid = geometry["semantic_valid_mask"].unsqueeze(-1)
         update = torch.where(valid, gate * semantic, 0).to(local_token.dtype)
         outputs = {"fused_token": local_token + update}
         if return_intermediate:
             outputs.update(geometry)
-            outputs.update(semantic_token=pooled, semantic_gate=torch.where(valid, gate, 0))
+            outputs.update(
+                semantic_token=pooled, semantic_gate=torch.where(valid, gate, 0)
+            )
         return outputs
-
-
-def example() -> None:
-    torch.manual_seed(0)
-    xyz = torch.rand(2, 32, 3) - 0.5
-    xyz[..., 2] = 1
-    depth = torch.ones(2, 2, 64, 64)
-    intrinsics = torch.tensor([[50., 0., 31.5], [0., 50., 31.5], [0., 0., 1.]]).expand(2, 2, 3, 3)
-    extrinsic = torch.eye(4).expand(2, 2, 4, 4)
-    correspondence = project_points_to_images(
-        xyz, depth, intrinsics, extrinsic, resize_crop_transform((64, 64), (32, 32))
-    )
-    fusion = PointImageFusion(image_channels=48, token_channels=24)
-    output = fusion(
-        torch.randn(2, 4, 24), torch.arange(32).reshape(1, 4, 8).expand(2, -1, -1),
-        torch.randn(2, 2, 16, 48), **correspondence,
-        image_hw=(32, 32), patch_grid_size=(4, 4), return_intermediate=True,
-    )
-    for name, value in output.items():
-        print(f"{name}: {tuple(value.shape)}")
-
-
-if __name__ == "__main__":
-    example()

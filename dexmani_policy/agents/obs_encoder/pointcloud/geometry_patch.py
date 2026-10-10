@@ -243,28 +243,3 @@ class GeometryPatchEncoder(nn.Module):
     @property
     def out_shape(self) -> tuple[int, int]:
         return (self.num_patches, self.token_channels)
-
-
-def example() -> None:
-    batch_size, num_points = 2, 1024
-
-    xyz = torch.empty(batch_size, num_points, 3)
-    xyz[..., 0] = torch.rand(batch_size, num_points) * 0.6 - 0.3
-    xyz[..., 1] = torch.rand(batch_size, num_points) * 0.8 - 0.4
-    xyz[..., 2] = torch.rand(batch_size, num_points) * 0.5
-    rgb = torch.rand(batch_size, num_points, 3)
-    pointcloud = torch.cat([xyz, rgb], dim=-1)
-
-    print("=== GeometryPatchEncoder Example ===")
-    encoder = GeometryPatchEncoder(input_channels=6).eval()
-    with torch.no_grad():
-        out = encoder(pointcloud, return_intermediate=True)
-    print("input:", tuple(pointcloud.shape))
-    for name, value in out.items():
-        print(f"{name}:", tuple(value.shape))
-    print("out_dim:", encoder.out_dim)
-    print("out_shape:", encoder.out_shape)
-
-
-if __name__ == "__main__":
-    example()
