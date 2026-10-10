@@ -6,6 +6,7 @@ from torch import nn
 from dexmani_policy.agents.obs_encoder.interaction.attention import InteractionSelfAttentionBlock
 from dexmani_policy.agents.obs_encoder.interaction.finger_evidence import FingerEvidenceEncoder
 from dexmani_policy.agents.obs_encoder.interaction.hand_scene_relation import HandSceneRelationEncoder
+from dexmani_policy.agents.obs_encoder.interaction.modality_gate import FingerModalityGate
 from dexmani_policy.agents.obs_encoder.interaction.scene_context import SceneContextPool
 from dexmani_policy.agents.obs_encoder.pointcloud.geometry_patch import GeometryPatchEncoder
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
@@ -28,6 +29,7 @@ class InteractionObsEncoder(nn.Module):
         edge_frame: str = "wrist", wrist_pose_key: str = "eef_pose",
         fps_random_config: dict | None = None, tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
+        use_modality_gate: bool = True,
     ):
         super().__init__()
         if n_obs_steps < 1 or num_scene_tokens > num_patches:
@@ -48,6 +50,7 @@ class InteractionObsEncoder(nn.Module):
         self.wrist_pose_key = wrist_pose_key
         self.tactile_dropout_prob = tactile_dropout_prob
         self.use_tactile_valid = use_tactile_valid
+        self.use_modality_gate = use_modality_gate
         self.geometry = GeometryPatchEncoder(
             input_channels=pc_dim, token_channels=token_dim,
             num_patches=num_patches, group_size=group_size, depth=patch_depth,
@@ -56,6 +59,7 @@ class InteractionObsEncoder(nn.Module):
         self.state = create_state_mlp(state_dim, token_dim)
         self.tactile = XHandTactileFrameEncoder(tactile_input_key)
         self.finger_evidence = FingerEvidenceEncoder(self.tactile.out_dim, token_dim)
+        self.modality_gate = FingerModalityGate(token_dim)
         self.relation = HandSceneRelationEncoder(token_channels=token_dim, edge_frame=edge_frame)
         self.scene = SceneContextPool(token_channels=token_dim, num_scene_tokens=num_scene_tokens)
         self.hand_input_norm = nn.LayerNorm(token_dim)
@@ -116,18 +120,27 @@ class InteractionObsEncoder(nn.Module):
         frames = self.tactile(tactile_input.unsqueeze(1), valid.unsqueeze(1)).squeeze(1)
         evidence = self.finger_evidence(frames, force, valid)
         state_token = self.state(state)
+        patches = self.geometry(pointcloud, return_intermediate=True)
+        scene = self.scene(patches["patch_token"], patches["patch_center"])["scene_token"]
+        hand_encoding = self.relation.hand_encoder(wrist, fingers)
+        # 门控只看读取前的共同证据，绝不使用 Q/L 不同的 relation_update。
+        gains = self.modality_gate(
+            hand_encoding["hand_token"] + state_token[:, None], evidence,
+            scene.mean(dim=1), force, valid, enabled=self.use_modality_gate,
+        )
+        gated_evidence = gains["tactile_gain"] * evidence
         query_context = state_token[:, None].expand(-1, 6, -1)
         if self.tactile_fusion == "query":
-            query_context = query_context + evidence
-        patches = self.geometry(pointcloud, return_intermediate=True)
+            query_context = query_context + gated_evidence
         relation = self.relation(
             pointcloud, patches, wrist, fingers, query_context=query_context,
+            hand_encoding=hand_encoding,
             return_intermediate=return_intermediate,
         )
         # Q/L share the same direct evidence, normalization and coordination.
-        hand = relation["hand_query"] + state_token[:, None] + evidence + relation["relation_update"]
+        hand = (relation["hand_query"] + state_token[:, None] + gated_evidence
+                + gains["geometry_gain"] * relation["relation_update"])
         hand = self.hand_output_norm(self.hand_coordination(self.hand_input_norm(hand)))
-        scene = self.scene(patches["patch_token"], patches["patch_center"])["scene_token"]
         frame_tokens = torch.cat((
             scene + self.token_type[0], hand + self.token_type[1],
             state_token[:, None] + self.token_type[2],
@@ -135,5 +148,6 @@ class InteractionObsEncoder(nn.Module):
         cond = frame_tokens.reshape(batch, self.n_obs_steps * self.tokens_per_frame, self.obs_token_dim)
         aux = {}
         if return_intermediate:
-            aux = dict(relation, finger_evidence=evidence, tactile_valid=valid, frame_tokens=frame_tokens)
+            aux = dict(relation, **gains, finger_evidence=evidence,
+                       gated_finger_evidence=gated_evidence, tactile_valid=valid, frame_tokens=frame_tokens)
         return cond, aux

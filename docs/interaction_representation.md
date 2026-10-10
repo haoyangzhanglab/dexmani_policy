@@ -17,6 +17,10 @@
 同时保留该触觉的直接残差，可能比几何聚合完成后的晚期融合更适合接触建立和调整。
 无接触时的收益应主要来自身体位置与几何对应；实时触觉通常不能提前指出尚未触碰的目标位置。
 
+同时需要区分**融合位置**与**融合强度**：模态的任务价值随交互状态改变，同一时刻不同手指也可能承担不同作用。
+AdapTac 报告了到达阶段更重视觉、操作阶段更重触觉的 attention 变化；这支持考虑动态调制，但不构成固定阶段切换规则或门值的因果解释。
+本版加入读取前的逐指模态门控，让视觉几何与触觉贡献随当前状态变化；不预测离散阶段，也不预设接触后视觉失效。
+
 建议工作标题：**Touch-Conditioned Hand–Scene Relations for Dexterous Manipulation**。
 研究目标仍是手–物交互；代码使用 `HandScene`，因为输入尚未要求可靠物体分割，也不能保证已去除机器人自身点云。
 
@@ -36,7 +40,7 @@
 | [AdapTac](https://arxiv.org/html/2505.13982v1) | 观测/预测力引导视触觉 attention | “力引导融合”不是新贡献；其统一坐标合力依赖 taxel 位姿，不能照搬硬件通道 |
 | [TransDex](https://arxiv.org/html/2603.13869v1) | 触觉力 query 多轮读取已编码的全局、局部手–物及触觉位置分支 | “触觉作为 query”已有直接先例；本研究需验证逐指 patch 聚合的粒度与位置 |
 | [TACIT](https://arxiv.org/html/2609.24507v1) | 用示范接触中心监督较早点云的空间注意力，注意力头推理时看相机点 | 接触引导空间注意力也已有先例；本版用当前触觉 query，不使用未来接触标签 |
-| [FingerEye](https://arxiv.org/html/2604.20689v3)、[DeCAL](https://arxiv.org/html/2609.09119v1) | 分组模态处理，或局部触觉读取与全局门控 | 注意模态压制，但本版不引入额外门控和预测体系来扩大假设 |
+| [FingerEye](https://arxiv.org/html/2604.20689v3)、[DeCAL](https://arxiv.org/html/2609.09119v1) | 分组模态处理，或局部触觉读取与全局门控 | 引入一个逐指模态门控，单独检验融合强度；不引入预测体系 |
 | [MoPA](https://mopa-policy.github.io/)、[GeoHAT](https://icr-lab.github.io/GeoHAT/) | 为不同执行部件组织感知/动作交互 | 支持按身体作用位置组织证据的动机，不代表本模型学习了语义动作角色 |
 | [ProxiDex](https://arxiv.org/abs/2609.16586)、[UniDex](https://arxiv.org/abs/2603.22264)、[TacEx](https://arxiv.org/abs/2609.40134) | 邻近状态建模、功能执行器表示、或触觉探索 | proximity 不等于真实接触；当前 attention 不是主动探索，也没有角色标签监督 |
 
@@ -48,7 +52,7 @@
 2. **融合位置**：在共享直接触觉残差的前提下，让当前触觉参与 patch→身体锚点的空间聚合，并提供完全同参数的晚期融合对照。
 3. **证据与实验**：分别处理几何邻近、真实传感器读数、无局部观测和缺失传感器，检验这种组织方式在接触歧义与局部遮挡下的效果。
 
-这些贡献围绕同一个问题。第二项与第一项的联合效果需要闭环实验支撑；缺失 mask、门控删除和目录重构属于工程与对照设计，不应拆成独立算法贡献。
+这些贡献围绕同一个问题。第二项与第一项的联合效果需要闭环实验支撑；缺失 mask、普通 sigmoid 门控和目录重构不应拆成独立算法贡献。
 不使用“首次触觉引导注意力”“首次手部锚定”“完整 SE(3) 等变”“重建真实接触场”等表述。
 
 ## 4. 最小架构
@@ -65,12 +69,19 @@ flowchart TD
     Q[关节状态] --> S[StateMLP]
     P --> R[HandSceneRelationEncoder]
     H --> R
-    E --> R
+    E --> G[FingerModalityGate]
+    H --> G
+    S --> G
+    SC --> G
+    G --> R
     S --> R
     P --> SC[SceneContextPool]
-    R --> C[一次手部协调]
-    E --> C
-    S --> C
+    R --> F[逐指残差调制]
+    G --> F
+    E --> F
+    H --> F
+    S --> F
+    F --> C[一次手部协调]
     C --> O[按帧排列条件 token]
     SC --> O
     S --> O
@@ -83,16 +94,43 @@ flowchart TD
 两种融合使用完全相同的参数：
 
 \[
-q_i^{Q}=k_i+s+e_i,\qquad q_i^{L}=k_i+s,
+q_i^{Q}=k_i+s+g_i^t e_i,\qquad q_i^{L}=k_i+s,
 \]
 \[
 u_i=\operatorname{ReadGeometry}(q_i),\qquad
 z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
-(\operatorname{LN}_{in}(k_i+s+e_i+u_i))\right).
+(\operatorname{LN}_{in}(k_i+s+g_i^t e_i+g_i^v u_i))\right).
 \]
 
-区别仅在 `ReadGeometry` 是否收到触觉。Q/L 都保留同一触觉直接路径，归一化顺序相同，手部协调次数相同。
-它比同时使用 tactile query、channel gain、fusion gate、near gate 更容易解释。
+区别仅在 `ReadGeometry` 是否收到触觉。Q/L 使用相同读取前输入计算 gain，保留同一触觉直接路径，归一化顺序相同，手部协调次数相同。
+关闭 `use_modality_gate` 后，五指的 gain 固定为 1（缺失触觉仍为 0），恢复原融合形式。
+
+### 当前交互状态条件的模态调制
+
+`FingerModalityGate` 接收读取前的运动学+状态、同指触觉证据、共享场景摘要、规范化 contact_force 和有效位：
+
+\[
+(g_i^v,g_i^t)=2\sigma(f_\theta(k_i+s,e_i,\bar c,\tilde f_i,m_i)),\qquad
+ g_i^t\leftarrow m_i g_i^t.
+\]
+
+- 两个 gain 独立，范围为 0 到 2，允许两种模态同时增强。输出层零初始化，初始 gain=1，延续原融合幅度。
+- 几何 gain 控制逐指关系更新；触觉 gain 同时控制 query 注入与直接残差。
+- 16 个 scene token 保留，腕部固定 geometry gain=1、tactile gain=0。
+- 门控不接收 relation_update、attention 或 null mass，避免 Q/L 的读取结果反过来改变残差对照。
+- 规范化 contact_force 保留幅度通道；只对触觉 embedding 做 LayerNorm 会弱化这部分信息。无效通道先 mask 再送入 MLP，避免 NaN 污染视觉 gain。
+- 门值是特征调制强度，不是接触概率、可信度或经校准的模态重要性。当前门没有时序输入；两帧 DiTX 能使用历史，不等于门本身已识别接触建立/释放的方向。
+
+以下是设计预期，不是硬编码策略或已经观察到的结果：
+
+| 交互状态 | 视觉几何的作用 | 触觉的作用 |
+|---|---|---|
+| 接近 | 目标、可达表面及指尖对齐 | 有效零接触与意外碰触信息 |
+| 接触建立 | 几何对齐与物体位姿 | 接触出现、局部载荷反馈 |
+| 保持与调整 | 目标进展、整体姿态、环境约束 | 局部接触变化与稳定性相关读数 |
+| 释放与重新接触 | 下一个接触位置 | 卸载和是否仍存在接触 |
+
+同一时刻，支撑手指与移动手指的模态需求可能不同，因此采用逐指 gain，不给整只手规定一个全局视觉/触觉开关。
 
 ### 几何读取
 
@@ -137,6 +175,7 @@ z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
 | `pointcloud/scene_compressor.py` / PointPatchSceneCompressor | `interaction/scene_context.py` / SceneContextPool | 保留任务相关场景上下文的汇聚路径 |
 | 分散的几何/手部 attention | `interaction/attention.py` | GeometryCrossAttention、InteractionSelfAttentionBlock |
 | `finger_aligned_fusion.py` / FingerAlignedFusion | `interaction/finger_evidence.py` / FingerEvidenceEncoder | 简化为逐指证据与有效位；移除重复 gain/gate/hand mixing |
+| 新增 | `interaction/modality_gate.py` / FingerModalityGate | 读取前计算逐指独立几何/触觉 gain；默认启用，支持单位 gain 对照 |
 | `pointcloud/semantic_fusion.py` / PointPatchSemanticFusion | `interaction/point_image_fusion.py` / PointImageFusion | 可选 RGB–point patch 融合；当前策略不启用 |
 | 无完整组装器 | `interaction/encoder.py` / InteractionObsEncoder | Q/L 控制开关、统一残差、一次手部协调、frame-major 输出 |
 
@@ -192,6 +231,7 @@ OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
 | N：`tactile_fusion=none` | 同 token 布局，屏蔽全部触觉证据，检验传感器信息价值 | 已实现 |
 | L：`tactile_fusion=late` | 先几何聚合，再加同指触觉残差 | 已实现 |
 | Q：`tactile_fusion=query` | 触觉参与聚合，同时保留与 L 完全相同的直接残差 | 已实现；主假设 |
+| `use_modality_gate=true/false` | 与 Q/L 交叉组成四组，独立检验状态条件调制 | 已实现 |
 | Q 的 `edge_frame=base/wrist` | 仅比较关系边坐标表达 | 已实现 |
 | 无身体约束的同容量 tactile attention | 排除普通触觉 query 已足够的解释 | 待实现论文对照 |
 | FINGR 式逐指相对点 pooling | 排除相对坐标加简单汇聚已足够的解释 | 待实现论文对照 |
@@ -199,6 +239,9 @@ OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
 
 最重要比较是 **Q−L**，不是 Q−N。保持 demonstrations、编码器、token/参数数、骨干、动作窗口、NFE、优化器和训练种子一致。
 L 与 Q 的实现测试已验证相同直接残差和归一化顺序；这仍不等于闭环收益。
+分别在固定 gain 和自适应 gain 条件下比较 Q−L；分别在 Q 与 L 内比较 adaptive−unit gain。
+若需证明状态依赖超越一般幅度校正，应再加入可学习但输入无关的常数 gain 对照。
+按外部事件划分阶段，联合报告闭环效果与门值诊断；门曲线本身不足以证明模态贡献的因果性。
 
 至少设计常规场景和接触歧义场景：例如接触建立后局部遮挡、同一可见几何下不同载荷/接触配置、单指触觉缺失。
 缺失测试使用有效位；错配指序仅作为受控诊断，不改变正常数据的指序约定。
@@ -215,6 +258,7 @@ L 与 Q 的实现测试已验证相同直接残差和归一化顺序；这仍不
 本轮定向测试覆盖：标准 flow loss 反向传播、DiTX Euler 推理、optimizer 覆盖、frame-major PE、
 几何腕系边变换、空邻域/成员 mask、Q/L 控制变量、触觉缺失与有效零读数、SIM/Real shape、dense tactile、
 动作执行窗口和 Real warmup bool mask。
+加入门控后 24 项 CPU 测试通过，包括非单位门值下的 Q/L 对照、单位初始化等价、缺测 NaN 隔离、双模态同时增强、原始幅度通道以及门参数梯度。
 CPU 集成测试显式替换 FPS/KNN 为小型参考实现，生产代码继续使用原 PyTorch3D backend；没有为通过测试增加采样 fallback。
 CPU bfloat16 autocast 有独立检查；GPU AMP、生产 PyTorch3D kernel、真实数据训练、真机闭环和性能收益尚待验证。
 当前默认 23 token、尺度和宽度均为可检验起点，不作为最优结果报告。

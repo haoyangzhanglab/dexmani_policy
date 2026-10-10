@@ -142,6 +142,9 @@ class InteractionFlowTest(unittest.TestCase):
             if p.grad is not None
         )
         self.assertGreater(gradient, 0.0)
+        gate_grad = agent.obs_encoder.modality_gate.gate[-1].weight.grad
+        self.assertIsNotNone(gate_grad)
+        self.assertGreater(gate_grad.abs().sum().item(), 0.0)
 
         agent.eval()
         prediction = agent.predict_action(obs)

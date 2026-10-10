@@ -37,6 +37,7 @@ class InteractionFlowAgent(BaseAgent):
         fps_random_config: dict | None = None,
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
+        use_modality_gate: bool = True,
         # 固定标准 flow matching + 8 层 DiT-X；宽度可用于低成本形状检查。
         n_layers: int = 8,
         hidden_dim: int = 768,
@@ -85,6 +86,7 @@ class InteractionFlowAgent(BaseAgent):
             fps_random_config=fps_random_config,
             tactile_dropout_prob=tactile_dropout_prob,
             use_tactile_valid=use_tactile_valid,
+            use_modality_gate=use_modality_gate,
         )
         backbone = DiTX(
             horizon=horizon,

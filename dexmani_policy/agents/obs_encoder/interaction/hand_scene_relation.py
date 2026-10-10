@@ -95,6 +95,7 @@ class HandSceneRelationEncoder(nn.Module):
         *,
         member_valid: torch.Tensor | None = None,
         query_context: torch.Tensor | None = None,
+        hand_encoding: Mapping[str, torch.Tensor] | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
         """patches 来自 GeometryPatchEncoder(return_intermediate=True)。
@@ -104,6 +105,7 @@ class HandSceneRelationEncoder(nn.Module):
         edge_frame 仅选择相对边的轴向，不变换输入点云或输出 anchor，也不保证网络等变。
         member_valid 只屏蔽几何成员；编码前仍需处理无效点，patch 特征必须有限。
         query_context 接受 [B,D] 的共享状态或 [B,6,D] 的逐锚点条件。
+        hand_encoding 可复用同一腕部/指尖输入的编码，避免门控与关系层重复计算。
         """
         if pointcloud.ndim != 3 or pointcloud.shape[-1] < 3 or 0 in pointcloud.shape[:2]:
             raise ValueError("pointcloud must be nonempty [B,N,C>=3]")
@@ -128,7 +130,12 @@ class HandSceneRelationEncoder(nn.Module):
         ):
             raise ValueError("member_valid must be boolean with shape [B,M,K]")
 
-        hand = self.hand_encoder(eef_pose, fingertip_points)
+        hand = self.hand_encoder(eef_pose, fingertip_points) if hand_encoding is None else hand_encoding
+        expected = {"hand_token": (batch, 6, self.token_channels),
+                    "hand_center": (batch, 6, 3), "wrist_rotation": (batch, 3, 3)}
+        for key, shape in expected.items():
+            if key not in hand or hand[key].shape != shape or not torch.isfinite(hand[key]).all():
+                raise ValueError(f"hand_encoding.{key} must be finite with shape {shape}")
         anchors = hand["hand_center"]
         hand_query = hand["hand_token"]
         query = hand_query

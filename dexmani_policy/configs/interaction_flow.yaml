@@ -79,6 +79,7 @@ agent:
   edge_frame: wrist
   tactile_input_key: contact_force
   tactile_fusion: query          # query | late | none；固定其他配置的核心消融。
+  use_modality_gate: true       # 逐指独立几何/触觉 gain；false 为固定单位 gain 对照。
   tactile_dropout_prob: 0.0     # 用有效性掩码丢弃触觉，不把 0 误作缺测。
   use_tactile_valid: false      # true 时数据需提供 bool [T,5]，normalization 为 identity。
   fps_random_config:
