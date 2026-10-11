@@ -51,7 +51,10 @@ class TrainWorkspace:
         self.wandb_logger = None
         if wandb_cfg is not None:
             try:
-                wandb_id = f"{wandb_cfg.id}_{self.output_dir.name}_{uuid.uuid4().hex[:8]}"
+                # DDP policy prefixes (including saved resume configs) contain '/';
+                # W&B permits it in display names/groups, but not in run IDs.
+                wandb_id_prefix = wandb_cfg.id.replace("/", "_")
+                wandb_id = f"{wandb_id_prefix}_{self.output_dir.name}_{uuid.uuid4().hex[:8]}"
                 self.wandb_logger = WandbLogger(
                     output_dir=self.output_dir,
                     project=wandb_cfg.project,

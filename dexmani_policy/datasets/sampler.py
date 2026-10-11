@@ -196,7 +196,6 @@ class SequenceSampler:
         self.validity_summary = counts
         self.observation_source_rows = np.flatnonzero(obs_rows)
         self.action_source_rows = np.flatnonzero(action_rows)
-        print(f"SequenceSampler window validity (rejections may overlap): {counts}")
         if not len(self.indices):
             raise ValueError(f"Zero valid training/validation windows: {counts}")
 

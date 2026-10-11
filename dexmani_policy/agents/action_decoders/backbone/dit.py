@@ -158,17 +158,17 @@ class FinalLayer(nn.Module):
 class DiTDiffusion(nn.Module):
     """DiT backbone for diffusion-based action prediction (MultiTask).
 
-    Encodes actions and observation context through separate MLP embedders,
+    Encodes actions and observation context through separate linear projections,
     applies a stack of self-attention DiT blocks with AdaLN (Adaptive Layer
-    Normalization) modulation conditioned on the diffusion timestep, and
-    projects back to action dimension.
+    Normalization) modulation conditioned on the sum of timestep and projected
+    context embeddings, and projects back to action dimension.
 
     Architecture:
         - Action embedder: ``Linear(action_dim, n_emb)`` + positional embedding
         - Context embedder: ``Linear(cond_dim, n_emb)`` (flattened obs)
-        - Timestep embedder: ``SinusoidalPosEmb`` + 2-layer MLP + SiLU
+        - ``TimestepEmbedder``: sinusoidal features → Linear → SiLU → Linear
         - N_layers ``DiTBlock`` (self-attention + MLP with AdaLN)
-        - ``FinalLayer`` (AdaLN → LayerNorm → Linear → action_dim)
+        - ``FinalLayer`` (LayerNorm → AdaLN modulation → Linear → action_dim)
     """
 
     def __init__(

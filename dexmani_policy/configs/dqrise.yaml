@@ -84,7 +84,7 @@ agent:
   codebook_num_groups: 2
   codebook_size: 4
 
-  # Point cloud encoder (identical to dp3)
+  # Shared DP3ObsEncoder; encoder_type selects the point-cloud branch.
   encoder_type: idp3                 # idp3 | pointnext | dp3
   pc_dim: 6
   pc_out_dim: 128
@@ -95,9 +95,9 @@ agent:
     use_random: true
     use_random_start: true
     random_noise_scale: 0.0
-    use_shuffle_output: ${eval:"'${agent.encoder_type}' not in ('dp3', 'idp3')"}  # PointNet only; new RNG consumption
+    use_shuffle_output: ${eval:"'${agent.encoder_type}' not in ('dp3', 'idp3')"}  # FPS output shuffle: off for dp3/idp3, on for PointNext.
 
-  # Diffusion backbone (UNet, same as dp3)
+  # ConditionalUnet1D backbone
   diffusion_step_embed_dim: 128
   down_dims: [256, 512]
   kernel_size: 5
@@ -140,7 +140,7 @@ training:
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-    log_interval_steps: 50
+    log_interval_steps: 100
     gradient_accumulation_steps: 1
 
 # ── Workspace ──
@@ -152,7 +152,7 @@ workspace:
     _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
-    name: ${task_name}_${run_id:}_${training.seed}
+    name: ${task_name}_${run_id:}_seed${training.seed}
     id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
@@ -251,7 +251,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
     subdir: ${hydra.job.num}

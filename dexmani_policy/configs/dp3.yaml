@@ -75,7 +75,7 @@ agent:
     use_random: true
     use_random_start: true
     random_noise_scale: 0.0
-    use_shuffle_output: ${eval:"'${agent.encoder_type}' not in ('dp3', 'idp3')"}  # PointNet only; new RNG consumption
+    use_shuffle_output: ${eval:"'${agent.encoder_type}' not in ('dp3', 'idp3')"}  # FPS output shuffle: off for dp3/idp3, on for PointNext.
 
   # Diffusion backbone
   diffusion_step_embed_dim: 128
@@ -120,7 +120,7 @@ training:
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-    log_interval_steps: 50
+    log_interval_steps: 100
     gradient_accumulation_steps: 1
 
 # ── Workspace ──
@@ -132,18 +132,18 @@ workspace:
     _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
-    name: ${task_name}_${run_id:}_${training.seed}
+    name: ${task_name}_${run_id:}_seed${training.seed}
     id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
-    video_fps: 15  # decoupled from env_runner; default matches frame_skip(16)/time_step(1/240)
+    video_fps: 15  # Independent W&B video encoding rate; not the env control frequency.
 
 # ── Env Runner ──
 env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 25        # PC-based policies: 25; RGB-based: 20
+  default_eval_episodes: 25        # Runner fallback; eval entry points resolve their own budgets.
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
@@ -184,7 +184,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
     subdir: ${hydra.job.num}

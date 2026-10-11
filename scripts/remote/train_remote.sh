@@ -257,8 +257,8 @@ else
     # stdout/stderr are redirected to logs/<session>.log (root-anchored `logs/`
     # is excluded from sync_code --delete, and .gitignore already lists it), so a
     # crash traceback survives after the session closes. No trailing `read`, so
-    # once training exits — checkpoints already saved, GPU memory freed — tmux
-    # destroys the session automatically.
+    # tmux destroys the session when training exits, including on failure.
+    # Session exit alone does not establish that a checkpoint was saved.
     REMOTE_TMUX_SCRIPT="set -o noclobber; mkdir -p \"$SERVER_PROJ/logs\" && { $REMOTE_CMD; _rc=\$?; if [[ \$_rc -eq 0 ]]; then echo \"[train_remote] $SESSION finished successfully (exit 0).\"; else echo \"[train_remote] $SESSION FAILED (exit \$_rc).\"; fi; exit \$_rc; } > \"$SERVER_PROJ/logs/${SESSION}.log\" 2>&1"
     printf -v tmux_script_q '%q' "$REMOTE_TMUX_SCRIPT"
     ssh "$SERVER" "$(remote_bash_invocation "tmux -L $TMUX_SOCKET new-session -d -s $session_q bash -lc $tmux_script_q")" || {

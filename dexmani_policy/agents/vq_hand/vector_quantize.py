@@ -357,11 +357,14 @@ class VectorQuantize(nn.Module):
         Args:
             x:  (B, D)       single vector per sample
                 (B, N, D)   sequence of vectors
-            indices:  if given, return CE loss instead of commitment loss
+            indices:  (B, N) targets for CE loss instead of commitment loss;
+                      N=1 for a single-vector (B, D) input
         Returns:
-            quantize:  (B, D) or (B, N, D)
-            embed_ind: (B,) or (B, N)  codebook indices
-            loss:      scalar commitment loss (or CE loss if indices given)
+            Without indices: (quantize, embed_ind, commitment_loss).
+            quantize has shape (B, D) or (B, N, D); embed_ind has shape
+            (B,) or (B, N); commitment_loss is a one-element tensor (1,).
+            With indices: (quantize, ce_loss), with scalar CE loss and no
+            returned code indices.
         """
         only_one = x.ndim == 2
         if only_one:

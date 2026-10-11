@@ -88,9 +88,11 @@ class ResidualVQ(nn.Module):
             x:        (B, N, dim)  input to quantize
             indices:  (B, N, num_quantizers)  if given, compute CE loss
         Returns:
-            quantized_out:  (B, N, dim)  reconstructed after projection
-            all_indices:    (B, N, num_quantizers)  per-layer code indices
-            all_losses:     (num_quantizers,)  per-layer commitment losses
+            Without indices: (quantized_out, all_indices, all_losses), with
+            shapes (B, N, dim), (B, N, num_quantizers), and
+            (1, num_quantizers), respectively.
+            With indices: (quantized_out, summed_ce_loss); code indices and
+            per-layer commitment losses are not returned.
         """
         return_loss = exists(indices)
 

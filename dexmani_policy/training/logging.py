@@ -128,20 +128,11 @@ def print_param_count(agent) -> None:
     from termcolor import cprint
 
     total, _ = count_params(agent)
-    observation = getattr(agent, "obs_encoder", None)
-    if observation is not None:
-        fields = getattr(observation, "consumed_observation_fields", ())
-        cprint(f"  Declared observation fields: {tuple(fields)}", "white")
-        pointcloud = getattr(observation, "pc_encoder", None)
-        if pointcloud is not None:
-            values = {key: getattr(pointcloud, key) for key in (
-                "input_channels", "pc_in_channels", "out_dim", "hidden_channels",
-                "num_layers", "num_group", "num_patches", "include_global_token",
-                "feature_mode",
-            ) if hasattr(pointcloud, key)}
-            if hasattr(pointcloud, "stages"):
-                values["stages"] = len(pointcloud.stages)
-            cprint(f"  Actual point-cloud module: {type(pointcloud).__name__} {values}", "white")
+    fields = getattr(agent, "consumed_observation_fields", None)
+    if fields is None:
+        fields = getattr(getattr(agent, "obs_encoder", None), "consumed_observation_fields", ())
+    if fields:
+        cprint(f"[Modalities] {', '.join(fields)}", "white")
     cprint(f"[{type(agent).__name__}] Parameter Count", "cyan", attrs=["bold"])
     cprint(f"  Total: {total / 1e6:.2f} M", "white")
 
@@ -153,19 +144,3 @@ def print_param_count(agent) -> None:
             f"  {name:<20}: {t / 1e6:.2f} M  (trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)",
             color,
         )
-
-
-def print_storage_dtypes(model, ema_model, *, autocast):
-    """Startup-only metadata; reading dtype does not synchronize tensor values."""
-    def groups(module):
-        result = {"parameters": set(), "lora": set(), "frozen_backbone": set()}
-        if module is not None:
-            for name, param in module.named_parameters():
-                result["parameters"].add(str(param.dtype))
-                if "lora_" in name:
-                    result["lora"].add(str(param.dtype))
-                elif "backbone" in name and not param.requires_grad:
-                    result["frozen_backbone"].add(str(param.dtype))
-        return {key: sorted(value) for key, value in result.items()}
-    print(f"Storage dtype: model={groups(model)}, EMA={groups(ema_model)}, "
-          f"BF16 autocast={autocast}")

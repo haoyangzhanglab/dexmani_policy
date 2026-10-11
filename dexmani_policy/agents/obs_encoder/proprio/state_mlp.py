@@ -37,12 +37,10 @@ def create_state_mlp(
 ) -> StateMLP:
     """Create the shared StateMLP for observation encoders.
 
-    Policy observation encoders using this helper embed the
-    robot's joint state through this MLP before concatenating it with
-    vision / point-cloud features.  This factory centralises the
-    project-wide default so that a change to the state-encoding
-    architecture (e.g. adding LayerNorm, dropout, or changing the
-    hidden size) only needs to be made in one place.
+    Projects state_dim inputs to state_out_dim features using StateMLP's
+    defaults and any explicitly supplied constructor kwargs. The calling
+    observation encoder decides how to combine these features with its other
+    inputs, for example by concatenation, addition or a separate state token.
     """
     return StateMLP(input_channels=state_dim, output_channels=state_out_dim, **kwargs)
 

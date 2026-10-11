@@ -181,7 +181,7 @@ training:
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-    log_interval_steps: 50
+    log_interval_steps: 100
     gradient_accumulation_steps: 1
 
 
@@ -193,11 +193,11 @@ workspace:
     _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
-    name: ${task_name}_${run_id:}_${training.seed}
+    name: ${task_name}_${run_id:}_seed${training.seed}
     id: ${policy_name}_${task_name}_${training.seed}
     resume: allow
     mode: offline
-    video_fps: 15  # decoupled from env_runner; default matches frame_skip(16)/time_step(1/240)
+    video_fps: 15  # Independent W&B video encoding rate; not the env control frequency.
 
 env_runner:
   _target_: dexmani_policy.env_runner.multi_task_sim_runner.MultiTaskSimRunner
@@ -259,7 +259,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
     subdir: ${hydra.job.num}

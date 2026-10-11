@@ -318,7 +318,7 @@ def main() -> None:
         "--policy-name",
         type=str,
         required=True,
-        help="Policy config name (e.g. dp3, maniflow).",
+        help="Experiment policy path (e.g. dp3, ddp/maniflow); reads saved config.yaml.",
     )
     parser.add_argument(
         "--task-name",

@@ -58,7 +58,9 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     set_seed(cfg.training.seed)
 
     checkpoint = CheckpointStore(pathlib.Path(resume_from).parent).load(resume_from) if resume_from else None
-    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
+    dataset, normalizer = build_dataset_and_normalizer(
+        cfg, resume_checkpoint=checkpoint, verbose=rank == 0
+    )
 
     train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
 
@@ -185,10 +187,9 @@ def main(cfg):
     OmegaConf.resolve(cfg)
 
     if "MASTER_PORT" not in os.environ:
-        # Auto-assign a free port.  There is a theoretical TOCTOU race
-        # between close() and mp.spawn() — another process could bind the
-        # same port.  In practice this window is microseconds and shared
-        # training machines are the only scenario where it matters.
+        # Probe a free port, then release it before spawning workers. Another
+        # process can claim it before the distributed backend binds it; this
+        # probe does not reserve the port across worker startup.
         # If you hit an address-in-use error, set MASTER_PORT explicitly.
         sock = socket.socket()
         sock.bind(("", 0))

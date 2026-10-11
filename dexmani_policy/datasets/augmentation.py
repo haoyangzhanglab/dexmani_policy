@@ -305,11 +305,12 @@ class ImageAug:
     """Color + blur + noise for pre-resized float32 CHW tensors (no numpy roundtrip).
 
     Reference: DexUMI (brightness=0.6 for challenging lighting).
-    Each sub-augmentation is independently probabilistic.
+    A shared outer probability gate controls the whole augmentation. Once it
+    passes, ColorJitter runs and grayscale, noise and blur have their own gates.
 
-    Performance note: all probabilistic gates are decided from a single
-    ``torch.rand`` call instead of one per sub-transform, reducing CUDA
-    kernel launches.
+    The outer, noise and blur gates share one ``torch.rand`` call (the outer
+    gate is omitted when prob=1). Torchvision transforms still sample their
+    own parameters and grayscale gate.
     """
 
     __slots__ = ("prob", "color_jitter", "grayscale", "noise", "noise_prob", "blur", "blur_prob")

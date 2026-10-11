@@ -15,7 +15,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "One-shot evaluation pipeline: select best ckpt → numerical held-out eval."
     echo ""
     echo "Positional args:"
-    echo "  policy_name   Policy config name (e.g. dp3, maniflow, sat)"
+    echo "  policy_name   Experiment policy path (e.g. dp3, ddp/maniflow); reads saved config.yaml"
     echo "  task_name     Task name (e.g. pour, pick_apple_messy)"
     echo "  exp_name      Experiment timestamp/name under experiments/<policy>/<task>/"
     echo ""

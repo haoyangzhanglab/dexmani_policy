@@ -98,7 +98,7 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<old-run
 bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<task>/<old-run>'
 ```
 
-`resume_from` 接受当前格式的实验目录或 checkpoint 文件，展开 `~`，相对路径以**项目根目录**为基准。恢复始终写入新输出目录。默认 run 使用微秒时间和随机后缀；已有训练配置、metrics 或 checkpoints 的目录会拒绝使用。遇到冲突请指定新目录。目录检查不提供并发锁，不要让多个训练写入同一自定义目录；Hydra 在进入训练前可能已写入自己的启动文件。
+`resume_from` 接受当前格式的实验目录或 checkpoint 文件，展开 `~`，相对路径以**项目根目录**为基准。恢复始终写入新输出目录。新 run 默认命名为 `YYYY-MM-DD_HH-MM-SS_seed<seed>`，例如 `2026-10-11_02-00-52_seed1011`，已有实验目录保持原名。已有训练配置、metrics 或 checkpoints 的目录会拒绝使用；同一秒内启动相同 Policy、任务和 seed 可能重名，遇到冲突请指定新目录。目录检查不提供并发锁，不要让多个训练写入同一目录；Hydra 在进入训练前可能已写入自己的启动文件。
 
 完整续训先读取来源实验的 resolved `config.yaml`，再校验和构造。仅允许显式覆盖新输出位置、W&B、等价设备定位、日志间隔、worker 参数、compile 开关/模式、当次执行上限 `+max_updates=N`，以及数据目录迁移；worker/compile 覆盖沿用有界恢复承诺，不承诺增强或算子逐位相同。`max_updates` 仅作用于当次启动，不从来源实验继承。`workspace` 使用当前字段 `_target_`、`output_dir` 和 `wandb_cfg`，不自动清理已废弃字段。world_size、batch/accumulation、训练 seed、AMP/dtype、总计划和模型/数据配方不能覆盖。路径迁移使用 `dataset.zarr_path=...` 或 `dataset.datasets.<index>.zarr_path=...`，训练时仍校验 revision 与保存集合；相同 revision 不是内容 hash 证明。
 
@@ -118,7 +118,7 @@ Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。支持 Gaus
 
 RGB 可通过 `dataset.rgb_keep_uint8=true` 使用 uint8 transport（要求 `normalization.rgb=identity`）；当前 DP 显式启用。配置 CPU resize 时，含 ImageAug 的 recipe 在 float resize/crop/增强后最终量化，无颜色增强的 uint8 recipe 保留 uint8 spatial 路径；视觉入口恢复 float32。缺省/false 保留原 float preprocessing；未配置 CPU resize 时仍返回原始 HWC uint8。recipe 变化不能跨越 strict resume；MultiTask 的 RGB child 必须一致。确定性评测、验证与 Real preprocessing 从保存配置恢复。
 
-DP3/DQRISE 的 PointNet/MultiStagePointNet 配方取消同一已选点集的采样后 shuffle，保留 FPS 随机起点与子集选择；新 run 会改变 RNG 消耗，后续随机轨迹不保证相同。切换为 PointNext 的配置保留 shuffle。SAT action shuffle、EJC、ManiFlow dense tokenizer、Uni3D 和 compile/static_graph 不受此结论影响。
+DP3/DQRISE 的 PointNet/MultiStagePointNet 配方在执行 FPS 时关闭采样后 shuffle，随机起点与子集选择开关保持不变。该预处理仅在输入点数大于 `agent.num_points` 时采样；当前默认数据与目标均为 1024 点，不执行这条 FPS 路径，也不会因该 shuffle 开关改变 RNG 消耗。对于实际进入 FPS 的配方，关闭 shuffle 会改变 RNG 消耗，后续随机轨迹不保证相同。切换为 PointNext 的配置保留采样后 shuffle。SAT action shuffle、EJC、ManiFlow dense tokenizer、Uni3D 和 compile/static_graph 不受此结论影响。
 
 ### DQ-RISE 码本与 Policy 对齐
 

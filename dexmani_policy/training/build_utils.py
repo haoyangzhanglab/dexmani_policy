@@ -3,6 +3,7 @@
 import copy
 import math
 from collections.abc import Mapping
+from pathlib import Path
 
 import hydra
 from omegaconf import open_dict
@@ -68,7 +69,7 @@ def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
     return normalizer
 
 
-def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
+def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     """Instantiate the dataset and build the normalizer from the config-driven spec.
 
     The caller is responsible for resolving OmegaConf interpolations before
@@ -76,8 +77,6 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     parent process before ``mp.spawn``).
     """
     if cfg.get("resume_from") is not None and resume_checkpoint is None:
-        from pathlib import Path
-
         from dexmani_policy.training.checkpoint import CheckpointStore
         path = Path(cfg.resume_from)
         resume_checkpoint = CheckpointStore(path.parent).load(path)
@@ -129,6 +128,19 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None):
     else:
         normalizer = build_normalizer(dataset, spec, cfg.action_key)
     validate_normalizer_state(normalizer, spec)
+    if verbose:
+        summaries = []
+        for child in children:
+            counts = child.sampler.validity_summary
+            summary = (
+                f"{Path(child.zarr_path).name}: "
+                f"train episodes={int(child.train_mask.sum()):,}, windows={len(child):,}"
+            )
+            rejected = counts["candidate"] - counts["valid"]
+            if rejected:
+                summary += f", rejected={rejected:,}"
+            summaries.append(summary)
+        print(f"[Dataset] {' | '.join(summaries)}")
     return dataset, normalizer
 
 
@@ -216,9 +228,6 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         from dexmani_policy.training.resume import restore_model_weights
         restore_model_weights(checkpoint, model, ema_model, device)
 
-    if rank == 0:
-        from dexmani_policy.training.logging import print_storage_dtypes
-        print_storage_dtypes(model, ema_model, autocast=cfg.training.get("use_bfloat16", False))
     return model, ema_model, ema_updater
 
 
@@ -401,9 +410,8 @@ def _validate_encoder_normalization_contract(cfg, spec) -> None:
     PointNeXT (``encoder_type in {pointnext, pointnext_tokenizer}``) uses FPS and
     fixed ball-query radii directly on point-cloud coordinates; per-axis min-max
     (``limits``) rescaling would change Euclidean geometry underneath a radius
-    that stays fixed. This single rule covers every agent exposing
-    ``agent.encoder_type`` (DP3, DQ-RISE, ManiFlow, SAT) — no per-agent special
-    case is kept.
+    that stays fixed. This rule applies when ``agent.encoder_type`` selects
+    one of these PointNeXT encoders, without per-agent special cases.
     """
     agent = cfg.get("agent", {})
     encoder_type = agent.get("encoder_type")

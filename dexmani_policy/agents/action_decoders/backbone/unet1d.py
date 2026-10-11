@@ -102,13 +102,13 @@ class ConditionalUnet1D(nn.Module):
     (sinusoidal encoding + MLP) with the observation context.
 
     Architecture:
-        - Down-sampling path: ``Conv1dBlock`` → ``ConditionalResidualBlock1D``
-          at each resolution, with optional FiLM scale prediction
-          (``cond_predict_scale``).
-        - Mid-block: single ``ConditionalResidualBlock1D`` at the bottleneck.
-        - Up-sampling path: ``Upsample1d`` → ``ConditionalResidualBlock1D``
-          at each resolution, with skip connections from the down path.
-        - Final: ``Conv1d`` to ``input_dim``.
+        - Down-sampling path: two ``ConditionalResidualBlock1D`` blocks at
+          each resolution, then ``Downsample1d`` except at the last level.
+          FiLM scale prediction is controlled by ``cond_predict_scale``.
+        - Bottleneck: two ``ConditionalResidualBlock1D`` blocks.
+        - Up-sampling path: concatenate the down-path skip, apply two
+          ``ConditionalResidualBlock1D`` blocks, then ``Upsample1d``.
+        - Final: ``Conv1dBlock`` → ``Conv1d`` to ``input_dim``.
 
     The ``down_dims`` list controls the channel dimensions at each resolution
     level. Default: ``[256, 512, 1024]``.

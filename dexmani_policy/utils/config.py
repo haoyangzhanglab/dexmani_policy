@@ -3,7 +3,6 @@
 import copy
 import re
 import warnings
-import uuid
 from datetime import datetime
 from numbers import Integral
 from pathlib import Path
@@ -11,7 +10,7 @@ from pathlib import Path
 from omegaconf import DictConfig, OmegaConf, open_dict
 
 
-_LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + "_" + uuid.uuid4().hex[:8]
+_LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 TASK_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
 
 

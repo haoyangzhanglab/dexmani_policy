@@ -256,7 +256,7 @@ L 与 Q 保持相同直接残差和归一化顺序，闭环收益需通过实际
 
 ## 8. 运行检查
 
-先运行第 6 节的 config-only 命令，确认配置字段、Hydra target 与构造参数。该模式不读取真实数据，也不运行 GPU 算子。
+先运行第 6 节的 config-only 命令，解析配置、检查现有配置约束、定位 Hydra target 模块并导入 Agent target。该模式不读取真实数据、不构造 Dataset 或 Agent，也不运行 GPU 算子；它不逐一验证构造参数兼容性，该项需通过正式 smoke 的实际构造路径确认。
 确认数据配方和运行环境后，使用正式 smoke 入口验证真实 batch、训练更新、动作预测与 raw/EMA 保存恢复：
 
 ```bash

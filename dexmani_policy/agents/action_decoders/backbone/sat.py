@@ -416,8 +416,9 @@ class SATBackbone(nn.Module):
 class _AdaLNZeroObs(nn.Module):
     """AdaLN-Zero pre-normalisation for observation tokens.
 
-    Zero-initialised so obs tokens start at identity contribution
-    and gradually participate in conditioning the action tokens.
+    Applies LayerNorm before time-conditioned affine modulation. Initial
+    gamma=1 and beta=0 give identity modulation of the normalized tokens;
+    the module initially returns LayerNorm(x).
     """
 
     def __init__(self, dim: int, cond_dim: int):
@@ -442,8 +443,9 @@ class _AdaLNZeroObs(nn.Module):
 class _FinalLayer(nn.Module):
     """Final projection with AdaLN time modulation (DiT standard).
 
-    Time-conditioned shift/scale → RMSNorm → Linear.
-    Zero-initialised so the model starts from identity output.
+    RMSNorm → time-conditioned shift/scale → Linear.
+    SATBackbone zero-initialises the modulation and final projection,
+    so its initial predicted velocity is zero.
     """
 
     def __init__(self, hidden_size: int, out_channels: int):

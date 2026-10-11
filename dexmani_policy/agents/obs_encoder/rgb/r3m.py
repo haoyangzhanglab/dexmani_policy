@@ -224,8 +224,8 @@ class R3M(nn.Module):
 
         flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
 
-        # Official R3M: [0, 1] → ImageNet norm.  The dataset already emits
-        # float [0, 1], so there is no ×255.
+        # Official R3M: [0, 1] → ImageNet norm. The upstream ImageProcessor
+        # converts uint8 or float dataset RGB to float [0, 1]; no ×255 here.
         flat_rgb = self.normlayer(flat_rgb)
 
         feature_map = self.backbone(flat_rgb)

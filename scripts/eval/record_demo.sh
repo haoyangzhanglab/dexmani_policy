@@ -12,7 +12,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name> [args...]"
     echo ""
     echo "Positional args:"
-    echo "  policy_name   policy config name (e.g. dp3, sat, maniflow)"
+    echo "  policy_name   Experiment policy path (e.g. dp3, ddp/maniflow); reads saved config.yaml"
     echo "  task_name     task name (e.g. pour, pick_apple_messy)"
     echo "  exp_name      experiment timestamp/name under experiments/<policy>/<task>/"
     echo ""

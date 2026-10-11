@@ -227,15 +227,18 @@ def normalize_tensor(x, params, forward=True):
 class SingleFieldLinearNormalizer(DictOfTensorMixin):
     """Linear normalizer for a single data field (joint_state or action).
 
-    Fits scale/offset parameters from data and applies affine transformation
-    to map data into ``[output_min, output_max]`` (default ``[-1, 1]``).
+    Fits scale/offset parameters from data and applies an affine transformation.
+    Normalization does not clip values or guarantee bounded outputs.
 
     Supports two modes:
 
-    - ``"limits"``: min-max normalization. Low-variance dimensions
-      (range < ``range_eps``) are zero-centered without scaling to avoid
-      amplifying noise.
-    - ``"gaussian"``: z-score normalization (mean=0, std=1).
+    - ``"limits"``: with default ``fit_offset=True``, maps the fitted min/max
+      range to ``[output_min, output_max]`` (default ``[-1, 1]``), except that
+      dimensions with range < ``range_eps`` are mean-centered with unit scale.
+      With ``fit_offset=False``, uses max-absolute scaling with zero offset.
+      Values outside the fitted range can exceed the requested output bounds.
+    - ``"gaussian"``: scales by fitted standard deviation and centers the
+      mean when ``fit_offset=True``. Near-constant dimensions use unit scale.
 
     Implements ``DictOfTensorMixin`` for easy serialization with
     ``torch.save``/``torch.load``.

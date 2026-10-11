@@ -372,7 +372,8 @@ class Trainer:
                 total=self.total_train_steps,
                 desc="Steps",
                 position=0,
-                mininterval=1.0,
+                mininterval=5.0,
+                miniters=1,
             )
 
         try:
@@ -454,8 +455,6 @@ class Trainer:
                         group_metric_count = 0
                         global_step += 1
                         self.global_step = global_step
-                        if self.is_main_process and self._step_pbar is not None:
-                            self._step_pbar.update(global_step - self._step_pbar.n)
                         self.next_micro_step = micro_step + 1
                         if self.next_micro_step == num_batches:
                             self.current_epoch = epoch + 1
@@ -497,12 +496,15 @@ class Trainer:
                             )
 
                             if self.is_main_process and self._step_pbar is not None:
-                                if hasattr(self._step_pbar, "set_postfix"):
-                                    self._step_pbar.set_postfix(
-                                        loss=f"{step_metrics['train/loss']:.5f}",
-                                        step=f"{global_step:,}",
-                                        lr=f"{step_metrics['train/lr']:.2e}",
-                                    )
+                                # Advance the count and metrics together at log boundaries.
+                                # Let update() enforce the terminal refresh interval.
+                                self._step_pbar.set_postfix(
+                                    loss=f"{step_metrics['train/loss']:.5f}",
+                                    step=f"{global_step:,}",
+                                    lr=f"{step_metrics['train/lr']:.2e}",
+                                    refresh=False,
+                                )
+                                self._step_pbar.update(global_step - self._step_pbar.n)
                             if self.is_main_process and self.workspace is not None:
                                 self.workspace.log(step_metrics, step=global_step)
 
@@ -538,6 +540,10 @@ class Trainer:
 
             if self._step_pbar is not None:
                 try:
+                    if self._step_pbar.n != global_step:
+                        # Show the actual stop step without metrics from an older step.
+                        self._step_pbar.set_postfix({}, refresh=False)
+                        self._step_pbar.n = global_step
                     self._step_pbar.close()
                 except Exception:
                     pass
