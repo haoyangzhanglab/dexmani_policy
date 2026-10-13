@@ -3,6 +3,7 @@ from __future__ import annotations
 import warnings
 from typing import Dict, Literal, Optional, Tuple
 
+import torch
 import torch.nn as nn
 import torchvision
 
@@ -14,7 +15,7 @@ BackboneName = Literal["resnet", "clip", "dino", "siglip", "r3m"]
 RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     "resnet": {
         "model_name": "resnet18",
-        "tune_mode": "freeze",
+        "tune_mode": "full",
         "norm_mode": "group_norm",
         "global_token_type": "avg",
         "weights": None,
@@ -37,7 +38,7 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
     "r3m": {
         "model_name": "resnet18",
         "tune_mode": "freeze",
-        "norm_mode": "group_norm",
+        "norm_mode": "frozen_bn",
         "global_token_type": "avg",
     },
 }
@@ -66,11 +67,14 @@ def build_backbone(
     cfg = dict(base_cfg)
     if config:
         cfg.update(config)
+    effective_config = dict(cfg)
 
     # Pop ImageProcessor-level overrides before passing to backbone constructor.
     # The backbone classes (ResNet, DINO, CLIP, SigLIP) don't accept these params.
     image_size = cfg.pop("image_size", None)
     interpolation = cfg.pop("interpolation", None)
+    image_mean = cfg.pop("image_mean", None)
+    image_std = cfg.pop("image_std", None)
 
     if name == "resnet":
         from .resnet import ResNet
@@ -115,5 +119,21 @@ def build_backbone(
         image_processor.image_size = to_hw(image_size)
     if interpolation is not None:
         image_processor.interpolation = get_interpolation(interpolation)
+    if image_mean is not None:
+        image_processor.image_mean = torch.as_tensor(image_mean, dtype=torch.float32)
+    if image_std is not None:
+        image_processor.image_std = torch.as_tensor(image_std, dtype=torch.float32)
+    for name in ('image_mean', 'image_std'):
+        value = getattr(image_processor, name)
+        if value.shape != (3,) or not torch.isfinite(value).all() or (name == 'image_std' and (value <= 0).any()):
+            raise ValueError(f'{name} requires three finite values (std must be positive)')
+        effective_config[name] = value.tolist()
+    effective_config['image_size'] = image_processor.image_size
+    effective_config['interpolation'] = image_processor.interpolation
 
+    import inspect
+    for key, parameter in inspect.signature(type(backbone)).parameters.items():
+        if key not in effective_config and parameter.default is not inspect.Parameter.empty:
+            effective_config[key] = parameter.default
+    backbone.effective_config = effective_config
     return backbone, image_processor

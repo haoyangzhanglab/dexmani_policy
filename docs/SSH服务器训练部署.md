@@ -460,6 +460,8 @@ bash scripts/remote/train_remote.sh --gpus 0 <config> <task> \
 
 不同 world size 或 loader contract 的 checkpoint 能被读出权重，并不等价于能够 strict resume。
 
+严格续训要求 `simple.v4` 内嵌的 `effective_config` 与来源 sidecar 配方一致，再应用允许的运行或路径覆盖。未绑定的 `simple.v3` 只保留有限保证的推理路径，不能靠补写 `config.yaml` 获得严格续训支持。远程数据预检和实际训练共用该来源配置解析；具体覆盖边界见 [README 训练说明](../README.md#训练)。
+
 ### 6.4 Pre-flight
 
 正常 launch 前执行 fail-fast checks，包括：
@@ -704,7 +706,7 @@ model-specific activation/token memory
 
 checkpoint transfer 中断后重新运行 `sync_down.sh`。其 Pass-1 设计避免把 partial checkpoint 长期当成已存在的完整 artifact。
 
-评测前应确认目标 checkpoint 实际存在并能通过 `CheckpointStore.load()`。
+评测前确认目标 checkpoint 和来源配置已同步完整，再由 `agents.loader.restore_policy_agent` 检查绑定配方及所选 raw/EMA 权重。`CheckpointStore.load()` 是完整续训检查，额外要求 optimizer/scheduler/RNG 等状态，不能用来判定纯推理产物是否可用。
 
 ### 10.6 Stale / Unknown Session
 

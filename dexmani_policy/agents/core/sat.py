@@ -12,7 +12,7 @@ from dexmani_policy.agents.action_decoders.backbone.sat import SATBackbone
 from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_patch_tokenizer
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnext_tokenizer import PointNextPatchTokenizer
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
@@ -43,13 +43,13 @@ class SATObsEncoder(nn.Module):
         pc_encoder_config = dict(pc_encoder_config or {})
         pc_encoder_config.setdefault("fps_random_config", fps_random_config)
 
-        self.pc_encoder = build_pc_patch_tokenizer(encoder_type, pc_dim, pc_encoder_config)
-        if (not getattr(self.pc_encoder, "supports_global_token", False)
-                or not getattr(self.pc_encoder, "include_global_token", True)):
-            raise ValueError(
-                f"SAT requires a tokenizer with a global token; {encoder_type!r} "
-                "does not support one. Use pointnext_tokenizer."
-            )
+        if encoder_type != "pointnext_tokenizer":
+            raise ValueError("SAT requires pointnext_tokenizer")
+        pc_encoder_config.setdefault("num_patches", 96)
+        self.pc_encoder = PointNextPatchTokenizer(input_channels=pc_dim, **pc_encoder_config)
+        self.pc_encoder.effective_config = dict(pc_encoder_config)
+        if not self.pc_encoder.include_global_token:
+            raise ValueError("SAT requires pc_encoder_config.include_global_token=True")
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import signal
 import time
@@ -12,7 +13,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
-from dexmani_policy.training.build_utils import validate_gradient_accumulation
+from dexmani_policy.utils.validation import validate_gradient_accumulation
 from dexmani_policy.training.checkpoint import TrainCheckpoint, fix_state_dict
 from dexmani_policy.training.logging import to_log_scalars
 from dexmani_policy.training.workspace import TrainWorkspace
@@ -55,6 +56,7 @@ class Trainer:
         workspace: Optional[TrainWorkspace],
         train_loop_cfg: TrainLoopConfig,
         resume_contract: dict,
+        effective_config,
         max_grad_norm: float = 1.0,
         use_bfloat16: bool = False,
         is_main_process: bool = True,
@@ -101,6 +103,11 @@ class Trainer:
         self.distributed = distributed
         self._ddp_backward_initialized = False
         self.resume_contract = resume_contract
+        from omegaconf import OmegaConf
+        self.effective_config = copy.deepcopy(
+            OmegaConf.to_container(effective_config, resolve=True)
+            if OmegaConf.is_config(effective_config) else effective_config
+        )
         self.next_micro_step = 0
         self.current_epoch = 0
         self.global_step = 0
@@ -136,8 +143,14 @@ class Trainer:
         return [
             name
             for name, param in self.raw_model.named_parameters()
-            if param.grad is not None and not torch.isfinite(param.grad).all()
+            if param.grad is not None and not torch.isfinite(self._gradient_values(param.grad)).all()
         ]
+
+    @staticmethod
+    def _gradient_values(grad):
+        if grad.layout == torch.sparse_coo:
+            return grad._values()
+        return grad if grad.layout == torch.strided else grad.values()
 
     def apply_gradient_step(self):
         grad_norm = None
@@ -158,7 +171,10 @@ class Trainer:
                     print(f"Non-finite gradients at step={self.global_step}: {bad[:5]}")
                 raise
         else:
-            grad_nan_params = self._find_nonfinite_gradients()
+            flags = [torch.isfinite(self._gradient_values(p.grad)).all()
+                     for p in self.raw_model.parameters() if p.grad is not None]
+            if flags and not bool(torch.stack(flags).all()):
+                grad_nan_params = self._find_nonfinite_gradients()
 
         if grad_nan_params:
             self.optimizer.zero_grad(set_to_none=True)
@@ -266,6 +282,7 @@ class Trainer:
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
             resume_contract=self.resume_contract,
+            effective_config=self.effective_config,
             # Persist the full training state machine: EMA decay warmup counter
             # and the process RNG stream, so resume reproduces the same schedule.
             ema_updater_step=(
@@ -470,6 +487,11 @@ class Trainer:
 
                         if record_group:
                             step_metrics = {"train/lr": self.scheduler.get_last_lr()[0]}
+                            epoch_samples = min(self.train_loader.sampler.num_samples,
+                                                self.batches_per_epoch * self.train_loader.batch_size)
+                            step_metrics['train/processed_windows'] = self.resume_contract['world_size'] * (
+                                self.current_epoch * epoch_samples +
+                                min(self.next_micro_step * self.train_loader.batch_size, epoch_samples))
                             if self._last_grad_norm is not None:
                                 step_metrics["train/grad_norm"] = self._last_grad_norm
                                 step_metrics["train/clip_ratio"] = self._last_clip_ratio

@@ -68,8 +68,9 @@ def build_train_components(cfg):
     )
 
     batches_per_epoch = len(train_loader)
-    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, batches_per_epoch)
-    print_training_recipe(cfg, world_size=1, batches_per_epoch=batches_per_epoch)
+    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model)
+    print_training_recipe(cfg, world_size=1, batches_per_epoch=batches_per_epoch,
+                          samples_per_rank=train_loader.sampler.num_samples)
 
     workspace = hydra.utils.instantiate(cfg.workspace)
 
@@ -103,6 +104,7 @@ def build_trainer(cfg, comp):
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
         resume_contract=build_resume_contract(cfg, comp.model, comp.train_loader),
+        effective_config=cfg,
         batches_per_epoch=comp.batches_per_epoch,
     )
 

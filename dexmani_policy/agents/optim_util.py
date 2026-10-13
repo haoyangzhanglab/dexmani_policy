@@ -7,8 +7,6 @@ def get_optim_group_with_no_decay(
     module: nn.Module,
     weight_decay: float,
     no_decay_names: Optional[List[str]] = None,
-    decay_names: Optional[List[str]] = None,
-    extra_whitelist: Optional[Tuple[nn.Module]] = None,
     extra_blacklist: Optional[Tuple[nn.Module]] = None,
 ):
     whitelist = (
@@ -34,29 +32,17 @@ def get_optim_group_with_no_decay(
         nn.InstanceNorm3d,
     )
 
-    if extra_whitelist is not None:
-        whitelist = whitelist + tuple(extra_whitelist)
     if extra_blacklist is not None:
         blacklist = blacklist + tuple(extra_blacklist)
 
     no_decay_names = set(no_decay_names or [])
-    decay_names = set(decay_names or [])
-
-    overlap = no_decay_names & decay_names
-    if overlap:
-        raise ValueError(f"Parameters appear in both decay_names and no_decay_names: {sorted(overlap)}")
-
     param_dict = {name: param for name, param in module.named_parameters() if param.requires_grad}
 
     unknown_no_decay = no_decay_names - set(param_dict.keys())
     if unknown_no_decay:
         raise ValueError(f"Unknown parameter names in no_decay_names: {sorted(unknown_no_decay)}")
 
-    unknown_decay = decay_names - set(param_dict.keys())
-    if unknown_decay:
-        raise ValueError(f"Unknown parameter names in decay_names: {sorted(unknown_decay)}")
-
-    decay = set(decay_names)
+    decay = set()
     no_decay = set(no_decay_names)
 
     for mn, m in module.named_modules():
@@ -65,7 +51,7 @@ def get_optim_group_with_no_decay(
                 continue
             fpn = f"{mn}.{pn}" if mn else pn
 
-            if fpn in decay_names or fpn in no_decay_names:
+            if fpn in no_decay_names:
                 continue
 
             if pn.endswith("bias"):
@@ -107,23 +93,3 @@ def get_optim_group_with_no_decay(
     assert len(all_params) == len(set(map(id, all_params))), "Some parameters appear in more than one group"
 
     return optim_group
-
-
-class OptimGroupMixin:
-    """Mixin that provides ``get_optim_groups()`` by reading class-level config.
-
-    Subclasses declare which parameter names to exclude from weight decay and
-    which module types to add to the blacklist.  The actual implementation is
-    delegated to :func:`get_optim_group_with_no_decay`.
-    """
-
-    _optim_no_decay_names: tuple[str, ...] = ()
-    _optim_extra_blacklist: tuple[type, ...] = ()
-
-    def get_optim_groups(self, weight_decay: float = 1e-3):
-        return get_optim_group_with_no_decay(
-            self,
-            weight_decay=weight_decay,
-            no_decay_names=list(self._optim_no_decay_names) or None,
-            extra_blacklist=self._optim_extra_blacklist or None,
-        )

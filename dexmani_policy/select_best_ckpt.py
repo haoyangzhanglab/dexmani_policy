@@ -268,7 +268,9 @@ def select_best_checkpoint(
             return {"ckpt_relpath": artifact_reference(a.ckpt.path, exp_dir), "pct": a.ckpt.pct,
                     "global_step": a.ckpt.global_step, "success_rate": a.success_rate,
                     "success_count": a.success_count, "avg_steps": a.avg_steps,
-                    "n_episodes": a.n_episodes, "episode_details": a.episode_details}
+                    "n_episodes": a.n_episodes,
+                    "stage_indices": [i for i, stage in enumerate(record['stages'])
+                                      if stage['checkpoint'] == artifact_reference(a.ckpt.path, exp_dir)]}
         record["all_results"] = [candidate(a) for a in accumulators]
         selection["selection_all_zero"] = all(a.success_count == 0 for a in accumulators)
         record.update(status="success", best_checkpoint=candidate(best),
@@ -280,7 +282,7 @@ def select_best_checkpoint(
                          selection_summary=artifact_reference(summary_path, exp_dir),
                          inference=dict(record["inference"]), selection=selection)
         # The pipeline handoff references this immutable per-selection record.
-        best_info.update(_format="selection.v2", status="success",
+        best_info.update(_format="selection.v3", status="success",
                          all_results=record["all_results"], stages=record["stages"])
         result_path = run_dir / "selection_result.json"
         atomic_json(result_path, best_info)
@@ -292,6 +294,10 @@ def select_best_checkpoint(
                         pct=best_info["pct"], selection_id=best_info["selection_id"])
         atomic_json(exp_dir / "best_ckpt.json", snapshot)
         published = True
+        # One permanent copy of episode evidence, in the immutable result.
+        atomic_json(summary_path, dict(reference, selection_id=run_dir.name, status='success',
+                                       all_results=record['all_results'], best_checkpoint=candidate(best),
+                                       eval_config=record['eval_config']))
         _print_table(accumulators, "Selection results:")
         cprint(f"Published best: {best.ckpt.label}, selection={run_dir.name}", "green")
         return best.ckpt, accumulators

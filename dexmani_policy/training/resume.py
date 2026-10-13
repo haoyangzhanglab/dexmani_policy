@@ -39,23 +39,24 @@ def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
             "use drop_last=True or gradient_accumulation_steps=1"
         )
     generator = torch.Generator().manual_seed(cfg.training.seed + rank)
-    return DataLoader(
+    loader = DataLoader(
         dataset,
         sampler=sampler,
         generator=generator,
         worker_init_fn=worker_init_fn,
         **options,
     )
+    if len(loader) == 0:
+        raise ValueError('Training DataLoader is empty; check dataset length, batch_size and drop_last')
+    return loader
 
 
 def build_resume_contract(cfg, model, train_loader, *, world_size=1):
     def plain(section):
         return OmegaConf.to_container(section, resolve=True)
 
-    training = {"loop": {
-        "total_train_steps": int(cfg.training.loop.total_train_steps),
-        "gradient_accumulation_steps": cfg.training.loop.get("gradient_accumulation_steps", 1),
-    }}
+    from dexmani_policy.utils.config import recipe_content
+    training = recipe_content(cfg)['training']
     options = loader_options(cfg)
     return {
         "agent": build_agent_contract(model),
@@ -70,6 +71,9 @@ def build_resume_contract(cfg, model, train_loader, *, world_size=1):
         "batches_per_epoch": len(train_loader),
         "world_size": world_size,
         "training": training,
+        "optimizer": plain(cfg.optimizer),
+        "ema": plain(cfg.ema) if cfg.training.get('use_ema') else None,
+        "sampling_recipe": plain(cfg.sampling_recipe) if 'sampling_recipe' in cfg else None,
     }
 
 
@@ -124,12 +128,14 @@ def restore_training_state(
 def restore_model_weights(checkpoint, model, ema_model, device):
     state = fix_state_dict(checkpoint.model_state)
     model.load_state_dict(state, strict=True)
+    model.validate_normalizer()
     # Normalizers reconstruct their ParameterDict from checkpoint tensors.
     # A CPU-loaded checkpoint must not leave these parameters on CPU before
     # DDP wraps the restored model or broadcasts normalization state.
     model.to(device)
     if ema_model is not None:
         ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state), strict=True)
+        ema_model.validate_normalizer()
         ema_model.to(device)
 
 
@@ -183,9 +189,7 @@ def build_agent_contract(model) -> Dict[str, Any]:
 
 def validate_resume_contract(saved, current) -> None:
     """Compare saved and current runtime facts without altering either contract."""
-    import copy
-
-    saved, current = copy.deepcopy(dict(saved)), copy.deepcopy(dict(current))
+    saved, current = dict(saved), dict(current)
     if current.get("facts_format") != 1 or saved.get("facts_format") != 1:
         raise ValueError("Resume contract requires facts_format=1")
     validate_data_identity(saved.pop("data_identity", None), current.pop("data_identity", None))

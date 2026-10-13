@@ -37,7 +37,6 @@ __all__ = [
     "compile_models",
     "print_training_recipe",
     "validate_config",
-    "validate_gradient_accumulation",
 ]
 
 
@@ -80,6 +79,9 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         from dexmani_policy.training.checkpoint import CheckpointStore
         path = Path(cfg.resume_from)
         resume_checkpoint = CheckpointStore(path.parent).load(path)
+    if resume_checkpoint is not None:
+        from dexmani_policy.utils.config import validate_source_recipe
+        validate_source_recipe(resume_checkpoint.effective_config, cfg)
     spec = resolve_normalization_spec(cfg)
     dataset_cfg = copy.deepcopy(cfg.dataset)
     saved_recipes = getattr(resume_checkpoint, "resume_contract", {}).get("data_recipe")
@@ -98,6 +100,19 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     with open_dict(cfg):
         cfg.data_identity = capture_data_identity(dataset)
         children = getattr(dataset, "datasets", [dataset])
+        dims = []
+        for child in children:
+            widths = {key: int(child.replay_buffer[key].shape[-1])
+                      for key, mode in spec.items() if key != 'action' and mode != 'identity'}
+            if 'point_cloud' in widths and getattr(child, 'pc_dim', None) is not None:
+                widths['point_cloud'] = child.pc_dim
+            widths['action'] = int(child.replay_buffer[child.action_key].shape[-1]) + (9 if child.use_aux_ee else 0)
+            dims.append(widths)
+        if any(widths != dims[0] for widths in dims):
+            raise ValueError('Child datasets must have matching normalization feature widths')
+        cfg.normalization_dims = dims[0]
+        if getattr(dataset, 'sampling_strategy', None) == 'weighted':
+            cfg.sampling_recipe = {'weighted_quota': 'cumulative_random_offset_v1'}
         cfg.data_recipe = [
             dict(
                 child.data_recipe,
@@ -127,7 +142,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
             cfg.normalizer_source = "saved_checkpoint"
     else:
         normalizer = build_normalizer(dataset, spec, cfg.action_key)
-    validate_normalizer_state(normalizer, spec)
+    validate_normalizer_state(normalizer, spec, dict(cfg.normalization_dims))
     if verbose:
         summaries = []
         for child in children:
@@ -191,6 +206,21 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     # Store local HF architecture and closed-text dimensions in the owning config.
     rgb = getattr(getattr(model, "obs_encoder", None), "backbone", None)
     with open_dict(cfg.agent):
+        # Record actual constructor defaults, including nested RGB presets, so a
+        # future default change cannot silently reinterpret a bound checkpoint.
+        import inspect
+        for name, parameter in inspect.signature(type(model)).parameters.items():
+            if name not in cfg.agent and parameter.default is not inspect.Parameter.empty:
+                cfg.agent[name] = parameter.default
+        if checkpoint is None and hasattr(rgb, 'effective_config'):
+            cfg.agent.rgb_backbone_config = rgb.effective_config
+        pc_encoder = getattr(getattr(model, 'obs_encoder', None), 'pc_encoder', None)
+        if type(pc_encoder).__name__ in {'PointNetDense', 'PointNextPatchTokenizer'}:
+            config = dict(pc_encoder.effective_config)
+            for name, parameter in inspect.signature(type(pc_encoder)).parameters.items():
+                if name != 'input_channels' and name not in config and parameter.default is not inspect.Parameter.empty:
+                    config[name] = getattr(pc_encoder, name, parameter.default)
+            cfg.agent.pc_encoder_config = config
         if hasattr(rgb, "architecture"):
             if cfg.agent.get("rgb_backbone_config") is None:
                 cfg.agent.rgb_backbone_config = {}
@@ -202,7 +232,9 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         model.initialize_training()
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
-    model.set_normalization_spec(resolve_normalization_spec(cfg))
+    from dexmani_policy.agents.normalization import normalization_dims_from_config
+    model.set_normalization_spec(resolve_normalization_spec(cfg), normalization_dims_from_config(cfg))
+    model.validate_normalizer()
     model.to(device)
 
     requires_ema_for_loss = model.requires_ema_for_loss
@@ -223,6 +255,10 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         ema_model = copy.deepcopy(model)
         ema_model.eval()
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
+        with open_dict(cfg.ema):
+            for name, parameter in inspect.signature(type(ema_updater)).parameters.items():
+                if name != 'model' and name not in cfg.ema and parameter.default is not inspect.Parameter.empty:
+                    cfg.ema[name] = parameter.default
 
     if checkpoint is not None:
         from dexmani_policy.training.resume import restore_model_weights
@@ -234,21 +270,17 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
 # Optimizer & Scheduler
 
 
-def validate_gradient_accumulation(
-    batches_per_epoch: int, gradient_accumulation_steps: int
-) -> None:
-    if batches_per_epoch <= 0:
-        raise ValueError("train loader must contain at least one batch")
-    positive_int(gradient_accumulation_steps, "gradient_accumulation_steps")
-
-
-def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1, *, verbose=True):
-    """Build optimizer (via the agent's ``configure_optimizer``) and LR scheduler."""
-    grad_accum = (
-        cfg.get("training", {}).get("loop", {}).get("gradient_accumulation_steps", 1)
-    )
-    validate_gradient_accumulation(batches_per_epoch, grad_accum)
+def build_optimizer_and_scheduler(cfg, model, *, verbose=True):
+    """Build initial optimizer/scheduler; resume loads their complete saved states."""
     optimizer = model.configure_optimizer(**cfg.optimizer)
+    import inspect
+    with open_dict(cfg.optimizer):
+        for name, parameter in inspect.signature(model.configure_optimizer).parameters.items():
+            if name not in cfg.optimizer and parameter.default is not inspect.Parameter.empty:
+                cfg.optimizer[name] = parameter.default
+    if cfg.training.lr_scheduler == 'cosine_min_lr':
+        with open_dict(cfg.training):
+            cfg.training.lr_min_ratio = cfg.training.get('lr_min_ratio', 0.1)
     if verbose:
         print_param_count(model)
     scheduler = get_scheduler(
@@ -256,7 +288,6 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1, 
         name=cfg.training.lr_scheduler,
         num_warmup_steps=cfg.training.lr_warmup_steps,
         num_training_steps=positive_int(cfg.training.loop.total_train_steps, "total_train_steps"),
-        last_epoch=last_epoch,
         **({"lr_min_ratio": cfg.training.get("lr_min_ratio", 0.1)}
            if cfg.training.lr_scheduler == "cosine_min_lr" else {}),
     )
@@ -266,8 +297,9 @@ def build_optimizer_and_scheduler(cfg, model, batches_per_epoch, last_epoch=-1, 
 # Training Recipe
 
 
-def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int) -> None:
-    """Print configured training budgets; sample counts are nominal, not exact."""
+def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int, samples_per_rank: int) -> None:
+    """Distinguish nominal batches from the windows actually processed."""
+    positive_int(batches_per_epoch, "batches_per_epoch")
     per_device_batch = int(cfg.dataloader.batch_size)
     grad_accum = int(cfg.training.get("loop", {}).get("gradient_accumulation_steps", 1))
     total_train_steps = int(cfg.training.loop.total_train_steps)
@@ -275,7 +307,11 @@ def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int) -> No
     updates_per_epoch = (batches_per_epoch + grad_accum - 1) // grad_accum
     remainder = batches_per_epoch % grad_accum
     last_group_microbatches = grad_accum if remainder == 0 else remainder
-    last_group_global_batch = per_device_batch * world_size * last_group_microbatches
+    epoch_samples = min(samples_per_rank, batches_per_epoch * per_device_batch)
+    last_group_global_batch = world_size * (epoch_samples - (updates_per_epoch - 1) * grad_accum * per_device_batch)
+    full_epochs, partial_updates = divmod(total_train_steps, updates_per_epoch)
+    processed_budget = world_size * (full_epochs * epoch_samples +
+                                     min(partial_updates * grad_accum * per_device_batch, epoch_samples))
     has_partial_accumulation_group = last_group_microbatches != grad_accum
     lr = cfg.optimizer.lr
     obs_lr = cfg.optimizer.get("obs_lr")
@@ -297,6 +333,8 @@ def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int) -> No
         ("last group global batch", last_group_global_batch),
         ("total optimizer updates", total_train_steps),
         ("nominal sample budget", nominal_global_batch * total_train_steps),
+        ("processed window budget", processed_budget),
+        ("window counting", "includes sampler repeats / DDP padding; not unique source rows"),
         ("drop_last", cfg.dataloader.drop_last),
         ("learning rate", f"{lr:.3e}"),
         ("obs learning rate", f"{obs_lr:.3e}"),
@@ -459,6 +497,9 @@ def validate_config(cfg):
 
     Called by training and config-only smoke entry points.
     """
+    for child in cfg.dataset.get('datasets', [cfg.dataset]):
+        if child.get('pc_dim') is not None and child.pc_dim != cfg.agent.get('pc_dim'):
+            raise ValueError('Dataset pc_dim must match the actual Agent point-cloud channels')
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):

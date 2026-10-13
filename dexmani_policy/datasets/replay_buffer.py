@@ -86,12 +86,13 @@ class ReplayBuffer:
             self._pid = os.getpid()
         return self._data
 
-    def read(self, key, rows, *, columns=None):
+    def read(self, key, rows, *, columns=None, cache=True):
         arr = self[key]
         selection = rows if columns is None else (rows, columns)
         values = None
         if (
             self._path is not None
+            and cache
             and isinstance(rows, slice)
             and rows.step in (None, 1)
         ):
@@ -123,9 +124,18 @@ class ReplayBuffer:
         return max(1, min(physical, limit))
 
     def iter_chunks(self, key, *, columns=None):
-        step = self.chunk_rows(key)
+        step = self.scan_chunk_rows(key)
         for start in range(0, int(self.episode_ends[-1]), step):
-            yield start, self.read(key, slice(start, start + step), columns=columns)
+            yield start, self.read(key, slice(start, start + step), columns=columns, cache=False)
+
+    def scan_chunk_rows(self, key):
+        """Sequential scans decode a physical time chunk once, without retaining it.
+
+        The decoder can allocate a full physical chunk regardless of the 16 MiB
+        window-cache bound; slicing it into smaller requests does not cap that peak.
+        """
+        arr = self[key]
+        return arr.chunks[0] if isinstance(arr, zarr.Array) else self.chunk_rows(key)
 
     @property
     def episode_ends(self):

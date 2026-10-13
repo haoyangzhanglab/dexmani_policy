@@ -195,6 +195,18 @@ def smoke_test(config_name: str, *, max_updates=4):
                     pred = selected.predict_action(obs)["control_action"]
                 assert pred.shape == (1, cfg.n_action_steps, selected.control_action_dim)
                 assert torch.isfinite(pred).all()
+                # Restore uses eager inference. Compare checkpoint roundtrips
+                # with the same kernels, while still exercising compiled
+                # training/prediction above. Fusion can change float rounding.
+                backbone = selected.action_decoder.model
+                if hasattr(backbone, "_orig_mod"):
+                    selected.action_decoder.model = backbone._orig_mod
+                    set_seed(cfg.training.seed)
+                    with torch.inference_mode():
+                        eager = selected.predict_action(obs)["control_action"]
+                    print(f"{'EMA' if use_ema else 'raw'} compiled/eager prediction max abs diff: "
+                          f"{(pred - eager).abs().max().item():.8g}")
+                    pred = eager
                 predictions[use_ema] = pred.cpu()
                 selected.to("cpu")
             optimizer_to(comp.optimizer, "cpu")

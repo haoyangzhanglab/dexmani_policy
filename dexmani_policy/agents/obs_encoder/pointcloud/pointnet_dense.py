@@ -11,23 +11,15 @@ class PointNetDense(nn.Module):
     cross-attention, matching the official ManiFlow design where the
     transformer decides which points to attend to.
 
-    Compatible with the patch-tokenizer registry interface via
-    ``build_pc_patch_tokenizer("pointnet_dense", ...)``.
-
     Parameters:
         input_channels: Point cloud channels (3 for xyz, 6 for xyz+rgb).
         out_channels: Output feature dimension per point.
-        num_points: Expected point count for out_shape metadata; sampling is
-            performed by the caller.
     """
-
-    supports_global_token = False
 
     def __init__(
         self,
         input_channels: int = 3,
         out_channels: int = 128,
-        num_points: int = 256,
     ):
         super().__init__()
         if input_channels not in (3, 6):
@@ -35,7 +27,6 @@ class PointNetDense(nn.Module):
 
         self.input_channels = input_channels
         self._out_channels = out_channels
-        self._num_points = num_points
 
         layers = []
         in_dim = input_channels
@@ -79,7 +70,3 @@ class PointNetDense(nn.Module):
     @property
     def out_dim(self) -> int:
         return self._out_channels
-
-    @property
-    def out_shape(self) -> tuple[int, int]:
-        return (self._num_points, self._out_channels)

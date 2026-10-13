@@ -9,6 +9,7 @@ Continuous indices in [-1, 1] decode with half-up rounding, then clamping.
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
 import warnings
 from pathlib import Path
@@ -16,6 +17,26 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
+
+
+def compact_artifact_metadata(metadata):
+    """Keep runtime provenance short; complete split evidence lives in the VQ checkpoint."""
+    keys = {'hand_dim', 'latent_dim', 'hidden_dim', 'num_layers', 'num_groups', 'codebook_size',
+            'act_scale', 'source_checkpoint', 'source_checkpoint_sha256', 'source_epoch',
+            'normalizer_sha256', 'checkpoint_metrics', 'export_diagnostics', 'source_summary'}
+    result = {key: value for key, value in metadata.items() if key in keys}
+    split = metadata.get('split_metadata')
+    if isinstance(split, dict):
+        summary = {key: split[key] for key in ('normalization_scope', 'normalization_spec',
+                   'data_revision', 'train_frame_count', 'val_frame_count', 'selection_metric') if key in split}
+        for key in ('train_source_rows', 'val_source_rows', 'train_episode_ids', 'val_episode_ids'):
+            if key in split:
+                summary[key + '_count'] = len(split[key])
+        summary['split_metadata_sha256'] = hashlib.sha256(
+            json.dumps(split, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+        ).hexdigest()
+        result['source_summary'] = summary
+    return result
 
 
 def _positive_integer(value, name):
@@ -373,9 +394,7 @@ class CodebookManager(nn.Module):
                 f"PCA explained_variance_ratio is low "
                 f"({pca.explained_variance_ratio_[0]:.4f}). "
                 "Hand pose prototypes may lack a clear 1-D ordering. "
-                "Consider improving VQ-VAE training quality — low PC1 ratio "
-                "often correlates with low vq_idx_used and downstream "
-                "success-rate collapse.",
+                "This ordering diagnostic does not estimate control success.",
                 RuntimeWarning,
             )
 
@@ -418,7 +437,7 @@ class CodebookManager(nn.Module):
                 self.hand_max.detach().cpu().item(), dtype=np.float64
             ),
             "metadata_json": np.asarray(
-                json.dumps(self.artifact_metadata, sort_keys=True)
+                json.dumps(compact_artifact_metadata(self.artifact_metadata), sort_keys=True)
             ),
         }
         payload["layer_weights"] = self.layer_weights.detach().cpu().numpy()
@@ -496,7 +515,7 @@ class CodebookManager(nn.Module):
             # Every candidate has passed validation in its actual buffer dtype.
             for name, value in converted.items():
                 setattr(self, name, value)
-            self.artifact_metadata = metadata
+            self.artifact_metadata = compact_artifact_metadata(metadata)
 
     # Runtime mappings
 

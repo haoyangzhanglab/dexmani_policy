@@ -71,7 +71,7 @@ class ResNet(nn.Module):
     def __init__(
         self,
         model_name: str = "resnet18",
-        tune_mode: TuneMode = "freeze",
+        tune_mode: TuneMode = "full",
         norm_mode: NormMode = "group_norm",
         global_token_type: GlobalTokenType = "avg",
         out_dim: Optional[int] = None,
@@ -126,6 +126,12 @@ class ResNet(nn.Module):
 
         raise ValueError(f"Unsupported tune_mode: {tune_mode}")
 
+    def train(self, mode=True):
+        super().train(mode)
+        if self.tune_mode == 'freeze':
+            self.backbone.eval()
+        return self
+
     def get_global_token(self, feature_map: torch.Tensor) -> torch.Tensor:
         if self.global_token_type == "avg":
             return feature_map.mean(dim=(-2, -1))
@@ -135,9 +141,6 @@ class ResNet(nn.Module):
     def forward(self, rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
         if rgb.ndim < 4 or rgb.shape[-3] != 3:
             raise ValueError(f"rgb should have shape [..., 3, H, W], got {tuple(rgb.shape)}")
-
-        if self.tune_mode == "freeze":
-            self.backbone.eval()
 
         flat_rgb, leading_shape = flatten_batch(rgb, trailing_ndim=3)
         feature_map = self.backbone(flat_rgb)

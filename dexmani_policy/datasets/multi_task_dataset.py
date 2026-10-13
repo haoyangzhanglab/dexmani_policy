@@ -19,6 +19,8 @@ class MultiTaskDataset(torch.utils.data.Dataset):
     ):
         if len(datasets) != len(task_names):
             raise ValueError("datasets and task_names must have the same length")
+        if not datasets:
+            raise ValueError('MultiTaskDataset requires at least one child')
         if task_texts is not None and len(task_texts) != len(datasets):
             raise ValueError("task_texts must have the same length as datasets")
         if sampling_strategy not in ["proportional", "balanced", "weighted"]:
@@ -73,6 +75,23 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         }
         if len(rgb_transport) > 1:
             raise ValueError("RGB child datasets must have consistent rgb_keep_uint8")
+        from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
+        fields = set(datasets[0].sensor_modalities)
+        for child in datasets[1:]:
+            if set(child.sensor_modalities) != fields:
+                raise ValueError('Child datasets must share the complete observation modality set')
+            for field in fields:
+                if field == 'rgb':
+                    if rgb_preprocessing_kwargs(vars(child)) != rgb_preprocessing_kwargs(vars(datasets[0])):
+                        raise ValueError('Child datasets must share RGB numerical preprocessing')
+                else:
+                    def layout(dataset):
+                        shape = tuple(dataset.replay_buffer[field].shape[1:])
+                        if field == 'point_cloud' and dataset.pc_dim is not None:
+                            shape = (*shape[:-1], dataset.pc_dim)
+                        return shape
+                    if layout(child) != layout(datasets[0]):
+                        raise ValueError(f'Child observation layout mismatch: {field}')
         self.datasets = datasets
         self.task_names = task_names
         self.action_key = action_key

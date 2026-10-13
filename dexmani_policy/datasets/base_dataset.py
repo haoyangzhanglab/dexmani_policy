@@ -61,6 +61,7 @@ class BaseDataset(torch.utils.data.Dataset):
         rgb_keep_uint8: bool = False,
         split_manifest: str | None = None,
         saved_split: dict | None = None,
+        pc_dim: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -77,6 +78,9 @@ class BaseDataset(torch.utils.data.Dataset):
         self.zarr_path = str(Path(zarr_path).expanduser().resolve())
         self.action_key = action_key
         self.use_aux_ee = use_aux_ee
+        if pc_dim is not None and (type(pc_dim) is not int or pc_dim not in (3, 6)):
+            raise ValueError('pc_dim must be 3 (XYZ), 6 (XYZRGB), or None (all stored channels)')
+        self.pc_dim = pc_dim
         self.obs_horizon = horizon if obs_horizon is None else obs_horizon
         if not 1 <= self.obs_horizon <= horizon:
             raise ValueError("obs_horizon must satisfy 1 <= N <= horizon")
@@ -97,6 +101,10 @@ class BaseDataset(torch.utils.data.Dataset):
         )
 
         self.data_revision = self.replay_buffer.data_revision
+        if 'point_cloud' in sensor_modalities and pc_dim is not None:
+            shape = self.replay_buffer['point_cloud'].shape
+            if len(shape) != 3 or shape[-1] < pc_dim:
+                raise ValueError('Stored point_cloud does not satisfy configured pc_dim')
         n_rows = int(self.replay_buffer.episode_ends[-1])
 
         def finite_rows(key, columns=None):
@@ -105,6 +113,8 @@ class BaseDataset(torch.utils.data.Dataset):
                 for start, values in self.replay_buffer.iter_chunks(
                     key, columns=columns
                 ):
+                    if key == 'point_cloud' and self.pc_dim is not None:
+                        values = values[..., :self.pc_dim]
                     valid[start : start + len(values)] = (
                         np.isfinite(values).reshape(len(values), -1).all(axis=1)
                     )
@@ -124,6 +134,11 @@ class BaseDataset(torch.utils.data.Dataset):
             "window_validity": "role_finite_v1",
             "normalization": "unique_train_source_rows",
         }
+        if 'point_cloud' in sensor_modalities and self.pc_dim == 3:
+            self.data_recipe.update(window_validity='role_finite_xyz_v2', point_cloud_channels=3)
+        elif ('point_cloud' in sensor_modalities and self.pc_dim is not None
+              and self.pc_dim < self.replay_buffer['point_cloud'].shape[-1]):
+            self.data_recipe.update(window_validity='role_finite_channels_v2', point_cloud_channels=self.pc_dim)
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
         self.augmentors = {}
@@ -211,6 +226,8 @@ class BaseDataset(torch.utils.data.Dataset):
         return len(self.sampler)
 
     def sample_to_data(self, sample):
+        if 'point_cloud' in sample and self.pc_dim is not None:
+            sample['point_cloud'] = sample['point_cloud'][..., :self.pc_dim]
         # Build action by concatenating enabled auxiliary modalities.
         # EE aux loss: wrist pose = action_ee[..., :9] = pos(3) + rot6d(6).
         parts = [sample[self.action_key]]
@@ -311,6 +328,10 @@ class BaseDataset(torch.utils.data.Dataset):
         for section, cls, key, modality in AUGMENTOR_REGISTRY:
             config = (self.augmentation_cfg.get(section) or {}).get(key)
             if config:
+                if self.pc_dim == 3 and section == 'pc' and key in {'color', 'color_noise'}:
+                    if config.get('prob', 1) > 0:
+                        raise ValueError('XYZ-only point clouds cannot use color augmentation')
+                    continue
                 self.augmentors.setdefault(modality, []).append(cls(**config))
 
     def apply_augmentation(self, data):
@@ -350,9 +371,9 @@ class BaseDataset(torch.utils.data.Dataset):
             if action
             else self.sampler.observation_source_rows
         )
-        step = self.replay_buffer.chunk_rows(field)
+        step = self.replay_buffer.scan_chunk_rows(field)
         if action and self.use_aux_ee:
-            step = min(step, self.replay_buffer.chunk_rows("action_ee"))
+            step = min(step, self.replay_buffer.scan_chunk_rows("action_ee"))
         for start in range(0, int(self.replay_buffer.episode_ends[-1]), step):
             end = min(start + step, int(self.replay_buffer.episode_ends[-1]))
             selected = (
@@ -360,10 +381,12 @@ class BaseDataset(torch.utils.data.Dataset):
             )
             if not len(selected):
                 continue
-            values = self.replay_buffer.read(field, slice(start, end))[selected]
+            values = self.replay_buffer.read(field, slice(start, end), cache=False)[selected]
+            if field == 'point_cloud' and self.pc_dim is not None:
+                values = values[..., :self.pc_dim]
             if action and self.use_aux_ee:
                 aux = self.replay_buffer.read(
-                    "action_ee", slice(start, end), columns=slice(0, 9)
+                    "action_ee", slice(start, end), columns=slice(0, 9), cache=False
                 )[selected]
                 values = np.concatenate((values, aux), axis=-1)
             yield values

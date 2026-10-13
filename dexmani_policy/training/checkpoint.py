@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import torch
 from dexmani_policy.utils.atomic import atomic_path
 
-TRAIN_CHECKPOINT_FORMAT = "simple.v3"
+TRAIN_CHECKPOINT_FORMAT = "simple.v4"
 
 @dataclass
 class TrainCheckpoint:
@@ -25,6 +25,7 @@ class TrainCheckpoint:
     ema_updater_step: Optional[int]
     ema_decay: Optional[float]
     rng_states: list[Dict[str, Any]]
+    effective_config: Dict[str, Any]
 
 
 class CheckpointStore:
@@ -35,6 +36,7 @@ class CheckpointStore:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         path = self.checkpoint_dir / filename
         payload = {
+            "effective_config": checkpoint.effective_config,
             "state": {
                 "epoch": int(checkpoint.epoch),
                 "global_step": int(checkpoint.global_step),
@@ -60,14 +62,16 @@ class CheckpointStore:
     def load_payload(self, path: Path) -> dict:
         """Read one .pt container; purpose-specific readers validate required fields."""
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
-        if not isinstance(payload, dict) or payload.get("_format") != TRAIN_CHECKPOINT_FORMAT:
+        if not isinstance(payload, dict) or payload.get("_format") not in {TRAIN_CHECKPOINT_FORMAT, "simple.v3"}:
             raise RuntimeError("Unsupported checkpoint format")
         if not isinstance(payload.get("weights"), dict) or not isinstance(payload.get("state"), dict):
             raise RuntimeError("Checkpoint requires state and weights mappings")
+        if payload['_format'] == TRAIN_CHECKPOINT_FORMAT and not isinstance(payload.get('effective_config'), dict):
+            raise ValueError('simple.v4 requires checkpoint-bound effective_config')
         return payload
 
-    def load_inference(self, path: Path, *, use_ema: bool):
-        payload = self.load_payload(path)
+    def load_inference(self, path: Path, *, use_ema: bool, payload=None):
+        payload = self.load_payload(path) if payload is None else payload
         state = payload["weights"].get("ema_model" if use_ema else "model")
         if state is None and use_ema:
             raise ValueError("Requested EMA weights are absent; select raw explicitly")
@@ -82,6 +86,8 @@ class CheckpointStore:
 
     def load(self, path: Path) -> TrainCheckpoint:
         payload = self.load_payload(path)
+        from dexmani_policy.utils.config import checkpoint_source_config
+        effective_config = checkpoint_source_config(payload, path, strict_resume=True)
         state = payload["state"]
         weights = payload["weights"]
         expected_state = {
@@ -124,6 +130,7 @@ class CheckpointStore:
             ema_model_state=weights["ema_model"],
             optimizer_state=weights["optimizer"],
             scheduler_state=weights["scheduler"],
+            effective_config=effective_config,
         )
 
 

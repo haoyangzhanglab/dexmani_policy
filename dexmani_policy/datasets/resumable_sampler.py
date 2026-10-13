@@ -10,10 +10,10 @@ from torch.utils.data.distributed import DistributedSampler
 
 def multitask_indices(task_lengths, sample_probs, seed, epoch, *, deterministic=False,
                       sampling_strategy="balanced"):
-    """Original task mapping M_e, expressed as stable concatenated-dataset indices.
+    """Task mapping M_e, expressed as stable concatenated-dataset indices.
 
-    Preserve the dataset rounding and NumPy RNG, including the fixed proportional
-    branch. DistributedSampler independently supplies logical positions Q_e,r.
+    Weighted quotas use unbiased random-offset rounding. Other strategies retain
+    their rounding and RNG. DistributedSampler supplies logical positions Q_e,r.
     """
     parts = (seed, "fixed") if deterministic else (seed, epoch)
     raw = "_".join(str(p) for p in parts)
@@ -23,14 +23,27 @@ def multitask_indices(task_lengths, sample_probs, seed, epoch, *, deterministic=
     if deterministic and sampling_strategy == "proportional":
         indices = list(range(total))
     else:
-        counts = np.round(np.asarray(sample_probs) * total).astype(int)
-        diff = total - counts.sum()
-        if diff > 0:
-            counts[rng.choice(len(task_lengths), p=sample_probs)] += diff
-        while diff < 0:
-            valid = np.where(counts > 0)[0]
-            counts[valid[rng.choice(len(valid))]] -= 1
-            diff += 1
+        if sampling_strategy == 'weighted':
+            probs = np.asarray(sample_probs, dtype=np.float64)
+            if (probs.shape != (len(task_lengths),) or not np.isfinite(probs).all()
+                    or (probs < 0).any() or not np.isclose(probs.sum(), 1)):
+                raise ValueError('weighted sampling requires finite nonnegative probabilities summing to one')
+            cumulative = np.r_[0., np.cumsum(probs / probs.sum()) * total]
+            cumulative = np.minimum(cumulative, total)
+            # Fix the endpoint at the last positive task, including trailing
+            # zero probabilities, without awarding floating-point residue to them.
+            cumulative[np.flatnonzero(probs)[-1] + 1:] = total
+            counts = np.diff(np.floor(cumulative + rng.random())).astype(np.int64)
+        else:
+            # Preserve balanced/proportional quota rounding and RNG consumption.
+            counts = np.round(np.asarray(sample_probs) * total).astype(int)
+            diff = total - counts.sum()
+            if diff > 0:
+                counts[rng.choice(len(task_lengths), p=sample_probs)] += diff
+            while diff < 0:
+                valid = np.where(counts > 0)[0]
+                counts[valid[rng.choice(len(valid))]] -= 1
+                diff += 1
         indices = []
         for task, (length, count) in enumerate(zip(task_lengths, counts)):
             if count == 0:

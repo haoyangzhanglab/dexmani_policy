@@ -82,9 +82,29 @@ class BaseRunner:
         On the first call the buffer is allocated lazily from the frame shapes.
         """
         pos = self._obs_cursor % self.n_obs_steps
-        for k, v in observation.items():
-            if k not in self.sensor_modalities:
-                continue
+        missing = set(self.sensor_modalities) - observation.keys()
+        if missing:
+            raise ValueError(f'Missing required observation frame fields: {sorted(missing)}')
+        # Validate the entire frame before allocating, writing or advancing any
+        # history. In particular NumPy assignment must not broadcast a bad frame.
+        for k in self.sensor_modalities:
+            v = observation[k]
+            if not isinstance(v, (np.ndarray, torch.Tensor, str)):
+                raise TypeError(f'Unsupported observation type for {k}: {type(v).__name__}')
+            if isinstance(v, np.ndarray) and v.dtype.kind not in 'buif':
+                raise TypeError(f'Observation {k} must be a numeric array or a string')
+            if torch.is_tensor(v) and (v.layout != torch.strided or v.is_complex()):
+                raise TypeError(f'Observation {k} must be a dense real tensor')
+            if k in self._obs_str_buffer and not isinstance(v, str):
+                raise TypeError(f'Observation {k} changed from string to numeric')
+            if k in self._obs_buffer:
+                buf = self._obs_buffer[k]
+                if (type(v) is not type(buf) or v.shape != buf.shape[1:]
+                        or v.dtype != buf.dtype
+                        or (torch.is_tensor(v) and v.device != buf.device)):
+                    raise ValueError(f'Observation {k} changed type, shape, dtype or device')
+        for k in self.sensor_modalities:
+            v = observation[k]
             if isinstance(v, np.ndarray):
                 if k not in self._obs_buffer:
                     self._obs_buffer[k] = np.zeros(

@@ -183,17 +183,16 @@ def query_ball_point(
     )
     neighbor_idx = result.idx if hasattr(result, "idx") else result[1]
 
-    if (neighbor_idx < 0).any():
+    valid_mask = neighbor_idx >= 0
+    has_valid = valid_mask.any(dim=-1, keepdim=True)
+    first_valid_pos = valid_mask.to(torch.int64).argmax(dim=-1, keepdim=True)
+    fallback_idx = torch.gather(neighbor_idx, dim=-1, index=first_valid_pos)
+    # Internal queries normally include themselves. Only truly empty external
+    # balls need KNN; avoid dynamic ragged subsets in the normal compiled path.
+    if not has_valid.all():
         nearest_idx = knn_point(1, support_xyz, query_xyz)
-
-        valid_mask = neighbor_idx >= 0
-        has_valid = valid_mask.any(dim=-1, keepdim=True)
-
-        first_valid_pos = valid_mask.to(torch.int64).argmax(dim=-1, keepdim=True)
-        first_valid_idx = torch.gather(neighbor_idx, dim=-1, index=first_valid_pos)
-
-        fallback_idx = torch.where(has_valid, first_valid_idx, nearest_idx)
-        neighbor_idx = torch.where(valid_mask, neighbor_idx, fallback_idx.expand_as(neighbor_idx))
+        fallback_idx = torch.where(has_valid, fallback_idx, nearest_idx)
+    neighbor_idx = torch.where(valid_mask, neighbor_idx, fallback_idx.expand_as(neighbor_idx))
 
     return neighbor_idx
 

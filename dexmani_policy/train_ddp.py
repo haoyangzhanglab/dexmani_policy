@@ -73,12 +73,13 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
 
     batches_per_epoch = len(train_loader)
     optimizer, scheduler = build_optimizer_and_scheduler(
-        cfg, model, batches_per_epoch, verbose=rank == 0
+        cfg, model, verbose=rank == 0
     )
 
     if rank == 0:
         print_training_recipe(
-            cfg, world_size=world_size, batches_per_epoch=batches_per_epoch
+            cfg, world_size=world_size, batches_per_epoch=batches_per_epoch,
+            samples_per_rank=train_loader.sampler.num_samples,
         )
         workspace = hydra.utils.instantiate(cfg.workspace)
     else:
@@ -143,6 +144,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
         is_main_process=(rank == 0),
         distributed=True,
         resume_contract=resume_contract,
+        effective_config=cfg,
         batches_per_epoch=batches_per_epoch,
     )
 

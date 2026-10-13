@@ -31,13 +31,22 @@ class BaseAgent(nn.Module):
         self.action_dim = action_dim
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = LinearNormalizer()
+        self.normalization_dims = {}
 
-    def set_normalization_spec(self, spec):
+    def set_normalization_spec(self, spec, feature_dims=None):
         from dexmani_policy.agents.normalization import validate_action_clipping
 
         if isinstance(self.action_decoder, Diffusion):
             validate_action_clipping(spec, self.action_decoder.noise_scheduler.config.clip_sample)
         self.normalization_spec = dict(spec)
+        self.normalization_dims = dict(feature_dims or {})
+        if self.normalization_dims.get('action', self.action_dim) != self.action_dim:
+            raise ValueError('Normalizer action width must match the full prediction layout')
+        self.normalization_dims['action'] = self.action_dim
+
+    def validate_normalizer(self):
+        from dexmani_policy.agents.normalization import validate_normalizer_state
+        validate_normalizer_state(self.normalizer, self.normalization_spec, self.normalization_dims)
 
     def initialize_training(self) -> None:
         """Initialize fresh training weights; complete checkpoints skip this step."""
@@ -122,6 +131,11 @@ class BaseAgent(nn.Module):
                 )
 
     def preprocess(self, obs_dict: Dict) -> Dict:
+        # Sim runners can supply XYZRGB even when this run consumes XYZ only.
+        # Select before normalization, just as Dataset and Real runtime do.
+        if self.normalization_dims.get("point_cloud") == 3 and "point_cloud" in obs_dict:
+            obs_dict = dict(obs_dict)
+            obs_dict["point_cloud"] = obs_dict["point_cloud"][..., :3]
         obs = self.normalizer.normalize(obs_dict)
         result = {}
         for k, v in obs.items():

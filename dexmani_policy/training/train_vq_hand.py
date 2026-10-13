@@ -521,6 +521,19 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         metrics=final_metrics,
     )
 
+    # One deployment diagnostic after selection; it does not participate in best
+    # selection and consumes exactly the already prepared train/held-out rows.
+    from dexmani_policy.agents.vq_hand.export_codebook import (
+        load_checkpoint_snapshot, build_runtime_codebook, deployment_diagnostics,
+    )
+    import json
+    selected_path = output_dir / 'vqvae_hand_best.pt'
+    selected, source_hash = load_checkpoint_snapshot(selected_path)
+    runtime_codebook = build_runtime_codebook(selected, source_hash, selected_path, device='cpu')
+    diagnostics = deployment_diagnostics(runtime_codebook, {'train': train_norm, 'held_out': val_norm})
+    with atomic_path(output_dir / 'codebook_diagnostics.json') as temporary:
+        temporary.write_text(json.dumps(diagnostics, indent=2, allow_nan=False) + '\n')
+
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(train_history)
     ax.set_xlabel("Epoch")

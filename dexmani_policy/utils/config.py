@@ -14,15 +14,90 @@ _LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 TASK_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
 
 
+RESUME_OPERATIONAL_FIELDS = {
+    'resume_from', 'max_updates', 'workspace.output_dir',
+    'training.device', 'training.gpu_ids', 'training.use_compile', 'training.compile_mode',
+    'training.loop.log_interval_steps', 'dataloader.num_workers',
+    'dataloader.persistent_workers', 'dataloader.prefetch_factor',
+}
+
+
+def recipe_content(config):
+    """Compare recipe values, excluding only supported run/location changes."""
+    plain = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
+
+    def visit(value, path=''):
+        if isinstance(value, dict):
+            result = {}
+            for key, child in value.items():
+                child_path = f'{path}.{key}' if path else key
+                if (child_path in RESUME_OPERATIONAL_FIELDS
+                        or child_path in {'workspace.wandb_cfg', 'normalizer_source'}
+                        or re.fullmatch(r'dataset\.(?:datasets\.\d+\.)?zarr_path', child_path)):
+                    continue
+                result[key] = visit(child, child_path)
+            return result
+        if isinstance(value, (list, tuple)):
+            return [visit(child, f'{path}.{i}') for i, child in enumerate(value)]
+        return value
+
+    return visit(plain)
+
+
+def validate_source_recipe(saved, current):
+    """Reject a sidecar or programmatic resume config with a different recipe."""
+    differences = []
+
+    def compare(left, right, path):
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(left.keys() | right.keys()):
+                if key not in left or key not in right:
+                    differences.append(f'{path}.{key}: missing field')
+                else:
+                    compare(left[key], right[key], f'{path}.{key}')
+        elif isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                differences.append(f'{path}: different lengths')
+            for i, (a, b) in enumerate(zip(left, right)):
+                compare(a, b, f'{path}[{i}]')
+        elif type(left) is not type(right) or left != right:
+            differences.append(f'{path}: checkpoint={left!r}, config={right!r}')
+
+    compare(recipe_content(saved), recipe_content(current), 'config')
+    if differences:
+        raise ValueError('Checkpoint source recipe mismatch:\n' + '\n'.join(differences))
+
+
+def checkpoint_source_config(payload, checkpoint_path, *, strict_resume, supplied=None):
+    """Select config from the same payload as the weights; never bless legacy provenance."""
+    # A sidecar copied into an old container after training is not provenance.
+    bound = payload.get('effective_config') if payload.get('_format') == 'simple.v4' else None
+    if bound is None:
+        if strict_resume or payload.get('_format') != 'simple.v3':
+            raise ValueError('Strict resume requires checkpoint-bound effective_config (simple.v4); '
+                             'a legacy sidecar cannot prove the source recipe')
+        warnings.warn('Legacy simple.v3 inference uses an unbound sidecar; source recipe is not proven',
+                      stacklevel=2)
+    elif not isinstance(bound, dict) or not bound:
+        raise ValueError('Checkpoint effective_config must be a nonempty mapping')
+    source = Path(checkpoint_path).resolve().parent.parent / 'config.yaml'
+    sidecar = OmegaConf.to_container(OmegaConf.load(source), resolve=True) if source.is_file() else None
+    for candidate in (sidecar, supplied):
+        if candidate is not None:
+            if not isinstance(candidate, (dict, DictConfig)) or not candidate:
+                raise ValueError('Source config must be a nonempty mapping')
+            if bound is not None:
+                validate_source_recipe(bound, candidate)
+    result = bound if bound is not None else (sidecar if supplied is None else supplied)
+    if result is None:
+        raise ValueError(f'Legacy inference requires source config.yaml: {source}')
+    return copy.deepcopy(result)
+
+
 def load_resume_source_config(checkpoint_path):
-    """Read the required resolved recipe belonging to the source checkpoint."""
-    source = Path(checkpoint_path).resolve().parent.parent / "config.yaml"
-    if not source.is_file():
-        raise ValueError(f"Full resume requires the source experiment config.yaml: {source}")
-    saved = OmegaConf.to_container(OmegaConf.load(source), resolve=True)
-    if not isinstance(saved, dict) or not saved:
-        raise ValueError(f"Full resume requires a non-empty config mapping: {source}")
-    return saved
+    from dexmani_policy.training.checkpoint import CheckpointStore
+    payload = CheckpointStore(Path(checkpoint_path).parent).load_payload(checkpoint_path)
+    return checkpoint_source_config(payload, checkpoint_path, strict_resume=True)
 
 
 def resolve_input_recipe(cfg, *, overrides):
@@ -39,12 +114,7 @@ def resolve_input_recipe(cfg, *, overrides):
     if source is None:
         return copy.deepcopy(cfg)
     result = OmegaConf.create(load_resume_source_config(source))
-    operational = {
-        'resume_from', 'max_updates', 'workspace.output_dir',
-        'training.device', 'training.gpu_ids', 'training.use_compile', 'training.compile_mode',
-        'training.loop.log_interval_steps', 'dataloader.num_workers',
-        'dataloader.persistent_workers', 'dataloader.prefetch_factor',
-    }
+    operational = RESUME_OPERATIONAL_FIELDS
     with open_dict(result):
         # The execution limit belongs to this invocation.
         result.pop('max_updates', None)

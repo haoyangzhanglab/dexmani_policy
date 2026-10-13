@@ -20,3 +20,11 @@ def validate_observation_fields(agent, declared, *, require_declaration=False):
     unused = set(declared) - set(consumed)
     if missing or unused:
         raise ValueError(f"Model observation mismatch: missing={sorted(missing)}, unconsumed={sorted(unused)}")
+
+
+def validate_gradient_accumulation(
+    batches_per_epoch: int, gradient_accumulation_steps: int
+) -> None:
+    if batches_per_epoch <= 0:
+        raise ValueError("train loader must contain at least one batch")
+    positive_int(gradient_accumulation_steps, "gradient_accumulation_steps")

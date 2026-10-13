@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -17,11 +16,11 @@ from dexmani_policy.agents.vq_hand.codebook_manager import CodebookManager
 class DQRISEAgent(BaseAgent):
     """DQ-RISE policy with a self-contained runtime hand codebook."""
 
-    def set_normalization_spec(self, spec):
+    def set_normalization_spec(self, spec, feature_dims=None):
         from dexmani_policy.agents.normalization import validate_dq_normalization
 
         validate_dq_normalization(spec)
-        super().set_normalization_spec(spec)
+        super().set_normalization_spec(spec, feature_dims)
 
     def __init__(
         self,
@@ -273,48 +272,3 @@ class DQRISEAgent(BaseAgent):
             f"codes={self.codebook_manager.num_codes}, "
             f"codebook_loaded={self.codebook_manager.is_loaded})"
         )
-
-
-def example() -> None:
-    """Minimal construction example; project dependencies are still required."""
-    import tempfile
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    obs_steps, horizon, action_dim, points = 2, 16, 21, 256
-    tcp_dim = 9
-    manager = CodebookManager(hand_dim=action_dim - tcp_dim)
-    manager.sorted_hand_poses = (
-        torch.linspace(0, 65535, 16).unsqueeze(1).repeat(1, manager.hand_dim)
-    )
-    manager.pca_permutation = torch.arange(16)
-    manager.layer_weights = torch.full((manager.num_groups,), 1.0 / manager.num_groups)
-    manager.set_hand_normalizer(
-        torch.ones(manager.hand_dim), torch.zeros(manager.hand_dim)
-    )
-
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "codebook.npz"
-        manager.save(path)
-        agent = DQRISEAgent(
-            horizon=horizon,
-            n_obs_steps=obs_steps,
-            n_action_steps=8,
-            action_dim=action_dim,
-            tcp_dim=tcp_dim,
-            codebook_path=path,
-            encoder_type="idp3",
-            pc_dim=3,
-            pc_out_dim=64,
-            state_dim=action_dim,
-            num_points=points,
-            down_dims=(64, 128),
-            diffusion_step_embed_dim=64,
-            num_training_steps=10,
-            num_inference_steps=3,
-        ).to(device)
-        agent.initialize_training()
-        print(agent)
-
-
-if __name__ == "__main__":
-    example()

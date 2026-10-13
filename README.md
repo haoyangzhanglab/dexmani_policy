@@ -4,7 +4,7 @@
 
 当前研究内容会持续变化，可能涉及 3D / 点云、多模态感知、灵巧操作、生成式策略等方向。具体模型结构、输入输出和训练方式始终以**当前 config 与源码**为准，不在 README 中固化。
 
-> **事实来源**：当前实现以 config 和源码为准；已有实验以其保存的 resolved `config.yaml` 与 checkpoint 为准。README 只维护稳定入口、常用命令和研究工作流。
+> **事实来源**：当前实现以 config 和源码为准；新 checkpoint 的 `effective_config` 绑定该次运行的配方，旁边 resolved `config.yaml` 用于阅读和交叉核对。旧产物的支持边界见下文。README 只维护稳定入口、常用命令和研究工作流。
 
 ## 研究定位
 
@@ -26,7 +26,7 @@ conda activate policy
 python -m pip install -r requirements.txt
 python -m pip install -e .
 python -m pip check
-python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise r3d multitask_dit interaction_flow
+python dexmani_policy/smoke_test.py --config-only dp dp3 sat maniflow dqrise r3d multitask_dit interaction_flow
 ```
 
 新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
@@ -100,13 +100,13 @@ bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<ta
 
 `resume_from` 接受当前格式的实验目录或 checkpoint 文件，展开 `~`，相对路径以**项目根目录**为基准。恢复始终写入新输出目录。新 run 默认命名为 `YYYY-MM-DD_HH-MM-SS_seed<seed>`，例如 `2026-10-11_02-00-52_seed1011`，已有实验目录保持原名。已有训练配置、metrics 或 checkpoints 的目录会拒绝使用；同一秒内启动相同 Policy、任务和 seed 可能重名，遇到冲突请指定新目录。目录检查不提供并发锁，不要让多个训练写入同一目录；Hydra 在进入训练前可能已写入自己的启动文件。
 
-完整续训先读取来源实验的 resolved `config.yaml`，再校验和构造。仅允许显式覆盖新输出位置、W&B、等价设备定位、日志间隔、worker 参数、compile 开关/模式、当次执行上限 `+max_updates=N`，以及数据目录迁移；worker/compile 覆盖沿用有界恢复承诺，不承诺增强或算子逐位相同。`max_updates` 仅作用于当次启动，不从来源实验继承。`workspace` 使用当前字段 `_target_`、`output_dir` 和 `wandb_cfg`，不自动清理已废弃字段。world_size、batch/accumulation、训练 seed、AMP/dtype、总计划和模型/数据配方不能覆盖。路径迁移使用 `dataset.zarr_path=...` 或 `dataset.datasets.<index>.zarr_path=...`，训练时仍校验 revision 与保存集合；相同 revision 不是内容 hash 证明。
+完整续训先读取 checkpoint 内绑定的 resolved `effective_config`，并核对来源 `config.yaml` 的配方，再校验和构造。仅允许显式覆盖新输出位置、W&B、等价设备定位、日志间隔、worker 参数、compile 开关/模式、当次执行上限 `+max_updates=N`，以及数据目录迁移；worker/compile 覆盖沿用有界恢复承诺，不承诺增强或算子逐位相同。`max_updates` 仅作用于当次启动，不从来源实验继承。`workspace` 使用当前字段 `_target_`、`output_dir` 和 `wandb_cfg`，不自动清理已废弃字段。world_size、batch/accumulation、训练 seed、AMP/dtype、总计划、optimizer/scheduler/EMA 和模型/数据配方不能覆盖。路径迁移使用 `dataset.zarr_path=...` 或 `dataset.datasets.<index>.zarr_path=...`，训练时仍校验 revision 与保存集合；相同 revision 不是内容 hash 证明。
 
-续训时显式 `task_name` 仅断言来源任务身份，必须与保存值完全相同（复合任务包含顺序）；冲突重复参数也会拒绝。未显式指定时使用保存任务，不受当前 YAML 默认任务影响。远程 `train_remote.sh <config> <task> +resume_from=...` 的数据预检与训练共享配方解析，检查保存的单任务/child 数据路径或显式迁移路径；`--check` 只保证目录存在，不保证数据完整或训练成功。来源配置缺失或损坏时拒绝续训，不回退到当前配方。
+续训时显式 `task_name` 仅断言来源任务身份，必须与保存值完全相同（复合任务包含顺序）；冲突重复参数也会拒绝。未显式指定时使用保存任务，不受当前 YAML 默认任务影响。远程 `train_remote.sh <config> <task> +resume_from=...` 的数据预检与训练共享配方解析，检查保存的单任务/child 数据路径或显式迁移路径；`--check` 只保证目录存在，不保证数据完整或训练成功。checkpoint 绑定配置缺失或损坏时拒绝续训，不回退到当前配方；存在的 sidecar 必须与绑定配方一致。
 
 保存配置记录 HF 结构及闭集文本维度；完整权重恢复要求 HF backbone 的 `architecture` 为有效映射，闭集 `text_embed_dim` 与保存的 embedding 表一致，不再加载外部初始化权重。固定文本保留任务映射、embedding 表和 projection，未知文本报错；所有 checkpoint 权重严格加载。推理读取完整 `.pt` 文件，不跳过 optimizer I/O。
 
-训练 checkpoint 使用 `simple.v3`，VQ checkpoint/NPZ 使用 v3。`best_ckpt.json` 只接受 `best.v1`，其中 EMA、NFE 和 policy seed mode 必须完整有效。严格评测读取完整 `selection.v2` 证据；显式 `--selection-record` 可接收当前 selector 生成的交接引用、`selection.v2` 结果或 `best.v1` 快照。未知格式和无格式 best 均拒绝，不自动迁移或改写产物。
+新训练 checkpoint 使用 `simple.v4`；未绑定来源的 `simple.v3` 拒绝严格续训，仍可在配置足够明确时警告后推理，不自动降级或补写绑定。VQ checkpoint/NPZ 保持 v3。`best_ckpt.json` 使用 `best.v1`，EMA、NFE 和 policy seed mode 必须完整有效。新 selection 使用 `selection.v3`，每个 stage 保存一次完整 episode 证据；读取端保留 `selection.v2` 支持。`--selection-record` 接收交接引用、上述 selection 结果或 `best.v1` 快照，不重生成旧计划。版本边界、回归命令和源码对照见 [修复与验证记录](docs/修复与验证记录.md)。
 
 完整续训要求 `resume_contract.facts_format=1`，CUDA RNG 为每个 rank 的单个 Tensor；CPU RNG 的 CUDA 字段为 null。配置、contract 和状态字段必须满足当前约定，恢复失败不会自动退回 weights-only。
 
@@ -142,7 +142,7 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 
 导出生成 Policy 使用的完整 residual-code 组合码本。NPZ 必须严格符合 v3 schema，额外字段会被拒绝；Policy checkpoint 同时保存推理需要的内嵌码本。
 
-训练过程保留分组码本使用图和损失曲线，导出时报告 decoder 范围与 PCA 诊断；码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。Policy 和 standalone VQ checkpoint 均须保存 `split_metadata.normalization_spec`；导出前检查结构和动作归一化模式，缺失声明、Gaussian、identity 或非法模式均在解码前拒绝。
+训练过程保留分组码本使用图和损失曲线；结束后另存 `codebook_diagnostics.json`，对已选 best 的实际部署查表链路报告 train/held-out 误差及原型利用率，不参与 best 排名。导出权重、epoch、SHA256 取自同一字节快照，运行 NPZ 只留短来源摘要，完整源行列表保留在 VQ checkpoint。码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。Policy 和 standalone VQ checkpoint 均须保存 `split_metadata.normalization_spec`；导出前检查结构和动作归一化模式，缺失声明、Gaussian、identity 或非法模式均在解码前拒绝。
 
 ## 验证
 
@@ -158,9 +158,17 @@ python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name>
 ```
 
-完整训练、DDP 和长时间评测不是普通代码改动后的默认验证步骤。
+配置与训练链路统一使用 `smoke_test.py`，Agent 模块不再维护独立的合成数据演示入口。安装 `pytest` 后，定向回归检查使用：
+
+```bash
+python -m pytest -q tests
+```
+
+pytest 使用合成数据和临时产物；CUDA 不可见时会跳过对应检查，CPU 检查通过不代表 GPU 检查通过。完整训练、DDP 和长时间评测不是普通代码改动后的默认验证步骤。
 
 `--config-only` 只检查配置和 target。完整 smoke 通过正式 Trainer 使用原资产、batch、BF16/compile/accumulation 配置，默认运行 4 次 optimizer update（可用 `--max-updates N` 设置本次上限），要求实际学习参数发生有限变化，再验证预测及 raw/EMA 保存恢复。执行预算不修改 warmup 和总训练计划，`global_step` 随实际更新增长；预算内没有有效变化会失败，不提高学习率。输出使用临时目录且不创建 W&B run；此入口不验证多卡运行。
+
+保存恢复的预测比较使用相同 eager 执行模式，保持原误差阈值；compile 预测仍检查形状/有限性，并单独报告与 eager 的数值差异。DDIM 推理将 scheduler 系数统一放在采样设备，避免训练曾调用 add_noise 与新恢复实例之间的 CPU/GPU 标量运算差异。
 
 smoke 接受配置名、`--config-only` 和 `--max-updates`，不接受 `task_name=...` 等 Hydra 字段覆盖。需要修改数据配方或保留产物时，使用正式单卡/DDP 入口及 `+max_updates=N`；有界停止会保存真实训练进度和采样游标。具体命令见 [interaction 运行检查](docs/interaction_representation.md#8-运行检查)。配置检查不证明 GPU 算子、真实数据链路或闭环性能已通过。
 
@@ -180,7 +188,7 @@ bash scripts/eval/eval_best_ckpt.sh <policy_name> <task_name> <exp_name>
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <exp_name>
 ```
 
-评测使用实验保存的 resolved `config.yaml` 与 checkpoint。`eval_pipeline.sh` 执行 selection 和不录视频的 held-out eval；demo 用独立的 `record_demo.sh`，不作为 held-out 结果。
+评测从 checkpoint 的绑定配方恢复模型，并核对实验 `config.yaml`；旧 v3 推理仅有上文所述的 sidecar 保证。`eval_pipeline.sh` 执行 selection 和不录视频的 held-out eval；demo 用独立的 `record_demo.sh`，不作为 held-out 结果。
 
 评测从 runner 的 seed 池按 evaluation seed 确定性抽样，不需要额外清单。selection 使用 `--initial-episodes`、`--batch-size` 和 `--max-episodes` 控制预算；最终评测使用 `--episodes` 控制每任务数量，并排除实际用于选点的 seeds。具体规则见 [仿真评测机制](docs/仿真评测机制.md#42-seed-池与采样预算)。
 

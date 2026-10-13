@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import copy
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,11 @@ class PolicyInfo:
     fingertip_link_names: tuple[str, ...] | None
     weights: str
     inference_steps: int
+    action_dim: int
+    control_action_dim: int
+    rgb_preprocessing: dict
+    normalization: dict
+    pc_dim: int | None
 
 
 def inspect_policy(
@@ -122,6 +128,11 @@ def inspect_policy(
         tuple(links) if links is not None else None,
         weights,
         steps,
+        positive_int(cfg['agent']['action_dim'], 'action_dim'),
+        19 if cfg['action_key'] == 'action' else 21,
+        rgb_preprocessing_kwargs(cfg['dataset']),
+        dict(cfg['normalization']),
+        cfg['dataset'].get('pc_dim'),
     )
 
 
@@ -146,12 +157,80 @@ def load_policy(config, info, *, device="cuda:0", seed=0):
 class LoadedPolicy:
     def __init__(self, agent, config, info, *, device, seed):
         from dexmani_policy.utils.validation import validate_observation_fields
+        from dexmani_policy.utils.config import validate_source_recipe, validate_window_contract
+        from dexmani_policy.agents.normalization import resolve_normalization_spec, normalization_dims_from_config
+        if info.weights not in {'raw', 'ema'}:
+            raise ValueError('weights must be raw or ema')
+        positive_int(info.inference_steps, 'inference_steps')
+        if type(seed) is not int or seed < 0:
+            raise ValueError('seed must be a non-negative integer')
+        modes = {'action': 'joint', 'action_ee': 'eef'}
+        key = config.get('action_key')
+        if key not in modes or info.action_mode not in modes.values() or info.action_mode != modes[key]:
+            raise ValueError('Policy action mode disagrees with saved config')
+        if getattr(agent, 'action_key', None) != key:
+            raise ValueError('Agent action_key disagrees with PolicyInfo/config')
+        validate_window_contract(info.horizon, info.n_obs_steps, info.n_action_steps)
+        for name in ('horizon', 'n_obs_steps', 'n_action_steps', 'action_dim'):
+            if getattr(agent, name) != getattr(info, name) or config['agent'][name] != getattr(info, name):
+                raise ValueError(f'Agent/config/PolicyInfo mismatch: {name}')
+        control_dim = 19 if key == 'action' else 21
+        aux = bool(getattr(agent, 'use_aux_ee', False))
+        if (aux != bool(config['agent'].get('use_aux_ee', False))
+                or agent.control_action_dim != control_dim or info.control_action_dim != control_dim
+                or agent.action_dim != control_dim + (9 if aux else 0)
+                or (aux and (key != 'action' or getattr(agent, 'ee_dim', None) != 9))):
+            raise ValueError('Invalid complete/control action layout or auxiliary tail')
+        if tuple(config['dataset'].get('sensor_modalities', ())) != info.observation_fields:
+            raise ValueError('PolicyInfo observation fields disagree with config')
+        if (info.rgb_preprocessing != rgb_preprocessing_kwargs(config['dataset'])
+                or info.pc_dim != config['dataset'].get('pc_dim')
+                or info.normalization != resolve_normalization_spec(config)
+                or getattr(agent, 'normalization_spec', None) != info.normalization):
+            raise ValueError('Policy numerical preprocessing/normalization mismatch')
+        feature_dims = normalization_dims_from_config(config)
+        if any(agent.normalization_dims.get(key) != feature_dims.get(key)
+               for key, mode in info.normalization.items() if mode != 'identity'):
+            raise ValueError('Agent normalization feature widths disagree with config')
+        runtime = config.get('real_runtime') or {}
+        if (info.control_dt_s != runtime.get('dt') or info.pointcloud_config != runtime.get('pointcloud')
+                or info.fingertip_link_names != (tuple(runtime['fingertip_link_names'])
+                                               if runtime.get('fingertip_link_names') is not None else None)):
+            raise ValueError('PolicyInfo real numerical recipe disagrees with config')
+        if hasattr(agent, '_inference_config'):
+            validate_source_recipe(agent._inference_config, config)
+        encoder = agent.obs_encoder
+        if hasattr(encoder, 'use_coord_only') and encoder.use_coord_only != (config['agent'].get('pc_dim') == 3):
+            raise ValueError('Agent XYZ/RGB channel selection disagrees with config')
+        if (hasattr(encoder, 'use_coord_only') and info.pc_dim is not None
+                and info.pc_dim != (3 if encoder.use_coord_only else 6)):
+            raise ValueError('Dataset/Agent point-cloud channel selection disagrees')
+        for name in ('num_points', 'fps_random_config'):
+            if hasattr(encoder, name) and getattr(encoder, name) != (config['agent'].get(name) or ({} if name == 'fps_random_config' else None)):
+                raise ValueError(f'Agent point-cloud preprocessing disagrees with config: {name}')
+        if hasattr(encoder, 'image_processor'):
+            import torch
+            from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
+            from dexmani_policy.agents.obs_encoder.rgb.utils import to_hw, get_interpolation
+            expected = ImageProcessor.from_preset(config['agent']['rgb_backbone_name'])
+            rgb = config['agent'].get('rgb_backbone_config') or {}
+            if rgb.get('image_size') is not None:
+                expected.image_size = to_hw(rgb['image_size'])
+            if rgb.get('interpolation') is not None:
+                expected.interpolation = get_interpolation(rgb['interpolation'])
+            processor = encoder.image_processor
+            if (processor.image_size != expected.image_size or processor.interpolation != expected.interpolation
+                    or any(not torch.equal(getattr(processor, name).cpu(), torch.as_tensor(
+                        rgb[name] if rgb.get(name) is not None else getattr(expected, name), dtype=torch.float32))
+                        for name in ('image_mean', 'image_std'))):
+                raise ValueError('Agent RGB numerical preprocessing disagrees with config')
+        agent.validate_normalizer()
         consumed = getattr(agent, "consumed_observation_fields", ())
         if "task_text" in consumed:
             raise NotImplementedError("MultiTask Real deployment lacks task selection and child numerical recipe restoration")
         validate_observation_fields(agent, info.observation_fields, require_declaration=True)
         self.agent = agent
-        self.info = info
+        self.info = copy.deepcopy(info)
         self._rgb = rgb_preprocessing_kwargs(config["dataset"])
         self._device = device
         self._seed = seed
@@ -204,15 +283,29 @@ class LoadedPolicy:
         missing = set(self.info.observation_fields) - observation.keys()
         if missing:
             raise ValueError(f"Missing policy observations: {sorted(missing)}")
+        arrays = {name: np.asarray(observation[name]) for name in self.info.observation_fields}
+        lengths = set()
+        for name, value in arrays.items():
+            if value.ndim < 2 or value.dtype.kind not in 'buif':
+                raise ValueError(f'Policy history {name} requires numeric (T, ...) input')
+            lengths.add(len(value))
+        if len(lengths) != 1 or next(iter(lengths), 0) < self.info.n_obs_steps:
+            raise ValueError('Policy histories must have equal raw lengths >= n_obs_steps')
         tensors = {}
         for name in self.info.observation_fields:
-            value = np.asarray(observation[name])
+            value = arrays[name][-self.info.n_obs_steps:]
+            if name == 'point_cloud' and self.info.pc_dim is not None:
+                if value.shape[-1] < self.info.pc_dim:
+                    raise ValueError('Point cloud has fewer channels than the saved input recipe')
+                value = value[..., :self.info.pc_dim]
+            if not np.isfinite(value).all():
+                raise ValueError(f'Nonfinite policy observation: {name}')
             if name == "rgb":
                 tensor = preprocess_validation_rgb(value, **self._rgb)
             else:
                 tensor = torch.from_numpy(np.ascontiguousarray(value))
             tensors[name] = tensor.unsqueeze(0).to(self._device)
-        dimensions = 19 if self.info.action_mode == "joint" else 21
+        dimensions = self.agent.control_action_dim
         kwargs = {}
         if rtc_prefix is not None:
             prefix = np.asarray(rtc_prefix)
@@ -242,9 +335,11 @@ class LoadedPolicy:
         if (
             not torch.is_tensor(prediction) or prediction.ndim != 3
             or tuple(prediction.shape[:2]) != (1, self.info.horizon)
-            or prediction.shape[2] < dimensions or not prediction.is_floating_point()
+            or prediction.shape[2] != self.agent.action_dim or not prediction.is_floating_point()
         ):
-            raise ValueError(f"Policy future requires floating pred_action (1, {self.info.horizon}, >= {dimensions})")
+            raise ValueError(f"Policy future requires floating pred_action (1, {self.info.horizon}, {self.agent.action_dim})")
+        if not torch.isfinite(prediction).all():
+            raise ValueError('Nonfinite policy prediction')
         control = prediction[:, self.info.n_obs_steps - 1 :, :dimensions]
         expected = (1, self.info.horizon - self.info.n_obs_steps + 1, dimensions)
         if tuple(control.shape) != expected:

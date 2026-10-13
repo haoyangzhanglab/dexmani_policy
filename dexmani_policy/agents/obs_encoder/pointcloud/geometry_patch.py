@@ -109,10 +109,6 @@ class GeometryPatchEncoder(nn.Module):
     对应同一输入点序列，图像特征/投影每次观测只计算一次。默认参数保留纯几何路径。
     """
 
-    supports_global_token = False
-    supports_intermediate_outputs = True
-    requires_fixed_num_points = False
-
     def __init__(
         self,
         input_channels: int = 6,

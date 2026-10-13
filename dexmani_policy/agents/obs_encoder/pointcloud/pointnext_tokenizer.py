@@ -156,10 +156,6 @@ class MultiScalePatchTokenizer(nn.Module):
 
 
 class PointNextPatchTokenizer(nn.Module):
-    supports_global_token = True
-    supports_intermediate_outputs = True
-    requires_fixed_num_points = False
-
     def __init__(
         self,
         input_channels: int = 6,

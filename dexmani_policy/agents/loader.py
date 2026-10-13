@@ -67,8 +67,8 @@ def _read_selection_reference(root, info):
             "Selection reference is missing; use an explicit checkpoint with its EMA/NFE settings"
         ) from exc
     result = _read_record(target)
-    if result.get("_format") != "selection.v2":
-        raise ValueError("Selection reference requires selection.v2")
+    if result.get("_format") not in {"selection.v2", "selection.v3"}:
+        raise ValueError("Selection reference requires selection.v2/v3")
     return result
 
 
@@ -114,28 +114,33 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
 
     from dexmani_policy.agents.normalization import (
         resolve_normalization_spec,
-        validate_normalizer_state,
+        normalization_dims_from_config,
     )
     from dexmani_policy.training.checkpoint import CheckpointStore, fix_state_dict
     from dexmani_policy.utils.config import validate_window_contract
 
+    from dexmani_policy.utils.config import checkpoint_source_config
+    store = CheckpointStore(Path(checkpoint_path).parent)
+    payload = store.load_payload(checkpoint_path)
+    saved_config = checkpoint_source_config(payload, checkpoint_path, strict_resume=False, supplied=saved_config)
     cfg = OmegaConf.create(saved_config)
     validate_window_contract(
         cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps
     )
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
-    state, global_step = CheckpointStore(Path(checkpoint_path).parent).load_inference(
-        checkpoint_path, use_ema=use_ema
+    state, global_step = store.load_inference(
+        checkpoint_path, use_ema=use_ema, payload=payload
     )
     state = fix_state_dict(state)
     cfg = checkpoint_agent_config(cfg, state)
     agent = hydra.utils.instantiate(cfg.agent)
     agent._checkpoint_global_step = global_step
     agent.action_key = cfg.action_key
-    agent.set_normalization_spec(resolve_normalization_spec(cfg))
+    agent.set_normalization_spec(resolve_normalization_spec(cfg), normalization_dims_from_config(cfg))
     agent.load_state_dict(state, strict=True)
-    validate_normalizer_state(agent.normalizer, agent.normalization_spec)
+    agent.validate_normalizer()
+    agent._inference_config = saved_config
     agent.to(device)
     agent.eval()
     return agent
@@ -152,6 +157,9 @@ def checkpoint_agent_config(cfg, state):
     with open_dict(agent):
         if agent.get('rgb_backbone_name') is not None:
             rgb = dict(agent.get('rgb_backbone_config') or {})
+            if agent.rgb_backbone_name in {'resnet', 'r3m'} and not {'tune_mode', 'norm_mode'} <= rgb.keys():
+                raise ValueError('Saved ResNet/R3M requires explicit tune_mode and norm_mode; '
+                                 'legacy omitted defaults cannot be reinterpreted using current defaults')
             if (agent.rgb_backbone_name in {'dino', 'clip', 'siglip'}
                     and not isinstance(rgb.get('architecture'), (dict, DictConfig))):
                 raise ValueError('Saved HF backbone requires an architecture mapping')

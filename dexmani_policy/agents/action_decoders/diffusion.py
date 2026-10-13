@@ -137,6 +137,11 @@ class Diffusion(nn.Module):
         rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
         num_steps = resolve_inference_steps(self.num_inference_steps, inference_steps)
+        # add_noise moves this plain scheduler state during training; a fresh
+        # checkpoint restore starts on CPU. Keep scalar arithmetic on the same
+        # device in both paths (these tensors are not nn.Module buffers).
+        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(action_template.device)
+        self.noise_scheduler.final_alpha_cumprod = self.noise_scheduler.final_alpha_cumprod.to(action_template.device)
         if rtc_prefix is not None and rtc_prefix.shape[-2] and rtc_guidance_cap != 0:
             from dexmani_policy.agents.action_decoders.rtc import predict_rtc
 

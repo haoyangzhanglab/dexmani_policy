@@ -37,7 +37,7 @@ def resolve_selection_checkpoint(experiment_dir, record_path=None):
     # Explicit handoffs written by select_best_ckpt contain only this reference.
     if record_path is not None and set(info) == {"selection_result"}:
         info = _read_selection_reference(root, info)
-    allowed_formats = ("best.v1", "selection.v2") if record_path is not None else ("best.v1",)
+    allowed_formats = ("best.v1", "selection.v2", "selection.v3") if record_path is not None else ("best.v1",)
     if info.get("_format") not in allowed_formats:
         raise ValueError(f"Unsupported selection record format: {info.get('_format')!r}")
     snapshot = info if info.get("_format") == "best.v1" else None
@@ -47,8 +47,8 @@ def resolve_selection_checkpoint(experiment_dir, record_path=None):
                                      checkpoint=True, immutable=True)
     if snapshot is not None:
         info = _read_selection_reference(root, info)
-    if info.get("_format") != "selection.v2":
-        raise ValueError("Selection evidence requires selection.v2")
+    if info.get("_format") not in {"selection.v2", "selection.v3"}:
+        raise ValueError("Selection evidence requires selection.v2/v3")
     _validate_record_inference(info)
     resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
     if snapshot is not None:
@@ -72,6 +72,24 @@ def resolve_selection_checkpoint(experiment_dir, record_path=None):
     if not isinstance(task_seeds, dict) or not task_seeds:
         raise ValueError("Selection requires actual task_seeds evidence")
     validate_task_seeds(task_seeds, task_seeds)
+    if info['_format'] == 'selection.v3':
+        observed = {task: set() for task in task_seeds}
+        for stage in stages:
+            plan = stage.get('requested_task_seeds')
+            validate_task_seeds(plan, task_seeds)
+            validate_episode_result({'episode_details': stage.get('episode_details')}, plan)
+            for task, seeds in plan.items():
+                observed[task].update(seeds)
+        if any(observed[task] != set(task_seeds[task]) for task in observed):
+            raise ValueError('Selection task seeds disagree with saved stages')
+        for candidate in candidates:
+            expected = [i for i, stage in enumerate(stages) if stage['checkpoint'] == candidate['ckpt_relpath']]
+            if candidate.get('stage_indices') != expected or not expected:
+                raise ValueError('Candidate stage references disagree with evidence')
+            details = [d for i in expected for d in stages[i]['episode_details']]
+            if (candidate.get('n_episodes') != len(details)
+                    or candidate.get('success_count') != sum(d['success'] for d in details)):
+                raise ValueError('Candidate totals disagree with saved episode evidence')
     return info, resolved
 
 
@@ -420,13 +438,15 @@ def select_eval_seeds(runner, eval_seed, episodes, excluded_seeds=None):
     if not isinstance(excluded, dict):
         raise ValueError("Excluded selection seeds must be a task-to-seeds mapping")
     if excluded:
-        validate_task_seeds(excluded, pools)
+        validate_task_seeds(excluded, pools, equal_budget=False)
     available = {}
-    common_count = min(len(pool) for pool in pools.values())
     for task, pool in pools.items():
-        pool = list(dict.fromkeys(pool))[:common_count]
+        if any(type(seed) is not int or seed < 0 for seed in pool):
+            raise ValueError(f'{task}: seed pool requires nonnegative integer seeds')
+        removed = set(excluded.get(task, []))
+        pool = [seed for seed in dict.fromkeys(pool) if seed not in removed]
         random.Random(eval_seed).shuffle(pool)
-        available[task] = [s for s in pool if s not in excluded.get(task, [])]
+        available[task] = pool
     count = min(episodes, *(len(pool) for pool in available.values()))
     if count == 0:
         raise RuntimeError("No evaluation seeds remain after excluding checkpoint-selection seeds")
@@ -441,14 +461,14 @@ def plan_size(plan):
     return sizes.pop()
 
 
-def validate_task_seeds(plan, tasks):
+def validate_task_seeds(plan, tasks, *, equal_budget=True):
     if not isinstance(plan, dict) or set(plan) != set(tasks):
         raise ValueError("Task seed plan tasks do not match runner")
     for task, seeds in plan.items():
         if (not isinstance(seeds, list) or any(type(seed) is not int or seed < 0 for seed in seeds)
                 or len(set(seeds)) != len(seeds)):
             raise ValueError(f"{task}: invalid or duplicate seeds")
-    if plan_size(plan) == 0:
+    if equal_budget and plan_size(plan) == 0:
         raise ValueError("Task seed plan is empty")
 
 

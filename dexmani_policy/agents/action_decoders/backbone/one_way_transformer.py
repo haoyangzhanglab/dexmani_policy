@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from dexmani_policy.agents.optim_util import OptimGroupMixin
+from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
 from dexmani_policy.agents.position_encodings import TimestepMLP
 
 
@@ -164,7 +164,7 @@ class OneWayTransformer(nn.Module):
         return queries
 
 
-class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
+class OneWayTransformerBackbone(nn.Module):
     """R3D action decoder: OneWayTransformer with timestep + temporal PE + pc_pe routing.
 
     forward(x, timestep, context) -> (B, horizon, action_dim)
@@ -334,4 +334,7 @@ class OneWayTransformerBackbone(OptimGroupMixin, nn.Module):
                 out_parts.append(self.ee_output_proj(output[:, H : 2 * H, :]))
             return torch.cat(out_parts, dim=-1)
 
-    _optim_no_decay_names = ("temporal_pe_horizon", "temporal_pe_obs")
+    def get_optim_groups(self, weight_decay: float = 1e-3):
+        return get_optim_group_with_no_decay(
+            self, weight_decay, no_decay_names=["temporal_pe_horizon", "temporal_pe_obs"]
+        )

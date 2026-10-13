@@ -35,6 +35,7 @@ dataloader:
 
 # ── Dataset ──
 dataset:
+  pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.pc_dataset.PCDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}

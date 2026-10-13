@@ -9,9 +9,7 @@ from dexmani_policy.agents.action_decoders.consistency_flow import (
 )
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.registry import (
-    build_pc_patch_tokenizer,
-)
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet_dense import PointNetDense
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 
 
@@ -48,10 +46,8 @@ class ManiFlowObsEncoder(nn.Module):
             raise ValueError(
                 "Configure ManiFlow point count only through agent.num_points"
             )
-        pc_encoder_config["num_points"] = num_points
-        self.pc_encoder = build_pc_patch_tokenizer(
-            encoder_type, pc_dim, pc_encoder_config
-        )
+        self.pc_encoder = PointNetDense(input_channels=pc_dim, **pc_encoder_config)
+        self.pc_encoder.effective_config = dict(pc_encoder_config)
         self.state_mlp = create_state_mlp(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3

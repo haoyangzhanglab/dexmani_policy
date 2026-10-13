@@ -159,7 +159,7 @@ def _params_from_stats(
 
 def fit_params(
     data: torch.Tensor | np.ndarray | zarr.Array,
-    last_n_dims=1,
+    *,
     dtype=torch.float32,
     mode="limits",
     output_max=1.0,
@@ -168,9 +168,8 @@ def fit_params(
     fit_offset=True,
     label=None,
 ):
-    assert (
-        mode in ["limits", "gaussian"] and last_n_dims >= 0 and output_max > output_min
-    )
+    """Fit one affine parameter per feature on the final axis."""
+    assert mode in ["limits", "gaussian"] and output_max > output_min
 
     if isinstance(data, zarr.Array):
         data = data[:]
@@ -179,10 +178,9 @@ def fit_params(
     if dtype is not None:
         data = data.type(dtype)
 
-    dim = 1
-    if last_n_dims > 0:
-        dim = np.prod(data.shape[-last_n_dims:])
-    data = data.reshape(-1, dim)
+    if data.ndim == 0:
+        raise ValueError("Normalizer fitting requires a trailing feature axis")
+    data = data.reshape(-1, data.shape[-1])
 
     input_min, _ = data.min(axis=0)
     input_max, _ = data.max(axis=0)
@@ -214,13 +212,13 @@ def normalize_tensor(x, params, forward=True):
     if offset.device != x.device:
         offset = offset.to(device=x.device)
     x = x.to(dtype=scale.dtype)
-    src_shape = x.shape
-    x = x.reshape(-1, scale.shape[0])
+    if scale.ndim != 1 or offset.shape != scale.shape or x.ndim == 0 or x.shape[-1] != len(scale):
+        raise ValueError(f'Normalizer feature shape mismatch: input={tuple(x.shape)}, '
+                         f'scale={tuple(scale.shape)}, offset={tuple(offset.shape)}')
     if forward:
         x = x * scale + offset
     else:
         x = (x - offset) / scale
-    x = x.reshape(src_shape)
     return x
 
 
@@ -248,7 +246,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     def fit(
         self,
         data: torch.Tensor | np.ndarray | zarr.Array,
-        last_n_dims=1,
+        *,
         dtype=torch.float32,
         mode="limits",
         output_max=1.0,
@@ -258,7 +256,6 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     ):
         self.params_dict, self.input_stats = fit_params(
             data,
-            last_n_dims=last_n_dims,
             dtype=dtype,
             mode=mode,
             output_max=output_max,
@@ -276,8 +273,9 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     ):
         def to_tensor(x):
             if not isinstance(x, torch.Tensor):
-                x = torch.from_numpy(x)
-            x = x.flatten()
+                x = torch.as_tensor(x)
+            if x.ndim != 1:
+                raise ValueError('Manual normalizer statistics must have one feature axis')
             return x
 
         params_dict = nn.ParameterDict(
@@ -286,6 +284,12 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
                 "offset": to_tensor(offset),
             }
         )
+        if (params_dict['scale'].shape != params_dict['offset'].shape
+                or params_dict['scale'].numel() == 0
+                or not torch.isfinite(params_dict['scale']).all()
+                or not torch.isfinite(params_dict['offset']).all()
+                or torch.any(params_dict['scale'] == 0)):
+            raise ValueError('Manual normalizer requires matching finite scale/offset and nonzero scale')
         obj = cls(params_dict)
         obj.params_dict.requires_grad_(False)
         if input_stats_dict is not None:
@@ -303,11 +307,13 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
 
 
 class LinearNormalizer(DictOfTensorMixin):
+    """Named fields with one affine parameter per trailing feature."""
+
     @torch.no_grad()
     def fit(
         self,
-        data: dict | torch.Tensor | np.ndarray | zarr.Array,
-        last_n_dims=1,
+        data: dict,
+        *,
         dtype=torch.float32,
         mode="limits",
         output_max=1.0,
@@ -315,64 +321,20 @@ class LinearNormalizer(DictOfTensorMixin):
         range_eps=1e-4,
         fit_offset=True,
     ):
-        if isinstance(data, dict):
-            self.input_stats = {}
-            for key, value in data.items():
-                params, stats = fit_params(
-                    value,
-                    last_n_dims=last_n_dims,
-                    dtype=dtype,
-                    mode=mode,
-                    output_max=output_max,
-                    output_min=output_min,
-                    range_eps=range_eps,
-                    fit_offset=fit_offset,
-                    label=key,
-                )
-                self.params_dict[key] = params
-                self.input_stats[key] = stats
-        else:
-            self.params_dict["_default"], self.input_stats = fit_params(
-                data,
-                last_n_dims=last_n_dims,
+        self.input_stats = {}
+        for key, value in data.items():
+            params, stats = fit_params(
+                value,
                 dtype=dtype,
                 mode=mode,
                 output_max=output_max,
                 output_min=output_min,
                 range_eps=range_eps,
                 fit_offset=fit_offset,
+                label=key,
             )
-        self._field_views.clear()
-
-    @torch.no_grad()
-    def fit_field(
-        self,
-        key: str,
-        data: torch.Tensor | np.ndarray | zarr.Array,
-        last_n_dims=1,
-        dtype=torch.float32,
-        mode="limits",
-        output_max=1.0,
-        output_min=-1.0,
-        range_eps=1e-4,
-        fit_offset=True,
-    ):
-        """Fit a single field from one (full) array using the existing one-shot math."""
-        params, stats = fit_params(
-            data,
-            last_n_dims=last_n_dims,
-            dtype=dtype,
-            mode=mode,
-            output_max=output_max,
-            output_min=output_min,
-            range_eps=range_eps,
-            fit_offset=fit_offset,
-            label=key,
-        )
-        if not hasattr(self, "input_stats"):
-            self.input_stats = {}
-        self.params_dict[key] = params
-        self.input_stats[key] = stats
+            self.params_dict[key] = params
+            self.input_stats[key] = stats
         self._field_views.clear()
 
     @torch.no_grad()
@@ -380,7 +342,7 @@ class LinearNormalizer(DictOfTensorMixin):
         self,
         key: str,
         chunks,
-        last_n_dims=1,
+        *,
         dtype=torch.float32,
         mode="limits",
         output_max=1.0,
@@ -390,9 +352,9 @@ class LinearNormalizer(DictOfTensorMixin):
     ):
         """Fit a single field from multiple arrays via streaming Welford merge.
 
-        Never concatenates the (potentially huge) observation arrays.  ``last_n_dims``
-        must be consistent across chunks; the resulting scale/offset are identical to
-        ``fit_field`` on the concatenated array up to floating-point accumulation error.
+        Never concatenates the (potentially huge) observation arrays. The final
+        feature width must match across chunks. Results agree with ``fit`` on
+        concatenated data up to floating-point accumulation error.
         """
         assert mode in ["limits", "gaussian"]
 
@@ -413,7 +375,9 @@ class LinearNormalizer(DictOfTensorMixin):
         mean = m2 = running_min = running_max = None
         for chunk in chunks:
             arr = _as_float64_array(chunk)
-            c_dim = int(np.prod(arr.shape[-last_n_dims:])) if last_n_dims > 0 else 1
+            if arr.ndim == 0:
+                raise ValueError("Normalizer fitting requires a trailing feature axis")
+            c_dim = arr.shape[-1]
             if arr.numel() == 0:
                 continue
             if dim is None:
@@ -475,7 +439,7 @@ class LinearNormalizer(DictOfTensorMixin):
         self.input_stats[key] = stats
         self._field_views.clear()
 
-    def __call__(self, x: dict | torch.Tensor | np.ndarray) -> torch.Tensor:
+    def __call__(self, x: dict) -> dict:
         return self.normalize(x)
 
     def __getitem__(self, key: str):
@@ -504,25 +468,16 @@ class LinearNormalizer(DictOfTensorMixin):
         return True
 
     def _normalize_impl(self, x, forward=True):
-        if isinstance(x, dict):
-            result = {}
-            for key, value in x.items():
-                if key not in self.params_dict:
-                    result[key] = value
-                    continue
-                params = self.params_dict[key]
-                result[key] = normalize_tensor(value, params, forward=forward)
-            return result
-        else:
-            if "_default" not in self.params_dict:
-                raise RuntimeError("Not initialized")
-            params = self.params_dict["_default"]
-            return normalize_tensor(x, params, forward=forward)
+        return {
+            key: normalize_tensor(value, self.params_dict[key], forward=forward)
+            if key in self.params_dict else value
+            for key, value in x.items()
+        }
 
-    def normalize(self, x: dict | torch.Tensor | np.ndarray) -> torch.Tensor:
+    def normalize(self, x: dict) -> dict:
         return self._normalize_impl(x, forward=True)
 
-    def unnormalize(self, x: dict | torch.Tensor | np.ndarray) -> torch.Tensor:
+    def unnormalize(self, x: dict) -> dict:
         return self._normalize_impl(x, forward=False)
 
 
@@ -654,7 +609,7 @@ def validate_normalization_spec(
 
 
 def validate_normalizer_state(
-    normalizer: "LinearNormalizer", normalization_spec: dict
+    normalizer: "LinearNormalizer", normalization_spec: dict, feature_dims: dict
 ) -> None:
     """Validate fitted normalizer params against the semantic normalization spec.
 
@@ -691,14 +646,47 @@ def validate_normalizer_state(
             or not torch.is_tensor(offset)
             or scale.numel() == 0
             or offset.numel() == 0
+            or scale.ndim != 1
+            or scale.shape != offset.shape
+            or key not in feature_dims
+            or scale.shape != (feature_dims[key],)
             or not bool(torch.isfinite(scale).all())
             or not bool(torch.isfinite(offset).all())
             or bool(torch.any(scale == 0))
         ):
             raise ValueError(
                 f"Normalizer state for '{key}' is invalid "
-                "(empty, non-finite, or zero scale)"
+                f"(expected feature width {feature_dims.get(key)}, one-dimensional matching "
+                "scale/offset, finite values and nonzero scale)"
             )
+
+
+def normalization_dims_from_config(cfg):
+    """Numerical feature widths saved by Dataset; explicit legacy layouts for inference."""
+    dims = dict(cfg.get('normalization_dims', {}))
+    agent = cfg['agent']
+    action_dim = int(agent['action_dim'])
+    if 'action' in dims and dims['action'] != action_dim:
+        raise ValueError('Saved normalization action dimension disagrees with Agent')
+    dims['action'] = action_dim
+    # Legacy artifacts lack Dataset widths. These are the existing observation
+    # layouts, not arbitrary broadcasting rules; RGB must remain identity.
+    defaults = {'joint_state': agent.get('state_dim', 19), 'eef_pose': 9,
+                'eef_pos': 3, 'eef_rot6d': 6, 'tactile_force': 3,
+                'tactile_valid': 5,
+                'point_cloud': cfg.get('dataset', {}).get('pc_dim') or dims.get('point_cloud', 6)}
+    for key in ('contact_force', 'fingertip_points'):
+        if cfg.get('normalization', {}).get(key, 'identity') != 'identity' and key not in dims:
+            raise ValueError(f'Saved normalization_dims.{key} is required: legacy input may be '
+                             'flat (...,15) or per-finger (...,5,3); weight length cannot prove the layout')
+        if key in dims and dims[key] not in (3, 15):
+            raise ValueError(f'Saved {key} feature width must be 3 or 15')
+    for key, width in defaults.items():
+        dims.setdefault(key, width)
+        if (key in cfg.get('normalization', {}) and cfg['normalization'][key] != 'identity'
+                and dims[key] != width):
+            raise ValueError(f'Saved {key} feature width disagrees with the input recipe: expected {width}')
+    return dims
 
 
 def resolve_normalization_spec(cfg) -> dict:

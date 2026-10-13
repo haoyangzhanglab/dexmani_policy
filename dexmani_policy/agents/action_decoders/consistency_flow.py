@@ -247,7 +247,7 @@ class ConsistencyFlowMatch(nn.Module):
         batch_size = x0.shape[0]
         x = x0
         dt = 1.0 / num_steps
-        context_kv = self.model.prepare_context_kv(cond)
+        context_kv = self.model.prepare_context_kv(cond) if num_steps > 1 else None
 
         for step in range(num_steps):
             t = torch.full(

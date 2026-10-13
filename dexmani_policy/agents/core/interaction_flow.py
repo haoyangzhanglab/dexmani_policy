@@ -133,7 +133,7 @@ class InteractionFlowAgent(BaseAgent):
         self.metric_observation_fields = metric_fields
         self.use_tactile_valid = use_tactile_valid
 
-    def set_normalization_spec(self, spec):
+    def set_normalization_spec(self, spec, feature_dims=None):
         """Reject affine normalization that would change distances and wrist axes."""
         for field in self.metric_observation_fields:
             if spec.get(field) != "identity":
@@ -145,4 +145,4 @@ class InteractionFlowAgent(BaseAgent):
             raise ValueError(
                 "tactile_valid is a boolean mask and requires identity normalization"
             )
-        super().set_normalization_spec(spec)
+        super().set_normalization_spec(spec, feature_dims)

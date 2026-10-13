@@ -40,6 +40,12 @@ class EmbodiedJointCodebook(nn.Module):
         super().__init__()
         if num_functions is None:
             num_functions = num_joints
+        from dexmani_policy.utils.validation import positive_int
+        for name, value in (('num_joints', num_joints), ('num_embodiments', num_embodiments),
+                            ('num_functions', num_functions), ('num_axes', num_axes)):
+            positive_int(value, name)
+        if num_functions < num_joints:
+            raise ValueError('Default joint_function=arange(num_joints) requires num_functions >= num_joints')
 
         self.hidden_dim = hidden_dim
 
@@ -55,6 +61,21 @@ class EmbodiedJointCodebook(nn.Module):
         self.register_buffer("joint_embodiment", torch.zeros(num_joints, dtype=torch.long))
         self.register_buffer("joint_function", torch.arange(num_joints, dtype=torch.long))
         self.register_buffer("joint_axis", torch.zeros(num_joints, dtype=torch.long))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        for name, size in (('joint_embodiment', self.emb_emb.num_embeddings),
+                           ('joint_function', self.func_emb.num_embeddings),
+                           ('joint_axis', self.axis_emb.num_embeddings)):
+            value = state_dict.get(prefix + name)
+            if value is not None and (
+                not torch.is_tensor(value) or value.shape != self.joint_function.shape
+                or value.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64)
+                or bool(((value < 0) | (value >= size)).any())
+            ):
+                raise ValueError(f'Invalid EJC mapping {prefix + name}: expected integer joint indices in [0, {size})')
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
 
     def forward(self) -> torch.Tensor:
         """Return ``(num_joints, hidden_dim)`` — one embedding per action token."""
