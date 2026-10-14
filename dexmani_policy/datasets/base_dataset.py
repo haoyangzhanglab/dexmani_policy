@@ -14,6 +14,7 @@ from dexmani_policy.datasets.augmentation import (
     PointCoordNoiseAug,
     PointDropout,
     StateNoiseAug,
+    validate_pc_color_augmentation,
 )
 from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb, raw_rgb_tensor
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
@@ -141,9 +142,7 @@ class BaseDataset(torch.utils.data.Dataset):
             self.data_recipe.update(window_validity='role_finite_channels_v2', point_cloud_channels=self.pc_dim)
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
-        self.augmentors = {}
-        if augmentation_cfg is not None:
-            self._build_augmentors()
+        self._build_augmentors()
 
         if saved_split is not None:
             from dexmani_policy.datasets.split import restore_split
@@ -319,18 +318,16 @@ class BaseDataset(torch.utils.data.Dataset):
     def _build_augmentors(self):
         """Build augmentors from ``augmentation_cfg`` using AUGMENTOR_REGISTRY.
 
-        Subclasses that need different augmentors (e.g. RGB-only) can override
-        this method, but the registry covers all standard cases.
+        RGB transforms run separately in ``_preprocess_rgb_cpu``.
         """
         self.augmentors = {}
+        validate_pc_color_augmentation(self.pc_dim, self.augmentation_cfg)
         if self.augmentation_cfg is None:
             return
         for section, cls, key, modality in AUGMENTOR_REGISTRY:
             config = (self.augmentation_cfg.get(section) or {}).get(key)
             if config:
                 if self.pc_dim == 3 and section == 'pc' and key in {'color', 'color_noise'}:
-                    if config.get('prob', 1) > 0:
-                        raise ValueError('XYZ-only point clouds cannot use color augmentation')
                     continue
                 self.augmentors.setdefault(modality, []).append(cls(**config))
 
@@ -342,8 +339,6 @@ class BaseDataset(torch.utils.data.Dataset):
         when its first augmentor triggers; subsequent transforms modify that
         copy in-place. Policy normalization happens later in the Agent.
         """
-        if self.augmentation_cfg is None:
-            return data
         for modality, augs in self.augmentors.items():
             if modality not in data["obs"]:
                 continue

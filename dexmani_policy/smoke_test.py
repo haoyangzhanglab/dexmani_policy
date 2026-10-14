@@ -185,6 +185,10 @@ def smoke_test(config_name: str, *, max_updates=4):
             batch = next(iter(comp.train_loader))
             obs = dict_apply({k: v[:1] for k, v in batch["obs"].items()},
                              lambda x: x.to(comp.device))
+            prediction_kwargs = {}
+            if "action_context" in batch:
+                prediction_kwargs["action_context"] = dict_apply(
+                    batch["action_context"], lambda x: x[:1].to(comp.device))
             predictions = {}
             for use_ema, selected in ((False, comp.model), (True, comp.ema_model)):
                 if selected is None:
@@ -192,7 +196,7 @@ def smoke_test(config_name: str, *, max_updates=4):
                 selected.eval()
                 set_seed(cfg.training.seed)
                 with torch.inference_mode():
-                    pred = selected.predict_action(obs)["control_action"]
+                    pred = selected.predict_action(obs, **prediction_kwargs)["control_action"]
                 assert pred.shape == (1, cfg.n_action_steps, selected.control_action_dim)
                 assert torch.isfinite(pred).all()
                 # Restore uses eager inference. Compare checkpoint roundtrips
@@ -203,7 +207,7 @@ def smoke_test(config_name: str, *, max_updates=4):
                     selected.action_decoder.model = backbone._orig_mod
                     set_seed(cfg.training.seed)
                     with torch.inference_mode():
-                        eager = selected.predict_action(obs)["control_action"]
+                        eager = selected.predict_action(obs, **prediction_kwargs)["control_action"]
                     print(f"{'EMA' if use_ema else 'raw'} compiled/eager prediction max abs diff: "
                           f"{(pred - eager).abs().max().item():.8g}")
                     pred = eager
@@ -215,7 +219,7 @@ def smoke_test(config_name: str, *, max_updates=4):
                 restored = restore_policy_agent(saved, path, use_ema=use_ema, device=comp.device)
                 set_seed(cfg.training.seed)
                 with torch.inference_mode():
-                    actual = restored.predict_action(obs)["control_action"].cpu()
+                    actual = restored.predict_action(obs, **prediction_kwargs)["control_action"].cpu()
                 torch.testing.assert_close(actual, expected)
                 del restored
         finally:

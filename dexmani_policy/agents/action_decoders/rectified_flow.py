@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -38,14 +40,15 @@ class RectifiedFlow(nn.Module):
         super().__init__()
         positive_int(num_inference_steps, "num_inference_steps")
         positive_int(num_flow_train_timesteps, "num_flow_train_timesteps")
-        if time_shift_alpha < 1.0:
-            raise ValueError("time_shift_alpha must be >= 1")
+        time_shift_alpha = float(time_shift_alpha)
+        if not math.isfinite(time_shift_alpha) or time_shift_alpha < 1.0:
+            raise ValueError("time_shift_alpha must be finite and >= 1")
 
         self.model = model
         self.num_inference_steps = num_inference_steps
         self.num_flow_train_timesteps = num_flow_train_timesteps
         self.t_sample_mode = t_sample_mode
-        self.time_shift_alpha = float(time_shift_alpha)
+        self.time_shift_alpha = time_shift_alpha
         self.time_sampler = TimeSampler(
             num_steps=num_flow_train_timesteps,
             beta_s=beta_s,

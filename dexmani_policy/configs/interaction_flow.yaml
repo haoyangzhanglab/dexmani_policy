@@ -103,7 +103,7 @@ agent:
   beta_s: 0.999
   beta_alpha: 1.0
   beta_beta: 1.5
-  time_shift_alpha: 1.0         # >= 1；仅改变训练时间采样，保持已有标准 FM 目标。
+  time_shift_alpha: 1.0         # 有限且 >= 1；仅改变训练时间采样，保持已有标准 FM 目标。
   num_flow_train_timesteps: 10 # 仅离散时间采样模式使用。
 
 # ── Optimizer ──

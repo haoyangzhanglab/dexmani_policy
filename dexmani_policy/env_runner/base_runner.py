@@ -66,6 +66,7 @@ class BaseRunner:
         self._obs_cursor = 0  # next write position in ring buffer
         self._obs_count = 0  # number of frames stored (0 .. n_obs_steps)
         self._obs_str_buffer: Dict[str, list] = {}  # for string modalities
+        self._hand_history = None  # LAMP: executed commands, independent of observation history.
 
         self.env_video_fps = env_video_fps  # may be None → auto-detect from env
         self.default_eval_episodes = default_eval_episodes
@@ -196,6 +197,7 @@ class BaseRunner:
         self._obs_str_buffer.clear()
         self._obs_cursor = 0
         self._obs_count = 0
+        self._hand_history = None
 
     @torch.no_grad()
     def get_action_chunk(
@@ -203,8 +205,15 @@ class BaseRunner:
     ) -> np.ndarray:
         if inference_steps is not None:
             positive_int(inference_steps, "inference_steps")
+        kwargs = {}
+        if getattr(agent, "history_steps", 0):
+            if self._hand_history is None:
+                raise RuntimeError("Hand command history must be initialized at episode reset")
+            history = torch.as_tensor(self._hand_history, dtype=torch.float32,
+                                      device=obs_batch["joint_state"].device)
+            kwargs["action_context"] = {"hand_history": history.unsqueeze(0)}
         result = agent.predict_action(
-            obs_dict=obs_batch, inference_steps=inference_steps
+            obs_dict=obs_batch, inference_steps=inference_steps, **kwargs
         )
 
         return result["control_action"].detach().cpu().numpy().squeeze(0)
@@ -296,6 +305,11 @@ class BaseRunner:
         obs, info = env.reset(seed=episode_seed, options=options)
         self.reset()
         self.update_obs(obs)
+        if getattr(agent, "history_steps", 0):
+            initial_hand = np.asarray(obs["joint_state"])[-agent.hand_dim:]
+            if initial_hand.shape != (agent.hand_dim,) or not np.isfinite(initial_hand).all():
+                raise ValueError("LAMP reset requires a finite measured hand pose")
+            self._hand_history = np.repeat(initial_hand[None], agent.history_steps, axis=0)
 
         # Seed policy noise per episode. ``env.reset`` controls only the
         # simulator's RNG; decoder sampling uses the global Torch generator.
@@ -316,6 +330,13 @@ class BaseRunner:
             )
             for i in range(action_chunk.shape[0]):
                 obs, reward, done, truncated, info = env.step(action_chunk[i])
+                if self._hand_history is not None:
+                    # Use the command after the environment's clipping, not a predicted tail.
+                    executed = np.asarray(info.get("executed_joint_action"), dtype=np.float32)
+                    if executed.shape != (agent.action_dim,) or not np.isfinite(executed).all():
+                        raise ValueError("LAMP requires env.step info['executed_joint_action']")
+                    self._hand_history[:-1] = self._hand_history[1:]
+                    self._hand_history[-1] = executed[-agent.hand_dim:]
                 self.update_obs(obs)
 
                 # Record first success step using the raw success_condition (no hold delay)

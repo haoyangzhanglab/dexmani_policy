@@ -12,12 +12,12 @@ TuneMode = Literal["freeze", "lora", "full"]
 GlobalTokenType = Literal["cls", "avg", "pooler"]
 """How to aggregate patch tokens into a global image representation.
 
-ViT backbones support all three; ResNet uses only ``"avg"``.
+Supported values depend on the backbone: ResNet/R3M use only ``"avg"``;
+SigLIP has no CLS token and accepts ``"avg"`` or ``"pooler"``.
 """
 
-NormMode = Literal["batch_norm", "frozen_bn", "group_norm", "identity"]
+NormMode = Literal["batch_norm", "frozen_bn", "group_norm"]
 """Normalization mode for the backbone feature map.
 
-ResNet supports ``"frozen_bn"`` and ``"group_norm"``; most configs use
-``"group_norm"``.
+ResNet and R3M support BatchNorm, frozen BatchNorm, and GroupNorm.
 """

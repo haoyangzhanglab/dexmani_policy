@@ -6,6 +6,18 @@ _BT601_LUMA = (0.299, 0.587, 0.114)
 """BT.601 luma coefficients for RGB-to-grayscale conversion."""
 
 
+def validate_pc_color_augmentation(pc_dim, augmentation_cfg):
+    """Reject enabled color transforms for explicitly XYZ-only point clouds."""
+    if pc_dim != 3:
+        return
+    pc = ((augmentation_cfg or {}).get('pc') or {})
+    for key in ('color', 'color_noise'):
+        config = pc.get(key)
+        if config and config.get('prob', 1) > 0:
+            raise ValueError(f'XYZ-only point clouds cannot use color augmentation ({key}); '
+                             'set prob=0 or use XYZRGB channels')
+
+
 class Aug:
     """Prob-gated augmentation base.
 

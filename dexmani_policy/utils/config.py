@@ -15,7 +15,7 @@ TASK_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
 
 
 RESUME_OPERATIONAL_FIELDS = {
-    'resume_from', 'max_updates', 'workspace.output_dir',
+    'resume_from', 'max_updates', 'workspace.output_dir', 'workspace.wandb_cfg',
     'training.device', 'training.gpu_ids', 'training.use_compile', 'training.compile_mode',
     'training.loop.log_interval_steps', 'dataloader.num_workers',
     'dataloader.persistent_workers', 'dataloader.prefetch_factor',
@@ -32,7 +32,7 @@ def recipe_content(config):
             for key, child in value.items():
                 child_path = f'{path}.{key}' if path else key
                 if (child_path in RESUME_OPERATIONAL_FIELDS
-                        or child_path in {'workspace.wandb_cfg', 'normalizer_source'}
+                        or child_path == 'normalizer_source'
                         or re.fullmatch(r'dataset\.(?:datasets\.\d+\.)?zarr_path', child_path)):
                     continue
                 result[key] = visit(child, child_path)
@@ -100,12 +100,14 @@ def load_resume_source_config(checkpoint_path):
     return checkpoint_source_config(payload, checkpoint_path, strict_resume=True)
 
 
-def resolve_input_recipe(cfg, *, overrides):
+def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
     """Select the authoritative recipe without binding or creating a training run.
 
     Explicit task overrides assert the saved identity; only operational and
     dataset-location overrides can change a resumed recipe. Unrelated incoming
     interpolations (notably Hydra's runtime output directory) stay unevaluated.
+    ``resume_checkpoint``, when supplied, must be the source already validated
+    by CheckpointStore.load in this invocation; reuse only its bound config.
     """
     from hydra.core.override_parser.overrides_parser import OverridesParser
     from dexmani_policy.utils.path import resolve_resume_source
@@ -113,8 +115,9 @@ def resolve_input_recipe(cfg, *, overrides):
     source = resolve_resume_source(cfg.get("resume_from"))
     if source is None:
         return copy.deepcopy(cfg)
-    result = OmegaConf.create(load_resume_source_config(source))
-    operational = RESUME_OPERATIONAL_FIELDS
+    source_config = (load_resume_source_config(source) if resume_checkpoint is None
+                     else resume_checkpoint.effective_config)
+    result = OmegaConf.create(source_config)
     with open_dict(result):
         # The execution limit belongs to this invocation.
         result.pop('max_updates', None)
@@ -134,7 +137,7 @@ def resolve_input_recipe(cfg, *, overrides):
                     raise ValueError(f'Resume task identity mismatch: requested={requested!r}, saved={identity!r}')
                 continue
             data_path = re.fullmatch(r'dataset\.(?:datasets\.\d+\.)?zarr_path', key) is not None
-            if key not in operational and not key.startswith('workspace.wandb_cfg.') and not data_path:
+            if key not in RESUME_OPERATIONAL_FIELDS and not key.startswith('workspace.wandb_cfg.') and not data_path:
                 raise ValueError(f'Resume recipe is owned by saved config; forbidden override: {key}')
             if key == 'resume_from':
                 continue

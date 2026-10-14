@@ -1,4 +1,7 @@
 import copy
+import weakref
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -89,8 +92,8 @@ def test_cuda_ddim_restore_is_independent_of_training_scheduler_device():
             torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
-def test_real_dp3_components_resume_multiple_updates_and_raw_ema(tmp_path):
-    """Bounded CPU integration of real components, not the original CUDA smoke config."""
+def small_dp3_config(tmp_path):
+    """Bounded CPU fixture; leaves the repository's training recipe unchanged."""
     data = tmp_path / 'data'
     write_data(data, 32)
     cfg = load_config('dp3')
@@ -107,6 +110,12 @@ def test_real_dp3_components_resume_multiple_updates_and_raw_ema(tmp_path):
     cfg.agent.diffusion_step_embed_dim = 32
     cfg.workspace.output_dir = str(tmp_path / 'continuous')
     cfg.workspace.wandb_cfg = None
+    return cfg
+
+
+def test_real_dp3_components_resume_multiple_updates_and_raw_ema(tmp_path):
+    """Bounded CPU integration of real components, not the original CUDA smoke config."""
+    cfg = small_dp3_config(tmp_path)
     set_seed(42)
     continuous = components(cfg)
     try:
@@ -178,3 +187,94 @@ def test_real_dp3_components_resume_multiple_updates_and_raw_ema(tmp_path):
             resumed.workspace.close()
     finally:
         continuous.workspace.close()
+
+
+def test_single_process_resume_deserializes_once_and_releases_checkpoint(tmp_path, monkeypatch):
+    from hydra.core.hydra_config import HydraConfig
+    from dexmani_policy import train as entry
+
+    cfg = small_dp3_config(tmp_path)
+    cfg.dataloader.pin_memory = False
+    with open_dict(cfg):
+        cfg.max_updates = 1
+    original_build = entry.build_train_components
+    original_train = Trainer.train
+    original_load = CheckpointStore.load
+    original_torch_load = torch.load
+    reads, checkpoint_refs, cursors = [], [], []
+
+    def counted_torch_load(path, *args, **kwargs):
+        reads.append(Path(path).resolve())
+        return original_torch_load(path, *args, **kwargs)
+
+    def tracked_checkpoint_load(self, path):
+        checkpoint = original_load(self, path)
+        checkpoint_refs.append(weakref.ref(checkpoint))
+        return checkpoint
+
+    def cpu_components(config, **kwargs):
+        # Isolate only the entry's GPU availability guard. Dataset, normalization,
+        # model/EMA construction, checkpoint I/O and state restoration stay real.
+        with monkeypatch.context() as guard:
+            guard.setattr(torch.cuda, 'is_available', lambda: True)
+            return original_build(config, **kwargs)
+
+    def bounded_train(self, **kwargs):
+        assert all(ref() is None for ref in checkpoint_refs)
+        cursors.append(kwargs.get('resume_state'))
+        return original_train(self, **kwargs)
+
+    monkeypatch.setattr(torch, 'load', counted_torch_load)
+    monkeypatch.setattr(CheckpointStore, 'load', tracked_checkpoint_load)
+    monkeypatch.setattr(entry, 'build_train_components', cpu_components)
+    monkeypatch.setattr(Trainer, 'train', bounded_train)
+    entry.main.__wrapped__(cfg)
+    assert reads == [] and checkpoint_refs == []  # Fresh startup loads no resume file.
+    source = (Path(cfg.workspace.output_dir) / 'checkpoints' / 'latest.pt').resolve()
+    incoming = OmegaConf.create({'resume_from': str(source),
+                                'workspace': {'output_dir': str(tmp_path / 'resumed-entry')}})
+    monkeypatch.setattr(HydraConfig, 'get', lambda: SimpleNamespace(
+        overrides=SimpleNamespace(task=['max_updates=1', 'workspace.wandb_cfg=null'])))
+    entry.main.__wrapped__(incoming)
+    assert reads == [source]
+    assert len(checkpoint_refs) == 1 and checkpoint_refs[0]() is None
+    assert cursors == [None, (1, 0, 1)]
+    print('single-process target torch.load count:', reads.count(source), '; fresh startup: 0')
+
+    # Standalone component callers still load and validate when no object is supplied.
+    saved_cfg = OmegaConf.load(Path(cfg.workspace.output_dir) / 'config.yaml')
+    with open_dict(saved_cfg):
+        saved_cfg.resume_from = str(source)
+        saved_cfg.workspace.output_dir = str(tmp_path / 'standalone-components')
+    reads.clear()
+    comp = cpu_components(saved_cfg)
+    try:
+        assert reads == [source]
+        assert comp.resume_checkpoint is checkpoint_refs[-1]()
+        assert comp.resume_checkpoint.global_step == 1
+    finally:
+        comp.workspace.close()
+        comp.resume_checkpoint = None
+
+
+@pytest.mark.parametrize('invalid_source', ['sidecar', 'legacy'])
+def test_single_process_validates_source_before_build(tmp_path, monkeypatch, invalid_source):
+    from dexmani_policy import train as entry
+    from test_semantic_boundaries import checkpoint_at
+    store, path, cfg = checkpoint_at(tmp_path)
+    if invalid_source == 'sidecar':
+        cfg['training']['lr_scheduler'] = 'constant'
+        OmegaConf.save(OmegaConf.create(cfg), tmp_path / 'config.yaml')
+        error = 'source recipe mismatch'
+    else:
+        payload = store.load_payload(path)
+        payload['_format'] = 'simple.v3'  # Even with effective_config and a matching sidecar.
+        torch.save(payload, path)
+        error = 'Strict resume requires'
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Invalid source must be rejected before building components')
+
+    monkeypatch.setattr(entry, 'build_train_components', forbidden)
+    with pytest.raises(ValueError, match=error):
+        entry.main.__wrapped__(OmegaConf.create({'resume_from': str(path)}))

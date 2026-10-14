@@ -187,7 +187,12 @@ def test_real_rgb_preprocessing_and_failed_load_cleanup(monkeypatch):
 def checkpoint_at(tmp_path):
     config = {'training': {'lr_warmup_steps': 2, 'lr_scheduler': 'cosine', 'lr_min_ratio': .01, 'seed': 42},
               'ema': {'power': .75}, 'agent': {'action_dim': 19}, 'action_key': 'action',
-              'dataset': {'zarr_path': '/original/data'}, 'workspace': {'output_dir': '/original/run'}}
+              'dataset': {'zarr_path': '/original/data'},
+              'workspace': {'_target_': 'dexmani_policy.training.workspace.TrainWorkspace',
+                            'output_dir': '/original/run',
+                            'wandb_cfg': {'_target_': 'dexmani_policy.training.workspace.WandbConfig',
+                                          'project': 'test', 'group': 'test', 'name': 'test',
+                                          'id': 'test', 'resume': 'allow', 'mode': 'online'}}}
     store = CheckpointStore(tmp_path / 'checkpoints')
     checkpoint = TrainCheckpoint(0, 0, 0, {'x': torch.zeros(1)}, None, {}, {}, {}, None, None, [{}], config)
     path = store.save('test.pt', checkpoint)
@@ -226,3 +231,73 @@ def test_checkpoint_binding_overrides_and_legacy(tmp_path):
         store.load(path)
     with pytest.warns(UserWarning, match='unbound'):
         assert checkpoint_source_config(payload, path, strict_resume=False) == cfg
+
+
+@pytest.mark.parametrize('override', [
+    'workspace.wandb_cfg=null',
+    'workspace.wandb_cfg.mode=disabled',
+    'workspace.wandb_cfg={_target_:dexmani_policy.training.workspace.WandbConfig,'
+    'project:local,group:test,name:resumed,id:resumed,resume:allow,mode:disabled}',
+])
+def test_resume_wandb_operational_overrides(tmp_path, monkeypatch, override):
+    import hydra
+    from dexmani_policy.utils.config import recipe_content
+
+    _, path, cfg = checkpoint_at(tmp_path)
+    resumed = resolve_input_recipe(OmegaConf.create({'resume_from': str(path)}), overrides=[override])
+    assert recipe_content(resumed) == recipe_content(cfg)
+    if override.endswith('=null'):
+        assert resumed.workspace.wandb_cfg is None
+
+        def forbidden(*args, **kwargs):
+            pytest.fail('Disabled W&B must not construct a remote logger or require login')
+
+        monkeypatch.setattr('dexmani_policy.training.workspace.WandbLogger', forbidden)
+        resumed.workspace.output_dir = str(tmp_path / 'resumed')
+        workspace = hydra.utils.instantiate(resumed.workspace)
+        try:
+            assert workspace.wandb_logger is None
+            workspace.save_hydra_config(resumed)
+        finally:
+            workspace.close()
+    else:
+        wandb_cfg = hydra.utils.instantiate(resumed.workspace.wandb_cfg)
+        assert wandb_cfg.mode == 'disabled'
+        assert wandb_cfg.project == ('local' if 'project:local' in override else 'test')
+
+
+@pytest.mark.parametrize('override', [
+    'agent.action_dim=21', 'training.lr_scheduler=constant', 'ema.power=0.5',
+    'optimizer.lr=0.1', 'dataset.sampling_strategy=weighted',
+    'workspace={output_dir:/new/run}',
+])
+def test_resume_wandb_override_does_not_allow_recipe_changes(tmp_path, override):
+    _, path, _ = checkpoint_at(tmp_path)
+    with pytest.raises(ValueError, match='forbidden override'):
+        resolve_input_recipe(OmegaConf.create({'resume_from': str(path)}),
+                             overrides=['workspace.wandb_cfg=null', override])
+
+
+@pytest.mark.parametrize('alpha', [float('nan'), float('inf'), -float('inf'), .99, -1.])
+def test_time_shift_rejects_nonfinite_or_below_one(alpha):
+    from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
+    from dexmani_policy.agents.action_decoders.time_sampler import shift_time_to_noise
+    with pytest.raises(ValueError, match='finite and >= 1'):
+        RectifiedFlow(torch.nn.Identity(), time_shift_alpha=alpha)
+    with pytest.raises(ValueError, match='finite and >= 1'):
+        shift_time_to_noise(torch.tensor([0., .5, 1.]), alpha)
+
+
+@pytest.mark.parametrize('alpha', [1., 1.5, 4.])
+def test_time_shift_preserves_formula_and_endpoints(alpha):
+    from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
+    from dexmani_policy.agents.action_decoders.time_sampler import shift_time_to_noise
+    decoder = RectifiedFlow(torch.nn.Identity(), time_shift_alpha=alpha)
+    t = torch.tensor([0., .1, .5, .9, 1.], dtype=torch.float64)
+    actual = shift_time_to_noise(t, decoder.time_shift_alpha)
+    expected = torch.tensor([x / (1 + (alpha - 1) * (1 - x)) for x in t.tolist()],
+                            dtype=t.dtype)
+    torch.testing.assert_close(actual, expected, rtol=1e-14, atol=1e-14)
+    assert actual[0] == 0 and actual[-1] == 1
+    if alpha == 1.:
+        assert actual is t

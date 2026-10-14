@@ -72,8 +72,8 @@ def shift_time_to_noise(t: torch.Tensor, alpha: float) -> torch.Tensor:
     probability mass near high-noise states while keeping the standard
     rectified-flow interpolation and velocity target unchanged.
     """
-    if alpha < 1.0:
-        raise ValueError(f"time-shift alpha must be >= 1, got {alpha}")
+    if not math.isfinite(alpha) or alpha < 1.0:
+        raise ValueError(f"time-shift alpha must be finite and >= 1, got {alpha}")
     if alpha == 1.0:
         return t
     return t / (1.0 + (alpha - 1.0) * (1.0 - t))

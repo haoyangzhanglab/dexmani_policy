@@ -1,0 +1,195 @@
+# State-conditioned temporal hand codec (arXiv:2609.19666) + flow matching.
+# Pretrain the codec once; frozen encoder means supply BC targets online.
+policy_name: temporal_codec_flow
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+seed: 42
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_key: action
+action_dim: 19
+
+codec:
+  path: experiments/temporal_codec/${task_name}/codec.pt
+  latent_dim: 9             # Paper default; configurable for the 12-DoF hand.
+  hidden_dim: 128
+  n_layers: 3
+  n_heads: 4
+  mlp_ratio: 2.0
+  # XHand order: thumb x3, index x3, middle x2, ring x2, pinky x2.
+  joint_weights: [1, 1, 1, 1, 1, 1, 1, 1, 0.5, 0.5, 0.5, 0.5]
+
+normalization:
+  joint_state: limits
+  action: auto
+  point_cloud: identity
+
+dataloader:
+  batch_size: 128
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: true
+
+dataset:
+  _target_: dexmani_policy.datasets.temporal_codec_dataset.TemporalCodecDataset
+  zarr_path: ${zarr_path}
+  action_key: ${action_key}
+  pc_dim: ${agent.pc_dim}
+  seed: ${training.seed}
+  horizon: ${horizon}
+  obs_horizon: ${n_obs_steps}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  val_ratio: 0.0
+  max_train_episodes: 80
+  sensor_modalities: [joint_state, point_cloud]
+  codec_path: ${codec.path}
+  # Read the dataset metadata. For older data, assert obs_before_action only
+  # after checking the recording alignment; never infer it from array indices.
+  obs_alignment: null
+  augmentation_cfg:
+    pc:
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color: {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+      dropout: {max_dropout_ratio: 0.8, prob: 1.0}
+    state:
+      noise: {noise_std: 0.0002, prob: 1.0}
+
+agent:
+  _target_: dexmani_policy.agents.core.temporal_codec_flow.TemporalCodecFlowAgent
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+  codec_path: ${codec.path}
+  latent_dim: ${codec.latent_dim}
+  codec_hidden_dim: ${codec.hidden_dim}
+  codec_n_layers: ${codec.n_layers}
+  codec_n_heads: ${codec.n_heads}
+  codec_mlp_ratio: ${codec.mlp_ratio}
+  pc_dim: 6
+  state_dim: 19
+  state_out_dim: 64
+  num_points: 1024
+  fps_random_config:
+    use_random: true
+    use_random_start: true
+    random_noise_scale: 0.0
+    use_shuffle_output: true
+  pc_encoder_config:
+    stem_channels: 48
+    token_channels: 256
+    num_patches: 96
+    patch_radii: [0.05, 0.10]
+    patch_neighbors: [20, 48]
+    use_patch_self_attn: true
+    patch_attn_layers: 4
+    patch_attn_heads: 4
+    patch_attn_dropout: 0.1
+    prepend_global_in_attn: true
+  n_layers: 8
+  hidden_dim: 768
+  n_head: 8
+  mlp_ratio: 4.0
+  p_drop_attn: 0.1
+  qkv_bias: true
+  qk_norm: true
+  num_inference_steps: 10
+  t_sample_mode_for_flow: beta
+  beta_s: 0.999
+  beta_alpha: 1.0
+  beta_beta: 1.5
+  # Each loss is a mean over its own coordinates and full horizon.
+  arm_loss_weight: 1.0
+  latent_loss_weight: 0.25
+  decoded_loss_weight: 0.75
+  # Explicit local metric choice; physical uses squared joint errors in rad^2.
+  decoded_loss_space: standardized
+  modality_dropout_probs:
+    joint_state: 0.0
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+
+ema:
+  _target_: dexmani_policy.training.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: true
+  use_compile: true
+  use_ema: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    total_train_steps: 100000
+    log_interval_steps: 100
+    gradient_accumulation_steps: 1
+
+workspace:
+  _target_: dexmani_policy.training.workspace.TrainWorkspace
+  output_dir: ${hydra:runtime.output_dir}
+  wandb_cfg:
+    _target_: dexmani_policy.training.workspace.WandbConfig
+    project: dexmani_policy
+    group: ${policy_name}
+    name: ${task_name}_${run_id:}_seed${training.seed}
+    id: ${policy_name}_${task_name}_${training.seed}
+    resume: allow
+    mode: offline
+    video_fps: 15
+
+env_runner:
+  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
+  task_name: ${task_name}
+  n_obs_steps: ${n_obs_steps}
+  default_eval_episodes: 25
+  # Independent simulator state for each evaluation episode.
+  clear_cache_freq: 1
+  sensor_modalities: ${dataset.sensor_modalities}
+  env_kwargs:
+    control_mode: joint
+    texture_random: false
+    instance_random: true
+    table_random: true
+
+eval:
+  inference_steps: 10
+  inference_steps_list: null
+  use_ema: true
+  select_best:
+    initial_episodes: 25
+    batch_size: 5
+    max_episodes: 100
+  offline:
+    episodes: 100
+  demo:
+    episodes: 5
+    viewer_resolution: [1280, 960]
+  video:
+    enabled: true
+    fps: null
+
+hydra:
+  job:
+    override_dirname: ${policy_name}_${task_name}
+  run:
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
+  sweep:
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
+    subdir: ${hydra.job.num}

@@ -144,6 +144,49 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 
 训练过程保留分组码本使用图和损失曲线；结束后另存 `codebook_diagnostics.json`，对已选 best 的实际部署查表链路报告 train/held-out 误差及原型利用率，不参与 best 排名。导出权重、epoch、SHA256 取自同一字节快照，运行 NPZ 只留短来源摘要，完整源行列表保留在 VQ checkpoint。码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。Policy 和 standalone VQ checkpoint 均须保存 `split_metadata.normalization_spec`；导出前检查结构和动作归一化模式，缺失声明、Gaussian、identity 或非法模式均在解码前拒绝。
 
+### LAMP-style 手部动作空间
+
+`lamp_flow` 使用冻结的历史 MLP prior 和逐帧 hand decoder，DiTX/Flow Matching 预测整段 latent offset。该实现是 LAMP 的 chunk FM 适配；latent 标签来自离线 decoder 反演，采用每个真实帧一份 absolute latent。当前支持单手 joint `7+12` 与同步 SIM 执行。
+
+从仓库根目录执行，三个入口必须使用相同的数据、split、窗口与 `lamp.*` 配置：
+
+```bash
+python -m dexmani_policy.training.train_lamp_prior --config lamp_flow
+python -m dexmani_policy.training.export_lamp_latents --config lamp_flow
+bash scripts/training/train.sh lamp_flow
+```
+
+数据须声明 `obs_alignment="obs[t]_before_action[t]"` 和有效 `dt`。旧数据只有在确认记录时序后，才能为三个入口都追加 `dataset.obs_alignment=obs_before_action`。历史取 query 之前的手部命令，episode 开始用初始测得姿态补齐；SIM 使用实际执行后的命令更新历史，不写入未执行预测。
+
+Prior 默认训练 20k 步；有验证集时按重建 MSE 选点，无验证集时保存最终权重。导出只处理有效 train/validation 源帧，并报告关节单位下的重建误差和 latent 跳变。`--device cpu --steps 2` 可用于小样本入口检查，不代表 prior 已有可用精度。默认产物写入 `experiments/lamp_prior/<task>/`，已有文件拒绝覆盖；不同配方应为三个入口指定新的 `lamp.prior_path` 和 `lamp.latent_path`。
+
+反演默认 `--center-penalty 0`，只优化重建。可显式设置 `--center-penalty 1e-4`，在原始 latent 坐标中加入到源帧 history mean 的均方距离惩罚；每帧按同一目标选最佳迭代，包含初始化。该选项用于研究反演多解，不是原论文算法：它可能降低极端分支跳变，也可能增加标签对历史的依赖。导出同时报告完全相同相邻动作的 latent 跳变和重建不劣于初始化的比例；应结合重建误差和 policy 使用的 latent scale 比较，不能只看 raw latent 最大跳变。
+
+Policy checkpoint 内嵌 prior、归一化和 latent scale，推理无需外部 prior/cache；训练和续训仍校验缓存的数据、split 和权重身份。`agent.decoded_loss_weight=0` 可关闭 decoded hand 辅助损失；整段动作不施加向当前 prior 姿态回缩的 drift 惩罚。[LAMP 论文](https://arxiv.org/abs/2607.06323) 的单步 BC 直接监督解码动作，Equation 6 正则化 latent offset；[开源实现](https://github.com/dex-lamp/LAMP) 则使用 decoded-action drift。这里的反演标签与 chunk FM 均为本地适配，decoded supervision 参考 [latent FM](https://arxiv.org/abs/2609.19666)。
+
+`agent.latent_loss_weight` 默认 `1.0`，只缩放 latent FM 项：`(7 * arm_MSE + 12 * latent_loss_weight * latent_MSE) / 19`。它用于隔离反演标签监督强度，不改变 arm 或 decoded hand 的权重、latent 坐标及推理解码；非默认值属于消融实验。
+
+`lamp_flow` 与 `temporal_codec_flow` 的 SIM 配置均使用 `env_runner.clear_cache_freq=1`，每回合重建环境，避免前一回合的仿真状态影响比较。已有实验仍以各自保存的评测配置为准。
+
+### Temporal hand codec 动作空间
+
+`temporal_codec_flow` 根据 [Towards High-DoF Dexterous Manipulation through VLA Post-Training](https://arxiv.org/abs/2609.19666) 的 codec 与 SFT 描述实现单手 BC baseline。时序 VAE 用实测手部姿态 `q0` 条件化 E/D，将 `H×12` 手部命令编码为 `H×Z`，保持时间长度。冻结 encoder 的 posterior mean 在线提供 FM 标签，无需反演或 latent 缓存；冻结 decoder 仍向 policy 回传 decoded hand loss 的梯度。
+
+```bash
+python -m dexmani_policy.training.train_temporal_codec --config temporal_codec_flow
+bash scripts/training/train.sh temporal_codec_flow
+```
+
+两个入口使用相同的数据、split、窗口和 `codec.*` 配置。数据需声明 `obs_alignment="obs[t]_before_action[t]"`；旧数据确认时序后，在两个入口都追加 `dataset.obs_alignment=obs_before_action`。默认产物为 `experiments/temporal_codec/<task>/codec.pt`，已有文件拒绝覆盖；改变配方时应指定新的 `codec.path`。Policy checkpoint 内嵌完整 codec，部署不依赖外部 codec 文件。
+
+codec 使用双向时序 Transformer、相对手部命令的 train-only 标准化、位置/一阶/二阶 weighted Huber 和分阶段 KL。默认 `Z=9`，可通过 `codec.latent_dim` 改动后重新预训练。保留本项目的数据划分和 `H=16` 窗口：`q0` 取 query 时刻（`n_obs_steps-1`）未增强的实测手部状态，整个训练窗口均相对此姿态表示，包含窗口前部的历史帧；推理先解码完整窗口再截取执行段。手臂沿用原来的归一化绝对关节命令。
+
+这是论文方法的本地适配。block 未公开的细节采用 pre-LN、GELU、可学习位置编码和零 dropout；KL 取 batch/time/latent 全均值，论文未明确其实现中的 reduction。BC 的 arm/latent/decoded 三项分别取均值，权重为 `1/0.25/0.75`，decoded loss 在标准化相对动作空间计算。预训练默认 30k 步；有验证集时按原关节单位 MAE 选 checkpoint，包括 KL ramp 期间的候选。默认 `dataset.val_ratio=0` 沿用现有策略配置，此时按 train MAE 选点，不能报告 held-out 重建性能；需要验证集时为两个入口设置相同的 `dataset.val_ratio`。
+
+`agent.decoded_loss_space=physical` 可单独检验 BC decoded loss 的单位选择：对逆标准化后的关节误差计算 MSE（rad²）。默认 `standardized` 保持已有实验语义；该选项不改变 latent 标签、其他损失或推理解码，需要重新训练 BC 才能比较效果。论文 Eq.10 没有充分展开此处的标准化边界，两种设置应明确标注为复现选择，不能仅凭公式相似就宣称与作者实现等价。
+
+预训练可选 `--reference-noise-std 0.05`（rad）：仅对训练窗口的 `q0` 加独立 Gaussian 扰动，整段共用该 reference，physical action targets 保持原样，E/D 和 relative targets 使用同一扰动值。统计量和验证仍使用原始数据，增强使用独立 RNG 并写入 artifact 元信息。默认 `0`；这是针对少量数据下状态偏移的鲁棒性实验，不属于论文 baseline，可能牺牲干净数据重建精度。改变 codec 后需指定新的 `codec.path` 并重新训练 BC，不能直接替换旧策略内的 codec。
+
 ## 验证
 
 修改 config 或研究实现后，优先执行轻量检查：

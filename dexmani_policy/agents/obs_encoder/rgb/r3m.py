@@ -126,6 +126,8 @@ class R3M(nn.Module):
         load_pretrained: bool = True,
     ):
         super().__init__()
+        if norm_mode not in ("batch_norm", "frozen_bn", "group_norm"):
+            raise ValueError(f"Unsupported norm_mode: {norm_mode!r}; expected batch_norm, frozen_bn, or group_norm")
         if load_pretrained and tune_mode == 'freeze' and norm_mode == 'group_norm':
             raise ValueError('Frozen pretrained R3M requires batch_norm/frozen_bn; '
                              'group_norm is a separate full-finetuning recipe')

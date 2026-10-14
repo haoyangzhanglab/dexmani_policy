@@ -1,0 +1,140 @@
+"""Policy windows with the raw measured hand pose used by the temporal codec."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from dexmani_policy.agents.hand_prior.temporal_codec import load_codec
+from dexmani_policy.datasets.lamp_dataset import OBS_ALIGNMENT, _array_sha256
+from dexmani_policy.datasets.pc_dataset import PCDataset
+
+
+class TemporalCodecDataset(PCDataset):
+    """Keep physical actions and add q0 at the policy's query observation.
+
+    q0 comes from the unaugmented measured state, including at episode padding.
+    Pretraining indexes the small hand arrays directly through ``raw_hand_batch``;
+    window qualification still uses the policy's full observation modalities.
+    """
+
+    def __init__(self, zarr_path, *, codec_path=None, require_codec=True,
+                 obs_alignment=None, **kwargs):
+        if type(require_codec) is not bool:
+            raise ValueError("require_codec must be bool")
+        if kwargs.get("action_key", "action") != "action" or kwargs.get("use_aux_ee", False):
+            raise ValueError("TemporalCodecDataset requires joint action=7+12 without auxiliary targets")
+        if "joint_state" not in (kwargs.get("sensor_modalities") or self.DEFAULT_MODALITIES):
+            raise ValueError("Temporal codec reference requires joint_state observations")
+        self.codec_path = str(Path(codec_path).expanduser().resolve()) if codec_path else None
+        self.codec_sha256 = None
+        super().__init__(zarr_path, **kwargs)
+        if self.horizon < 3:
+            raise ValueError("Temporal codec horizon must be at least 3")
+        buffer = self.replay_buffer
+        asserted = OBS_ALIGNMENT if obs_alignment == "obs_before_action" else obs_alignment
+        if asserted is not None and asserted != OBS_ALIGNMENT:
+            raise ValueError(f"Unsupported asserted obs_alignment: {asserted!r}")
+        stored = buffer.attrs.get("obs_alignment")
+        if stored is not None and stored != OBS_ALIGNMENT:
+            raise ValueError(f"Unsupported stored obs_alignment: {stored!r}")
+        if stored is None and asserted is None:
+            raise ValueError(
+                "Temporal codec requires obs_alignment='obs[t]_before_action[t]' in data attributes "
+                "or an explicit obs_alignment='obs_before_action' assertion"
+            )
+        dt = buffer.attrs.get("dt")
+        if "dt" in buffer.attrs and (isinstance(dt, bool) or not isinstance(dt, (int, float))
+                                     or not np.isfinite(dt) or dt <= 0):
+            raise ValueError("Temporal codec dt, when supplied, must be positive and finite")
+        if buffer["action"].shape[1:] != (19,) or buffer["joint_state"].shape[1:] != (19,):
+            raise ValueError("Temporal codec requires action and joint_state with shape [T,19]")
+        self.hand_actions = np.asarray(
+            buffer.read("action", slice(None), columns=slice(7, 19)), dtype=np.float32
+        )
+        self.hand_states = np.asarray(
+            buffer.read("joint_state", slice(None), columns=slice(7, 19)), dtype=np.float32
+        )
+        self.codec_source_metadata = {
+            "reference": "raw_measured_hand_at_query_observation",
+            "obs_alignment": OBS_ALIGNMENT,
+            "alignment_source": "data_attribute" if stored is not None else "explicit_assertion",
+            "dt": None if dt is None else float(dt),
+            "action_key": "action", "hand_slice": [7, 19],
+            "data_revision": self.data_revision,
+            "num_frames": len(self.hand_actions),
+            "hand_actions_sha256": _array_sha256(self.hand_actions),
+            "hand_states_sha256": _array_sha256(self.hand_states),
+            "episode_ends_sha256": _array_sha256(np.asarray(buffer.episode_ends, dtype=np.int64)),
+        }
+        canonical = json.dumps(self.codec_source_metadata, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        self.codec_source_fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
+        self._codec_source_recipe = copy.deepcopy(self.data_recipe)
+        self._codec_train_indices = self.sampler.indices.copy()
+        self.data_recipe["temporal_codec_reference"] = {
+            "source_fingerprint": self.codec_source_fingerprint,
+            "query_index": self.obs_horizon - 1,
+        }
+        if require_codec:
+            self._load_codec()
+
+    @property
+    def codec_metadata(self):
+        validation = self.get_validation_dataset()
+        val_indices = (np.empty((0, 4), dtype=np.int64) if validation is None
+                       else validation.sampler.indices)
+        return {
+            "source_fingerprint": self.codec_source_fingerprint,
+            "source_metadata": dict(self.codec_source_metadata),
+            "train_mask": self.train_mask.tolist(), "val_mask": self.val_mask.tolist(),
+            "window": {
+                "horizon": self.horizon, "obs_horizon": self.obs_horizon,
+                "pad_before": self.pad_before, "pad_after": self.pad_after,
+                "train_windows": len(self._codec_train_indices), "val_windows": len(val_indices),
+                "train_indices_sha256": _array_sha256(self._codec_train_indices),
+                "val_indices_sha256": _array_sha256(val_indices),
+                "data_recipe": copy.deepcopy(self._codec_source_recipe),
+            },
+        }
+
+    def _load_codec(self):
+        if self.codec_path is None:
+            raise ValueError("Temporal codec training requires codec_path")
+        codec, payload = load_codec(self.codec_path)
+        if codec.hand_dim != 12 or codec.horizon != self.horizon:
+            raise ValueError("Temporal codec artifact hand_dim/horizon does not match dataset")
+        metadata = payload.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("Temporal codec artifact requires metadata")
+        for key, value in self.codec_metadata.items():
+            if metadata.get(key) != value:
+                raise ValueError(f"Temporal codec metadata mismatch: {key}")
+        self.codec_sha256 = payload["_file_sha256"]
+        self.data_recipe["temporal_codec"] = {"sha256": self.codec_sha256}
+        if self._validation_dataset is not None:
+            self._validation_dataset.codec_sha256 = self.codec_sha256
+            self._validation_dataset.data_recipe["temporal_codec"] = dict(self.data_recipe["temporal_codec"])
+
+    def raw_hand_batch(self, indices):
+        """Return raw [B,H,12] commands and [B,12] measured q0 without PC reads."""
+        indices = np.asarray(indices)
+        if (indices.ndim != 1 or indices.dtype.kind not in "iu"
+                or (indices < 0).any() or (indices >= len(self)).any()):
+            raise ValueError("Hand batch indices must be one-dimensional valid window indices")
+        rows = self.sampler.source_rows(self.sampler.indices[indices.astype(np.int64, copy=False)])
+        return self.hand_actions[rows], self.hand_states[rows[:, self.obs_horizon - 1]]
+
+    def __getitem__(self, idx):
+        if idx < 0:
+            idx += len(self)
+        if not 0 <= idx < len(self):
+            raise IndexError(idx)
+        data = super().__getitem__(idx)
+        _, reference = self.raw_hand_batch(np.asarray([idx]))
+        data["action_context"] = {"hand_reference": torch.from_numpy(reference[0])}
+        return data

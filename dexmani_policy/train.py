@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import hydra
@@ -13,7 +14,7 @@ from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.path import resolve_resume_source, set_project_root
 from dexmani_policy.utils.random import set_seed
 
-ROOT_DIR = set_project_root()
+set_project_root()
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.training.build_utils import (
@@ -27,6 +28,7 @@ from dexmani_policy.training.build_utils import (
 from dexmani_policy.training.resume import (
     build_resume_contract, build_train_loader, restore_training_state,
 )
+from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
 from dexmani_policy.training.workspace import prepare_output_dir
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 
@@ -46,19 +48,20 @@ class TrainingComponents:
     train_loader: DataLoader
     workspace: Any
     batches_per_epoch: int
-    resume_checkpoint: Any = None
+    resume_checkpoint: Optional[TrainCheckpoint] = None
 
 
-def build_train_components(cfg):
+def build_train_components(cfg, *, resume_checkpoint=None):
+    """Build components, reusing a source already validated by CheckpointStore.load."""
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. This training script requires GPU.")
 
     device = torch.device(cfg.training.device)
 
-    from pathlib import Path
-    from dexmani_policy.training.checkpoint import CheckpointStore
     source = cfg.get("resume_from")
-    checkpoint = CheckpointStore(Path(source).parent).load(source) if source else None
+    checkpoint = resume_checkpoint
+    if source is not None and checkpoint is None:
+        checkpoint = CheckpointStore(Path(source).parent).load(source)
     dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
 
     train_loader = build_train_loader(cfg, dataset)
@@ -112,14 +115,18 @@ def build_trainer(cfg, comp):
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     from dexmani_policy.training.resume import resolve_training_config
-    cfg = resolve_training_config(cfg)
+    source = resolve_resume_source(cfg.get("resume_from"))
+    checkpoint = CheckpointStore(Path(source).parent).load(source) if source is not None else None
+    cfg = resolve_training_config(cfg, resume_checkpoint=checkpoint)
     validate_config(cfg)
     with open_dict(cfg):
-        cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
+        cfg.resume_from = source
     prepare_output_dir(cfg.workspace.output_dir)
 
     set_seed(cfg.training.seed)
-    comp = build_train_components(cfg)
+    comp = build_train_components(cfg, resume_checkpoint=checkpoint)
+    # Components own the temporary CPU state until restoration below.
+    del checkpoint
 
     trainer = build_trainer(cfg, comp)
     resume_state = None

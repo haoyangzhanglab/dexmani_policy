@@ -255,14 +255,14 @@ def validate_data_identity(saved, current, path="data_identity"):
         warnings.warn(f"{path}: 数据身份未验证 (dataset has no data_revision)", stacklevel=2)
 
 
-def resolve_training_config(cfg, *, overrides=None):
+def resolve_training_config(cfg, *, overrides=None, resume_checkpoint=None):
     """Resolve the input recipe and bind this invocation's output directory."""
     from hydra.core.hydra_config import HydraConfig
     from omegaconf import open_dict
 
     if overrides is None:
         overrides = HydraConfig.get().overrides.task if cfg.get('resume_from') is not None else []
-    result = resolve_input_recipe(cfg, overrides=overrides)
+    result = resolve_input_recipe(cfg, overrides=overrides, resume_checkpoint=resume_checkpoint)
     if result.get('resume_from') is not None:
         with open_dict(result):
             # The destination is this invocation's new run, never the source output.

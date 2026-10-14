@@ -75,8 +75,8 @@ class TrainWorkspace:
     def save_hydra_config(self, hydra_config):
         with atomic_path(self.output_dir / "config.yaml") as temporary:
             OmegaConf.save(hydra_config, temporary, resolve=True)
-        cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
         if self.wandb_logger is not None:
+            cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
             self.wandb_logger.log_config(cfg_dict, self.output_dir)
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None):

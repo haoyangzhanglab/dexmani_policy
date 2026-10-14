@@ -79,6 +79,11 @@ class ResNet(nn.Module):
         load_pretrained: bool = True,
     ):
         super().__init__()
+        if norm_mode not in ("batch_norm", "frozen_bn", "group_norm"):
+            raise ValueError(f"Unsupported norm_mode: {norm_mode!r}; expected batch_norm, frozen_bn, or group_norm")
+        if load_pretrained and weights is not None and tune_mode == "freeze" and norm_mode == "group_norm":
+            raise ValueError("Frozen pretrained ResNet requires batch_norm/frozen_bn; "
+                             "group_norm is a separate full-finetuning recipe")
 
         self.model_name = model_name
         self.tune_mode = tune_mode

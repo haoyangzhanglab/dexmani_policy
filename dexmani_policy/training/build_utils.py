@@ -21,6 +21,7 @@ from dexmani_policy.agents.normalization import (
     validate_normalizer_state,
 )
 from dexmani_policy.datasets.sampler import validate_dataset_splits
+from dexmani_policy.datasets.augmentation import validate_pc_color_augmentation
 from dexmani_policy.training.logging import print_param_count
 from dexmani_policy.training.lr_scheduler import get_scheduler
 from dexmani_policy.utils.config import (
@@ -69,7 +70,7 @@ def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
 
 
 def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
-    """Instantiate the dataset and build the normalizer from the config-driven spec.
+    """Instantiate the dataset; fit fresh stats or restore checkpoint normalization.
 
     The caller is responsible for resolving OmegaConf interpolations before
     calling this function (DDP paths call ``OmegaConf.resolve(cfg)`` in the
@@ -84,7 +85,8 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         validate_source_recipe(resume_checkpoint.effective_config, cfg)
     spec = resolve_normalization_spec(cfg)
     dataset_cfg = copy.deepcopy(cfg.dataset)
-    saved_recipes = getattr(resume_checkpoint, "resume_contract", {}).get("data_recipe")
+    saved_recipes = (resume_checkpoint.resume_contract.get("data_recipe")
+                     if resume_checkpoint is not None else None)
     if cfg.get("resume_from") is not None and saved_recipes is None:
         raise ValueError("Full resume requires saved data_recipe")
     if saved_recipes is not None:
@@ -355,31 +357,6 @@ def print_training_recipe(cfg, *, world_size: int, batches_per_epoch: int, sampl
 # Config Validation
 
 
-def _validate_augmentation_consistency(cfg):
-    """Warn/error when PC color augmentation is configured but pc_dim < 6."""
-    agent_cfg = cfg.agent
-    pc_dim = agent_cfg.get("pc_dim")
-    if pc_dim is None or pc_dim >= 6:
-        return
-
-    aug_cfg = cfg.dataset.get("augmentation_cfg")
-    if aug_cfg is None:
-        return
-
-    pc_color = aug_cfg.get("pc", {}).get("color")
-    pc_color_noise = aug_cfg.get("pc", {}).get("color_noise")
-    missing_rgb = (
-        f"PC color augmentation requires agent.pc_dim >= 6, got {pc_dim}. "
-        f"The encoder only reads the first {pc_dim} channels (XYZ), "
-        f"while the augmentation modifies channels 3:6 (RGB). "
-        f"Either set agent.pc_dim=6 or remove the augmentation key."
-    )
-    if pc_color is not None:
-        raise ValueError(missing_rgb)
-    if pc_color_noise is not None:
-        raise ValueError(f"PC color_noise augmentation: {missing_rgb}")
-
-
 def _validate_aux_config(cfg):
     """Validate use_aux_ee consistency.
 
@@ -497,9 +474,14 @@ def validate_config(cfg):
 
     Called by training and config-only smoke entry points.
     """
+    agent_pc_dim = cfg.agent.get('pc_dim')
     for child in cfg.dataset.get('datasets', [cfg.dataset]):
-        if child.get('pc_dim') is not None and child.pc_dim != cfg.agent.get('pc_dim'):
+        if child.get('pc_dim') is not None and child.pc_dim != agent_pc_dim:
             raise ValueError('Dataset pc_dim must match the actual Agent point-cloud channels')
+        validate_pc_color_augmentation(agent_pc_dim, child.get('augmentation_cfg'))
+    if 'datasets' in cfg.dataset:
+        # Hydra constructs children before MultiTaskDataset applies its shared augmentation.
+        validate_pc_color_augmentation(agent_pc_dim, cfg.dataset.get('augmentation_cfg'))
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):
@@ -513,7 +495,6 @@ def validate_config(cfg):
             "optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)"
         )
 
-    _validate_augmentation_consistency(cfg)
     _validate_aux_config(cfg)
     _validate_normalization_config(cfg)
     validate_action_key_consistency(cfg)

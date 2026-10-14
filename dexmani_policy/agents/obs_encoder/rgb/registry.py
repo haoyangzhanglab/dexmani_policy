@@ -5,7 +5,6 @@ from typing import Dict, Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torchvision
 
 from .image_processor import ImageProcessor
 from .utils import get_interpolation, to_hw
@@ -44,17 +43,6 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
 }
 
 
-def resolve_resnet_weights(cfg: Dict) -> Dict:
-    model_name = str(cfg["model_name"])
-    weights_value = cfg.pop("weights")
-    if isinstance(weights_value, str):
-        weights_enum = torchvision.models.get_model_weights(model_name)
-        cfg["weights"] = getattr(weights_enum, weights_value)
-    else:
-        cfg["weights"] = weights_value
-    return cfg
-
-
 def build_backbone(
     name: BackboneName,
     config: Optional[Dict] = None,
@@ -70,7 +58,7 @@ def build_backbone(
     effective_config = dict(cfg)
 
     # Pop ImageProcessor-level overrides before passing to backbone constructor.
-    # The backbone classes (ResNet, DINO, CLIP, SigLIP) don't accept these params.
+    # Backbone constructors do not accept image processing parameters.
     image_size = cfg.pop("image_size", None)
     interpolation = cfg.pop("interpolation", None)
     image_mean = cfg.pop("image_mean", None)
@@ -79,7 +67,6 @@ def build_backbone(
     if name == "resnet":
         from .resnet import ResNet
 
-        cfg = resolve_resnet_weights(cfg)
         backbone = ResNet(**cfg)
     elif name == "clip":
         from .clip import CLIP

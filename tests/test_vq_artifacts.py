@@ -5,6 +5,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 from dexmani_policy.agents.normalization import LinearNormalizer
@@ -98,10 +99,15 @@ def test_metadata_size_lookup_diagnostics_and_embedded_restore(tmp_path):
     diagnostics = deployment_diagnostics(manager, {'train': rows, 'held_out': rows[:7]}, chunk_size=5)
     idx = manager.hand_pose_to_continuous_index(rows)
     reconstructed, discrete = manager.continuous_index_to_hand_pose(idx)
-    error = reconstructed.reshape_as(rows) - rows
-    assert abs(diagnostics['splits']['train']['normalized']['mae'] - float(error.abs().mean())) < 1e-6
-    physical = error / manager.hand_normalizer_scale
-    assert abs(diagnostics['splits']['train']['physical']['mae'] - float(physical.abs().mean())) < 1e-6
+    # Deployment subtracts FP32 reconstructions first, then accumulates in FP64.
+    error = (reconstructed.reshape_as(rows) - rows).double()
+    # 31 * 12 positive terms: 1e-12 comfortably covers FP64 reduction-order
+    # roundoff (~N * eps), while remaining well below an FP32 oracle's error.
+    assert diagnostics['splits']['train']['normalized']['mae'] == pytest.approx(
+        float(error.abs().mean()), rel=1e-12, abs=1e-12)
+    physical = error / manager.hand_normalizer_scale.double()
+    assert diagnostics['splits']['train']['physical']['mae'] == pytest.approx(
+        float(physical.abs().mean()), rel=1e-12, abs=1e-12)
     assert sum(diagnostics['splits']['train']['prototype_counts']) == len(rows)
     assert diagnostics['splits']['held_out']['count'] == 7
     empty = deployment_diagnostics(manager, {'held_out': np.empty((0, 12))})
