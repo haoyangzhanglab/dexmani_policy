@@ -221,6 +221,12 @@ class GeometryAwarePointTransformer(nn.Module):
         self.blocks = nn.ModuleList([PointRelationBlock(channels, num_heads, mlp_ratio) for _ in range(depth)])
         self.norm = nn.LayerNorm(channels)
 
+    def _global_forward(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+        """Dense compile boundary; keep sampling and neighborhood backward eager."""
+        for block in self.blocks:
+            tokens = block(tokens, cos, sin)
+        return self.norm(tokens)
+
     def forward(self, pointcloud: torch.Tensor, *, return_geometry: bool = False) -> dict[str, torch.Tensor]:
         if pointcloud.ndim != 3 or pointcloud.shape[0] == 0 or pointcloud.shape[-1] < self.input_channels:
             raise ValueError("pointcloud must be nonempty [B,N,C] with enough channels")
@@ -250,10 +256,8 @@ class GeometryAwarePointTransformer(nn.Module):
         attributes = index_points(pointcloud[..., 3:self.input_channels], neighbors)
         tokens, radius = self.patch_embedding(relative_xyz, attributes)
         tokens = self.local_relation(tokens, local_indices, edges)
-        for block in self.blocks:
-            tokens = block(tokens, cos, sin)
         outputs = {
-            "tokens": self.norm(tokens),
+            "tokens": self._global_forward(tokens, cos, sin),
             "xyz": centers,
             "mask": torch.ones(centers.shape[:2], device=xyz.device, dtype=torch.bool),
         }

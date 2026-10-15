@@ -205,6 +205,10 @@ def smoke_test(config_name: str, *, max_updates=4):
                 backbone = selected.action_decoder.model
                 if hasattr(backbone, "_orig_mod"):
                     selected.action_decoder.model = backbone._orig_mod
+                    geometry = getattr(selected.obs_encoder, "geometry", None)
+                    global_forward = getattr(geometry, "_global_forward", None)
+                    if hasattr(global_forward, "__wrapped__"):
+                        geometry._global_forward = global_forward.__wrapped__
                     set_seed(cfg.training.seed)
                     with torch.inference_mode():
                         eager = selected.predict_action(obs, **prediction_kwargs)["control_action"]

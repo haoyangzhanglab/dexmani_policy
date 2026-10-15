@@ -450,9 +450,14 @@ def test_cuda_policy_compiled_training_and_strict_reload(tmp_path):
     normalizer.fit_field_chunks("finger_tactile_force", [obs["finger_tactile_force"]], mode="gaussian")
     model, ema, updater = build_model_and_ema(cfg, "cuda", normalizer)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=False)
+    geometry_keys = tuple(model.obs_encoder.geometry.state_dict())
     compile_models(model, ema, mode="reduce-overhead")
     assert hasattr(model.action_decoder.model, "_orig_mod")
     assert not hasattr(model.obs_encoder.geometry, "_orig_mod")
+    for selected in (model, ema):
+        geometry = selected.obs_encoder.geometry
+        assert tuple(geometry.state_dict()) == geometry_keys
+        assert geometry._global_forward.__wrapped__.__self__ is geometry
     obs = {key: value.cuda() for key, value in obs.items()}
     batch = {"obs": obs, "action": actions.cuda()}
     weight = model.obs_encoder.geometry.patch_embedding.member_mlp[0].weight
@@ -481,6 +486,8 @@ def test_cuda_policy_compiled_training_and_strict_reload(tmp_path):
         assert prediction["control_action"].shape == (2, 8, 19)
         assert torch.isfinite(prediction["pred_action"]).all()
         selected.action_decoder.model = selected.action_decoder.model._orig_mod
+        geometry = selected.obs_encoder.geometry
+        geometry._global_forward = geometry._global_forward.__wrapped__
         torch.manual_seed(71)
         expected = selected.predict_action(obs)["pred_action"]
         path = tmp_path / f"{name}.pt"
@@ -511,3 +518,60 @@ def test_cuda_compiled_patch_pooling_backward():
     torch.testing.assert_close(actual, expected, atol=0.025, rtol=0.025)
     loss.backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for global compile comparison")
+@pytest.mark.parametrize("amp", [False, True])
+def test_cuda_global_compile_preserves_outputs_gradients_and_state(amp):
+    pytest.importorskip("pytorch3d.ops")
+    torch.manual_seed(17)
+    model = gp.GeometryAwarePointTransformer().cuda().eval()
+    points = (torch.randn(1, 1024, 6, device="cuda") * 0.1).requires_grad_()
+    target = torch.randn(1, 256, 384, device="cuda")
+    keys = tuple(model.state_dict())
+    parameter_ids = [id(p) for p in model.parameters()]
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+        expected = model(points, return_geometry=True)
+        (expected["tokens"].float() - target).square().mean().backward()
+    expected_grad = {name: p.grad.clone() for name, p in model.named_parameters()}
+    expected_input_grad = points.grad.clone()
+    model.zero_grad(set_to_none=True)
+    points.grad = None
+
+    eager_global = model._global_forward
+    compiled_global = torch.compile(eager_global, mode="reduce-overhead", fullgraph=True)
+    model._global_forward = compiled_global
+    assert tuple(model.state_dict()) == keys
+    assert [id(p) for p in model.parameters()] == parameter_ids
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+        actual = model(points, return_geometry=True)
+        (actual["tokens"].float() - target).square().mean().backward()
+    for key in expected:
+        tolerance = 0.025 if amp else 2e-5
+        torch.testing.assert_close(actual[key], expected[key],
+                                   atol=tolerance if key == "tokens" else 0,
+                                   rtol=tolerance if key == "tokens" else 0)
+    # Compare the complete gradient, including the eager geometric stages.
+    # Relative L2 avoids dividing by individual near-zero gradient elements.
+    for prefix in ("patch_embedding.", "local_relation.", "blocks.", "norm."):
+        reference = torch.cat([g.flatten() for name, g in expected_grad.items() if name.startswith(prefix)])
+        gradient = torch.cat([p.grad.flatten() for name, p in model.named_parameters() if name.startswith(prefix)])
+        assert torch.isfinite(gradient).all() and reference.norm() > 0
+        assert (gradient - reference).norm() / reference.norm() < (0.025 if amp else 2e-4)
+    assert torch.isfinite(points.grad).all() and expected_input_grad.norm() > 0
+    assert (points.grad - expected_input_grad).norm() / expected_input_grad.norm() < (0.025 if amp else 2e-4)
+
+    # Check more geometries with the original BF16 output tolerance unchanged.
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+        for seed in (37, 53):
+            torch.manual_seed(seed)
+            sample = torch.randn(1, 1024, 6, device="cuda") * 0.1
+            actual = model(sample)["tokens"].clone()
+            model._global_forward = eager_global
+            expected = model(sample)["tokens"]
+            model._global_forward = compiled_global
+            torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    invalid = points.detach().clone()
+    invalid[0, 0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        model(invalid)

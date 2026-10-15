@@ -59,6 +59,12 @@ Agent、ObsEncoder 和配置的默认 Patch 数同步为 256、深度为 6。策
 
 这是架构与状态字典的不兼容升级。旧 GeometryPatchEncoder/Compact/双投影版本 checkpoint 不能完整恢复到新模型，不提供 silent fallback 或用 strict=False 假装恢复。请使用新的运行目录；历史实验仍需匹配其保存的源码与配置。
 
+## 编译边界
+
+`InteractionFlowAgent.compile_backbone()` 沿用现有 `training.use_compile` 和 `compile_mode`，编译 DiT-X 以及 GAPT 的 `_global_forward` 方法。后者只包含六层全局 Transformer 与最终 LayerNorm，使用 `fullgraph=True`；输入检查、FPS/kNN、几何统计、Patch Embedding 和局部关系继续 eager 执行。这样原生采样与邻域索引反向不进入编译区域，不需要自定义算子或新的配置开关。
+
+编译绑定方法不改变 `blocks.*`、`norm.*` 等参数名、参数对象或模块层级。raw/EMA 在各自实例上分别编译，现有 GAPT checkpoint 可严格加载；这次执行方式调整不构成新的模型版本。smoke 的 checkpoint 对照在还原 DiT-X 后，也还原该方法，再比较 eager 预测，保留原断言。
+
 ## 验证
 
 2026-10-15 在本地 `policy` 环境（Python 3.10、PyTorch 2.4.1+cu124、原生 PyTorch3D、RTX 4090）完成最终集成检查：
@@ -66,19 +72,31 @@ Agent、ObsEncoder 和配置的默认 Patch 数同步为 256、深度为 6。策
 | 检查 | 结果与范围 |
 |---|---|
 | Python 语法、实际 import、`git diff --check` | PASS |
-| GAPT 定向测试 | **38 PASS**；含原生 CPU/CUDA，XYZ/XYZRGB，FP32/BF16，默认模型前反向与 AdamW 更新 |
+| GAPT 定向测试 | **40 PASS**；含原生 CPU/CUDA，XYZ/XYZRGB，FP32/BF16，默认模型前反向与 AdamW 更新、局部编译输出/梯度对照 |
 | 几何与位置编码 | PASS；独立 Gaussian/中心化协方差/Fourier 数值对照、米制 RoPE 相位与 Q/K Norm 顺序、固定锚点下完整 forward 排列等变、重复坐标按索引排除 self、随机 FPS 索引对齐 |
 | 策略接口 | PASS；真实 Scene 与两路 HandSceneRelation 共享同一 Tensor，原始成员距离/硬半径/无支持零更新，每帧 23 tokens |
-| CUDA 合成策略集成 | PASS；默认模型、BF16、原有 DiT-X compile、normalization 模式、optimizer 与 warmup；2 条合成观测执行 12 次更新后 GAPT 参数实际变化，raw/EMA 严格保存加载及预测一致 |
-| `pytest -q tests` | **243 PASS / 7 SKIP**（CPU 可见环境，跳过 CUDA 专项；GAPT 的 CUDA 项另行通过） |
+| CUDA 合成策略集成 | PASS；默认模型、BF16、DiT-X 与 GAPT 全局阶段 compile、normalization 模式、optimizer 与 warmup；2 条合成观测执行 12 次更新后 GAPT 参数实际变化，raw/EMA 严格保存加载及预测一致 |
+| `pytest -q tests` | **243 PASS / 9 SKIP**（CPU 可见环境，跳过 CUDA 专项；GAPT 的 CUDA 项另行通过） |
 | 单卡与 DDP config-only | PASS；DDP 实际多卡运行 NOT VERIFIED |
 | 真实数据完整 smoke | **NOT VERIFIED / 已尝试失败**；默认数据缺少 `fingertip_xyz`、`eef_pose`、`finger_tactile_force`，在建 Dataset 时拒绝运行；未替换、推测或改写旧数据 |
 
 参考 FPS/kNN 仅用于部分 CPU 数学检查；原生算子检查独立执行。reader 测试直接调用真实模块，以 hook 观察 memory，不再用替身 attention。合成策略测试保持原学习率和 500-step warmup：零初始化动作输出与门控下，4 次更新不足以观察到 GAPT 首层 FP32 参数变化，故仅延长此小批量 fixture 的检查预算至 12 次。
 
-当前 `compile_backbone()` **只编译 DiT-X**。额外尝试整个 GAPT 的 `torch.compile(mode="reduce-overhead")` 后，CUDA BF16 前反向通过；PatchEmbedding 的 `fullgraph=True` 编译前反向已加入回归测试。原生 PyTorch3D 仍产生 graph break，部分 backward 无法使用 CUDA Graph。完整 GAPT 的 FP32 compiled/eager 最大差异为 `2.38e-6`；BF16 最大差异为 `0.0382`、RMS 为 `0.00719`，在预设 `atol=rtol=0.025` 下仍有 1/98,304 元素超限，**该额外对比不标为 PASS，也未放宽阈值**。eager/compiled BF16 对 FP32 的 RMS 分别为 `0.00634/0.00605`，与融合舍入差异相符；默认策略的 GAPT 仍为 eager，未改变 compile 范围。
+初始集成曾额外尝试编译整个 GAPT：CUDA BF16 前反向可运行，但原生 PyTorch3D 产生 graph break，部分 backward 无法使用 CUDA Graph。该尝试的 FP32 compiled/eager 最大差异为 `2.38e-6`；BF16 最大差异为 `0.0382`、RMS 为 `0.00719`，在预设 `atol=rtol=0.025` 下有 1/98,304 元素超限。这个历史对比仍记为失败，阈值未放宽；当前正式路径采用上文的局部编译边界。
 
-RTX 4090 的 GAPT 单独测量（输入 `[1,1024,6]`，10 次预热、30 次前向，含同步的墙钟均值）：
+局部编译验证：FP32/BF16 的完整 GAPT 输出、原始几何索引、输入及各阶段参数梯度对照通过；参数身份与 state_dict 键不变。三组 BF16 输入的最大输出差异约 `0.0044`，保留原 `atol=rtol=0.025`；梯度按阶段比较相对 L2，FP32/BF16 阈值分别为 `2e-4/0.025`。12 次合成策略更新及 raw/EMA 严格恢复通过。Profiler 在连续三次 GAPT 前反向中记录到 6 次 `cudaGraphLaunch`，编译区域实际发生 replay。
+
+RTX 4090、PyTorch 2.4.1 上的 BF16 局部编译前后短测（同一模型/输入布局，5 次预热，含同步的墙钟均值；GAPT 30 次，策略 20 次）：
+
+| 范围 | GAPT 全部 eager | GAPT 全局阶段 compile | 峰值 allocated（前→后） |
+|---|---:|---:|---:|
+| 完整 GAPT 推理，`[1,1024,6]` | 2.64 ms | 2.08 ms | 84.2→81.3 MiB |
+| 完整 GAPT 前反向，`[4,1024,6]` | 8.08 ms | 5.97 ms | 400.5→269.7 MiB |
+| 完整策略前反向，B=2、T=2 | 22.88 ms | 17.66 ms | 898.2→738.5 MiB |
+
+策略两组都编译 DiT-X，只改变 GAPT 全局阶段的执行方式；前反向耗时不含 optimizer/EMA 更新和数据加载。短测不是默认 batch=128 的吞吐承诺，也不证明任务效果。
+
+初始集成时 GAPT 全部 eager 的单独测量（输入 `[1,1024,6]`，10 次预热、30 次前向，含同步的墙钟均值）：
 
 | 精度 | 推理时延 | 推理峰值 allocated | 单次 AdamW 训练峰值 allocated |
 |---|---:|---:|---:|
@@ -97,7 +115,7 @@ python dexmani_policy/smoke_test.py --config-only interaction_flow
 python dexmani_policy/smoke_test.py interaction_flow
 ```
 
-架构合理性、参数量与模块测试不能保证任务成功率；本次不声称精度提升或 GPU 加速。
+架构合理性、参数量与模块测试不能保证任务成功率；以上性能结论仅限所列环境与短测范围，不声称任务精度提升。
 
 ## 参考边界
 

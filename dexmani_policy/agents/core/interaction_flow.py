@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from dexmani_policy.agents.action_decoders.backbone.ditx import DiTX
 from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
 from dexmani_policy.agents.core.base import BaseAgent
@@ -124,6 +126,14 @@ class InteractionFlowAgent(BaseAgent):
         )
         self.metric_observation_fields = metric_fields
         self.use_tactile_valid = use_tactile_valid
+
+    def compile_backbone(self, **compile_kwargs):
+        super().compile_backbone(**compile_kwargs)
+        # Compile a bound method so blocks.* / norm.* checkpoint keys and EMA
+        # module traversal stay unchanged. Geometry preparation remains eager.
+        compile_kwargs["fullgraph"] = True
+        geometry = self.obs_encoder.geometry
+        geometry._global_forward = torch.compile(geometry._global_forward, **compile_kwargs)
 
     def set_normalization_spec(self, spec, feature_dims=None):
         """Reject affine normalization that would change distances and wrist axes."""
