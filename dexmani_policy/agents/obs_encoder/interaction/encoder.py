@@ -20,8 +20,9 @@ from dexmani_policy.agents.obs_encoder.pointcloud.geometry_patch import (
     GeometryAwarePointTransformer,
 )
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
-from dexmani_policy.agents.obs_encoder.tactile.xhand_frame import (
-    XHandTactileFrameEncoder,
+from dexmani_policy.agents.obs_encoder.tactile.xhand_tactile_encoder import (
+    XHandForceEncoder,
+    XHandTaxelEncoder,
 )
 
 
@@ -81,7 +82,12 @@ class InteractionObsEncoder(nn.Module):
             nn.Linear(self.geometry.out_dim, token_dim), nn.LayerNorm(token_dim)
         )
         self.state = create_state_mlp(state_dim, token_dim)
-        self.tactile = XHandTactileFrameEncoder(tactile_input_key)
+        if tactile_input_key == "finger_tactile_force":
+            self.tactile = XHandForceEncoder()
+        elif tactile_input_key == "taxel_tactile_force":
+            self.tactile = XHandTaxelEncoder()
+        else:
+            raise ValueError("tactile_input_key must be 'finger_tactile_force' or 'taxel_tactile_force'")
         self.finger_evidence = FingerEvidenceEncoder(self.tactile.out_dim, token_dim)
         self.modality_gate = FingerModalityGate(token_dim)
         self.relation = HandSceneRelationEncoder(

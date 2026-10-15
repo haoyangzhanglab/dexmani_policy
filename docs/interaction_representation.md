@@ -85,7 +85,7 @@ flowchart TD
     P --> PT[空间 tokens / 共享 384→192 投影]
     P -->|原始成员索引与中心| R[context + near 几何读取]
     K[腕部与五指位置] --> H[HandKinematicsEncoder]
-    T[指尖触觉] --> TF[XHandTactileFrameEncoder]
+    T[指尖触觉] --> TF[XHandForceEncoder / XHandTaxelEncoder]
     TF --> E[FingerEvidenceEncoder]
     Q[关节状态] --> S[StateMLP]
     PT --> R
@@ -202,9 +202,9 @@ near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不
 
 ### 4.6 触觉与缺失
 
-`XHandTactileFrameEncoder` 直接编码每帧每指数据：聚合三通道使用 `3→64→64` MLP；120 taxel 阵列使用 KineDex 1D CNN（`3→32→64` 通道，再沿 taxel 轴平均池化），均输出 64 维特征。
+`XHandForceEncoder` 和 `XHandTaxelEncoder` 对每帧每指触觉独立编码：前者使用共享三层 MLP（`3→64→64→64`，前两层 ReLU），后者沿用 KineDex 单指 1D CNN（`3→32→64`，沿 taxel 轴平均池化）。两者均输出每指 64 维，不做跨指或时序编码。
 `FingerEvidenceEncoder` 将 frame 特征和归一化的聚合读数投影到 token 维度，加入有效读数标记，并把无效指证据严格置零。
-具体为 `e_i = mask_i × (W_frame LN(frame_i) + W_force force_i + valid_embedding)`；实现用 `torch.where` 屏蔽无效值，避免 `NaN × 0` 污染。即使使用 `taxel_tactile_force` 阵列，`finger_tactile_force` 仍由证据直连和门控消费，不能删去。默认聚合输入的 3 维读数同时走 `3→64→64` MLP 和直接线性投影；腕部证据始终为零。
+具体为 `e_i = mask_i × (W_frame LN(frame_i) + W_force force_i + valid_embedding)`；实现用 `torch.where` 屏蔽无效值，避免 `NaN × 0` 污染。即使使用 `taxel_tactile_force` 阵列，`finger_tactile_force` 仍由证据直连和门控消费，不能删去。默认聚合输入的 3 维读数同时走 `3→64→64→64` MLP 和直接线性投影；腕部证据始终为零。
 三通道读数保留其传感器语义，不旋转成未标定的世界系力，也不假定 taxel 的完整姿态。
 
 有效零接触读数与传感器缺失不同。默认所有输入有效；可显式启用 bool `tactile_valid`。
@@ -238,7 +238,7 @@ x_t=(1-t)\epsilon+ta,\qquad
 |---|---|
 | [geometry_patch.py](../dexmani_policy/agents/obs_encoder/pointcloud/geometry_patch.py) / GeometryAwarePointTransformer | FPS/KNN、几何聚合、局部关系与全局 3D RoPE Transformer，输出一套空间 tokens |
 | [hand_kinematics.py](../dexmani_policy/agents/obs_encoder/proprio/hand_kinematics.py) / HandKinematicsEncoder | 腕部/指尖位置、朝向、手形与身体 identity |
-| [xhand_frame.py](../dexmani_policy/agents/obs_encoder/tactile/xhand_frame.py) / XHandTactileFrameEncoder | 直接逐帧逐指触觉编码 |
+| [xhand_tactile_encoder.py](../dexmani_policy/agents/obs_encoder/tactile/xhand_tactile_encoder.py) / XHandForceEncoder、XHandTaxelEncoder | 三维聚合力与 120 点阵列的逐帧逐指触觉编码 |
 | [hand_scene_relation.py](../dexmani_policy/agents/obs_encoder/interaction/hand_scene_relation.py) / HandSceneRelationEncoder | 双路几何检索、最近成员与支撑诊断 |
 | [scene_context.py](../dexmani_policy/agents/obs_encoder/interaction/scene_context.py) / SceneContextPool | 空间分区初始化、全局读取与场景协调 |
 | [attention.py](../dexmani_policy/agents/obs_encoder/interaction/attention.py) | GeometryCrossAttention、InteractionSelfAttentionBlock |

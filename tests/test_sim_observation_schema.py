@@ -213,9 +213,9 @@ def test_camera_fields_dataset_normalizer_and_runtime(tmp_path):
 
 def test_dense_tactile_retains_array_layout_and_aggregate_evidence():
     from dexmani_policy.agents.obs_encoder.interaction.encoder import InteractionObsEncoder
-    from dexmani_policy.agents.obs_encoder.tactile.xhand_frame import XHandTactileFrameEncoder
+    from dexmani_policy.agents.obs_encoder.tactile import XHandTaxelEncoder
 
-    encoder = XHandTactileFrameEncoder("taxel_tactile_force").eval()
+    encoder = XHandTaxelEncoder().eval()
     valid = torch.ones(1, 2, 5, dtype=torch.bool)
     valid[:, :, 1] = False
     tactile = torch.randn(1, 2, 5, 120, 3)
