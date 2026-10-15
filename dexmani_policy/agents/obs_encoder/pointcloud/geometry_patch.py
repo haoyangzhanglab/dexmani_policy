@@ -18,6 +18,86 @@ from dexmani_policy.agents.obs_encoder.interaction.point_image_fusion import Poi
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import PatchEncoder
 
 
+class CompactPatchEncoder(nn.Module):
+    """Uni3D-style within-patch context, with wide projection after pooling.
+
+    Keep the local max/broadcast/refine operation, but run it at 64 channels.
+    Max and mean are over the K members only, never over the M spatial patches.
+    This is a scratch-training alternative, not a pretrained Uni3D replacement.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.point_mlp = nn.Sequential(
+            nn.Linear(in_channels, 32), nn.LayerNorm(32), nn.GELU(),
+            nn.Linear(32, 64), nn.LayerNorm(64), nn.GELU(),
+        )
+        self.refine = nn.Sequential(
+            nn.Linear(128, 64), nn.LayerNorm(64), nn.GELU(),
+            nn.Linear(64, 64),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(128, out_channels), nn.LayerNorm(out_channels), nn.GELU(),
+            nn.Linear(out_channels, out_channels),
+        )
+
+    def forward(self, point_patches: torch.Tensor) -> torch.Tensor:
+        x = self.point_mlp(point_patches)
+        pooled = x.max(dim=2, keepdim=True).values
+        x = self.refine(torch.cat((x, pooled.expand_as(x)), dim=-1))
+        # Accumulate the mean in FP32 under autocast, then restore feature dtype.
+        mean = x.float().mean(dim=2).to(x.dtype)
+        return self.proj(torch.cat((x.max(dim=2).values, mean), dim=-1))
+
+
+class LocalPatchMixer(nn.Module):
+    """One low-width geometric interaction on the existing patch anchors.
+
+    Projects tokens once before gathering neighbors. No dynamic feature graph,
+    second FPS, pooling of spatial tokens, or action-conditioned geometry.
+    The coordinate scale is a fixed divisor, NOT a radius cutoff.
+    """
+
+    def __init__(self, channels: int, neighbors: int, scale: float = 0.1):
+        super().__init__()
+        if type(neighbors) is not int or neighbors < 1 or not math.isfinite(scale) or scale <= 0:
+            raise ValueError("positive local neighbors and finite positive scale required")
+        self.neighbors = neighbors
+        self.scale = float(scale)
+        width = min(64, channels)
+        self.norm = nn.LayerNorm(channels)
+        self.input_proj = nn.Linear(channels, width)
+        self.position_mlp = nn.Sequential(
+            nn.Linear(4, 16), nn.GELU(), nn.Linear(16, width),
+        )
+        self.output_proj = nn.Linear(2 * width, channels)
+        self.gain = nn.Parameter(torch.full((channels,), 1e-2))
+
+    def forward(self, tokens: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
+        if self.neighbors >= centers.size(1):
+            raise ValueError("local neighbors must be smaller than the patch count")
+        # Small fixed anchor graph. Exclude self by INDEX, not zero distance:
+        # distinct sampled points may share the same coordinates.
+        with torch.no_grad(), torch.autocast(device_type=centers.device.type, enabled=False):
+            distance = torch.cdist(
+                centers.float(), centers.float(), compute_mode="donot_use_mm_for_euclid_dist"
+            )
+            diagonal = torch.eye(centers.size(1), device=centers.device, dtype=torch.bool)
+            distance = distance.masked_fill(diagonal.unsqueeze(0), float("inf"))
+            neighbor_idx = distance.topk(self.neighbors, largest=False, sorted=False).indices
+        projected = self.input_proj(self.norm(tokens))
+        relative_xyz = (index_points(centers.float(), neighbor_idx) - centers.float().unsqueeze(2)) / self.scale
+        relative_distance = torch.linalg.vector_norm(relative_xyz, dim=-1, keepdim=True)
+        geometry = torch.cat((relative_xyz, relative_distance), dim=-1)
+        position = self.position_mlp(geometry.to(self.position_mlp[0].weight.dtype))
+        message = F.gelu(
+            index_points(projected, neighbor_idx) - projected.unsqueeze(2) + position
+        )
+        mean = message.float().mean(dim=2).to(message.dtype)
+        update = self.output_proj(torch.cat((message.max(dim=2).values, mean), dim=-1))
+        return tokens + self.gain * update
+
+
 class RotaryPositionEncoding3D(nn.Module):
     def __init__(
         self,
@@ -107,6 +187,12 @@ class GeometryPatchEncoder(nn.Module):
 
     semantic_channels 启用 local_token 后的可选图像语义残差；point_uv 必须
     对应同一输入点序列，图像特征/投影每次观测只计算一次。默认参数保留纯几何路径。
+
+    patch_encoder_type="uni3d" and local_mixer_neighbors=0 preserve the original
+    parameter names, shapes and computation. Opt into "compact" to reduce the
+    per-member MLP width; optionally add one local mixer before global RoPE
+    attention. local_token always describes only the original K raw members.
+    XYZ and local_mixer_scale use the same metric coordinate system.
     """
 
     def __init__(
@@ -123,6 +209,10 @@ class GeometryPatchEncoder(nn.Module):
         fps_random_config: dict | None = None,
         semantic_channels: int | None = None,
         semantic_gate_init: float = 0.1,
+        *,
+        patch_encoder_type: str = "uni3d",
+        local_mixer_neighbors: int = 0,
+        local_mixer_scale: float = 0.1,
     ):
         super().__init__()
         if input_channels not in (3, 6):
@@ -134,16 +224,31 @@ class GeometryPatchEncoder(nn.Module):
         if not math.isfinite(mlp_ratio) or int(token_channels * mlp_ratio) < 1:
             raise ValueError("mlp_ratio must be finite and produce at least one hidden channel")
 
+        if patch_encoder_type not in {"uni3d", "compact"}:
+            raise ValueError("patch_encoder_type must be uni3d or compact")
+        if type(local_mixer_neighbors) is not int or not 0 <= local_mixer_neighbors < num_patches:
+            raise ValueError("local_mixer_neighbors must be an integer in [0, num_patches)")
+        if not math.isfinite(local_mixer_scale) or local_mixer_scale <= 0:
+            raise ValueError("local_mixer_scale must be finite and positive")
+
         self.input_channels = input_channels
         self.token_channels = token_channels
         self.num_patches = num_patches
         self.group_size = group_size
         self.fps_random_config = fps_random_config or {}
 
-        self.patch_encoder = PatchEncoder(
-            in_channels=input_channels,
-            out_channels=token_channels,
-            hidden_dims=[128, 256],
+        self.patch_encoder_type = patch_encoder_type
+        if patch_encoder_type == "uni3d":
+            self.patch_encoder = PatchEncoder(
+                in_channels=input_channels,
+                out_channels=token_channels,
+                hidden_dims=[128, 256],
+            )
+        else:
+            self.patch_encoder = CompactPatchEncoder(input_channels, token_channels)
+        self.local_mixer = (
+            LocalPatchMixer(token_channels, local_mixer_neighbors, local_mixer_scale)
+            if local_mixer_neighbors else None
         )
         self.rope = RotaryPositionEncoding3D(
             token_channels // num_heads,
@@ -215,6 +320,10 @@ class GeometryPatchEncoder(nn.Module):
                 image_hw, patch_grid_size, return_intermediate=return_intermediate,
             )
             patch_token = semantic_outputs["fused_token"]
+        # Keep local_token and fused_local_token tied to raw patch membership.
+        # Only the contextual patch_token path mixes neighboring patches.
+        if self.local_mixer is not None:
+            patch_token = self.local_mixer(patch_token, patch_center)
         cos, sin = self.rope(patch_center)
         for block in self.blocks:
             patch_token = block(patch_token, cos, sin)

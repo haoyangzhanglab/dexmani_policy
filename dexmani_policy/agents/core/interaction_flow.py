@@ -55,6 +55,9 @@ class InteractionFlowAgent(BaseAgent):
         time_shift_alpha: float = 1.0,
         num_flow_train_timesteps: int = 10,
         modality_dropout_probs: dict | None = None,
+        patch_encoder_type: str = "uni3d",
+        patch_local_neighbors: int = 0,
+        patch_local_scale: float = 0.1,
     ) -> None:
         if type(n_layers) is not int or n_layers != 8:
             raise ValueError(
@@ -87,6 +90,9 @@ class InteractionFlowAgent(BaseAgent):
             num_patches=num_patches,
             group_size=group_size,
             patch_depth=patch_depth,
+            patch_encoder_type=patch_encoder_type,
+            patch_local_neighbors=patch_local_neighbors,
+            patch_local_scale=patch_local_scale,
             num_scene_tokens=num_scene_tokens,
             tactile_input_key=tactile_input_key,
             tactile_fusion=tactile_fusion,
