@@ -106,13 +106,58 @@ class XHandTaxelEncoder(nn.Module):
         return (self.input_key,)
 
 
+
+# ReTouch Figure 6 + right-hand T30/T16 sensor geometry (reconstructed).
+# These are not author-released region_ids and have not been verified to match
+# every firmware/SDK raw_force ordering. Index j = 12*r + c (0-based):
+#   r=0..9 circumferential strips, c=0..11 base-to-tip.
+# IDs: 0 tip, 1 center, 2 base, 3 left, 4 right.
+# Sources: https://arxiv.org/html/2608.01824v2 (Figure 6)
+#          https://github.com/tsingqingyun/xhand1/tree/main/tactile
+_RIGHT_T30_PATCH_ROWS = (
+    "233333333333",
+    "333333333333",
+    "223333333300",
+    "222111110000",
+    "222111110000",
+    "222111110000",
+    "222111111000",
+    "224444444400",
+    "444444444444",
+    "244444444444",
+)
+_RIGHT_T16_PATCH_ROWS = (
+    "233333333330",
+    "333333333300",
+    "333333333000",
+    "222113330000",
+    "222111110000",
+    "222111110000",
+    "222111140000",
+    "244444444000",
+    "444444444400",
+    "244444444440",
+)
+
+
+def _right_hand_reconstructed_region_ids() -> torch.Tensor:
+    """Five [120] labels, thumb T30 then four T16, in assumed SDK index order."""
+    rows = (_RIGHT_T30_PATCH_ROWS,) + (_RIGHT_T16_PATCH_ROWS,) * 4
+    return torch.tensor(
+        [[int(label) for row in finger_rows for label in row] for finger_rows in rows],
+        dtype=torch.long,
+    )
+
+
 class XHandReTouchEncoder(nn.Module):
     """ReTouch-inspired five-patch encoder for single-frame XHand taxel arrays.
 
-    Requires a VERIFIED region_ids [5,120] mapping in the original XHand SDK
-    taxel order. Label convention: 0 tip, 1 center, 2 base, 3 left, 4 right.
-    The thumb uses T30; the other four fingers use T16. The ReTouch paper's
-    Fig. 6 does not provide an executable taxel-index mapping.
+    By default uses a reconstructed RIGHT-hand (T30 thumb / T16 others)
+    region_ids [5,120] inferred from ReTouch Figure 6 and public T30/T16
+    coordinates. The paper does not publish its exact SDK taxel-index map:
+    the default mapping is evidence-based but NOT an official verified map.
+    Pass region_ids explicitly to override it for another hand or SDK order.
+    Label convention: 0 tip, 1 center, 2 base, 3 left, 4 right.
 
     ReTouch Appendix A.2 specifies 8D patch statistics, soft contact weighting,
     8->256->1024 patch MLP and contact-area-biased attention pooling.
@@ -130,13 +175,15 @@ class XHandReTouchEncoder(nn.Module):
     input_key = "taxel_tactile_force"
     input_shape = (5, 120, 3)
 
-    def __init__(self, region_ids: torch.Tensor) -> None:
+    def __init__(self, region_ids: torch.Tensor | None = None) -> None:
         super().__init__()
+        if region_ids is None:
+            region_ids = _right_hand_reconstructed_region_ids()
         labels = torch.as_tensor(region_ids)
         if labels.shape != (5, 120) or labels.dtype not in (
             torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64,
         ):
-            raise ValueError("region_ids must be integer [5,120] in verified SDK taxel order")
+            raise ValueError("region_ids must be integer [5,120] in SDK taxel index order")
         if not bool(((labels >= 0) & (labels < self.num_regions)).all()):
             raise ValueError("region_ids values must be 0..4 (tip,center,base,left,right)")
         patch_mask = F.one_hot(labels.long(), num_classes=self.num_regions).permute(0, 2, 1).bool()
@@ -173,7 +220,7 @@ class XHandReTouchEncoder(nn.Module):
         h = self.patch_mlp(descriptors)
         h = h + self.finger_embedding[None, :, None, :] + self.region_embedding[None, None, :, :]
         # ReTouch Eq. (12): patch-level learned score + log contact-area prior.
-        logits = self.attention_score(F.silu(h)).squeeze(-1).float() + torch.log(area.clamp_min(1e-6))
+        logits = self.attention_score(F.silu(h)).squeeze(-1).float() + torch.log(area + 1e-6)
         alpha = torch.softmax(logits, dim=-1)
         token = self.token_norm((alpha[..., None] * h.float()).sum(dim=2))
         output = token.reshape(*leading, self.num_tokens, self.frame_dim)

@@ -104,3 +104,30 @@ def test_patch_encoder_cpu_bfloat16_autocast():
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         out = model(torch.randn(1, 5, 120, 3))
     assert out.shape == (1, 5, 64) and torch.isfinite(out).all()
+
+
+def test_default_reconstructed_map_has_all_600_assigned():
+    """Pin the published-figure reconstruction, not the SDK permutation."""
+    model = XHandReTouchEncoder()
+    mask = model.patch_mask
+    assert mask.shape == (5, 5, 120)
+    assert torch.all(mask.sum(dim=1) == 1)
+    labels = mask.long().argmax(dim=1)
+    assert torch.bincount(labels[0], minlength=5).tolist() == [19, 21, 18, 31, 31]
+    for finger in range(1, 5):
+        assert torch.bincount(labels[finger], minlength=5).tolist() == [28, 16, 15, 32, 29]
+        torch.testing.assert_close(labels[finger], labels[1])
+    # j=12*r+c, with r a circumferential strip and c base-to-tip.
+    assert labels[0, 0].item() == 2
+    assert labels[0, 2 * 12 + 10].item() == 0
+    assert labels[0, 7 * 12 + 2].item() == 4
+    assert labels[1, 0 * 12 + 11].item() == 0
+    assert labels[1, 3 * 12 + 7].item() == 3
+    assert labels[1, 6 * 12 + 7].item() == 4
+
+
+def test_default_map_is_optional_and_custom_map_remains_supported():
+    model = XHandReTouchEncoder()
+    custom = XHandReTouchEncoder(_fake_map())
+    assert not torch.equal(model.patch_mask, custom.patch_mask)
+    assert model(torch.randn(2, 5, 120, 3)).shape == (2, 5, 64)
