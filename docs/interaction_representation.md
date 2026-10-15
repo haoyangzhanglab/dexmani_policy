@@ -119,7 +119,7 @@ flowchart TD
 
 `GeometryAwarePointTransformer` 对每帧执行一次 FPS256 和原始点 kNN32 分组。成员编码使用相对 XYZ、距离、8 频段 Fourier 与 RGB，经过 64/128 维 max/broadcast/refine 后，以同一支持集的两种 Gaussian 加权均值、max 和中心化协方差聚合，再投影到 384 维。固定中心图上的一层局部几何 attention 之后，六层全局 Transformer 使用连续 3D Axial RoPE 与 Q/K Norm。输出仅有一套空间 `tokens`、米制 `xyz` 和有效性 `mask`；策略侧共享投影为 192 维。具体尺度、接口与数值约束见 [GAPT 说明](geometry_aware_point_transformer.md)。
 
-训练时默认随机 FPS 起点并打乱输出顺序；`eval()` 强制确定性 FPS。分组索引在 `no_grad` 下计算，不通过邻居选择反传。默认 `pc_dim=6` 已使用点的 RGB；未接入独立 RGB image encoder 或 `PointImageFusion`，不能将其描述为纯 XYZ 输入。
+训练时默认随机 FPS 起点并打乱输出顺序；`eval()` 强制确定性 FPS。分组索引在 `no_grad` 下计算，不通过邻居选择反传。默认 `pc_dim=6` 使用点的 RGB，不依赖独立 RGB image encoder。
 
 `SceneContextPool` 的 16 个 token 也不是固定 learned latent：先从 patch 中心确定性选取空间锚点，按最近锚点分区，区域内均值池化作为初始 query；加上锚点位置编码后，cross-attention 读取**全部** patch，再经过 FFN、1 层 scene self-attention 和 LayerNorm。区域给出初始化位置，最终感受野可以是全局。各帧重新分区，不保证同一个 scene 槽位持续跟踪同一物体。
 
@@ -202,9 +202,9 @@ near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不
 
 ### 4.6 触觉与缺失
 
-`XHandTactileFrameEncoder` 直接编码每帧每指数据：聚合三通道使用已有 MLP；120 taxel 阵列复用已有 ArrayEncoder。
+`XHandTactileFrameEncoder` 直接编码每帧每指数据：聚合三通道使用 `3→64→64` MLP；120 taxel 阵列使用 KineDex 1D CNN（`3→32→64` 通道，再沿 taxel 轴平均池化），均输出 64 维特征。
 `FingerEvidenceEncoder` 将 frame 特征和归一化的聚合读数投影到 token 维度，加入有效读数标记，并把无效指证据严格置零。
-具体为 `e_i = mask_i × (W_frame LN(frame_i) + W_force force_i + valid_embedding)`；实现用 `torch.where` 屏蔽无效值，避免 `NaN × 0` 污染。即使使用 `tactile_force` 阵列，`finger_tactile_force` 仍由证据直连和门控消费，不能删去。默认聚合输入的 3 维读数同时走 `3→64→64` MLP 和直接线性投影；腕部证据始终为零。
+具体为 `e_i = mask_i × (W_frame LN(frame_i) + W_force force_i + valid_embedding)`；实现用 `torch.where` 屏蔽无效值，避免 `NaN × 0` 污染。即使使用 `taxel_tactile_force` 阵列，`finger_tactile_force` 仍由证据直连和门控消费，不能删去。默认聚合输入的 3 维读数同时走 `3→64→64` MLP 和直接线性投影；腕部证据始终为零。
 三通道读数保留其传感器语义，不旋转成未标定的世界系力，也不假定 taxel 的完整姿态。
 
 有效零接触读数与传感器缺失不同。默认所有输入有效；可显式启用 bool `tactile_valid`。
@@ -250,7 +250,7 @@ x_t=(1-t)\epsilon+ta,\qquad
 | [ditx.py](../dexmani_policy/agents/action_decoders/backbone/ditx.py) / DiTX | 单一 flow 时间条件的动作速度网络 |
 | [rectified_flow.py](../dexmani_policy/agents/action_decoders/rectified_flow.py) / RectifiedFlow | FM 目标与 Euler 推理 |
 
-可选 [PointImageFusion](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py) 由通用 patch encoder 提供，但当前 InteractionFlowAgent 没有配置或传入其语义输入。模块存在不等于本策略已接入。
+仓库保留独立的 [PointImageFusion](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py)，用于按点云邻域索引汇聚并融合图像特征；当前 GAPT 和 `InteractionFlowAgent` 未调用该模块。
 
 ## 6. 数据与配置
 
@@ -275,7 +275,7 @@ normalizer 保留每指每轴独立的 15 个统计通道，只跨训练源行�
 | 数据与划分 | `pick_apple_messy`，最多 80 个训练 episode，`val_ratio=0` | 默认没有留出验证集 |
 | 训练预算 | batch 128，100000 optimizer steps，seed 42 | DDP 为每卡 32 × 4 卡，梯度累积均为 1 |
 | 优化器 | AdamW；obs/action lr 均 `1e-4`，weight decay 均 `1e-6`，betas `[0.95,0.999]` | cosine schedule、warmup 500、梯度裁剪 1.0 |
-| 数值与评测 | BF16、编译 action backbone、EMA 均开启 | eval 默认选择 EMA，NFE=10 |
+| 数值与评测 | BF16、编译 DiT-X 与 GAPT 全局 Transformer、EMA 均开启 | eval 默认选择 EMA，NFE=10 |
 | 点云增强 | XYZ noise std `0.002 m`、color jitter、最大 dropout ratio `0.8`，均 `prob=1` | 增强发生在 patch FPS 前；不把随机缺点视作接触标签 |
 | 状态增强 | noise std `0.0002`，`prob=1` | 在 Agent 归一化之前作用于 joint_state |
 
@@ -283,13 +283,13 @@ normalizer 保留每指每轴独立的 15 个统计通道，只跨训练源行�
 
 ### 6.2 稠密触觉与 Real 接入边界
 
-当前 `dexmani_real` 仍生产 `fingertip_points` / `contact_force`，其数据导出与在线部署协议尚未迁移，不能直接运行当前 interaction 策略。完成生产者适配后，稠密触觉配方如下；这里只声明消费接口，不改写真机数据：
+当前 `dexmani_real` 已统一公开字段名；使用从 Raw 重新导出的 Canonical 数据。稠密触觉配方如下，保留独立的逐指聚合读数，不从 taxel 求和或求均值生成：
 
 ```yaml
 agent:
-  tactile_input_key: tactile_force   # 若只用聚合读数，保留 finger_tactile_force
+  tactile_input_key: taxel_tactile_force   # 若只用聚合读数，保留 finger_tactile_force
 dataset:
-  sensor_modalities: [joint_state, point_cloud, fingertip_xyz, eef_pose, finger_tactile_force, tactile_force]
+  sensor_modalities: [joint_state, point_cloud, fingertip_xyz, eef_pose, finger_tactile_force, taxel_tactile_force]
 normalization:
   joint_state: limits
   action: auto
@@ -297,10 +297,10 @@ normalization:
   fingertip_xyz: identity
   eef_pose: identity
   finger_tactile_force: gaussian
-  tactile_force: gaussian
+  taxel_tactile_force: gaussian
 ```
 
-稠密模式在默认逐指字段之外增加 `tactile_force`；dataset 与 normalization 必须一起声明。Real `eef_pose` 为 `[B,T,9]`；阵列 `tactile_force` 为 `[B,T,5,120,3]`，且仍需 `[B,T,5,3]` 的 `finger_tactile_force`。
+稠密模式在默认逐指字段之外增加 `taxel_tactile_force`；dataset 与 normalization 必须一起声明。Real `eef_pose` 为 `[B,T,9]`；阵列 `taxel_tactile_force` 为 `[B,T,5,120,3]`，且仍需 `[B,T,5,3]` 的 `finger_tactile_force`。
 `eef_pose` 必须来自当前测量/FK，不能来自未来 action_ee。
 采用 Real 数据还需使用仓库已有的 Real runtime 数据配方与评测流程；默认配置中的 SimRunner 不代表真机评测入口。
 所有几何字段强制 identity，跨模态坐标增强必须保持点云、腕部和指尖的一致性。
@@ -366,7 +366,7 @@ L 与 Q 保持相同直接残差和归一化顺序，闭环收益需通过实际
 | `context_update` / `near_update` | `[BT,6,192]` | 哪条几何路径在提供更新 |
 | `near_has_support` | `[BT,6,4]` | 各 attention head 是否至少有一个受支持 patch |
 | `min_observed_distance` | `[BT,6]` | 锚点到所有已分组 patch 成员的最短距离；不保证覆盖原始全点云 |
-| `context_attention` / `near_attention` | `[BT,6,4,129]` | 对 128 个 patch 与最后一个 null 槽的读取分配 |
+| `context_attention` / `near_attention` | `[BT,6,4,257]` | 对 256 个 patch 与最后一个 null 槽的读取分配 |
 | `context_null_mass` / `near_null_mass` | `[BT,6,4]` | 各头分配给 null 的权重 |
 | `interaction_center` / `frame_tokens` | `[BT,6,3]` / `[BT,23,192]` | 锚点坐标与最终逐帧 token 布局 |
 
@@ -387,7 +387,7 @@ L 与 Q 保持相同直接残差和归一化顺序，闭环收益需通过实际
 PYTHONPATH=. python dexmani_policy/smoke_test.py interaction_flow --max-updates 4
 ```
 
-smoke 使用当前配置的 batch、BF16、compile 和生产 PyTorch3D 算子；`training.use_compile` 编译 action backbone，并不代表整个 observation encoder 被编译。临时产物在退出时清理，不创建 W&B run。
+smoke 使用当前配置的 batch、BF16、compile 和生产 PyTorch3D 算子；`training.use_compile` 编译 DiT-X 以及 GAPT 的六层全局 Transformer 和最终 LayerNorm，几何准备与局部关系保持 eager。具体边界与 checkpoint 对照见 [GAPT 编译说明](geometry_aware_point_transformer.md#编译边界)。临时产物在退出时清理，不创建 W&B run。
 
 smoke 不接受 Hydra 字段覆盖。需要保存产物并按 episode 留出验证集时，可从仓库根目录使用正式入口运行有界训练：
 

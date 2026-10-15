@@ -1,3 +1,3 @@
-from .xhand_tactile_encoder import XHandTactileEncoder
+from .xhand_frame import XHandTactileFrameEncoder
 
-__all__ = ["XHandTactileEncoder"]
+__all__ = ["XHandTactileFrameEncoder"]

@@ -63,8 +63,6 @@ class InteractionObsEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.obs_token_dim = token_dim
         self.tokens_per_frame = num_scene_tokens + 7
-        self.state_dim = state_dim
-        self.pc_dim = pc_dim
         self.tactile_input_key = tactile_input_key
         self.tactile_fusion = tactile_fusion
         self.tactile_dropout_prob = tactile_dropout_prob
@@ -78,7 +76,7 @@ class InteractionObsEncoder(nn.Module):
             depth=patch_depth,
             fps_random_config=fps_random_config,
         )
-        # One shared policy-side projection, not separate local/context heads.
+        # Project the same spatial memory once for scene and hand readers.
         self.geometry_projection = nn.Sequential(
             nn.Linear(self.geometry.out_dim, token_dim), nn.LayerNorm(token_dim)
         )

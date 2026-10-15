@@ -2,9 +2,9 @@
 
 `robot_data/` 当前包含两类数据：**真机数据**与 **sim 仿真数据**。两者都使用 **Zarr v2 目录存储**，共享 `data/` 和 `meta/` 的组织方式，但模态字段、部分形状与物理含义不同。
 
-本文以真机任务 `pick_place_toy` 和 sim 任务 `pick_apple_messy` 为例。数量、相机设置及未迁移字段依据 **2026-10-09 本地数据快照**；第 4 节的指尖、逐指触觉和末端观察量已按当前 SIM 生产者更新，不能据此推断旧目录已经迁移。数据重新生成后，帧数、episode 数和其余布局应以新 Zarr 为准。
+本文以真机任务 `pick_place_toy` 和 sim 任务 `pick_apple_messy` 为例。数量与相机设置依据 **2026-10-09 本地数据快照**；字段定义已按当前 Real / Sim 生产者更新，不能据此推断旧目录已经重新导出。数据重新生成后，帧数、episode 数和其余布局应以新 Zarr 为准。
 
-当前 SIM 与 interaction 策略使用 `fingertip_xyz (T,5,3)`、`finger_tactile_force (T,5,3)` 和 `eef_pose (T,9)`。不提供旧字段别名、平铺 15 维或拆分末端字段的兼容路径。现有数据没有改写；`dexmani_real` 的生产者和部署协议仍使用 `fingertip_points` / `contact_force`，需要单独迁移后才能供当前 interaction 策略消费，稠密 `tactile_force (T,5,120,3)` 的语义保持不变。
+Real、Sim 与 Policy 统一使用 `fingertip_xyz (T,5,3)`、`finger_tactile_force (T,5,3)` 和 `eef_pose (T,9)`；Real 稠密触觉使用 `taxel_tactile_force (T,5,120,3)`，数值与顺序保持不变。旧 Real Canonical 缓存须从 Raw 重新导出，不提供旧字段别名或 checkpoint 自动改写。
 
 ## 1. 目录与命名
 
@@ -76,7 +76,7 @@ episode = array[start:end]
 
 ## 3. Real：`pick_place_toy.zarr`
 
-该数据集是由真机 Raw 记录导出的 canonical 多模态数据，根属性 `format` 为 `dexmani.real.canonical`。下表中的 `T = 13991`，所有 shape 均为**磁盘存储形状**。
+该数据集是由真机 Raw 记录导出的 canonical 多模态数据，根属性 `format` 为 `dexmani.real.canonical`。下表为当前导出的 **15 个字段**；历史快照的 `T = 13991` 仅作规模参考，旧目录尚未重新导出。
 
 ### 3.1 帧级数据 `data/`
 
@@ -92,11 +92,15 @@ episode = array[start:end]
 | `rgb` | `(T, 480, 640, 3)` | `uint8` | RGB 图像，通道在最后，像素值为 0–255 |
 | `depth` | `(T, 480, 640)` | `uint16` | 深度原始整数值；转为米需要乘根属性中的深度尺度 |
 | `point_cloud` | `(T, 1024, 6)` | `float32` | 场景点云，每点为 `[x, y, z, r, g, b]` |
-| `fingertip_points` | `(T, 5, 3)` | `float32` | 5 个指尖的位置，每个位置 3 维 |
-| `contact_force` | `(T, 5, 3)` | `float32` | 每根手指的三轴聚合触觉力读数 |
-| `tactile_force` | `(T, 5, 120, 3)` | `float32` | 5 根手指，每根 120 个触觉点，每点 3 维 |
+| `fingertip_xyz` | `(T, 5, 3)` | `float32` | 5 个指尖的位置，每个位置 3 维 |
+| `finger_tactile_force` | `(T, 5, 3)` | `float32` | 每根手指的三轴聚合触觉力读数 |
+| `taxel_tactile_force` | `(T, 5, 120, 3)` | `float32` | 5 根手指，每根 120 个触觉点，每点 3 维 |
+| `camera_intrinsic` | `(T, 9)` | `float32` | color RGB 的 3×3 pinhole K，C-order 行展开 |
+| `camera_extrinsic` | `(T, 12)` | `float32` | xarm_base → color optical RDF 的 3×4 `[R\|t]`，C-order 行展开 |
 
 `joint_state` 是观测到的状态，`action` 是控制目标，二者即使形状相同也不能互换。真机 `action_ee` 的前 9 维由机械臂**目标关节**经过 FK 计算；`eef_pose` 则由**实测关节**计算。
+
+Real 外参为 `inv(T_xarm_base_from_color)[:3,:4]`；相机坐标轴为右、下、前，参考系是 `xarm_base`，不等同于 Sim World 的数值坐标。K/E 不包含完整畸变模型；Raw 保留 distortion model、coefficients 和 depth scale。历史导出使用各 episode 的 Raw 标定，部署使用当前相机会话的有效标定。
 
 指尖位置的 5 指顺序由 `fingertip_link_names` 明确保存：
 
@@ -129,7 +133,7 @@ episode 的文本标识和处理配置保存在根属性 `.zattrs`，不在 `dat
 | `fingertip_link_names` | 长度为 5 的字符串列表 | 指尖几何的 link 选择和顺序 |
 | `pointcloud_config` | 配置字典 | 点云生成参数，包括 `num_points: 1024`、深度范围、workspace、去桌面与采样参数 |
 
-此 canonical Zarr 没有保存 sim 的 `done`、`segmentation`、相机内外参数组或 `episode_seeds`；也没有单独的 `eef_pos` 和 `eef_rot6d` 数组。
+Real canonical Zarr 不包含 sim 的 `done`、`segmentation` 或 `episode_seeds`；末端观测使用 `eef_pose`。
 
 ## 4. Sim：`pick_apple_messy.zarr`
 
@@ -177,7 +181,7 @@ episode 的文本标识和处理配置保存在根属性 `.zattrs`，不在 `dat
 | `physics_dt` | 约 `0.00416667` | 仿真物理步长，约 1/240 s |
 | `frame_skip` | `15` | 一个控制步对应 15 个物理步，`dt ≈ physics_dt × frame_skip` |
 
-历史 sim 示例没有真机的 `format`、`data_revision`、`episode_ids` 或 `depth_scale_m_per_unit` 属性，也没有 `arm_qvel`、`arm_effort`、`hand_current` 和稠密 `tactile_force` 数组。新 SIM 数据包含 `eef_pose`，并要求记录及转换保留 `robot_setup_json`；当前安装配置下机器人 base 与 world 重合。
+历史 sim 示例没有真机的 `format`、`data_revision`、`episode_ids` 或 `depth_scale_m_per_unit` 属性，也没有 `arm_qvel`、`arm_effort`、`hand_current` 和稠密 `taxel_tactile_force` 数组。新 SIM 数据包含 `eef_pose`，并要求记录及转换保留 `robot_setup_json`；当前安装配置下机器人 base 与 world 重合。
 
 ## 5. 两种格式之间最容易混淆的地方
 
@@ -211,9 +215,9 @@ eef_pose               (9) = position[0:3] + rot6d[3:9]
 
 | 项目 | Real | Sim |
 | --- | --- | --- |
-| 指尖位置 | `fingertip_points (T,5,3)` | `fingertip_xyz (T,5,3)` |
-| 逐指聚合力 | `contact_force (T,5,3)`，来自硬件聚合触觉通道 | `finger_tactile_force (T,5,3)`，来自仿真接触冲量计算并在物理子步间取平均的净接触力 |
-| `tactile_force` | `(T, 5, 120, 3)`，硬件稠密触觉通道 | 无此字段 |
+| 指尖位置 | `fingertip_xyz (T,5,3)` | `fingertip_xyz (T,5,3)` |
+| 逐指聚合力 | `finger_tactile_force (T,5,3)`，来自硬件聚合触觉通道 | `finger_tactile_force (T,5,3)`，来自仿真接触冲量计算并在物理子步间取平均的净接触力 |
+| `taxel_tactile_force` | `(T, 5, 120, 3)`，硬件稠密触觉通道 | 无此字段 |
 
 字段重命名只能统一接口，不能统一测量含义。真机触觉值保留硬件通道的数据约定；当前 Zarr 属性没有给出其力单位与轴向标定，不能将其当作 sim 世界坐标系下的力直接比较。
 
@@ -228,7 +232,7 @@ eef_pose               (9) = position[0:3] + rot6d[3:9]
 | 字段与布局 | Gaussian 统计通道 | 汇总范围 |
 | --- | --- | --- |
 | `finger_tactile_force (T,5,3)` | 5 指 × 3 轴，共 15 个独立通道 | 训练源行 |
-| `tactile_force (T,5,120,3)` | 3 个轴通道 | 训练源行、手指和 taxel |
+| `taxel_tactile_force (T,5,120,3)` | 3 个轴通道 | 训练源行、手指和 taxel |
 
 逐指 scale/offset 和拟合统计的形状固定为 `(5,3)`，`normalization_dims` 记录统计量数量 15；`eef_pose` 使用 9 个分量，interaction 配方对几何字段保持 `identity`。逐指拟合只在内部临时展开这两个特征轴，应用时检查完整尾部形状并广播，绝不重排 batch/time。数值统计与旧 SIM 平铺 15 维等价，但不自动读取旧字段或旧 checkpoint 参数布局。训练只使用有效训练窗口的唯一源行拟合，验证、推理和恢复复用该份统计；稠密触觉保持三个共享轴通道。
 
@@ -253,6 +257,9 @@ Zarr data/<action_key> → sample["action"]
 | `obs.point_cloud` | `(N, 1024, 6)` | `(B, N, 1024, 6)` |
 | `obs.fingertip_xyz` | `(N, 5, 3)` | `(B, N, 5, 3)` |
 | `obs.finger_tactile_force` | `(N, 5, 3)` | `(B, N, 5, 3)` |
+| `obs.taxel_tactile_force` | `(N, 5, 120, 3)` | `(B, N, 5, 120, 3)` |
+| `obs.camera_intrinsic` | `(N, 9)` | `(B, N, 9)` |
+| `obs.camera_extrinsic` | `(N, 12)` | `(B, N, 12)` |
 | `obs.eef_pose` | `(N, 9)` | `(B, N, 9)` |
 | `obs.rgb`，启用 RGB 预处理后 | `(N, 3, H_out, W_out)` | `(B, N, 3, H_out, W_out)` |
 | `action`，选择关节动作 | `(L, 19)` | `(B, L, 19)` |
@@ -262,7 +269,11 @@ Zarr data/<action_key> → sample["action"]
 
 上表的动作形状按未启用辅助末端监督计算。若设置 `use_aux_ee=True`，Dataset 会额外拼接 `action_ee[..., :9]`，监督张量最后一维增加 9；Zarr 中原始数组的形状不变。
 
-`RGBDataset` 和 `PCDataset` 分别默认使用 `joint_state + rgb`、`joint_state + point_cloud`，它们是**观测选择方式**，不是 Real / Sim 两种数据格式。数据中存在的模态也不等于当前模型一定消费该模态；例如 `depth` 和 `tactile_force` 不会因存在于 Zarr 就自动进入模型。
+`RGBDataset` 和 `PCDataset` 分别默认使用 `joint_state + rgb`、`joint_state + point_cloud`，它们是**观测选择方式**，不是 Real / Sim 两种数据格式。数据中存在的模态也不等于当前模型一定消费该模态；例如 `depth` 和 `taxel_tactile_force` 不会因存在于 Zarr 就自动进入模型。
+
+相机字段可通过现有 Dataset 选择、normalizer 与部署历史接口传递，单帧 shape 为 `(9,)` / `(12,)`，部署为 `(N,9)` / `(N,12)`。当前模型默认输入不变；仅实际消费相机参数的模型才应在 `consumed_observation_fields`、`dataset.sensor_modalities` 与 `normalization` 中声明它们。warmup 使用明确的合成 K/E，不作为真机标定回退。
+
+K 对应存储的原始 color RGB 分辨率；现有 RGB resize/crop 不会同步变换 K。消费相机参数的模型需要明确使用哪个图像坐标系。
 
 ## 7. 只读检查示例
 

@@ -1,5 +1,5 @@
 # 手-物交互表征 + 标准 flow matching + 8 层 DiT-X。
-# 默认使用逐指聚合触觉；稠密阵列模式需额外提供 tactile_force。
+# 默认使用逐指聚合触觉；稠密阵列模式需额外提供 taxel_tactile_force。
 # 同一帧：16 scene + 6 wrist/finger interaction + 1 state = 23 tokens。
 
 policy_name: interaction_flow

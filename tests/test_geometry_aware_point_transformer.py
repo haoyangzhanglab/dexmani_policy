@@ -274,9 +274,7 @@ def test_fixed_anchor_permutation_and_cross_patch_influence(reference_geometry):
         edges = torch.cat((delta, delta.norm(dim=-1, keepdim=True)), dim=-1)
         f = model.local_relation(f, idx, edges)
         cos, sin = model.rope(c)
-        for block in model.blocks:
-            f = block(f, cos, sin)
-        return model.norm(f)
+        return model._global_forward(f, cos, sin)
 
     a = contextualize(features, xyz)
     b = contextualize(features[:, perm], xyz[:, perm])

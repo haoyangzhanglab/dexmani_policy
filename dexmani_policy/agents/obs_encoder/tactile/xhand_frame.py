@@ -1,19 +1,40 @@
+"""Per-frame XHand features; dense CNN follows https://github.com/DinoMini00/KineDex_code."""
+
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.obs_encoder.tactile.xhand_tactile_encoder import ArrayEncoder
+
+class _TaxelEncoder(nn.Module):
+    """KineDex 1D CNN: one finger's [120,3] taxels -> 64 features."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+
+    def forward(self, tactile: torch.Tensor) -> torch.Tensor:
+        return self.net(tactile.transpose(1, 2)).squeeze(-1)
 
 
 class XHandTactileFrameEncoder(nn.Module):
-    """Normalized [B,T,5,3] or [B,T,5,120,3] -> [B,T,5,64]."""
+    """Normalized [B,T,5,3] or [B,T,5,120,3] -> [B,T,5,64].
+
+    Fingers: thumb, index, middle, ring, pinky. Real aggregates are SDK readings;
+    Sim contact forces share the field name but are not equivalent measurements.
+    """
 
     num_tokens = 5
     frame_dim = 64
 
     def __init__(self, input_key: str = "finger_tactile_force") -> None:
         super().__init__()
-        if input_key not in ("finger_tactile_force", "tactile_force"):
-            raise ValueError("input_key must be 'finger_tactile_force' or 'tactile_force'")
+        if input_key not in ("finger_tactile_force", "taxel_tactile_force"):
+            raise ValueError("input_key must be 'finger_tactile_force' or 'taxel_tactile_force'")
         self.input_key = input_key
         self.input_shape = (5, 3) if input_key == "finger_tactile_force" else (5, 120, 3)
         if input_key == "finger_tactile_force":
@@ -24,7 +45,7 @@ class XHandTactileFrameEncoder(nn.Module):
                 nn.ReLU(),
             )
         else:
-            self.frame_encoder = ArrayEncoder(backend="kinedex", use_eca=False)
+            self.frame_encoder = _TaxelEncoder()
 
     def forward(
         self,

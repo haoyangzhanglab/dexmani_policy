@@ -47,7 +47,9 @@ result = encoder(pointcloud)  # [B,N,6]
 
 `return_geometry=True` 另外返回 `center_indices`、`neighbor_indices`、`patch_radius`，用于几何证据读取。这些只是索引与几何元数据，不是第二套特征。`patch_radius` 是原始支持集半径，不是经过全局 Attention 后完整的感受野。
 
-编码器不接机器人状态、动作、图像 Tokens、语言或时间索引。需要这些模态时在编码器外融合。无独立图像 Backbone，因此原 `semantic_channels/image_tokens/point_uv/...` 参数不再属于此 API；独立 `PointImageFusion` 文件未删除或修改。
+编码器直接消费 XYZ 或 XYZRGB，不接机器人状态、动作、图像 Tokens、语言或时间索引。其他模态在策略侧融合；点的 RGB 随邻域成员进入几何编码，不依赖独立图像 Backbone。
+
+独立的 [PointImageFusion](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py) 模块予以保留；当前 GAPT 和交互策略没有接入其图像特征融合路径。
 
 ## 当前仓库衔接
 
@@ -72,7 +74,7 @@ Agent、ObsEncoder 和配置的默认 Patch 数同步为 256、深度为 6。策
 | 检查 | 结果与范围 |
 |---|---|
 | Python 语法、实际 import、`git diff --check` | PASS |
-| GAPT 定向测试 | **40 PASS**；含原生 CPU/CUDA，XYZ/XYZRGB，FP32/BF16，默认模型前反向与 AdamW 更新、局部编译输出/梯度对照 |
+| GAPT 定向测试 | **40 PASS**；含原生 CPU/CUDA，XYZ/XYZRGB，FP32/BF16，默认模型前反向与 AdamW 更新、全局阶段编译输出/梯度对照 |
 | 几何与位置编码 | PASS；独立 Gaussian/中心化协方差/Fourier 数值对照、米制 RoPE 相位与 Q/K Norm 顺序、固定锚点下完整 forward 排列等变、重复坐标按索引排除 self、随机 FPS 索引对齐 |
 | 策略接口 | PASS；真实 Scene 与两路 HandSceneRelation 共享同一 Tensor，原始成员距离/硬半径/无支持零更新，每帧 23 tokens |
 | CUDA 合成策略集成 | PASS；默认模型、BF16、DiT-X 与 GAPT 全局阶段 compile、normalization 模式、optimizer 与 warmup；2 条合成观测执行 12 次更新后 GAPT 参数实际变化，raw/EMA 严格保存加载及预测一致 |
@@ -84,9 +86,9 @@ Agent、ObsEncoder 和配置的默认 Patch 数同步为 256、深度为 6。策
 
 初始集成曾额外尝试编译整个 GAPT：CUDA BF16 前反向可运行，但原生 PyTorch3D 产生 graph break，部分 backward 无法使用 CUDA Graph。该尝试的 FP32 compiled/eager 最大差异为 `2.38e-6`；BF16 最大差异为 `0.0382`、RMS 为 `0.00719`，在预设 `atol=rtol=0.025` 下有 1/98,304 元素超限。这个历史对比仍记为失败，阈值未放宽；当前正式路径采用上文的局部编译边界。
 
-局部编译验证：FP32/BF16 的完整 GAPT 输出、原始几何索引、输入及各阶段参数梯度对照通过；参数身份与 state_dict 键不变。三组 BF16 输入的最大输出差异约 `0.0044`，保留原 `atol=rtol=0.025`；梯度按阶段比较相对 L2，FP32/BF16 阈值分别为 `2e-4/0.025`。12 次合成策略更新及 raw/EMA 严格恢复通过。Profiler 在连续三次 GAPT 前反向中记录到 6 次 `cudaGraphLaunch`，编译区域实际发生 replay。
+全局阶段编译验证：FP32/BF16 的完整 GAPT 输出、原始几何索引、输入及各阶段参数梯度对照通过；参数身份与 state_dict 键不变。三组 BF16 输入的最大输出差异约 `0.0044`，保留原 `atol=rtol=0.025`；梯度按阶段比较相对 L2，FP32/BF16 阈值分别为 `2e-4/0.025`。12 次合成策略更新及 raw/EMA 严格恢复通过。Profiler 在连续三次 GAPT 前反向中记录到 6 次 `cudaGraphLaunch`，编译区域实际发生 replay。
 
-RTX 4090、PyTorch 2.4.1 上的 BF16 局部编译前后短测（同一模型/输入布局，5 次预热，含同步的墙钟均值；GAPT 30 次，策略 20 次）：
+RTX 4090、PyTorch 2.4.1 上的 BF16 全局阶段编译前后短测（同一模型/输入布局，5 次预热，含同步的墙钟均值；GAPT 30 次，策略 20 次）：
 
 | 范围 | GAPT 全部 eager | GAPT 全局阶段 compile | 峰值 allocated（前→后） |
 |---|---:|---:|---:|

@@ -33,10 +33,8 @@ def farthest_point_sample(
 ):
     """Farthest point sampling with optional randomness for data augmentation.
 
-    Standard FPS is deterministic: given the same point cloud, it always selects
-    the same subset in the same order.  This can cause the policy to overfit to
-    the deterministic sampling pattern.  Randomizing the start point and output
-    order acts as a cheap, effective regulariser (R3D-Policy, 2026).
+    Randomness changes selection and ordering; returned points retain their
+    original coordinates and attributes, including when FPS uses noisy XYZ.
 
     Args:
         pointcloud:          (B, N, C>=3) – xyz must be the first three channels.
@@ -164,7 +162,7 @@ def knn_point(num_neighbors: int, support_xyz: torch.Tensor, query_xyz: torch.Te
         K=min(num_neighbors, support_xyz.size(1)),
         return_sorted=False,
     )
-    return result.idx if hasattr(result, "idx") else result[1]
+    return result.idx
 
 
 def query_ball_point(
@@ -181,7 +179,7 @@ def query_ball_point(
         radius=radius,
         return_nn=False,
     )
-    neighbor_idx = result.idx if hasattr(result, "idx") else result[1]
+    neighbor_idx = result.idx
 
     valid_mask = neighbor_idx >= 0
     has_valid = valid_mask.any(dim=-1, keepdim=True)

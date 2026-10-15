@@ -511,10 +511,10 @@ def validate_config(cfg):
 
 
 def compile_models(model, ema_model=None, **compile_kwargs):
-    """torch.compile the backbone of *model* and optionally *ema_model*.
+    """Compile Agent-selected regions of *model* and optionally *ema_model*.
 
-    The shared ``compile_backbone()`` protocol is defined in
-    :class:`~dexmani_policy.agents.core.base.BaseAgent`.
+    ``BaseAgent.compile_backbone()`` compiles the action backbone. Agent
+    overrides may also compile dense observation-encoder regions.
 
     Keyword arguments are forwarded to :func:`torch.compile`; defaults to
     ``mode='reduce-overhead'``.

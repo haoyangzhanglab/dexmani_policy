@@ -697,7 +697,8 @@ def normalization_dims_from_config(cfg):
     # Keep the 15 finger/axis statistics independent despite the explicit (5, 3)
     # layout. Dense tactile arrays retain their three shared axis statistics.
     defaults = {'joint_state': agent.get('state_dim', 19), 'eef_pose': 9,
-                'fingertip_xyz': 15, 'finger_tactile_force': 15, 'tactile_force': 3,
+                'fingertip_xyz': 15, 'finger_tactile_force': 15, 'taxel_tactile_force': 3,
+                'camera_intrinsic': 9, 'camera_extrinsic': 12,
                 'tactile_valid': 5,
                 'point_cloud': cfg.get('dataset', {}).get('pc_dim') or dims.get('point_cloud', 6)}
     for key, width in defaults.items():

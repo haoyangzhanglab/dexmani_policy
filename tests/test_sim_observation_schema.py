@@ -1,6 +1,7 @@
 from dataclasses import replace
 import io
 from pathlib import Path
+from unittest.mock import patch
 
 import hydra
 import numpy as np
@@ -19,7 +20,7 @@ from dexmani_policy.smoke_test import load_config
 from dexmani_policy.training.build_utils import build_dataset_and_normalizer, validate_config
 
 
-def write_sim_data(path, *, flat_force=False):
+def write_observation_data(path, *, flat_force=False):
     rng = np.random.default_rng(12)
     n = 8
     data = {
@@ -28,6 +29,9 @@ def write_sim_data(path, *, flat_force=False):
         "point_cloud": rng.normal(size=(n, 16, 6)).astype("f4"),
         "fingertip_xyz": rng.normal(size=(n, 5, 3)).astype("f4"),
         "finger_tactile_force": rng.normal(size=(n, 5, 3)).astype("f4"),
+        "taxel_tactile_force": rng.normal(size=(n, 5, 120, 3)).astype("f4"),
+        "camera_intrinsic": np.tile(np.array([300, 0, 160, 0, 310, 120, 0, 0, 1], dtype="f4"), (n, 1)),
+        "camera_extrinsic": np.tile(np.array([1, 0, 0, .2, 0, 1, 0, -.1, 0, 0, 1, .3], dtype="f4"), (n, 1)),
         "eef_pose": np.tile(np.array([.2, .1, .3, 1, 0, 0, 0, 1, 0], dtype="f4"), (n, 1)),
     }
     if flat_force:
@@ -61,8 +65,8 @@ def test_interaction_config_and_dataset_preserve_finger_axes(tmp_path):
     }
     assert "wrist_pose_key" not in cfg.agent
 
-    path = tmp_path / "sim.zarr"
-    data = write_sim_data(path)
+    path = tmp_path / "observations.zarr"
+    data = write_observation_data(path)
     cfg = small_config(path)
     dataset, normalizer = build_dataset_and_normalizer(cfg, verbose=False)
     sample = dataset[0]
@@ -92,15 +96,20 @@ def test_interaction_config_and_dataset_preserve_finger_axes(tmp_path):
 
 def test_training_rejects_flat_force_statistics(tmp_path):
     path = tmp_path / "flat.zarr"
-    write_sim_data(path, flat_force=True)
+    write_observation_data(path, flat_force=True)
     with pytest.raises(ValueError, match="finger_tactile_force requires stored shape"):
         build_dataset_and_normalizer(small_config(path), verbose=False)
 
 
-def test_cpu_dataset_agent_and_runtime_consume_new_schema(tmp_path):
-    path = tmp_path / "sim.zarr"
-    data = write_sim_data(path)
+@pytest.mark.parametrize("dense", [False, True])
+def test_cpu_dataset_agent_and_runtime_consume_new_schema(tmp_path, dense):
+    path = tmp_path / "observations.zarr"
+    data = write_observation_data(path)
     cfg = small_config(path)
+    if dense:
+        cfg.agent.tactile_input_key = "taxel_tactile_force"
+        cfg.dataset.sensor_modalities.append("taxel_tactile_force")
+        cfg.normalization = dict(cfg.normalization, taxel_tactile_force="gaussian")
     dataset, normalizer = build_dataset_and_normalizer(cfg, verbose=False)
     agent = hydra.utils.instantiate(cfg.agent)
     agent.action_key = cfg.action_key
@@ -137,11 +146,76 @@ def test_cpu_dataset_agent_and_runtime_consume_new_schema(tmp_path):
     assert len(timing["bootstrap"]) == 1
 
 
+def test_camera_fields_dataset_normalizer_and_runtime(tmp_path):
+    from dexmani_policy.agents.core.base import BaseAgent
+
+    fields = ("joint_state", "camera_intrinsic", "camera_extrinsic", "taxel_tactile_force")
+
+    class ObservationProbe(BaseAgent):
+        """Offline consumer only; production models keep their observation sets."""
+        consumed_observation_fields = fields
+
+        def __init__(self):
+            super().__init__(torch.nn.Identity(), torch.nn.Identity(), 4, 2, 2, 19)
+            self.action_key = "action"
+
+        def predict_action(self, observations, **kwargs):
+            self.seen = self.preprocess(observations)
+            # Every declared field affects the result; no unused-input validation bypass.
+            value = sum(self.seen[key].mean() for key in fields)
+            return {"pred_action": value.expand(1, 4, 19)}
+
+    path = tmp_path / "camera.zarr"
+    data = write_observation_data(path)
+    cfg = small_config(path)
+    cfg.dataset.sensor_modalities = list(fields)
+    cfg.normalization = {"action": "limits", **{key: "gaussian" for key in fields}}
+    dataset, normalizer = build_dataset_and_normalizer(cfg, verbose=False)
+    dims = normalization_dims_from_config(cfg)
+    assert tuple(dims[key] for key in fields) == (19, 9, 12, 3)
+    sample = dataset[0]
+    assert set(sample["obs"]) == set(fields)
+    for key in fields:
+        assert sample["obs"][key].dtype == torch.float32
+        np.testing.assert_array_equal(sample["obs"][key], data[key][:2])
+        normalized = normalizer[key].normalize(sample["obs"][key])
+        torch.testing.assert_close(normalizer[key].unnormalize(normalized), sample["obs"][key])
+
+    agent = ObservationProbe().eval()
+    agent.load_normalizer_from_dataset(normalizer)
+    agent.set_normalization_spec(dict(cfg.normalization), dims)
+    plain = OmegaConf.to_container(cfg, resolve=True)
+    info = PolicyInfo(Path("."), Path("unused.pt"), "offline", cfg.task_name,
+                      fields, 2, 2, 4, "joint", None, None, None, "raw", 1, 19, 19,
+                      rgb_preprocessing_kwargs(plain["dataset"]), dict(cfg.normalization), 6)
+    policy = LoadedPolicy(agent, plain, info, device="cpu", seed=0)
+    observations = {key: data[key][:3].copy() for key in fields}
+    future = policy.predict(observations)
+    assert future.shape == (3, 19) and np.isfinite(future).all()
+    for key in fields:
+        torch.testing.assert_close(agent.seen[key], normalizer[key].normalize(torch.from_numpy(data[key][1:3])))
+    for key in fields:
+        changed = dict(observations, **{key: observations[key] + .5})
+        assert not np.array_equal(policy.predict(changed), future)
+        with pytest.raises(ValueError, match="Nonfinite policy observation"):
+            policy.predict(dict(observations, **{key: np.full_like(observations[key], np.nan)}))
+    timing = policy.warmup(samples=1)
+    assert len(timing["bootstrap"]) == 1
+    for key, columns in (("camera_intrinsic", 3), ("camera_extrinsic", 4)):
+        restored = normalizer[key].unnormalize(agent.seen[key])
+        assert restored.shape == (2, 3 * columns) and restored.dtype == torch.float32
+        expected = torch.eye(3, columns).reshape(1, -1).expand(2, -1)
+        torch.testing.assert_close(restored, expected, atol=1e-5, rtol=0)
+    with patch.object(agent, "predict_action", return_value={"pred_action": torch.full((1, 4, 19), float("nan"))}):
+        with pytest.raises(ValueError, match="Nonfinite policy prediction"):
+            policy.warmup(samples=1)
+
+
 def test_dense_tactile_retains_array_layout_and_aggregate_evidence():
     from dexmani_policy.agents.obs_encoder.interaction.encoder import InteractionObsEncoder
     from dexmani_policy.agents.obs_encoder.tactile.xhand_frame import XHandTactileFrameEncoder
 
-    encoder = XHandTactileFrameEncoder("tactile_force").eval()
+    encoder = XHandTactileFrameEncoder("taxel_tactile_force").eval()
     valid = torch.ones(1, 2, 5, dtype=torch.bool)
     valid[:, :, 1] = False
     tactile = torch.randn(1, 2, 5, 120, 3)
@@ -153,9 +227,9 @@ def test_dense_tactile_retains_array_layout_and_aggregate_evidence():
     assert not output[:, :, 1].any()
     interaction = InteractionObsEncoder(n_obs_steps=2, token_dim=24, num_patches=4,
                                         group_size=4, patch_depth=1, num_scene_tokens=2,
-                                        tactile_input_key="tactile_force")
+                                        tactile_input_key="taxel_tactile_force")
     assert set(interaction.consumed_observation_fields) == {
-        "joint_state", "point_cloud", "fingertip_xyz", "eef_pose", "finger_tactile_force", "tactile_force"
+        "joint_state", "point_cloud", "fingertip_xyz", "eef_pose", "finger_tactile_force", "taxel_tactile_force"
     }
 
 
@@ -220,9 +294,9 @@ def test_finger_normalizer_rejects_shared_or_flat_checkpoint_statistics(shape):
 def test_dense_tactile_normalization_still_shares_three_axis_statistics():
     values = torch.arange(2 * 5 * 120 * 3, dtype=torch.float32).reshape(2, 5, 120, 3)
     actual, reference = LinearNormalizer(), LinearNormalizer()
-    actual.fit_field_chunks("tactile_force", values.split(1), mode="gaussian")
+    actual.fit_field_chunks("taxel_tactile_force", values.split(1), mode="gaussian")
     reference.fit_field_chunks("dense_axes", values.reshape(2, 600, 3).split(1), mode="gaussian")
-    assert actual.params_dict["tactile_force"]["scale"].shape == (3,)
-    validate_normalizer_state(actual, {"tactile_force": "gaussian"}, {"tactile_force": 3})
-    torch.testing.assert_close(actual["tactile_force"].normalize(values),
+    assert actual.params_dict["taxel_tactile_force"]["scale"].shape == (3,)
+    validate_normalizer_state(actual, {"taxel_tactile_force": "gaussian"}, {"taxel_tactile_force": 3})
+    torch.testing.assert_close(actual["taxel_tactile_force"].normalize(values),
                                reference["dense_axes"].normalize(values), atol=0, rtol=0)

@@ -354,12 +354,18 @@ class LoadedPolicy:
             "eef_pose": (9,),
             "finger_tactile_force": (5, 3),
             "fingertip_xyz": (5, 3),
-            "tactile_force": (5, 120, 3),
+            "taxel_tactile_force": (5, 120, 3),
         }
         observation = {}
         for name in self.info.observation_fields:
             if name == "tactile_valid":
                 observation[name] = np.ones((self.info.n_obs_steps, 5), dtype=np.bool_)
+                continue
+            if name in {"camera_intrinsic", "camera_extrinsic"}:
+                # Synthetic pinhole K / base-to-camera [R|t], not a live calibration fallback.
+                columns = 3 if name == "camera_intrinsic" else 4
+                matrix = np.eye(3, columns, dtype=np.float32)
+                observation[name] = np.tile(matrix.reshape(1, -1), (self.info.n_obs_steps, 1))
                 continue
             if name == "rgb":
                 if rgb_hw is None:
@@ -382,17 +388,11 @@ class LoadedPolicy:
                 if dtype == np.uint8
                 else ((values % 101) / 100.0 - 0.5).astype(dtype)
             )
-        def checked_predict(**kwargs):
-            output = self.predict(observation, **kwargs)
-            if not np.isfinite(output).all():
-                raise ValueError("Nonfinite policy warmup future")
-            return output
-
         def measure(**kwargs):
             durations = []
             for _ in range(samples):
                 start = time.perf_counter_ns()
-                checked_predict(**kwargs)
+                self.predict(observation, **kwargs)
                 durations.append((time.perf_counter_ns() - start) / 1e9)
             return tuple(durations)
 
@@ -400,12 +400,12 @@ class LoadedPolicy:
         try:
             # Initialization is outside the measured set; its finite result is the
             # reusable synthetic prefix in physical units for the guided path.
-            prefix = checked_predict()
+            prefix = self.predict(observation)
             bootstrap = measure()
             steady = bootstrap
             if self.rtc_guidance_cap > 0:
                 kwargs = {"rtc_prefix": prefix, "delay_steps": rtc_delay}
-                checked_predict(**kwargs)
+                self.predict(observation, **kwargs)
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}
         finally:
