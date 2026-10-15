@@ -4,6 +4,8 @@
 >
 > 编制日期：2026-10-15（Asia/Shanghai）。
 >
+> 终审修订：2026-10-15。已复核 main@8f8465100e39b8b9d6e34543ca1108a3f5c0e73a；与下述代码基线相比，仅新增本任务书，模型代码未变化。本版通过静态设计与实施边界审查，准予进入实现；模型正确性、训练与性能仍须按本文验收。
+>
 > 代码依据：[haoyangzhanglab/dexmani_policy](https://github.com/haoyangzhanglab/dexmani_policy)，main 分支提交 [d615bb225658ed5e754344aaf2671c788502ab05](https://github.com/haoyangzhanglab/dexmani_policy/commit/d615bb225658ed5e754344aaf2671c788502ab05)，提交说明 “1014 temp”，提交时间 2026-10-14 04:13:55 UTC。
 >
 > 本任务只重构 interaction_flow 的观测表征。先遵守根目录 [AGENTS.md](AGENTS.md)，再执行本文。若执行时 HEAD 已变化，先检查本文涉及文件的差异，按实际接口调整，不回滚用户新改动。本任务书不是仓库级长期规则。
@@ -94,7 +96,8 @@ hand 使用一个简单字典即可；固定顺序已定义 part ID，无需引�
 - 选择 contact_force 时，仅消费该字段；选择 tactile_force 时，仅消费该字段，不再强制读取额外 contact_force。
 - SIM contact_force 的 [BT,15] 到 [BT,5,3] reshape 必须发生在现有 normalizer 之后，保留原有 15 通道统计。不要为了统一布局改变归一化粒度。
 - 几何字段保持 identity；joint_state 和触觉沿用当前归一化配方。Real eef_pose 使用 identity，只有 XYZ 被模型消费。
-- consumed_observation_fields、dataset.sensor_modalities、normalization 和 env_runner.sensor_modalities 必须一致。仓库的 validate_observation_fields 会拒绝遗漏和未消费字段。
+- consumed_observation_fields、dataset.sensor_modalities 与 env_runner.sensor_modalities 的观测字段集合必须一致；normalization 的键集合必须等于“数值观测字段 + action”。必须保留 normalization.action，不要把动作字段误当成未消费观测删除。启用 tactile_valid 时其 normalization 为 identity。
+- SIM/Real 配方切换时完整更新字段集合，尤其清除已不使用的 eef_pos/eef_rot6d/contact_force 条目；不要让 YAML 深合并残留旧字段。复用 validate_observation_fields 与 validate_normalization_spec 的现有严格校验。
 
 ## 5. GeometryReadout：一次共享几何读取
 
@@ -104,7 +107,7 @@ hand 使用一个简单字典即可；固定顺序已定义 part ID，无需引�
 
 修改 GeometryPatchEncoder 时保持默认接口兼容，增加明确的 return_geometry=False 关键字；新 encoder 使用 return_geometry=True。
 
-直接复用 forward 中已计算的 neighbor_xyz，不再让下游携带整份原始点云通过 neighbor_idx 重新 gather。正常几何输出不依赖 return_intermediate；后者仅控制可视化/诊断信息。
+直接复用 forward 中已计算的 neighbor_xyz，不再让下游携带整份原始点云通过 neighbor_idx 重新 gather。patches 保留现有键 patch_token、patch_center，新增 member_xyz、member_valid，不把旧键重命名为 token/center。正常几何输出不依赖 return_intermediate；后者仅控制可视化/诊断信息。
 
 当前 GeometryPatchEncoder 要求有限点且 N>=max(M,K)，因此常规 member_valid 全为 true。保留该输入要求。若接口接受部分无效成员，最近点计算必须使用 mask；不能把零坐标当作有效表面。不要借本任务扩展整个点云缺测/补全系统。
 
@@ -112,12 +115,27 @@ hand 使用一个简单字典即可；固定顺序已定义 part ID，无需引�
 
 - Scene queries：迁移现有 _spatial_partition 与区域平均池化算法；由 16 个区域的 pooled patch features + seed XYZ 的 PE 初始化。
 - Hand queries：共享的位置 MLP 编码 A，加 6 个可学习部位 identity embeddings。
-- PE 可直接沿用 SceneContextPool 的两层 XYZ MLP 形式，作用于米制 XYZ；避免额外手形编码、姿态编码或新位置编码框架。
+- PE 采用 SceneContextPool 的两层 XYZ MLP 形式（3→D→D，GELU），在 scene seed、hand anchor 和 patch center 之间共享参数，作用于米制 XYZ；不增加手形编码、姿态编码或新位置编码框架。
 - Stack Q=[Q_scene;Q_hand]，形状 [BT,22,D]。
 - K/V 共享 memory=LN(patch_token+PE(patch_center))，只投影一次。
 - 只执行一次 22×M 的多头 cross-attention，然后共享 residual/FFN，拆分为 S 与 H。不再增加 scene self-attention 或手部第二次几何读取。
 
-区域池化只是构造 scene query，不是第二个 learned attention。当前只有一种 patch 分辨率：称为“单次、多距离范围几何读取”，不要写成已经具备多分辨率点云层级的“多尺度编码”。
+区域池化只是构造 scene query，不是第二个 learned attention。若 member_valid 含 false，先计算 patch_valid=member_valid.any(-1)：分区 seed 只能选有效 patch，区域平均的无效 patch 权重为零，attention 中也屏蔽这些 keys。每帧有效 patch 少于 S 时在 softmax 前报错；有效 seed 保证所属区域非空。区域平均保持现有 FP32 累积方式。
+
+明确 residual 基准，避免把投影后的 Q 当成残差：
+
+~~~text
+X0 = concat(Q_scene, Q_hand)             # 未做 Wq 投影的 22 tokens
+Q = Wq(LN_query(X0))
+K,V = Wk(memory), Wv(memory)
+Y0 = X0 + Wo(concat_heads(u))
+Y = Y0 + FFN(LN_ffn(Y0))
+S,H = split(Y, [16,6])                   # 实现按配置 S 切分
+~~~
+
+新增读取与交互模块的 FFN 统一取 D→2D→D、GELU，attention dropout=0；这些默认值固定在模块实现，不再增加一组实验开关。不改变原 GeometryPatchEncoder 或动作 backbone 的 FFN/dropout。所有 head 的内容聚合与关系 value 聚合复用同一份 alpha；“一次读取”指一套 Q/K/V 和一次 softmax，不要求在单个 GPU kernel 中完成。
+
+当前只有一种 patch 分辨率：称为“单次、多距离范围几何读取”，不要写成已经具备多分辨率点云层级的“多尺度编码”。
 
 ### 5.3 最近可见表面关系
 
@@ -131,6 +149,8 @@ e_ij = MLP([delta_ij / metric_scale, d_ij / metric_scale])   # r=16
 ~~~
 
 metric_scale=0.10 m。最近成员选择和距离计算用 FP32；离散索引选择可 no_grad，但关系 MLP 与投影必须能训练。
+
+nearest_patch_evidence 对无有效成员的 patch 返回 observed=false、distance=inf。该 inf 只能用于诊断，不能直接进入 MLP 或高斯距离项。先用 torch.where(observed, value, 0) 构造有限的 safe_delta/safe_distance；以安全值计算关系和偏置，最后将无效 key 的 logit 置 -inf。global head 的解析距离惩罚显式设为零，不计算 inf/inf。valid 成员、锚点和 memory 必须满足有限性检查；被 mask 的成员值不得污染输出或梯度。
 
 不要用 patch center 距离代替该默认表面距离，不对 XYZ 分别做标准化后再相减。距离仅代表可见几何接近程度，不等于接触、占据概率或无遮挡证明。
 
@@ -155,7 +175,7 @@ u_hand_i^h = sum_j alpha_ijh * v_j^h
 - 对无有效成员的 patch 屏蔽 key；对非法/非有限 memory 报错。不要让整行 -inf softmax 产生 NaN。
 - 先聚合 r 维关系再用每头 U_h 映射至 d_head；U_h 使用无 bias 线性投影。
 - 禁止构造 [BT,6,M,D] 或 [BT,6,M,heads,d_head] 的全维 pairwise edge_value。必要的关系张量是 [BT,6,M,r]。
-- 计算 logits、距离偏置与 softmax 使用 FP32；其余投影按现有 AMP 配方。
+- 在关闭 autocast 的作用域内，以 FP32 计算 logits、距离偏置与 softmax；只调用 .float() 而仍留在 autocast matmul 中不足以保证这一点。其余投影按现有 AMP 配方。
 - 训练默认不返回 attention maps；return_intermediate=True 才提供 surface_distance、surface_valid、scene/hand attention 等诊断。
 
 这里的效率改进是减少独立读取与全维 pairwise 中间张量。GeometryPatchEncoder 本身仍可能占主要耗时；未经 profile 不承诺整条策略按相同比例加速。
@@ -187,7 +207,7 @@ b_ijh = small_MLP([delta_xyz/scale, distance/scale])_h
          + learned_part_pair_bias[h, query_part_id, key_part_id]
 ~~~
 
-空间关系 bias 使用 A 和 key_xyz；手指身份对应由固定排序确定，不通过原始传感器幅值推测。part-pair bias 可以用很小的 [heads,6,6] 参数表，不建立图网络或第二层协同模块。
+空间关系定义为 delta_xyz_ij=key_xyz_j-A_i，distance=norm(delta_xyz_ij)，scale 使用同一个 metric_scale=0.10 m。small_MLP 固定为 4→32→heads、GELU；part-pair bias 使用 [heads,6,6] 参数表并零初始化。手指身份对应由固定排序确定，不通过原始传感器幅值推测，不建立图网络或第二层协同模块。
 
 ### 6.3 逐指门控只进入触觉 key logits
 
@@ -211,7 +231,7 @@ Z = Z0 + FFN(LN(Z0))
 - 门控只读取同指 H_tip 与 F，不读取 s、S、原始力旁路或上一帧。
 - GateMLP 是共享的小 MLP，建议 hidden_dim=64、输出每指一个标量；所有 query/head 共享该指的 key gate。
 - 末层 weight=0、bias=0，初始 g=0.5；该初始化不是旧 2*sigmoid 的 unit gain。
-- 使用 FP32 logsigmoid 和 softmax，避免先 sigmoid 再 log 的下溢；不能依赖 BF16 在零点附近保留微小门控差异。
+- 在关闭 autocast 的作用域内计算 FP32 QK logits、logsigmoid、加性门控和 softmax，避免先 sigmoid 再 log 的下溢；不能将计算后的 log_rho 先转回 BF16，再加入 FP32 logits。
 - gate 只加在 logits，不再同时乘 E/V，避免双重抑制。
 - 输出一次 attention residual + FFN 即止，不追加 hand self-attention。
 - 6 个几何 keys 始终提供非空有效集合，因此触觉全部缺失时仍可正常前向。
@@ -221,13 +241,13 @@ Z = Z0 + FFN(LN(Z0))
 
 - use_tactile_valid=false 时创建全 true 的 [BT,5] mask。
 - true 时要求显式 bool mask；有效零读数不能据阈值改成 false。
-- 在触觉编码前用 torch.where 清除无效值，编码后再次置零；投影/embedding 后仍屏蔽缺测 keys。不能用 NaN*0 作为清洗。
+- 在触觉编码前用 torch.where 清除无效值，编码后再次置零；Interaction 入口也对无效 F 做 torch.where，不能假定单独调用模块时上游已清洗。投影/embedding 后仍屏蔽缺测 keys。不能用 NaN*0 作为清洗，也不能仅在 softmax 后清零来补救已经污染的 K/V。
 - tactile_dropout_prob 保留为编码阶段的 mask dropout，默认 0。新实现按 [BT,5] 采样，不借 dropout 将两帧绑定；不改变几何输入。
 - tactile_fusion=none 时将 5 个 tactile keys 全部屏蔽，保持 6 queries、11 个槽位和最终 46-token 布局。
 
 **数据层现有限制必须保留在实现说明中：** BaseDataset 按原始有限性筛选窗口；Real runtime 在进入 encoder 前拒绝非有限输入；normalizer 当前不会按 tactile_valid 排除有限占位值。encoder 层的 NaN-mask 测试不能被报告为端到端缺测数据训练已经支持。
 
-本轮默认实验使用现有有限、无缺测污染的训练数据及编码后 mask dropout，不重写通用 Dataset/normalizer。若训练集实际存在 valid=false 的传感器样本，应在拟合触觉统计前拒绝该未支持配方，并报告需要 mask-aware fitting；不要静默将占位值纳入统计。该检查只在本策略且显式启用 tactile_valid 时触发，不能扩大成全仓库数据重构。Real 推理可使用有限占位值 + false mask，调用方仍须满足 runtime 的有限性契约。
+本轮默认实验使用现有有限、无缺测污染的训练数据及编码后 mask dropout，不重写通用 Dataset/normalizer。仅当本策略启用 tactile_valid，且本次需要从数据拟合所选触觉字段的非 identity normalizer 时，检查与 iter_normalization_data 一致的训练源行；若其中存在 valid=false，应在拟合前明确拒绝并说明需要 mask-aware fitting，不能将有限占位值静默纳入统计。该检查不扫描验证集来决定训练配方，也不因未被采样的 episode 拒绝训练。触觉使用 identity 或从已绑定 checkpoint 恢复统计时，不因 false mask 额外拒绝；仍执行原有数据有限性与 strict resume 校验。Real 推理可使用有限占位值 + false mask，调用方仍须满足 runtime 的有限性契约。
 
 ## 7. 编排与策略集成
 
@@ -275,7 +295,11 @@ adapt/concat 可以是该类中的短方法或几行代码，不必再建立模�
 
 仅在实际兼容要求出现时小改 dexmani_policy/training/build_utils.py，例如缺测训练配方的窄范围拒绝；不要为了新 encoder 改写通用 normalization、loader、runtime 或 checkpoint 框架。现有 strict restore 和字段校验应被复用。
 
-当前 dexmani_policy/train_ddp.py 使用 find_unused_parameters=False。固定门控、关闭关系 value 或关闭触觉等消融，必须在构造时冻结/不实例化不会参与计算的参数，或保持明确可达的计算路径；不能留下未使用的可训练参数，再通过打开 find_unused_parameters 掩盖问题。有效位导致某批次梯度为零与结构性未使用参数应区分。此项属于消融配置验收，不要求本次自动启动多卡训练。
+当前 dexmani_policy/train_ddp.py 使用 find_unused_parameters=False。消融优先保持模块/state_dict 结构一致，在构造时根据配置冻结被禁用分支的参数，且在建立 optimizer/EMA/DDP 前完成：fixed 模式冻结 gate 专用 MLP/LayerNorm；use_relative_value=false 冻结 U_h；tactile_fusion=none 冻结 tactile encoder、触觉专用投影/归一化/embedding 与 gate 专用参数。共享的 Q/K/V、几何/关系 bias 和 FFN 继续训练。不要按某个 batch 的有效位动态冻结参数。
+
+启用触觉的配置即使某个 batch/某个 rank 全部 valid=false，也必须通过固定的 masked attention 计算图；禁止 if not valid.any(): return geometry_only(...) 这类跳过可训练触觉分支的提前返回。参数梯度为数值零可以合法，结构性 grad=None 必须解释并解决。不能通过打开 find_unused_parameters 掩盖新模块问题。
+
+所有消融使用自身绑定配置恢复，至少覆盖默认、fixed gate、no tactile 和 no relative value 四种配置的构造、反向、optimizer 覆盖与严格保存/加载检查。此项不要求本次自动启动多卡训练。
 
 ### 8.1 新配置建议
 
@@ -328,14 +352,15 @@ D=192、M=128、K=32、patch_depth=4、S=16 等沿用现有键和值。校验 he
 | 帧独立 | 只扰动 t=0 的点云、锚点或触觉，t=1 的 frame_tokens 不变；测试前关闭随机增强/dropout，使用 eval FPS |
 | 表面邻近 | 反例中一个 patch 的中心较远、成员较近，计算出的表面距离确实取成员；不偷偷回退到 center |
 | 关系 value | 小张量数值对照：先聚合 r 维再线性投影，与等价的显式 pairwise value 公式在容差内一致；关系 MLP/U_h 有梯度 |
-| 几何有效性 | 无效成员不参与最近点；无效 patch 不获 attention；不足有效 patch / 非法点云明确报错；不出现 NaN |
+| 几何有效性 | 无效成员不参与最近点；无效 patch 不参与 seed/区域平均/attention；inf 距离经安全值处理，global head 不计算 inf/inf；不足有效 patch / 非法点云明确报错；前向与梯度有限 |
 | 门控语义 | 固定 Q/K/V/b，降低单指 gate 降低该触觉 key 的概率；两个几何 key 的注意力比值不变 |
 | 门控数值 | 极端 ell、FP32/BF16 场景前向与反向有限；使用 logsigmoid；FP32-only 环境不能冒称 BF16 CUDA 已验证 |
 | 有效零与缺失 | 有效零保留可读 key；invalid key 概率严格为零；全部 invalid 等价于 tactile_fusion=none；encoder 边界无效 NaN 不污染输出 |
-| 字段契约 | 配置字段与 consumed_observation_fields 精确对应；SIM/Real/array 路径均覆盖，array 路径无 contact_force 依赖 |
+| 字段契约 | 观测声明精确匹配，normalization 额外包含 action；SIM/Real/array 路径均覆盖，array 路径无 contact_force 依赖；Real 配方无深合并残留 |
 | 布局与梯度 | cond=[B,46,192]，按帧 [S16,Z6,s1]；所有新可训练参数进入 optimizer 一次，无断梯度/重复参数 |
 | 策略接口 | 实际 compute_loss 与 predict_action 的接口保持；pred_action=[B,16,Da]，control_action=[B,8,Da] |
-| 保存恢复 | 新配置、新权重、normalizer 与 EMA 按现有 strict 路径恢复；旧配方明确失败；不放宽 source recipe 校验 |
+| 保存恢复 | 默认、fixed gate、no tactile、no relative value 各自的新配置/权重/normalizer/EMA 严格恢复；无未使用可训练参数；旧配方明确失败；不放宽 source recipe 校验 |
+| 缺测统计边界 | 仅在实际拟合的训练源行存在 false mask 时拒绝不支持的拟合；identity、checkpoint 恢复不被误拒绝；不把 encoder NaN-mask 测试当成 Dataset/runtime 已支持 NaN |
 
 DiT-X 的 final layer 为零初始化，初次动作 loss 反向不一定立即给 encoder 非零梯度；门控末层零初始化也会使其上游在初始一步出现合法零梯度。表征梯度测试应直接对表示定义测试标量，或在真实受限更新后检查；不要把这一现有初始化性质误判为新模块断梯度，更不要为通过测试修改 decoder 初始化。
 
@@ -389,4 +414,4 @@ g=1 可以另作普通融合对照，但它与初始 g=0.5 的对照同时改变
 - 修改摘要：改了什么、为什么、哪些动作/训练行为保持不变、有哪些未验证项。
 - 不自动修改 AGENTS.md/CLAUDE.md/项目 skills，不把单次架构写成长期规则；README 只在稳定入口确实变化时更新。
 
-本任务书提交时仅完成了最新源码、配置、数据路径和恢复接口的静态核对，未实现新网络，未运行模型测试或训练，未声称性能收益。后续执行者不得将本文验收计划抄写为已经通过的结果。
+终审结论：在保留上述约束及控制变量的前提下，本版方案可进入实现。终审完成了源码/配置一致性、模块输入输出、attention 与 masking 公式、消融/DDP 及恢复边界的静态核对；未实现新网络，未运行模型测试或训练，未验证性能收益。后续执行者不得将本文验收计划抄写为已经通过的结果。
