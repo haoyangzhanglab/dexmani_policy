@@ -10,6 +10,27 @@ from dexmani_policy.utils.tensor import dict_apply
 
 logger = logging.getLogger(__name__)
 
+FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
+
+
+def _flatten_finger_features(value, key):
+    if key not in FINGER_VECTOR_FIELDS:
+        return value
+    if isinstance(value, zarr.Array):
+        value = value[:]
+    if value.ndim < 2 or tuple(value.shape[-2:]) != (5, 3):
+        raise ValueError(f"{key} requires trailing feature shape (5, 3), got {tuple(value.shape)}")
+    # Keep each finger/axis statistic independent, as in the former flat 15-vector.
+    return value.reshape(*value.shape[:-2], 15)
+
+
+def _restore_finger_features(key, params, stats):
+    if key in FINGER_VECTOR_FIELDS:
+        for name in params:
+            params[name] = nn.Parameter(params[name].reshape(5, 3), requires_grad=False)
+        stats = {name: value.reshape(5, 3) for name, value in stats.items()}
+    return params, stats
+
 
 def dfs_add(dest: dict, keys: list[str], value: torch.Tensor):
     if len(keys) == 1:
@@ -212,7 +233,8 @@ def normalize_tensor(x, params, forward=True):
     if offset.device != x.device:
         offset = offset.to(device=x.device)
     x = x.to(dtype=scale.dtype)
-    if scale.ndim != 1 or offset.shape != scale.shape or x.ndim == 0 or x.shape[-1] != len(scale):
+    # Parameters are checked when fitted/loaded; guard against broadcasting over time.
+    if x.shape[-scale.ndim:] != scale.shape:
         raise ValueError(f'Normalizer feature shape mismatch: input={tuple(x.shape)}, '
                          f'scale={tuple(scale.shape)}, offset={tuple(offset.shape)}')
     if forward:
@@ -307,7 +329,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
 
 
 class LinearNormalizer(DictOfTensorMixin):
-    """Named fields with one affine parameter per trailing feature."""
+    """Named affine fields; explicit finger vectors retain independent (5, 3) features."""
 
     @torch.no_grad()
     def fit(
@@ -324,7 +346,7 @@ class LinearNormalizer(DictOfTensorMixin):
         self.input_stats = {}
         for key, value in data.items():
             params, stats = fit_params(
-                value,
+                _flatten_finger_features(value, key),
                 dtype=dtype,
                 mode=mode,
                 output_max=output_max,
@@ -333,6 +355,7 @@ class LinearNormalizer(DictOfTensorMixin):
                 fit_offset=fit_offset,
                 label=key,
             )
+            params, stats = _restore_finger_features(key, params, stats)
             self.params_dict[key] = params
             self.input_stats[key] = stats
         self._field_views.clear()
@@ -374,7 +397,7 @@ class LinearNormalizer(DictOfTensorMixin):
         dim = None
         mean = m2 = running_min = running_max = None
         for chunk in chunks:
-            arr = _as_float64_array(chunk)
+            arr = _flatten_finger_features(_as_float64_array(chunk), key)
             if arr.ndim == 0:
                 raise ValueError("Normalizer fitting requires a trailing feature axis")
             c_dim = arr.shape[-1]
@@ -435,6 +458,7 @@ class LinearNormalizer(DictOfTensorMixin):
         )
         if not hasattr(self, "input_stats"):
             self.input_stats = {}
+        params, stats = _restore_finger_features(key, params, stats)
         self.params_dict[key] = params
         self.input_stats[key] = stats
         self._field_views.clear()
@@ -616,6 +640,8 @@ def validate_normalizer_state(
     - ``identity`` fields must have no params entry;
     - ``limits`` / ``gaussian`` fields (and the resolved ``action`` field) must have a
       finite, non-degenerate (scale != 0) ``scale``/``offset`` entry;
+    - finger vectors require ``(5, 3)`` parameters; other fields require one
+      trailing feature axis, including every action representation;
     - no unexpected fields may be present.
 
     Used by training build, eval restore and deployment restore as the single validator.
@@ -641,51 +667,46 @@ def validate_normalizer_state(
             )
         scale = entry["scale"]
         offset = entry["offset"]
+        expected_shape = (5, 3) if key in FINGER_VECTOR_FIELDS else (feature_dims.get(key),)
         if (
             not torch.is_tensor(scale)
             or not torch.is_tensor(offset)
             or scale.numel() == 0
-            or offset.numel() == 0
-            or scale.ndim != 1
             or scale.shape != offset.shape
-            or key not in feature_dims
-            or scale.shape != (feature_dims[key],)
+            or scale.shape != expected_shape
+            or scale.numel() != feature_dims.get(key)
             or not bool(torch.isfinite(scale).all())
             or not bool(torch.isfinite(offset).all())
             or bool(torch.any(scale == 0))
         ):
             raise ValueError(
                 f"Normalizer state for '{key}' is invalid "
-                f"(expected feature width {feature_dims.get(key)}, one-dimensional matching "
+                f"(expected feature shape {expected_shape} and {feature_dims.get(key)} statistics, matching "
                 "scale/offset, finite values and nonzero scale)"
             )
 
 
 def normalization_dims_from_config(cfg):
-    """Numerical feature widths saved by Dataset; explicit legacy layouts for inference."""
+    """Number of fitted statistics per field, checked against observation layouts."""
     dims = dict(cfg.get('normalization_dims', {}))
     agent = cfg['agent']
     action_dim = int(agent['action_dim'])
     if 'action' in dims and dims['action'] != action_dim:
         raise ValueError('Saved normalization action dimension disagrees with Agent')
     dims['action'] = action_dim
-    # Legacy artifacts lack Dataset widths. These are the existing observation
-    # layouts, not arbitrary broadcasting rules; RGB must remain identity.
+    # Keep the 15 finger/axis statistics independent despite the explicit (5, 3)
+    # layout. Dense tactile arrays retain their three shared axis statistics.
     defaults = {'joint_state': agent.get('state_dim', 19), 'eef_pose': 9,
-                'eef_pos': 3, 'eef_rot6d': 6, 'tactile_force': 3,
+                'fingertip_xyz': 15, 'finger_tactile_force': 15, 'tactile_force': 3,
                 'tactile_valid': 5,
                 'point_cloud': cfg.get('dataset', {}).get('pc_dim') or dims.get('point_cloud', 6)}
-    for key in ('contact_force', 'fingertip_points'):
-        if cfg.get('normalization', {}).get(key, 'identity') != 'identity' and key not in dims:
-            raise ValueError(f'Saved normalization_dims.{key} is required: legacy input may be '
-                             'flat (...,15) or per-finger (...,5,3); weight length cannot prove the layout')
-        if key in dims and dims[key] not in (3, 15):
-            raise ValueError(f'Saved {key} feature width must be 3 or 15')
     for key, width in defaults.items():
         dims.setdefault(key, width)
-        if (key in cfg.get('normalization', {}) and cfg['normalization'][key] != 'identity'
-                and dims[key] != width):
-            raise ValueError(f'Saved {key} feature width disagrees with the input recipe: expected {width}')
+        if dims[key] != width and (
+            key in FINGER_VECTOR_FIELDS or key == 'eef_pose'
+            or cfg.get('normalization', {}).get(key, 'identity') != 'identity'
+        ):
+            raise ValueError(f'Saved {key} feature width must be {width}')
     return dims
 
 

@@ -36,6 +36,7 @@ def test_normalizer_roundtrip_and_restore(width):
 @pytest.mark.parametrize('scale,offset', [
     (torch.ones(2), torch.zeros(2)), (torch.ones(19), torch.zeros(2)),
     (torch.ones(1, 19), torch.zeros(1, 19)), (torch.tensor(1.), torch.tensor(0.)),
+    (torch.ones(5, 3), torch.zeros(5, 3)),
     (torch.zeros(19), torch.zeros(19)), (torch.full((19,), float('nan')), torch.zeros(19)),
     (torch.ones(19), torch.full((19,), float('inf'))),
 ])
@@ -53,12 +54,14 @@ def test_normalizer_cannot_repartition_time():
     n.fit({'force': torch.randn(2, 5, 120, 3)})
     validate_normalizer_state(n, {'force': 'limits', 'rgb': 'identity'}, {'force': 3})
     from dexmani_policy.agents.normalization import normalization_dims_from_config
-    cfg = {'agent': {'action_dim': 19}, 'normalization': {'contact_force': 'gaussian'}}
-    with pytest.raises(ValueError, match='legacy input'):
-        normalization_dims_from_config(cfg)
-    for width in (3, 15):
-        cfg['normalization_dims'] = {'contact_force': width}
-        assert normalization_dims_from_config(cfg)['contact_force'] == width
+    cfg = {'agent': {'action_dim': 19}, 'normalization': {'finger_tactile_force': 'gaussian'}}
+    assert normalization_dims_from_config(cfg)['finger_tactile_force'] == 15
+    for key, width in (('finger_tactile_force', 15), ('fingertip_xyz', 15), ('eef_pose', 9)):
+        cfg['normalization_dims'] = {key: width}
+        assert normalization_dims_from_config(cfg)[key] == width
+        cfg['normalization_dims'] = {key: 3}
+        with pytest.raises(ValueError, match=f'{key} feature width must be {width}'):
+            normalization_dims_from_config(cfg)
 
 
 @pytest.mark.parametrize('tensor', [False, True])

@@ -113,7 +113,7 @@ flowchart TD
     D --> V[动作速度]
 ```
 
-图中省略了 `contact_force` 与有效位到 evidence/gate 的直接输入，具体见 4.5–4.6 节。Observation encoder 没有跨帧 attention、循环状态或未来预测头；两帧条件由动作端的 cross-attention 共同读取。
+图中省略了 `finger_tactile_force` 与有效位到 evidence/gate 的直接输入，具体见 4.5–4.6 节。Observation encoder 没有跨帧 attention、循环状态或未来预测头；两帧条件由动作端的 cross-attention 共同读取。
 
 ### 4.2 点云与场景分支
 
@@ -127,7 +127,7 @@ scene 分支不以手部或触觉为输入，保留整体目标和环境信息�
 
 ### 4.3 身体锚点与融合位置
 
-`HandKinematicsEncoder` 输出顺序固定为 wrist、thumb、index、middle、ring、pinky。每个 token 包含锚点绝对位置及 Fourier 编码、身体 identity，以及共享的腕部朝向和五指相对腕部位移编码。后者沿输入基坐标轴表达；指尖本身没有独立姿态输入。`eef_rot6d`/`eef_pose[3:9]` 是旋转矩阵前两列依次拼接，必须非退化。
+`HandKinematicsEncoder` 输出顺序固定为 wrist、thumb、index、middle、ring、pinky。每个 token 包含锚点绝对位置及 Fourier 编码、身体 identity，以及共享的腕部朝向和五指相对腕部位移编码。后者沿输入基坐标轴表达；指尖本身没有独立姿态输入。`eef_pose[3:9]` 是旋转矩阵前两列依次拼接，必须非退化。
 
 令 `k_i` 为身体运动学 token，`s` 为状态编码，`e_i` 为同指触觉证据；腕部 `e_0=0`。
 Q（query）与 L（late）使用相同的模块与参数布局：
@@ -172,7 +172,7 @@ near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不
 
 ### 4.5 当前交互状态条件的模态调制
 
-`FingerModalityGate` 接收读取前的运动学+状态、同指触觉证据、共享场景摘要、规范化 contact_force 和有效位：
+`FingerModalityGate` 接收读取前的运动学+状态、同指触觉证据、共享场景摘要、规范化 finger_tactile_force 和有效位：
 
 \[
 (g_i^v,g_i^t)=2\sigma(f_\theta(k_i+s,e_i,\bar c,\tilde f_i,m_i)),\qquad
@@ -186,7 +186,7 @@ near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不
 - 几何 gain 在读取后缩放 `context + near` 的总更新；触觉 gain 控制直接残差，并在 Q 模式额外控制 query 注入。
 - 16 个 scene token 保留，腕部固定 geometry gain=1、tactile gain=0。
 - 门控不接收 relation_update、attention 或 null mass，避免 Q/L 的读取结果反过来改变残差对照。
-- 规范化 contact_force 保留幅度通道；只对触觉 embedding 做 LayerNorm 会弱化这部分信息。无效通道先 mask 再送入 MLP，避免 NaN 污染视觉 gain。
+- 规范化 finger_tactile_force 保留幅度通道；只对触觉 embedding 做 LayerNorm 会弱化这部分信息。无效通道先 mask 再送入 MLP，避免 NaN 污染视觉 gain。
 - 门值是特征调制强度，不是接触概率、可信度或经校准的模态重要性。当前门没有时序输入；两帧 DiTX 能使用历史，不等于门本身已识别接触建立/释放的方向。
 
 以下是设计预期，不是硬编码策略或已经观察到的结果：
@@ -204,7 +204,7 @@ near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不
 
 `XHandTactileFrameEncoder` 直接编码每帧每指数据：聚合三通道使用已有 MLP；120 taxel 阵列复用已有 ArrayEncoder。
 `FingerEvidenceEncoder` 将 frame 特征和归一化的聚合读数投影到 token 维度，加入有效读数标记，并把无效指证据严格置零。
-具体为 `e_i = mask_i × (W_frame LN(frame_i) + W_force force_i + valid_embedding)`；实现用 `torch.where` 屏蔽无效值，避免 `NaN × 0` 污染。即使使用 `tactile_force` 阵列，`contact_force` 仍由证据直连和门控消费，不能删去。默认聚合输入的 3 维读数同时走 `3→64→64` MLP 和直接线性投影；腕部证据始终为零。
+具体为 `e_i = mask_i × (W_frame LN(frame_i) + W_force force_i + valid_embedding)`；实现用 `torch.where` 屏蔽无效值，避免 `NaN × 0` 污染。即使使用 `tactile_force` 阵列，`finger_tactile_force` 仍由证据直连和门控消费，不能删去。默认聚合输入的 3 维读数同时走 `3→64→64` MLP 和直接线性投影；腕部证据始终为零。
 三通道读数保留其传感器语义，不旋转成未标定的世界系力，也不假定 taxel 的完整姿态。
 
 有效零接触读数与传感器缺失不同。默认所有输入有效；可显式启用 bool `tactile_valid`。
@@ -262,13 +262,13 @@ x_t=(1-t)\epsilon+ta,\qquad
 |---|---|---|
 | `joint_state` | `[B,T,19]` | 状态编码 / `limits` |
 | `point_cloud` | `[B,T,N,6]` | XYZRGB patch / `identity` |
-| `fingertip_points` | `[B,T,15]` 或 `[B,T,5,3]` | 五指锚点 / `identity` |
-| `eef_pos` + `eef_rot6d` | `[B,T,3]` + `[B,T,6]` | `wrist_pose_key=split` 的腕部输入 / 均为 `identity` |
-| `contact_force` | `[B,T,15]` 或 `[B,T,5,3]` | 触觉 MLP、证据直连、门控 / `gaussian` |
+| `fingertip_xyz` | `[B,T,5,3]` | 五指锚点 / `identity` |
+| `eef_pose` | `[B,T,9]` | 位置 XYZ + rotation-6D 的腕部输入 / `identity` |
+| `finger_tactile_force` | `[B,T,5,3]` | 触觉 MLP、证据直连、门控 / `gaussian` |
 | `action` | `[B,16,19]` | 示范动作监督 / `auto` |
 
-展平 `(15,)` 的指尖/接触数据在 encoder 入口统一成 `(5,3)`，指序为拇指、食指、中指、无名指、小指。
-normalizer 在此 reshape 之前拟合；不同触觉布局的统计粒度见 [数据与模态说明](./data_modality.md#54-触觉有效性与归一化)。
+指尖和逐指触觉严格保留 `(5,3)`，指序为拇指、食指、中指、无名指、小指；不接受平铺 15 维、旧字段名或拆分末端字段。
+normalizer 保留每指每轴独立的 15 个统计通道，只跨训练源行汇总，scale/offset 保存为 `(5,3)`；字段重排不会改变原 SIM 的归一化数值语义。统计粒度见 [数据与模态说明](./data_modality.md#54-触觉有效性与归一化)。
 
 | 配方项 | 当前配置值 | 对实验的影响 |
 |---|---|---|
@@ -279,34 +279,33 @@ normalizer 在此 reshape 之前拟合；不同触觉布局的统计粒度见 [�
 | 点云增强 | XYZ noise std `0.002 m`、color jitter、最大 dropout ratio `0.8`，均 `prob=1` | 增强发生在 patch FPS 前；不把随机缺点视作接触标签 |
 | 状态增强 | noise std `0.0002`，`prob=1` | 在 Agent 归一化之前作用于 joint_state |
 
-这些是当前 YAML 的值，不是历史实验事实或推荐最优值。类构造默认 `wrist_pose_key=eef_pose`，当前 YAML 显式覆盖为 `split`；直接实例化类与用 Hydra 加载配置的输入契约不同。
+这些是当前 YAML 的值，不是历史实验事实或推荐最优值。类构造与 YAML 均使用固定 `eef_pose` 字段，不再提供 `wrist_pose_key` 选项。
 
-### 6.2 Real 字段替换与有效位
+### 6.2 稠密触觉与 Real 接入边界
 
-Real 切换时必须一起修改：
+当前 `dexmani_real` 仍生产 `fingertip_points` / `contact_force`，其数据导出与在线部署协议尚未迁移，不能直接运行当前 interaction 策略。完成生产者适配后，稠密触觉配方如下；这里只声明消费接口，不改写真机数据：
 
 ```yaml
 agent:
-  wrist_pose_key: eef_pose
-  tactile_input_key: tactile_force   # 若只用聚合读数，保留 contact_force
+  tactile_input_key: tactile_force   # 若只用聚合读数，保留 finger_tactile_force
 dataset:
-  sensor_modalities: [joint_state, point_cloud, fingertip_points, eef_pose, contact_force, tactile_force]
+  sensor_modalities: [joint_state, point_cloud, fingertip_xyz, eef_pose, finger_tactile_force, tactile_force]
 normalization:
   joint_state: limits
   action: auto
   point_cloud: identity
-  fingertip_points: identity
+  fingertip_xyz: identity
   eef_pose: identity
-  contact_force: gaussian
+  finger_tactile_force: gaussian
   tactile_force: gaussian
 ```
 
-这是替换字段集合的示意，不可在保留 SIM normalization 键的情况下机械 merge。Real `eef_pose` 为 `[B,T,9]`；阵列 `tactile_force` 为 `[B,T,5,120,3]`，且仍需 `[B,T,5,3]` 的 `contact_force`。
+稠密模式在默认逐指字段之外增加 `tactile_force`；dataset 与 normalization 必须一起声明。Real `eef_pose` 为 `[B,T,9]`；阵列 `tactile_force` 为 `[B,T,5,120,3]`，且仍需 `[B,T,5,3]` 的 `finger_tactile_force`。
 `eef_pose` 必须来自当前测量/FK，不能来自未来 action_ee。
 采用 Real 数据还需使用仓库已有的 Real runtime 数据配方与评测流程；默认配置中的 SimRunner 不代表真机评测入口。
 所有几何字段强制 identity，跨模态坐标增强必须保持点云、腕部和指尖的一致性。
 这里的坐标增强指整体旋转/平移；默认仅对点云加测量噪声，并未同步扰动运动学锚点，表达的是传感器噪声而非共同坐标变换。
-实机与仿真 contact_force 虽可统一 shape，测量含义和归一化统计不能直接混用。
+实机与仿真 finger_tactile_force 虽可统一 shape，测量含义和归一化统计不能直接混用。
 
 启用 `agent.use_tactile_valid=true` 时，dataset 字段集合需增加 bool `tactile_valid [T,5]`，normalization 增加 identity。
 真实硬件仍需提供实际有效位；warmup 仅构造全有效 bool 合成输入。

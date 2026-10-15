@@ -34,18 +34,7 @@ class FingerModalityGate(nn.Module):
         *,
         enabled=True,
     ):
-        if hand_context.ndim != 3 or hand_context.shape[1] != 6:
-            raise ValueError("hand_context must be [BT,6,D]")
-        batch, _, dim = hand_context.shape
-        if evidence.shape != hand_context.shape or scene_summary.shape != (batch, dim):
-            raise ValueError("evidence must be [BT,6,D] and scene_summary [BT,D]")
-        if (
-            force.shape != (batch, 5, 3)
-            or valid.shape != (batch, 5)
-            or valid.dtype != torch.bool
-        ):
-            raise ValueError("force must be [BT,5,3] and valid bool [BT,5]")
-
+        batch = hand_context.shape[0]
         # 先清除无效通道；NaN*0 无法防止污染视觉 gain。
         touch = torch.where(valid[..., None], evidence[:, 1:], 0.0)
         force = torch.where(valid[..., None], force, 0.0)

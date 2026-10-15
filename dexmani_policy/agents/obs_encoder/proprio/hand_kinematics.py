@@ -11,7 +11,7 @@ class HandKinematicsEncoder(nn.Module):
     """编码米制世界系 wrist / fingertip，输出 [B,6,D] token 与 [B,6,3] center。
 
     eef_pose [B,9] 为 XYZ + 有效 rot6d（旋转矩阵前两列依次拼接）；
-    fingertip_points 为 [B,5,3] 或 [B,15]，顺序 thumb/index/middle/ring/pinky。
+    fingertip_xyz 为 [B,5,3]，顺序 thumb/index/middle/ring/pinky。
     输出按 wrist、五指排列；位置与手形位移沿输入基座/世界轴，max_wavelength 单位为米。
     wrist_rotation 的三列为腕部轴在输入坐标系中的方向，可供关系模块旋转相对边。
     """
@@ -54,22 +54,20 @@ class HandKinematicsEncoder(nn.Module):
     def forward(
         self,
         eef_pose: torch.Tensor,
-        fingertip_points: torch.Tensor,
+        fingertip_xyz: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         if eef_pose.ndim != 2 or eef_pose.shape[-1] != 9:
             raise ValueError("eef_pose must have shape [B,9]")
         batch = eef_pose.shape[0]
-        if fingertip_points.shape == (batch, 15):
-            fingertip_points = fingertip_points.reshape(batch, 5, 3)
-        if fingertip_points.shape != (batch, 5, 3):
-            raise ValueError("fingertip_points must have shape [B,5,3] or [B,15]")
-        if not torch.isfinite(eef_pose).all() or not torch.isfinite(fingertip_points).all():
+        if fingertip_xyz.shape != (batch, 5, 3):
+            raise ValueError("fingertip_xyz must have shape [B,5,3]")
+        if not torch.isfinite(eef_pose).all() or not torch.isfinite(fingertip_xyz).all():
             raise ValueError("hand geometry must be finite")
 
         # 几何和 Fourier 相位保持 FP32。
         with torch.autocast(device_type=eef_pose.device.type, enabled=False):
             wrist = eef_pose.float()
-            fingertips = fingertip_points.float()
+            fingertips = fingertip_xyz.float()
             centers = torch.cat((wrist[:, None, :3], fingertips), dim=1)
             position_features = torch.cat(
                 (centers / self.position_scale,

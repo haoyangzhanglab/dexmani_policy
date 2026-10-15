@@ -102,7 +102,7 @@ class HandSceneRelationEncoder(nn.Module):
         pointcloud: torch.Tensor,
         patches: Mapping[str, torch.Tensor],
         eef_pose: torch.Tensor,
-        fingertip_points: torch.Tensor,
+        fingertip_xyz: torch.Tensor,
         *,
         member_valid: torch.Tensor | None = None,
         query_context: torch.Tensor | None = None,
@@ -111,47 +111,16 @@ class HandSceneRelationEncoder(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """patches 来自 GeometryPatchEncoder(return_intermediate=True)。
 
-        pointcloud、eef_pose XYZ 与 fingertip_points 必须共用米制基座/世界坐标。
+        pointcloud、eef_pose XYZ 与 fingertip_xyz 必须共用米制基座/世界坐标。
         rot6d 为腕部旋转矩阵前两列依次拼接；指序为 thumb/index/middle/ring/pinky。
         edge_frame 仅选择相对边的轴向，不变换输入点云或输出 anchor，也不保证网络等变。
         member_valid 只屏蔽几何成员；编码前仍需处理无效点，patch 特征必须有限。
         query_context 接受 [B,D] 的共享状态或 [B,6,D] 的逐锚点条件。
         hand_encoding 可复用同一腕部/指尖输入的编码，避免门控与关系层重复计算。
         """
-        if (
-            pointcloud.ndim != 3
-            or pointcloud.shape[-1] < 3
-            or 0 in pointcloud.shape[:2]
-        ):
-            raise ValueError("pointcloud must be nonempty [B,N,C>=3]")
-        batch = pointcloud.shape[0]
-        if eef_pose.shape != (batch, 9):
-            raise ValueError(
-                "eef_pose must have shape [B,9] with the pointcloud batch size"
-            )
+        # Patch and cached hand layouts are established by their producing encoders.
         global_memory, local_memory = patches["patch_token"], patches["local_token"]
         centers, indices = patches["patch_center"], patches["neighbor_idx"]
-        if (
-            indices.ndim != 3
-            or indices.dtype != torch.long
-            or indices.shape[0] != batch
-        ):
-            raise ValueError(
-                "neighbor_idx must be a torch.long tensor with shape [B,M,K]"
-            )
-        if (
-            indices.numel() == 0
-            or indices.min() < 0
-            or indices.max() >= pointcloud.shape[1]
-        ):
-            raise ValueError("neighbor_idx contains empty or out-of-bounds indices")
-        memory_shape = (batch, indices.shape[1], self.token_channels)
-        if global_memory.shape != memory_shape or local_memory.shape != memory_shape:
-            raise ValueError(
-                "patch_token and local_token must have shape [B,M,token_channels]"
-            )
-        if centers.shape != (batch, indices.shape[1], 3):
-            raise ValueError("patch_center must have shape [B,M,3]")
         if (
             not torch.isfinite(global_memory).all()
             or not torch.isfinite(local_memory).all()
@@ -165,32 +134,16 @@ class HandSceneRelationEncoder(nn.Module):
             raise ValueError("member_valid must be boolean with shape [B,M,K]")
 
         hand = (
-            self.hand_encoder(eef_pose, fingertip_points)
+            self.hand_encoder(eef_pose, fingertip_xyz)
             if hand_encoding is None
             else hand_encoding
         )
-        expected = {
-            "hand_token": (batch, 6, self.token_channels),
-            "hand_center": (batch, 6, 3),
-            "wrist_rotation": (batch, 3, 3),
-        }
-        for key, shape in expected.items():
-            if (
-                key not in hand
-                or hand[key].shape != shape
-                or not torch.isfinite(hand[key]).all()
-            ):
-                raise ValueError(
-                    f"hand_encoding.{key} must be finite with shape {shape}"
-                )
         anchors = hand["hand_center"]
         hand_query = hand["hand_token"]
         query = hand_query
         if query_context is not None:
-            if query_context.shape == (batch, self.token_channels):
+            if query_context.ndim == 2:
                 query_context = query_context[:, None]
-            elif query_context.shape != (batch, 6, self.token_channels):
-                raise ValueError("query_context must have shape [B,D] or [B,6,D]")
             if not torch.isfinite(query_context).all():
                 raise ValueError("query_context must be finite")
             query = query + query_context.to(query.dtype)

@@ -43,10 +43,9 @@ class InteractionObsEncoder(nn.Module):
         group_size: int = 32,
         patch_depth: int = 4,
         num_scene_tokens: int = 16,
-        tactile_input_key: str = "contact_force",
+        tactile_input_key: str = "finger_tactile_force",
         tactile_fusion: str = "query",
         edge_frame: str = "wrist",
-        wrist_pose_key: str = "eef_pose",
         fps_random_config: dict | None = None,
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
@@ -59,8 +58,6 @@ class InteractionObsEncoder(nn.Module):
             )
         if tactile_fusion not in {"query", "late", "none"}:
             raise ValueError("tactile_fusion must be query, late or none")
-        if wrist_pose_key not in {"eef_pose", "split"}:
-            raise ValueError("wrist_pose_key must be eef_pose (Real) or split (Sim)")
         if not 0 <= tactile_dropout_prob <= 1:
             raise ValueError("tactile_dropout_prob must be in [0,1]")
         self.n_obs_steps = n_obs_steps
@@ -70,7 +67,6 @@ class InteractionObsEncoder(nn.Module):
         self.pc_dim = pc_dim
         self.tactile_input_key = tactile_input_key
         self.tactile_fusion = tactile_fusion
-        self.wrist_pose_key = wrist_pose_key
         self.tactile_dropout_prob = tactile_dropout_prob
         self.use_tactile_valid = use_tactile_valid
         self.use_modality_gate = use_modality_gate
@@ -103,68 +99,36 @@ class InteractionObsEncoder(nn.Module):
 
     @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
-        wrist = (
-            ("eef_pose",)
-            if self.wrist_pose_key == "eef_pose"
-            else ("eef_pos", "eef_rot6d")
-        )
         fields = [
             "joint_state",
             "point_cloud",
-            "fingertip_points",
-            *wrist,
+            "fingertip_xyz",
+            "eef_pose",
             self.tactile_input_key,
-            "contact_force",
+            "finger_tactile_force",
         ]
         if self.use_tactile_valid:
             fields.append("tactile_valid")
         return tuple(dict.fromkeys(fields))
 
-    @staticmethod
-    def _finger_vectors(value, batch, name):
-        if value.shape not in {(batch, 15), (batch, 5, 3)}:
-            raise ValueError(f"{name} must be [BT,15] or [BT,5,3]")
-        return value.reshape(batch, 5, 3)
-
     def forward(self, obs: dict, *, return_intermediate: bool = False):
         pointcloud = obs["point_cloud"]
-        if pointcloud.ndim != 3 or pointcloud.shape[-1] < self.pc_dim:
-            raise ValueError("point_cloud must be [BT,N,C] before interaction encoding")
         bt = pointcloud.shape[0]
-        if not bt or bt % self.n_obs_steps:
-            raise ValueError(
-                "observation batch must be nonempty and divisible by n_obs_steps"
-            )
         batch = bt // self.n_obs_steps
         state = obs["joint_state"]
-        if state.shape != (bt, self.state_dim) or not torch.isfinite(state).all():
-            raise ValueError("joint_state must be finite [BT,state_dim]")
-        fingers = self._finger_vectors(obs["fingertip_points"], bt, "fingertip_points")
-        if self.wrist_pose_key == "eef_pose":
-            wrist = obs["eef_pose"]
-        else:
-            if obs["eef_pos"].shape != (bt, 3) or obs["eef_rot6d"].shape != (bt, 6):
-                raise ValueError(
-                    "split wrist pose requires eef_pos [BT,3] and eef_rot6d [BT,6]"
-                )
-            wrist = torch.cat((obs["eef_pos"], obs["eef_rot6d"]), dim=-1)
-        if (
-            wrist.shape != (bt, 9)
-            or not torch.isfinite(wrist).all()
-            or not torch.isfinite(fingers).all()
-        ):
-            raise ValueError(
-                "wrist and fingertip geometry must be finite in the common metric frame"
-            )
-
-        force = self._finger_vectors(obs["contact_force"], bt, "contact_force")
+        if not torch.isfinite(state).all():
+            raise ValueError("joint_state must be finite")
+        fingers = obs["fingertip_xyz"]
+        wrist = obs["eef_pose"]
+        force = obs["finger_tactile_force"]
+        # Aggregate force also enters the gate when dense tactile arrays are used.
+        if force.shape != (bt, 5, 3):
+            raise ValueError("finger_tactile_force must be [BT,5,3]")
         valid = torch.ones(bt, 5, dtype=torch.bool, device=pointcloud.device)
         if self.use_tactile_valid:
             valid = obs["tactile_valid"]
             if valid.dtype != torch.bool or valid.shape != (bt, 5):
-                raise ValueError(
-                    "tactile_valid must be bool [BT,5], not normalized contact scores"
-                )
+                raise ValueError("tactile_valid must be bool [BT,5]")
         if self.training and self.tactile_dropout_prob > 0:
             # One sensor-drop mask per sample/finger, shared by its history frames.
             keep = (
@@ -177,7 +141,7 @@ class InteractionObsEncoder(nn.Module):
 
         tactile_input = (
             force
-            if self.tactile_input_key == "contact_force"
+            if self.tactile_input_key == "finger_tactile_force"
             else obs[self.tactile_input_key]
         )
         frames = self.tactile(tactile_input.unsqueeze(1), valid.unsqueeze(1)).squeeze(1)

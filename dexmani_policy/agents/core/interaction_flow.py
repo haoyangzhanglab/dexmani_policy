@@ -11,9 +11,8 @@ from dexmani_policy.agents.obs_encoder.interaction.encoder import InteractionObs
 class InteractionFlowAgent(BaseAgent):
     """Keep the action recipe fixed while testing interaction representations.
 
-    Geometry enters in one common metric frame. ``wrist_pose_key='split'`` uses
-    the simulation fields ``eef_pos`` and ``eef_rot6d``; ``'eef_pose'`` uses the
-    measured XYZ + rotation-6D pose. Actions retain BaseAgent's ``[B,H,Da]``
+    Geometry enters in one common metric frame. ``eef_pose`` contains
+    XYZ + rotation-6D. Actions retain BaseAgent's ``[B,H,Da]``
     layout, normalization and execution-window semantics.
     """
 
@@ -30,10 +29,9 @@ class InteractionFlowAgent(BaseAgent):
         group_size: int = 32,
         patch_depth: int = 4,
         num_scene_tokens: int = 16,
-        tactile_input_key: str = "contact_force",
+        tactile_input_key: str = "finger_tactile_force",
         tactile_fusion: str = "query",
         edge_frame: str = "wrist",
-        wrist_pose_key: str = "eef_pose",
         fps_random_config: dict | None = None,
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
@@ -60,15 +58,10 @@ class InteractionFlowAgent(BaseAgent):
             raise ValueError(
                 "InteractionFlowAgent fixes the action backbone to 8 DiT-X layers"
             )
-        if wrist_pose_key not in {"eef_pose", "split"}:
-            raise ValueError("wrist_pose_key must be 'eef_pose' or 'split'")
-        wrist_fields = (
-            ("eef_pos", "eef_rot6d") if wrist_pose_key == "split" else ("eef_pose",)
-        )
-        metric_fields = ("point_cloud", "fingertip_points", *wrist_fields)
+        metric_fields = ("point_cloud", "fingertip_xyz", "eef_pose")
         protected_fields = {
             *metric_fields,
-            "contact_force",
+            "finger_tactile_force",
             tactile_input_key,
             "tactile_valid",
         }
@@ -91,7 +84,6 @@ class InteractionFlowAgent(BaseAgent):
             tactile_input_key=tactile_input_key,
             tactile_fusion=tactile_fusion,
             edge_frame=edge_frame,
-            wrist_pose_key=wrist_pose_key,
             fps_random_config=fps_random_config,
             tactile_dropout_prob=tactile_dropout_prob,
             use_tactile_valid=use_tactile_valid,

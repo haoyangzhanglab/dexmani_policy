@@ -11,8 +11,10 @@ from torch.nn.modules.batchnorm import _BatchNorm
 
 from dexmani_policy.agents.normalization import (
     NON_NUMERIC_OBSERVATION_FIELDS,
+    FINGER_VECTOR_FIELDS,
     LinearNormalizer,
     build_mixed_action_normalizer_chunks,
+    normalization_dims_from_config,
     resolve_normalization_spec,
     uses_diffusion_config,
     validate_action_clipping,
@@ -106,6 +108,12 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         for child in children:
             widths = {key: int(child.replay_buffer[key].shape[-1])
                       for key, mode in spec.items() if key != 'action' and mode != 'identity'}
+            for key in FINGER_VECTOR_FIELDS.intersection(child.sensor_modalities):
+                shape = child.replay_buffer[key].shape
+                if len(shape) != 3 or shape[1:] != (5, 3):
+                    raise ValueError(f'{key} requires stored shape (T, 5, 3), got {shape}')
+                if key in widths:
+                    widths[key] = 15
             if 'point_cloud' in widths and getattr(child, 'pc_dim', None) is not None:
                 widths['point_cloud'] = child.pc_dim
             widths['action'] = int(child.replay_buffer[child.action_key].shape[-1]) + (9 if child.use_aux_ee else 0)
@@ -144,7 +152,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
             cfg.normalizer_source = "saved_checkpoint"
     else:
         normalizer = build_normalizer(dataset, spec, cfg.action_key)
-    validate_normalizer_state(normalizer, spec, dict(cfg.normalization_dims))
+    validate_normalizer_state(normalizer, spec, normalization_dims_from_config(cfg))
     if verbose:
         summaries = []
         for child in children:
@@ -551,7 +559,7 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
         # This is the producer's saved input shape, not the encoder's FPS count.
         # Encoder-specific channel/patch/point constraints remain in its forward path.
         runtime["pointcloud"] = dict(cloud)
-    if "fingertip_points" in dataset.sensor_modalities:
+    if "fingertip_xyz" in dataset.sensor_modalities:
         links = attrs.get("fingertip_link_names")
         if (
             not isinstance(links, (list, tuple))
@@ -560,7 +568,7 @@ def _capture_real_runtime(dataset, cfg) -> dict | None:
             or len(set(links)) != 5
         ):
             raise ValueError(
-                "Real fingertip_points requires five distinct non-empty link names"
+                "Real fingertip_xyz requires five distinct non-empty link names"
             )
         runtime["fingertip_link_names"] = list(links)
     return runtime

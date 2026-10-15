@@ -72,62 +72,28 @@ class BaseAgent(nn.Module):
     def _validate_batch(self, batch: Dict) -> None:
         """Check action windows and matching observation batches before normalization."""
         action = batch.get("action")
-        obs = batch.get("obs", {})
-
-        if action is not None:
-            if action.ndim != 3:
-                raise ValueError(
-                    f"action must be 3D (B, horizon, action_dim), "
-                    f"got {action.ndim}D shape {tuple(action.shape)}"
-                )
-            B, H, A = action.shape
-            if H != self.horizon:
-                raise ValueError(
-                    f"action horizon mismatch: got {H}, expected "
-                    f"{self.horizon}.  Shape: {tuple(action.shape)}"
-                )
-            if A != self.action_dim:
-                raise ValueError(
-                    f"action dim mismatch: got {A}, expected "
-                    f"{self.action_dim}.  Shape: {tuple(action.shape)}.  "
-                    f"Check action_key consistency."
-                )
-
-        self._validate_obs_dict(obs, expected_batch=B if action is not None else None)
+        if action is not None and action.shape[1:] != (self.horizon, self.action_dim):
+            raise ValueError(
+                f"action must be (B, {self.horizon}, {self.action_dim}), got {tuple(action.shape)}"
+            )
+        self._validate_obs_dict(
+            batch.get("obs", {}), expected_batch=action.shape[0] if action is not None else None
+        )
 
     def _validate_obs_dict(self, obs_dict: Dict, expected_batch: int | None = None) -> None:
         """Require (B, T, ...) tensors with T >= n_obs_steps and a common B."""
-        if not obs_dict:
-            return
-
-        batch_sizes: set[int] = set()
         for key, value in obs_dict.items():
             if not torch.is_tensor(value):
                 continue
-            if value.ndim < 2:
+            if value.ndim < 2 or value.shape[1] < self.n_obs_steps:
                 raise ValueError(
-                    f"obs['{key}']: expected >=2D (B, n_obs_steps, ...), "
-                    f"got {value.ndim}D shape {tuple(value.shape)}"
+                    f"obs['{key}'] requires (B, T >= {self.n_obs_steps}, ...), got {tuple(value.shape)}"
                 )
-            Bk, Tk = value.shape[0], value.shape[1]
-            batch_sizes.add(Bk)
-            if Tk < self.n_obs_steps:
+            if expected_batch is None:
+                expected_batch = value.shape[0]
+            elif value.shape[0] != expected_batch:
                 raise ValueError(
-                    f"obs['{key}']: time dim too small — got {Tk}, "
-                    f"need >= {self.n_obs_steps}.  Shape: {tuple(value.shape)}"
-                )
-
-        if len(batch_sizes) > 1:
-            shapes = {k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)}
-            raise ValueError(f"Observation batch-size mismatch across modalities: {shapes}")
-
-        if expected_batch is not None and batch_sizes:
-            obs_b = next(iter(batch_sizes))
-            if obs_b != expected_batch:
-                shapes = {k: tuple(v.shape) for k, v in obs_dict.items() if torch.is_tensor(v)}
-                raise ValueError(
-                    f"Batch size mismatch: obs batch={obs_b}, "
-                    f"action batch={expected_batch}.  Obs shapes: {shapes}"
+                    f"obs['{key}'] batch size {value.shape[0]} differs from {expected_batch}"
                 )
 
     def preprocess(self, obs_dict: Dict) -> Dict:

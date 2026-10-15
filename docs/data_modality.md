@@ -2,7 +2,9 @@
 
 `robot_data/` 当前包含两类数据：**真机数据**与 **sim 仿真数据**。两者都使用 **Zarr v2 目录存储**，共享 `data/` 和 `meta/` 的组织方式，但模态字段、部分形状与物理含义不同。
 
-本文以真机任务 `pick_place_toy` 和 sim 任务 `pick_apple_messy` 为例。字段、shape、dtype 与数量依据 **2026-10-09 本地实际数据**核对；数据重新导出后，帧数和 episode 数应以新的 Zarr 为准。
+本文以真机任务 `pick_place_toy` 和 sim 任务 `pick_apple_messy` 为例。数量、相机设置及未迁移字段依据 **2026-10-09 本地数据快照**；第 4 节的指尖、逐指触觉和末端观察量已按当前 SIM 生产者更新，不能据此推断旧目录已经迁移。数据重新生成后，帧数、episode 数和其余布局应以新 Zarr 为准。
+
+当前 SIM 与 interaction 策略使用 `fingertip_xyz (T,5,3)`、`finger_tactile_force (T,5,3)` 和 `eef_pose (T,9)`。不提供旧字段别名、平铺 15 维或拆分末端字段的兼容路径。现有数据没有改写；`dexmani_real` 的生产者和部署协议仍使用 `fingertip_points` / `contact_force`，需要单独迁移后才能供当前 interaction 策略消费，稠密 `tactile_force (T,5,120,3)` 的语义保持不变。
 
 ## 1. 目录与命名
 
@@ -131,7 +133,7 @@ episode 的文本标识和处理配置保存在根属性 `.zattrs`，不在 `dat
 
 ## 4. Sim：`pick_apple_messy.zarr`
 
-该数据集由仿真 episode 转换并拼接而成。下表中的 `T = 21293`。
+该类数据由仿真 episode 转换并拼接而成。历史样例有 `T = 21293`；下表中新的观察字段描述当前导出契约，不表示历史样例已重新生成。
 
 ### 4.1 帧级数据 `data/`
 
@@ -140,20 +142,19 @@ episode 的文本标识和处理配置保存在根属性 `.zattrs`，不在 `dat
 | `joint_state` | `(T, 19)` | `float32` | 当前关节位置：机械臂 7 维 + 灵巧手 12 维 |
 | `action` | `(T, 19)` | `float32` | 关节目标：机械臂 7 维 + 灵巧手 12 维 |
 | `action_ee` | `(T, 21)` | `float32` | 目标末端位置 3 维 + `rot6d` 6 维 + 手关节目标 12 维 |
-| `eef_pos` | `(T, 3)` | `float32` | 当前末端位置 |
-| `eef_rot6d` | `(T, 6)` | `float32` | 当前末端姿态的 6D 旋转表示 |
+| `eef_pose` | `(T, 9)` | `float32` | 当前末端位置 3 维 + 姿态的 6D 旋转表示 |
 | `rgb` | `(T, 240, 320, 3)` | `uint8` | RGB 图像，通道在最后，像素值为 0–255 |
 | `depth` | `(T, 240, 320)` | `uint16` | 深度，单位为 mm；转换为米时除以 1000 |
 | `segmentation` | `(T, 240, 320)` | `uint8` | 每个像素的分割标签，不是 RGB 图像 |
 | `point_cloud` | `(T, 1024, 6)` | `float32` | 场景点云，每点为 `[x, y, z, r, g, b]` |
 | `imagine_point_cloud` | `(T, 512, 6)` | `float32` | 根据手部模型表面采样并随 link 位姿变换的几何点云，每点为 XYZ + RGB |
-| `fingertip_points` | `(T, 15)` | `float32` | 5 个指尖的 XYZ 位置，展平为 `5 × 3 = 15` 维 |
-| `contact_force` | `(T, 15)` | `float32` | 5 个手指接触 link 的三轴净接触力，展平为 15 维 |
+| `fingertip_xyz` | `(T, 5, 3)` | `float32` | 5 个指尖的 world XYZ 位置 |
+| `finger_tactile_force` | `(T, 5, 3)` | `float32` | 5 个手指接触 link 的 world 三轴净接触力 |
 | `camera_intrinsic` | `(T, 9)` | `float32` | 相机 `3 × 3` 内参矩阵展平后的 9 维 |
 | `camera_extrinsic` | `(T, 12)` | `float32` | 相机 `3 × 4` 外参矩阵展平后的 12 维，采用仿真导出的 `extrinsic_cv` 约定 |
 | `done` | `(T,)` | `bool` | 每一步记录的环境完成标记；episode 边界仍由 `episode_ends` 定义 |
 
-`fingertip_points` 与 `contact_force` 都按拇指、食指、中指、无名指、小指排列，每根手指占连续 3 维。需要显式的手指轴时，可将 `(T, 15)` reshape 为 `(T, 5, 3)`。`imagine_point_cloud` 来自手部模型几何，不能当作相机采到的场景点云。
+`fingertip_xyz` 与 `finger_tactile_force` 都按拇指、食指、中指、无名指、小指排列，显式保留手指轴和 XYZ 轴。`eef_pose` 按位置 XYZ、旋转矩阵前两列依次拼接。模型几何点云不能当作相机采到的场景点云。
 
 ### 4.2 Episode 信息与根属性
 
@@ -176,7 +177,7 @@ episode 的文本标识和处理配置保存在根属性 `.zattrs`，不在 `dat
 | `physics_dt` | 约 `0.00416667` | 仿真物理步长，约 1/240 s |
 | `frame_skip` | `15` | 一个控制步对应 15 个物理步，`dt ≈ physics_dt × frame_skip` |
 
-该 sim 示例没有真机的 `format`、`data_revision`、`episode_ids` 或 `depth_scale_m_per_unit` 属性，也没有 `arm_qvel`、`arm_effort`、`hand_current`、`tactile_force` 和 `eef_pose` 数组。
+历史 sim 示例没有真机的 `format`、`data_revision`、`episode_ids` 或 `depth_scale_m_per_unit` 属性，也没有 `arm_qvel`、`arm_effort`、`hand_current` 和稠密 `tactile_force` 数组。新 SIM 数据包含 `eef_pose`，并要求记录及转换保留 `robot_setup_json`；当前安装配置下机器人 base 与 world 重合。
 
 ## 5. 两种格式之间最容易混淆的地方
 
@@ -187,8 +188,7 @@ episode 的文本标识和处理配置保存在根属性 `.zattrs`，不在 `dat
 ```text
 joint_state / action  (19) = arm[0:7] + hand[7:19]
 action_ee             (21) = position[0:3] + rot6d[3:9] + hand[9:21]
-Real eef_pose          (9) = position[0:3] + rot6d[3:9]
-Sim 末端观测          (9) = concatenate(eef_pos, eef_rot6d)
+eef_pose               (9) = position[0:3] + rot6d[3:9]
 ```
 
 关节位置 / 目标使用弧度，位置使用米。`rot6d` 是旋转矩阵前两列依次拼接的 6D 表示，不是欧拉角、四元数，也不是“位置 + 旋转”共 6 维。
@@ -211,11 +211,11 @@ Sim 末端观测          (9) = concatenate(eef_pos, eef_rot6d)
 
 | 项目 | Real | Sim |
 | --- | --- | --- |
-| `fingertip_points` | `(T, 5, 3)` | `(T, 15)` |
-| `contact_force` | `(T, 5, 3)`，来自硬件聚合触觉通道 | `(T, 15)`，来自仿真接触冲量计算并在物理子步间取平均的净接触力 |
+| 指尖位置 | `fingertip_points (T,5,3)` | `fingertip_xyz (T,5,3)` |
+| 逐指聚合力 | `contact_force (T,5,3)`，来自硬件聚合触觉通道 | `finger_tactile_force (T,5,3)`，来自仿真接触冲量计算并在物理子步间取平均的净接触力 |
 | `tactile_force` | `(T, 5, 120, 3)`，硬件稠密触觉通道 | 无此字段 |
 
-reshape 只能统一布局，不能统一测量含义。真机触觉值保留硬件通道的数据约定；当前 Zarr 属性没有给出其力单位与轴向标定，不能仅凭 `contact_force` 这个同名字段就将其当作 sim 世界坐标系下的力直接比较。
+字段重命名只能统一接口，不能统一测量含义。真机触觉值保留硬件通道的数据约定；当前 Zarr 属性没有给出其力单位与轴向标定，不能将其当作 sim 世界坐标系下的力直接比较。
 
 ### 5.4 触觉有效性与归一化
 
@@ -223,15 +223,14 @@ reshape 只能统一布局，不能统一测量含义。真机触觉值保留硬
 
 有效位进入 encoder 后可以屏蔽无效触觉，但当前 dataset 仍会拒绝含 NaN 的观测窗口，normalizer 也不会排除有限占位值。训练集有缺测污染时，需要处理数据过滤和统计拟合，不能只依靠 encoder mask。`tactile_dropout_prob` 在规范化后的编码路径模拟缺测，不会修复原始数据中的污染。
 
-当前 [normalizer 构建](../dexmani_policy/training/build_utils.py)固定以最后一个轴作为特征轴，前面的轴用于汇总统计。因此触觉存储布局决定统计粒度：
+当前 [normalizer 构建](../dexmani_policy/training/build_utils.py)为 `fingertip_xyz` / `finger_tactile_force` 显式保留 `(5,3)` 特征轴，每指每轴独立统计，延续旧 SIM 平铺 15 维的数值语义。其他字段仍以最后一轴作为特征轴：
 
-| 原始布局 | Gaussian 统计通道 | 汇总范围 |
+| 字段与布局 | Gaussian 统计通道 | 汇总范围 |
 | --- | --- | --- |
-| `(T,15)` | 15 个手指 × 轴通道 | 时间 / 训练源行 |
-| `(T,5,3)` | 3 个轴通道 | 训练源行和手指 |
-| `(T,5,120,3)` | 3 个轴通道 | 训练源行、手指和 taxel |
+| `finger_tactile_force (T,5,3)` | 5 指 × 3 轴，共 15 个独立通道 | 训练源行 |
+| `tactile_force (T,5,120,3)` | 3 个轴通道 | 训练源行、手指和 taxel |
 
-因此，拟合统计前后的 reshape 不可视为等价操作；不同布局的统计不能直接替换。训练保存各拟合字段的 `normalization_dims`，载入时检查一维 scale/offset 与实际特征宽度，应用时逐特征广播。训练只使用有效训练窗口的唯一源行拟合，验证、推理和恢复复用该份统计。
+逐指 scale/offset 和拟合统计的形状固定为 `(5,3)`，`normalization_dims` 记录统计量数量 15；`eef_pose` 使用 9 个分量，interaction 配方对几何字段保持 `identity`。逐指拟合只在内部临时展开这两个特征轴，应用时检查完整尾部形状并广播，绝不重排 batch/time。数值统计与旧 SIM 平铺 15 维等价，但不自动读取旧字段或旧 checkpoint 参数布局。训练只使用有效训练窗口的唯一源行拟合，验证、推理和恢复复用该份统计；稠密触觉保持三个共享轴通道。
 
 interaction 要求点云、腕部和指尖处于同一米制坐标系，几何字段使用 `identity`。Real/SIM 的字段选择、完整 normalization 替换方式及开关见 [interaction 数据与配置](./interaction_representation.md#6-数据与配置)。
 
@@ -252,6 +251,9 @@ Zarr data/<action_key> → sample["action"]
 | --- | --- | --- |
 | `obs.joint_state` | `(N, 19)` | `(B, N, 19)` |
 | `obs.point_cloud` | `(N, 1024, 6)` | `(B, N, 1024, 6)` |
+| `obs.fingertip_xyz` | `(N, 5, 3)` | `(B, N, 5, 3)` |
+| `obs.finger_tactile_force` | `(N, 5, 3)` | `(B, N, 5, 3)` |
+| `obs.eef_pose` | `(N, 9)` | `(B, N, 9)` |
 | `obs.rgb`，启用 RGB 预处理后 | `(N, 3, H_out, W_out)` | `(B, N, 3, H_out, W_out)` |
 | `action`，选择关节动作 | `(L, 19)` | `(B, L, 19)` |
 | `action`，选择末端动作 | `(L, 21)` | `(B, L, 21)` |
@@ -282,4 +284,4 @@ print(f"episodes={len(ends)}, total_frames={int(ends[-1])}")
 print(f"first_episode=[0:{int(ends[0])}]")
 ```
 
-将路径替换为 `robot_data/pick_apple_messy.zarr` 即可检查 sim 示例。本文的 shape、dtype、属性和 episode 边界以本地 Zarr 为依据；字段生成含义同时对照同级 `dexmani_real` 的 `dataset/processing.py`、`dataset/contracts.py`，以及 `dexmani_sim` 的 `envs/base_env.py`、`sensors/`、`mimic_gen/utils/env_recorder.py` 和 `data_process/hdf5_to_zarr.py`。本仓库的读取与维度校验见 [ReplayBuffer](../dexmani_policy/datasets/replay_buffer.py)。
+将路径替换为实际使用的 SIM 数据目录即可检查其格式。历史样例数量来自本地 Zarr 快照；当前 SIM 观察字段以 `dexmani_sim` 的 `envs/base_env.py`、`sensors/`、`mimic_gen/utils/env_recorder.py` 和 `data_process/hdf5_to_zarr.py` 为准，Real 生产者见同级 `dexmani_real` 的 `dataset/processing.py`、`dataset/contracts.py`。本仓库的读取与维度校验见 [ReplayBuffer](../dexmani_policy/datasets/replay_buffer.py)。

@@ -332,18 +332,15 @@ class LoadedPolicy:
             )
         # Core callers keep their A-step control_action convention. Real needs P.
         prediction = result.get("pred_action") if isinstance(result, dict) else None
+        expected = (1, self.info.horizon, self.agent.action_dim)
         if (
-            not torch.is_tensor(prediction) or prediction.ndim != 3
-            or tuple(prediction.shape[:2]) != (1, self.info.horizon)
-            or prediction.shape[2] != self.agent.action_dim or not prediction.is_floating_point()
+            not torch.is_tensor(prediction) or prediction.shape != expected
+            or not prediction.is_floating_point()
         ):
-            raise ValueError(f"Policy future requires floating pred_action (1, {self.info.horizon}, {self.agent.action_dim})")
+            raise ValueError(f"Policy future requires floating pred_action {expected}")
         if not torch.isfinite(prediction).all():
             raise ValueError('Nonfinite policy prediction')
         control = prediction[:, self.info.n_obs_steps - 1 :, :dimensions]
-        expected = (1, self.info.horizon - self.info.n_obs_steps + 1, dimensions)
-        if tuple(control.shape) != expected:
-            raise ValueError(f"Policy future must be floating point {expected}")
         future = control.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
         return future
 
@@ -355,8 +352,8 @@ class LoadedPolicy:
         shapes = {
             "joint_state": (19,),
             "eef_pose": (9,),
-            "contact_force": (5, 3),
-            "fingertip_points": (5, 3),
+            "finger_tactile_force": (5, 3),
+            "fingertip_xyz": (5, 3),
             "tactile_force": (5, 120, 3),
         }
         observation = {}

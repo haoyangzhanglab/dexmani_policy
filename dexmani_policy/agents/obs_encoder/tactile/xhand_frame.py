@@ -10,13 +10,13 @@ class XHandTactileFrameEncoder(nn.Module):
     num_tokens = 5
     frame_dim = 64
 
-    def __init__(self, input_key: str = "contact_force") -> None:
+    def __init__(self, input_key: str = "finger_tactile_force") -> None:
         super().__init__()
-        if input_key not in ("contact_force", "tactile_force"):
-            raise ValueError("input_key must be 'contact_force' or 'tactile_force'")
+        if input_key not in ("finger_tactile_force", "tactile_force"):
+            raise ValueError("input_key must be 'finger_tactile_force' or 'tactile_force'")
         self.input_key = input_key
-        self.input_shape = (5, 3) if input_key == "contact_force" else (5, 120, 3)
-        if input_key == "contact_force":
+        self.input_shape = (5, 3) if input_key == "finger_tactile_force" else (5, 120, 3)
+        if input_key == "finger_tactile_force":
             self.frame_encoder = nn.Sequential(
                 nn.Linear(3, self.frame_dim),
                 nn.ReLU(),

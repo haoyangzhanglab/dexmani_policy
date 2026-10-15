@@ -20,12 +20,6 @@ class FingerEvidenceEncoder(nn.Module):
         nn.init.normal_(self.valid_embedding, std=0.02)
 
     def forward(self, frames, force, valid):
-        if frames.ndim != 3 or frames.shape[1] != 5:
-            raise ValueError("frames must be [BT,5,F]")
-        if force.shape != (*frames.shape[:2], 3):
-            raise ValueError("force must be [BT,5,3]")
-        if valid.dtype != torch.bool or valid.shape != frames.shape[:2]:
-            raise ValueError("valid must be bool [BT,5]")
         frames = torch.where(valid[..., None], frames, 0.0)
         force = torch.where(valid[..., None], force, 0.0)
         if not torch.isfinite(frames).all() or not torch.isfinite(force).all():

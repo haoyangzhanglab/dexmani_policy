@@ -69,11 +69,11 @@ class XHandTactileEncoder(nn.Module):
         use_eca: bool = False,
     ) -> None:
         super().__init__()
-        if input_key not in ("contact_force", "tactile_force"):
-            raise ValueError("input_key must be 'contact_force' or 'tactile_force'")
+        if input_key not in ("finger_tactile_force", "tactile_force"):
+            raise ValueError("input_key must be 'finger_tactile_force' or 'tactile_force'")
         if array_backend not in ("kinedex", "mlp"):
             raise ValueError("array_backend must be 'kinedex' or 'mlp'")
-        if input_key == "contact_force" and array_backend != "kinedex":
+        if input_key == "finger_tactile_force" and array_backend != "kinedex":
             raise ValueError("array_backend override is only applicable to tactile_force")
         if use_eca and (input_key != "tactile_force" or array_backend != "kinedex"):
             raise ValueError("use_eca requires tactile_force with array_backend='kinedex'")
@@ -84,9 +84,9 @@ class XHandTactileEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.output_channels = out_dim
         self.validate_finite = validate_finite
-        self.input_shape = (5, 3) if input_key == "contact_force" else (5, 120, 3)
+        self.input_shape = (5, 3) if input_key == "finger_tactile_force" else (5, 120, 3)
 
-        if input_key == "contact_force":
+        if input_key == "finger_tactile_force":
             self.frame_encoder = nn.Sequential(
                 nn.Linear(3, self.frame_dim),
                 nn.ReLU(),
@@ -145,11 +145,11 @@ class XHandTactileEncoder(nn.Module):
 def example() -> None:
     batch_size, n_obs_steps = 2, 2
     # Synthetic normalized inputs.
-    contact_force = torch.randn(batch_size, n_obs_steps, 5, 3)
+    finger_tactile_force = torch.randn(batch_size, n_obs_steps, 5, 3)
     tactile_force = torch.randn(batch_size, n_obs_steps, 5, 120, 3)
 
     for input_key, history, use_eca in (
-        ("contact_force", contact_force, False),
+        ("finger_tactile_force", finger_tactile_force, False),
         ("tactile_force", tactile_force, False),
         ("tactile_force", tactile_force, True),
     ):
