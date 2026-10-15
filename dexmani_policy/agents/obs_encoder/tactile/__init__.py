@@ -1,3 +1,3 @@
-from .xhand_tactile_encoder import XHandForceEncoder, XHandTaxelEncoder
+from .xhand_tactile_encoder import XHandForceEncoder, XHandTaxelEncoder, XHandReTouchEncoder
 
-__all__ = ["XHandForceEncoder", "XHandTaxelEncoder"]
+__all__ = ["XHandForceEncoder", "XHandTaxelEncoder", "XHandReTouchEncoder"]

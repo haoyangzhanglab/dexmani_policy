@@ -203,6 +203,7 @@ near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不
 ### 4.6 触觉与缺失
 
 `XHandForceEncoder` 和 `XHandTaxelEncoder` 对每帧每指触觉独立编码：前者使用共享三层 MLP（`3→64→64→64`，前两层 ReLU），后者沿用 KineDex 单指 1D CNN（`3→32→64`，沿 taxel 轴平均池化）。两者均输出每指 64 维，不做跨指或时序编码。
+作为**尚未接入策略**的可选对照，`XHandReTouchEncoder(region_ids)` 在同一 `xhand_tactile_encoder.py` 中复现 ReTouch（arXiv:2608.01824，附录 A.2）的五区域统计量和注意力池化，单帧每指输出 64 维。它需要经过真机 taxel 索引校验的 `region_ids [5,120]`（tip/center/base/left/right）；论文 Figure 6 未公开可直接用于 SDK 的 120 点索引清单，故实现**没有默认或推测分区**。原论文 8→256→1024 的 Patch MLP 为适配本策略 64 维输入改为 8→256→64，且未复现辅助预训练，因此该模块只能称为 ReTouch-inspired 对照，不能视为论文完整复现。当前 `InteractionObsEncoder` 仍使用 KineDex `XHandTaxelEncoder`，默认实验行为不变。
 `FingerEvidenceEncoder` 将 frame 特征和归一化的聚合读数投影到 token 维度，加入有效读数标记，并把无效指证据严格置零。
 具体为 `e_i = mask_i × (W_frame LN(frame_i) + W_force force_i + valid_embedding)`；实现用 `torch.where` 屏蔽无效值，避免 `NaN × 0` 污染。即使使用 `taxel_tactile_force` 阵列，`finger_tactile_force` 仍由证据直连和门控消费，不能删去。默认聚合输入的 3 维读数同时走 `3→64→64→64` MLP 和直接线性投影；腕部证据始终为零。
 三通道读数保留其传感器语义，不旋转成未标定的世界系力，也不假定 taxel 的完整姿态。

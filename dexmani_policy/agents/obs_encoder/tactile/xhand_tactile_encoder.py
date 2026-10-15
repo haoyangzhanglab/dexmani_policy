@@ -11,6 +11,7 @@ modeling, cross-finger interaction, or multimodal fusion is performed here.
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 def _prepare_input(
@@ -95,6 +96,90 @@ class XHandTaxelEncoder(nn.Module):
         if tactile_valid is not None:
             features = torch.where(tactile_valid[..., None], features, 0.0)
         return features
+
+    @property
+    def out_dim(self) -> int:
+        return self.frame_dim
+
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return (self.input_key,)
+
+
+class XHandReTouchEncoder(nn.Module):
+    """ReTouch-inspired five-patch encoder for single-frame XHand taxel arrays.
+
+    Requires a VERIFIED region_ids [5,120] mapping in the original XHand SDK
+    taxel order. Label convention: 0 tip, 1 center, 2 base, 3 left, 4 right.
+    The thumb uses T30; the other four fingers use T16. The ReTouch paper's
+    Fig. 6 does not provide an executable taxel-index mapping.
+
+    ReTouch Appendix A.2 specifies 8D patch statistics, soft contact weighting,
+    8->256->1024 patch MLP and contact-area-biased attention pooling.
+    For this repo the MLP ends at the existing 64D token width (8->256->64).
+    Auxiliary encoder pretraining from ReTouch is NOT reproduced.
+
+    Input must already be normalized using the training-set statistics.
+    The published policy-stage theta=1.0 and gamma=0.5 refer to normalized
+    force magnitudes, not Newton units.
+    """
+
+    num_tokens = 5
+    num_regions = 5
+    frame_dim = 64
+    input_key = "taxel_tactile_force"
+    input_shape = (5, 120, 3)
+
+    def __init__(self, region_ids: torch.Tensor) -> None:
+        super().__init__()
+        labels = torch.as_tensor(region_ids)
+        if labels.shape != (5, 120) or labels.dtype not in (
+            torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64,
+        ):
+            raise ValueError("region_ids must be integer [5,120] in verified SDK taxel order")
+        if not bool(((labels >= 0) & (labels < self.num_regions)).all()):
+            raise ValueError("region_ids values must be 0..4 (tip,center,base,left,right)")
+        patch_mask = F.one_hot(labels.long(), num_classes=self.num_regions).permute(0, 2, 1).bool()
+        if not bool(patch_mask.any(dim=-1).all()):
+            raise ValueError("each finger must have at least one taxel in each of five regions")
+
+        # Checkpoints retain the exact taxel-to-patch mapping as a buffer.
+        self.register_buffer("patch_mask", patch_mask)
+        self.patch_mlp = nn.Sequential(nn.Linear(8, 256), nn.SiLU(), nn.Linear(256, self.frame_dim))
+        self.finger_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
+        self.region_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
+        nn.init.normal_(self.finger_embedding, std=0.02)
+        nn.init.normal_(self.region_embedding, std=0.02)
+        self.attention_score = nn.Linear(self.frame_dim, 1)
+        self.token_norm = nn.LayerNorm(self.frame_dim)
+
+    def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
+        x = _prepare_input(x, tactile_valid, self.input_shape, self.input_key, self.patch_mlp[0].weight.dtype)
+        leading = x.shape[:-3]
+        # Force norms, contact weights and reductions use float32 under autocast.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            f = x.reshape(-1, 5, 120, 3).float()
+            magnitude = torch.linalg.vector_norm(f, dim=-1)
+            weights = torch.sigmoid((magnitude - 1.0) / 0.5)
+            mask = self.patch_mask[None].float()  # [1,5,5,120]
+            gated = weights[:, :, None, :] * mask
+            mass = gated.sum(dim=-1)
+            gated_mean = torch.einsum("bfpt,bftc->bfpc", gated, f) / mass.clamp_min(1e-6)[..., None]
+            component_max = (f.abs()[:, :, None, :, :] * mask[..., None]).amax(dim=-2)
+            area = mass / mask.sum(dim=-1)
+            strength = (magnitude[:, :, None, :] * mask).amax(dim=-1)
+            descriptors = torch.cat((gated_mean, component_max, area[..., None], strength[..., None]), dim=-1)
+
+        h = self.patch_mlp(descriptors)
+        h = h + self.finger_embedding[None, :, None, :] + self.region_embedding[None, None, :, :]
+        # ReTouch Eq. (12): patch-level learned score + log contact-area prior.
+        logits = self.attention_score(F.silu(h)).squeeze(-1).float() + torch.log(area.clamp_min(1e-6))
+        alpha = torch.softmax(logits, dim=-1)
+        token = self.token_norm((alpha[..., None] * h.float()).sum(dim=2))
+        output = token.reshape(*leading, self.num_tokens, self.frame_dim)
+        if tactile_valid is not None:
+            output = torch.where(tactile_valid[..., None], output, 0.0)
+        return output
 
     @property
     def out_dim(self) -> int:
