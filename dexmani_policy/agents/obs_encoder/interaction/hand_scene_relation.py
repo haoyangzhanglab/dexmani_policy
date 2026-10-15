@@ -109,7 +109,7 @@ class HandSceneRelationEncoder(nn.Module):
         hand_encoding: Mapping[str, torch.Tensor] | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """patches 来自 GeometryPatchEncoder(return_intermediate=True)。
+        """patches 来自 GeometryAwarePointTransformer(return_geometry=True)，tokens 已由调用层投影。
 
         pointcloud、eef_pose XYZ 与 fingertip_xyz 必须共用米制基座/世界坐标。
         rot6d 为腕部旋转矩阵前两列依次拼接；指序为 thumb/index/middle/ring/pinky。
@@ -118,13 +118,14 @@ class HandSceneRelationEncoder(nn.Module):
         query_context 接受 [B,D] 的共享状态或 [B,6,D] 的逐锚点条件。
         hand_encoding 可复用同一腕部/指尖输入的编码，避免门控与关系层重复计算。
         """
-        # Patch and cached hand layouts are established by their producing encoders.
-        global_memory, local_memory = patches["patch_token"], patches["local_token"]
-        centers, indices = patches["patch_center"], patches["neighbor_idx"]
-        if (
-            not torch.isfinite(global_memory).all()
-            or not torch.isfinite(local_memory).all()
-        ):
+        # Both readers use the SAME contextual descriptors. Near support is
+        # still determined by observed raw members, not a separate local head.
+        memory = patches["tokens"]
+        centers, indices = patches["xyz"], patches["neighbor_indices"]
+        token_valid = patches["mask"]
+        if token_valid.dtype != torch.bool or token_valid.shape != centers.shape[:2]:
+            raise ValueError("patch mask must be boolean [B,M]")
+        if not torch.isfinite(memory).all():
             raise ValueError(
                 "patch features must be finite; member_valid only masks geometry"
             )
@@ -153,10 +154,13 @@ class HandSceneRelationEncoder(nn.Module):
             torch.autocast(device_type=pointcloud.device.type, enabled=False),
         ):
             members = index_points(pointcloud[..., :3], indices)
+            valid_members = token_valid.unsqueeze(-1).expand_as(indices)
+            if member_valid is not None:
+                valid_members = valid_members & member_valid
             relative, distance, observed = nearest_patch_evidence(
-                anchors, members, member_valid
+                anchors, members, valid_members
             )
-            center_valid = torch.isfinite(centers).all(-1)
+            center_valid = torch.isfinite(centers).all(-1) & token_valid
             safe_centers = torch.where(center_valid[..., None], centers.float(), 0.0)
             center_relative = safe_centers[:, None] - anchors[:, :, None]
             center_distance = center_relative.norm(dim=-1)
@@ -170,10 +174,10 @@ class HandSceneRelationEncoder(nn.Module):
                 )
 
         context, context_attention, _ = self.context(
-            query, global_memory, center_relative, center_distance, context_valid
+            query, memory, center_relative, center_distance, context_valid
         )
         near, near_attention, support = self.near(
-            query, local_memory, relative, distance, observed
+            query, memory, relative, distance, observed
         )
         # 即使 null_value/out bias 非零，没有局部观测支撑时也不能注入近场更新。
         near_update = near * support.any(-1, keepdim=True).to(near.dtype)

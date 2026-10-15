@@ -17,7 +17,7 @@ from dexmani_policy.agents.obs_encoder.interaction.modality_gate import (
 )
 from dexmani_policy.agents.obs_encoder.interaction.scene_context import SceneContextPool
 from dexmani_policy.agents.obs_encoder.pointcloud.geometry_patch import (
-    GeometryPatchEncoder,
+    GeometryAwarePointTransformer,
 )
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.obs_encoder.tactile.xhand_frame import (
@@ -39,9 +39,9 @@ class InteractionObsEncoder(nn.Module):
         state_dim: int = 19,
         pc_dim: int = 6,
         token_dim: int = 192,
-        num_patches: int = 128,
+        num_patches: int = 256,
         group_size: int = 32,
-        patch_depth: int = 4,
+        patch_depth: int = 6,
         num_scene_tokens: int = 16,
         tactile_input_key: str = "finger_tactile_force",
         tactile_fusion: str = "query",
@@ -71,13 +71,16 @@ class InteractionObsEncoder(nn.Module):
         self.use_tactile_valid = use_tactile_valid
         self.use_modality_gate = use_modality_gate
 
-        self.geometry = GeometryPatchEncoder(
+        self.geometry = GeometryAwarePointTransformer(
             input_channels=pc_dim,
-            token_channels=token_dim,
             num_patches=num_patches,
             group_size=group_size,
             depth=patch_depth,
             fps_random_config=fps_random_config,
+        )
+        # One shared policy-side projection, not separate local/context heads.
+        self.geometry_projection = nn.Sequential(
+            nn.Linear(self.geometry.out_dim, token_dim), nn.LayerNorm(token_dim)
         )
         self.state = create_state_mlp(state_dim, token_dim)
         self.tactile = XHandTactileFrameEncoder(tactile_input_key)
@@ -148,10 +151,11 @@ class InteractionObsEncoder(nn.Module):
         evidence = self.finger_evidence(frames, force, valid)
 
         state_token = self.state(state)
-        patches = self.geometry(pointcloud, return_intermediate=True)
+        patches = self.geometry(pointcloud, return_geometry=True)
+        patches["tokens"] = self.geometry_projection(patches["tokens"])
         scene = self.scene(
-            patches["patch_token"],
-            patches["patch_center"],
+            patches["tokens"],
+            patches["xyz"],
         )["scene_token"]
         hand_encoding = self.relation.hand_encoder(wrist, fingers)
 

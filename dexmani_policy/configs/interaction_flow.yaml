@@ -71,9 +71,9 @@ agent:
   pc_dim: 6
   state_dim: 19
   token_dim: 192
-  num_patches: 128
+  num_patches: 256
   group_size: 32
-  patch_depth: 4
+  patch_depth: 6
   num_scene_tokens: 16
   edge_frame: wrist
   tactile_input_key: finger_tactile_force

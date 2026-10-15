@@ -1,5 +1,8 @@
-"""Point-patch encoder with continuous 3D RoPE."""
+"""Geometry-Aware Point Transformer (GAPT), trained from scratch.
 
+One set of spatial tokens. No local/context output heads, image backbone,
+robot state, or action conditioning. XYZ must be in a common metric frame.
+"""
 from __future__ import annotations
 
 import math
@@ -8,234 +11,257 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from dexmani_policy.agents.obs_encoder.pointcloud.ops import (
+from .ops import (
     farthest_point_sample,
     index_points,
     knn_point,
     resolve_fps_random_config,
 )
-from dexmani_policy.agents.obs_encoder.interaction.point_image_fusion import PointImageFusion
-from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import PatchEncoder
+
+
+class GeometricPatchEmbedding(nn.Module):
+    """Shared member features, soft distance pooling and second-order geometry.
+
+    Both Gaussian pools use the SAME observed kNN support. They do not create
+    larger neighborhoods or reconstruct missing surfaces. Wide projections are
+    performed after pooling, once per patch instead of once per member.
+    """
+
+    def __init__(self, input_channels: int, channels: int, geometry_scale: float):
+        super().__init__()
+        self.geometry_scale = geometry_scale
+        self.register_buffer("wavelengths", torch.logspace(math.log10(0.02), math.log10(0.32), 8))
+        self.register_buffer("pool_sigmas", torch.tensor([0.04, 0.12]))
+        self.member_mlp = nn.Sequential(
+            nn.Linear(input_channels + 1 + 48, 64), nn.LayerNorm(64), nn.GELU(),
+            nn.Linear(64, 128), nn.LayerNorm(128), nn.GELU(),
+        )
+        self.refine = nn.Sequential(
+            nn.Linear(256, 128), nn.LayerNorm(128), nn.GELU(), nn.Linear(128, 128),
+        )
+        # max + two weighted means + covariance upper triangle + patch radius
+        self.projection = nn.Sequential(
+            nn.Linear(3 * 128 + 7, channels), nn.LayerNorm(channels), nn.GELU(),
+            nn.Linear(channels, channels),
+        )
+
+    def forward(self, relative_xyz: torch.Tensor, attributes: torch.Tensor):
+        # Geometry, phases, moments and weighted sums accumulate in FP32.
+        with torch.autocast(device_type=relative_xyz.device.type, enabled=False):
+            relative_xyz = relative_xyz.float()
+            scaled = relative_xyz / self.geometry_scale
+            distance = torch.linalg.vector_norm(relative_xyz, dim=-1, keepdim=True)
+            angles = relative_xyz.unsqueeze(-1) * (2 * math.pi / self.wavelengths.float())
+            fourier = torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(-2)
+            features = torch.cat((scaled, distance / self.geometry_scale, fourier, attributes.float()), dim=-1)
+            weights = (-0.5 * (distance / self.pool_sigmas.float()).square()).softmax(dim=2)
+            centered = scaled - scaled.mean(dim=2, keepdim=True)
+            covariance = centered.transpose(-1, -2) @ centered / centered.size(2)
+            covariance = torch.stack(tuple(covariance[..., i, j] for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))), dim=-1)
+            radius = distance.amax(dim=2)
+            moments = torch.cat((covariance, radius / self.geometry_scale), dim=-1)
+        member = self.member_mlp(features.to(self.member_mlp[0].weight.dtype))
+        context = member.amax(dim=2, keepdim=True).expand_as(member)
+        member = self.refine(torch.cat((member, context), dim=-1))
+        with torch.autocast(device_type=member.device.type, enabled=False):
+            weighted = torch.einsum("bmks,bmkd->bmsd", weights, member.float()).flatten(-2)
+        pooled = torch.cat((member.amax(dim=2), weighted.to(member.dtype), moments.to(member.dtype)), dim=-1)
+        return self.projection(pooled), radius
 
 
 class RotaryPositionEncoding3D(nn.Module):
-    def __init__(
-        self,
-        head_dim: int,
-        scale: float = 1.0,
-        base: float = 10000.0,
-    ):
+    """Continuous metric XYZ RoPE; relative-position encoding, not SE(3) equivariance."""
+
+    def __init__(self, head_dim: int, scale: float = 0.05, base: float = 100.0):
         super().__init__()
-        if head_dim <= 0 or head_dim % 6 != 0:
+        if head_dim <= 0 or head_dim % 6:
             raise ValueError("head_dim must be positive and divisible by 6")
-        if not math.isfinite(scale) or scale <= 0:
-            raise ValueError("scale must be finite and positive")
-        if not math.isfinite(base) or base <= 1:
-            raise ValueError("base must be finite and greater than 1")
-
+        if not math.isfinite(scale) or scale <= 0 or not math.isfinite(base) or base <= 1:
+            raise ValueError("RoPE requires finite scale > 0 and base > 1")
         axis_dim = head_dim // 3
-        self.scale = float(scale)
-        self.register_buffer(
-            "inv_freq",
-            base ** (-torch.arange(0, axis_dim, 2, dtype=torch.float32) / axis_dim),
-            persistent=False,
-        )
+        self.scale = scale
+        self.register_buffer("inv_freq", base ** (-torch.arange(0, axis_dim, 2, dtype=torch.float32) / axis_dim), persistent=False)
 
-    def forward(self, xyz: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        positions = xyz.float() / self.scale
-        angles = positions.unsqueeze(-1) * self.inv_freq
-        angles = angles.repeat_interleave(2, dim=-1).flatten(start_dim=-2)
-        return angles.cos().unsqueeze(1), angles.sin().unsqueeze(1)
+    def forward(self, xyz: torch.Tensor):
+        with torch.autocast(device_type=xyz.device.type, enabled=False):
+            # A shared origin improves phase precision without changing pairwise offsets.
+            positions = (xyz.float() - xyz.float().mean(dim=1, keepdim=True)) / self.scale
+            angles = positions.unsqueeze(-1) * self.inv_freq.float()
+            angles = angles.repeat_interleave(2, dim=-1).flatten(-2)
+            return angles.cos().unsqueeze(1), angles.sin().unsqueeze(1)
 
     @staticmethod
-    def apply_rotary(
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
-        dtype = x.dtype
-        x = x.float()
-        pairs = x.unflatten(-1, (-1, 2))
+    def apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+        pairs = x.float().unflatten(-1, (-1, 2))
         rotated = torch.stack((-pairs[..., 1], pairs[..., 0]), dim=-1).flatten(-2)
-        return (x * cos + rotated * sin).to(dtype)
+        return (x.float() * cos + rotated * sin).to(x.dtype)
 
 
-class PointPatchBlock(nn.Module):
-    def __init__(
-        self,
-        channels: int,
-        num_heads: int,
-        mlp_ratio: float,
-    ):
+class LocalRelationAttention(nn.Module):
+    """One geometry-aware neighborhood block, on fixed patch anchors.
+
+    QKV is projected BEFORE neighbor gathering. Self edges are excluded by
+    index, so coincident but distinct anchors remain valid neighbors.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.heads = 4
+        self.head_dim = 32
+        self.norm1 = nn.LayerNorm(channels)
+        self.qkv = nn.Linear(channels, 3 * 128)
+        self.q_norm = nn.LayerNorm(self.head_dim)
+        self.k_norm = nn.LayerNorm(self.head_dim)
+        self.edge_mlp = nn.Sequential(nn.Linear(4, 64), nn.GELU(), nn.Linear(64, 128 + self.heads))
+        self.projection = nn.Linear(128, channels)
+        self.norm2 = nn.LayerNorm(channels)
+        self.ffn = nn.Sequential(nn.Linear(channels, 2 * channels), nn.GELU(), nn.Linear(2 * channels, channels))
+        self.attention_gain = nn.Parameter(torch.full((channels,), 0.1))
+        self.ffn_gain = nn.Parameter(torch.full((channels,), 0.1))
+
+    def forward(self, tokens: torch.Tensor, indices: torch.Tensor, edges: torch.Tensor):
+        b, m, _ = tokens.shape
+        neighbors = indices.shape[-1]
+        q, k, v = self.qkv(self.norm1(tokens)).chunk(3, dim=-1)
+        q = self.q_norm(q.reshape(b, m, self.heads, self.head_dim))
+        k = self.k_norm(k.reshape(b, m, self.heads, self.head_dim))
+        k = index_points(k, indices).permute(0, 1, 3, 2, 4)
+        v = index_points(v, indices).reshape(b, m, neighbors, self.heads, self.head_dim).permute(0, 1, 3, 2, 4)
+        relative_value, bias = self.edge_mlp(edges.to(self.edge_mlp[0].weight.dtype)).split((128, self.heads), dim=-1)
+        relative_value = relative_value.reshape(b, m, neighbors, self.heads, self.head_dim).permute(0, 1, 3, 2, 4)
+        logits = (q.float().unsqueeze(-2) * k.float()).sum(-1) / math.sqrt(self.head_dim)
+        logits = logits + bias.float().permute(0, 1, 3, 2)
+        weights = logits.softmax(dim=-1).to(v.dtype)
+        update = (weights.unsqueeze(-1) * (v + relative_value.to(v.dtype))).sum(-2).reshape(b, m, 128)
+        tokens = tokens + self.attention_gain * self.projection(update)
+        return tokens + self.ffn_gain * self.ffn(self.norm2(tokens))
+
+
+class PointRelationBlock(nn.Module):
+    """Pre-LN residual attention/FFN; Q/K normalization precedes 3D rotation."""
+
+    def __init__(self, channels: int, num_heads: int, mlp_ratio: float):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = channels // num_heads
         self.norm1 = nn.LayerNorm(channels)
-        self.qkv = nn.Linear(channels, channels * 3)
-        self.proj = nn.Linear(channels, channels)
+        self.qkv = nn.Linear(channels, 3 * channels)
+        self.q_norm = nn.LayerNorm(self.head_dim)
+        self.k_norm = nn.LayerNorm(self.head_dim)
+        self.projection = nn.Linear(channels, channels)
         self.norm2 = nn.LayerNorm(channels)
+        hidden = int(channels * mlp_ratio)
+        self.ffn = nn.Sequential(nn.Linear(channels, hidden), nn.GELU(), nn.Linear(hidden, channels))
+        self.attention_gain = nn.Parameter(torch.full((channels,), 0.1))
+        self.ffn_gain = nn.Parameter(torch.full((channels,), 0.1))
 
-        hidden_channels = int(channels * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(channels, hidden_channels),
-            nn.GELU(),
-            nn.Linear(hidden_channels, channels),
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size, num_tokens, channels = x.shape
-        qkv = self.qkv(self.norm1(x)).reshape(
-            batch_size, num_tokens, 3, self.num_heads, self.head_dim
-        )
+    def forward(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+        b, m, d = tokens.shape
+        qkv = self.qkv(self.norm1(tokens)).reshape(b, m, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
-        q = RotaryPositionEncoding3D.apply_rotary(q, cos, sin)
-        k = RotaryPositionEncoding3D.apply_rotary(k, cos, sin)
+        q = RotaryPositionEncoding3D.apply_rotary(self.q_norm(q), cos, sin)
+        k = RotaryPositionEncoding3D.apply_rotary(self.k_norm(k), cos, sin)
+        update = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        update = update.transpose(1, 2).reshape(b, m, d)
+        tokens = tokens + self.attention_gain * self.projection(update)
+        return tokens + self.ffn_gain * self.ffn(self.norm2(tokens))
 
-        context = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
-        context = context.transpose(1, 2).reshape(batch_size, num_tokens, channels)
-        x = x + self.proj(context)
-        return x + self.mlp(self.norm2(x))
 
+class GeometryAwarePointTransformer(nn.Module):
+    """GAPT: one set of context-aware, spatially anchored point-cloud tokens.
 
-class GeometryPatchEncoder(nn.Module):
-    """Encode XYZ[RGB] into patch_token [B,M,D] and patch_center [B,M,3].
+    Default: FPS256/kNN32 -> shared geometric patch MLP -> local attention ->
+    six 384-channel RoPE blocks -> LN. No pretraining, pooling across spatial
+    tokens, separate output projection, or task-specific feature branch.
 
-    semantic_channels 启用 local_token 后的可选图像语义残差；point_uv 必须
-    对应同一输入点序列，图像特征/投影每次观测只计算一次。默认参数保留纯几何路径。
+    Inputs are dense batches of finite observed points, NOT padded point clouds.
+    Every sample needs N >= max(num_patches, group_size). Returned mask is all
+    True for this fixed-observation contract; it does not detect missing data.
+    XYZ remains in meters. RGB, when present, should be scaled consistently.
     """
 
     def __init__(
         self,
         input_channels: int = 6,
-        token_channels: int = 192,
-        num_patches: int = 128,
+        channels: int = 384,
+        num_patches: int = 256,
         group_size: int = 32,
-        depth: int = 4,
-        num_heads: int = 4,
+        depth: int = 6,
+        num_heads: int = 8,
         mlp_ratio: float = 4.0,
-        rope_scale: float = 1.0,
-        rope_base: float = 10000.0,
+        geometry_scale: float = 0.10,
+        rope_scale: float = 0.05,
+        rope_base: float = 100.0,
         fps_random_config: dict | None = None,
-        semantic_channels: int | None = None,
-        semantic_gate_init: float = 0.1,
     ):
         super().__init__()
-        if input_channels not in (3, 6):
-            raise ValueError(f"input_channels must be 3 (XYZ) or 6 (XYZRGB), but got {input_channels}")
-        if min(token_channels, num_patches, group_size, depth, num_heads) <= 0:
-            raise ValueError("channels, patch sizes, depth and num_heads must be positive")
-        if token_channels % num_heads != 0:
-            raise ValueError("token_channels must be divisible by num_heads")
-        if not math.isfinite(mlp_ratio) or int(token_channels * mlp_ratio) < 1:
-            raise ValueError("mlp_ratio must be finite and produce at least one hidden channel")
-
+        if type(input_channels) is not int or input_channels not in (3, 6):
+            raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")
+        sizes = (channels, num_patches, group_size, depth, num_heads)
+        if any(type(value) is not int or value <= 0 for value in sizes) or num_patches < 2:
+            raise ValueError("sizes must be positive integers and num_patches >= 2")
+        if channels % num_heads or (channels // num_heads) % 6:
+            raise ValueError("channels/num_heads must be an integer divisible by 6")
+        if not math.isfinite(mlp_ratio) or mlp_ratio <= 0 or int(channels * mlp_ratio) < 1:
+            raise ValueError("mlp_ratio must be finite and positive")
+        if not math.isfinite(geometry_scale) or geometry_scale <= 0:
+            raise ValueError("geometry_scale must be finite and positive")
         self.input_channels = input_channels
-        self.token_channels = token_channels
+        self.channels = channels
         self.num_patches = num_patches
         self.group_size = group_size
-        self.fps_random_config = fps_random_config or {}
+        self.geometry_scale = float(geometry_scale)
+        self.fps_random_config = dict(fps_random_config or {})
+        self.patch_embedding = GeometricPatchEmbedding(input_channels, channels, geometry_scale)
+        self.local_relation = LocalRelationAttention(channels)
+        self.rope = RotaryPositionEncoding3D(channels // num_heads, rope_scale, rope_base)
+        self.blocks = nn.ModuleList([PointRelationBlock(channels, num_heads, mlp_ratio) for _ in range(depth)])
+        self.norm = nn.LayerNorm(channels)
 
-        self.patch_encoder = PatchEncoder(
-            in_channels=input_channels,
-            out_channels=token_channels,
-            hidden_dims=[128, 256],
-        )
-        self.rope = RotaryPositionEncoding3D(
-            token_channels // num_heads,
-            scale=rope_scale,
-            base=rope_base,
-        )
-        self.blocks = nn.ModuleList(
-            [PointPatchBlock(token_channels, num_heads, mlp_ratio) for _ in range(depth)]
-        )
-        self.norm = nn.LayerNorm(token_channels)
-        self.semantic_fusion = None
-        if semantic_channels is not None:
-            self.semantic_fusion = PointImageFusion(
-                image_channels=semantic_channels,
-                token_channels=token_channels,
-                gate_init=semantic_gate_init,
-            )
-
-    def forward(
-        self,
-        pointcloud: torch.Tensor,
-        return_intermediate: bool = False,
-        *,
-        image_tokens: torch.Tensor | None = None,
-        point_uv: torch.Tensor | None = None,
-        view_weight: torch.Tensor | None = None,
-        image_hw: tuple[int, int] | None = None,
-        patch_grid_size: tuple[int, int] | None = None,
-    ) -> dict[str, torch.Tensor]:
-        semantic_inputs = (image_tokens, point_uv, view_weight, image_hw, patch_grid_size)
-        use_semantics = any(value is not None for value in semantic_inputs)
-        if use_semantics and (self.semantic_fusion is None or any(value is None for value in semantic_inputs)):
-            raise ValueError("set semantic_channels and provide all five semantic inputs")
-        if pointcloud.ndim != 3 or pointcloud.size(-1) < self.input_channels:
-            raise ValueError(
-                f"Expected [B, N, C] with C >= {self.input_channels}, got {tuple(pointcloud.shape)}"
-            )
-        if use_semantics and (point_uv.ndim != 4 or point_uv.shape[2] != pointcloud.shape[1]):
-            raise ValueError("point_uv must preserve the input point order and count: [B,V,N,2]")
-        if pointcloud.size(1) < max(self.num_patches, self.group_size):
-            raise ValueError("N must be at least max(num_patches, group_size)")
-
-        xyz = pointcloud[..., :3].float()
+    def forward(self, pointcloud: torch.Tensor, *, return_geometry: bool = False) -> dict[str, torch.Tensor]:
+        if pointcloud.ndim != 3 or pointcloud.shape[0] == 0 or pointcloud.shape[-1] < self.input_channels:
+            raise ValueError("pointcloud must be nonempty [B,N,C] with enough channels")
+        if not pointcloud.is_floating_point():
+            raise ValueError("pointcloud must be floating point")
+        if pointcloud.shape[1] < max(self.num_patches, self.group_size):
+            raise ValueError("N must be at least max(num_patches, group_size); remove padding upstream")
         if not torch.isfinite(pointcloud[..., :self.input_channels]).all():
-            raise ValueError("pointcloud must contain finite observed points before patch sampling")
-        with torch.no_grad():
-            fps_config = resolve_fps_random_config(
-                self.fps_random_config, self.training
+            raise ValueError("pointcloud must contain only finite observed points")
+        xyz = pointcloud[..., :3].float().contiguous()
+        with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
+            centers, center_indices = farthest_point_sample(
+                xyz, self.num_patches,
+                **resolve_fps_random_config(self.fps_random_config, self.training),
             )
-            patch_center, patch_center_idx = farthest_point_sample(
-                xyz, self.num_patches, **fps_config
-            )
-            neighbor_idx = knn_point(self.group_size, xyz, patch_center)
-
-        neighbor_xyz = index_points(xyz, neighbor_idx)
-        relative_xyz = neighbor_xyz - patch_center.unsqueeze(2)
-        patch_input = relative_xyz
-        if self.input_channels > 3:
-            point_feature = pointcloud[..., 3 : self.input_channels]
-            neighbor_feature = index_points(point_feature, neighbor_idx)
-            patch_input = torch.cat((relative_xyz, neighbor_feature), dim=-1)
-
-        local_token = self.patch_encoder(patch_input)
-        patch_token = local_token
-        semantic_outputs = None
-        if use_semantics:
-            semantic_outputs = self.semantic_fusion(
-                local_token, neighbor_idx, image_tokens, point_uv, view_weight,
-                image_hw, patch_grid_size, return_intermediate=return_intermediate,
-            )
-            patch_token = semantic_outputs["fused_token"]
-        cos, sin = self.rope(patch_center)
+            neighbors = knn_point(self.group_size, xyz, centers)
+            # A single MxM distance matrix for a small, fixed anchor graph.
+            distances = torch.cdist(centers, centers, compute_mode="donot_use_mm_for_euclid_dist")
+            diagonal = torch.eye(self.num_patches, dtype=torch.bool, device=xyz.device)
+            local_indices = distances.masked_fill(diagonal[None], float("inf")).topk(
+                min(12, self.num_patches - 1), largest=False, sorted=False,
+            ).indices
+            offsets = (index_points(centers, local_indices) - centers.unsqueeze(2)) / self.geometry_scale
+            edges = torch.cat((offsets, torch.linalg.vector_norm(offsets, dim=-1, keepdim=True)), dim=-1)
+            cos, sin = self.rope(centers)
+        relative_xyz = index_points(xyz, neighbors) - centers.unsqueeze(2)
+        attributes = index_points(pointcloud[..., 3:self.input_channels], neighbors)
+        tokens, radius = self.patch_embedding(relative_xyz, attributes)
+        tokens = self.local_relation(tokens, local_indices, edges)
         for block in self.blocks:
-            patch_token = block(patch_token, cos, sin)
-        patch_token = self.norm(patch_token)
-
-        outputs = {"patch_token": patch_token, "patch_center": patch_center}
-        if return_intermediate:
-            outputs.update(
-                patch_center_idx=patch_center_idx,
-                neighbor_idx=neighbor_idx,
-                local_token=local_token,
-            )
-            if semantic_outputs is not None:
-                outputs["fused_local_token"] = semantic_outputs["fused_token"]
-                outputs.update({key: value for key, value in semantic_outputs.items() if key != "fused_token"})
+            tokens = block(tokens, cos, sin)
+        outputs = {
+            "tokens": self.norm(tokens),
+            "xyz": centers,
+            "mask": torch.ones(centers.shape[:2], device=xyz.device, dtype=torch.bool),
+        }
+        if return_geometry:
+            outputs.update(center_indices=center_indices, neighbor_indices=neighbors, patch_radius=radius)
         return outputs
 
     @property
     def out_dim(self) -> int:
-        return self.token_channels
+        return self.channels
 
     @property
     def out_shape(self) -> tuple[int, int]:
-        return (self.num_patches, self.token_channels)
+        return self.num_patches, self.channels
