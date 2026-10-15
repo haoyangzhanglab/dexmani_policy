@@ -65,8 +65,11 @@ class GeometricPatchEmbedding(nn.Module):
         member = self.refine(torch.cat((member, context), dim=-1))
         with torch.autocast(device_type=member.device.type, enabled=False):
             weighted = torch.einsum("bmks,bmkd->bmsd", weights, member.float()).flatten(-2)
-        pooled = torch.cat((member.amax(dim=2), weighted.to(member.dtype), moments.to(member.dtype)), dim=-1)
-        return self.projection(pooled), radius
+            # Concatenate in FP32, then cast once at the projection boundary.
+            # Per-input casts inside an autocast cat can be miscompiled by
+            # Torch 2.4 Inductor into an FP32 input / BF16 weight addmm.
+            pooled = torch.cat((member.amax(dim=2).float(), weighted, moments), dim=-1)
+        return self.projection(pooled.to(member.dtype)), radius
 
 
 class RotaryPositionEncoding3D(nn.Module):

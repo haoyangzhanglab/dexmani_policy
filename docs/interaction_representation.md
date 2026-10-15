@@ -66,13 +66,14 @@ AdapTac 报告了到达阶段更重视觉、操作阶段更重触觉的 attentio
 
 真实训练链路为 `train.py → build_train_components → Trainer → BaseAgent.compute_loss`；`PCDataset` 复用 `BaseDataset` 的采样、增强和字段读取。Dataset 返回 `obs [B,T,…]` 与 `action [B,H,Da]`；`BaseAgent.preprocess` 先归一化，再取前 `n_obs_steps` 帧并展平为 `[BT,…]`。因此直接调用 observation encoder 时，不能传入未归一化的原始 batch。
 
-下文用 `B` 表示 batch size，`T=2` 表示观测帧数，`M=128` 表示 patch 数，`K=32` 表示每个 patch 的邻居数，`D=192` 表示 token 宽度。每帧独立编码，最后恢复 batch 和历史顺序：
+下文用 `B` 表示 batch size，`T=2` 表示观测帧数，`M=256` 表示 patch 数，`K=32` 表示每个 patch 的邻居数，`D=192` 表示策略 token 宽度；GAPT 内部宽度为 384。每帧独立编码，最后恢复 batch 和历史顺序：
 
 | 阶段 | 默认张量形状 | 语义 |
 |---|---|---|
 | 输入点云 | `[BT,N,6]` | XYZRGB；`N >= max(M,K)`，点数由数据提供 |
-| patch 邻域 / local token | `[BT,128,32,6]` / `[BT,128,192]` | 中心相对 XYZ + RGB，逐 patch 编码 |
-| 全局混合后的 patch token | `[BT,128,192]` | 4 层带 3D RoPE 的 self-attention |
+| patch 原始邻域 | `[BT,256,32,6]` | 原始成员索引保留，用于可见几何查询 |
+| GAPT 空间 tokens | `[BT,256,384]` | 几何聚合、1 层局部 attention、6 层全局 3D RoPE Transformer |
+| 共享策略 memory | `[BT,256,192]` | 一次 384→192 Linear + LayerNorm，供 scene/context/near 共同读取 |
 | scene / hand / state | `[BT,16,192]` / `[BT,6,192]` / `[BT,1,192]` | 场景上下文、身体交互、关节状态 |
 | observation condition | `[B,46,192]` | 每帧依次为 scene、wrist、五指、state，按帧拼接 |
 | DiTX condition / action hidden | `[B,46,768]` / `[B,16,768]` | 观测和动作分别线性投影 |
@@ -80,14 +81,13 @@ AdapTac 报告了到达阶段更重视觉、操作阶段更重触觉的 attentio
 
 ```mermaid
 flowchart TD
-    PC[XYZRGB 点云] --> P[FPS / KNN / PatchEncoder]
-    P --> L[local_token]
-    L --> PT[4 层 patch self-attention / 3D RoPE]
+    PC[XYZRGB 点云] --> P[GAPT / FPS256 / kNN32]
+    P --> PT[空间 tokens / 共享 384→192 投影]
+    P -->|原始成员索引与中心| R[context + near 几何读取]
     K[腕部与五指位置] --> H[HandKinematicsEncoder]
     T[指尖触觉] --> TF[XHandTactileFrameEncoder]
     TF --> E[FingerEvidenceEncoder]
     Q[关节状态] --> S[StateMLP]
-    L --> R[context + near 几何读取]
     PT --> R
     H --> R
     E --> G[FingerModalityGate]
@@ -117,7 +117,7 @@ flowchart TD
 
 ### 4.2 点云与场景分支
 
-`GeometryPatchEncoder` 对每帧执行 FPS 选中心和 KNN 分组。`PatchEncoder` 用共享逐点 MLP、max pooling、局部/池化特征拼接与再次 max pooling 得到 `local_token`；随后 4 层 patch self-attention 用中心 XYZ 构造连续 3D RoPE，得到 `patch_token`。这里复用了 `uni3d.py` 的局部编码类，当前策略没有加载 Uni3D 预训练 backbone。
+`GeometryAwarePointTransformer` 对每帧执行一次 FPS256 和原始点 kNN32 分组。成员编码使用相对 XYZ、距离、8 频段 Fourier 与 RGB，经过 64/128 维 max/broadcast/refine 后，以同一支持集的两种 Gaussian 加权均值、max 和中心化协方差聚合，再投影到 384 维。固定中心图上的一层局部几何 attention 之后，六层全局 Transformer 使用连续 3D Axial RoPE 与 Q/K Norm。输出仅有一套空间 `tokens`、米制 `xyz` 和有效性 `mask`；策略侧共享投影为 192 维。具体尺度、接口与数值约束见 [GAPT 说明](geometry_aware_point_transformer.md)。
 
 训练时默认随机 FPS 起点并打乱输出顺序；`eval()` 强制确定性 FPS。分组索引在 `no_grad` 下计算，不通过邻居选择反传。默认 `pc_dim=6` 已使用点的 RGB；未接入独立 RGB image encoder 或 `PointImageFusion`，不能将其描述为纯 XYZ 输入。
 
@@ -151,7 +151,7 @@ z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
 
 | 属性 | context 分支 | near 分支 |
 |---|---|---|
-| memory | 全局混合后的 `patch_token` | 全局混合前的 `local_token` |
+| memory | 共享投影后的 GAPT `tokens` | 同一份 GAPT `tokens`，包含场景上下文 |
 | 相对边 | 锚点 → patch 中心 | 锚点 → patch 内最近有效成员 |
 | 每头高斯尺度 | `0.08 / 0.08 / 0.20 / ∞ m` | `0.015 / 0.015 / 0.04 / 0.04 m` |
 | 硬支持范围 | 无半径截断；保留有效 patch | 最近成员距离不大于 `3σ`，即 `0.045 / 0.12 m` |
@@ -166,7 +166,7 @@ z_i=\operatorname{LN}_{out}\!\left(\operatorname{HandAttention}
 
 无效/超范围项置为 `-∞`，再加入 learned null key 的 logit，一起 softmax；value 汇聚同时包含 memory value、edge value 和 null value，最后做输出投影。logits/softmax 用 FP32。`σ=∞` 的 context 头没有高斯距离惩罚，但仍使用 learned edge bias/value，不能称为完全不含几何信息的头。
 
-near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不把整个 KNN patch 裁剪进接触半径**。读出的 `local_token` 仍可能汇聚较远成员；一个 patch 也可能含机器人自身、其他物体或背景点。所有头无支持时才整体清零；某一头无支持而其他头有支持时，该头的 learned null 仍可参与输出。null mass 表示模型分配的读取权重，不是接触概率或空域证明。
+near 的硬 mask 只约束“该 patch 是否存在足够近的成员”，**不把整个 KNN patch 裁剪进接触半径**。读出的 GAPT token 已包含全场景上下文，不能视为纯局部特征；原始成员也可能来自机器人自身、其他物体或背景。所有头无支持时才整体清零；某一头无支持而其他头有支持时，该头的 learned null 仍可参与输出。null mass 表示模型分配的读取权重，不是接触概率或空域证明。
 
 默认 `edge_frame=wrist` 将两路边向量表示为 `R_wrist^T(p-c_i)`，距离保持米制。它不改变点云输入、patch/RoPE 坐标、运动学绝对位置或动作空间，因此整体网络不具备由此保证的 SE(3) 等变性。这些距离尺度目前是实现默认值，尚无最优性结论。
 
@@ -236,7 +236,7 @@ x_t=(1-t)\epsilon+ta,\qquad
 
 | 文件 / 类 | 职责 |
 |---|---|
-| [geometry_patch.py](../dexmani_policy/agents/obs_encoder/pointcloud/geometry_patch.py) / GeometryPatchEncoder | FPS/KNN、局部编码、3D RoPE 与 patch self-attention |
+| [geometry_patch.py](../dexmani_policy/agents/obs_encoder/pointcloud/geometry_patch.py) / GeometryAwarePointTransformer | FPS/KNN、几何聚合、局部关系与全局 3D RoPE Transformer，输出一套空间 tokens |
 | [hand_kinematics.py](../dexmani_policy/agents/obs_encoder/proprio/hand_kinematics.py) / HandKinematicsEncoder | 腕部/指尖位置、朝向、手形与身体 identity |
 | [xhand_frame.py](../dexmani_policy/agents/obs_encoder/tactile/xhand_frame.py) / XHandTactileFrameEncoder | 直接逐帧逐指触觉编码 |
 | [hand_scene_relation.py](../dexmani_policy/agents/obs_encoder/interaction/hand_scene_relation.py) / HandSceneRelationEncoder | 双路几何检索、最近成员与支撑诊断 |
