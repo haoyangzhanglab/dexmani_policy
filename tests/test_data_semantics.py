@@ -13,10 +13,10 @@ from dexmani_policy.datasets.resumable_sampler import multitask_indices, Resumab
 from dexmani_policy.evaluation.protocol import select_eval_seeds, validate_heldout
 
 
-def write_data(path, n=24, *, channels=6):
+def write_data(path, n=24, *, channels=6, num_points=8):
     root = zarr.open_group(str(path), mode='w')
     rng = np.random.default_rng(14)
-    for key, shape in [('action', (n, 19)), ('joint_state', (n, 19)), ('point_cloud', (n, 8, channels))]:
+    for key, shape in [('action', (n, 19)), ('joint_state', (n, 19)), ('point_cloud', (n, num_points, channels))]:
         root.create_dataset('data/' + key, data=rng.normal(size=shape).astype('f4'), chunks=(min(8, n), *shape[1:]))
     root.create_dataset('meta/episode_ends', data=np.array([n], dtype=np.int64))
     root.attrs['data_revision'] = 'synthetic-test-v1'
@@ -267,6 +267,145 @@ def test_xyzrgb_color_order_and_rng_unchanged(tmp_path):
     assert np.random.random() == expected_rng
     np.testing.assert_array_equal(actual[..., :3], plain[..., :3])
     assert not np.array_equal(actual[..., 3:], plain[..., 3:])
+
+
+@pytest.mark.parametrize('dtype', [np.float32, np.float64])
+def test_random_point_subset_indices_attributes_and_rng(dtype):
+    from dexmani_policy.datasets.augmentation import random_sample_points
+    # Unique XYZ and RGB encode the same source index; frames start identical.
+    row = np.arange(1024, dtype=dtype)[:, None] * 10 + np.arange(6, dtype=dtype)
+    source = np.stack([row, row])
+    before = source.copy()
+    np.random.seed(42)
+    actual = random_sample_points(source, 768)
+    assert actual.shape == (2, 768, 6)
+    assert actual.dtype == source.dtype and actual.flags.c_contiguous
+    assert not np.shares_memory(actual, source)
+    indices = (actual[..., 0] / 10).astype(int)
+    for frame in range(2):
+        assert len(np.unique(indices[frame])) == 768
+        np.testing.assert_array_equal(actual[frame], source[frame, indices[frame]])
+    assert not np.array_equal(np.sort(indices[0]), np.sort(indices[1]))
+    np.testing.assert_array_equal(source, before)
+    np.random.seed(42)
+    np.testing.assert_array_equal(actual, random_sample_points(source, 768))
+    np.random.seed(43)
+    different = random_sample_points(source, 768)
+    assert not np.array_equal(np.sort(actual[0, :, 0]), np.sort(different[0, :, 0]))
+    full = random_sample_points(source, 1024)
+    np.testing.assert_array_equal(np.sort(full[0, :, 0]), source[0, :, 0])
+    assert random_sample_points(source[..., :3], 768).flags.c_contiguous
+    with pytest.raises(ValueError, match='N=767.*random_keep_points=768'):
+        random_sample_points(source[:, :767], 768)
+    with pytest.raises(ValueError, match='shape'):
+        random_sample_points(source[0], 768)
+
+
+@pytest.mark.parametrize('value', [True, False, 0, -1, 768.0, '768', [768]])
+def test_random_point_subset_rejects_invalid_config(tmp_path, value):
+    from dexmani_policy.datasets.augmentation import random_sample_points
+    from dexmani_policy.smoke_test import load_config
+    from dexmani_policy.training.build_utils import validate_config
+    cfg = load_config('interaction_flow')
+    cfg.dataset.augmentation_cfg.pc.random_keep_points = value
+    with pytest.raises(ValueError, match='random_keep_points must be a positive integer'):
+        validate_config(cfg)
+    with pytest.raises(ValueError, match='random_keep_points must be a positive integer'):
+        random_sample_points(np.zeros((2, 1024, 6)), value)
+    path = tmp_path / 'invalid'
+    write_data(path)
+    with pytest.raises(ValueError, match='random_keep_points must be a positive integer'):
+        BaseDataset(str(path), sensor_modalities=['point_cloud'],
+                    augmentation_cfg={'pc': {'random_keep_points': value}})
+
+
+@pytest.mark.parametrize('config_name', ['interaction_flow', 'ddp/interaction_flow'])
+def test_sparse_interaction_config_bounds(config_name):
+    from dexmani_policy.smoke_test import load_config
+    from dexmani_policy.training.build_utils import validate_config
+    cfg = load_config(config_name)
+    validate_config(cfg)
+    assert cfg.agent.num_patches == 192 and cfg.agent.group_size == 32
+    assert cfg.agent.patch_depth == 6
+    assert cfg.dataset.augmentation_cfg.pc.random_keep_points == 768
+    assert cfg.dataset.augmentation_cfg.pc.dropout is None
+    assert 'gapt192' in cfg.workspace.wandb_cfg.name
+    assert 'gapt192' in cfg.workspace.wandb_cfg.id
+    cfg.dataset.augmentation_cfg.pc.random_keep_points = 191
+    with pytest.raises(ValueError, match='random_keep_points=191.*num_patches=192'):
+        validate_config(cfg)
+    cfg.dataset.augmentation_cfg.pc.random_keep_points = 768
+    cfg.agent.group_size = 769
+    with pytest.raises(ValueError, match='random_keep_points=768.*group_size=769'):
+        validate_config(cfg)
+
+
+def test_sparse_dataset_training_validation_and_source_integrity(tmp_path):
+    from dexmani_policy.datasets.augmentation import PointCoordNoiseAug, PointColorJitter, random_sample_points
+    from dexmani_policy.smoke_test import load_config
+    from dexmani_policy.utils.random import worker_init_fn
+    path = tmp_path / 'sparse'
+    root = write_data(path, num_points=1024)
+    root['meta/episode_ends'][:] = [24]
+    # Two episodes allow an actual held-out Dataset.
+    del root['meta/episode_ends']
+    root.create_dataset('meta/episode_ends', data=np.array([12, 24], dtype=np.int64))
+    rgb = np.random.default_rng(8).uniform(.2, .8, (24, 1024, 3)).astype('f4')
+    root['data/point_cloud'][:, :, 3:] = rgb
+    source = {key: root['data/' + key][:] for key in ('point_cloud', 'joint_state', 'action')}
+    cfg = load_config('interaction_flow')
+    kwargs = dict(zarr_path=str(path), horizon=4, obs_horizon=2, val_ratio=.5,
+                  sensor_modalities=['point_cloud', 'joint_state'], pc_dim=6)
+    ds = BaseDataset(**kwargs, augmentation_cfg=cfg.dataset.augmentation_cfg)
+    assert [type(aug) for aug in ds.augmentors['point_cloud']] == [PointCoordNoiseAug, PointColorJitter]
+    plain = BaseDataset(**kwargs)
+    raw = plain[0]
+    np.random.seed(19)
+    augmented = ds.apply_augmentation(copy.deepcopy({
+        'obs': {k: v.numpy() for k, v in raw['obs'].items()}, 'action': raw['action'].numpy(),
+    }))
+    assert not np.array_equal(augmented['obs']['point_cloud'][..., :3], raw['obs']['point_cloud'][..., :3])
+    assert not np.array_equal(augmented['obs']['point_cloud'][..., 3:], raw['obs']['point_cloud'][..., 3:])
+    expected = random_sample_points(augmented['obs']['point_cloud'], 768)
+    np.random.seed(19)
+    train = ds[0]
+    np.testing.assert_array_equal(train['obs']['point_cloud'], expected)
+    np.testing.assert_array_equal(train['obs']['joint_state'], augmented['obs']['joint_state'])
+    torch.testing.assert_close(train['action'], raw['action'], rtol=0, atol=0)
+    assert train['obs']['point_cloud'].shape == (2, 768, 6)
+    assert train['obs']['joint_state'].shape == (2, 19)
+    val = ds.get_validation_dataset()
+    assert val[0]['obs']['point_cloud'].shape == (2, 1024, 6)
+    for key, value in plain.get_validation_dataset()[0]['obs'].items():
+        torch.testing.assert_close(val[0]['obs'][key], value, rtol=0, atol=0)
+    for key in ('point_cloud', 'joint_state', 'action'):
+        np.testing.assert_array_equal(np.concatenate(list(ds.iter_normalization_data(key))),
+                                      np.concatenate(list(plain.iter_normalization_data(key))))
+        np.testing.assert_array_equal(root['data/' + key][:], source[key])
+        np.testing.assert_array_equal(ds.replay_buffer.read(key, slice(None)), source[key])
+    # Exercise both stacking and the production NumPy worker seeding mechanism.
+    def load():
+        return next(iter(torch.utils.data.DataLoader(
+            ds, batch_size=2, num_workers=2, worker_init_fn=worker_init_fn,
+            generator=torch.Generator().manual_seed(29),
+        )))
+    batch, repeated = load(), load()
+    assert batch['obs']['point_cloud'].shape == (2, 2, 768, 6)
+    for key in batch['obs']:
+        torch.testing.assert_close(batch['obs'][key], repeated['obs'][key], rtol=0, atol=0)
+    with pytest.raises(ValueError, match='N=1024.*random_keep_points=1025'):
+        BaseDataset(**kwargs, augmentation_cfg={'pc': {'random_keep_points': 1025}})
+    for augmentation in (None, {}, {'pc': {'random_keep_points': None}}):
+        disabled = BaseDataset(**kwargs, augmentation_cfg=augmentation)
+        np.random.seed(31)
+        full = disabled[0]['obs']['point_cloud']
+        next_random = np.random.random()
+        np.random.seed(31)
+        assert next_random == np.random.random()
+        torch.testing.assert_close(full, raw['obs']['point_cloud'], rtol=0, atol=0)
+    multi = MultiTaskDataset([plain], ['sparse'], augmentation_cfg=cfg.dataset.augmentation_cfg)
+    assert multi[0]['obs']['point_cloud'].shape == (2, 768, 6)
+    assert multi.get_validation_dataset()[0]['obs']['point_cloud'].shape == (2, 1024, 6)
 
 
 def test_ejc_construct_and_loaded_mapping():

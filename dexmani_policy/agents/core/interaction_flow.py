@@ -27,7 +27,7 @@ class InteractionFlowAgent(BaseAgent):
         state_dim: int = 19,
         pc_dim: int = 6,
         token_dim: int = 192,
-        num_patches: int = 256,
+        num_patches: int = 192,
         group_size: int = 32,
         patch_depth: int = 6,
         num_scene_tokens: int = 16,

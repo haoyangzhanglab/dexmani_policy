@@ -66,14 +66,14 @@ AdapTac 报告了到达阶段更重视觉、操作阶段更重触觉的 attentio
 
 真实训练链路为 `train.py → build_train_components → Trainer → BaseAgent.compute_loss`；`PCDataset` 复用 `BaseDataset` 的采样、增强和字段读取。Dataset 返回 `obs [B,T,…]` 与 `action [B,H,Da]`；`BaseAgent.preprocess` 先归一化，再取前 `n_obs_steps` 帧并展平为 `[BT,…]`。因此直接调用 observation encoder 时，不能传入未归一化的原始 batch。
 
-下文用 `B` 表示 batch size，`T=2` 表示观测帧数，`M=256` 表示 patch 数，`K=32` 表示每个 patch 的邻居数，`D=192` 表示策略 token 宽度；GAPT 内部宽度为 384。每帧独立编码，最后恢复 batch 和历史顺序：
+下文用 `B` 表示 batch size，`T=2` 表示观测帧数，`M=192` 表示 patch 数，`K=32` 表示每个 patch 的邻居数，`D=192` 表示策略 token 宽度；GAPT 内部宽度为 384。每帧独立编码，最后恢复 batch 和历史顺序：
 
 | 阶段 | 默认张量形状 | 语义 |
 |---|---|---|
 | 输入点云 | `[BT,N,6]` | XYZRGB；`N >= max(M,K)`，点数由数据提供 |
-| patch 原始邻域 | `[BT,256,32,6]` | 原始成员索引保留，用于可见几何查询 |
-| GAPT 空间 tokens | `[BT,256,384]` | 几何聚合、1 层局部 attention、6 层全局 3D RoPE Transformer |
-| 共享策略 memory | `[BT,256,192]` | 一次 384→192 Linear + LayerNorm，供 scene/context/near 共同读取 |
+| patch 原始邻域 | `[BT,192,32,6]` | 原始成员索引保留，用于可见几何查询 |
+| GAPT 空间 tokens | `[BT,192,384]` | 几何聚合、1 层局部 attention、6 层全局 3D RoPE Transformer |
+| 共享策略 memory | `[BT,192,192]` | 一次 384→192 Linear + LayerNorm，供 scene/context/near 共同读取 |
 | scene / hand / state | `[BT,16,192]` / `[BT,6,192]` / `[BT,1,192]` | 场景上下文、身体交互、关节状态 |
 | observation condition | `[B,46,192]` | 每帧依次为 scene、wrist、五指、state，按帧拼接 |
 | DiTX condition / action hidden | `[B,46,768]` / `[B,16,768]` | 观测和动作分别线性投影 |
@@ -81,7 +81,7 @@ AdapTac 报告了到达阶段更重视觉、操作阶段更重触觉的 attentio
 
 ```mermaid
 flowchart TD
-    PC[XYZRGB 点云] --> P[GAPT / FPS256 / kNN32]
+    PC[XYZRGB 点云] --> P[GAPT / FPS192 / kNN32]
     P --> PT[空间 tokens / 共享 384→192 投影]
     P -->|原始成员索引与中心| R[context + near 几何读取]
     K[腕部与五指位置] --> H[HandKinematicsEncoder]
@@ -117,7 +117,7 @@ flowchart TD
 
 ### 4.2 点云与场景分支
 
-`GeometryAwarePointTransformer` 对每帧执行一次 FPS256 和原始点 kNN32 分组。成员编码使用相对 XYZ、距离、8 频段 Fourier 与 RGB，经过 64/128 维 max/broadcast/refine 后，以同一支持集的两种 Gaussian 加权均值、max 和中心化协方差聚合，再投影到 384 维。固定中心图上的一层局部几何 attention 之后，六层全局 Transformer 使用连续 3D Axial RoPE 与 Q/K Norm。输出仅有一套空间 `tokens`、米制 `xyz` 和有效性 `mask`；策略侧共享投影为 192 维。具体尺度、接口与数值约束见 [GAPT 说明](geometry_aware_point_transformer.md)。
+`GeometryAwarePointTransformer` 对每帧执行一次 FPS192 和原始点 kNN32 分组。成员编码使用相对 XYZ、距离、8 频段 Fourier 与 RGB，经过 64/128 维 max/broadcast/refine 后，以同一支持集的两种 Gaussian 加权均值、max 和中心化协方差聚合，再投影到 384 维。固定中心图上的一层局部几何 attention 之后，六层全局 Transformer 使用连续 3D Axial RoPE 与 Q/K Norm。输出仅有一套空间 `tokens`、米制 `xyz` 和有效性 `mask`；策略侧共享投影为 192 维。具体尺度、接口与数值约束见 [GAPT 说明](geometry_aware_point_transformer.md)。
 
 训练时默认随机 FPS 起点并打乱输出顺序；`eval()` 强制确定性 FPS。分组索引在 `no_grad` 下计算，不通过邻居选择反传。默认 `pc_dim=6` 使用点的 RGB，不依赖独立 RGB image encoder。
 
@@ -277,8 +277,10 @@ normalizer 保留每指每轴独立的 15 个统计通道，只跨训练源行�
 | 训练预算 | batch 128，100000 optimizer steps，seed 42 | DDP 为每卡 32 × 4 卡，梯度累积均为 1 |
 | 优化器 | AdamW；obs/action lr 均 `1e-4`，weight decay 均 `1e-6`，betas `[0.95,0.999]` | cosine schedule、warmup 500、梯度裁剪 1.0 |
 | 数值与评测 | BF16、编译 DiT-X 与 GAPT 全局 Transformer、EMA 均开启 | eval 默认选择 EMA，NFE=10 |
-| 点云增强 | XYZ noise std `0.002 m`、color jitter、最大 dropout ratio `0.8`，均 `prob=1` | 增强发生在 patch FPS 前；不把随机缺点视作接触标签 |
+| 点云增强 | XYZ noise std `0.002 m`、color jitter（均 `prob=1`），随后每帧无放回保留 768 点；`dropout: null` | 仅训练执行，验证/推理保留完整点云；在 FPS192/kNN32 前完成 |
 | 状态增强 | noise std `0.0002`，`prob=1` | 在 Agent 归一化之前作用于 joint_state |
+
+默认输入 1024 点时，训练 batch 为 `[B,T,768,6]`，验证/推理为 `[B,T,1024,6]`；编码器不写死原始点数。采样不新增重复索引，已有重复坐标仍可能保留。XYZ/RGB 同索引，其他模态不变；GAPT 与 HandSceneRelation 共用采样后的 Tensor，邻域索引不会错位。Normalizer 的原始训练源行统计不变。Fourier 保持 8 频段、2～32 cm 与 FP32 相位。
 
 这些是当前 YAML 的值，不是历史实验事实或推荐最优值。类构造与 YAML 均使用固定 `eef_pose` 字段，不再提供 `wrist_pose_key` 选项。
 
@@ -321,7 +323,7 @@ PYTHONPATH=. python dexmani_policy/smoke_test.py --config-only interaction_flow
 PYTHONPATH=. python dexmani_policy/smoke_test.py --config-only ddp/interaction_flow
 ```
 
-实际训练沿用仓库 `train.py`/训练脚本入口，选择配置 `interaction_flow`。
+实际训练沿用仓库 `train.py`/训练脚本入口，选择配置 `interaction_flow`。新运行目录与 W&B 标识包含 `gapt192`，区分历史 GAPT-256；恢复仍遵循来源实验保存的配置，不把旧 checkpoint 静默续训为新配方。
 不要在未检查数据字段、指序、坐标系与真实采样后直接启动长训练。
 
 ## 7. 最小判别实验
@@ -367,7 +369,7 @@ L 与 Q 保持相同直接残差和归一化顺序，闭环收益需通过实际
 | `context_update` / `near_update` | `[BT,6,192]` | 哪条几何路径在提供更新 |
 | `near_has_support` | `[BT,6,4]` | 各 attention head 是否至少有一个受支持 patch |
 | `min_observed_distance` | `[BT,6]` | 锚点到所有已分组 patch 成员的最短距离；不保证覆盖原始全点云 |
-| `context_attention` / `near_attention` | `[BT,6,4,257]` | 对 256 个 patch 与最后一个 null 槽的读取分配 |
+| `context_attention` / `near_attention` | `[BT,6,4,193]` | 对 192 个 patch 与最后一个 null 槽的读取分配 |
 | `context_null_mass` / `near_null_mass` | `[BT,6,4]` | 各头分配给 null 的权重 |
 | `interaction_center` / `frame_tokens` | `[BT,6,3]` / `[BT,23,192]` | 锚点坐标与最终逐帧 token 布局 |
 
@@ -410,7 +412,9 @@ PYTHONPATH=. python dexmani_policy/train.py --config-name interaction_flow \
 
 `ddp/interaction_flow` 可执行 config-only 检查；多卡运行需使用 `train_ddp.py` 或对应训练脚本，单卡 smoke 不验证多卡执行。短程检查只能证明相应实现链路，不能证明闭环收益或门控已学会阶段切换。
 
-本次文档更新的验证记录（2026-10-15）：
+GAPT-192 与随机稀疏增强的本次回归：完整 `tests/` **293 PASS / 0 SKIP**，包含 768 点训练/1024 点推理的 CUDA BF16 合成策略更新与 raw/EMA 恢复；两个 config-only 均通过。真实数据 smoke 因缺少 `fingertip_xyz`、`eef_pose`、`finger_tactile_force` 为 **NOT VERIFIED**，DDP 实际运行亦未验证。详情见 [GAPT-192 验证记录](geometry_aware_point_transformer.md#gapt-192-本次验证2026-10-15)。
+
+此前仅更新说明文档时的验证记录（2026-10-15，GAPT-256 历史配置）：
 
 - **PASS**：在 `policy` 环境执行 `interaction_flow` 与 `ddp/interaction_flow` 两个 config-only 检查，均通过配置校验与 6 个 Hydra target 引用检查。
 - **PASS**：文档 diff 与仓库内链接/引用路径检查。

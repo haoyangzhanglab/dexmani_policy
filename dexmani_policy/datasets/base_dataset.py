@@ -14,7 +14,9 @@ from dexmani_policy.datasets.augmentation import (
     PointCoordNoiseAug,
     PointDropout,
     StateNoiseAug,
+    random_sample_points,
     validate_pc_color_augmentation,
+    validate_random_keep_points,
 )
 from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb, raw_rgb_tensor
 from dexmani_policy.datasets.replay_buffer import ReplayBuffer
@@ -106,6 +108,9 @@ class BaseDataset(torch.utils.data.Dataset):
             shape = self.replay_buffer['point_cloud'].shape
             if len(shape) != 3 or shape[-1] < pc_dim:
                 raise ValueError('Stored point_cloud does not satisfy configured pc_dim')
+        self.sensor_modalities = sensor_modalities
+        self.augmentation_cfg = augmentation_cfg
+        self._build_augmentors()
         n_rows = int(self.replay_buffer.episode_ends[-1])
 
         def finite_rows(key, columns=None):
@@ -140,10 +145,6 @@ class BaseDataset(torch.utils.data.Dataset):
         elif ('point_cloud' in sensor_modalities and self.pc_dim is not None
               and self.pc_dim < self.replay_buffer['point_cloud'].shape[-1]):
             self.data_recipe.update(window_validity='role_finite_channels_v2', point_cloud_channels=self.pc_dim)
-        self.sensor_modalities = sensor_modalities
-        self.augmentation_cfg = augmentation_cfg
-        self._build_augmentors()
-
         if saved_split is not None:
             from dexmani_policy.datasets.split import restore_split
             train_mask, val_mask, manifest, digest = restore_split(
@@ -217,6 +218,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # Validation set disables randomness: no augmentation, random crop → center crop
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
+        val_set.random_keep_points = None
         val_set._is_val = True
         self._validation_dataset = val_set
         return val_set
@@ -308,6 +310,10 @@ class BaseDataset(torch.utils.data.Dataset):
         sample = self.sampler.sample_sequence(idx, key_lengths=self._role_lengths)
         data = self.sample_to_data(sample)
         data = self.apply_augmentation(data)
+        if not self._is_val and self.random_keep_points is not None:
+            data['obs']['point_cloud'] = random_sample_points(
+                data['obs']['point_cloud'], self.random_keep_points,
+            )
 
         if self.rgb_preprocess_size is not None and "rgb" in data["obs"]:
             data["obs"]["rgb"] = self._preprocess_rgb_cpu(data["obs"]["rgb"])
@@ -321,6 +327,16 @@ class BaseDataset(torch.utils.data.Dataset):
         RGB transforms run separately in ``_preprocess_rgb_cpu``.
         """
         self.augmentors = {}
+        pc_cfg = ((self.augmentation_cfg or {}).get('pc') or {})
+        self.random_keep_points = pc_cfg.get('random_keep_points')
+        validate_random_keep_points(self.random_keep_points)
+        if self.random_keep_points is not None:
+            if 'point_cloud' not in self.sensor_modalities:
+                raise ValueError('random_keep_points requires the point_cloud modality')
+            shape = self.replay_buffer['point_cloud'].shape
+            if len(shape) != 3:
+                raise ValueError('Stored point_cloud must have shape [T,N,C]')
+            validate_random_keep_points(self.random_keep_points, num_points=shape[1])
         validate_pc_color_augmentation(self.pc_dim, self.augmentation_cfg)
         if self.augmentation_cfg is None:
             return

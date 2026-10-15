@@ -6,7 +6,7 @@
 
 ```text
 XYZ / XYZRGB（米制，共同坐标系）
- -> 一次 FPS256 + 原始点 kNN32
+ -> 一次 FPS192 + 原始点 kNN32
  -> 相对 XYZ、距离、8 频段 Fourier 特征
  -> 64/128 维共享成员 MLP + max/broadcast/refine
  -> 同一支持集上的近/宽软距离池化 + max + 二阶几何统计
@@ -14,10 +14,10 @@ XYZ / XYZRGB（米制，共同坐标系）
  -> 一层近邻 Patch 几何 Attention（12 邻居、128 维关系空间）
  -> 六层 384 维、8-head 全局 3D RoPE Transformer
  -> LayerNorm
- -> 一套 [B,256,384] Tokens + XYZ + 有效性 Mask
+ -> 一套 [B,192,384] Tokens + XYZ + 有效性 Mask
 ```
 
-默认 XYZRGB 参数量：**11,814,084**，小于 30M。最后没有 global pooling、CLS 压缩、local/context 双投影或额外的局部输出相加。局部与全局模块内部保留标准残差、Pre-LayerNorm 和 LayerScale。
+默认 XYZRGB 参数量：**11,814,084**（约 11.81M），与 GAPT-256 完全一致；Patch 数不引入网络参数。最后没有 global pooling、CLS 压缩、local/context 双投影或额外的局部输出相加。局部与全局模块内部保留标准残差、Pre-LayerNorm 和 LayerScale。
 
 ## 几何与效率细节
 
@@ -38,18 +38,30 @@ from dexmani_policy.agents.obs_encoder.pointcloud.geometry_patch import Geometry
 
 encoder = GeometryAwarePointTransformer(input_channels=6)
 result = encoder(pointcloud)  # [B,N,6]
-# result['tokens']: [B,256,384]
-# result['xyz']:    [B,256,3]，米制
-# result['mask']:   [B,256]，True 表示有效
+# result['tokens']: [B,192,384]
+# result['xyz']:    [B,192,3]，米制
+# result['mask']:   [B,192]，True 表示有效
 ```
 
 输入必须为有限的实际观测点，每个样本 `N >= max(num_patches, group_size)`。不支持把 NaN、Inf 或补零 Padding 当作有效观测；当前固定观测契约下返回的 Mask 全为 True，它不是缺测检测器，也不表示中心唯一。RGB 建议使用一致的 [0,1] 标度。坐标不要逐帧、逐轴独立缩放为不同物理单位。
 
-`return_geometry=True` 另外返回 `center_indices`、`neighbor_indices`、`patch_radius`，用于几何证据读取。这些只是索引与几何元数据，不是第二套特征。`patch_radius` 是原始支持集半径，不是经过全局 Attention 后完整的感受野。
+`return_geometry=True` 另外返回 `center_indices [B,192]`、`neighbor_indices [B,192,32]`、`patch_radius [B,192,1]`，用于几何证据读取。这些只是索引与几何元数据，不是第二套特征。`patch_radius` 是原始支持集半径，不是经过全局 Attention 后完整的感受野。
 
 编码器直接消费 XYZ 或 XYZRGB，不接机器人状态、动作、图像 Tokens、语言或时间索引。其他模态在策略侧融合；点的 RGB 随邻域成员进入几何编码，不依赖独立图像 Backbone。
 
 独立的 [PointImageFusion](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py) 模块予以保留；当前 GAPT 和交互策略没有接入其图像特征融合路径。
+
+## 训练随机稀疏增强
+
+当前 `interaction_flow` 在 Dataset 完成原有 2 mm 坐标噪声和颜色增强后、转 Tensor 前，按帧独立无放回保留 768 个真实输入索引。配置为 `augmentation_cfg.pc.dropout: null`、`random_keep_points: 768`；旧复制式 PointDropout 仍供其他策略使用，`Aug` 原地且不改 shape 的契约保持不变。
+
+训练 `[T,N,C] → [T,768,C]`，验证/推理保留 `[T,N,C]`，当前预期 `N=1024`、`C=3/6`。采样使用 Worker 已设种子的 NumPy RNG；XYZ/RGB 共用索引，其他非逐点模态与时间顺序不变，返回独立连续数组且保持 dtype。无放回只保证不新增重复输入索引，无法消除传感器已有的重复坐标。
+
+配置必须为正整数（拒绝 bool），或省略/设为 null 关闭。配置校验要求 `random_keep_points >= num_patches` 且 `>= group_size`，Dataset 按实际存储 shape 检查 `N >= random_keep_points`；不足时直接报错，不复制、补零或有放回采样。Normalizer 继续读取原始训练源行，Zarr 不修改。
+
+GAPT 与 HandSceneRelation 消费 Dataset 输出的**同一份**点云 Tensor，所有中心/邻域索引均相对这份输入；编码器内不再采样子集，无需维护原始 1024 点映射。当前策略不消费独立逐点 UV/语义/有效性字段。
+
+本次只改 Patch 数与训练稀疏增强：Fourier 保留 8 个对数频段、2～32 cm 波长、原始 Relative XYZ/Distance 和 FP32 相位。现有数值测试覆盖其实现；未发现需要修复的错误，因此不同时改变 Fourier 这个研究变量。
 
 ## 当前仓库衔接
 
@@ -57,9 +69,11 @@ result = encoder(pointcloud)  # [B,N,6]
 
 `HandSceneRelationEncoder` 改为消费 `tokens/xyz/mask/neighbor_indices`，最近可见成员距离与无支持时 near_update=0 的保护保留。近场是受局部观测约束的读取，**其 value 已包含全场景上下文**，不能再描述为纯局部 Patch 特征。
 
-Agent、ObsEncoder 和配置的默认 Patch 数同步为 256、深度为 6。策略输出仍是每帧 16 scene + 6 hand + 1 state，动作/触觉/normalization/训练配方未更改。[交互架构说明](interaction_representation.md) 已同步单一空间 memory 的调用链。
+Agent、ObsEncoder 和配置的默认 Patch 数同步为 192、深度为 6。策略输出仍是每帧 16 scene + 6 hand + 1 state，动作、触觉、normalization 与优化配方未更改。[交互架构说明](interaction_representation.md) 已同步单一空间 memory 的调用链。
 
-这是架构与状态字典的不兼容升级。旧 GeometryPatchEncoder/Compact/双投影版本 checkpoint 不能完整恢复到新模型，不提供 silent fallback 或用 strict=False 假装恢复。请使用新的运行目录；历史实验仍需匹配其保存的源码与配置。
+此前从旧编码器迁移至 GAPT 是架构与状态字典的不兼容升级。旧 GeometryPatchEncoder/Compact/双投影版本 checkpoint 不能完整恢复到新模型，不提供 silent fallback 或用 strict=False 假装恢复。请使用新的运行目录；历史实验仍需匹配其保存的源码与配置。
+
+当前 GAPT-192 与 GAPT-256 的参数形状一致，但采样配方不同；新训练目录和 W&B 标识包含 `gapt192`，不得作为历史实验的静默续训。显式恢复仍以实验保存的配置为准。
 
 ## 编译边界
 
@@ -67,7 +81,26 @@ Agent、ObsEncoder 和配置的默认 Patch 数同步为 256、深度为 6。策
 
 编译绑定方法不改变 `blocks.*`、`norm.*` 等参数名、参数对象或模块层级。raw/EMA 在各自实例上分别编译，现有 GAPT checkpoint 可严格加载；这次执行方式调整不构成新的模型版本。smoke 的 checkpoint 对照在还原 DiT-X 后，也还原该方法，再比较 eager 预测，保留原断言。
 
-## 验证
+## GAPT-192 本次验证（2026-10-15）
+
+基于 `main@645d729`，在 `policy` 环境、PyTorch 2.4.1+cu124、原生 PyTorch3D、RTX 4090 验证。以下使用当前 192 Patch 配置，未运行消融或长训练：
+
+| 检查 | 实际结果 |
+|---|---|
+| `python -m pytest -q tests/test_geometry_aware_point_transformer.py` | **49 PASS / 0 SKIP**；768/1024 点、XYZ/XYZRGB、CPU/CUDA FP32/BF16、索引/半径/数值测试、AdamW 更新及编译输出/梯度对照 |
+| `python -m pytest -q tests/test_data_semantics.py` | **55 PASS / 0 SKIP**；独立逐帧无放回采样、属性/dtype/连续性、种子复现、配置边界、训练/验证分离、多 Worker 堆叠、源数据与统计来源不变 |
+| `python -m pytest -q tests` | **293 PASS / 0 SKIP**；包含 CUDA 专项；4 条提示来自 TF32 设置与已有 VQ PCA 排序诊断 |
+| 完整策略合成集成 | **PASS**；768 点训练、1024 点推理，默认 BF16/compile、12 次小 batch 更新、raw/EMA 严格恢复；条件仍为 `[B,46,192]` |
+| `smoke_test.py --config-only interaction_flow` 与 `ddp/interaction_flow` | **PASS**；DDP 继承配置，未重复覆盖参数 |
+| Python 语法、文档链接、新运行目录与 `git diff --check` | **PASS**；输出目录与 W&B 标识均带 `gapt192` |
+| `smoke_test.py interaction_flow --max-updates 4` | **NOT VERIFIED / 已尝试失败**；真实 Zarr 为 `[21293,1024,6]`，缺少 `fingertip_xyz`、`eef_pose`、`finger_tactile_force`，在 Dataset 校验时停止；未修改真实数据 |
+| 多卡 DDP、真实数据训练/恢复、闭环效果 | **NOT VERIFIED**；本次不据合成测试推断任务效果 |
+
+无放回采样不处理传感器原有重复坐标；当前训练路径未消费独立逐点 UV/语义字段。仿真 runner 与部署 runtime 的观测入口均不调用训练随机采样。CUDA 和多 Worker 测试在主机权限下执行；沙箱内多 Worker 检查曾中止，主机重跑通过。
+
+## 历史 GAPT-256 验证记录
+
+以下计数、延迟和显存均属于 **256 Patch 的历史配置**，不代表 GAPT-192 的测量结果。
 
 2026-10-15 在本地 `policy` 环境（Python 3.10、PyTorch 2.4.1+cu124、原生 PyTorch3D、RTX 4090）完成最终集成检查：
 

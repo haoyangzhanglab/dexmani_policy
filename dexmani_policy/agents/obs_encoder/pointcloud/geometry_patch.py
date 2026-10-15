@@ -173,7 +173,7 @@ class PointRelationBlock(nn.Module):
 class GeometryAwarePointTransformer(nn.Module):
     """GAPT: one set of context-aware, spatially anchored point-cloud tokens.
 
-    Default: FPS256/kNN32 -> shared geometric patch MLP -> local attention ->
+    Default: FPS192/kNN32 -> shared geometric patch MLP -> local attention ->
     six 384-channel RoPE blocks -> LN. No pretraining, pooling across spatial
     tokens, separate output projection, or task-specific feature branch.
 
@@ -187,7 +187,7 @@ class GeometryAwarePointTransformer(nn.Module):
         self,
         input_channels: int = 6,
         channels: int = 384,
-        num_patches: int = 256,
+        num_patches: int = 192,
         group_size: int = 32,
         depth: int = 6,
         num_heads: int = 8,

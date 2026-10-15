@@ -50,12 +50,13 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud", "fingertip_xyz", "eef_pose", "finger_tactile_force"]
   obs_horizon: ${n_obs_steps}
 
-  # Shared R3D-derived sensor recipe; dataset dropout precedes encoder patch FPS.
+  # Training only: sensor noise/color, then a real-point subset before GAPT FPS.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
       color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
-      dropout:     {max_dropout_ratio: 0.8, prob: 1.0}
+      dropout: null
+      random_keep_points: 768
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
@@ -71,7 +72,7 @@ agent:
   pc_dim: 6
   state_dim: 19
   token_dim: 192
-  num_patches: 256
+  num_patches: 192
   group_size: 32
   patch_depth: 6
   num_scene_tokens: 16
@@ -145,8 +146,8 @@ workspace:
     _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
-    name: ${task_name}_${run_id:}_seed${training.seed}
-    id: ${policy_name}_${task_name}_${training.seed}
+    name: ${task_name}_${run_id:}_gapt${agent.num_patches}_seed${training.seed}
+    id: ${policy_name}_${task_name}_gapt${agent.num_patches}_${training.seed}
     resume: allow
     mode: offline
     video_fps: 15
@@ -190,7 +191,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_gapt${agent.num_patches}_seed${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_gapt${agent.num_patches}_seed${training.seed}
     subdir: ${hydra.job.num}

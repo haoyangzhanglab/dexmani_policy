@@ -23,7 +23,7 @@ from dexmani_policy.agents.normalization import (
     validate_normalizer_state,
 )
 from dexmani_policy.datasets.sampler import validate_dataset_splits
-from dexmani_policy.datasets.augmentation import validate_pc_color_augmentation
+from dexmani_policy.datasets.augmentation import validate_pc_color_augmentation, validate_random_keep_points
 from dexmani_policy.training.logging import print_param_count
 from dexmani_policy.training.lr_scheduler import get_scheduler
 from dexmani_policy.utils.config import (
@@ -487,6 +487,16 @@ def validate_config(cfg):
         if child.get('pc_dim') is not None and child.pc_dim != agent_pc_dim:
             raise ValueError('Dataset pc_dim must match the actual Agent point-cloud channels')
         validate_pc_color_augmentation(agent_pc_dim, child.get('augmentation_cfg'))
+        augmentation = child.get('augmentation_cfg')
+        validate_random_keep_points(((augmentation or {}).get('pc') or {}).get('random_keep_points'))
+        if 'datasets' in cfg.dataset and cfg.dataset.get('augmentation_cfg') is not None:
+            augmentation = cfg.dataset.augmentation_cfg
+        keep_points = ((augmentation or {}).get('pc') or {}).get('random_keep_points')
+        geometry_sizes = {}
+        if cfg.agent.get('_target_') == 'dexmani_policy.agents.core.interaction_flow.InteractionFlowAgent':
+            geometry_sizes = dict(num_patches=cfg.agent.get('num_patches', 192),
+                                  group_size=cfg.agent.get('group_size', 32))
+        validate_random_keep_points(keep_points, **geometry_sizes)
     if 'datasets' in cfg.dataset:
         # Hydra constructs children before MultiTaskDataset applies its shared augmentation.
         validate_pc_color_augmentation(agent_pc_dim, cfg.dataset.get('augmentation_cfg'))

@@ -2,8 +2,41 @@ import numpy as np
 import torch
 import torchvision.transforms.v2 as v2
 
+from dexmani_policy.utils.validation import positive_int
+
 _BT601_LUMA = (0.299, 0.587, 0.114)
 """BT.601 luma coefficients for RGB-to-grayscale conversion."""
+
+
+def validate_random_keep_points(keep_points, *, num_points=None, num_patches=None, group_size=None):
+    """Validate optional dataset subsampling and the receiving geometry sizes."""
+    if keep_points is None:
+        return
+    positive_int(keep_points, 'random_keep_points')
+    if num_points is not None and num_points < keep_points:
+        raise ValueError(f'point_cloud N={num_points} must be >= random_keep_points={keep_points}')
+    for name, size in (('num_patches', num_patches), ('group_size', group_size)):
+        if size is not None:
+            positive_int(size, name)
+            if keep_points < size:
+                raise ValueError(f'random_keep_points={keep_points} must be >= {name}={size}')
+
+
+def random_sample_points(pointcloud: np.ndarray, keep_points: int) -> np.ndarray:
+    """Copy a per-frame subset of [T,N,C], without replacement of input indices.
+
+    All channels share indices. Existing duplicate coordinates may remain.
+    Uses the worker-seeded NumPy RNG, independently for each frame.
+    This shape-changing operation is deliberately outside the in-place Aug API.
+    """
+    positive_int(keep_points, 'random_keep_points')
+    if pointcloud.ndim != 3:
+        raise ValueError('pointcloud must have shape [T,N,C]')
+    t, n, _ = pointcloud.shape
+    validate_random_keep_points(keep_points, num_points=n)
+    scores = np.random.random((t, n))
+    indices = np.argpartition(scores, kth=keep_points - 1, axis=1)[:, :keep_points]
+    return np.ascontiguousarray(np.take_along_axis(pointcloud, indices[..., None], axis=1))
 
 
 def validate_pc_color_augmentation(pc_dim, augmentation_cfg):

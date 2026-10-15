@@ -1,6 +1,7 @@
 """GAPT module checks. CPU reference FPS/kNN do not validate native kernels."""
 import math
 
+import numpy as np
 import pytest
 import torch
 
@@ -65,14 +66,19 @@ def test_shapes_geometry_backward_and_single_output(reference_geometry, input_ch
         assert param.grad is not None and torch.isfinite(param.grad).all(), name
 
 
-def test_full_default_budget_and_optimizer_step(reference_geometry):
+@pytest.mark.parametrize("num_points", [768, 1024])
+def test_full_default_budget_and_optimizer_step(reference_geometry, num_points):
     model = gp.GeometryAwarePointTransformer().train()
     parameter_count = sum(p.numel() for p in model.parameters())
     assert parameter_count == 11814084 and parameter_count < 30_000_000
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     before = model.patch_embedding.member_mlp[0].weight.detach().clone()
-    result = model(torch.randn(1, 1024, 6) * 0.12)
-    assert result["tokens"].shape == (1, 256, 384)
+    assert model.out_dim == 384 and model.out_shape == (192, 384)
+    historical = gp.GeometryAwarePointTransformer(num_patches=256)
+    assert {k: v.shape for k, v in model.state_dict().items()} == {k: v.shape for k, v in historical.state_dict().items()}
+    assert sum(p.numel() for p in historical.parameters()) == parameter_count
+    result = model(torch.randn(1, num_points, 6) * 0.12)
+    assert result["tokens"].shape == (1, 192, 384)
     loss = (result["tokens"] - torch.randn_like(result["tokens"])).square().mean()
     loss.backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
@@ -326,8 +332,17 @@ def test_repository_wiring_is_single_memory(reference_geometry):
     handles = [model.scene.register_forward_pre_hook(lambda m, args: memories.append(args[0]))]
     for reader in (model.relation.context, model.relation.near):
         handles.append(reader.register_forward_pre_hook(lambda m, args: memories.append(args[1])))
+    from dexmani_policy.datasets.augmentation import random_sample_points
+    np.random.seed(37)
+    cloud = torch.from_numpy(random_sample_points((torch.randn(2, 1024, 6) * 0.1).numpy(), 768))
+    geometry_inputs, relation_inputs, geometries = [], [], []
+    handles.extend([
+        model.geometry.register_forward_pre_hook(lambda m, args: geometry_inputs.append(args[0])),
+        model.geometry.register_forward_hook(lambda m, args, out: geometries.append(out)),
+        model.relation.register_forward_pre_hook(lambda m, args: relation_inputs.append(args[0])),
+    ])
     obs = {
-        "point_cloud": torch.randn(2, 256, 6) * 0.1,
+        "point_cloud": cloud,
         "joint_state": torch.randn(2, 19),
         "eef_pose": torch.tensor([[0., 0., 0., 1., 0., 0., 0., 1., 0.]]).expand(2, -1),
         "fingertip_xyz": torch.randn(2, 5, 3) * 0.1,
@@ -338,7 +353,12 @@ def test_repository_wiring_is_single_memory(reference_geometry):
         handle.remove()
     assert isinstance(model.geometry, gp.GeometryAwarePointTransformer)
     assert len(memories) == 3 and all(memory is memories[0] for memory in memories)
-    assert memories[0].shape == (2, 256, 192)
+    assert memories[0].shape == (2, 192, 192)
+    assert geometry_inputs[0] is relation_inputs[0] is cloud
+    members = gp.index_points(cloud[..., :3], geometries[0]["neighbor_indices"])
+    anchors = torch.cat((obs["eef_pose"][:, None, :3], obs["fingertip_xyz"]), dim=1)
+    distances = (members[:, None] - anchors[:, :, None, None]).norm(dim=-1).amin(-1)
+    torch.testing.assert_close(aux["surface_distance"], distances)
     assert cond.shape == (1, 46, 192) and aux["frame_tokens"].shape == (2, 23, 192)
     (cond - torch.randn_like(cond)).square().mean().backward()
     for module in (model.geometry, model.geometry_projection, model.scene, model.relation):
@@ -348,20 +368,26 @@ def test_repository_wiring_is_single_memory(reference_geometry):
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("amp", [False, True])
 @pytest.mark.parametrize("input_channels", [3, 6])
-def test_native_backend_when_available(device, amp, input_channels):
+@pytest.mark.parametrize("num_points", [768, 1024])
+def test_native_backend_when_available(device, amp, input_channels, num_points):
     pytest.importorskip("pytorch3d.ops", reason="Native PyTorch3D FPS/kNN not installed")
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA device unavailable; CPU checks do not validate CUDA")
     model = gp.GeometryAwarePointTransformer(input_channels=input_channels).to(device).train()
-    points = torch.randn(1, 1024, input_channels, device=device) * 0.1
+    points = torch.randn(1, num_points, input_channels, device=device) * 0.1
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     before = model.patch_embedding.member_mlp[0].weight.detach().clone()
     with torch.autocast(device, dtype=torch.bfloat16, enabled=amp):
         result = model(points, return_geometry=True)
         loss = (result["tokens"].float() - torch.randn_like(result["tokens"], dtype=torch.float32)).square().mean()
-    assert result["tokens"].shape == (1, 256, 384)
+    assert result["tokens"].shape == (1, 192, 384)
     assert torch.isfinite(result["tokens"]).all()
     torch.testing.assert_close(result["xyz"], gp.index_points(points[..., :3], result["center_indices"]), rtol=0, atol=0)
+    assert result["center_indices"].shape == (1, 192)
+    assert result["neighbor_indices"].shape == (1, 192, 32)
+    assert result["patch_radius"].shape == (1, 192, 1)
+    assert result["xyz"].shape == (1, 192, 3)
+    assert result["mask"].shape == (1, 192) and result["mask"].all()
     neighbors = result["neighbor_indices"]
     assert neighbors.min() >= 0 and neighbors.max() < points.shape[1]
     actual_distances = (gp.index_points(points[..., :3], neighbors) - result["xyz"][:, :, None]).norm(dim=-1)
@@ -457,7 +483,11 @@ def test_cuda_policy_compiled_training_and_strict_reload(tmp_path):
         assert tuple(geometry.state_dict()) == geometry_keys
         assert geometry._global_forward.__wrapped__.__self__ is geometry
     obs = {key: value.cuda() for key, value in obs.items()}
-    batch = {"obs": obs, "action": actions.cuda()}
+    from dexmani_policy.datasets.augmentation import random_sample_points
+    np.random.seed(53)
+    sampled = random_sample_points(obs["point_cloud"].cpu().numpy().reshape(4, 1024, 6), 768)
+    train_obs = dict(obs, point_cloud=torch.from_numpy(sampled.reshape(2, 2, 768, 6)).cuda())
+    batch = {"obs": train_obs, "action": actions.cuda()}
     weight = model.obs_encoder.geometry.patch_embedding.member_mlp[0].weight
     before = weight.detach().clone()
     # Zero-initialized DiT output/gates and the unchanged 500-step warmup delay
@@ -504,7 +534,7 @@ def test_cuda_compiled_patch_pooling_backward():
     # BF16 projection weights. Compile the actual module without a fallback.
     torch.manual_seed(79)
     model = gp.GeometricPatchEmbedding(6, 384, 0.1).cuda()
-    relative = torch.randn(1, 256, 32, 3, device="cuda") * 0.05
+    relative = torch.randn(1, 192, 32, 3, device="cuda") * 0.05
     attributes = torch.rand_like(relative)
     compiled = torch.compile(model, mode="reduce-overhead", fullgraph=True)
     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -524,8 +554,8 @@ def test_cuda_global_compile_preserves_outputs_gradients_and_state(amp):
     pytest.importorskip("pytorch3d.ops")
     torch.manual_seed(17)
     model = gp.GeometryAwarePointTransformer().cuda().eval()
-    points = (torch.randn(1, 1024, 6, device="cuda") * 0.1).requires_grad_()
-    target = torch.randn(1, 256, 384, device="cuda")
+    points = (torch.randn(1, 768, 6, device="cuda") * 0.1).requires_grad_()
+    target = torch.randn(1, 192, 384, device="cuda")
     keys = tuple(model.state_dict())
     parameter_ids = [id(p) for p in model.parameters()]
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
@@ -563,7 +593,7 @@ def test_cuda_global_compile_preserves_outputs_gradients_and_state(amp):
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
         for seed in (37, 53):
             torch.manual_seed(seed)
-            sample = torch.randn(1, 1024, 6, device="cuda") * 0.1
+            sample = torch.randn(1, 768, 6, device="cuda") * 0.1
             actual = model(sample)["tokens"].clone()
             model._global_forward = eager_global
             expected = model(sample)["tokens"]
