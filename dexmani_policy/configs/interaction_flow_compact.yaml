@@ -1,0 +1,14 @@
+# Encoder-only ablation: inherit action, training, augmentation and token budgets.
+defaults:
+  - interaction_flow
+  - _self_
+
+agent:
+  patch_encoder_type: compact
+  patch_local_neighbors: 0   # First isolate the compact stem; then compare 8.
+  patch_local_scale: 0.1     # Metric divisor, NOT a neighborhood cutoff.
+
+workspace:
+  wandb_cfg:
+    group: geometry_patch_compact
+    id: geometry_patch_compact_${task_name}_${training.seed}

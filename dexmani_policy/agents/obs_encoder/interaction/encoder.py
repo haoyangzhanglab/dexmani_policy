@@ -51,6 +51,9 @@ class InteractionObsEncoder(nn.Module):
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
         use_modality_gate: bool = True,
+        patch_encoder_type: str = "uni3d",
+        patch_local_neighbors: int = 0,
+        patch_local_scale: float = 0.1,
     ):
         super().__init__()
         if n_obs_steps < 1 or num_scene_tokens > num_patches:
@@ -81,6 +84,9 @@ class InteractionObsEncoder(nn.Module):
             num_patches=num_patches,
             group_size=group_size,
             depth=patch_depth,
+            patch_encoder_type=patch_encoder_type,
+            local_mixer_neighbors=patch_local_neighbors,
+            local_mixer_scale=patch_local_scale,
             fps_random_config=fps_random_config,
         )
         self.state = create_state_mlp(state_dim, token_dim)
