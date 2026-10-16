@@ -361,7 +361,7 @@ def test_repository_wiring_is_single_memory(reference_geometry):
     torch.testing.assert_close(aux["surface_distance"], distances)
     assert cond.shape == (1, 46, 192) and aux["frame_tokens"].shape == (2, 23, 192)
     (cond - torch.randn_like(cond)).square().mean().backward()
-    for module in (model.geometry, model.geometry_projection, model.scene, model.relation):
+    for module in (model.geometry, model.geometry_projection, model.scene, model.hand_encoder, model.relation):
         assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in module.parameters())
 
 
@@ -403,7 +403,10 @@ def test_native_backend_when_available(device, amp, input_channels, num_points):
 def test_reader_contract_uses_one_memory_and_honors_missing_geometry(reference_geometry):
     from dexmani_policy.agents.obs_encoder.interaction.hand_scene_relation import HandSceneRelationEncoder
 
+    from dexmani_policy.agents.obs_encoder.proprio.hand_spatial_encoder import HandSpatialEncoder
+
     reader = HandSceneRelationEncoder(token_channels=48)
+    hand_encoder = HandSpatialEncoder(token_dim=48)
     # Nonzero learned null/out bias must still produce exactly zero near update
     # if no visible member satisfies a head's radius constraint.
     with torch.no_grad():
@@ -416,7 +419,9 @@ def test_reader_contract_uses_one_memory_and_honors_missing_geometry(reference_g
     patches = small_encoder().eval()(pointcloud, return_geometry=True)
     wrist = torch.tensor([[0., 0., 0., 1., 0., 0., 0., 1., 0.]])
     fingers = pointcloud[:, :5, :3].clone()
-    result = reader(pointcloud, patches, wrist, fingers, return_intermediate=True)
+    anchors = torch.cat((wrist[:, None, :3], fingers), dim=1)
+    hand_tokens = hand_encoder(anchors)
+    result = reader(pointcloud, patches, anchors, hand_tokens, return_intermediate=True)
     for handle in handles:
         handle.remove()
     assert len(memories) == 2 and all(memory is patches["tokens"] for memory in memories)
@@ -430,17 +435,16 @@ def test_reader_contract_uses_one_memory_and_honors_missing_geometry(reference_g
     assert result["near_attention"][..., :-1][~allowed].eq(0).all()
     assert result["near_has_support"].any()
 
-    far_wrist = wrist.clone()
-    far_wrist[:, :3] += 10
-    far = reader(pointcloud, patches, far_wrist, fingers + 10, return_intermediate=True)
+    far_anchors = anchors + 10
+    far = reader(pointcloud, patches, far_anchors, hand_encoder(far_anchors), return_intermediate=True)
     assert not far["near_has_support"].any() and far["near_update"].eq(0).all()
-    missing_members = reader(pointcloud, patches, wrist, fingers,
+    missing_members = reader(pointcloud, patches, anchors, hand_tokens,
                              member_valid=torch.zeros_like(patches["neighbor_indices"], dtype=torch.bool),
                              return_intermediate=True)
     assert missing_members["near_update"].eq(0).all()
     assert torch.isinf(missing_members["min_observed_distance"]).all()
     patches["mask"] = torch.zeros_like(patches["mask"])
-    missing = reader(pointcloud, patches, wrist, fingers, return_intermediate=True)
+    missing = reader(pointcloud, patches, anchors, hand_tokens, return_intermediate=True)
     assert missing["near_update"].eq(0).all()
     assert torch.isinf(missing["min_observed_distance"]).all()
 
