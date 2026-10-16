@@ -14,7 +14,7 @@ class InteractionFlowAgent(BaseAgent):
     """Keep the action recipe fixed while testing interaction representations.
 
     Geometry enters in one common metric frame. ``eef_pose`` contains
-    XYZ + rotation-6D. Actions retain BaseAgent's ``[B,H,Da]``
+    XYZ + rotation-6D; spatial tokens consume XYZ only. Actions retain BaseAgent's ``[B,H,Da]``
     layout, normalization and execution-window semantics.
     """
 
@@ -33,7 +33,7 @@ class InteractionFlowAgent(BaseAgent):
         num_scene_tokens: int = 16,
         tactile_input_key: str = "finger_tactile_force",
         tactile_fusion: str = "query",
-        edge_frame: str = "wrist",
+        hand_spatial: dict | None = None,
         fps_random_config: dict | None = None,
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
@@ -85,7 +85,7 @@ class InteractionFlowAgent(BaseAgent):
             num_scene_tokens=num_scene_tokens,
             tactile_input_key=tactile_input_key,
             tactile_fusion=tactile_fusion,
-            edge_frame=edge_frame,
+            hand_spatial=hand_spatial,
             fps_random_config=fps_random_config,
             tactile_dropout_prob=tactile_dropout_prob,
             use_tactile_valid=use_tactile_valid,
@@ -136,7 +136,7 @@ class InteractionFlowAgent(BaseAgent):
         geometry._global_forward = torch.compile(geometry._global_forward, **compile_kwargs)
 
     def set_normalization_spec(self, spec, feature_dims=None):
-        """Reject affine normalization that would change distances and wrist axes."""
+        """Keep metric geometry independent of feature-only spatial scaling."""
         for field in self.metric_observation_fields:
             if spec.get(field) != "identity":
                 raise ValueError(

@@ -12,9 +12,6 @@ from dexmani_policy.agents.obs_encoder.interaction.attention import (
     GeometryCrossAttention,
 )
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import index_points
-from dexmani_policy.agents.obs_encoder.proprio.hand_kinematics import (
-    HandKinematicsEncoder,
-)
 
 
 def nearest_patch_evidence(
@@ -45,8 +42,8 @@ def nearest_patch_evidence(
 class HandSceneRelationEncoder(nn.Module):
     """为 wrist + 五指读取场景上下文与近场几何，不在此融合残差或协调手指。
 
-    query_context 只改变检索 query；输出 hand_query 始终是直接运动学编码。
-    上层统一构造 kin + state + touch + relation_update，并共享归一化与手部注意力。
+    query_context 只改变检索 query；hand_query 原样返回调用方提供的空间 token。
+    上层统一构造 spatial + state + touch + relation_update；此处不重复编码手部。
     """
 
     def __init__(
@@ -55,12 +52,8 @@ class HandSceneRelationEncoder(nn.Module):
         context_sigmas: Sequence[float] = (0.08, 0.08, 0.20, float("inf")),
         near_sigmas: Sequence[float] = (0.015, 0.015, 0.04, 0.04),
         metric_scale: float = 0.10,
-        position_scale: float = 1.0,
         radius_multiple: float = 3.0,
         num_heads: int = 4,
-        position_num_frequencies: int = 6,
-        position_max_wavelength: float = 0.64,
-        edge_frame: str = "wrist",
     ):
         super().__init__()
         if token_channels <= 0 or num_heads <= 0 or token_channels % num_heads:
@@ -71,25 +64,15 @@ class HandSceneRelationEncoder(nn.Module):
             raise ValueError(
                 "context_sigmas and near_sigmas must have length num_heads"
             )
-        scales = (metric_scale, position_scale, radius_multiple, *near_sigmas)
+        scales = (metric_scale, radius_multiple, *near_sigmas)
         if any(not math.isfinite(s) or s <= 0 for s in scales):
             raise ValueError("scales and near_sigmas must be finite and positive")
         if any(math.isnan(s) or s <= 0 for s in context_sigmas):
             raise ValueError("context_sigmas must be positive; infinity is allowed")
-        if edge_frame not in ("wrist", "base"):
-            raise ValueError("edge_frame must be 'wrist' or 'base'")
 
         self.token_channels = token_channels
         self.metric_scale = metric_scale
-        self.edge_frame = edge_frame
         proximity_scales = (min(near_sigmas), max(near_sigmas))
-        self.hand_encoder = HandKinematicsEncoder(
-            token_channels=token_channels,
-            position_scale=position_scale,
-            hand_scale=metric_scale,
-            num_frequencies=position_num_frequencies,
-            max_wavelength=position_max_wavelength,
-        )
         self.context = GeometryCrossAttention(
             token_channels, context_sigmas, metric_scale, proximity_scales, None
         )
@@ -101,22 +84,20 @@ class HandSceneRelationEncoder(nn.Module):
         self,
         pointcloud: torch.Tensor,
         patches: Mapping[str, torch.Tensor],
-        eef_pose: torch.Tensor,
-        fingertip_xyz: torch.Tensor,
+        anchor_xyz: torch.Tensor,
+        hand_tokens: torch.Tensor,
         *,
         member_valid: torch.Tensor | None = None,
         query_context: torch.Tensor | None = None,
-        hand_encoding: Mapping[str, torch.Tensor] | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
         """patches 来自 GeometryAwarePointTransformer(return_geometry=True)，tokens 已由调用层投影。
 
-        pointcloud、eef_pose XYZ 与 fingertip_xyz 必须共用米制基座/世界坐标。
-        rot6d 为腕部旋转矩阵前两列依次拼接；指序为 thumb/index/middle/ring/pinky。
-        edge_frame 仅选择相对边的轴向，不变换输入点云或输出 anchor，也不保证网络等变。
+        anchor_xyz [BT,6,3] 与点云共用米制世界坐标；hand_tokens [BT,6,D] 已编码。
+        两者顺序均为 wrist/thumb/index/middle/ring/pinky。关系边始终沿世界轴。
         member_valid 只屏蔽几何成员；编码前仍需处理无效点，patch 特征必须有限。
         query_context 接受 [B,D] 的共享状态或 [B,6,D] 的逐锚点条件。
-        hand_encoding 可复用同一腕部/指尖输入的编码，避免门控与关系层重复计算。
+        物理锚点与特征分开传递；位置缩放只用于编码器，不得用于几何距离。
         """
         # Both readers use the SAME contextual descriptors. Near support is
         # still determined by observed raw members, not a separate local head.
@@ -134,17 +115,25 @@ class HandSceneRelationEncoder(nn.Module):
         ):
             raise ValueError("member_valid must be boolean with shape [B,M,K]")
 
-        hand = (
-            self.hand_encoder(eef_pose, fingertip_xyz)
-            if hand_encoding is None
-            else hand_encoding
-        )
-        anchors = hand["hand_center"]
-        hand_query = hand["hand_token"]
+        batch = memory.shape[0]
+        if anchor_xyz.shape != (batch, 6, 3) or not anchor_xyz.is_floating_point():
+            raise ValueError("anchor_xyz must be floating point [BT,6,3]")
+        if hand_tokens.shape != (batch, 6, self.token_channels):
+            raise ValueError("hand_tokens must have shape [BT,6,D]")
+        if anchor_xyz.device != memory.device or hand_tokens.device != memory.device:
+            raise ValueError("anchors, hand tokens and patch memory must share a device")
+        if not torch.isfinite(anchor_xyz).all() or not torch.isfinite(hand_tokens).all():
+            raise ValueError("hand anchors and tokens must be finite")
+        anchors = anchor_xyz.float()
+        hand_query = hand_tokens
         query = hand_query
         if query_context is not None:
-            if query_context.ndim == 2:
+            if query_context.shape == (batch, self.token_channels):
                 query_context = query_context[:, None]
+            if query_context.shape not in (
+                (batch, 1, self.token_channels), (batch, 6, self.token_channels)
+            ):
+                raise ValueError("query_context must be [BT,D], [BT,1,D] or [BT,6,D]")
             if not torch.isfinite(query_context).all():
                 raise ValueError("query_context must be finite")
             query = query + query_context.to(query.dtype)
@@ -165,13 +154,6 @@ class HandSceneRelationEncoder(nn.Module):
             center_relative = safe_centers[:, None] - anchors[:, :, None]
             center_distance = center_relative.norm(dim=-1)
             context_valid = center_valid[:, None] & observed
-            if self.edge_frame == "wrist":
-                # 行向量乘 R，相当于列向量左乘 R^T：base/world -> wrist。
-                rotation = hand["wrist_rotation"]
-                relative = torch.einsum("bqmi,bij->bqmj", relative, rotation)
-                center_relative = torch.einsum(
-                    "bqmi,bij->bqmj", center_relative, rotation
-                )
 
         context, context_attention, _ = self.context(
             query, memory, center_relative, center_distance, context_valid

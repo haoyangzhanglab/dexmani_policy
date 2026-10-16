@@ -76,7 +76,13 @@ agent:
   group_size: 32
   patch_depth: 6
   num_scene_tokens: 16
-  edge_frame: wrist
+  # Six world-frame anchors; scales below apply to features, never to geometry.
+  hand_spatial:
+    hidden_dim: 128
+    position_scale: 0.25
+    hand_scale: 0.10
+    num_frequencies: 2
+    use_wrist_offset: true
   tactile_input_key: finger_tactile_force
   tactile_fusion: query          # query | late | none；固定其他配置的核心消融。
   use_modality_gate: true       # 逐指独立几何/触觉 gain；false 为固定单位 gain 对照。
