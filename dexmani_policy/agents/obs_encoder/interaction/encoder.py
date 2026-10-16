@@ -19,6 +19,7 @@ from dexmani_policy.agents.obs_encoder.interaction.scene_context import SceneCon
 from dexmani_policy.agents.obs_encoder.pointcloud.geometry_patch import (
     GeometryAwarePointTransformer,
 )
+from dexmani_policy.agents.obs_encoder.proprio.hand_spatial_encoder import HandSpatialEncoder
 from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
 from dexmani_policy.agents.obs_encoder.tactile.xhand_tactile_encoder import (
     XHandForceEncoder,
@@ -46,7 +47,7 @@ class InteractionObsEncoder(nn.Module):
         num_scene_tokens: int = 16,
         tactile_input_key: str = "finger_tactile_force",
         tactile_fusion: str = "query",
-        edge_frame: str = "wrist",
+        hand_spatial: dict | None = None,
         fps_random_config: dict | None = None,
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
@@ -90,9 +91,10 @@ class InteractionObsEncoder(nn.Module):
             raise ValueError("tactile_input_key must be 'finger_tactile_force' or 'taxel_tactile_force'")
         self.finger_evidence = FingerEvidenceEncoder(self.tactile.out_dim, token_dim)
         self.modality_gate = FingerModalityGate(token_dim)
-        self.relation = HandSceneRelationEncoder(
-            token_channels=token_dim, edge_frame=edge_frame
+        self.hand_encoder = HandSpatialEncoder(
+            token_dim=token_dim, **dict(hand_spatial or {})
         )
+        self.relation = HandSceneRelationEncoder(token_channels=token_dim)
         self.scene = SceneContextPool(
             token_channels=token_dim, num_scene_tokens=num_scene_tokens
         )
@@ -121,12 +123,21 @@ class InteractionObsEncoder(nn.Module):
     def forward(self, obs: dict, *, return_intermediate: bool = False):
         pointcloud = obs["point_cloud"]
         bt = pointcloud.shape[0]
+        if bt == 0 or bt % self.n_obs_steps:
+            raise ValueError("flattened BT must be positive and divisible by n_obs_steps")
         batch = bt // self.n_obs_steps
         state = obs["joint_state"]
         if not torch.isfinite(state).all():
             raise ValueError("joint_state must be finite")
         fingers = obs["fingertip_xyz"]
         wrist = obs["eef_pose"]
+        if wrist.shape != (bt, 9) or fingers.shape != (bt, 5, 3):
+            raise ValueError("eef_pose/fingertip_xyz must be [BT,9]/[BT,5,3]")
+        if not wrist.is_floating_point() or not fingers.is_floating_point():
+            raise TypeError("hand geometry must be floating point")
+        # Data schema is unchanged. Only measured XYZ is consumed here;
+        # orientation remains available elsewhere but is not reconstructed.
+        hand_xyz = torch.cat((wrist[:, None, :3], fingers), dim=1)
         force = obs["finger_tactile_force"]
         # Aggregate force also enters the gate when dense tactile arrays are used.
         if force.shape != (bt, 5, 3):
@@ -161,11 +172,11 @@ class InteractionObsEncoder(nn.Module):
             patches["tokens"],
             patches["xyz"],
         )["scene_token"]
-        hand_encoding = self.relation.hand_encoder(wrist, fingers)
+        hand_tokens = self.hand_encoder(hand_xyz)
 
         # 门控只看读取前的共同证据，绝不使用 Q/L 不同的 relation_update。
         gains = self.modality_gate(
-            hand_encoding["hand_token"] + state_token[:, None],
+            hand_tokens + state_token[:, None],
             evidence,
             scene.mean(dim=1),
             force,
@@ -179,10 +190,9 @@ class InteractionObsEncoder(nn.Module):
         relation = self.relation(
             pointcloud,
             patches,
-            wrist,
-            fingers,
+            anchor_xyz=hand_xyz,
+            hand_tokens=hand_tokens,
             query_context=query_context,
-            hand_encoding=hand_encoding,
             return_intermediate=return_intermediate,
         )
 
