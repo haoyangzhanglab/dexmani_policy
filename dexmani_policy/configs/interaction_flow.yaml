@@ -1,6 +1,6 @@
 # 手-物交互表征 + 标准 flow matching + 8 层 DiT-X。
 # 默认使用逐指聚合触觉；稠密阵列模式需额外提供 taxel_tactile_force。
-# 同一帧：16 scene + 6 wrist/finger interaction + 1 state = 23 tokens。
+# GReST：K scene + 6 wrist/finger interaction + 1 state；默认 K=12，每帧 19 tokens。
 
 policy_name: interaction_flow
 
@@ -75,7 +75,18 @@ agent:
   num_patches: 192
   group_size: 32
   patch_depth: 6
-  num_scene_tokens: 16
+  num_scene_tokens: 12          # 初始预算，非最优结论；建议分别训练 8/12/16/24。
+  scene_tokenizer:              # GReST；token 数/宽度只由上面两个 agent 字段决定。
+    route_dim: 64
+    routing_steps: 2
+    nearest_slots: 3
+    geometry_scale: 0.10        # 米制路由尺度；Cauchy 距离先验，非接触半径。
+    position_scale: 1.0
+    use_relation: true
+    relation_dim: 64
+    relation_heads: 4
+    mlp_ratio: 2.0
+    validate_inputs: true
   # Six world-frame anchors; scales below apply to features, never to geometry.
   hand_spatial:
     hidden_dim: 128
@@ -152,8 +163,8 @@ workspace:
     _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
-    name: ${task_name}_${run_id:}_gapt${agent.num_patches}_seed${training.seed}
-    id: ${policy_name}_${task_name}_gapt${agent.num_patches}_${training.seed}
+    name: ${task_name}_${run_id:}_gapt${agent.num_patches}_grest${agent.num_scene_tokens}_seed${training.seed}
+    id: ${policy_name}_${task_name}_gapt${agent.num_patches}_grest${agent.num_scene_tokens}_${training.seed}
     resume: allow
     mode: offline
     video_fps: 15
@@ -197,7 +208,7 @@ hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
   run:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_gapt${agent.num_patches}_seed${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_gapt${agent.num_patches}_grest${agent.num_scene_tokens}_seed${training.seed}
   sweep:
-    dir: experiments/${policy_name}/${task_name}/${run_id:}_gapt${agent.num_patches}_seed${training.seed}
+    dir: experiments/${policy_name}/${task_name}/${run_id:}_gapt${agent.num_patches}_grest${agent.num_scene_tokens}_seed${training.seed}
     subdir: ${hydra.job.num}
