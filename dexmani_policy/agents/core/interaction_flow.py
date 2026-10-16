@@ -30,7 +30,7 @@ class InteractionFlowAgent(BaseAgent):
         num_patches: int = 192,
         group_size: int = 32,
         patch_depth: int = 6,
-        num_scene_tokens: int = 16,
+        num_scene_tokens: int = 12,
         tactile_input_key: str = "finger_tactile_force",
         tactile_fusion: str = "query",
         hand_spatial: dict | None = None,
@@ -55,6 +55,7 @@ class InteractionFlowAgent(BaseAgent):
         time_shift_alpha: float = 1.0,
         num_flow_train_timesteps: int = 10,
         modality_dropout_probs: dict | None = None,
+        scene_tokenizer: dict | None = None,
     ) -> None:
         if type(n_layers) is not int or n_layers != 8:
             raise ValueError(
@@ -90,6 +91,7 @@ class InteractionFlowAgent(BaseAgent):
             tactile_dropout_prob=tactile_dropout_prob,
             use_tactile_valid=use_tactile_valid,
             use_modality_gate=use_modality_gate,
+            scene_tokenizer=scene_tokenizer,
         )
         backbone = DiTX(
             horizon=horizon,

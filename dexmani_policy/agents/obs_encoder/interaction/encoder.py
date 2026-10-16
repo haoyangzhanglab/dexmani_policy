@@ -15,7 +15,9 @@ from dexmani_policy.agents.obs_encoder.interaction.hand_scene_relation import (
 from dexmani_policy.agents.obs_encoder.interaction.modality_gate import (
     FingerModalityGate,
 )
-from dexmani_policy.agents.obs_encoder.interaction.scene_context import SceneContextPool
+from dexmani_policy.agents.obs_encoder.interaction.scene_context import (
+    GeometricRegionRelationTokenizer,
+)
 from dexmani_policy.agents.obs_encoder.pointcloud.geometry_patch import (
     GeometryAwarePointTransformer,
 )
@@ -33,6 +35,7 @@ class InteractionObsEncoder(nn.Module):
     query/late 共享所有参数与 residual/norm 顺序，唯一区别是几何读取
     query 是否含同指触觉。none 保持 token 数，去掉触觉证据。
     输入点云、腕部和指尖必须处于同一米制基坐标系；上游不得独立归一化。
+    GReST 只压缩 scene 分支；hand reader 仍读取完整 patches。
     """
 
     def __init__(
@@ -44,7 +47,7 @@ class InteractionObsEncoder(nn.Module):
         num_patches: int = 192,
         group_size: int = 32,
         patch_depth: int = 6,
-        num_scene_tokens: int = 16,
+        num_scene_tokens: int = 12,
         tactile_input_key: str = "finger_tactile_force",
         tactile_fusion: str = "query",
         hand_spatial: dict | None = None,
@@ -52,12 +55,20 @@ class InteractionObsEncoder(nn.Module):
         tactile_dropout_prob: float = 0.0,
         use_tactile_valid: bool = False,
         use_modality_gate: bool = True,
+        scene_tokenizer: dict | None = None,
     ):
         super().__init__()
-        if n_obs_steps < 1 or num_scene_tokens > num_patches:
+        if (
+            type(n_obs_steps) is not int or n_obs_steps < 1
+            or type(num_scene_tokens) is not int
+            or not 1 <= num_scene_tokens <= num_patches
+        ):
             raise ValueError(
-                "positive history and num_scene_tokens <= num_patches required"
+                "positive integer history and 1 <= num_scene_tokens <= num_patches required"
             )
+        scene_options = dict(scene_tokenizer or {})
+        if {"token_channels", "num_scene_tokens"} & scene_options.keys():
+            raise ValueError("set token_dim/num_scene_tokens on the agent, not scene_tokenizer")
         if tactile_fusion not in {"query", "late", "none"}:
             raise ValueError("tactile_fusion must be query, late or none")
         if not 0 <= tactile_dropout_prob <= 1:
@@ -95,8 +106,8 @@ class InteractionObsEncoder(nn.Module):
             token_dim=token_dim, **dict(hand_spatial or {})
         )
         self.relation = HandSceneRelationEncoder(token_channels=token_dim)
-        self.scene = SceneContextPool(
-            token_channels=token_dim, num_scene_tokens=num_scene_tokens
+        self.scene = GeometricRegionRelationTokenizer(
+            token_channels=token_dim, num_scene_tokens=num_scene_tokens, **scene_options
         )
         self.hand_input_norm = nn.LayerNorm(token_dim)
         self.hand_coordination = InteractionSelfAttentionBlock(
@@ -168,10 +179,13 @@ class InteractionObsEncoder(nn.Module):
         state_token = self.state(state)
         patches = self.geometry(pointcloud, return_geometry=True)
         patches["tokens"] = self.geometry_projection(patches["tokens"])
-        scene = self.scene(
+        scene_outputs = self.scene(
             patches["tokens"],
             patches["xyz"],
-        )["scene_token"]
+            return_intermediate=return_intermediate,
+            patch_mask=patches["mask"],
+        )
+        scene = scene_outputs["scene_token"]
         hand_tokens = self.hand_encoder(hand_xyz)
 
         # 门控只看读取前的共同证据，绝不使用 Q/L 不同的 relation_update。
@@ -226,5 +240,6 @@ class InteractionObsEncoder(nn.Module):
                 gated_finger_evidence=gated_evidence,
                 tactile_valid=valid,
                 frame_tokens=frame_tokens,
+                scene=scene_outputs,
             )
         return cond, aux
