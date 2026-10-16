@@ -20,8 +20,12 @@ def gather_members(value: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Ten
     return flat.gather(1, index).reshape(*neighbor_idx.shape, *value.shape[2:])
 
 
-def _check_hw(value, name):
-    if len(value) != 2 or any(type(x) is not int or x <= 0 for x in value):
+def _check_hw(value: tuple[int, int], name: str) -> None:
+    if (
+        not isinstance(value, (tuple, list))
+        or len(value) != 2
+        or any(type(x) is not int or x <= 0 for x in value)
+    ):
         raise ValueError(f"{name} must contain two positive integers")
 
 
@@ -58,8 +62,12 @@ def build_patch_image_weights(
         raise ValueError("point_uv batch, views and points must be nonempty")
     if view_weight.shape != point_uv.shape[:-1] or not view_weight.is_floating_point():
         raise ValueError("view_weight must be floating [B,V,N]")
-    if (neighbor_idx.ndim != 3 or neighbor_idx.dtype != torch.long
-            or neighbor_idx.shape[0] != batch_size or min(neighbor_idx.shape[1:]) < 1):
+    if (
+        neighbor_idx.ndim != 3
+        or neighbor_idx.dtype != torch.long
+        or neighbor_idx.shape[0] != batch_size
+        or min(neighbor_idx.shape[1:]) < 1
+    ):
         raise ValueError("neighbor_idx must be nonempty int64 [B,M,K]")
     height, width = image_hw
     grid_h, grid_w = patch_grid_size
@@ -77,10 +85,15 @@ def build_patch_image_weights(
         if tensor is not None and tensor.device != point_uv.device:
             raise ValueError("all correspondence inputs must be on the same device")
 
-    # No data-dependent CPU synchronization. Invalid indices raise in gather.
-    dtype = (torch.float64 if any(t is not None and t.dtype == torch.float64
-                                 for t in (point_uv, view_weight, member_weight))
-             else torch.float32)
+    # Invalid indices are rejected by gather without a GPU-to-CPU scalar check.
+    dtype = (
+        torch.float64
+        if any(
+            t is not None and t.dtype == torch.float64
+            for t in (point_uv, view_weight, member_weight)
+        )
+        else torch.float32
+    )
     with torch.autocast(device_type=point_uv.device.type, enabled=False):
         finite = torch.isfinite(point_uv).all(-1) & torch.isfinite(view_weight)
         uv = torch.nan_to_num(point_uv.to(dtype))
@@ -112,7 +125,8 @@ def build_patch_image_weights(
         normalized = confidence / torch.where(view_sum > 0, view_sum, 1)
         point_weight = normalized.unsqueeze(-1) * bilinear
         point_valid = view_sum[:, 0] > 0
-        token_idx = token_idx + torch.arange(num_views, device=uv.device)[None, :, None, None] * (grid_h * grid_w)
+        view_offset = torch.arange(num_views, device=uv.device) * (grid_h * grid_w)
+        token_idx = token_idx + view_offset[None, :, None, None]
 
         member_valid = gather_members(point_valid, neighbor_idx)
         if member_weight is None:
@@ -166,7 +180,10 @@ class PointImageFusion(nn.Module):
         attention_dim: int = 32,
     ):
         super().__init__()
-        if any(type(x) is not int or x < 1 for x in (image_channels, token_channels, attention_dim)):
+        if any(
+            type(x) is not int or x < 1
+            for x in (image_channels, token_channels, attention_dim)
+        ):
             raise ValueError("channel counts and attention_dim must be positive integers")
         if not 0 < gate_init < 1:
             raise ValueError("gate_init must be in (0,1)")
@@ -226,11 +243,17 @@ class PointImageFusion(nn.Module):
         geometry tokens must be finite. Unreferenced/padded image values may
         be NaN/Inf; they are cleared BEFORE normalization and matrix products.
         """
-        if (local_token.ndim != 3 or local_token.shape[-1] != self.token_channels
-                or not local_token.is_floating_point()):
+        if (
+            local_token.ndim != 3
+            or local_token.shape[-1] != self.token_channels
+            or not local_token.is_floating_point()
+        ):
             raise ValueError("local_token must be floating [B,M,token_channels]")
-        if (image_tokens.ndim != 4 or image_tokens.shape[-1] != self.image_channels
-                or not image_tokens.is_floating_point()):
+        if (
+            image_tokens.ndim != 4
+            or image_tokens.shape[-1] != self.image_channels
+            or not image_tokens.is_floating_point()
+        ):
             raise ValueError("image_tokens must be floating [B,V,Hf*Wf,image_channels]")
         batch, patches = local_token.shape[:2]
         if min(batch, patches, *image_tokens.shape[1:3]) < 1 or image_tokens.shape[0] != batch:
@@ -255,13 +278,18 @@ class PointImageFusion(nn.Module):
         weight = prior.to(pool_dtype)
         if self.alignment == "content":
             query = self.query(self.geometry_norm(local_token.to(self.query.weight.dtype)))
-            key = self.key(F.layer_norm(image.to(self.key.weight.dtype), (self.image_channels,)))
+            key = self.key(
+                F.layer_norm(image.to(self.key.weight.dtype), (self.image_channels,))
+            )
             with torch.autocast(device_type=image.device.type, enabled=False):
                 scores = torch.bmm(query.to(pool_dtype), key.to(pool_dtype).transpose(1, 2))
                 support = weight > 0
                 # log(1) on forbidden entries avoids log(0) in backward.
                 log_prior = torch.where(support, weight, 1).log()
-                logits = log_prior + self.content_scale.to(pool_dtype) * scores / math.sqrt(self.attention_dim)
+                logits = (
+                    log_prior
+                    + self.content_scale.to(pool_dtype) * scores / math.sqrt(self.attention_dim)
+                )
                 logits = logits.masked_fill(~support, float("-inf"))
                 # Empty rows must not execute softmax([-inf,...,-inf]).
                 logits = torch.where(support.any(-1, keepdim=True), logits, 0.0)
@@ -270,10 +298,14 @@ class PointImageFusion(nn.Module):
             pooled = torch.bmm(weight, image.to(pool_dtype))
         semantic = self.proj(self.image_norm(pooled.to(self.proj.weight.dtype)))
         quality = torch.stack((geometry["semantic_coverage"], geometry["semantic_confidence"]), -1)
-        gate_input = torch.cat((
-            self.geometry_norm(local_token), self.semantic_norm(semantic),
-            quality.to(local_token.dtype),
-        ), dim=-1)
+        gate_input = torch.cat(
+            (
+                self.geometry_norm(local_token),
+                self.semantic_norm(semantic),
+                quality.to(local_token.dtype),
+            ),
+            dim=-1,
+        )
         gate_logits = self.gate(gate_input)
         # Keep small changes visible under BF16/FP16 autocast.
         if gate_logits.dtype in (torch.float16, torch.bfloat16):

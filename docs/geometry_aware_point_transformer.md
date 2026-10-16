@@ -49,7 +49,7 @@ result = encoder(pointcloud)  # [B,N,6]
 
 编码器直接消费 XYZ 或 XYZRGB，不接机器人状态、动作、图像 Tokens、语言或时间索引。其他模态在策略侧融合；点的 RGB 随邻域成员进入几何编码，不依赖独立图像 Backbone。
 
-独立的 [PointImageFusion](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py) 模块予以保留；当前 GAPT 和交互策略没有接入其图像特征融合路径。
+[PointImageFusion](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py) 是独立的图像语义对应模块；其输入契约、融合模式和测试见 [2D–3D patch 融合说明](point_image_fusion.md)。当前 GAPT 和交互策略未调用它，不应把该模块的结果当作策略训练或推理的结果。
 
 ## 训练随机稀疏增强
 
