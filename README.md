@@ -42,7 +42,7 @@ ls dexmani_policy/configs/ddp/*.yaml
 
 配置名只用于定位实验入口，不代表内部模型一定采用某种固定结构；理解实现时应继续进入实际源码。
 
-交互表征策略使用 `interaction_flow`，多卡配置为 `ddp/interaction_flow`。当前模型机制、模态开关与 Real 数据配方见 [逐指交互表征](docs/interaction_representation.md)。
+交互表征策略使用 `interaction_flow`，多卡配置为 `ddp/interaction_flow`。当前模型机制、模态开关与 Real 数据配方见 [逐指交互表征](docs/interaction_representation.md)；GReST 场景编码与可配置 token 预算见 [GReST 专项说明](docs/grest_scene_tokenizer.md)。
 
 ## 推荐研究流程
 
@@ -292,6 +292,8 @@ scripts/
 
 - [`docs/项目架构.md`](docs/项目架构.md)
 - [`docs/interaction_representation.md`](docs/interaction_representation.md)：逐指交互表征、模态开关与运行检查
+- [`docs/grest_scene_tokenizer.md`](docs/grest_scene_tokenizer.md)：GReST 区域—关系场景编码、token 预算与研究验证边界
+- [`docs/geometry_aware_point_transformer.md`](docs/geometry_aware_point_transformer.md)：GAPT 几何 Patch 编码与历史集成验证
 - [`docs/hand_spatial_encoding.md`](docs/hand_spatial_encoding.md)：腕部与指尖位置编码的输入契约和研究边界
 - [`docs/point_image_fusion.md`](docs/point_image_fusion.md)：独立的 2D–3D patch 对应与语义融合模块（当前策略未接入）
 - [`docs/data_modality.md`](docs/data_modality.md)：Zarr schema、SIM/Real 模态语义与归一化边界

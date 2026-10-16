@@ -1,5 +1,7 @@
 # Geometry-Aware Point Transformer（GAPT）
 
+**当前集成提示：** GAPT 仍输出共享的空间 Patch memory；`InteractionFlow` 的 scene 分支现由 [GReST](grest_scene_tokenizer.md) 编码，默认生成 12 个、可由配置调整的 scene tokens，hand reader 继续读取完整 memory。本页保留 2026-10-15 的旧 scene pooling 集成记录；当时的 16 scene / 23 tokens 每帧与 `[B,46,192]` 不代表当前 GReST 默认配置。
+
 这是从 PR #14（`d4af23f`，基于 `main@5975701`）集成的独立点云编码器。实现文件仍为 `dexmani_policy/agents/obs_encoder/pointcloud/geometry_patch.py`，类名为 `GeometryAwarePointTransformer`。不保留旧类别名，不加载预训练权重，不提供多种 Stem 或双输出头。
 
 ## 固定的默认结构
@@ -61,7 +63,7 @@ result = encoder(pointcloud)  # [B,N,6]
 
 GAPT 与 HandSceneRelation 消费 Dataset 输出的**同一份**点云 Tensor，所有中心/邻域索引均相对这份输入；编码器内不再采样子集，无需维护原始 1024 点映射。当前策略不消费独立逐点 UV/语义/有效性字段。
 
-本次只改 Patch 数与训练稀疏增强：Fourier 保留 8 个对数频段、2～32 cm 波长、原始 Relative XYZ/Distance 和 FP32 相位。现有数值测试覆盖其实现；未发现需要修复的错误，因此不同时改变 Fourier 这个研究变量。
+在 GAPT-192 迁移时，仅调整 Patch 数与训练稀疏增强：Fourier 保留 8 个对数频段、2～32 cm 波长、原始 Relative XYZ/Distance 和 FP32 相位。现有数值测试覆盖其实现；未发现需要修复的错误，因此不同时改变 Fourier 这个研究变量。
 
 ## 当前仓库衔接
 
@@ -69,11 +71,11 @@ GAPT 与 HandSceneRelation 消费 Dataset 输出的**同一份**点云 Tensor，
 
 `HandSceneRelationEncoder` 改为消费 `tokens/xyz/mask/neighbor_indices`，最近可见成员距离与无支持时 near_update=0 的保护保留。近场是受局部观测约束的读取，**其 value 已包含全场景上下文**，不能再描述为纯局部 Patch 特征。
 
-Agent、ObsEncoder 和配置的默认 Patch 数同步为 192、深度为 6。策略输出仍是每帧 16 scene + 6 hand + 1 state，动作、触觉、normalization 与优化配方未更改。[交互架构说明](interaction_representation.md) 已同步单一空间 memory 的调用链。
+当前 GAPT 默认建立 192 个 Patches，使用 6 层全局 Transformer；经共享 384→192 投影后，[GReST](grest_scene_tokenizer.md) 将 scene 分支编码为可配置的 K 个 tokens（默认 K=12），hand reader 仍读取完整的共享 Patches。每帧最终条件数为 K+7（6 hand + 1 state）；当前两帧默认条件形状为 `[B,38,192]`。[交互架构说明](interaction_representation.md) 记录最新调用链。
 
 此前从旧编码器迁移至 GAPT 是架构与状态字典的不兼容升级。旧 GeometryPatchEncoder/Compact/双投影版本 checkpoint 不能完整恢复到新模型，不提供 silent fallback 或用 strict=False 假装恢复。请使用新的运行目录；历史实验仍需匹配其保存的源码与配置。
 
-当前 GAPT-192 与 GAPT-256 的参数形状一致，但采样配方不同；新训练目录和 W&B 标识包含 `gapt192`，不得作为历史实验的静默续训。显式恢复仍以实验保存的配置为准。
+GAPT-192 与历史 GAPT-256 的参数形状一致，但采样配方不同；旧实验目录和 W&B 标识中的 `gapt192` 属于其保存时的配置。当前 GReST 配方还附带 `_grest${agent.num_scene_tokens}` 标识，不可将旧 SceneContextPool checkpoint、EMA 或 optimizer 状态静默续训至新结构。显式恢复始终以原实验保存的源码和配置为准。
 
 ## 编译边界
 
@@ -81,9 +83,9 @@ Agent、ObsEncoder 和配置的默认 Patch 数同步为 192、深度为 6。策
 
 编译绑定方法不改变 `blocks.*`、`norm.*` 等参数名、参数对象或模块层级。raw/EMA 在各自实例上分别编译，现有 GAPT checkpoint 可严格加载；这次执行方式调整不构成新的模型版本。smoke 的 checkpoint 对照在还原 DiT-X 后，也还原该方法，再比较 eager 预测，保留原断言。
 
-## GAPT-192 本次验证（2026-10-15）
+## GAPT-192 历史验证（2026-10-15，GReST 合并前）
 
-基于 `main@645d729`，在 `policy` 环境、PyTorch 2.4.1+cu124、原生 PyTorch3D、RTX 4090 验证。以下使用当前 192 Patch 配置，未运行消融或长训练：
+基于 `main@645d729`，在 `policy` 环境、PyTorch 2.4.1+cu124、原生 PyTorch3D、RTX 4090 验证。以下保留当时 192 Patch 与旧 SceneContextPool 的历史测试结果；`[B,46,192]` 和测试 PASS 仅适用于该源码与配置，**不代表当前 GReST 通过相同范围的端到端验证**。当时未运行消融或长训练：
 
 | 检查 | 实际结果 |
 |---|---|
