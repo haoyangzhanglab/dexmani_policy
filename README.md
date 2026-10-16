@@ -213,7 +213,7 @@ pytest 使用合成数据和临时产物；CUDA 不可见时会跳过对应检�
 
 保存恢复的预测比较使用相同 eager 执行模式，保持原误差阈值；compile 预测仍检查形状/有限性，并单独报告与 eager 的数值差异。DDIM 推理将 scheduler 系数统一放在采样设备，避免训练曾调用 add_noise 与新恢复实例之间的 CPU/GPU 标量运算差异。
 
-smoke 接受配置名、`--config-only` 和 `--max-updates`，不接受 `task_name=...` 等 Hydra 字段覆盖。需要修改数据配方或保留产物时，使用正式单卡/DDP 入口及 `+max_updates=N`；有界停止会保存真实训练进度和采样游标。具体命令见 [interaction 运行检查](docs/interaction_representation.md#8-运行检查)。配置检查不证明 GPU 算子、真实数据链路或闭环性能已通过。
+smoke 接受配置名、`--config-only` 和 `--max-updates`，不接受 `task_name=...` 等 Hydra 字段覆盖。需要修改数据配方或保留产物时，使用正式单卡/DDP 入口及 `+max_updates=N`；有界停止会保存真实训练进度和采样游标。具体命令见 [interaction 运行检查](docs/interaction_representation.md#运行检查)。配置检查不证明 GPU 算子、真实数据链路或闭环性能已通过。
 
 ## 仿真评测
 
@@ -292,6 +292,8 @@ scripts/
 
 - [`docs/项目架构.md`](docs/项目架构.md)
 - [`docs/interaction_representation.md`](docs/interaction_representation.md)：逐指交互表征、模态开关与运行检查
+- [`docs/hand_spatial_encoding.md`](docs/hand_spatial_encoding.md)：腕部与指尖位置编码的输入契约和研究边界
+- [`docs/point_image_fusion.md`](docs/point_image_fusion.md)：独立的 2D–3D patch 对应与语义融合模块（当前策略未接入）
 - [`docs/data_modality.md`](docs/data_modality.md)：Zarr schema、SIM/Real 模态语义与归一化边界
 - [`docs/仿真评测机制.md`](docs/仿真评测机制.md)
 - [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md)

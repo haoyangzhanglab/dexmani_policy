@@ -1,7 +1,6 @@
 # 2D 语义与 3D 几何的 patch-level 对应与融合
 
-本次改动只涉及独立的 `PointImageFusion`、定向测试和微基准；不改点云编码器、视觉 Backbone、数据预处理或下游策略。
-基于 `d37423b241fccd8c5c8b04083229b9348a81a369` 核对，原融合文件 blob 为 `ada3a08f7134208b750f964b99ac9931c67fdede`。
+`PointImageFusion` 独立实现点云 patch 与图像语义 token 的几何对应和门控融合。当前默认 `interaction_flow` 未调用此模块；点云编码器、视觉 Backbone、数据预处理和下游策略均保持各自职责。以下记录接口、数值约束与定向验证证据。
 
 ## 1. 设计结论
 
@@ -136,10 +135,10 @@ LayerNorm 不是线性的，因此没有把原先的 `LN(A@F)` 改成 `A@LN(F)`�
 矩阵池化、内容 logits/softmax 至少使用 FP32；任一几何输入为 FP64 时构图保持 FP64，FP64 图像保持 FP64 聚合。
 低精度 gate logits 转 FP32 再 sigmoid，不承诺与旧 AMP 数值逐位相同。
 
-## 5. 验证与性能边界（2026-10-16）
+## 5. 定向验证与性能记录（2026-10-16）
 
-修改文件：[融合模块](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py)、[定向测试](../tests/test_point_image_fusion.py)、[微基准](../scripts/utils/benchmark_point_image_fusion.py)。
-本次没有修改任何已有策略配置或训练配方。
+相关文件：[融合模块](../dexmani_policy/agents/obs_encoder/interaction/point_image_fusion.py)、[定向测试](../tests/test_point_image_fusion.py)、[微基准](../scripts/utils/benchmark_point_image_fusion.py)。
+模块未接入现有策略配置；下列测试和微基准不能证明完整策略的训练或推理性能。
 
 **PASS：37 tests；SKIP：1 CUDA test**。环境为 Python 3.13.5、PyTorch 2.10.0+cpu。
 测试通过文件路径加载独立模块，不加载预训练权重或仿真/点云后端。

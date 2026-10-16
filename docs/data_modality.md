@@ -236,7 +236,7 @@ eef_pose               (9) = position[0:3] + rot6d[3:9]
 
 逐指 scale/offset 和拟合统计的形状固定为 `(5,3)`，`normalization_dims` 记录统计量数量 15；`eef_pose` 使用 9 个分量，interaction 配方对几何字段保持 `identity`。逐指拟合只在内部临时展开这两个特征轴，应用时检查完整尾部形状并广播，绝不重排 batch/time。数值统计与旧 SIM 平铺 15 维等价，但不自动读取旧字段或旧 checkpoint 参数布局。训练只使用有效训练窗口的唯一源行拟合，验证、推理和恢复复用该份统计；稠密触觉保持三个共享轴通道。
 
-interaction 要求点云、腕部和指尖处于同一米制坐标系，几何字段使用 `identity`。Real/SIM 的字段选择、完整 normalization 替换方式及开关见 [interaction 数据与配置](./interaction_representation.md#6-数据与配置)。
+interaction 要求点云、腕部和指尖处于同一米制坐标系，几何字段使用 `identity`。当前交互策略的输入约束与配置入口见 [interaction 数据与配置](./interaction_representation.md#数据与配置)；各字段的实际开关以 [`interaction_flow.yaml`](../dexmani_policy/configs/interaction_flow.yaml) 为准。
 
 ## 6. 从 Zarr 到训练样本
 

@@ -283,6 +283,10 @@ def test_reject_bad_shapes_masks_and_indices():
         build_patch_image_weights(idx.float(), uv, confidence, hw, grid)
     with pytest.raises(ValueError, match="positive integers"):
         build_patch_image_weights(idx, uv, confidence, hw, (0, 5))
+    with pytest.raises(ValueError, match="positive integers"):
+        build_patch_image_weights(idx, uv, confidence, 224, grid)
+    with pytest.raises(ValueError, match="positive integers"):
+        build_patch_image_weights(idx, uv, confidence, hw, ("16", 16))
     with pytest.raises(ValueError, match="image_token_valid"):
         model(local, idx, image, uv, confidence, hw, grid, image_token_valid=torch.ones_like(image[..., 0]))
     with pytest.raises(ValueError, match="member_weight"):
