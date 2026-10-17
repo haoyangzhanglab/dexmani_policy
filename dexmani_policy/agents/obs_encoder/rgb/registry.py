@@ -1,28 +1,18 @@
-from __future__ import annotations
-
-import warnings
-from typing import Dict, Literal, Optional, Tuple
+import inspect
+from typing import Literal
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from .image_processor import ImageProcessor
-from .utils import get_interpolation, to_hw
 
-BackboneName = Literal["resnet", "clip", "dino", "siglip", "r3m"]
-
-RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
+RGB_ENCODER_DEFAULTS = {
     "resnet": {
         "model_name": "resnet18",
         "tune_mode": "full",
         "norm_mode": "group_norm",
         "global_token_type": "avg",
         "weights": None,
-    },
-    "clip": {
-        "model_name": "openai/clip-vit-base-patch32",
-        "tune_mode": "freeze",
-        "global_token_type": "avg",
     },
     "dino": {
         "model_name": "facebook/dinov2-base",
@@ -34,93 +24,65 @@ RGB_BACKBONE_CONFIGS: Dict[BackboneName, Dict[str, object]] = {
         "tune_mode": "freeze",
         "global_token_type": "avg",
     },
-    "r3m": {
-        "model_name": "resnet18",
-        "tune_mode": "freeze",
-        "norm_mode": "frozen_bn",
-        "global_token_type": "avg",
-    },
 }
 
 
-def build_backbone(
-    name: BackboneName,
-    config: Optional[Dict] = None,
-) -> Tuple[nn.Module, ImageProcessor]:
-
-    if name not in RGB_BACKBONE_CONFIGS:
-        raise ValueError(f"Unsupported backbone name: {name}")
-
-    base_cfg = dict(RGB_BACKBONE_CONFIGS[name])
-    cfg = dict(base_cfg)
-    if config:
-        cfg.update(config)
-    effective_config = dict(cfg)
-
-    # Pop ImageProcessor-level overrides before passing to backbone constructor.
-    # Backbone constructors do not accept image processing parameters.
-    image_size = cfg.pop("image_size", None)
-    interpolation = cfg.pop("interpolation", None)
-    image_mean = cfg.pop("image_mean", None)
-    image_std = cfg.pop("image_std", None)
+def build_rgb_encoder(
+    name: Literal["resnet", "dino", "siglip"], config: dict | None = None
+) -> tuple[nn.Module, ImageProcessor]:
+    config = {**RGB_ENCODER_DEFAULTS[name], **(config or {})}
+    processor = ImageProcessor.from_preset(name, config)
+    preprocessing = processor.config
+    encoder_config = {
+        key: value for key, value in config.items() if key not in preprocessing
+    }
 
     if name == "resnet":
-        from .resnet import ResNet
+        from .resnet import ResNetEncoder
 
-        backbone = ResNet(**cfg)
-    elif name == "clip":
-        from .clip import CLIP
-
-        backbone = CLIP(**cfg)
+        encoder = ResNetEncoder(**encoder_config)
     elif name == "dino":
-        from .dino import DINO
+        from .dino import DINOEncoder
 
-        backbone = DINO(**cfg)
-    elif name == "siglip":
-        from .siglip import SigLIP
-
-        backbone = SigLIP(**cfg)
-    elif name == "r3m":
-        from .r3m import R3M
-
-        backbone = R3M(**cfg)
+        encoder = DINOEncoder(**encoder_config)
     else:
-        raise ValueError(f"Unsupported backbone name: {name}")
+        from .siglip import SigLIPEncoder
 
-    resolved_name = getattr(backbone, "model_name", cfg.get("model_name"))
-    if str(resolved_name) != str(base_cfg.get("model_name")):
-        warnings.warn(
-            f"build_backbone(name='{name}') resolved to model_name='{resolved_name}' "
-            f"(preset default is '{base_cfg.get('model_name')}'), "
-            f"but ImageProcessor is still selected by preset name='{name}'. "
-            "Please make sure the processor matches the checkpoint's resize / crop / normalization."
+        encoder = SigLIPEncoder(**encoder_config)
+
+    defaults = {
+        key: parameter.default
+        for key, parameter in inspect.signature(type(encoder)).parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+    encoder.effective_config = {**defaults, **encoder_config, **preprocessing}
+    return encoder, processor
+
+
+def example(name: str = "resnet") -> None:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    encoder, processor = build_rgb_encoder(name)
+    encoder.to(device).eval()
+    images = torch.randint(256, (2, 2, 240, 320, 3), dtype=torch.uint8)
+    rgb = processor.process_images(images).to(
+        device=device, dtype=next(encoder.backbone.parameters()).dtype
+    )
+    with torch.no_grad():
+        features = encoder(rgb)
+        feature_map = encoder.tokens_to_feature_map(
+            features["patch_tokens"], rgb.shape[-2:]
         )
+    for key, value in {**features, "feature_map": feature_map}.items():
+        print(f"{key}: {tuple(value.shape)}")
 
-    image_processor = ImageProcessor.from_preset(name)
 
-    # Override preset defaults with user-specified image processing params.
-    # This lets the config align the processor's target size with the dataset's
-    # CPU-side preprocess output (e.g., rgb_random_crop_size), avoiding a
-    # second redundant resize on GPU.
-    if image_size is not None:
-        image_processor.image_size = to_hw(image_size)
-    if interpolation is not None:
-        image_processor.interpolation = get_interpolation(interpolation)
-    if image_mean is not None:
-        image_processor.image_mean = torch.as_tensor(image_mean, dtype=torch.float32)
-    if image_std is not None:
-        image_processor.image_std = torch.as_tensor(image_std, dtype=torch.float32)
-    for name in ('image_mean', 'image_std'):
-        value = getattr(image_processor, name)
-        if value.shape != (3,) or not torch.isfinite(value).all() or (name == 'image_std' and (value <= 0).any()):
-            raise ValueError(f'{name} requires three finite values (std must be positive)')
-        effective_config[name] = value.tolist()
-    effective_config['image_size'] = image_processor.image_size
-    effective_config['interpolation'] = image_processor.interpolation
+if __name__ == "__main__":
+    import argparse
 
-    import inspect
-    for key, parameter in inspect.signature(type(backbone)).parameters.items():
-        if key not in effective_config and parameter.default is not inspect.Parameter.empty:
-            effective_config[key] = parameter.default
-    backbone.effective_config = effective_config
-    return backbone, image_processor
+    parser = argparse.ArgumentParser(
+        description="Extract spatial and global RGB features."
+    )
+    parser.add_argument(
+        "encoder", nargs="?", choices=RGB_ENCODER_DEFAULTS, default="resnet"
+    )
+    example(parser.parse_args().encoder)

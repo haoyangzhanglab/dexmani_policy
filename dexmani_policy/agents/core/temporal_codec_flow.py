@@ -9,9 +9,9 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from dexmani_policy.agents.action_decoders.backbone.ditx import DiTX
-from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
-from dexmani_policy.agents.action_decoders.time_sampler import shift_time_to_noise
+from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
+from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_time_to_noise
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.core.sat import SATObsEncoder
 from dexmani_policy.agents.hand_prior.temporal_codec import TemporalHandCodec, load_codec
@@ -65,7 +65,7 @@ class TemporalCodecFlowAgent(BaseAgent):
             if not 0 <= weight < float("inf"):
                 raise ValueError("Temporal codec loss weights must be finite and nonnegative")
         obs_encoder = SATObsEncoder(
-            encoder_type="pointnext_tokenizer", pc_dim=pc_dim, state_dim=state_dim,
+            pc_dim=pc_dim, state_dim=state_dim,
             num_points=num_points, n_obs_steps=n_obs_steps, state_out_dim=state_out_dim,
             pc_encoder_config=pc_encoder_config, fps_random_config=fps_random_config,
         )
@@ -116,10 +116,10 @@ class TemporalCodecFlowAgent(BaseAgent):
     def _condition(self, obs):
         if not self.codec.ready.item():
             raise RuntimeError("Initialize the temporal codec or restore a complete policy checkpoint")
-        cond, aux = self._build_cond(obs)
+        cond = self.encode_observation(obs)
         b, patches, _ = cond.shape
         cond = cond.reshape(b, patches, self.n_obs_steps, -1).transpose(1, 2)
-        return cond.reshape(b, self.n_obs_steps * patches, -1), aux
+        return cond.reshape(b, self.n_obs_steps * patches, -1)
 
     def _hand_reference(self, obs, action_context, *, required=False):
         reference = (action_context or {}).get("hand_reference")
@@ -135,10 +135,8 @@ class TemporalCodecFlowAgent(BaseAgent):
         self._validate_batch(batch)
         # Dataset supplies the measured query state before observation augmentation.
         reference = self._hand_reference(batch["obs"], batch.get("action_context"), required=True)
-        cond, aux = self._condition(batch["obs"])
+        cond = self._condition(batch["obs"])
         actions = self.normalizer["action"].normalize(batch["action"])
-        if not torch.isfinite(actions).all():
-            raise ValueError("Temporal codec action targets must be finite")
         with torch.no_grad(), torch.autocast(device_type=actions.device.type, enabled=False):
             mu, _ = self.codec.encode(batch["action"][..., self.arm_dim:].float(), reference)
         target = torch.cat((actions[..., :self.arm_dim], mu), dim=-1)
@@ -169,7 +167,7 @@ class TemporalCodecFlowAgent(BaseAgent):
         metrics = dict(loss=loss, loss_action=flow_loss, loss_arm=arm_loss,
                        loss_latent=latent_loss, loss_decoded_hand=decoded_loss,
                        t_mean=t.mean())
-        return self._merge_aux_loss(loss, metrics, aux)
+        return loss, metrics
 
     @torch.no_grad()
     def predict_action(self, obs_dict, inference_steps=None, *, action_context=None,
@@ -178,7 +176,7 @@ class TemporalCodecFlowAgent(BaseAgent):
             raise NotImplementedError("Temporal codec currently supports synchronous chunk execution")
         self._validate_obs_dict(obs_dict)
         reference = self._hand_reference(obs_dict, action_context)
-        cond, _ = self._condition(obs_dict)
+        cond = self._condition(obs_dict)
         return self.predict_action_from_cond(cond, inference_steps, hand_reference=reference)
 
     @torch.no_grad()

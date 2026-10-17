@@ -1,6 +1,6 @@
 # DP — Diffusion Policy with RGB observation
 # Encoder:  DINOv2-small + LoRA (384d, 1.3M trainable params)
-# Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
+# Decoder:  ConditionalUNet1D (FiLM conditioning) + DDIM
 # Modality: RGB + joint_state → action
 
 policy_name: dp

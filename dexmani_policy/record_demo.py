@@ -57,7 +57,7 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.agents.loader import resolve_best_checkpoint
+from dexmani_policy.training.checkpoint import resolve_best_checkpoint
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (

@@ -1,27 +1,25 @@
-"""Local SAT policy with temporal feature fusion and shuffled joint trajectories.
-
-Actions use (B, Da, T).
-"""
+"""Local SAT policy with temporal feature fusion and (B, Da, T) joint trajectories."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.action_decoders.backbone.sat import SATBackbone
-from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
+from dexmani_policy.agents.action_decoders.backbones.sat import SAT
+from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.pointnext_tokenizer import PointNextPatchTokenizer
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.utils.validation import positive_int
 
 
 class SATObsEncoder(nn.Module):
     """Broadcast state into point tokens, then fuse time along the feature axis.
 
+    Sparse3DEncoder supplies K spatial tokens; their mean is the global token.
     Output: (B, K+1, T*(pc_out_dim+state_out_dim)), with K point patches.
     Token slots do not imply physical correspondence across frames.
-    Official SAT uses separate StateAttn tokens.
     """
 
     @property
@@ -30,7 +28,6 @@ class SATObsEncoder(nn.Module):
 
     def __init__(
         self,
-        encoder_type: str,
         pc_dim: int,
         state_dim: int,
         num_points: int,
@@ -43,14 +40,12 @@ class SATObsEncoder(nn.Module):
         pc_encoder_config = dict(pc_encoder_config or {})
         pc_encoder_config.setdefault("fps_random_config", fps_random_config)
 
-        if encoder_type != "pointnext_tokenizer":
-            raise ValueError("SAT requires pointnext_tokenizer")
+        positive_int(num_points, "num_points")
+        positive_int(n_obs_steps, "n_obs_steps")
         pc_encoder_config.setdefault("num_patches", 96)
-        self.pc_encoder = PointNextPatchTokenizer(input_channels=pc_dim, **pc_encoder_config)
+        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **pc_encoder_config)
         self.pc_encoder.effective_config = dict(pc_encoder_config)
-        if not self.pc_encoder.include_global_token:
-            raise ValueError("SAT requires pc_encoder_config.include_global_token=True")
-        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
         self.n_obs_steps = n_obs_steps
@@ -61,19 +56,7 @@ class SATObsEncoder(nn.Module):
         self.obs_token_dim = n_obs_steps * (pc_out_dim + self.state_mlp.out_dim)
 
     def forward(self, obs: dict):
-        """Encode observations with local temporal feature fusion.
-
-        Each frame is encoded independently, then same-index
-        tokens across time are concatenated along the feature dimension.
-        This yields ``num_patches + 1`` tokens (not ``T*(num_patches + 1)``).
-
-        Args:
-            obs: dict with keys ``'point_cloud'`` (B*T, N, pc_dim) and
-                 ``'joint_state'`` (B*T, state_dim)
-
-        Returns:
-            ``(cond, aux)`` where cond is ``(B, num_obs_tokens, obs_token_dim)``
-        """
+        """Encode [B*T,...] observations as [B,K+1,T*D] temporal features."""
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
@@ -82,36 +65,18 @@ class SATObsEncoder(nn.Module):
             training=self.training,
         )
 
-        pc_outputs = self.pc_encoder(pc, return_global_token=True)
-        if not isinstance(pc_outputs, tuple) or len(pc_outputs) != 3:
-            raise ValueError("SAT tokenizer must return (patch_tokens, patch_centers, global_token)")
-        patch_token, patch_centers, global_token = pc_outputs
-        if (
-            not all(isinstance(value, torch.Tensor) for value in pc_outputs)
-            or patch_token.ndim != 3
-            or patch_centers.shape != (*patch_token.shape[:2], 3)
-            or global_token.shape != (patch_token.shape[0], 1, patch_token.shape[2])
-        ):
-            raise ValueError("SAT tokenizer requires patches (BT,K,D), centers (BT,K,3), global token (BT,1,D)")
-        # patch_token: (B*T, K, D_pc)
-        # global_token: (B*T, 1, D_pc)
+        patch_token = self.pc_encoder(pc)["tokens"]
+        global_token = patch_token.mean(dim=1, keepdim=True)
+        pc_feat = torch.cat([global_token, patch_token], dim=1)
 
-        # [global_token, patch_0, patch_1, ...]
-        pc_feat = torch.cat([global_token, patch_token], dim=1)  # (B*T, K+1, D_pc)
-
-        state_feat = self.state_mlp(obs["joint_state"])  # (B*T, D_state)
+        state_feat = self.state_mlp(obs["joint_state"])
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
-        feat = torch.cat([pc_feat, state_feat], dim=-1)  # (B*T, K+1, D_pc+D_state)
-
-        B = feat.shape[0] // self.n_obs_steps
-        T = self.n_obs_steps
-        D = feat.shape[-1]  # pc_out_dim + state_out_dim
+        feat = torch.cat([pc_feat, state_feat], dim=-1)
 
         # (B*T, K+1, D) → (B, T, K+1, D) → (B, K+1, T*D)
-        feat = feat.reshape(B, T, -1, D)
-        feat = feat.transpose(1, 2).reshape(B, -1, T * D)
+        feat = feat.unflatten(0, (-1, self.n_obs_steps)).transpose(1, 2).flatten(2)
 
-        return feat, {}
+        return feat
 
 
 class SATAgent(BaseAgent):
@@ -132,7 +97,6 @@ class SATAgent(BaseAgent):
         n_action_steps: int,
         action_dim: int,
         # Obs encoder
-        encoder_type: str = "pointnext_tokenizer",
         pc_dim: int = 6,
         state_dim: int = 19,
         num_points: int = 1024,
@@ -154,8 +118,6 @@ class SATAgent(BaseAgent):
         ejc_embodiment_dim: int = 8,
         ejc_function_dim: int = 32,
         ejc_axis_dim: int = 8,
-        # Structural tokens
-        shuffle_action_tokens: bool = True,
         # Flow matching
         num_inference_steps: int = 10,
         t_sample_mode_for_flow: str = "beta",
@@ -167,7 +129,6 @@ class SATAgent(BaseAgent):
         num_flow_train_timesteps: int = 10,
     ):
         obs_encoder = SATObsEncoder(
-            encoder_type=encoder_type,
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,
@@ -177,7 +138,7 @@ class SATAgent(BaseAgent):
             fps_random_config=fps_random_config,
         )
 
-        backbone = SATBackbone(
+        backbone = SAT(
             horizon=horizon,
             action_dim=action_dim,
             obs_token_dim=obs_encoder.obs_token_dim,
@@ -196,7 +157,6 @@ class SATAgent(BaseAgent):
             ejc_axis_dim=ejc_axis_dim,
         )
 
-        # RectifiedFlow decoder (passes shuffle to backbone)
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
@@ -218,47 +178,16 @@ class SATAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-        self.shuffle_action_tokens = shuffle_action_tokens
-
     def compute_loss(self, batch, **kwargs):
-        """Compute Flow Matching loss with structural-centric actions.
-
-        Actions are transposed from ``(B, T, Da)`` to ``(B, Da, T)``
-        before being passed to the flow matching decoder.
-        """
+        """Flow matching on joint-trajectory tokens [B, Da, T]."""
         self._validate_batch(batch)
-        cond, aux = self._build_cond(batch["obs"])
-
+        cond = self.encode_observation(batch["obs"])
         normed_actions = self.normalizer["action"].normalize(batch["action"])
-        if not torch.isfinite(normed_actions).all():
-            nan_count = (~torch.isfinite(normed_actions)).sum().item()
-            raw = batch["action"]
-            raise ValueError(
-                f"NaN/Inf in normalized actions ({nan_count}/{normed_actions.numel()} "
-                f"elements). Raw action stats: min={raw.min():.4f} max={raw.max():.4f} "
-                f"mean={raw.mean():.4f}."
-            )
-
-        # Axis transposition: (B, T, Da) → (B, Da, T)
-        normed_actions = normed_actions.transpose(1, 2)
-
-        action_loss, loss_dict = self.action_decoder.compute_loss(
-            cond,
-            normed_actions,
-            model_kwargs={
-                "shuffle": self.training and self.shuffle_action_tokens,
-            },
-        )
-        return self._merge_aux_loss(action_loss, loss_dict, aux)
+        return self.action_decoder.compute_loss(cond, normed_actions.transpose(1, 2))
 
     @torch.no_grad()
     def predict_action_from_cond(self, cond, inference_steps: int | None = None):
-        """Inference from pre-built condition tensor.
-
-        Uses structural-centric ``(B, Da, T)`` template matching the SAT
-        backbone, then transposes back to ``(B, T, Da)`` for output.
-        """
-        # Template in structural-centric format: (B, Da, T) not (B, T, Da)
+        """Sample joint trajectories [B, Da, T] and return physical actions [B, T, Da]."""
         template = torch.zeros(
             cond.shape[0],
             self.action_dim,
@@ -270,9 +199,6 @@ class SATAgent(BaseAgent):
         pred = self.action_decoder.predict_action(cond, template, inference_steps=inference_steps)
         if not torch.isfinite(pred).all():
             raise RuntimeError("Non-finite SAT action prediction")
-        # pred is (B, Da, T)
-
-        # Transpose back: (B, Da, T) → (B, T, Da)
         pred = pred.transpose(1, 2)
 
         pred = self.normalizer["action"].unnormalize(pred)
@@ -290,17 +216,3 @@ class SATAgent(BaseAgent):
             "control_action": control_action,
             "tail": tail,
         }
-
-    def compile_backbone(self, **compile_kwargs):
-        """Override to use ``mode='default'`` instead of ``'reduce-overhead'``.
-
-        The shuffle path (``x[:, perm, :]``) produces data-dependent
-        indexing that CUDA graphs cannot capture.  ``mode='reduce-overhead'``
-        enables CUDA graphs and segfaults on the graph-capture attempt.
-        ``mode='default'`` keeps inductor kernel fusion but skips CUDA
-        graphs, which is safe for dynamic indexing.
-        """
-        import torch
-
-        compile_kwargs["mode"] = "default"  # force override (setdefault won't work)
-        self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)

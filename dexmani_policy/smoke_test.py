@@ -119,7 +119,8 @@ def validate_config_only(config_name: str):
 def smoke_test(config_name: str, *, max_updates=4):
     """Run the production single-device Trainer with an execution-only budget."""
     from dexmani_policy.train import build_train_components, build_trainer
-    from dexmani_policy.agents.loader import load_experiment_config, restore_policy_agent
+    from dexmani_policy.utils.config import load_experiment_config
+    from dexmani_policy.training.checkpoint import restore_policy_agent
     from dexmani_policy.training.resume import optimizer_to
     from dexmani_policy.utils.validation import positive_int
 
@@ -199,16 +200,10 @@ def smoke_test(config_name: str, *, max_updates=4):
                     pred = selected.predict_action(obs, **prediction_kwargs)["control_action"]
                 assert pred.shape == (1, cfg.n_action_steps, selected.control_action_dim)
                 assert torch.isfinite(pred).all()
-                # Restore uses eager inference. Compare checkpoint roundtrips
-                # with the same kernels, while still exercising compiled
-                # training/prediction above. Fusion can change float rounding.
+                # Compare checkpoint roundtrips with eager kernels to avoid compile rounding differences.
                 backbone = selected.action_decoder.model
                 if hasattr(backbone, "_orig_mod"):
                     selected.action_decoder.model = backbone._orig_mod
-                    geometry = getattr(selected.obs_encoder, "geometry", None)
-                    global_forward = getattr(geometry, "_global_forward", None)
-                    if hasattr(global_forward, "__wrapped__"):
-                        geometry._global_forward = global_forward.__wrapped__
                     set_seed(cfg.training.seed)
                     with torch.inference_mode():
                         eager = selected.predict_action(obs, **prediction_kwargs)["control_action"]

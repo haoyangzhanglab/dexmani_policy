@@ -12,6 +12,9 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 
 _LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 TASK_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
+FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
+NON_NUMERIC_OBSERVATION_FIELDS = frozenset({"task_text", "task_name"})
+ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
 
 
 RESUME_OPERATIONAL_FIELDS = {
@@ -68,36 +71,23 @@ def validate_source_recipe(saved, current):
         raise ValueError('Checkpoint source recipe mismatch:\n' + '\n'.join(differences))
 
 
-def checkpoint_source_config(payload, checkpoint_path, *, strict_resume, supplied=None):
-    """Select config from the same payload as the weights; never bless legacy provenance."""
-    # A sidecar copied into an old container after training is not provenance.
-    bound = payload.get('effective_config') if payload.get('_format') == 'simple.v4' else None
-    if bound is None:
-        if strict_resume or payload.get('_format') != 'simple.v3':
-            raise ValueError('Strict resume requires checkpoint-bound effective_config (simple.v4); '
-                             'a legacy sidecar cannot prove the source recipe')
-        warnings.warn('Legacy simple.v3 inference uses an unbound sidecar; source recipe is not proven',
-                      stacklevel=2)
-    elif not isinstance(bound, dict) or not bound:
-        raise ValueError('Checkpoint effective_config must be a nonempty mapping')
+def checkpoint_source_config(payload, checkpoint_path, *, supplied=None):
+    """Compare sidecar and supplied recipes against a validated checkpoint's bound config."""
+    bound = payload['effective_config']
     source = Path(checkpoint_path).resolve().parent.parent / 'config.yaml'
     sidecar = OmegaConf.to_container(OmegaConf.load(source), resolve=True) if source.is_file() else None
     for candidate in (sidecar, supplied):
         if candidate is not None:
             if not isinstance(candidate, (dict, DictConfig)) or not candidate:
                 raise ValueError('Source config must be a nonempty mapping')
-            if bound is not None:
-                validate_source_recipe(bound, candidate)
-    result = bound if bound is not None else (sidecar if supplied is None else supplied)
-    if result is None:
-        raise ValueError(f'Legacy inference requires source config.yaml: {source}')
-    return copy.deepcopy(result)
+            validate_source_recipe(bound, candidate)
+    return copy.deepcopy(bound)
 
 
 def load_resume_source_config(checkpoint_path):
     from dexmani_policy.training.checkpoint import CheckpointStore
     payload = CheckpointStore(Path(checkpoint_path).parent).load_payload(checkpoint_path)
-    return checkpoint_source_config(payload, checkpoint_path, strict_resume=True)
+    return checkpoint_source_config(payload, checkpoint_path)
 
 
 def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
@@ -219,4 +209,87 @@ def validate_action_key_consistency(cfg) -> None:
             f"dataset.action_key='{ds_action_key}' != action_key='{action_key}'. "
             f"They must be the same. Check CLI overrides for dataset.action_key "
             f"and/or action_key."
+        )
+
+
+def load_experiment_config(experiment_dir):
+    """Read the resolved snapshot without composing current repository YAML."""
+    cfg = OmegaConf.to_container(
+        OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True
+    )
+    if not isinstance(cfg, dict):
+        raise ValueError("Expected a saved experiment config mapping")
+    return cfg
+
+
+def validate_normalization_spec(spec, *, observation_fields=None):
+    """Validate declared modes and optional exact numeric-field coverage."""
+    if not isinstance(spec, dict):
+        raise ValueError("Normalization must map field names to modes")
+    for key, mode in spec.items():
+        if not isinstance(key, str) or not key or key in NON_NUMERIC_OBSERVATION_FIELDS:
+            raise ValueError(f"Invalid numeric normalization field: {key!r}")
+        if not isinstance(mode, str) or mode not in ALLOWED_NORMALIZATION_MODES:
+            raise ValueError(f"Invalid normalization mode for {key}: {mode!r}")
+        if mode == "auto" and key != "action":
+            raise ValueError("Normalization auto is only supported for action")
+    if not {"joint_state", "action"} <= spec.keys():
+        raise ValueError("Normalization must declare joint_state and action")
+    if spec["action"] == "identity":
+        raise ValueError("Action normalization requires fitted affine parameters")
+    if spec.get("rgb", "identity") != "identity":
+        raise ValueError("RGB preprocessing requires normalization.rgb=identity")
+    if observation_fields is not None:
+        expected = set(observation_fields) | {"action"}
+        if set(spec) != expected:
+            raise ValueError(
+                f"Normalization field mismatch: missing={sorted(expected - spec.keys())}, "
+                f"extra={sorted(spec.keys() - expected)}"
+            )
+    return dict(spec)
+
+
+def resolve_normalization_spec(cfg, *, observation_fields=None):
+    spec = cfg.get("normalization")
+    if isinstance(spec, DictConfig):
+        spec = OmegaConf.to_container(spec, resolve=True)
+    return validate_normalization_spec(spec, observation_fields=observation_fields)
+
+
+def normalization_dims_from_config(cfg):
+    """Number of fitted statistics per field, checked against observation layouts."""
+    dims = dict(cfg.get('normalization_dims', {}))
+    agent = cfg['agent']
+    action_dim = int(agent['action_dim'])
+    if 'action' in dims and dims['action'] != action_dim:
+        raise ValueError('Saved normalization action dimension disagrees with Agent')
+    dims['action'] = action_dim
+    # Finger vectors have 15 independent statistics; dense taxels share three axis statistics.
+    defaults = {'joint_state': agent.get('state_dim', 19), 'eef_pose': 9,
+                'fingertip_xyz': 15, 'finger_tactile_force': 15, 'taxel_tactile_force': 3,
+                'camera_intrinsic': 9, 'camera_extrinsic': 12,
+                'tactile_valid': 5,
+                'point_cloud': cfg.get('dataset', {}).get('pc_dim') or dims.get('point_cloud', 6)}
+    for key, width in defaults.items():
+        dims.setdefault(key, width)
+        if dims[key] != width and (
+            key in FINGER_VECTOR_FIELDS or key == 'eef_pose'
+            or cfg.get('normalization', {}).get(key, 'identity') != 'identity'
+        ):
+            raise ValueError(f'Saved {key} feature width must be {width}')
+    return dims
+
+
+def validate_dq_normalization(spec):
+    """DQ/VQ hand prototypes require the existing bounded action coordinates."""
+    if spec.get("action") not in {"auto", "limits"}:
+        raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
+
+
+def validate_action_clipping(spec, clip_sample):
+    if type(clip_sample) is not bool:
+        raise TypeError("agent.clip_sample must be a bool")
+    if spec.get("action") == "gaussian" and clip_sample:
+        raise ValueError(
+            "Gaussian action normalization requires agent.clip_sample=false."
         )

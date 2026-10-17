@@ -81,16 +81,15 @@ agent:
     random_noise_scale: 0.0
     use_shuffle_output: true
   pc_encoder_config:
-    stem_channels: 48
-    token_channels: 256
+    channels: 384
     num_patches: 96
-    patch_radii: [0.05, 0.10]
-    patch_neighbors: [20, 48]
-    use_patch_self_attn: true
-    patch_attn_layers: 4
-    patch_attn_heads: 4
-    patch_attn_dropout: 0.1
-    prepend_global_in_attn: true
+    group_size: 32
+    depth: 6
+    num_heads: 8
+    mlp_ratio: 4.0
+    geometry_scale: 0.10
+    rope_scale: 0.05
+    rope_base: 100.0
   n_layers: 8
   hidden_dim: 768
   n_head: 8

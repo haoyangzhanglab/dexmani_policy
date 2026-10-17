@@ -6,18 +6,18 @@ from typing import Any
 
 import torch
 
-from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
+from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.core.dp3 import DP3ObsEncoder
-from dexmani_policy.agents.vq_hand.codebook_manager import CodebookManager
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 
 
 class DQRISEAgent(BaseAgent):
     """DQ-RISE policy with a self-contained runtime hand codebook."""
 
     def set_normalization_spec(self, spec, feature_dims=None):
-        from dexmani_policy.agents.normalization import validate_dq_normalization
+        from dexmani_policy.utils.config import validate_dq_normalization
 
         validate_dq_normalization(spec)
         super().set_normalization_spec(spec, feature_dims)
@@ -59,7 +59,7 @@ class DQRISEAgent(BaseAgent):
         diffusion_action_dim = tcp_dim + 1
 
         # Attach the codebook module only after BaseAgent initialises nn.Module.
-        codebook_manager = CodebookManager(
+        hand_codebook = HandStateCodebook(
             hand_dim=hand_dim,
             num_groups=codebook_num_groups,
             codebook_size=codebook_size,
@@ -75,7 +75,7 @@ class DQRISEAgent(BaseAgent):
             state_out_dim=state_out_dim,
             fps_random_config=fps_random_config,
         )
-        backbone = ConditionalUnet1D(
+        backbone = ConditionalUNet1D(
             input_dim=diffusion_action_dim,
             context_dim=obs_encoder.out_dim * n_obs_steps,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
@@ -106,42 +106,29 @@ class DQRISEAgent(BaseAgent):
         self.codebook_num_groups = int(codebook_num_groups)
         self.codebook_size = int(codebook_size)
         self.diffusion_action_dim = int(diffusion_action_dim)
-        self.codebook_manager = codebook_manager
+        self.hand_codebook = hand_codebook
         self.codebook_path = codebook_path
-        self.register_load_state_dict_post_hook(self._check_restored_codebook)
-        self._normalizer_checked = False
-
-    # Normalizer/codebook consistency
+        self.register_load_state_dict_post_hook(self.check_restored_codebook)
+        self.normalizer_checked = False
 
     def initialize_training(self):
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
-        self.codebook_manager.load(self.codebook_path)
-        self._check_restored_codebook(self, None)
+        self.hand_codebook.load(self.codebook_path)
+        self.check_restored_codebook(self, None)
 
-    def _check_restored_codebook(self, module, incompatible_keys):
-        self._normalizer_checked = False
-        manager = self.codebook_manager
-        if (
-            not manager.is_loaded
-            or not manager.has_hand_normalizer
-            or manager.hand_dim != self.hand_dim
-            or manager.num_groups != self.codebook_num_groups
-            or manager.codebook_size != self.codebook_size
-        ):
-            raise ValueError(
-                "DQ-RISE requires complete, dimensionally consistent codebook state"
-            )
-        self._validate_codebook_normalizer()
+    def check_restored_codebook(self, module, incompatible_keys):
+        self.normalizer_checked = False
+        self.validate_codebook_normalizer()
 
     def load_normalizer_from_dataset(self, normalizer):
         super().load_normalizer_from_dataset(normalizer)
-        self._validate_codebook_normalizer()
+        self.validate_codebook_normalizer()
 
-    def _validate_codebook_normalizer(
+    def validate_codebook_normalizer(
         self, *, rtol: float = 1e-5, atol: float = 1e-6
     ) -> None:
-        if not self.codebook_manager.is_loaded:
+        if not self.hand_codebook.is_loaded:
             return
         if "action" not in self.normalizer.params_dict:
             return
@@ -149,8 +136,8 @@ class DQRISEAgent(BaseAgent):
         params = self.normalizer["action"].params_dict
         policy_scale = params["scale"][-self.hand_dim :].detach().cpu()
         policy_offset = params["offset"][-self.hand_dim :].detach().cpu()
-        code_scale = self.codebook_manager.hand_normalizer_scale.detach().cpu()
-        code_offset = self.codebook_manager.hand_normalizer_offset.detach().cpu()
+        code_scale = self.hand_codebook.hand_normalizer_scale.detach().cpu()
+        code_offset = self.hand_codebook.hand_normalizer_offset.detach().cpu()
 
         try:
             torch.testing.assert_close(policy_scale, code_scale, rtol=rtol, atol=atol)
@@ -163,24 +150,22 @@ class DQRISEAgent(BaseAgent):
                 "python -m dexmani_policy.training.train_vq_hand "
                 "--policy-config using this Policy's data recipe and normalization."
             ) from exc
-        self._normalizer_checked = True
+        self.normalizer_checked = True
 
-    def _require_codebook(self) -> None:
-        if not self.codebook_manager.is_loaded:
+    def require_codebook(self) -> None:
+        if not self.hand_codebook.is_loaded:
             raise RuntimeError(
                 "DQRISEAgent has no hand codebook. Supply codebook_path when "
                 "initializing fresh training, or load a complete "
                 "policy checkpoint before training/inference."
             )
-        if not self._normalizer_checked and self.normalizer.is_fitted(["action"]):
-            self._validate_codebook_normalizer()
-
-    # Training
+        if not self.normalizer_checked and self.normalizer.is_fitted(["action"]):
+            self.validate_codebook_normalizer()
 
     def compute_loss(self, batch: dict[str, Any], **kwargs):
         self._validate_batch(batch)
-        self._require_codebook()
-        cond, aux = self._build_cond(batch["obs"])
+        self.require_codebook()
+        cond = self.encode_observation(batch["obs"])
 
         normed = self.normalizer["action"].normalize(batch["action"])
         if not torch.isfinite(normed).all():
@@ -191,46 +176,36 @@ class DQRISEAgent(BaseAgent):
         tcp_part = normed[..., : self.tcp_dim]
         hand_part = normed[..., self.tcp_dim :]
 
-        batch_size, horizon, _ = hand_part.shape
-        hand_flat = hand_part.reshape(-1, self.hand_dim).float()
-        index = self.codebook_manager.hand_pose_to_continuous_index(hand_flat)
-        index = index.reshape(batch_size, horizon, 1).to(tcp_part.dtype)
+        index, discrete_idx = self.hand_codebook.encode(hand_part)
+        index = index.to(tcp_part.dtype)
 
         joint_action = torch.cat([tcp_part, index], dim=-1)
         action_loss, loss_dict = self.action_decoder.compute_loss(
             cond, joint_action, **kwargs
         )
 
-        # Explicitly mark this as a mini-batch nearest-prototype statistic.
-        num_codes = self.codebook_manager.num_codes
-        safe_max = max(num_codes - 1, 1)
-        discrete_idx = torch.floor(
-            ((index + 1.0) * 0.5 * safe_max).clamp(0, max(num_codes - 1, 0)) + 0.5
-        ).long()
+        num_codes = self.hand_codebook.num_codes
         counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
         probabilities = counts / counts.sum().clamp_min(1.0)
         entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
         loss_dict["batch_nn_code_entropy"] = entropy.detach()
         loss_dict["batch_nn_code_used_1pct"] = (probabilities > 0.01).sum().detach()
 
-        return self._merge_aux_loss(action_loss, loss_dict, aux)
-
-    # Inference
+        return action_loss, loss_dict
 
     @torch.no_grad()
     def predict_action(
         self, obs_dict: dict, inference_steps: int | None = None
     ) -> dict:
         self._validate_obs_dict(obs_dict)
-        self._require_codebook()
-        cond, _ = self._build_cond(obs_dict)
+        cond = self.encode_observation(obs_dict)
         return self.predict_action_from_cond(cond, inference_steps=inference_steps)
 
     @torch.no_grad()
     def predict_action_from_cond(
         self, cond, inference_steps: int | None = None
     ) -> dict:
-        self._require_codebook()
+        self.require_codebook()
         batch_size = cond.shape[0]
         template = torch.zeros(
             batch_size,
@@ -245,12 +220,8 @@ class DQRISEAgent(BaseAgent):
 
         tcp_pred = reduced_action[..., : self.tcp_dim]
         idx_pred = reduced_action[..., -1]
-        hand_flat, discrete_idx = self.codebook_manager.continuous_index_to_hand_pose(
-            idx_pred.reshape(-1)
-        )
-        hand_pred = hand_flat.reshape(batch_size, self.horizon, self.hand_dim).to(
-            tcp_pred.dtype
-        )
+        hand_pred, discrete_idx = self.hand_codebook.decode(idx_pred)
+        hand_pred = hand_pred.to(tcp_pred.dtype)
 
         normalized_full_action = torch.cat([tcp_pred, hand_pred], dim=-1)
         pred = self.normalizer["action"].unnormalize(normalized_full_action)
@@ -260,7 +231,7 @@ class DQRISEAgent(BaseAgent):
         return {
             "pred_action": pred,
             "control_action": control_action,
-            "pred_code_index": discrete_idx.reshape(batch_size, self.horizon),
+            "pred_code_index": discrete_idx,
             "pred_code_continuous": idx_pred,
         }
 
@@ -269,6 +240,6 @@ class DQRISEAgent(BaseAgent):
             f"DQRISEAgent(action_dim={self.action_dim}, tcp_dim={self.tcp_dim}, "
             f"hand_dim={self.hand_dim}, "
             f"diffusion_action_dim={self.diffusion_action_dim}, "
-            f"codes={self.codebook_manager.num_codes}, "
-            f"codebook_loaded={self.codebook_manager.is_loaded})"
+            f"codes={self.hand_codebook.num_codes}, "
+            f"codebook_loaded={self.hand_codebook.is_loaded})"
         )

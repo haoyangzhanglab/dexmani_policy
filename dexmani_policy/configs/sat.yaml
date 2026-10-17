@@ -1,6 +1,6 @@
 # SAT — local Structural Action Transformer adaptation
-# Encoder:  PointNeXT tokenizer (256d tokens, SAT-style patch self-attention)
-# Decoder:  SAT backbone (MultiModalAttention, obs-as-KV-prefix) + Flow Matching
+# Encoder:  Sparse3DEncoder (384d spatial tokens + mean-pooled global token)
+# Decoder:  SAT (joint trajectories with observation-prefix attention) + Flow Matching
 # Modality: point_cloud + joint_state → action
 # Key:      structural-centric action representation (Da as sequence, T as feature)
 
@@ -66,8 +66,7 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  # Obs encoder: PointNeXT patch tokens with temporal feature fusion
-  encoder_type: pointnext_tokenizer
+  # Obs encoder: Sparse3DEncoder patches + mean global token; temporal feature fusion
   pc_dim: 6
   state_dim: 19
   num_points: 1024
@@ -79,16 +78,15 @@ agent:
     use_shuffle_output: true
 
   pc_encoder_config:
-    stem_channels: 48
-    token_channels: 256
+    channels: 384
     num_patches: 96
-    patch_radii: [0.05, 0.10]
-    patch_neighbors: [20, 48]
-    use_patch_self_attn: true
-    patch_attn_layers: 4
-    patch_attn_heads: 4
-    patch_attn_dropout: 0.1
-    prepend_global_in_attn: true
+    group_size: 32
+    depth: 6
+    num_heads: 8
+    mlp_ratio: 4.0
+    geometry_scale: 0.10
+    rope_scale: 0.05
+    rope_base: 100.0
 
   # SAT backbone (structural-centric DiT)
   n_layers: 8
@@ -99,16 +97,13 @@ agent:
   qkv_bias: true
   qk_norm: true
 
-  # EJC (Embodied Joint Codebook)
+  # EJC defaults identify joints without anatomical function or axis labels.
   ejc_num_embodiments: 1
-  # ejc_num_functions defaults to action_dim (auto-tracked by EmbodiedJointCodebook)
+  # ejc_num_functions defaults to action_dim.
   ejc_num_axes: 1
   ejc_embodiment_dim: 8
   ejc_function_dim: 32
   ejc_axis_dim: 8
-
-  # Structural token config
-  shuffle_action_tokens: true
 
   # Flow matching (standard CFM, no consistency training)
   num_inference_steps: 10
@@ -143,7 +138,7 @@ training:
   seed: ${seed}
   device: cuda:0
   use_bfloat16: true
-  use_compile: true              # SATAgent overrides to mode='default' (no cudagraphs)
+  use_compile: true
   use_ema: true
   lr_scheduler: cosine
   lr_warmup_steps: 500

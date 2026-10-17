@@ -1,42 +1,23 @@
-from typing import Dict, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from dexmani_policy.agents.obs_encoder.rgb.utils import (
-    ArrayLike,
-    flatten_batch,
-    flatten_matrix_batch,
-    get_interpolation,
-    make_spatial_transform_meta,
-    restore_batch,
-    restore_matrix_batch,
-    to_depth_tensor,
-    to_hw,
-    to_rgb_tensor,
-    update_intrinsics_after_spatial_ops,
-)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
-_IMAGENET_MEAN = (0.485, 0.456, 0.406)
-_IMAGENET_STD = (0.229, 0.224, 0.225)
-
-IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
+IMAGE_PROCESSOR_PRESETS: dict[str, dict] = {
     "dino": {
         "image_size": (224, 224),
-        "image_mean": _IMAGENET_MEAN,
-        "image_std": _IMAGENET_STD,
+        "image_mean": IMAGENET_MEAN,
+        "image_std": IMAGENET_STD,
         "interpolation": "bilinear",
     },
     "resnet": {
         "image_size": (224, 224),
-        "image_mean": _IMAGENET_MEAN,
-        "image_std": _IMAGENET_STD,
-        "interpolation": "bilinear",
-    },
-    "clip": {
-        "image_size": (224, 224),
-        "image_mean": (0.48145466, 0.45782750, 0.40821073),
-        "image_std": (0.26862954, 0.26130258, 0.27577711),
+        "image_mean": IMAGENET_MEAN,
+        "image_std": IMAGENET_STD,
         "interpolation": "bilinear",
     },
     "siglip": {
@@ -45,222 +26,109 @@ IMAGE_PROCESSOR_PRESETS: Dict[str, Dict[str, object]] = {
         "image_std": (0.5, 0.5, 0.5),
         "interpolation": "bilinear",
     },
-    "r3m": {
-        "image_size": (224, 224),
-        "image_mean": (0.0, 0.0, 0.0),
-        "image_std": (1.0, 1.0, 1.0),
-        "interpolation": "bilinear",
-    },
 }
 
 
-class ImageProcessor:
-    """Resize and normalize RGB through process_images for the DP policy path.
+def to_rgb_tensor(images: np.ndarray | torch.Tensor) -> torch.Tensor:
+    """Convert integer [0, 255] or floating-point [0, 1] RGB to contiguous CHW float32."""
+    if isinstance(images, np.ndarray):
+        images = torch.from_numpy(images)
+    elif not isinstance(images, torch.Tensor):
+        raise TypeError(f"Unsupported input type: {type(images)}")
+    if images.ndim < 3:
+        raise ValueError("images should have at least 3 dims.")
 
-    process_rgbd is an optional explicit depth/intrinsics API for geometry work;
-    DP forward does not call it. Processed RGB supports uint8 or float32 input.
-    """
+    if images.shape[-3] != 3:
+        if images.shape[-1] != 3:
+            raise ValueError("Cannot infer RGB channel dimension.")
+        images = images.movedim(-1, -3)
+
+    if images.dtype in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+        images = images.to(torch.float32).div_(255.0)
+    else:
+        images = images.to(torch.float32)
+
+    return images.contiguous()
+
+
+class ImageProcessor:
+    """Resize and normalize uint8 or floating-point RGB for policy inputs."""
 
     def __init__(
         self,
-        image_size: Union[int, Tuple[int, int], None] = None,
-        image_mean: Sequence[float] = (0.485, 0.456, 0.406),
-        image_std: Sequence[float] = (0.229, 0.224, 0.225),
+        image_size: int | Sequence[int] | None = None,
+        image_mean: Sequence[float] = IMAGENET_MEAN,
+        image_std: Sequence[float] = IMAGENET_STD,
         interpolation: str = "bilinear",
     ):
-        self.image_size = to_hw(image_size)
+        if isinstance(image_size, int):
+            image_size = (image_size, image_size)
+        self.image_size = (
+            tuple(map(int, image_size)) if image_size is not None else None
+        )
         self.image_mean = torch.tensor(image_mean, dtype=torch.float32)
         self.image_std = torch.tensor(image_std, dtype=torch.float32)
-        self.interpolation = get_interpolation(interpolation)
-        self._normalization_cache = {}
+        for name, value in (
+            ("image_mean", self.image_mean),
+            ("image_std", self.image_std),
+        ):
+            if value.shape != (3,) or not torch.isfinite(value).all():
+                raise ValueError(f"{name} requires three finite values")
+        if (self.image_std <= 0).any():
+            raise ValueError("image_std must be positive")
+
+        self.interpolation = interpolation.lower()
+        if self.interpolation not in ("nearest", "bilinear", "bicubic"):
+            raise ValueError(f"Unsupported interpolation: {interpolation}")
+        self.normalization_cache = {}
 
     def __getstate__(self):
         # Device copies are disposable constants, not serialized model state.
-        return {**self.__dict__, "_normalization_cache": {}}
+        return {**self.__dict__, "normalization_cache": {}}
 
     @classmethod
-    def from_preset(cls, name: str) -> "ImageProcessor":
-        if name not in IMAGE_PROCESSOR_PRESETS:
-            raise KeyError(f"Unknown image processor preset: {name}")
-        return cls(**IMAGE_PROCESSOR_PRESETS[name])
-
-    def apply_spatial_transform(
-        self,
-        image_batch: torch.Tensor,
-        depth_batch: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, object]]:
-        if image_batch.ndim != 4 or image_batch.shape[1] != 3:
-            raise ValueError("image_batch should have shape [N, 3, H, W].")
-        if depth_batch is not None and (
-            depth_batch.ndim != 4 or depth_batch.shape[1] != 1
-        ):
-            raise ValueError("depth_batch should have shape [N, 1, H, W].")
-
-        orig_h, orig_w = image_batch.shape[-2:]
-        scale_x, scale_y = 1.0, 1.0
-        crop_top, crop_left = 0, 0
-
-        if self.image_size is not None:
-            target_h, target_w = self.image_size
-            # If image is already at the target size, skip the resize entirely.
-            if (orig_h, orig_w) != (target_h, target_w):
-                scale_x = float(target_w) / float(orig_w)
-                scale_y = float(target_h) / float(orig_h)
-                image_batch = self.resize_tensor(
-                    image_batch, size=(target_h, target_w), mode=self.interpolation
-                )
-                if depth_batch is not None:
-                    depth_batch = self.resize_tensor(
-                        depth_batch, size=(target_h, target_w), mode="nearest"
-                    )
-            processed_h, processed_w = target_h, target_w
-
-        else:
-            processed_h, processed_w = orig_h, orig_w
-
-        spatial = make_spatial_transform_meta(
-            orig_hw=(orig_h, orig_w),
-            resized_hw=(
-                (processed_h, processed_w)
-                if (scale_x, scale_y) != (1.0, 1.0)
-                else (orig_h, orig_w)
-            ),
-            processed_hw=(processed_h, processed_w),
-            resize_scale_xy=(scale_x, scale_y),
-            crop_top_left=(crop_top, crop_left),
+    def from_preset(cls, name: str, config: dict | None = None) -> "ImageProcessor":
+        """Select preprocessing settings from the combined RGB encoder config."""
+        config = config or {}
+        return cls(
+            **{
+                key: config[key] if config.get(key) is not None else default
+                for key, default in IMAGE_PROCESSOR_PRESETS[name].items()
+            }
         )
-        return image_batch, depth_batch, spatial
 
-    @staticmethod
-    def resize_tensor(
-        x: torch.Tensor,
-        size: Tuple[int, int],
-        mode: str,
-    ) -> torch.Tensor:
-        if mode not in {"nearest", "bilinear", "bicubic"}:
-            raise ValueError(f"Unsupported interpolation mode: {mode}")
-        if mode == "nearest":
-            return F.interpolate(x, size=size, mode=mode)
-        return F.interpolate(x, size=size, mode=mode, align_corners=False)
+    @property
+    def config(self) -> dict:
+        return {
+            "image_size": self.image_size,
+            "image_mean": self.image_mean.tolist(),
+            "image_std": self.image_std.tolist(),
+            "interpolation": self.interpolation,
+        }
 
     def normalize(self, image_batch: torch.Tensor) -> torch.Tensor:
         device, dtype = image_batch.device, image_batch.dtype
-        key = (device.type, device.index, dtype)
-        if key not in self._normalization_cache:
-            self._normalization_cache[key] = (
+        key = (device, dtype)
+        if key not in self.normalization_cache:
+            self.normalization_cache[key] = (
                 self.image_mean.to(device=device, dtype=dtype).view(1, 3, 1, 1),
                 self.image_std.to(device=device, dtype=dtype).view(1, 3, 1, 1),
             )
-        mean, std = self._normalization_cache[key]
-        return image_batch.sub(mean).div(std)
+        mean, std = self.normalization_cache[key]
+        return image_batch.sub(mean).div_(std)
 
-    def process_images(self, images: ArrayLike, *, validate_float_range: bool = True) -> Dict[str, object]:
-        """Normalize RGB; disable float checks only for trusted preprocessing output."""
-        images = to_rgb_tensor(images, validate_float_range=validate_float_range)
-        flat_images, leading_shape = flatten_batch(images, trailing_ndim=3)
-
-        flat_images, _, spatial = self.apply_spatial_transform(flat_images)
-        flat_images = self.normalize(flat_images)
-
-        return {
-            "image": restore_batch(flat_images, leading_shape),
-            "spatial": spatial,
-        }
-
-    def process_rgbd(
-        self,
-        images: ArrayLike,
-        depths: ArrayLike,
-        intrinsics: ArrayLike,
-        camera_to_world: Optional[ArrayLike] = None,
-    ) -> Dict[str, object]:
-
+    def process_images(self, images: np.ndarray | torch.Tensor) -> torch.Tensor:
+        """Normalize RGB; floating-point inputs must already be finite and in [0,1]."""
         images = to_rgb_tensor(images)
-        depths = to_depth_tensor(depths)
+        leading_shape = images.shape[:-3]
+        flat_images = images.reshape(-1, *images.shape[-3:])
 
-        flat_images, leading_shape = flatten_batch(images, trailing_ndim=3)
-        flat_depths, depth_leading_shape = flatten_batch(depths, trailing_ndim=3)
-        if leading_shape != depth_leading_shape:
-            raise ValueError(
-                f"images leading shape {leading_shape} != depths leading shape {depth_leading_shape}"
+        if self.image_size is not None and self.image_size != images.shape[-2:]:
+            flat_images = F.interpolate(
+                flat_images,
+                size=self.image_size,
+                mode=self.interpolation,
+                align_corners=None if self.interpolation == "nearest" else False,
             )
-
-        flat_intrinsics = flatten_matrix_batch(
-            matrix=intrinsics,
-            mat_shape=(3, 3),
-            leading_shape=leading_shape,
-            device=flat_images.device,
-        )
-
-        flat_camera_to_world = None
-        if camera_to_world is not None:
-            cam_shape = tuple(torch.as_tensor(camera_to_world).shape[-2:])
-            if cam_shape not in [(3, 4), (4, 4)]:
-                raise ValueError(
-                    f"camera_to_world must have shape [..., 3, 4] or [..., 4, 4], got [..., {cam_shape[0]}, {cam_shape[1]}]"
-                )
-            cam_tensor = flatten_matrix_batch(
-                matrix=camera_to_world,
-                mat_shape=(4, 4) if cam_shape == (4, 4) else (3, 4),
-                leading_shape=leading_shape,
-                device=flat_images.device,
-            )
-            flat_camera_to_world = (
-                cam_tensor[:, :3, :] if cam_tensor.shape[-2] == 4 else cam_tensor
-            )
-
-        flat_images, flat_depths, spatial = self.apply_spatial_transform(
-            flat_images, flat_depths
-        )
         flat_images = self.normalize(flat_images)
-
-        scale_x, scale_y = spatial["resize_scale_xy"]
-        crop_top, crop_left = spatial["crop_top_left"]
-        flat_intrinsics = update_intrinsics_after_spatial_ops(
-            intrinsics=flat_intrinsics,
-            scale_x=scale_x,
-            scale_y=scale_y,
-            crop_left=crop_left,
-            crop_top=crop_top,
-        )
-
-        return {
-            "image": restore_batch(flat_images, leading_shape),
-            "depth": restore_batch(flat_depths, leading_shape),
-            "intrinsics": restore_matrix_batch(flat_intrinsics, leading_shape),
-            "camera_to_world": (
-                restore_matrix_batch(flat_camera_to_world, leading_shape)
-                if flat_camera_to_world is not None
-                else None
-            ),
-            "spatial": spatial,
-        }
-
-
-def example() -> None:
-    processor = ImageProcessor.from_preset("dino")
-
-    images = torch.randint(0, 256, (4, 480, 640, 3), dtype=torch.uint8)
-    depths = torch.randint(1, 2000, (4, 480, 640), dtype=torch.uint16)
-    intrinsics = torch.tensor(
-        [[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]],
-        dtype=torch.float32,
-    )
-    camera_to_world = torch.tensor(
-        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.5]],
-        dtype=torch.float32,
-    )
-
-    rgb_out = processor.process_images(images)
-    rgbd_out = processor.process_rgbd(images, depths, intrinsics, camera_to_world)
-
-    print("process_images image:", tuple(rgb_out["image"].shape))
-    print("process_rgbd image   :", tuple(rgbd_out["image"].shape))
-    print("process_rgbd depth   :", tuple(rgbd_out["depth"].shape))
-    print("process_rgbd K       :", tuple(rgbd_out["intrinsics"].shape))
-    if rgbd_out["camera_to_world"] is not None:
-        print("process_rgbd Tcw     :", tuple(rgbd_out["camera_to_world"].shape))
-
-
-if __name__ == "__main__":
-    example()
+        return flat_images.reshape(*leading_shape, *flat_images.shape[1:])

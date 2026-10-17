@@ -1,6 +1,6 @@
 # DP3 — 3D Diffusion Policy with point cloud observation
 # Encoder:  DP3 MLP point cloud encoder (per-point MLP + max pool, 128d)
-# Decoder:  ConditionalUnet1D (FiLM conditioning) + DDIM
+# Decoder:  ConditionalUNet1D (FiLM conditioning) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
 
 policy_name: dp3
@@ -66,7 +66,7 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: dp3                  # dp3 (MLP) | idp3 (Conv) | pointnext
+  encoder_type: dp3                  # dp3 (MLP) | idp3 (Conv)
   pc_dim: 6
   pc_out_dim: 128
   state_dim: 19
@@ -76,7 +76,7 @@ agent:
     use_random: true
     use_random_start: true
     random_noise_scale: 0.0
-    use_shuffle_output: ${eval:"'${agent.encoder_type}' not in ('dp3', 'idp3')"}  # FPS output shuffle: off for dp3/idp3, on for PointNext.
+    use_shuffle_output: false  # PointNet/MultiStagePointNet FPS output order.
 
   # Diffusion backbone
   diffusion_step_embed_dim: 128

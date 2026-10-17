@@ -26,12 +26,12 @@ conda activate policy
 python -m pip install -r requirements.txt
 python -m pip install -e .
 python -m pip check
-python dexmani_policy/smoke_test.py --config-only dp dp3 sat maniflow dqrise r3d multitask_dit interaction_flow
+python dexmani_policy/smoke_test.py --config-only dp dp3 sat maniflow dqrise r3d multitask_dit
 ```
 
-新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。R3M 自动下载额外需要 `gdown`，已有本地权重不需要它。
+新环境先安装与目标设备匹配的 Torch 2.4.1 / torchvision 0.19.1，再按上面的 requirements → editable install 顺序安装。PyTorch3D 0.7.8 是单独的编译后端，须针对实际 Torch/CUDA 安装；点云采样会明确报告缺失依赖。
 
-仿真评测需要另外安装 `dexmani_sim`。训练数据路径由当前 config 决定，常见位置为 `robot_data/<task>.zarr`；字段、坐标系与 SIM/Real 差异见 [数据与模态说明](docs/data_modality.md)。
+仿真评测需要另外安装 `dexmani_sim`。训练数据路径由当前 config 决定，常见位置为 `robot_data/<task>.zarr`；字段、坐标系与 SIM/Real 差异见 [数据接口](docs/项目架构.md#31-dataset-contract)。
 
 查看当前可用配置：
 
@@ -42,7 +42,7 @@ ls dexmani_policy/configs/ddp/*.yaml
 
 配置名只用于定位实验入口，不代表内部模型一定采用某种固定结构；理解实现时应继续进入实际源码。
 
-交互表征策略使用 `interaction_flow`，多卡配置为 `ddp/interaction_flow`。当前模型机制、模态开关与 Real 数据配方见 [逐指交互表征](docs/interaction_representation.md)；GReST 场景编码与可配置 token 预算见 [GReST 专项说明](docs/grest_scene_tokenizer.md)。
+独立的手–场景关系读取与场景聚合组件位于 `agents/obs_encoder/interaction/`，分别为 `HandSceneAttention` 和 `SceneAggregator`；模块边界见 [观察编码器](docs/项目架构.md#33-observation-encoder-contract)。这些组件当前没有专属策略配置。
 
 ## 推荐研究流程
 
@@ -106,7 +106,7 @@ bash scripts/remote/train_remote.sh dp3 <task> '+resume_from=experiments/dp3/<ta
 
 保存配置记录 HF 结构及闭集文本维度；完整权重恢复要求 HF backbone 的 `architecture` 为有效映射，闭集 `text_embed_dim` 与保存的 embedding 表一致，不再加载外部初始化权重。固定文本保留任务映射、embedding 表和 projection，未知文本报错；所有 checkpoint 权重严格加载。推理读取完整 `.pt` 文件，不跳过 optimizer I/O。
 
-新训练 checkpoint 使用 `simple.v4`；未绑定来源的 `simple.v3` 拒绝严格续训，仍可在配置足够明确时警告后推理，不自动降级或补写绑定。VQ checkpoint/NPZ 保持 v3。`best_ckpt.json` 使用 `best.v1`，EMA、NFE 和 policy seed mode 必须完整有效。新 selection 使用 `selection.v3`，每个 stage 保存一次完整 episode 证据；读取端保留 `selection.v2` 支持。`--selection-record` 接收交接引用、上述 selection 结果或 `best.v1` 快照，不重生成旧计划。版本边界、回归命令和源码对照见 [修复与验证记录](docs/修复与验证记录.md)。
+训练恢复和推理统一读取绑定 `effective_config` 的 `simple.v4` checkpoint。VQ checkpoint 使用 v4，码本 NPZ 使用 v3。`best_ckpt.json` 使用 `best.v1`，EMA、NFE 和 policy seed mode 必须完整有效；selection 结果只读取 `selection.v3`，每个 stage 保存完整 episode 证据。`--selection-record` 接收交接引用、selection 结果或 `best.v1` 快照。历史格式使用对应源码快照，不自动转换或降级；当前规则见 [Checkpoint / Resume 接口](docs/项目架构.md#36-checkpoint--resume-contract)。
 
 完整续训要求 `resume_contract.facts_format=1`，CUDA RNG 为每个 rank 的单个 Tensor；CPU RNG 的 CUDA 字段为 null。配置、contract 和状态字段必须满足当前约定，恢复失败不会自动退回 weights-only。
 
@@ -118,7 +118,11 @@ Diffusion 默认 `agent.clip_sample=true` 保持有界动作行为。支持 Gaus
 
 RGB 可通过 `dataset.rgb_keep_uint8=true` 使用 uint8 transport（要求 `normalization.rgb=identity`）；当前 DP 显式启用。配置 CPU resize 时，含 ImageAug 的 recipe 在 float resize/crop/增强后最终量化，无颜色增强的 uint8 recipe 保留 uint8 spatial 路径；视觉入口恢复 float32。缺省/false 保留原 float preprocessing；未配置 CPU resize 时仍返回原始 HWC uint8。recipe 变化不能跨越 strict resume；MultiTask 的 RGB child 必须一致。确定性评测、验证与 Real preprocessing 从保存配置恢复。
 
-DP3/DQRISE 的 PointNet/MultiStagePointNet 配方在执行 FPS 时关闭采样后 shuffle，随机起点与子集选择开关保持不变。该预处理仅在输入点数大于 `agent.num_points` 时采样；当前默认数据与目标均为 1024 点，不执行这条 FPS 路径，也不会因该 shuffle 开关改变 RNG 消耗。对于实际进入 FPS 的配方，关闭 shuffle 会改变 RNG 消耗，后续随机轨迹不保证相同。切换为 PointNext 的配置保留采样后 shuffle。SAT action shuffle、EJC、ManiFlow dense tokenizer、Uni3D 和 compile/static_graph 不受此结论影响。
+DP3/DQRISE 的 PointNet/MultiStagePointNet 配方在执行 FPS 时关闭采样后 shuffle，随机起点与子集选择开关保持不变。该预处理仅在输入点数大于 `agent.num_points` 时采样；当前默认数据与目标均为 1024 点，不执行这条 FPS 路径，也不会因该 shuffle 开关改变 RNG 消耗。对于实际进入 FPS 的配方，关闭 shuffle 会改变 RNG 消耗，后续随机轨迹不保证相同。此结论不涉及 SAT 的 EJC、ManiFlow dense tokenizer、Uni3D 或 compile/static_graph。
+
+SAT、LAMP-FM 和 Temporal-codec-FM 共享的观测编码器使用 [Sparse3DEncoder](dexmani_policy/agents/obs_encoder/pointcloud/sparse3d_encoder.py)，要求 `normalization.point_cloud: identity`；数据布局见 [观察编码器接口](docs/项目架构.md#33-observation-encoder-contract)。
+
+当前 SAT/ManiFlow 配置不再提供单值 `agent.encoder_type`，R3D 的 `pc_encoder_config` 不再提供 `feature_mode`/`norm`。这些冗余参数不做自动兼容；旧保存配置应使用对应源码快照。DP3/DQRISE 保留实际有效的 `encoder_type: dp3/idp3` 选择。
 
 ### DQ-RISE 码本与 Policy 对齐
 
@@ -130,7 +134,7 @@ python -m dexmani_policy.training.train_vq_hand \
   --policy-config dexmani_policy/configs/dqrise.yaml \
   --policy-override task_name=pick_apple_messy \
   --output_dir "$VQ_RUN"
-python -m dexmani_policy.agents.vq_hand.export_codebook \
+python -m dexmani_policy.training.export_hand_codebook \
   --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
   --output "$VQ_RUN/codebook.npz"
 bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="$VQ_RUN/codebook.npz"
@@ -142,7 +146,11 @@ bash scripts/training/train.sh dqrise task_name=pick_apple_messy codebook_path="
 
 导出生成 Policy 使用的完整 residual-code 组合码本。NPZ 必须严格符合 v3 schema，额外字段会被拒绝；Policy checkpoint 同时保存推理需要的内嵌码本。
 
-训练过程保留分组码本使用图和损失曲线；结束后另存 `codebook_diagnostics.json`，对已选 best 的实际部署查表链路报告 train/held-out 误差及原型利用率，不参与 best 排名。导出权重、epoch、SHA256 取自同一字节快照，运行 NPZ 只留短来源摘要，完整源行列表保留在 VQ checkpoint。码本沿用严格 affine 兼容校验。`train_vq_hand.sh` 同样使用目标 Policy 配方。独立 VQ 研究仍可显式指定 Python `--config` 使用全量 hand 统计，但不作为 DQ 默认路径，不保证与目标 Policy 的 affine 参数一致。Policy 和 standalone VQ checkpoint 均须保存 `split_metadata.normalization_spec`；导出前检查结构和动作归一化模式，缺失声明、Gaussian、identity 或非法模式均在解码前拒绝。
+训练结束后，`codebook_diagnostics.json` 报告已选 best 在 train/held-out 数据上的实际查表误差和原型利用率，不参与 best 排名。导出权重、epoch、SHA256 取自同一字节快照；NPZ 保留来源摘要，完整源行列表保留在 VQ checkpoint。
+
+训练仅接受 `--policy-config`，数据与划分通过 `--policy-override` 调整，`train_vq_hand.sh` 使用相同入口。VQ checkpoint 保存 `split_metadata.normalization_spec`；导出仅接受 action 的 auto/limits 归一化，Policy 加载时检查 hand affine 一致性。
+
+模型与量化实现位于 `dexmani_policy/agents/hand_prior/vqvae.py`，运行时查表位于 `dexmani_policy/agents/hand_prior/codebook.py`。VQ checkpoint 使用 v4，码本 NPZ 保持 v3；Policy 码本参数前缀为 `hand_codebook`。旧 VQ v3 模型及旧 `codebook_manager` Policy 权重不提供自动转换。
 
 ### LAMP-style 手部动作空间
 
@@ -201,19 +209,13 @@ python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name>
 ```
 
-配置与训练链路统一使用 `smoke_test.py`，Agent 模块不再维护独立的合成数据演示入口。安装 `pytest` 后，定向回归检查使用：
-
-```bash
-python -m pytest -q tests
-```
-
-pytest 使用合成数据和临时产物；CUDA 不可见时会跳过对应检查，CPU 检查通过不代表 GPU 检查通过。完整训练、DDP 和长时间评测不是普通代码改动后的默认验证步骤。
+配置与训练链路统一使用 `smoke_test.py`。CPU 检查通过不代表 GPU 检查通过；完整训练、DDP 和长时间评测仅在需要时运行。
 
 `--config-only` 只检查配置和 target。完整 smoke 通过正式 Trainer 使用原资产、batch、BF16/compile/accumulation 配置，默认运行 4 次 optimizer update（可用 `--max-updates N` 设置本次上限），要求实际学习参数发生有限变化，再验证预测及 raw/EMA 保存恢复。执行预算不修改 warmup 和总训练计划，`global_step` 随实际更新增长；预算内没有有效变化会失败，不提高学习率。输出使用临时目录且不创建 W&B run；此入口不验证多卡运行。
 
 保存恢复的预测比较使用相同 eager 执行模式，保持原误差阈值；compile 预测仍检查形状/有限性，并单独报告与 eager 的数值差异。DDIM 推理将 scheduler 系数统一放在采样设备，避免训练曾调用 add_noise 与新恢复实例之间的 CPU/GPU 标量运算差异。
 
-smoke 接受配置名、`--config-only` 和 `--max-updates`，不接受 `task_name=...` 等 Hydra 字段覆盖。需要修改数据配方或保留产物时，使用正式单卡/DDP 入口及 `+max_updates=N`；有界停止会保存真实训练进度和采样游标。具体命令见 [interaction 运行检查](docs/interaction_representation.md#运行检查)。配置检查不证明 GPU 算子、真实数据链路或闭环性能已通过。
+smoke 接受配置名、`--config-only` 和 `--max-updates`，不接受 `task_name=...` 等 Hydra 字段覆盖。需要修改数据配方或保留产物时，使用正式单卡/DDP 入口及 `+max_updates=N`；有界停止会保存真实训练进度和采样游标。配置检查不证明 GPU 算子、真实数据链路或闭环性能已通过。
 
 ## 仿真评测
 
@@ -291,12 +293,6 @@ scripts/
 较长的背景和机制说明放在 `docs/`：
 
 - [`docs/项目架构.md`](docs/项目架构.md)
-- [`docs/interaction_representation.md`](docs/interaction_representation.md)：逐指交互表征、模态开关与运行检查
-- [`docs/grest_scene_tokenizer.md`](docs/grest_scene_tokenizer.md)：GReST 区域—关系场景编码、token 预算与研究验证边界
-- [`docs/geometry_aware_point_transformer.md`](docs/geometry_aware_point_transformer.md)：GAPT 几何 Patch 编码与历史集成验证
-- [`docs/hand_spatial_encoding.md`](docs/hand_spatial_encoding.md)：腕部与指尖位置编码的输入契约和研究边界
-- [`docs/point_image_fusion.md`](docs/point_image_fusion.md)：独立的 2D–3D patch 对应与语义融合模块（当前策略未接入）
-- [`docs/data_modality.md`](docs/data_modality.md)：Zarr schema、SIM/Real 模态语义与归一化边界
 - [`docs/仿真评测机制.md`](docs/仿真评测机制.md)
 - [`docs/SSH服务器训练部署.md`](docs/SSH服务器训练部署.md)
 

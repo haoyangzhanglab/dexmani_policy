@@ -1,1 +1,1 @@
-"""Continuous hand motion priors."""
+"""Hand state quantization and continuous hand motion priors."""

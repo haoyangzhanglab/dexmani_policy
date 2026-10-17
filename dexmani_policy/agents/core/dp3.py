@@ -3,8 +3,8 @@ import torch.nn as nn
 
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.registry import build_pc_global_encoder
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import MultiStagePointNet, PointNet
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 
 
 class DP3ObsEncoder(nn.Module):
@@ -24,15 +24,14 @@ class DP3ObsEncoder(nn.Module):
         fps_random_config: dict = None,
     ):
         super().__init__()
-        self.pc_encoder = build_pc_global_encoder(
-            encoder_type,
-            pc_dim,
-            config={
-                "output_channels": pc_out_dim,
-                **({"fps_random_config": fps_random_config} if encoder_type == "pointnext" else {}),
-            },
-        )
-        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
+        if encoder_type == "dp3":
+            encoder_cls = PointNet
+        elif encoder_type == "idp3":
+            encoder_cls = MultiStagePointNet
+        else:
+            raise ValueError(f"encoder_type must be 'dp3' or 'idp3', got {encoder_type!r}")
+        self.pc_encoder = encoder_cls(input_channels=pc_dim, output_channels=pc_out_dim)
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
         self.n_obs_steps = n_obs_steps
@@ -54,8 +53,7 @@ class DP3ObsEncoder(nn.Module):
             ],
             dim=-1,
         )
-        B = feat.shape[0] // self.n_obs_steps
-        return feat.reshape(B, -1), {}
+        return feat.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
 class DP3Agent(UNetDiffusionAgent):

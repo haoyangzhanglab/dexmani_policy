@@ -1,13 +1,9 @@
-"""Train a single-step hand-state VQ-VAE for DQ-RISE.
-
-Use --policy-config for DQ-RISE: the target Policy Dataset decides splits,
-valid windows and unique source rows; its action normalizer supplies hand stats.
-The explicit standalone option uses full-data hand statistics.
-"""
+"""Train single-step hand-state quantization using the target DQ-RISE Policy data recipe."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -17,24 +13,20 @@ import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import yaml
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.normalization import (
-    LinearNormalizer,
-    SingleFieldLinearNormalizer,
-    resolve_normalization_spec,
-)
-from dexmani_policy.agents.vq_hand import VQVAEHand
+from dexmani_policy.agents.core.normalizer import AffineNormalizer, FieldNormalizer
+from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.datasets.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.sampler import downsample_mask, get_val_mask
 from dexmani_policy.training.workspace import prepare_output_dir
 from dexmani_policy.training.build_utils import build_normalizer
-from dexmani_policy.utils.config import register_resolvers
-
-_project_root = Path(__file__).resolve().parents[2]
+from dexmani_policy.utils.atomic import atomic_path
+from dexmani_policy.utils.config import register_resolvers, resolve_normalization_spec
+from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.training.export_hand_codebook import (
+    build_runtime_codebook, deployment_diagnostics, load_checkpoint_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +34,17 @@ logger = logging.getLogger(__name__)
 @torch.no_grad()
 def evaluate_vq(vqvae, loader, device):
     """Sample means, independent of validation batch partitioning."""
-    sums = {"enc": 0.0, "vq": 0.0, "mse": 0.0}
+    sums = torch.zeros(3, device=device, dtype=torch.float64)
     count = 0
     for (batch,) in loader:
         batch = batch.to(device, non_blocking=True)
         enc, vq, _, mse = vqvae(batch)
         n = batch.shape[0]
         count += n
-        for key, value in (("enc", enc), ("vq", vq), ("mse", mse)):
-            sums[key] += float(value) * n
+        sums += torch.stack((enc, vq, mse)).double() * n
     if not count:
         raise ValueError("VQ validation loader is empty")
-    return {key: value / count for key, value in sums.items()}
+    return dict(zip(("enc", "vq", "mse"), (sums / count).tolist()))
 
 
 def set_seed(seed: int) -> None:
@@ -63,29 +54,14 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _episode_mask_to_frame_indices(
-    episode_ends: np.ndarray, episode_mask: np.ndarray
-) -> np.ndarray:
-    mask = np.asarray(episode_mask, dtype=bool)
-    if len(mask) != len(episode_ends):
-        raise ValueError("episode mask and episode_ends have different lengths")
-    starts = np.concatenate(([0], episode_ends[:-1]))
-    chunks = [
-        np.arange(start, end, dtype=np.int64)
-        for use, start, end in zip(mask, starts, episode_ends)
-        if use
-    ]
-    return np.concatenate(chunks) if chunks else np.empty((0,), dtype=np.int64)
-
-
-def _save_checkpoint(
+def save_checkpoint(
     path: str | Path,
     *,
     epoch: int,
     vqvae: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler,
-    normalizer: LinearNormalizer,
+    normalizer: AffineNormalizer,
     args: argparse.Namespace,
     train_history: list[float],
     split_metadata: dict,
@@ -114,99 +90,23 @@ def _save_checkpoint(
         "split_metadata": split_metadata,
         "metrics": metrics,
         "train_history": train_history,
-        "format_version": 3,
+        "format_version": HandVQVAE.FORMAT_VERSION,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    from dexmani_policy.utils.atomic import atomic_path
     with atomic_path(path) as temporary:
         torch.save(payload, temporary)
     logger.info("checkpoint saved: %s", path)
-
-
-def prepare_standalone_data(args):
-    buffer = ReplayBuffer.open(args.zarr_path, keys=[args.action_key])
-    all_actions = buffer.read(args.action_key, slice(None))
-    hand_data = all_actions[:, args.tcp_dim :]
-    if hand_data.shape[1] != args.hand_dim:
-        raise ValueError(
-            f"Configured hand_dim={args.hand_dim}, but data gives "
-            f"{hand_data.shape[1]} after tcp_dim={args.tcp_dim}"
-        )
-
-    episode_ends = np.asarray(buffer.episode_ends, dtype=np.int64)
-    val_episode_mask = get_val_mask(
-        seed=args.seed,
-        val_ratio=args.val_ratio,
-        n_episodes=len(episode_ends),
-    )
-    train_episode_mask = downsample_mask(
-        seed=args.seed,
-        mask=~val_episode_mask,
-        max_n=args.max_train_episodes,
-    )
-    train_indices = _episode_mask_to_frame_indices(episode_ends, train_episode_mask)
-    val_indices = _episode_mask_to_frame_indices(episode_ends, val_episode_mask)
-    if len(train_indices) == 0:
-        raise ValueError("No training frames selected")
-
-    logger.info(
-        "episodes: train=%d, val=%d, excluded=%d; frames: train=%d, val=%d",
-        int(train_episode_mask.sum()),
-        int(val_episode_mask.sum()),
-        int((~train_episode_mask & ~val_episode_mask).sum()),
-        len(train_indices),
-        len(val_indices),
-    )
-
-    # Preserve this VQ recipe: full-dataset hand statistics, including validation.
-    # Policy uses valid train-window source rows and checks codebook compatibility;
-    # matching dataset paths alone does not guarantee equal affine parameters.
-    normalizer = LinearNormalizer()
-    normalizer.fit(
-        data={"hand": hand_data},
-        mode="limits",
-        range_eps=1e-4,
-    )
-    train_norm = (
-        normalizer["hand"]
-        .normalize(hand_data[train_indices])
-        .cpu()
-        .numpy()
-        .astype(np.float32)
-    )
-    val_norm = (
-        normalizer["hand"]
-        .normalize(hand_data[val_indices])
-        .cpu()
-        .numpy()
-        .astype(np.float32)
-        if len(val_indices) > 0
-        else np.empty((0, args.hand_dim), dtype=np.float32)
-    )
-
-    split_metadata = {
-        "normalization_spec": {"action": "limits"},
-        "episode_ends": episode_ends.tolist(),
-        "train_episode_ids": np.flatnonzero(train_episode_mask).tolist(),
-        "val_episode_ids": np.flatnonzero(val_episode_mask).tolist(),
-        "train_frame_count": len(train_indices),
-        "val_frame_count": len(val_indices),
-    }
-    return train_norm, val_norm, normalizer, split_metadata
 
 
 def load_policy_config(path, overrides=()):
     """Compose the target config without constructing a model or runtime."""
     register_resolvers()
     path = Path(path).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"Policy config not found: {path}")
     config_root = Path(__file__).resolve().parents[1] / "configs"
     if path.is_relative_to(config_root):
         config_name = path.relative_to(config_root).with_suffix("").as_posix()
     else:
-        # External standalone YAML keeps absolute defaults relative to its own root.
         config_root, config_name = path.parent, path.stem
     with hydra.initialize_config_dir(config_dir=str(config_root), version_base=None):
         return hydra.compose(config_name=config_name, overrides=list(overrides))
@@ -262,7 +162,7 @@ def policy_hand_rows(dataset, tcp_dim):
 
 
 def prepare_policy_data(cfg):
-    from dexmani_policy.agents.normalization import validate_dq_normalization
+    from dexmani_policy.utils.config import validate_dq_normalization
 
     spec = resolve_normalization_spec(cfg)
     validate_dq_normalization(spec)
@@ -271,8 +171,8 @@ def prepare_policy_data(cfg):
         "action"
     ]
     hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))
-    normalizer = LinearNormalizer()
-    normalizer["hand"] = SingleFieldLinearNormalizer.create_manual(
+    normalizer = AffineNormalizer()
+    normalizer["hand"] = FieldNormalizer.from_parameters(
         action.params_dict["scale"][hand_slice].clone(),
         action.params_dict["offset"][hand_slice].clone(),
         {key: value[hand_slice].clone() for key, value in action.input_stats.items()},
@@ -300,7 +200,6 @@ def prepare_policy_data(cfg):
         "val_windows": val.sampler.validity_summary if val is not None else None,
     }
     metadata["resolved_dataset"]["zarr_path"] = dataset.zarr_path
-    # Only low-dimensional hand samples are materialized for the existing VQ trainer.
     return (
         normalizer["hand"].normalize(train_hand).numpy(),
         normalizer["hand"].normalize(val_hand).numpy(),
@@ -310,7 +209,6 @@ def prepare_policy_data(cfg):
 
 
 def train(args: argparse.Namespace, *, policy_cfg) -> None:
-    from dexmani_policy.utils.validation import positive_int
     for name in ("num_epochs", "batch_size", "save_epochs", "codebook_report_epochs"):
         positive_int(getattr(args, name), name)
     if args.output_dir is None:
@@ -319,14 +217,11 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
     output_dir = Path(args.output_dir)
     prepare_output_dir(output_dir)
     logger.info("VQ run: %s", output_dir.resolve())
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device)
     set_seed(args.seed)
-    if policy_cfg is not None:
-        train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(
-            policy_cfg
-        )
-    else:
-        train_norm, val_norm, normalizer, split_metadata = prepare_standalone_data(args)
+    train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(policy_cfg)
+    if not len(train_norm):
+        raise ValueError("No qualified Policy training hand states")
 
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
@@ -350,10 +245,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         if len(val_ds) > 0
         else None
     )
-    if len(train_loader) == 0:
-        raise ValueError("Training DataLoader has zero batches")
-
-    vqvae = VQVAEHand(
+    vqvae = HandVQVAE(
         hand_dim=args.hand_dim,
         latent_dim=args.latent_dim,
         hidden_dim=args.hidden_dim,
@@ -403,9 +295,9 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
 
     for epoch in range(1, args.num_epochs + 1):
         vqvae.train()
-        sums = {"enc": 0.0, "vq": 0.0, "mse": 0.0}
+        sums = torch.zeros(3, device=device, dtype=torch.float64)
         train_count = 0
-        usage = torch.zeros(args.num_groups, args.codebook_size, dtype=torch.long)
+        usage = torch.zeros(args.num_groups, args.codebook_size, dtype=torch.long, device=device)
 
         for (batch,) in train_loader:
             batch = batch.to(device, non_blocking=True)
@@ -418,17 +310,11 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             scheduler.step()
 
             with torch.no_grad():
-                for group in range(args.num_groups):
-                    usage[group] += torch.bincount(
-                        indices[:, group].detach().cpu(),
-                        minlength=args.codebook_size,
-                    )
+                usage += torch.nn.functional.one_hot(indices, args.codebook_size).sum(0)
+                sums += torch.stack((enc_loss, vq_loss, recon_mse)).double() * batch.shape[0]
             train_count += batch.shape[0]
-            sums["enc"] += float(enc_loss) * batch.shape[0]
-            sums["vq"] += float(vq_loss) * batch.shape[0]
-            sums["mse"] += float(recon_mse) * batch.shape[0]
 
-        train_metrics = {key: value / train_count for key, value in sums.items()}
+        train_metrics = dict(zip(("enc", "vq", "mse"), (sums / train_count).tolist()))
         train_total = (
             args.enc_loss_weight * train_metrics["enc"]
             + args.vq_loss_weight * train_metrics["vq"]
@@ -463,7 +349,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         )
 
         if epoch % args.save_epochs == 0 or epoch == args.num_epochs:
-            _save_checkpoint(
+            save_checkpoint(
                 output_dir / f"vqvae_hand_epoch={epoch:04d}.pt",
                 epoch=epoch,
                 vqvae=vqvae,
@@ -483,7 +369,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             )
         if selection_mse < best_mse:
             best_mse = selection_mse
-            _save_checkpoint(
+            save_checkpoint(
                 output_dir / "vqvae_hand_best.pt",
                 epoch=epoch,
                 vqvae=vqvae,
@@ -499,7 +385,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         if epoch % args.codebook_report_epochs == 0:
             for group in range(args.num_groups):
                 fig, ax = plt.subplots(figsize=(6, 3))
-                ax.bar(np.arange(args.codebook_size), usage[group].numpy())
+                ax.bar(np.arange(args.codebook_size), usage[group].cpu().numpy())
                 ax.set_title(f"Group {group} code usage — epoch {epoch}")
                 ax.set_xlabel("Code index")
                 ax.set_ylabel("Count")
@@ -508,7 +394,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
                 plt.close(fig)
 
     final_metrics = metrics
-    _save_checkpoint(
+    save_checkpoint(
         output_dir / "vqvae_hand_last.pt",
         epoch=args.num_epochs,
         vqvae=vqvae,
@@ -521,12 +407,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         metrics=final_metrics,
     )
 
-    # One deployment diagnostic after selection; it does not participate in best
-    # selection and consumes exactly the already prepared train/held-out rows.
-    from dexmani_policy.agents.vq_hand.export_codebook import (
-        load_checkpoint_snapshot, build_runtime_codebook, deployment_diagnostics,
-    )
-    import json
+    # Deployment diagnostics evaluate the selected best without changing selection.
     selected_path = output_dir / 'vqvae_hand_best.pt'
     selected, source_hash = load_checkpoint_snapshot(selected_path)
     runtime_codebook = build_runtime_codebook(selected, source_hash, selected_path, device='cpu')
@@ -544,29 +425,18 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
     plt.close(fig)
 
 
-def _parse_loss_weight(value):
+def parse_loss_weight(value):
     if value is None:
         return None
-    if isinstance(value, list):
-        return [float(item) for item in value]
     return [float(item.strip()) for item in value.split(",")]
 
 
-def _load_yaml_config(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
-    if not isinstance(config, dict):
-        raise TypeError("YAML config must be a mapping")
-    return dict(config.get("vq_vae", config))
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default=None)
     parser.add_argument(
         "--policy-config",
-        default=None,
-        help="Target Policy YAML; overrides independent data/split options",
+        required=True,
+        help="Target DQ-RISE Policy YAML providing data and VQ defaults",
     )
     parser.add_argument(
         "--policy-override",
@@ -574,17 +444,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=[],
         help="Hydra override for the target Policy (repeatable)",
     )
-    parser.add_argument("--zarr_path", default=None)
-    parser.add_argument("--action_key", default=None)
-    parser.add_argument("--tcp_dim", type=int, default=None)
-    parser.add_argument("--hand_dim", type=int, default=None)
     parser.add_argument("--latent_dim", type=int, default=None)
     parser.add_argument("--hidden_dim", type=int, default=None)
     parser.add_argument("--num_groups", type=int, default=None)
     parser.add_argument("--codebook_size", type=int, default=None)
     parser.add_argument("--num_layers", type=int, default=None)
     parser.add_argument("--act_scale", type=float, default=None)
-    parser.add_argument("--loss_weight", type=_parse_loss_weight, default=None)
+    parser.add_argument("--loss_weight", type=parse_loss_weight, default=None)
     parser.add_argument("--vq_decay", type=float, default=None)
     parser.add_argument("--threshold_ema_dead_code", type=int, default=None)
     parser.add_argument(
@@ -602,8 +468,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vq_loss_weight", type=float, default=None)
     parser.add_argument("--max_grad_norm", type=float, default=None)
     parser.add_argument("--warmup_steps", type=int, default=None)
-    parser.add_argument("--val_ratio", type=float, default=None)
-    parser.add_argument("--max_train_episodes", type=int, default=None)
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--save_epochs", type=int, default=None)
     parser.add_argument("--codebook_report_epochs", type=int, default=None)
@@ -614,58 +478,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = _build_arg_parser()
-    config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument("--config", default=None)
-    config_parser.add_argument("--policy-config", default=None)
-    config_parser.add_argument("--policy-override", action="append", default=[])
-    config_args, remaining = config_parser.parse_known_args(argv)
-    if config_args.config:
-        config_path = Path(config_args.config)
-        if not config_path.is_absolute():
-            config_path = _project_root / config_path
-        parser.set_defaults(**_load_yaml_config(str(config_path)))
-    policy_cfg = None
-    if config_args.policy_config:
-        policy_cfg = load_policy_config(
-            config_args.policy_config, config_args.policy_override
-        )
-        if not config_args.config:
-            parser.set_defaults(
-                **OmegaConf.to_container(policy_cfg.vq_vae, resolve=True)
-            )
-    parser.set_defaults(
-        policy_config=config_args.policy_config,
-        policy_override=config_args.policy_override,
-    )
-    args = parser.parse_args(remaining)
-    if policy_cfg is None and not config_args.config:
-        parser.error("DQ codebooks require --policy-config; independent VQ research requires explicit --config")
-    if policy_cfg is not None:
-        args.zarr_path = str(policy_cfg.dataset.zarr_path)
-        args.action_key = policy_cfg.action_key
-        args.tcp_dim = int(policy_cfg.agent.tcp_dim)
-        args.hand_dim = int(policy_cfg.agent.action_dim) - args.tcp_dim
-        args.val_ratio = policy_cfg.dataset.get("val_ratio", 0.0)
-        args.max_train_episodes = policy_cfg.dataset.get("max_train_episodes")
-        if (args.num_groups, args.codebook_size) != (
-            policy_cfg.agent.codebook_num_groups,
-            policy_cfg.agent.codebook_size,
-        ):
-            parser.error("VQ num_groups/codebook_size must match the target Policy")
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    if args.zarr_path is None:
-        parser.error("--zarr_path is required")
-    if args.hand_dim is None or args.hand_dim <= 0:
-        buffer = ReplayBuffer.open(args.zarr_path, keys=[args.action_key])
-        args.hand_dim = int(buffer[args.action_key].shape[-1] - args.tcp_dim)
+    parser = build_arg_parser()
+    initial = parser.parse_args(argv)
+    policy_cfg = load_policy_config(initial.policy_config, initial.policy_override)
+    parser.set_defaults(**OmegaConf.to_container(policy_cfg.vq_vae, resolve=True))
+    args = parser.parse_args(argv)
+    args.zarr_path = str(policy_cfg.dataset.zarr_path)
+    args.hand_dim = int(policy_cfg.agent.action_dim) - int(policy_cfg.agent.tcp_dim)
+    if (args.num_groups, args.codebook_size) != (
+        policy_cfg.agent.codebook_num_groups, policy_cfg.agent.codebook_size,
+    ):
+        parser.error("VQ num_groups/codebook_size must match the target Policy")
     if args.loss_weight is None:
         args.loss_weight = [1.0] * args.hand_dim
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S",
+    )
     train(args, policy_cfg=policy_cfg)
 
 

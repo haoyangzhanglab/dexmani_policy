@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
 
-def _pointcloud_ops():
+def load_pointcloud_ops():
     try:
         import pytorch3d.ops
+
         return pytorch3d.ops
     except ImportError as exc:
-        raise ImportError("Point-cloud operations require pytorch3d built for the installed Torch/CUDA") from exc
+        raise ImportError(
+            "Point-cloud operations require pytorch3d built for the installed Torch/CUDA"
+        ) from exc
 
 
 def resolve_fps_random_config(
@@ -31,41 +33,25 @@ def farthest_point_sample(
     use_shuffle_output: bool = True,
     random_noise_scale: float = 0.0,
 ):
-    """Farthest point sampling with optional randomness for data augmentation.
+    """Sample original points (K <= N); XYZ noise affects only FPS selection."""
+    torch3d_ops = load_pointcloud_ops()
 
-    Randomness changes selection and ordering; returned points retain their
-    original coordinates and attributes, including when FPS uses noisy XYZ.
+    if pointcloud.size(-1) < 3:
+        raise ValueError("pointcloud must have at least three XYZ channels")
 
-    Args:
-        pointcloud:          (B, N, C>=3) – xyz must be the first three channels.
-        num_samples:         number of points to keep.
-        use_random:          master switch – when ``False``, FPS is fully
-                             deterministic regardless of the flags below.
-        use_random_start:    pick a random start point instead of the default
-                             (first point, index 0).
-        use_shuffle_output:  randomly permute the output order after sampling.
-        random_noise_scale:  std of Gaussian noise added to xyz *during FPS only*
-                             (0 = no noise).  The output points are unaffected.
-    Returns:
-        sampled_points: (B, num_samples, C) — selected points.
-        sample_idx:     (B, num_samples)    — indices into the input.
-    """
-    torch3d_ops = _pointcloud_ops()
-
-    if pointcloud.ndim != 3 or pointcloud.size(-1) < 3:
-        raise ValueError(f"pointcloud must have shape [B, N, C>=3], but got {tuple(pointcloud.shape)}")
-
-    num_samples = min(num_samples, pointcloud.size(1))
-    xyz = pointcloud[..., :3]  # (B, N, 3)
+    xyz = pointcloud[..., :3]
     B, N, _ = xyz.shape
 
     if not use_random:
-        # Fast path — original deterministic FPS.
         sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
             points=xyz,
             K=num_samples,
         )
-        sampled_points = sampled_xyz if pointcloud.size(-1) == 3 else index_points(pointcloud, sample_idx)
+        sampled_points = (
+            sampled_xyz
+            if pointcloud.size(-1) == 3
+            else index_points(pointcloud, sample_idx)
+        )
         return sampled_points.contiguous(), sample_idx
 
     start_indices = None
@@ -79,7 +65,6 @@ def farthest_point_sample(
     else:
         modified_xyz = xyz
 
-    # Optional coordinate noise (used only for FPS distance computation).
     if random_noise_scale > 0:
         noisy_xyz = modified_xyz + torch.randn_like(modified_xyz) * random_noise_scale
     else:
@@ -90,25 +75,22 @@ def farthest_point_sample(
         K=num_samples,
     )
 
-    # Map back indices when random-start was used.
+    # Undo the initial swap to recover indices into the original cloud.
     if use_random_start:
-        # Vectorized: swap index 0 ↔ start_indices[b] in each row of sample_idx.
-        mask_0 = sample_idx == 0  # (B, K)
-        si_expanded = start_indices.unsqueeze(1)  # (B, 1)
-        mask_si = sample_idx == si_expanded  # (B, K)
+        mask_0 = sample_idx == 0
+        si_expanded = start_indices.unsqueeze(1)
+        mask_si = sample_idx == si_expanded
         sample_idx[mask_0] = si_expanded.expand(B, num_samples)[mask_0]
         sample_idx[mask_si] = 0
 
-    # Shuffle
     shuffle_perm = None
     if use_shuffle_output:
-        # Vectorized: generate a random permutation per batch item.
-        shuffle_perm = torch.rand(B, num_samples, device=pointcloud.device).argsort(dim=1)
+        shuffle_perm = torch.rand(B, num_samples, device=pointcloud.device).argsort(
+            dim=1
+        )
         sample_idx = torch.gather(sample_idx, 1, shuffle_perm)
 
-    # Build output
-    # Fast path: pc_dim=3 + no coordinate noise → pytorch3d already returned
-    # valid XYZ.  Only need to match the shuffle (if any), no full gather.
+    # Reuse native XYZ output when sampling did not perturb coordinates.
     if random_noise_scale == 0.0 and pointcloud.size(-1) == 3:
         if shuffle_perm is not None:
             sampled_xyz = sampled_xyz.gather(
@@ -117,7 +99,6 @@ def farthest_point_sample(
             )
         return sampled_xyz.contiguous(), sample_idx
 
-    # Gather full channels using the (possibly remapped & shuffled) indices.
     sampled_points = torch.gather(
         pointcloud,
         1,
@@ -133,11 +114,7 @@ def preprocess_point_cloud(
     fps_random_config: dict | None = None,
     training: bool = True,
 ) -> torch.Tensor:
-    """Slice channels, cast to fp32, and apply farthest-point sampling.
-
-    Shared by the point-cloud observation encoders. Evaluation always uses
-    deterministic FPS, while training keeps the policy-specific augmentation.
-    """
+    """Select channels and sample FP32 points, with deterministic FPS at evaluation."""
     if use_coord_only:
         pc = pc[..., :3]
     if pc.dtype != torch.float32:
@@ -154,132 +131,45 @@ def index_points(points: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
     return points[batch_index.view(*view_shape), index]
 
 
-def knn_point(num_neighbors: int, support_xyz: torch.Tensor, query_xyz: torch.Tensor) -> torch.Tensor:
-    torch3d_ops = _pointcloud_ops()
-    result = torch3d_ops.knn_points(
+def knn_indices(
+    num_neighbors: int,
+    support_xyz: torch.Tensor,
+    query_xyz: torch.Tensor,
+    *,
+    backend: str = "pytorch3d",
+) -> torch.Tensor:
+    """Return unsorted kNN indices (K <= N), preserving backend distance/tie rules."""
+    if backend == "torch":
+        distances = torch.cdist(query_xyz, support_xyz)
+        if num_neighbors == 1:
+            return distances.min(dim=2, keepdim=True).indices
+        return distances.topk(num_neighbors, dim=2, largest=False, sorted=False).indices
+    if backend != "pytorch3d":
+        raise ValueError(f"Unknown kNN backend: {backend}")
+    result = load_pointcloud_ops().knn_points(
         p1=query_xyz,
         p2=support_xyz,
-        K=min(num_neighbors, support_xyz.size(1)),
+        K=num_neighbors,
         return_sorted=False,
     )
     return result.idx
 
 
-def query_ball_point(
-    radius: float,
-    num_neighbors: int,
-    support_xyz: torch.Tensor,
-    query_xyz: torch.Tensor,
-):
-    torch3d_ops = _pointcloud_ops()
-    result = torch3d_ops.ball_query(
-        p1=query_xyz,
-        p2=support_xyz,
-        K=min(num_neighbors, support_xyz.size(1)),
-        radius=radius,
-        return_nn=False,
-    )
-    neighbor_idx = result.idx
-
-    valid_mask = neighbor_idx >= 0
-    has_valid = valid_mask.any(dim=-1, keepdim=True)
-    first_valid_pos = valid_mask.to(torch.int64).argmax(dim=-1, keepdim=True)
-    fallback_idx = torch.gather(neighbor_idx, dim=-1, index=first_valid_pos)
-    # Internal queries normally include themselves. Only truly empty external
-    # balls need KNN; avoid dynamic ragged subsets in the normal compiled path.
-    if not has_valid.all():
-        nearest_idx = knn_point(1, support_xyz, query_xyz)
-        fallback_idx = torch.where(has_valid, fallback_idx, nearest_idx)
-    neighbor_idx = torch.where(valid_mask, neighbor_idx, fallback_idx.expand_as(neighbor_idx))
-
-    return neighbor_idx
-
-
-def group(
-    radius: float,
-    num_neighbors: int,
+@torch.no_grad()
+def sample_point_patches(
     xyz: torch.Tensor,
-    features: torch.Tensor | None,
-):
-    neighbor_idx = query_ball_point(radius, num_neighbors, xyz, xyz)
-    grouped_xyz = index_points(xyz, neighbor_idx)
-    relative_xyz = grouped_xyz - xyz.unsqueeze(2)
-
-    if features is None:
-        return relative_xyz
-
-    grouped_features = index_points(features, neighbor_idx)
-    return torch.cat((relative_xyz, grouped_features), dim=-1)
-
-
-def sample_and_group(
-    sample_ratio: float,
-    radius: float,
-    num_neighbors: int,
-    xyz: torch.Tensor,
-    features: torch.Tensor | None,
-    returnfps: bool = False,
+    num_patches: int,
+    group_size: int,
     fps_random_config: dict | None = None,
     training: bool = True,
-):
-    fps_kwargs = resolve_fps_random_config(fps_random_config, training)
-    num_centers = max(1, int(sample_ratio * xyz.size(1)))
-    center_xyz, fps_idx = farthest_point_sample(xyz, num_centers, **fps_kwargs)
-    center_features = None if features is None else index_points(features, fps_idx)
-
-    neighbor_idx = query_ball_point(radius, num_neighbors, xyz, center_xyz)
-    grouped_xyz = index_points(xyz, neighbor_idx)
-    relative_xyz = grouped_xyz - center_xyz.unsqueeze(2)
-
-    if features is None:
-        grouped_features = relative_xyz
-    else:
-        neighborhood_features = index_points(features, neighbor_idx)
-        grouped_features = torch.cat((relative_xyz, neighborhood_features), dim=-1)
-
-    if returnfps:
-        return center_xyz, grouped_features, grouped_xyz, fps_idx
-    return center_xyz, grouped_features, center_features
-
-
-def sample_and_group_all(xyz: torch.Tensor, features: torch.Tensor | None):
-    center_xyz = xyz.mean(dim=1, keepdim=True)
-    grouped_xyz = xyz.unsqueeze(1)
-    relative_xyz = grouped_xyz - center_xyz.unsqueeze(2)
-
-    if features is None:
-        grouped_features = relative_xyz
-    else:
-        grouped_features = torch.cat((relative_xyz, features.unsqueeze(1)), dim=-1)
-
-    return center_xyz, grouped_features
-
-
-def resolve_stage_values(value, num_stages: int, name: str):
-    if len(value) != num_stages:
-        raise ValueError(f"{name} must have length {num_stages}, but got {len(value)}")
-    return tuple(value)
-
-
-def normalize_relative_xyz(
-    relative_xyz: torch.Tensor,
-    radius: float,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """Normalize relative coordinates by ball query radius."""
-    return relative_xyz / max(radius, eps)
-
-
-class PointMLP(nn.Module):
-    """Linear + LayerNorm + GELU block used in point cloud encoders."""
-
-    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
-        super().__init__()
-        self.linear = nn.Linear(in_channels, out_channels)
-        self.norm = nn.LayerNorm(out_channels)
-        self.activation = nn.GELU() if use_activation else nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear(x)
-        x = self.norm(x)
-        return self.activation(x)
+    *,
+    knn_backend: str = "pytorch3d",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return FPS centers, center indices and kNN member indices."""
+    if xyz.shape[1] < max(num_patches, group_size):
+        raise ValueError("N must be at least max(num_patches, group_size)")
+    centers, center_indices = farthest_point_sample(
+        xyz, num_patches, **resolve_fps_random_config(fps_random_config, training)
+    )
+    neighbors = knn_indices(group_size, xyz, centers, backend=knn_backend)
+    return centers, center_indices, neighbors

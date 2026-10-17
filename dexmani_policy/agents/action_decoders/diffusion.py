@@ -1,3 +1,5 @@
+"""Action diffusion with squared-cosine training noise and DDIM sampling."""
+
 from __future__ import annotations
 
 import torch
@@ -5,30 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-from dexmani_policy.agents.action_decoders.utils import resolve_inference_steps
 from dexmani_policy.utils.validation import positive_int
 
 
 class Diffusion(nn.Module):
-    """Denoising diffusion probabilistic model for action prediction.
-
-    Wraps a backbone (UNet or DiT) with a DDIM noise scheduler for training
-    and inference. Supports three prediction types controlled by
-    ``prediction_type``:
-
-    - ``"sample"``: model predicts the clean action directly (x0-prediction)
-    - ``"epsilon"``: model predicts the noise added to the action
-    - ``"v_prediction"``: model predicts v = sqrt(alpha)*noise - sqrt(1-alpha)*action
-      (velocity prediction, see https://arxiv.org/abs/2202.00512)
-
-    Training: adds noise to actions, model predicts target, MSE loss.
-    Inference: DDIM iterative denoising from random noise (default 10 steps).
-
-    The noise scheduler intentionally uses a fixed squared-cosine configuration
-    with ``beta_start=0.0001`` and ``beta_end=0.02``. Callers configure the
-    training/inference step counts and prediction type, not the beta schedule.
-    """
-
     def __init__(
         self,
         model: nn.Module,
@@ -41,8 +23,6 @@ class Diffusion(nn.Module):
         super().__init__()
         positive_int(num_inference_steps, "num_inference_steps")
 
-        if type(clip_sample) is not bool:
-            raise TypeError("clip_sample must be a bool")
         self.model = model
         self.aux_loss_weight = aux_loss_weight
         self.noise_scheduler = DDIMScheduler(
@@ -56,7 +36,6 @@ class Diffusion(nn.Module):
             prediction_type=prediction_type,
         )
         self.num_inference_steps = num_inference_steps
-        self._cached_alphas_device = None
 
     def compute_loss(
         self,
@@ -64,12 +43,10 @@ class Diffusion(nn.Module):
         actions: torch.Tensor,
         dim_groups: dict[str, tuple[int, int]] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        B = actions.shape[0]
-
-        noise = torch.randn_like(actions, device=actions.device)
+        noise = torch.randn_like(actions)
         timestep = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device
-        ).long()
+            self.noise_scheduler.config.num_train_timesteps, (actions.shape[0],), device=actions.device
+        )
 
         pred = self.model(
             x=self.noise_scheduler.add_noise(actions, noise, timestep),
@@ -83,38 +60,25 @@ class Diffusion(nn.Module):
         elif pred_type == "sample":
             target = actions
         elif pred_type == "v_prediction":
-            # v_t = sqrt(alpha_cumprod) * noise - sqrt(1-alpha_cumprod) * x_0
-            # See: https://arxiv.org/abs/2202.00512 (Progressive Distillation)
-            # Cache alphas in float32 to avoid bfloat16 precision loss (~0.1%);
-            # the final target is cast to actions.dtype for AMP compatibility.
-            if self._cached_alphas_device != actions.device:
-                self._cached_alphas = self.noise_scheduler.alphas_cumprod.to(
-                    device=actions.device, dtype=torch.float32
-                )
-                self._cached_alphas_device = actions.device
-            alpha_t = self._cached_alphas[timestep].sqrt()
-            sigma_t = (1 - self._cached_alphas[timestep]).sqrt()
+            # add_noise places the schedule on-device; v-target coefficients stay in FP32.
+            alpha_bar = self.noise_scheduler.alphas_cumprod[timestep].float()
+            alpha_t = alpha_bar.sqrt()
+            sigma_t = (1 - alpha_bar).sqrt()
             target = alpha_t.view(-1, 1, 1) * noise - sigma_t.view(-1, 1, 1) * actions
             target = target.to(dtype=actions.dtype)
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
 
+        # R3D averages each action group separately and weights only auxiliary losses.
         if dim_groups is not None:
-            # Per-dimension-group MSE losses — each group uses the per-element
-            # MSE (F.mse_loss default mean over B×H×D elements), matching the
-            # R3D-Policy dim_groups convention.
-            # Auxiliary groups (all except 'joint') are weighted by
-            # ``aux_loss_weight`` (default 1.0 for R3D-Policy parity).
             group_losses = []
             loss_dict = {}
             for name, (start, end) in dim_groups.items():
-                g_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
-                # Log the raw per-element MSE for monitoring — comparable
-                # across experiments regardless of aux_loss_weight.
-                loss_dict[f"loss_{name}"] = g_loss.detach()
+                group_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
+                loss_dict[f"loss_{name}"] = group_loss.detach()
                 if name != "joint":
-                    g_loss = g_loss * self.aux_loss_weight
-                group_losses.append(g_loss)
+                    group_loss = group_loss * self.aux_loss_weight
+                group_losses.append(group_loss)
             loss = sum(group_losses)
             loss_dict["loss_action"] = loss.detach()
         else:
@@ -136,16 +100,23 @@ class Diffusion(nn.Module):
         history_offset=0,
         rtc_guidance_cap=0.0,
     ) -> torch.Tensor:
-        num_steps = resolve_inference_steps(self.num_inference_steps, inference_steps)
-        # add_noise moves this plain scheduler state during training; a fresh
-        # checkpoint restore starts on CPU. Keep scalar arithmetic on the same
-        # device in both paths (these tensors are not nn.Module buffers).
-        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(action_template.device)
-        self.noise_scheduler.final_alpha_cumprod = self.noise_scheduler.final_alpha_cumprod.to(action_template.device)
-        if rtc_prefix is not None and rtc_prefix.shape[-2] and rtc_guidance_cap != 0:
-            from dexmani_policy.agents.action_decoders.rtc import predict_rtc
+        num_steps = (
+            self.num_inference_steps
+            if inference_steps is None
+            else positive_int(inference_steps, "inference_steps")
+        )
 
-            return predict_rtc(
+        # Scheduler tensors are not module buffers; restored and trained instances need the same device.
+        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
+            action_template.device
+        )
+        self.noise_scheduler.final_alpha_cumprod = self.noise_scheduler.final_alpha_cumprod.to(
+            action_template.device
+        )
+        if rtc_prefix is not None and rtc_prefix.shape[-2] and rtc_guidance_cap != 0:
+            from dexmani_policy.agents.action_decoders.sampling.rtc import guided_inference
+
+            return guided_inference(
                 self,
                 cond,
                 action_template,
@@ -155,10 +126,11 @@ class Diffusion(nn.Module):
                 beta=rtc_guidance_cap,
                 steps=num_steps,
             )
-        sample = torch.randn_like(action_template, device=action_template.device)
-        self.noise_scheduler.set_timesteps(num_steps, device=sample.device)
-        for t in self.noise_scheduler.timesteps:
-            output = self.model(x=sample, timestep=t, context=cond)
-            sample = self.noise_scheduler.step(output, t, sample).prev_sample
+        sample = torch.randn_like(action_template)
+        self.noise_scheduler.set_timesteps(num_steps)
+        timesteps = self.noise_scheduler.timesteps.to(sample.device)
+        for index, timestep in enumerate(self.noise_scheduler.timesteps.tolist()):
+            output = self.model(x=sample, timestep=timesteps[index], context=cond)
+            sample = self.noise_scheduler.step(output, timestep, sample).prev_sample
 
         return sample

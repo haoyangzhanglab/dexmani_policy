@@ -9,27 +9,21 @@ import hydra
 from omegaconf import open_dict
 from torch.nn.modules.batchnorm import _BatchNorm
 
-from dexmani_policy.agents.normalization import (
-    NON_NUMERIC_OBSERVATION_FIELDS,
+from dexmani_policy.agents.core.normalizer import AffineNormalizer, validate_normalizer_state
+from dexmani_policy.utils.config import (
     FINGER_VECTOR_FIELDS,
-    LinearNormalizer,
-    build_mixed_action_normalizer_chunks,
+    NON_NUMERIC_OBSERVATION_FIELDS,
     normalization_dims_from_config,
     resolve_normalization_spec,
-    uses_diffusion_config,
     validate_action_clipping,
+    validate_action_key_consistency,
     validate_dq_normalization,
-    validate_normalization_spec,
-    validate_normalizer_state,
+    validate_window_contract,
 )
 from dexmani_policy.datasets.sampler import validate_dataset_splits
 from dexmani_policy.datasets.augmentation import validate_pc_color_augmentation, validate_random_keep_points
 from dexmani_policy.training.logging import print_param_count
 from dexmani_policy.training.lr_scheduler import get_scheduler
-from dexmani_policy.utils.config import (
-    validate_action_key_consistency,
-    validate_window_contract,
-)
 from dexmani_policy.utils.validation import positive_int
 
 __all__ = [
@@ -43,30 +37,25 @@ __all__ = [
 ]
 
 
-def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
-    """Fit the resolved spec on unique source rows from valid training windows.
-
-    ``identity`` registers no parameters. ``action:auto`` uses mixed normalization
-    for EEF actions and limits for joint actions, including enabled auxiliary
-    targets. All fitted fields use the dataset's role-specific training rows.
-    """
-    normalizer = LinearNormalizer()
+def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
+    """Fit valid training rows, preserving rot6d coordinates for action_ee auto mode."""
+    normalizer = AffineNormalizer()
 
     for key, mode in spec.items():
         if mode == "identity":
             continue
 
-        if key == "action" and mode == "auto":
-            if action_key == "action_ee":
-                normalizer["action"] = build_mixed_action_normalizer_chunks(
-                    dataset.iter_normalization_data("action")
-                )
-                continue
-            mode = "limits"
-
-        normalizer.fit_field_chunks(
-            key, dataset.iter_normalization_data(key), mode=mode
-        )
+        mixed_action = key == "action" and mode == "auto" and action_key == "action_ee"
+        mode = "limits" if mode == "auto" else mode
+        normalizer.fit_field(key, dataset.iter_normalization_data(key), mode=mode)
+        if mixed_action:
+            field = normalizer[key]
+            if field.params_dict["scale"].numel() <= 9:
+                raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
+            field.params_dict["scale"][3:9] = 1
+            field.params_dict["offset"][3:9] = 0
+            for name, value in (("min", -1), ("max", 1), ("mean", 0), ("std", 1)):
+                field.input_stats[name][3:9] = value
 
     return normalizer
 
@@ -140,7 +129,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         from dexmani_policy.training.checkpoint import fix_state_dict
 
         state = fix_state_dict(resume_checkpoint.model_state)
-        normalizer = LinearNormalizer()
+        normalizer = AffineNormalizer()
         normalizer.load_state_dict(
             {
                 key.removeprefix("normalizer."): value
@@ -201,8 +190,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     """
     model_cfg = cfg
     if checkpoint is not None:
-        from dexmani_policy.agents.loader import checkpoint_agent_config
-        from dexmani_policy.training.checkpoint import fix_state_dict
+        from dexmani_policy.training.checkpoint import checkpoint_agent_config, fix_state_dict
         model_cfg = checkpoint_agent_config(
             cfg, fix_state_dict(checkpoint.model_state)
         )
@@ -225,7 +213,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         if checkpoint is None and hasattr(rgb, 'effective_config'):
             cfg.agent.rgb_backbone_config = rgb.effective_config
         pc_encoder = getattr(getattr(model, 'obs_encoder', None), 'pc_encoder', None)
-        if type(pc_encoder).__name__ in {'PointNetDense', 'PointNextPatchTokenizer'}:
+        if type(pc_encoder).__name__ in {'PointNetDense', 'Sparse3DEncoder'}:
             config = dict(pc_encoder.effective_config)
             for name, parameter in inspect.signature(type(pc_encoder)).parameters.items():
                 if name != 'input_channels' and name not in config and parameter.default is not inspect.Parameter.empty:
@@ -242,7 +230,6 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         model.initialize_training()
     model.load_normalizer_from_dataset(normalizer)
     model.action_key = cfg.action_key
-    from dexmani_policy.agents.normalization import normalization_dims_from_config
     model.set_normalization_spec(resolve_normalization_spec(cfg), normalization_dims_from_config(cfg))
     model.validate_normalizer()
     model.to(device)
@@ -384,10 +371,14 @@ def _validate_aux_config(cfg):
             raise ValueError("use_aux_ee=true requires joint_dim and ee_dim in config.")
 
 
-_METRIC_POINTNEXT_ENCODER_TYPES = frozenset({"pointnext", "pointnext_tokenizer"})
+_SPARSE3D_AGENT_TARGETS = frozenset({
+    "dexmani_policy.agents.core.sat.SATAgent",
+    "dexmani_policy.agents.core.lamp_flow.LampFlowAgent",
+    "dexmani_policy.agents.core.temporal_codec_flow.TemporalCodecFlowAgent",
+})
 
 
-def _numeric_modalities(sensor_modalities) -> set:
+def numeric_modalities(sensor_modalities) -> set:
     return {
         modality
         for modality in sensor_modalities
@@ -395,24 +386,19 @@ def _numeric_modalities(sensor_modalities) -> set:
     }
 
 
-def _resolve_numeric_observation_fields(cfg) -> set:
-    """Return the exact numeric observation field set for coverage checking.
-
-    Single-task: the dataset's own ``sensor_modalities``.  MultiTask: all child
-    datasets must declare the *same* numeric modality set — a mismatch is a
-    startup fail-fast, never a silently-constructed union.
-    """
+def resolve_numeric_observation_fields(cfg) -> set:
+    """Require the same numeric observation fields across tasks."""
     dataset = cfg.get("dataset", {})
     sensor_modalities = dataset.get("sensor_modalities")
     if sensor_modalities is not None:
-        return _numeric_modalities(sensor_modalities)
+        return numeric_modalities(sensor_modalities)
 
     child_datasets = dataset.get("datasets")
     if child_datasets is None:
         return set()
 
     child_sets = [
-        _numeric_modalities(child.get("sensor_modalities", []))
+        numeric_modalities(child.get("sensor_modalities", []))
         for child in child_datasets
     ]
     distinct = {frozenset(s) for s in child_sets}
@@ -426,55 +412,56 @@ def _resolve_numeric_observation_fields(cfg) -> set:
     return child_sets[0] if child_sets else set()
 
 
-def _validate_encoder_normalization_contract(cfg, spec) -> None:
-    """Reject metric-sensitive PointNext point-cloud encoders paired with a
-    non-identity ``point_cloud`` normalization mode.
-
-    PointNeXT (``encoder_type in {pointnext, pointnext_tokenizer}``) uses FPS and
-    fixed ball-query radii directly on point-cloud coordinates; per-axis min-max
-    (``limits``) rescaling would change Euclidean geometry underneath a radius
-    that stays fixed. This rule applies when ``agent.encoder_type`` selects
-    one of these PointNeXT encoders, without per-agent special cases.
-    """
+def validate_encoder_normalization(cfg, spec) -> None:
+    """Keep Sparse3DEncoder's geometric statistics and RoPE in metric XYZ."""
     agent = cfg.get("agent", {})
-    encoder_type = agent.get("encoder_type")
     if (
-        encoder_type in _METRIC_POINTNEXT_ENCODER_TYPES
+        agent.get("_target_") in _SPARSE3D_AGENT_TARGETS
         and spec.get("point_cloud") != "identity"
     ):
         raise ValueError(
-            f"agent.encoder_type={encoder_type!r} requires normalization.point_cloud: "
-            "identity (PointNeXT FPS/ball-query radii need metric-space coordinates; "
-            "per-axis min-max would change Euclidean geometry)."
+            "Sparse3DEncoder requires normalization.point_cloud: identity "
+            "(geometric statistics and 3D RoPE require metric XYZ)."
         )
 
 
-def _validate_normalization_config(cfg):
+def uses_diffusion_config(agent_config):
+    """Recognize known Diffusion constructors; runtime checks cover custom agents."""
+    if not agent_config.get("_target_"):
+        return False
+    from hydra.utils import get_class
+
+    from dexmani_policy.agents.core.base import UNetDiffusionAgent
+    from dexmani_policy.agents.core.dqrise import DQRISEAgent
+    from dexmani_policy.agents.core.multi_task import MultiTaskAgent
+    from dexmani_policy.agents.core.r3d import R3DAgent
+
+    cls = get_class(agent_config["_target_"])
+    if cls is MultiTaskAgent:
+        return agent_config.get("action_decoder_type", "diffusion") == "diffusion"
+    from dexmani_policy.agents.core.dp import DPAgent
+    from dexmani_policy.agents.core.dp3 import DP3Agent
+
+    return cls in (UNetDiffusionAgent, DPAgent, DP3Agent, DQRISEAgent, R3DAgent)
+
+
+def validate_normalization_config(cfg):
     """Validate the feature-level normalization spec and its sensor-modality coverage."""
     rgb_transport = set()
     for child in cfg.dataset.get("datasets", [cfg.dataset]):
         if "rgb" in child.get("sensor_modalities", []):
             keep_uint8 = bool(child.get("rgb_keep_uint8", False))
             rgb_transport.add(keep_uint8)
-            if keep_uint8 and (cfg.get("normalization") or {}).get("rgb") != "identity":
-                raise ValueError(
-                    "rgb_keep_uint8 requires normalization.rgb=identity because RGB "
-                    "must remain uint8 until the vision preprocessing boundary."
-                )
     if len(rgb_transport) > 1:
         raise ValueError("RGB child datasets must have consistent rgb_keep_uint8")
-    spec = resolve_normalization_spec(cfg)
+    spec = resolve_normalization_spec(cfg, observation_fields=resolve_numeric_observation_fields(cfg))
     from dexmani_policy.agents.core.dqrise import DQRISEAgent
 
     if issubclass(hydra.utils.get_class(cfg.agent._target_), DQRISEAgent):
         validate_dq_normalization(spec)
     if uses_diffusion_config(cfg.agent):
         validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
-    numeric_fields = _resolve_numeric_observation_fields(cfg)
-    # Re-validate with exact-coverage enforcement (missing AND extra fields),
-    # reusing the same shared grammar `resolve_normalization_spec` already applied.
-    validate_normalization_spec(dict(spec), observation_fields=numeric_fields)
-    _validate_encoder_normalization_contract(cfg, spec)
+    validate_encoder_normalization(cfg, spec)
 
 
 def validate_config(cfg):
@@ -483,19 +470,27 @@ def validate_config(cfg):
     Called by training and config-only smoke entry points.
     """
     agent_pc_dim = cfg.agent.get('pc_dim')
+    geometry_sizes = {}
+    if cfg.agent.get('_target_') in _SPARSE3D_AGENT_TARGETS:
+        pc_config = cfg.agent.get('pc_encoder_config') or {}
+        geometry_sizes = dict(num_patches=pc_config.get('num_patches', 96),
+                              group_size=pc_config.get('group_size', 32))
+        point_limit = cfg.agent.get('num_points', 1024)
+        positive_int(point_limit, 'agent.num_points')
+        for name, size in geometry_sizes.items():
+            positive_int(size, name)
+        if point_limit < max(geometry_sizes.values()):
+            raise ValueError('agent.num_points must be at least max(num_patches, group_size)')
     for child in cfg.dataset.get('datasets', [cfg.dataset]):
         if child.get('pc_dim') is not None and child.pc_dim != agent_pc_dim:
             raise ValueError('Dataset pc_dim must match the actual Agent point-cloud channels')
         validate_pc_color_augmentation(agent_pc_dim, child.get('augmentation_cfg'))
         augmentation = child.get('augmentation_cfg')
-        validate_random_keep_points(((augmentation or {}).get('pc') or {}).get('random_keep_points'))
         if 'datasets' in cfg.dataset and cfg.dataset.get('augmentation_cfg') is not None:
+            # Hydra constructs each child before the shared augmentation is applied.
+            validate_random_keep_points(((augmentation or {}).get('pc') or {}).get('random_keep_points'))
             augmentation = cfg.dataset.augmentation_cfg
         keep_points = ((augmentation or {}).get('pc') or {}).get('random_keep_points')
-        geometry_sizes = {}
-        if cfg.agent.get('_target_') == 'dexmani_policy.agents.core.interaction_flow.InteractionFlowAgent':
-            geometry_sizes = dict(num_patches=cfg.agent.get('num_patches', 192),
-                                  group_size=cfg.agent.get('group_size', 32))
         validate_random_keep_points(keep_points, **geometry_sizes)
     if 'datasets' in cfg.dataset:
         # Hydra constructs children before MultiTaskDataset applies its shared augmentation.
@@ -514,21 +509,14 @@ def validate_config(cfg):
         )
 
     _validate_aux_config(cfg)
-    _validate_normalization_config(cfg)
+    validate_normalization_config(cfg)
     validate_action_key_consistency(cfg)
 
     print("Config validation passed")
 
 
 def compile_models(model, ema_model=None, **compile_kwargs):
-    """Compile Agent-selected regions of *model* and optionally *ema_model*.
-
-    ``BaseAgent.compile_backbone()`` compiles the action backbone. Agent
-    overrides may also compile dense observation-encoder regions.
-
-    Keyword arguments are forwarded to :func:`torch.compile`; defaults to
-    ``mode='reduce-overhead'``.
-    """
+    """Compile action backbones with reduce-overhead mode by default."""
     compile_kwargs.setdefault("mode", "reduce-overhead")
     model.compile_backbone(**compile_kwargs)
     if ema_model is not None:

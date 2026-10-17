@@ -460,7 +460,7 @@ bash scripts/remote/train_remote.sh --gpus 0 <config> <task> \
 
 不同 world size 或 loader contract 的 checkpoint 能被读出权重，并不等价于能够 strict resume。
 
-严格续训要求 `simple.v4` 内嵌的 `effective_config` 与来源 sidecar 配方一致，再应用允许的运行或路径覆盖。未绑定的 `simple.v3` 只保留有限保证的推理路径，不能靠补写 `config.yaml` 获得严格续训支持。远程数据预检和实际训练共用该来源配置解析；具体覆盖边界见 [README 训练说明](../README.md#训练)。
+严格续训要求 `simple.v4` 内嵌的 `effective_config` 与来源 sidecar 配方一致，再应用允许的运行或路径覆盖。推理也要求相同的来源绑定，旧格式须使用对应源码快照。远程数据预检和实际训练共用该来源配置解析；具体覆盖边界见 [README 训练说明](../README.md#训练)。
 
 ### 6.4 Pre-flight
 
@@ -624,13 +624,13 @@ VQ_RUN="experiments/vq_hand/<task>/$(date +%Y%m%d_%H%M%S)_${RANDOM}"
 conda run --no-capture-output -n policy python -m dexmani_policy.training.train_vq_hand \
   --policy-config dexmani_policy/configs/dqrise.yaml \
   --policy-override task_name=<task> --output_dir "$VQ_RUN"
-conda run --no-capture-output -n policy python -m dexmani_policy.agents.vq_hand.export_codebook \
+conda run --no-capture-output -n policy python -m dexmani_policy.training.export_hand_codebook \
   --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
   --output "$VQ_RUN/codebook.npz"
 bash scripts/training/train.sh dqrise task_name=<task> codebook_path="$VQ_RUN/codebook.npz"
 ```
 
-每次使用新 run；已有训练产物的目录拒绝重用，已有导出文件只有显式 `--overwrite` 才可覆盖。Stage 2 额外的数据/窗口覆盖必须与 `--policy-override` 一致。不要用旧独立 VQ 的全量统计配方替代这个入口。这里的 VQ 产物归 `experiments/`，远端生成后用 `sync_down.sh vq_hand/<task>/<run>` 拉取。
+每次使用新 run；已有训练产物的目录拒绝重用，已有导出文件只有显式 `--overwrite` 才可覆盖。Stage 2 额外的数据/窗口覆盖必须与 `--policy-override` 一致。训练只支持 `--policy-config`，不再提供独立 `--config` 模式。这里的 VQ 产物归 `experiments/`，远端生成后用 `sync_down.sh vq_hand/<task>/<run>` 拉取。
 
 如果另外将 Stage 1 artifact 发布到 `data/`，才使用下面的数据同步流程：
 
@@ -706,7 +706,7 @@ model-specific activation/token memory
 
 checkpoint transfer 中断后重新运行 `sync_down.sh`。其 Pass-1 设计避免把 partial checkpoint 长期当成已存在的完整 artifact。
 
-评测前确认目标 checkpoint 和来源配置已同步完整，再由 `agents.loader.restore_policy_agent` 检查绑定配方及所选 raw/EMA 权重。`CheckpointStore.load()` 是完整续训检查，额外要求 optimizer/scheduler/RNG 等状态，不能用来判定纯推理产物是否可用。
+评测前确认目标 checkpoint 和来源配置已同步完整，再由 `training.checkpoint.restore_policy_agent` 检查绑定配方及所选 raw/EMA 权重。`CheckpointStore.load()` 是完整续训检查，额外要求 optimizer/scheduler/RNG 等状态，不能用来判定纯推理产物是否可用。
 
 ### 10.6 Stale / Unknown Session
 

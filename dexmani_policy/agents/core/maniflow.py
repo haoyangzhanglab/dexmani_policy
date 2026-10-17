@@ -1,16 +1,12 @@
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.action_decoders.backbone.consistency_ditx import (
-    ConsistencyDiTX,
-)
-from dexmani_policy.agents.action_decoders.consistency_flow import (
-    ConsistencyFlowMatch,
-)
+from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
+from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.pointnet_dense import PointNetDense
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNetDense
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 
 
 class ManiFlowObsEncoder(nn.Module):
@@ -27,7 +23,6 @@ class ManiFlowObsEncoder(nn.Module):
 
     def __init__(
         self,
-        encoder_type: str,
         pc_dim: int,
         state_dim: int,
         num_points: int,
@@ -37,18 +32,12 @@ class ManiFlowObsEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ):
         super().__init__()
-        if encoder_type != "pointnet_dense":
-            raise ValueError("ManiFlow requires pointnet_dense")
         if n_obs_steps <= 0:
             raise ValueError("n_obs_steps must be greater than 0")
         pc_encoder_config = dict(pc_encoder_config or {})
-        if "num_points" in pc_encoder_config:
-            raise ValueError(
-                "Configure ManiFlow point count only through agent.num_points"
-            )
         self.pc_encoder = PointNetDense(input_channels=pc_dim, **pc_encoder_config)
         self.pc_encoder.effective_config = dict(pc_encoder_config)
-        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
         self.n_obs_steps = n_obs_steps
@@ -71,14 +60,11 @@ class ManiFlowObsEncoder(nn.Module):
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
         feat = torch.cat([pc_feat, state_feat], dim=-1)
 
-        if feat.shape[0] % self.n_obs_steps != 0:
-            raise ValueError("observation batch must be divisible by n_obs_steps")
-        batch_size = feat.shape[0] // self.n_obs_steps
-        return feat.reshape(batch_size, -1, self.obs_token_dim), {}
+        return feat.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
 class ManiFlowAgent(BaseAgent):
-    """ManiFlow policy using ConsistencyDiTX + ConsistencyFlowMatch."""
+    """ManiFlow policy using ConsistencyDiTX + ConsistencyFlow."""
 
     def __init__(
         self,
@@ -86,7 +72,6 @@ class ManiFlowAgent(BaseAgent):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        encoder_type: str,
         pc_dim: int,
         state_dim: int,
         num_points: int,
@@ -113,7 +98,6 @@ class ManiFlowAgent(BaseAgent):
         modality_dropout_probs: dict | None = None,
     ):
         obs_encoder = ManiFlowObsEncoder(
-            encoder_type=encoder_type,
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,
@@ -139,7 +123,7 @@ class ManiFlowAgent(BaseAgent):
             qk_norm=qk_norm,
             pre_norm_modality=pre_norm_modality,
         )
-        action_decoder = ConsistencyFlowMatch(
+        action_decoder = ConsistencyFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
             denoise_timesteps=denoise_timesteps,

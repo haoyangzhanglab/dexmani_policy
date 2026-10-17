@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.action_decoders.backbone.dit import DiTDiffusion
+from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
-from dexmani_policy.agents.core.base import BaseAgent
+from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.core.base import BaseAgent, parameter_groups
 from dexmani_policy.agents.core.dp import DPObsEncoder
-from dexmani_policy.agents.obs_encoder.text.clip import CLIPTextEncoder
+from dexmani_policy.agents.obs_encoder.text import CLIPTextEncoder
 
 
 class MultiTaskAgent(BaseAgent):
@@ -62,9 +62,6 @@ class MultiTaskAgent(BaseAgent):
         num_flow_train_timesteps: int = 10,
         clip_sample: bool = True,
     ):
-        assert rgb_backbone_name in ("resnet", "clip", "dino", "siglip", "r3m"), (
-            f"rgb_backbone_name must be one of resnet/clip/dino/siglip/r3m, got {rgb_backbone_name}"
-        )
         assert action_decoder_type in ("diffusion", "rectified_flow"), (
             "action_decoder_type must be 'diffusion' or 'rectified_flow', "
             f"got {action_decoder_type}"
@@ -84,7 +81,7 @@ class MultiTaskAgent(BaseAgent):
         obs_cond_dim = obs_encoder.out_dim * n_obs_steps
         full_cond_dim = obs_cond_dim + n_emb
 
-        backbone = DiTDiffusion(
+        backbone = DiT(
             horizon=horizon,
             action_dim=action_dim,
             cond_dim=full_cond_dim,
@@ -132,9 +129,7 @@ class MultiTaskAgent(BaseAgent):
         self._needs_text_initialization = text_encoder is None
         self.text_proj = nn.Linear(text_dim, n_emb)
         if task_texts is None:
-            # The explicit open-text interface remains online.
             self.text_encoder = text_encoder
-            self.text_encoder.requires_grad_(False)
             self.register_buffer("task_emb_table", None)
         else:
             unique = list(dict.fromkeys(task_texts))
@@ -143,8 +138,7 @@ class MultiTaskAgent(BaseAgent):
             if text_encoder is None:
                 table = torch.zeros(len(unique), text_dim)
             else:
-                with torch.no_grad():
-                    table = torch.stack([text_encoder([t]).squeeze() for t in unique])
+                table = torch.stack([text_encoder([t])[0, 0] for t in unique])
             self.register_buffer("task_emb_table", table)
             self.task_to_idx = {t: i for i, t in enumerate(unique)}
 
@@ -153,9 +147,8 @@ class MultiTaskAgent(BaseAgent):
             encoder = CLIPTextEncoder(model_name=self.text_encoder_model)
             if encoder.embed_dim != self.text_embed_dim:
                 raise ValueError("Saved text dimension differs from initialization model")
-            with torch.no_grad():
-                table = torch.stack([encoder([t]).squeeze() for t in self.task_to_idx])
-                self.task_emb_table.copy_(table.to(self.task_emb_table))
+            table = torch.stack([encoder([t])[0, 0] for t in self.task_to_idx])
+            self.task_emb_table.copy_(table.to(self.task_emb_table))
             self._needs_text_initialization = False
 
     @property
@@ -173,18 +166,15 @@ class MultiTaskAgent(BaseAgent):
         emb = self.text_encoder(task_texts).squeeze(1)
         return self.text_proj(emb.to(dtype=self.text_proj.weight.dtype))
 
-    def _build_cond(self, obs_dict):
+    def encode_observation(self, obs_dict):
         task_texts = obs_dict["task_text"]
         obs_numerical = {k: v for k, v in obs_dict.items() if k not in ("task_text", "task_name")}
         obs = self.preprocess(obs_numerical)
-        cond, aux = self.obs_encoder(obs)
+        cond = self.obs_encoder(obs)
         text_emb = self.get_text_emb(task_texts)
         cond = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
-        return cond, aux
+        return cond
 
-    def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
-        groups = super().get_optim_param_groups(lr, obs_lr, weight_decay, obs_wd)
-        groups.append({"params": [self.text_proj.weight], "weight_decay": weight_decay, "lr": lr})
-        if self.text_proj.bias is not None:
-            groups.append({"params": [self.text_proj.bias], "weight_decay": 0.0, "lr": lr})
-        return groups
+    def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
+        groups = super().optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
+        return groups + parameter_groups(self.text_proj, lr=lr, weight_decay=weight_decay)

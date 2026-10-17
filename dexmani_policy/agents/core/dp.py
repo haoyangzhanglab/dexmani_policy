@@ -2,16 +2,14 @@ import torch
 import torch.nn as nn
 
 from dexmani_policy.agents.core.base import UNetDiffusionAgent
-from dexmani_policy.agents.obs_encoder.proprio.state_mlp import create_state_mlp
-from dexmani_policy.agents.obs_encoder.rgb.r3m import R3M
-from dexmani_policy.agents.obs_encoder.rgb.registry import build_backbone
-from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNet
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.obs_encoder.rgb.registry import build_rgb_encoder
+from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
 
 
 class DPObsEncoder(nn.Module):
     @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
-        """Return the exact raw observation fields consumed by ``forward``."""
         return ("joint_state", "rgb")
 
     def __init__(
@@ -23,23 +21,18 @@ class DPObsEncoder(nn.Module):
         rgb_backbone_config: dict = None,
     ):
         super().__init__()
-        cfg = dict(rgb_backbone_config or {})
-        if "crop_ratio" in cfg:
-            raise ValueError(
-                "rgb_backbone_config.crop_ratio is no longer supported; "
-                "configure Dataset rgb_random_crop_size instead."
-            )
-        self.backbone, self.image_processor = build_backbone(rgb_backbone_name, config=cfg)
-        self.state_mlp = create_state_mlp(state_dim, state_out_dim)
+        self.backbone, self.image_processor = build_rgb_encoder(
+            rgb_backbone_name, config=rgb_backbone_config
+        )
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
     def forward(self, obs: dict):
-        rgb = obs["rgb"]  # uint8 or float32 [0,1], from Dataset/saved eval preprocessing
-        rgb = self.image_processor.process_images(rgb, validate_float_range=False)["image"]
+        rgb = self.image_processor.process_images(obs["rgb"])
 
         # Use channels-last memory format for CNN backbones; shape stays NCHW.
-        if isinstance(self.backbone, (ResNet, R3M)):
+        if isinstance(self.backbone, ResNetEncoder):
             rgb = rgb.to(memory_format=torch.channels_last)
 
         feat = torch.cat(
@@ -49,8 +42,7 @@ class DPObsEncoder(nn.Module):
             ],
             dim=-1,
         )
-        B = feat.shape[0] // self.n_obs_steps
-        return feat.reshape(B, -1), {}
+        return feat.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
 class DPAgent(UNetDiffusionAgent):

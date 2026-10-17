@@ -115,12 +115,6 @@ agent:
     tune_mode: full
     norm_mode: group_norm
     image_size: [224, 224]
-  # rgb_backbone_name: r3m
-  # rgb_backbone_config:
-  #   model_name: resnet18          # resnet18(512d) | resnet34(512d) | resnet50(2048d)
-  #   tune_mode: full               # Pretrained + group_norm requires full finetuning.
-  #   norm_mode: group_norm         # Reinitializes norm affine parameters and discards BN statistics.
-  #   image_size: [224, 224]
   # rgb_backbone_name: dino
   # rgb_backbone_config:
   #   model_name: facebook/dinov2-small  # 384d

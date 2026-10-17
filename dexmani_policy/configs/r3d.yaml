@@ -1,8 +1,8 @@
 # R3D — 3D Diffusion Policy with Uni3D encoder
 # Encoder:  Uni3D (ViT-tiny, 256d, pre-trained) with color point cloud
-# Decoder:  OneWayTransformer (cross-attention) + DDIM
+# Decoder:  R3DTransformer (cross-attention) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
-# Note:     pc_in_channels=6 (color), use_compile=true (OneWayTransformer backbone only)
+# Note:     pc_in_channels=6 (color), use_compile=true (R3DTransformer backbone only)
 #
 # Auxiliary loss: use_aux_ee predicts wrist pose (pos3+rot6d6=9dim) from
 # action_ee[:9] alongside the primary joint action.  Matches official
@@ -92,7 +92,6 @@ agent:
     pc_in_channels: 6
     patch_dropout: 0.0
     drop_path_rate: 0.2
-    feature_mode: pointsam
     use_pretrained_weights: true
     pretrained_weights_path: data/pretrained/uni3d
     allow_random_init: false
@@ -103,7 +102,7 @@ agent:
     random_noise_scale: 0.0
     use_shuffle_output: true
 
-  # OneWayTransformer backbone
+  # R3DTransformer backbone
   timestep_embed_dim: 128
   embedding_dim: 256
   depth: 4
@@ -141,7 +140,7 @@ training:
   seed: ${seed}
   device: cuda:0
   use_bfloat16: true
-  use_compile: true                # compile_backbone() compiles OneWayTransformer only, not ViT
+  use_compile: true                # compile_backbone() compiles R3DTransformer only, not ViT
   use_ema: true
   lr_scheduler: cosine
   lr_warmup_steps: 500

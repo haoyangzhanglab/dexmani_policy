@@ -9,9 +9,9 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from dexmani_policy.agents.action_decoders.backbone.ditx import DiTX
-from dexmani_policy.agents.action_decoders.rectified_flow import RectifiedFlow
-from dexmani_policy.agents.action_decoders.time_sampler import shift_time_to_noise
+from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
+from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
+from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_time_to_noise
 from dexmani_policy.agents.core.base import BaseAgent
 from dexmani_policy.agents.core.sat import SATObsEncoder
 from dexmani_policy.agents.hand_prior.lamp import HandMotionPrior, load_prior
@@ -61,7 +61,7 @@ class LampFlowAgent(BaseAgent):
             if not 0 <= value < float("inf"):
                 raise ValueError(f"{name} must be finite and nonnegative")
         obs_encoder = SATObsEncoder(
-            encoder_type="pointnext_tokenizer", pc_dim=pc_dim, state_dim=state_dim,
+            pc_dim=pc_dim, state_dim=state_dim,
             num_points=num_points, n_obs_steps=n_obs_steps, state_out_dim=state_out_dim,
             pc_encoder_config=pc_encoder_config, fps_random_config=fps_random_config,
         )
@@ -130,13 +130,13 @@ class LampFlowAgent(BaseAgent):
         # Keep the frozen prior in FP32, matching offline latent construction.
         with torch.no_grad(), torch.autocast(device_type=history.device.type, enabled=False):
             mu, log_var = self.prior.encode_history(history.float())
-        cond, aux = self._build_cond(obs)
+        cond = self.encode_observation(obs)
         b, patches, _ = cond.shape
         cond = cond.reshape(b, patches, self.n_obs_steps, -1).transpose(1, 2)
         cond = cond.reshape(b, self.n_obs_steps * patches, -1)
         prior_features = torch.cat((mu, log_var), dim=-1).to(cond.dtype)
         cond = torch.cat((cond, prior_features[:, None].expand(-1, cond.shape[1], -1)), dim=-1)
-        return cond, mu, aux
+        return cond, mu
 
     def _decode_hand(self, offsets, mu):
         with torch.autocast(device_type=offsets.device.type, enabled=False):
@@ -145,20 +145,17 @@ class LampFlowAgent(BaseAgent):
 
     def compute_loss(self, batch, **kwargs):
         self._validate_batch(batch)
-        cond, mu, aux = self._condition(batch["obs"], batch.get("action_context"))
+        cond, mu = self._condition(batch["obs"], batch.get("action_context"))
         z = batch.get("hand_latent_target")
         if (not isinstance(z, torch.Tensor)
                 or z.shape != (mu.shape[0], self.horizon, self.latent_dim)
                 or not torch.isfinite(z).all()):
             raise ValueError("LAMP requires finite hand_latent_target [B,H,Z]")
         actions = self.normalizer["action"].normalize(batch["action"])
-        if not torch.isfinite(actions).all():
-            raise ValueError("LAMP action targets must be finite")
         offsets = (z.float() - mu[:, None]) / self.prior.latent_scale
         target = torch.cat((actions[..., :self.arm_dim], offsets), dim=-1)
 
-        # Same noise -> data path and time sampler as RectifiedFlow. The local
-        # loss retains arm/hand group weights and optionally supervises decoded hands.
+        # Match RectifiedFlow's noise-to-data path with arm/hand losses and decoded supervision.
         flow = self.action_decoder
         noise = torch.randn_like(target)
         t = flow.time_sampler.sample(len(target), flow.t_sample_mode, device=target.device)
@@ -179,7 +176,7 @@ class LampFlowAgent(BaseAgent):
         metrics = dict(loss=loss, loss_action=flow_loss, loss_arm=arm_loss,
                        loss_latent=latent_loss, loss_decoded_hand=decoded_loss,
                        t_mean=t.mean())
-        return self._merge_aux_loss(loss, metrics, aux)
+        return loss, metrics
 
     @torch.no_grad()
     def predict_action(self, obs_dict, inference_steps=None, *, action_context=None,
@@ -187,7 +184,7 @@ class LampFlowAgent(BaseAgent):
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("LAMP currently supports synchronous chunk execution")
         self._validate_obs_dict(obs_dict)
-        cond, mu, _ = self._condition(obs_dict, action_context)
+        cond, mu = self._condition(obs_dict, action_context)
         return self.predict_action_from_cond(cond, inference_steps, mu=mu)
 
     @torch.no_grad()

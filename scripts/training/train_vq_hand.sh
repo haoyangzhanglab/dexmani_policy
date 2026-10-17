@@ -1,7 +1,6 @@
 #!/bin/bash
 # Policy-aligned DQ codebook training.
 # Usage: train_vq_hand.sh [task_name] [VQ training options...]
-# Independent VQ research remains explicitly available via the Python --config CLI.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

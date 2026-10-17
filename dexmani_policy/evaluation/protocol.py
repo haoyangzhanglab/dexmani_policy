@@ -17,40 +17,51 @@ import hydra
 from omegaconf import OmegaConf
 
 from dexmani_policy.utils.config import (
+    load_experiment_config,
     validate_action_key_consistency,
     validate_window_contract,
 )
-from dexmani_policy.agents.loader import load_experiment_config, resolve_checkpoint
+from dexmani_policy.training.checkpoint import (
+    read_checkpoint_record,
+    resolve_record_path,
+    validate_inference_settings,
+    resolve_checkpoint,
+)
 from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.utils.validation import positive_int
 from dexmani_policy.utils.atomic import atomic_path
 
 
+def read_selection_reference(root, info):
+    try:
+        target = resolve_record_path(root, info.get("selection_result"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            "Selection reference is missing; use an explicit checkpoint with its EMA/NFE settings"
+        ) from exc
+    return read_checkpoint_record(target)
+
+
 def resolve_selection_checkpoint(experiment_dir, record_path=None):
     """Resolve a current selection result, snapshot, or explicit writer handoff."""
-    from dexmani_policy.agents.loader import (
-        _read_record, _record_path, _read_selection_reference, _validate_record_inference,
-    )
-
     root = Path(experiment_dir).resolve()
-    info = _read_record(Path(record_path) if record_path else root / "best_ckpt.json")
+    info = read_checkpoint_record(Path(record_path) if record_path else root / "best_ckpt.json")
     # Explicit handoffs written by select_best_ckpt contain only this reference.
     if record_path is not None and set(info) == {"selection_result"}:
-        info = _read_selection_reference(root, info)
-    allowed_formats = ("best.v1", "selection.v2", "selection.v3") if record_path is not None else ("best.v1",)
-    if info.get("_format") not in allowed_formats:
-        raise ValueError(f"Unsupported selection record format: {info.get('_format')!r}")
+        info = read_selection_reference(root, info)
+    if record_path is None and info.get("_format") != "best.v1":
+        raise ValueError("best_ckpt.json requires best.v1")
     snapshot = info if info.get("_format") == "best.v1" else None
     if snapshot is not None:
-        _validate_record_inference(snapshot)
-        snapshot_path = _record_path(root, snapshot.get("ckpt_relpath"),
-                                     checkpoint=True, immutable=True)
-    if snapshot is not None:
-        info = _read_selection_reference(root, info)
-    if info.get("_format") not in {"selection.v2", "selection.v3"}:
-        raise ValueError("Selection evidence requires selection.v2/v3")
-    _validate_record_inference(info)
-    resolved = _record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
+        validate_inference_settings(snapshot)
+        snapshot_path = resolve_record_path(
+            root, snapshot.get("ckpt_relpath"), checkpoint=True, immutable=True
+        )
+        info = read_selection_reference(root, info)
+    if info.get("_format") != "selection.v3":
+        raise ValueError("Selection evidence requires selection.v3")
+    validate_inference_settings(info)
+    resolved = resolve_record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
     if snapshot is not None:
         if snapshot_path != resolved or snapshot["inference"] != info["inference"]:
             raise ValueError("Best snapshot/selection checkpoint or inference mismatch")
@@ -72,24 +83,23 @@ def resolve_selection_checkpoint(experiment_dir, record_path=None):
     if not isinstance(task_seeds, dict) or not task_seeds:
         raise ValueError("Selection requires actual task_seeds evidence")
     validate_task_seeds(task_seeds, task_seeds)
-    if info['_format'] == 'selection.v3':
-        observed = {task: set() for task in task_seeds}
-        for stage in stages:
-            plan = stage.get('requested_task_seeds')
-            validate_task_seeds(plan, task_seeds)
-            validate_episode_result({'episode_details': stage.get('episode_details')}, plan)
-            for task, seeds in plan.items():
-                observed[task].update(seeds)
-        if any(observed[task] != set(task_seeds[task]) for task in observed):
-            raise ValueError('Selection task seeds disagree with saved stages')
-        for candidate in candidates:
-            expected = [i for i, stage in enumerate(stages) if stage['checkpoint'] == candidate['ckpt_relpath']]
-            if candidate.get('stage_indices') != expected or not expected:
-                raise ValueError('Candidate stage references disagree with evidence')
-            details = [d for i in expected for d in stages[i]['episode_details']]
-            if (candidate.get('n_episodes') != len(details)
-                    or candidate.get('success_count') != sum(d['success'] for d in details)):
-                raise ValueError('Candidate totals disagree with saved episode evidence')
+    observed = {task: set() for task in task_seeds}
+    for stage in stages:
+        plan = stage.get('requested_task_seeds')
+        validate_task_seeds(plan, task_seeds)
+        validate_episode_result({'episode_details': stage.get('episode_details')}, plan)
+        for task, seeds in plan.items():
+            observed[task].update(seeds)
+    if any(observed[task] != set(task_seeds[task]) for task in observed):
+        raise ValueError('Selection task seeds disagree with saved stages')
+    for candidate in candidates:
+        expected = [i for i, stage in enumerate(stages) if stage['checkpoint'] == candidate['ckpt_relpath']]
+        if candidate.get('stage_indices') != expected or not expected:
+            raise ValueError('Candidate stage references disagree with evidence')
+        details = [d for i in expected for d in stages[i]['episode_details']]
+        if (candidate.get('n_episodes') != len(details)
+                or candidate.get('success_count') != sum(d['success'] for d in details)):
+            raise ValueError('Candidate totals disagree with saved episode evidence')
     return info, resolved
 
 
@@ -208,7 +218,7 @@ def load_ckpt_for_inference(
     cfg,
 ):
     """Use the shared loader with the original saved config, never eval overrides."""
-    from dexmani_policy.agents.loader import restore_policy_agent
+    from dexmani_policy.training.checkpoint import restore_policy_agent
 
     saved = load_experiment_config(cfg._exp_dir)
     validate_eval_config(cfg, saved)

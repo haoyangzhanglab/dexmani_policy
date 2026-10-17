@@ -67,7 +67,6 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: pointnet_dense
   pc_dim: 6                       # xyz+rgb
   state_dim: 19
   state_out_dim: 64

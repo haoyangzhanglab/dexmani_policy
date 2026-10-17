@@ -10,11 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-from dexmani_policy.agents.loader import (
-    load_experiment_config,
-    resolve_best_checkpoint,
-    resolve_checkpoint,
-)
+from dexmani_policy.utils.config import load_experiment_config
+from dexmani_policy.training.checkpoint import resolve_best_checkpoint, resolve_checkpoint
 from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.utils.validation import positive_int
 
@@ -137,7 +134,7 @@ def inspect_policy(
 
 
 def load_policy(config, info, *, device="cuda:0", seed=0):
-    from dexmani_policy.agents.loader import restore_policy_agent
+    from dexmani_policy.training.checkpoint import restore_policy_agent
 
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
@@ -157,8 +154,13 @@ def load_policy(config, info, *, device="cuda:0", seed=0):
 class LoadedPolicy:
     def __init__(self, agent, config, info, *, device, seed):
         from dexmani_policy.utils.validation import validate_observation_fields
-        from dexmani_policy.utils.config import validate_source_recipe, validate_window_contract
-        from dexmani_policy.agents.normalization import resolve_normalization_spec, normalization_dims_from_config
+        from dexmani_policy.utils.config import (
+            normalization_dims_from_config,
+            resolve_normalization_spec,
+            validate_source_recipe,
+            validate_window_contract,
+        )
+
         if info.weights not in {'raw', 'ema'}:
             raise ValueError('weights must be raw or ema')
         positive_int(info.inference_steps, 'inference_steps')
@@ -211,17 +213,13 @@ class LoadedPolicy:
         if hasattr(encoder, 'image_processor'):
             import torch
             from dexmani_policy.agents.obs_encoder.rgb.image_processor import ImageProcessor
-            from dexmani_policy.agents.obs_encoder.rgb.utils import to_hw, get_interpolation
-            expected = ImageProcessor.from_preset(config['agent']['rgb_backbone_name'])
-            rgb = config['agent'].get('rgb_backbone_config') or {}
-            if rgb.get('image_size') is not None:
-                expected.image_size = to_hw(rgb['image_size'])
-            if rgb.get('interpolation') is not None:
-                expected.interpolation = get_interpolation(rgb['interpolation'])
+
+            expected = ImageProcessor.from_preset(
+                config['agent']['rgb_backbone_name'], config['agent'].get('rgb_backbone_config')
+            )
             processor = encoder.image_processor
             if (processor.image_size != expected.image_size or processor.interpolation != expected.interpolation
-                    or any(not torch.equal(getattr(processor, name).cpu(), torch.as_tensor(
-                        rgb[name] if rgb.get(name) is not None else getattr(expected, name), dtype=torch.float32))
+                    or any(not torch.equal(getattr(processor, name).cpu(), getattr(expected, name))
                         for name in ('image_mean', 'image_std'))):
                 raise ValueError('Agent RGB numerical preprocessing disagrees with config')
         agent.validate_normalizer()
@@ -259,7 +257,7 @@ class LoadedPolicy:
 
     def configure_rtc(self, guidance_cap):
         from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-        from dexmani_policy.agents.action_decoders.rtc import validate_scheduler
+        from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
         from dexmani_policy.agents.core.base import BaseAgent
 
         if (
@@ -268,7 +266,7 @@ class LoadedPolicy:
             or not isinstance(self.agent.action_decoder, Diffusion)
         ):
             raise NotImplementedError("RTC supports continuous BaseAgent DDIM agents only")
-        validate_scheduler(
+        prepare_schedule(
             self.agent.action_decoder.noise_scheduler, self.info.inference_steps, guidance_cap
         )
         self.rtc_guidance_cap = guidance_cap

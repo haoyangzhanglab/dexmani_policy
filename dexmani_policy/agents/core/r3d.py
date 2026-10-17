@@ -1,24 +1,61 @@
-"""R3D Agent: Uni3D + OneWayTransformer + Diffusion."""
+"""R3D Agent: Uni3D + R3DTransformer + Diffusion."""
 
-from dexmani_policy.agents.action_decoders.backbone.one_way_transformer import (
-    OneWayTransformerBackbone,
-)
+import torch
+import torch.nn as nn
+
+from dexmani_policy.agents.action_decoders.backbones.r3d import R3DTransformer
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.core.base import BaseAgent
-from dexmani_policy.agents.obs_encoder.pointcloud.r3d_obs_encoder import R3DObsEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+
+
+class R3DObsEncoder(nn.Module):
+    """Concatenate Uni3D features, broadcast state and XYZ encoding as [B, T*K, 2*D+D_s]."""
+
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return ("joint_state", "point_cloud")
+
+    def __init__(
+        self,
+        state_dim: int,
+        n_obs_steps: int,
+        pc_encoder_config: dict = None,
+        state_out_dim: int = 256,
+        fps_random_config: dict = None,
+    ):
+        super().__init__()
+        pc_encoder_config = dict(pc_encoder_config or {})
+        if fps_random_config:
+            pc_encoder_config.setdefault("fps_random_config", fps_random_config)
+
+        self.pc_encoder = Uni3DEncoder(**pc_encoder_config)
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.n_obs_steps = n_obs_steps
+
+        self.pc_pe_dim = self.pc_encoder.out_dim
+        self.obs_token_dim = 2 * self.pc_pe_dim + self.state_mlp.out_dim
+
+    def forward(self, obs: dict):
+        state = obs["joint_state"]
+
+        # R3D clamps normalized XYZRGB; other encoders retain their own input contract.
+        pc = obs["point_cloud"].float().clamp(min=-1 - 1e-6, max=1 + 1e-6)
+
+        patch_tokens, pc_pe = self.pc_encoder(pc)
+
+        state_emb = self.state_mlp(state)
+        state_emb = state_emb.unsqueeze(1).expand(-1, patch_tokens.shape[1], -1)
+
+        obs_feat = torch.cat([patch_tokens, state_emb], dim=-1)
+        tokens = torch.cat([obs_feat, pc_pe], dim=-1)
+
+        return tokens.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
 class R3DAgent(BaseAgent):
-    """R3D policy agent.
-
-    Constructs R3DObsEncoder + OneWayTransformerBackbone + Diffusion.
-
-    When ``use_aux_ee`` is enabled, predicts wrist pose (pos3+rot6d6=9dim)
-    as an auxiliary target alongside the primary joint action (19dim),
-    matching the official R3D-Policy ``use_target_ee`` design.
-    Overrides ``_get_dim_groups`` to compute separate joint/EE loss
-    components and ``control_action_dim`` to return joint-only at inference.
-    """
+    """R3D diffusion policy with optional auxiliary wrist-pose prediction."""
 
     def __init__(
         self,
@@ -46,8 +83,7 @@ class R3DAgent(BaseAgent):
         use_aux_ee: bool = False,
         joint_dim: int = 19,
         ee_dim: int = 9,
-        # Auxiliary loss weight (applied to non-joint dim groups).
-        # Forwarded to Diffusion; must match when use_aux_ee=True.
+        # Weight applied to the auxiliary EE loss, leaving the joint loss unchanged.
         aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
     ):
@@ -63,11 +99,10 @@ class R3DAgent(BaseAgent):
             fps_random_config=fps_random_config,
         )
 
-        backbone = OneWayTransformerBackbone(
+        backbone = R3DTransformer(
             horizon=horizon,
             action_dim=action_dim,
             n_obs_steps=n_obs_steps,
-            num_obs_tokens=obs_encoder.num_obs_tokens,
             obs_token_dim=obs_encoder.obs_token_dim,
             pc_pe_dim=obs_encoder.pc_pe_dim,
             timestep_embed_dim=timestep_embed_dim,
@@ -103,7 +138,7 @@ class R3DAgent(BaseAgent):
     def initialize_training(self):
         self.obs_encoder.pc_encoder.initialize_training()
 
-    def _get_dim_groups(self):
+    def loss_groups(self):
         if not self.use_aux_ee:
             return None
         return {

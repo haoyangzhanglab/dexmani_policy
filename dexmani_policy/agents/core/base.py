@@ -5,10 +5,34 @@ from typing import Dict
 import torch
 import torch.nn as nn
 
-from dexmani_policy.agents.action_decoders.backbone.unet1d import ConditionalUnet1D
+from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.normalization import LinearNormalizer
-from dexmani_policy.agents.optim_util import get_optim_group_with_no_decay
+from dexmani_policy.agents.core.normalizer import AffineNormalizer
+
+
+def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float):
+    """Decay linear, convolution and attention weights; group each trainable parameter once."""
+    decay_types = (
+        nn.Linear,
+        nn.Conv1d,
+        nn.Conv2d,
+        nn.Conv3d,
+        nn.ConvTranspose1d,
+        nn.ConvTranspose2d,
+        nn.ConvTranspose3d,
+        nn.MultiheadAttention,
+    )
+    groups = [
+        {"params": [], "lr": lr, "weight_decay": weight_decay},
+        {"params": [], "lr": lr, "weight_decay": 0.0},
+    ]
+    modules = dict(module.named_modules())
+    parameters = ((name, param) for name, param in module.named_parameters() if param.requires_grad)
+    for name, param in sorted(parameters):
+        owner, _, field = name.rpartition(".")
+        decay = field.endswith("weight") and isinstance(modules[owner], decay_types)
+        groups[0 if decay else 1]["params"].append(param)
+    return groups
 
 
 class BaseAgent(nn.Module):
@@ -30,12 +54,16 @@ class BaseAgent(nn.Module):
         self.n_action_steps = n_action_steps
         self.action_dim = action_dim
         self.modality_dropout_probs = modality_dropout_probs or {}
-        self.normalizer = LinearNormalizer()
+        self.normalizer = AffineNormalizer()
         self.normalization_dims = {}
 
     def set_normalization_spec(self, spec, feature_dims=None):
-        from dexmani_policy.agents.normalization import validate_action_clipping
+        from dexmani_policy.utils.config import validate_action_clipping
+        from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 
+        if (isinstance(getattr(self.obs_encoder, "pc_encoder", None), Sparse3DEncoder)
+                and spec.get("point_cloud") != "identity"):
+            raise ValueError("Sparse3DEncoder requires normalization.point_cloud: identity (metric XYZ)")
         if isinstance(self.action_decoder, Diffusion):
             validate_action_clipping(spec, self.action_decoder.noise_scheduler.config.clip_sample)
         self.normalization_spec = dict(spec)
@@ -45,13 +73,13 @@ class BaseAgent(nn.Module):
         self.normalization_dims['action'] = self.action_dim
 
     def validate_normalizer(self):
-        from dexmani_policy.agents.normalization import validate_normalizer_state
+        from dexmani_policy.agents.core.normalizer import validate_normalizer_state
         validate_normalizer_state(self.normalizer, self.normalization_spec, self.normalization_dims)
 
     def initialize_training(self) -> None:
         """Initialize fresh training weights; complete checkpoints skip this step."""
 
-    def load_normalizer_from_dataset(self, normalizer: LinearNormalizer):
+    def load_normalizer_from_dataset(self, normalizer: AffineNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
     @property
@@ -114,17 +142,11 @@ class BaseAgent(nn.Module):
             result[k] = v
         return result
 
-    def _build_cond(self, obs_dict):
-        obs = self.preprocess(obs_dict)
-        cond, aux = self.obs_encoder(obs)
-        return cond, aux
+    def encode_observation(self, obs_dict):
+        return self.obs_encoder(self.preprocess(obs_dict))
 
-    def _get_dim_groups(self):
-        """Override in subclasses to return per-head dimension slices.
-
-        Returns ``None`` (standard single-loss) or a dict ``{name: (start, end)}``
-        mapping loss component names to dimension ranges.
-        """
+    def loss_groups(self):
+        """Optional named action slices for separate diffusion losses."""
         return None
 
     def forward(self, batch, **kwargs):
@@ -132,40 +154,12 @@ class BaseAgent(nn.Module):
 
     def compute_loss(self, batch, **kwargs):
         self._validate_batch(batch)
-        cond, aux = self._build_cond(batch["obs"])
+        cond = self.encode_observation(batch["obs"])
         normed_actions = self.normalizer["action"].normalize(batch["action"])
-        if not torch.isfinite(normed_actions).all():
-            nan_count = (~torch.isfinite(normed_actions)).sum().item()
-            raw = batch["action"]
-            raise ValueError(
-                f"NaN/Inf in normalized actions ({nan_count}/{normed_actions.numel()} "
-                f"elements). Raw action stats: min={raw.min():.4f} max={raw.max():.4f} "
-                f"mean={raw.mean():.4f}. Check normalizer, Zarr data, or data pipeline."
-            )
-        action_loss, loss_dict = self.action_decoder.compute_loss(
-            cond, normed_actions, dim_groups=self._get_dim_groups(), **kwargs
-        )
-        return self._merge_aux_loss(action_loss, loss_dict, aux)
-
-    def _merge_aux_loss(self, action_loss, loss_dict, aux):
-        """Add optional auxiliary loss and its scalar metrics."""
-        aux_loss = aux.get("loss")
-        if aux_loss is None:
-            return action_loss, loss_dict
-
-        total = action_loss + aux_loss
-        loss_dict["loss"] = total
-        # Preserve per-group loss_action if the action decoder already set it
-        # (e.g. via dim_groups); otherwise use the raw action loss.
-        loss_dict["loss_action"] = loss_dict.get("loss_action", action_loss)
-        for k, v in aux.items():
-            if k == "loss":
-                continue
-            # Log scalar aux values; skip multi-element tensors
-            # (e.g. router_probs / dispatch) that can't be logged.
-            if not torch.is_tensor(v) or v.numel() <= 1:
-                loss_dict[f"aux_{k}"] = v
-        return total, loss_dict
+        groups = self.loss_groups()
+        if groups is not None:
+            kwargs["dim_groups"] = groups
+        return self.action_decoder.compute_loss(cond, normed_actions, **kwargs)
 
     @torch.no_grad()
     def predict_action(
@@ -178,7 +172,7 @@ class BaseAgent(nn.Module):
         rtc_guidance_cap=0.0,
     ) -> Dict:
         self._validate_obs_dict(obs_dict)
-        cond, _ = self._build_cond(obs_dict)
+        cond = self.encode_observation(obs_dict)
         if rtc_prefix is None or rtc_guidance_cap == 0:
             return self.predict_action_from_cond(cond, inference_steps=inference_steps)
         if type(self).predict_action_from_cond is not BaseAgent.predict_action_from_cond:
@@ -255,47 +249,24 @@ class BaseAgent(nn.Module):
     def compile_backbone(self, **compile_kwargs):
         self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
 
-    def get_optim_param_groups(self, lr, obs_lr, weight_decay, obs_wd):
-        action_groups = self.action_decoder.model.get_optim_groups(weight_decay)
-        for g in action_groups:
-            g["lr"] = lr
-        obs_groups = get_optim_group_with_no_decay(self.obs_encoder, weight_decay=obs_wd)
-        for g in obs_groups:
-            g["lr"] = obs_lr
-        return action_groups + obs_groups
+    def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
+        return (
+            parameter_groups(self.action_decoder.model, lr=lr, weight_decay=weight_decay)
+            + parameter_groups(self.obs_encoder, lr=obs_lr, weight_decay=obs_weight_decay)
+        )
 
-    def _check_params_in_optimizer(self, optimizer: torch.optim.Optimizer):
-        """Require every trainable parameter exactly once, without reordering."""
-        model_param_ids = {id(p) for p in self.parameters() if p.requires_grad}
-        optim_param_ids = set()
-        duplicate_ids = set()
-        for group in optimizer.param_groups:
-            for p in group["params"]:
-                if id(p) in optim_param_ids:
-                    duplicate_ids.add(id(p))
-                optim_param_ids.add(id(p))
-
-        if duplicate_ids:
-            names = [n for n, p in self.named_parameters() if id(p) in duplicate_ids]
-            raise ValueError(f"Duplicate optimizer parameters: {names}")
-        foreign = optim_param_ids - {id(p) for p in self.parameters()}
-        if foreign:
-            raise ValueError("Optimizer contains parameters outside this model")
-
-        missing_ids = model_param_ids - optim_param_ids
-        if missing_ids:
-            missing_params = [p for p in self.parameters() if id(p) in missing_ids]
-            param_info = []
-            for p in missing_params:
-                name = next((n for n, pp in self.named_parameters() if pp is p), "?")
-                param_info.append(f"  {name}: shape={tuple(p.shape)}, device={p.device}")
-            raise ValueError(
-                f"The following {len(missing_ids)} trainable parameter(s) are NOT "
-                f"tracked by the optimizer:\n"
-                + "\n".join(param_info)
-                + "\nThis usually means get_optim_param_groups() is missing a module. "
-                "These parameters will not be updated during training.",
-            )
+    def validate_optimizer_groups(self, groups):
+        """Require every trainable Agent parameter exactly once across all groups."""
+        names = {id(param): name for name, param in self.named_parameters() if param.requires_grad}
+        param_ids = [id(param) for group in groups for param in group["params"]]
+        assigned = set(param_ids)
+        if len(param_ids) != len(assigned):
+            raise ValueError("Optimizer groups contain duplicate parameters")
+        if assigned - names.keys():
+            raise ValueError("Optimizer groups must contain only this Agent's trainable parameters")
+        missing = names.keys() - assigned
+        if missing:
+            raise ValueError(f"Trainable parameters missing from optimizer: {sorted(names[key] for key in missing)}")
 
     def configure_optimizer(
         self,
@@ -306,21 +277,21 @@ class BaseAgent(nn.Module):
         betas=(0.95, 0.999),
     ):
         obs_lr = obs_lr if obs_lr is not None else lr
-        obs_wd = obs_weight_decay if obs_weight_decay is not None else weight_decay
+        obs_weight_decay = obs_weight_decay if obs_weight_decay is not None else weight_decay
         if obs_lr == 0:
             self.obs_encoder.requires_grad_(False)
-        groups = self.get_optim_param_groups(lr, obs_lr, weight_decay, obs_wd)
+        groups = self.optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
+        groups = [group for group in groups if group["params"]]
+        self.validate_optimizer_groups(groups)
         names = {id(p): n for n, p in self.named_parameters()}
         for group in groups:
             group["param_names"] = [names[id(p)] for p in group["params"]]
-        optimizer = torch.optim.AdamW(
-            [g for g in groups if g["params"]],
+        return torch.optim.AdamW(
+            groups,
             lr=lr,
             betas=betas,
             fused=torch.cuda.is_available(),
         )
-        self._check_params_in_optimizer(optimizer)
-        return optimizer
 
 
 class UNetDiffusionAgent(BaseAgent):
@@ -342,7 +313,7 @@ class UNetDiffusionAgent(BaseAgent):
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
     ):
-        backbone = ConditionalUnet1D(
+        backbone = ConditionalUNet1D(
             input_dim=action_dim,
             context_dim=obs_encoder.out_dim * n_obs_steps,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
