@@ -10,8 +10,6 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.utils.config import resolve_normalization_spec
-
 
 def implementation_version():
     root = Path(__file__).resolve().parents[2]
@@ -225,6 +223,4 @@ def restore_artifact_metadata(model, config):
     validate_artifact_metadata(record, kind, module)
     if record.get("representation_state_sha256") != state_sha256(module):
         raise ValueError("Embedded representation differs from action_space_artifact")
-    if record["details"]["normalization_spec"] != resolve_normalization_spec(config):
-        raise ValueError("Saved artifact/policy normalization recipes disagree")
     model.action_space_artifact = record

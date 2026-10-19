@@ -167,10 +167,19 @@ def batch_for(dataset, count=2):
 def test_trainer_resume_raw_ema_without_external_artifact(prepared, tmp_path, name, compiled):
     root, configs = prepared
     cfg = copy.deepcopy(configs[name])
+    original_spec = OmegaConf.to_container(cfg.normalization, resolve=True)
+    _, original_normalizer = build_dataset_and_normalizer(cfg, verbose=False)
+    cfg.normalization.joint_state = "gaussian"
+    if name == "dqrise":
+        cfg.normalization.point_cloud = "identity"
     cfg.workspace.output_dir = str(tmp_path / "run")
     cfg.training.use_compile = compiled
     validate_config(cfg)
     comp = build(cfg)
+    assert comp.model.action_space_artifact["details"]["normalization_spec"] == original_spec
+    for key in ("scale", "offset"):
+        torch.testing.assert_close(comp.model.normalizer["action"].params_dict[key].cpu(),
+                                   original_normalizer["action"].params_dict[key].cpu(), rtol=0, atol=0)
     trainer = build_trainer(cfg, comp)
     comp.workspace.save_hydra_config(cfg)
     if compiled:
@@ -189,6 +198,12 @@ def test_trainer_resume_raw_ema_without_external_artifact(prepared, tmp_path, na
     path = comp.workspace.checkpoint_dir / "latest.pt"
     checkpoint = CheckpointStore(path.parent).load(path)
     assert checkpoint.effective_config["action_space_artifact"] == OmegaConf.to_container(cfg.action_space_artifact)
+    bad_cfg = OmegaConf.create(checkpoint.effective_config)
+    bad_cfg.normalization.joint_state = original_spec["joint_state"]
+    with pytest.raises(ValueError, match="source recipe mismatch"):
+        build_dataset_and_normalizer(bad_cfg, resume_checkpoint=checkpoint, verbose=False)
+    with pytest.raises(ValueError, match="source recipe mismatch"):
+        restore_policy_agent(bad_cfg, path, use_ema=False, device=DEVICE)
     batch = batch_for(comp.train_loader.dataset)
     context = batch.get("action_context")
     artifact = Path(getattr(comp.model, "prior_path", getattr(comp.model, "codec_path", getattr(comp.model, "codebook_path", ""))))
@@ -242,6 +257,25 @@ def test_trainer_resume_raw_ema_without_external_artifact(prepared, tmp_path, na
     finally:
         hidden.rename(artifact)
         comp.workspace.close()
+
+
+@pytest.mark.parametrize("name", ["lamp", "dqrise"])
+@pytest.mark.parametrize("parameter", ["scale", "offset"])
+def test_hand_affine_mismatch_rejected_on_binding_and_restore(prepared, name, parameter):
+    cfg = copy.deepcopy(prepared[1][name])
+    dataset, normalizer = build_dataset_and_normalizer(cfg, verbose=False)
+    model, _, _ = build_model_and_ema(cfg, DEVICE, normalizer, dataset=dataset)
+    state = {key: value.clone() for key, value in model.state_dict().items()}
+    changed = copy.deepcopy(normalizer)
+    with torch.no_grad():
+        changed["action"].params_dict[parameter][-12:] += .1
+    state.update({"normalizer." + key: value for key, value in changed.state_dict().items()})
+    message = "affine mismatch|normalizer.*do not match"
+    with pytest.raises(ValueError, match=message):
+        model.load_normalizer_from_dataset(changed)
+    restored = hydra.utils.instantiate(cfg.agent)
+    with pytest.raises(ValueError, match=message):
+        restored.load_state_dict(state, strict=True)
 
 
 def test_lamp_gradients_coordinates_and_compile(prepared):

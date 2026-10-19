@@ -294,8 +294,6 @@ def bind_action_space_artifact(cfg, model, dataset):
     if record["source_contract"] != current:
         changed = sorted(key for key in current if current[key] != record["source_contract"].get(key))
         raise ValueError(f"Hand artifact source mismatch: {changed}; regenerate for this data recipe")
-    if record["details"].get("normalization_spec") != resolve_normalization_spec(cfg):
-        raise ValueError("Hand artifact normalization recipe differs from policy")
     with open_dict(cfg):
         cfg.action_space_artifact = OmegaConf.create(record)
 
