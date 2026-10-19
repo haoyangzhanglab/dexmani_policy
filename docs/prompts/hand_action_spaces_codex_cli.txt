@@ -4,7 +4,7 @@
 
 明确目标：
 1. LAMP 只保留 lamp.yaml + LAMPPolicy：H=Nobs=C=1，冻结历史先验，直接预测 arm 和 delta_z，以 D(mu+delta_z) 的手部重建损失加 latent offset L2 训练；删除旧 Flow、逆解、latent cache 和别名。
-2. 保留 DQ-RISE 的 RVQ→实际原型 NN→PCA 排序标量→查表链路，补齐来源校验和 checkpoint 元信息，不重写正确核心。
+2. 保留 DQ-RISE 的 RVQ 原型生成与 PCA 排序、实际原型 NN 标量标签、查表解码，补齐来源校验和 checkpoint 元信息，不重写正确核心。
 3. 保留 Temporal 的 q0 条件时序 VAE、posterior mean 目标、完整 chunk 解码和 Flow Matching，固定 standardized decoded loss，补全选点、恢复和同步部署契约。
 
 先追踪 config→dataset→normalizer/artifact→policy/loss→trainer/EMA/compile/checkpoint→SIM/runtime，再分阶段完成最小端到端改动。特别验证：LAMP 历史只追加实际执行命令；Temporal q0 来自未增强的 query 实测手姿，整段固定；冻结 decoder 仍对 policy 输出保留梯度；所有物理变换只做一次；raw/EMA checkpoint 内嵌表示产物并可独立推理。不要通过放宽 strict load、删除来源检查或伪造 metadata 使测试通过。
