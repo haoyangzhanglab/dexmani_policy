@@ -129,6 +129,9 @@ def restore_model_weights(checkpoint, model, ema_model, device):
     state = fix_state_dict(checkpoint.model_state)
     model.load_state_dict(state, strict=True)
     model.validate_normalizer()
+    from dexmani_policy.utils.hand_artifact import restore_artifact_metadata
+
+    restore_artifact_metadata(model, checkpoint.effective_config)
     # Normalizers reconstruct their ParameterDict from checkpoint tensors.
     # A CPU-loaded checkpoint must not leave these parameters on CPU before
     # DDP wraps the restored model or broadcasts normalization state.
@@ -136,6 +139,7 @@ def restore_model_weights(checkpoint, model, ema_model, device):
     if ema_model is not None:
         ema_model.load_state_dict(fix_state_dict(checkpoint.ema_model_state), strict=True)
         ema_model.validate_normalizer()
+        restore_artifact_metadata(ema_model, checkpoint.effective_config)
         ema_model.to(device)
 
 

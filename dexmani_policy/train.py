@@ -67,7 +67,7 @@ def build_train_components(cfg, *, resume_checkpoint=None):
     train_loader = build_train_loader(cfg, dataset)
 
     model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, checkpoint=checkpoint
+        cfg, device, normalizer, checkpoint=checkpoint, dataset=dataset
     )
 
     batches_per_epoch = len(train_loader)

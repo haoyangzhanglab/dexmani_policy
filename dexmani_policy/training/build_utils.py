@@ -188,7 +188,7 @@ def validate_ema_batchnorm(model) -> None:
         )
 
 
-def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
+def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None, dataset=None):
     """Build the policy and local EMA for rank-0 evaluation or per-rank training targets."""
     model_cfg = cfg
     if checkpoint is not None:
@@ -243,6 +243,8 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     )
     model.validate_normalizer()
     model.to(device)
+    if checkpoint is None:
+        bind_action_space_artifact(cfg, model, dataset)
 
     requires_ema_for_loss = model.requires_ema_for_loss
     if requires_ema_for_loss and not cfg.training.use_ema:
@@ -272,8 +274,30 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         from dexmani_policy.training.resume import restore_model_weights
 
         restore_model_weights(checkpoint, model, ema_model, device)
+        bind_action_space_artifact(cfg, model, dataset)
 
     return model, ema_model, ema_updater
+
+
+def bind_action_space_artifact(cfg, model, dataset):
+    from omegaconf import OmegaConf
+    from dexmani_policy.utils.hand_artifact import (
+        policy_representation, source_contract,
+    )
+
+    if policy_representation(model) is None:
+        return
+    if dataset is None:
+        raise ValueError("Hand policies require the actual training dataset at artifact binding")
+    record = model.action_space_artifact
+    current = source_contract(dataset)
+    if record["source_contract"] != current:
+        changed = sorted(key for key in current if current[key] != record["source_contract"].get(key))
+        raise ValueError(f"Hand artifact source mismatch: {changed}; regenerate for this data recipe")
+    if record["details"].get("normalization_spec") != resolve_normalization_spec(cfg):
+        raise ValueError("Hand artifact normalization recipe differs from policy")
+    with open_dict(cfg):
+        cfg.action_space_artifact = OmegaConf.create(record)
 
 
 def build_optimizer_and_scheduler(cfg, model, *, verbose=True):
@@ -383,7 +407,7 @@ def validate_aux_config(cfg):
 SPARSE3D_POLICY_TARGETS = frozenset(
     {
         "dexmani_policy.agents.core.sat_policy.SATPolicy",
-        "dexmani_policy.agents.core.lamp_flow_policy.LAMPFlowPolicy",
+        "dexmani_policy.agents.core.lamp_policy.LAMPPolicy",
         "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy",
     }
 )
@@ -487,14 +511,6 @@ def validate_config(cfg):
         if point_limit < max(geometry_sizes.values()):
             raise ValueError("agent.num_points must be at least max(num_patches, group_size)")
     for child in cfg.dataset.get("datasets", [cfg.dataset]):
-        for name in ("prior_path", "latent_path", "codec_path"):
-            if name not in cfg.agent:
-                continue
-            agent_path, dataset_path = cfg.agent.get(name), child.get(name)
-            if not agent_path or not dataset_path:
-                raise ValueError(f"agent.{name} and dataset.{name} are required")
-            if Path(agent_path).expanduser().resolve() != Path(dataset_path).expanduser().resolve():
-                raise ValueError(f"agent.{name} must match dataset.{name}")
         if child.get("pc_dim") is not None and child.pc_dim != agent_pc_dim:
             raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
         validate_pc_color_augmentation(agent_pc_dim, child.get("augmentation_cfg"))
@@ -516,6 +532,24 @@ def validate_config(cfg):
         value = cfg.training.get("loop", {}).get(name, 100 if name == "log_interval_steps" else 1)
         positive_int(value, name)
     validate_window_contract(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
+    if cfg.agent.get("_target_") == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
+        windows = [cfg[name] for name in ("horizon", "n_obs_steps", "n_action_steps")]
+        windows += [cfg.agent[name] for name in ("horizon", "n_obs_steps", "n_action_steps")]
+        windows += [cfg.dataset.horizon, cfg.dataset.obs_horizon]
+        if any(type(value) is not int or value != 1 for value in windows):
+            raise ValueError("LAMP requires H=Nobs=C=1")
+        if cfg.action_key != "action" or cfg.agent.action_dim != 19:
+            raise ValueError("LAMP requires joint action=7+12")
+        if cfg.dataset.history_steps != cfg.agent.history_steps or cfg.lamp.history_steps != cfg.agent.history_steps:
+            raise ValueError("LAMP dataset/prior/policy history_steps must match")
+        if cfg.agent.get("num_inference_steps", 1) != 1 or cfg.eval.inference_steps != 1:
+            raise ValueError("LAMP requires inference_steps=1 in agent/eval")
+        if cfg.eval.get("inference_steps_list") not in (None, [1]):
+            raise ValueError("LAMP inference_steps_list must be null or [1]")
+    for section, key, agent_key in (("lamp", "prior_path", "prior_path"),
+                                    ("codec", "path", "codec_path")):
+        if section in cfg and Path(cfg[section][key]).expanduser().resolve() != Path(cfg.agent[agent_key]).expanduser().resolve():
+            raise ValueError(f"{section}.{key} must match agent.{agent_key}")
     validate_dataset_splits(cfg.dataset)
 
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:

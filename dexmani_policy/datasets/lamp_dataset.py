@@ -1,39 +1,27 @@
-"""Point-cloud windows with causal hand commands and frozen LAMP targets."""
+"""Point-cloud windows with strictly past hand commands."""
 
 from __future__ import annotations
 
 import hashlib
-import io
 import json
-from pathlib import Path
 
 import numpy as np
 import torch
 
 from dexmani_policy.datasets.pc_dataset import PCDataset
+from dexmani_policy.utils.hand_artifact import array_sha256
 
 OBS_ALIGNMENT = "obs[t]_before_action[t]"
 
 
-def array_sha256(values):
-    values = np.ascontiguousarray(values)
-    digest = hashlib.sha256()
-    digest.update(str((values.shape, values.dtype.str)).encode())
-    digest.update(values.tobytes())
-    return digest.hexdigest()
-
-
 class LampDataset(PCDataset):
-    """Pair causal command histories with per-source-frame absolute latent targets."""
+    """Pair observations/actions with strictly past physical hand commands."""
 
     def __init__(
         self,
         zarr_path,
         *,
         history_steps=8,
-        latent_path=None,
-        prior_path=None,
-        require_latents=True,
         obs_alignment=None,
         **kwargs,
     ):
@@ -47,17 +35,10 @@ class LampDataset(PCDataset):
         if "joint_state" not in modalities:
             raise ValueError("LAMP bootstrap requires joint_state observations")
         self.history_steps = history_steps
-        self.latent_path = str(Path(latent_path).expanduser().resolve()) if latent_path else None
-        self.prior_path = str(Path(prior_path).expanduser().resolve()) if prior_path else None
         self._alignment_assertion = obs_alignment
         self._lamp_ready = False
-        self.hand_latents = None
-        self.latent_scale = None
-        self.prior_sha256 = None
         super().__init__(zarr_path, **kwargs)
         self._lamp_train_source_rows = self.sampler.action_source_rows.copy()
-        if require_latents:
-            self.load_latents()
 
     def prepare_lamp_source(self):
         if self._lamp_ready:
@@ -180,86 +161,6 @@ class LampDataset(PCDataset):
             else validation.sampler.action_source_rows.tolist(),
         }
 
-    def load_latents(self):
-        if self.latent_path is None or self.prior_path is None:
-            raise ValueError("LAMP training requires latent_path and prior_path")
-        prior_bytes = Path(self.prior_path).read_bytes()
-        cache_bytes = Path(self.latent_path).read_bytes()
-        prior = torch.load(io.BytesIO(prior_bytes), map_location="cpu", weights_only=True)
-        cache = torch.load(io.BytesIO(cache_bytes), map_location="cpu", weights_only=True)
-        if not isinstance(prior, dict) or prior.get("_format") != "lamp_prior.v1":
-            raise ValueError("Expected lamp_prior.v1 artifact")
-        if not isinstance(cache, dict) or cache.get("_format") != "lamp_latents.v1":
-            raise ValueError("Expected lamp_latents.v1 artifact")
-        expected = self.lamp_metadata
-        for label, artifact in (("prior", prior), ("latent cache", cache)):
-            metadata = artifact.get("metadata", {})
-            if not isinstance(metadata, dict):
-                raise ValueError(f"Invalid {label} metadata")
-            for key, value in expected.items():
-                if metadata.get(key) != value:
-                    raise ValueError(f"LAMP {label} metadata mismatch: {key}")
-        self.prior_sha256 = hashlib.sha256(prior_bytes).hexdigest()
-        if cache.get("prior_sha256") != self.prior_sha256:
-            raise ValueError("LAMP latent cache prior_sha256 mismatch")
-        latent_dim = prior.get("model_config", {}).get("latent_dim")
-        if type(latent_dim) is not int or latent_dim < 1:
-            raise ValueError("LAMP prior requires a positive latent_dim")
-        latents, valid = cache.get("latents"), cache.get("valid")
-        errors, scale = cache.get("reconstruction_error"), cache.get("latent_scale")
-        n = len(self.hand_actions)
-        if (
-            not torch.is_tensor(latents)
-            or latents.dtype != torch.float32
-            or latents.shape != (n, latent_dim)
-        ):
-            raise ValueError("LAMP latents must be float32 [source_frames, latent_dim]")
-        if not torch.is_tensor(valid) or valid.dtype != torch.bool or valid.shape != (n,):
-            raise ValueError("LAMP latent valid must be bool [source_frames]")
-        if not torch.is_tensor(errors) or errors.dtype != torch.float32 or errors.shape != (n,):
-            raise ValueError("LAMP reconstruction_error must be float32 [source_frames]")
-        if (
-            not torch.is_tensor(scale)
-            or scale.dtype != torch.float32
-            or scale.shape != (latent_dim,)
-            or not torch.isfinite(scale).all()
-            or not (scale > 0).all()
-        ):
-            raise ValueError("LAMP latent_scale must be positive finite float32 [latent_dim]")
-        frame_valid = torch.from_numpy(
-            self.history_valid & np.isfinite(self.hand_actions).all(axis=-1)
-        )
-        if (valid & ~frame_valid).any():
-            raise ValueError("LAMP cache marks invalid hand/history source frames valid")
-        required = torch.tensor(
-            sorted(set(expected["train_source_rows"] + expected["val_source_rows"])),
-            dtype=torch.long,
-        )
-        if not valid[required].all():
-            raise ValueError(
-                "LAMP cache lacks valid labels for qualified train/validation source rows"
-            )
-        if (
-            not torch.isfinite(latents[valid]).all()
-            or not torch.isfinite(errors[valid]).all()
-            or (errors[valid] < 0).any()
-        ):
-            raise ValueError("LAMP valid latent labels and reconstruction errors must be finite")
-        self.hand_latents = latents
-        self.latent_scale = scale
-        self.data_recipe["lamp_latents"] = {
-            "sha256": hashlib.sha256(cache_bytes).hexdigest(),
-            "prior_sha256": self.prior_sha256,
-        }
-        # lamp_metadata may have constructed the shallow validation copy above.
-        if self._validation_dataset is not None:
-            self._validation_dataset.hand_latents = latents
-            self._validation_dataset.latent_scale = scale
-            self._validation_dataset.prior_sha256 = self.prior_sha256
-            self._validation_dataset.data_recipe["lamp_latents"] = dict(
-                self.data_recipe["lamp_latents"]
-            )
-
     def __getitem__(self, idx):
         if idx < 0:
             idx += len(self)
@@ -269,6 +170,4 @@ class LampDataset(PCDataset):
         rows = self.sampler.source_rows(self.sampler.indices[idx : idx + 1])[0]
         query = rows[self.obs_horizon - 1]
         data["action_context"] = {"hand_history": torch.from_numpy(self.history_for_frame(query))}
-        if self.hand_latents is not None:
-            data["hand_latent_target"] = self.hand_latents[torch.from_numpy(rows)]
         return data

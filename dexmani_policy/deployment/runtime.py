@@ -85,11 +85,6 @@ def inspect_policy(
         raise NotImplementedError(
             "MultiTask Real deployment lacks task selection and child numerical recipe restoration"
         )
-    if (
-        cfg["agent"].get("_target_") == "dexmani_policy.agents.core.lamp_flow_policy.LAMPFlowPolicy"
-        or cfg["dataset"].get("_target_") == "dexmani_policy.datasets.lamp_dataset.LampDataset"
-    ):
-        raise NotImplementedError("LAMP Real deployment requires executed hand-command history")
     resolved_best = resolve_best_checkpoint(directory) if checkpoint == "best" else None
     path = (
         resolved_best[1] if resolved_best is not None else resolve_checkpoint(directory, checkpoint)
@@ -107,6 +102,8 @@ def inspect_policy(
         defaults.get("inference_steps") if inference_steps is None else inference_steps,
         "inference_steps",
     )
+    if cfg["agent"].get("_target_") == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy" and steps != 1:
+        raise ValueError("LAMP PolicyInfo requires inference_steps=1")
     action_modes = {"action": "joint", "action_ee": "eef"}
     if cfg["action_key"] not in action_modes:
         raise ValueError("action_key must be action or action_ee")
@@ -129,7 +126,7 @@ def inspect_policy(
         positive_int(cfg["agent"]["n_action_steps"], "n_action_steps"),
         positive_int(cfg["agent"]["horizon"], "horizon"),
         action_modes[cfg["action_key"]],
-        recipe.get("dt") if recipe is not None else None,
+        (recipe or {}).get("dt", (cfg.get("action_space_artifact") or {}).get("source_contract", {}).get("dt")),
         recipe.get("pointcloud") if recipe is not None else None,
         tuple(links) if links is not None else None,
         weights,
@@ -162,7 +159,7 @@ def load_policy(config, info, *, device="cuda:0", seed=0):
 
 class LoadedPolicy:
     def __init__(self, agent, config, info, *, device, seed):
-        from dexmani_policy.agents.core.lamp_flow_policy import LAMPFlowPolicy
+        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
         from dexmani_policy.utils.config import (
             normalization_dims_from_config,
             resolve_normalization_spec,
@@ -171,8 +168,8 @@ class LoadedPolicy:
         )
         from dexmani_policy.utils.validation import validate_observation_fields
 
-        if isinstance(agent, LAMPFlowPolicy):
-            raise NotImplementedError("LAMP Real deployment requires executed hand-command history")
+        if isinstance(agent, LAMPPolicy):
+            agent.validate_inference_steps(info.inference_steps)
         if "task_text" in getattr(agent, "consumed_observation_fields", ()):
             raise NotImplementedError(
                 "MultiTask Real deployment lacks task selection and child recipe restoration"
@@ -226,7 +223,7 @@ class LoadedPolicy:
             raise ValueError("Agent normalization feature widths disagree with config")
         runtime = config.get("real_runtime") or {}
         if (
-            info.control_dt_s != runtime.get("dt")
+            info.control_dt_s != runtime.get("dt", (config.get("action_space_artifact") or {}).get("source_contract", {}).get("dt"))
             or info.pointcloud_config != runtime.get("pointcloud")
             or info.fingertip_link_names
             != (
@@ -295,6 +292,11 @@ class LoadedPolicy:
             reset()
 
     def configure_execution(self, mode, guidance_cap=None):
+        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
+        from dexmani_policy.agents.core.temporal_latent_flow_policy import TemporalLatentFlowPolicy
+
+        if isinstance(self.agent, (LAMPPolicy, TemporalLatentFlowPolicy)) and mode in {"async", "rtc"}:
+            raise NotImplementedError("LAMP and Temporal support sync execution only")
         if mode == "rtc":
             self.configure_rtc(guidance_cap)
         elif mode in {"sync", "async"}:
@@ -318,7 +320,7 @@ class LoadedPolicy:
         )
         self.rtc_guidance_cap = guidance_cap
 
-    def predict(self, observation, *, rtc_prefix=None, delay_steps=0):
+    def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0):
         import torch
 
         from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
@@ -352,6 +354,20 @@ class LoadedPolicy:
             tensors[name] = tensor.unsqueeze(0).to(self._device)
         dimensions = self.agent.control_action_dim
         kwargs = {}
+        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
+
+        if isinstance(self.agent, LAMPPolicy):
+            if not isinstance(action_context, dict) or set(action_context) != {"hand_history"}:
+                raise ValueError("LAMP requires only action_context.hand_history from executed commands")
+            history = action_context["hand_history"]
+            if (not isinstance(history, np.ndarray) or history.dtype.kind not in "fiu"
+                    or history.shape != (self.agent.history_steps, self.agent.hand_dim)
+                    or not np.isfinite(history).all()):
+                raise ValueError("hand_history must be finite physical NumPy [K,12]")
+            kwargs["action_context"] = {"hand_history": torch.tensor(
+                history, device=self._device, dtype=torch.float32).unsqueeze(0)}
+        elif action_context is not None and (not isinstance(action_context, dict) or action_context):
+            raise ValueError("This runtime policy does not accept external action_context keys")
         if rtc_prefix is not None:
             prefix = np.asarray(rtc_prefix)
             if (
@@ -364,7 +380,7 @@ class LoadedPolicy:
                 <= self.info.horizon - self.info.n_obs_steps + 1
             ):
                 raise ValueError("Invalid physical RTC prefix")
-            kwargs = dict(
+            kwargs.update(
                 rtc_prefix=torch.as_tensor(prefix, device=self._device).unsqueeze(0),
                 delay_steps=delay_steps,
                 rtc_guidance_cap=self.rtc_guidance_cap,
@@ -420,7 +436,7 @@ class LoadedPolicy:
             elif name == "point_cloud":
                 shape, dtype = (
                     (
-                        self.info.pointcloud_config["num_points"],
+                        (self.info.pointcloud_config or {}).get("num_points", self.agent.obs_encoder.num_points),
                         6,
                     ),
                     np.float32,
@@ -435,11 +451,18 @@ class LoadedPolicy:
                 else ((values % 101) / 100.0 - 0.5).astype(dtype)
             )
 
+        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
+
+        context = None
+        if isinstance(self.agent, LAMPPolicy):
+            context = {"hand_history": np.repeat(observation["joint_state"][-1:, -12:],
+                                                self.agent.history_steps, axis=0)}
+
         def measure(**kwargs):
             durations = []
             for _ in range(samples):
                 start = time.perf_counter_ns()
-                self.predict(observation, **kwargs)
+                self.predict(observation, action_context=context, **kwargs)
                 durations.append((time.perf_counter_ns() - start) / 1e9)
             return tuple(durations)
 
@@ -447,12 +470,12 @@ class LoadedPolicy:
         try:
             # Initialization is outside the measured set; its finite result is the
             # reusable synthetic prefix in physical units for the guided path.
-            prefix = self.predict(observation)
+            prefix = self.predict(observation, action_context=context)
             bootstrap = measure()
             steady = bootstrap
             if self.rtc_guidance_cap > 0:
                 kwargs = {"rtc_prefix": prefix, "delay_steps": rtc_delay}
-                self.predict(observation, **kwargs)
+                self.predict(observation, action_context=context, **kwargs)
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}
         finally:

@@ -19,14 +19,18 @@ from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE
 from dexmani_policy.datasets.temporal_codec_dataset import TemporalCodecDataset
 from dexmani_policy.training.train_lamp_prior import load_policy_config
 from dexmani_policy.utils.atomic import atomic_path
+from dexmani_policy.utils.config import resolve_normalization_spec
 from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.hand_artifact import (
+    source_contract, metadata_sha256, validate_selection_schedule,
+)
 
 
 def validate_config_paths(cfg):
     paths = [Path(value).expanduser().resolve() for value in
-             (cfg.codec.path, cfg.dataset.codec_path, cfg.agent.codec_path)]
-    if paths[1:] != [paths[0], paths[0]]:
-        raise ValueError("codec.path, dataset.codec_path and agent.codec_path must match")
+             (cfg.codec.path, cfg.agent.codec_path)]
+    if paths[1:] != [paths[0]]:
+        raise ValueError("codec.path and agent.codec_path must match")
     return paths[0]
 
 
@@ -37,7 +41,7 @@ def build_codec_dataset(cfg):
         raise ValueError("Prepare codec from a fresh policy config, not resume_from")
     # Preserve all modality validity checks and split/window settings. Only the
     # pretraining batch path below bypasses point-cloud reads and augmentation.
-    dataset = hydra.utils.instantiate(cfg.dataset, require_codec=False)
+    dataset = hydra.utils.instantiate(cfg.dataset)
     if not isinstance(dataset, TemporalCodecDataset):
         raise TypeError("Temporal codec pretraining requires TemporalCodecDataset")
     if dataset.horizon != int(cfg.horizon) or dataset.obs_horizon != int(cfg.n_obs_steps):
@@ -105,13 +109,18 @@ def save_codec(path, codec, dataset, cfg, args, step, metrics, statistics):
     codec.validate_state()
     metadata = dict(dataset.codec_metadata)
     metadata["relative_statistics"] = statistics
-    metadata["reference_augmentation"] = {
-        "mode": "independent_gaussian_per_window_joint",
-        "units": "radians", "std": float(args.reference_noise_std),
-        "generator_seed": int(args.seed) + 1,
-        "physical_action_target": "unchanged",
-        "statistics": "unaugmented_training_windows",
-    }
+    contract = source_contract(dataset)
+    evaluation = metrics["evaluation"]
+    metadata.update(implementation=dataset.hand_implementation_version, source_contract=contract,
+                    source_contract_sha256=metadata_sha256(contract),
+                    model_config=codec.model_config, normalization_spec=resolve_normalization_spec(cfg),
+                    selection=dict(selection_step=int(step), beta=metrics["beta"], target_beta=args.beta,
+                                   eligible_step=args.kl_warmup + max(1, args.kl_ramp),
+                                   split=metrics["selection_split"], metric="physical_mae",
+                                   value=evaluation["physical_mae"],
+                                   reconstruction=evaluation["reconstruction"], kl=evaluation["kl"],
+                                   physical_joint_mae=evaluation["physical_joint_mae"]))
+    metadata["reference"] = "unaugmented_raw_query_hand_fixed_for_full_chunk"
     metadata["loss_reduction"] = {
         "kl": "mean_over_batch_time_latent",
         "reconstruction": "weighted_huber_mean_over_batch_valid_frames_joints",
@@ -134,11 +143,12 @@ def train(args):
     for key in ("kl_warmup", "kl_ramp"):
         if getattr(args, key) < 0:
             raise ValueError(f"{key} must be nonnegative")
-    for key in ("beta", "weight_decay", "reference_noise_std"):
+    for key in ("beta", "weight_decay"):
         if not 0 <= getattr(args, key) < float("inf"):
             raise ValueError(f"{key} must be nonnegative and finite")
     if not 0 < args.lr < float("inf") or not 0 < args.clip_grad < float("inf"):
         raise ValueError("lr and clip_grad must be positive and finite")
+    validate_selection_schedule(args.steps, args.beta, args.kl_warmup + max(1, args.kl_ramp))
     cfg = load_policy_config(args)
     output = validate_config_paths(cfg)
     if output.exists() and not args.overwrite:
@@ -148,11 +158,10 @@ def train(args):
         raise RuntimeError("CUDA is unavailable; pass --device cpu for a small local check")
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    reference_rng = (torch.Generator(device=device).manual_seed(args.seed + 1)
-                     if args.reference_noise_std > 0 else None)
     dataset = build_codec_dataset(cfg)
+    source_contract(dataset)
     validation = dataset.get_validation_dataset()
-    selection = "validation" if validation is not None else "train (no held-out windows)"
+    selection = "validation" if validation is not None else "final_no_holdout"
     selection_dataset = validation if validation is not None else dataset
     codec = TemporalHandVAE(
         hand_dim=12, horizon=dataset.horizon, latent_dim=int(cfg.codec.latent_dim),
@@ -169,7 +178,7 @@ def train(args):
     optimizer = torch.optim.AdamW(codec.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps)
     print(f"Codec windows: train={len(dataset)}, validation={0 if validation is None else len(validation)}; "
-          f"best checkpoint selected by {selection} physical MAE; output={output}")
+          f"selection={selection}, metric=physical MAE; output={output}")
     print(f"Relative statistics: {statistics}")
     best_mae = float("inf")
     order, cursor = rng.permutation(len(dataset)), 0
@@ -179,12 +188,6 @@ def train(args):
         indices = order[cursor:cursor + args.batch_size]
         cursor += len(indices)
         actions, q0 = raw_batch(dataset, indices, device)
-        # Optional robustness experiment: the same perturbed reference is used
-        # throughout this window, while physical command targets stay unchanged.
-        # An independent generator preserves the posterior-noise RNG sequence.
-        if reference_rng is not None:
-            q0 = q0 + args.reference_noise_std * torch.randn(
-                q0.shape, device=q0.device, dtype=q0.dtype, generator=reference_rng)
         mu, log_var = codec.encode(actions, q0)
         z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
         reconstruction = codec.reconstruction_loss(codec.decode(z, q0), codec.normalize_actions(actions, q0))
@@ -203,14 +206,15 @@ def train(args):
                    "kl": float(kl.detach()), "beta": beta, "lr": lr}
         if step == 1 or step % args.print_every == 0:
             print(f"Step {step}/{args.steps}: {metrics}")
-        if step % args.eval_every == 0 or step == args.steps:
+        eligible = step >= args.kl_warmup + max(1, args.kl_ramp)
+        if eligible and ((validation is not None and step % args.eval_every == 0) or step == args.steps):
             evaluation = evaluate(codec, selection_dataset, args.batch_size)
             metrics.update(selection_split=selection, evaluation=evaluation)
             print(f"{selection} at {step}: {evaluation}")
-            if evaluation["physical_mae"] < best_mae:
+            if validation is None or evaluation["physical_mae"] < best_mae:
                 best_mae = evaluation["physical_mae"]
                 save_codec(output, codec, dataset, cfg, args, step, metrics, statistics)
-    print(f"Saved best {selection} codec: {output}")
+    print(f"Saved {selection} codec: {output}")
 
 
 def main():
@@ -227,8 +231,6 @@ def main():
     parser.add_argument("--beta", type=float, default=3e-4)
     parser.add_argument("--kl-warmup", type=int, default=4000)
     parser.add_argument("--kl-ramp", type=int, default=4000)
-    parser.add_argument("--reference-noise-std", type=float, default=0.0,
-                        help="Optional train-only q0 Gaussian noise std in radians; paper baseline uses 0")
     parser.add_argument("--clip-grad", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--eval-every", type=int, default=1000)

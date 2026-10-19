@@ -50,15 +50,12 @@ class TemporalLatentFlowPolicy(BasePolicy):
         latent_loss_weight: float = 0.25,
         decoded_loss_weight: float = 0.75,
         modality_dropout_probs: dict | None = None,
-        decoded_loss_space: str = "standardized",
     ) -> None:
         validate_window_contract(horizon, n_obs_steps, n_action_steps)
         if action_dim != 19 or state_dim != 19:
             raise ValueError(
                 "Temporal codec currently requires joint actions/state: 7 arm + 12 hand"
             )
-        if decoded_loss_space not in ("standardized", "physical"):
-            raise ValueError("decoded_loss_space must be 'standardized' or 'physical'")
         for weight in (arm_loss_weight, latent_loss_weight, decoded_loss_weight):
             if not 0 <= weight < float("inf"):
                 raise ValueError("Temporal codec loss weights must be finite and nonnegative")
@@ -109,7 +106,6 @@ class TemporalLatentFlowPolicy(BasePolicy):
         self.arm_loss_weight = arm_loss_weight
         self.latent_loss_weight = latent_loss_weight
         self.decoded_loss_weight = decoded_loss_weight
-        self.decoded_loss_space = decoded_loss_space
         self.codec = TemporalHandVAE(
             hand_dim=12,
             horizon=horizon,
@@ -126,10 +122,17 @@ class TemporalLatentFlowPolicy(BasePolicy):
 
     def initialize_training(self) -> None:
         self.codec_initialized = False
-        codec, _ = load_temporal_vae(self.codec_path)
+        if not self.codec_path:
+            raise ValueError("Fresh Temporal training requires codec_path")
+        codec, payload = load_temporal_vae(self.codec_path)
         if codec.model_config != self.codec.model_config:
             raise ValueError("Temporal codec architecture differs from the policy configuration")
         self.codec.load_state_dict(codec.state_dict(), strict=True)
+        from dexmani_policy.utils.hand_artifact import artifact_record
+
+        self.action_space_artifact = artifact_record(
+            "temporal", "temporal_hand_codec.v1", payload["_file_sha256"], payload["metadata"], self.codec,
+        )
         self.codec_initialized = True
 
     def validate_restored_codec(self, module: torch.nn.Module, incompatible_keys) -> None:
@@ -196,12 +199,8 @@ class TemporalLatentFlowPolicy(BasePolicy):
             hand_target = self.codec.normalize_actions(
                 batch["action"][..., self.arm_dim :].float(), reference
             )
-            if self.decoded_loss_space == "physical":
-                # The common q0 and mean cancel in physical command error.
-                error = (decoded - hand_target) * self.codec.action_std
-                decoded_loss = error.square().mean()
-            else:
-                decoded_loss = F.mse_loss(decoded, hand_target)
+            decoded_loss = F.mse_loss(decoded, hand_target)
+            physical_error = (decoded.detach() - hand_target) * self.codec.action_std
         loss = flow_loss + self.decoded_loss_weight * decoded_loss
         metrics = dict(
             loss=loss,
@@ -210,6 +209,8 @@ class TemporalLatentFlowPolicy(BasePolicy):
             loss_latent=latent_loss,
             loss_decoded_hand=decoded_loss,
             t_mean=t.mean(),
+            physical_hand_mae=physical_error.abs().mean(),
+            physical_hand_rmse=physical_error.square().mean().sqrt(),
         )
         return loss, metrics
 

@@ -17,6 +17,12 @@ NON_NUMERIC_OBSERVATION_FIELDS = frozenset({"task_text", "task_name"})
 ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
 
 
+ARTIFACT_LOCATION_FIELDS = {
+    'lamp.prior_path', 'codec.path', 'codebook_path',
+    'agent.prior_path', 'agent.codec_path', 'agent.codebook_path',
+}
+
+
 RESUME_OPERATIONAL_FIELDS = {
     'resume_from', 'max_updates', 'workspace.output_dir', 'workspace.wandb_cfg',
     'training.device', 'training.gpu_ids', 'training.use_compile', 'training.compile_mode',
@@ -35,6 +41,7 @@ def recipe_content(config):
             for key, child in value.items():
                 child_path = f'{path}.{key}' if path else key
                 if (child_path in RESUME_OPERATIONAL_FIELDS
+                        or child_path in ARTIFACT_LOCATION_FIELDS
                         or child_path == 'normalizer_source'
                         or re.fullmatch(r'dataset\.(?:datasets\.\d+\.)?zarr_path', child_path)):
                     continue
@@ -127,7 +134,7 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
                     raise ValueError(f'Resume task identity mismatch: requested={requested!r}, saved={identity!r}')
                 continue
             data_path = re.fullmatch(r'dataset\.(?:datasets\.\d+\.)?zarr_path', key) is not None
-            if key not in RESUME_OPERATIONAL_FIELDS and not key.startswith('workspace.wandb_cfg.') and not data_path:
+            if key not in RESUME_OPERATIONAL_FIELDS and key not in ARTIFACT_LOCATION_FIELDS and not key.startswith('workspace.wandb_cfg.') and not data_path:
                 raise ValueError(f'Resume recipe is owned by saved config; forbidden override: {key}')
             if key == 'resume_from':
                 continue

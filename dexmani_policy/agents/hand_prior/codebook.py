@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import io
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -31,6 +32,8 @@ def summarize_codebook_metadata(metadata: dict) -> dict:
         "checkpoint_metrics",
         "export_diagnostics",
         "source_summary",
+        "source_contract", "source_contract_sha256", "selection", "model_config", "implementation",
+        "normalization_spec", "prototype_count", "ordering", "layer_weights",
     }
     result = {key: value for key, value in metadata.items() if key in keys}
     if "split_metadata" in metadata:
@@ -50,8 +53,8 @@ def summarize_codebook_metadata(metadata: dict) -> dict:
         for key in ("train_source_rows", "val_source_rows", "train_episode_ids", "val_episode_ids"):
             if key in split:
                 summary[key + "_count"] = len(split[key])
-        summary["split_metadata_sha256"] = hashlib.sha256(
-            json.dumps(split, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        summary["source_contract_sha256"] = hashlib.sha256(
+            json.dumps(split.get("source_contract"), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         ).hexdigest()
         result["source_summary"] = summary
     return result
@@ -214,7 +217,8 @@ class HandStateCodebook(nn.Module):
             np.savez(file, **payload)
 
     def load(self, path: str | Path) -> None:
-        with np.load(Path(path), allow_pickle=False) as data:
+        raw = Path(path).expanduser().read_bytes()
+        with np.load(io.BytesIO(raw), allow_pickle=False) as data:
             if (
                 data["format_version"].item() != self.FORMAT_VERSION
                 or data["pose_space"].item() != "affine_raw"
@@ -228,7 +232,11 @@ class HandStateCodebook(nn.Module):
             values = {name: torch.from_numpy(data[name].copy()) for name in self.BUFFER_NAMES}
             metadata = summarize_codebook_metadata(json.loads(data["metadata_json"].item()))
         self.set_buffers(values)
+        from dexmani_policy.utils.hand_artifact import validate_source_metadata
+
+        validate_source_metadata(metadata)
         self.artifact_metadata = metadata
+        self.artifact_sha256 = hashlib.sha256(raw).hexdigest()
 
     def extra_repr(self) -> str:
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}, loaded={self.is_loaded}"

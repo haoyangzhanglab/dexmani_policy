@@ -34,7 +34,11 @@ def load_checkpoint_snapshot(path):
 
 @torch.no_grad()
 def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
-    validate_dq_normalization(checkpoint["split_metadata"]["normalization_spec"])
+    from dexmani_policy.utils.hand_artifact import validate_source_metadata, implementation_version
+
+    split = checkpoint["split_metadata"]
+    validate_source_metadata(split)
+    validate_dq_normalization(split["normalization_spec"])
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
     codebook = HandStateCodebook(model.hand_dim, model.num_groups, model.codebook_size)
     embeddings = model.codebooks
@@ -71,6 +75,18 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
     }
     codebook.artifact_metadata = summarize_codebook_metadata({
         **checkpoint["model_config"],
+        "model_config": checkpoint["model_config"],
+        "implementation": {"training": split.get("implementation"), "export": implementation_version()},
+        "source_contract": split["source_contract"],
+        "source_contract_sha256": split["source_contract_sha256"],
+        "normalization_spec": split["normalization_spec"],
+        "prototype_count": codebook.num_codes,
+        "ordering": "decoded_prototype_pca1_ascending",
+        "layer_weights": weights.cpu().tolist(),
+        "selection": {"selection_step": int(checkpoint["epoch"]), "unit": "epoch",
+                      "split": "validation" if split["val_frame_count"] else "train_no_holdout",
+                      "metric": split["selection_metric"],
+                      "value": checkpoint["metrics"][split["selection_metric"]]},
         "source_checkpoint": str(Path(checkpoint_path).resolve()),
         "source_checkpoint_sha256": source_hash,
         "source_epoch": int(checkpoint["epoch"]),

@@ -1,12 +1,11 @@
-# LAMP-style hand prior + Sparse3DEncoder/DiT-X flow matching.
-# Prepare the prior and per-frame latent labels before policy training.
-policy_name: lamp_flow
+# Single-step LAMP BC with a frozen history-conditioned prior.
+policy_name: lamp
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 seed: 42
-horizon: 16
-n_obs_steps: 2
-n_action_steps: 8
+horizon: 1
+n_obs_steps: 1
+n_action_steps: 1
 action_key: action
 action_dim: 19
 
@@ -15,7 +14,6 @@ lamp:
   latent_dim: 2
   hidden_dim: 256
   prior_path: experiments/lamp_prior/${task_name}/prior.pt
-  latent_path: experiments/lamp_prior/${task_name}/latents.pt
 
 normalization:
   joint_state: limits
@@ -45,8 +43,6 @@ dataset:
   max_train_episodes: 80
   sensor_modalities: [joint_state, point_cloud]
   history_steps: ${lamp.history_steps}
-  prior_path: ${lamp.prior_path}
-  latent_path: ${lamp.latent_path}
   # Read the dataset metadata. For older data, assert obs_before_action only
   # after checking the recording alignment; never infer it from array indices.
   obs_alignment: null
@@ -59,13 +55,12 @@ dataset:
       noise: {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  _target_: dexmani_policy.agents.core.lamp_flow_policy.LAMPFlowPolicy
+  _target_: dexmani_policy.agents.core.lamp_policy.LAMPPolicy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
   prior_path: ${lamp.prior_path}
-  latent_path: ${lamp.latent_path}
   history_steps: ${lamp.history_steps}
   latent_dim: ${lamp.latent_dim}
   prior_hidden_dim: ${lamp.hidden_dim}
@@ -88,20 +83,9 @@ agent:
     geometry_scale: 0.10
     rope_scale: 0.05
     rope_base: 100.0
-  n_layers: 8
-  hidden_dim: 768
-  n_head: 8
-  mlp_ratio: 4.0
-  p_drop_attn: 0.1
-  qkv_bias: true
-  qk_norm: true
-  num_inference_steps: 10
-  t_sample_mode_for_flow: beta
-  beta_s: 0.999
-  beta_alpha: 1.0
-  beta_beta: 1.5
-  latent_loss_weight: 1.0
-  decoded_loss_weight: 1.0
+  num_inference_steps: 1
+  hand_loss_weight: 1.0
+  offset_reg_weight: 1.0e-3
   modality_dropout_probs:
     joint_state: 0.0
 
@@ -162,7 +146,7 @@ env_runner:
     table_random: true
 
 eval:
-  inference_steps: 10
+  inference_steps: 1
   inference_steps_list: null
   use_ema: true
   select_best:

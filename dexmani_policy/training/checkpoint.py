@@ -74,6 +74,10 @@ class CheckpointStore:
         config = payload.get("effective_config")
         if not isinstance(config, dict) or not config:
             raise ValueError("Checkpoint requires a nonempty effective_config mapping")
+        if (config.get("dataset", {}).get("_target_") == "dexmani_policy.datasets.lamp_dataset.LampDataset"
+                and config.get("agent", {}).get("_target_") != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy"):
+            raise ValueError("Historical LAMP checkpoint: use its historical checkout or retrain "
+                             "the single-step LAMPPolicy with lamp_prior.v2")
         return payload
 
     def load_inference(self, path: Path, *, use_ema: bool, payload=None):
@@ -253,6 +257,9 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     agent.set_normalization_spec(resolve_normalization_spec(cfg), normalization_dims_from_config(cfg))
     agent.load_state_dict(state, strict=True)
     agent.validate_normalizer()
+    from dexmani_policy.utils.hand_artifact import restore_artifact_metadata
+
+    restore_artifact_metadata(agent, saved_config)
     agent._inference_config = saved_config
     agent.to(device)
     agent.eval()

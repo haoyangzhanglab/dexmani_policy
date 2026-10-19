@@ -47,7 +47,6 @@ dataset:
   val_ratio: 0.0
   max_train_episodes: 80
   sensor_modalities: [joint_state, point_cloud]
-  codec_path: ${codec.path}
   # Read the dataset metadata. For older data, assert obs_before_action only
   # after checking the recording alignment; never infer it from array indices.
   obs_alignment: null
@@ -105,9 +104,8 @@ agent:
   # Each loss is a mean over its own coordinates and full horizon.
   arm_loss_weight: 1.0
   latent_loss_weight: 0.25
+  # Decoded MSE is always in standardized relative coordinates.
   decoded_loss_weight: 0.75
-  # Explicit local metric choice; physical uses squared joint errors in rad^2.
-  decoded_loss_space: standardized
   modality_dropout_probs:
     joint_state: 0.0
 

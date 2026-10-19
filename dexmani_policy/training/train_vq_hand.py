@@ -180,7 +180,13 @@ def prepare_policy_data(cfg):
     val = dataset.get_validation_dataset()
     train_hand = policy_hand_rows(dataset, cfg.agent.tcp_dim)
     val_hand = policy_hand_rows(val, cfg.agent.tcp_dim)
+    from dexmani_policy.utils.hand_artifact import source_contract, metadata_sha256
+
+    contract = source_contract(dataset)
     metadata = {
+        "implementation": dataset.hand_implementation_version,
+        "source_contract": contract,
+        "source_contract_sha256": metadata_sha256(contract),
         "normalization_scope": "unique_valid_policy_train_action_source_rows",
         "policy_config": OmegaConf.to_container(cfg, resolve=False),
         "resolved_dataset": OmegaConf.to_container(cfg.dataset, resolve=True),

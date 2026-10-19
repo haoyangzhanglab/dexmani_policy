@@ -1,6 +1,6 @@
 """Train the LAMP hand prior on the policy dataset's eligible source rows.
 
-Example: python -m dexmani_policy.training.train_lamp_prior --config lamp_flow
+Example: python -m dexmani_policy.training.train_lamp_prior --config lamp
          zarr_path=/path/to/data.zarr dataset.obs_alignment=obs_before_action
 """
 
@@ -17,15 +17,18 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.utils.config import resolve_normalization_spec
-from dexmani_policy.training.build_utils import build_normalizer
+from dexmani_policy.training.build_utils import build_normalizer, validate_config
 from dexmani_policy.utils.atomic import atomic_path
 from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.hand_artifact import (
+    source_contract, metadata_sha256, validate_selection_schedule,
+)
 
 
 def add_config_arguments(parser):
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--config", default="lamp_flow", help="Hydra policy config name")
+    group.add_argument("--config", default="lamp", help="Hydra policy config name")
     group.add_argument("--policy-config", help="Policy YAML path instead of a config name")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. zarr_path=...")
 
@@ -48,11 +51,12 @@ def build_prior_dataset(cfg):
     """Bootstrap the exact policy split/history rules without opening artifacts."""
     from dexmani_policy.datasets.lamp_dataset import LampDataset
 
+    validate_config(cfg)
     if cfg.action_key != "action" or int(cfg.action_dim) != 19:
         raise ValueError("The initial LAMP baseline requires joint actions: arm 7 + hand 12")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare prior artifacts from a fresh policy config, not resume_from")
-    dataset = hydra.utils.instantiate(cfg.dataset, require_latents=False)
+    dataset = hydra.utils.instantiate(cfg.dataset)
     if not isinstance(dataset, LampDataset):
         raise TypeError("LAMP prior preparation requires LampDataset")
     return dataset
@@ -69,14 +73,6 @@ def source_rows(dataset):
     if not len(train):
         raise ValueError("No eligible training hand targets")
     return train, val
-
-
-def validate_source_metadata(metadata, dataset):
-    expected = dataset.lamp_metadata
-    for key in ("source_fingerprint", "source_metadata", "train_mask", "val_mask",
-                "train_source_rows", "val_source_rows"):
-        if metadata.get(key) != expected[key]:
-            raise ValueError(f"Prior and policy dataset disagree on {key}")
 
 
 def raw_batch(dataset, rows, device):
@@ -115,12 +111,24 @@ def evaluate(prior, dataset, rows, batch_size):
 
 def save_prior(path, prior, dataset, cfg, args, step, metrics, optimizer):
     prior.ready.fill_(True)
+    contract = source_contract(dataset)
+    evaluation = metrics["evaluation"]
+    metadata = dict(dataset.lamp_metadata)
+    metadata.update(implementation=dataset.hand_implementation_version, source_contract=contract,
+                    source_contract_sha256=metadata_sha256(contract),
+                    model_config=prior.model_config, normalization_spec=resolve_normalization_spec(cfg),
+                    selection=dict(selection_step=int(step), beta=metrics["beta"], target_beta=args.beta,
+                                   eligible_step=max(1, args.beta_warmup),
+                                   split="validation" if dataset.val_mask.any() else "final_no_holdout",
+                                   metric="prior_mean_mse", value=evaluation["mse"],
+                                   reconstruction=evaluation["mse"], kl=evaluation["kl"],
+                                   physical_joint_mae=evaluation["physical_joint_mae"]))
     payload = {
-        "_format": "lamp_prior.v1",
+        "_format": "lamp_prior.v2",
         "model_config": dict(prior.model_config),
         "model_state_dict": {key: value.detach().cpu().clone()
                              for key, value in prior.state_dict().items()},
-        "metadata": dict(dataset.lamp_metadata),
+        "metadata": metadata,
         "policy_config": OmegaConf.to_container(cfg, resolve=False),
         "train_args": vars(args), "step": int(step), "metrics": metrics,
         "optimizer_state_dict": optimizer.state_dict(),
@@ -142,6 +150,7 @@ def train(args):
         raise ValueError("lr and clip_grad must be positive and finite")
     if args.min_lr > args.lr:
         raise ValueError("min_lr must not exceed lr")
+    validate_selection_schedule(args.steps, args.beta, max(1, args.beta_warmup))
     cfg = load_policy_config(args)
     output = Path(args.output or cfg.lamp.prior_path).expanduser()
     if output.exists() and not args.overwrite:
@@ -152,6 +161,7 @@ def train(args):
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     dataset = build_prior_dataset(cfg)
+    source_contract(dataset)
     train_rows, val_rows = source_rows(dataset)
     prior = HandMotionPrior(
         hand_dim=12, history_steps=int(cfg.lamp.history_steps),
@@ -205,15 +215,16 @@ def train(args):
                         "kl": float(kl.detach()), "beta": beta, "lr": lr}
         if step == 1 or step % args.print_every == 0:
             print(f"Step {step}/{args.steps}: {last_metrics}")
-        if step % args.eval_every == 0 or step == args.steps:
-            validation = evaluate(prior, dataset, val_rows, args.batch_size)
-            last_metrics["validation"] = validation
-            if validation is not None:
-                print(f"Validation at {step}: {validation}")
-                if validation["mse"] < best_mse:
-                    best_mse = validation["mse"]
+        if (step % args.eval_every == 0 or step == args.steps) and step >= max(1, args.beta_warmup):
+            if len(val_rows):
+                evaluation = evaluate(prior, dataset, val_rows, args.batch_size)
+                last_metrics["evaluation"] = evaluation
+                print(f"Validation at {step}: {evaluation}")
+                if evaluation["mse"] < best_mse:
+                    best_mse = evaluation["mse"]
                     save_prior(output, prior, dataset, cfg, args, step, last_metrics, optimizer)
             elif step == args.steps:
+                last_metrics["evaluation"] = evaluate(prior, dataset, train_rows, args.batch_size)
                 save_prior(output, prior, dataset, cfg, args, step, last_metrics, optimizer)
     print(f"Saved {'best validation' if len(val_rows) else 'final'} prior: {output}")
 

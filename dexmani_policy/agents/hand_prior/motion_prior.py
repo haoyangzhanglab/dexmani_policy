@@ -44,7 +44,6 @@ class HandMotionPrior(nn.Module):
         )
         self.register_buffer("hand_scale", torch.ones(hand_dim))
         self.register_buffer("hand_offset", torch.zeros(hand_dim))
-        self.register_buffer("latent_scale", torch.ones(latent_dim))
         self.register_buffer("ready", torch.tensor(False))
 
     def normalize_hand(self, raw: Tensor) -> Tensor:
@@ -76,71 +75,16 @@ class HandMotionPrior(nn.Module):
             raise ValueError("Prior checkpoint is not ready")
         if not all(torch.isfinite(value).all() for value in self.state_dict().values()):
             raise ValueError("Prior checkpoint contains nonfinite tensors")
-        if (self.hand_scale <= 0).any() or (self.latent_scale <= 0).any():
+        if (self.hand_scale <= 0).any():
             raise ValueError("Prior normalization scales must be positive")
-
-    @torch.enable_grad()
-    def invert(
-        self,
-        target_raw: Tensor,
-        history_raw: Tensor,
-        steps: int = 100,
-        lr: float = 0.05,
-        center_penalty: float = 0.0,
-    ) -> Tensor:
-        """Retain each sample's best latent, including its initial history mean."""
-        if steps < 0:
-            raise ValueError("Inversion steps must be nonnegative")
-        if not 0 < lr < float("inf"):
-            raise ValueError("Inversion learning rate must be positive and finite")
-        if not 0 <= center_penalty < float("inf"):
-            raise ValueError("Inversion center_penalty must be nonnegative and finite")
-
-        with torch.no_grad():
-            target = self.normalize_hand(target_raw)
-            mu, _ = self.encode_history(history_raw)
-            if target.shape[:-1] != mu.shape[:-1] or target.numel() == 0:
-                raise ValueError("Inversion requires nonempty matching target/history batches")
-        best = mu.clone()
-        best_objective = mu.new_full(mu.shape[:-1], torch.inf)
-        # Accumulate finite checks on-device and synchronize once after inversion.
-        finite = mu.new_ones((), dtype=torch.bool)
-        z = mu.clone().requires_grad_(True)
-        optimizer = torch.optim.Adam([z], lr=lr)
-
-        for step in range(steps + 1):
-            with torch.set_grad_enabled(step < steps):
-                objective = (self.decode(z) - target).square().mean(dim=-1)
-                if center_penalty:
-                    objective = objective + center_penalty * (z - mu).square().mean(dim=-1)
-
-            with torch.no_grad():
-                valid = torch.isfinite(objective)
-                finite &= valid.all()
-                improved = valid & (objective < best_objective)
-                best = torch.where(improved.unsqueeze(-1), z, best)
-                best_objective = torch.where(improved, objective, best_objective)
-
-            if step == steps:
-                break
-            # Summed objectives keep each latent update independent of batch size.
-            (gradient,) = torch.autograd.grad(objective.sum(), z)
-            finite &= torch.isfinite(gradient).all()
-            z.grad = gradient
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-
-        if not finite:
-            raise ValueError("Decoder inversion produced nonfinite objectives or gradients")
-        return best.detach()
 
 
 def load_motion_prior(path: str | Path) -> tuple[HandMotionPrior, dict]:
     """Restore a complete artifact, retaining the hash of exactly these bytes."""
     raw = Path(path).expanduser().read_bytes()
     payload = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("_format") != "lamp_prior.v1":
-        raise ValueError("Expected a lamp_prior.v1 checkpoint")
+    if not isinstance(payload, dict) or payload.get("_format") != "lamp_prior.v2":
+        raise ValueError("Expected lamp_prior.v2; regenerate the prior or checkout the historical code for v1")
     prior = HandMotionPrior(**payload["model_config"])
     prior.load_state_dict(payload["model_state_dict"], strict=True)
     prior.validate_state()
