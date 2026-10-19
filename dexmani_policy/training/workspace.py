@@ -1,5 +1,4 @@
 import atexit
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -31,10 +30,7 @@ class WandbConfig:
     project: str
     group: str
     name: str
-    id: str
-    resume: str
     mode: str
-    video_fps: int = 15
 
 
 class TrainWorkspace:
@@ -46,24 +42,15 @@ class TrainWorkspace:
         self.checkpoint_store = CheckpointStore(self.checkpoint_dir)
 
         self.json_logger = JsonlLogger(output_dir=self.output_dir)
-        # Include a random suffix: sweep basenames such as "0"
-        # repeat across launches and cannot identify a W&B run on their own.
         self.wandb_logger = None
         if wandb_cfg is not None:
             try:
-                # DDP policy prefixes (including saved resume configs) contain '/';
-                # W&B permits it in display names/groups, but not in run IDs.
-                wandb_id_prefix = wandb_cfg.id.replace("/", "_")
-                wandb_id = f"{wandb_id_prefix}_{self.output_dir.name}_{uuid.uuid4().hex[:8]}"
                 self.wandb_logger = WandbLogger(
                     output_dir=self.output_dir,
                     project=wandb_cfg.project,
                     name=wandb_cfg.name,
                     group=wandb_cfg.group,
-                    id=wandb_id,
-                    resume=wandb_cfg.resume,
                     mode=wandb_cfg.mode,
-                    video_fps=wandb_cfg.video_fps,
                 )
             except Exception:
                 self.json_logger.close()

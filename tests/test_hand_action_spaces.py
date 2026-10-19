@@ -27,7 +27,6 @@ from dexmani_policy.training.build_utils import (
 )
 from dexmani_policy.training.checkpoint import CheckpointStore, restore_policy_agent
 from dexmani_policy.training.resume import build_train_loader, restore_training_state
-from dexmani_policy.training.workspace import TrainWorkspace
 from dexmani_policy.train import TrainingComponents, build_train_components, build_trainer
 from dexmani_policy.utils.hand_artifact import source_contract, policy_representation, state_sha256
 from dexmani_policy.utils.tensor import dict_apply
@@ -153,7 +152,7 @@ def build(cfg, *, checkpoint=None):
     model, ema, updater = build_model_and_ema(cfg, torch.device(DEVICE), normalizer,
                                             dataset=dataset, checkpoint=checkpoint)
     optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=False)
-    workspace = TrainWorkspace(cfg.workspace.output_dir)
+    workspace = hydra.utils.instantiate(cfg.workspace)
     return TrainingComponents(torch.device(DEVICE), model, ema, updater, optimizer, scheduler,
                               loader, workspace, len(loader), checkpoint)
 
@@ -276,6 +275,71 @@ def test_hand_affine_mismatch_rejected_on_binding_and_restore(prepared, name, pa
     restored = hydra.utils.instantiate(cfg.agent)
     with pytest.raises(ValueError, match=message):
         restored.load_state_dict(state, strict=True)
+
+
+@pytest.mark.parametrize("logging_override", [
+    "null",
+    "{_target_:dexmani_policy.training.workspace.WandbConfig,project:dexmani_policy,"
+    "group:lamp,name:continued,mode:offline}",
+])
+def test_resume_saved_logging_with_explicit_override(prepared, tmp_path, monkeypatch, logging_override):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from dexmani_policy.utils.config import resolve_input_recipe
+
+    run = SimpleNamespace(log=Mock(), config={}, finish=Mock())
+    initialize = Mock(return_value=run)
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=initialize))
+    cfg = copy.deepcopy(prepared[1]["lamp"])
+    cfg.workspace.output_dir = str(tmp_path / "source")
+    comp = build(cfg)
+    # Reproduce a saved logging section from before the interface cleanup.
+    cfg.workspace.wandb_cfg = dict(
+        _target_="dexmani_policy.training.workspace.WandbConfig",
+        project="dexmani_policy", group="lamp", name="source", mode="offline",
+        id="lamp_pick_apple_messy_42", resume="allow", video_fps=15,
+    )
+    try:
+        trainer = build_trainer(cfg, comp)
+        comp.workspace.save_hydra_config(cfg)
+        trainer.train(max_updates=1)
+        path = comp.workspace.checkpoint_dir / "latest.pt"
+        checkpoint = CheckpointStore(path.parent).load(path)
+        with pytest.raises(hydra.errors.InstantiationException, match="unexpected keyword argument 'id'"):
+            hydra.utils.instantiate(cfg.workspace.wandb_cfg)
+        restored = restore_policy_agent(checkpoint.effective_config, path, use_ema=True, device=DEVICE)
+        batch = batch_for(comp.train_loader.dataset)
+        prediction = restored.predict_action(batch["obs"], action_context=batch["action_context"])
+        assert torch.isfinite(prediction["pred_action"]).all()
+    finally:
+        comp.workspace.close()
+
+    incoming = load_config("lamp")
+    OmegaConf.update(incoming, "resume_from", str(path), force_add=True)
+    resume_cfg = resolve_input_recipe(incoming, overrides=[
+        "workspace.wandb_cfg=" + logging_override,
+        "workspace.output_dir=" + str(tmp_path / "continued"),
+    ], resume_checkpoint=checkpoint)
+    resumed = build(resume_cfg, checkpoint=checkpoint)
+    try:
+        trainer = build_trainer(resume_cfg, resumed)
+        state = restore_training_state(
+            checkpoint, resume_contract=trainer.resume_contract,
+            model=resumed.model, ema_model=resumed.ema_model, ema_updater=resumed.ema_updater,
+            optimizer=resumed.optimizer, scheduler=resumed.scheduler, device=DEVICE,
+        )
+        assert state[0] == 1
+        trainer.train(resume_state=state, max_updates=1)
+        assert trainer.global_step == 2
+    finally:
+        resumed.workspace.close()
+    if logging_override == "null":
+        initialize.assert_not_called()
+    else:
+        initialize.assert_called_once()
+        assert initialize.call_args.kwargs["resume"] == "never"
+        run.finish.assert_called_once()
 
 
 def test_lamp_gradients_coordinates_and_compile(prepared):

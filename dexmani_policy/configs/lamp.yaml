@@ -126,10 +126,7 @@ workspace:
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${run_id:}_seed${training.seed}
-    id: ${policy_name}_${task_name}_${training.seed}
-    resume: allow
     mode: offline
-    video_fps: 15
 
 env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
