@@ -1,4 +1,4 @@
-"""DQRISEAgent — quantised hand state + TCP/index diffusion."""
+"""DQRISEPolicy — quantised hand state + TCP/index diffusion."""
 
 from __future__ import annotations
 
@@ -8,15 +8,17 @@ import torch
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.core.base import BaseAgent
-from dexmani_policy.agents.core.dp3 import DP3ObsEncoder
+from dexmani_policy.agents.core.base_policy import BasePolicy
+from dexmani_policy.agents.core.dp3_policy import DP3ObservationEncoder
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 
 
-class DQRISEAgent(BaseAgent):
+class DQRISEPolicy(BasePolicy):
     """DQ-RISE policy with a self-contained runtime hand codebook."""
 
-    def set_normalization_spec(self, spec, feature_dims=None):
+    def set_normalization_spec(
+        self, spec: dict[str, str], feature_dims: dict[str, int] | None = None
+    ) -> None:
         from dexmani_policy.utils.config import validate_dq_normalization
 
         validate_dq_normalization(spec)
@@ -51,21 +53,19 @@ class DQRISEAgent(BaseAgent):
         clip_sample: bool = True,
     ) -> None:
         if tcp_dim <= 0 or tcp_dim >= action_dim:
-            raise ValueError(
-                f"Expected 0 < tcp_dim < action_dim, got {tcp_dim}, {action_dim}"
-            )
+            raise ValueError(f"Expected 0 < tcp_dim < action_dim, got {tcp_dim}, {action_dim}")
 
         hand_dim = action_dim - tcp_dim
         diffusion_action_dim = tcp_dim + 1
 
-        # Attach the codebook module only after BaseAgent initialises nn.Module.
+        # Attach the codebook module only after BasePolicy initialises nn.Module.
         hand_codebook = HandStateCodebook(
             hand_dim=hand_dim,
             num_groups=codebook_num_groups,
             codebook_size=codebook_size,
         )
 
-        obs_encoder = DP3ObsEncoder(
+        obs_encoder = DP3ObservationEncoder(
             encoder_type=encoder_type,
             pc_dim=pc_dim,
             pc_out_dim=pc_out_dim,
@@ -101,33 +101,27 @@ class DQRISEAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-        self.tcp_dim = int(tcp_dim)
-        self.hand_dim = int(hand_dim)
-        self.codebook_num_groups = int(codebook_num_groups)
-        self.codebook_size = int(codebook_size)
-        self.diffusion_action_dim = int(diffusion_action_dim)
+        self.tcp_dim = tcp_dim
+        self.hand_dim = hand_dim
+        self.diffusion_action_dim = diffusion_action_dim
         self.hand_codebook = hand_codebook
         self.codebook_path = codebook_path
-        self.register_load_state_dict_post_hook(self.check_restored_codebook)
-        self.normalizer_checked = False
+        self.register_load_state_dict_post_hook(self.validate_restored_codebook)
 
-    def initialize_training(self):
+    def initialize_training(self) -> None:
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
         self.hand_codebook.load(self.codebook_path)
-        self.check_restored_codebook(self, None)
+        self.validate_restored_codebook(self, None)
 
-    def check_restored_codebook(self, module, incompatible_keys):
-        self.normalizer_checked = False
+    def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:
         self.validate_codebook_normalizer()
 
-    def load_normalizer_from_dataset(self, normalizer):
+    def load_normalizer_from_dataset(self, normalizer) -> None:
         super().load_normalizer_from_dataset(normalizer)
         self.validate_codebook_normalizer()
 
-    def validate_codebook_normalizer(
-        self, *, rtol: float = 1e-5, atol: float = 1e-6
-    ) -> None:
+    def validate_codebook_normalizer(self, *, rtol: float = 1e-5, atol: float = 1e-6) -> None:
         if not self.hand_codebook.is_loaded:
             return
         if "action" not in self.normalizer.params_dict:
@@ -150,20 +144,17 @@ class DQRISEAgent(BaseAgent):
                 "python -m dexmani_policy.training.train_vq_hand "
                 "--policy-config using this Policy's data recipe and normalization."
             ) from exc
-        self.normalizer_checked = True
 
     def require_codebook(self) -> None:
         if not self.hand_codebook.is_loaded:
             raise RuntimeError(
-                "DQRISEAgent has no hand codebook. Supply codebook_path when "
+                "DQRISEPolicy has no hand codebook. Supply codebook_path when "
                 "initializing fresh training, or load a complete "
                 "policy checkpoint before training/inference."
             )
-        if not self.normalizer_checked and self.normalizer.is_fitted(["action"]):
-            self.validate_codebook_normalizer()
 
-    def compute_loss(self, batch: dict[str, Any], **kwargs):
-        self._validate_batch(batch)
+    def compute_loss(self, batch: dict[str, Any], **kwargs) -> tuple[torch.Tensor, dict]:
+        self.validate_batch(batch)
         self.require_codebook()
         cond = self.encode_observation(batch["obs"])
 
@@ -180,9 +171,7 @@ class DQRISEAgent(BaseAgent):
         index = index.to(tcp_part.dtype)
 
         joint_action = torch.cat([tcp_part, index], dim=-1)
-        action_loss, loss_dict = self.action_decoder.compute_loss(
-            cond, joint_action, **kwargs
-        )
+        action_loss, loss_dict = self.action_decoder.compute_loss(cond, joint_action, **kwargs)
 
         num_codes = self.hand_codebook.num_codes
         counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
@@ -194,16 +183,8 @@ class DQRISEAgent(BaseAgent):
         return action_loss, loss_dict
 
     @torch.no_grad()
-    def predict_action(
-        self, obs_dict: dict, inference_steps: int | None = None
-    ) -> dict:
-        self._validate_obs_dict(obs_dict)
-        cond = self.encode_observation(obs_dict)
-        return self.predict_action_from_cond(cond, inference_steps=inference_steps)
-
-    @torch.no_grad()
     def predict_action_from_cond(
-        self, cond, inference_steps: int | None = None
+        self, cond: torch.Tensor, inference_steps: int | None = None
     ) -> dict:
         self.require_codebook()
         batch_size = cond.shape[0]
@@ -237,7 +218,7 @@ class DQRISEAgent(BaseAgent):
 
     def __repr__(self) -> str:
         return (
-            f"DQRISEAgent(action_dim={self.action_dim}, tcp_dim={self.tcp_dim}, "
+            f"DQRISEPolicy(action_dim={self.action_dim}, tcp_dim={self.tcp_dim}, "
             f"hand_dim={self.hand_dim}, "
             f"diffusion_action_dim={self.diffusion_action_dim}, "
             f"codes={self.hand_codebook.num_codes}, "

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from dexmani_policy.agents.hand_prior.lamp import load_prior
+from dexmani_policy.agents.hand_prior.motion_prior import load_motion_prior
 from dexmani_policy.training.train_lamp_prior import (
     add_config_arguments, build_prior_dataset, load_policy_config, raw_batch,
     source_rows, validate_source_metadata,
@@ -68,7 +68,7 @@ def export(args):
     prior_path = Path(args.prior or cfg.lamp.prior_path).expanduser()
     if output.resolve() == prior_path.resolve():
         raise ValueError("Latent output must not replace the prior checkpoint")
-    prior, prior_payload = load_prior(prior_path)
+    prior, prior_payload = load_motion_prior(prior_path)
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable; pass --device cpu for a small local check")

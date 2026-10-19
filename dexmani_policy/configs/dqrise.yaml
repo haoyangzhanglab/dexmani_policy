@@ -73,7 +73,7 @@ dataset:
 # ── Agent ──
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.core.dqrise.DQRISEAgent
+  _target_: dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
@@ -85,7 +85,7 @@ agent:
   codebook_num_groups: 2
   codebook_size: 4
 
-  # Shared DP3ObsEncoder; encoder_type selects the point-cloud branch.
+  # Shared DP3ObservationEncoder; encoder_type selects the point-cloud branch.
   encoder_type: idp3                 # idp3 | dp3
   pc_dim: 6
   pc_out_dim: 128

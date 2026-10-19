@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from sklearn.decomposition import PCA
 
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, compact_artifact_metadata
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, summarize_codebook_metadata
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.utils.config import validate_dq_normalization
 from dexmani_policy.utils.atomic import atomic_path
@@ -69,7 +69,7 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
         "max_violation": float((decoded.abs() - 1).clamp_min(0).max()),
         "pca_explained_variance_ratio": variance_ratio,
     }
-    codebook.artifact_metadata = compact_artifact_metadata({
+    codebook.artifact_metadata = summarize_codebook_metadata({
         **checkpoint["model_config"],
         "source_checkpoint": str(Path(checkpoint_path).resolve()),
         "source_checkpoint_sha256": source_hash,

@@ -114,8 +114,8 @@ def load_policy_config(path, overrides=()):
 
 def build_policy_dataset(cfg):
     """Reuse Policy's actual Dataset, including observation/window qualification."""
-    if cfg.agent._target_ != "dexmani_policy.agents.core.dqrise.DQRISEAgent":
-        raise ValueError("--policy-config requires a DQRISEAgent configuration")
+    if cfg.agent._target_ != "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy":
+        raise ValueError("--policy-config requires a DQRISEPolicy configuration")
     if cfg.dataset.get("use_aux_ee", False):
         raise ValueError(
             "DQ-RISE VQ preparation does not support auxiliary action layouts"

@@ -278,7 +278,7 @@ def checkpoint_agent_config(cfg, state):
                 raise ValueError('Saved HF backbone requires an architecture mapping')
             rgb['load_pretrained'] = False
             agent.rgb_backbone_config = rgb
-        if agent.get('_target_') == 'dexmani_policy.agents.core.multi_task.MultiTaskAgent' and agent.get('task_texts') is not None:
+        if agent.get('_target_') == 'dexmani_policy.agents.core.multitask_policy.MultiTaskPolicy' and agent.get('task_texts') is not None:
             table = state.get('task_emb_table')
             texts = list(dict.fromkeys(agent.task_texts))
             dim = agent.get('text_embed_dim')

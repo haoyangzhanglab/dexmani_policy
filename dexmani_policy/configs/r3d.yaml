@@ -70,7 +70,7 @@ dataset:
 # ── Agent ──
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.core.r3d.R3DAgent
+  _target_: dexmani_policy.agents.core.r3d_policy.R3DPolicy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}

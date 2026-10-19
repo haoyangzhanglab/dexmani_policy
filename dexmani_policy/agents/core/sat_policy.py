@@ -3,24 +3,19 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.sat import SAT
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.core.base import BaseAgent
+from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.utils.validation import positive_int
 
 
-class SATObsEncoder(nn.Module):
-    """Broadcast state into point tokens, then fuse time along the feature axis.
-
-    Sparse3DEncoder supplies K spatial tokens; their mean is the global token.
-    Output: (B, K+1, T*(pc_out_dim+state_out_dim)), with K point patches.
-    Token slots do not imply physical correspondence across frames.
-    """
+class SATObservationEncoder(nn.Module):
+    """Fuse frame features as [B,K+1,T*D]; patch slots need not match across frames."""
 
     @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
@@ -35,7 +30,7 @@ class SATObsEncoder(nn.Module):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-    ):
+    ) -> None:
         super().__init__()
         pc_encoder_config = dict(pc_encoder_config or {})
         pc_encoder_config.setdefault("fps_random_config", fps_random_config)
@@ -55,7 +50,7 @@ class SATObsEncoder(nn.Module):
         self.num_obs_tokens = patch_seq_len + 1
         self.obs_token_dim = n_obs_steps * (pc_out_dim + self.state_mlp.out_dim)
 
-    def forward(self, obs: dict):
+    def forward(self, obs: dict) -> torch.Tensor:
         """Encode [B*T,...] observations as [B,K+1,T*D] temporal features."""
         pc = preprocess_point_cloud(
             obs["point_cloud"],
@@ -73,22 +68,11 @@ class SATObsEncoder(nn.Module):
         state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
         feat = torch.cat([pc_feat, state_feat], dim=-1)
 
-        # (B*T, K+1, D) → (B, T, K+1, D) → (B, K+1, T*D)
-        feat = feat.unflatten(0, (-1, self.n_obs_steps)).transpose(1, 2).flatten(2)
-
-        return feat
+        return feat.unflatten(0, (-1, self.n_obs_steps)).transpose(1, 2).flatten(2)
 
 
-class SATAgent(BaseAgent):
-    """Structural Action Transformer agent.
-
-    Inherits ``BaseAgent`` directly because
-    SAT uses a fundamentally different action representation:
-    ``(B, Da, T)`` instead of ``(B, T, Da)``.
-
-    The agent handles axis transposition at the I/O boundary so that
-    the backbone always operates on structural-centric tensors.
-    """
+class SATPolicy(BasePolicy):
+    """Structural Action Transformer with [B,Da,T] trajectory tokens."""
 
     def __init__(
         self,
@@ -96,14 +80,12 @@ class SATAgent(BaseAgent):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        # Obs encoder
         pc_dim: int = 6,
         state_dim: int = 19,
         num_points: int = 1024,
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-        # SAT backbone
         n_layers: int = 12,
         hidden_dim: int = 768,
         n_head: int = 8,
@@ -111,24 +93,21 @@ class SATAgent(BaseAgent):
         qkv_bias: bool = True,
         qk_norm: bool = True,
         p_drop_attn: float = 0.1,
-        # EJC
         ejc_num_embodiments: int = 1,
         ejc_num_functions: int | None = None,
         ejc_num_axes: int = 1,
         ejc_embodiment_dim: int = 8,
         ejc_function_dim: int = 32,
         ejc_axis_dim: int = 8,
-        # Flow matching
         num_inference_steps: int = 10,
         t_sample_mode_for_flow: str = "beta",
         beta_s: float = 0.999,
         beta_alpha: float = 1.0,
         beta_beta: float = 1.5,
-        # BaseAgent
         modality_dropout_probs: dict | None = None,
         num_flow_train_timesteps: int = 10,
-    ):
-        obs_encoder = SATObsEncoder(
+    ) -> None:
+        obs_encoder = SATObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,
@@ -160,8 +139,11 @@ class SATAgent(BaseAgent):
         action_decoder = RectifiedFlow(
             model=backbone,
             num_inference_steps=num_inference_steps,
-            **({"num_flow_train_timesteps": num_flow_train_timesteps}
-               if t_sample_mode_for_flow in ("discrete", "discrete_pow") else {}),
+            **(
+                {"num_flow_train_timesteps": num_flow_train_timesteps}
+                if t_sample_mode_for_flow in ("discrete", "discrete_pow")
+                else {}
+            ),
             t_sample_mode=t_sample_mode_for_flow,
             beta_s=beta_s,
             beta_alpha=beta_alpha,
@@ -178,15 +160,17 @@ class SATAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    def compute_loss(self, batch, **kwargs):
+    def compute_loss(self, batch: dict, **kwargs) -> tuple[torch.Tensor, dict]:
         """Flow matching on joint-trajectory tokens [B, Da, T]."""
-        self._validate_batch(batch)
+        self.validate_batch(batch)
         cond = self.encode_observation(batch["obs"])
         normed_actions = self.normalizer["action"].normalize(batch["action"])
         return self.action_decoder.compute_loss(cond, normed_actions.transpose(1, 2))
 
     @torch.no_grad()
-    def predict_action_from_cond(self, cond, inference_steps: int | None = None):
+    def predict_action_from_cond(
+        self, cond: torch.Tensor, inference_steps: int | None = None
+    ) -> dict[str, torch.Tensor]:
         """Sample joint trajectories [B, Da, T] and return physical actions [B, T, Da]."""
         template = torch.zeros(
             cond.shape[0],
@@ -202,17 +186,4 @@ class SATAgent(BaseAgent):
         pred = pred.transpose(1, 2)
 
         pred = self.normalizer["action"].unnormalize(pred)
-
-        start = self.n_obs_steps - 1
-        control_action = pred[:, start : start + self.n_action_steps]
-        tail = pred[:, start + self.n_action_steps :]
-
-        if self.control_action_dim != self.action_dim:
-            control_action = control_action[..., : self.control_action_dim]
-            tail = tail[..., : self.control_action_dim]
-
-        return {
-            "pred_action": pred,
-            "control_action": control_action,
-            "tail": tail,
-        }
+        return self.format_action_output(pred)

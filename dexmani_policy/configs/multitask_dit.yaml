@@ -105,7 +105,7 @@ dataset:
 # ── Agent ──
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.core.multi_task.MultiTaskAgent
+  _target_: dexmani_policy.agents.core.multitask_policy.MultiTaskPolicy
   text_encoder_model: openai/clip-vit-base-patch16
   task_texts: ${dataset.task_texts}
   rgb_backbone_name: resnet

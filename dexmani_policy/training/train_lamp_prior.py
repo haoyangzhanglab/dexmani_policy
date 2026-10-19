@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.agents.hand_prior.lamp import HandMotionPrior
+from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.utils.config import resolve_normalization_spec
 from dexmani_policy.training.build_utils import build_normalizer
 from dexmani_policy.utils.atomic import atomic_path

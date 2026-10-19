@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.agents.hand_prior.temporal_codec import TemporalHandCodec
+from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE
 from dexmani_policy.datasets.temporal_codec_dataset import TemporalCodecDataset
 from dexmani_policy.training.train_lamp_prior import load_policy_config
 from dexmani_policy.utils.atomic import atomic_path
@@ -154,7 +154,7 @@ def train(args):
     validation = dataset.get_validation_dataset()
     selection = "validation" if validation is not None else "train (no held-out windows)"
     selection_dataset = validation if validation is not None else dataset
-    codec = TemporalHandCodec(
+    codec = TemporalHandVAE(
         hand_dim=12, horizon=dataset.horizon, latent_dim=int(cfg.codec.latent_dim),
         hidden_dim=int(cfg.codec.hidden_dim), n_layers=int(cfg.codec.n_layers),
         n_heads=int(cfg.codec.n_heads), mlp_ratio=float(cfg.codec.mlp_ratio),

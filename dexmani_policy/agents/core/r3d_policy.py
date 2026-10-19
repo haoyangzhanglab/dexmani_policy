@@ -1,16 +1,18 @@
-"""R3D Agent: Uni3D + R3DTransformer + Diffusion."""
+"""R3D diffusion policy with Uni3D observation tokens."""
+
+from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.r3d import R3DTransformer
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.core.base import BaseAgent
+from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 
 
-class R3DObsEncoder(nn.Module):
+class R3DObservationEncoder(nn.Module):
     """Concatenate Uni3D features, broadcast state and XYZ encoding as [B, T*K, 2*D+D_s]."""
 
     @property
@@ -21,10 +23,10 @@ class R3DObsEncoder(nn.Module):
         self,
         state_dim: int,
         n_obs_steps: int,
-        pc_encoder_config: dict = None,
+        pc_encoder_config: dict | None = None,
         state_out_dim: int = 256,
-        fps_random_config: dict = None,
-    ):
+        fps_random_config: dict | None = None,
+    ) -> None:
         super().__init__()
         pc_encoder_config = dict(pc_encoder_config or {})
         if fps_random_config:
@@ -37,7 +39,7 @@ class R3DObsEncoder(nn.Module):
         self.pc_pe_dim = self.pc_encoder.out_dim
         self.obs_token_dim = 2 * self.pc_pe_dim + self.state_mlp.out_dim
 
-    def forward(self, obs: dict):
+    def forward(self, obs: dict) -> torch.Tensor:
         state = obs["joint_state"]
 
         # R3D clamps normalized XYZRGB; other encoders retain their own input contract.
@@ -48,13 +50,11 @@ class R3DObsEncoder(nn.Module):
         state_emb = self.state_mlp(state)
         state_emb = state_emb.unsqueeze(1).expand(-1, patch_tokens.shape[1], -1)
 
-        obs_feat = torch.cat([patch_tokens, state_emb], dim=-1)
-        tokens = torch.cat([obs_feat, pc_pe], dim=-1)
-
+        tokens = torch.cat((patch_tokens, state_emb, pc_pe), dim=-1)
         return tokens.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
-class R3DAgent(BaseAgent):
+class R3DPolicy(BasePolicy):
     """R3D diffusion policy with optional auxiliary wrist-pose prediction."""
 
     def __init__(
@@ -64,21 +64,19 @@ class R3DAgent(BaseAgent):
         n_action_steps: int,
         action_dim: int,
         state_dim: int,
-        pc_encoder_config: dict = None,
+        pc_encoder_config: dict | None = None,
         state_out_dim: int = 256,
-        fps_random_config: dict = None,
-        # Backbone params
+        fps_random_config: dict | None = None,
         timestep_embed_dim: int = 128,
         embedding_dim: int = 256,
         depth: int = 4,
         num_heads: int = 8,
         mlp_dim: int = 2048,
         attention_downsample_rate: int = 2,
-        # Diffusion params
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
-        modality_dropout_probs: dict = None,
+        modality_dropout_probs: dict | None = None,
         # EE auxiliary loss — wrist pose (pos3 + rot6d6 = 9dim)
         use_aux_ee: bool = False,
         joint_dim: int = 19,
@@ -86,12 +84,12 @@ class R3DAgent(BaseAgent):
         # Weight applied to the auxiliary EE loss, leaving the joint loss unchanged.
         aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
-    ):
+    ) -> None:
         self.use_aux_ee = use_aux_ee
         self.joint_dim = joint_dim
         self.ee_dim = ee_dim
 
-        obs_encoder = R3DObsEncoder(
+        obs_encoder = R3DObservationEncoder(
             state_dim=state_dim,
             n_obs_steps=n_obs_steps,
             pc_encoder_config=pc_encoder_config,
@@ -135,10 +133,10 @@ class R3DAgent(BaseAgent):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    def initialize_training(self):
+    def initialize_training(self) -> None:
         self.obs_encoder.pc_encoder.initialize_training()
 
-    def loss_groups(self):
+    def loss_groups(self) -> dict[str, tuple[int, int]] | None:
         if not self.use_aux_ee:
             return None
         return {
@@ -147,5 +145,5 @@ class R3DAgent(BaseAgent):
         }
 
     @property
-    def control_action_dim(self):
+    def control_action_dim(self) -> int:
         return self.joint_dim if self.use_aux_ee else self.action_dim

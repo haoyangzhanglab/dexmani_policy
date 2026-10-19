@@ -1,21 +1,18 @@
+from __future__ import annotations
+
 import torch
-import torch.nn as nn
+from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow
-from dexmani_policy.agents.core.base import BaseAgent
+from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNetDense
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 
 
-class ManiFlowObsEncoder(nn.Module):
-    """Dense point features with absolute XYZ and broadcast state.
-
-    PointNet directly encodes XYZRGB; DiTX adds a shared temporal embedding
-    for each observation frame. Flattening preserves frame-major order:
-    all points of frame 0, then all points of frame 1, and so on.
-    """
+class ManiFlowObservationEncoder(nn.Module):
+    """Dense XYZRGB and state tokens in frame-major order [B,T*N,D]."""
 
     @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
@@ -30,7 +27,7 @@ class ManiFlowObsEncoder(nn.Module):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-    ):
+    ) -> None:
         super().__init__()
         if n_obs_steps <= 0:
             raise ValueError("n_obs_steps must be greater than 0")
@@ -45,7 +42,7 @@ class ManiFlowObsEncoder(nn.Module):
 
         self.obs_token_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
-    def forward(self, obs: dict):
+    def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
@@ -63,7 +60,7 @@ class ManiFlowObsEncoder(nn.Module):
         return feat.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
-class ManiFlowAgent(BaseAgent):
+class ManiFlowPolicy(BasePolicy):
     """ManiFlow policy using ConsistencyDiTX + ConsistencyFlow."""
 
     def __init__(
@@ -96,8 +93,8 @@ class ManiFlowAgent(BaseAgent):
         dt_sample_mode_for_consistency: str = "uniform",
         target_t_sample_mode: str = "relative",
         modality_dropout_probs: dict | None = None,
-    ):
-        obs_encoder = ManiFlowObsEncoder(
+    ) -> None:
+        obs_encoder = ManiFlowObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,

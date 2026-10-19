@@ -1,13 +1,15 @@
-import torch
-import torch.nn as nn
+from __future__ import annotations
 
-from dexmani_policy.agents.core.base import UNetDiffusionAgent
+import torch
+from torch import nn
+
+from dexmani_policy.agents.core.base_policy import UNetDiffusionPolicy
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.registry import build_rgb_encoder
 from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
 
 
-class DPObsEncoder(nn.Module):
+class RGBObservationEncoder(nn.Module):
     @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
         return ("joint_state", "rgb")
@@ -18,8 +20,8 @@ class DPObsEncoder(nn.Module):
         state_dim: int,
         n_obs_steps: int,
         state_out_dim: int = 64,
-        rgb_backbone_config: dict = None,
-    ):
+        rgb_backbone_config: dict | None = None,
+    ) -> None:
         super().__init__()
         self.backbone, self.image_processor = build_rgb_encoder(
             rgb_backbone_name, config=rgb_backbone_config
@@ -28,7 +30,7 @@ class DPObsEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
-    def forward(self, obs: dict):
+    def forward(self, obs: dict) -> torch.Tensor:
         rgb = self.image_processor.process_images(obs["rgb"])
 
         # Use channels-last memory format for CNN backbones; shape stays NCHW.
@@ -45,7 +47,7 @@ class DPObsEncoder(nn.Module):
         return feat.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
-class DPAgent(UNetDiffusionAgent):
+class DiffusionPolicy(UNetDiffusionPolicy):
     def __init__(
         self,
         horizon: int,
@@ -55,10 +57,10 @@ class DPAgent(UNetDiffusionAgent):
         rgb_backbone_name: str,
         state_dim: int,
         state_out_dim: int = 64,
-        rgb_backbone_config: dict = None,
+        rgb_backbone_config: dict | None = None,
         **kwargs,
-    ):
-        obs_encoder = DPObsEncoder(
+    ) -> None:
+        obs_encoder = RGBObservationEncoder(
             rgb_backbone_name,
             state_dim,
             n_obs_steps,

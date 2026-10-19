@@ -1,13 +1,15 @@
-import torch
-import torch.nn as nn
+from __future__ import annotations
 
-from dexmani_policy.agents.core.base import UNetDiffusionAgent
+import torch
+from torch import nn
+
+from dexmani_policy.agents.core.base_policy import UNetDiffusionPolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import MultiStagePointNet, PointNet
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 
 
-class DP3ObsEncoder(nn.Module):
+class DP3ObservationEncoder(nn.Module):
     @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
         return ("joint_state", "point_cloud")
@@ -21,8 +23,8 @@ class DP3ObsEncoder(nn.Module):
         num_points: int,
         n_obs_steps: int,
         state_out_dim: int = 64,
-        fps_random_config: dict = None,
-    ):
+        fps_random_config: dict | None = None,
+    ) -> None:
         super().__init__()
         if encoder_type == "dp3":
             encoder_cls = PointNet
@@ -38,7 +40,7 @@ class DP3ObsEncoder(nn.Module):
         self.fps_random_config = fps_random_config or {}
         self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
-    def forward(self, obs: dict):
+    def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
@@ -56,7 +58,7 @@ class DP3ObsEncoder(nn.Module):
         return feat.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
-class DP3Agent(UNetDiffusionAgent):
+class DP3Policy(UNetDiffusionPolicy):
     def __init__(
         self,
         horizon: int,
@@ -69,10 +71,10 @@ class DP3Agent(UNetDiffusionAgent):
         state_dim: int,
         num_points: int,
         state_out_dim: int = 64,
-        fps_random_config: dict = None,
+        fps_random_config: dict | None = None,
         **kwargs,
-    ):
-        obs_encoder = DP3ObsEncoder(
+    ) -> None:
+        obs_encoder = DP3ObservationEncoder(
             encoder_type,
             pc_dim,
             pc_out_dim,
