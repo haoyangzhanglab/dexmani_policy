@@ -136,13 +136,11 @@ Fresh training 校验来源、窗口、划分和手部表示坐标，观测归�
 
 ## 验证
 
-Smoke 也接受显式 `.yaml` 路径，与预训练入口共用 Hydra 配置组合规则（包括 `defaults`），便于使用临时微型数据/产物。定向测试通过真实预训练/导出入口创建临时产物，默认 CPU；设 `DEXMANI_TEST_DEVICE=cuda:0` 可验证实际 GPU Trainer 构建入口。
-
+Smoke 也接受显式 `.yaml` 路径，与预训练入口共用 Hydra 配置组合规则（包括 `defaults`），便于使用临时微型数据/产物。
 
 ```bash
 python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name> --max-updates 4
-python -m pytest -q tests/test_hand_action_spaces.py
 ```
 
 `--config-only` 检查配置、Hydra target 和策略导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
