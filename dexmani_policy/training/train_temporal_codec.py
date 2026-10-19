@@ -17,35 +17,32 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE
 from dexmani_policy.datasets.temporal_codec_dataset import TemporalCodecDataset
-from dexmani_policy.training.train_lamp_prior import load_policy_config
+from dexmani_policy.training.build_utils import validate_config
 from dexmani_policy.utils.atomic import atomic_path
-from dexmani_policy.utils.config import resolve_normalization_spec
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
 from dexmani_policy.utils.hand_artifact import (
-    source_contract, metadata_sha256, validate_selection_schedule,
+    metadata_sha256,
+    source_contract,
+    validate_selection_schedule,
 )
-
-
-def validate_config_paths(cfg):
-    paths = [Path(value).expanduser().resolve() for value in
-             (cfg.codec.path, cfg.agent.codec_path)]
-    if paths[1:] != [paths[0]]:
-        raise ValueError("codec.path and agent.codec_path must match")
-    return paths[0]
+from dexmani_policy.utils.validation import positive_int
 
 
 def build_codec_dataset(cfg):
-    if cfg.action_key != "action" or int(cfg.action_dim) != 19:
-        raise ValueError("Temporal codec currently requires joint actions: arm 7 + hand 12")
+    validate_config(cfg)
+    if (
+        cfg.agent._target_
+        != "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy"
+    ):
+        raise ValueError(
+            "Codec preparation requires a TemporalLatentFlowPolicy configuration"
+        )
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare codec from a fresh policy config, not resume_from")
-    # Preserve all modality validity checks and split/window settings. Only the
-    # pretraining batch path below bypasses point-cloud reads and augmentation.
+    # Keep policy eligibility; raw pretraining batches bypass observation augmentation.
     dataset = hydra.utils.instantiate(cfg.dataset)
     if not isinstance(dataset, TemporalCodecDataset):
         raise TypeError("Temporal codec pretraining requires TemporalCodecDataset")
-    if dataset.horizon != int(cfg.horizon) or dataset.obs_horizon != int(cfg.n_obs_steps):
-        raise ValueError("Codec dataset H/Nobs must match the policy config")
     return dataset
 
 
@@ -107,20 +104,28 @@ def evaluate(codec, dataset, batch_size):
 def save_codec(path, codec, dataset, cfg, args, step, metrics, statistics):
     codec.ready.fill_(True)
     codec.validate_state()
-    metadata = dict(dataset.codec_metadata)
-    metadata["relative_statistics"] = statistics
     contract = source_contract(dataset)
     evaluation = metrics["evaluation"]
-    metadata.update(implementation=dataset.hand_implementation_version, source_contract=contract,
-                    source_contract_sha256=metadata_sha256(contract),
-                    model_config=codec.model_config, normalization_spec=resolve_normalization_spec(cfg),
-                    selection=dict(selection_step=int(step), beta=metrics["beta"], target_beta=args.beta,
-                                   eligible_step=args.kl_warmup + max(1, args.kl_ramp),
-                                   split=metrics["selection_split"], metric="physical_mae",
-                                   value=evaluation["physical_mae"],
-                                   reconstruction=evaluation["reconstruction"], kl=evaluation["kl"],
-                                   physical_joint_mae=evaluation["physical_joint_mae"]))
-    metadata["reference"] = "unaugmented_raw_query_hand_fixed_for_full_chunk"
+    metadata = dict(
+        implementation=dataset.hand_implementation_version,
+        source_contract=contract,
+        source_contract_sha256=metadata_sha256(contract),
+        model_config=codec.model_config,
+        normalization_spec=resolve_normalization_spec(cfg),
+        selection=dict(
+            selection_step=int(step),
+            beta=metrics["beta"],
+            target_beta=args.beta,
+            eligible_step=args.kl_warmup + max(1, args.kl_ramp),
+            split=metrics["selection_split"],
+            metric="physical_mae",
+            value=evaluation["physical_mae"],
+            reconstruction=evaluation["reconstruction"],
+            kl=evaluation["kl"],
+            physical_joint_mae=evaluation["physical_joint_mae"],
+        ),
+    )
+    metadata["relative_statistics"] = statistics
     metadata["loss_reduction"] = {
         "kl": "mean_over_batch_time_latent",
         "reconstruction": "weighted_huber_mean_over_batch_valid_frames_joints",
@@ -149,8 +154,8 @@ def train(args):
     if not 0 < args.lr < float("inf") or not 0 < args.clip_grad < float("inf"):
         raise ValueError("lr and clip_grad must be positive and finite")
     validate_selection_schedule(args.steps, args.beta, args.kl_warmup + max(1, args.kl_ramp))
-    cfg = load_policy_config(args)
-    output = validate_config_paths(cfg)
+    cfg = load_policy_config(args.policy_config or args.config, args.overrides)
+    output = Path(cfg.codec.path).expanduser()
     if output.exists() and not args.overwrite:
         raise FileExistsError(f"Codec already exists: {output}; use --overwrite to replace it")
     device = torch.device(args.device)

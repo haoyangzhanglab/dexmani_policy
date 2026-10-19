@@ -16,35 +16,15 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
-from dexmani_policy.utils.config import resolve_normalization_spec
 from dexmani_policy.training.build_utils import build_normalizer, validate_config
 from dexmani_policy.utils.atomic import atomic_path
-from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
 from dexmani_policy.utils.hand_artifact import (
-    source_contract, metadata_sha256, validate_selection_schedule,
+    metadata_sha256,
+    source_contract,
+    validate_selection_schedule,
 )
-
-
-def add_config_arguments(parser):
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--config", default="lamp", help="Hydra policy config name")
-    group.add_argument("--policy-config", help="Policy YAML path instead of a config name")
-    parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. zarr_path=...")
-
-
-def load_policy_config(args):
-    register_resolvers()
-    root = Path(__file__).resolve().parents[1] / "configs"
-    name = args.config
-    if args.policy_config is not None:
-        path = Path(args.policy_config).expanduser().resolve(strict=True)
-        if path.is_relative_to(root):
-            name = path.relative_to(root).with_suffix("").as_posix()
-        else:
-            root, name = path.parent, path.stem
-    with hydra.initialize_config_dir(config_dir=str(root), version_base=None):
-        return hydra.compose(config_name=name, overrides=args.overrides)
+from dexmani_policy.utils.validation import positive_int
 
 
 def build_prior_dataset(cfg):
@@ -52,8 +32,8 @@ def build_prior_dataset(cfg):
     from dexmani_policy.datasets.lamp_dataset import LampDataset
 
     validate_config(cfg)
-    if cfg.action_key != "action" or int(cfg.action_dim) != 19:
-        raise ValueError("The initial LAMP baseline requires joint actions: arm 7 + hand 12")
+    if cfg.agent._target_ != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
+        raise ValueError("Prior preparation requires a LAMPPolicy configuration")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare prior artifacts from a fresh policy config, not resume_from")
     dataset = hydra.utils.instantiate(cfg.dataset)
@@ -67,11 +47,6 @@ def source_rows(dataset):
     validation = dataset.get_validation_dataset()
     val = (np.asarray(validation.sampler.action_source_rows, dtype=np.int64)
            if validation is not None else np.empty(0, dtype=np.int64))
-    for name, rows in (("train", train), ("validation", val)):
-        if len(rows) and not np.asarray(dataset.history_valid)[rows].all():
-            raise ValueError(f"{name} action rows include invalid hand history")
-    if not len(train):
-        raise ValueError("No eligible training hand targets")
     return train, val
 
 
@@ -113,16 +88,25 @@ def save_prior(path, prior, dataset, cfg, args, step, metrics, optimizer):
     prior.ready.fill_(True)
     contract = source_contract(dataset)
     evaluation = metrics["evaluation"]
-    metadata = dict(dataset.lamp_metadata)
-    metadata.update(implementation=dataset.hand_implementation_version, source_contract=contract,
-                    source_contract_sha256=metadata_sha256(contract),
-                    model_config=prior.model_config, normalization_spec=resolve_normalization_spec(cfg),
-                    selection=dict(selection_step=int(step), beta=metrics["beta"], target_beta=args.beta,
-                                   eligible_step=max(1, args.beta_warmup),
-                                   split="validation" if dataset.val_mask.any() else "final_no_holdout",
-                                   metric="prior_mean_mse", value=evaluation["mse"],
-                                   reconstruction=evaluation["mse"], kl=evaluation["kl"],
-                                   physical_joint_mae=evaluation["physical_joint_mae"]))
+    metadata = dict(
+        implementation=dataset.hand_implementation_version,
+        source_contract=contract,
+        source_contract_sha256=metadata_sha256(contract),
+        model_config=prior.model_config,
+        normalization_spec=resolve_normalization_spec(cfg),
+        selection=dict(
+            selection_step=int(step),
+            beta=metrics["beta"],
+            target_beta=args.beta,
+            eligible_step=max(1, args.beta_warmup),
+            split="validation" if dataset.val_mask.any() else "final_no_holdout",
+            metric="prior_mean_mse",
+            value=evaluation["mse"],
+            reconstruction=evaluation["mse"],
+            kl=evaluation["kl"],
+            physical_joint_mae=evaluation["physical_joint_mae"],
+        ),
+    )
     payload = {
         "_format": "lamp_prior.v2",
         "model_config": dict(prior.model_config),
@@ -151,7 +135,7 @@ def train(args):
     if args.min_lr > args.lr:
         raise ValueError("min_lr must not exceed lr")
     validate_selection_schedule(args.steps, args.beta, max(1, args.beta_warmup))
-    cfg = load_policy_config(args)
+    cfg = load_policy_config(args.policy_config or args.config, args.overrides)
     output = Path(args.output or cfg.lamp.prior_path).expanduser()
     if output.exists() and not args.overwrite:
         raise FileExistsError(f"Prior already exists: {output}; use --overwrite to replace it")
@@ -181,7 +165,6 @@ def train(args):
     best_mse = float("inf")
     order = rng.permutation(train_rows)
     cursor = 0
-    last_metrics = {}
     for step in range(1, args.steps + 1):
         if cursor >= len(order):
             order, cursor = rng.permutation(train_rows), 0
@@ -189,8 +172,7 @@ def train(args):
         cursor += len(rows)
         history, target_raw = raw_batch(dataset, rows, device)
         if args.noise_std:
-            # The encoder accepts physical commands; augmentation is specified
-            # in normalized coordinates, independently of the joint units.
+            # Apply normalized-coordinate noise to the physical command history.
             history = history + torch.randn_like(history) * args.noise_std / prior.hand_scale
         mu, log_var = prior.encode_history(history)
         z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
@@ -231,7 +213,14 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    add_config_arguments(parser)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--config", default="lamp", help="Hydra policy config name")
+    group.add_argument(
+        "--policy-config", help="Policy YAML path instead of a config name"
+    )
+    parser.add_argument(
+        "overrides", nargs="*", help="Hydra overrides, e.g. zarr_path=..."
+    )
     parser.add_argument("--output", help="Defaults to lamp.prior_path")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--steps", type=int, default=20000)

@@ -10,6 +10,7 @@ from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
 from dexmani_policy.utils.config import validate_window_contract
+from dexmani_policy.utils.hand_artifact import artifact_record
 
 
 class LAMPRegressionHead(nn.Module):
@@ -85,8 +86,6 @@ class LAMPPolicy(BasePolicy):
         if prior.model_config != self.prior.model_config:
             raise ValueError("LAMP prior architecture differs from the policy configuration")
         self.prior.load_state_dict(prior.state_dict(), strict=True)
-        from dexmani_policy.utils.hand_artifact import artifact_record
-
         self.action_space_artifact = artifact_record(
             "lamp", "lamp_prior.v2", payload["_file_sha256"], payload["metadata"], self.prior,
         )
@@ -114,7 +113,7 @@ class LAMPPolicy(BasePolicy):
 
     def train(self, mode: bool = True) -> LAMPPolicy:
         super().train(mode)
-        self.prior.freeze()
+        self.prior.eval()
         return self
 
     def encode_condition(self, obs: dict, action_context: dict | None):
@@ -154,8 +153,6 @@ class LAMPPolicy(BasePolicy):
         hand_loss = F.mse_loss(hand, hand_target)
         offset_l2 = offset.square().sum(-1).mean()
         loss = arm_loss + self.hand_loss_weight * hand_loss + self.offset_reg_weight * offset_l2
-        if not torch.isfinite(loss):
-            raise ValueError("LAMP produced a nonfinite loss")
         with torch.no_grad():
             prior_error = F.mse_loss(self.decode_hand(torch.zeros_like(offset), mu), hand_target)
             physical_mae = ((hand - hand_target) / self.prior.hand_scale).abs().mean()
@@ -169,7 +166,6 @@ class LAMPPolicy(BasePolicy):
     @torch.no_grad()
     def predict_action(self, obs_dict, inference_steps=None, *, action_context=None,
                        rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
-        self.validate_inference_steps(inference_steps)
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("LAMP supports synchronous execution only")
         self.validate_observations(obs_dict)

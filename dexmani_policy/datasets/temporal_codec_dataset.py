@@ -2,24 +2,18 @@
 
 from __future__ import annotations
 
-import copy
-import hashlib
-import json
-
 import numpy as np
 import torch
 
 from dexmani_policy.datasets.lamp_dataset import OBS_ALIGNMENT
-from dexmani_policy.utils.hand_artifact import array_sha256
 from dexmani_policy.datasets.pc_dataset import PCDataset
+from dexmani_policy.utils.hand_artifact import array_sha256, metadata_sha256
 
 
 class TemporalCodecDataset(PCDataset):
     """Keep physical actions and raw measured q0 at the policy's query observation."""
 
-    def __init__(
-        self, zarr_path, *, obs_alignment=None, **kwargs
-    ):
+    def __init__(self, zarr_path, *, obs_alignment=None, **kwargs):
         if kwargs.get("action_key", "action") != "action" or kwargs.get("use_aux_ee", False):
             raise ValueError(
                 "TemporalCodecDataset requires joint action=7+12 without auxiliary targets"
@@ -60,49 +54,23 @@ class TemporalCodecDataset(PCDataset):
         self.codec_source_metadata = {
             "reference": "raw_measured_hand_at_query_observation",
             "obs_alignment": OBS_ALIGNMENT,
-            "alignment_source": "data_attribute" if stored is not None else "explicit_assertion",
-            "dt": None if dt is None else float(dt),
+            "alignment_source": (
+                "data_attribute" if stored is not None else "explicit_assertion"
+            ),
+            "dt": float(dt),
             "action_key": "action",
             "hand_slice": [7, 19],
             "data_revision": self.data_revision,
             "num_frames": len(self.hand_actions),
             "hand_actions_sha256": array_sha256(self.hand_actions),
             "hand_states_sha256": array_sha256(self.hand_states),
-            "episode_ends_sha256": array_sha256(np.asarray(buffer.episode_ends, dtype=np.int64)),
+            "episode_ends_sha256": array_sha256(
+                np.asarray(buffer.episode_ends, dtype=np.int64)
+            ),
         }
-        canonical = json.dumps(
-            self.codec_source_metadata, sort_keys=True, separators=(",", ":"), allow_nan=False
-        )
-        self.codec_source_fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
-        self._codec_source_recipe = copy.deepcopy(self.data_recipe)
-        self._codec_train_indices = self.sampler.indices.copy()
         self.data_recipe["temporal_codec_reference"] = {
-            "source_fingerprint": self.codec_source_fingerprint,
+            "source_fingerprint": metadata_sha256(self.codec_source_metadata),
             "query_index": self.obs_horizon - 1,
-        }
-
-    @property
-    def codec_metadata(self):
-        validation = self.get_validation_dataset()
-        val_indices = (
-            np.empty((0, 4), dtype=np.int64) if validation is None else validation.sampler.indices
-        )
-        return {
-            "source_fingerprint": self.codec_source_fingerprint,
-            "source_metadata": dict(self.codec_source_metadata),
-            "train_mask": self.train_mask.tolist(),
-            "val_mask": self.val_mask.tolist(),
-            "window": {
-                "horizon": self.horizon,
-                "obs_horizon": self.obs_horizon,
-                "pad_before": self.pad_before,
-                "pad_after": self.pad_after,
-                "train_windows": len(self._codec_train_indices),
-                "val_windows": len(val_indices),
-                "train_indices_sha256": array_sha256(self._codec_train_indices),
-                "val_indices_sha256": array_sha256(val_indices),
-                "data_recipe": copy.deepcopy(self._codec_source_recipe),
-            },
         }
 
     def raw_hand_batch(self, indices):

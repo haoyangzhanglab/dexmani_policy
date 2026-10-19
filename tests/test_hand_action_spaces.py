@@ -570,3 +570,116 @@ def test_historical_lamp_policy_has_explicit_diagnostic(tmp_path):
                 }}, path)
     with pytest.raises(ValueError, match="historical checkout or retrain"):
         CheckpointStore(tmp_path).load_payload(path)
+
+
+def test_config_names_paths_and_smoke_share_hydra_composition(tmp_path):
+    from dexmani_policy.utils.config import load_policy_config
+
+    named = load_policy_config("lamp")
+    explicit = load_policy_config(ROOT / "dexmani_policy/configs/lamp.yaml")
+    assert OmegaConf.to_container(named) == OmegaConf.to_container(explicit)
+    OmegaConf.save(named, tmp_path / "base.yaml")
+    derived = tmp_path / "derived.yaml"
+    derived.write_text("defaults: [base, _self_]\ntask_name: composition_check\n")
+    composed = load_policy_config(derived, ["agent.state_out_dim=32"])
+    assert composed.agent.state_out_dim == 32
+    assert composed.dataset.zarr_path == "robot_data/composition_check.zarr"
+    smoked = load_config(str(derived))
+    assert smoked.task_name == "composition_check" and smoked.horizon == 1
+    for name in ("lamp", "temporal_codec_flow", "dqrise"):
+        cfg = load_policy_config(
+            name,
+            [
+                "zarr_path=/new/revision.zarr",
+                "dataset.split_manifest=/new/split.json",
+                "dataset.max_train_episodes=null",
+                "dataset.val_ratio=0",
+                "action_key=action",
+            ],
+        )
+        validate_config(cfg)
+        assert cfg.dataset.zarr_path == "/new/revision.zarr"
+        assert cfg.dataset.split_manifest == "/new/split.json"
+
+
+@pytest.mark.parametrize("name", ["lamp", "temporal_codec_flow", "dqrise"])
+def test_pretraining_rejects_config_mismatch_before_opening_data(tmp_path, name):
+    from dexmani_policy.training.train_lamp_prior import build_prior_dataset
+    from dexmani_policy.training.train_temporal_codec import build_codec_dataset
+    from dexmani_policy.training.train_vq_hand import build_policy_dataset
+
+    builder = {
+        "lamp": build_prior_dataset,
+        "temporal_codec_flow": build_codec_dataset,
+        "dqrise": build_policy_dataset,
+    }[name]
+    cfg = load_config(name)
+    cfg.dataset.zarr_path = str(tmp_path / "missing.zarr")
+    artifact_key = {
+        "lamp": "prior_path",
+        "temporal_codec_flow": "codec_path",
+        "dqrise": "codebook_path",
+    }[name]
+    cases = (
+        ("agent.horizon", cfg.horizon + 1, "agent.horizon"),
+        ("dataset.obs_horizon", cfg.n_obs_steps + 1, "H/Nobs"),
+        ("agent." + artifact_key, str(tmp_path / "different.pt"), "artifact path"),
+        ("dataset.use_aux_ee", True, "auxiliary"),
+    )
+    for key, value, message in cases:
+        changed = copy.deepcopy(cfg)
+        OmegaConf.update(changed, key, value, force_add=True)
+        with pytest.raises(ValueError, match=message):
+            builder(changed)
+
+
+@pytest.mark.parametrize("name", ["lamp", "temporal_codec_flow", "dqrise"])
+def test_fresh_and_restored_artifact_metadata_agree(prepared, name):
+    from dexmani_policy.utils.hand_artifact import (
+        artifact_record,
+        restore_artifact_metadata,
+    )
+
+    cfg = copy.deepcopy(prepared[1][name])
+    dataset, normalizer = build_dataset_and_normalizer(cfg, verbose=False)
+    model, _, _ = build_model_and_ema(cfg, DEVICE, normalizer, dataset=dataset)
+    kind, representation = policy_representation(model)
+    record = copy.deepcopy(model.action_space_artifact)
+    if name == "dqrise":
+        record["details"]["prototype_count"] += 1
+    else:
+        record["details"]["model_config"]["hidden_dim"] += 1
+    metadata = {**record, **record["details"]}
+    with pytest.raises(ValueError, match="metadata"):
+        artifact_record(
+            kind, record["schema"], record["sha256"], metadata, representation
+        )
+    cfg.action_space_artifact = record
+    with pytest.raises(ValueError, match="metadata"):
+        restore_artifact_metadata(model, cfg)
+    cfg.action_space_artifact = model.action_space_artifact
+    with torch.no_grad():
+        tensor = (
+            representation.sorted_hand_poses
+            if name == "dqrise"
+            else representation.fc_mu.bias
+        )
+        tensor.flatten()[0] += 1
+    with pytest.raises(ValueError, match="Embedded representation differs"):
+        restore_artifact_metadata(model, cfg)
+
+
+def test_lamp_nonfinite_loss_uses_trainer_guard(prepared, tmp_path):
+    cfg = copy.deepcopy(prepared[1]["lamp"])
+    cfg.workspace.output_dir = str(tmp_path / "run")
+    comp = build(cfg)
+    trainer = build_trainer(cfg, comp)
+    try:
+        with torch.no_grad():
+            comp.model.action_decoder.model[-1].bias.fill_(float("nan"))
+        with pytest.raises(RuntimeError, match="Non-finite loss"):
+            trainer.train_one_step(batch_for(comp.train_loader.dataset))
+        assert trainer.global_step == 0
+        assert all(parameter.grad is None for parameter in comp.model.parameters())
+    finally:
+        comp.workspace.close()

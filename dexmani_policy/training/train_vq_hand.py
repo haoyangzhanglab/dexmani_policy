@@ -19,14 +19,16 @@ from torch.utils.data import DataLoader, TensorDataset
 from dexmani_policy.agents.core.normalizer import AffineNormalizer, FieldNormalizer
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.training.workspace import prepare_output_dir
-from dexmani_policy.training.build_utils import build_normalizer
-from dexmani_policy.utils.atomic import atomic_path
-from dexmani_policy.utils.config import register_resolvers, resolve_normalization_spec
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.training.build_utils import build_normalizer, validate_config
 from dexmani_policy.training.export_hand_codebook import (
-    build_runtime_codebook, deployment_diagnostics, load_checkpoint_snapshot,
+    build_runtime_codebook,
+    deployment_diagnostics,
+    load_checkpoint_snapshot,
 )
+from dexmani_policy.training.workspace import prepare_output_dir
+from dexmani_policy.utils.atomic import atomic_path
+from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
+from dexmani_policy.utils.validation import positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -99,32 +101,11 @@ def save_checkpoint(
     logger.info("checkpoint saved: %s", path)
 
 
-def load_policy_config(path, overrides=()):
-    """Compose the target config without constructing a model or runtime."""
-    register_resolvers()
-    path = Path(path).expanduser().resolve()
-    config_root = Path(__file__).resolve().parents[1] / "configs"
-    if path.is_relative_to(config_root):
-        config_name = path.relative_to(config_root).with_suffix("").as_posix()
-    else:
-        config_root, config_name = path.parent, path.stem
-    with hydra.initialize_config_dir(config_dir=str(config_root), version_base=None):
-        return hydra.compose(config_name=config_name, overrides=list(overrides))
-
-
 def build_policy_dataset(cfg):
     """Reuse Policy's actual Dataset, including observation/window qualification."""
+    validate_config(cfg)
     if cfg.agent._target_ != "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy":
         raise ValueError("--policy-config requires a DQRISEPolicy configuration")
-    if cfg.dataset.get("use_aux_ee", False):
-        raise ValueError(
-            "DQ-RISE VQ preparation does not support auxiliary action layouts"
-        )
-    layout = {"action": (7, 19), "action_ee": (9, 21)}.get(cfg.action_key)
-    if layout is None or (cfg.agent.tcp_dim, cfg.agent.action_dim) != layout:
-        raise ValueError("Supported DQ-RISE layouts are action=7+12 or action_ee=9+12")
-    if cfg.dataset.action_key != cfg.action_key:
-        raise ValueError("Policy and Dataset action_key must match")
     if cfg.get("resume_from") is not None:
         raise ValueError(
             "Prepare a new codebook from a fresh Policy config, not resume_from"
@@ -132,7 +113,7 @@ def build_policy_dataset(cfg):
     dataset = hydra.utils.instantiate(cfg.dataset)
     if not isinstance(dataset, BaseDataset):
         raise TypeError("DQ-RISE VQ preparation requires a single BaseDataset")
-    if dataset.replay_buffer[dataset.action_key].shape[1:] != (layout[1],):
+    if dataset.replay_buffer[dataset.action_key].shape[1:] != (cfg.agent.action_dim,):
         raise ValueError("Dataset action shape does not match the Policy layout")
     return dataset
 
@@ -191,15 +172,6 @@ def prepare_policy_data(cfg):
         "policy_config": OmegaConf.to_container(cfg, resolve=False),
         "resolved_dataset": OmegaConf.to_container(cfg.dataset, resolve=True),
         "normalization_spec": spec,
-        "data_recipe": dataset.data_recipe,
-        "data_revision": dataset.data_revision,
-        "episode_ends": dataset.replay_buffer.episode_ends.tolist(),
-        "train_episode_ids": np.flatnonzero(dataset.train_mask).tolist(),
-        "val_episode_ids": np.flatnonzero(dataset.val_mask).tolist(),
-        "train_source_rows": dataset.sampler.action_source_rows.tolist(),
-        "val_source_rows": val.sampler.action_source_rows.tolist()
-        if val is not None
-        else [],
         "train_frame_count": len(train_hand),
         "val_frame_count": len(val_hand),
         "train_windows": dataset.sampler.validity_summary,
@@ -226,9 +198,6 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
     device = torch.device(args.device)
     set_seed(args.seed)
     train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(policy_cfg)
-    if not len(train_norm):
-        raise ValueError("No qualified Policy training hand states")
-
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
     train_loader = DataLoader(

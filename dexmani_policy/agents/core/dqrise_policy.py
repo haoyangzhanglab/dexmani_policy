@@ -11,6 +11,7 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.dp3_policy import DP3ObservationEncoder
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
+from dexmani_policy.utils.hand_artifact import artifact_record
 
 
 class DQRISEPolicy(BasePolicy):
@@ -112,13 +113,11 @@ class DQRISEPolicy(BasePolicy):
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
         self.hand_codebook.load(self.codebook_path)
-        from dexmani_policy.utils.hand_artifact import artifact_record
-
         self.action_space_artifact = artifact_record(
             "dqrise", "hand_codebook.v3", self.hand_codebook.artifact_sha256,
             self.hand_codebook.artifact_metadata, self.hand_codebook,
         )
-        self.validate_restored_codebook(self, None)
+        self.validate_codebook_normalizer()
 
     def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:
         self.validate_codebook_normalizer()
@@ -139,17 +138,17 @@ class DQRISEPolicy(BasePolicy):
         code_scale = self.hand_codebook.hand_normalizer_scale.detach().cpu()
         code_offset = self.hand_codebook.hand_normalizer_offset.detach().cpu()
 
-        try:
-            torch.testing.assert_close(policy_scale, code_scale, rtol=rtol, atol=atol)
-            torch.testing.assert_close(policy_offset, code_offset, rtol=rtol, atol=atol)
-        except AssertionError as exc:
+        if not (
+            torch.allclose(policy_scale, code_scale, rtol=rtol, atol=atol)
+            and torch.allclose(policy_offset, code_offset, rtol=rtol, atol=atol)
+        ):
             raise ValueError(
                 "The policy action normalizer and VQ codebook hand normalizer "
                 "do not match. Training/inference would use incompatible hand "
                 "coordinates. Rebuild the codebook with "
                 "python -m dexmani_policy.training.train_vq_hand "
                 "--policy-config using this Policy's data recipe and normalization."
-            ) from exc
+            )
 
     def require_codebook(self) -> None:
         if not self.hand_codebook.is_loaded:

@@ -1,10 +1,10 @@
 # DQ-RISE — VQ-VAE Hand Quantisation + TCP/Index Diffusion
 # Encoder:  iDP3 point cloud encoder (configured by encoder_type)
 # Decoder:  ConditionalUNet1D (FiLM conditioning) + DDIM
-#           ↓ output dim reduced: tcp_dim + 1 (VQ index) instead of full action
-# Hand:     VQ-VAE codebook lookup (discrete hand poses, PCA-sorted)
+#           Output width: tcp_dim + 1 (nearest-prototype index).
+# Hand:     Lookup of RVQ-decoded, PCA-sorted hand poses.
 
-# Modality: point_cloud(6d, xyz+rgb) + joint_state → [TCP EE pose(9) + vq_index(1)] (default action_ee: 10 reduced dims)
+# point_cloud + joint_state → TCP EE pose(9) + prototype index(1) for action_ee.
 
 policy_name: dqrise
 
@@ -29,11 +29,10 @@ normalization:
 # DQ-RISE specific: action-space decomposition
 # tcp_dim auto-derived: 9 for action_ee (21d), 7 for action (19d)
 tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
-# hand_dim = action_dim - tcp_dim     # (auto-derived in agent)
 
 # VQ codebook path (output of dexmani_policy.training.export_hand_codebook / PCA re-indexing, stage 2).
 # New codebooks: python -m dexmani_policy.training.train_vq_hand --policy-config dexmani_policy/configs/dqrise.yaml
-# VQ optimizer/model defaults are in vq_vae below; data comes from dataset above.
+# VQ optimizer/model defaults are in vq_vae; data comes from dataset.
 codebook_path: robot_data/sorted_hand_poses_${task_name}.npz
 
 # ── Dataloader ──
@@ -58,6 +57,7 @@ dataset:
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.0
   max_train_episodes: 80
+  split_manifest: null
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 

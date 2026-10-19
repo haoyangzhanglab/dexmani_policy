@@ -89,7 +89,7 @@ bash scripts/training/train.sh dqrise "${DATA[@]}" action_key=action \
   codebook_path="$HAND_RUN/dqrise/codebook.npz"
 ```
 
-配置默认仍为 EEF `9+12`；示例的 joint `7+12` 是显式覆盖。VQ 使用有效训练窗口引用的唯一 action 源行，有验证集按 `val_mse` 选点，否则按 `train_mse`，本轮不改变该规则。VQ checkpoint v4、码本 NPZ v3 保留，新增必需 source contract；旧产物缺少契约时需用当前代码重新准备，不能只复制 affine。`codebook_diagnostics.json` 报告实际 NN→lookup 的误差、利用率和相邻跳变。
+配置默认仍为 EEF `9+12`；示例的 joint `7+12` 是显式覆盖。VQ 使用有效训练窗口引用的唯一 action 源行，有验证集按 `val_mse` 选点，否则按 `train_mse`。VQ checkpoint v4、码本 NPZ v3 必须包含 source contract；旧产物缺少契约时需用当前代码重新准备，不能只复制 affine。`codebook_diagnostics.json` 报告实际 NN→lookup 的误差、利用率和相邻跳变。
 
 ### LAMP
 
@@ -117,13 +117,15 @@ bash scripts/training/train.sh temporal_codec_flow "${DATA[@]}" \
 
 LAMP/Temporal 的候选选点必须在 KL 达到目标系数后：LAMP 默认 20k steps、2k warmup、beta=1e-3；Temporal 默认 30k、4k 零 KL + 4k ramp、beta=3e-4。有 holdout 按各自验证指标选点，无 holdout 保存最终合格步骤并标记 `final_no_holdout`。不足 schedule 在训练前报错。
 
-所有阶段的数据覆盖必须一致；若使用 LAMP `--output`，policy 的 `lamp.prior_path` 必须同步。已有文件默认不覆盖。Fresh training 校验来源、窗口、划分和归一化；strict resume 使用 checkpoint 内嵌表示并重新核对当前数据，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示、normalizer 和 `action_space_artifact` 元信息，独立推理无需原 artifact 或训练数据。LAMP/Temporal 本轮仅支持 sync。
+所有阶段的数据覆盖必须一致；若使用 LAMP `--output`，policy 的 `lamp.prior_path` 必须同步。三种预训练入口与 policy 共用配置校验，在读取数据前检查窗口、动作布局和产物路径是否对齐；三份配置均声明了可直接覆盖的 `dataset.split_manifest`。已有文件默认不覆盖。
+
+Fresh training 校验来源、窗口、划分和归一化；strict resume 使用 checkpoint 内嵌表示并重新核对当前数据，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示、normalizer 和 `action_space_artifact` 元信息，独立推理无需原 artifact 或训练数据。来源以单一 source contract 记录，源行/窗口保留计数与指纹，不重复保存完整索引列表。LAMP/Temporal 仅支持 sync。
 
 机制公式、论文对应与固定官方提交差异见[手部动作表示](docs/项目架构.md#手部动作表示)。
 
 ## 验证
 
-Smoke 也接受显式 YAML 路径，便于使用临时微型数据/产物；不修改生产默认配置。定向测试通过真实预训练/导出入口创建临时产物，默认 CPU；设 `DEXMANI_TEST_DEVICE=cuda:0` 可验证实际 GPU Trainer 构建入口。
+Smoke 也接受显式 `.yaml` 路径，与预训练入口共用 Hydra 配置组合规则（包括 `defaults`），便于使用临时微型数据/产物。定向测试通过真实预训练/导出入口创建临时产物，默认 CPU；设 `DEXMANI_TEST_DEVICE=cuda:0` 可验证实际 GPU Trainer 构建入口。
 
 
 ```bash

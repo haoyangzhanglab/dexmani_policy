@@ -11,15 +11,13 @@ ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
 os.chdir(ROOT_DIR)
 
 import torch
-from hydra import compose, initialize_config_dir
-from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
 from dexmani_policy.training.checkpoint import (
     CheckpointStore,
     fix_state_dict,
 )
-from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.utils.config import load_policy_config
 from dexmani_policy.utils.tensor import dict_apply
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.training.build_utils import (
@@ -27,18 +25,12 @@ from dexmani_policy.training.build_utils import (
     validate_config,
 )
 
-register_resolvers()
-
 
 def load_config(config_name: str):
-    GlobalHydra.instance().clear()
-    config_dir = os.path.join(ROOT_DIR, "dexmani_policy", "configs")
-    with initialize_config_dir(version_base=None, config_dir=config_dir):
-        cfg = (OmegaConf.load(config_name) if pathlib.Path(config_name).is_file()
-               else compose(config_name=config_name))
-        # compose has no Hydra runtime; provide the only runtime value used by configs.
-        cfg.workspace.output_dir = "/tmp/smoke_test_output"
-        OmegaConf.resolve(cfg)
+    cfg = load_policy_config(config_name)
+    # compose has no Hydra runtime; provide the only runtime value used by configs.
+    cfg.workspace.output_dir = "/tmp/smoke_test_output"
+    OmegaConf.resolve(cfg)
     return cfg
 
 

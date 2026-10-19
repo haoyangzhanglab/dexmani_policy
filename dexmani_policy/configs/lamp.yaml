@@ -41,10 +41,10 @@ dataset:
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.0
   max_train_episodes: 80
+  split_manifest: null
   sensor_modalities: [joint_state, point_cloud]
   history_steps: ${lamp.history_steps}
-  # Read the dataset metadata. For older data, assert obs_before_action only
-  # after checking the recording alignment; never infer it from array indices.
+  # Assert obs_before_action only after verifying the recording alignment.
   obs_alignment: null
   augmentation_cfg:
     pc:

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import io
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -13,51 +13,6 @@ import torch
 from torch import Tensor, nn
 
 from dexmani_policy.utils.validation import positive_int
-
-
-def summarize_codebook_metadata(metadata: dict) -> dict:
-    """Keep provenance summaries; complete source rows remain in the VQ checkpoint."""
-    keys = {
-        "hand_dim",
-        "latent_dim",
-        "hidden_dim",
-        "num_layers",
-        "num_groups",
-        "codebook_size",
-        "act_scale",
-        "source_checkpoint",
-        "source_checkpoint_sha256",
-        "source_epoch",
-        "normalizer_sha256",
-        "checkpoint_metrics",
-        "export_diagnostics",
-        "source_summary",
-        "source_contract", "source_contract_sha256", "selection", "model_config", "implementation",
-        "normalization_spec", "prototype_count", "ordering", "layer_weights",
-    }
-    result = {key: value for key, value in metadata.items() if key in keys}
-    if "split_metadata" in metadata:
-        split = metadata["split_metadata"]
-        summary = {
-            key: split[key]
-            for key in (
-                "normalization_scope",
-                "normalization_spec",
-                "data_revision",
-                "train_frame_count",
-                "val_frame_count",
-                "selection_metric",
-            )
-            if key in split
-        }
-        for key in ("train_source_rows", "val_source_rows", "train_episode_ids", "val_episode_ids"):
-            if key in split:
-                summary[key + "_count"] = len(split[key])
-        summary["source_contract_sha256"] = hashlib.sha256(
-            json.dumps(split.get("source_contract"), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-        ).hexdigest()
-        result["source_summary"] = summary
-    return result
 
 
 class HandStateCodebook(nn.Module):
@@ -203,7 +158,7 @@ class HandStateCodebook(nn.Module):
     def save(self, path: str | Path) -> None:
         values = self.prepare_buffers({name: getattr(self, name) for name in self.BUFFER_NAMES})
         payload = {name: value.cpu().numpy() for name, value in values.items()}
-        metadata = json.dumps(summarize_codebook_metadata(self.artifact_metadata), sort_keys=True)
+        metadata = json.dumps(self.artifact_metadata, sort_keys=True, allow_nan=False)
         payload.update(
             format_version=np.asarray(self.FORMAT_VERSION),
             pose_space=np.asarray("affine_raw"),
@@ -230,7 +185,7 @@ class HandStateCodebook(nn.Module):
             if dimensions != (self.hand_dim, self.num_groups, self.codebook_size):
                 raise ValueError(f"Hand codebook dimensions do not match Policy: {dimensions}")
             values = {name: torch.from_numpy(data[name].copy()) for name in self.BUFFER_NAMES}
-            metadata = summarize_codebook_metadata(json.loads(data["metadata_json"].item()))
+            metadata = json.loads(data["metadata_json"].item())
         self.set_buffers(values)
         from dexmani_policy.utils.hand_artifact import validate_source_metadata
 

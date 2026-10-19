@@ -153,6 +153,26 @@ def register_resolvers():
         OmegaConf.register_new_resolver("eq", lambda a, b: a == b, replace=True)
 
 
+def load_policy_config(config, overrides=()):
+    """Compose a repository config name or explicit YAML with the same Hydra rules."""
+    import hydra
+
+    register_resolvers()
+    root = Path(__file__).resolve().parents[1] / "configs"
+    path = Path(config).expanduser()
+    if path.suffix:
+        if path.suffix != ".yaml":
+            raise ValueError("Policy config paths must use the .yaml extension")
+        path = path.resolve(strict=True)
+        if not path.is_relative_to(root):
+            root = path.parent
+        name = path.relative_to(root).with_suffix("").as_posix()
+    else:
+        name = str(config)
+    with hydra.initialize_config_dir(config_dir=str(root), version_base=None):
+        return hydra.compose(config_name=name, overrides=list(overrides))
+
+
 def validate_window_contract(horizon, n_obs_steps, n_action_steps) -> None:
     """Shared training and checkpoint-evaluation action-window grammar."""
     for name, value in (

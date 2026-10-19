@@ -8,6 +8,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
+
+from dexmani_policy.utils.config import resolve_normalization_spec
 
 
 def implementation_version():
@@ -116,13 +119,52 @@ def validate_source_metadata(metadata):
 
 
 def artifact_record(kind, schema, sha256, metadata, module):
+    record = dict(
+        kind=kind,
+        schema=schema,
+        sha256=sha256,
+        source_contract=metadata.get("source_contract"),
+        source_contract_sha256=metadata.get("source_contract_sha256"),
+        selection=metadata.get("selection"),
+        details={
+            key: metadata[key]
+            for key in (
+                "relative_statistics",
+                "loss_reduction",
+                "source_summary",
+                "model_config",
+                "normalization_spec",
+                "prototype_count",
+                "ordering",
+                "layer_weights",
+                "implementation",
+            )
+            if key in metadata
+        },
+    )
+    validate_artifact_metadata(record, kind, module)
+    record["representation_state_sha256"] = state_sha256(module)
+    return record
+
+
+def validate_artifact_metadata(record, kind, module):
+    """Apply the same representation contract to fresh artifacts and checkpoints."""
+    if not isinstance(record, dict) or record.get("kind") != kind:
+        raise ValueError(
+            "Checkpoint requires action_space_artifact; use historical code or retrain"
+        )
     expected_schema = {"lamp": "lamp_prior.v2", "temporal": "temporal_hand_codec.v1",
                        "dqrise": "hand_codebook.v3"}[kind]
-    if (schema != expected_schema or not isinstance(sha256, str) or len(sha256) != 64
-            or any(c not in "0123456789abcdef" for c in sha256)):
+    sha256 = record.get("sha256")
+    if (
+        record.get("schema") != expected_schema
+        or not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(c not in "0123456789abcdef" for c in sha256)
+    ):
         raise ValueError("Invalid hand artifact schema/SHA; regenerate or use historical code")
-    contract = validate_source_metadata(metadata)
-    selection = metadata.get("selection")
+    contract = validate_source_metadata(record)
+    selection = record.get("selection")
     if (not isinstance(selection, dict)
             or not {"selection_step", "split", "metric", "value"} <= selection.keys()):
         raise ValueError("Missing artifact selection metadata; regenerate the artifact")
@@ -140,22 +182,6 @@ def artifact_record(kind, schema, sha256, metadata, module):
         if (selection["split"] != expected_split
                 or not {"reconstruction", "kl", "physical_joint_mae"} <= selection.keys()):
             raise ValueError("Selection split/metrics do not match the source contract")
-    return dict(kind=kind, schema=schema, sha256=sha256, source_contract=contract,
-                source_contract_sha256=metadata_sha256(contract), selection=selection,
-                representation_state_sha256=state_sha256(module),
-                details={key: metadata[key] for key in (
-                    "relative_statistics", "loss_reduction", "source_summary", "model_config",
-                    "normalization_spec", "prototype_count", "ordering", "layer_weights",
-                    "implementation",
-                ) if key in metadata})
-
-
-def validate_artifact_record(record, kind, module):
-    if not isinstance(record, dict) or record.get("kind") != kind:
-        raise ValueError("Checkpoint requires action_space_artifact; use historical code or retrain")
-    validated = artifact_record(kind, record.get("schema"), record.get("sha256"), record, module)
-    if record.get("representation_state_sha256") != validated["representation_state_sha256"]:
-        raise ValueError("Embedded representation differs from action_space_artifact")
     details = record.get("details", {})
     if not isinstance(details.get("normalization_spec"), dict):
         raise ValueError("Artifact metadata requires the normalization recipe")
@@ -193,14 +219,12 @@ def restore_artifact_metadata(model, config):
     if representation is None:
         return
     record = config.get("action_space_artifact")
-    from omegaconf import OmegaConf
-
     if OmegaConf.is_config(record):
         record = OmegaConf.to_container(record, resolve=True)
     kind, module = representation
-    validate_artifact_record(record, kind, module)
-    from dexmani_policy.utils.config import resolve_normalization_spec
-
+    validate_artifact_metadata(record, kind, module)
+    if record.get("representation_state_sha256") != state_sha256(module):
+        raise ValueError("Embedded representation differs from action_space_artifact")
     if record["details"]["normalization_spec"] != resolve_normalization_spec(config):
         raise ValueError("Saved artifact/policy normalization recipes disagree")
     model.action_space_artifact = record

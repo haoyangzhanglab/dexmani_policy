@@ -12,6 +12,7 @@ from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE, load_temporal_vae
 from dexmani_policy.utils.config import validate_window_contract
+from dexmani_policy.utils.hand_artifact import artifact_record
 
 
 class TemporalLatentFlowPolicy(BasePolicy):
@@ -54,7 +55,7 @@ class TemporalLatentFlowPolicy(BasePolicy):
         validate_window_contract(horizon, n_obs_steps, n_action_steps)
         if action_dim != 19 or state_dim != 19:
             raise ValueError(
-                "Temporal codec currently requires joint actions/state: 7 arm + 12 hand"
+                "Temporal codec requires joint actions/state: 7 arm + 12 hand"
             )
         for weight in (arm_loss_weight, latent_loss_weight, decoded_loss_weight):
             if not 0 <= weight < float("inf"):
@@ -128,8 +129,6 @@ class TemporalLatentFlowPolicy(BasePolicy):
         if codec.model_config != self.codec.model_config:
             raise ValueError("Temporal codec architecture differs from the policy configuration")
         self.codec.load_state_dict(codec.state_dict(), strict=True)
-        from dexmani_policy.utils.hand_artifact import artifact_record
-
         self.action_space_artifact = artifact_record(
             "temporal", "temporal_hand_codec.v1", payload["_file_sha256"], payload["metadata"], self.codec,
         )
@@ -227,7 +226,7 @@ class TemporalLatentFlowPolicy(BasePolicy):
     ) -> dict[str, torch.Tensor]:
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError(
-                "Temporal codec currently supports synchronous chunk execution"
+                "Temporal codec supports synchronous chunk execution"
             )
         self.validate_observations(obs_dict)
         reference = self.resolve_hand_reference(obs_dict, action_context)

@@ -495,6 +495,72 @@ def validate_normalization_config(cfg):
     validate_encoder_normalization(cfg, spec)
 
 
+def validate_hand_config(cfg):
+    """Align representation preparation and policy training before opening data."""
+    target = cfg.agent.get("_target_")
+    if target not in {
+        "dexmani_policy.agents.core.lamp_policy.LAMPPolicy",
+        "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy",
+        "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy",
+    }:
+        return
+    for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
+        if type(cfg.agent[name]) is not type(cfg[name]) or cfg.agent[name] != cfg[name]:
+            raise ValueError(f"Hand policy agent.{name} must match {name}")
+    for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
+        if (
+            type(cfg.dataset[field]) is not type(cfg[name])
+            or cfg.dataset[field] != cfg[name]
+        ):
+            raise ValueError("Hand dataset H/Nobs must match the policy config")
+    if cfg.dataset.get("use_aux_ee", False):
+        raise ValueError("Hand representations do not support auxiliary action targets")
+
+    if target == "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy":
+        layout = {"action": (7, 19), "action_ee": (9, 21)}.get(cfg.action_key)
+        if (cfg.agent.tcp_dim, cfg.agent.action_dim) != layout:
+            raise ValueError(
+                "Supported DQ-RISE layouts are action=7+12 or action_ee=9+12"
+            )
+    else:
+        if (
+            cfg.action_key != "action"
+            or cfg.action_dim != 19
+            or cfg.agent.state_dim != 19
+        ):
+            raise ValueError("LAMP/Temporal require joint action/state=7+12")
+
+    if target == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
+        if (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps) != (1, 1, 1):
+            raise ValueError("LAMP requires H=Nobs=C=1")
+        if (
+            cfg.dataset.history_steps != cfg.agent.history_steps
+            or cfg.lamp.history_steps != cfg.agent.history_steps
+        ):
+            raise ValueError("LAMP dataset/prior/policy history_steps must match")
+        if (
+            cfg.agent.get("num_inference_steps", 1) != 1
+            or cfg.eval.inference_steps != 1
+        ):
+            raise ValueError("LAMP requires inference_steps=1 in agent/eval")
+        if cfg.eval.get("inference_steps_list") not in (None, [1]):
+            raise ValueError("LAMP inference_steps_list must be null or [1]")
+
+    paths = []
+    if "lamp" in cfg:
+        paths.append(("lamp.prior_path", cfg.lamp.prior_path, cfg.agent.prior_path))
+    if "codec" in cfg:
+        paths.append(("codec.path", cfg.codec.path, cfg.agent.codec_path))
+    if "codebook_path" in cfg:
+        paths.append(("codebook_path", cfg.codebook_path, cfg.agent.codebook_path))
+    for name, artifact_path, agent_path in paths:
+        if (
+            Path(artifact_path).expanduser().resolve()
+            != Path(agent_path).expanduser().resolve()
+        ):
+            raise ValueError(f"{name} must match the agent artifact path")
+
+
 def validate_config(cfg):
     """Validate shared training constraints without opening data or model artifacts."""
     agent_pc_dim = cfg.agent.get("pc_dim")
@@ -532,24 +598,7 @@ def validate_config(cfg):
         value = cfg.training.get("loop", {}).get(name, 100 if name == "log_interval_steps" else 1)
         positive_int(value, name)
     validate_window_contract(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
-    if cfg.agent.get("_target_") == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
-        windows = [cfg[name] for name in ("horizon", "n_obs_steps", "n_action_steps")]
-        windows += [cfg.agent[name] for name in ("horizon", "n_obs_steps", "n_action_steps")]
-        windows += [cfg.dataset.horizon, cfg.dataset.obs_horizon]
-        if any(type(value) is not int or value != 1 for value in windows):
-            raise ValueError("LAMP requires H=Nobs=C=1")
-        if cfg.action_key != "action" or cfg.agent.action_dim != 19:
-            raise ValueError("LAMP requires joint action=7+12")
-        if cfg.dataset.history_steps != cfg.agent.history_steps or cfg.lamp.history_steps != cfg.agent.history_steps:
-            raise ValueError("LAMP dataset/prior/policy history_steps must match")
-        if cfg.agent.get("num_inference_steps", 1) != 1 or cfg.eval.inference_steps != 1:
-            raise ValueError("LAMP requires inference_steps=1 in agent/eval")
-        if cfg.eval.get("inference_steps_list") not in (None, [1]):
-            raise ValueError("LAMP inference_steps_list must be null or [1]")
-    for section, key, agent_key in (("lamp", "prior_path", "prior_path"),
-                                    ("codec", "path", "codec_path")):
-        if section in cfg and Path(cfg[section][key]).expanduser().resolve() != Path(cfg.agent[agent_key]).expanduser().resolve():
-            raise ValueError(f"{section}.{key} must match agent.{agent_key}")
+    validate_hand_config(cfg)
     validate_dataset_splits(cfg.dataset)
 
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:

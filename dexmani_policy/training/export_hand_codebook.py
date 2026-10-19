@@ -13,10 +13,14 @@ import numpy as np
 import torch
 from sklearn.decomposition import PCA
 
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, summarize_codebook_metadata
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.utils.config import validate_dq_normalization
 from dexmani_policy.utils.atomic import atomic_path
+from dexmani_policy.utils.config import validate_dq_normalization
+from dexmani_policy.utils.hand_artifact import (
+    implementation_version,
+    validate_source_metadata,
+)
 from dexmani_policy.utils.validation import positive_int
 
 
@@ -34,10 +38,8 @@ def load_checkpoint_snapshot(path):
 
 @torch.no_grad()
 def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
-    from dexmani_policy.utils.hand_artifact import validate_source_metadata, implementation_version
-
     split = checkpoint["split_metadata"]
-    validate_source_metadata(split)
+    contract = validate_source_metadata(split)
     validate_dq_normalization(split["normalization_spec"])
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
     codebook = HandStateCodebook(model.hand_dim, model.num_groups, model.codebook_size)
@@ -73,20 +75,42 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
         "max_violation": float((decoded.abs() - 1).clamp_min(0).max()),
         "pca_explained_variance_ratio": variance_ratio,
     }
-    codebook.artifact_metadata = summarize_codebook_metadata({
-        **checkpoint["model_config"],
+    summary = {
+        key: split[key]
+        for key in (
+            "normalization_scope",
+            "normalization_spec",
+            "train_frame_count",
+            "val_frame_count",
+            "selection_metric",
+            "source_contract_sha256",
+        )
+    }
+    summary["data_revision"] = contract["data_revision"]
+    for name in ("train", "val"):
+        summary[name + "_source_rows_count"] = contract["splits"][name][
+            "source_rows_count"
+        ]
+        summary[name + "_episode_ids_count"] = sum(contract[name + "_mask"])
+    codebook.artifact_metadata = {
         "model_config": checkpoint["model_config"],
-        "implementation": {"training": split.get("implementation"), "export": implementation_version()},
+        "implementation": {
+            "training": split.get("implementation"),
+            "export": implementation_version(),
+        },
         "source_contract": split["source_contract"],
         "source_contract_sha256": split["source_contract_sha256"],
         "normalization_spec": split["normalization_spec"],
         "prototype_count": codebook.num_codes,
         "ordering": "decoded_prototype_pca1_ascending",
         "layer_weights": weights.cpu().tolist(),
-        "selection": {"selection_step": int(checkpoint["epoch"]), "unit": "epoch",
-                      "split": "validation" if split["val_frame_count"] else "train_no_holdout",
-                      "metric": split["selection_metric"],
-                      "value": checkpoint["metrics"][split["selection_metric"]]},
+        "selection": {
+            "selection_step": int(checkpoint["epoch"]),
+            "unit": "epoch",
+            "split": "validation" if split["val_frame_count"] else "train_no_holdout",
+            "metric": split["selection_metric"],
+            "value": checkpoint["metrics"][split["selection_metric"]],
+        },
         "source_checkpoint": str(Path(checkpoint_path).resolve()),
         "source_checkpoint_sha256": source_hash,
         "source_epoch": int(checkpoint["epoch"]),
@@ -94,9 +118,9 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
             scale.contiguous().numpy().tobytes() + offset.contiguous().numpy().tobytes()
         ).hexdigest(),
         "checkpoint_metrics": checkpoint["metrics"],
-        "split_metadata": checkpoint["split_metadata"],
+        "source_summary": summary,
         "export_diagnostics": diagnostics,
-    })
+    }
     if variance_ratio < 0.3:
         warnings.warn(
             f"Hand prototypes have weak PC1 ordering: variance ratio={variance_ratio:.4f}", RuntimeWarning,

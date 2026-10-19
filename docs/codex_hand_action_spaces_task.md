@@ -301,3 +301,26 @@ python dexmani_policy/smoke_test.py \
 - 完整 SIM 与外部真机闭环：未启动。runner 只用可控执行器验证历史追加语义；外部 dexmani_real 仍未传入执行 history。真机需在外部完成按 dt 对齐的 bootstrap/逐执行步历史维护并另获明确运动指令，不能将本轮 runtime 测试当作闭环通过。
 
 正式产物准备、相同 split/路径覆盖和训练命令见 [README](../README.md#手部先验准备)。不根据本轮微型测试宣称论文系统完整复现、表示容量足够或取得论文成绩。
+
+## 14. 实施后清理与对齐（2026-10-19）
+
+从干净的 `b51fbb0` 开始，保留三种机制、损失、窗口和默认训练配方，完成调用链清理：
+
+- 删除 LAMP/Temporal 旧 metadata 属性、重复源行/窗口副本、重复 JSON 指纹实现及多余 readiness 标志；VQ checkpoint 同样移除 source contract 已覆盖的完整索引列表和重复字段。
+- DQ source_summary 只在导出时生成；NPZ 保存/加载直接保留 metadata，不再反复过滤或隐式重写。RVQ、PCA、NN、标量映射及 lookup 未改动。
+- 三个预训练入口和 smoke 共用 Hydra loader；Temporal/DQ 预训练补接共享配置校验，窗口、动作布局和路径错配在读取数据前失败。删除单独路径校验及跨方法导入 loader。
+- 三份 YAML 补充 `split_manifest: null`，修复 README 覆盖命令被 Hydra 拒绝的问题；显式 YAML 的 smoke 支持 `defaults` 组合。
+- fresh/restored artifact 共用 metadata 校验，恢复直接核对表示 state hash，不再通过重建临时记录完成校验。来源、归一化、选点和 strict load 约束保留。
+- LAMP 移除重复 inference-step/loss 检查，非有限 loss 交由 Trainer 统一处理；保持 prior 冻结，在 train/eval 切换时仅设 eval。DQ normalizer 比较改用 `torch.allclose`，不在生产路径依赖测试断言 API。
+- 整理改动区域的导入、命名、格式和过期注释，同步 README 与机制文档。
+
+本轮实际验证：
+
+| 检查 | 结果 |
+| --- | --- |
+| `python -m pytest -q tests/test_hand_action_spaces.py` | PASS：26 项，43.76s；随后补充 README 参数组合断言，单独复跑 1 项通过 |
+| `DEXMANI_TEST_DEVICE=cuda:0 TORCHINDUCTOR_CACHE_DIR=/tmp/dexmani-hand-inductor-20261019 python -m pytest -q tests/test_hand_action_spaces.py` | PASS：最终 26 项，45.82s；含真实 GPU Trainer、raw/EMA、strict resume 和 compiled LAMP |
+| `python dexmani_policy/smoke_test.py --config-only dqrise lamp temporal_codec_flow dp sat ddp/dqrise` | PASS：6 个配置 |
+| 变更 Python AST、未使用 import 候选检查、diff 与旧活跃入口扫描 | PASS：15 个 Python 文件可解析，无旧活跃入口或未使用 import 候选 |
+
+新增测试覆盖配置名/路径/继承的一致性、README 参数组合、预训练在数据读取前拒绝错配、fresh/restored metadata 校验一致性、表示状态篡改拒绝及 Trainer 非有限 loss 处理。测试只使用临时合成数据；生产容量、真实数据训练、多卡运行、完整 SIM 和外部真机闭环仍为 **NOT VERIFIED**，复跑前提沿用第 13 节。
