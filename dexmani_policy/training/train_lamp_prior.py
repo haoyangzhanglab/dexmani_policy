@@ -1,7 +1,7 @@
 """Train the LAMP hand prior on the policy dataset's eligible source rows.
 
 Example: python -m dexmani_policy.training.train_lamp_prior --config lamp
-         zarr_path=/path/to/data.zarr dataset.obs_alignment=obs_before_action
+         zarr_path=/path/to/data.zarr
 """
 
 from __future__ import annotations

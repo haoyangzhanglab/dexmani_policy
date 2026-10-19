@@ -8,20 +8,11 @@ import torch
 from dexmani_policy.datasets.pc_dataset import PCDataset
 from dexmani_policy.utils.hand_artifact import array_sha256, metadata_sha256
 
-OBS_ALIGNMENT = "obs[t]_before_action[t]"
-
 
 class LampDataset(PCDataset):
-    """Pair observations/actions with strictly past physical hand commands."""
+    """Use current exports' pre-action observations and strictly past hand commands."""
 
-    def __init__(
-        self,
-        zarr_path,
-        *,
-        history_steps=8,
-        obs_alignment=None,
-        **kwargs,
-    ):
+    def __init__(self, zarr_path, *, history_steps=8, **kwargs):
         if type(history_steps) is not int or history_steps < 1:
             raise ValueError("history_steps must be a positive integer")
         if kwargs.get("action_key", "action") != "action" or kwargs.get("use_aux_ee", False):
@@ -32,27 +23,12 @@ class LampDataset(PCDataset):
         if "joint_state" not in modalities:
             raise ValueError("LAMP bootstrap requires joint_state observations")
         self.history_steps = history_steps
-        self.alignment_assertion = obs_alignment
         self.history_valid = None
         super().__init__(zarr_path, **kwargs)
 
     def prepare_lamp_source(self):
         buffer = self.replay_buffer
-        attrs = buffer.attrs
-        asserted = self.alignment_assertion
-        if asserted == "obs_before_action":
-            asserted = OBS_ALIGNMENT
-        if asserted is not None and asserted != OBS_ALIGNMENT:
-            raise ValueError(f"Unsupported asserted obs_alignment: {asserted!r}")
-        stored = attrs.get("obs_alignment")
-        if stored is not None and stored != OBS_ALIGNMENT:
-            raise ValueError(f"Unsupported stored obs_alignment: {stored!r}")
-        if stored is None and asserted is None:
-            raise ValueError(
-                "LAMP requires obs_alignment='obs[t]_before_action[t]' in data attributes "
-                "or an explicit obs_alignment='obs_before_action' assertion"
-            )
-        dt = attrs.get("dt")
+        dt = buffer.attrs.get("dt")
         if (
             isinstance(dt, bool)
             or not isinstance(dt, (float, int))
@@ -94,8 +70,6 @@ class LampDataset(PCDataset):
             "history_steps": self.history_steps,
             "history": "strictly_past_hand_command_targets",
             "bootstrap": "episode_initial_measured_hand_pose",
-            "obs_alignment": OBS_ALIGNMENT,
-            "alignment_source": "data_attribute" if stored is not None else "explicit_assertion",
             "dt": float(dt),
             "action_key": "action",
             "hand_slice": [7, 19],

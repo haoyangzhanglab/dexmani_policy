@@ -5,15 +5,14 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from dexmani_policy.datasets.lamp_dataset import OBS_ALIGNMENT
 from dexmani_policy.datasets.pc_dataset import PCDataset
 from dexmani_policy.utils.hand_artifact import array_sha256, metadata_sha256
 
 
 class TemporalCodecDataset(PCDataset):
-    """Keep physical actions and raw measured q0 at the policy's query observation."""
+    """Use current exports' raw measured q0 before the query action."""
 
-    def __init__(self, zarr_path, *, obs_alignment=None, **kwargs):
+    def __init__(self, zarr_path, **kwargs):
         if kwargs.get("action_key", "action") != "action" or kwargs.get("use_aux_ee", False):
             raise ValueError(
                 "TemporalCodecDataset requires joint action=7+12 without auxiliary targets"
@@ -24,17 +23,6 @@ class TemporalCodecDataset(PCDataset):
         if self.horizon < 3:
             raise ValueError("Temporal codec horizon must be at least 3")
         buffer = self.replay_buffer
-        asserted = OBS_ALIGNMENT if obs_alignment == "obs_before_action" else obs_alignment
-        if asserted is not None and asserted != OBS_ALIGNMENT:
-            raise ValueError(f"Unsupported asserted obs_alignment: {asserted!r}")
-        stored = buffer.attrs.get("obs_alignment")
-        if stored is not None and stored != OBS_ALIGNMENT:
-            raise ValueError(f"Unsupported stored obs_alignment: {stored!r}")
-        if stored is None and asserted is None:
-            raise ValueError(
-                "Temporal codec requires data attribute obs_alignment='obs[t]_before_action[t]' "
-                "or an explicit obs_alignment='obs_before_action' assertion"
-            )
         dt = buffer.attrs.get("dt")
         if (
             isinstance(dt, bool)
@@ -53,10 +41,6 @@ class TemporalCodecDataset(PCDataset):
         )
         self.codec_source_metadata = {
             "reference": "raw_measured_hand_at_query_observation",
-            "obs_alignment": OBS_ALIGNMENT,
-            "alignment_source": (
-                "data_attribute" if stored is not None else "explicit_assertion"
-            ),
             "dt": float(dt),
             "action_key": "action",
             "hand_slice": [7, 19],

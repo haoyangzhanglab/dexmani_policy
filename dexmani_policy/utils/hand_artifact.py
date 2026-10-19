@@ -78,17 +78,15 @@ def source_contract(dataset):
         task_name=attrs.get("task_name"), episode_ids=attrs.get("episode_ids"),
         episode_ends_sha256=array_sha256(np.asarray(buffer.episode_ends, dtype=np.int64)),
         train_mask=dataset.train_mask.tolist(), val_mask=dataset.val_mask.tolist(),
-        arrays=arrays, splits=splits, dt=float(dt), obs_alignment=attrs.get("obs_alignment"),
+        arrays=arrays, splits=splits, dt=float(dt),
         window=dict(horizon=dataset.horizon, obs_horizon=dataset.obs_horizon,
                     pad_before=dataset.pad_before, pad_after=dataset.pad_after),
         data_recipe=dataset.data_recipe,
     )
     if hasattr(dataset, "lamp_source_metadata"):
         contract["history"] = dataset.lamp_source_metadata
-        contract["obs_alignment"] = dataset.lamp_source_metadata["obs_alignment"]
     if hasattr(dataset, "codec_source_metadata"):
         contract["reference"] = dataset.codec_source_metadata
-        contract["obs_alignment"] = dataset.codec_source_metadata["obs_alignment"]
         contract["statistics_population"] = "train_windows_including_repeated_rows_and_padding"
     # Detach from mutable dataset recipes and normalize scalar/container types.
     dataset.hand_source_contract = json.loads(json.dumps(contract, allow_nan=False))

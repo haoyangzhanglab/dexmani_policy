@@ -44,8 +44,6 @@ dataset:
   split_manifest: null
   sensor_modalities: [joint_state, point_cloud]
   history_steps: ${lamp.history_steps}
-  # Assert obs_before_action only after verifying the recording alignment.
-  obs_alignment: null
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}

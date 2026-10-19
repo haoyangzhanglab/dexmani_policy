@@ -2,7 +2,7 @@
 # Encoder:  Uni3D (ViT-tiny, 256d, pre-trained) with color point cloud
 # Decoder:  R3DTransformer (cross-attention) + DDIM
 # Modality: point_cloud(6d, xyz+rgb) + joint_state → action
-# Note:     pc_in_channels=6 (color), use_compile=true (R3DTransformer backbone only)
+# Note:     pc_in_channels=6 (internal XYZRGB patch width), use_compile=true (backbone only)
 #
 # Auxiliary loss: use_aux_ee predicts wrist pose (pos3+rot6d6=9dim) from
 # action_ee[:9] alongside the primary joint action.  Matches official

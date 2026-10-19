@@ -244,6 +244,7 @@ class Sparse3DEncoder(nn.Module):
             input_channels, channels, geometry_scale
         )
         self.local_relation = LocalGeometricTransformerBlock(channels)
+        self.position_embedding = build_mlp([3, 128, channels], normalize=False)
         self.rope = RotaryPositionEmbedding3D(
             channels // num_heads, rope_scale, rope_base
         )
@@ -256,7 +257,7 @@ class Sparse3DEncoder(nn.Module):
         self.norm = nn.LayerNorm(channels)
 
     def encode_global(self, tokens: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-        """Dense compile boundary; keep sampling and neighborhood backward eager."""
+        """Compile global attention; keep sampling and local feature extraction eager."""
         for block in self.blocks:
             tokens = block(tokens, cos, sin)
         return self.norm(tokens)
@@ -314,6 +315,11 @@ class Sparse3DEncoder(nn.Module):
         attributes = index_points(pointcloud[..., 3 : self.input_channels], neighbors)
         tokens, radius = self.patch_embedding(relative_xyz, attributes)
         tokens = self.local_relation(tokens, local_indices, edges)
+        # Preserve absolute metric position as content alongside relative geometry/RoPE.
+        position = self.position_embedding(
+            centers.to(self.position_embedding[0].weight.dtype)
+        )
+        tokens = tokens + position.to(tokens.dtype)
         outputs = {
             "tokens": self.encode_global(tokens, cos, sin),
             "xyz": centers,

@@ -291,8 +291,12 @@ def bind_action_space_artifact(cfg, model, dataset):
         raise ValueError("Hand policies require the actual training dataset at artifact binding")
     record = model.action_space_artifact
     current = source_contract(dataset)
-    if record["source_contract"] != current:
-        changed = sorted(key for key in current if current[key] != record["source_contract"].get(key))
+    saved = record["source_contract"]
+    if saved != current:
+        changed = sorted(
+            key for key in saved.keys() | current.keys()
+            if key not in saved or key not in current or saved[key] != current[key]
+        )
         raise ValueError(f"Hand artifact source mismatch: {changed}; regenerate for this data recipe")
     with open_dict(cfg):
         cfg.action_space_artifact = OmegaConf.create(record)
@@ -443,12 +447,12 @@ def resolve_numeric_observation_fields(cfg) -> set:
 
 
 def validate_encoder_normalization(cfg, spec) -> None:
-    """Keep Sparse3DEncoder's geometric statistics and RoPE in metric XYZ."""
+    """Keep Sparse3D position content and geometric features in metric XYZ."""
     agent = cfg.get("agent", {})
     if agent.get("_target_") in SPARSE3D_POLICY_TARGETS and spec.get("point_cloud") != "identity":
         raise ValueError(
             "Sparse3DEncoder requires normalization.point_cloud: identity "
-            "(geometric statistics and 3D RoPE require metric XYZ)."
+            "(position content and geometric features require metric XYZ)."
         )
 
 

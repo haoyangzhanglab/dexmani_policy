@@ -116,7 +116,7 @@ class RandomFourierPositionEmbedding3D(nn.Module):
 
 
 class Uni3DEncoder(nn.Module):
-    """PointNet patch embeddings and global attention with Fourier spatial encoding."""
+    """Encode XYZ or XYZRGB using internal 6-channel (relative XYZ + RGB) patches."""
 
     def __init__(
         self,
@@ -133,6 +133,12 @@ class Uni3DEncoder(nn.Module):
         fps_random_config=None,
     ):
         super().__init__()
+        if type(pc_in_channels) is not int or pc_in_channels != 6:
+            raise ValueError(
+                f"Uni3D pc_in_channels must be the integer 6, got {pc_in_channels!r}; "
+                "it is the internal patch feature width. XYZ input is padded with "
+                "zero RGB and does not require pc_in_channels=3."
+            )
 
         import timm
 
@@ -275,6 +281,12 @@ class Uni3DEncoder(nn.Module):
         return self.embed_dim
 
     def forward(self, pcd):
+        if pcd.ndim != 3 or (pcd.shape[-1] != 3 and pcd.shape[-1] < 6):
+            raise ValueError(
+                "Uni3D point cloud must have shape [B,N,C] with C=3 (XYZ) or "
+                "C>=6 (first six channels are XYZRGB); keep pc_in_channels=6 "
+                "even for XYZ input, which is padded with zero RGB."
+            )
         if pcd.shape[-1] == 3:
             colors = torch.zeros_like(pcd)
             pcd = torch.cat([pcd, colors], dim=-1)

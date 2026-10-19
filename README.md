@@ -65,7 +65,10 @@ bash scripts/training/train.sh dp3 \
 - 显式 `dataset.split_manifest` 定义最终 episode 集合，需同时设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`。
 - Diffusion 使用 Gaussian 动作归一化时需设置 `agent.clip_sample=false`；DQ-RISE/VQ 仅支持动作 `auto/limits`。
 - `dataset.rgb_keep_uint8=true` 要求 `normalization.rgb=identity`；评测沿用保存的 RGB 预处理配方。
-- SAT、LAMP 和 Temporal 策略的 Sparse3DEncoder 要求 `normalization.point_cloud=identity`。
+- SAT、LAMP 和 Temporal 的 Sparse3DEncoder 要求 `normalization.point_cloud=identity`：原始米制 centers 经位置 MLP 加入 token 内容，相对几何与 RoPE 保留局部结构和相对位移。训练和推理必须沿用同一坐标系与原点。
+- Uni3D 的 `pc_in_channels` 固定为整数 `6`，表示内部 patch 宽度；原始 XYZ 输入由 encoder 补零 RGB，不应改为 `3`。这不提供完整 R3D XYZ-only 数据/normalizer 配方。
+
+缺少 `position_embedding.*` 的旧 Sparse3D 策略 checkpoint 会在严格加载时失败；请使用对应历史 checkout，或重新训练新策略。视觉分支变化不要求重训来源、配方、normalizer 和表示状态均匹配的手部 prior/codec/codebook。机制和兼容边界见[项目架构](docs/项目架构.md#观测编码)。
 
 ## 手部先验准备
 
@@ -82,7 +85,7 @@ DATA=("zarr_path=$DATA_ZARR" "dataset.split_manifest=$SPLIT"
 
 正式 baseline 必须提供 episode 级 held-out manifest，并在表示预训练、policy 和各 seed 中复用。manifest 所需 `data_revision`、`episode_ids`、trial 分组见[数据与划分](docs/项目架构.md)；缺少这些信息时应核实并重新导出数据，不补造身份。开发 smoke 可无 holdout，但不据此报告泛化。各方法 history/window 合法性不同，需报告实际样本数与 padding 比例。
 
-LAMP/Temporal 要求数据声明 `obs_alignment="obs[t]_before_action[t]"`，三种表示要求有限正 `dt`。只有确认采集时序后，才可向 LAMP/Temporal 的两个阶段同时追加 `dataset.obs_alignment=obs_before_action`；不要从索引猜测。手部物理坐标为本仓 XHand thumb×3、index×3、middle×2、ring×2、pinky×2，单位 radians。
+只支持当前 dexmani_sim/dexmani_real 采集与导出的 Zarr：每行观测在该行动作提交前取得，时序由生产端保证。训练不读取或配置 `obs_alignment`，不支持旧版错位数据，也不执行自动移位。三种表示要求有限正 `dt`；手部物理坐标为本仓 XHand thumb×3、index×3、middle×2、ring×2、pinky×2，单位 radians。来源契约已移除旧时序声明字段，含这些字段的旧表示产物需使用历史 checkout 或重新准备；严格匹配边界见[来源与选点契约](docs/项目架构.md#来源与选点契约)。
 
 ### DQ-RISE
 

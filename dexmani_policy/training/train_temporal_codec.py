@@ -1,7 +1,7 @@
 """Pretrain the temporal hand VAE on exactly the policy's qualified windows.
 
 python -m dexmani_policy.training.train_temporal_codec --config temporal_codec_flow
-    zarr_path=/path/to/data.zarr dataset.obs_alignment=obs_before_action
+    zarr_path=/path/to/data.zarr
 """
 
 from __future__ import annotations
