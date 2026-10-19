@@ -34,7 +34,8 @@ def load_config(config_name: str):
     GlobalHydra.instance().clear()
     config_dir = os.path.join(ROOT_DIR, "dexmani_policy", "configs")
     with initialize_config_dir(version_base=None, config_dir=config_dir):
-        cfg = compose(config_name=config_name)
+        cfg = (OmegaConf.load(config_name) if pathlib.Path(config_name).is_file()
+               else compose(config_name=config_name))
         # compose has no Hydra runtime; provide the only runtime value used by configs.
         cfg.workspace.output_dir = "/tmp/smoke_test_output"
         OmegaConf.resolve(cfg)
@@ -240,7 +241,7 @@ def main():
         ),
     )
     parser.add_argument(
-        "config_names", nargs="+", help="Hydra config names to validate."
+        "config_names", nargs="+", help="Hydra config names or explicit test YAML paths."
     )
     parser.add_argument("--max-updates", type=int, default=4, help="Execution-only optimizer-update budget (default: 4).")
     args = parser.parse_args()

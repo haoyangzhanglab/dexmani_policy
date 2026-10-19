@@ -14,7 +14,7 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 python -m pip check
 python dexmani_policy/smoke_test.py --config-only dp dp3 dqrise sat r3d \
-  maniflow multitask_dit lamp_flow temporal_codec_flow
+  maniflow multitask_dit lamp temporal_codec_flow
 ```
 
 部分点云算子需要单独安装与 Torch/CUDA 匹配的 PyTorch3D；仿真评测需要 `dexmani_sim`。模型所需的外部预训练权重由配置指定，可查看 `scripts/utils/download_pretrained.sh`。
@@ -58,61 +58,78 @@ bash scripts/training/train.sh dp3 \
 
 ## 手部先验准备
 
-下列多阶段流程必须使用一致的数据、split、窗口和归一化配置。更换任务或数据时，将相同覆盖传给每个阶段，并为新产物选择新路径。
+三种方法各保留一个策略实现，均为论文机制的机器人/训练框架适配，不能视作已隔离模型、窗口和目标差异的纯动作空间消融。生产默认值见配置；以下示例统一使用 joint action、同一数据 revision 和固定 episode split，各自保存独立产物。
+
+```bash
+conda activate policy
+DATA_ZARR=/path/to/revision.zarr
+SPLIT=/path/to/episode_split.json
+HAND_RUN="experiments/hand_spaces/$(date +%Y%m%d_%H%M%S)_${RANDOM}"
+DATA=("zarr_path=$DATA_ZARR" "dataset.split_manifest=$SPLIT"
+      dataset.max_train_episodes=null dataset.val_ratio=0)
+```
+
+正式 baseline 必须提供 episode 级 held-out manifest，并在表示预训练、policy 和各 seed 中复用。manifest 所需 `data_revision`、`episode_ids`、trial 分组见[数据与划分](docs/项目架构.md)；缺少这些信息时应核实并重新导出数据，不补造身份。开发 smoke 可无 holdout，但不据此报告泛化。各方法 history/window 合法性不同，需报告实际样本数与 padding 比例。
+
+LAMP/Temporal 要求数据声明 `obs_alignment="obs[t]_before_action[t]"`，三种表示要求有限正 `dt`。只有确认采集时序后，才可向 LAMP/Temporal 的两个阶段同时追加 `dataset.obs_alignment=obs_before_action`；不要从索引猜测。手部物理坐标为本仓 XHand thumb×3、index×3、middle×2、ring×2、pinky×2，单位 radians。
 
 ### DQ-RISE
 
-先按目标 Policy 的数据配方训练 VQ，再导出码本：
-
 ```bash
-VQ_RUN="experiments/vq_hand/pick_apple_messy/$(date +%Y%m%d_%H%M%S)_${RANDOM}"
+VQ_DATA=()
+for item in "${DATA[@]}"; do VQ_DATA+=(--policy-override "$item"); done
 python -m dexmani_policy.training.train_vq_hand \
   --policy-config dexmani_policy/configs/dqrise.yaml \
-  --policy-override task_name=pick_apple_messy \
-  --output_dir "$VQ_RUN"
+  "${VQ_DATA[@]}" --policy-override action_key=action \
+  --output_dir "$HAND_RUN/dqrise"
 python -m dexmani_policy.training.export_hand_codebook \
-  --checkpoint "$VQ_RUN/vqvae_hand_best.pt" \
-  --output "$VQ_RUN/codebook.npz"
-bash scripts/training/train.sh dqrise \
-  task_name=pick_apple_messy codebook_path="$VQ_RUN/codebook.npz"
+  --checkpoint "$HAND_RUN/dqrise/vqvae_hand_best.pt" \
+  --output "$HAND_RUN/dqrise/codebook.npz"
+bash scripts/training/train.sh dqrise "${DATA[@]}" action_key=action \
+  codebook_path="$HAND_RUN/dqrise/codebook.npz"
 ```
 
-额外覆盖用重复的 `--policy-override` 传入，并同步到 Policy 训练命令。VQ 使用有效训练窗口引用的唯一 action 源行；验证集复用训练统计。有验证集按 `val_mse` 选点，否则按 `train_mse`。支持 joint `7+12` 和 EEF `9+12`，不支持辅助动作尾部。
-
-VQ checkpoint 使用 v4，码本 NPZ 使用 v3；导出已有文件需要显式 `--overwrite`。`codebook_diagnostics.json` 提供查表误差和原型利用率。Policy 加载时核对手部 affine 参数，完整 Policy checkpoint 内嵌码本，推理无需原 NPZ。
+配置默认仍为 EEF `9+12`；示例的 joint `7+12` 是显式覆盖。VQ 使用有效训练窗口引用的唯一 action 源行，有验证集按 `val_mse` 选点，否则按 `train_mse`，本轮不改变该规则。VQ checkpoint v4、码本 NPZ v3 保留，新增必需 source contract；旧产物缺少契约时需用当前代码重新准备，不能只复制 affine。`codebook_diagnostics.json` 报告实际 NN→lookup 的误差、利用率和相邻跳变。
 
 ### LAMP
 
 ```bash
-python -m dexmani_policy.training.train_lamp_prior --config lamp_flow
-python -m dexmani_policy.training.export_lamp_latents --config lamp_flow
-bash scripts/training/train.sh lamp_flow
+python -m dexmani_policy.training.train_lamp_prior --config lamp "${DATA[@]}" \
+  lamp.prior_path="$HAND_RUN/lamp/prior.pt"
+bash scripts/training/train.sh lamp "${DATA[@]}" \
+  lamp.prior_path="$HAND_RUN/lamp/prior.pt"
 ```
 
-通过 `lamp.prior_path`、`lamp.latent_path` 指定产物，默认位于 `experiments/lamp_prior/<task>/`。训练入口要求 dataset 与 Policy 使用同一路径，缓存还需匹配 prior 哈希、数据身份和划分。
+唯一结构为 `H=Nobs=C=1`、K=8 历史先验、单步 arm/latent offset 回归；训练用 decoded hand MSE 与 latent offset L2，不需要离线 latent 标签。prior 为 `lamp_prior.v2`，旧 v1 和旧 Flow policy 不自动迁移，历史实验使用历史提交。
 
-数据须声明 `obs_alignment="obs[t]_before_action[t]"` 和有效 `dt`。只有确认记录时序后，才能为上述三个入口追加 `dataset.obs_alignment=obs_before_action`。历史使用 query 之前的手部命令，episode 开始以初始实测姿态补齐。
-
-当前实现支持单手 joint `7+12` 和同步 SIM；SIM 使用实际执行命令更新历史。Real bridge 尚未提供该历史，加载 LAMP 会明确报错。完整 Policy checkpoint 内嵌 prior 和 latent 统计，推理不依赖外部 prior/cache。
+历史严格来自 query 之前的实际执行命令，reset 用初始实测手姿补齐。SIM 每个成功执行步追加处理后的命令。runtime 要求调用者显式传 `action_context={"hand_history": history}`，其中 `history` 是物理 NumPy `[K,12]`；`predict` 不更新历史。外部 `dexmani_real` 尚未接入该历史，真机闭环 **NOT VERIFIED**。
 
 ### Temporal hand codec
 
 ```bash
-python -m dexmani_policy.training.train_temporal_codec --config temporal_codec_flow
-bash scripts/training/train.sh temporal_codec_flow
+python -m dexmani_policy.training.train_temporal_codec --config temporal_codec_flow "${DATA[@]}" \
+  codec.path="$HAND_RUN/temporal/codec.pt"
+bash scripts/training/train.sh temporal_codec_flow "${DATA[@]}" \
+  codec.path="$HAND_RUN/temporal/codec.pt"
 ```
 
-通过 `codec.path` 指定产物，默认位于 `experiments/temporal_codec/<task>/codec.pt`。两个入口使用相同的 `codec.*` 和数据配方；数据也须声明上述 observation/action 时序，确认后可在两个入口追加同样的显式断言。
+保留 H=16、Nobs=2、C=8、12→9 时序 VAE。冻结 encoder 的 posterior mean 在线生成标签；q0 取 query 源帧未增强的实测值，整段固定，完整解码后切片。decoded loss 唯一使用 standardized relative 空间；物理 MAE/RMSE 只作诊断。codec 保持 `temporal_hand_codec.v1` 张量格式，旧文件缺来源/选点信息时必须重新预训练。
 
-冻结 encoder 的 posterior mean 在线生成 latent 标签，无需离线缓存；手部参考姿态取 query 源帧未增强的实测值。Policy checkpoint 内嵌完整 codec。更换 codec 后应重新训练 Policy，不能直接替换已训练策略中的权重。
+LAMP/Temporal 的候选选点必须在 KL 达到目标系数后：LAMP 默认 20k steps、2k warmup、beta=1e-3；Temporal 默认 30k、4k 零 KL + 4k ramp、beta=3e-4。有 holdout 按各自验证指标选点，无 holdout 保存最终合格步骤并标记 `final_no_holdout`。不足 schedule 在训练前报错。
 
-先验结构、损失和实验选项见 [手部动作表示](docs/项目架构.md#手部动作表示)；默认超参数以配置和各预训练入口的 `--help` 为准。
+所有阶段的数据覆盖必须一致；若使用 LAMP `--output`，policy 的 `lamp.prior_path` 必须同步。已有文件默认不覆盖。Fresh training 校验来源、窗口、划分和归一化；strict resume 使用 checkpoint 内嵌表示并重新核对当前数据，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示、normalizer 和 `action_space_artifact` 元信息，独立推理无需原 artifact 或训练数据。LAMP/Temporal 本轮仅支持 sync。
+
+机制公式、论文对应与固定官方提交差异见[手部动作表示](docs/项目架构.md#手部动作表示)。
 
 ## 验证
+
+Smoke 也接受显式 YAML 路径，便于使用临时微型数据/产物；不修改生产默认配置。定向测试通过真实预训练/导出入口创建临时产物，默认 CPU；设 `DEXMANI_TEST_DEVICE=cuda:0` 可验证实际 GPU Trainer 构建入口。
+
 
 ```bash
 python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name> --max-updates 4
+python -m pytest -q tests/test_hand_action_spaces.py
 ```
 
 `--config-only` 检查配置、Hydra target 和策略导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
@@ -175,7 +192,7 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | [项目架构](docs/项目架构.md) | 数据流、接口、归一化、先验和恢复边界 |
 | [仿真评测机制](docs/仿真评测机制.md) | selection、held-out seeds、指标与结果 |
 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) | 远端启动、同步、监控和停止 |
-| [三种手部动作空间 Codex CLI 任务书](docs/codex_hand_action_spaces_task.md) | 待实施的 DQ-RISE、LAMP、Temporal 修改方案与验收；不代表当前算法已修改 |
+| [三种手部动作空间 Codex CLI 任务书](docs/codex_hand_action_spaces_task.md) | DQ-RISE、LAMP、Temporal 实施约束、验收证据及未验证项 |
 | [配套 Codex CLI prompt](docs/prompts/hand_action_spaces_codex_cli.txt) | 复制给 Codex CLI 执行上述任务书 |
 | [AGENTS.md](AGENTS.md) | AI 研究协作规则 |
 | [CLAUDE.md](CLAUDE.md) | Claude Code 的规则加载入口 |

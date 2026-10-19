@@ -1,6 +1,6 @@
 # Codex CLI 任务书：三种灵巧手动作空间的唯一实现
 
-> 状态：待实施的设计与验收规范；提交本文件不表示算法代码已经修改或测试通过。
+> 状态：实现已落地（实现提交 `a5fd3e0`）；本文件保留机制规范，实际验收范围和未验证项见 §13。
 >
 > 审计基线：`haoyangzhanglab/dexmani_policy@ef65cf7848e19bbf3e84cb7ad785840705a0741f`（2026-10-19，`1019 temp`）。CLI 执行时必须重新确认实际 HEAD、工作区修改及调用链，保留此后已经正确完成的工作。
 >
@@ -238,12 +238,66 @@ CUDA、依赖、数据、权重或外部执行器缺失时，完成仍可做的�
 
 ## 12. 完成定义与 CLI 最终交付
 
-- [ ] DQ-RISE、LAMP、Temporal 各一个有效策略实现，配置、准备、训练、恢复、推理入口互相一致。
-- [ ] LAMP 单步 direct BC + frozen history prior + decoded supervision + raw latent offset L2，逆解/缓存/旧 Flow 链路彻底退出。
-- [ ] Temporal 保持 q0-conditioned full-chunk codec 和正确 FM，不发生误锚定、截断解码或梯度断路。
-- [ ] 表示产物的来源、坐标、划分和选点记录可追溯；fresh、strict resume、独立推理的边界分明。
-- [ ] SIM 与 runtime 的 history/reference/execution 语义已落到调用方，外部未验证部分明确披露。
-- [ ] README 和机制文档说明论文要求、本地适配、生产命令及不兼容点；不得声称完整复现论文系统或取得论文成绩。
-- [ ] 针对风险的检查有命令和结果；仅实际运行通过标 `PASS`，缺条件标 `NOT VERIFIED`；不留下绕过校验的临时代码。
+- [x] DQ-RISE、LAMP、Temporal 各一个有效策略实现，配置、准备、训练、恢复、推理入口互相一致。
+- [x] LAMP 单步 direct BC + frozen history prior + decoded supervision + raw latent offset L2，逆解/缓存/旧 Flow 链路彻底退出。
+- [x] Temporal 保持 q0-conditioned full-chunk codec 和正确 FM，不发生误锚定、截断解码或梯度断路。
+- [x] 表示产物的来源、坐标、划分和选点记录可追溯；fresh、strict resume、独立推理的边界分明。
+- [x] SIM 与 runtime 的 history/reference/execution 语义已落到调用方，外部未验证部分明确披露。
+- [x] README 和机制文档说明论文要求、本地适配、生产命令及不兼容点；不得声称完整复现论文系统或取得论文成绩。
+- [x] 针对风险的检查有命令和结果；仅实际运行通过标 `PASS`，缺条件标 `NOT VERIFIED`；不留下绕过校验的临时代码。
 
 最终用中文报告：实际起始/最终提交、改动与删除清单、三种动作空间的有效配置和数据流、与论文的对应及适配、测试命令/结果、剩余环境或外部集成缺口、用户接下来如何生成产物并开始训练。遇到非阻塞实现细节按本任务选择简单方案继续；只有真实冲突、无法访问的必要输入或破坏性操作才请求用户决策，不停在再次提出方案。
+
+
+## 13. 本轮实施与验收记录（2026-10-19）
+
+实际起始 HEAD 为 `4708a04e8c73c365a0aab884cd6d0c5c4f8d73ab`，初始工作区干净。相对审计基线只有两次文档提交，未回退；实现提交为 `a5fd3e0`。测试与文档另作本地提交，未 push/merge，未修改已有数据、权重、实验或外部 dexmani_real。
+
+### 已落实的链路
+
+- LAMP：`lamp.yaml` → 无缓存 LampDataset → `lamp_prior.v2` → 单步 LAMPPolicy；H=Nobs=C=1，MLP `.model` 接通 optimizer/compile/EMA，decoded hand MSE + raw offset L2；旧 Flow、inverse、latent cache/exporter 和活跃别名删除。
+- DQ：保留 RVQ/learned weights/PCA/实际 prototype NN/lookup；补齐内容来源绑定和 checkpoint 元信息。
+- Temporal：保留 q0 条件时序 VAE、posterior mean、全 H 解码和 FM；固定 standardized decoded loss，删除 q0 扰动分支，选点只使用完成 KL schedule 的候选。
+- 来源：fresh dataset/normalizer/artifact 边界验证一次；strict resume 使用内嵌表示，并检查当前数据；记录源内容、划分、窗口和 padding 比例、坐标及 selection_step。source code revision/dirty 状态仅用于追溯。
+- 部署：LAMP 显式 NumPy history、合成 warmup、runtime P 步返回；LAMP/Temporal 配置入口拒绝 async/RTC。SIM 已有成功 step 后追加执行命令的正确路径保留，由模拟执行器测试覆盖。
+
+### 实际执行证据
+
+解释器为 `/home/zhanghaoyang/miniconda3/envs/policy/bin/python`，PyTorch `2.4.1+cu124`。sandbox 内 CUDA 不可见，sandbox 外确认可用；下列 GPU 检查在可访问 CUDA 的环境执行。
+
+| 检查 | 结果与范围 |
+| --- | --- |
+| 变更 Python 语法、`git diff --check`、旧活跃入口扫描 | PASS；21 个 Python 文件可解析，无旧入口/参数活跃残留 |
+| `smoke_test.py --config-only dqrise lamp temporal_codec_flow dp sat` | PASS，五个正式配置 |
+| `python -m pytest -q tests/test_hand_action_spaces.py` | PASS：先执行 17 项，随后新增 historical-policy 诊断定向执行 1 项通过；共覆盖当前 18 项 |
+| `DEXMANI_TEST_DEVICE=cuda:0 python -m pytest -q tests/test_hand_action_spaces.py --basetemp /tmp/dexmani-hand-acceptance-20261019` | PASS：17 项，36.00s；含 actual compiled LAMP strict resume；新增 metadata-only 历史诊断另在 CPU 通过 |
+| 三种微型 YAML 的 `smoke_test.py ... --max-updates 2` | PASS；实际 torch.compile + BF16，分别 2 次 production Trainer update、保存及 raw/EMA 推理恢复 |
+
+定向检查覆盖因果 history/reset/取消预测、q0 不受 observation augmentation 影响、sampler/source-row 与控制切片、全 H decoder、非线性冻结 decoder 的梯度、非 identity affine、FM 两端点、DQ NN/round/learned export weights、来源/划分/窗口拒绝、同内容迁移、选点资格及无 holdout final、optimizer 参数覆盖、runtime context/sync-only/P 步返回。恢复测试同时暂时隐藏测试数据和外部表示产物，raw/EMA 推理仍通过；随后恢复数据，在外部表示仍隐藏时 strict resume 再更新 1 步。变更命令时序但保持 affine 统计的测试数据在 fresh binding 和 strict resume 均被拒绝。
+
+这些检查使用真实生产预训练入口生成的临时产物，没有伪造正式 metadata。数据为 3 个合成 episode，每段 24 帧，固定 2 train/1 val。LAMP 有 48 个训练窗口，DQ/Temporal 各 34 个；保留 H/Nobs/C 的方法差异。测试将点数降到 16，prior/codec hidden 降到 16，Temporal codec 层数降到 1、flow hidden 降到 24；DQ 采用较小 dp3 encoder/UNet。LAMP head 仍为固定 `[512,512,256]`。这验证 production 调用链，不是生产容量或任务成功率实验。
+
+BF16 训练后，raw/EMA compiled→eager 预测最大绝对差分别为：LAMP 0，Temporal `7.4505806e-09`，DQ `7.3414296e-05`；eager checkpoint round-trip 均通过既有数值检查。
+
+可复跑命令（激活 policy 环境，GPU 命令需在 CUDA 可见的环境执行）：
+
+```bash
+python dexmani_policy/smoke_test.py --config-only dqrise lamp temporal_codec_flow dp sat
+python -m pytest -q tests/test_hand_action_spaces.py
+TEST_ROOT=$(mktemp -d /tmp/dexmani-hand-check-XXXXXX)
+DEXMANI_TEST_DEVICE=cuda:0 python -m pytest -q tests/test_hand_action_spaces.py --basetemp "$TEST_ROOT"
+python dexmani_policy/smoke_test.py \
+  "$TEST_ROOT/hand-contracts0/lamp.yaml" \
+  "$TEST_ROOT/hand-contracts0/temporal_codec_flow.yaml" \
+  "$TEST_ROOT/hand-contracts0/dqrise.yaml" --max-updates 2
+```
+
+上面的测试 YAML 默认 eager。复跑本轮 compile/BF16 检查时，在这些临时 YAML 的新副本中设 `training.use_compile=true`、`training.use_bfloat16=true` 后传给同一 smoke 命令。本轮实际副本位于 `/tmp/dexmani-hand-acceptance-20261019/hand-contracts0/*_compiled.yaml`，均未进入仓库。
+
+### NOT VERIFIED 与复跑前提
+
+- 默认真实数据上的生产规模 pretraining/policy training 与成功率：未启动。当前 `pick_apple_messy.zarr` 缺少 obs_alignment/data_revision；先核实采集时序并准备具有真实身份、固定 held-out manifest 的新数据版本，再执行 README 的三套准备命令及 `python dexmani_policy/smoke_test.py dqrise lamp temporal_codec_flow --max-updates 4`（先将配置指向匹配的真实数据/产物）。不自动修改旧数据 metadata。
+- 多卡 DDP：共享构建调用方已同步，但本轮无多卡执行；需至少两块可用 GPU，使用对应 DDP 配置和匹配产物做有界续训检查。
+- 完整 SIM 与外部真机闭环：未启动。runner 只用可控执行器验证历史追加语义；外部 dexmani_real 仍未传入执行 history。真机需在外部完成按 dt 对齐的 bootstrap/逐执行步历史维护并另获明确运动指令，不能将本轮 runtime 测试当作闭环通过。
+
+正式产物准备、相同 split/路径覆盖和训练命令见 [README](../README.md#手部先验准备)。不根据本轮微型测试宣称论文系统完整复现、表示容量足够或取得论文成绩。
