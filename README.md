@@ -194,8 +194,6 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | [项目架构](docs/项目架构.md) | 数据流、接口、归一化、先验和恢复边界 |
 | [仿真评测机制](docs/仿真评测机制.md) | selection、held-out seeds、指标与结果 |
 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) | 远端启动、同步、监控和停止 |
-| [三种手部动作空间 Codex CLI 任务书](docs/codex_hand_action_spaces_task.md) | DQ-RISE、LAMP、Temporal 实施约束、验收证据及未验证项 |
-| [配套 Codex CLI prompt](docs/prompts/hand_action_spaces_codex_cli.txt) | 复制给 Codex CLI 执行上述任务书 |
 | [AGENTS.md](AGENTS.md) | AI 研究协作规则 |
 | [CLAUDE.md](CLAUDE.md) | Claude Code 的规则加载入口 |
 
