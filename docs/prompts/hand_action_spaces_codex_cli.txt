@@ -1,0 +1,16 @@
+请在当前 dexmani_policy 仓库执行 docs/codex_hand_action_spaces_task.md，完成代码、配置、调用方、必要测试和文档修改，不要只给分析或计划。
+
+先读 AGENTS.md、任务书、git status 和当前 HEAD；任务书审计基线是 ef65cf7848e19bbf3e84cb7ad785840705a0741f，不是要求回退。检查其后的相关变化，以实际运行路径为准，保留已正确完成的工作与用户未提交修改。按任务书固定论文/官方代码核对关键公式与活跃实现，不凭名称推断；需要改变任务书的机制决定时，先给出具体证据，不能静默换算法。
+
+明确目标：
+1. LAMP 只保留 lamp.yaml + LAMPPolicy：H=Nobs=C=1，冻结历史先验，直接预测 arm 和 delta_z，以 D(mu+delta_z) 的手部重建损失加 latent offset L2 训练；删除旧 Flow、逆解、latent cache 和别名。
+2. 保留 DQ-RISE 的 RVQ→实际原型 NN→PCA 排序标量→查表链路，补齐来源校验和 checkpoint 元信息，不重写正确核心。
+3. 保留 Temporal 的 q0 条件时序 VAE、posterior mean 目标、完整 chunk 解码和 Flow Matching，固定 standardized decoded loss，补全选点、恢复和同步部署契约。
+
+先追踪 config→dataset→normalizer/artifact→policy/loss→trainer/EMA/compile/checkpoint→SIM/runtime，再分阶段完成最小端到端改动。特别验证：LAMP 历史只追加实际执行命令；Temporal q0 来自未增强的 query 实测手姿，整段固定；冻结 decoder 仍对 policy 输出保留梯度；所有物理变换只做一次；raw/EMA checkpoint 内嵌表示产物并可独立推理。不要通过放宽 strict load、删除来源检查或伪造 metadata 使测试通过。
+
+遵守任务书的结构、损失、默认值、删除清单和验收条件。不要新增并行 legacy/paper_mode 方案、统一 codec 框架、RL、RTC、新视觉主干或无关重构。普通实现细节自主选择最简单合理方案并记录，不反复等待确认。
+
+实施后运行针对真实风险的定向测试与 config-only smoke；数据/依赖允许时做少量 production Trainer updates、保存恢复和推理。不要启动完整训练、长仿真或真机，不覆盖既有数据/权重/实验。缺少环境时继续完成不受阻部分，仅实际执行通过标 PASS，其余标 NOT VERIFIED 并给复跑条件和命令。外部 dexmani_real 未适配不能声称真机闭环完成。
+
+完成后检查 diff、旧入口残留和所有调用方，按逻辑单元作本地提交（如仓库允许），不自行 push/merge。中文交付实际提交、关键改动/删除、论文对应与适配、测试证据、未验证项，以及三种方法各自的产物准备和训练命令。持续推进至任务完成，不停在方案阶段。
