@@ -129,7 +129,7 @@ LAMP/Temporal 的候选选点必须在 KL 达到目标系数后：LAMP 默认 20
 
 所有阶段的数据覆盖必须一致。LAMP/Temporal 默认写入实际 policy 配置的 `agent.prior_path` / `agent.codec_path`，默认分别由 `lamp.prior_path` / `codec.path` 插值。若使用 LAMP `--output`，policy 的 `agent.prior_path` 也应指向该产物。三种预训练入口与 policy 共用窗口、动作布局校验；产物加载时核对内容和坐标，不要求两处路径字符串相同。三份配置均声明了可直接覆盖的 `dataset.split_manifest`。已有文件默认不覆盖。
 
-Fresh training 校验来源、窗口、划分和手部表示坐标，观测归一化可在 encoder 允许范围内另选；strict resume 使用 checkpoint 内嵌表示并重新核对当前数据，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示、normalizer 和 `action_space_artifact` 元信息，独立推理无需原 artifact 或训练数据。来源以单一 source contract 记录，源行/窗口保留计数与指纹，不重复保存完整索引列表。LAMP/Temporal 仅支持 sync。
+Fresh training 校验来源、窗口、划分和手部表示坐标，观测归一化可在 encoder 允许范围内另选；strict resume 使用 checkpoint 内嵌表示并重新核对当前数据，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示、normalizer 和 `action_space_artifact` 元信息，独立推理无需原 artifact 或训练数据。artifact 层保存单一来源记录，保留原始 action/state 与有效窗口指纹；Dataset 不再维护重复的手部 metadata。精简前的来源或显式划分记录使用对应源码版本，不自动迁移。LAMP/Temporal 仅支持 sync。
 
 机制公式、论文对应与固定官方提交差异见[手部动作表示](docs/项目架构.md#手部动作表示)。
 
@@ -142,7 +142,7 @@ python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name> --max-updates 4
 ```
 
-`--config-only` 检查配置、Hydra target 和策略/训练模块导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
+`--config-only` 检查配置、Hydra target 和策略、训练、Dataset、增强类的导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
 
 smoke 支持多个配置名，默认运行 4 次 optimizer update，不接受 Hydra 字段覆盖。若需覆盖配置或保留短跑产物，使用正式训练入口：
 
@@ -188,7 +188,9 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | --- | --- |
 | `dexmani_policy/configs/` | 当前实验配置与 DDP overlay |
 | `dexmani_policy/agents/` | Policy、观测编码器、动作解码器和手部先验 |
-| `dexmani_policy/datasets/` | Zarr 读取、窗口采样、增强和划分 |
+| `dexmani_policy/datasets/` | 通用 Dataset、RGB、点云和多任务组合 |
+| `dexmani_policy/datasets/hand_prior/` | LAMP 历史命令与 Temporal Codec 参考姿态的数据集 |
+| `dexmani_policy/datasets/common/` | 只读存储、窗口与分布式采样、划分、增强和 RGB 预处理 |
 | `dexmani_policy/training/` | 组件构建、训练循环、实验管理、状态恢复与校验 |
 | `dexmani_policy/training/common/` | EMA、学习率调度、日志与 checkpoint |
 | `dexmani_policy/training/pretrain/hand_prior/` | 动作空间预训练：VQ、LAMP、Temporal 及码本导出 |

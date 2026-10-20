@@ -53,7 +53,7 @@ def split_target(target: str) -> tuple[str, str]:
 
 
 def validate_target_references(cfg) -> int:
-    """Import policy/training targets; optional simulation targets only need a module."""
+    """Resolve policy, training and dataset classes; locate optional simulation modules."""
     targets = list(iter_targets(cfg))
     agent_target = cfg.get("agent", {}).get("_target_")
 
@@ -70,7 +70,9 @@ def validate_target_references(cfg) -> int:
                 f"Failed to locate Hydra target module {module_name!r} for {target!r} at {path}"
             )
 
-        if target == agent_target or module_name.startswith("dexmani_policy.training."):
+        if target == agent_target or module_name.startswith(
+            ("dexmani_policy.training.", "dexmani_policy.datasets.")
+        ):
             try:
                 module = importlib.import_module(module_name)
                 getattr(module, attribute)

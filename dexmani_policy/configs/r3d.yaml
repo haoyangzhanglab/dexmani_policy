@@ -46,7 +46,7 @@ dataloader:
 
 # ── Dataset ──
 dataset:
-  _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  _target_: dexmani_policy.datasets.point_cloud_dataset.PointCloudDataset
   action_key: ${action_key}
   use_aux_ee: ${use_aux_ee}
   zarr_path: ${zarr_path}

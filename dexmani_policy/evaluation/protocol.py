@@ -16,20 +16,20 @@ from typing import Any
 import hydra
 from omegaconf import OmegaConf
 
+from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
+from dexmani_policy.training.common.checkpoint import (
+    read_checkpoint_record,
+    resolve_checkpoint,
+    resolve_record_path,
+    validate_inference_settings,
+)
+from dexmani_policy.utils.atomic import atomic_path
 from dexmani_policy.utils.config import (
     load_experiment_config,
     validate_action_key_consistency,
     validate_window_contract,
 )
-from dexmani_policy.training.common.checkpoint import (
-    read_checkpoint_record,
-    resolve_record_path,
-    validate_inference_settings,
-    resolve_checkpoint,
-)
-from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.utils.validation import positive_int
-from dexmani_policy.utils.atomic import atomic_path
 
 
 def read_selection_reference(root, info):

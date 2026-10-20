@@ -38,7 +38,7 @@ dataloader:
 # ── Dataset ──
 dataset:
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.pc_dataset.PCDataset
+  _target_: dexmani_policy.datasets.point_cloud_dataset.PointCloudDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
   seed: ${training.seed}

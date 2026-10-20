@@ -3,11 +3,10 @@ import os
 import numpy as np
 import zarr
 
-
 READ_CACHE_BYTES = 16 * 1024 * 1024
 
 
-def validate_episode_metadata(episode_ends, data, keys=None):
+def validate_episode_metadata(episode_ends, data):
     ends = np.asarray(episode_ends)
     if (
         ends.ndim != 1
@@ -19,10 +18,8 @@ def validate_episode_metadata(episode_ends, data, keys=None):
         raise ValueError(
             "episode_ends must be nonempty 1D positive, strictly increasing integers (not bool)"
         )
-    for key in data.keys() if keys is None else keys:
-        if key not in data:
-            raise ValueError(f"Missing data field: {key}")
-        shape = data[key].shape
+    for key, values in data.items():
+        shape = values.shape
         if not shape or shape[0] != ends[-1]:
             raise ValueError(
                 f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
@@ -33,72 +30,55 @@ class ReplayBuffer:
     """Selected read-only arrays; process-local Zarr handles and bounded reads."""
 
     def __init__(self, root, *, keys=None):
-        if (
-            "data" not in root
-            or "meta" not in root
-            or "episode_ends" not in root["meta"]
-        ):
-            raise ValueError("ReplayBuffer requires data and meta/episode_ends")
-        self._keys = tuple(dict.fromkeys(root["data"].keys() if keys is None else keys))
-        self.meta = {
-            k: np.asarray(v) if isinstance(v, np.ndarray) else v[...]
-            for k, v in root["meta"].items()
-        }
-        validate_episode_metadata(self.meta["episode_ends"], root["data"], self._keys)
-        self.attrs = dict(
-            root.get("attrs", {}) if isinstance(root, dict) else root.attrs
-        )
+        self.field_names = tuple(dict.fromkeys(root["data"].keys() if keys is None else keys))
+        self.data = {key: root["data"][key] for key in self.field_names}
+        self.episode_ends = np.asarray(root["meta"]["episode_ends"])
+        validate_episode_metadata(self.episode_ends, self.data)
+        self.attrs = dict(root.get("attrs", {}) if isinstance(root, dict) else root.attrs)
         revision = self.attrs.get("data_revision")
         if "data_revision" in self.attrs and (
             not isinstance(revision, str) or not revision.strip()
         ):
-            raise ValueError(
-                "Zarr data_revision must be a nonempty string when present"
-            )
+            raise ValueError("Zarr data_revision must be a nonempty string when present")
         self.data_revision = revision
-        self._path = None
-        self._group = None
-        self._pid = None
-        self._data = {key: root["data"][key] for key in self._keys}
-        self._read_cache = {}
+        self.path = None
+        self.group = None
+        self.pid = None
+        self.read_cache = {}
 
     @classmethod
     def open(cls, zarr_path, keys=None):
         path = os.path.abspath(os.path.expanduser(zarr_path))
         group = zarr.open_group(path, mode="r")
         buffer = cls(group, keys=keys)
-        buffer._path = path
-        buffer._data = None
+        buffer.path = path
+        buffer.group = group
+        buffer.pid = os.getpid()
         return buffer
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state["_group"] = state["_pid"] = None
-        state["_read_cache"] = {}
-        if self._path is not None:
-            state["_data"] = None
+        state["group"] = state["pid"] = None
+        state["read_cache"] = {}
+        if self.path is not None:
+            state["data"] = None
         return state
 
-    def _arrays(self):
-        if self._path is None:
-            return self._data
-        if self._group is None or self._pid != os.getpid():
-            self._group = zarr.open_group(self._path, mode="r")
-            self._data = {key: self._group["data"][key] for key in self._keys}
-            self._read_cache = {}
-            self._pid = os.getpid()
-        return self._data
+    def get_arrays(self):
+        if self.path is None:
+            return self.data
+        if self.group is None or self.pid != os.getpid():
+            self.group = zarr.open_group(self.path, mode="r")
+            self.data = {key: self.group["data"][key] for key in self.field_names}
+            self.read_cache = {}
+            self.pid = os.getpid()
+        return self.data
 
     def read(self, key, rows, *, columns=None, cache=True):
         arr = self[key]
         selection = rows if columns is None else (rows, columns)
         dtype = np.float32 if np.issubdtype(arr.dtype, np.floating) else arr.dtype
-        if (
-            self._path is not None
-            and cache
-            and isinstance(rows, slice)
-            and rows.step in (None, 1)
-        ):
+        if self.path is not None and cache and isinstance(rows, slice) and rows.step in (None, 1):
             start, stop, _ = rows.indices(arr.shape[0])
             step = self.chunk_rows(key)
             block_bytes = step * int(np.prod(arr.shape[1:])) * arr.dtype.itemsize
@@ -106,11 +86,11 @@ class ReplayBuffer:
             if start < stop and block_bytes <= READ_CACHE_BYTES:
                 result = None
                 for block in range(start // step * step, stop, step):
-                    cached = self._read_cache.get(key)
+                    cached = self.read_cache.get(key)
                     if cached is None or cached[0] != block:
-                        self._read_cache.pop(key, None)
+                        self.read_cache.pop(key, None)
                         cached = (block, arr[block : block + step])
-                        self._read_cache[key] = cached
+                        self.read_cache[key] = cached
                     left, right = max(start, block), min(stop, block + step)
                     values = cached[1][left - block : right - block]
                     if columns is not None:
@@ -136,20 +116,14 @@ class ReplayBuffer:
             yield start, self.read(key, slice(start, start + step), columns=columns, cache=False)
 
     @property
-    def episode_ends(self):
-        return self.meta["episode_ends"]
-
-    @property
     def n_episodes(self):
         return len(self.episode_ends)
 
     def keys(self):
-        return self._keys
+        return self.field_names
 
     def __getitem__(self, key):
-        if key not in self._keys:
-            raise KeyError(key)
-        return self._arrays()[key]
+        return self.get_arrays()[key]
 
     def __contains__(self, key):
-        return key in self._keys
+        return key in self.field_names

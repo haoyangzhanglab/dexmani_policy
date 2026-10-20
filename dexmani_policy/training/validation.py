@@ -3,11 +3,12 @@
 import hydra
 from torch.nn.modules.batchnorm import _BatchNorm
 
-from dexmani_policy.datasets.augmentation import (
+from dexmani_policy.datasets.common.augmentation import (
     validate_pc_color_augmentation,
     validate_random_keep_points,
 )
-from dexmani_policy.datasets.sampler import validate_dataset_splits
+from dexmani_policy.datasets.common.episode_split import validate_split_options
+from dexmani_policy.datasets.common.rgb_preprocessing import validate_rgb_preprocessing
 from dexmani_policy.utils.config import (
     NON_NUMERIC_OBSERVATION_FIELDS,
     resolve_normalization_spec,
@@ -160,6 +161,17 @@ def validate_config(cfg):
         if point_limit < max(geometry_sizes.values()):
             raise ValueError("agent.num_points must be at least max(num_patches, group_size)")
     for child in cfg.dataset.get("datasets", [cfg.dataset]):
+        validate_split_options(
+            child.get("val_ratio", 0),
+            child.get("max_train_episodes"),
+            explicit=child.get("split_manifest") is not None
+            or child.get("saved_split") is not None,
+        )
+        validate_rgb_preprocessing(
+            child.get("rgb_preprocess_size"),
+            child.get("rgb_random_crop_size"),
+            child.get("rgb_color_aug"),
+        )
         if child.get("pc_dim") is not None and child.pc_dim != agent_pc_dim:
             raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
         validate_pc_color_augmentation(agent_pc_dim, child.get("augmentation_cfg"))
@@ -183,7 +195,6 @@ def validate_config(cfg):
         raise ValueError("training.lr_warmup_steps must be nonnegative")
     validate_window_contract(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
     validate_hand_config(cfg)
-    validate_dataset_splits(cfg.dataset)
 
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")

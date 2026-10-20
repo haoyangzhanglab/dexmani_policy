@@ -1,7 +1,8 @@
-"""Saved deterministic RGB validation preprocessing; Torch loads only on use."""
+"""Training and deterministic evaluation RGB recipes; Torch loads only on use."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -12,12 +13,28 @@ if TYPE_CHECKING:
 
 def rgb_preprocessing_kwargs(dataset_config):
     """The exact deterministic BaseDataset validation recipe."""
+    validate_rgb_preprocessing(
+        dataset_config.get("rgb_preprocess_size"),
+        dataset_config.get("rgb_random_crop_size"),
+        dataset_config.get("rgb_color_aug"),
+    )
     return {
         "resize_hw": dataset_config.get("rgb_preprocess_size"),
         "center_crop_hw": dataset_config.get("rgb_random_crop_size"),
         "keep_uint8": bool(dataset_config.get("rgb_keep_uint8", False)),
         "float_spatial_before_uint8": dataset_config.get("rgb_color_aug") is not None,
     }
+
+
+def validate_rgb_preprocessing(resize_hw, crop_hw, color_augmentation=None):
+    if resize_hw is None and (crop_hw is not None or color_augmentation is not None):
+        raise ValueError("RGB crop and color augmentation require rgb_preprocess_size")
+    if crop_hw is not None and (
+        len(crop_hw) != 2
+        or len(resize_hw) != 2
+        or any(not 0 < crop <= size for crop, size in zip(crop_hw, resize_hw))
+    ):
+        raise ValueError("RGB crop must fit within the resize dimensions")
 
 
 def raw_rgb_tensor(rgb, *, ndim=None):
@@ -27,11 +44,46 @@ def raw_rgb_tensor(rgb, *, ndim=None):
     value = torch.from_numpy(rgb) if isinstance(rgb, np.ndarray) else rgb
     if not torch.is_tensor(value):
         raise TypeError("raw RGB must be a NumPy array or torch tensor")
-    if (value.ndim < 3 or value.shape[-1] != 3 or value.dtype != torch.uint8
-            or (ndim is not None and value.ndim != ndim)):
+    if (
+        value.ndim < 3
+        or value.shape[-1] != 3
+        or value.dtype != torch.uint8
+        or (ndim is not None and value.ndim != ndim)
+    ):
         shape = "(T, H, W, 3)" if ndim == 4 else "[..., H, W, 3]"
         raise ValueError(f"raw RGB must have shape {shape} and dtype uint8")
     return value
+
+
+def preprocess_training_rgb(
+    rgb: np.ndarray | torch.Tensor,
+    *,
+    resize_hw: tuple[int, int],
+    random_crop_hw: tuple[int, int] | None,
+    keep_uint8: bool,
+    color_augmentation: Callable | None = None,
+) -> torch.Tensor:
+    """Share crop and color parameters across the observation window."""
+    import torch
+    import torchvision.transforms.functional as TVF
+
+    value = raw_rgb_tensor(rgb, ndim=4).permute(0, 3, 1, 2).contiguous()
+    if not keep_uint8 or color_augmentation is not None:
+        value = value.float().div_(255.0)
+    value = TVF.resize(value, list(resize_hw), antialias=True)
+    if random_crop_hw is not None:
+        height, width = random_crop_hw
+        top = torch.randint(0, value.shape[-2] - height + 1, (1,)).item()
+        left = torch.randint(0, value.shape[-1] - width + 1, (1,)).item()
+        value = TVF.crop(value, top, left, height, width)
+    if color_augmentation is not None:
+        value = color_augmentation(value)
+    if value.dtype.is_floating_point:
+        value = value.clamp_(0, 1)
+        if keep_uint8:
+            value = value.mul(255).round_().clamp_(0, 255).to(torch.uint8)
+        return value
+    return value.contiguous()
 
 
 def preprocess_validation_rgb(
@@ -42,11 +94,7 @@ def preprocess_validation_rgb(
     keep_uint8: bool,
     float_spatial_before_uint8: bool = False,
 ) -> torch.Tensor:
-    """Apply the deterministic validation RGB path to raw HWC uint8 frames.
-
-    ``float_spatial_before_uint8`` preserves the training color-augmentation
-    recipe's float interpolation, even though validation skips augmentation.
-    """
+    """Preserve the training interpolation dtype while disabling augmentation."""
     import torch
     import torchvision.transforms.functional as TVF
     from torchvision.transforms import InterpolationMode

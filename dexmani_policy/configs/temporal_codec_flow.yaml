@@ -35,7 +35,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.temporal_codec_dataset.TemporalCodecDataset
+  _target_: dexmani_policy.datasets.hand_prior.temporal_codec_dataset.TemporalCodecDataset
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}

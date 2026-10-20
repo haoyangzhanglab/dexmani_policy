@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
+from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.training.common.checkpoint import resolve_best_checkpoint, resolve_checkpoint
 from dexmani_policy.utils.config import load_experiment_config
 from dexmani_policy.utils.validation import positive_int
@@ -77,10 +77,8 @@ def hand_history_steps(config):
     if config["agent"].get("_target_") != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
         return None
     steps = positive_int(config["agent"].get("history_steps"), "agent.history_steps")
-    for name in ("dataset", "lamp"):
-        value = positive_int(config.get(name, {}).get("history_steps"), f"{name}.history_steps")
-        if value != steps:
-            raise ValueError("LAMP dataset/prior/policy history_steps must match")
+    if config["dataset"]["history_steps"] != steps:
+        raise ValueError("LAMP dataset/policy history_steps must match")
     return steps
 
 
@@ -93,7 +91,7 @@ def inspect_policy(
         cfg["agent"].get("_target_")
         == "dexmani_policy.agents.core.multitask_policy.MultiTaskPolicy"
         or cfg["dataset"].get("_target_")
-        == "dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset"
+        == "dexmani_policy.datasets.multitask_dataset.MultiTaskDataset"
     ):
         raise NotImplementedError(
             "MultiTask Real deployment lacks task selection and child numerical recipe restoration"
@@ -342,7 +340,7 @@ class LoadedPolicy:
     def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0):
         import torch
 
-        from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
+        from dexmani_policy.datasets.common.rgb_preprocessing import preprocess_validation_rgb
 
         if self.agent is None:
             raise RuntimeError("Policy is closed")

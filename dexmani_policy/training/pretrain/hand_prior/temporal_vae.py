@@ -12,7 +12,7 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE
-from dexmani_policy.datasets.temporal_codec_dataset import TemporalCodecDataset
+from dexmani_policy.datasets.hand_prior.temporal_codec_dataset import TemporalCodecDataset
 from dexmani_policy.training.validation import validate_config
 from dexmani_policy.utils.atomic import atomic_path
 from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec

@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from termcolor import cprint
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.datasets.common.rgb_preprocessing import preprocess_validation_rgb
 from dexmani_policy.utils.tensor import dict_apply
-from dexmani_policy.datasets.preprocessing import preprocess_validation_rgb
+from dexmani_policy.utils.validation import positive_int
 
 
 class EvalEpisodeError(RuntimeError):

@@ -12,6 +12,7 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
+from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.training.builder import build_normalizer
 from dexmani_policy.training.validation import validate_config
 from dexmani_policy.utils.atomic import atomic_path
@@ -26,16 +27,14 @@ from dexmani_policy.utils.validation import positive_int
 
 def build_prior_dataset(cfg):
     """Bootstrap the exact policy split/history rules without opening artifacts."""
-    from dexmani_policy.datasets.lamp_dataset import LampDataset
-
     validate_config(cfg)
     if cfg.agent._target_ != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
         raise ValueError("Prior preparation requires a LAMPPolicy configuration")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare prior artifacts from a fresh policy config, not resume_from")
     dataset = hydra.utils.instantiate(cfg.dataset)
-    if not isinstance(dataset, LampDataset):
-        raise TypeError("LAMP prior preparation requires LampDataset")
+    if not isinstance(dataset, LAMPDataset):
+        raise TypeError("LAMP prior preparation requires LAMPDataset")
     return dataset
 
 

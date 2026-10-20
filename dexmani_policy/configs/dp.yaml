@@ -48,12 +48,11 @@ dataset:
   obs_horizon: ${n_obs_steps}
   rgb_preprocess_size: [240, 240]
   rgb_random_crop_size: [224, 224]
-  rgb_keep_uint8: true           # Quantize after CPU ImageAug; float32 again at vision input.
+  rgb_keep_uint8: true
 
-  # Training: float resize → shared random crop → ImageAug → uint8 quantization.
-  # Validation: float resize → center crop → uint8 quantization, no ImageAug.
+  # Color augmentation selects float interpolation for both training and validation.
   rgb_color_aug:
-    _target_: dexmani_policy.datasets.augmentation.ImageAug
+    _target_: dexmani_policy.datasets.common.augmentation.ImageAugmentation
     brightness: 0.3
     contrast: 0.2
     saturation: 0.2

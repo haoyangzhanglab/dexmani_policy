@@ -14,7 +14,8 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.agents.core.normalizer import AffineNormalizer, validate_normalizer_state
-from dexmani_policy.datasets.resumable_sampler import ResumableDistributedSampler
+from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
+from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.checkpoint import (
     checkpoint_agent_config,
     unwrap_state_dict,
@@ -85,33 +86,30 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
                 with open_dict(child):
                     child.saved_split = recipe["split_manifest"]
     dataset = hydra.utils.instantiate(dataset_cfg)
+    children = dataset.datasets if isinstance(dataset, MultiTaskDataset) else [dataset]
+    reference = children[0]
     runtime = capture_real_runtime(dataset, cfg)
     with open_dict(cfg):
         cfg.data_identity = capture_data_identity(dataset)
-        children = getattr(dataset, "datasets", [dataset])
-        dims = []
-        for child in children:
-            widths = {
-                key: int(child.replay_buffer[key].shape[-1])
-                for key, mode in spec.items()
-                if key != "action" and mode != "identity"
-            }
-            for key in FINGER_VECTOR_FIELDS.intersection(child.sensor_modalities):
-                shape = child.replay_buffer[key].shape
-                if len(shape) != 3 or shape[1:] != (5, 3):
-                    raise ValueError(f"{key} requires stored shape (T, 5, 3), got {shape}")
-                if key in widths:
-                    widths[key] = 15
-            if "point_cloud" in widths and getattr(child, "pc_dim", None) is not None:
-                widths["point_cloud"] = child.pc_dim
-            widths["action"] = int(child.replay_buffer[child.action_key].shape[-1]) + (
-                9 if child.use_aux_ee else 0
-            )
-            dims.append(widths)
-        if any(widths != dims[0] for widths in dims):
-            raise ValueError("Child datasets must have matching normalization feature widths")
-        cfg.normalization_dims = dims[0]
-        if getattr(dataset, "sampling_strategy", None) == "weighted":
+        # MultiTaskDataset already enforces a shared output layout.
+        widths = {
+            key: int(reference.replay_buffer[key].shape[-1])
+            for key, mode in spec.items()
+            if key != "action" and mode != "identity"
+        }
+        for key in FINGER_VECTOR_FIELDS.intersection(reference.sensor_modalities):
+            shape = reference.replay_buffer[key].shape
+            if shape[1:] != (5, 3):
+                raise ValueError(f"{key} requires stored shape (T, 5, 3), got {shape}")
+            if key in widths:
+                widths[key] = 15
+        if "point_cloud" in widths and reference.pc_dim is not None:
+            widths["point_cloud"] = reference.pc_dim
+        widths["action"] = int(reference.replay_buffer[reference.action_key].shape[-1]) + (
+            9 if reference.use_aux_ee else 0
+        )
+        cfg.normalization_dims = widths
+        if isinstance(dataset, MultiTaskDataset) and dataset.sampling_strategy == "weighted":
             cfg.sampling_recipe = {"weighted_quota": "cumulative_random_offset_v1"}
         cfg.data_recipe = [
             dict(
@@ -271,9 +269,9 @@ def compile_models(model, ema_model=None, **compile_kwargs):
 
 def capture_real_runtime(dataset, cfg) -> dict | None:
     """Capture numerical deployment inputs from the buffer actually used to train."""
-    buffer = getattr(dataset, "replay_buffer", None)
-    if buffer is None:
+    if isinstance(dataset, MultiTaskDataset):
         return None
+    buffer = dataset.replay_buffer
     attrs = buffer.attrs
     if attrs.get("format") != "dexmani.real.canonical":
         if attrs.get("domain") == "real" or str(attrs.get("format", "")).startswith(
@@ -312,14 +310,14 @@ def capture_real_runtime(dataset, cfg) -> dict | None:
 
 def capture_data_identity(dataset):
     """Producer-declared revisions captured once while loading, never scanned at save."""
-    if hasattr(dataset, "task_names") and hasattr(dataset, "datasets"):
+    if isinstance(dataset, MultiTaskDataset):
         return {
             "tasks": {
                 name: capture_data_identity(child)
                 for name, child in zip(dataset.task_names, dataset.datasets)
             }
         }
-    return {"revision": getattr(dataset, "data_revision", None)}
+    return {"revision": dataset.data_revision}
 
 
 def loader_options(cfg):

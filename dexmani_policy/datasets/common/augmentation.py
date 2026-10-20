@@ -4,99 +4,69 @@ import torchvision.transforms.v2 as v2
 
 from dexmani_policy.utils.validation import positive_int
 
-_BT601_LUMA = (0.299, 0.587, 0.114)
-"""BT.601 luma coefficients for RGB-to-grayscale conversion."""
+BT601_LUMA = (0.299, 0.587, 0.114)
 
 
 def validate_random_keep_points(keep_points, *, num_points=None, num_patches=None, group_size=None):
     """Validate optional dataset subsampling and the receiving geometry sizes."""
     if keep_points is None:
         return
-    positive_int(keep_points, 'random_keep_points')
+    positive_int(keep_points, "random_keep_points")
     if num_points is not None and num_points < keep_points:
-        raise ValueError(f'point_cloud N={num_points} must be >= random_keep_points={keep_points}')
-    for name, size in (('num_patches', num_patches), ('group_size', group_size)):
-        if size is not None:
-            positive_int(size, name)
-            if keep_points < size:
-                raise ValueError(f'random_keep_points={keep_points} must be >= {name}={size}')
+        raise ValueError(f"point_cloud N={num_points} must be >= random_keep_points={keep_points}")
+    for name, size in (("num_patches", num_patches), ("group_size", group_size)):
+        if size is not None and keep_points < size:
+            raise ValueError(f"random_keep_points={keep_points} must be >= {name}={size}")
 
 
 def random_sample_points(pointcloud: np.ndarray, keep_points: int) -> np.ndarray:
-    """Copy a per-frame subset of [T,N,C], without replacement of input indices.
-
-    All channels share indices. Existing duplicate coordinates may remain.
-    Uses the worker-seeded NumPy RNG, independently for each frame.
-    This shape-changing operation is deliberately outside the in-place Aug API.
-    """
-    positive_int(keep_points, 'random_keep_points')
-    if pointcloud.ndim != 3:
-        raise ValueError('pointcloud must have shape [T,N,C]')
+    """Sample each frame without replacement, using shared indices for all channels."""
     t, n, _ = pointcloud.shape
-    validate_random_keep_points(keep_points, num_points=n)
     scores = np.random.random((t, n))
     indices = np.argpartition(scores, kth=keep_points - 1, axis=1)[:, :keep_points]
     return np.ascontiguousarray(np.take_along_axis(pointcloud, indices[..., None], axis=1))
 
 
 def validate_pc_color_augmentation(pc_dim, augmentation_cfg):
-    """Reject enabled color transforms for explicitly XYZ-only point clouds."""
-    if pc_dim != 3:
+    """Require XYZRGB channels for enabled point color transforms."""
+    if pc_dim is None or pc_dim >= 6:
         return
-    pc = ((augmentation_cfg or {}).get('pc') or {})
-    for key in ('color', 'color_noise'):
+    pc = (augmentation_cfg or {}).get("pc") or {}
+    for key in ("color", "color_noise"):
         config = pc.get(key)
-        if config and config.get('prob', 1) > 0:
-            raise ValueError(f'XYZ-only point clouds cannot use color augmentation ({key}); '
-                             'set prob=0 or use XYZRGB channels')
+        if config and config.get("prob", 1) > 0:
+            raise ValueError(
+                f"XYZ-only or incomplete RGB point clouds cannot use color augmentation ({key}); "
+                "set prob=0 or use XYZRGB channels"
+            )
 
 
-class Aug:
-    """Prob-gated augmentation base.
-
-    Subclasses implement ``_augment(x)`` which **must** modify *x*
-    in-place — the caller guarantees that *x* is a detached copy
-    when ``_augment`` runs (via ``apply_augmentation`` in the dataset).
-
-    Prob-gating and defensive copying are handled by
-    :meth:`~dexmani_policy.datasets.base_dataset.BaseDataset.apply_augmentation`,
-    which iterates over augmentors, decides per-augmentor whether to trigger,
-    and makes a single ``.copy()`` before the first trigger.
-    """
+class Augmentation:
+    """In-place transform; the dataset applies probability gating to owned sample arrays."""
 
     __slots__ = ("prob",)
 
     def __init__(self, prob=1.0):
         self.prob = prob
 
-    def _augment(self, x):
-        """Modify *x* **in-place**.  Caller guarantees *x* is a detached copy."""
+    def augment(self, x):
         raise NotImplementedError
 
 
-class PointColorJitter(Aug):
-    """RGB color jitter with optional HSV hue shifts (last 3 channels).
-
-    Brightness is **additive** (R3D-Policy, 2026): ``rgb += delta`` where
-    delta ∈ [-brightness, +brightness]. Contrast is centered on the current
-    flattened RGB global mean; saturation uses BT.601 luma. Optional hue
-    shifts are retained for recipes beyond the R3D brightness/contrast/saturation trio.
-
-    Input ``(T,N,C) float32, C>=6``.  Modifies the RGB channels **in-place**
-    on a pre-copied array.
-    """
+class PointColorJitter(Augmentation):
+    """Additive brightness and shared contrast, saturation and hue on the last RGB channels."""
 
     __slots__ = ("brightness", "contrast", "saturation", "hue")
 
     def __init__(self, brightness=0.125, contrast=0.5, saturation=0.5, hue=0.08, prob=1.0):
         super().__init__(prob=prob)
-        self.brightness = self._make_range(brightness, center=0.0, symmetric=True)
-        self.contrast = self._make_range(contrast, center=1.0)
-        self.saturation = self._make_range(saturation, center=1.0)
-        self.hue = self._make_range(hue, center=0.0, symmetric=True)
+        self.brightness = self.make_range(brightness, center=0.0, symmetric=True)
+        self.contrast = self.make_range(contrast, center=1.0)
+        self.saturation = self.make_range(saturation, center=1.0)
+        self.hue = self.make_range(hue, center=0.0, symmetric=True)
 
     @staticmethod
-    def _make_range(value, center, symmetric=False):
+    def make_range(value, center, symmetric=False):
         if symmetric:
             if isinstance(value, (int, float)):
                 return [-abs(value), abs(value)]
@@ -106,26 +76,19 @@ class PointColorJitter(Aug):
             return [max(0.0, center - value), center + value]
         return [value[0], value[1]]
 
-    # in-place augment
-    def _augment(self, x):
-        if x.shape[-1] < 6:
-            return
-
-        # Flatten RGB across frames and points for shared color transforms.
+    def augment(self, x):
         rgb = x[..., -3:].reshape(-1, 3)
 
-        self._apply_brightness_ip(rgb)
-        self._apply_contrast_ip(rgb)
-        self._apply_saturation_ip(rgb)
+        self.apply_brightness(rgb)
+        self.apply_contrast(rgb)
+        self.apply_saturation(rgb)
 
-        # Brightness is additive, so dark RGB values can temporarily leave
-        # the valid RGB domain.  HSV conversion assumes RGB in [0, 1].
+        # Additive brightness can leave the [0, 1] domain required by HSV.
         np.clip(rgb, 0.0, 1.0, out=rgb)
-        self._apply_hue_ip(rgb)
+        self.apply_hue(rgb)
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
-    # in-place colour helpers
-    def _apply_brightness_ip(self, rgb):
+    def apply_brightness(self, rgb):
         if self.brightness[0] == self.brightness[1]:
             delta = self.brightness[0]
         else:
@@ -134,7 +97,7 @@ class PointColorJitter(Aug):
             return
         rgb += delta
 
-    def _apply_contrast_ip(self, rgb):
+    def apply_contrast(self, rgb):
         if self.contrast[0] == self.contrast[1]:
             factor = self.contrast[0]
         else:
@@ -146,36 +109,33 @@ class PointColorJitter(Aug):
         rgb *= factor
         rgb += mean
 
-    def _apply_saturation_ip(self, rgb):
+    def apply_saturation(self, rgb):
         if self.saturation[0] == self.saturation[1]:
             factor = self.saturation[0]
         else:
             factor = np.random.uniform(*self.saturation)
         if factor == 1:
             return
-        # gray is (N,) — no [:, None] needed since we add channel-wise
-        gray = np.dot(rgb, _BT601_LUMA)  # (N,)
+        gray = np.dot(rgb, BT601_LUMA)
         inv_factor = 1.0 - factor
         rgb *= factor
         rgb[:, 0] += gray * inv_factor
         rgb[:, 1] += gray * inv_factor
         rgb[:, 2] += gray * inv_factor
 
-    def _apply_hue_ip(self, rgb):
+    def apply_hue(self, rgb):
         if self.hue[0] == self.hue[1]:
             shift = self.hue[0]
         else:
             shift = np.random.uniform(*self.hue)
-        if shift == 0:
-            return
         if abs(shift) < 1e-6:
             return
-        hsv = self._rgb_to_hsv(rgb)
+        hsv = self.rgb_to_hsv(rgb)
         hsv[:, 0] = (hsv[:, 0] + shift) % 1.0
-        rgb[...] = self._hsv_to_rgb(hsv)
+        rgb[...] = self.hsv_to_rgb(hsv)
 
     @staticmethod
-    def _rgb_to_hsv(rgb):
+    def rgb_to_hsv(rgb):
         r, g, b = rgb[:, 0], rgb[:, 1], rgb[:, 2]
         max_v, min_v = np.max(rgb, axis=-1), np.min(rgb, axis=-1)
         diff = max_v - min_v
@@ -198,7 +158,7 @@ class PointColorJitter(Aug):
         return np.stack([h, s, max_v], axis=-1)
 
     @staticmethod
-    def _hsv_to_rgb(hsv):
+    def hsv_to_rgb(hsv):
         h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
         h6 = h * 6.0
         i = np.floor(h6).astype(np.int32) % 6
@@ -226,14 +186,8 @@ class PointColorJitter(Aug):
         return rgb
 
 
-class PointDropout(Aug):
-    """R3D point dropout with first-point full-row replacement.
-
-    Each frame independently samples a ratio uniformly in [0, max_dropout_ratio]
-    and drops points with independent Bernoulli draws. Dropped XYZRGB rows are
-    replaced by that frame's first point, preserving the point count. Modifies
-    the array **in-place** on a pre-copied input.
-    """
+class PointDropout(Augmentation):
+    """Replace dropped rows with the first point, sampling a dropout ratio per frame."""
 
     __slots__ = ("max_dropout_ratio",)
 
@@ -243,7 +197,7 @@ class PointDropout(Aug):
         super().__init__(prob=prob)
         self.max_dropout_ratio = float(max_dropout_ratio)
 
-    def _augment(self, x):
+    def augment(self, x):
         if self.max_dropout_ratio <= 0:
             return
 
@@ -259,19 +213,8 @@ class PointDropout(Aug):
                 x[t, drop_mask] = anchor
 
 
-class PointCoordNoiseAug(Aug):
-    """Clipped Gaussian noise on ALL point XYZ coordinates (R3D-Policy, 2026).
-
-    Unlike ``StateNoiseAug`` which perturbs proprioceptive state, this adds
-    per-point geometric noise to simulate real sensor measurement error.
-    Noise is applied to **all** points (not a subset), matching the official
-    R3D ``add_noise()`` behaviour.
-
-    Noise is clipped to ±clip_range (default 2σ) in raw coordinate units,
-    before policy normalization. This does not bound normalized coordinates.
-
-    Modifies the first 3 channels **in-place** on a pre-copied input.
-    """
+class PointCoordinateNoise(Augmentation):
+    """Clipped Gaussian noise on all XYZ coordinates, in raw coordinate units."""
 
     __slots__ = ("noise_std", "clip_range")
 
@@ -280,8 +223,7 @@ class PointCoordNoiseAug(Aug):
         self.noise_std = float(noise_std)
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
 
-    def _augment(self, x):
-        # x: (T, N, C) — noise on ALL points' first 3 channels
+    def augment(self, x):
         if self.noise_std <= 0:
             return
 
@@ -293,18 +235,8 @@ class PointCoordNoiseAug(Aug):
             x[t, :, :3] += noise.astype(dtype)
 
 
-class PointColorNoiseAug(Aug):
-    """Per-channel independent Gaussian noise on point cloud RGB.
-
-    Optional sensor noise, separate from ``PointColorJitter`` lighting changes.
-    The thesis R3D-derived recipe leaves this augmentation disabled.
-
-    Noise is clipped to ``±clip_range`` (default 2σ) and the result is
-    clamped to [0, 1] to keep RGB values valid.
-
-    Modifies the last 3 channels **in-place** on a pre-copied input.
-    Requires C >= 6 (xyz + rgb); silently returns for coord-only point clouds.
-    """
+class PointColorNoise(Augmentation):
+    """Clipped Gaussian noise on the last RGB channels, clamped to [0, 1]."""
 
     __slots__ = ("noise_std", "clip_range")
 
@@ -313,8 +245,8 @@ class PointColorNoiseAug(Aug):
         self.noise_std = float(noise_std)
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
 
-    def _augment(self, x):
-        if x.shape[-1] < 6 or self.noise_std <= 0:
+    def augment(self, x):
+        if self.noise_std <= 0:
             return
         rgb = x[..., -3:]
         noise = np.random.normal(0, self.noise_std, rgb.shape)
@@ -323,15 +255,8 @@ class PointColorNoiseAug(Aug):
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
 
-class StateNoiseAug(Aug):
-    """Clipped Gaussian noise on proprioceptive state.
-
-    Noise is clipped to ``±clip_range`` (default 2σ) in raw state units,
-    before policy normalization. This does not bound normalized state.
-    Agent-level modality dropout is a separate operation.
-
-    Modifies the array **in-place** on a pre-copied input.
-    """
+class StateNoise(Augmentation):
+    """Clipped Gaussian noise on proprioception, in raw state units."""
 
     __slots__ = ("noise_std", "clip_range")
 
@@ -340,23 +265,14 @@ class StateNoiseAug(Aug):
         self.noise_std = float(noise_std)
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
 
-    def _augment(self, x):
+    def augment(self, x):
         noise = np.random.normal(0, self.noise_std, x.shape)
         noise = np.clip(noise, -self.clip_range, self.clip_range)
         x += noise.astype(x.dtype)
 
 
-class ImageAug:
-    """Color + blur + noise for pre-resized float32 CHW tensors (no numpy roundtrip).
-
-    Reference: DexUMI (brightness=0.6 for challenging lighting).
-    A shared outer probability gate controls the whole augmentation. Once it
-    passes, ColorJitter runs and grayscale, noise and blur have their own gates.
-
-    The outer, noise and blur gates share one ``torch.rand`` call (the outer
-    gate is omitted when prob=1). Torchvision transforms still sample their
-    own parameters and grayscale gate.
-    """
+class ImageAugmentation:
+    """Color jitter, grayscale, pixel noise and blur on float32 observation windows."""
 
     __slots__ = ("prob", "color_jitter", "grayscale", "noise", "noise_prob", "blur", "blur_prob")
 
@@ -387,13 +303,14 @@ class ImageAug:
         self.noise = v2.GaussianNoise(mean=0.0, sigma=noise_std) if noise_std > 0 else None
         self.noise_prob = noise_prob
 
-        self.blur = v2.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma) if blur_kernel > 0 else None
+        self.blur = (
+            v2.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma) if blur_kernel > 0 else None
+        )
         self.blur_prob = blur_prob
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """x: (T, 3, H, W) float32 [0, 1] → same shape."""
-        # Fuse prob gate + noise + blur decisions. When prob=1.0 the prob gate
-        # is skipped and only noise/blur decisions are generated (save 1 RNG value).
+        # Preserve RNG consumption: prob=1 omits the outer probability draw.
         need_prob = self.prob < 1.0
         n_rand = 3 if need_prob else 2
         rand_vals = torch.rand(n_rand, device=x.device)
@@ -416,3 +333,13 @@ class ImageAug:
             x = self.blur(x)
 
         return x.clamp(0, 1)
+
+
+# NumPy transforms run in this order before point subsampling and RGB processing.
+AUGMENTATION_SPECS = (
+    ("pc", PointCoordinateNoise, "coord_noise", "point_cloud"),
+    ("pc", PointColorJitter, "color", "point_cloud"),
+    ("pc", PointColorNoise, "color_noise", "point_cloud"),
+    ("pc", PointDropout, "dropout", "point_cloud"),
+    ("state", StateNoise, "noise", "joint_state"),
+)

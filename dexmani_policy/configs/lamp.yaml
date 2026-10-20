@@ -30,7 +30,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.lamp_dataset.LampDataset
+  _target_: dexmani_policy.datasets.hand_prior.lamp_dataset.LAMPDataset
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}

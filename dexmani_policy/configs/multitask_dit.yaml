@@ -35,7 +35,7 @@ dataloader:
 
 # ── Dataset ──
 dataset:
-  _target_: dexmani_policy.datasets.multi_task_dataset.MultiTaskDataset
+  _target_: dexmani_policy.datasets.multitask_dataset.MultiTaskDataset
   seed: ${training.seed}
   sampling_strategy: balanced          # proportional | balanced | weighted
   action_key: ${action_key}
@@ -68,7 +68,7 @@ dataset:
       rgb_preprocess_size: [240, 240]
       rgb_random_crop_size: [224, 224]
       rgb_color_aug:
-        _target_: dexmani_policy.datasets.augmentation.ImageAug
+        _target_: dexmani_policy.datasets.common.augmentation.ImageAugmentation
         brightness: 0.3
         contrast: 0.2
         saturation: 0.2
@@ -92,7 +92,7 @@ dataset:
       rgb_preprocess_size: [240, 240]
       rgb_random_crop_size: [224, 224]
       rgb_color_aug:
-        _target_: dexmani_policy.datasets.augmentation.ImageAug
+        _target_: dexmani_policy.datasets.common.augmentation.ImageAugmentation
         brightness: 0.3
         contrast: 0.2
         saturation: 0.2
