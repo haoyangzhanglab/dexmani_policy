@@ -1,12 +1,11 @@
 #!/bin/bash
 # Policy-aligned DQ codebook training.
-# Usage: train_vq_hand.sh [task_name] [VQ training options...]
+# Usage: vqvae.sh [task_name] [VQ training options...]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# ── Task name (first positional arg, before any --flags) ─────────────────────
 if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
     TASK_NAME="$1"
     shift
@@ -19,7 +18,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}/$(date +%Y%m%d_%H%M%S
 
 # Keep Conda activation hooks outside this shell's nounset mode and stream logs.
 exec conda run --no-capture-output -n policy \
-    python -u -m dexmani_policy.training.train_vq_hand \
+    python -u -m dexmani_policy.training.pretrain.hand_prior.vqvae \
     --policy-config dexmani_policy/configs/dqrise.yaml \
     --policy-override "task_name=${TASK_NAME}" \
     --policy-override "dataset.zarr_path=${ZARR_PATH}" \

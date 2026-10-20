@@ -44,23 +44,17 @@ bash scripts/training/train.sh dp3 \
   '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
-`resume_from` 接受实验目录或 checkpoint，支持 `~`，相对路径按项目根目录解析。完整恢复使用保存的配方、normalizer、raw/EMA、optimizer、scheduler、RNG 和采样位置；只允许规定的运行参数和数据路径覆盖。显式 `task_name` 必须与保存值一致，不能借续训改变模型、数据配方、world size 或训练预算。详见 [Checkpoint 与续训](docs/项目架构.md#checkpoint-与续训)。
+`resume_from` 接受实验目录或 checkpoint，支持 `~`，相对路径按项目根目录解析。完整恢复以 checkpoint 的 `effective_config` 为唯一配方来源，恢复 normalizer、raw/EMA、optimizer、scheduler、RNG 和采样位置；只允许规定的运行参数和数据路径覆盖。显式 `task_name` 必须与保存值一致，不能借续训改变模型、数据配方、world size 或训练预算。详见 [Checkpoint 与续训](docs/项目架构.md#checkpoint-与续训)。
 
 训练日志记录标量指标。每次启动（含续训）创建新的 W&B run，默认 `offline`；`workspace.wandb_cfg` 只配置 `project/group/name/mode`。评测录像使用 `eval.video`，不经训练日志上传。
 
-来源实验若保存了已删除的 W&B `id/resume/video_fps` 字段，续训时显式关闭 W&B：
-
-```bash
-bash scripts/training/train.sh dp3 \
-  '+resume_from=experiments/dp3/<task>/<run>' 'workspace.wandb_cfg=null'
-```
-
-需要 W&B 时，显式替换整个日志配置，见[完整恢复边界](docs/项目架构.md#完整恢复边界)。无需改写来源实验；独立推理不构造日志组件。
+设置 `workspace.wandb_cfg=null` 可关闭 W&B。续训可覆盖 W&B 的 `project/group/name/mode`，见[完整恢复边界](docs/项目架构.md#完整恢复边界)；独立推理不构造日志组件。
 
 训练与推理均要求绑定配置的 `simple.v4`。旧类路径和历史格式使用对应源码快照，不自动迁移实验产物。
 
 常见配置约束：
 
+- 单卡入口要求 `training.num_gpus=1` 或不设置；多 GPU 配置使用 `train_ddp.py`。`training.loop` 显式声明总更新步数、日志间隔和梯度累积步数。
 - 重新生成数据时使用新路径和新的 `data_revision`；revision 是生产者声明，不是内容哈希。
 - 显式 `dataset.split_manifest` 定义最终 episode 集合，需同时设置 `dataset.max_train_episodes=null`、`dataset.val_ratio=0`。
 - Diffusion 使用 Gaussian 动作归一化时需设置 `agent.clip_sample=false`；DQ-RISE/VQ 仅支持动作 `auto/limits`。
@@ -73,6 +67,8 @@ bash scripts/training/train.sh dp3 \
 ## 手部先验准备
 
 三种方法各保留一个策略实现，均为论文机制的机器人/训练框架适配，不能视作已隔离模型、窗口和目标差异的纯动作空间消融。生产默认值见配置；以下示例统一使用 joint action、同一数据 revision 和固定 episode split，各自保存独立产物。
+
+动作空间预训练与码本导出入口位于 `dexmani_policy/training/pretrain/hand_prior/`，共享表示模型位于 `agents/hand_prior/`。观测表征预训练目录为 `training/pretrain/obs/`，当前尚无实现。VQ 的便捷 Shell 入口为 `bash scripts/pretrain/vqvae.sh <task> [VQ options...]`。
 
 ```bash
 conda activate policy
@@ -92,11 +88,11 @@ DATA=("zarr_path=$DATA_ZARR" "dataset.split_manifest=$SPLIT"
 ```bash
 VQ_DATA=()
 for item in "${DATA[@]}"; do VQ_DATA+=(--policy-override "$item"); done
-python -m dexmani_policy.training.train_vq_hand \
+python -m dexmani_policy.training.pretrain.hand_prior.vqvae \
   --policy-config dexmani_policy/configs/dqrise.yaml \
   "${VQ_DATA[@]}" --policy-override action_key=action \
   --output_dir "$HAND_RUN/dqrise"
-python -m dexmani_policy.training.export_hand_codebook \
+python -m dexmani_policy.training.pretrain.hand_prior.export_codebook \
   --checkpoint "$HAND_RUN/dqrise/vqvae_hand_best.pt" \
   --output "$HAND_RUN/dqrise/codebook.npz"
 bash scripts/training/train.sh dqrise "${DATA[@]}" action_key=action \
@@ -108,7 +104,7 @@ bash scripts/training/train.sh dqrise "${DATA[@]}" action_key=action \
 ### LAMP
 
 ```bash
-python -m dexmani_policy.training.train_lamp_prior --config lamp "${DATA[@]}" \
+python -m dexmani_policy.training.pretrain.hand_prior.lamp --config lamp "${DATA[@]}" \
   lamp.prior_path="$HAND_RUN/lamp/prior.pt"
 bash scripts/training/train.sh lamp "${DATA[@]}" \
   lamp.prior_path="$HAND_RUN/lamp/prior.pt"
@@ -116,12 +112,12 @@ bash scripts/training/train.sh lamp "${DATA[@]}" \
 
 唯一结构为 `H=Nobs=C=1`、K=8 历史先验、单步 arm/latent offset 回归；训练用 decoded hand MSE 与 latent offset L2，不需要离线 latent 标签。prior 为 `lamp_prior.v2`，旧 v1 和旧 Flow policy 不自动迁移，历史实验使用历史提交。
 
-历史严格来自 query 之前的实际执行命令，reset 用初始实测手姿补齐。SIM 每个成功执行步追加处理后的命令。runtime 要求调用者显式传 `action_context={"hand_history": history}`，其中 `history` 是物理 NumPy `[K,12]`；`predict` 不更新历史。外部 `dexmani_real` 尚未接入该历史，真机闭环 **NOT VERIFIED**。
+历史严格来自 query 之前的实际执行命令，reset 用初始实测手姿补齐。SIM 每个成功执行步追加处理后的命令。runtime 要求调用者显式传 `action_context={"hand_history": history}`，其中 `history` 是物理 NumPy `[K,12]`；`predict` 不更新历史。执行端按实际提交的命令维护历史，真机闭环 **NOT VERIFIED**。
 
 ### Temporal hand codec
 
 ```bash
-python -m dexmani_policy.training.train_temporal_codec --config temporal_codec_flow "${DATA[@]}" \
+python -m dexmani_policy.training.pretrain.hand_prior.temporal_vae --config temporal_codec_flow "${DATA[@]}" \
   codec.path="$HAND_RUN/temporal/codec.pt"
 bash scripts/training/train.sh temporal_codec_flow "${DATA[@]}" \
   codec.path="$HAND_RUN/temporal/codec.pt"
@@ -131,7 +127,7 @@ bash scripts/training/train.sh temporal_codec_flow "${DATA[@]}" \
 
 LAMP/Temporal 的候选选点必须在 KL 达到目标系数后：LAMP 默认 20k steps、2k warmup、beta=1e-3；Temporal 默认 30k、4k 零 KL + 4k ramp、beta=3e-4。有 holdout 按各自验证指标选点，无 holdout 保存最终合格步骤并标记 `final_no_holdout`。不足 schedule 在训练前报错。
 
-所有阶段的数据覆盖必须一致；若使用 LAMP `--output`，policy 的 `lamp.prior_path` 必须同步。三种预训练入口与 policy 共用配置校验，在读取数据前检查窗口、动作布局和产物路径是否对齐；三份配置均声明了可直接覆盖的 `dataset.split_manifest`。已有文件默认不覆盖。
+所有阶段的数据覆盖必须一致。LAMP/Temporal 默认写入实际 policy 配置的 `agent.prior_path` / `agent.codec_path`，默认分别由 `lamp.prior_path` / `codec.path` 插值。若使用 LAMP `--output`，policy 的 `agent.prior_path` 也应指向该产物。三种预训练入口与 policy 共用窗口、动作布局校验；产物加载时核对内容和坐标，不要求两处路径字符串相同。三份配置均声明了可直接覆盖的 `dataset.split_manifest`。已有文件默认不覆盖。
 
 Fresh training 校验来源、窗口、划分和手部表示坐标，观测归一化可在 encoder 允许范围内另选；strict resume 使用 checkpoint 内嵌表示并重新核对当前数据，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示、normalizer 和 `action_space_artifact` 元信息，独立推理无需原 artifact 或训练数据。来源以单一 source contract 记录，源行/窗口保留计数与指纹，不重复保存完整索引列表。LAMP/Temporal 仅支持 sync。
 
@@ -146,7 +142,7 @@ python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name> --max-updates 4
 ```
 
-`--config-only` 检查配置、Hydra target 和策略导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
+`--config-only` 检查配置、Hydra target 和策略/训练模块导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
 
 smoke 支持多个配置名，默认运行 4 次 optimizer update，不接受 Hydra 字段覆盖。若需覆盖配置或保留短跑产物，使用正式训练入口：
 
@@ -193,7 +189,10 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | `dexmani_policy/configs/` | 当前实验配置与 DDP overlay |
 | `dexmani_policy/agents/` | Policy、观测编码器、动作解码器和手部先验 |
 | `dexmani_policy/datasets/` | Zarr 读取、窗口采样、增强和划分 |
-| `dexmani_policy/training/` | 构建、训练循环、EMA、保存与恢复 |
+| `dexmani_policy/training/` | 组件构建、训练循环、实验管理、状态恢复与校验 |
+| `dexmani_policy/training/common/` | EMA、学习率调度、日志与 checkpoint |
+| `dexmani_policy/training/pretrain/hand_prior/` | 动作空间预训练：VQ、LAMP、Temporal 及码本导出 |
+| `dexmani_policy/training/pretrain/obs/` | 观测表征预训练（当前尚无实现） |
 | `dexmani_policy/evaluation/` | 离线评测共享协议 |
 | `dexmani_policy/env_runner/` | 仿真环境与动作执行 |
 | `dexmani_policy/deployment/` | 已保存策略的检查与 Real 推理接口 |

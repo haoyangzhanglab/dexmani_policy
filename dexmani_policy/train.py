@@ -1,120 +1,30 @@
 import os
+from pathlib import Path
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Optional
-
 import hydra
-import torch
-from torch.utils.data import DataLoader
+from omegaconf import open_dict
 
+from dexmani_policy.training.builder import (
+    build_train_components,
+    build_trainer,
+    compile_models,
+)
+from dexmani_policy.training.common.checkpoint import CheckpointStore
+from dexmani_policy.training.resume import resolve_training_config, restore_training_state
+from dexmani_policy.training.validation import validate_config
+from dexmani_policy.training.workspace import prepare_output_dir
 from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.path import resolve_resume_source, set_project_root
 from dexmani_policy.utils.random import set_seed
 
-set_project_root()
-from omegaconf import OmegaConf, open_dict
-
-from dexmani_policy.training.build_utils import (
-    build_dataset_and_normalizer,
-    build_model_and_ema,
-    build_optimizer_and_scheduler,
-    compile_models,
-    print_training_recipe,
-    validate_config,
-)
-from dexmani_policy.training.resume import (
-    build_resume_contract, build_train_loader, restore_training_state,
-)
-from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
-from dexmani_policy.training.workspace import prepare_output_dir
-from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
-
 register_resolvers()
-
-
-@dataclass
-class TrainingComponents:
-    """Single-device components shared by training and integration smoke."""
-
-    device: torch.device
-    model: torch.nn.Module
-    ema_model: Optional[torch.nn.Module]
-    ema_updater: Optional[Any]
-    optimizer: torch.optim.Optimizer
-    scheduler: Any
-    train_loader: DataLoader
-    workspace: Any
-    batches_per_epoch: int
-    resume_checkpoint: Optional[TrainCheckpoint] = None
-
-
-def build_train_components(cfg, *, resume_checkpoint=None):
-    """Build components, reusing a source already validated by CheckpointStore.load."""
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. This training script requires GPU.")
-
-    device = torch.device(cfg.training.device)
-
-    source = cfg.get("resume_from")
-    checkpoint = resume_checkpoint
-    if source is not None and checkpoint is None:
-        checkpoint = CheckpointStore(Path(source).parent).load(source)
-    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
-
-    train_loader = build_train_loader(cfg, dataset)
-
-    model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, checkpoint=checkpoint, dataset=dataset
-    )
-
-    batches_per_epoch = len(train_loader)
-    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model)
-    print_training_recipe(cfg, world_size=1, batches_per_epoch=batches_per_epoch,
-                          samples_per_rank=train_loader.sampler.num_samples)
-
-    workspace = hydra.utils.instantiate(cfg.workspace)
-
-    return TrainingComponents(
-        device=device,
-        model=model,
-        ema_model=ema_model,
-        ema_updater=ema_updater,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        train_loader=train_loader,
-        workspace=workspace,
-        batches_per_epoch=batches_per_epoch,
-        resume_checkpoint=checkpoint,
-    )
-
-
-def build_trainer(cfg, comp):
-    return Trainer(
-        device=comp.device,
-        model=comp.model,
-        ema_model=comp.ema_model,
-        ema_updater=comp.ema_updater,
-        optimizer=comp.optimizer,
-        scheduler=comp.scheduler,
-        train_loader=comp.train_loader,
-        workspace=comp.workspace,
-        train_loop_cfg=TrainLoopConfig(
-            **OmegaConf.to_container(cfg.training.loop, resolve=True)
-        ),
-        max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
-        use_bfloat16=cfg.training.get("use_bfloat16", False),
-        resume_contract=build_resume_contract(cfg, comp.model, comp.train_loader),
-        effective_config=cfg,
-        batches_per_epoch=comp.batches_per_epoch,
-    )
+set_project_root()
 
 
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
-    from dexmani_policy.training.resume import resolve_training_config
     source = resolve_resume_source(cfg.get("resume_from"))
     checkpoint = CheckpointStore(Path(source).parent).load(source) if source is not None else None
     cfg = resolve_training_config(cfg, resume_checkpoint=checkpoint)
@@ -125,25 +35,31 @@ def main(cfg):
 
     set_seed(cfg.training.seed)
     comp = build_train_components(cfg, resume_checkpoint=checkpoint)
-    # Components own the temporary CPU state until restoration below.
-    del checkpoint
-
-    trainer = build_trainer(cfg, comp)
-    resume_state = None
-    if comp.resume_checkpoint is not None:
-        resume_state = restore_training_state(
-            comp.resume_checkpoint, resume_contract=trainer.resume_contract,
-            model=comp.model, ema_model=comp.ema_model, ema_updater=comp.ema_updater,
-            optimizer=comp.optimizer, scheduler=comp.scheduler, device=comp.device,
-        )
-    comp.resume_checkpoint = None
-    comp.workspace.save_hydra_config(cfg)
-    if cfg.training.get("use_compile", False):
-        compile_models(
-            comp.model, comp.ema_model,
-            mode=cfg.training.get("compile_mode", "reduce-overhead"),
-        )
-    trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
+    try:
+        trainer = build_trainer(cfg, comp)
+        resume_state = None
+        if checkpoint is not None:
+            resume_state = restore_training_state(
+                checkpoint,
+                resume_contract=trainer.resume_contract,
+                effective_config=cfg,
+                model=comp.model,
+                ema_updater=comp.ema_updater,
+                optimizer=comp.optimizer,
+                scheduler=comp.scheduler,
+                device=comp.device,
+            )
+        del checkpoint
+        comp.workspace.save_hydra_config(cfg)
+        if cfg.training.get("use_compile", False):
+            compile_models(
+                comp.model,
+                comp.ema_model,
+                mode=cfg.training.get("compile_mode", "reduce-overhead"),
+            )
+        trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
+    finally:
+        comp.workspace.close()
 
 
 if __name__ == "__main__":

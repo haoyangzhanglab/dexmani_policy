@@ -19,15 +19,17 @@ from torch.utils.data import DataLoader, TensorDataset
 from dexmani_policy.agents.core.normalizer import AffineNormalizer, FieldNormalizer
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.training.build_utils import build_normalizer, validate_config
-from dexmani_policy.training.export_hand_codebook import (
+from dexmani_policy.training.builder import build_normalizer
+from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
     build_runtime_codebook,
     deployment_diagnostics,
     load_checkpoint_snapshot,
 )
+from dexmani_policy.training.validation import validate_config
 from dexmani_policy.training.workspace import prepare_output_dir
 from dexmani_policy.utils.atomic import atomic_path
 from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
+from dexmani_policy.utils.hand_artifact import metadata_sha256, source_contract
 from dexmani_policy.utils.validation import positive_int
 
 logger = logging.getLogger(__name__)
@@ -107,9 +109,7 @@ def build_policy_dataset(cfg):
     if cfg.agent._target_ != "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy":
         raise ValueError("--policy-config requires a DQRISEPolicy configuration")
     if cfg.get("resume_from") is not None:
-        raise ValueError(
-            "Prepare a new codebook from a fresh Policy config, not resume_from"
-        )
+        raise ValueError("Prepare a new codebook from a fresh Policy config, not resume_from")
     dataset = hydra.utils.instantiate(cfg.dataset)
     if not isinstance(dataset, BaseDataset):
         raise TypeError("DQ-RISE VQ preparation requires a single BaseDataset")
@@ -127,10 +127,7 @@ def policy_hand_rows(dataset, tcp_dim):
     blocks = []
     step = buffer.chunk_rows(dataset.action_key)
     for start in range(0, int(buffer.episode_ends[-1]), step):
-        selected = (
-            rows[np.searchsorted(rows, start) : np.searchsorted(rows, start + step)]
-            - start
-        )
+        selected = rows[np.searchsorted(rows, start) : np.searchsorted(rows, start + step)] - start
         if len(selected):
             blocks.append(
                 buffer.read(
@@ -143,14 +140,9 @@ def policy_hand_rows(dataset, tcp_dim):
 
 
 def prepare_policy_data(cfg):
-    from dexmani_policy.utils.config import validate_dq_normalization
-
-    spec = resolve_normalization_spec(cfg)
-    validate_dq_normalization(spec)
     dataset = build_policy_dataset(cfg)
-    action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)[
-        "action"
-    ]
+    spec = resolve_normalization_spec(cfg)
+    action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)["action"]
     hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))
     normalizer = AffineNormalizer()
     normalizer["hand"] = FieldNormalizer.from_parameters(
@@ -161,8 +153,6 @@ def prepare_policy_data(cfg):
     val = dataset.get_validation_dataset()
     train_hand = policy_hand_rows(dataset, cfg.agent.tcp_dim)
     val_hand = policy_hand_rows(val, cfg.agent.tcp_dim)
-    from dexmani_policy.utils.hand_artifact import source_contract, metadata_sha256
-
     contract = source_contract(dataset)
     metadata = {
         "implementation": dataset.hand_implementation_version,
@@ -194,6 +184,11 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         args.output_dir = str(Path("experiments/vq_hand") / Path(args.zarr_path).stem / run)
     output_dir = Path(args.output_dir)
     prepare_output_dir(output_dir)
+    for pattern in ("vqvae_hand_*.pt", "*.npz", "code_usage_*.png", "loss_curve.png"):
+        if any(output_dir.glob(pattern)):
+            raise FileExistsError(
+                f"VQ output already exists in {output_dir}; use a new output directory"
+            )
     logger.info("VQ run: %s", output_dir.resolve())
     device = torch.device(args.device)
     set_seed(args.seed)
@@ -259,9 +254,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             milestones=[warmup_steps],
         )
     else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_steps
-        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
     selection_metric = "val_mse" if val_loader is not None else "train_mse"
     split_metadata["selection_metric"] = selection_metric
@@ -285,14 +278,13 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             scheduler.step()
 
             with torch.no_grad():
-                usage += torch.nn.functional.one_hot(indices, args.codebook_size).sum(0)
+                usage.scatter_add_(1, indices.T, torch.ones_like(indices.T))
                 sums += torch.stack((enc_loss, vq_loss, recon_mse)).double() * batch.shape[0]
             train_count += batch.shape[0]
 
         train_metrics = dict(zip(("enc", "vq", "mse"), (sums / train_count).tolist()))
         train_total = (
-            args.enc_loss_weight * train_metrics["enc"]
-            + args.vq_loss_weight * train_metrics["vq"]
+            args.enc_loss_weight * train_metrics["enc"] + args.vq_loss_weight * train_metrics["vq"]
         )
         train_history.append(train_total)
 
@@ -383,12 +375,14 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
     )
 
     # Deployment diagnostics evaluate the selected best without changing selection.
-    selected_path = output_dir / 'vqvae_hand_best.pt'
+    selected_path = output_dir / "vqvae_hand_best.pt"
     selected, source_hash = load_checkpoint_snapshot(selected_path)
-    runtime_codebook = build_runtime_codebook(selected, source_hash, selected_path, device='cpu')
-    diagnostics = deployment_diagnostics(runtime_codebook, {'train': train_norm, 'held_out': val_norm})
-    with atomic_path(output_dir / 'codebook_diagnostics.json') as temporary:
-        temporary.write_text(json.dumps(diagnostics, indent=2, allow_nan=False) + '\n')
+    runtime_codebook = build_runtime_codebook(selected, source_hash, selected_path, device="cpu")
+    diagnostics = deployment_diagnostics(
+        runtime_codebook, {"train": train_norm, "held_out": val_norm}
+    )
+    with atomic_path(output_dir / "codebook_diagnostics.json") as temporary:
+        temporary.write_text(json.dumps(diagnostics, indent=2, allow_nan=False) + "\n")
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(train_history)
@@ -461,13 +455,16 @@ def main(argv: list[str] | None = None) -> None:
     args.zarr_path = str(policy_cfg.dataset.zarr_path)
     args.hand_dim = int(policy_cfg.agent.action_dim) - int(policy_cfg.agent.tcp_dim)
     if (args.num_groups, args.codebook_size) != (
-        policy_cfg.agent.codebook_num_groups, policy_cfg.agent.codebook_size,
+        policy_cfg.agent.codebook_num_groups,
+        policy_cfg.agent.codebook_size,
     ):
         parser.error("VQ num_groups/codebook_size must match the target Policy")
     if args.loss_weight is None:
         args.loss_weight = [1.0] * args.hand_dim
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S",
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
     )
     train(args, policy_cfg=policy_cfg)
 

@@ -14,17 +14,13 @@ def validate_observation_fields(agent, declared, *, require_declaration=False):
         consumed = getattr(getattr(agent, "obs_encoder", None), "consumed_observation_fields", None)
     if consumed is None:
         if require_declaration:
-            raise ValueError("Real deployment requires consumed_observation_fields on Agent or encoder")
+            raise ValueError(
+                "Real deployment requires consumed_observation_fields on Agent or encoder"
+            )
         return
     missing = set(consumed) - set(declared)
     unused = set(declared) - set(consumed)
     if missing or unused:
-        raise ValueError(f"Model observation mismatch: missing={sorted(missing)}, unconsumed={sorted(unused)}")
-
-
-def validate_gradient_accumulation(
-    batches_per_epoch: int, gradient_accumulation_steps: int
-) -> None:
-    if batches_per_epoch <= 0:
-        raise ValueError("train loader must contain at least one batch")
-    positive_int(gradient_accumulation_steps, "gradient_accumulation_steps")
+        raise ValueError(
+            f"Model observation mismatch: missing={sorted(missing)}, unconsumed={sorted(unused)}"
+        )

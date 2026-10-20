@@ -303,11 +303,11 @@ def evaluate_checkpoint_robotwin(
         episodes=episodes,
         selection_seeds=selection_seeds,
     )
-    if best_info is not None and "global_step" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+    if best_info is not None and "global_step" in best_info and agent.checkpoint_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
-        global_step=agent._checkpoint_global_step, use_ema=use_ema,
+        global_step=agent.checkpoint_step, use_ema=use_ema,
         inference_steps_list=[inference_steps], episodes=episodes,
         effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,
         policy_seed_mode="episode_seed", task_seeds=eval_seeds,
@@ -328,7 +328,7 @@ def evaluate_checkpoint_robotwin(
         selection_seeds_excluded=selection_seeds,
         heldout_from_selection=best_info is not None,
         use_ema=use_ema,
-        eval_config=snapshot_ref, global_step=agent._checkpoint_global_step,
+        eval_config=snapshot_ref, global_step=agent.checkpoint_step,
     )
 
     # Report
@@ -405,11 +405,11 @@ def evaluate_checkpoint_sweep(
         episodes=episodes,
         selection_seeds=selection_seeds,
     )
-    if best_info is not None and "global_step" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+    if best_info is not None and "global_step" in best_info and agent.checkpoint_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     snapshot_ref = save_eval_snapshot(
         result_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
-        global_step=agent._checkpoint_global_step, use_ema=use_ema,
+        global_step=agent.checkpoint_step, use_ema=use_ema,
         inference_steps_list=inference_steps_list, episodes=episodes,
         effective_episodes=plan_size(eval_seeds), shuffle_seed=eval_seed,
         policy_seed_mode="episode_seed", task_seeds=eval_seeds,
@@ -442,7 +442,7 @@ def evaluate_checkpoint_sweep(
             selection_seeds_excluded=selection_seeds,
             heldout_from_selection=best_info is not None,
             use_ema=use_ema,
-            eval_config=snapshot_ref, global_step=agent._checkpoint_global_step,
+            eval_config=snapshot_ref, global_step=agent.checkpoint_step,
         )
 
         avg_str = f"{info['avg_steps']:.1f}" if info["avg_steps"] is not None else "N/A"

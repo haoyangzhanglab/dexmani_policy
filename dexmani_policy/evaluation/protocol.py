@@ -21,7 +21,7 @@ from dexmani_policy.utils.config import (
     validate_action_key_consistency,
     validate_window_contract,
 )
-from dexmani_policy.training.checkpoint import (
+from dexmani_policy.training.common.checkpoint import (
     read_checkpoint_record,
     resolve_record_path,
     validate_inference_settings,
@@ -218,7 +218,7 @@ def load_ckpt_for_inference(
     cfg,
 ):
     """Use the shared loader with the original saved config, never eval overrides."""
-    from dexmani_policy.training.checkpoint import restore_policy_agent
+    from dexmani_policy.training.common.checkpoint import restore_policy_agent
 
     saved = load_experiment_config(cfg._exp_dir)
     validate_eval_config(cfg, saved)

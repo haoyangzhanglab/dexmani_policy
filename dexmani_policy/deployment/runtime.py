@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from dexmani_policy.datasets.preprocessing import rgb_preprocessing_kwargs
-from dexmani_policy.training.checkpoint import resolve_best_checkpoint, resolve_checkpoint
+from dexmani_policy.training.common.checkpoint import resolve_best_checkpoint, resolve_checkpoint
 from dexmani_policy.utils.config import load_experiment_config
 from dexmani_policy.utils.validation import positive_int
 
@@ -154,7 +154,7 @@ def inspect_policy(
 
 
 def load_policy(config, info, *, device="cuda:0", seed=0):
-    from dexmani_policy.training.checkpoint import restore_policy_agent
+    from dexmani_policy.training.common.checkpoint import restore_policy_agent
 
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
@@ -253,8 +253,7 @@ class LoadedPolicy:
             )
         ):
             raise ValueError("PolicyInfo real numerical recipe disagrees with config")
-        if hasattr(agent, "_inference_config"):
-            validate_source_recipe(agent._inference_config, config)
+        validate_source_recipe(agent.inference_config, config)
         encoder = agent.obs_encoder
         if hasattr(encoder, "use_coord_only") and encoder.use_coord_only != (
             config["agent"].get("pc_dim") == 3

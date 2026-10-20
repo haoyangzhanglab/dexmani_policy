@@ -111,7 +111,7 @@ optimizer:
 
 # ── EMA ──
 ema:
-  _target_: dexmani_policy.training.ema_model.EMAModel
+  _target_: dexmani_policy.training.common.ema.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -135,7 +135,7 @@ training:
 
 # ── Workspace ──
 workspace:
-  _target_: dexmani_policy.training.workspace.TrainWorkspace
+  _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:

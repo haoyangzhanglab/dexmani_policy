@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from dexmani_policy.utils.atomic import atomic_path
 
@@ -18,15 +18,15 @@ class TrainCheckpoint:
     epoch: int
     global_step: int
     next_micro_step: int
-    model_state: Dict[str, Any]
-    ema_model_state: Optional[Dict[str, Any]]
-    optimizer_state: Dict[str, Any]
-    scheduler_state: Dict[str, Any]
-    resume_contract: Dict[str, Any]
-    ema_updater_step: Optional[int]
-    ema_decay: Optional[float]
-    rng_states: list[Dict[str, Any]]
-    effective_config: Dict[str, Any]
+    model_state: dict[str, Any]
+    ema_model_state: dict[str, Any] | None
+    optimizer_state: dict[str, Any]
+    scheduler_state: dict[str, Any]
+    resume_contract: dict[str, Any]
+    ema_updater_step: int | None
+    ema_decay: float | None
+    rng_states: list[dict[str, Any]]
+    effective_config: dict[str, Any]
 
 
 class CheckpointStore:
@@ -69,32 +69,10 @@ class CheckpointStore:
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         if not isinstance(payload, dict) or payload.get("_format") != TRAIN_CHECKPOINT_FORMAT:
             raise RuntimeError(f"Checkpoint requires {TRAIN_CHECKPOINT_FORMAT}")
-        if not isinstance(payload.get("weights"), dict) or not isinstance(payload.get("state"), dict):
-            raise RuntimeError("Checkpoint requires state and weights mappings")
         config = payload.get("effective_config")
         if not isinstance(config, dict) or not config:
             raise ValueError("Checkpoint requires a nonempty effective_config mapping")
-        if (config.get("dataset", {}).get("_target_") == "dexmani_policy.datasets.lamp_dataset.LampDataset"
-                and config.get("agent", {}).get("_target_") != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy"):
-            raise ValueError("Historical LAMP checkpoint: use its historical checkout or retrain "
-                             "the single-step LAMPPolicy with lamp_prior.v2")
         return payload
-
-    def load_inference(self, path: Path, *, use_ema: bool, payload=None):
-        import torch
-
-        payload = self.load_payload(path) if payload is None else payload
-        state = payload["weights"].get("ema_model" if use_ema else "model")
-        if state is None and use_ema:
-            raise ValueError("Requested EMA weights are absent; select raw explicitly")
-        if not isinstance(state, dict) or not state or any(
-            not isinstance(k, str) or not isinstance(v, torch.Tensor) for k, v in state.items()
-        ):
-            raise RuntimeError("Inference requires a nonempty tensor state_dict")
-        step = payload["state"].get("global_step")
-        if type(step) is not int or step < 0:
-            raise ValueError("Checkpoint global_step must be an int >= 0")
-        return state, step
 
     def load(self, path: Path) -> TrainCheckpoint:
         from dexmani_policy.utils.config import checkpoint_source_config
@@ -103,37 +81,12 @@ class CheckpointStore:
         effective_config = checkpoint_source_config(payload, path)
         state = payload["state"]
         weights = payload["weights"]
-        expected_state = {
-            "epoch",
-            "global_step",
-            "next_micro_step",
-            "resume_contract",
-            "ema_updater_step",
-            "ema_decay",
-            "rng_states",
-        }
-        expected_weights = {"model", "ema_model", "optimizer", "scheduler"}
-        if not expected_state <= state.keys() or not expected_weights <= weights.keys():
-            raise RuntimeError(
-                f"Checkpoint does not match the {TRAIN_CHECKPOINT_FORMAT} schema"
-            )
         for key in ("epoch", "global_step", "next_micro_step"):
             if type(state[key]) is not int or state[key] < 0:
                 raise ValueError(f"Checkpoint {key} must be an int >= 0")
-        if not isinstance(state["resume_contract"], dict):
-            raise ValueError("Checkpoint resume_contract must be a dict")
-        if not isinstance(state["rng_states"], list) or not state["rng_states"]:
-            raise ValueError(
-                "Checkpoint rng_states must be a nonempty rank-ordered list"
-            )
-        for key in ("model", "optimizer", "scheduler"):
-            if not isinstance(weights[key], dict):
-                raise ValueError(f"Resume requires {key} state mapping")
-        if weights["ema_model"] is not None and not isinstance(weights["ema_model"], dict):
-            raise ValueError("ema_model must be a state mapping or None")
         return TrainCheckpoint(
-            epoch=int(state["epoch"]),
-            global_step=int(state["global_step"]),
+            epoch=state["epoch"],
+            global_step=state["global_step"],
             next_micro_step=state["next_micro_step"],
             resume_contract=state["resume_contract"],
             ema_updater_step=state["ema_updater_step"],
@@ -147,7 +100,18 @@ class CheckpointStore:
         )
 
 
-def fix_state_dict(state_dict: Dict) -> Dict:
+def inference_weights(payload, *, use_ema):
+    """Select raw or EMA tensors from a checkpoint already read by CheckpointStore."""
+    state = payload["weights"]["ema_model" if use_ema else "model"]
+    if state is None and use_ema:
+        raise ValueError("Requested EMA weights are absent; select raw explicitly")
+    step = payload["state"]["global_step"]
+    if type(step) is not int or step < 0:
+        raise ValueError("Checkpoint global_step must be an int >= 0")
+    return state, step
+
+
+def unwrap_state_dict(state_dict: dict) -> dict:
     """Remove training wrappers for loading or saving the underlying model."""
     if any("_orig_mod." in k for k in state_dict):
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
@@ -219,9 +183,7 @@ def resolve_checkpoint(experiment_dir, selector="best"):
             path = root / "checkpoints" / path
     path = path.resolve(strict=True)
     if not path.is_file() or not path.is_relative_to(root / "checkpoints"):
-        raise ValueError(
-            "Checkpoint must be inside the selected experiment/checkpoints"
-        )
+        raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
     return path
 
 
@@ -232,35 +194,32 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
 
     from dexmani_policy.utils.config import (
         checkpoint_source_config,
-        resolve_normalization_spec,
         normalization_dims_from_config,
+        resolve_normalization_spec,
         validate_window_contract,
     )
+    from dexmani_policy.utils.hand_artifact import restore_artifact_metadata
 
     store = CheckpointStore(Path(checkpoint_path).parent)
     payload = store.load_payload(checkpoint_path)
     saved_config = checkpoint_source_config(payload, checkpoint_path, supplied=saved_config)
     cfg = OmegaConf.create(saved_config)
-    validate_window_contract(
-        cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps
-    )
+    validate_window_contract(cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps)
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
-    state, global_step = store.load_inference(
-        checkpoint_path, use_ema=use_ema, payload=payload
-    )
-    state = fix_state_dict(state)
+    state, global_step = inference_weights(payload, use_ema=use_ema)
+    state = unwrap_state_dict(state)
     cfg = checkpoint_agent_config(cfg, state)
     agent = hydra.utils.instantiate(cfg.agent)
-    agent._checkpoint_global_step = global_step
+    agent.checkpoint_step = global_step
     agent.action_key = cfg.action_key
-    agent.set_normalization_spec(resolve_normalization_spec(cfg), normalization_dims_from_config(cfg))
+    agent.set_normalization_spec(
+        resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
+    )
     agent.load_state_dict(state, strict=True)
     agent.validate_normalizer()
-    from dexmani_policy.utils.hand_artifact import restore_artifact_metadata
-
     restore_artifact_metadata(agent, saved_config)
-    agent._inference_config = saved_config
+    agent.inference_config = saved_config
     agent.to(device)
     agent.eval()
     return agent
@@ -275,21 +234,31 @@ def checkpoint_agent_config(cfg, state):
     cfg = copy.deepcopy(cfg)
     agent = cfg.agent
     with open_dict(agent):
-        if agent.get('rgb_backbone_name') is not None:
-            rgb = dict(agent.get('rgb_backbone_config') or {})
-            if agent.rgb_backbone_name == 'resnet' and not {'tune_mode', 'norm_mode'} <= rgb.keys():
-                raise ValueError('Saved ResNet requires explicit tune_mode and norm_mode; '
-                                 'legacy omitted defaults cannot be reinterpreted using current defaults')
-            if (agent.rgb_backbone_name in {'dino', 'siglip'}
-                    and not isinstance(rgb.get('architecture'), (dict, DictConfig))):
-                raise ValueError('Saved HF backbone requires an architecture mapping')
-            rgb['load_pretrained'] = False
+        if agent.get("rgb_backbone_name") is not None:
+            rgb = dict(agent.get("rgb_backbone_config") or {})
+            if agent.rgb_backbone_name == "resnet" and not {"tune_mode", "norm_mode"} <= rgb.keys():
+                raise ValueError("Saved ResNet requires explicit tune_mode and norm_mode")
+            if agent.rgb_backbone_name in {"dino", "siglip"} and not isinstance(
+                rgb.get("architecture"), (dict, DictConfig)
+            ):
+                raise ValueError("Saved HF backbone requires an architecture mapping")
+            rgb["load_pretrained"] = False
             agent.rgb_backbone_config = rgb
-        if agent.get('_target_') == 'dexmani_policy.agents.core.multitask_policy.MultiTaskPolicy' and agent.get('task_texts') is not None:
-            table = state.get('task_emb_table')
+        if (
+            agent.get("_target_") == "dexmani_policy.agents.core.multitask_policy.MultiTaskPolicy"
+            and agent.get("task_texts") is not None
+        ):
+            table = state.get("task_emb_table")
             texts = list(dict.fromkeys(agent.task_texts))
-            dim = agent.get('text_embed_dim')
-            if (type(dim) is not int or dim <= 0 or not isinstance(table, torch.Tensor)
-                    or table.ndim != 2 or tuple(table.shape) != (len(texts), dim)):
-                raise ValueError('Closed text checkpoint requires task_emb_table matching saved task_texts and text_embed_dim')
+            dim = agent.get("text_embed_dim")
+            if (
+                type(dim) is not int
+                or dim <= 0
+                or not isinstance(table, torch.Tensor)
+                or table.ndim != 2
+                or tuple(table.shape) != (len(texts), dim)
+            ):
+                raise ValueError(
+                    "Closed text checkpoint requires task_emb_table matching saved task_texts and text_embed_dim"
+                )
     return cfg

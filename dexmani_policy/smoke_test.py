@@ -2,28 +2,24 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
-import pathlib
 import tempfile
 import traceback
-
-ROOT_DIR = str(pathlib.Path(__file__).parent.parent)
-os.chdir(ROOT_DIR)
 
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy.training.checkpoint import (
+from dexmani_policy.training.builder import compile_models
+from dexmani_policy.training.common.checkpoint import (
     CheckpointStore,
-    fix_state_dict,
+    unwrap_state_dict,
 )
+from dexmani_policy.training.validation import validate_config
 from dexmani_policy.utils.config import load_policy_config
-from dexmani_policy.utils.tensor import dict_apply
+from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
-from dexmani_policy.training.build_utils import (
-    compile_models,
-    validate_config,
-)
+from dexmani_policy.utils.tensor import dict_apply
+
+set_project_root()
 
 
 def load_config(config_name: str):
@@ -34,7 +30,7 @@ def load_config(config_name: str):
     return cfg
 
 
-def _iter_targets(node, path: str = "$"):
+def iter_targets(node, path: str = "$"):
     if OmegaConf.is_config(node):
         node = OmegaConf.to_container(node, resolve=True)
 
@@ -43,53 +39,43 @@ def _iter_targets(node, path: str = "$"):
         if isinstance(target, str):
             yield path, target
         for key, value in node.items():
-            yield from _iter_targets(value, f"{path}.{key}")
+            yield from iter_targets(value, f"{path}.{key}")
     elif isinstance(node, list):
         for index, value in enumerate(node):
-            yield from _iter_targets(value, f"{path}[{index}]")
+            yield from iter_targets(value, f"{path}[{index}]")
 
 
-def _split_target(target: str) -> tuple[str, str]:
+def split_target(target: str) -> tuple[str, str]:
     module_name, separator, attribute = target.rpartition(".")
     if not separator:
         raise ImportError(f"Invalid Hydra target: {target!r}")
     return module_name, attribute
 
 
-def _validate_target_references(cfg) -> int:
-    """Check target modules cheaply; import only the policy Agent target.
-
-    Some runtime targets (notably env runners) intentionally import optional
-    external packages such as dexmani_sim. Config-only validation should not
-    require those runtime dependencies just to prove the policy config is
-    structurally wired.
-    """
-    targets = list(_iter_targets(cfg))
+def validate_target_references(cfg) -> int:
+    """Import policy/training targets; optional simulation targets only need a module."""
+    targets = list(iter_targets(cfg))
     agent_target = cfg.get("agent", {}).get("_target_")
 
     for path, target in targets:
-        module_name, attribute = _split_target(target)
+        module_name, attribute = split_target(target)
         try:
             spec = importlib.util.find_spec(module_name)
         except ImportError as exc:
             raise ImportError(
-                f"Failed to locate Hydra target module {module_name!r} "
-                f"for {target!r} at {path}"
+                f"Failed to locate Hydra target module {module_name!r} for {target!r} at {path}"
             ) from exc
         if spec is None:
             raise ImportError(
-                f"Failed to locate Hydra target module {module_name!r} "
-                f"for {target!r} at {path}"
+                f"Failed to locate Hydra target module {module_name!r} for {target!r} at {path}"
             )
 
-        if target == agent_target:
+        if target == agent_target or module_name.startswith("dexmani_policy.training."):
             try:
                 module = importlib.import_module(module_name)
                 getattr(module, attribute)
             except Exception as exc:
-                raise ImportError(
-                    f"Failed to import agent target {target!r} at {path}"
-                ) from exc
+                raise ImportError(f"Failed to import target {target!r} at {path}") from exc
 
     return len(targets)
 
@@ -102,7 +88,7 @@ def validate_config_only(config_name: str):
     cfg = load_config(config_name)
     validate_config(cfg)
 
-    target_count = _validate_target_references(cfg)
+    target_count = validate_target_references(cfg)
 
     print(f"      checked Hydra targets: {target_count}")
     print(f"\n✓ {config_name} config check PASSED\n")
@@ -111,17 +97,14 @@ def validate_config_only(config_name: str):
 
 def smoke_test(config_name: str, *, max_updates=4):
     """Run the production single-device Trainer with an execution-only budget."""
-    from dexmani_policy.train import build_train_components, build_trainer
+    from dexmani_policy.training.builder import build_train_components, build_trainer
+    from dexmani_policy.training.common.checkpoint import restore_policy_agent
     from dexmani_policy.utils.config import load_experiment_config
-    from dexmani_policy.training.checkpoint import restore_policy_agent
-    from dexmani_policy.training.resume import optimizer_to
     from dexmani_policy.utils.validation import positive_int
 
     positive_int(max_updates, "max_updates")
     cfg = load_config(config_name)
     validate_config(cfg)
-    if cfg.training.get("num_gpus", 1) > 1:
-        raise RuntimeError("NOT VERIFIED: multi-rank configs require a bounded train_ddp run")
     if not torch.cuda.is_available():
         raise RuntimeError("NOT VERIFIED: original training configuration requires CUDA")
     set_seed(cfg.training.seed)
@@ -129,15 +112,18 @@ def smoke_test(config_name: str, *, max_updates=4):
         cfg.workspace.output_dir = tmpdir
         cfg.workspace.wandb_cfg = None
         comp = build_train_components(cfg)
-        trainer = build_trainer(cfg, comp)
         try:
+            trainer = build_trainer(cfg, comp)
             comp.workspace.save_hydra_config(cfg)
-            before = {name: p.detach().cpu().clone()
-                      for name, p in comp.model.named_parameters()
-                      if p.requires_grad and p.is_floating_point()}
+            before = {
+                name: p.detach().cpu().clone()
+                for name, p in comp.model.named_parameters()
+                if p.requires_grad and p.is_floating_point()
+            }
             if cfg.training.get("use_compile", False):
                 compile_models(
-                    comp.model, comp.ema_model,
+                    comp.model,
+                    comp.ema_model,
                     mode=cfg.training.get("compile_mode", "reduce-overhead"),
                 )
             trainer.train(max_updates=max_updates)
@@ -153,7 +139,9 @@ def smoke_test(config_name: str, *, max_updates=4):
                         changed.append(name)
             del before
             if not changed:
-                raise AssertionError("No finite learning-parameter update observed within the smoke budget")
+                raise AssertionError(
+                    "No finite learning-parameter update observed within the smoke budget"
+                )
             print(f"Observed parameter update: {changed[0]} (step={trainer.global_step})")
 
             path = comp.workspace.checkpoint_dir / "latest.pt"
@@ -162,27 +150,36 @@ def smoke_test(config_name: str, *, max_updates=4):
             assert checkpoint.epoch == trainer.current_epoch
             assert checkpoint.next_micro_step == trainer.next_micro_step
             assert comp.scheduler.state_dict() == checkpoint.scheduler_state
-            assert checkpoint.resume_contract["training"]["loop"]["total_train_steps"] == cfg.training.loop.total_train_steps
+            assert (
+                checkpoint.effective_config["training"]["loop"]["total_train_steps"]
+                == cfg.training.loop.total_train_steps
+            )
             if comp.ema_updater is not None:
                 assert checkpoint.ema_updater_step == comp.ema_updater.optimization_step
-            for selected, state in ((comp.model, checkpoint.model_state),
-                                    (comp.ema_model, checkpoint.ema_model_state)):
+            for selected, state in (
+                (comp.model, checkpoint.model_state),
+                (comp.ema_model, checkpoint.ema_model_state),
+            ):
                 if selected is not None:
-                    actual = fix_state_dict(selected.state_dict())
+                    actual = unwrap_state_dict(selected.state_dict())
                     assert actual.keys() == state.keys()
                     for key, tensor in actual.items():
-                        torch.testing.assert_close(tensor.detach().cpu(), state[key], rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            tensor.detach().cpu(), state[key], rtol=0, atol=0
+                        )
             del checkpoint
 
             # One real batch, unchanged preprocessing; inference uses one observation.
             comp.train_loader.sampler.set_epoch(trainer.current_epoch, 0)
             batch = next(iter(comp.train_loader))
-            obs = dict_apply({k: v[:1] for k, v in batch["obs"].items()},
-                             lambda x: x.to(comp.device))
+            obs = dict_apply(
+                {k: v[:1] for k, v in batch["obs"].items()}, lambda x: x.to(comp.device)
+            )
             prediction_kwargs = {}
             if "action_context" in batch:
                 prediction_kwargs["action_context"] = dict_apply(
-                    batch["action_context"], lambda x: x[:1].to(comp.device))
+                    batch["action_context"], lambda x: x[:1].to(comp.device)
+                )
             predictions = {}
             for use_ema, selected in ((False, comp.model), (True, comp.ema_model)):
                 if selected is None:
@@ -200,18 +197,23 @@ def smoke_test(config_name: str, *, max_updates=4):
                     set_seed(cfg.training.seed)
                     with torch.inference_mode():
                         eager = selected.predict_action(obs, **prediction_kwargs)["control_action"]
-                    print(f"{'EMA' if use_ema else 'raw'} compiled/eager prediction max abs diff: "
-                          f"{(pred - eager).abs().max().item():.8g}")
+                    print(
+                        f"{'EMA' if use_ema else 'raw'} compiled/eager prediction max abs diff: "
+                        f"{(pred - eager).abs().max().item():.8g}"
+                    )
                     pred = eager
                 predictions[use_ema] = pred.cpu()
                 selected.to("cpu")
-            optimizer_to(comp.optimizer, "cpu")
+            # Training is finished; release optimizer tensors before loading inference copies.
+            comp.optimizer.state.clear()
             saved = load_experiment_config(tmpdir)
             for use_ema, expected in predictions.items():
                 restored = restore_policy_agent(saved, path, use_ema=use_ema, device=comp.device)
                 set_seed(cfg.training.seed)
                 with torch.inference_mode():
-                    actual = restored.predict_action(obs, **prediction_kwargs)["control_action"].cpu()
+                    actual = restored.predict_action(obs, **prediction_kwargs)[
+                        "control_action"
+                    ].cpu()
                 torch.testing.assert_close(actual, expected)
                 del restored
         finally:
@@ -229,13 +231,18 @@ def main():
         action="store_true",
         help=(
             "Resolve/validate config, check Hydra target modules, and import the "
-            "agent target without data or GPU execution."
+            "agent and training targets without data or GPU execution."
         ),
     )
     parser.add_argument(
         "config_names", nargs="+", help="Hydra config names or explicit test YAML paths."
     )
-    parser.add_argument("--max-updates", type=int, default=4, help="Execution-only optimizer-update budget (default: 4).")
+    parser.add_argument(
+        "--max-updates",
+        type=int,
+        default=4,
+        help="Execution-only optimizer-update budget (default: 4).",
+    )
     args = parser.parse_args()
 
     for config_name in args.config_names:

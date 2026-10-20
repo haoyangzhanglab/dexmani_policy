@@ -57,7 +57,7 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.training.checkpoint import resolve_best_checkpoint
+from dexmani_policy.training.common.checkpoint import resolve_best_checkpoint
 from dexmani_policy.utils.path import set_project_root
 from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
@@ -297,7 +297,7 @@ def main() -> None:
 
     cprint(f"\nLoading checkpoint: {ckpt_label} (EMA={use_ema})", "cyan")
     agent = load_ckpt_for_inference(ckpt_path, use_ema, cfg=cfg)
-    if best_info is not None and "global_step" in best_info and agent._checkpoint_global_step != best_info["global_step"]:
+    if best_info is not None and "global_step" in best_info and agent.checkpoint_step != best_info["global_step"]:
         raise ValueError("Best record global_step disagrees with actual checkpoint state")
     cprint("✅ Checkpoint loaded\n", "green")
 
@@ -339,7 +339,7 @@ def main() -> None:
     # Only the actual demo plan is used; selection evidence remains provenance.
     snapshot_ref = save_eval_snapshot(
         video_save_dir, cfg, env_runner, checkpoint=artifact_reference(ckpt_path, exp_dir),
-        global_step=agent._checkpoint_global_step, use_ema=use_ema,
+        global_step=agent.checkpoint_step, use_ema=use_ema,
         inference_steps_list=inference_steps_list, episodes=demo_episodes,
         shuffle_seed=eval_seed, policy_seed_mode="episode_seed",
         task_seeds=eval_seeds,
@@ -371,7 +371,7 @@ def main() -> None:
         statistics = compute_eval_stats(result)
         atomic_json(sub_dir / "result_details.json", {
             "eval_config": snapshot_ref, "checkpoint": artifact_reference(ckpt_path, exp_dir),
-            "global_step": agent._checkpoint_global_step, "inference_steps": inference_steps,
+            "global_step": agent.checkpoint_step, "inference_steps": inference_steps,
             "use_ema": use_ema, "episode_details": per_seed_details,
             "statistics": statistics, "heldout_from_selection": False,
         })

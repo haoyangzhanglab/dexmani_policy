@@ -30,8 +30,8 @@ normalization:
 # tcp_dim auto-derived: 9 for action_ee (21d), 7 for action (19d)
 tcp_dim: ${eval:'9 if ${eq:${action_key},action_ee} else 7'}
 
-# VQ codebook path (output of dexmani_policy.training.export_hand_codebook / PCA re-indexing, stage 2).
-# New codebooks: python -m dexmani_policy.training.train_vq_hand --policy-config dexmani_policy/configs/dqrise.yaml
+# VQ codebook path (output of dexmani_policy.training.pretrain.hand_prior.export_codebook / PCA re-indexing, stage 2).
+# New codebooks: python -m dexmani_policy.training.pretrain.hand_prior.vqvae --policy-config dexmani_policy/configs/dqrise.yaml
 # VQ optimizer/model defaults are in vq_vae; data comes from dataset.
 codebook_path: robot_data/sorted_hand_poses_${task_name}.npz
 
@@ -122,7 +122,7 @@ optimizer:
 
 # ── EMA ──
 ema:
-  _target_: dexmani_policy.training.ema_model.EMAModel
+  _target_: dexmani_policy.training.common.ema.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -146,7 +146,7 @@ training:
 
 # ── Workspace ──
 workspace:
-  _target_: dexmani_policy.training.workspace.TrainWorkspace
+  _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:

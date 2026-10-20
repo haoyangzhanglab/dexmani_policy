@@ -1,16 +1,12 @@
-import atexit
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from omegaconf import OmegaConf
-from dexmani_policy.utils.atomic import atomic_path
 
-from dexmani_policy.training.checkpoint import CheckpointStore, TrainCheckpoint
-from dexmani_policy.training.logging import (
-    JsonlLogger,
-    WandbLogger,
-)
+from dexmani_policy.training.common.checkpoint import CheckpointStore, TrainCheckpoint
+from dexmani_policy.training.common.logging import JsonlLogger, WandbLogger
+from dexmani_policy.utils.atomic import atomic_path
 
 
 def prepare_output_dir(output_dir):
@@ -19,10 +15,9 @@ def prepare_output_dir(output_dir):
     root.mkdir(parents=True, exist_ok=True)
     for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
         if (root / name).exists():
-            raise FileExistsError(f"Training output already exists: {root / name}; use a new output directory")
-    for pattern in ("vqvae_hand_*.pt", "*.npz", "code_usage_*.png", "loss_curve.png"):
-        if any(root.glob(pattern)):
-            raise FileExistsError(f"VQ output already exists in {root}; use a new output directory")
+            raise FileExistsError(
+                f"Training output already exists: {root / name}; use a new output directory"
+            )
 
 
 @dataclass
@@ -33,7 +28,7 @@ class WandbConfig:
     mode: str
 
 
-class TrainWorkspace:
+class Workspace:
     def __init__(self, output_dir: str, wandb_cfg: WandbConfig | None = None):
         self.output_dir = Path(output_dir)
         prepare_output_dir(self.output_dir)
@@ -56,17 +51,16 @@ class TrainWorkspace:
                 self.json_logger.close()
                 raise
 
-        self._closed = False
-        atexit.register(self.close)
+        self.closed = False
 
     def save_hydra_config(self, hydra_config):
         with atomic_path(self.output_dir / "config.yaml") as temporary:
             OmegaConf.save(hydra_config, temporary, resolve=True)
         if self.wandb_logger is not None:
             cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)
-            self.wandb_logger.log_config(cfg_dict, self.output_dir)
+            self.wandb_logger.log_config(cfg_dict)
 
-    def log(self, data: Dict[str, Any], step: Optional[int] = None):
+    def log(self, data: dict[str, Any], step: int | None = None):
         self.json_logger.log(data, step=step)
         if self.wandb_logger is not None:
             self.wandb_logger.log(data, step=step)
@@ -83,9 +77,9 @@ class TrainWorkspace:
         return latest_path
 
     def close(self):
-        if self._closed:
+        if self.closed:
             return
-        self._closed = True
+        self.closed = True
         try:
             self.json_logger.close()
         finally:

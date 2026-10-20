@@ -45,9 +45,9 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
     codebook = HandStateCodebook(model.hand_dim, model.num_groups, model.codebook_size)
     embeddings = model.codebooks
     weights = model.quantizer.layer_weights.softmax(0)
-    combinations = torch.cartesian_prod(*[
-        torch.arange(model.codebook_size, device=device) for _ in range(model.num_groups)
-    ]).reshape(-1, model.num_groups)
+    combinations = torch.cartesian_prod(
+        *[torch.arange(model.codebook_size, device=device) for _ in range(model.num_groups)]
+    ).reshape(-1, model.num_groups)
     latent = embeddings.new_zeros(len(combinations), model.latent_dim)
     for group, weight in enumerate(weights):
         latent = latent + weight * embeddings[group, combinations[:, group]]
@@ -61,12 +61,17 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
     state = checkpoint["normalizer_state_dict"]
     scale = state["params_dict.hand.scale"].detach().float().cpu()
     offset = state["params_dict.hand.offset"].detach().float().cpu()
-    codebook.set_buffers({
-        "hand_min": codebook.hand_min, "hand_max": codebook.hand_max,
-        "sorted_hand_poses": poses[permutation], "pca_permutation": permutation,
-        "layer_weights": weights.cpu(), "hand_normalizer_scale": scale,
-        "hand_normalizer_offset": offset,
-    })
+    codebook.set_buffers(
+        {
+            "hand_min": codebook.hand_min,
+            "hand_max": codebook.hand_max,
+            "sorted_hand_poses": poses[permutation],
+            "pca_permutation": permutation,
+            "layer_weights": weights.cpu(),
+            "hand_normalizer_scale": scale,
+            "hand_normalizer_offset": offset,
+        }
+    )
     variance_ratio = float(np.nan_to_num(pca.explained_variance_ratio_[0], nan=0.0))
     diagnostics = {
         "decoder_min_before_clamp": float(decoded.min()),
@@ -88,9 +93,7 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
     }
     summary["data_revision"] = contract["data_revision"]
     for name in ("train", "val"):
-        summary[name + "_source_rows_count"] = contract["splits"][name][
-            "source_rows_count"
-        ]
+        summary[name + "_source_rows_count"] = contract["splits"][name]["source_rows_count"]
         summary[name + "_episode_ids_count"] = sum(contract[name + "_mask"])
     codebook.artifact_metadata = {
         "model_config": checkpoint["model_config"],
@@ -123,7 +126,8 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
     }
     if variance_ratio < 0.3:
         warnings.warn(
-            f"Hand prototypes have weak PC1 ordering: variance ratio={variance_ratio:.4f}", RuntimeWarning,
+            f"Hand prototypes have weak PC1 ordering: variance ratio={variance_ratio:.4f}",
+            RuntimeWarning,
         )
     if diagnostics["outside_fraction"]:
         warnings.warn(f"Decoded hand states were clamped to [-1, 1]: {diagnostics}", RuntimeWarning)
@@ -157,7 +161,8 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
     report = {
         "distance_space": "HandStateCodebook affine_raw squared Euclidean",
         "source_checkpoint_sha256": codebook.artifact_metadata.get("source_checkpoint_sha256"),
-        "source_epoch": codebook.artifact_metadata.get("source_epoch"), "splits": {},
+        "source_epoch": codebook.artifact_metadata.get("source_epoch"),
+        "splits": {},
     }
     scale = codebook.hand_normalizer_scale.cpu().double()
     spaces = ("normalized", "physical")
@@ -170,7 +175,9 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
         per_sample = {space: np.empty(count, dtype=np.float32) for space in spaces}
         utilization = torch.zeros(codebook.num_codes, dtype=torch.int64)
         for start in range(0, count, chunk_size):
-            values = torch.as_tensor(rows[start:start + chunk_size], dtype=torch.float32, device=device)
+            values = torch.as_tensor(
+                rows[start : start + chunk_size], dtype=torch.float32, device=device
+            )
             if values.ndim != 2 or not torch.isfinite(values).all():
                 raise ValueError("Codebook diagnostics require finite (N, hand_dim) rows")
             continuous, _ = codebook.encode(values)
@@ -181,9 +188,12 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
                 delta = error if space == "normalized" else error / scale
                 sums[space][0] += delta.abs().sum(0)
                 sums[space][1] += delta.square().sum(0)
-                per_sample[space][start:start + len(values)] = delta.square().mean(-1).sqrt().numpy()
+                per_sample[space][start : start + len(values)] = (
+                    delta.square().mean(-1).sqrt().numpy()
+                )
         result = {
-            "count": count, "prototype_counts": utilization.tolist(),
+            "count": count,
+            "prototype_counts": utilization.tolist(),
             "used_prototypes": int((utilization > 0).sum()),
         }
         for space in spaces:
@@ -193,10 +203,12 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
                 "rmse": float((squared.sum() / (count * width)).sqrt()),
                 "joint_mae": (absolute / count).tolist(),
                 "joint_rmse": (squared / count).sqrt().tolist(),
-                "sample_rmse_quantiles": dict(zip(
-                    ("p50", "p90", "p95", "p99", "max"),
-                    np.quantile(per_sample[space], [.5, .9, .95, .99, 1]).tolist(),
-                )),
+                "sample_rmse_quantiles": dict(
+                    zip(
+                        ("p50", "p90", "p95", "p99", "max"),
+                        np.quantile(per_sample[space], [0.5, 0.9, 0.95, 0.99, 1]).tolist(),
+                    )
+                ),
             }
         report["splits"][name] = result
     adjacent = torch.diff(codebook.sorted_hand_poses, dim=0).norm(dim=-1)

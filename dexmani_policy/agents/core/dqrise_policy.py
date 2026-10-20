@@ -146,7 +146,7 @@ class DQRISEPolicy(BasePolicy):
                 "The policy action normalizer and VQ codebook hand normalizer "
                 "do not match. Training/inference would use incompatible hand "
                 "coordinates. Rebuild the codebook with "
-                "python -m dexmani_policy.training.train_vq_hand "
+                "python -m dexmani_policy.training.pretrain.hand_prior.vqvae "
                 "--policy-config using this Policy's data recipe and normalization."
             )
 

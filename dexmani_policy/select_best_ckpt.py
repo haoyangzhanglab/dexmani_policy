@@ -140,7 +140,7 @@ def evaluate_checkpoint(
     """Evaluate one checkpoint on the complete physical task/seed plan."""
 
     agent = load_ckpt_for_inference(ckpt.path, use_ema, cfg=cfg)
-    if agent._checkpoint_global_step != ckpt.global_step:
+    if agent.checkpoint_step != ckpt.global_step:
         raise ValueError("Checkpoint filename/global_step disagrees with saved training state")
 
     for leaf_runner in iter_leaf_env_runners(env_runner):

@@ -1,8 +1,4 @@
-"""Pretrain the temporal hand VAE on exactly the policy's qualified windows.
-
-python -m dexmani_policy.training.train_temporal_codec --config temporal_codec_flow
-    zarr_path=/path/to/data.zarr
-"""
+"""Pretrain the temporal hand VAE on qualified policy windows."""
 
 from __future__ import annotations
 
@@ -17,7 +13,7 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE
 from dexmani_policy.datasets.temporal_codec_dataset import TemporalCodecDataset
-from dexmani_policy.training.build_utils import validate_config
+from dexmani_policy.training.validation import validate_config
 from dexmani_policy.utils.atomic import atomic_path
 from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
 from dexmani_policy.utils.hand_artifact import (
@@ -34,9 +30,7 @@ def build_codec_dataset(cfg):
         cfg.agent._target_
         != "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy"
     ):
-        raise ValueError(
-            "Codec preparation requires a TemporalLatentFlowPolicy configuration"
-        )
+        raise ValueError("Codec preparation requires a TemporalLatentFlowPolicy configuration")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare codec from a fresh policy config, not resume_from")
     # Keep policy eligibility; raw pretraining batches bypass observation augmentation.
@@ -52,7 +46,9 @@ def fit_relative_statistics(dataset, batch_size=4096, std_floor=1e-6):
     squared = np.zeros(12, dtype=np.float64)
     count = 0
     for start in range(0, len(dataset), batch_size):
-        actions, q0 = dataset.raw_hand_batch(np.arange(start, min(start + batch_size, len(dataset))))
+        actions, q0 = dataset.raw_hand_batch(
+            np.arange(start, min(start + batch_size, len(dataset)))
+        )
         relative = actions.astype(np.float64) - q0[:, None].astype(np.float64)
         total += relative.sum(axis=(0, 1))
         squared += np.square(relative).sum(axis=(0, 1))
@@ -61,10 +57,16 @@ def fit_relative_statistics(dataset, batch_size=4096, std_floor=1e-6):
     std = np.sqrt(np.maximum(squared / count - np.square(mean), 0)).clip(min=std_floor)
     if not np.isfinite(mean).all() or not np.isfinite(std).all():
         raise ValueError("Temporal codec train relative statistics must be finite")
-    return torch.from_numpy(mean.astype(np.float32)), torch.from_numpy(std.astype(np.float32)), {
-        "population": "train_policy_windows_including_repeated_source_rows_and_padding",
-        "windows": len(dataset), "frames": count, "std_floor": float(std_floor),
-    }
+    return (
+        torch.from_numpy(mean.astype(np.float32)),
+        torch.from_numpy(std.astype(np.float32)),
+        {
+            "population": "train_policy_windows_including_repeated_source_rows_and_padding",
+            "windows": len(dataset),
+            "frames": count,
+            "std_floor": float(std_floor),
+        },
+    )
 
 
 def raw_batch(dataset, indices, device):
@@ -81,7 +83,7 @@ def evaluate(codec, dataset, batch_size):
     was_training = codec.training
     codec.eval()
     absolute = torch.zeros(12, device=codec.action_mean.device)
-    reconstruction = kl_sum = 0.0
+    totals = torch.zeros(2, dtype=torch.float64, device=codec.action_mean.device)
     for start in range(0, len(dataset), batch_size):
         indices = np.arange(start, min(start + batch_size, len(dataset)))
         actions, q0 = raw_batch(dataset, indices, codec.action_mean.device)
@@ -89,13 +91,19 @@ def evaluate(codec, dataset, batch_size):
         decoded = codec.decode(mu, q0)
         physical = decoded * codec.action_std + codec.action_mean + q0[:, None]
         absolute += (physical - actions).abs().sum(dim=(0, 1))
-        reconstruction += float(codec.reconstruction_loss(decoded, codec.normalize_actions(actions, q0))) * len(indices)
-        kl_sum += float(-0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()) * len(indices)
+        reconstruction = codec.reconstruction_loss(decoded, codec.normalize_actions(actions, q0))
+        kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
+        totals += torch.stack((reconstruction, kl)).double() * len(indices)
+    reconstruction, kl = (totals / len(dataset)).tolist()
     joint_mae = absolute / (len(dataset) * dataset.horizon)
     codec.train(was_training)
-    metrics = {"physical_mae": float(joint_mae.mean()), "physical_joint_mae": joint_mae.tolist(),
-               "reconstruction": reconstruction / len(dataset), "kl": kl_sum / len(dataset),
-               "windows": len(dataset)}
+    metrics = {
+        "physical_mae": float(joint_mae.mean()),
+        "physical_joint_mae": joint_mae.tolist(),
+        "reconstruction": reconstruction,
+        "kl": kl,
+        "windows": len(dataset),
+    }
     if not all(math.isfinite(metrics[key]) for key in ("physical_mae", "reconstruction", "kl")):
         raise ValueError("Temporal codec evaluation became nonfinite")
     return metrics
@@ -132,10 +140,16 @@ def save_codec(path, codec, dataset, cfg, args, step, metrics, statistics):
         "joint_weights": "multiply_numerator_only_do_not_change_denominator",
     }
     payload = {
-        "_format": "temporal_hand_codec.v1", "model_config": dict(codec.model_config),
-        "state_dict": {key: value.detach().cpu().clone() for key, value in codec.state_dict().items()},
-        "metadata": metadata, "policy_config": OmegaConf.to_container(cfg, resolve=False),
-        "train_args": vars(args), "step": int(step), "metrics": metrics,
+        "_format": "temporal_hand_codec.v1",
+        "model_config": dict(codec.model_config),
+        "state_dict": {
+            key: value.detach().cpu().clone() for key, value in codec.state_dict().items()
+        },
+        "metadata": metadata,
+        "policy_config": OmegaConf.to_container(cfg, resolve=False),
+        "train_args": vars(args),
+        "step": int(step),
+        "metrics": metrics,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(path) as temporary:
@@ -148,19 +162,16 @@ def train(args):
     for key in ("kl_warmup", "kl_ramp"):
         if getattr(args, key) < 0:
             raise ValueError(f"{key} must be nonnegative")
-    for key in ("beta", "weight_decay"):
-        if not 0 <= getattr(args, key) < float("inf"):
-            raise ValueError(f"{key} must be nonnegative and finite")
+    if not 0 <= args.weight_decay < float("inf"):
+        raise ValueError("weight_decay must be nonnegative and finite")
     if not 0 < args.lr < float("inf") or not 0 < args.clip_grad < float("inf"):
         raise ValueError("lr and clip_grad must be positive and finite")
     validate_selection_schedule(args.steps, args.beta, args.kl_warmup + max(1, args.kl_ramp))
     cfg = load_policy_config(args.policy_config or args.config, args.overrides)
-    output = Path(cfg.codec.path).expanduser()
+    output = Path(cfg.agent.codec_path).expanduser()
     if output.exists() and not args.overwrite:
         raise FileExistsError(f"Codec already exists: {output}; use --overwrite to replace it")
     device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is unavailable; pass --device cpu for a small local check")
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     dataset = build_codec_dataset(cfg)
@@ -169,9 +180,13 @@ def train(args):
     selection = "validation" if validation is not None else "final_no_holdout"
     selection_dataset = validation if validation is not None else dataset
     codec = TemporalHandVAE(
-        hand_dim=12, horizon=dataset.horizon, latent_dim=int(cfg.codec.latent_dim),
-        hidden_dim=int(cfg.codec.hidden_dim), n_layers=int(cfg.codec.n_layers),
-        n_heads=int(cfg.codec.n_heads), mlp_ratio=float(cfg.codec.mlp_ratio),
+        hand_dim=12,
+        horizon=dataset.horizon,
+        latent_dim=int(cfg.agent.latent_dim),
+        hidden_dim=int(cfg.agent.codec_hidden_dim),
+        n_layers=int(cfg.agent.codec_n_layers),
+        n_heads=int(cfg.agent.codec_n_heads),
+        mlp_ratio=float(cfg.agent.codec_mlp_ratio),
     ).to(device)
     weights = torch.as_tensor(list(cfg.codec.joint_weights), dtype=torch.float32, device=device)
     if weights.shape != (12,) or not torch.isfinite(weights).all() or not (weights > 0).all():
@@ -182,20 +197,24 @@ def train(args):
     codec.action_std.copy_(std.to(device))
     optimizer = torch.optim.AdamW(codec.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps)
-    print(f"Codec windows: train={len(dataset)}, validation={0 if validation is None else len(validation)}; "
-          f"selection={selection}, metric=physical MAE; output={output}")
+    print(
+        f"Codec windows: train={len(dataset)}, validation={0 if validation is None else len(validation)}; "
+        f"selection={selection}, metric=physical MAE; output={output}"
+    )
     print(f"Relative statistics: {statistics}")
     best_mae = float("inf")
     order, cursor = rng.permutation(len(dataset)), 0
     for step in range(1, args.steps + 1):
         if cursor >= len(order):
             order, cursor = rng.permutation(len(dataset)), 0
-        indices = order[cursor:cursor + args.batch_size]
+        indices = order[cursor : cursor + args.batch_size]
         cursor += len(indices)
         actions, q0 = raw_batch(dataset, indices, device)
         mu, log_var = codec.encode(actions, q0)
         z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
-        reconstruction = codec.reconstruction_loss(codec.decode(z, q0), codec.normalize_actions(actions, q0))
+        reconstruction = codec.reconstruction_loss(
+            codec.decode(z, q0), codec.normalize_actions(actions, q0)
+        )
         kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
         beta = kl_coefficient(step, args.beta, args.kl_warmup, args.kl_ramp)
         loss = reconstruction + beta * kl
@@ -207,12 +226,22 @@ def train(args):
         torch.nn.utils.clip_grad_norm_(codec.parameters(), args.clip_grad, error_if_nonfinite=True)
         optimizer.step()
         scheduler.step()
-        metrics = {"loss": float(loss.detach()), "reconstruction": float(reconstruction.detach()),
-                   "kl": float(kl.detach()), "beta": beta, "lr": lr}
-        if step == 1 or step % args.print_every == 0:
-            print(f"Step {step}/{args.steps}: {metrics}")
+        report = step == 1 or step % args.print_every == 0
         eligible = step >= args.kl_warmup + max(1, args.kl_ramp)
-        if eligible and ((validation is not None and step % args.eval_every == 0) or step == args.steps):
+        select = eligible and (
+            (validation is not None and step % args.eval_every == 0) or step == args.steps
+        )
+        if report or select:
+            metrics = {
+                "loss": float(loss.detach()),
+                "reconstruction": float(reconstruction.detach()),
+                "kl": float(kl.detach()),
+                "beta": beta,
+                "lr": lr,
+            }
+        if report:
+            print(f"Step {step}/{args.steps}: {metrics}")
+        if select:
             evaluation = evaluate(codec, selection_dataset, args.batch_size)
             metrics.update(selection_split=selection, evaluation=evaluation)
             print(f"{selection} at {step}: {evaluation}")
