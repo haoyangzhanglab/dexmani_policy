@@ -6,7 +6,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from dexmani_policy.env_runner.evaluation import (
-    add_inference_steps_argument,
+    add_evaluation_arguments,
     get_eval_param,
     parse_eval_overrides,
 )
@@ -17,28 +17,26 @@ ROOT_DIR = set_project_root()
 register_resolvers()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy-name", required=True)
-    parser.add_argument("--task-name", required=True)
-    parser.add_argument("--exp-name", required=True)
-    parser.add_argument("--initial-episodes", type=int)
+    add_evaluation_arguments(parser)
+    parser.add_argument("--initial-episodes", type=int, help="Initial episodes per checkpoint/task.")
     parser.add_argument(
         "--batch-size", type=int, help="Extra episodes for tied candidates; 0 disables."
     )
-    parser.add_argument("--max-episodes", type=int)
-    add_inference_steps_argument(parser)
-    weights = parser.add_mutually_exclusive_group()
-    weights.add_argument("--ema", dest="use_ema", action="store_true", default=None)
-    weights.add_argument("--no-ema", dest="use_ema", action="store_false")
-    parser.add_argument("--seed", type=int)
+    parser.add_argument("--max-episodes", type=int, help="Per-task episode cap including tie breaks.")
+    parser.add_argument("--seed", type=int, help="Seed for shuffling each task's evaluation pool.")
     videos = parser.add_mutually_exclusive_group()
-    videos.add_argument("--videos", dest="record_video", action="store_true")
-    videos.add_argument("--no-videos", dest="record_video", action="store_false")
+    videos.add_argument(
+        "--videos", dest="record_video", action="store_true", help="Record candidate rollouts."
+    )
+    videos.add_argument(
+        "--no-videos", dest="record_video", action="store_false", help="Disable videos (default)."
+    )
     parser.set_defaults(record_video=False)
     parser.add_argument("--output-dir", help="Empty directory under experiment/eval_ckpt_selector.")
     parser.add_argument("overrides", nargs="*", help="Evaluation/environment dotlist overrides.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
     cfg = OmegaConf.merge(load_experiment_config(exp_dir), parse_eval_overrides(args.overrides))

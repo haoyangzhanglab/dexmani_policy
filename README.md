@@ -140,12 +140,9 @@ Smoke 也接受显式 `.yaml` 路径，与预训练入口共用 Hydra 配置组�
 ```bash
 python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name> --max-updates 4
-python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 `--config-only` 检查配置、Hydra target 和策略、训练、Dataset、增强类的导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
-
-CPU 回归使用临时合成数据：`test_utils.py` 检查路径/续训配方、原子写入、RNG 和手部产物恢复；`test_deployment.py` 检查部署配置快照与动作输出；`test_evaluation.py` 检查观测窗口、多任务输入对齐、seed 证据，以及选点、评测和 demo 入口。不替代完整训练 smoke 或仿真、真机闭环。
 
 smoke 支持多个配置名，默认运行 4 次 optimizer update，不接受 Hydra 字段覆盖。若需覆盖配置或保留短跑产物，使用正式训练入口：
 
@@ -162,7 +159,9 @@ bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run>
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <run>
 ```
 
-流水线执行 checkpoint selection 和不录视频的 held-out eval，使用本次选择的固定记录交接；demo 单独运行。也可分别使用 `select_best_ckpt.sh`、`eval_best_ckpt.sh`，按各入口的 `--help` 调整预算、EMA/raw、NFE 和录像。
+流水线执行 checkpoint selection 和不录视频的 held-out eval，使用本次选择的固定记录交接；demo 单独运行。也可分别使用 `select_checkpoint.sh`、`evaluate.sh`，按各入口的 `--help` 调整预算、EMA/raw、NFE 和录像。
+
+三个分步 Shell 入口的 `--help` 直接调用对应 Python 参数解析器，使用 Conda 的 `policy` 环境，不要求已有实验或显示环境。
 
 评测读取已保存实验，不重新组合当前 Policy YAML。`best_ckpt.json` 仅引用本次成功的 `selection_result.json`，推理参数与 episode 证据只保存一份；最终 best 评测排除实际用于选点的 `(task, seed)`。正常全零结果仍可完成选择，技术异常不会记成普通任务失败。
 

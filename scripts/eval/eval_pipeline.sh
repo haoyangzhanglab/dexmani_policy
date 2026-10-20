@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # Select a checkpoint, then evaluate disjoint held-out seeds without video.
-# Usage: bash scripts/eval/eval_pipeline.sh <policy> <task> <exp>
-# Both stages share this invocation's selection record; demos use record_demo.sh.
 
 set -euo pipefail
 
@@ -43,12 +41,6 @@ fi
 
 EXP_DIR="experiments/${POLICY}/${TASK}/${EXP_NAME}"
 
-if [[ ! -d "$EXP_DIR" ]]; then
-    echo "Error: experiment directory not found: ${EXP_DIR}" >&2
-    echo "Check that policy_name, task_name, and exp_name are correct." >&2
-    exit 1
-fi
-
 if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     echo "Error: config.yaml not found in ${EXP_DIR}" >&2
     exit 1
@@ -62,44 +54,25 @@ if ! flock -n 9; then
     exit 1
 fi
 
-# Step 1/2: Select Best Checkpoint (fixed two-stage selection, no videos)
-echo ""
-echo "============================================================"
-echo "  Step 1/2: Select Best Checkpoint"
-echo "  (fixed initial stage plus optional exact-tie batch, no videos)"
-echo "============================================================"
-echo ""
+echo "Selecting a checkpoint: ${EXP_DIR}"
 
 mkdir -p "${EXP_DIR}/eval_ckpt_selector"
 SELECTION_DIR="$(mktemp -d "${EXP_DIR}/eval_ckpt_selector/pipeline_XXXXXXXX")"
 SELECTION_RECORD="${SELECTION_DIR}/selection_result.json"
-conda run --no-capture-output -n policy python dexmani_policy/select_best_ckpt.py \
+conda run --no-capture-output -n policy python dexmani_policy/select_checkpoint.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
     --output-dir="$SELECTION_DIR" \
     --no-videos
 
-# Step 2/2: Evaluate Best Checkpoint (held-out seeds)
-echo ""
-echo "============================================================"
-echo "  Step 2/2: Evaluate Best Checkpoint (held-out seeds)"
-echo "============================================================"
-echo ""
+echo "Evaluating held-out seeds: ${SELECTION_RECORD}"
 
-conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py \
+conda run --no-capture-output -n policy python dexmani_policy/evaluate.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
     --selection-record="$SELECTION_RECORD" \
     --no-videos
 
-# Summary
-echo ""
-echo "============================================================"
-echo "  ✅ Pipeline Complete!"
-echo "============================================================"
-echo "  Experiment  : ${EXP_DIR}"
-echo "  Selection   : ${SELECTION_RECORD}"
-echo "  Eval result : ${EXP_DIR}/eval_dexsim/<run-id>/result.txt (exact path printed in Step 2)"
-echo "============================================================"
+echo "Pipeline complete. Selection record: ${SELECTION_RECORD}"

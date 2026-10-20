@@ -1,3 +1,5 @@
+"""Train a policy with one spawned process per configured GPU."""
+
 import os
 import socket
 from pathlib import Path
@@ -8,28 +10,24 @@ import hydra
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dexmani_policy.agents.core.normalizer import AffineNormalizer
 from dexmani_policy.training.builder import (
+    TrainingComponents,
     build_dataset_and_normalizer,
     build_model_and_ema,
     build_optimizer_and_scheduler,
     build_train_loader,
+    build_trainer,
     compile_models,
+    prepare_training,
 )
 from dexmani_policy.training.common.checkpoint import CheckpointStore
 from dexmani_policy.training.common.logging import print_training_recipe
-from dexmani_policy.training.resume import (
-    build_resume_contract,
-    resolve_training_config,
-    restore_training_state,
-)
-from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
-from dexmani_policy.training.validation import validate_config
-from dexmani_policy.training.workspace import prepare_output_dir
-from dexmani_policy.utils.config import register_resolvers, resolve_resume_source, set_project_root
+from dexmani_policy.training.resume import build_resume_contract, restore_training_state
+from dexmani_policy.utils.config import register_resolvers, set_project_root
 from dexmani_policy.utils.runtime import set_seed
 
 register_resolvers()
@@ -50,8 +48,8 @@ def validate_gpu_ids(num_gpus, gpu_ids, available_gpus):
 
 
 def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_state):
-    actual_gpu_id = gpu_ids[rank]
-    device = torch.device(f"cuda:{actual_gpu_id}")
+    gpu_id = gpu_ids[rank]
+    device = torch.device(f"cuda:{gpu_id}")
     torch.cuda.set_device(device)
     dist.init_process_group(backend="nccl", init_method="env://", world_size=world_size, rank=rank)
 
@@ -89,12 +87,11 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
             )
             workspace = hydra.utils.instantiate(cfg.workspace)
 
-        resume_contract = build_resume_contract(train_loader)
-        resume_state = (0, 0, 0)
+        resume_state = None
         if resume_from is not None:
             resume_state = restore_training_state(
                 checkpoint,
-                resume_contract=resume_contract,
+                resume_contract=build_resume_contract(train_loader),
                 effective_config=cfg,
                 model=model,
                 ema_updater=ema_updater,
@@ -116,8 +113,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
 
         ddp_model = DDP(
             model,
-            device_ids=[actual_gpu_id],
-            output_device=actual_gpu_id,
+            device_ids=[gpu_id],
+            output_device=gpu_id,
             find_unused_parameters=False,
             gradient_as_bucket_view=True,
             static_graph=True,
@@ -127,7 +124,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
             # Only fresh EMA follows the raw state synchronized by DDP.
             ema_model.load_state_dict(model.state_dict(), strict=True)
 
-        trainer = Trainer(
+        components = TrainingComponents(
             device=device,
             model=ddp_model,
             ema_model=ema_model,
@@ -136,17 +133,8 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
             scheduler=scheduler,
             train_loader=train_loader,
             workspace=workspace,
-            train_loop_cfg=TrainLoopConfig(
-                **OmegaConf.to_container(cfg.training.loop, resolve=True)
-            ),
-            max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
-            use_bfloat16=cfg.training.get("use_bfloat16", False),
-            is_main_process=(rank == 0),
-            distributed=True,
-            resume_contract=resume_contract,
-            effective_config=cfg,
         )
-
+        trainer = build_trainer(cfg, components)
         trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
     finally:
         try:
@@ -158,22 +146,13 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
 
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
-    source = resolve_resume_source(cfg.get("resume_from"))
-    checkpoint = CheckpointStore(Path(source).parent).load(source) if source else None
-    cfg = resolve_training_config(cfg, resume_checkpoint=checkpoint)
-    validate_config(cfg)
-    with open_dict(cfg):
-        cfg.resume_from = source
-    prepare_output_dir(cfg.workspace.output_dir)
+    cfg, checkpoint = prepare_training(cfg)
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. DDP training requires GPU.")
 
     num_gpus = cfg.training.get("num_gpus")
-
-    gpu_ids = validate_gpu_ids(
-        num_gpus, cfg.training.get("gpu_ids", None), torch.cuda.device_count()
-    )
+    gpu_ids = validate_gpu_ids(num_gpus, cfg.training.get("gpu_ids"), torch.cuda.device_count())
     print(f"Using GPUs: {gpu_ids}")
 
     os.environ.setdefault("MASTER_ADDR", "localhost")
@@ -182,6 +161,7 @@ def main(cfg):
     dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
     normalizer_state = normalizer.state_dict() if normalizer is not None else None
     del normalizer, checkpoint
+
     # Child processes cannot access Hydra runtime resolvers.
     OmegaConf.resolve(cfg)
     print(f"[Dataset] Prepared once in parent pid={os.getpid()} for {num_gpus} ranks")

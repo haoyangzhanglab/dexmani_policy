@@ -10,6 +10,7 @@ from typing import Any
 
 import hydra
 import torch
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
@@ -17,6 +18,7 @@ from dexmani_policy.agents.core.normalizer import AffineNormalizer, validate_nor
 from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.checkpoint import (
+    CheckpointStore,
     checkpoint_agent_config,
     unwrap_state_dict,
 )
@@ -25,17 +27,40 @@ from dexmani_policy.training.common.logging import print_param_count, print_trai
 from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.resume import build_resume_contract, restore_model_weights
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
-from dexmani_policy.training.validation import HAND_POLICY_TARGETS, validate_ema_batchnorm
-from dexmani_policy.training.workspace import Workspace
+from dexmani_policy.training.validation import (
+    HAND_POLICY_TARGETS,
+    validate_config,
+    validate_ema_batchnorm,
+)
+from dexmani_policy.training.workspace import Workspace, prepare_output_dir
 from dexmani_policy.utils.config import (
     FINGER_VECTOR_FIELDS,
     normalization_dims_from_config,
     positive_int,
+    resolve_input_recipe,
     resolve_normalization_spec,
+    resolve_resume_source,
     validate_observation_fields,
 )
 from dexmani_policy.utils.hand_representation import describe_hand_data
 from dexmani_policy.utils.runtime import worker_init_fn
+
+
+def prepare_training(cfg):
+    """Resolve the saved recipe before validating and preparing a new run."""
+    source = resolve_resume_source(cfg.get("resume_from"))
+    checkpoint = CheckpointStore(Path(source).parent).load(source) if source is not None else None
+    overrides = HydraConfig.get().overrides.task if source is not None else []
+    effective_config = resolve_input_recipe(
+        cfg, overrides=overrides, resume_checkpoint=checkpoint
+    )
+    with open_dict(effective_config):
+        effective_config.resume_from = source
+        # Resume writes into this invocation's directory, never the source run.
+        effective_config.workspace.output_dir = cfg.workspace.output_dir
+    validate_config(effective_config)
+    prepare_output_dir(effective_config.workspace.output_dir)
+    return effective_config, checkpoint
 
 
 def bind_defaults(config, constructor):
@@ -357,7 +382,7 @@ def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
 
 @dataclass
 class TrainingComponents:
-    """Single-device components shared by training and integration smoke."""
+    """Per-process training components; only rank 0 owns a workspace."""
 
     device: torch.device
     model: torch.nn.Module
@@ -366,7 +391,7 @@ class TrainingComponents:
     optimizer: torch.optim.Optimizer
     scheduler: Any
     train_loader: DataLoader
-    workspace: Workspace
+    workspace: Workspace | None
 
 
 def build_train_components(cfg, *, resume_checkpoint=None):
@@ -408,19 +433,22 @@ def build_train_components(cfg, *, resume_checkpoint=None):
     )
 
 
-def build_trainer(cfg, comp):
+def build_trainer(cfg, components):
+    sampler = components.train_loader.sampler
     return Trainer(
-        device=comp.device,
-        model=comp.model,
-        ema_model=comp.ema_model,
-        ema_updater=comp.ema_updater,
-        optimizer=comp.optimizer,
-        scheduler=comp.scheduler,
-        train_loader=comp.train_loader,
-        workspace=comp.workspace,
+        device=components.device,
+        model=components.model,
+        ema_model=components.ema_model,
+        ema_updater=components.ema_updater,
+        optimizer=components.optimizer,
+        scheduler=components.scheduler,
+        train_loader=components.train_loader,
+        workspace=components.workspace,
         train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
-        resume_contract=build_resume_contract(comp.train_loader),
+        is_main_process=sampler.rank == 0,
+        distributed=sampler.num_replicas > 1,
+        resume_contract=build_resume_contract(components.train_loader),
         effective_config=cfg,
     )

@@ -2,11 +2,8 @@
 
 import warnings
 
-from hydra.core.hydra_config import HydraConfig
-from omegaconf import open_dict
-
 from dexmani_policy.training.common.checkpoint import TrainCheckpoint, unwrap_state_dict
-from dexmani_policy.utils.config import resolve_input_recipe, validate_source_recipe
+from dexmani_policy.utils.config import validate_source_recipe
 from dexmani_policy.utils.runtime import set_rng_state
 
 
@@ -94,15 +91,3 @@ def validate_ema_resume_state(checkpoint: TrainCheckpoint, *, require_ema: bool)
     step = checkpoint.ema_updater_step
     if type(step) is not int or step < 0:
         raise RuntimeError("Resume checkpoint ema_updater_step must be an int (not bool) >= 0")
-
-
-def resolve_training_config(cfg, *, overrides=None, resume_checkpoint=None):
-    """Resolve the input recipe and bind this invocation's output directory."""
-    if overrides is None:
-        overrides = HydraConfig.get().overrides.task if cfg.get("resume_from") is not None else []
-    result = resolve_input_recipe(cfg, overrides=overrides, resume_checkpoint=resume_checkpoint)
-    if result.get("resume_from") is not None:
-        with open_dict(result):
-            # The destination is this invocation's new run, never the source output.
-            result.workspace.output_dir = cfg.workspace.output_dir
-    return result

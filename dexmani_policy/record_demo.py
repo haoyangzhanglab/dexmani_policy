@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.env_runner.common.seeds import select_eval_seeds, validate_task_seeds
 from dexmani_policy.env_runner.evaluation import (
-    add_inference_steps_argument,
+    add_evaluation_arguments,
     build_eval_runner,
     evaluate_policy,
     get_eval_param,
@@ -22,28 +22,28 @@ ROOT_DIR = set_project_root()
 register_resolvers()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy-name", required=True)
-    parser.add_argument("--task-name", required=True)
-    parser.add_argument("--exp-name", required=True)
+    add_evaluation_arguments(parser)
     parser.add_argument("--ckpt-tag", default="best", help="best, latest, or 20pct..100pct.")
-    parser.add_argument("--episodes", type=int)
+    parser.add_argument("--episodes", type=int, help="Episodes per task; defaults to saved config.")
     parser.add_argument(
         "--seeds", type=int, nargs="+", help="Physical seeds for every task; overrides episodes."
     )
-    add_inference_steps_argument(parser)
-    weights = parser.add_mutually_exclusive_group()
-    weights.add_argument("--ema", dest="use_ema", action="store_true", default=None)
-    weights.add_argument("--no-ema", dest="use_ema", action="store_false")
     parser.add_argument("--output-dir", help="Parent directory for this run's videos.")
-    parser.add_argument("--resolution", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"))
-    parser.add_argument("--fps", type=int)
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        nargs=2,
+        metavar=("WIDTH", "HEIGHT"),
+        help="Viewer size; defaults to saved demo config, then 1280 960.",
+    )
+    parser.add_argument("--fps", type=int, help="Override saved video or environment FPS.")
     parser.add_argument("--selection-record", help="Path to a completed selection_result.json.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
-    cfg, use_ema, steps, selection, checkpoint = resolve_eval_request(
+    cfg, use_ema, inference_steps, selection, checkpoint_path = resolve_eval_request(
         OmegaConf.create(load_experiment_config(exp_dir)),
         exp_dir,
         args.ckpt_tag,
@@ -53,8 +53,8 @@ def main():
         inference_steps_list=[args.inference_steps] if args.inference_steps is not None else None,
     )
     runner = build_eval_runner(cfg)
+    pools = task_seed_pools(runner)
     if args.seeds is not None:
-        pools = task_seed_pools(runner)
         plan = {task: list(args.seeds) for task in pools}
         validate_task_seeds(plan, pools)
         for task, seeds in plan.items():
@@ -66,7 +66,8 @@ def main():
             if args.episodes is not None
             else get_eval_param(cfg, "episodes", "demo", default=5)
         )
-        plan = select_eval_seeds(task_seed_pools(runner), resolve_eval_seed(cfg), episodes)
+        plan = select_eval_seeds(pools, resolve_eval_seed(cfg), episodes)
+
     resolution = args.resolution or get_eval_param(
         cfg, "viewer_resolution", "demo", default=[1280, 960]
     )
@@ -75,17 +76,17 @@ def main():
         leaf.viewer_resolution = tuple(resolution)
         if args.fps is not None:
             leaf.env_video_fps = args.fps
-    root = (
+    output_root = (
         Path(args.output_dir).expanduser().resolve() if args.output_dir else exp_dir / "demo_videos"
     )
     evaluate_policy(
         cfg,
         runner,
-        checkpoint,
+        checkpoint_path,
         plan,
         use_ema=use_ema,
-        inference_steps_list=steps,
-        output_root=root,
+        inference_steps_list=inference_steps,
+        output_root=output_root,
         record_video=True,
         selection=selection,
     )

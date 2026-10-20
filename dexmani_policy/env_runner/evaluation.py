@@ -79,13 +79,21 @@ def validate_inference_steps(inference_steps_list) -> None:
         raise ValueError("Inference steps must be distinct to preserve per-value results")
 
 
-def add_inference_steps_argument(parser) -> None:
-    """Add the shared inference-step override to evaluation CLIs."""
+def add_evaluation_arguments(parser) -> None:
+    parser.add_argument("--policy-name", required=True, help="Experiment policy path, e.g. ddp/sat.")
+    parser.add_argument("--task-name", required=True, help="Task directory in the saved experiment.")
+    parser.add_argument("--exp-name", required=True, help="Run directory under experiments/policy/task.")
     parser.add_argument(
         "--inference-steps",
         type=int,
-        default=None,
-        help="DDIM/Euler inference steps (best: selection record; otherwise saved config).",
+        help="DDIM/Euler steps; defaults come from the saved config or selection record.",
+    )
+    weights = parser.add_mutually_exclusive_group()
+    weights.add_argument(
+        "--ema", dest="use_ema", action="store_true", default=None, help="Use EMA weights."
+    )
+    weights.add_argument(
+        "--no-ema", dest="use_ema", action="store_false", help="Use raw model weights."
     )
 
 
@@ -157,7 +165,6 @@ def code_version(directory):
     import subprocess
 
     try:
-
         def git(*args):
             return subprocess.check_output(
                 ["git", "-C", str(directory), *args], stderr=subprocess.DEVNULL, text=True
