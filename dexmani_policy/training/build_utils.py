@@ -40,6 +40,13 @@ __all__ = [
 ]
 
 
+HAND_POLICY_TARGETS = frozenset({
+    "dexmani_policy.agents.core.lamp_policy.LAMPPolicy",
+    "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy",
+    "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy",
+})
+
+
 def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
     """Fit valid training rows, preserving rot6d coordinates for action_ee auto mode."""
     normalizer = AffineNormalizer()
@@ -150,6 +157,10 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     else:
         normalizer = build_normalizer(dataset, spec, cfg.action_key)
     validate_normalizer_state(normalizer, spec, normalization_dims_from_config(cfg))
+    if cfg.agent.get("_target_") in HAND_POLICY_TARGETS:
+        from dexmani_policy.utils.hand_artifact import source_contract
+
+        source_contract(dataset)
     if verbose:
         summaries = []
         for child in children:
@@ -500,11 +511,7 @@ def validate_normalization_config(cfg):
 def validate_hand_config(cfg):
     """Align representation preparation and policy training before opening data."""
     target = cfg.agent.get("_target_")
-    if target not in {
-        "dexmani_policy.agents.core.lamp_policy.LAMPPolicy",
-        "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy",
-        "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy",
-    }:
+    if target not in HAND_POLICY_TARGETS:
         return
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
         if type(cfg.agent[name]) is not type(cfg[name]) or cfg.agent[name] != cfg[name]:

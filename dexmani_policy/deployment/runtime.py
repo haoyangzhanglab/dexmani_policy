@@ -69,6 +69,19 @@ class PolicyInfo:
     rgb_preprocessing: dict
     normalization: dict
     pc_dim: int | None
+    hand_history_steps: int | None
+
+
+def hand_history_steps(config):
+    """Read LAMP's saved history contract without constructing a model."""
+    if config["agent"].get("_target_") != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
+        return None
+    steps = positive_int(config["agent"].get("history_steps"), "agent.history_steps")
+    for name in ("dataset", "lamp"):
+        value = positive_int(config.get(name, {}).get("history_steps"), f"{name}.history_steps")
+        if value != steps:
+            raise ValueError("LAMP dataset/prior/policy history_steps must match")
+    return steps
 
 
 def inspect_policy(
@@ -136,6 +149,7 @@ def inspect_policy(
         rgb_preprocessing_kwargs(cfg["dataset"]),
         dict(cfg["normalization"]),
         cfg["dataset"].get("pc_dim"),
+        hand_history_steps(cfg),
     )
 
 
@@ -168,8 +182,14 @@ class LoadedPolicy:
         )
         from dexmani_policy.utils.validation import validate_observation_fields
 
+        if info.hand_history_steps != hand_history_steps(config):
+            raise ValueError("PolicyInfo hand history disagrees with saved config")
         if isinstance(agent, LAMPPolicy):
             agent.validate_inference_steps(info.inference_steps)
+            if info.hand_history_steps != agent.history_steps or agent.hand_dim != 12:
+                raise ValueError("Agent hand history disagrees with PolicyInfo/config")
+        elif info.hand_history_steps is not None:
+            raise ValueError("Only LAMP accepts external hand history")
         if "task_text" in getattr(agent, "consumed_observation_fields", ()):
             raise NotImplementedError(
                 "MultiTask Real deployment lacks task selection and child recipe restoration"
@@ -358,7 +378,7 @@ class LoadedPolicy:
 
         if isinstance(self.agent, LAMPPolicy):
             if not isinstance(action_context, dict) or set(action_context) != {"hand_history"}:
-                raise ValueError("LAMP requires only action_context.hand_history from executed commands")
+                raise ValueError("LAMP requires only action_context.hand_history from past dispatched targets")
             history = action_context["hand_history"]
             if (not isinstance(history, np.ndarray) or history.dtype.kind not in "fiu"
                     or history.shape != (self.agent.history_steps, self.agent.hand_dim)
@@ -434,13 +454,19 @@ class LoadedPolicy:
                     raise ValueError("RGB warmup requires the current raw camera height/width")
                 shape, dtype = (*rgb_hw, 3), np.uint8
             elif name == "point_cloud":
-                shape, dtype = (
-                    (
-                        (self.info.pointcloud_config or {}).get("num_points", self.agent.obs_encoder.num_points),
-                        6,
-                    ),
-                    np.float32,
-                )
+                recipe = self.info.pointcloud_config or {}
+                if "num_points" in recipe:
+                    num_points = positive_int(recipe["num_points"], "pointcloud.num_points")
+                else:
+                    from dexmani_policy.agents.core.dp3_policy import DP3ObservationEncoder
+                    from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
+
+                    encoder = self.agent.obs_encoder
+                    if not isinstance(encoder, (DP3ObservationEncoder, SATObservationEncoder)):
+                        raise ValueError("Point-cloud warmup requires saved pointcloud.num_points")
+                    # These encoders can warm up at their sampling size when no raw recipe was saved.
+                    num_points = positive_int(encoder.num_points, "encoder.num_points")
+                shape, dtype = (num_points, 6), np.float32
             else:
                 shape, dtype = shapes[name], np.float32
             shape = (self.info.n_obs_steps, *shape)

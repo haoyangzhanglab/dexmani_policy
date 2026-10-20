@@ -12,6 +12,7 @@ import torch.multiprocessing as mp
 from omegaconf import OmegaConf, open_dict
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from dexmani_policy.agents.core.normalizer import AffineNormalizer
 from dexmani_policy.training.checkpoint import CheckpointStore
 from dexmani_policy.utils.config import register_resolvers
 from dexmani_policy.utils.path import resolve_resume_source, set_project_root
@@ -47,9 +48,8 @@ def setup_ddp(rank: int, world_size: int):
     )
 
 
-def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
-    gpu_ids = validate_gpu_ids(world_size, gpu_ids, torch.cuda.device_count())
-    actual_gpu_id = gpu_ids[rank] if gpu_ids else rank
+def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_state):
+    actual_gpu_id = gpu_ids[rank]
     device = torch.device(f"cuda:{actual_gpu_id}")
     torch.cuda.set_device(device)
     setup_ddp(rank, world_size)
@@ -57,10 +57,10 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
     # DDP requires identical initial parameters across all ranks — use same seed
     set_seed(cfg.training.seed)
 
+    resume_from = cfg.get("resume_from")
     checkpoint = CheckpointStore(pathlib.Path(resume_from).parent).load(resume_from) if resume_from else None
-    dataset, normalizer = build_dataset_and_normalizer(
-        cfg, resume_checkpoint=checkpoint, verbose=rank == 0
-    )
+    normalizer = AffineNormalizer()
+    normalizer.load_state_dict(normalizer_state)
 
     train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
 
@@ -159,10 +159,12 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, resume_from=None):
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     from dexmani_policy.training.resume import resolve_training_config
-    cfg = resolve_training_config(cfg)
+    source = resolve_resume_source(cfg.get("resume_from"))
+    checkpoint = CheckpointStore(pathlib.Path(source).parent).load(source) if source else None
+    cfg = resolve_training_config(cfg, resume_checkpoint=checkpoint)
     validate_config(cfg)
     with open_dict(cfg):
-        cfg.resume_from = resolve_resume_source(cfg.get("resume_from"))
+        cfg.resume_from = source
     prepare_output_dir(cfg.workspace.output_dir)
 
     if not torch.cuda.is_available():
@@ -184,9 +186,16 @@ def main(cfg):
     if "MASTER_ADDR" not in os.environ:
         os.environ["MASTER_ADDR"] = "localhost"
 
-    # Child processes cannot access Hydra runtime resolvers — resolve all
-    # interpolations before mp.spawn.
+    set_seed(cfg.training.seed)
+    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
+    normalizer_state = {
+        key: value.detach().cpu().clone()
+        for key, value in normalizer.state_dict().items()
+    }
+    del normalizer, checkpoint
+    # Child processes cannot access Hydra runtime resolvers.
     OmegaConf.resolve(cfg)
+    print(f"[Dataset] Prepared once in parent pid={os.getpid()} for {num_gpus} ranks")
 
     if "MASTER_PORT" not in os.environ:
         # Probe a free port, then release it before spawning workers. Another
@@ -198,10 +207,9 @@ def main(cfg):
         os.environ["MASTER_PORT"] = str(sock.getsockname()[1])
         sock.close()
 
-    resume_from = cfg.get("resume_from", None)
     mp.spawn(
         ddp_worker,
-        args=(num_gpus, cfg, gpu_ids, resume_from),
+        args=(num_gpus, cfg, gpu_ids, dataset, normalizer_state),
         nprocs=num_gpus,
         join=True,
     )

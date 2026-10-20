@@ -382,9 +382,9 @@ class BaseDataset(torch.utils.data.Dataset):
             if action
             else self.sampler.observation_source_rows
         )
-        step = self.replay_buffer.scan_chunk_rows(field)
+        step = self.replay_buffer.chunk_rows(field)
         if action and self.use_aux_ee:
-            step = min(step, self.replay_buffer.scan_chunk_rows("action_ee"))
+            step = min(step, self.replay_buffer.chunk_rows("action_ee"))
         for start in range(0, int(self.replay_buffer.episode_ends[-1]), step):
             end = min(start + step, int(self.replay_buffer.episode_ends[-1]))
             selected = (

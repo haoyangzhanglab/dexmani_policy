@@ -4,6 +4,9 @@ import numpy as np
 import zarr
 
 
+READ_CACHE_BYTES = 16 * 1024 * 1024
+
+
 def validate_episode_metadata(episode_ends, data, keys=None):
     ends = np.asarray(episode_ends)
     if (
@@ -89,7 +92,7 @@ class ReplayBuffer:
     def read(self, key, rows, *, columns=None, cache=True):
         arr = self[key]
         selection = rows if columns is None else (rows, columns)
-        values = None
+        dtype = np.float32 if np.issubdtype(arr.dtype, np.floating) else arr.dtype
         if (
             self._path is not None
             and cache
@@ -98,44 +101,39 @@ class ReplayBuffer:
         ):
             start, stop, _ = rows.indices(arr.shape[0])
             step = self.chunk_rows(key)
-            block = start // step * step
-            if start < stop <= block + step:
-                cached = self._read_cache.get(key)
-                if cached is None or cached[0] != block:
-                    # Exactly one bounded decoded block per selected field,
-                    # released on PID change/pickle. Adjacent windows reuse it.
-                    cached = (block, arr[block : block + step])
-                    self._read_cache[key] = cached
-                values = cached[1][start - block : stop - block]
-                if columns is not None:
-                    values = values[:, columns]
-        if values is None:
-            values = arr[selection]
-        dtype = np.float32 if np.issubdtype(values.dtype, np.floating) else values.dtype
-        # Callers may augment windows in place; no mutable alias escapes even
-        # when this buffer was constructed from an in-memory NumPy dictionary.
-        return np.array(values, dtype=dtype, copy=True)
+            block_bytes = step * int(np.prod(arr.shape[1:])) * arr.dtype.itemsize
+            # Retention bounds do not bound decoder allocations, even for a tail slice.
+            if start < stop and block_bytes <= READ_CACHE_BYTES:
+                result = None
+                for block in range(start // step * step, stop, step):
+                    cached = self._read_cache.get(key)
+                    if cached is None or cached[0] != block:
+                        self._read_cache.pop(key, None)
+                        cached = (block, arr[block : block + step])
+                        self._read_cache[key] = cached
+                    left, right = max(start, block), min(stop, block + step)
+                    values = cached[1][left - block : right - block]
+                    if columns is not None:
+                        values = values[:, columns]
+                    if result is None:
+                        result = np.empty((stop - start, *values.shape[1:]), dtype=dtype)
+                    result[left - start : right - start] = values
+                return result
+        # No mutable alias escapes, including in-memory buffers and direct large-block reads.
+        return np.array(arr[selection], dtype=dtype, copy=True)
 
     def chunk_rows(self, key):
+        """Scan physical time blocks; only in-memory arrays need an artificial bound."""
         arr = self[key]
-        row_bytes = max(1, int(np.prod(arr.shape[1:])) * max(arr.dtype.itemsize, 4))
-        limit = max(1, (16 * 1024 * 1024) // row_bytes)
-        physical = arr.chunks[0] if isinstance(arr, zarr.Array) else limit
-        return max(1, min(physical, limit))
+        if isinstance(arr, zarr.Array):
+            return arr.chunks[0]
+        row_bytes = max(1, int(np.prod(arr.shape[1:])) * arr.dtype.itemsize)
+        return max(1, READ_CACHE_BYTES // row_bytes)
 
     def iter_chunks(self, key, *, columns=None):
-        step = self.scan_chunk_rows(key)
+        step = self.chunk_rows(key)
         for start in range(0, int(self.episode_ends[-1]), step):
             yield start, self.read(key, slice(start, start + step), columns=columns, cache=False)
-
-    def scan_chunk_rows(self, key):
-        """Sequential scans decode a physical time chunk once, without retaining it.
-
-        The decoder can allocate a full physical chunk regardless of the 16 MiB
-        window-cache bound; slicing it into smaller requests does not cap that peak.
-        """
-        arr = self[key]
-        return arr.chunks[0] if isinstance(arr, zarr.Array) else self.chunk_rows(key)
 
     @property
     def episode_ends(self):

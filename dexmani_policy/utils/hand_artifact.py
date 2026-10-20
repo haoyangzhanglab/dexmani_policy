@@ -68,7 +68,7 @@ def source_contract(dataset):
             continue
         arr = buffer[key]
         digest = hashlib.sha256(str((arr.shape, np.dtype(arr.dtype).str)).encode())
-        step = buffer.scan_chunk_rows(key)
+        step = buffer.chunk_rows(key)
         for start in range(0, arr.shape[0], step):
             digest.update(np.ascontiguousarray(arr[start:start + step]).tobytes())
         arrays[key] = digest.hexdigest()

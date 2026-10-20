@@ -16,15 +16,9 @@ logger = logging.getLogger(__name__)
 def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
     """Replace points with the first point using a dropout rate sampled per cloud."""
     B, N, _ = batch_pc.shape
-    result = torch.clone(batch_pc)
-    for b in range(B):
-        dropout_ratio = torch.rand(1).item() * max_dropout_ratio
-        drop_idx = torch.where(torch.rand(N, device=batch_pc.device) <= dropout_ratio)[
-            0
-        ]
-        if len(drop_idx) > 0:
-            result[b, drop_idx, :] = batch_pc[b, 0, :].unsqueeze(0)
-    return result
+    ratios = torch.rand(B, 1, device=batch_pc.device) * max_dropout_ratio
+    mask = torch.rand(B, N, device=batch_pc.device) <= ratios
+    return torch.where(mask.unsqueeze(-1), batch_pc[:, :1, :], batch_pc)
 
 
 class PointNetPatchEncoder(nn.Module):
