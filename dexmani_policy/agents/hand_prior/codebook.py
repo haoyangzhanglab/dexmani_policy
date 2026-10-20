@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import io
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -12,13 +10,13 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 
 class HandStateCodebook(nn.Module):
     """Store affine-raw prototypes and their Policy normalization as persistent buffers."""
 
-    FORMAT_VERSION = 3
+    FORMAT_VERSION = 4
     BUFFER_NAMES = (
         "hand_min",
         "hand_max",
@@ -172,26 +170,23 @@ class HandStateCodebook(nn.Module):
             np.savez(file, **payload)
 
     def load(self, path: str | Path) -> None:
-        raw = Path(path).expanduser().read_bytes()
-        with np.load(io.BytesIO(raw), allow_pickle=False) as data:
+        with np.load(Path(path).expanduser(), allow_pickle=False) as data:
             if (
                 data["format_version"].item() != self.FORMAT_VERSION
                 or data["pose_space"].item() != "affine_raw"
             ):
-                raise ValueError("Hand codebook requires v3 affine_raw format")
+                raise ValueError(
+                    "Hand codebook requires v4 affine_raw format; regenerate or use historical code"
+                )
             dimensions = tuple(
                 data[name].item() for name in ("hand_dim", "num_groups", "codebook_size")
             )
             if dimensions != (self.hand_dim, self.num_groups, self.codebook_size):
                 raise ValueError(f"Hand codebook dimensions do not match Policy: {dimensions}")
-            values = {name: torch.from_numpy(data[name].copy()) for name in self.BUFFER_NAMES}
+            values = {name: torch.from_numpy(data[name]) for name in self.BUFFER_NAMES}
             metadata = json.loads(data["metadata_json"].item())
         self.set_buffers(values)
-        from dexmani_policy.utils.hand_artifact import validate_source_metadata
-
-        validate_source_metadata(metadata)
         self.artifact_metadata = metadata
-        self.artifact_sha256 = hashlib.sha256(raw).hexdigest()
 
     def extra_repr(self) -> str:
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}, loaded={self.is_loaded}"

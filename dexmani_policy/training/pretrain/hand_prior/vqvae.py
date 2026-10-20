@@ -23,14 +23,12 @@ from dexmani_policy.training.builder import build_normalizer
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
     build_runtime_codebook,
     deployment_diagnostics,
-    load_checkpoint_snapshot,
 )
 from dexmani_policy.training.validation import validate_config
 from dexmani_policy.training.workspace import prepare_output_dir
-from dexmani_policy.utils.atomic import atomic_path
-from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
-from dexmani_policy.utils.hand_artifact import metadata_sha256, source_contract
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.utils.hand_representation import describe_hand_data
+from dexmani_policy.utils.runtime import atomic_path
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +47,6 @@ def evaluate_vq(vqvae, loader, device):
     if not count:
         raise ValueError("VQ validation loader is empty")
     return dict(zip(("enc", "vq", "mse"), (sums / count).tolist()))
-
-
-def set_seed(seed: int) -> None:
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def save_checkpoint(
@@ -141,6 +132,7 @@ def policy_hand_rows(dataset, tcp_dim):
 
 def prepare_policy_data(cfg):
     dataset = build_policy_dataset(cfg)
+    hand_data = describe_hand_data(dataset)
     spec = resolve_normalization_spec(cfg)
     action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)["action"]
     hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))
@@ -153,17 +145,11 @@ def prepare_policy_data(cfg):
     val = dataset.get_validation_dataset()
     train_hand = policy_hand_rows(dataset, cfg.agent.tcp_dim)
     val_hand = policy_hand_rows(val, cfg.agent.tcp_dim)
-    contract = source_contract(dataset)
     metadata = {
-        "implementation": dataset.hand_implementation_version,
-        "source_contract": contract,
-        "source_contract_sha256": metadata_sha256(contract),
-        "normalization_scope": "unique_valid_policy_train_action_source_rows",
+        "hand_data": hand_data,
         "policy_config": OmegaConf.to_container(cfg, resolve=False),
         "resolved_dataset": OmegaConf.to_container(cfg.dataset, resolve=True),
         "normalization_spec": spec,
-        "train_frame_count": len(train_hand),
-        "val_frame_count": len(val_hand),
         "train_windows": dataset.sampler.validity_summary,
         "val_windows": val.sampler.validity_summary if val is not None else None,
     }
@@ -191,7 +177,8 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             )
     logger.info("VQ run: %s", output_dir.resolve())
     device = torch.device(args.device)
-    set_seed(args.seed)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(policy_cfg)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
@@ -360,7 +347,6 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
                 fig.savefig(output_dir / f"code_usage_g{group}_epoch{epoch:04d}.png")
                 plt.close(fig)
 
-    final_metrics = metrics
     save_checkpoint(
         output_dir / "vqvae_hand_last.pt",
         epoch=args.num_epochs,
@@ -371,13 +357,13 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         args=args,
         train_history=train_history,
         split_metadata=split_metadata,
-        metrics=final_metrics,
+        metrics=metrics,
     )
 
     # Deployment diagnostics evaluate the selected best without changing selection.
     selected_path = output_dir / "vqvae_hand_best.pt"
-    selected, source_hash = load_checkpoint_snapshot(selected_path)
-    runtime_codebook = build_runtime_codebook(selected, source_hash, selected_path, device="cpu")
+    selected = torch.load(selected_path, map_location="cpu", weights_only=False)
+    runtime_codebook = build_runtime_codebook(selected, selected_path, device="cpu")
     diagnostics = deployment_diagnostics(
         runtime_codebook, {"train": train_norm, "held_out": val_norm}
     )

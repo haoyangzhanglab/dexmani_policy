@@ -2,7 +2,7 @@
 
 面向灵巧手操作研究的个人策略仓库，提供数据读取、策略训练、离线模型选择、仿真评测和已保存策略的推理接口。方法名表示本地研究适配，具体行为以配置和源码为准。
 
-当前实验从 `dexmani_policy/configs/` 进入；历史实验以 checkpoint 内的 `effective_config`、模型状态及对应产物为准，实验目录的 `config.yaml` 用于阅读与交叉核对。
+当前实验从 `dexmani_policy/configs/` 进入；历史实验以 checkpoint 内的 `effective_config`、模型状态及对应产物为准。实验目录的 `config.yaml` 供阅读及评测、部署入口显式核对，checkpoint 加载器不隐式读取旁路配置。
 
 ## 安装与配置
 
@@ -62,7 +62,7 @@ bash scripts/training/train.sh dp3 \
 - SAT、LAMP 和 Temporal 的 Sparse3DEncoder 要求 `normalization.point_cloud=identity`：原始米制 centers 经位置 MLP 加入 token 内容，相对几何与 RoPE 保留局部结构和相对位移。训练和推理必须沿用同一坐标系与原点。
 - Uni3D 的 `pc_in_channels` 固定为整数 `6`，表示内部 patch 宽度；原始 XYZ 输入由 encoder 补零 RGB，不应改为 `3`。这不提供完整 R3D XYZ-only 数据/normalizer 配方。
 
-缺少 `position_embedding.*` 的旧 Sparse3D 策略 checkpoint 会在严格加载时失败；请使用对应历史 checkout，或重新训练新策略。视觉分支变化不要求重训来源、配方、normalizer 和表示状态均匹配的手部 prior/codec/codebook。机制和兼容边界见[项目架构](docs/项目架构.md#观测编码)。
+缺少 `position_embedding.*` 的旧 Sparse3D 策略 checkpoint 会在严格加载时失败；请使用对应历史 checkout，或重新训练新策略。视觉分支变化不要求重训 `hand_data` 和 normalizer 坐标仍匹配的手部 prior/codec/codebook。机制和加载边界见[项目架构](docs/项目架构.md#观测编码)。
 
 ## 手部先验准备
 
@@ -81,7 +81,7 @@ DATA=("zarr_path=$DATA_ZARR" "dataset.split_manifest=$SPLIT"
 
 正式 baseline 必须提供 episode 级 held-out manifest，并在表示预训练、policy 和各 seed 中复用。manifest 所需 `data_revision`、`episode_ids`、trial 分组见[数据与划分](docs/项目架构.md)；缺少这些信息时应核实并重新导出数据，不补造身份。开发 smoke 可无 holdout，但不据此报告泛化。各方法 history/window 合法性不同，需报告实际样本数与 padding 比例。
 
-只支持当前 dexmani_sim/dexmani_real 采集与导出的 Zarr：每行观测在该行动作提交前取得，时序由生产端保证。训练不读取或配置 `obs_alignment`，不支持旧版错位数据，也不执行自动移位。三种表示要求有限正 `dt`；手部物理坐标为本仓 XHand thumb×3、index×3、middle×2、ring×2、pinky×2，单位 radians。来源契约已移除旧时序声明字段，含这些字段的旧表示产物需使用历史 checkout 或重新准备；严格匹配边界见[来源与选点契约](docs/项目架构.md#来源与选点契约)。
+只支持当前 dexmani_sim/dexmani_real 采集与导出的 Zarr：每行观测在该行动作提交前取得，时序由生产端保证。训练不读取或配置 `obs_alignment`，不支持旧版错位数据，也不执行自动移位。三种表示要求有限正 `dt`；手部物理坐标为本仓 XHand thumb×3、index×3、middle×2、ring×2、pinky×2，单位 radians。预训练与策略训练通过 `hand_data` 核对数据设置，不计算内容哈希；修改数据内容时需更新 `data_revision`。详见[预训练数据与选点](docs/项目架构.md#预训练数据与选点)。
 
 ### DQ-RISE
 
@@ -99,7 +99,7 @@ bash scripts/training/train.sh dqrise "${DATA[@]}" action_key=action \
   codebook_path="$HAND_RUN/dqrise/codebook.npz"
 ```
 
-配置默认仍为 EEF `9+12`；示例的 joint `7+12` 是显式覆盖。VQ 使用有效训练窗口引用的唯一 action 源行，有验证集按 `val_mse` 选点，否则按 `train_mse`。VQ checkpoint v4、码本 NPZ v3 必须包含 source contract；旧产物缺少契约时需用当前代码重新准备，不能只复制 affine。`codebook_diagnostics.json` 报告实际 NN→lookup 的误差、利用率和相邻跳变。
+配置默认仍为 EEF `9+12`；示例的 joint `7+12` 是显式覆盖。VQ 使用有效训练窗口引用的唯一 action 源行，有验证集按 `val_mse` 选点，否则按 `train_mse`。VQ checkpoint v5、码本 NPZ v4 保存 `hand_data` 和归一化参数。训练指标保留在 VQ checkpoint，码本仅记录选点及导出诊断；无 holdout 也可导出。`codebook_diagnostics.json` 报告实际 NN→lookup 的误差、利用率和相邻跳变。
 
 ### LAMP
 
@@ -110,7 +110,7 @@ bash scripts/training/train.sh lamp "${DATA[@]}" \
   lamp.prior_path="$HAND_RUN/lamp/prior.pt"
 ```
 
-唯一结构为 `H=Nobs=C=1`、K=8 历史先验、单步 arm/latent offset 回归；训练用 decoded hand MSE 与 latent offset L2，不需要离线 latent 标签。prior 为 `lamp_prior.v2`，旧 v1 和旧 Flow policy 不自动迁移，历史实验使用历史提交。
+唯一结构为 `H=Nobs=C=1`、K=8 历史先验、单步 arm/latent offset 回归；训练用 decoded hand MSE 与 latent offset L2，不需要离线 latent 标签。prior 为 `lamp_prior.v3`。
 
 历史严格来自 query 之前的实际执行命令，reset 用初始实测手姿补齐。SIM 每个成功执行步追加处理后的命令。runtime 要求调用者显式传 `action_context={"hand_history": history}`，其中 `history` 是物理 NumPy `[K,12]`；`predict` 不更新历史。执行端按实际提交的命令维护历史，真机闭环 **NOT VERIFIED**。
 
@@ -123,13 +123,13 @@ bash scripts/training/train.sh temporal_codec_flow "${DATA[@]}" \
   codec.path="$HAND_RUN/temporal/codec.pt"
 ```
 
-保留 H=16、Nobs=2、C=8、12→9 时序 VAE。冻结 encoder 的 posterior mean 在线生成标签；q0 取 query 源帧未增强的实测值，整段固定，完整解码后切片。decoded loss 唯一使用 standardized relative 空间；物理 MAE/RMSE 只作诊断。codec 保持 `temporal_hand_codec.v1` 张量格式，旧文件缺来源/选点信息时必须重新预训练。
+保留 H=16、Nobs=2、C=8、12→9 时序 VAE。冻结 encoder 的 posterior mean 在线生成标签；q0 取 query 源帧未增强的实测值，整段固定，完整解码后切片。decoded loss 唯一使用 standardized relative 空间；物理 MAE/RMSE 只作诊断。codec 为 `temporal_hand_codec.v2`。
 
 LAMP/Temporal 的候选选点必须在 KL 达到目标系数后：LAMP 默认 20k steps、2k warmup、beta=1e-3；Temporal 默认 30k、4k 零 KL + 4k ramp、beta=3e-4。有 holdout 按各自验证指标选点，无 holdout 保存最终合格步骤并标记 `final_no_holdout`。不足 schedule 在训练前报错。
 
-所有阶段的数据覆盖必须一致。LAMP/Temporal 默认写入实际 policy 配置的 `agent.prior_path` / `agent.codec_path`，默认分别由 `lamp.prior_path` / `codec.path` 插值。若使用 LAMP `--output`，policy 的 `agent.prior_path` 也应指向该产物。三种预训练入口与 policy 共用窗口、动作布局校验；产物加载时核对内容和坐标，不要求两处路径字符串相同。三份配置均声明了可直接覆盖的 `dataset.split_manifest`。已有文件默认不覆盖。
+所有阶段的数据覆盖必须一致。LAMP/Temporal 默认写入实际 policy 配置的 `agent.prior_path` / `agent.codec_path`，默认分别由 `lamp.prior_path` / `codec.path` 插值。若使用 LAMP `--output`，policy 的 `agent.prior_path` 也应指向该产物。三种预训练入口与 policy 共用窗口、动作布局校验；训练构建时核对数据设置与坐标，不要求两处路径字符串相同。三份配置均声明了可直接覆盖的 `dataset.split_manifest`。已有文件默认不覆盖。
 
-Fresh training 校验来源、窗口、划分和手部表示坐标，观测归一化可在 encoder 允许范围内另选；strict resume 使用 checkpoint 内嵌表示并重新核对当前数据，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示、normalizer 和 `action_space_artifact` 元信息，独立推理无需原 artifact 或训练数据。artifact 层保存单一来源记录，保留原始 action/state 与有效窗口指纹；Dataset 不再维护重复的手部 metadata。精简前的来源或显式划分记录使用对应源码版本，不自动迁移。LAMP/Temporal 仅支持 sync。
+Fresh training 核对数据版本、窗口、划分和手部表示坐标，观测归一化可在 encoder 允许范围内另选；strict resume 使用 checkpoint 内嵌表示并重新核对 `hand_data`，不重新加载外部 artifact。`simple.v4` 的 raw/EMA 均内嵌表示和 normalizer，独立推理无需原 artifact、训练数据或额外表示记录。选点规则在预训练循环中执行，诊断保存在预训练产物；不再保存 Git 状态、内容哈希或参数指纹。旧手部预训练产物及缺少 `hand_data` 的手部训练恢复需重新准备或使用历史提交，普通策略 checkpoint 格式不变。LAMP/Temporal 仅支持 sync。
 
 机制公式、论文对应与固定官方提交差异见[手部动作表示](docs/项目架构.md#手部动作表示)。
 
@@ -140,9 +140,12 @@ Smoke 也接受显式 `.yaml` 路径，与预训练入口共用 Hydra 配置组�
 ```bash
 python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name> --max-updates 4
+python -m unittest discover -s tests -p test_utils.py
 ```
 
 `--config-only` 检查配置、Hydra target 和策略、训练、Dataset、增强类的导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
+
+`test_utils.py` 使用 CPU 和临时合成数据检查路径/续训配方、原子写入、RNG、手部产物导出及 raw/EMA 内嵌表示恢复；不替代完整训练 smoke。
 
 smoke 支持多个配置名，默认运行 4 次 optimizer update，不接受 Hydra 字段覆盖。若需覆盖配置或保留短跑产物，使用正式训练入口：
 
@@ -187,6 +190,7 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | 路径 | 职责 |
 | --- | --- |
 | `dexmani_policy/configs/` | 当前实验配置与 DDP overlay |
+| `dexmani_policy/utils/` | `config.py` 配置与路径、`runtime.py` 运行工具、`hand_representation.py` 手部数据设置与 KL schedule |
 | `dexmani_policy/agents/` | Policy、观测编码器、动作解码器和手部先验 |
 | `dexmani_policy/datasets/` | 通用 Dataset、RGB、点云和多任务组合 |
 | `dexmani_policy/datasets/hand_prior/` | LAMP 历史命令与 Temporal Codec 参考姿态的数据集 |

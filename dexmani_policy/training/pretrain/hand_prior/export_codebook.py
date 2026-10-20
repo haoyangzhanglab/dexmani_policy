@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import tempfile
 import warnings
 from pathlib import Path
 
@@ -15,31 +13,13 @@ from sklearn.decomposition import PCA
 
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.utils.atomic import atomic_path
-from dexmani_policy.utils.config import validate_dq_normalization
-from dexmani_policy.utils.hand_artifact import (
-    implementation_version,
-    validate_source_metadata,
-)
-from dexmani_policy.utils.validation import positive_int
-
-
-def load_checkpoint_snapshot(path):
-    """Hash and deserialize the same file snapshot with bounded memory overhead."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as file, tempfile.TemporaryFile() as snapshot:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-            snapshot.write(chunk)
-        snapshot.seek(0)
-        checkpoint = torch.load(snapshot, map_location="cpu", weights_only=False)
-    return checkpoint, digest.hexdigest()
+from dexmani_policy.utils.config import positive_int, validate_dq_normalization
+from dexmani_policy.utils.runtime import atomic_path
 
 
 @torch.no_grad()
-def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
+def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
     split = checkpoint["split_metadata"]
-    contract = validate_source_metadata(split)
     validate_dq_normalization(split["normalization_spec"])
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
     codebook = HandStateCodebook(model.hand_dim, model.num_groups, model.codebook_size)
@@ -80,48 +60,19 @@ def build_runtime_codebook(checkpoint, source_hash, checkpoint_path, *, device):
         "max_violation": float((decoded.abs() - 1).clamp_min(0).max()),
         "pca_explained_variance_ratio": variance_ratio,
     }
-    summary = {
-        key: split[key]
-        for key in (
-            "normalization_scope",
-            "normalization_spec",
-            "train_frame_count",
-            "val_frame_count",
-            "selection_metric",
-            "source_contract_sha256",
-        )
-    }
-    summary["data_revision"] = contract["data_revision"]
-    for name in ("train", "val"):
-        summary[name + "_source_rows_count"] = contract["splits"][name]["source_rows_count"]
-        summary[name + "_episode_ids_count"] = sum(contract[name + "_mask"])
     codebook.artifact_metadata = {
         "model_config": checkpoint["model_config"],
-        "implementation": {
-            "training": split.get("implementation"),
-            "export": implementation_version(),
-        },
-        "source_contract": split["source_contract"],
-        "source_contract_sha256": split["source_contract_sha256"],
+        "hand_data": split["hand_data"],
         "normalization_spec": split["normalization_spec"],
-        "prototype_count": codebook.num_codes,
         "ordering": "decoded_prototype_pca1_ascending",
-        "layer_weights": weights.cpu().tolist(),
         "selection": {
             "selection_step": int(checkpoint["epoch"]),
             "unit": "epoch",
-            "split": "validation" if split["val_frame_count"] else "train_no_holdout",
+            "split": "validation" if split["hand_data"]["val_episodes"] else "train_no_holdout",
             "metric": split["selection_metric"],
             "value": checkpoint["metrics"][split["selection_metric"]],
         },
         "source_checkpoint": str(Path(checkpoint_path).resolve()),
-        "source_checkpoint_sha256": source_hash,
-        "source_epoch": int(checkpoint["epoch"]),
-        "normalizer_sha256": hashlib.sha256(
-            scale.contiguous().numpy().tobytes() + offset.contiguous().numpy().tobytes()
-        ).hexdigest(),
-        "checkpoint_metrics": checkpoint["metrics"],
-        "source_summary": summary,
         "export_diagnostics": diagnostics,
     }
     if variance_ratio < 0.3:
@@ -140,13 +91,12 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
         raise ValueError("Codebook path must use the .npz suffix")
     if output.exists() and not overwrite:
         raise FileExistsError(f"Codebook already exists: {output}; use --overwrite explicitly")
-    checkpoint, source_hash = load_checkpoint_snapshot(checkpoint_path)
-    codebook = build_runtime_codebook(checkpoint, source_hash, checkpoint_path, device=device)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    codebook = build_runtime_codebook(checkpoint, checkpoint_path, device=device)
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output, overwrite=overwrite, suffix=".tmp.npz") as temporary:
         codebook.save(temporary)
     print(f"Exported {codebook.num_codes} hand states to {output}")
-    print(f"Checkpoint SHA256: {source_hash}")
     print("Layer weights:", codebook.layer_weights.tolist())
     print(json.dumps(codebook.artifact_metadata["export_diagnostics"], indent=2))
     return codebook
@@ -160,8 +110,8 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
     chunk_size = min(chunk_size, max(1, (16 * 1024 * 1024) // (codebook.num_codes * width * 4)))
     report = {
         "distance_space": "HandStateCodebook affine_raw squared Euclidean",
-        "source_checkpoint_sha256": codebook.artifact_metadata.get("source_checkpoint_sha256"),
-        "source_epoch": codebook.artifact_metadata.get("source_epoch"),
+        "source_checkpoint": codebook.artifact_metadata.get("source_checkpoint"),
+        "selection": codebook.artifact_metadata.get("selection"),
         "splits": {},
     }
     scale = codebook.hand_normalizer_scale.cpu().double()

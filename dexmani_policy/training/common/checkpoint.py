@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dexmani_policy.utils.atomic import atomic_path
+from dexmani_policy.utils.runtime import atomic_path
 
 TRAIN_CHECKPOINT_FORMAT = "simple.v4"
 
@@ -75,10 +75,7 @@ class CheckpointStore:
         return payload
 
     def load(self, path: Path) -> TrainCheckpoint:
-        from dexmani_policy.utils.config import checkpoint_source_config
-
         payload = self.load_payload(path)
-        effective_config = checkpoint_source_config(payload, path)
         state = payload["state"]
         weights = payload["weights"]
         for key in ("epoch", "global_step", "next_micro_step"):
@@ -96,7 +93,7 @@ class CheckpointStore:
             ema_model_state=weights["ema_model"],
             optimizer_state=weights["optimizer"],
             scheduler_state=weights["scheduler"],
-            effective_config=effective_config,
+            effective_config=payload["effective_config"],
         )
 
 
@@ -193,18 +190,19 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     from omegaconf import OmegaConf
 
     from dexmani_policy.utils.config import (
-        checkpoint_source_config,
         normalization_dims_from_config,
         resolve_normalization_spec,
-        validate_window_contract,
+        validate_action_window,
+        validate_source_recipe,
     )
-    from dexmani_policy.utils.hand_artifact import restore_artifact_metadata
 
     store = CheckpointStore(Path(checkpoint_path).parent)
     payload = store.load_payload(checkpoint_path)
-    saved_config = checkpoint_source_config(payload, checkpoint_path, supplied=saved_config)
+    if saved_config is not None:
+        validate_source_recipe(payload["effective_config"], saved_config)
+    saved_config = payload["effective_config"]
     cfg = OmegaConf.create(saved_config)
-    validate_window_contract(cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps)
+    validate_action_window(cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps)
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     state, global_step = inference_weights(payload, use_ema=use_ema)
@@ -218,7 +216,6 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     )
     agent.load_state_dict(state, strict=True)
     agent.validate_normalizer()
-    restore_artifact_metadata(agent, saved_config)
     agent.inference_config = saved_config
     agent.to(device)
     agent.eval()

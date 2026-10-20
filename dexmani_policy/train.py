@@ -15,9 +15,8 @@ from dexmani_policy.training.common.checkpoint import CheckpointStore
 from dexmani_policy.training.resume import resolve_training_config, restore_training_state
 from dexmani_policy.training.validation import validate_config
 from dexmani_policy.training.workspace import prepare_output_dir
-from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.utils.path import resolve_resume_source, set_project_root
-from dexmani_policy.utils.random import set_seed
+from dexmani_policy.utils.config import register_resolvers, resolve_resume_source, set_project_root
+from dexmani_policy.utils.runtime import set_seed
 
 register_resolvers()
 set_project_root()

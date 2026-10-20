@@ -11,7 +11,7 @@ from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 
 class SATObservationEncoder(nn.Module):

@@ -14,10 +14,8 @@ from dexmani_policy.training.common.checkpoint import (
     unwrap_state_dict,
 )
 from dexmani_policy.training.validation import validate_config
-from dexmani_policy.utils.config import load_policy_config
-from dexmani_policy.utils.path import set_project_root
-from dexmani_policy.utils.random import set_seed
-from dexmani_policy.utils.tensor import dict_apply
+from dexmani_policy.utils.config import load_policy_config, set_project_root
+from dexmani_policy.utils.runtime import dict_apply, set_seed
 
 set_project_root()
 
@@ -101,8 +99,7 @@ def smoke_test(config_name: str, *, max_updates=4):
     """Run the production single-device Trainer with an execution-only budget."""
     from dexmani_policy.training.builder import build_train_components, build_trainer
     from dexmani_policy.training.common.checkpoint import restore_policy_agent
-    from dexmani_policy.utils.config import load_experiment_config
-    from dexmani_policy.utils.validation import positive_int
+    from dexmani_policy.utils.config import load_experiment_config, positive_int
 
     positive_int(max_updates, "max_updates")
     cfg = load_config(config_name)

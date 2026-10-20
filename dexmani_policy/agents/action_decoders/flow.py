@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 from .sampling.time_sampling import TimeSampler, euler_time_grid, shift_time_to_noise
 

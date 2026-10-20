@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torchvision.transforms.v2 as v2
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 BT601_LUMA = (0.299, 0.587, 0.114)
 

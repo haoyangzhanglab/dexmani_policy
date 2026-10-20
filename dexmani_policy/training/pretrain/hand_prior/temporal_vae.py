@@ -14,14 +14,12 @@ from omegaconf import OmegaConf
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE
 from dexmani_policy.datasets.hand_prior.temporal_codec_dataset import TemporalCodecDataset
 from dexmani_policy.training.validation import validate_config
-from dexmani_policy.utils.atomic import atomic_path
-from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
-from dexmani_policy.utils.hand_artifact import (
-    metadata_sha256,
-    source_contract,
-    validate_selection_schedule,
+from dexmani_policy.utils.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.utils.hand_representation import (
+    describe_hand_data,
+    validate_kl_schedule,
 )
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.runtime import atomic_path
 
 
 def build_codec_dataset(cfg):
@@ -109,28 +107,18 @@ def evaluate(codec, dataset, batch_size):
     return metrics
 
 
-def save_codec(path, codec, dataset, cfg, args, step, metrics, statistics):
+def save_codec(path, codec, hand_data, cfg, args, step, metrics, statistics):
     codec.ready.fill_(True)
     codec.validate_state()
-    contract = source_contract(dataset)
     evaluation = metrics["evaluation"]
     metadata = dict(
-        implementation=dataset.hand_implementation_version,
-        source_contract=contract,
-        source_contract_sha256=metadata_sha256(contract),
-        model_config=codec.model_config,
+        hand_data=hand_data,
         normalization_spec=resolve_normalization_spec(cfg),
         selection=dict(
             selection_step=int(step),
-            beta=metrics["beta"],
-            target_beta=args.beta,
-            eligible_step=args.kl_warmup + max(1, args.kl_ramp),
             split=metrics["selection_split"],
             metric="physical_mae",
             value=evaluation["physical_mae"],
-            reconstruction=evaluation["reconstruction"],
-            kl=evaluation["kl"],
-            physical_joint_mae=evaluation["physical_joint_mae"],
         ),
     )
     metadata["relative_statistics"] = statistics
@@ -140,7 +128,7 @@ def save_codec(path, codec, dataset, cfg, args, step, metrics, statistics):
         "joint_weights": "multiply_numerator_only_do_not_change_denominator",
     }
     payload = {
-        "_format": "temporal_hand_codec.v1",
+        "_format": "temporal_hand_codec.v2",
         "model_config": dict(codec.model_config),
         "state_dict": {
             key: value.detach().cpu().clone() for key, value in codec.state_dict().items()
@@ -166,7 +154,7 @@ def train(args):
         raise ValueError("weight_decay must be nonnegative and finite")
     if not 0 < args.lr < float("inf") or not 0 < args.clip_grad < float("inf"):
         raise ValueError("lr and clip_grad must be positive and finite")
-    validate_selection_schedule(args.steps, args.beta, args.kl_warmup + max(1, args.kl_ramp))
+    validate_kl_schedule(args.steps, args.beta, args.kl_warmup + max(1, args.kl_ramp))
     cfg = load_policy_config(args.policy_config or args.config, args.overrides)
     output = Path(cfg.agent.codec_path).expanduser()
     if output.exists() and not args.overwrite:
@@ -175,7 +163,7 @@ def train(args):
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     dataset = build_codec_dataset(cfg)
-    source_contract(dataset)
+    hand_data = describe_hand_data(dataset)
     validation = dataset.get_validation_dataset()
     selection = "validation" if validation is not None else "final_no_holdout"
     selection_dataset = validation if validation is not None else dataset
@@ -247,7 +235,7 @@ def train(args):
             print(f"{selection} at {step}: {evaluation}")
             if validation is None or evaluation["physical_mae"] < best_mae:
                 best_mae = evaluation["physical_mae"]
-                save_codec(output, codec, dataset, cfg, args, step, metrics, statistics)
+                save_codec(output, codec, hand_data, cfg, args, step, metrics, statistics)
     print(f"Saved {selection} codec: {output}")
 
 

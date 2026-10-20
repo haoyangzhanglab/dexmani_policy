@@ -50,9 +50,8 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.utils.path import set_project_root
-from dexmani_policy.utils.random import set_seed
+from dexmani_policy.utils.config import register_resolvers, set_project_root
+from dexmani_policy.utils.runtime import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param, resolve_selection_checkpoint,
@@ -94,7 +93,7 @@ def _prepare_result_dir(exp_dir: Path, result_save_dir: Path | None) -> Path:
 
 def _write_result(path: Path, text: str) -> None:
     """Never replace an artifact from a previous invocation."""
-    from dexmani_policy.utils.atomic import atomic_path
+    from dexmani_policy.utils.runtime import atomic_path
     with atomic_path(path, overwrite=False) as temporary:
         temporary.write_text(text, encoding="utf-8")
 

@@ -30,11 +30,12 @@ from dexmani_policy.training.workspace import Workspace
 from dexmani_policy.utils.config import (
     FINGER_VECTOR_FIELDS,
     normalization_dims_from_config,
+    positive_int,
     resolve_normalization_spec,
+    validate_observation_fields,
 )
-from dexmani_policy.utils.hand_artifact import policy_representation, source_contract
-from dexmani_policy.utils.random import worker_init_fn
-from dexmani_policy.utils.validation import positive_int, validate_observation_fields
+from dexmani_policy.utils.hand_representation import describe_hand_data
+from dexmani_policy.utils.runtime import worker_init_fn
 
 
 def bind_defaults(config, constructor):
@@ -128,8 +129,6 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     if resume_checkpoint is None:
         normalizer = build_normalizer(dataset, spec, cfg.action_key)
         validate_normalizer_state(normalizer, spec, normalization_dims_from_config(cfg))
-    if cfg.agent.get("_target_") in HAND_POLICY_TARGETS:
-        source_contract(dataset)
     if verbose:
         summaries = []
         for child in children:
@@ -146,7 +145,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     return dataset, normalizer
 
 
-def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None, dataset=None):
+def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=None):
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
     model_cfg = cfg
     if checkpoint is not None:
@@ -190,6 +189,9 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None, dat
         model.initialize_training()
         model.load_normalizer_from_dataset(normalizer)
         model.validate_normalizer()
+
+    validate_hand_pretraining(cfg, model, dataset, checkpoint=checkpoint)
+    if checkpoint is None:
         model.to(device)
 
     requires_ema_for_loss = model.requires_ema_for_loss
@@ -210,30 +212,22 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None, dat
 
     if checkpoint is not None:
         restore_model_weights(checkpoint, model, ema_model, device)
-    bind_action_space_artifact(cfg, model, dataset)
 
     return model, ema_model, ema_updater
 
 
-def bind_action_space_artifact(cfg, model, dataset):
-    if policy_representation(model) is None:
+def validate_hand_pretraining(cfg, model, dataset, *, checkpoint=None):
+    if cfg.agent.get("_target_") not in HAND_POLICY_TARGETS:
         return
-    if dataset is None:
-        raise ValueError("Hand policies require the actual training dataset at artifact binding")
-    record = model.action_space_artifact
-    current = source_contract(dataset)
-    saved = record["source_contract"]
-    if saved != current:
-        changed = sorted(
-            key
-            for key in saved.keys() | current.keys()
-            if key not in saved or key not in current or saved[key] != current[key]
-        )
+    current = describe_hand_data(dataset)
+    saved = model.hand_data if checkpoint is None else checkpoint.effective_config["hand_data"]
+    changed = [key for key in current if saved[key] != current[key]]
+    if changed:
         raise ValueError(
-            f"Hand artifact source mismatch: {changed}; regenerate for this data recipe"
+            f"Hand pretraining data mismatch: {changed}; regenerate for this data recipe"
         )
     with open_dict(cfg):
-        cfg.action_space_artifact = OmegaConf.create(record)
+        cfg.hand_data = current
 
 
 def build_optimizer_and_scheduler(cfg, model, *, verbose=True):

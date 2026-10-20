@@ -1,20 +1,22 @@
-"""Lightweight input recipes, Hydra resolvers and config validation."""
+"""Configuration loading, numerical settings and dataset path resolution."""
 
+import argparse
 import copy
+import json
+import os
 import re
-import warnings
 from datetime import datetime
 from numbers import Integral
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf, open_dict
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 TASK_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
 FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
 NON_NUMERIC_OBSERVATION_FIELDS = frozenset({"task_text", "task_name"})
 ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
-
 
 ARTIFACT_LOCATION_FIELDS = {
     "lamp.prior_path",
@@ -24,7 +26,6 @@ ARTIFACT_LOCATION_FIELDS = {
     "agent.codec_path",
     "agent.codebook_path",
 }
-
 
 RESUME_OPERATIONAL_FIELDS = {
     "resume_from",
@@ -40,6 +41,24 @@ RESUME_OPERATIONAL_FIELDS = {
     "dataloader.persistent_workers",
     "dataloader.prefetch_factor",
 }
+
+
+def set_project_root() -> str:
+    """Resolve entry-point relative paths from the repository root."""
+    os.chdir(PROJECT_ROOT)
+    return str(PROJECT_ROOT)
+
+
+def resolve_resume_source(source):
+    if source is None:
+        return None
+    path = PROJECT_ROOT / Path(source).expanduser()
+    if path.is_dir():
+        path = path / "checkpoints" / "latest.pt"
+    path = path.resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"Resume source must be a checkpoint file: {path}")
+    return str(path)
 
 
 def recipe_content(config):
@@ -67,7 +86,7 @@ def recipe_content(config):
 
 
 def validate_source_recipe(saved, current):
-    """Reject a sidecar or programmatic resume config with a different recipe."""
+    """Require the same experiment recipe, allowing supported run/location changes."""
     differences = []
 
     def compare(left, right, path):
@@ -90,41 +109,21 @@ def validate_source_recipe(saved, current):
         raise ValueError("Checkpoint source recipe mismatch:\n" + "\n".join(differences))
 
 
-def checkpoint_source_config(payload, checkpoint_path, *, supplied=None):
-    """Compare sidecar and supplied recipes against a validated checkpoint's bound config."""
-    bound = payload["effective_config"]
-    source = Path(checkpoint_path).resolve().parent.parent / "config.yaml"
-    sidecar = (
-        OmegaConf.to_container(OmegaConf.load(source), resolve=True) if source.is_file() else None
-    )
-    for candidate in (sidecar, supplied):
-        if candidate is not None:
-            if not isinstance(candidate, (dict, DictConfig)) or not candidate:
-                raise ValueError("Source config must be a nonempty mapping")
-            validate_source_recipe(bound, candidate)
-    return copy.deepcopy(bound)
-
-
-def load_resume_source_config(checkpoint_path):
-    from dexmani_policy.training.common.checkpoint import CheckpointStore
-
-    payload = CheckpointStore(Path(checkpoint_path).parent).load_payload(checkpoint_path)
-    return checkpoint_source_config(payload, checkpoint_path)
-
-
 def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
     """Use the saved recipe on resume, applying only explicit operational/location overrides."""
     from hydra.core.override_parser.overrides_parser import OverridesParser
-    from dexmani_policy.utils.path import resolve_resume_source
 
     source = resolve_resume_source(cfg.get("resume_from"))
     if source is None:
         return copy.deepcopy(cfg)
-    source_config = (
-        load_resume_source_config(source)
-        if resume_checkpoint is None
-        else resume_checkpoint.effective_config
-    )
+    if resume_checkpoint is None:
+        from dexmani_policy.training.common.checkpoint import CheckpointStore
+
+        source_config = CheckpointStore(Path(source).parent).load_payload(source)[
+            "effective_config"
+        ]
+    else:
+        source_config = resume_checkpoint.effective_config
     result = OmegaConf.create(source_config)
     with open_dict(result):
         # The execution limit belongs to this invocation.
@@ -165,12 +164,10 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
 
 def register_resolvers():
     OmegaConf.register_new_resolver("run_id", lambda: LAUNCH_ID, replace=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        OmegaConf.register_new_resolver(
-            "eval", lambda expr: eval(expr, {"__builtins__": {}}, {}), replace=True
-        )
-        OmegaConf.register_new_resolver("eq", lambda a, b: a == b, replace=True)
+    OmegaConf.register_new_resolver(
+        "eval", lambda expr: eval(expr, {"__builtins__": {}}, {}), replace=True
+    )
+    OmegaConf.register_new_resolver("eq", lambda a, b: a == b, replace=True)
 
 
 def load_policy_config(config, overrides=()):
@@ -178,12 +175,10 @@ def load_policy_config(config, overrides=()):
     import hydra
 
     register_resolvers()
-    root = Path(__file__).resolve().parents[1] / "configs"
+    root = PROJECT_ROOT / "dexmani_policy" / "configs"
     path = Path(config).expanduser()
-    if path.suffix:
-        if path.suffix != ".yaml":
-            raise ValueError("Policy config paths must use the .yaml extension")
-        path = path.resolve(strict=True)
+    if path.is_file():
+        path = path.resolve()
         if not path.is_relative_to(root):
             root = path.parent
         name = path.relative_to(root).with_suffix("").as_posix()
@@ -193,8 +188,7 @@ def load_policy_config(config, overrides=()):
         return hydra.compose(config_name=name, overrides=list(overrides))
 
 
-def validate_window_contract(horizon, n_obs_steps, n_action_steps) -> None:
-    """Shared training and checkpoint-evaluation action-window grammar."""
+def validate_action_window(horizon, n_obs_steps, n_action_steps) -> None:
     for name, value in (
         ("horizon", horizon),
         ("n_obs_steps", n_obs_steps),
@@ -217,37 +211,21 @@ def validate_action_key_consistency(cfg) -> None:
 
     expected_control = "ee" if action_key == "action_ee" else "joint"
     env_runner = cfg.get("env_runner", {})
-    task_configs = env_runner.get("task_configs")
-    if task_configs is not None:
-        for task_index, task_config in enumerate(task_configs):
-            env_kwargs = task_config.get("env_kwargs", {})
-            actual_control = env_kwargs.get("control_mode", "joint")
-            if actual_control != expected_control:
-                task_name = task_config.get("task_name", f"index {task_index}")
-                raise ValueError(
-                    f"action_key='{action_key}' requires control_mode='{expected_control}', "
-                    f"but env_runner.task_configs task '{task_name}' has "
-                    f"control_mode='{actual_control}'."
-                )
-    else:
-        env_kwargs = env_runner.get("env_kwargs", {})
-        if isinstance(env_kwargs, (dict, DictConfig)):
-            actual_control = env_kwargs.get("control_mode", "joint")
-        else:
-            actual_control = "joint"
+    tasks = env_runner.get("task_configs")
+    for index, task in enumerate([env_runner] if tasks is None else tasks):
+        env_kwargs = task.get("env_kwargs") or {}
+        actual_control = env_kwargs.get("control_mode", "joint")
         if actual_control != expected_control:
+            name = task.get("task_name", f"index {index}")
             raise ValueError(
-                f"action_key='{action_key}' requires control_mode='{expected_control}', "
-                f"but env_runner.env_kwargs.control_mode='{actual_control}'. "
-                f"Check CLI overrides for env_runner.env_kwargs.control_mode."
+                f"Task {name!r}: action_key={action_key!r} requires "
+                f"control_mode={expected_control!r}, got {actual_control!r}"
             )
 
     ds_action_key = cfg.get("dataset", {}).get("action_key")
     if ds_action_key is not None and ds_action_key != action_key:
         raise ValueError(
-            f"dataset.action_key='{ds_action_key}' != action_key='{action_key}'. "
-            f"They must be the same. Check CLI overrides for dataset.action_key "
-            f"and/or action_key."
+            f"dataset.action_key={ds_action_key!r} differs from action_key={action_key!r}"
         )
 
 
@@ -335,3 +313,59 @@ def validate_action_clipping(spec, clip_sample):
         raise TypeError("agent.clip_sample must be a bool")
     if spec.get("action") == "gaussian" and clip_sample:
         raise ValueError("Gaussian action normalization requires agent.clip_sample=false.")
+
+
+def positive_int(value: int, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return value
+
+
+def validate_observation_fields(agent, declared, *, require_declaration=False):
+    consumed = getattr(agent, "consumed_observation_fields", None)
+    if consumed is None:
+        consumed = getattr(getattr(agent, "obs_encoder", None), "consumed_observation_fields", None)
+    if consumed is None:
+        if require_declaration:
+            raise ValueError(
+                "Real deployment requires consumed_observation_fields on Agent or encoder"
+            )
+        return
+    missing = set(consumed) - set(declared)
+    unused = set(declared) - set(consumed)
+    if missing or unused:
+        raise ValueError(
+            f"Model observation mismatch: missing={sorted(missing)}, unconsumed={sorted(unused)}"
+        )
+
+
+def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
+    """Resolve fresh or saved dataset paths without opening data or importing models."""
+    cfg = load_policy_config(config_name, overrides)
+    cfg = resolve_input_recipe(cfg, overrides=overrides)
+    datasets = cfg.dataset.get("datasets", [cfg.dataset])
+    return list(
+        dict.fromkeys(
+            (PROJECT_ROOT / Path(child.zarr_path).expanduser()).resolve() for child in datasets
+        )
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Resolve training dataset paths.")
+    parser.add_argument("--config-name", required=True)
+    parser.add_argument(
+        "--check", action="store_true", help="Require existing dataset directories."
+    )
+    parser.add_argument("overrides", nargs="*", help="Hydra overrides passed to training.")
+    args = parser.parse_args()
+    paths = resolve_dataset_paths(args.config_name, args.overrides)
+    print(json.dumps({"dataset_paths": [str(path) for path in paths]}, indent=2))
+    if args.check:
+        missing = [str(path) for path in paths if not path.is_dir()]
+        if missing:
+            raise SystemExit("Missing dataset directories:\n  " + "\n  ".join(missing))
+
+
+if __name__ == "__main__":
+    main()

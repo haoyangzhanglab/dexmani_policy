@@ -88,9 +88,8 @@ build_remote_commands() {
         printf -v remote_arg_q '%q' "$remote_arg"
         REMOTE_CMD+=" $remote_arg_q"
     done
-    # Module execution binds both preflight and training to this source copy,
-    # even when the environment has an editable install of the main checkout.
-    PREFLIGHT_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\" -m dexmani_policy.utils.resolve_datasets --check"
+    # Run this source copy even when the environment has another editable install.
+    PREFLIGHT_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\" -m dexmani_policy.utils.config --check"
     for remote_arg in "${REMOTE_ARGS[@]:2}"; do
         printf -v remote_arg_q '%q' "$remote_arg"
         PREFLIGHT_CMD+=" $remote_arg_q"

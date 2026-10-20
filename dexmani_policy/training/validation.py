@@ -11,13 +11,13 @@ from dexmani_policy.datasets.common.episode_split import validate_split_options
 from dexmani_policy.datasets.common.rgb_preprocessing import validate_rgb_preprocessing
 from dexmani_policy.utils.config import (
     NON_NUMERIC_OBSERVATION_FIELDS,
+    positive_int,
     resolve_normalization_spec,
     validate_action_clipping,
     validate_action_key_consistency,
     validate_dq_normalization,
-    validate_window_contract,
+    validate_action_window,
 )
-from dexmani_policy.utils.validation import positive_int
 
 HAND_POLICY_TARGETS = frozenset(
     {
@@ -193,7 +193,7 @@ def validate_config(cfg):
         positive_int(cfg.training.loop[name], f"training.loop.{name}")
     if cfg.training.lr_warmup_steps < 0:
         raise ValueError("training.lr_warmup_steps must be nonnegative")
-    validate_window_contract(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
+    validate_action_window(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
     validate_hand_config(cfg)
 
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:

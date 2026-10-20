@@ -56,10 +56,9 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.utils.config import register_resolvers
+from dexmani_policy.utils.config import register_resolvers, set_project_root
+from dexmani_policy.utils.runtime import set_seed
 from dexmani_policy.training.common.checkpoint import resolve_best_checkpoint
-from dexmani_policy.utils.path import set_project_root
-from dexmani_policy.utils.random import set_seed
 from dexmani_policy.evaluation.protocol import (
     _get_eval_param, resolve_selection_checkpoint,
     save_eval_snapshot, run_eval_plan, plan_size, task_seed_pools, artifact_reference, atomic_json, compute_eval_stats, selection_provenance,

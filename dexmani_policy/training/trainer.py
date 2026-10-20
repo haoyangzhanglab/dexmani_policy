@@ -17,9 +17,8 @@ from tqdm import tqdm
 from dexmani_policy.training.common.checkpoint import TrainCheckpoint, unwrap_state_dict
 from dexmani_policy.training.common.logging import to_log_scalars
 from dexmani_policy.training.workspace import Workspace
-from dexmani_policy.utils.random import get_rng_state
-from dexmani_policy.utils.tensor import dict_apply
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
+from dexmani_policy.utils.runtime import dict_apply, get_rng_state
 
 
 @dataclass

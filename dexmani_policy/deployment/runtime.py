@@ -12,10 +12,9 @@ import numpy as np
 
 from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.training.common.checkpoint import resolve_best_checkpoint, resolve_checkpoint
-from dexmani_policy.utils.config import load_experiment_config
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import load_experiment_config, positive_int
 
-_EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
+EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
 
 
 def resolve_experiment(selector):
@@ -25,10 +24,10 @@ def resolve_experiment(selector):
     else:
         project_candidate = Path(__file__).resolve().parents[2] / candidate
         candidate = (
-            project_candidate if project_candidate.is_dir() else _EXPERIMENTS_ROOT / candidate
+            project_candidate if project_candidate.is_dir() else EXPERIMENTS_ROOT / candidate
         )
         resolved = candidate.resolve(strict=True)
-        if not resolved.is_relative_to(_EXPERIMENTS_ROOT.resolve()):
+        if not resolved.is_relative_to(EXPERIMENTS_ROOT.resolve()):
             raise ValueError("Relative experiment selector must remain inside experiments")
     if not resolved.is_dir() or not (resolved / "config.yaml").is_file():
         raise ValueError(f"Experiment requires config.yaml: {resolved}")
@@ -40,8 +39,8 @@ def resolve_experiment(selector):
 def list_experiments(filter=None):
     return tuple(
         sorted(
-            str(path.parent.relative_to(_EXPERIMENTS_ROOT))
-            for path in _EXPERIMENTS_ROOT.rglob("config.yaml")
+            str(path.parent.relative_to(EXPERIMENTS_ROOT))
+            for path in EXPERIMENTS_ROOT.rglob("config.yaml")
             if any(p.is_file() for p in (path.parent / "checkpoints").glob("*.pt"))
             and (filter is None or filter.casefold() in str(path.parent).casefold())
         )
@@ -73,7 +72,7 @@ class PolicyInfo:
 
 
 def hand_history_steps(config):
-    """Read LAMP's saved history contract without constructing a model."""
+    """Read LAMP's saved history length without constructing a model."""
     if config["agent"].get("_target_") != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
         return None
     steps = positive_int(config["agent"].get("history_steps"), "agent.history_steps")
@@ -113,7 +112,10 @@ def inspect_policy(
         defaults.get("inference_steps") if inference_steps is None else inference_steps,
         "inference_steps",
     )
-    if cfg["agent"].get("_target_") == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy" and steps != 1:
+    if (
+        cfg["agent"].get("_target_") == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy"
+        and steps != 1
+    ):
         raise ValueError("LAMP PolicyInfo requires inference_steps=1")
     action_modes = {"action": "joint", "action_ee": "eef"}
     if cfg["action_key"] not in action_modes:
@@ -137,7 +139,7 @@ def inspect_policy(
         positive_int(cfg["agent"]["n_action_steps"], "n_action_steps"),
         positive_int(cfg["agent"]["horizon"], "horizon"),
         action_modes[cfg["action_key"]],
-        (recipe or {}).get("dt", (cfg.get("action_space_artifact") or {}).get("source_contract", {}).get("dt")),
+        (recipe or {}).get("dt", cfg.get("hand_data", {}).get("dt")),
         recipe.get("pointcloud") if recipe is not None else None,
         tuple(links) if links is not None else None,
         weights,
@@ -175,10 +177,10 @@ class LoadedPolicy:
         from dexmani_policy.utils.config import (
             normalization_dims_from_config,
             resolve_normalization_spec,
+            validate_action_window,
+            validate_observation_fields,
             validate_source_recipe,
-            validate_window_contract,
         )
-        from dexmani_policy.utils.validation import validate_observation_fields
 
         if info.hand_history_steps != hand_history_steps(config):
             raise ValueError("PolicyInfo hand history disagrees with saved config")
@@ -207,7 +209,7 @@ class LoadedPolicy:
             raise ValueError("Policy action mode disagrees with saved config")
         if getattr(agent, "action_key", None) != key:
             raise ValueError("Agent action_key disagrees with PolicyInfo/config")
-        validate_window_contract(info.horizon, info.n_obs_steps, info.n_action_steps)
+        validate_action_window(info.horizon, info.n_obs_steps, info.n_action_steps)
         for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
             if getattr(agent, name) != getattr(info, name) or config["agent"][name] != getattr(
                 info, name
@@ -241,7 +243,7 @@ class LoadedPolicy:
             raise ValueError("Agent normalization feature widths disagree with config")
         runtime = config.get("real_runtime") or {}
         if (
-            info.control_dt_s != runtime.get("dt", (config.get("action_space_artifact") or {}).get("source_contract", {}).get("dt"))
+            info.control_dt_s != runtime.get("dt", config.get("hand_data", {}).get("dt"))
             or info.pointcloud_config != runtime.get("pointcloud")
             or info.fingertip_link_names
             != (
@@ -312,7 +314,10 @@ class LoadedPolicy:
         from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
         from dexmani_policy.agents.core.temporal_latent_flow_policy import TemporalLatentFlowPolicy
 
-        if isinstance(self.agent, (LAMPPolicy, TemporalLatentFlowPolicy)) and mode in {"async", "rtc"}:
+        if isinstance(self.agent, (LAMPPolicy, TemporalLatentFlowPolicy)) and mode in {
+            "async",
+            "rtc",
+        }:
             raise NotImplementedError("LAMP and Temporal support sync execution only")
         if mode == "rtc":
             self.configure_rtc(guidance_cap)
@@ -375,15 +380,25 @@ class LoadedPolicy:
 
         if isinstance(self.agent, LAMPPolicy):
             if not isinstance(action_context, dict) or set(action_context) != {"hand_history"}:
-                raise ValueError("LAMP requires only action_context.hand_history from past dispatched targets")
+                raise ValueError(
+                    "LAMP requires only action_context.hand_history from past dispatched targets"
+                )
             history = action_context["hand_history"]
-            if (not isinstance(history, np.ndarray) or history.dtype.kind not in "fiu"
-                    or history.shape != (self.agent.history_steps, self.agent.hand_dim)
-                    or not np.isfinite(history).all()):
+            if (
+                not isinstance(history, np.ndarray)
+                or history.dtype.kind not in "fiu"
+                or history.shape != (self.agent.history_steps, self.agent.hand_dim)
+                or not np.isfinite(history).all()
+            ):
                 raise ValueError("hand_history must be finite physical NumPy [K,12]")
-            kwargs["action_context"] = {"hand_history": torch.tensor(
-                history, device=self._device, dtype=torch.float32).unsqueeze(0)}
-        elif action_context is not None and (not isinstance(action_context, dict) or action_context):
+            kwargs["action_context"] = {
+                "hand_history": torch.tensor(
+                    history, device=self._device, dtype=torch.float32
+                ).unsqueeze(0)
+            }
+        elif action_context is not None and (
+            not isinstance(action_context, dict) or action_context
+        ):
             raise ValueError("This runtime policy does not accept external action_context keys")
         if rtc_prefix is not None:
             prefix = np.asarray(rtc_prefix)
@@ -478,8 +493,11 @@ class LoadedPolicy:
 
         context = None
         if isinstance(self.agent, LAMPPolicy):
-            context = {"hand_history": np.repeat(observation["joint_state"][-1:, -12:],
-                                                self.agent.history_steps, axis=0)}
+            context = {
+                "hand_history": np.repeat(
+                    observation["joint_state"][-1:, -12:], self.agent.history_steps, axis=0
+                )
+            }
 
         def measure(**kwargs):
             durations = []

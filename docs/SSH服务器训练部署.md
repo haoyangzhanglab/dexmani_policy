@@ -59,11 +59,11 @@ bash scripts/remote/train_remote.sh --sync-data dp3 <task>
 
 ```bash
 python dexmani_policy/smoke_test.py --config-only dp3
-python -m dexmani_policy.utils.resolve_datasets \
+python -m dexmani_policy.utils.config \
   --config-name dp3 'task_name=<task>'
 ```
 
-resolver 输出实际 Dataset 路径；加 `--check` 只验证目录存在，不加载 Zarr 或证明训练可运行。多任务和 resume 均按实际配置解析，不能仅凭 task 名推断数据位置。
+resolver 输出实际 Dataset 路径；相对数据路径与训练入口一致，按当前源码的项目根目录解析，不依赖调用目录。加 `--check` 只验证目录存在，不加载 Zarr 或证明训练可运行。多任务和 resume 均按实际配置解析，不能仅凭 task 名推断数据位置。
 
 ### 启动过程
 

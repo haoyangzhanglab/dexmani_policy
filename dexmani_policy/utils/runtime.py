@@ -1,0 +1,102 @@
+"""Atomic persistence, random state and tensor containers."""
+
+from __future__ import annotations
+
+import os
+import random
+import tempfile
+from collections.abc import Callable
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+
+if TYPE_CHECKING:
+    import torch
+
+
+@contextmanager
+def atomic_path(path, *, overwrite=True, suffix=".tmp"):
+    path = Path(path)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".dexmani-publish-", suffix=suffix)
+    os.close(fd)
+    temporary = Path(name)
+    try:
+        yield temporary
+        if not temporary.is_symlink():
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+        if overwrite:
+            os.replace(temporary, path)
+        else:
+            # A hard link publishes atomically without replacing an existing target.
+            os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def set_seed(seed: int):
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+
+def get_rng_state(device="cpu") -> dict[str, Any]:
+    """Capture process RNG; worker augmentation and prefetch state are not included."""
+    import torch
+
+    device = torch.device(device)
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
+    }
+
+
+def set_rng_state(state: dict[str, Any], device="cpu") -> None:
+    import torch
+
+    device = torch.device(device)
+    cuda_state = state["torch_cuda"]
+    if (cuda_state is not None) != (device.type == "cuda"):
+        raise ValueError("Checkpoint CUDA RNG and target device must agree for exact resume")
+    if cuda_state is not None:
+        torch.cuda.set_rng_state(cuda_state.cpu(), device=device)
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"].cpu())
+
+
+def worker_init_fn(worker_id):
+    import torch
+
+    seed = torch.initial_seed() % 2**32
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def dict_apply(x: dict, func: Callable) -> dict:
+    import torch
+
+    result = {}
+    for key, value in x.items():
+        if isinstance(value, dict):
+            result[key] = dict_apply(value, func)
+        elif isinstance(value, list):
+            result[key] = [func(item) if isinstance(item, torch.Tensor) else item for item in value]
+        else:
+            result[key] = func(value)
+    return result
+
+
+def ensure_tensor(x: torch.Tensor | np.ndarray) -> torch.Tensor:
+    import torch
+
+    return x if isinstance(x, torch.Tensor) else torch.from_numpy(x)

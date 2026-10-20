@@ -28,7 +28,7 @@ from dexmani_policy.datasets.common.rgb_preprocessing import (
     validate_rgb_preprocessing,
 )
 from dexmani_policy.datasets.common.sequence_sampler import SequenceSampler
-from dexmani_policy.utils.tensor import dict_apply, ensure_tensor
+from dexmani_policy.utils.runtime import dict_apply, ensure_tensor
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -135,7 +135,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 window_validity="role_finite_channels_v2", point_cloud_channels=self.pc_dim
             )
         if saved_split is not None:
-            train_mask, val_mask, manifest, digest = restore_split(
+            train_mask, val_mask, manifest = restore_split(
                 saved_split, self.replay_buffer.attrs, self.replay_buffer.n_episodes
             )
         elif split_manifest is None:
@@ -144,7 +144,7 @@ class BaseDataset(torch.utils.data.Dataset):
             )
             train_mask = downsample_mask(seed=seed, mask=~val_mask, max_n=max_train_episodes)
         else:
-            train_mask, val_mask, manifest, digest = load_split_manifest(
+            train_mask, val_mask, manifest = load_split_manifest(
                 split_manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes
             )
         self.val_mask = val_mask
@@ -160,7 +160,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.filter_sampler(self.sampler)
         self.validation_dataset = None
         if split_manifest is not None or saved_split is not None:
-            self.data_recipe["split_manifest"] = {"content": manifest, "sha256": digest}
+            self.data_recipe["split_manifest"] = {"content": manifest}
 
     def finite_rows(self, key, columns=None):
         valid = np.ones(int(self.replay_buffer.episode_ends[-1]), dtype=bool)

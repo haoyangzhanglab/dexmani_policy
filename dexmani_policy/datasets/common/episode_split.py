@@ -1,6 +1,5 @@
 """Seeded episode splits and explicit trial manifests with strict restoration."""
 
-import hashlib
 import json
 import math
 from numbers import Integral, Real
@@ -10,7 +9,6 @@ import numpy as np
 
 
 def load_split_manifest(path, attrs, episode_count):
-    # Read once: masks, digest and saved recipe all describe these exact contents.
     manifest = json.loads(Path(path).read_text())
     return validate_split_manifest(manifest, attrs, episode_count)
 
@@ -68,20 +66,10 @@ def validate_split_manifest(manifest, attrs, episode_count):
         val_ids=[i for i in ids if i in val],
         exclusions=[i for i in ids if i in excluded],
     )
-    digest = hashlib.sha256(
-        json.dumps(
-            normalized,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode()
-    ).hexdigest()
     return (
         np.array([i in train for i in ids]),
         np.array([i in val for i in ids]),
         normalized,
-        digest,
     )
 
 
@@ -91,10 +79,7 @@ def restore_split(saved, attrs, episode_count):
 
     if OmegaConf.is_config(saved):
         saved = OmegaConf.to_container(saved, resolve=True)
-    train, val, manifest, digest = validate_split_manifest(saved["content"], attrs, episode_count)
-    if saved.get("sha256") != digest:
-        raise ValueError("Saved split manifest digest mismatch")
-    return train, val, manifest, digest
+    return validate_split_manifest(saved["content"], attrs, episode_count)
 
 
 def get_val_mask(n_episodes, val_ratio, seed=0):

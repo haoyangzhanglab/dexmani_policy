@@ -66,9 +66,8 @@ import torch
 from omegaconf import OmegaConf
 from termcolor import cprint
 
-from dexmani_policy.utils.config import register_resolvers
-from dexmani_policy.utils.path import set_project_root
-from dexmani_policy.utils.random import set_seed
+from dexmani_policy.utils.config import positive_int, register_resolvers, set_project_root
+from dexmani_policy.utils.runtime import set_seed
 from dexmani_policy.env_runner.base_runner import EvalEpisodeError
 from dexmani_policy.evaluation.protocol import (
     MilestoneCheckpoint,
@@ -85,7 +84,6 @@ from dexmani_policy.evaluation.protocol import (
     select_eval_seeds,
     validate_inference_steps,
 )
-from dexmani_policy.utils.validation import positive_int
 
 ROOT_DIR = set_project_root()
 register_resolvers()

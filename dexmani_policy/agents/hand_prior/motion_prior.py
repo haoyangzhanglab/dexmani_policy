@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import io
 from pathlib import Path
 
 import torch
 from torch import Tensor, nn
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 
 class HandMotionPrior(nn.Module):
@@ -80,13 +78,10 @@ class HandMotionPrior(nn.Module):
 
 
 def load_motion_prior(path: str | Path) -> tuple[HandMotionPrior, dict]:
-    """Restore a complete artifact, retaining the hash of exactly these bytes."""
-    raw = Path(path).expanduser().read_bytes()
-    payload = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("_format") != "lamp_prior.v2":
-        raise ValueError("Expected lamp_prior.v2; regenerate the prior or checkout the historical code for v1")
+    payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict) or payload.get("_format") != "lamp_prior.v3":
+        raise ValueError("Expected lamp_prior.v3; regenerate the prior or use historical code")
     prior = HandMotionPrior(**payload["model_config"])
     prior.load_state_dict(payload["model_state_dict"], strict=True)
     prior.validate_state()
-    payload["_file_sha256"] = hashlib.sha256(raw).hexdigest()
     return prior.freeze(), payload

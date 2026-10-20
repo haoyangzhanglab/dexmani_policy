@@ -23,13 +23,13 @@ from dexmani_policy.training.common.checkpoint import (
     resolve_record_path,
     validate_inference_settings,
 )
-from dexmani_policy.utils.atomic import atomic_path
 from dexmani_policy.utils.config import (
     load_experiment_config,
+    positive_int,
     validate_action_key_consistency,
-    validate_window_contract,
+    validate_action_window,
 )
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.runtime import atomic_path
 
 
 def read_selection_reference(root, info):
@@ -120,7 +120,7 @@ def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
 
 def validate_eval_config(cfg, saved: dict) -> None:
     """Validate saved model windows against the current evaluation environment."""
-    validate_window_contract(
+    validate_action_window(
         saved["agent"]["horizon"],
         saved["agent"]["n_obs_steps"],
         saved["agent"]["n_action_steps"],

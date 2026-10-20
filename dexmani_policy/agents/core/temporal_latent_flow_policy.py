@@ -11,8 +11,7 @@ from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_t
 from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE, load_temporal_vae
-from dexmani_policy.utils.config import validate_window_contract
-from dexmani_policy.utils.hand_artifact import artifact_record
+from dexmani_policy.utils.config import validate_action_window
 
 
 class TemporalLatentFlowPolicy(BasePolicy):
@@ -52,7 +51,7 @@ class TemporalLatentFlowPolicy(BasePolicy):
         decoded_loss_weight: float = 0.75,
         modality_dropout_probs: dict | None = None,
     ) -> None:
-        validate_window_contract(horizon, n_obs_steps, n_action_steps)
+        validate_action_window(horizon, n_obs_steps, n_action_steps)
         if action_dim != 19 or state_dim != 19:
             raise ValueError(
                 "Temporal codec requires joint actions/state: 7 arm + 12 hand"
@@ -129,9 +128,7 @@ class TemporalLatentFlowPolicy(BasePolicy):
         if codec.model_config != self.codec.model_config:
             raise ValueError("Temporal codec architecture differs from the policy configuration")
         self.codec.load_state_dict(codec.state_dict(), strict=True)
-        self.action_space_artifact = artifact_record(
-            "temporal", "temporal_hand_codec.v1", payload["_file_sha256"], payload["metadata"], self.codec,
-        )
+        self.hand_data = payload["metadata"]["hand_data"]
         self.codec_initialized = True
 
     def validate_restored_codec(self, module: torch.nn.Module, incompatible_keys) -> None:

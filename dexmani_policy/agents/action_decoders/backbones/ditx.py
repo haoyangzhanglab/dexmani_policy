@@ -5,7 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 from timm.models.vision_transformer import Mlp, RmsNorm
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 from .modules import (
     TimestepMLP,

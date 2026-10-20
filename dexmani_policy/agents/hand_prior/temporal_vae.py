@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import io
 import math
 from pathlib import Path
 
@@ -11,7 +9,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 
 class TemporalHandVAE(nn.Module):
@@ -175,13 +173,10 @@ class TemporalHandVAE(nn.Module):
 
 
 def load_temporal_vae(path: str | Path) -> tuple[TemporalHandVAE, dict]:
-    """Load one immutable artifact snapshot; policy state can embed all tensors."""
-    raw = Path(path).expanduser().read_bytes()
-    payload = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("_format") != "temporal_hand_codec.v1":
-        raise ValueError("Expected a temporal_hand_codec.v1 checkpoint")
+    payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict) or payload.get("_format") != "temporal_hand_codec.v2":
+        raise ValueError("Expected temporal_hand_codec.v2; regenerate the codec or use historical code")
     codec = TemporalHandVAE(**payload["model_config"])
     codec.load_state_dict(payload["state_dict"], strict=True)
     codec.validate_state()
-    payload["_file_sha256"] = hashlib.sha256(raw).hexdigest()
     return codec.freeze(), payload

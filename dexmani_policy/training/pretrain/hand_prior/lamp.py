@@ -15,14 +15,12 @@ from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.training.builder import build_normalizer
 from dexmani_policy.training.validation import validate_config
-from dexmani_policy.utils.atomic import atomic_path
-from dexmani_policy.utils.config import load_policy_config, resolve_normalization_spec
-from dexmani_policy.utils.hand_artifact import (
-    metadata_sha256,
-    source_contract,
-    validate_selection_schedule,
+from dexmani_policy.utils.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.utils.hand_representation import (
+    describe_hand_data,
+    validate_kl_schedule,
 )
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.runtime import atomic_path
 
 
 def build_prior_dataset(cfg):
@@ -78,7 +76,7 @@ def evaluate(prior, dataset, rows, batch_size):
         kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
         totals += torch.stack((reconstruction, copy_error, kl)).double() * len(selected)
     mse, copy_mse, kl = (totals / len(rows)).tolist()
-    return {
+    metrics = {
         "mse": mse,
         "copy_mse": copy_mse,
         "kl": kl,
@@ -87,33 +85,27 @@ def evaluate(prior, dataset, rows, batch_size):
         "physical_joint_mae": (physical_absolute / len(rows)).tolist(),
         "physical_frame_rmse_p95": float(torch.quantile(torch.cat(frame_rmse), 0.95)),
     }
+    if not all(math.isfinite(metrics[key]) for key in ("mse", "copy_mse", "kl")):
+        raise ValueError("Prior evaluation became nonfinite")
+    return metrics
 
 
-def save_prior(path, prior, dataset, cfg, args, step, metrics, optimizer):
+def save_prior(path, prior, hand_data, cfg, args, step, metrics, optimizer):
     prior.ready.fill_(True)
-    contract = source_contract(dataset)
+    prior.validate_state()
     evaluation = metrics["evaluation"]
     metadata = dict(
-        implementation=dataset.hand_implementation_version,
-        source_contract=contract,
-        source_contract_sha256=metadata_sha256(contract),
-        model_config=prior.model_config,
+        hand_data=hand_data,
         normalization_spec=resolve_normalization_spec(cfg),
         selection=dict(
             selection_step=int(step),
-            beta=metrics["beta"],
-            target_beta=args.beta,
-            eligible_step=max(1, args.beta_warmup),
-            split="validation" if dataset.val_mask.any() else "final_no_holdout",
+            split="validation" if hand_data["val_episodes"] else "final_no_holdout",
             metric="prior_mean_mse",
             value=evaluation["mse"],
-            reconstruction=evaluation["mse"],
-            kl=evaluation["kl"],
-            physical_joint_mae=evaluation["physical_joint_mae"],
         ),
     )
     payload = {
-        "_format": "lamp_prior.v2",
+        "_format": "lamp_prior.v3",
         "model_config": dict(prior.model_config),
         "model_state_dict": {
             key: value.detach().cpu().clone() for key, value in prior.state_dict().items()
@@ -142,7 +134,7 @@ def train(args):
         raise ValueError("lr and clip_grad must be positive and finite")
     if args.min_lr > args.lr:
         raise ValueError("min_lr must not exceed lr")
-    validate_selection_schedule(args.steps, args.beta, max(1, args.beta_warmup))
+    validate_kl_schedule(args.steps, args.beta, max(1, args.beta_warmup))
     cfg = load_policy_config(args.policy_config or args.config, args.overrides)
     output = Path(args.output or cfg.agent.prior_path).expanduser()
     if output.exists() and not args.overwrite:
@@ -151,7 +143,7 @@ def train(args):
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     dataset = build_prior_dataset(cfg)
-    source_contract(dataset)
+    hand_data = describe_hand_data(dataset)
     train_rows, val_rows = source_rows(dataset)
     prior = HandMotionPrior(
         hand_dim=12,
@@ -221,10 +213,10 @@ def train(args):
                 print(f"Validation at {step}: {evaluation}")
                 if evaluation["mse"] < best_mse:
                     best_mse = evaluation["mse"]
-                    save_prior(output, prior, dataset, cfg, args, step, last_metrics, optimizer)
+                    save_prior(output, prior, hand_data, cfg, args, step, last_metrics, optimizer)
             elif step == args.steps:
                 last_metrics["evaluation"] = evaluate(prior, dataset, train_rows, args.batch_size)
-                save_prior(output, prior, dataset, cfg, args, step, last_metrics, optimizer)
+                save_prior(output, prior, hand_data, cfg, args, step, last_metrics, optimizer)
     print(f"Saved {'best validation' if len(val_rows) else 'final'} prior: {output}")
 
 

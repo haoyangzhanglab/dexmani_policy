@@ -9,8 +9,7 @@ from torch.nn import functional as F
 from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
-from dexmani_policy.utils.config import validate_window_contract
-from dexmani_policy.utils.hand_artifact import artifact_record
+from dexmani_policy.utils.config import validate_action_window
 
 
 class LAMPRegressionHead(nn.Module):
@@ -48,7 +47,7 @@ class LAMPPolicy(BasePolicy):
         offset_reg_weight: float = 1e-3,
         modality_dropout_probs: dict | None = None,
     ) -> None:
-        validate_window_contract(horizon, n_obs_steps, n_action_steps)
+        validate_action_window(horizon, n_obs_steps, n_action_steps)
         if (horizon, n_obs_steps, n_action_steps) != (1, 1, 1):
             raise ValueError("LAMP requires horizon=n_obs_steps=n_action_steps=1")
         if action_dim != 19 or state_dim != 19:
@@ -86,9 +85,7 @@ class LAMPPolicy(BasePolicy):
         if prior.model_config != self.prior.model_config:
             raise ValueError("LAMP prior architecture differs from the policy configuration")
         self.prior.load_state_dict(prior.state_dict(), strict=True)
-        self.action_space_artifact = artifact_record(
-            "lamp", "lamp_prior.v2", payload["_file_sha256"], payload["metadata"], self.prior,
-        )
+        self.hand_data = payload["metadata"]["hand_data"]
         self.prior_initialized = True
 
     def validate_restored_prior(self, module, incompatible_keys) -> None:

@@ -11,7 +11,6 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.dp3_policy import DP3ObservationEncoder
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
-from dexmani_policy.utils.hand_artifact import artifact_record
 
 
 class DQRISEPolicy(BasePolicy):
@@ -113,10 +112,7 @@ class DQRISEPolicy(BasePolicy):
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
         self.hand_codebook.load(self.codebook_path)
-        self.action_space_artifact = artifact_record(
-            "dqrise", "hand_codebook.v3", self.hand_codebook.artifact_sha256,
-            self.hand_codebook.artifact_metadata, self.hand_codebook,
-        )
+        self.hand_data = self.hand_codebook.artifact_metadata["hand_data"]
         self.validate_codebook_normalizer()
 
     def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:

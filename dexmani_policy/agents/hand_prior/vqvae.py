@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from dexmani_policy.utils.validation import positive_int
+from dexmani_policy.utils.config import positive_int
 
 
 def orthogonal_init(module: nn.Module) -> None:
@@ -171,7 +171,7 @@ class ResidualVectorQuantizer(nn.Module):
 class HandVQVAE(nn.Module):
     """Residual VQ-VAE for individual hand states, independent of action chunks."""
 
-    FORMAT_VERSION = 4
+    FORMAT_VERSION = 5
 
     def __init__(
         self,
