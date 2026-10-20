@@ -46,7 +46,7 @@ bash scripts/training/train.sh dp3 \
 
 `resume_from` 接受实验目录或 checkpoint，支持 `~`，相对路径按项目根目录解析。完整恢复以 checkpoint 的 `effective_config` 为唯一配方来源，恢复 normalizer、raw/EMA、optimizer、scheduler、RNG 和采样位置；只允许规定的运行参数和数据路径覆盖。显式 `task_name` 必须与保存值一致，不能借续训改变模型、数据配方、world size 或训练预算。详见 [Checkpoint 与续训](docs/项目架构.md#checkpoint-与续训)。
 
-训练日志记录标量指标。每次启动（含续训）创建新的 W&B run，默认 `offline`；`workspace.wandb_cfg` 只配置 `project/group/name/mode`。评测录像使用 `eval.video`，不经训练日志上传。
+训练日志记录标量指标。每次启动（含续训）创建新的 W&B run，默认 `offline`；`workspace.wandb_cfg` 只配置 `project/group/name/mode`。评测入口共用 `eval.video.fps` 设置录像帧率，不经训练日志上传；录像开关与优先级见[仿真评测机制](docs/仿真评测机制.md)。
 
 设置 `workspace.wandb_cfg=null` 可关闭 W&B。续训可覆盖 W&B 的 `project/group/name/mode`，见[完整恢复边界](docs/项目架构.md#完整恢复边界)；独立推理不构造日志组件。
 
@@ -140,12 +140,12 @@ Smoke 也接受显式 `.yaml` 路径，与预训练入口共用 Hydra 配置组�
 ```bash
 python dexmani_policy/smoke_test.py --config-only <config_name>
 python dexmani_policy/smoke_test.py <config_name> --max-updates 4
-python -m unittest discover -s tests -p test_utils.py
+python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 `--config-only` 检查配置、Hydra target 和策略、训练、Dataset、增强类的导入，不加载数据或执行 GPU 算子。完整 smoke 需要 CUDA、真实数据和所需权重，按原训练配方运行有界更新，再检查预测和 raw/EMA 保存恢复；临时目录退出时清理，不创建 W&B run。
 
-`test_utils.py` 使用 CPU 和临时合成数据检查路径/续训配方、原子写入、RNG、手部产物导出及 raw/EMA 内嵌表示恢复；不替代完整训练 smoke。
+CPU 回归使用临时合成数据：`test_utils.py` 检查路径/续训配方、原子写入、RNG 和手部产物恢复；`test_deployment.py` 检查部署配置快照与动作输出；`test_evaluation.py` 检查观测窗口、多任务输入对齐、seed 证据，以及选点、评测和 demo 入口。不替代完整训练 smoke 或仿真、真机闭环。
 
 smoke 支持多个配置名，默认运行 4 次 optimizer update，不接受 Hydra 字段覆盖。若需覆盖配置或保留短跑产物，使用正式训练入口：
 
@@ -164,7 +164,7 @@ bash scripts/eval/record_demo.sh <policy_name> <task_name> <run>
 
 流水线执行 checkpoint selection 和不录视频的 held-out eval，使用本次选择的固定记录交接；demo 单独运行。也可分别使用 `select_best_ckpt.sh`、`eval_best_ckpt.sh`，按各入口的 `--help` 调整预算、EMA/raw、NFE 和录像。
 
-评测读取已保存实验，不重新组合当前 Policy YAML。`best_ckpt.json` 使用 `best.v1` 推理快照，详细选择证据使用 `selection.v3`；最终 best 评测排除实际用于选点的 `(task, seed)`。正常全零结果仍可完成选择，技术异常不会记成普通任务失败。
+评测读取已保存实验，不重新组合当前 Policy YAML。`best_ckpt.json` 仅引用本次成功的 `selection_result.json`，推理参数与 episode 证据只保存一份；最终 best 评测排除实际用于选点的 `(task, seed)`。正常全零结果仍可完成选择，技术异常不会记成普通任务失败。
 
 结果按调用保存到独立目录，包含 `eval_config.yaml`、实际 checkpoint、推理参数、seed 计划及 episode 明细。协议、参数优先级、指标和结果路径见 [仿真评测机制](docs/仿真评测机制.md)。
 
@@ -199,9 +199,9 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | `dexmani_policy/training/common/` | EMA、学习率调度、日志与 checkpoint |
 | `dexmani_policy/training/pretrain/hand_prior/` | 动作空间预训练：VQ、LAMP、Temporal 及码本导出 |
 | `dexmani_policy/training/pretrain/obs/` | 观测表征预训练（当前尚无实现） |
-| `dexmani_policy/evaluation/` | 离线评测共享协议 |
-| `dexmani_policy/env_runner/` | 仿真环境与动作执行 |
-| `dexmani_policy/deployment/` | 已保存策略的检查与 Real 推理接口 |
+| `dexmani_policy/env_runner/` | 仿真执行；`evaluation.py` 评测、`selection.py` 选点 |
+| `dexmani_policy/env_runner/common/` | `seeds.py` 采样与计划校验、`metrics.py` 指标、`video.py` 录像 |
+| `dexmani_policy/deployment/` | `metadata.py` 检查保存配置，`runtime.py` 提供 Real 推理接口 |
 | `scripts/` | 本地训练、评测、远端运行和运维入口 |
 
 观测交互组件 `HandSceneEncoder`、`SceneAggregator` 位于 `agents/obs_encoder/interaction/`，当前没有专属策略配置；不要仅凭模块存在推断默认模型已接入。

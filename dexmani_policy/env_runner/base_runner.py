@@ -1,74 +1,52 @@
+"""Single-task rollout with observation windows and physical action execution."""
+
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-import imageio
 import numpy as np
 import torch
 from termcolor import cprint
 
 from dexmani_policy.datasets.common.rgb_preprocessing import preprocess_validation_rgb
+from dexmani_policy.env_runner.common.metrics import summarize_episodes, validate_episode_details
+from dexmani_policy.env_runner.common.video import save_episode_video
 from dexmani_policy.utils.config import positive_int
-from dexmani_policy.utils.runtime import dict_apply
 
 
-class EvalEpisodeError(RuntimeError):
-    """Fatal per-episode failure that must abort the whole eval run (non-zero exit).
+class EvaluationError(RuntimeError):
+    """A technical failure aborts evaluation rather than becoming a task outcome."""
 
-    Raised when a model-forward / env / OOM / contract error occurs during an
-    episode — distinct from a genuine ``success=False`` task outcome, which the
-    episode loop records normally without raising.
-    """
-
-    def __init__(self, category: str, seed: int, message: str):
-        super().__init__(f"[{category}] seed {seed}: {message}")
-        self.category = category
+    def __init__(self, error: Exception, *, task, seed):
+        super().__init__(f"task={task} seed={seed}: {type(error).__name__}: {error}")
+        self.task = task
         self.seed = seed
 
 
-def _classify_eval_exception(e: BaseException) -> str:
-    """Tag an episode exception with a coarse category for diagnostics."""
-    if isinstance(e, torch.cuda.OutOfMemoryError):
-        return "oom"
-    if isinstance(e, ValueError):
-        return "value_error"
-    if isinstance(e, RuntimeError):
-        return "runtime_error"
-    return type(e).__name__
-
-
 class BaseRunner:
-    """Single-task evaluation with observation windows and optional video.
-
-    Model/env errors raise EvalEpisodeError; genuine task failures are results.
-    Subclasses provide make_env() and get_seed_list(), optionally action preparation.
-    Multi-task evaluation composes these runners.
-    """
+    """Subclasses supply an environment and physical evaluation seeds."""
 
     def __init__(
         self,
         n_obs_steps: int,
         default_eval_episodes: int,
-        sensor_modalities: List[str] | None = None,
+        sensor_modalities: list[str] | None = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
         rgb_preprocess_size: tuple[int, int] | None = None,
         rgb_random_crop_size: tuple[int, int] | None = None,
     ):
-        self.is_multi_task = False
-        self.n_obs_steps = n_obs_steps
+        self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
+        self.obs_buffer: dict[str, np.ndarray | torch.Tensor] = {}
+        self.obs_strings: dict[str, str] = {}
+        self.obs_cursor = 0
+        self.obs_count = 0
+        self.hand_history = None
 
-        # Circular buffer: pre-allocated per-modality storage to avoid per-step
-        # np.zeros allocations in the hot path.
-        self._obs_buffer: Dict[str, np.ndarray] = {}
-        self._obs_cursor = 0  # next write position in ring buffer
-        self._obs_count = 0  # number of frames stored (0 .. n_obs_steps)
-        self._obs_str_buffer: Dict[str, list] = {}  # for string modalities
-        self._hand_history = None  # LAMP: executed commands, independent of observation history.
-
-        self.env_video_fps = env_video_fps  # may be None → auto-detect from env
+        self.env_video_fps = env_video_fps
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
         self.rgb_preprocessing = {
@@ -77,214 +55,105 @@ class BaseRunner:
             "keep_uint8": False,
         }
 
-    def update_obs(self, observation: Dict[str, Any]):
-        """Write one observation frame into the circular buffer.
-
-        On the first call the buffer is allocated lazily from the frame shapes.
-        """
-        pos = self._obs_cursor % self.n_obs_steps
+    def update_obs(self, observation: dict[str, Any]):
         missing = set(self.sensor_modalities) - observation.keys()
         if missing:
-            raise ValueError(f'Missing required observation frame fields: {sorted(missing)}')
-        # Validate the entire frame before allocating, writing or advancing any
-        # history. In particular NumPy assignment must not broadcast a bad frame.
-        for k in self.sensor_modalities:
-            v = observation[k]
-            if not isinstance(v, (np.ndarray, torch.Tensor, str)):
-                raise TypeError(f'Unsupported observation type for {k}: {type(v).__name__}')
-            if isinstance(v, np.ndarray) and v.dtype.kind not in 'buif':
-                raise TypeError(f'Observation {k} must be a numeric array or a string')
-            if torch.is_tensor(v) and (v.layout != torch.strided or v.is_complex()):
-                raise TypeError(f'Observation {k} must be a dense real tensor')
-            if k in self._obs_str_buffer and not isinstance(v, str):
-                raise TypeError(f'Observation {k} changed from string to numeric')
-            if k in self._obs_buffer:
-                buf = self._obs_buffer[k]
-                if (type(v) is not type(buf) or v.shape != buf.shape[1:]
-                        or v.dtype != buf.dtype
-                        or (torch.is_tensor(v) and v.device != buf.device)):
-                    raise ValueError(f'Observation {k} changed type, shape, dtype or device')
-        for k in self.sensor_modalities:
-            v = observation[k]
-            if isinstance(v, np.ndarray):
-                if k not in self._obs_buffer:
-                    self._obs_buffer[k] = np.zeros(
-                        (self.n_obs_steps,) + v.shape, dtype=v.dtype
+            raise ValueError(f"Missing required observation frame fields: {sorted(missing)}")
+        # Check the whole frame before writes; NumPy assignment can silently broadcast.
+        for name in self.sensor_modalities:
+            value = observation[name]
+            if name in self.obs_buffer:
+                buffer = self.obs_buffer[name]
+                if (
+                    type(value) is not type(buffer)
+                    or value.shape != buffer.shape[1:]
+                    or value.dtype != buffer.dtype
+                    or (
+                        torch.is_tensor(value)
+                        and (value.device != buffer.device or value.layout != torch.strided)
                     )
-                self._obs_buffer[k][pos] = v
-            elif isinstance(v, torch.Tensor):
-                if k not in self._obs_buffer:
-                    self._obs_buffer[k] = torch.zeros(
-                        (self.n_obs_steps,) + tuple(v.shape),
-                        dtype=v.dtype,
-                        device=v.device,
-                    )
-                self._obs_buffer[k][pos] = v
-            elif isinstance(v, str):
-                if k not in self._obs_str_buffer:
-                    self._obs_str_buffer[k] = []
-                buf = self._obs_str_buffer[k]
-                buf.append(v)
-                if len(buf) > self.n_obs_steps:
-                    buf.pop(0)
-        self._obs_cursor += 1
-        self._obs_count = min(self._obs_count + 1, self.n_obs_steps)
+                ):
+                    raise ValueError(f"Observation {name} changed type, shape, dtype or device")
+            elif name in self.obs_strings:
+                if not isinstance(value, str):
+                    raise TypeError(f"Observation {name} changed from string to numeric")
+            elif isinstance(value, np.ndarray):
+                if value.dtype.kind not in "buif":
+                    raise TypeError(f"Observation {name} must be a numeric array")
+            elif torch.is_tensor(value):
+                if value.layout != torch.strided or value.is_complex():
+                    raise TypeError(f"Observation {name} must be a dense real tensor")
+            elif not isinstance(value, str):
+                raise TypeError(f"Unsupported observation type for {name}: {type(value).__name__}")
 
-    def get_stacked_obs(self) -> Dict[str, Any]:
-        """Return a time-ordered stack of the last n_obs_steps frames.
+        position = self.obs_cursor % self.n_obs_steps
+        for name in self.sensor_modalities:
+            value = observation[name]
+            if isinstance(value, str):
+                self.obs_strings[name] = value
+                continue
+            if name not in self.obs_buffer:
+                shape = (self.n_obs_steps, *value.shape)
+                self.obs_buffer[name] = (
+                    np.empty(shape, dtype=value.dtype)
+                    if isinstance(value, np.ndarray)
+                    else value.new_empty(shape)
+                )
+            self.obs_buffer[name][position] = value
+        self.obs_cursor += 1
+        self.obs_count = min(self.obs_count + 1, self.n_obs_steps)
 
-        Numeric storage is reused on writes. Reading uses padding or advanced
-        indexing to produce chronological copies, including when the buffer
-        is full.
-        """
-        if self._obs_count == 0:
+    def get_stacked_obs(self) -> dict[str, Any]:
+        """Return independent chronological copies, padding the first observed frame."""
+        if self.obs_count == 0:
             raise RuntimeError("No observation in buffer")
-        out: Dict[str, Any] = {}
-        for k, buf in self._obs_buffer.items():
-            if self._obs_count < self.n_obs_steps:
-                # Episode start: only _obs_count frames available.
-                # Pad the beginning with the first frame.
-                result = (
-                    np.empty_like(buf)
-                    if isinstance(buf, np.ndarray)
-                    else torch.empty_like(buf)
-                )
-                pad_len = self.n_obs_steps - self._obs_count
-                result[:pad_len] = buf[0]
-                result[pad_len:] = buf[: self._obs_count]
-                out[k] = result
+        if self.obs_count < self.n_obs_steps:
+            indices = np.maximum(np.arange(self.n_obs_steps) - self.n_obs_steps + self.obs_count, 0)
+        else:
+            indices = (self.obs_cursor + np.arange(self.n_obs_steps)) % self.n_obs_steps
+        stacked = {}
+        tensor_indices = {}
+        for name, buffer in self.obs_buffer.items():
+            if isinstance(buffer, np.ndarray):
+                stacked[name] = buffer[indices]
             else:
-                # Normal case: return chronologically-ordered slice.
-                start = self._obs_cursor % self.n_obs_steps
-                idx = (start + np.arange(self.n_obs_steps)) % self.n_obs_steps
-                if isinstance(buf, np.ndarray):
-                    out[k] = buf[idx]
-                else:
-                    out[k] = buf[torch.as_tensor(idx, device=buf.device)]
-        for k, buf in self._obs_str_buffer.items():
-            out[k] = [buf[-1]] * self.n_obs_steps if buf else []
-        if len(out) == 0:
-            raise RuntimeError("Stacked observation dict is empty")
-        return out
-
-    def get_obs_batch(self, device) -> Dict[str, Any]:
-        def to_torch(x, *, dtype=None, device=None):
-            if isinstance(x, torch.Tensor):
-                return (
-                    x.to(device=device, dtype=dtype)
-                    if dtype is not None
-                    else x.to(device=device)
-                )
-            if isinstance(x, np.ndarray):
-                return torch.as_tensor(x, device=device, dtype=dtype)
-            return x
-
-        stacked_obs = self.get_stacked_obs()
-        if "rgb" in stacked_obs:
-            stacked_obs["rgb"] = preprocess_validation_rgb(
-                stacked_obs["rgb"],
-                **self.rgb_preprocessing,
-            )
-        obs_batch = dict_apply(stacked_obs, lambda x: to_torch(x, device=device))
-        obs_batch = dict_apply(
-            obs_batch, lambda x: x.unsqueeze(0) if torch.is_tensor(x) else x
+                if buffer.device not in tensor_indices:
+                    tensor_indices[buffer.device] = torch.as_tensor(indices, device=buffer.device)
+                stacked[name] = buffer[tensor_indices[buffer.device]]
+        stacked.update(
+            {name: [value] * self.n_obs_steps for name, value in self.obs_strings.items()}
         )
+        return stacked
 
-        return obs_batch
+    def get_obs_batch(self, device) -> dict[str, Any]:
+        batch = {}
+        for name, value in self.get_stacked_obs().items():
+            if name == "rgb":
+                value = preprocess_validation_rgb(value, **self.rgb_preprocessing)
+            if isinstance(value, (np.ndarray, torch.Tensor)):
+                value = torch.as_tensor(value, device=device).unsqueeze(0)
+            batch[name] = value
+        return batch
 
     def reset(self):
-        self._obs_buffer.clear()
-        self._obs_str_buffer.clear()
-        self._obs_cursor = 0
-        self._obs_count = 0
-        self._hand_history = None
+        self.obs_buffer.clear()
+        self.obs_strings.clear()
+        self.obs_cursor = 0
+        self.obs_count = 0
+        self.hand_history = None
 
     @torch.no_grad()
-    def get_action_chunk(
-        self, obs_batch, agent, inference_steps: int | None = None
-    ) -> np.ndarray:
-        if inference_steps is not None:
-            positive_int(inference_steps, "inference_steps")
+    def get_action_chunk(self, obs_batch, agent, inference_steps: int | None = None) -> np.ndarray:
         kwargs = {}
         if getattr(agent, "history_steps", 0):
-            if self._hand_history is None:
+            if self.hand_history is None:
                 raise RuntimeError("Hand command history must be initialized at episode reset")
-            history = torch.as_tensor(self._hand_history, dtype=torch.float32,
-                                      device=obs_batch["joint_state"].device)
+            history = torch.as_tensor(
+                self.hand_history, dtype=torch.float32, device=obs_batch["joint_state"].device
+            )
             kwargs["action_context"] = {"hand_history": history.unsqueeze(0)}
-        result = agent.predict_action(
-            obs_dict=obs_batch, inference_steps=inference_steps, **kwargs
-        )
-
+        result = agent.predict_action(obs_dict=obs_batch, inference_steps=inference_steps, **kwargs)
         return result["control_action"].detach().cpu().numpy().squeeze(0)
-
-    @staticmethod
-    def _encode_video(path: Path, frames: np.ndarray, fps: int) -> None:
-        """Encode frames to MP4, preferring ffmpeg pipe for streaming.
-
-        Falls back to imageio.mimsave if ffmpeg is not available.
-        """
-        import shutil
-        import subprocess
-        import tempfile
-
-        if shutil.which("ffmpeg"):
-            T, H, W, C = frames.shape
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-f",
-                "rawvideo",
-                "-pixel_format",
-                "rgb24",
-                "-video_size",
-                f"{W}x{H}",
-                "-framerate",
-                str(fps),
-                "-i",
-                "-",
-                "-pix_fmt",
-                "yuv420p",
-                "-vcodec",
-                "libx264",
-                "-crf",
-                "23",
-                str(path),
-            ]
-            # A file avoids deadlocking the streaming stdin writer on a full
-            # stderr pipe. Only a bounded tail is included in failure messages.
-            with tempfile.TemporaryFile() as stderr:
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr)
-                try:
-                    for frame in frames:
-                        proc.stdin.write(frame.astype(np.uint8).tobytes())
-                    proc.stdin.close()
-                    returncode = proc.wait(timeout=60)
-                    if returncode != 0:
-                        stderr.seek(0, 2)
-                        stderr.seek(max(0, stderr.tell() - 4096))
-                        detail = stderr.read().decode("utf-8", errors="replace").strip()
-                        raise RuntimeError(
-                            f"ffmpeg exited with status {returncode}: {detail}"
-                        )
-                finally:
-                    # Reap a hung/zombie ffmpeg on BrokenPipeError / TimeoutExpired so
-                    # a failed encode never leaks a subprocess.
-                    if proc.poll() is None:
-                        try:
-                            proc.stdin.close()
-                        except Exception:
-                            pass
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            proc.wait()
-        else:
-            imageio.mimsave(str(path), frames.astype(np.uint8), fps=fps)
 
     def run_one_episode(
         self,
@@ -292,27 +161,18 @@ class BaseRunner:
         env,
         episode_seed,
         inference_steps: int | None = None,
-        *,
-        options=None,
     ):
-        """Run one episode and record the first raw success_condition at action_cnt.
-
-        info["success"] determines episode success and may include a hold delay.
-        Missing success_condition/action_cnt leaves task_done_step=None and avg_steps=N/A.
-        """
-        if inference_steps is not None:
-            positive_int(inference_steps, "inference_steps")
-        obs, info = env.reset(seed=episode_seed, options=options)
+        """Record first raw success separately from the final hold/grace success."""
+        obs, _ = env.reset(seed=episode_seed)
         self.reset()
         self.update_obs(obs)
         if getattr(agent, "history_steps", 0):
-            initial_hand = np.asarray(obs["joint_state"])[-agent.hand_dim:]
+            initial_hand = np.asarray(obs["joint_state"])[-agent.hand_dim :]
             if initial_hand.shape != (agent.hand_dim,) or not np.isfinite(initial_hand).all():
                 raise ValueError("LAMP reset requires a finite measured hand pose")
-            self._hand_history = np.repeat(initial_hand[None], agent.history_steps, axis=0)
+            self.hand_history = np.repeat(initial_hand[None], agent.history_steps, axis=0)
 
-        # Seed policy noise per episode. ``env.reset`` controls only the
-        # simulator's RNG; decoder sampling uses the global Torch generator.
+        # Environment reset does not seed the policy sampling generator.
         torch.manual_seed(episode_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(episode_seed)
@@ -320,26 +180,23 @@ class BaseRunner:
         done = False
         truncated = False
         episode_success = False
-        task_done_step = None  # None = not yet succeeded (distinct from action_cnt=0)
+        task_done_step = None
         device = next(agent.parameters()).device
 
         while not (done or truncated):
             obs_batch = self.get_obs_batch(device=device)
-            action_chunk = self.get_action_chunk(
-                obs_batch, agent, inference_steps=inference_steps
-            )
-            for i in range(action_chunk.shape[0]):
-                obs, reward, done, truncated, info = env.step(action_chunk[i])
-                if self._hand_history is not None:
+            action_chunk = self.get_action_chunk(obs_batch, agent, inference_steps=inference_steps)
+            for action in action_chunk:
+                obs, _, done, truncated, info = env.step(action)
+                if self.hand_history is not None:
                     # Use the command after the environment's clipping, not a predicted tail.
                     executed = np.asarray(info.get("executed_joint_action"), dtype=np.float32)
                     if executed.shape != (agent.action_dim,) or not np.isfinite(executed).all():
                         raise ValueError("LAMP requires env.step info['executed_joint_action']")
-                    self._hand_history[:-1] = self._hand_history[1:]
-                    self._hand_history[-1] = executed[-agent.hand_dim:]
+                    self.hand_history[:-1] = self.hand_history[1:]
+                    self.hand_history[-1] = executed[-agent.hand_dim :]
                 self.update_obs(obs)
 
-                # Record first success step using the raw success_condition (no hold delay)
                 if info.get("success_condition") and task_done_step is None:
                     task_done_step = getattr(env, "action_cnt", None)
 
@@ -355,213 +212,103 @@ class BaseRunner:
         self,
         agent,
         inference_steps: int | None = None,
-        eval_episodes: int = None,
-        video_save_dir: Optional[Path] = None,
+        eval_episodes: int | None = None,
+        video_save_dir: Path | None = None,
+        *,
+        seeds: list[int] | None = None,
     ):
-        """Run eval_episodes trials; model/env/OOM/contract errors abort the run.
-
-        Genuine task failures remain results. Video extraction/encoding is best-effort
-        and must not corrupt metrics or mask an episode error.
-        """
-        if inference_steps is not None:
-            positive_int(inference_steps, "inference_steps")
-        success_list = []
-        task_done_step_list = []
-        episode_video_list = []
-        episode_details = []  # per-episode: {seed, success, steps}
-        attempted = 0
+        details = []
+        videos = []
         env = None
-
-        print("=" * 90)
+        seed = None
+        task = self.task_name
 
         try:
-            # Keep setup inside the guard so construction and seed-pool errors
-            # follow the same fail-fast cleanup path as episode errors.
-            env = self.make_env()
-            if self.env_video_fps is None:
-                self.env_video_fps = getattr(env, "video_fps", 15)
-            eval_seeds = self.get_seed_list()
-            if not eval_seeds:
-                raise RuntimeError("seed pool is empty — cannot evaluate")
-
-            eval_episodes = (
-                eval_episodes
-                if eval_episodes is not None
-                else self.default_eval_episodes
+            if inference_steps is not None:
+                positive_int(inference_steps, "inference_steps")
+            default_count = self.default_eval_episodes if seeds is None else len(seeds)
+            seeds = self.get_seed_list() if seeds is None else seeds
+            if not seeds:
+                raise ValueError("Evaluation seed pool is empty")
+            count = positive_int(
+                default_count if eval_episodes is None else eval_episodes, "eval_episodes"
             )
-
-            if eval_episodes > len(eval_seeds):
+            if count > len(seeds):
                 cprint(
-                    f"⚠️ eval_episodes ({eval_episodes}) > available seeds ({len(eval_seeds)}), limiting to {len(eval_seeds)}",
+                    f"Requested {count} episodes; limiting to {len(seeds)} available seeds",
                     "yellow",
                 )
-                eval_episodes = len(eval_seeds)
+            seeds = seeds[:count]
+            count = len(seeds)
+            if (
+                any(type(value) is not int or value < 0 for value in seeds)
+                or len(set(seeds)) != count
+            ):
+                raise ValueError("Evaluation seeds must be distinct nonnegative integers")
 
-            num_episodes = eval_episodes
-
-            seed_idx = 0
-            while len(success_list) < num_episodes and seed_idx < len(eval_seeds):
-                if (
-                    attempted > 0
-                    and self.clear_cache_freq > 0
-                    and attempted % self.clear_cache_freq == 0
+            for index, seed in enumerate(seeds):
+                if env is None or (
+                    self.clear_cache_freq > 0 and index % self.clear_cache_freq == 0
                 ):
-                    env = self._refresh_env(env)
-                eval_seed = eval_seeds[seed_idx]
-                seed_idx += 1
-                attempted += 1
-
+                    if env is not None:
+                        with suppress(Exception):
+                            env.close()
+                        env = None
+                    env = self.make_env()
+                    video_fps = (
+                        self.env_video_fps
+                        if self.env_video_fps is not None
+                        else getattr(env, "video_fps", 15)
+                    )
                 try:
-                    episode_success, task_done_step = self.run_one_episode(
-                        agent, env, eval_seed, inference_steps=inference_steps
-                    )
-                except EvalEpisodeError:
-                    raise
-                except Exception as e:
-                    category = _classify_eval_exception(e)
-                    cprint(
-                        f"Seed {eval_seed} FAILED (fatal, category={category}): {e}",
-                        "red",
-                    )
-                    # Best-effort crash video, but never let it mask the fatal error.
-                    crash_video = None
-                    try:
-                        crash_video = env.get_video()
-                    except Exception:
-                        crash_video = None
-                    encoded = False
-                    if crash_video is not None and video_save_dir is not None:
-                        crash_path = video_save_dir / f"episode_{eval_seed}_crash.mp4"
-                        try:
-                            crash_path.parent.mkdir(parents=True, exist_ok=True)
-                            self._encode_video(
-                                crash_path, crash_video, self.env_video_fps
-                            )
-                            encoded = True
-                        except Exception:
-                            pass
-                        if encoded:
-                            episode_video_list.append(
-                                {f"episode_{eval_seed}_crash": str(crash_path)}
-                            )
-                    episode_details.append(
-                        {
-                            "seed": eval_seed,
-                            "success": False,
-                            "steps": None,
-                            "total_steps": getattr(env, "action_cnt", None),
-                            "error": str(e),
-                            "error_category": category,
-                        }
-                    )
-                    raise EvalEpisodeError(category, eval_seed, str(e)) from e
-
-                total_steps = getattr(env, "action_cnt", None)
-
-                # get_video() is best-effort — failures must not corrupt episode metrics
-                try:
-                    video = env.get_video()
+                    success, steps = self.run_one_episode(agent, env, seed, inference_steps)
                 except Exception:
-                    video = None
-
-                status = "success" if episode_success else "fail"
-                done_step_str = (
-                    task_done_step if task_done_step is not None else "N/A"
+                    save_episode_video(env, video_save_dir, f"episode_{seed}_crash", video_fps)
+                    raise
+                details.append(
+                    {
+                        "task_name": task,
+                        "seed": seed,
+                        "success": success,
+                        "steps": steps,
+                        "total_steps": getattr(env, "action_cnt", None),
+                    }
                 )
+                video = save_episode_video(env, video_save_dir, f"episode_{seed}", video_fps)
+                if video is not None:
+                    videos.append(video)
+                status = "success" if success else "fail"
                 cprint(
-                    f"[progress {len(success_list) + 1}/{num_episodes}] env seed: {eval_seed}, status: {status}, done step: {done_step_str}",
+                    f"[progress {index + 1}/{count}] env seed: {seed}, status: {status}, "
+                    f"done step: {steps if steps is not None else 'N/A'}",
                     "cyan",
                 )
 
-                success_list.append(episode_success)
-                if episode_success and task_done_step is not None:
-                    task_done_step_list.append(task_done_step)
-                episode_details.append(
-                    {
-                        "seed": eval_seed,
-                        "success": episode_success,
-                        "steps": task_done_step,
-                        "total_steps": total_steps,
-                    }
-                )
-                # Video encoding is best-effort — failures must not corrupt metrics
-                if video is not None and video_save_dir is not None:
-                    video_path = video_save_dir / f"episode_{eval_seed}.mp4"
-                    try:
-                        video_path.parent.mkdir(parents=True, exist_ok=True)
-                        self._encode_video(video_path, video, self.env_video_fps)
-                        episode_video_list.append(
-                            {f"episode_{eval_seed}": str(video_path)}
-                        )
-                    except Exception as e:
-                        cprint(
-                            f"  ⚠ Video encoding failed for seed {eval_seed}: {e}",
-                            "yellow",
-                        )
-
-            if len(success_list) < num_episodes:
-                cprint(
-                    f"Warning: Only collected {len(success_list)}/{num_episodes} valid episodes (ran out of seeds)",
-                    "red",
-                )
-
-            success_rate = (
-                float(np.mean(success_list)) if len(success_list) > 0 else None
-            )
-            avg_steps = (
-                int(round(np.mean(task_done_step_list)))
-                if len(task_done_step_list) > 0
-                else None
-            )
-
-            # avg_steps_all includes all episodes (failures → full episode length)
-            all_steps = [
-                d["total_steps"]
-                for d in episode_details
-                if d.get("total_steps") is not None
-            ]
-            avg_steps_all = int(round(np.mean(all_steps))) if all_steps else None
-
-            sr_str = format_success_rate(success_rate)
-            avg_steps_str = "N/A" if avg_steps is None else str(avg_steps)
-            avg_all_str = "N/A" if avg_steps_all is None else str(avg_steps_all)
+            validate_episode_details(details, {task: seeds})
+            stats = summarize_episodes(details)
             cprint(
-                f"[result] Valid: {len(success_list)}/{num_episodes}, Success rate: {sr_str}, "
-                f"Avg steps (success): {avg_steps_str}, Avg steps (all): {avg_all_str}",
+                f"[result] Episodes: {count}, Success rate: {stats['success_rate']:.1%}, "
+                f"Avg steps (success): {stats['avg_steps']}, Avg steps (all): {stats['avg_steps_all']}",
                 "yellow",
             )
-            print("=" * 90)
-
+            return {
+                "episode_details": details,
+                "success_rate": stats["success_rate"],
+                "avg_steps": stats["avg_steps"],
+                "avg_steps_all": stats["avg_steps_all"],
+                "videos": videos,
+            }
+        except EvaluationError:
+            raise
+        except Exception as exc:
+            raise EvaluationError(exc, task=task, seed=seed) from exc
         finally:
             if env is not None:
-                try:
+                with suppress(Exception):
                     env.close()
-                except Exception:
-                    pass
-
-        return {
-            "success_rate": success_rate,
-            "avg_steps": avg_steps,
-            "avg_steps_all": avg_steps_all,
-            "videos": episode_video_list,
-            "episode_details": episode_details,
-            "episodes_collected": len(success_list),
-            "episodes_requested": num_episodes,
-        }
-
-    def _refresh_env(self, env):
-        try:
-            env.close()
-        except Exception:
-            pass
-        return self.make_env()
 
     def make_env(self):
         raise NotImplementedError
 
-    def get_seed_list(self) -> List[int]:
+    def get_seed_list(self) -> list[int]:
         raise NotImplementedError
-
-
-def format_success_rate(rate: float | None) -> str:
-    return "N/A" if rate is None else f"{rate * 100:.1f}%"

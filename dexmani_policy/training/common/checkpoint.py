@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,20 +153,29 @@ def validate_inference_settings(info):
     steps = inference.get("inference_steps")
     if type(steps) is not int or steps <= 0:
         raise ValueError("inference.inference_steps must be a positive int (not bool)")
-    mode = inference.get("policy_seed_mode")
-    if not isinstance(mode, str) or not mode:
-        raise ValueError("Record requires inference.policy_seed_mode")
+    if inference.get("policy_seed_mode") != "episode_seed":
+        raise ValueError("Record requires inference.policy_seed_mode=episode_seed")
+
+
+def resolve_selection_record(experiment_dir, record_path):
+    root = Path(experiment_dir).resolve()
+    record_path = Path(record_path).expanduser().resolve(strict=True)
+    if not record_path.is_relative_to(root):
+        raise ValueError("Selection record must be inside the experiment")
+    info = read_checkpoint_record(record_path)
+    if info["status"] != "success":
+        raise ValueError("Selection has not completed successfully")
+    validate_inference_settings(info)
+    checkpoint = resolve_record_path(root, info["ckpt_relpath"], checkpoint=True, immutable=True)
+    info["selection_result"] = str(record_path.relative_to(root))
+    return info, checkpoint
 
 
 def resolve_best_checkpoint(experiment_dir):
-    """Resolve the best.v1 inference snapshot and its concrete checkpoint."""
     root = Path(experiment_dir).resolve()
-    info = read_checkpoint_record(root / "best_ckpt.json")
-    if info.get("_format") != "best.v1":
-        raise ValueError("best_ckpt.json requires best.v1")
-    validate_inference_settings(info)
-    resolved = resolve_record_path(root, info.get("ckpt_relpath"), checkpoint=True, immutable=True)
-    return info, resolved
+    pointer = read_checkpoint_record(root / "best_ckpt.json")
+    record = resolve_record_path(root, pointer["selection_result"])
+    return resolve_selection_record(root, record)
 
 
 def resolve_checkpoint(experiment_dir, selector="best"):
@@ -193,13 +203,13 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
         normalization_dims_from_config,
         resolve_normalization_spec,
         validate_action_window,
-        validate_source_recipe,
     )
 
     store = CheckpointStore(Path(checkpoint_path).parent)
     payload = store.load_payload(checkpoint_path)
     if saved_config is not None:
-        validate_source_recipe(payload["effective_config"], saved_config)
+        if inference_config(payload["effective_config"]) != inference_config(saved_config):
+            raise ValueError("Checkpoint inference recipe mismatch with saved config")
     saved_config = payload["effective_config"]
     cfg = OmegaConf.create(saved_config)
     validate_action_window(cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps)
@@ -220,6 +230,40 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     agent.to(device)
     agent.eval()
     return agent
+
+
+def inference_config(config):
+    """Compare inference semantics without training, data-location or initialization settings."""
+    from omegaconf import OmegaConf
+
+    from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
+
+    config = OmegaConf.to_container(OmegaConf.create(config), resolve=True)
+    agent = dict(config["agent"])
+    for key in ("prior_path", "codec_path", "codebook_path"):
+        agent.pop(key, None)
+
+    def inputs(dataset):
+        values = {
+            key: dataset.get(key)
+            for key in ("sensor_modalities", "pc_dim", "history_steps", "task_names", "task_texts")
+        }
+        values["rgb"] = rgb_preprocessing_kwargs(dataset)
+        values["datasets"] = [inputs(child) for child in dataset.get("datasets", ())]
+        return values
+
+    return {
+        "agent": agent,
+        "inputs": inputs(config["dataset"]),
+        "normalization": config.get("normalization"),
+        "normalization_dims": config.get("normalization_dims"),
+        "action_key": config["action_key"],
+        "task_name": config.get("task_name"),
+        "real_runtime": config.get("real_runtime"),
+        "control_dt": (config.get("real_runtime") or {}).get(
+            "dt", (config.get("hand_data") or {}).get("dt")
+        ),
+    }
 
 
 def checkpoint_agent_config(cfg, state):
@@ -259,3 +303,61 @@ def checkpoint_agent_config(cfg, state):
                     "Closed text checkpoint requires task_emb_table matching saved task_texts and text_embed_dim"
                 )
     return cfg
+
+
+MILESTONE_PATTERN = re.compile(r"^epoch=\d+-step=(?P<step>\d+)-milestone=(?P<pct>\d+)pct\.pt$")
+
+
+@dataclass
+class MilestoneCheckpoint:
+    path: Path
+    pct: int
+    global_step: int
+
+    @property
+    def label(self) -> str:
+        return f"{self.pct}% (step={self.global_step})"
+
+
+def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
+    """Find regular milestone files inside this experiment, sorted by pct."""
+    ckpt_dir = exp_dir / "checkpoints"
+    found: list[MilestoneCheckpoint] = []
+    for pt_file in ckpt_dir.glob("epoch=*.pt"):
+        match = MILESTONE_PATTERN.fullmatch(pt_file.name)
+        if not match:
+            continue
+        if pt_file.is_symlink():
+            raise ValueError(f"Milestone checkpoint must not be a symlink: {pt_file}")
+        found.append(
+            MilestoneCheckpoint(
+                path=resolve_checkpoint(exp_dir, pt_file.name),
+                pct=int(match.group("pct")),
+                global_step=int(match.group("step")),
+            )
+        )
+
+    if not found:
+        raise FileNotFoundError(f"No milestone checkpoints found in {ckpt_dir}")
+
+    return sorted(found, key=lambda checkpoint: (checkpoint.pct, checkpoint.path.name))
+
+
+def resolve_checkpoint_path(
+    exp_dir: Path,
+    ckpt_tag_or_path: str,
+) -> tuple[Path, str]:
+    """Resolve a checkpoint tag to an absolute path and human-readable label."""
+    if ckpt_tag_or_path.endswith("pct"):
+        milestones = discover_milestone_checkpoints(exp_dir)
+        target_pct = int(ckpt_tag_or_path.removesuffix("pct"))
+        match = [m for m in milestones if m.pct == target_pct]
+        if not match:
+            available = sorted(m.pct for m in milestones)
+            raise FileNotFoundError(
+                f"No {target_pct}% milestone checkpoint. Available: {available}"
+            )
+        return match[0].path, match[0].label
+
+    path = resolve_checkpoint(exp_dir, ckpt_tag_or_path)
+    return path, f"{ckpt_tag_or_path} ({path.name})"

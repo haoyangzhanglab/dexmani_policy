@@ -8,7 +8,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# ── Usage ────────────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>"
     echo ""
@@ -42,7 +41,6 @@ if [[ $# -gt 0 ]]; then
     exit 1
 fi
 
-# ── Validate experiment directory ────────────────────────────────────────────
 EXP_DIR="experiments/${POLICY}/${TASK}/${EXP_NAME}"
 
 if [[ ! -d "$EXP_DIR" ]]; then
@@ -56,19 +54,15 @@ if [[ ! -f "$EXP_DIR/config.yaml" ]]; then
     exit 1
 fi
 
-# ── Concurrency lock ─────────────────────────────────────────────────────────
 LOCK_FILE="${EXP_DIR}/.pipeline.lock"
-# Keep the lock file in place. flock locks its inode, so it releases safely
-# when this process exits without stale-PID cleanup races.
+# Keep the inode so concurrent invocations share the same flock.
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "Error: another eval pipeline is running for ${EXP_DIR}" >&2
     exit 1
 fi
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Step 1/2: Select Best Checkpoint (fixed two-stage selection, no videos)
-# ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
 echo "  Step 1/2: Select Best Checkpoint"
@@ -76,25 +70,23 @@ echo "  (fixed initial stage plus optional exact-tie batch, no videos)"
 echo "============================================================"
 echo ""
 
-HANDOFF_DIR="$(mktemp -d "${EXP_DIR}/pipeline_XXXXXXXX")"
-SELECTION_RECORD="${HANDOFF_DIR}/selection.json"
+mkdir -p "${EXP_DIR}/eval_ckpt_selector"
+SELECTION_DIR="$(mktemp -d "${EXP_DIR}/eval_ckpt_selector/pipeline_XXXXXXXX")"
+SELECTION_RECORD="${SELECTION_DIR}/selection_result.json"
 conda run --no-capture-output -n policy python dexmani_policy/select_best_ckpt.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
-    --result-file="$SELECTION_RECORD" \
+    --output-dir="$SELECTION_DIR" \
     --no-videos
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Step 2/2: Evaluate Best Checkpoint (held-out seeds)
-# ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
 echo "  Step 2/2: Evaluate Best Checkpoint (held-out seeds)"
 echo "============================================================"
 echo ""
 
-# shellcheck disable=SC2086
 conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py \
     --policy-name="$POLICY" \
     --task-name="$TASK" \
@@ -102,14 +94,12 @@ conda run --no-capture-output -n policy python dexmani_policy/eval_best_ckpt.py 
     --selection-record="$SELECTION_RECORD" \
     --no-videos
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Summary
-# ═══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================================"
 echo "  ✅ Pipeline Complete!"
 echo "============================================================"
 echo "  Experiment  : ${EXP_DIR}"
 echo "  Selection   : ${SELECTION_RECORD}"
-echo "  Eval result : ${EXP_DIR}/eval_dexsim/<run-id>/_result.txt (exact path printed in Step 2)"
+echo "  Eval result : ${EXP_DIR}/eval_dexsim/<run-id>/result.txt (exact path printed in Step 2)"
 echo "============================================================"

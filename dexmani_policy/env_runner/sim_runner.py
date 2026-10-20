@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import importlib
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from dexmani_sim import DATA_DIR
+from dexmani_sim import DATA_DIR, resolve_env_class
 
 from dexmani_policy.env_runner.base_runner import BaseRunner
 
-ENV_PREFIX = "dexmani_sim.envs"
 DEFAULT_EVAL_SEED_COUNT = 100
-"""Default number of evaluation seeds when no seed file is available."""
 
 
 class SimRunner(BaseRunner):
@@ -19,9 +15,9 @@ class SimRunner(BaseRunner):
         task_name: str,
         n_obs_steps: int,
         default_eval_episodes: int,
-        sensor_modalities: List[str] | None = None,
-        env_kwargs: Optional[Dict[str, Any]] = None,
-        eval_seeds: Optional[List[int]] = None,
+        sensor_modalities: list[str] | None = None,
+        env_kwargs: dict[str, Any] | None = None,
+        eval_seeds: list[int] | None = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
         rgb_preprocess_size: tuple[int, int] | None = None,
@@ -47,16 +43,8 @@ class SimRunner(BaseRunner):
         self.viewer_resolution = viewer_resolution
 
     @staticmethod
-    def name_to_pascal_case(name: str) -> str:
-        return "".join(part.capitalize() for part in re.split(r"[_\s-]+", name) if part)
-
-    @staticmethod
-    def _expand_env_kwargs(env_kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """Expand randomization switches; explicit kwargs take precedence.
-
-        texture_random covers scene/object textures, skybox, lights and camera pose,
-        but excludes per-step crazy_light. instance_random controls model_id.
-        """
+    def expand_env_kwargs(env_kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Expand episode randomization switches; explicit kwargs take precedence."""
         expanded = dict(env_kwargs)
 
         if expanded.pop("texture_random", False):
@@ -75,42 +63,19 @@ class SimRunner(BaseRunner):
         return expanded
 
     def make_env(self):
-        env_module = importlib.import_module(f"{ENV_PREFIX}.{self.task_name}")
-        class_name = self.name_to_pascal_case(self.task_name)
-        env_class = getattr(env_module, class_name, None)
-        if env_class is None:
-            available = [name for name in dir(env_module) if not name.startswith("_")]
-            raise AttributeError(
-                f"Environment class '{class_name}' not found in {ENV_PREFIX}.{self.task_name}. "
-                f"Task name '{self.task_name}' maps to PascalCase '{class_name}'. "
-                f"Available names in module: {available}. "
-                f"If the class name doesn't follow the snake_case→PascalCase convention, "
-                f"add an explicit mapping to name_to_pascal_case."
-            )
-        env_kwargs = self._expand_env_kwargs(self.env_kwargs)
+        env_class = resolve_env_class(self.task_name)
+        env_kwargs = self.expand_env_kwargs(self.env_kwargs)
         env = env_class(render_mode=self.render_mode, record_video=self.record_video, **env_kwargs)
 
-        # Apply custom viewer resolution (only meaningful when render_mode="human")
         if self.viewer_resolution is not None and env.viewer is not None:
             env.viewer.resolution = self.viewer_resolution
 
         return env
 
-    def get_seed_list(self) -> List[int]:
+    def get_seed_list(self) -> list[int]:
         if self.eval_seeds is not None:
             return self.eval_seeds
         seed_file = DATA_DIR / "eval_seeds" / f"{self.task_name}.txt"
         if seed_file.exists():
             return [int(x) for x in seed_file.read_text().split()]
-        default_seeds = list(range(DEFAULT_EVAL_SEED_COUNT))
-        if len(default_seeds) < self.default_eval_episodes:
-            import warnings
-
-            warnings.warn(
-                f"eval_episodes={self.default_eval_episodes} exceeds default seed count "
-                f"({DEFAULT_EVAL_SEED_COUNT}). Only {DEFAULT_EVAL_SEED_COUNT} "
-                f"episodes will be evaluated unless eval_seeds is provided or "
-                f"a seed file exists at {seed_file}.",
-                UserWarning,
-            )
-        return default_seeds
+        return list(range(DEFAULT_EVAL_SEED_COUNT))

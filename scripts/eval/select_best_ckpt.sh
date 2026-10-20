@@ -26,7 +26,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  --no-ema               Use raw weights instead of EMA"
     echo "  --seed N               Eval seed override"
     echo "  --videos               Record isolated candidate/stage videos (default: off)"
-    echo "  --result-file PATH     Write this selection to a new handoff file"
+    echo "  --output-dir PATH     Empty directory under experiment/eval_ckpt_selector"
     echo ""
     echo "  Dot-list overrides may change eval/environment controls; model inputs come from saved config.yaml and cannot be overridden."
     echo ""

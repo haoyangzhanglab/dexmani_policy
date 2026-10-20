@@ -20,7 +20,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  --ckpt-tag TAG       Checkpoint: best, latest, 20pct..100pct (default: best)"
     echo "                         'best' requires best_ckpt.json written by select_best_ckpt.sh"
     echo "  --ckpt-path PATH     Path inside experiment/checkpoints (overrides --ckpt-tag)"
-    echo "  --selection-record PATH  Pin a selection handoff; conflicting checkpoint/EMA/NFE rejected"
+    echo "  --selection-record PATH  Pin a selection result; conflicting checkpoint/EMA/NFE rejected"
     echo "  --episodes N         Seeds per task to evaluate (default: from config)"
     echo "  --inference-steps N    Single inference step count (best: selection record; otherwise config)"
     echo "                       To sweep multiple inference step counts, append this dotlist override:"
@@ -32,7 +32,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Examples:"
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42"
     echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --ckpt-tag 40pct"
-    echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --selection-record /path/to/selection_record.json"
+    echo "  bash scripts/eval/eval_best_ckpt.sh dp3 pour 2026-07-29_01-53_42 --selection-record /path/to/selection_result.json"
     exit 0
 fi
 

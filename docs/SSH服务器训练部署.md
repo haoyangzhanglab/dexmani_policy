@@ -140,8 +140,8 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run> --with-wandb
 | 阶段 | 更新内容 |
 | --- | --- |
 | 1 | 下载新文件，已有不可变产物不覆盖，排除临时文件和后续可变项 |
-| 2 | 按 size/mtime 更新 `metrics.jsonl`、`checkpoints/latest.pt`、`vqvae_hand_best.pt` |
-| 3 | 按 checksum 更新 `best_ckpt.json` 和各次 selection 的 `best_ckpt_selection.json` |
+| 2 | 按 size/mtime 更新 `metrics.jsonl`、`checkpoints/latest.pt`、`vqvae_hand_best.pt`；随后按 checksum 更新各次 `selection_result.json` |
+| 3 | 在 selection 记录更新完成后，按 checksum 更新 `best_ckpt.json` |
 
 checkpoint 和选择结果先于引用它们的指针拉取。新文件传输不组合 `--partial` 与 `--ignore-existing`，避免残缺正式文件在下次同步时被跳过。任一 rsync 非零退出都会中止后续阶段，包括源文件消失的退出码 24。
 

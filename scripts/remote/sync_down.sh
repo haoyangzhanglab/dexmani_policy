@@ -107,8 +107,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════
 # Pass 1: Download new files only
 # ═══════════════════════════════════════════════════════════════════
-# Do not combine --partial with --ignore-existing: a later sync would skip an
-# interrupted checkpoint merely because its partial destination file exists.
+# --partial would leave incomplete files that --ignore-existing skips on retry.
 echo "--- Pass 1/3: new files (--ignore-existing) ---"
 
 PASS1_OPTS=(
@@ -123,14 +122,13 @@ PASS1_OPTS=(
     --exclude='checkpoints/latest.tmp.pt'
     --exclude='vqvae_hand_*.pt.tmp'
     --exclude='.best_ckpt.json*.tmp'
-    --exclude='.best_ckpt_selection.json*.tmp'
     --exclude='.selection_result.json*.tmp'
     --exclude='.result_details.json*.tmp'
     --exclude='metrics.jsonl'
     --exclude='checkpoints/latest.pt'
     --exclude='vqvae_hand_best.pt'
     --exclude='best_ckpt.json'
-    --exclude='eval_ckpt_selector/*/best_ckpt_selection.json'
+    --exclude='eval_ckpt_selector/**/selection_result.json'
     $DRY_RUN
 )
 
@@ -143,10 +141,9 @@ rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
 # ═══════════════════════════════════════════════════════════════════
 # Pass 2: Update explicitly mutable training files
 # ═══════════════════════════════════════════════════════════════════
-# Default rsync temporary-file transfer preserves the old complete destination
-# on failure. Targets of latest/best are downloaded before these references.
+# rsync's temporary transfer preserves the previous complete file on failure.
 echo ""
-echo "--- Pass 2/3: metrics, latest checkpoint and VQ best ---"
+echo "--- Pass 2/3: training state and selection results ---"
 
 PASS2_OPTS=(
     -av
@@ -165,15 +162,18 @@ rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     exit "$rc"
 }
 
-# Small mutable evidence needs content comparison even at equal size/mtime.
-# Checkpoints and growing metrics are intentionally excluded from this pass.
-echo "--- Pass 3/3: best pointer and selection progress (--checksum) ---"
+# Publish selection records before the best reference, even at equal size/mtime.
+rsync -av --checksum "${WANDB_EXCLUDE[@]}" \
+    --include='*/' --include='eval_ckpt_selector/**/selection_result.json' \
+    --exclude='*' $DRY_RUN "$REMOTE_PATH" "$LOCAL_PATH" || exit "$?"
+
+# Compare small references by content without hashing large checkpoints.
+echo "--- Pass 3/3: best pointer (--checksum) ---"
 PASS3_OPTS=(
     -av --checksum
     "${WANDB_EXCLUDE[@]}"
     --include='*/'
     --include='best_ckpt.json'
-    --include='eval_ckpt_selector/*/best_ckpt_selection.json'
     --exclude='*'
     $DRY_RUN
 )
