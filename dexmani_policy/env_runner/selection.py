@@ -94,6 +94,7 @@ def select_best_checkpoint(
     try:
         cfg.experiment_dir = str(exp_dir)
         seed = resolve_eval_seed(cfg, eval_seed)
+        OmegaConf.update(cfg, "eval.seed", seed)
         set_seed(seed)
         milestones = discover_milestone_checkpoints(exp_dir)
         runner = build_eval_runner(cfg)

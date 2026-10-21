@@ -6,8 +6,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+USAGE="Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name> [--seed SEED] [--episodes N]"
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>"
+    echo "$USAGE"
     echo ""
     echo "One-shot evaluation pipeline: select best ckpt → numerical held-out eval."
     echo ""
@@ -15,17 +17,18 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "  policy_name   Experiment policy path (e.g. dp3, ddp/maniflow); reads saved config.yaml"
     echo "  task_name     Task name (e.g. pour, pick_apple_messy)"
     echo "  exp_name      Experiment timestamp/name under experiments/<policy>/<task>/"
+    echo "  --seed SEED   Use the same explicit evaluation seed for selection and held-out eval"
+    echo "  --episodes N Final eval episodes per task after excluding selection seeds"
     echo ""
     echo "  Demo recording is separate: scripts/eval/record_demo.sh"
     echo ""
     echo "Examples:"
-    echo "  bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56"
-    echo "  bash scripts/eval/eval_pipeline.sh maniflow pour 2026-08-04_22-19_42"
+    echo "  bash scripts/eval/eval_pipeline.sh dp3 pour 2026-08-01_12-34-56 --seed 1024 --episodes 70"
     exit 0
 fi
 
 if [[ $# -lt 3 ]]; then
-    echo "Usage: bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <exp_name>" >&2
+    echo "$USAGE" >&2
     exit 1
 fi
 
@@ -34,10 +37,26 @@ TASK="$2"
 EXP_NAME="$3"
 shift 3
 
-if [[ $# -gt 0 ]]; then
-    echo "Error: unexpected argument: $1. Pipeline always runs without videos; use record_demo.sh separately." >&2
-    exit 1
-fi
+SEED_ARGS=()
+EVAL_ARGS=()
+while [[ $# -gt 0 ]]; do
+    if [[ $# -lt 2 || ! "$2" =~ ^[0-9]+$ ]]; then
+        echo "$USAGE" >&2
+        exit 1
+    fi
+    case "$1" in
+        --seed) SEED_ARGS+=(--seed "$2") ;;
+        --episodes)
+            if [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+                echo "Error: --episodes requires a positive integer." >&2
+                exit 1
+            fi
+            EVAL_ARGS+=(--episodes "$2")
+            ;;
+        *) echo "$USAGE" >&2; exit 1 ;;
+    esac
+    shift 2
+done
 
 EXP_DIR="experiments/${POLICY}/${TASK}/${EXP_NAME}"
 
@@ -64,6 +83,7 @@ conda run --no-capture-output -n policy python dexmani_policy/select_checkpoint.
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
     --output-dir="$SELECTION_DIR" \
+    "${SEED_ARGS[@]}" \
     --no-videos
 
 echo "Evaluating held-out seeds: ${SELECTION_RECORD}"
@@ -73,6 +93,8 @@ conda run --no-capture-output -n policy python dexmani_policy/evaluate.py \
     --task-name="$TASK" \
     --exp-name="$EXP_NAME" \
     --selection-record="$SELECTION_RECORD" \
+    "${SEED_ARGS[@]}" \
+    "${EVAL_ARGS[@]}" \
     --no-videos
 
 echo "Pipeline complete. Selection record: ${SELECTION_RECORD}"

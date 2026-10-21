@@ -38,6 +38,7 @@ def main(argv=None):
         use_ema=args.use_ema,
         inference_steps_list=[args.inference_steps] if args.inference_steps is not None else None,
         overrides=args.overrides,
+        eval_seed=args.seed,
         selection_record=args.selection_record,
         record_video=False if args.no_videos else None,
     )

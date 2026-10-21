@@ -75,28 +75,20 @@ def affine_parameters(
     output_min: float,
     output_max: float,
     range_eps: float,
-    fit_offset: bool,
     label: str,
 ) -> nn.ParameterDict:
     low, high, mean, std = (stats[key] for key in ("min", "max", "mean", "std"))
     if mode == "limits":
-        if fit_offset:
-            span = high - low
-            constant = span < range_eps
-            span = span.masked_fill(constant, output_max - output_min)
-            scale = (output_max - output_min) / span
-            offset = output_min - scale * low
-            offset[constant] = -mean[constant]
-        else:
-            bound = min(abs(output_min), abs(output_max))
-            magnitude = torch.maximum(low.abs(), high.abs())
-            constant = magnitude < range_eps
-            scale = bound / magnitude.masked_fill(constant, bound)
-            offset = torch.zeros_like(mean)
+        span = high - low
+        constant = span < range_eps
+        span = span.masked_fill(constant, output_max - output_min)
+        scale = (output_max - output_min) / span
+        offset = output_min - scale * low
+        offset[constant] = (output_max + output_min) / 2 - low[constant]
     else:
         constant = std < range_eps
         scale = std.masked_fill(constant, 1).reciprocal()
-        offset = -mean * scale if fit_offset else torch.zeros_like(mean)
+        offset = -mean * scale
 
     if logger.isEnabledFor(logging.INFO) and constant.any():
         logger.info(
@@ -174,21 +166,18 @@ class AffineNormalizer(NormalizerState):
         key: str,
         chunks: Iterable,
         *,
-        dtype: torch.dtype | None = torch.float32,
         mode: str = "limits",
         output_max: float = 1.0,
         output_min: float = -1.0,
         range_eps: float = 1e-4,
-        fit_offset: bool = True,
     ) -> None:
-        """Merge chunk statistics in FP64 using Welford's algorithm."""
+        """Merge chunk statistics in FP64 and store FP32 affine parameters."""
         if mode not in {"limits", "gaussian"} or output_max <= output_min:
             raise ValueError("Fitting requires limits/gaussian mode and output_max > output_min")
-        dtype = torch.float32 if dtype is None else dtype
         count = 0
         width = None
         mean = m2 = low = high = None
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks):
             values = torch.as_tensor(chunk).to(torch.float64)
             if key in FINGER_VECTOR_FIELDS:
                 if values.shape[-2:] != (5, 3):
@@ -207,10 +196,12 @@ class AffineNormalizer(NormalizerState):
             values = values.reshape(-1, width)
             size = len(values)
             chunk_min, chunk_max = values.min(0).values, values.max(0).values
+            if not (torch.isfinite(chunk_min).all() and torch.isfinite(chunk_max).all()):
+                raise ValueError(f"Nonfinite normalization field {key!r}, chunk {index}")
             low = chunk_min if low is None else torch.minimum(low, chunk_min)
             high = chunk_max if high is None else torch.maximum(high, chunk_max)
             chunk_mean = values.mean(0)
-            chunk_m2 = (values - chunk_mean).square().sum(0)
+            chunk_m2 = (values - chunk_mean).square_().sum(0)
             delta = chunk_mean - mean
             total = count + size
             m2 = m2 + chunk_m2 + delta.square() * (count * size / total)
@@ -221,10 +212,10 @@ class AffineNormalizer(NormalizerState):
         if not count or (mode == "gaussian" and count < 2):
             raise ValueError(f"Insufficient samples for {key} with mode={mode}")
         stats = {
-            "min": low.to(dtype),
-            "max": high.to(dtype),
-            "mean": mean.to(dtype),
-            "std": (m2 / max(count - 1, 1)).sqrt().to(dtype),
+            "min": low.float(),
+            "max": high.float(),
+            "mean": mean.float(),
+            "std": (m2 / max(count - 1, 1)).sqrt().float(),
         }
         params = affine_parameters(
             stats,
@@ -232,9 +223,12 @@ class AffineNormalizer(NormalizerState):
             output_min=output_min,
             output_max=output_max,
             range_eps=range_eps,
-            fit_offset=fit_offset,
             label=key,
         )
+        if any(not torch.isfinite(value).all() for value in params.values()) or (
+            params["scale"] == 0
+        ).any():
+            raise ValueError(f"Cannot represent finite, invertible affine parameters for {key!r}")
         if key in FINGER_VECTOR_FIELDS:
             params = nn.ParameterDict(
                 {

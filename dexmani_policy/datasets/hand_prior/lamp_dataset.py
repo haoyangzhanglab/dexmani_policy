@@ -51,7 +51,7 @@ class LAMPDataset(PointCloudDataset):
             self.history_valid[start:end] = valid
 
     def filter_sampler(self, sampler):
-        # Called inside BaseDataset.__init__, before normalizer source rows exist.
+        # BaseDataset construction dispatches here before valid source rows are known.
         if self.history_valid is None:
             self.prepare_lamp_source()
         sampler.filter_valid(

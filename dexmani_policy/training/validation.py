@@ -1,8 +1,11 @@
 """Configuration and model checks at training boundaries."""
 
+import inspect
+
 import hydra
 from torch.nn.modules.batchnorm import _BatchNorm
 
+from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.datasets.common.augmentation import (
     validate_pc_color_augmentation,
     validate_random_keep_points,
@@ -49,16 +52,6 @@ def validate_ema_batchnorm(model) -> None:
             unsafe.append(name or "<root>")
     if unsafe:
         raise ValueError(f"EMA requires frozen BatchNorm or GroupNorm; active modules: {unsafe}")
-
-
-def validate_aux_config(cfg):
-    """Require joint-primary actions when supervising an auxiliary wrist pose."""
-    if not cfg.get("use_aux_ee", False):
-        return
-    if cfg.action_key != "action":
-        raise ValueError("use_aux_ee=true requires action_key='action' (joint primary)")
-    if cfg.get("joint_dim") is None or cfg.get("ee_dim") is None:
-        raise ValueError("use_aux_ee=true requires joint_dim and ee_dim")
 
 
 def resolve_numeric_observation_fields(cfg) -> set:
@@ -112,17 +105,61 @@ def validate_normalization_config(cfg):
     validate_encoder_normalization(cfg, spec)
 
 
+def validate_policy_layout(cfg):
+    """Check shared windows and action layouts before opening data."""
+    from dexmani_policy.agents.core.base_policy import UNetDiffusionPolicy
+    from dexmani_policy.agents.core.dqrise_policy import DQRISEPolicy
+
+    validate_action_window(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
+    positive_int(cfg.action_dim, "action_dim")
+    for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
+        if type(cfg.agent[name]) is not type(cfg[name]) or cfg.agent[name] != cfg[name]:
+            raise ValueError(f"agent.{name} must match {name}")
+    aux = cfg.get("use_aux_ee", False)
+    if cfg.agent.get("use_aux_ee", False) != aux:
+        raise ValueError("agent.use_aux_ee must match use_aux_ee")
+    dataset_defaults = inspect.signature(BaseDataset).parameters
+    for index, child in enumerate(cfg.dataset.get("datasets", [cfg.dataset])):
+        layout = dict(child)
+        if issubclass(hydra.utils.get_class(child._target_), BaseDataset):
+            layout.setdefault("horizon", dataset_defaults["horizon"].default)
+            if layout.get("obs_horizon") is None:
+                layout["obs_horizon"] = layout["horizon"]
+        for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
+            if field in layout and (
+                type(layout[field]) is not type(cfg[name]) or layout[field] != cfg[name]
+            ):
+                raise ValueError(f"dataset[{index}].{field} must match {name}")
+        if child.get("use_aux_ee", False) != aux:
+            raise ValueError(f"dataset[{index}].use_aux_ee must match use_aux_ee")
+    if aux:
+        if cfg.action_key != "action":
+            raise ValueError("use_aux_ee=true requires action_key='action' (joint primary)")
+        if cfg.get("joint_dim") is None or cfg.get("ee_dim") is None:
+            raise ValueError("use_aux_ee=true requires joint_dim and ee_dim")
+        if cfg.ee_dim != 9 or cfg.action_dim != cfg.joint_dim + cfg.ee_dim:
+            raise ValueError("Auxiliary actions require joint_dim + 9 full prediction dimensions")
+        for name in ("joint_dim", "ee_dim"):
+            if cfg.agent.get(name) != cfg[name]:
+                raise ValueError(f"agent.{name} must match {name}")
+
+    agent_class = hydra.utils.get_class(cfg.agent._target_)
+    if issubclass(agent_class, (UNetDiffusionPolicy, DQRISEPolicy)):
+        constructor = DQRISEPolicy if issubclass(agent_class, DQRISEPolicy) else UNetDiffusionPolicy
+        defaults = inspect.signature(constructor).parameters["down_dims"].default
+        down_dims = cfg.agent.get("down_dims", defaults)
+        if not down_dims:
+            raise ValueError("UNet down_dims must be nonempty")
+        divisor = 2 ** (len(down_dims) - 1)
+        if cfg.horizon % divisor:
+            raise ValueError(f"UNet horizon must be divisible by {divisor}, got {cfg.horizon}")
+
+
 def validate_hand_config(cfg):
     """Align representation preparation and policy training before opening data."""
     target = cfg.agent.get("_target_")
     if target not in HAND_POLICY_TARGETS:
         return
-    for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
-        if type(cfg.agent[name]) is not type(cfg[name]) or cfg.agent[name] != cfg[name]:
-            raise ValueError(f"Hand policy agent.{name} must match {name}")
-    for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
-        if type(cfg.dataset[field]) is not type(cfg[name]) or cfg.dataset[field] != cfg[name]:
-            raise ValueError("Hand dataset H/Nobs must match the policy config")
     if cfg.dataset.get("use_aux_ee", False):
         raise ValueError("Hand representations do not support auxiliary action targets")
 
@@ -193,13 +230,12 @@ def validate_config(cfg):
         positive_int(cfg.training.loop[name], f"training.loop.{name}")
     if cfg.training.lr_warmup_steps < 0:
         raise ValueError("training.lr_warmup_steps must be nonnegative")
-    validate_action_window(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
+    validate_policy_layout(cfg)
     validate_hand_config(cfg)
 
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")
 
-    validate_aux_config(cfg)
     validate_normalization_config(cfg)
     validate_action_key_consistency(cfg)
 

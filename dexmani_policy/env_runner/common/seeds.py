@@ -8,23 +8,27 @@ from dexmani_policy.utils.config import positive_int
 def select_eval_seeds(pools, eval_seed, episodes, excluded_seeds=None):
     """Shuffle each task's pool and take equal budgets, excluding selection seeds."""
     positive_int(episodes, "episodes")
+    if not pools:
+        raise ValueError("Evaluation requires at least one task seed pool")
     excluded = {} if excluded_seeds is None else excluded_seeds
     if not isinstance(excluded, dict):
         raise ValueError("Excluded selection seeds must be a task-to-seeds mapping")
     if excluded:
         validate_task_seeds(excluded, pools, equal_budget=False)
-    available = {}
+    plan = {}
     for task, pool in pools.items():
         if any(type(seed) is not int or seed < 0 for seed in pool):
             raise ValueError(f"{task}: seed pool requires nonnegative integer seeds")
         removed = set(excluded.get(task, []))
         pool = [seed for seed in dict.fromkeys(pool) if seed not in removed]
+        if len(pool) < episodes:
+            raise ValueError(
+                f"{task}: requested {episodes} evaluation seeds, only {len(pool)} remain "
+                "after excluding checkpoint-selection seeds"
+            )
         random.Random(eval_seed).shuffle(pool)
-        available[task] = pool
-    count = min(episodes, *(len(pool) for pool in available.values()))
-    if count == 0:
-        raise RuntimeError("No evaluation seeds remain after excluding checkpoint-selection seeds")
-    return {task: pool[:count] for task, pool in available.items()}
+        plan[task] = pool[:episodes]
+    return plan
 
 
 def plan_size(plan):

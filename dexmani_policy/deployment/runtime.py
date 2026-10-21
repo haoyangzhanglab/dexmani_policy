@@ -146,6 +146,8 @@ class PolicyRuntime:
                 tensor = preprocess_validation_rgb(value, **self.rgb_preprocessing)
             else:
                 tensor = torch.from_numpy(np.ascontiguousarray(value))
+                if name != "tactile_valid":
+                    tensor = tensor.to(dtype=torch.float32)
             tensors[name] = tensor.unsqueeze(0).to(self.device)
         dimensions = self.agent.control_action_dim
         kwargs = {}
@@ -186,7 +188,9 @@ class PolicyRuntime:
             ):
                 raise ValueError("Invalid physical RTC prefix")
             kwargs.update(
-                rtc_prefix=torch.as_tensor(prefix, device=self.device).unsqueeze(0),
+                rtc_prefix=torch.as_tensor(
+                    prefix, device=self.device, dtype=torch.float32
+                ).unsqueeze(0),
                 delay_steps=delay_steps,
                 rtc_guidance_cap=self.rtc_guidance_cap,
             )

@@ -178,11 +178,20 @@ def resolve_best_checkpoint(experiment_dir):
     return resolve_selection_record(root, record)
 
 
-def resolve_checkpoint(experiment_dir, selector="best"):
-    root = Path(experiment_dir).resolve()
+def resolve_checkpoint_path(exp_dir, selector="best"):
+    """Resolve a tag or path to a file inside the experiment/checkpoints directory."""
+    root = Path(exp_dir).resolve()
     if selector == "best":
         return resolve_best_checkpoint(root)[1]
-    elif selector == "latest":
+    if selector.endswith("pct"):
+        milestones = discover_milestone_checkpoints(root)
+        target_pct = int(selector.removesuffix("pct"))
+        for milestone in milestones:
+            if milestone.pct == target_pct:
+                return milestone.path
+        available = sorted(m.pct for m in milestones)
+        raise FileNotFoundError(f"No {target_pct}% milestone checkpoint. Available: {available}")
+    if selector == "latest":
         path = root / "checkpoints/latest.pt"
     else:
         path = Path(selector)
@@ -192,6 +201,20 @@ def resolve_checkpoint(experiment_dir, selector="best"):
     if not path.is_file() or not path.is_relative_to(root / "checkpoints"):
         raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
     return path
+
+
+def load_policy_state(model, state):
+    """Restore saved parameter precision before strict copying, including FP32 EMA."""
+    for name, parameter in model.named_parameters():
+        saved = state.get(name)
+        if (
+            saved is not None
+            and parameter.is_floating_point()
+            and saved.is_floating_point()
+            and parameter.dtype != saved.dtype
+        ):
+            parameter.data = parameter.data.to(dtype=saved.dtype)
+    model.load_state_dict(state, strict=True)
 
 
 def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
@@ -224,7 +247,7 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     agent.set_normalization_spec(
         resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
     )
-    agent.load_state_dict(state, strict=True)
+    load_policy_state(agent, state)
     agent.validate_normalizer()
     agent.inference_config = saved_config
     agent.to(device)
@@ -331,7 +354,7 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
             raise ValueError(f"Milestone checkpoint must not be a symlink: {pt_file}")
         found.append(
             MilestoneCheckpoint(
-                path=resolve_checkpoint(exp_dir, pt_file.name),
+                path=resolve_checkpoint_path(exp_dir, pt_file.name),
                 pct=int(match.group("pct")),
                 global_step=int(match.group("step")),
             )
@@ -341,22 +364,3 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
         raise FileNotFoundError(f"No milestone checkpoints found in {ckpt_dir}")
 
     return sorted(found, key=lambda checkpoint: (checkpoint.pct, checkpoint.path.name))
-
-
-def resolve_checkpoint_path(
-    exp_dir: Path,
-    ckpt_tag_or_path: str,
-) -> Path:
-    """Resolve a checkpoint selector to a file inside the experiment/checkpoints directory."""
-    if ckpt_tag_or_path.endswith("pct"):
-        milestones = discover_milestone_checkpoints(exp_dir)
-        target_pct = int(ckpt_tag_or_path.removesuffix("pct"))
-        match = [m for m in milestones if m.pct == target_pct]
-        if not match:
-            available = sorted(m.pct for m in milestones)
-            raise FileNotFoundError(
-                f"No {target_pct}% milestone checkpoint. Available: {available}"
-            )
-        return match[0].path
-
-    return resolve_checkpoint(exp_dir, ckpt_tag_or_path)

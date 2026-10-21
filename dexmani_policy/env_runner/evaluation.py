@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -34,16 +35,34 @@ from dexmani_policy.utils.runtime import atomic_path, set_seed
 
 
 def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
-    if cli_seed is not None:
-        return cli_seed
-    training_seed = cfg.training.get("seed", 0) if hasattr(cfg, "training") else 0
-    return training_seed + 1024
+    seed = cli_seed if cli_seed is not None else cfg.get("eval", {}).get("seed")
+    if seed is None:
+        seed = cfg.get("training", {}).get("seed", 0) + 1024
+    if type(seed) is not int or not 0 <= seed < 2**32:
+        raise ValueError("Evaluation seed must be an integer in [0, 2**32)")
+    return seed
+
+
+class EvalSeedAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        previous = getattr(namespace, self.dest, None)
+        if previous is not None and previous != values:
+            parser.error("Conflicting --seed values")
+        setattr(namespace, self.dest, values)
 
 
 def parse_eval_overrides(overrides: list[str]):
     """Only evaluation/inference controls may override checkpoint evaluation."""
+    seeds = {}
     for override in overrides:
         key, separator, _ = override.partition("=")
+        if key == "eval.seed":
+            value = OmegaConf.select(OmegaConf.from_dotlist([override]), key)
+            if key in seeds and (type(seeds[key]) is not type(value) or seeds[key] != value):
+                raise ValueError(f"Conflicting {key} overrides")
+            seeds[key] = value
+        elif key.startswith("eval.") and key.endswith(".seed"):
+            raise ValueError("Use eval.seed for the shared evaluation seed")
         if key == "eval.seed_manifest":
             raise ValueError(
                 "Unsupported eval.seed_manifest; use evaluation seed and episode counts"
@@ -51,7 +70,7 @@ def parse_eval_overrides(overrides: list[str]):
         if key.split(".")[-1] in {"denoise_steps", "denoise_timesteps_list"}:
             raise ValueError("Use inference_steps or inference_steps_list for evaluation")
         if not separator or not (
-            key.startswith(("eval.", "env_runner.")) or key in {"training.device", "training.seed"}
+            key.startswith(("eval.", "env_runner.")) or key == "training.device"
         ):
             raise ValueError(f"Evaluation override cannot redefine saved inference config: {key}")
         if any(
@@ -83,6 +102,12 @@ def add_evaluation_arguments(parser) -> None:
     parser.add_argument("--policy-name", required=True, help="Experiment policy path, e.g. ddp/sat.")
     parser.add_argument("--task-name", required=True, help="Task directory in the saved experiment.")
     parser.add_argument("--exp-name", required=True, help="Run directory under experiments/policy/task.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        action=EvalSeedAction,
+        help="Evaluation seed: CLI > eval.seed dotlist > saved eval.seed > training.seed+1024.",
+    )
     parser.add_argument(
         "--inference-steps",
         type=int,
@@ -254,8 +279,8 @@ def selection_task_seeds(record):
     stages = record["stages"]
     if not stages or record["ckpt_relpath"] not in {stage["checkpoint"] for stage in stages}:
         raise ValueError("Selected checkpoint has no evaluation evidence")
-    selected = {}
     tasks = stages[0]["requested_task_seeds"]
+    selected = {}
     for stage in stages:
         if stage["status"] != "completed":
             raise ValueError("Selection contains an incomplete stage")
@@ -263,8 +288,8 @@ def selection_task_seeds(record):
         validate_task_seeds(plan, tasks)
         validate_episode_details(stage["episode_details"], plan)
         for task, seeds in plan.items():
-            selected[task] = list(dict.fromkeys(selected.get(task, []) + seeds))
-    return selected
+            selected.setdefault(task, {}).update(dict.fromkeys(seeds))
+    return {task: list(seeds) for task, seeds in selected.items()}
 
 
 def explicit_eval_value(cfg, section, name):
@@ -286,11 +311,13 @@ def resolve_eval_request(
     use_ema=None,
     inference_steps_list=None,
     selection_record=None,
+    eval_seed=None,
 ):
     """CLI > explicit dotlist > selected checkpoint > saved defaults."""
     cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
     override_cfg = parse_eval_overrides(list(overrides))
     merged = OmegaConf.merge(cfg, override_cfg)
+    OmegaConf.update(merged, "eval.seed", resolve_eval_seed(merged, eval_seed))
     merged.experiment_dir = str(exp_dir)
     resolved = (
         resolve_selection_record(exp_dir, selection_record)
@@ -441,6 +468,7 @@ def evaluate_checkpoint(
     selection_record=None,
     output_dir=None,
     record_video=False,
+    eval_seed=None,
 ):
     cfg, use_ema, steps, selection, path = resolve_eval_request(
         cfg,
@@ -450,6 +478,7 @@ def evaluate_checkpoint(
         use_ema=use_ema,
         inference_steps_list=inference_steps_list,
         selection_record=selection_record,
+        eval_seed=eval_seed,
     )
     excluded = selection_task_seeds(selection) if selection is not None else None
     runner = build_eval_runner(cfg)

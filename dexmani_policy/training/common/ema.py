@@ -13,7 +13,15 @@ class EMA:
         min_value=0.0,
         max_value=0.9999,
         foreach=False,
+        accumulation_dtype="float32",
     ):
+        if accumulation_dtype not in {"float32", "parameter"}:
+            raise ValueError("EMA accumulation_dtype must be float32 or parameter")
+        self.accumulation_dtype = accumulation_dtype
+        if accumulation_dtype == "float32":
+            for parameter in model.parameters():
+                if parameter.requires_grad and parameter.dtype in (torch.float16, torch.bfloat16):
+                    parameter.data = parameter.data.float()
         self.averaged_model = model
         self.averaged_model.eval()
         self.averaged_model.requires_grad_(False)

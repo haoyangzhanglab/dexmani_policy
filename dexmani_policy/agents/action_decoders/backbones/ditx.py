@@ -225,19 +225,32 @@ class DiTX(nn.Module):
         tokens = self.context_embedder(context)
         return add_temporal_embedding(tokens, self.context_frame_pos_embed.to(tokens.dtype))
 
-    def forward(self, x: torch.Tensor, timestep, context: torch.Tensor) -> torch.Tensor:
+    def prepare_context_kv(self, context):
+        if self.training:
+            return None
+        context_c = self.embed_context(context)
+        return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
+
+    def forward(
+        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None
+    ) -> torch.Tensor:
         if x.ndim != 3 or x.shape[1] != self.horizon:
             raise ValueError("actions must have shape [B, horizon, action_dim]")
         if context.shape[0] != x.shape[0]:
             raise ValueError("actions and context must have the same batch size")
-        context_c = self.embed_context(context)
+        context_c = self.embed_context(context) if context_kv is None else None
         timestep = batch_timesteps(timestep, x, dtype=torch.float32)
         time_c = self.timestep_embedder(timestep)
 
         x = self.input_embedder(x)
         x = x + self.input_pos_embed.to(dtype=x.dtype)
-        for block in self.ditx_blocks:
-            x = block(x, time_c, context_c)
+        for index, block in enumerate(self.ditx_blocks):
+            x = block(
+                x,
+                time_c,
+                context_c,
+                context_kv=None if context_kv is None else context_kv[index],
+            )
         return self.final_layer(x)
 
 

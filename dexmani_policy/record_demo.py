@@ -48,6 +48,7 @@ def main(argv=None):
         exp_dir,
         args.ckpt_tag,
         section="demo",
+        eval_seed=args.seed,
         use_ema=args.use_ema,
         selection_record=args.selection_record,
         inference_steps_list=[args.inference_steps] if args.inference_steps is not None else None,

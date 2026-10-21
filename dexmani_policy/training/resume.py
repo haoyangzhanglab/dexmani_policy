@@ -2,7 +2,11 @@
 
 import warnings
 
-from dexmani_policy.training.common.checkpoint import TrainCheckpoint, unwrap_state_dict
+from dexmani_policy.training.common.checkpoint import (
+    TrainCheckpoint,
+    load_policy_state,
+    unwrap_state_dict,
+)
 from dexmani_policy.utils.config import validate_source_recipe
 from dexmani_policy.utils.runtime import set_rng_state
 
@@ -71,12 +75,12 @@ def restore_training_state(
 def restore_model_weights(checkpoint, model, ema_model, device):
     validate_ema_resume_state(checkpoint, require_ema=ema_model is not None)
     state = unwrap_state_dict(checkpoint.model_state)
-    model.load_state_dict(state, strict=True)
+    load_policy_state(model, state)
     model.validate_normalizer()
     # Normalizer restoration creates parameters on CPU; move them before DDP wrapping.
     model.to(device)
     if ema_model is not None:
-        ema_model.load_state_dict(unwrap_state_dict(checkpoint.ema_model_state), strict=True)
+        load_policy_state(ema_model, unwrap_state_dict(checkpoint.ema_model_state))
         ema_model.validate_normalizer()
         ema_model.to(device)
 

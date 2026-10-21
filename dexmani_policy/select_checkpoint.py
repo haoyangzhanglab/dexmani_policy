@@ -25,7 +25,6 @@ def main(argv=None):
         "--batch-size", type=int, help="Extra episodes for tied candidates; 0 disables."
     )
     parser.add_argument("--max-episodes", type=int, help="Per-task episode cap including tie breaks.")
-    parser.add_argument("--seed", type=int, help="Seed for shuffling each task's evaluation pool.")
     videos = parser.add_mutually_exclusive_group()
     videos.add_argument(
         "--videos", dest="record_video", action="store_true", help="Record candidate rollouts."

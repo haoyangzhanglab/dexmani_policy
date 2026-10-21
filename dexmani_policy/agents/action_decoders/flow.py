@@ -95,9 +95,15 @@ class RectifiedFlow(nn.Module):
         x = torch.randn_like(action_template)
         dt = 1.0 / num_steps
 
+        context_kwargs = {}
+        prepare = getattr(self.model, "prepare_context_kv", None)
+        if not self.training and prepare is not None:
+            context_kv = prepare(cond)
+            if context_kv is not None:
+                context_kwargs["context_kv"] = context_kv
         for timestep in euler_time_grid(num_steps, x):
             t = timestep.expand(batch_size)
-            velocity = self.model(x=x, timestep=t, context=cond)
+            velocity = self.model(x=x, timestep=t, context=cond, **context_kwargs)
             x = x + dt * velocity
 
         return x

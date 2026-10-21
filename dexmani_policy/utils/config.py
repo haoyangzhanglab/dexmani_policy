@@ -222,11 +222,15 @@ def validate_action_key_consistency(cfg) -> None:
                 f"control_mode={expected_control!r}, got {actual_control!r}"
             )
 
-    ds_action_key = cfg.get("dataset", {}).get("action_key")
-    if ds_action_key is not None and ds_action_key != action_key:
-        raise ValueError(
-            f"dataset.action_key={ds_action_key!r} differs from action_key={action_key!r}"
-        )
+    dataset = cfg.get("dataset")
+    if dataset is None:
+        return
+    for child in [dataset, *dataset.get("datasets", ())]:
+        ds_action_key = child.get("action_key", "action")
+        if ds_action_key != action_key:
+            raise ValueError(
+                f"dataset.action_key={ds_action_key!r} differs from action_key={action_key!r}"
+            )
 
 
 def load_experiment_config(experiment_dir):

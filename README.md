@@ -35,6 +35,8 @@ bash scripts/training/train_ddp.sh ddp/sat 'task_name=<task>' 'training.seed=42'
 
 Shell 入口转发 Hydra overrides。数据通常位于 `robot_data/<task>.zarr`，但实际路径由 resolved `dataset` 配置决定；多任务使用各 child 的路径。数据字段、划分和归一化见 [数据接口](docs/项目架构.md#数据接口)。
 
+Fresh training 的通用 affine normalizer 按本次加载的完整 replay buffer 原始字段流式拟合，包括其中的验证 episode 和 `max_train_episodes` 外的行；这不是严格 train-only 统计。窗口、padding、增强及任务采样权重不改变拟合总体。配方记录在 `data_recipe[].normalization`，旧 checkpoint 继续使用保存的 scale/offset，不重新拟合。手部 codec 的专用统计保留各自定义。
+
 新 run 默认写入 `experiments/<policy_name>/<task_name>/<时间戳>_seed<seed>/`。已有训练产物的输出目录拒绝重用；并行任务必须使用不同目录。
 
 续训需要显式指定来源，恢复结果写入新目录：
@@ -45,6 +47,8 @@ bash scripts/training/train.sh dp3 \
 ```
 
 `resume_from` 接受实验目录或 checkpoint，支持 `~`，相对路径按项目根目录解析。完整恢复以 checkpoint 的 `effective_config` 为唯一配方来源，恢复 normalizer、raw/EMA、optimizer、scheduler、RNG 和采样位置；只允许规定的运行参数和数据路径覆盖。显式 `task_name` 必须与保存值一致，不能借续训改变模型、数据配方、world size 或训练预算。详见 [Checkpoint 与续训](docs/项目架构.md#checkpoint-与续训)。
+
+新配方设置 `ema.accumulation_dtype: float32`，可训练 BF16/FP16 参数直接以 FP32 EMA 参数累积，冻结参数保留原精度。保存恢复保留累积精度；旧 checkpoint 缺少此字段时继续按原参数精度更新，不能重建历史上已丢失的微小更新。
 
 训练日志记录标量指标。每次启动（含续训）创建新的 W&B run，默认 `offline`；`workspace.wandb_cfg` 只配置 `project/group/name/mode`。评测入口共用 `eval.video.fps` 设置录像帧率，不经训练日志上传；录像开关与优先级见[仿真评测机制](docs/仿真评测机制.md)。
 
@@ -155,11 +159,13 @@ bash scripts/training/train.sh dp3 'task_name=<task>' '+max_updates=4'
 ## 仿真评测
 
 ```bash
-bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run>
+bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run> --seed 1024 --episodes 70
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <run>
 ```
 
 流水线执行 checkpoint selection 和不录视频的 held-out eval，使用本次选择的固定记录交接；demo 单独运行。也可分别使用 `select_checkpoint.sh`、`evaluate.sh`，按各入口的 `--help` 调整预算、EMA/raw、NFE 和录像。
+
+新配置的 `eval.seed=1024` 独立于 training seed；评测优先级为 `--seed` > `eval.seed` dotlist > 保存的 `eval.seed` > 旧配方的 `training.seed+1024`。评测不接受 `training.seed` override。流水线的可选 `--seed` 同时传给 selection 和 final eval，`--episodes` 仅设置 final eval 每任务预算；省略时沿用保存配方。上例 70 适用于池为 100、selection 最多使用 30 的情况。跨实验比较须核对实际任务 seed 清单、预算和 selection 排除集合，不能仅比较 seed 数字；可用池不足会明确失败。
 
 三个分步 Shell 入口的 `--help` 直接调用对应 Python 参数解析器，使用 Conda 的 `policy` 环境，不要求已有实验或显示环境。
 

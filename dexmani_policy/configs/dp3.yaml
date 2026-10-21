@@ -103,6 +103,7 @@ optimizer:
 # ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema.EMA
+  accumulation_dtype: float32
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -151,6 +152,7 @@ env_runner:
 
 # ── Eval ──
 eval:
+  seed: 1024
   inference_steps: 10
   inference_steps_list: null
   use_ema: true

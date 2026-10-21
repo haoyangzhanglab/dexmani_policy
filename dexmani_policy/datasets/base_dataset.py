@@ -122,7 +122,6 @@ class BaseDataset(torch.utils.data.Dataset):
 
         self.data_recipe = {
             "window_validity": "role_finite_v1",
-            "normalization": "unique_train_source_rows",
         }
         if "point_cloud" in sensor_modalities and self.pc_dim == 3:
             self.data_recipe.update(window_validity="role_finite_xyz_v2", point_cloud_channels=3)
@@ -287,29 +286,30 @@ class BaseDataset(torch.utils.data.Dataset):
                     aug.augment(x)
 
     def iter_normalization_data(self, key: str):
-        """Fit only unique source rows referenced by valid training windows, by role."""
+        """Stream unaugmented fields from the complete loaded replay buffer."""
         if self.is_validation:
             raise ValueError("Validation must reuse the training normalizer")
         if key != "action" and key not in self.sensor_modalities:
             raise KeyError(f"Not an enabled observation field: {key}")
         action = key == "action"
         field = self.action_key if action else key
-        rows = self.sampler.action_source_rows if action else self.sampler.observation_source_rows
         num_rows = int(self.replay_buffer.episode_ends[-1])
         step = self.replay_buffer.chunk_rows(field)
         if action and self.use_aux_ee:
             step = min(step, self.replay_buffer.chunk_rows("action_ee"))
         for start in range(0, num_rows, step):
             end = min(start + step, num_rows)
-            selected = rows[np.searchsorted(rows, start) : np.searchsorted(rows, end)] - start
-            if not len(selected):
-                continue
-            values = self.replay_buffer.read(field, slice(start, end), cache=False)[selected]
+            values = self.replay_buffer.read(field, slice(start, end), cache=False)
             if field == "point_cloud" and self.pc_dim is not None:
                 values = values[..., : self.pc_dim]
             if action and self.use_aux_ee:
                 aux = self.replay_buffer.read(
                     "action_ee", slice(start, end), columns=slice(0, 9), cache=False
-                )[selected]
+                )
                 values = np.concatenate((values, aux), axis=-1)
+            if not np.isfinite(values).all():
+                raise ValueError(
+                    f"Nonfinite normalization field {key!r} from {self.zarr_path}, "
+                    f"source {field!r}, rows [{start}, {end})"
+                )
             yield values

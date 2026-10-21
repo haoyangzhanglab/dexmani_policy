@@ -281,8 +281,6 @@ class BasePolicy(nn.Module):
     ) -> torch.optim.AdamW:
         obs_lr = obs_lr if obs_lr is not None else lr
         obs_weight_decay = obs_weight_decay if obs_weight_decay is not None else weight_decay
-        if obs_lr == 0:
-            self.obs_encoder.requires_grad_(False)
         groups = self.optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
         groups = [group for group in groups if group["params"]]
         self.validate_optimizer_groups(groups)

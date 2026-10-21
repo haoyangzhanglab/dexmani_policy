@@ -72,7 +72,7 @@ def bind_defaults(config, constructor):
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
-    """Fit valid training rows, preserving rot6d coordinates for action_ee auto mode."""
+    """Fit the full buffer, preserving rot6d coordinates for action_ee auto mode."""
     normalizer = AffineNormalizer()
 
     for key, mode in spec.items():
@@ -134,6 +134,10 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         widths["action"] = int(reference.replay_buffer[reference.action_key].shape[-1]) + (
             9 if reference.use_aux_ee else 0
         )
+        if widths["action"] != cfg.agent.action_dim:
+            raise ValueError(
+                "Dataset action width including auxiliary targets must match agent.action_dim"
+            )
         cfg.normalization_dims = widths
         if isinstance(dataset, MultiTaskDataset) and dataset.sampling_strategy == "weighted":
             cfg.sampling_recipe = {"weighted_quota": "cumulative_random_offset_v1"}
@@ -146,6 +150,15 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
             )
             for child in children
         ]
+        for index, recipe in enumerate(cfg.data_recipe):
+            if saved_recipes is None:
+                recipe.normalization = {
+                    "population": "full_replay_buffer",
+                    "formula": "dp_affine_v1",
+                }
+            elif "normalization" in saved_recipes[index]:
+                # Restored statistics keep their recorded origin, including legacy descriptions.
+                recipe.normalization = saved_recipes[index]["normalization"]
         if runtime is not None:
             cfg.real_runtime = runtime
         else:
@@ -167,6 +180,8 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
                 summary += f", rejected={rejected:,}"
             summaries.append(summary)
         print(f"[Dataset] {' | '.join(summaries)}")
+        if resume_checkpoint is None:
+            print("[Normalizer] full_replay_buffer / dp_affine_v1 (includes held-out buffer episodes)")
     return dataset, normalizer
 
 
@@ -226,14 +241,25 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
     if cfg.training.use_ema:
         validate_ema_batchnorm(model)
 
+    # Freeze before EMA chooses which parameters need FP32 accumulation.
+    obs_lr = cfg.optimizer.get("obs_lr")
+    if (cfg.optimizer.lr if obs_lr is None else obs_lr) == 0:
+        model.obs_encoder.requires_grad_(False)
     ema_model = None
     ema_updater = None
     need_local_ema = cfg.training.use_ema and (rank == 0 or requires_ema_for_loss)
     if need_local_ema:
         # Copy before compile/DDP; resume restores raw and EMA independently below.
         ema_model = copy.deepcopy(model)
-        ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
-        bind_defaults(cfg.ema, type(ema_updater))
+        # Missing precision in a saved recipe means the original parameter-dtype updates.
+        precision = cfg.ema.get(
+            "accumulation_dtype", "float32" if checkpoint is None else "parameter"
+        )
+        ema_updater = hydra.utils.instantiate(
+            cfg.ema, model=ema_model, accumulation_dtype=precision
+        )
+        if checkpoint is None:
+            bind_defaults(cfg.ema, type(ema_updater))
 
     if checkpoint is not None:
         restore_model_weights(checkpoint, model, ema_model, device)
