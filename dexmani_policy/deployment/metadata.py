@@ -9,7 +9,10 @@ from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 
 from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
-from dexmani_policy.training.common.checkpoint import resolve_best_checkpoint, resolve_checkpoint
+from dexmani_policy.training.common.checkpoint import (
+    resolve_best_checkpoint,
+    resolve_checkpoint_path,
+)
 from dexmani_policy.utils.config import load_experiment_config, positive_int, validate_action_window
 
 EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
@@ -168,11 +171,13 @@ def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_ste
         )
     resolved_best = resolve_best_checkpoint(directory) if checkpoint == "best" else None
     path = (
-        resolved_best[1] if resolved_best is not None else resolve_checkpoint(directory, checkpoint)
+        resolved_best[1]
+        if resolved_best is not None
+        else resolve_checkpoint_path(directory, str(checkpoint))
     )
-    defaults = dict(cfg.get("eval", {})) if weights is None or inference_steps is None else {}
-    if resolved_best is not None:
-        defaults.update(resolved_best[0]["inference"])
+    defaults = (
+        resolved_best[0]["inference"] if resolved_best is not None else cfg.get("eval", {})
+    )
     if weights is None:
         if type(defaults.get("use_ema")) is not bool:
             raise ValueError("Inference defaults require boolean use_ema")

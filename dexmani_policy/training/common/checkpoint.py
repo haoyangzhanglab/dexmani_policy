@@ -346,8 +346,8 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
 def resolve_checkpoint_path(
     exp_dir: Path,
     ckpt_tag_or_path: str,
-) -> tuple[Path, str]:
-    """Resolve a checkpoint tag to an absolute path and human-readable label."""
+) -> Path:
+    """Resolve a checkpoint selector to a file inside the experiment/checkpoints directory."""
     if ckpt_tag_or_path.endswith("pct"):
         milestones = discover_milestone_checkpoints(exp_dir)
         target_pct = int(ckpt_tag_or_path.removesuffix("pct"))
@@ -357,7 +357,6 @@ def resolve_checkpoint_path(
             raise FileNotFoundError(
                 f"No {target_pct}% milestone checkpoint. Available: {available}"
             )
-        return match[0].path, match[0].label
+        return match[0].path
 
-    path = resolve_checkpoint(exp_dir, ckpt_tag_or_path)
-    return path, f"{ckpt_tag_or_path} ({path.name})"
+    return resolve_checkpoint(exp_dir, ckpt_tag_or_path)

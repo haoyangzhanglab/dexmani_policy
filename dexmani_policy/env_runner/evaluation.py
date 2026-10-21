@@ -297,39 +297,44 @@ def resolve_eval_request(
         if selection_record is not None
         else resolve_best_checkpoint(exp_dir) if checkpoint == "best" else None
     )
-    weights = get_eval_param(cfg, "use_ema", section, default=True)
-    steps = get_eval_param(cfg, "inference_steps_list", section)
-    steps = (
-        list(steps)
-        if steps is not None
-        else [get_eval_param(cfg, "inference_steps", section, default=10)]
-    )
-    if resolved is not None:
-        weights = resolved[0]["inference"]["use_ema"]
-        steps = [resolved[0]["inference"]["inference_steps"]]
     present, value = explicit_eval_value(override_cfg, section, "use_ema")
-    if present:
+    if use_ema is not None:
+        weights = use_ema
+    elif present:
         weights = value
+    elif resolved is not None:
+        weights = resolved[0]["inference"]["use_ema"]
+    else:
+        weights = get_eval_param(cfg, "use_ema", section, default=True)
+
     list_present, list_value = explicit_eval_value(override_cfg, section, "inference_steps_list")
     step_present, step_value = explicit_eval_value(override_cfg, section, "inference_steps")
-    if list_present and list_value is not None:
+    if inference_steps_list is not None:
+        steps = list(inference_steps_list)
+    elif list_present and list_value is not None:
         steps = list(list_value)
     elif step_present:
         steps = [step_value]
-    if use_ema is not None:
-        weights = use_ema
-    if inference_steps_list is not None:
-        steps = list(inference_steps_list)
+    elif resolved is not None:
+        steps = [resolved[0]["inference"]["inference_steps"]]
+    else:
+        saved_steps = get_eval_param(cfg, "inference_steps_list", section)
+        steps = (
+            list(saved_steps)
+            if saved_steps is not None
+            else [get_eval_param(cfg, "inference_steps", section, default=10)]
+        )
+
     if type(weights) is not bool:
         raise ValueError("use_ema must be boolean")
     validate_inference_steps(steps)
     if selection_record is not None:
-        if checkpoint != "best" and resolve_checkpoint_path(exp_dir, checkpoint)[0] != resolved[1]:
+        if checkpoint != "best" and resolve_checkpoint_path(exp_dir, checkpoint) != resolved[1]:
             raise ValueError("Checkpoint override differs from selection record")
         inference = resolved[0]["inference"]
         if weights != inference["use_ema"] or steps != [inference["inference_steps"]]:
             raise ValueError("Selection record cannot override raw/EMA or NFE")
-    path = resolved[1] if resolved else resolve_checkpoint_path(exp_dir, checkpoint)[0]
+    path = resolved[1] if resolved else resolve_checkpoint_path(exp_dir, checkpoint)
     return merged, weights, steps, resolved[0] if resolved else None, path
 
 
