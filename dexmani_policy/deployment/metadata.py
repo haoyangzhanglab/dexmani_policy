@@ -53,6 +53,15 @@ class PolicyInfo:
         OmegaConf.set_readonly(config, True)
         object.__setattr__(self, "saved_config", config)
 
+    def validate_execution_mode(self, mode):
+        if mode not in {"sync", "async", "rtc"}:
+            raise ValueError("Unsupported execution mode")
+        if mode != "sync" and self.saved_config.agent.get("_target_") in {
+            "dexmani_policy.agents.core.lamp_policy.LAMPPolicy",
+            "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy",
+        }:
+            raise NotImplementedError("LAMP and Temporal support sync execution only")
+
     def to_dict(self):
         """Serialize the deployment summary without duplicating the saved configuration."""
         values = {
