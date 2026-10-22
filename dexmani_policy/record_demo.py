@@ -3,9 +3,10 @@
 import argparse
 from pathlib import Path
 
-from omegaconf import OmegaConf
-
-from dexmani_policy.env_runner.common.seeds import select_eval_seeds, validate_task_seeds
+from dexmani_policy.env_runner.common.seeds import (
+    split_eval_seeds,
+    validate_task_seeds,
+)
 from dexmani_policy.env_runner.evaluation import (
     add_evaluation_arguments,
     build_eval_runner,
@@ -13,7 +14,6 @@ from dexmani_policy.env_runner.evaluation import (
     get_eval_param,
     iter_leaf_env_runners,
     resolve_eval_request,
-    resolve_eval_seed,
     task_seed_pools,
 )
 from dexmani_policy.utils.config import load_experiment_config, register_resolvers, set_project_root
@@ -44,7 +44,7 @@ def main(argv=None):
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
     cfg, use_ema, inference_steps, selection, checkpoint_path = resolve_eval_request(
-        OmegaConf.create(load_experiment_config(exp_dir)),
+        load_experiment_config(exp_dir),
         exp_dir,
         args.ckpt_tag,
         section="demo",
@@ -62,12 +62,8 @@ def main(argv=None):
             if set(seeds) - set(pools[task]):
                 raise ValueError(f"Unavailable demo seeds for {task}")
     else:
-        episodes = (
-            args.episodes
-            if args.episodes is not None
-            else get_eval_param(cfg, "episodes", "demo", default=5)
-        )
-        plan = select_eval_seeds(pools, resolve_eval_seed(cfg), episodes)
+        episodes = get_eval_param(cfg, "episodes", "demo", override=args.episodes, default=5)
+        plan, _ = split_eval_seeds(pools, cfg.eval.seed, episodes)
 
     resolution = args.resolution or get_eval_param(
         cfg, "viewer_resolution", "demo", default=[1280, 960]

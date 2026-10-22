@@ -171,7 +171,7 @@ eval:
     batch_size: 5
     max_episodes: 100
   offline:
-    episodes: 100
+    episodes: 70
   demo:
     episodes: 5
     viewer_resolution: [1280, 960]

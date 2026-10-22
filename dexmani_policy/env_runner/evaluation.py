@@ -20,8 +20,13 @@ from dexmani_policy.env_runner.common.metrics import (
     validate_episode_details,
 )
 from dexmani_policy.env_runner.common.seeds import (
+    SEED_PLAN_VERSION,
+    plan_selection_seeds,
     plan_size,
-    select_eval_seeds,
+    resolve_eval_seed,
+    selection_seed_counts,
+    validate_eval_seed,
+    validate_seed_pool,
     validate_task_seeds,
 )
 from dexmani_policy.training.common.checkpoint import (
@@ -34,15 +39,6 @@ from dexmani_policy.utils.config import positive_int, validate_action_key_consis
 from dexmani_policy.utils.runtime import atomic_path, set_seed
 
 
-def resolve_eval_seed(cfg, cli_seed: int | None = None) -> int:
-    seed = cli_seed if cli_seed is not None else cfg.get("eval", {}).get("seed")
-    if seed is None:
-        seed = cfg.get("training", {}).get("seed", 0) + 1024
-    if type(seed) is not int or not 0 <= seed < 2**32:
-        raise ValueError("Evaluation seed must be an integer in [0, 2**32)")
-    return seed
-
-
 class EvalSeedAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         previous = getattr(namespace, self.dest, None)
@@ -53,26 +49,41 @@ class EvalSeedAction(argparse.Action):
 
 def parse_eval_overrides(overrides: list[str]):
     """Only evaluation/inference controls may override checkpoint evaluation."""
-    seeds = {}
+    section_params = {
+        "select_best": {
+            "initial_episodes",
+            "batch_size",
+            "max_episodes",
+            "inference_steps",
+            "use_ema",
+        },
+        "offline": {"episodes", "inference_steps", "inference_steps_list", "use_ema"},
+        "demo": {
+            "episodes",
+            "inference_steps",
+            "inference_steps_list",
+            "use_ema",
+            "viewer_resolution",
+        },
+        "video": {"enabled", "fps"},
+    }
+    eval_keys = {"eval.seed"}
+    for section, names in section_params.items():
+        eval_keys.update(f"eval.{name}" for name in names)
+        eval_keys.update(f"eval.{section}.{name}" for name in names)
+    seed = None
     for override in overrides:
         key, separator, _ = override.partition("=")
         if key == "eval.seed":
             value = OmegaConf.select(OmegaConf.from_dotlist([override]), key)
-            if key in seeds and (type(seeds[key]) is not type(value) or seeds[key] != value):
+            validate_eval_seed(value)
+            if seed is not None and seed != value:
                 raise ValueError(f"Conflicting {key} overrides")
-            seeds[key] = value
-        elif key.startswith("eval.") and key.endswith(".seed"):
-            raise ValueError("Use eval.seed for the shared evaluation seed")
-        if key == "eval.seed_manifest":
-            raise ValueError(
-                "Unsupported eval.seed_manifest; use evaluation seed and episode counts"
-            )
-        if key.split(".")[-1] in {"denoise_steps", "denoise_timesteps_list"}:
-            raise ValueError("Use inference_steps or inference_steps_list for evaluation")
+            seed = value
         if not separator or not (
-            key.startswith(("eval.", "env_runner.")) or key == "training.device"
+            key in eval_keys or key.startswith("env_runner.") or key == "training.device"
         ):
-            raise ValueError(f"Evaluation override cannot redefine saved inference config: {key}")
+            raise ValueError(f"Unsupported evaluation override: {key}")
         if any(
             part in key.split(".")
             for part in (
@@ -85,7 +96,14 @@ def parse_eval_overrides(overrides: list[str]):
             )
         ):
             raise ValueError(f"Model inputs come from saved dataset config: {key}")
-    return OmegaConf.from_dotlist(overrides)
+    cfg = OmegaConf.from_dotlist(overrides)
+    shared = cfg.get("eval") or {}
+    # Explicit shared values must beat saved section defaults.
+    for section, names in section_params.items():
+        for name in names:
+            if name in shared and name not in (shared.get(section) or {}):
+                OmegaConf.update(cfg, f"eval.{section}.{name}", shared[name])
+    return cfg
 
 
 def validate_inference_steps(inference_steps_list) -> None:
@@ -99,14 +117,23 @@ def validate_inference_steps(inference_steps_list) -> None:
 
 
 def add_evaluation_arguments(parser) -> None:
-    parser.add_argument("--policy-name", required=True, help="Experiment policy path, e.g. ddp/sat.")
-    parser.add_argument("--task-name", required=True, help="Task directory in the saved experiment.")
-    parser.add_argument("--exp-name", required=True, help="Run directory under experiments/policy/task.")
+    parser.add_argument(
+        "--policy-name", required=True, help="Experiment policy path, e.g. ddp/sat."
+    )
+    parser.add_argument(
+        "--task-name", required=True, help="Task directory in the saved experiment."
+    )
+    parser.add_argument(
+        "--exp-name", required=True, help="Run directory under experiments/policy/task."
+    )
     parser.add_argument(
         "--seed",
         type=int,
         action=EvalSeedAction,
-        help="Evaluation seed: CLI > eval.seed dotlist > saved eval.seed > training.seed+1024.",
+        help=(
+            "Evaluation seed: CLI > eval.seed dotlist > saved eval.seed > 1024. "
+            "Final eval with a selection record reuses its seed and rejects conflicts."
+        ),
     )
     parser.add_argument(
         "--inference-steps",
@@ -151,8 +178,12 @@ def iter_leaf_env_runners(env_runner):
     return (env_runner,)
 
 
-def get_eval_param(cfg, param: str, section: str | None = None, *, default: Any = None) -> Any:
-    """Resolve section → shared eval → default; only None means unspecified."""
+def get_eval_param(
+    cfg, param: str, section: str | None = None, *, override: Any = None, default: Any = None
+) -> Any:
+    """Resolve explicit value → section → shared eval → default; None is unspecified."""
+    if override is not None:
+        return override
     eval_cfg = cfg.get("eval") or {}
     section_cfg = (eval_cfg.get(section) or {}) if section else {}
     for source in (section_cfg, eval_cfg):
@@ -163,7 +194,7 @@ def get_eval_param(cfg, param: str, section: str | None = None, *, default: Any 
 
 
 def task_seed_pools(runner):
-    """Physical seeds in task execution order; no reference-task indirection."""
+    """Physical seeds in task execution order."""
     return {leaf.task_name: list(leaf.get_seed_list()) for leaf in iter_leaf_env_runners(runner)}
 
 
@@ -174,7 +205,8 @@ def run_eval_plan(runner, agent, plan, *, inference_steps, video_save_dir=None):
     )
     if hasattr(runner, "runners"):
         return runner.run(agent, task_seeds=plan, **kwargs)
-    validate_task_seeds(plan, [runner.task_name])
+    if set(plan) != {runner.task_name}:
+        raise ValueError("Task seed plan does not match the runner task")
     return runner.run(agent, seeds=plan[runner.task_name], **kwargs)
 
 
@@ -190,6 +222,7 @@ def code_version(directory):
     import subprocess
 
     try:
+
         def git(*args):
             return subprocess.check_output(
                 ["git", "-C", str(directory), *args], stderr=subprocess.DEVNULL, text=True
@@ -274,22 +307,79 @@ def create_run_directory(root, directory=None):
     return directory
 
 
-def selection_task_seeds(record):
-    """Derive exclusion seeds from completed stages, including losing candidates."""
-    stages = record["stages"]
-    if not stages or record["ckpt_relpath"] not in {stage["checkpoint"] for stage in stages}:
+def fixed_test_request(record):
+    """Resolve the saved protocol and test budget before building a runner."""
+    evaluation = record.get("evaluation")
+    request = evaluation.get("request") if isinstance(evaluation, dict) else None
+    if not isinstance(request, dict) or request.get("seed_plan_version") != SEED_PLAN_VERSION:
+        raise ValueError("Selection record requires fixed_test_v1; rerun checkpoint selection")
+    if not {"shuffle_seed", "test_task_seeds"} <= request.keys():
+        raise ValueError(
+            "Selection record is missing its fixed test plan; rerun checkpoint selection"
+        )
+    validate_eval_seed(request["shuffle_seed"])
+    saved_cfg = evaluation.get("effective_config")
+    if not isinstance(saved_cfg, dict):
+        raise ValueError("Fixed test selection requires its saved evaluation config")
+    episodes = positive_int(get_eval_param(saved_cfg, "episodes", "offline"), "saved test episodes")
+    return request, episodes
+
+
+def selection_test_seeds(record, pools, episodes):
+    """Validate the frozen test/reserved plans and every candidate's stage evidence."""
+    request = record["evaluation"]["request"]
+    stages = record.get("stages")
+    if (
+        not isinstance(stages, list)
+        or not stages
+        or any(not isinstance(stage, dict) for stage in stages)
+        or not any(stage.get("checkpoint") == record["ckpt_relpath"] for stage in stages)
+    ):
         raise ValueError("Selected checkpoint has no evaluation evidence")
-    tasks = stages[0]["requested_task_seeds"]
-    selected = {}
+    required = {
+        "initial_episodes",
+        "batch_size",
+        "max_episodes",
+        "initial_task_seeds",
+        "possible_tie_task_seeds",
+    }
+    if not required <= request.keys():
+        raise ValueError("Reserved selection is missing its seed plan or budgets")
+    test = request["test_task_seeds"]
+    initial = request["initial_task_seeds"]
+    extra = request["possible_tie_task_seeds"]
+    if validate_task_seeds(test, pools) != episodes:
+        raise ValueError("Fixed test seed counts disagree with saved eval.offline.episodes")
+    initial_count, extra_count = selection_seed_counts(
+        request["initial_episodes"], request["batch_size"], request["max_episodes"]
+    )
+    if (
+        validate_task_seeds(initial, pools) != initial_count
+        or validate_task_seeds(extra, pools, allow_empty=True) != extra_count
+    ):
+        raise ValueError("Reserved selection seed counts disagree with its budgets")
+    reserved = {}
+    for task in initial:
+        if set(initial[task]) & set(extra[task]):
+            raise ValueError(f"{task}: initial and possible tie seeds overlap")
+        reserved[task] = initial[task] + extra[task]
+        pool = set(validate_seed_pool(task, pools[task]))
+        if not set(reserved[task]) <= pool:
+            raise ValueError(f"{task}: reserved selection seeds are outside the task seed pool")
+        if not set(test[task]) <= pool:
+            raise ValueError(f"{task}: fixed test seeds are outside the task seed pool")
+        if set(test[task]) & set(reserved[task]):
+            raise ValueError(f"{task}: fixed test and reserved selection seeds overlap")
     for stage in stages:
-        if stage["status"] != "completed":
+        if stage.get("status") != "completed":
             raise ValueError("Selection contains an incomplete stage")
-        plan = stage["requested_task_seeds"]
-        validate_task_seeds(plan, tasks)
-        validate_episode_details(stage["episode_details"], plan)
+        plan = stage.get("requested_task_seeds")
+        validate_task_seeds(plan, pools)
+        validate_episode_details(stage.get("episode_details"), plan)
         for task, seeds in plan.items():
-            selected.setdefault(task, {}).update(dict.fromkeys(seeds))
-    return {task: list(seeds) for task, seeds in selected.items()}
+            if not set(seeds) <= set(reserved[task]):
+                raise ValueError(f"{task}: selection stage seeds are outside the reserved plan")
+    return test
 
 
 def explicit_eval_value(cfg, section, name):
@@ -312,18 +402,42 @@ def resolve_eval_request(
     inference_steps_list=None,
     selection_record=None,
     eval_seed=None,
+    episodes=None,
 ):
     """CLI > explicit dotlist > selected checkpoint > saved defaults."""
-    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    cfg = OmegaConf.to_container(OmegaConf.create(cfg), resolve=True)
     override_cfg = parse_eval_overrides(list(overrides))
     merged = OmegaConf.merge(cfg, override_cfg)
-    OmegaConf.update(merged, "eval.seed", resolve_eval_seed(merged, eval_seed))
     merged.experiment_dir = str(exp_dir)
     resolved = (
         resolve_selection_record(exp_dir, selection_record)
         if selection_record is not None
         else resolve_best_checkpoint(exp_dir) if checkpoint == "best" else None
     )
+    episode_override, requested_episodes = explicit_eval_value(override_cfg, section, "episodes")
+    if episodes is not None:
+        episode_override, requested_episodes = True, episodes
+    if section == "offline" and episode_override:
+        positive_int(requested_episodes, "episodes")
+    if resolved is not None and section == "offline":
+        request, count = fixed_test_request(resolved[0])
+        explicit_seed = eval_seed is not None or "seed" in (override_cfg.get("eval") or {})
+        if explicit_seed and resolve_eval_seed(merged, eval_seed) != request["shuffle_seed"]:
+            raise ValueError(
+                "Explicit evaluation seed conflicts with selection record shuffle_seed"
+            )
+        seed = request["shuffle_seed"]
+        if episode_override and requested_episodes != count:
+            raise ValueError("Explicit episodes conflicts with selection record test count")
+        OmegaConf.update(merged, "eval.offline.episodes", count)
+    else:
+        seed = resolve_eval_seed(merged, eval_seed)
+        if section == "offline":
+            count = get_eval_param(
+                merged, "episodes", section, override=requested_episodes, default=100
+            )
+            OmegaConf.update(merged, "eval.offline.episodes", positive_int(count, "episodes"))
+    OmegaConf.update(merged, "eval.seed", seed)
     present, value = explicit_eval_value(override_cfg, section, "use_ema")
     if use_ema is not None:
         weights = use_ema
@@ -378,10 +492,10 @@ def evaluate_policy(
     record_video=False,
     selection=None,
     heldout=False,
+    seed_plan_version=None,
 ):
     """Load once and evaluate the same physical episodes at each requested NFE."""
-    validate_inference_steps(inference_steps_list)
-    seed = resolve_eval_seed(cfg)
+    seed = cfg.eval.seed
     set_seed(seed)
     for leaf in iter_leaf_env_runners(runner):
         leaf.record_video = record_video
@@ -400,6 +514,7 @@ def evaluate_policy(
         effective_episodes=plan_size(plan),
         shuffle_seed=seed,
         policy_seed_mode="episode_seed",
+        seed_plan_version=seed_plan_version,
         task_seeds=plan,
         selection_id=selection["selection_id"] if selection is not None else None,
         selection_result=selection["selection_result"] if selection is not None else None,
@@ -425,6 +540,7 @@ def evaluate_policy(
             "use_ema": use_ema,
             "inference_steps": nfe,
             "evaluation_seeds": plan,
+            "seed_plan_version": seed_plan_version,
             "heldout_from_selection": heldout,
             "episode_details": details,
             "statistics": stats,
@@ -479,15 +595,21 @@ def evaluate_checkpoint(
         inference_steps_list=inference_steps_list,
         selection_record=selection_record,
         eval_seed=eval_seed,
+        episodes=episodes,
     )
-    excluded = selection_task_seeds(selection) if selection is not None else None
     runner = build_eval_runner(cfg)
-    episodes = (
-        episodes
-        if episodes is not None
-        else get_eval_param(cfg, "episodes", "offline", default=100)
-    )
-    plan = select_eval_seeds(task_seed_pools(runner), resolve_eval_seed(cfg), episodes, excluded)
+    pools = task_seed_pools(runner)
+    if selection is not None:
+        plan = selection_test_seeds(selection, pools, cfg.eval.offline.episodes)
+    else:
+        plan, _, _ = plan_selection_seeds(
+            pools,
+            cfg.eval.seed,
+            episodes=cfg.eval.offline.episodes,
+            initial_episodes=get_eval_param(cfg, "initial_episodes", "select_best", default=25),
+            batch_size=get_eval_param(cfg, "batch_size", "select_best", default=5),
+            max_episodes=get_eval_param(cfg, "max_episodes", "select_best", default=100),
+        )
     if record_video is None:
         record_video = get_eval_param(cfg, "enabled", "video", default=True)
     return evaluate_policy(
@@ -502,4 +624,5 @@ def evaluate_checkpoint(
         record_video=record_video,
         selection=selection,
         heldout=selection is not None,
+        seed_plan_version=SEED_PLAN_VERSION,
     )

@@ -3,8 +3,6 @@
 import argparse
 from pathlib import Path
 
-from omegaconf import OmegaConf
-
 from dexmani_policy.env_runner.evaluation import (
     add_evaluation_arguments,
     evaluate_checkpoint,
@@ -22,14 +20,18 @@ def main(argv=None):
     parser.add_argument(
         "--ckpt-path", help="Path inside experiment/checkpoints; overrides --ckpt-tag."
     )
-    parser.add_argument("--episodes", type=int, help="Episodes per task; defaults to saved config.")
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        help="Test episodes per task; defaults to selection record, then saved config. Conflicts fail.",
+    )
     parser.add_argument("--no-videos", action="store_true", help="Override saved video settings.")
     parser.add_argument("--selection-record", help="Path to a completed selection_result.json.")
     parser.add_argument("overrides", nargs="*", help="Evaluation/environment dotlist overrides.")
     args = parser.parse_args(argv)
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
-    cfg = OmegaConf.create(load_experiment_config(exp_dir))
+    cfg = load_experiment_config(exp_dir)
     evaluate_checkpoint(
         exp_dir,
         cfg,

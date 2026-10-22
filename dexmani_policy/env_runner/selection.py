@@ -9,15 +9,20 @@ from omegaconf import OmegaConf
 from termcolor import cprint
 
 from dexmani_policy.env_runner.common.metrics import collect_episode_details, mean_success_steps
-from dexmani_policy.env_runner.common.seeds import plan_size, select_eval_seeds
+from dexmani_policy.env_runner.common.seeds import (
+    SEED_PLAN_VERSION,
+    plan_selection_seeds,
+    plan_size,
+    resolve_eval_seed,
+)
 from dexmani_policy.env_runner.evaluation import (
     artifact_reference,
     atomic_json,
     build_eval_runner,
     create_run_directory,
     evaluation_snapshot,
+    get_eval_param,
     iter_leaf_env_runners,
-    resolve_eval_seed,
     run_eval_plan,
     task_seed_pools,
     validate_inference_steps,
@@ -27,7 +32,6 @@ from dexmani_policy.training.common.checkpoint import (
     discover_milestone_checkpoints,
     restore_policy_agent,
 )
-from dexmani_policy.utils.config import positive_int
 from dexmani_policy.utils.runtime import set_seed
 
 
@@ -58,23 +62,31 @@ def select_best_checkpoint(
     exp_dir,
     cfg,
     *,
-    initial_episodes=25,
-    batch_size=5,
-    max_episodes=100,
-    inference_steps=10,
-    use_ema=True,
+    initial_episodes=None,
+    batch_size=None,
+    max_episodes=None,
+    inference_steps=None,
+    use_ema=None,
     eval_seed=None,
     record_video=False,
     output_dir=None,
 ):
+    initial_episodes = get_eval_param(
+        cfg, "initial_episodes", "select_best", override=initial_episodes, default=25
+    )
+    batch_size = get_eval_param(cfg, "batch_size", "select_best", override=batch_size, default=5)
+    max_episodes = get_eval_param(
+        cfg, "max_episodes", "select_best", override=max_episodes, default=100
+    )
+    inference_steps = get_eval_param(
+        cfg, "inference_steps", "select_best", override=inference_steps, default=10
+    )
+    use_ema = get_eval_param(cfg, "use_ema", "select_best", override=use_ema, default=True)
+    episodes = get_eval_param(cfg, "episodes", "offline", default=100)
     validate_inference_steps([inference_steps])
-    positive_int(initial_episodes, "initial_episodes")
-    positive_int(max_episodes, "max_episodes")
-    if type(batch_size) is not int or batch_size < 0:
-        raise ValueError("batch_size must be a non-negative integer")
     if type(use_ema) is not bool:
         raise ValueError("use_ema must be boolean")
-    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    cfg = OmegaConf.create(OmegaConf.to_container(OmegaConf.create(cfg), resolve=True))
     exp_dir = Path(exp_dir).resolve()
     root = exp_dir / "eval_ckpt_selector"
     if output_dir is not None and not Path(output_dir).expanduser().resolve().is_relative_to(root):
@@ -95,21 +107,26 @@ def select_best_checkpoint(
         cfg.experiment_dir = str(exp_dir)
         seed = resolve_eval_seed(cfg, eval_seed)
         OmegaConf.update(cfg, "eval.seed", seed)
+        OmegaConf.update(cfg, "eval.offline.episodes", episodes)
         set_seed(seed)
         milestones = discover_milestone_checkpoints(exp_dir)
         runner = build_eval_runner(cfg)
         for leaf in iter_leaf_env_runners(runner):
             leaf.record_video = record_video
-        seeds = select_eval_seeds(
-            task_seed_pools(runner), seed, min(initial_episodes + batch_size, max_episodes)
+        test, initial, extra = plan_selection_seeds(
+            task_seed_pools(runner),
+            seed,
+            episodes=episodes,
+            initial_episodes=initial_episodes,
+            batch_size=batch_size,
+            max_episodes=max_episodes,
         )
-        initial_count = min(initial_episodes, plan_size(seeds))
-        initial = {task: values[:initial_count] for task, values in seeds.items()}
-        extra = {task: values[initial_count:] for task, values in seeds.items()}
         record["evaluation"] = evaluation_snapshot(
             cfg,
             runner,
+            seed_plan_version=SEED_PLAN_VERSION,
             shuffle_seed=seed,
+            test_task_seeds=test,
             initial_episodes=initial_episodes,
             batch_size=batch_size,
             max_episodes=max_episodes,
@@ -117,6 +134,7 @@ def select_best_checkpoint(
             possible_tie_task_seeds=extra,
             checkpoints=[artifact_reference(m.path, exp_dir) for m in milestones],
         )
+        atomic_json(result_path, record)
 
         def evaluate(candidate, plan, phase):
             checkpoint = candidate.checkpoint

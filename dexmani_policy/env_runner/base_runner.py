@@ -12,6 +12,7 @@ from termcolor import cprint
 
 from dexmani_policy.datasets.common.rgb_preprocessing import preprocess_validation_rgb
 from dexmani_policy.env_runner.common.metrics import summarize_episodes, validate_episode_details
+from dexmani_policy.env_runner.common.seeds import validate_task_seeds
 from dexmani_policy.env_runner.common.video import save_episode_video
 from dexmani_policy.utils.config import positive_int
 
@@ -131,7 +132,8 @@ class BaseRunner:
             if name == "rgb":
                 value = preprocess_validation_rgb(value, **self.rgb_preprocessing)
             if isinstance(value, (np.ndarray, torch.Tensor)):
-                value = torch.as_tensor(value, device=device).unsqueeze(0)
+                dtype = None if name in {"rgb", "tactile_valid"} else torch.float32
+                value = torch.as_tensor(value, device=device, dtype=dtype).unsqueeze(0)
             batch[name] = value
         return batch
 
@@ -212,7 +214,6 @@ class BaseRunner:
         self,
         agent,
         inference_steps: int | None = None,
-        eval_episodes: int | None = None,
         video_save_dir: Path | None = None,
         *,
         seeds: list[int] | None = None,
@@ -226,25 +227,16 @@ class BaseRunner:
         try:
             if inference_steps is not None:
                 positive_int(inference_steps, "inference_steps")
-            default_count = self.default_eval_episodes if seeds is None else len(seeds)
-            seeds = self.get_seed_list() if seeds is None else seeds
-            if not seeds:
-                raise ValueError("Evaluation seed pool is empty")
-            count = positive_int(
-                default_count if eval_episodes is None else eval_episodes, "eval_episodes"
-            )
-            if count > len(seeds):
-                cprint(
-                    f"Requested {count} episodes; limiting to {len(seeds)} available seeds",
-                    "yellow",
-                )
-            seeds = seeds[:count]
-            count = len(seeds)
-            if (
-                any(type(value) is not int or value < 0 for value in seeds)
-                or len(set(seeds)) != count
-            ):
-                raise ValueError("Evaluation seeds must be distinct nonnegative integers")
+            if seeds is None:
+                seeds = self.get_seed_list()
+                count = positive_int(self.default_eval_episodes, "default_eval_episodes")
+                if count > len(seeds):
+                    raise ValueError(
+                        f"Requested {count} episodes, only {len(seeds)} seeds available"
+                    )
+                seeds = seeds[:count]
+            seeds = list(seeds)
+            count = validate_task_seeds({task: seeds}, [task])
 
             for index, seed in enumerate(seeds):
                 if env is None or (
