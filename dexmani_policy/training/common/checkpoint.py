@@ -145,6 +145,10 @@ def resolve_record_path(root, relative, *, checkpoint=False, immutable=False):
 
 
 def validate_inference_settings(info):
+    from omegaconf import OmegaConf
+
+    from dexmani_policy.utils.config import resolve_action_steps
+
     inference = info.get("inference")
     if not isinstance(inference, dict):
         raise ValueError("Record requires inference settings")
@@ -155,6 +159,11 @@ def validate_inference_settings(info):
         raise ValueError("inference.inference_steps must be a positive int (not bool)")
     if inference.get("policy_seed_mode") != "episode_seed":
         raise ValueError("Record requires inference.policy_seed_mode=episode_seed")
+    # Legacy selections used their saved model window, irrespective of eval defaults.
+    agent = OmegaConf.create(info["evaluation"]["effective_config"]["agent"])
+    if "action_steps" in inference and inference["action_steps"] is None:
+        raise ValueError("inference.action_steps must be a positive int")
+    inference["action_steps"] = resolve_action_steps(agent, inference.get("action_steps"))
 
 
 def resolve_selection_record(experiment_dir, record_path):

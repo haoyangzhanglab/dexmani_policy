@@ -160,13 +160,10 @@ class DQRISEPolicy(BasePolicy):
         cond = self.encode_observation(batch["obs"])
 
         normed = self.normalizer["action"].normalize(batch["action"])
-        if not torch.isfinite(normed).all():
-            raise ValueError(
-                "NaN or Inf detected in normalised action. "
-                "Check the data pipeline (Zarr integrity, normalizer fit range)."
-            )
         tcp_part = normed[..., : self.tcp_dim]
         hand_part = normed[..., self.tcp_dim :]
+        if not torch.isfinite(tcp_part).all():
+            raise ValueError("Normalized TCP actions must be finite before diffusion training")
 
         index, discrete_idx = self.hand_codebook.encode(hand_part)
         index = index.to(tcp_part.dtype)
@@ -207,12 +204,8 @@ class DQRISEPolicy(BasePolicy):
 
         normalized_full_action = torch.cat([tcp_pred, hand_pred], dim=-1)
         pred = self.normalizer["action"].unnormalize(normalized_full_action)
-        start = self.n_obs_steps - 1
-        control_action = pred[:, start : start + self.n_action_steps]
-
         return {
-            "pred_action": pred,
-            "control_action": control_action,
+            **self.format_action_output(pred),
             "pred_code_index": discrete_idx,
             "pred_code_continuous": idx_pred,
         }

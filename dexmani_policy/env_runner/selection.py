@@ -32,6 +32,7 @@ from dexmani_policy.training.common.checkpoint import (
     discover_milestone_checkpoints,
     restore_policy_agent,
 )
+from dexmani_policy.utils.config import resolve_action_steps
 from dexmani_policy.utils.runtime import set_seed
 
 
@@ -66,6 +67,7 @@ def select_best_checkpoint(
     batch_size=None,
     max_episodes=None,
     inference_steps=None,
+    action_steps=None,
     use_ema=None,
     eval_seed=None,
     record_video=False,
@@ -87,6 +89,10 @@ def select_best_checkpoint(
     if type(use_ema) is not bool:
         raise ValueError("use_ema must be boolean")
     cfg = OmegaConf.create(OmegaConf.to_container(OmegaConf.create(cfg), resolve=True))
+    action_steps = resolve_action_steps(
+        cfg.agent, get_eval_param(cfg, "action_steps", "select_best", override=action_steps)
+    )
+    OmegaConf.update(cfg, "eval.select_best.action_steps", action_steps)
     exp_dir = Path(exp_dir).resolve()
     root = exp_dir / "eval_ckpt_selector"
     if output_dir is not None and not Path(output_dir).expanduser().resolve().is_relative_to(root):
@@ -99,6 +105,7 @@ def select_best_checkpoint(
         "inference": {
             "use_ema": use_ema,
             "inference_steps": inference_steps,
+            "action_steps": action_steps,
             "policy_seed_mode": "episode_seed",
         },
         "stages": [],
@@ -125,6 +132,7 @@ def select_best_checkpoint(
             cfg,
             runner,
             seed_plan_version=SEED_PLAN_VERSION,
+            action_steps=action_steps,
             shuffle_seed=seed,
             test_task_seeds=test,
             initial_episodes=initial_episodes,
@@ -157,6 +165,7 @@ def select_best_checkpoint(
                 agent,
                 plan,
                 inference_steps=inference_steps,
+                action_steps=action_steps,
                 video_save_dir=video,
             )
             details = collect_episode_details(result)

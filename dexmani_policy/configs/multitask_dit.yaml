@@ -199,8 +199,6 @@ env_runner:
   task_configs:
     - task_name: pick_bottle
       task_text: ${dataset.task_texts[0]}
-      rgb_preprocess_size: ${dataset.datasets[0].rgb_preprocess_size}
-      rgb_random_crop_size: ${dataset.datasets[0].rgb_random_crop_size}
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
         texture_random: false  # Randomize textures, skybox, lights and camera pose.
@@ -208,8 +206,6 @@ env_runner:
         table_random: true
     - task_name: open_box
       task_text: ${dataset.task_texts[1]}
-      rgb_preprocess_size: ${dataset.datasets[1].rgb_preprocess_size}
-      rgb_random_crop_size: ${dataset.datasets[1].rgb_random_crop_size}
       env_kwargs:
         control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
         texture_random: false  # Randomize textures, skybox, lights and camera pose.

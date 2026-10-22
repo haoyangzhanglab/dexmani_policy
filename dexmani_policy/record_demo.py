@@ -40,6 +40,7 @@ def main(argv=None):
     )
     parser.add_argument("--fps", type=int, help="Override saved video or environment FPS.")
     parser.add_argument("--selection-record", help="Path to a completed selection_result.json.")
+    parser.add_argument("overrides", nargs="*", help="Evaluation/environment dotlist overrides.")
     args = parser.parse_args(argv)
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
@@ -47,9 +48,11 @@ def main(argv=None):
         load_experiment_config(exp_dir),
         exp_dir,
         args.ckpt_tag,
+        args.overrides,
         section="demo",
         eval_seed=args.seed,
         use_ema=args.use_ema,
+        action_steps=args.action_steps,
         selection_record=args.selection_record,
         inference_steps_list=[args.inference_steps] if args.inference_steps is not None else None,
     )
@@ -83,6 +86,7 @@ def main(argv=None):
         plan,
         use_ema=use_ema,
         inference_steps_list=inference_steps,
+        action_steps=cfg.eval.demo.action_steps,
         output_root=output_root,
         record_video=True,
         selection=selection,

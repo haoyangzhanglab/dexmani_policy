@@ -35,7 +35,11 @@ from dexmani_policy.training.common.checkpoint import (
     resolve_selection_record,
     restore_policy_agent,
 )
-from dexmani_policy.utils.config import positive_int, validate_action_key_consistency
+from dexmani_policy.utils.config import (
+    positive_int,
+    resolve_action_steps,
+    validate_action_key_consistency,
+)
 from dexmani_policy.utils.runtime import atomic_path, set_seed
 
 
@@ -55,13 +59,21 @@ def parse_eval_overrides(overrides: list[str]):
             "batch_size",
             "max_episodes",
             "inference_steps",
+            "action_steps",
             "use_ema",
         },
-        "offline": {"episodes", "inference_steps", "inference_steps_list", "use_ema"},
+        "offline": {
+            "episodes",
+            "inference_steps",
+            "inference_steps_list",
+            "action_steps",
+            "use_ema",
+        },
         "demo": {
             "episodes",
             "inference_steps",
             "inference_steps_list",
+            "action_steps",
             "use_ema",
             "viewer_resolution",
         },
@@ -84,20 +96,37 @@ def parse_eval_overrides(overrides: list[str]):
             key in eval_keys or key.startswith("env_runner.") or key == "training.device"
         ):
             raise ValueError(f"Unsupported evaluation override: {key}")
-        if any(
-            part in key.split(".")
-            for part in (
+    cfg = OmegaConf.from_dotlist(overrides)
+    # Inspect mapping/list overrides too, including whole multitask task_configs.
+    pending = [("env_runner", OmegaConf.to_container(cfg).get("env_runner", {}))]
+    while pending:
+        path, node = pending.pop()
+        if isinstance(node, dict):
+            entries = node.items()
+        elif isinstance(node, list):
+            entries = enumerate(node)
+        else:
+            continue
+        for name, value in entries:
+            key = f"{path}.{name}"
+            if name in {
                 "n_obs_steps",
                 "sensor_modalities",
                 "task_text",
                 "rgb_preprocess_size",
                 "rgb_random_crop_size",
                 "rgb_keep_uint8",
-            )
-        ):
-            raise ValueError(f"Model inputs come from saved dataset config: {key}")
-    cfg = OmegaConf.from_dotlist(overrides)
+                "rgb_preprocessing",
+                "rgb_color_aug",
+            }:
+                raise ValueError(f"Model inputs come from saved dataset config: {key}")
+            pending.append((key, value))
     shared = cfg.get("eval") or {}
+    # None is unspecified; keep saved defaults intact when this override is merged.
+    for source in (shared, *(shared.get(section) or {} for section in section_params)):
+        for name in list(source):
+            if source[name] is None:
+                del source[name]
     # Explicit shared values must beat saved section defaults.
     for section, names in section_params.items():
         for name in names:
@@ -140,6 +169,11 @@ def add_evaluation_arguments(parser) -> None:
         type=int,
         help="DDIM/Euler steps; defaults come from the saved config or selection record.",
     )
+    parser.add_argument(
+        "--action-steps",
+        type=int,
+        help="Physical actions consumed per prediction; defaults to selection or saved model window.",
+    )
     weights = parser.add_mutually_exclusive_group()
     weights.add_argument(
         "--ema", dest="use_ema", action="store_true", default=None, help="Use EMA weights."
@@ -152,7 +186,12 @@ def add_evaluation_arguments(parser) -> None:
 def build_eval_runner(cfg):
     """Build the evaluation environment with the saved model input recipe."""
     validate_action_key_consistency({"action_key": cfg.action_key, "env_runner": cfg.env_runner})
-    env_runner = hydra.utils.instantiate(cfg.env_runner)
+    runner_config = OmegaConf.to_container(cfg.env_runner, resolve=True)
+    # Old experiment YAMLs duplicated Dataset RGB sizes in the runner config.
+    for node in (runner_config, *runner_config.get("task_configs", ())):
+        node.pop("rgb_preprocess_size", None)
+        node.pop("rgb_random_crop_size", None)
+    env_runner = hydra.utils.instantiate(runner_config)
     dataset = cfg.dataset
     tasks = dataset.get("task_names", ())
     children = dict(zip(tasks, dataset.get("datasets", ()), strict=True))
@@ -198,9 +237,10 @@ def task_seed_pools(runner):
     return {leaf.task_name: list(leaf.get_seed_list()) for leaf in iter_leaf_env_runners(runner)}
 
 
-def run_eval_plan(runner, agent, plan, *, inference_steps, video_save_dir=None):
+def run_eval_plan(runner, agent, plan, *, inference_steps, action_steps=None, video_save_dir=None):
     kwargs = dict(
         inference_steps=inference_steps,
+        action_steps=action_steps,
         video_save_dir=video_save_dir,
     )
     if hasattr(runner, "runners"):
@@ -382,15 +422,6 @@ def selection_test_seeds(record, pools, episodes):
     return test
 
 
-def explicit_eval_value(cfg, section, name):
-    missing = object()
-    for key in (f"eval.{section}.{name}", f"eval.{name}"):
-        value = OmegaConf.select(cfg, key, default=missing)
-        if value is not missing:
-            return True, value
-    return False, None
-
-
 def resolve_eval_request(
     cfg,
     exp_dir,
@@ -400,6 +431,7 @@ def resolve_eval_request(
     section="offline",
     use_ema=None,
     inference_steps_list=None,
+    action_steps=None,
     selection_record=None,
     eval_seed=None,
     episodes=None,
@@ -414,11 +446,7 @@ def resolve_eval_request(
         if selection_record is not None
         else resolve_best_checkpoint(exp_dir) if checkpoint == "best" else None
     )
-    episode_override, requested_episodes = explicit_eval_value(override_cfg, section, "episodes")
-    if episodes is not None:
-        episode_override, requested_episodes = True, episodes
-    if section == "offline" and episode_override:
-        positive_int(requested_episodes, "episodes")
+    requested_episodes = get_eval_param(override_cfg, "episodes", section, override=episodes)
     if resolved is not None and section == "offline":
         request, count = fixed_test_request(resolved[0])
         explicit_seed = eval_seed is not None or "seed" in (override_cfg.get("eval") or {})
@@ -427,54 +455,58 @@ def resolve_eval_request(
                 "Explicit evaluation seed conflicts with selection record shuffle_seed"
             )
         seed = request["shuffle_seed"]
-        if episode_override and requested_episodes != count:
+        if requested_episodes is not None and requested_episodes != count:
             raise ValueError("Explicit episodes conflicts with selection record test count")
-        OmegaConf.update(merged, "eval.offline.episodes", count)
     else:
         seed = resolve_eval_seed(merged, eval_seed)
         if section == "offline":
             count = get_eval_param(
                 merged, "episodes", section, override=requested_episodes, default=100
             )
-            OmegaConf.update(merged, "eval.offline.episodes", positive_int(count, "episodes"))
-    OmegaConf.update(merged, "eval.seed", seed)
-    present, value = explicit_eval_value(override_cfg, section, "use_ema")
-    if use_ema is not None:
-        weights = use_ema
-    elif present:
-        weights = value
-    elif resolved is not None:
-        weights = resolved[0]["inference"]["use_ema"]
-    else:
-        weights = get_eval_param(cfg, "use_ema", section, default=True)
-
-    list_present, list_value = explicit_eval_value(override_cfg, section, "inference_steps_list")
-    step_present, step_value = explicit_eval_value(override_cfg, section, "inference_steps")
-    if inference_steps_list is not None:
-        steps = list(inference_steps_list)
-    elif list_present and list_value is not None:
-        steps = list(list_value)
-    elif step_present:
-        steps = [step_value]
-    elif resolved is not None:
-        steps = [resolved[0]["inference"]["inference_steps"]]
-    else:
-        saved_steps = get_eval_param(cfg, "inference_steps_list", section)
-        steps = (
-            list(saved_steps)
-            if saved_steps is not None
-            else [get_eval_param(cfg, "inference_steps", section, default=10)]
+    if section == "offline":
+        count = positive_int(
+            count if requested_episodes is None else requested_episodes, "episodes"
         )
+        OmegaConf.update(merged, "eval.offline.episodes", count)
+    OmegaConf.update(merged, "eval.seed", seed)
+    selected = resolved[0]["inference"] if resolved is not None else {}
+    weights = get_eval_param(override_cfg, "use_ema", section, override=use_ema)
+    if weights is None:
+        weights = selected.get("use_ema", get_eval_param(cfg, "use_ema", section, default=True))
+
+    steps = get_eval_param(
+        override_cfg, "inference_steps_list", section, override=inference_steps_list
+    )
+    step_value = get_eval_param(override_cfg, "inference_steps", section)
+    if steps is None and step_value is not None:
+        steps = [step_value]
+    if steps is None:
+        steps = (
+            [selected["inference_steps"]]
+            if selected
+            else get_eval_param(cfg, "inference_steps_list", section)
+        )
+    if steps is None:
+        steps = [get_eval_param(cfg, "inference_steps", section, default=10)]
+    steps = list(steps)
 
     if type(weights) is not bool:
         raise ValueError("use_ema must be boolean")
     validate_inference_steps(steps)
+    action_steps = get_eval_param(override_cfg, "action_steps", section, override=action_steps)
+    if action_steps is None:
+        action_steps = selected.get("action_steps", get_eval_param(cfg, "action_steps", section))
+    action_steps = resolve_action_steps(merged.agent, action_steps)
+    OmegaConf.update(merged, f"eval.{section}.action_steps", action_steps)
     if selection_record is not None:
         if checkpoint != "best" and resolve_checkpoint_path(exp_dir, checkpoint) != resolved[1]:
             raise ValueError("Checkpoint override differs from selection record")
-        inference = resolved[0]["inference"]
-        if weights != inference["use_ema"] or steps != [inference["inference_steps"]]:
-            raise ValueError("Selection record cannot override raw/EMA or NFE")
+        if (
+            weights != selected["use_ema"]
+            or steps != [selected["inference_steps"]]
+            or action_steps != selected["action_steps"]
+        ):
+            raise ValueError("Selection record cannot override raw/EMA, NFE or action_steps")
     path = resolved[1] if resolved else resolve_checkpoint_path(exp_dir, checkpoint)
     return merged, weights, steps, resolved[0] if resolved else None, path
 
@@ -488,6 +520,7 @@ def evaluate_policy(
     use_ema,
     inference_steps_list,
     output_root,
+    action_steps=None,
     output_dir=None,
     record_video=False,
     selection=None,
@@ -500,9 +533,11 @@ def evaluate_policy(
     for leaf in iter_leaf_env_runners(runner):
         leaf.record_video = record_video
     agent = restore_policy_agent(cfg, checkpoint, use_ema=use_ema, device=cfg.training.device)
+    action_steps = resolve_action_steps(agent, action_steps)
     if selection is not None and agent.checkpoint_step != selection["global_step"]:
         raise ValueError("Selection global_step disagrees with checkpoint state")
     directory = create_run_directory(output_root, output_dir)
+    selection_inference = selection["inference"] if selection is not None else None
     reference = save_eval_snapshot(
         directory,
         cfg,
@@ -511,6 +546,8 @@ def evaluate_policy(
         global_step=agent.checkpoint_step,
         use_ema=use_ema,
         inference_steps_list=inference_steps_list,
+        action_steps=action_steps,
+        selection_inference=selection_inference,
         effective_episodes=plan_size(plan),
         shuffle_seed=seed,
         policy_seed_mode="episode_seed",
@@ -529,16 +566,23 @@ def evaluate_policy(
             agent,
             plan,
             inference_steps=nfe,
+            action_steps=action_steps,
             video_save_dir=output if record_video else None,
         )
         details = collect_episode_details(result)
         stats = compute_eval_stats(result)
+        inference = dict(use_ema=use_ema, inference_steps=nfe, action_steps=action_steps)
         info = {
             "checkpoint": artifact_reference(checkpoint, cfg.experiment_dir),
             "global_step": agent.checkpoint_step,
             "eval_config": reference,
-            "use_ema": use_ema,
-            "inference_steps": nfe,
+            **inference,
+            "selection_inference": selection_inference,
+            "matches_selection_inference": (
+                all(selection_inference[key] == value for key, value in inference.items())
+                if selection_inference is not None
+                else None
+            ),
             "evaluation_seeds": plan,
             "seed_plan_version": seed_plan_version,
             "heldout_from_selection": heldout,
@@ -562,7 +606,14 @@ def evaluate_policy(
             [
                 {
                     key: result[key]
-                    for key in ("inference_steps", "success_rate", "avg_steps", "statistics")
+                    for key in (
+                        "inference_steps",
+                        "action_steps",
+                        "matches_selection_inference",
+                        "success_rate",
+                        "avg_steps",
+                        "statistics",
+                    )
                 }
                 for result in results
             ],
@@ -579,6 +630,7 @@ def evaluate_checkpoint(
     checkpoint="best",
     episodes=None,
     inference_steps_list=None,
+    action_steps=None,
     use_ema=None,
     overrides=(),
     selection_record=None,
@@ -593,6 +645,7 @@ def evaluate_checkpoint(
         overrides,
         use_ema=use_ema,
         inference_steps_list=inference_steps_list,
+        action_steps=action_steps,
         selection_record=selection_record,
         eval_seed=eval_seed,
         episodes=episodes,
@@ -619,6 +672,7 @@ def evaluate_checkpoint(
         plan,
         use_ema=use_ema,
         inference_steps_list=steps,
+        action_steps=cfg.eval.offline.action_steps,
         output_root=Path(exp_dir) / "eval_dexsim",
         output_dir=output_dir,
         record_video=record_video,

@@ -203,6 +203,17 @@ def validate_action_window(horizon, n_obs_steps, n_action_steps) -> None:
         )
 
 
+def resolve_action_steps(agent, action_steps=None) -> int:
+    """Resolve evaluation consumption from a Policy or its saved agent config."""
+    steps = positive_int(
+        agent.n_action_steps if action_steps is None else action_steps, "action_steps"
+    )
+    max_steps = agent.horizon - agent.n_obs_steps + 1
+    if steps > max_steps:
+        raise ValueError(f"action_steps must be in [1, {max_steps}], got {steps}")
+    return steps
+
+
 def validate_action_key_consistency(cfg) -> None:
     """Keep policy, dataset and environment action coordinates consistent."""
     action_key = cfg.get("action_key")

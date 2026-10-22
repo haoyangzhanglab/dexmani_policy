@@ -34,7 +34,7 @@ def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
     decoded = model.decode(latent).float().cpu()
     if not torch.isfinite(decoded).all():
         raise ValueError("VQ decoder produced non-finite hand states")
-    poses = codebook.to_affine_raw(decoded.clamp(-1, 1))
+    poses = decoded.clamp(-1, 1)
     pca = PCA(n_components=1)
     projection = pca.fit_transform(poses.numpy())[:, 0]
     permutation = torch.from_numpy(np.argsort(projection))
@@ -43,8 +43,6 @@ def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
     offset = state["params_dict.hand.offset"].detach().float().cpu()
     codebook.set_buffers(
         {
-            "hand_min": codebook.hand_min,
-            "hand_max": codebook.hand_max,
             "sorted_hand_poses": poses[permutation],
             "pca_permutation": permutation,
             "layer_weights": weights.cpu(),
@@ -109,7 +107,7 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
     device, width = codebook.sorted_hand_poses.device, codebook.hand_dim
     chunk_size = min(chunk_size, max(1, (16 * 1024 * 1024) // (codebook.num_codes * width * 4)))
     report = {
-        "distance_space": "HandStateCodebook affine_raw squared Euclidean",
+        "distance_space": "HandStateCodebook normalized squared Euclidean",
         "source_checkpoint": codebook.artifact_metadata.get("source_checkpoint"),
         "selection": codebook.artifact_metadata.get("selection"),
         "splits": {},
@@ -128,8 +126,8 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
             values = torch.as_tensor(
                 rows[start : start + chunk_size], dtype=torch.float32, device=device
             )
-            if values.ndim != 2 or not torch.isfinite(values).all():
-                raise ValueError("Codebook diagnostics require finite (N, hand_dim) rows")
+            if values.ndim != 2:
+                raise ValueError("Codebook diagnostics require (N, hand_dim) rows")
             continuous, _ = codebook.encode(values)
             restored, indices = codebook.decode(continuous.squeeze(-1))
             utilization += torch.bincount(indices.cpu(), minlength=codebook.num_codes)
@@ -162,7 +160,7 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
             }
         report["splits"][name] = result
     adjacent = torch.diff(codebook.sorted_hand_poses, dim=0).norm(dim=-1)
-    report["pca_adjacent_affine_raw_distance"] = {
+    report["pca_adjacent_normalized_distance"] = {
         "mean": float(adjacent.mean()) if len(adjacent) else 0.0,
         "max": float(adjacent.max()) if len(adjacent) else 0.0,
     }

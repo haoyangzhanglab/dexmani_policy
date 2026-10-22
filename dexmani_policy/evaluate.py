@@ -38,6 +38,7 @@ def main(argv=None):
         checkpoint=args.ckpt_path or args.ckpt_tag,
         episodes=args.episodes,
         use_ema=args.use_ema,
+        action_steps=args.action_steps,
         inference_steps_list=[args.inference_steps] if args.inference_steps is not None else None,
         overrides=args.overrides,
         eval_seed=args.seed,

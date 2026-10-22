@@ -53,6 +53,7 @@ def main(argv=None):
         batch_size=args.batch_size,
         max_episodes=args.max_episodes,
         inference_steps=args.inference_steps,
+        action_steps=args.action_steps,
         use_ema=args.use_ema,
         eval_seed=args.seed,
         record_video=args.record_video,

@@ -14,7 +14,7 @@ from dexmani_policy.datasets.common.rgb_preprocessing import preprocess_validati
 from dexmani_policy.env_runner.common.metrics import summarize_episodes, validate_episode_details
 from dexmani_policy.env_runner.common.seeds import validate_task_seeds
 from dexmani_policy.env_runner.common.video import save_episode_video
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.utils.config import positive_int, resolve_action_steps
 
 
 class EvaluationError(RuntimeError):
@@ -36,8 +36,6 @@ class BaseRunner:
         sensor_modalities: list[str] | None = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
-        rgb_preprocess_size: tuple[int, int] | None = None,
-        rgb_random_crop_size: tuple[int, int] | None = None,
     ):
         self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
@@ -50,11 +48,7 @@ class BaseRunner:
         self.env_video_fps = env_video_fps
         self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
-        self.rgb_preprocessing = {
-            "resize_hw": rgb_preprocess_size,
-            "center_crop_hw": rgb_random_crop_size,
-            "keep_uint8": False,
-        }
+        self.rgb_preprocessing = None
 
     def update_obs(self, observation: dict[str, Any]):
         missing = set(self.sensor_modalities) - observation.keys()
@@ -130,6 +124,8 @@ class BaseRunner:
         batch = {}
         for name, value in self.get_stacked_obs().items():
             if name == "rgb":
+                if self.rgb_preprocessing is None:
+                    raise ValueError("RGB runner requires the saved Dataset preprocessing recipe")
                 value = preprocess_validation_rgb(value, **self.rgb_preprocessing)
             if isinstance(value, (np.ndarray, torch.Tensor)):
                 dtype = None if name in {"rgb", "tactile_valid"} else torch.float32
@@ -145,7 +141,10 @@ class BaseRunner:
         self.hand_history = None
 
     @torch.no_grad()
-    def get_action_chunk(self, obs_batch, agent, inference_steps: int | None = None) -> np.ndarray:
+    def get_action_chunk(
+        self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int | None = None
+    ) -> np.ndarray:
+        steps = resolve_action_steps(agent, action_steps)
         kwargs = {}
         if getattr(agent, "history_steps", 0):
             if self.hand_history is None:
@@ -155,7 +154,12 @@ class BaseRunner:
             )
             kwargs["action_context"] = {"hand_history": history.unsqueeze(0)}
         result = agent.predict_action(obs_dict=obs_batch, inference_steps=inference_steps, **kwargs)
-        return result["control_action"].detach().cpu().numpy().squeeze(0)
+        prediction = result["pred_action"]
+        if prediction.shape != (1, agent.horizon, agent.action_dim):
+            raise ValueError("pred_action must contain one complete physical action trajectory")
+        start = agent.n_obs_steps - 1
+        actions = prediction[0, start : start + steps, : agent.control_action_dim]
+        return np.ascontiguousarray(actions.detach().cpu().numpy())
 
     def run_one_episode(
         self,
@@ -163,6 +167,8 @@ class BaseRunner:
         env,
         episode_seed,
         inference_steps: int | None = None,
+        *,
+        action_steps: int | None = None,
     ):
         """Record first raw success separately from the final hold/grace success."""
         obs, _ = env.reset(seed=episode_seed)
@@ -187,11 +193,13 @@ class BaseRunner:
 
         while not (done or truncated):
             obs_batch = self.get_obs_batch(device=device)
-            action_chunk = self.get_action_chunk(obs_batch, agent, inference_steps=inference_steps)
+            action_chunk = self.get_action_chunk(
+                obs_batch, agent, inference_steps=inference_steps, action_steps=action_steps
+            )
             for action in action_chunk:
                 obs, _, done, truncated, info = env.step(action)
                 if self.hand_history is not None:
-                    # Use the command after the environment's clipping, not a predicted tail.
+                    # History follows the command actually applied after environment clipping.
                     executed = np.asarray(info.get("executed_joint_action"), dtype=np.float32)
                     if executed.shape != (agent.action_dim,) or not np.isfinite(executed).all():
                         raise ValueError("LAMP requires env.step info['executed_joint_action']")
@@ -217,6 +225,7 @@ class BaseRunner:
         video_save_dir: Path | None = None,
         *,
         seeds: list[int] | None = None,
+        action_steps: int | None = None,
     ):
         details = []
         videos = []
@@ -225,6 +234,7 @@ class BaseRunner:
         task = self.task_name
 
         try:
+            action_steps = resolve_action_steps(agent, action_steps)
             if inference_steps is not None:
                 positive_int(inference_steps, "inference_steps")
             if seeds is None:
@@ -253,7 +263,9 @@ class BaseRunner:
                         else getattr(env, "video_fps", 15)
                     )
                 try:
-                    success, steps = self.run_one_episode(agent, env, seed, inference_steps)
+                    success, steps = self.run_one_episode(
+                        agent, env, seed, inference_steps, action_steps=action_steps
+                    )
                 except Exception:
                     save_episode_video(env, video_save_dir, f"episode_{seed}_crash", video_fps)
                     raise

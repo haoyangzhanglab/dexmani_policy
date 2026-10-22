@@ -240,7 +240,6 @@ class BasePolicy(nn.Module):
         return {
             "pred_action": prediction,
             "control_action": prediction[:, start:stop, :control_dim],
-            "tail": prediction[:, stop:, :control_dim],
         }
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:
