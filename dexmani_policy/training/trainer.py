@@ -260,17 +260,21 @@ class Trainer:
         if pct is not None:
             self.save_checkpoint(global_step, f"milestone={pct:02d}pct")
 
-    def step_performance_metrics(self, samples: int, elapsed: float) -> dict:
+    def step_performance_metrics(self, samples: int, elapsed: float, data_wait: float) -> dict:
         """Approximate update wall time, including data waits and excluding logging/saving."""
         if self.distributed:
-            local = torch.tensor([samples, elapsed], dtype=torch.float64, device=self.device)
+            local = torch.tensor(
+                [samples, elapsed, data_wait], dtype=torch.float64, device=self.device
+            )
             gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]
             dist.all_gather(gathered, local)
             values = torch.stack(gathered).cpu()
             samples = values[:, 0].sum().item()
             elapsed = values[:, 1].max().item()
+            data_wait = values[:, 2].max().item()
         return {
             "train/step_time": elapsed,
+            "train/data_wait_time": data_wait,
             "train/samples_per_sec": samples / elapsed,
             "train/samples_per_step": samples,
         }
@@ -296,7 +300,7 @@ class Trainer:
         packed /= dist.get_world_size()
         return dict(zip(keys, packed.cpu().tolist()))
 
-    def log_step(self, group_metrics, samples, elapsed):
+    def log_step(self, group_metrics, samples, elapsed, data_wait):
         epoch_samples = min(
             self.train_loader.sampler.num_samples,
             self.batches_per_epoch * self.train_loader.batch_size,
@@ -315,7 +319,7 @@ class Trainer:
             )
         metrics.update({f"train/{key}": value for key, value in group_metrics.items()})
         metrics = self.reduce_metrics(metrics)
-        metrics.update(self.step_performance_metrics(samples, elapsed))
+        metrics.update(self.step_performance_metrics(samples, elapsed, data_wait))
         if self.is_main_process:
             if self.step_pbar is not None:
                 self.step_pbar.set_postfix(
@@ -381,9 +385,12 @@ class Trainer:
                 group_metric_sums = {}
                 group_metric_count = 0
                 group_samples = 0
+                group_data_wait = 0.0
                 # Start before iterator creation, including the epoch's first data wait.
                 group_start_time = time.perf_counter()
+                data_wait_start = group_start_time
                 for micro_step, batch in enumerate(self.train_loader, start=self.next_micro_step):
+                    group_data_wait += time.perf_counter() - data_wait_start
                     self.current_epoch = epoch
                     group_samples += batch["action"].shape[0]
 
@@ -440,15 +447,19 @@ class Trainer:
                             self.next_micro_step = 0
                         self.interrupted = self.stop_requested_on_any_rank()
                         if record_group:
-                            self.log_step(group_metrics, group_samples, group_elapsed)
+                            self.log_step(
+                                group_metrics, group_samples, group_elapsed, group_data_wait
+                            )
 
                         self.check_milestone(global_step)
                         group_samples = 0
+                        group_data_wait = 0.0
                         # Exclude this update's logging/checkpoint work from the next one.
                         group_start_time = time.perf_counter()
 
                     if is_boundary and (global_step >= stop_step or self.interrupted):
                         break
+                    data_wait_start = time.perf_counter()
 
                 self.model.eval()
                 epoch = self.current_epoch

@@ -127,9 +127,14 @@ def parse_eval_overrides(overrides: list[str]):
             if source[name] is None:
                 del source[name]
     # Explicit shared values must beat saved section defaults.
+    nfe_fields = {"inference_steps", "inference_steps_list"}
     for section, names in section_params.items():
-        for name in names:
-            if name in shared and name not in (shared.get(section) or {}):
+        explicit = set(shared.get(section) or {})
+        for name in names - explicit:
+            # A section NFE shadows both spellings of the shared NFE.
+            if name in nfe_fields and explicit & nfe_fields:
+                continue
+            if name in shared:
                 OmegaConf.update(cfg, f"eval.{section}.{name}", shared[name])
     return cfg
 
@@ -464,20 +469,24 @@ def resolve_eval_request(
     if weights is None:
         weights = selected.get("use_ema", get_eval_param(cfg, "use_ema", section, default=True))
 
-    steps = get_eval_param(
-        override_cfg, "inference_steps_list", section, override=inference_steps_list
-    )
-    step_value = get_eval_param(override_cfg, "inference_steps", section)
-    if steps is None and step_value is not None:
-        steps = [step_value]
+    # Choose the source before the NFE spelling; shared lists cannot beat section scalars.
+    explicit_eval = override_cfg.get("eval") or {}
+    saved_eval = cfg.get("eval") or {}
+    steps = inference_steps_list
+    for source in (
+        explicit_eval.get(section) or {},
+        explicit_eval,
+        selected,
+        saved_eval.get(section) or {},
+        saved_eval,
+    ):
+        if steps is not None:
+            break
+        steps = source.get("inference_steps_list")
+        if steps is None and source.get("inference_steps") is not None:
+            steps = [source["inference_steps"]]
     if steps is None:
-        steps = (
-            [selected["inference_steps"]]
-            if selected
-            else get_eval_param(cfg, "inference_steps_list", section)
-        )
-    if steps is None:
-        steps = [get_eval_param(cfg, "inference_steps", section, default=10)]
+        steps = [10]
     steps = list(steps)
 
     if type(weights) is not bool:

@@ -70,13 +70,15 @@ class RectifiedFlow(nn.Module):
         pred_v = self.model(x=xt, timestep=t, context=cond)
         loss = F.mse_loss(pred_v, target_v)
 
-        return loss, {
-            "loss": loss,
-            "loss_action": loss,
-            "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
-            "target_v_magnitude": torch.sqrt(torch.mean(target_v**2)),
-            "t_mean": t.mean(),
-        }
+        with torch.no_grad():
+            metrics = {
+                "loss": loss.detach(),
+                "loss_action": loss.detach(),
+                "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
+                "target_v_magnitude": torch.sqrt(torch.mean(target_v**2)),
+                "t_mean": t.mean(),
+            }
+        return loss, metrics
 
     @torch.no_grad()
     def predict_action(
@@ -256,18 +258,20 @@ class ConsistencyFlow(nn.Module):
         loss_consistency = F.mse_loss(pred_consistency, consistency_targets["vt_target"])
 
         loss = loss_flow + loss_consistency
-        return loss, {
-            "loss": loss,
-            "loss_action": loss,
-            "loss_flow": loss_flow,
-            "loss_consistency": loss_consistency,
-            "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_flow**2)),
-            "pred_vt_consistency_magnitude": torch.sqrt(torch.mean(pred_consistency**2)),
-            "flow_batch_size": flow_batch_size,
-            "consistency_batch_size": consistency_batch_size,
-            "t_flow_mean": flow_targets["t"].mean(),
-            "t_consistency_mean": consistency_targets["t"].mean(),
-        }
+        with torch.no_grad():
+            metrics = {
+                "loss": loss.detach(),
+                "loss_action": loss.detach(),
+                "loss_flow": loss_flow.detach(),
+                "loss_consistency": loss_consistency.detach(),
+                "pred_vt_flow_magnitude": torch.sqrt(torch.mean(pred_flow**2)),
+                "pred_vt_consistency_magnitude": torch.sqrt(torch.mean(pred_consistency**2)),
+                "flow_batch_size": flow_batch_size,
+                "consistency_batch_size": consistency_batch_size,
+                "t_flow_mean": flow_targets["t"].mean(),
+                "t_consistency_mean": consistency_targets["t"].mean(),
+            }
+        return loss, metrics
 
     @torch.no_grad()
     def predict_action(

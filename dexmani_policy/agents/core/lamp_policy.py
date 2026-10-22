@@ -153,12 +153,19 @@ class LAMPPolicy(BasePolicy):
         with torch.no_grad():
             prior_error = F.mse_loss(self.decode_hand(torch.zeros_like(offset), mu), hand_target)
             physical_mae = ((hand - hand_target) / self.prior.hand_scale).abs().mean()
-        return loss, dict(loss=loss, loss_action=arm_loss + self.hand_loss_weight * hand_loss,
-                          loss_arm=arm_loss, loss_decoded_hand=hand_loss,
-                          loss_offset=self.offset_reg_weight * offset_l2,
-                          offset_l2=offset_l2.detach(), offset_rms=offset.square().mean().sqrt().detach(),
-                          prior_hand_mse=prior_error, policy_hand_mse=hand_loss.detach(),
-                          physical_hand_mae=physical_mae)
+            metrics = dict(
+                loss=loss.detach(),
+                loss_action=arm_loss + self.hand_loss_weight * hand_loss,
+                loss_arm=arm_loss.detach(),
+                loss_decoded_hand=hand_loss.detach(),
+                loss_offset=self.offset_reg_weight * offset_l2,
+                offset_l2=offset_l2.detach(),
+                offset_rms=offset.square().mean().sqrt(),
+                prior_hand_mse=prior_error,
+                policy_hand_mse=hand_loss.detach(),
+                physical_hand_mae=physical_mae,
+            )
+        return loss, metrics
 
     @torch.no_grad()
     def predict_action(self, obs_dict, inference_steps=None, *, action_context=None,

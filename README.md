@@ -47,7 +47,7 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<run>'
 
 训练入口转发 Hydra overrides。单卡要求 `training.num_gpus=1` 或不设置；DDP 需核对可见 GPU、`training.num_gpus` 和每卡 batch。训练按 optimizer update 推进，best 由离线选点产生。
 
-新 run 默认写入 `experiments/<policy_name>/<task_name>/<时间戳>_seed<seed>/`，已有训练产物的目录拒绝重用。`metrics.jsonl` 保存标量日志；每次启动（含续训）创建新的 W&B run，默认 `offline`，`workspace.wandb_cfg=null` 可关闭 W&B。
+新 run 默认写入 `experiments/<policy_name>/<task_name>/<时间戳>_seed<seed>/`，已有训练产物的目录拒绝重用。`metrics.jsonl` 保存标量日志；每次启动（含续训）尝试创建新的 W&B run，默认 `offline`，`workspace.wandb_cfg=null` 可关闭 W&B。服务异常时保留本地记录，详见[训练日志与可选远程服务](docs/项目架构.md#训练日志与可选远程服务)。
 
 `resume_from` 接受实验目录或 checkpoint，支持 `~`，相对路径按项目根目录解析，恢复写入新 run。配方和状态来自 checkpoint 的 `effective_config`；任务、数据语义、模型、world size 和训练预算必须保持一致。允许覆盖项见 [完整恢复边界](docs/项目架构.md#完整恢复边界)。
 
@@ -59,10 +59,11 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<run>'
 
 ```bash
 python dexmani_policy/smoke_test.py --config-only dp3
+python dexmani_policy/smoke_test.py --data-only dp3 --max-batches 2
 python dexmani_policy/smoke_test.py dp3 --max-updates 4
 ```
 
-config-only 不加载数据或执行 GPU 算子；完整 smoke 需要 CUDA、数据和所需权重，检查训练更新、预测及 raw/EMA 保存恢复，退出时清理临时产物。批量配置检查和保留短跑产物的命令见 [验证指南](docs/验证指南.md)。
+config-only 检查配置；data-only 在 CPU 上检查生产数据路径，不构建模型；完整 smoke 检查训练更新、预测及 raw/EMA 保存恢复，需要 CUDA、数据和所需权重。各模式的覆盖边界、批量检查和保留短跑产物的命令见 [验证指南](docs/验证指南.md)。
 
 ## 仿真评测
 

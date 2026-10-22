@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -41,10 +42,8 @@ class WandbLogger:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        import wandb
-
         # Checkpoint continuation belongs to a new logging run, including repeated sweep names.
-        self.run = wandb.init(
+        init_kwargs = dict(
             dir=str(self.output_dir),
             project=project,
             name=name,
@@ -53,24 +52,53 @@ class WandbLogger:
             resume="never",
             mode=mode,
         )
+        self.run = None
+        try:
+            import wandb
+        except Exception as exc:
+            self.disable("import", exc)
+            return
+        try:
+            self.run = wandb.init(**init_kwargs)
+        except Exception as exc:
+            self.disable("init", exc)
+
+    def disable(self, stage: str, error: Exception):
+        run, self.run = self.run, None
+        logging.getLogger(__name__).warning(
+            "W&B disabled during %s: %s: %s", stage, type(error).__name__, error
+        )
+        if run is not None:
+            try:
+                run.finish()
+            except Exception:
+                pass
 
     def log(self, data: dict[str, Any], step: int | None = None):
         if self.run is None:
             return
-        self.run.log(data, step=step)
+        try:
+            self.run.log(data, step=step)
+        except Exception as exc:
+            self.disable("log", exc)
 
     def log_config(self, cfg_dict: dict[str, Any]):
         if self.run is None:
             return
-        self.run.config.update({**cfg_dict, "output_dir": str(self.output_dir)})
+        config = {**cfg_dict, "output_dir": str(self.output_dir)}
+        try:
+            self.run.config.update(config)
+        except Exception as exc:
+            self.disable("config update", exc)
 
     def close(self):
         if self.run is None:
             return
+        run, self.run = self.run, None
         try:
-            self.run.finish()
-        finally:
-            self.run = None
+            run.finish()
+        except Exception as exc:
+            self.disable("finish", exc)
 
 
 def to_log_scalars(metrics: dict[str, Any]) -> dict[str, float]:

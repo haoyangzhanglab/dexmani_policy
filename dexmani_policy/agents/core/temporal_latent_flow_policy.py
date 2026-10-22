@@ -196,18 +196,19 @@ class TemporalLatentFlowPolicy(BasePolicy):
                 batch["action"][..., self.arm_dim :].float(), reference
             )
             decoded_loss = F.mse_loss(decoded, hand_target)
-            physical_error = (decoded.detach() - hand_target) * self.codec.action_std
         loss = flow_loss + self.decoded_loss_weight * decoded_loss
-        metrics = dict(
-            loss=loss,
-            loss_action=flow_loss,
-            loss_arm=arm_loss,
-            loss_latent=latent_loss,
-            loss_decoded_hand=decoded_loss,
-            t_mean=t.mean(),
-            physical_hand_mae=physical_error.abs().mean(),
-            physical_hand_rmse=physical_error.square().mean().sqrt(),
-        )
+        with torch.no_grad():
+            physical_error = (decoded - hand_target) * self.codec.action_std
+            metrics = dict(
+                loss=loss.detach(),
+                loss_action=flow_loss.detach(),
+                loss_arm=arm_loss.detach(),
+                loss_latent=latent_loss.detach(),
+                loss_decoded_hand=decoded_loss.detach(),
+                t_mean=t.mean(),
+                physical_hand_mae=physical_error.abs().mean(),
+                physical_hand_rmse=physical_error.square().mean().sqrt(),
+            )
         return loss, metrics
 
     @torch.no_grad()
