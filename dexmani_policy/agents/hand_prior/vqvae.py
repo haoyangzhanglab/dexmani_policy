@@ -171,8 +171,6 @@ class ResidualVectorQuantizer(nn.Module):
 class HandVQVAE(nn.Module):
     """Residual VQ-VAE for individual hand states, independent of action chunks."""
 
-    FORMAT_VERSION = 5
-
     def __init__(
         self,
         hand_dim: int,
@@ -231,8 +229,6 @@ class HandVQVAE(nn.Module):
 
     @classmethod
     def from_checkpoint(cls, checkpoint: dict, *, device: str | torch.device = "cpu") -> HandVQVAE:
-        if checkpoint["format_version"] != cls.FORMAT_VERSION:
-            raise ValueError(f"HandVQVAE requires checkpoint format_version={cls.FORMAT_VERSION}")
         model = cls(**checkpoint["model_config"], kmeans_init=False).to(device)
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         return model

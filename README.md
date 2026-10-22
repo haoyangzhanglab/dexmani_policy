@@ -35,7 +35,7 @@ python -m pip check
 python -m dexmani_policy.utils.config --config-name dp3 'task_name=<task>' --check
 ```
 
-该检查不加载 Zarr。字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。通用 affine normalizer 使用完整 replay buffer，包含验证 episode 和 `max_train_episodes` 外的行；手部 codec 专用统计另有定义。重新生成数据需使用新路径和新的 `data_revision`。
+该检查不加载 Zarr。字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。通用 affine normalizer 使用完整 replay buffer，包含验证 episode 和 `max_train_episodes` 外的行；手部 codec 专用统计另有定义。重新生成数据需使用新路径；数据身份按 episode 结构与实际划分核对，不计算内容哈希。
 
 ## 训练与续训
 
@@ -71,7 +71,7 @@ bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run> --seed 1024 -
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <run>
 ```
 
-流水线固定 test/selection 计划后选点，再复用本次记录进行不录视频的 held-out eval。当前配置默认每任务 test 70 个、selection 预留 30 个，需至少 100 个不同有效 seeds；旧实验预算不自动改写。分步入口、受限 dotlist、记录兼容性及参数优先级见 [仿真评测机制](docs/仿真评测机制.md)。实际 demo 录像需要 X11 或 XWayland。
+流水线固定 test/selection 计划后选点，再复用本次记录进行不录视频的 held-out eval。当前配置默认每任务 test 70 个、selection 预留 30 个，需至少 100 个不同有效 seeds；实际预算以实验保存配置和显式覆盖为准。分步入口、受限 dotlist、记录字段及参数优先级见 [仿真评测机制](docs/仿真评测机制.md)。实际 demo 录像需要 X11 或 XWayland。
 
 ## 远端与其他工作流
 

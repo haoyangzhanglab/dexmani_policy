@@ -16,7 +16,6 @@ from dexmani_policy.utils.config import positive_int
 class HandStateCodebook(nn.Module):
     """Store normalized prototypes and their Policy normalization as persistent buffers."""
 
-    FORMAT_VERSION = 5
     BUFFER_NAMES = (
         "sorted_hand_poses",
         "pca_permutation",
@@ -51,7 +50,7 @@ class HandStateCodebook(nn.Module):
         return self.sorted_hand_poses.numel() > 0
 
     def prepare_buffers(self, values: Mapping[str, Tensor]) -> dict[str, Tensor]:
-        """Convert legacy poses and validate once before replacing runtime buffers."""
+        """Validate normalized poses before replacing runtime buffers."""
         expected = {
             "sorted_hand_poses": (self.num_codes, self.hand_dim),
             "pca_permutation": (self.num_codes,),
@@ -59,9 +58,6 @@ class HandStateCodebook(nn.Module):
             "hand_normalizer_scale": (self.hand_dim,),
             "hand_normalizer_offset": (self.hand_dim,),
         }
-        legacy = "hand_min" in values or "hand_max" in values
-        if legacy:
-            expected.update(hand_min=(), hand_max=())
         if values.keys() != expected.keys():
             raise ValueError(f"Codebook requires exactly these buffers: {tuple(expected)}")
         for name, shape in expected.items():
@@ -79,18 +75,6 @@ class HandStateCodebook(nn.Module):
             name: values[name].detach().to(getattr(self, name), copy=True)
             for name in self.BUFFER_NAMES
         }
-        if legacy:
-            lower, upper = (
-                values[name].detach().to(self.sorted_hand_poses)
-                for name in ("hand_min", "hand_max")
-            )
-            span = upper - lower
-            if not torch.isfinite(torch.stack([lower, upper, span])).all() or span <= 0:
-                raise ValueError("hand_min/hand_max must define a finite positive range")
-            # Preserve prototype rows and PCA indices; only change coordinates.
-            converted["sorted_hand_poses"] = (
-                converted["sorted_hand_poses"] - lower
-            ) / span * 2.0 - 1.0
         if any(not torch.isfinite(value).all() for value in converted.values()):
             raise ValueError("Codebook buffers must be finite in runtime dtype")
         if (converted["hand_normalizer_scale"] == 0).any():
@@ -114,9 +98,6 @@ class HandStateCodebook(nn.Module):
         prepared = dict(state_dict)
         try:
             values = {name: prepared[prefix + name] for name in self.BUFFER_NAMES}
-            for name in ("hand_min", "hand_max"):
-                if prefix + name in prepared:
-                    values[name] = prepared.pop(prefix + name)
             values = self.prepare_buffers(values)
         except (KeyError, ValueError, RuntimeError) as exc:
             error_msgs.append(f"Invalid hand codebook: {exc}")
@@ -160,7 +141,6 @@ class HandStateCodebook(nn.Module):
         payload = {name: value.cpu().numpy() for name, value in values.items()}
         metadata = json.dumps(self.artifact_metadata, sort_keys=True, allow_nan=False)
         payload.update(
-            format_version=np.asarray(self.FORMAT_VERSION),
             pose_space=np.asarray("normalized"),
             hand_dim=np.asarray(self.hand_dim),
             num_groups=np.asarray(self.num_groups),
@@ -173,22 +153,15 @@ class HandStateCodebook(nn.Module):
 
     def load(self, path: str | Path) -> None:
         with np.load(Path(path).expanduser(), allow_pickle=False) as data:
-            version = positive_int(data["format_version"].item(), "format_version")
-            if (version, data["pose_space"].item()) not in ((4, "affine_raw"), (5, "normalized")):
-                raise ValueError("Hand codebook requires v4 affine_raw or v5 normalized format")
+            if data["pose_space"].item() != "normalized":
+                raise ValueError("Hand codebook requires normalized poses; regenerate the codebook")
             dimensions = tuple(
-                positive_int(data[name].item(), name)
+                data[name].item()
                 for name in ("hand_dim", "num_groups", "codebook_size")
             )
             if dimensions != (self.hand_dim, self.num_groups, self.codebook_size):
                 raise ValueError(f"Hand codebook dimensions do not match Policy: {dimensions}")
             values = {name: torch.from_numpy(data[name]) for name in self.BUFFER_NAMES}
-            if version == 4:
-                values.update(
-                    {name: torch.from_numpy(data[name]) for name in ("hand_min", "hand_max")}
-                )
-            elif "hand_min" in data or "hand_max" in data:
-                raise ValueError("v5 codebooks must not contain legacy hand_min/hand_max")
             metadata = json.loads(data["metadata_json"].item())
         self.set_buffers(values)
         self.artifact_metadata = metadata

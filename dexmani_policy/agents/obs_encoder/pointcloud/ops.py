@@ -4,14 +4,9 @@ import torch
 
 
 def load_pointcloud_ops():
-    try:
-        import pytorch3d.ops
+    import pytorch3d.ops
 
-        return pytorch3d.ops
-    except ImportError as exc:
-        raise ImportError(
-            "Point-cloud operations require pytorch3d built for the installed Torch/CUDA"
-        ) from exc
+    return pytorch3d.ops
 
 
 def resolve_fps_random_config(

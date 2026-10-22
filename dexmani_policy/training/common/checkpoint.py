@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from dexmani_policy.utils.runtime import atomic_path
-
-TRAIN_CHECKPOINT_FORMAT = "simple.v4"
 
 
 @dataclass
@@ -25,7 +22,6 @@ class TrainCheckpoint:
     scheduler_state: dict[str, Any]
     resume_contract: dict[str, Any]
     ema_updater_step: int | None
-    ema_decay: float | None
     rng_states: list[dict[str, Any]]
     effective_config: dict[str, Any]
 
@@ -47,7 +43,6 @@ class CheckpointStore:
                 "next_micro_step": checkpoint.next_micro_step,
                 "resume_contract": checkpoint.resume_contract,
                 "ema_updater_step": checkpoint.ema_updater_step,
-                "ema_decay": checkpoint.ema_decay,
                 "rng_states": checkpoint.rng_states,
             },
             "weights": {
@@ -56,8 +51,6 @@ class CheckpointStore:
                 "optimizer": checkpoint.optimizer_state,
                 "scheduler": checkpoint.scheduler_state,
             },
-            "_format": TRAIN_CHECKPOINT_FORMAT,
-            "_saved_at": time.time(),
         }
         with atomic_path(path) as temporary:
             torch.save(payload, temporary)
@@ -67,13 +60,7 @@ class CheckpointStore:
         """Read one .pt container; purpose-specific readers validate required fields."""
         import torch
 
-        payload = torch.load(Path(path), map_location="cpu", weights_only=False)
-        if not isinstance(payload, dict) or payload.get("_format") != TRAIN_CHECKPOINT_FORMAT:
-            raise RuntimeError(f"Checkpoint requires {TRAIN_CHECKPOINT_FORMAT}")
-        config = payload.get("effective_config")
-        if not isinstance(config, dict) or not config:
-            raise ValueError("Checkpoint requires a nonempty effective_config mapping")
-        return payload
+        return torch.load(Path(path), map_location="cpu", weights_only=False)
 
     def load(self, path: Path) -> TrainCheckpoint:
         payload = self.load_payload(path)
@@ -88,7 +75,6 @@ class CheckpointStore:
             next_micro_step=state["next_micro_step"],
             resume_contract=state["resume_contract"],
             ema_updater_step=state["ema_updater_step"],
-            ema_decay=state["ema_decay"],
             rng_states=state["rng_states"],
             model_state=weights["model"],
             ema_model_state=weights["ema_model"],
@@ -110,23 +96,14 @@ def inference_weights(payload, *, use_ema):
 
 
 def unwrap_state_dict(state_dict: dict) -> dict:
-    """Remove training wrappers for loading or saving the underlying model."""
+    """Remove DDP/compile parameter prefixes before saving model weights."""
     if any("_orig_mod." in k for k in state_dict):
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
-    is_checkpoint_ddp = next(iter(state_dict), "").startswith("module.")
-
-    if is_checkpoint_ddp:
+    if next(iter(state_dict), "").startswith("module."):
         return {k.removeprefix("module."): v for k, v in state_dict.items()}
 
     return state_dict
-
-
-def read_checkpoint_record(path):
-    info = json.loads(path.read_text())
-    if not isinstance(info, dict):
-        raise ValueError(f"Checkpoint record must contain an object: {path}")
-    return info
 
 
 def resolve_record_path(root, relative, *, checkpoint=False, immutable=False):
@@ -147,23 +124,17 @@ def resolve_record_path(root, relative, *, checkpoint=False, immutable=False):
 def validate_inference_settings(info):
     from omegaconf import OmegaConf
 
-    from dexmani_policy.utils.config import resolve_action_steps
+    from dexmani_policy.utils.config import positive_int, resolve_action_steps
 
-    inference = info.get("inference")
-    if not isinstance(inference, dict):
-        raise ValueError("Record requires inference settings")
-    if type(inference.get("use_ema")) is not bool:
+    inference = info["inference"]
+    if type(inference["use_ema"]) is not bool:
         raise ValueError("inference.use_ema must be a bool")
-    steps = inference.get("inference_steps")
-    if type(steps) is not int or steps <= 0:
-        raise ValueError("inference.inference_steps must be a positive int (not bool)")
-    if inference.get("policy_seed_mode") != "episode_seed":
+    positive_int(inference["inference_steps"], "inference.inference_steps")
+    if inference["policy_seed_mode"] != "episode_seed":
         raise ValueError("Record requires inference.policy_seed_mode=episode_seed")
-    # Legacy selections used their saved model window, irrespective of eval defaults.
     agent = OmegaConf.create(info["evaluation"]["effective_config"]["agent"])
-    if "action_steps" in inference and inference["action_steps"] is None:
-        raise ValueError("inference.action_steps must be a positive int")
-    inference["action_steps"] = resolve_action_steps(agent, inference.get("action_steps"))
+    steps = positive_int(inference["action_steps"], "inference.action_steps")
+    resolve_action_steps(agent, steps)
 
 
 def resolve_selection_record(experiment_dir, record_path):
@@ -171,7 +142,7 @@ def resolve_selection_record(experiment_dir, record_path):
     record_path = Path(record_path).expanduser().resolve(strict=True)
     if not record_path.is_relative_to(root):
         raise ValueError("Selection record must be inside the experiment")
-    info = read_checkpoint_record(record_path)
+    info = json.loads(record_path.read_text())
     if info["status"] != "success":
         raise ValueError("Selection has not completed successfully")
     validate_inference_settings(info)
@@ -182,7 +153,7 @@ def resolve_selection_record(experiment_dir, record_path):
 
 def resolve_best_checkpoint(experiment_dir):
     root = Path(experiment_dir).resolve()
-    pointer = read_checkpoint_record(root / "best_ckpt.json")
+    pointer = json.loads((root / "best_ckpt.json").read_text())
     record = resolve_record_path(root, pointer["selection_result"])
     return resolve_selection_record(root, record)
 
@@ -248,7 +219,6 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     state, global_step = inference_weights(payload, use_ema=use_ema)
-    state = unwrap_state_dict(state)
     cfg = checkpoint_agent_config(cfg, state)
     agent = hydra.utils.instantiate(cfg.agent)
     agent.checkpoint_step = global_step

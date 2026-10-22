@@ -1,30 +1,15 @@
 """Seeded episode splits and explicit trial manifests with strict restoration."""
 
-import json
 import math
 from numbers import Integral, Real
-from pathlib import Path
 
 import numpy as np
-
-
-def load_split_manifest(path, attrs, episode_count):
-    manifest = json.loads(Path(path).read_text())
-    return validate_split_manifest(manifest, attrs, episode_count)
+from omegaconf import OmegaConf
 
 
 def validate_split_manifest(manifest, attrs, episode_count):
-    if not isinstance(manifest, dict):
-        raise TypeError("split manifest must be an object")
-    revision = attrs.get("data_revision")
-    if (
-        not isinstance(revision, str)
-        or not revision.strip()
-        or revision.strip().lower() == "unknown"
-    ):
-        raise ValueError("split manifest requires a known canonical data_revision")
-    if manifest.get("data_revision") != revision:
-        raise ValueError("split manifest data_revision mismatch")
+    if OmegaConf.is_config(manifest):
+        manifest = OmegaConf.to_container(manifest, resolve=True)
     ids = attrs.get("episode_ids")
     if (
         not isinstance(ids, list)
@@ -71,15 +56,6 @@ def validate_split_manifest(manifest, attrs, episode_count):
         np.array([i in val for i in ids]),
         normalized,
     )
-
-
-def restore_split(saved, attrs, episode_count):
-    """Restore the exact episode sets declared by the saved manifest."""
-    from omegaconf import OmegaConf
-
-    if OmegaConf.is_config(saved):
-        saved = OmegaConf.to_container(saved, resolve=True)
-    return validate_split_manifest(saved["content"], attrs, episode_count)
 
 
 def get_val_mask(n_episodes, val_ratio, seed=0):

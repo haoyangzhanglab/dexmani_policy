@@ -10,7 +10,6 @@ from termcolor import cprint
 
 from dexmani_policy.env_runner.common.metrics import collect_episode_details, mean_success_steps
 from dexmani_policy.env_runner.common.seeds import (
-    SEED_PLAN_VERSION,
     plan_selection_seeds,
     plan_size,
     resolve_eval_seed,
@@ -131,7 +130,6 @@ def select_best_checkpoint(
         record["evaluation"] = evaluation_snapshot(
             cfg,
             runner,
-            seed_plan_version=SEED_PLAN_VERSION,
             action_steps=action_steps,
             shuffle_seed=seed,
             test_task_seeds=test,

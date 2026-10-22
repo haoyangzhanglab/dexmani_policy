@@ -103,7 +103,6 @@ optimizer:
 # ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema.EMA
-  accumulation_dtype: float32
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -142,7 +141,6 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 25        # Runner fallback; eval entry points resolve their own budgets.
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
@@ -154,7 +152,6 @@ env_runner:
 eval:
   seed: 1024
   inference_steps: 10
-  inference_steps_list: null
   use_ema: true
 
   select_best:
@@ -171,7 +168,6 @@ eval:
 
   video:
     enabled: true
-    fps: null
 # ── Hydra ──
 hydra:
   job:

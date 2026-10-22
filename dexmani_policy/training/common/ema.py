@@ -12,16 +12,10 @@ class EMA:
         power=2 / 3,
         min_value=0.0,
         max_value=0.9999,
-        foreach=False,
-        accumulation_dtype="float32",
     ):
-        if accumulation_dtype not in {"float32", "parameter"}:
-            raise ValueError("EMA accumulation_dtype must be float32 or parameter")
-        self.accumulation_dtype = accumulation_dtype
-        if accumulation_dtype == "float32":
-            for parameter in model.parameters():
-                if parameter.requires_grad and parameter.dtype in (torch.float16, torch.bfloat16):
-                    parameter.data = parameter.data.float()
+        for parameter in model.parameters():
+            if parameter.requires_grad and parameter.dtype in (torch.float16, torch.bfloat16):
+                parameter.data = parameter.data.float()
         self.averaged_model = model
         self.averaged_model.eval()
         self.averaged_model.requires_grad_(False)
@@ -30,8 +24,6 @@ class EMA:
         self.power = power
         self.min_value = min_value
         self.max_value = max_value
-        self.foreach = foreach
-        self.decay = 0.0
         self.optimization_step = 0
 
     def get_decay(self, optimization_step):
@@ -43,22 +35,14 @@ class EMA:
 
     @torch.no_grad()
     def step(self, new_model):
-        self.decay = self.get_decay(self.optimization_step)
-        buckets = {}
+        decay = self.get_decay(self.optimization_step)
         # Active BatchNorm is rejected at construction; frozen parameters are copied.
         for param, ema_param in zip(new_model.parameters(), self.averaged_model.parameters()):
             value = param.detach().to(dtype=ema_param.dtype)
             if not param.requires_grad:
                 ema_param.copy_(value)
-            elif self.foreach:
-                targets, values = buckets.setdefault((ema_param.device, ema_param.dtype), ([], []))
-                targets.append(ema_param)
-                values.append(value)
             else:
-                ema_param.mul_(self.decay)
-                ema_param.add_(value, alpha=1 - self.decay)
+                ema_param.mul_(decay)
+                ema_param.add_(value, alpha=1 - decay)
 
-        for targets, values in buckets.values():
-            torch._foreach_mul_(targets, self.decay)
-            torch._foreach_add_(targets, values, alpha=1 - self.decay)
         self.optimization_step += 1

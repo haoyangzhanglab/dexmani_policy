@@ -116,7 +116,6 @@ optimizer:
 
 ema:
   _target_: dexmani_policy.training.common.ema.EMA
-  accumulation_dtype: float32
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -151,7 +150,6 @@ env_runner:
   _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
   n_obs_steps: ${n_obs_steps}
-  default_eval_episodes: 25
   # Independent simulator state for each evaluation episode.
   clear_cache_freq: 1
   sensor_modalities: ${dataset.sensor_modalities}
@@ -164,7 +162,6 @@ env_runner:
 eval:
   seed: 1024
   inference_steps: 10
-  inference_steps_list: null
   use_ema: true
   select_best:
     initial_episodes: 25
@@ -177,7 +174,6 @@ eval:
     viewer_resolution: [1280, 960]
   video:
     enabled: true
-    fps: null
 
 hydra:
   job:

@@ -17,22 +17,12 @@ from dexmani_policy.env_runner.common.video import save_episode_video
 from dexmani_policy.utils.config import positive_int, resolve_action_steps
 
 
-class EvaluationError(RuntimeError):
-    """A technical failure aborts evaluation rather than becoming a task outcome."""
-
-    def __init__(self, error: Exception, *, task, seed):
-        super().__init__(f"task={task} seed={seed}: {type(error).__name__}: {error}")
-        self.task = task
-        self.seed = seed
-
-
 class BaseRunner:
     """Subclasses supply an environment and physical evaluation seeds."""
 
     def __init__(
         self,
         n_obs_steps: int,
-        default_eval_episodes: int,
         sensor_modalities: list[str] | None = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
@@ -46,7 +36,6 @@ class BaseRunner:
         self.hand_history = None
 
         self.env_video_fps = env_video_fps
-        self.default_eval_episodes = default_eval_episodes
         self.clear_cache_freq = clear_cache_freq
         self.rgb_preprocessing = None
 
@@ -224,27 +213,18 @@ class BaseRunner:
         inference_steps: int | None = None,
         video_save_dir: Path | None = None,
         *,
-        seeds: list[int] | None = None,
+        seeds: list[int],
         action_steps: int | None = None,
     ):
         details = []
         videos = []
         env = None
-        seed = None
         task = self.task_name
 
         try:
             action_steps = resolve_action_steps(agent, action_steps)
             if inference_steps is not None:
                 positive_int(inference_steps, "inference_steps")
-            if seeds is None:
-                seeds = self.get_seed_list()
-                count = positive_int(self.default_eval_episodes, "default_eval_episodes")
-                if count > len(seeds):
-                    raise ValueError(
-                        f"Requested {count} episodes, only {len(seeds)} seeds available"
-                    )
-                seeds = seeds[:count]
             seeds = list(seeds)
             count = validate_task_seeds({task: seeds}, [task])
 
@@ -267,6 +247,7 @@ class BaseRunner:
                         agent, env, seed, inference_steps, action_steps=action_steps
                     )
                 except Exception:
+                    cprint(f"Evaluation failed: task={task}, seed={seed}", "red")
                     save_episode_video(env, video_save_dir, f"episode_{seed}_crash", video_fps)
                     raise
                 details.append(
@@ -302,10 +283,6 @@ class BaseRunner:
                 "avg_steps_all": stats["avg_steps_all"],
                 "videos": videos,
             }
-        except EvaluationError:
-            raise
-        except Exception as exc:
-            raise EvaluationError(exc, task=task, seed=seed) from exc
         finally:
             if env is not None:
                 with suppress(Exception):

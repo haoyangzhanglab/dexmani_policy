@@ -62,7 +62,7 @@ def resolve_resume_source(source):
 
 
 def recipe_content(config):
-    """Compare recipe values, excluding only supported run/location changes."""
+    """Compare research settings, excluding supported run and location changes."""
     plain = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
 
     def visit(value, path=""):
@@ -246,10 +246,7 @@ def validate_action_key_consistency(cfg) -> None:
 
 def load_experiment_config(experiment_dir):
     """Read the resolved snapshot without composing current repository YAML."""
-    cfg = OmegaConf.to_container(OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True)
-    if not isinstance(cfg, dict):
-        raise ValueError("Expected a saved experiment config mapping")
-    return cfg
+    return OmegaConf.to_container(OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True)
 
 
 def validate_normalization_spec(spec, *, observation_fields=None):
@@ -287,16 +284,11 @@ def resolve_normalization_spec(cfg, *, observation_fields=None):
 
 
 def normalization_dims_from_config(cfg):
-    """Number of fitted statistics per field, checked against observation layouts."""
-    dims = dict(cfg.get("normalization_dims", {}))
+    """Check recorded affine widths against the policy's observation and action layout."""
+    dims = dict(cfg["normalization_dims"])
     agent = cfg["agent"]
-    action_dim = int(agent["action_dim"])
-    if "action" in dims and dims["action"] != action_dim:
-        raise ValueError("Saved normalization action dimension disagrees with Agent")
-    dims["action"] = action_dim
-    # Finger vectors have 15 independent statistics; dense taxels share three axis statistics.
-    defaults = {
-        "joint_state": agent.get("state_dim", 19),
+    expected = {
+        "action": agent["action_dim"],
         "eef_pose": 9,
         "fingertip_xyz": 15,
         "finger_tactile_force": 15,
@@ -304,16 +296,14 @@ def normalization_dims_from_config(cfg):
         "camera_intrinsic": 9,
         "camera_extrinsic": 12,
         "tactile_valid": 5,
-        "point_cloud": cfg.get("dataset", {}).get("pc_dim") or dims.get("point_cloud", 6),
     }
-    for key, width in defaults.items():
-        dims.setdefault(key, width)
-        if dims[key] != width and (
-            key in FINGER_VECTOR_FIELDS
-            or key == "eef_pose"
-            or cfg.get("normalization", {}).get(key, "identity") != "identity"
-        ):
-            raise ValueError(f"Saved {key} feature width must be {width}")
+    if "state_dim" in agent:
+        expected["joint_state"] = agent["state_dim"]
+    if cfg["dataset"].get("pc_dim") is not None:
+        expected["point_cloud"] = cfg["dataset"]["pc_dim"]
+    for key, mode in cfg["normalization"].items():
+        if mode != "identity" and key in expected and dims[key] != expected[key]:
+            raise ValueError(f"Saved {key} feature width must be {expected[key]}")
     return dims
 
 

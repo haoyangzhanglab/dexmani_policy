@@ -105,7 +105,6 @@ def save_prior(path, prior, hand_data, cfg, args, step, metrics, optimizer):
         ),
     )
     payload = {
-        "_format": "lamp_prior.v3",
         "model_config": dict(prior.model_config),
         "model_state_dict": {
             key: value.detach().cpu().clone() for key, value in prior.state_dict().items()

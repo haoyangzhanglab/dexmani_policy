@@ -4,8 +4,6 @@ import random
 
 from dexmani_policy.utils.config import positive_int
 
-SEED_PLAN_VERSION = "fixed_test_v1"
-
 
 def validate_eval_seed(seed):
     if type(seed) is not int or not 0 <= seed < 2**32:

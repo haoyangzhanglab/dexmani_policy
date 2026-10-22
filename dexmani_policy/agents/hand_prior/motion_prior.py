@@ -79,8 +79,6 @@ class HandMotionPrior(nn.Module):
 
 def load_motion_prior(path: str | Path) -> tuple[HandMotionPrior, dict]:
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("_format") != "lamp_prior.v3":
-        raise ValueError("Expected lamp_prior.v3; regenerate the prior or use historical code")
     prior = HandMotionPrior(**payload["model_config"])
     prior.load_state_dict(payload["model_state_dict"], strict=True)
     prior.validate_state()

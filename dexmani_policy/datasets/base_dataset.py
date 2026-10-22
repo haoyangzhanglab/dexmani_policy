@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
@@ -17,8 +18,7 @@ from dexmani_policy.datasets.common.augmentation import (
 from dexmani_policy.datasets.common.episode_split import (
     downsample_mask,
     get_val_mask,
-    load_split_manifest,
-    restore_split,
+    validate_split_manifest,
     validate_split_options,
 )
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
@@ -96,7 +96,6 @@ class BaseDataset(torch.utils.data.Dataset):
             keys=load_keys,
         )
 
-        self.data_revision = self.replay_buffer.data_revision
         if "rgb" in sensor_modalities:
             rgb = self.replay_buffer["rgb"]
             if len(rgb.shape) != 4 or rgb.shape[-1] != 3 or rgb.dtype != np.uint8:
@@ -120,32 +119,30 @@ class BaseDataset(torch.utils.data.Dataset):
         if use_aux_ee:
             self.role_lengths["action_ee"] = horizon
 
-        self.data_recipe = {
-            "window_validity": "role_finite_v1",
-        }
+        self.data_recipe = {}
         if "point_cloud" in sensor_modalities and self.pc_dim == 3:
-            self.data_recipe.update(window_validity="role_finite_xyz_v2", point_cloud_channels=3)
+            self.data_recipe.update(point_cloud_channels=3)
         elif (
             "point_cloud" in sensor_modalities
             and self.pc_dim is not None
             and self.pc_dim < self.replay_buffer["point_cloud"].shape[-1]
         ):
-            self.data_recipe.update(
-                window_validity="role_finite_channels_v2", point_cloud_channels=self.pc_dim
+            self.data_recipe.update(point_cloud_channels=self.pc_dim)
+        if saved_split is not None or split_manifest is not None:
+            manifest = (
+                saved_split
+                if saved_split is not None
+                else json.loads(Path(split_manifest).read_text())
             )
-        if saved_split is not None:
-            train_mask, val_mask, manifest = restore_split(
-                saved_split, self.replay_buffer.attrs, self.replay_buffer.n_episodes
+            train_mask, val_mask, manifest = validate_split_manifest(
+                manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes
             )
-        elif split_manifest is None:
+            self.data_recipe["split_manifest"] = manifest
+        else:
             val_mask = get_val_mask(
                 seed=seed, val_ratio=val_ratio, n_episodes=self.replay_buffer.n_episodes
             )
             train_mask = downsample_mask(seed=seed, mask=~val_mask, max_n=max_train_episodes)
-        else:
-            train_mask, val_mask, manifest = load_split_manifest(
-                split_manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes
-            )
         self.val_mask = val_mask
         self.train_mask = train_mask
 
@@ -158,8 +155,6 @@ class BaseDataset(torch.utils.data.Dataset):
         )
         self.filter_sampler(self.sampler)
         self.validation_dataset = None
-        if split_manifest is not None or saved_split is not None:
-            self.data_recipe["split_manifest"] = {"content": manifest}
 
     def finite_rows(self, key, columns=None):
         valid = np.ones(int(self.replay_buffer.episode_ends[-1]), dtype=bool)

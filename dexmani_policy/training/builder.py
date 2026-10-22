@@ -20,7 +20,6 @@ from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.checkpoint import (
     CheckpointStore,
     checkpoint_agent_config,
-    unwrap_state_dict,
 )
 from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
@@ -139,8 +138,6 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
                 "Dataset action width including auxiliary targets must match agent.action_dim"
             )
         cfg.normalization_dims = widths
-        if isinstance(dataset, MultiTaskDataset) and dataset.sampling_strategy == "weighted":
-            cfg.sampling_recipe = {"weighted_quota": "cumulative_random_offset_v1"}
         cfg.data_recipe = [
             dict(
                 child.data_recipe,
@@ -154,10 +151,8 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
             if saved_recipes is None:
                 recipe.normalization = {
                     "population": "full_replay_buffer",
-                    "formula": "dp_affine_v1",
                 }
-            elif "normalization" in saved_recipes[index]:
-                # Restored statistics keep their recorded origin, including legacy descriptions.
+            else:
                 recipe.normalization = saved_recipes[index]["normalization"]
         if runtime is not None:
             cfg.real_runtime = runtime
@@ -181,7 +176,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
             summaries.append(summary)
         print(f"[Dataset] {' | '.join(summaries)}")
         if resume_checkpoint is None:
-            print("[Normalizer] full_replay_buffer / dp_affine_v1 (includes held-out buffer episodes)")
+            print("[Normalizer] full_replay_buffer (includes held-out buffer episodes)")
     return dataset, normalizer
 
 
@@ -189,7 +184,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
     model_cfg = cfg
     if checkpoint is not None:
-        model_cfg = checkpoint_agent_config(cfg, unwrap_state_dict(checkpoint.model_state))
+        model_cfg = checkpoint_agent_config(cfg, checkpoint.model_state)
     model = hydra.utils.instantiate(model_cfg.agent)
     if "datasets" in cfg.dataset:
         for child in cfg.dataset.datasets:
@@ -251,13 +246,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
     if need_local_ema:
         # Copy before compile/DDP; resume restores raw and EMA independently below.
         ema_model = copy.deepcopy(model)
-        # Missing precision in a saved recipe means the original parameter-dtype updates.
-        precision = cfg.ema.get(
-            "accumulation_dtype", "float32" if checkpoint is None else "parameter"
-        )
-        ema_updater = hydra.utils.instantiate(
-            cfg.ema, model=ema_model, accumulation_dtype=precision
-        )
+        ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
         if checkpoint is None:
             bind_defaults(cfg.ema, type(ema_updater))
 
@@ -354,7 +343,7 @@ def capture_real_runtime(dataset, cfg) -> dict | None:
 
 
 def capture_data_identity(dataset):
-    """Producer-declared revisions captured once while loading, never scanned at save."""
+    """Record episode structure and actual splits without hashing data contents."""
     if isinstance(dataset, MultiTaskDataset):
         return {
             "tasks": {
@@ -362,7 +351,12 @@ def capture_data_identity(dataset):
                 for name, child in zip(dataset.task_names, dataset.datasets)
             }
         }
-    return {"revision": dataset.data_revision}
+    return {
+        "episode_ids": dataset.replay_buffer.attrs.get("episode_ids"),
+        "episode_ends": dataset.replay_buffer.episode_ends.tolist(),
+        "train_episodes": dataset.train_mask.nonzero()[0].tolist(),
+        "val_episodes": dataset.val_mask.nonzero()[0].tolist(),
+    }
 
 
 def loader_options(cfg):
@@ -421,7 +415,7 @@ class TrainingComponents:
 
 
 def build_train_components(cfg, *, resume_checkpoint=None):
-    """Build components, reusing a source already validated by CheckpointStore.load."""
+    """Build components from the saved recipe and loaded checkpoint state."""
     if cfg.training.get("num_gpus", 1) != 1:
         raise ValueError("Single-device training requires num_gpus=1; use train_ddp.py for DDP")
     if not torch.cuda.is_available():

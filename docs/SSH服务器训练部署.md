@@ -70,7 +70,7 @@ bash scripts/remote/sync_data.sh --checksum data
 bash scripts/remote/sync_data.sh --pull --dry-run robot_data
 ```
 
-目标可选 `all`、`data`、`robot_data`。默认 push，按 size/mtime 更新，不删除目标独有文件；`--checksum` 比内容，`--pull` 反转方向。`--prune` 删除目标独有文件且无回收站，先用同参数加 `--dry-run` 核对方向与删除清单。已用于实验的数据应保留，重新生成使用新路径和 revision。
+目标可选 `all`、`data`、`robot_data`。默认 push，按 size/mtime 更新，不删除目标独有文件；`--checksum` 比内容，`--pull` 反转方向。`--prune` 删除目标独有文件且无回收站，先用同参数加 `--dry-run` 核对方向与删除清单。已用于实验的数据应保留，重新生成使用新路径。
 
 ### 实验结果
 

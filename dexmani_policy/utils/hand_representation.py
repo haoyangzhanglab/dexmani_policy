@@ -21,7 +21,6 @@ def describe_hand_data(dataset):
 
     validation = dataset.get_validation_dataset()
     return {
-        "data_revision": dataset.data_revision,
         "episode_ids": attrs.get("episode_ids"),
         "episode_ends": buffer.episode_ends.tolist(),
         "train_episodes": np.flatnonzero(dataset.train_mask).tolist(),

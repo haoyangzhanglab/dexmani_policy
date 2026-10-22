@@ -20,7 +20,6 @@ from dexmani_policy.env_runner.common.metrics import (
     validate_episode_details,
 )
 from dexmani_policy.env_runner.common.seeds import (
-    SEED_PLAN_VERSION,
     plan_selection_seeds,
     plan_size,
     resolve_eval_seed,
@@ -186,12 +185,7 @@ def add_evaluation_arguments(parser) -> None:
 def build_eval_runner(cfg):
     """Build the evaluation environment with the saved model input recipe."""
     validate_action_key_consistency({"action_key": cfg.action_key, "env_runner": cfg.env_runner})
-    runner_config = OmegaConf.to_container(cfg.env_runner, resolve=True)
-    # Old experiment YAMLs duplicated Dataset RGB sizes in the runner config.
-    for node in (runner_config, *runner_config.get("task_configs", ())):
-        node.pop("rgb_preprocess_size", None)
-        node.pop("rgb_random_crop_size", None)
-    env_runner = hydra.utils.instantiate(runner_config)
+    env_runner = hydra.utils.instantiate(cfg.env_runner)
     dataset = cfg.dataset
     tasks = dataset.get("task_names", ())
     children = dict(zip(tasks, dataset.get("datasets", ()), strict=True))
@@ -349,18 +343,14 @@ def create_run_directory(root, directory=None):
 
 def fixed_test_request(record):
     """Resolve the saved protocol and test budget before building a runner."""
-    evaluation = record.get("evaluation")
-    request = evaluation.get("request") if isinstance(evaluation, dict) else None
-    if not isinstance(request, dict) or request.get("seed_plan_version") != SEED_PLAN_VERSION:
-        raise ValueError("Selection record requires fixed_test_v1; rerun checkpoint selection")
+    evaluation = record["evaluation"]
+    request = evaluation["request"]
     if not {"shuffle_seed", "test_task_seeds"} <= request.keys():
         raise ValueError(
             "Selection record is missing its fixed test plan; rerun checkpoint selection"
         )
     validate_eval_seed(request["shuffle_seed"])
-    saved_cfg = evaluation.get("effective_config")
-    if not isinstance(saved_cfg, dict):
-        raise ValueError("Fixed test selection requires its saved evaluation config")
+    saved_cfg = evaluation["effective_config"]
     episodes = positive_int(get_eval_param(saved_cfg, "episodes", "offline"), "saved test episodes")
     return request, episodes
 
@@ -525,7 +515,6 @@ def evaluate_policy(
     record_video=False,
     selection=None,
     heldout=False,
-    seed_plan_version=None,
 ):
     """Load once and evaluate the same physical episodes at each requested NFE."""
     seed = cfg.eval.seed
@@ -551,7 +540,6 @@ def evaluate_policy(
         effective_episodes=plan_size(plan),
         shuffle_seed=seed,
         policy_seed_mode="episode_seed",
-        seed_plan_version=seed_plan_version,
         task_seeds=plan,
         selection_id=selection["selection_id"] if selection is not None else None,
         selection_result=selection["selection_result"] if selection is not None else None,
@@ -584,7 +572,6 @@ def evaluate_policy(
                 else None
             ),
             "evaluation_seeds": plan,
-            "seed_plan_version": seed_plan_version,
             "heldout_from_selection": heldout,
             "episode_details": details,
             "statistics": stats,
@@ -678,5 +665,4 @@ def evaluate_checkpoint(
         record_video=record_video,
         selection=selection,
         heldout=selection is not None,
-        seed_plan_version=SEED_PLAN_VERSION,
     )

@@ -35,12 +35,6 @@ class ReplayBuffer:
         self.episode_ends = np.asarray(root["meta"]["episode_ends"])
         validate_episode_metadata(self.episode_ends, self.data)
         self.attrs = dict(root.get("attrs", {}) if isinstance(root, dict) else root.attrs)
-        revision = self.attrs.get("data_revision")
-        if "data_revision" in self.attrs and (
-            not isinstance(revision, str) or not revision.strip()
-        ):
-            raise ValueError("Zarr data_revision must be a nonempty string when present")
-        self.data_revision = revision
         self.path = None
         self.group = None
         self.pid = None

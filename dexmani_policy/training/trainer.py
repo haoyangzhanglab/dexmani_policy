@@ -123,19 +123,11 @@ class Trainer:
         grad_nan_params = []
 
         if self.max_grad_norm > 0:
-            try:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.raw_model.parameters(),
-                    max_norm=self.max_grad_norm,
-                    error_if_nonfinite=True,
-                )
-            except RuntimeError:
-                # A finite gradient can still overflow the aggregate norm.
-                bad = self.find_nonfinite_gradients()
-                self.optimizer.zero_grad(set_to_none=True)
-                if bad:
-                    print(f"Non-finite gradients at step={self.global_step}: {bad[:5]}")
-                raise
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.raw_model.parameters(),
+                max_norm=self.max_grad_norm,
+                error_if_nonfinite=True,
+            )
         else:
             flags = [
                 torch.isfinite(self.gradient_values(p.grad)).all()
@@ -242,7 +234,6 @@ class Trainer:
             ema_updater_step=(
                 self.ema_updater.optimization_step if self.ema_updater is not None else None
             ),
-            ema_decay=(self.ema_updater.decay if self.ema_updater is not None else None),
             rng_states=rng_states,
         )
         tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"

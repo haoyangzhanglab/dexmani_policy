@@ -14,7 +14,6 @@ class SimRunner(BaseRunner):
         self,
         task_name: str,
         n_obs_steps: int,
-        default_eval_episodes: int,
         sensor_modalities: list[str] | None = None,
         env_kwargs: dict[str, Any] | None = None,
         eval_seeds: list[int] | None = None,
@@ -27,7 +26,6 @@ class SimRunner(BaseRunner):
         super().__init__(
             n_obs_steps=n_obs_steps,
             env_video_fps=env_video_fps,
-            default_eval_episodes=default_eval_episodes,
             sensor_modalities=sensor_modalities,
             clear_cache_freq=clear_cache_freq,
         )

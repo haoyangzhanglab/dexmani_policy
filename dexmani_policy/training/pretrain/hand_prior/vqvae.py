@@ -85,7 +85,6 @@ def save_checkpoint(
         "split_metadata": split_metadata,
         "metrics": metrics,
         "train_history": train_history,
-        "format_version": HandVQVAE.FORMAT_VERSION,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

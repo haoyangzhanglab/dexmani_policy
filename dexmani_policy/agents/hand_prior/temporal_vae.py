@@ -174,8 +174,6 @@ class TemporalHandVAE(nn.Module):
 
 def load_temporal_vae(path: str | Path) -> tuple[TemporalHandVAE, dict]:
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("_format") != "temporal_hand_codec.v2":
-        raise ValueError("Expected temporal_hand_codec.v2; regenerate the codec or use historical code")
     codec = TemporalHandVAE(**payload["model_config"])
     codec.load_state_dict(payload["state_dict"], strict=True)
     codec.validate_state()

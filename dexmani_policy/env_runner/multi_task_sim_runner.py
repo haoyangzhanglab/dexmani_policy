@@ -31,7 +31,6 @@ class MultiTaskSimRunner:
         self,
         task_configs: list[dict[str, Any]],
         n_obs_steps: int,
-        default_eval_episodes: int,
         sensor_modalities: list[str] | None = None,
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
@@ -42,7 +41,6 @@ class MultiTaskSimRunner:
         self.runners: dict[str, TaskTextSimRunner] = {}
         defaults = {
             "n_obs_steps": n_obs_steps,
-            "default_eval_episodes": default_eval_episodes,
             "sensor_modalities": sensor_modalities,
             "clear_cache_freq": clear_cache_freq,
             "env_video_fps": env_video_fps,

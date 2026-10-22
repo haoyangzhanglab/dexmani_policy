@@ -128,7 +128,6 @@ def save_codec(path, codec, hand_data, cfg, args, step, metrics, statistics):
         "joint_weights": "multiply_numerator_only_do_not_change_denominator",
     }
     payload = {
-        "_format": "temporal_hand_codec.v2",
         "model_config": dict(codec.model_config),
         "state_dict": {
             key: value.detach().cpu().clone() for key, value in codec.state_dict().items()
