@@ -9,6 +9,12 @@ from typing import ClassVar
 import numpy as np
 import torch
 
+from dexmani_policy.common.rgb_preprocessing import (
+    preprocess_training_rgb,
+    preprocess_validation_rgb,
+    validate_rgb_preprocessing,
+)
+from dexmani_policy.common.runtime import dict_apply, ensure_tensor
 from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
@@ -22,13 +28,7 @@ from dexmani_policy.datasets.common.episode_split import (
     validate_split_options,
 )
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.common.rgb_preprocessing import (
-    preprocess_training_rgb,
-    preprocess_validation_rgb,
-    validate_rgb_preprocessing,
-)
 from dexmani_policy.datasets.common.sequence_sampler import SequenceSampler
-from dexmani_policy.utils.runtime import dict_apply, ensure_tensor
 
 
 class BaseDataset(torch.utils.data.Dataset):

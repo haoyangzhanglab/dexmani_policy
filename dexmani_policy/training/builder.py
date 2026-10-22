@@ -14,14 +14,25 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from dexmani_policy.agents.core.normalizer import AffineNormalizer, validate_normalizer_state
-from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
-from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
-from dexmani_policy.training.common.checkpoint import (
+from dexmani_policy.common.checkpoint import (
     CheckpointStore,
     checkpoint_agent_config,
 )
+from dexmani_policy.common.config import (
+    FINGER_VECTOR_FIELDS,
+    normalization_dims_from_config,
+    positive_int,
+    resolve_input_recipe,
+    resolve_normalization_spec,
+    resolve_resume_source,
+    validate_observation_fields,
+)
+from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
+from dexmani_policy.common.runtime import worker_init_fn
+from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
+from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.ema import EMA
+from dexmani_policy.training.common.hand_representation import describe_hand_data
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
 from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.resume import build_resume_contract, restore_model_weights
@@ -32,17 +43,6 @@ from dexmani_policy.training.validation import (
     validate_ema_batchnorm,
 )
 from dexmani_policy.training.workspace import Workspace, prepare_output_dir
-from dexmani_policy.utils.config import (
-    FINGER_VECTOR_FIELDS,
-    normalization_dims_from_config,
-    positive_int,
-    resolve_input_recipe,
-    resolve_normalization_spec,
-    resolve_resume_source,
-    validate_observation_fields,
-)
-from dexmani_policy.utils.hand_representation import describe_hand_data
-from dexmani_policy.utils.runtime import worker_init_fn
 
 
 def prepare_training(cfg):
@@ -270,10 +270,49 @@ def validate_hand_pretraining(cfg, model, dataset, *, checkpoint=None):
         cfg.hand_data = current
 
 
+def build_optimizer(
+    model,
+    lr: float,
+    weight_decay: float,
+    obs_lr: float | None = None,
+    obs_weight_decay: float | None = None,
+    betas: tuple[float, float] = (0.95, 0.999),
+) -> torch.optim.AdamW:
+    """Require each trainable parameter once and retain its name for resume checks."""
+    obs_lr = obs_lr if obs_lr is not None else lr
+    obs_weight_decay = obs_weight_decay if obs_weight_decay is not None else weight_decay
+    groups = model.optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
+    groups = [group for group in groups if group["params"]]
+    names = {id(param): name for name, param in model.named_parameters() if param.requires_grad}
+    param_ids = [id(param) for group in groups for param in group["params"]]
+    assigned = set(param_ids)
+    if len(param_ids) != len(assigned):
+        raise ValueError("Optimizer groups contain duplicate parameters")
+    if assigned - names.keys():
+        raise ValueError(
+            "Optimizer groups must contain only this policy's trainable parameters"
+        )
+    missing = names.keys() - assigned
+    if missing:
+        raise ValueError(
+            "Trainable parameters missing from optimizer: "
+            f"{sorted(names[key] for key in missing)}"
+        )
+
+    for group in groups:
+        group["param_names"] = [names[id(p)] for p in group["params"]]
+    return torch.optim.AdamW(
+        groups,
+        lr=lr,
+        betas=betas,
+        fused=torch.cuda.is_available(),
+    )
+
+
 def build_optimizer_and_scheduler(cfg, model, *, verbose=True):
     """Build initial optimizer/scheduler; resume loads their complete saved states."""
-    optimizer = model.configure_optimizer(**cfg.optimizer)
-    bind_defaults(cfg.optimizer, model.configure_optimizer)
+    optimizer = build_optimizer(model, **cfg.optimizer)
+    bind_defaults(cfg.optimizer, build_optimizer)
     if cfg.training.lr_scheduler == "cosine_min_lr":
         with open_dict(cfg.training):
             cfg.training.lr_min_ratio = cfg.training.get("lr_min_ratio", 0.1)
@@ -455,7 +494,7 @@ def build_train_components(cfg, *, resume_checkpoint=None):
 
 def build_trainer(cfg, components):
     sampler = components.train_loader.sampler
-    return Trainer(
+    trainer = Trainer(
         device=components.device,
         model=components.model,
         ema_model=components.ema_model,
@@ -472,3 +511,6 @@ def build_trainer(cfg, components):
         resume_contract=build_resume_contract(components.train_loader),
         effective_config=cfg,
     )
+    if components.ema_updater is not None:
+        components.ema_updater.validate_frozen_parameters(trainer.raw_model)
+    return trainer

@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 
 class Diffusion(nn.Module):
@@ -42,6 +42,8 @@ class Diffusion(nn.Module):
         cond: torch.Tensor,
         actions: torch.Tensor,
         dim_groups: dict[str, tuple[int, int]] | None = None,
+        *,
+        log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         noise = torch.randn_like(actions)
         timestep = torch.randint(
@@ -69,23 +71,23 @@ class Diffusion(nn.Module):
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
 
+        loss_dict = {}
         # R3D averages each action group separately and weights only auxiliary losses.
         if dim_groups is not None:
             group_losses = []
-            loss_dict = {}
             for name, (start, end) in dim_groups.items():
                 group_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
-                loss_dict[f"loss_{name}"] = group_loss.detach()
+                if log_metrics:
+                    loss_dict[f"loss_{name}"] = group_loss.detach()
                 if name != "joint":
                     group_loss = group_loss * self.aux_loss_weight
                 group_losses.append(group_loss)
             loss = sum(group_losses)
-            loss_dict["loss_action"] = loss.detach()
         else:
             loss = F.mse_loss(pred, target)
-            loss_dict = {"loss_action": loss.detach()}
 
-        loss_dict["loss"] = loss.detach()
+        if log_metrics:
+            loss_dict.update(loss=loss.detach(), loss_action=loss.detach())
         return loss, loss_dict
 
     @torch.no_grad()

@@ -14,11 +14,11 @@ from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
-from dexmani_policy.training.common.checkpoint import TrainCheckpoint, unwrap_state_dict
+from dexmani_policy.common.checkpoint import TrainCheckpoint, unwrap_state_dict
+from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.runtime import dict_apply, get_rng_state
 from dexmani_policy.training.common.logging import to_log_scalars
 from dexmani_policy.training.workspace import Workspace
-from dexmani_policy.utils.config import positive_int
-from dexmani_policy.utils.runtime import dict_apply, get_rng_state
 
 
 @dataclass
@@ -97,13 +97,8 @@ class Trainer:
 
     @property
     def raw_model(self):
-        """Unwrap DDP and compilation without changing the forward path."""
-        model = self.model
-        if isinstance(model, DDP):
-            model = model.module
-        if hasattr(model, "_orig_mod"):
-            model = model._orig_mod
-        return model
+        """DDP wraps the policy; compilation only wraps its action backbone."""
+        return self.model.module if isinstance(self.model, DDP) else self.model
 
     def find_nonfinite_gradients(self) -> list:
         return [
@@ -165,6 +160,7 @@ class Trainer:
         *,
         is_accumulation_boundary: bool = True,
         loss_divisor: int = 1,
+        log_metrics: bool = True,
     ):
         """Backpropagate one micro-batch, updating weights at accumulation boundaries."""
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
@@ -174,7 +170,7 @@ class Trainer:
             dtype=torch.bfloat16,
             enabled=self.use_bfloat16,
         ):
-            raw_loss, log_dict = self.model(batch, **loss_kwargs)
+            raw_loss, log_dict = self.model(batch, log_metrics=log_metrics, **loss_kwargs)
 
         self.validate_loss(raw_loss)
         (raw_loss / loss_divisor).backward()
@@ -410,17 +406,18 @@ class Trainer:
                     else:
                         sync_ctx = contextlib.nullcontext()
 
+                    record_group = (global_step + 1) % self.log_interval_steps == 0
                     with sync_ctx:
                         log_dict = self.train_one_step(
                             batch,
                             is_accumulation_boundary=is_boundary,
                             loss_divisor=group_size,
+                            log_metrics=record_group,
                         )
 
                     if is_boundary:
                         group_elapsed = time.perf_counter() - group_start_time
                     self.ddp_backward_initialized = True
-                    record_group = (global_step + 1) % self.log_interval_steps == 0
                     if record_group:
                         for key, value in log_dict.items():
                             if torch.is_tensor(value):

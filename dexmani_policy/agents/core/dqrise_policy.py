@@ -19,7 +19,7 @@ class DQRISEPolicy(BasePolicy):
     def set_normalization_spec(
         self, spec: dict[str, str], feature_dims: dict[str, int] | None = None
     ) -> None:
-        from dexmani_policy.utils.config import validate_dq_normalization
+        from dexmani_policy.common.config import validate_dq_normalization
 
         validate_dq_normalization(spec)
         super().set_normalization_spec(spec, feature_dims)
@@ -154,7 +154,9 @@ class DQRISEPolicy(BasePolicy):
                 "policy checkpoint before training/inference."
             )
 
-    def compute_loss(self, batch: dict[str, Any], **kwargs) -> tuple[torch.Tensor, dict]:
+    def compute_loss(
+        self, batch: dict[str, Any], *, log_metrics: bool = True
+    ) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
         self.require_codebook()
         cond = self.encode_observation(batch["obs"])
@@ -169,14 +171,20 @@ class DQRISEPolicy(BasePolicy):
         index = index.to(tcp_part.dtype)
 
         joint_action = torch.cat([tcp_part, index], dim=-1)
-        action_loss, loss_dict = self.action_decoder.compute_loss(cond, joint_action, **kwargs)
+        action_loss, loss_dict = self.action_decoder.compute_loss(
+            cond, joint_action, log_metrics=log_metrics
+        )
 
-        num_codes = self.hand_codebook.num_codes
-        counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
-        probabilities = counts / counts.sum().clamp_min(1.0)
-        entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
-        loss_dict["batch_nn_code_entropy"] = entropy.detach()
-        loss_dict["batch_nn_code_used_1pct"] = (probabilities > 0.01).sum().detach()
+        if not log_metrics:
+            return action_loss, loss_dict
+
+        with torch.no_grad():
+            num_codes = self.hand_codebook.num_codes
+            counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
+            probabilities = counts / counts.sum().clamp_min(1.0)
+            entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
+            loss_dict["batch_nn_code_entropy"] = entropy
+            loss_dict["batch_nn_code_used_1pct"] = (probabilities > 0.01).sum()
 
         return action_loss, loss_dict
 

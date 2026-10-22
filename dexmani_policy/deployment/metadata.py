@@ -8,12 +8,12 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
-from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
-from dexmani_policy.training.common.checkpoint import (
+from dexmani_policy.common.checkpoint import (
     resolve_best_checkpoint,
     resolve_checkpoint_path,
 )
-from dexmani_policy.utils.config import load_experiment_config, positive_int, validate_action_window
+from dexmani_policy.common.config import load_experiment_config, positive_int, validate_action_window
+from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 
 EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
 

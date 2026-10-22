@@ -5,14 +5,7 @@ import inspect
 import hydra
 from torch.nn.modules.batchnorm import _BatchNorm
 
-from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.datasets.common.augmentation import (
-    validate_pc_color_augmentation,
-    validate_random_keep_points,
-)
-from dexmani_policy.datasets.common.episode_split import validate_split_options
-from dexmani_policy.datasets.common.rgb_preprocessing import validate_rgb_preprocessing
-from dexmani_policy.utils.config import (
+from dexmani_policy.common.config import (
     NON_NUMERIC_OBSERVATION_FIELDS,
     positive_int,
     resolve_normalization_spec,
@@ -21,6 +14,13 @@ from dexmani_policy.utils.config import (
     validate_dq_normalization,
     validate_action_window,
 )
+from dexmani_policy.common.rgb_preprocessing import validate_rgb_preprocessing
+from dexmani_policy.datasets.base_dataset import BaseDataset
+from dexmani_policy.datasets.common.augmentation import (
+    validate_pc_color_augmentation,
+    validate_random_keep_points,
+)
+from dexmani_policy.datasets.common.episode_split import validate_split_options
 
 HAND_POLICY_TARGETS = frozenset(
     {

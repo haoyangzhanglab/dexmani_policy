@@ -8,6 +8,13 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from termcolor import cprint
 
+from dexmani_policy.common.checkpoint import (
+    MilestoneCheckpoint,
+    discover_milestone_checkpoints,
+    restore_policy_agent,
+)
+from dexmani_policy.common.config import resolve_action_steps
+from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.env_runner.common.metrics import collect_episode_details, mean_success_steps
 from dexmani_policy.env_runner.common.seeds import (
     plan_selection_seeds,
@@ -26,13 +33,6 @@ from dexmani_policy.env_runner.evaluation import (
     task_seed_pools,
     validate_inference_steps,
 )
-from dexmani_policy.training.common.checkpoint import (
-    MilestoneCheckpoint,
-    discover_milestone_checkpoints,
-    restore_policy_agent,
-)
-from dexmani_policy.utils.config import resolve_action_steps
-from dexmani_policy.utils.runtime import set_seed
 
 
 @dataclass

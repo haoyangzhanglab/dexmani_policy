@@ -3,11 +3,11 @@
 import argparse
 from pathlib import Path
 
+from dexmani_policy.common.config import load_experiment_config, register_resolvers, set_project_root
 from dexmani_policy.env_runner.evaluation import (
     add_evaluation_arguments,
     evaluate_checkpoint,
 )
-from dexmani_policy.utils.config import load_experiment_config, register_resolvers, set_project_root
 
 ROOT_DIR = set_project_root()
 register_resolvers()

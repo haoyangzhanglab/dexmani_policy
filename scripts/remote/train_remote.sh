@@ -89,7 +89,7 @@ build_remote_commands() {
         REMOTE_CMD+=" $remote_arg_q"
     done
     # Run this source copy even when the environment has another editable install.
-    PREFLIGHT_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\" -m dexmani_policy.utils.config --check"
+    PREFLIGHT_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\" -m dexmani_policy.common.config --check"
     for remote_arg in "${REMOTE_ARGS[@]:2}"; do
         printf -v remote_arg_q '%q' "$remote_arg"
         PREFLIGHT_CMD+=" $remote_arg_q"

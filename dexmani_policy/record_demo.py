@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 
+from dexmani_policy.common.config import load_experiment_config, register_resolvers, set_project_root
 from dexmani_policy.env_runner.common.seeds import (
     split_eval_seeds,
     validate_task_seeds,
@@ -16,7 +17,6 @@ from dexmani_policy.env_runner.evaluation import (
     resolve_eval_request,
     task_seed_pools,
 )
-from dexmani_policy.utils.config import load_experiment_config, register_resolvers, set_project_root
 
 ROOT_DIR = set_project_root()
 register_resolvers()

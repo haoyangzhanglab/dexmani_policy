@@ -8,11 +8,11 @@ from contextlib import suppress
 
 import numpy as np
 
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 
 def load_policy(info, *, device="cuda:0", seed=0):
-    from dexmani_policy.training.common.checkpoint import restore_policy_agent
+    from dexmani_policy.common.checkpoint import restore_policy_agent
 
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
@@ -36,7 +36,7 @@ class PolicyRuntime:
 
     def __init__(self, agent, info, *, device, seed):
         from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
-        from dexmani_policy.utils.config import validate_observation_fields
+        from dexmani_policy.common.config import validate_observation_fields
 
         if isinstance(agent, LAMPPolicy):
             agent.validate_inference_steps(info.inference_steps)
@@ -118,7 +118,7 @@ class PolicyRuntime:
     def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0):
         import torch
 
-        from dexmani_policy.datasets.common.rgb_preprocessing import preprocess_validation_rgb
+        from dexmani_policy.common.rgb_preprocessing import preprocess_validation_rgb
 
         if self.agent is None:
             raise RuntimeError("Policy is closed")

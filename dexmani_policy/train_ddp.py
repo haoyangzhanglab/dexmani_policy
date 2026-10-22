@@ -13,7 +13,10 @@ import torch.multiprocessing as mp
 from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from dexmani_policy.agents.core.normalizer import AffineNormalizer
+from dexmani_policy.common.checkpoint import CheckpointStore
+from dexmani_policy.common.config import register_resolvers, set_project_root
+from dexmani_policy.common.normalization import AffineNormalizer
+from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.training.builder import (
     TrainingComponents,
     build_dataset_and_normalizer,
@@ -24,11 +27,8 @@ from dexmani_policy.training.builder import (
     compile_models,
     prepare_training,
 )
-from dexmani_policy.training.common.checkpoint import CheckpointStore
 from dexmani_policy.training.common.logging import print_training_recipe
 from dexmani_policy.training.resume import build_resume_contract, restore_training_state
-from dexmani_policy.utils.config import register_resolvers, set_project_root
-from dexmani_policy.utils.runtime import set_seed
 
 register_resolvers()
 set_project_root()
@@ -93,7 +93,6 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
                 checkpoint,
                 resume_contract=build_resume_contract(train_loader),
                 effective_config=cfg,
-                model=model,
                 ema_updater=ema_updater,
                 optimizer=optimizer,
                 scheduler=scheduler,

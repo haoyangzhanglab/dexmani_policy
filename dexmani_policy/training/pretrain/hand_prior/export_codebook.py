@@ -13,8 +13,8 @@ from sklearn.decomposition import PCA
 
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.utils.config import positive_int, validate_dq_normalization
-from dexmani_policy.utils.runtime import atomic_path
+from dexmani_policy.common.config import positive_int, validate_dq_normalization
+from dexmani_policy.common.runtime import atomic_path
 
 
 @torch.no_grad()

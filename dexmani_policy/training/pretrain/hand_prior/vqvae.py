@@ -16,19 +16,19 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.core.normalizer import AffineNormalizer, FieldNormalizer
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
+from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
+from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.training.builder import build_normalizer
+from dexmani_policy.training.common.hand_representation import describe_hand_data
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
     build_runtime_codebook,
     deployment_diagnostics,
 )
 from dexmani_policy.training.validation import validate_config
 from dexmani_policy.training.workspace import prepare_output_dir
-from dexmani_policy.utils.config import load_policy_config, positive_int, resolve_normalization_spec
-from dexmani_policy.utils.hand_representation import describe_hand_data
-from dexmani_policy.utils.runtime import atomic_path
 
 logger = logging.getLogger(__name__)
 

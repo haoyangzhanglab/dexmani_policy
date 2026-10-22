@@ -5,7 +5,7 @@ from torch import nn
 
 from dexmani_policy.agents.core.base_policy import UNetDiffusionPolicy
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.obs_encoder.rgb.registry import build_rgb_encoder
+from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
 from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
 
 

@@ -32,7 +32,7 @@ python -m pip check
 数据通常位于 `robot_data/<task>.zarr`，实际路径由 resolved Dataset 配置决定。解析路径并检查目录存在：
 
 ```bash
-python -m dexmani_policy.utils.config --config-name dp3 'task_name=<task>' --check
+python -m dexmani_policy.common.config --config-name dp3 'task_name=<task>' --check
 ```
 
 该检查不加载 Zarr。字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。通用 affine normalizer 使用完整 replay buffer，包含验证 episode 和 `max_train_episodes` 外的行；手部 codec 专用统计另有定义。重新生成数据需使用新路径；数据身份按 episode 结构与实际划分核对，不计算内容哈希。
@@ -96,7 +96,8 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | `dexmani_policy/datasets/` | 读取、窗口、划分、增强与多任务组合 |
 | `dexmani_policy/training/` | 训练构建、循环、预训练与恢复 |
 | `dexmani_policy/env_runner/` | 仿真、选点、评测、seed 与指标 |
-| `dexmani_policy/deployment/`、`dexmani_policy/utils/` | 保存策略接口、配置和运行工具 |
+| `dexmani_policy/deployment/` | 已保存策略的检查与推理接口 |
+| `dexmani_policy/common/` | 共享配置、checkpoint、归一化、RGB 预处理与运行工具 |
 | `scripts/` | 运行入口 |
 | `robot_data/`、`data/`、`experiments/` | 数据、资源与实验产物 |
 | [AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md) | 研究协作规则及 Claude Code 加载入口 |

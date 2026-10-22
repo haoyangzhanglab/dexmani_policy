@@ -117,7 +117,7 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
     if source is None:
         return copy.deepcopy(cfg)
     if resume_checkpoint is None:
-        from dexmani_policy.training.common.checkpoint import CheckpointStore
+        from dexmani_policy.common.checkpoint import CheckpointStore
 
         source_config = CheckpointStore(Path(source).parent).load_payload(source)[
             "effective_config"

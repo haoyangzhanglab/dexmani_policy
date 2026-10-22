@@ -12,15 +12,15 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
+from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.training.builder import build_normalizer
-from dexmani_policy.training.validation import validate_config
-from dexmani_policy.utils.config import load_policy_config, positive_int, resolve_normalization_spec
-from dexmani_policy.utils.hand_representation import (
+from dexmani_policy.training.common.hand_representation import (
     describe_hand_data,
     validate_kl_schedule,
 )
-from dexmani_policy.utils.runtime import atomic_path
+from dexmani_policy.training.validation import validate_config
 
 
 def build_prior_dataset(cfg):

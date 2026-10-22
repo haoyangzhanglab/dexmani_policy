@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dexmani_policy.utils.runtime import atomic_path
+from dexmani_policy.common.runtime import atomic_path
 
 
 @dataclass
@@ -124,7 +124,7 @@ def resolve_record_path(root, relative, *, checkpoint=False, immutable=False):
 def validate_inference_settings(info):
     from omegaconf import OmegaConf
 
-    from dexmani_policy.utils.config import positive_int, resolve_action_steps
+    from dexmani_policy.common.config import positive_int, resolve_action_steps
 
     inference = info["inference"]
     if type(inference["use_ema"]) is not bool:
@@ -202,7 +202,7 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     import hydra
     from omegaconf import OmegaConf
 
-    from dexmani_policy.utils.config import (
+    from dexmani_policy.common.config import (
         normalization_dims_from_config,
         resolve_normalization_spec,
         validate_action_window,
@@ -238,7 +238,7 @@ def inference_config(config):
     """Compare inference semantics without training, data-location or initialization settings."""
     from omegaconf import OmegaConf
 
-    from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
+    from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 
     config = OmegaConf.to_container(OmegaConf.create(config), resolve=True)
     agent = dict(config["agent"])

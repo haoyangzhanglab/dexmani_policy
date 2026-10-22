@@ -5,7 +5,7 @@ import math
 import torch
 from torch.distributions import Beta
 
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 
 def sample_logit_normal(

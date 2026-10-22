@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 from .sampling.time_sampling import TimeSampler, euler_time_grid, shift_time_to_noise
 
@@ -51,6 +51,8 @@ class RectifiedFlow(nn.Module):
         self,
         cond: torch.Tensor,
         actions: torch.Tensor,
+        *,
+        log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch_size = actions.shape[0]
         x0 = torch.randn_like(actions)
@@ -69,6 +71,9 @@ class RectifiedFlow(nn.Module):
 
         pred_v = self.model(x=xt, timestep=t, context=cond)
         loss = F.mse_loss(pred_v, target_v)
+
+        if not log_metrics:
+            return loss, {}
 
         with torch.no_grad():
             metrics = {
@@ -222,6 +227,7 @@ class ConsistencyFlow(nn.Module):
         actions: torch.Tensor,
         *,
         ema_decoder: nn.Module | None = None,
+        log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if ema_decoder is None:
             raise RuntimeError("ConsistencyFlow requires an EMA action decoder during training")
@@ -257,7 +263,11 @@ class ConsistencyFlow(nn.Module):
         loss_flow = F.mse_loss(pred_flow, flow_targets["vt_target"])
         loss_consistency = F.mse_loss(pred_consistency, consistency_targets["vt_target"])
 
+        # Sample proportions are not loss weights.
         loss = loss_flow + loss_consistency
+        if not log_metrics:
+            return loss, {}
+
         with torch.no_grad():
             metrics = {
                 "loss": loss.detach(),

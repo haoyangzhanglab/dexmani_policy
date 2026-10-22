@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from dexmani_policy.utils.config import FINGER_VECTOR_FIELDS
+from dexmani_policy.common.config import FINGER_VECTOR_FIELDS
 
 logger = logging.getLogger(__name__)
 

@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 
 class HandStateCodebook(nn.Module):

@@ -2,7 +2,7 @@
 
 import random
 
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 
 def validate_eval_seed(seed):

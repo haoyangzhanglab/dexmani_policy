@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 
 class TemporalHandVAE(nn.Module):

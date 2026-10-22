@@ -1,8 +1,8 @@
 """Restore training from the saved recipe, loader geometry and state dictionaries."""
 
-from dexmani_policy.training.common.checkpoint import load_policy_state
-from dexmani_policy.utils.config import validate_source_recipe
-from dexmani_policy.utils.runtime import set_rng_state
+from dexmani_policy.common.checkpoint import load_policy_state
+from dexmani_policy.common.config import validate_source_recipe
+from dexmani_policy.common.runtime import set_rng_state
 
 
 def build_resume_contract(train_loader):
@@ -19,7 +19,6 @@ def restore_training_state(
     *,
     resume_contract,
     effective_config,
-    model,
     ema_updater,
     optimizer,
     scheduler,
@@ -46,9 +45,8 @@ def restore_training_state(
         raise ValueError("Checkpoint step/epoch/cursor disagree with full loader geometry")
     if checkpoint.global_step > total:
         raise ValueError("Checkpoint global_step exceeds the saved total plan")
-    names = {id(p): n for n, p in model.named_parameters()}
     for current, saved in zip(optimizer.param_groups, checkpoint.optimizer_state["param_groups"]):
-        if saved.get("param_names") != [names[id(p)] for p in current["params"]]:
+        if saved.get("param_names") != current["param_names"]:
             raise ValueError("Optimizer parameter name/order mismatch")
     optimizer.load_state_dict(checkpoint.optimizer_state)
     scheduler.load_state_dict(checkpoint.scheduler_state)

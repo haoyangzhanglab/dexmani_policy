@@ -3,8 +3,8 @@ import warnings
 import numpy as np
 import torch
 
+from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.datasets.common.rgb_preprocessing import rgb_preprocessing_kwargs
 
 
 def observation_layout(dataset, field):

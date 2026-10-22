@@ -7,7 +7,7 @@ from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.core.normalizer import AffineNormalizer, validate_normalizer_state
+from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
 
 
 def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> list[dict]:
@@ -63,7 +63,7 @@ class BasePolicy(nn.Module):
         self, spec: dict[str, str], feature_dims: dict[str, int] | None = None
     ) -> None:
         from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
-        from dexmani_policy.utils.config import validate_action_clipping
+        from dexmani_policy.common.config import validate_action_clipping
 
         if (
             isinstance(getattr(self.obs_encoder, "pc_encoder", None), Sparse3DEncoder)
@@ -155,17 +155,23 @@ class BasePolicy(nn.Module):
         """Optional named action slices for separate diffusion losses."""
         return None
 
-    def forward(self, batch: dict, **kwargs) -> tuple[torch.Tensor, dict]:
-        return self.compute_loss(batch, **kwargs)
+    def forward(
+        self, batch: dict, *, log_metrics: bool = True, **kwargs
+    ) -> tuple[torch.Tensor, dict]:
+        return self.compute_loss(batch, log_metrics=log_metrics, **kwargs)
 
-    def compute_loss(self, batch: dict, **kwargs) -> tuple[torch.Tensor, dict]:
+    def compute_loss(
+        self, batch: dict, *, log_metrics: bool = True, **kwargs
+    ) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
         cond = self.encode_observation(batch["obs"])
         normed_actions = self.normalizer["action"].normalize(batch["action"])
         groups = self.loss_groups()
         if groups is not None:
             kwargs["dim_groups"] = groups
-        return self.action_decoder.compute_loss(cond, normed_actions, **kwargs)
+        return self.action_decoder.compute_loss(
+            cond, normed_actions, log_metrics=log_metrics, **kwargs
+        )
 
     @torch.no_grad()
     def predict_action(
@@ -251,47 +257,6 @@ class BasePolicy(nn.Module):
         return parameter_groups(
             self.action_decoder.model, lr=lr, weight_decay=weight_decay
         ) + parameter_groups(self.obs_encoder, lr=obs_lr, weight_decay=obs_weight_decay)
-
-    def validate_optimizer_groups(self, groups: list[dict]) -> None:
-        """Require every trainable policy parameter exactly once across all groups."""
-        names = {id(param): name for name, param in self.named_parameters() if param.requires_grad}
-        param_ids = [id(param) for group in groups for param in group["params"]]
-        assigned = set(param_ids)
-        if len(param_ids) != len(assigned):
-            raise ValueError("Optimizer groups contain duplicate parameters")
-        if assigned - names.keys():
-            raise ValueError(
-                "Optimizer groups must contain only this policy's trainable parameters"
-            )
-        missing = names.keys() - assigned
-        if missing:
-            raise ValueError(
-                "Trainable parameters missing from optimizer: "
-                f"{sorted(names[key] for key in missing)}"
-            )
-
-    def configure_optimizer(
-        self,
-        lr: float,
-        weight_decay: float,
-        obs_lr: float | None = None,
-        obs_weight_decay: float | None = None,
-        betas: tuple[float, float] = (0.95, 0.999),
-    ) -> torch.optim.AdamW:
-        obs_lr = obs_lr if obs_lr is not None else lr
-        obs_weight_decay = obs_weight_decay if obs_weight_decay is not None else weight_decay
-        groups = self.optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
-        groups = [group for group in groups if group["params"]]
-        self.validate_optimizer_groups(groups)
-        names = {id(p): n for n, p in self.named_parameters()}
-        for group in groups:
-            group["param_names"] = [names[id(p)] for p in group["params"]]
-        return torch.optim.AdamW(
-            groups,
-            lr=lr,
-            betas=betas,
-            fused=torch.cuda.is_available(),
-        )
 
 
 class UNetDiffusionPolicy(BasePolicy):

@@ -11,7 +11,7 @@ from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_t
 from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE, load_temporal_vae
-from dexmani_policy.utils.config import validate_action_window
+from dexmani_policy.common.config import validate_action_window
 
 
 class TemporalLatentFlowPolicy(BasePolicy):
@@ -165,7 +165,9 @@ class TemporalLatentFlowPolicy(BasePolicy):
             raise ValueError("Temporal codec requires raw action_context.hand_reference [B,12]")
         return reference.float()
 
-    def compute_loss(self, batch: dict, **kwargs) -> tuple[torch.Tensor, dict]:
+    def compute_loss(
+        self, batch: dict, *, log_metrics: bool = True
+    ) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
         # Dataset supplies the measured query state before observation augmentation.
         reference = self.resolve_hand_reference(
@@ -197,6 +199,9 @@ class TemporalLatentFlowPolicy(BasePolicy):
             )
             decoded_loss = F.mse_loss(decoded, hand_target)
         loss = flow_loss + self.decoded_loss_weight * decoded_loss
+        if not log_metrics:
+            return loss, {}
+
         with torch.no_grad():
             physical_error = (decoded - hand_target) * self.codec.action_std
             metrics = dict(

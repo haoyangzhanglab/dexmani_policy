@@ -4,9 +4,9 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from dexmani_policy.training.common.checkpoint import CheckpointStore, TrainCheckpoint
+from dexmani_policy.common.checkpoint import CheckpointStore, TrainCheckpoint
+from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.training.common.logging import JsonlLogger, WandbLogger
-from dexmani_policy.utils.runtime import atomic_path
 
 
 def prepare_output_dir(output_dir):

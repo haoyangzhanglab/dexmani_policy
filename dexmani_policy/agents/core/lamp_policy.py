@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
-from dexmani_policy.utils.config import validate_action_window
+from dexmani_policy.common.config import validate_action_window
 
 
 class LAMPRegressionHead(nn.Module):
@@ -138,7 +138,9 @@ class LAMPPolicy(BasePolicy):
         with torch.autocast(device_type=offset.device.type, enabled=False):
             return self.prior.decode(mu + offset.float())
 
-    def compute_loss(self, batch: dict, **kwargs):
+    def compute_loss(
+        self, batch: dict, *, log_metrics: bool = True
+    ) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
         condition, mu = self.encode_condition(batch["obs"], batch.get("action_context"))
         native = self.action_decoder(condition).float()
@@ -150,6 +152,9 @@ class LAMPPolicy(BasePolicy):
         hand_loss = F.mse_loss(hand, hand_target)
         offset_l2 = offset.square().sum(-1).mean()
         loss = arm_loss + self.hand_loss_weight * hand_loss + self.offset_reg_weight * offset_l2
+        if not log_metrics:
+            return loss, {}
+
         with torch.no_grad():
             prior_error = F.mse_loss(self.decode_hand(torch.zeros_like(offset), mu), hand_target)
             physical_mae = ((hand - hand_target) / self.prior.hand_scale).abs().mean()
@@ -168,8 +173,16 @@ class LAMPPolicy(BasePolicy):
         return loss, metrics
 
     @torch.no_grad()
-    def predict_action(self, obs_dict, inference_steps=None, *, action_context=None,
-                       rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
+    def predict_action(
+        self,
+        obs_dict,
+        inference_steps=None,
+        *,
+        action_context=None,
+        rtc_prefix=None,
+        delay_steps=0,
+        rtc_guidance_cap=0.0,
+    ):
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("LAMP supports synchronous execution only")
         self.validate_observations(obs_dict)

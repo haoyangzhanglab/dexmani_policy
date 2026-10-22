@@ -11,7 +11,7 @@ from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.utils.config import positive_int
+from dexmani_policy.common.config import positive_int
 
 
 class SATObservationEncoder(nn.Module):
@@ -160,12 +160,16 @@ class SATPolicy(BasePolicy):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    def compute_loss(self, batch: dict, **kwargs) -> tuple[torch.Tensor, dict]:
+    def compute_loss(
+        self, batch: dict, *, log_metrics: bool = True
+    ) -> tuple[torch.Tensor, dict]:
         """Flow matching on joint-trajectory tokens [B, Da, T]."""
         self.validate_batch(batch)
         cond = self.encode_observation(batch["obs"])
         normed_actions = self.normalizer["action"].normalize(batch["action"])
-        return self.action_decoder.compute_loss(cond, normed_actions.transpose(1, 2))
+        return self.action_decoder.compute_loss(
+            cond, normed_actions.transpose(1, 2), log_metrics=log_metrics
+        )
 
     @torch.no_grad()
     def predict_action_from_cond(

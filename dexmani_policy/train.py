@@ -6,6 +6,8 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import hydra
 
+from dexmani_policy.common.config import register_resolvers, set_project_root
+from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.training.builder import (
     build_train_components,
     build_trainer,
@@ -13,8 +15,6 @@ from dexmani_policy.training.builder import (
     prepare_training,
 )
 from dexmani_policy.training.resume import restore_training_state
-from dexmani_policy.utils.config import register_resolvers, set_project_root
-from dexmani_policy.utils.runtime import set_seed
 
 register_resolvers()
 set_project_root()
@@ -33,7 +33,6 @@ def main(cfg):
                 checkpoint,
                 resume_contract=trainer.resume_contract,
                 effective_config=cfg,
-                model=components.model,
                 ema_updater=components.ema_updater,
                 optimizer=components.optimizer,
                 scheduler=components.scheduler,

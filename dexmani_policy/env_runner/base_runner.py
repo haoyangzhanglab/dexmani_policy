@@ -10,11 +10,11 @@ import numpy as np
 import torch
 from termcolor import cprint
 
-from dexmani_policy.datasets.common.rgb_preprocessing import preprocess_validation_rgb
+from dexmani_policy.common.config import positive_int, resolve_action_steps
+from dexmani_policy.common.rgb_preprocessing import preprocess_validation_rgb
 from dexmani_policy.env_runner.common.metrics import summarize_episodes, validate_episode_details
 from dexmani_policy.env_runner.common.seeds import validate_task_seeds
 from dexmani_policy.env_runner.common.video import save_episode_video
-from dexmani_policy.utils.config import positive_int, resolve_action_steps
 
 
 class BaseRunner:
