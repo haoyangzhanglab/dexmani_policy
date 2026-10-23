@@ -35,10 +35,9 @@ def test_default_behavior_is_unchanged_when_refinement_is_disabled():
     upgraded = make_aggregator(use_cross_refinement=True).eval()
     missing, unexpected = upgraded.load_state_dict(baseline.state_dict(), strict=False)
     assert not unexpected
-    assert set(missing) == {
-        *[f"cross_refinement.{name}" for name in upgraded.cross_refinement.state_dict()],
-        "refinement_gain",
-    }
+    expected = {f"cross_refinement.{name}" for name in upgraded.cross_refinement.state_dict()}
+    expected.add("refinement_gain")
+    assert set(missing) == expected
 
     with torch.no_grad():
         upgraded.refinement_gain.zero_()
