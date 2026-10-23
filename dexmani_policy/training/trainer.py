@@ -17,7 +17,7 @@ from tqdm import tqdm
 from dexmani_policy.common.checkpoint import TrainCheckpoint, policy_state_dict
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.runtime import dict_apply, get_rng_state
-from dexmani_policy.training.common.logging import to_log_scalars
+from dexmani_policy.training.common.logging import accumulate_metrics, to_log_scalars
 from dexmani_policy.training.resume import build_resume_contract
 
 
@@ -104,7 +104,7 @@ class Trainer:
             return grad._values()
         return grad if grad.layout == torch.strided else grad.values()
 
-    def apply_gradient_step(self):
+    def optimizer_step(self):
         grad_norm = None
         grad_nan_params = []
 
@@ -145,7 +145,7 @@ class Trainer:
         if self.ema_updater is not None:
             self.ema_updater.step(self.raw_model)
 
-    def train_one_step(
+    def train_microbatch(
         self,
         batch: dict[str, Any],
         *,
@@ -167,7 +167,7 @@ class Trainer:
         (raw_loss / loss_divisor).backward()
 
         if is_accumulation_boundary:
-            self.apply_gradient_step()
+            self.optimizer_step()
 
         return log_dict
 
@@ -193,7 +193,8 @@ class Trainer:
             f"({context}raw_loss={value.item()})"
         )
 
-    def save_checkpoint(self, global_step: int, tag_suffix: str):
+    def save_checkpoint(self, tag_suffix: str):
+        global_step = self.global_step
         if self.last_checkpoint_step == global_step:
             return
         rng_states = [get_rng_state(self.device)]
@@ -239,11 +240,10 @@ class Trainer:
         )
         self.stop_requested = True
 
-    def check_milestone(self, global_step: int):
-        """Save the largest colliding percentage once, at its integer target step."""
-        pct = self.milestone_steps.get(global_step)
+    def check_milestone(self):
+        pct = self.milestone_steps.get(self.global_step)
         if pct is not None:
-            self.save_checkpoint(global_step, f"milestone={pct:02d}pct")
+            self.save_checkpoint(f"milestone={pct:02d}pct")
 
     def step_performance_metrics(self, samples: int, elapsed: float, data_wait: float) -> dict:
         """Approximate update wall time, including data waits and excluding logging/saving."""
@@ -322,21 +322,20 @@ class Trainer:
             positive_int(max_updates, "max_updates")
         torch.set_float32_matmul_precision("high")
 
-        global_step, start_epoch, self.next_micro_step = (
+        self.global_step, start_epoch, self.next_micro_step = (
             (0, 0, 0) if resume_state is None else resume_state
         )
 
-        self.global_step = global_step
         stop_step = (
             self.total_train_steps
             if max_updates is None
-            else min(self.total_train_steps, global_step + max_updates)
+            else min(self.total_train_steps, self.global_step + max_updates)
         )
-        if global_step >= self.total_train_steps:
+        if self.global_step >= self.total_train_steps:
             self.current_epoch = start_epoch
             return
         if start_epoch > 0:
-            print(f"Resuming training from epoch {start_epoch}, step {global_step}")
+            print(f"Resuming training from epoch {start_epoch}, step {self.global_step}")
 
         if self.ema_model is not None:
             self.ema_model.eval()
@@ -350,7 +349,7 @@ class Trainer:
         self.current_epoch = epoch
         if self.is_main_process:
             self.step_pbar = tqdm(
-                initial=global_step,
+                initial=self.global_step,
                 total=self.total_train_steps,
                 desc="Steps",
                 position=0,
@@ -359,11 +358,9 @@ class Trainer:
             )
 
         try:
-            while global_step < stop_step:
+            while self.global_step < stop_step:
                 self.train_loader.sampler.set_epoch(epoch, self.next_micro_step)
-
                 self.model.train()
-
                 self.optimizer.zero_grad(set_to_none=True)
 
                 num_batches = self.batches_per_epoch
@@ -395,9 +392,9 @@ class Trainer:
                     else:
                         sync_ctx = contextlib.nullcontext()
 
-                    record_group = (global_step + 1) % self.log_interval_steps == 0
+                    record_group = (self.global_step + 1) % self.log_interval_steps == 0
                     with sync_ctx:
-                        log_dict = self.train_one_step(
+                        log_dict = self.train_microbatch(
                             batch,
                             is_accumulation_boundary=is_boundary,
                             loss_divisor=group_size,
@@ -408,14 +405,7 @@ class Trainer:
                         group_elapsed = time.perf_counter() - group_start_time
                     self.ddp_backward_initialized = True
                     if record_group:
-                        for key, value in log_dict.items():
-                            if torch.is_tensor(value):
-                                if value.numel() != 1:
-                                    continue
-                                value = value.detach().to(dtype=torch.float64)
-                            elif not isinstance(value, (int, float)):
-                                continue
-                            group_metric_sums[key] = group_metric_sums.get(key, 0.0) + value
+                        accumulate_metrics(group_metric_sums, log_dict)
                         group_metric_count += 1
 
                     if is_boundary:
@@ -425,8 +415,7 @@ class Trainer:
                         }
                         group_metric_sums = {}
                         group_metric_count = 0
-                        global_step += 1
-                        self.global_step = global_step
+                        self.global_step += 1
                         self.next_micro_step = micro_step + 1
                         if self.next_micro_step == num_batches:
                             self.current_epoch = epoch + 1
@@ -437,13 +426,13 @@ class Trainer:
                                 group_metrics, group_samples, group_elapsed, group_data_wait
                             )
 
-                        self.check_milestone(global_step)
+                        self.check_milestone()
                         group_samples = 0
                         group_data_wait = 0.0
                         # Exclude this update's logging/checkpoint work from the next one.
                         group_start_time = time.perf_counter()
 
-                    if is_boundary and (global_step >= stop_step or self.interrupted):
+                    if is_boundary and (self.global_step >= stop_step or self.interrupted):
                         break
                     data_wait_start = time.perf_counter()
 
@@ -452,25 +441,25 @@ class Trainer:
                 if self.interrupted:
                     break
 
-            if self.interrupted and global_step > 0:
+            if self.interrupted and self.global_step > 0:
                 print(
-                    f"Training interrupted at step {global_step}/{self.total_train_steps}",
+                    f"Training interrupted at step {self.global_step}/{self.total_train_steps}",
                     flush=True,
                 )
-                self.save_checkpoint(global_step, "interrupt")
-            elif global_step < self.total_train_steps:
-                self.save_checkpoint(global_step, "bounded")
-                print(f"Bounded run stopped at step {global_step}/{self.total_train_steps}")
+                self.save_checkpoint("interrupt")
+            elif self.global_step < self.total_train_steps:
+                self.save_checkpoint("bounded")
+                print(f"Bounded run stopped at step {self.global_step}/{self.total_train_steps}")
 
         finally:
             signal.signal(signal.SIGINT, prev_sigint)
             signal.signal(signal.SIGTERM, prev_sigterm)
 
             if self.step_pbar is not None:
-                if self.step_pbar.n != global_step:
+                if self.step_pbar.n != self.global_step:
                     # Show the actual stop step without metrics from an older step.
                     self.step_pbar.set_postfix({}, refresh=False)
-                    self.step_pbar.n = global_step
+                    self.step_pbar.n = self.global_step
                 self.step_pbar.close()
 
             if torch.cuda.is_available():

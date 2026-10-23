@@ -20,9 +20,9 @@ from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
 from dexmani_policy.common.runtime import atomic_path
-from dexmani_policy.datasets.base_dataset import BaseDataset
-from dexmani_policy.training.builder import build_normalizer
+from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.training.common.hand_representation import describe_hand_data
+from dexmani_policy.training.data import build_normalizer
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
     build_runtime_codebook,
     deployment_diagnostics,
@@ -101,8 +101,8 @@ def build_policy_dataset(cfg):
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare a new codebook from a fresh Policy config, not resume_from")
     dataset = hydra.utils.instantiate(cfg.dataset)
-    if not isinstance(dataset, BaseDataset):
-        raise TypeError("DQ-RISE VQ preparation requires a single BaseDataset")
+    if not isinstance(dataset, DemonstrationDataset):
+        raise TypeError("DQ-RISE VQ preparation requires a single DemonstrationDataset")
     if dataset.replay_buffer[dataset.action_key].shape[1:] != (cfg.agent.action_dim,):
         raise ValueError("Dataset action shape does not match the Policy layout")
     return dataset

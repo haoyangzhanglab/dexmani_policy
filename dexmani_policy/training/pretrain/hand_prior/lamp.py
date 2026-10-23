@@ -15,11 +15,12 @@ from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
-from dexmani_policy.training.builder import build_normalizer
 from dexmani_policy.training.common.hand_representation import (
     describe_hand_data,
+    shuffled_batches,
     validate_kl_schedule,
 )
+from dexmani_policy.training.data import build_normalizer
 from dexmani_policy.training.validation import validate_config
 
 
@@ -47,7 +48,7 @@ def source_rows(dataset):
     return train, val
 
 
-def raw_batch(dataset, rows, device):
+def prior_batch(dataset, rows, device):
     history = torch.as_tensor(dataset.history_for_rows(rows), device=device)
     target = torch.as_tensor(dataset.hand_actions[rows], device=device)
     return history, target
@@ -63,7 +64,7 @@ def evaluate(prior, dataset, rows, batch_size):
     frame_rmse = []
     for start in range(0, len(rows), batch_size):
         selected = rows[start : start + batch_size]
-        history, raw_target = raw_batch(dataset, selected, prior.hand_scale.device)
+        history, raw_target = prior_batch(dataset, selected, prior.hand_scale.device)
         target = prior.normalize_hand(raw_target)
         mu, log_var = prior.encode_history(history)
         normalized_error = prior.decode(mu) - target
@@ -161,14 +162,9 @@ def train(args):
     if initial is not None:
         print(f"Initial validation: {initial}")
     best_mse = float("inf")
-    order = rng.permutation(train_rows)
-    cursor = 0
+    batches = shuffled_batches(train_rows, args.batch_size, rng)
     for step in range(1, args.steps + 1):
-        if cursor >= len(order):
-            order, cursor = rng.permutation(train_rows), 0
-        rows = order[cursor : cursor + args.batch_size]
-        cursor += len(rows)
-        history, target_raw = raw_batch(dataset, rows, device)
+        history, target_raw = prior_batch(dataset, next(batches), device)
         if args.noise_std:
             # Apply normalized-coordinate noise to the physical command history.
             history = history + torch.randn_like(history) * args.noise_std / prior.hand_scale

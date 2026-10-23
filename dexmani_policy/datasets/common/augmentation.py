@@ -7,6 +7,16 @@ from dexmani_policy.common.config import positive_int
 BT601_LUMA = (0.299, 0.587, 0.114)
 
 
+def clipped_gaussian_noise(shape, std, clip_range, dtype):
+    noise = np.random.normal(0, std, shape)
+    np.clip(noise, -clip_range, clip_range, out=noise)
+    return noise.astype(dtype, copy=False)
+
+
+def sample_range(bounds):
+    return bounds[0] if bounds[0] == bounds[1] else np.random.uniform(*bounds)
+
+
 def validate_random_keep_points(keep_points, *, num_points=None):
     """Require subsampling without replacement within the raw point count."""
     if keep_points is None:
@@ -86,19 +96,13 @@ class PointColorJitter(Augmentation):
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
     def apply_brightness(self, rgb):
-        if self.brightness[0] == self.brightness[1]:
-            delta = self.brightness[0]
-        else:
-            delta = np.random.uniform(*self.brightness)
+        delta = sample_range(self.brightness)
         if delta == 0:
             return
         rgb += delta
 
     def apply_contrast(self, rgb):
-        if self.contrast[0] == self.contrast[1]:
-            factor = self.contrast[0]
-        else:
-            factor = np.random.uniform(*self.contrast)
+        factor = sample_range(self.contrast)
         if factor == 1:
             return
         mean = rgb.mean()
@@ -107,10 +111,7 @@ class PointColorJitter(Augmentation):
         rgb += mean
 
     def apply_saturation(self, rgb):
-        if self.saturation[0] == self.saturation[1]:
-            factor = self.saturation[0]
-        else:
-            factor = np.random.uniform(*self.saturation)
+        factor = sample_range(self.saturation)
         if factor == 1:
             return
         gray = np.dot(rgb, BT601_LUMA)
@@ -121,10 +122,7 @@ class PointColorJitter(Augmentation):
         rgb[:, 2] += gray * inv_factor
 
     def apply_hue(self, rgb):
-        if self.hue[0] == self.hue[1]:
-            shift = self.hue[0]
-        else:
-            shift = np.random.uniform(*self.hue)
+        shift = sample_range(self.hue)
         if abs(shift) < 1e-6:
             return
         hsv = self.rgb_to_hsv(rgb)
@@ -224,12 +222,8 @@ class PointCoordinateNoise(Augmentation):
         if self.noise_std <= 0:
             return
 
-        T, N = x.shape[:2]
-        dtype = x.dtype
-        for t in range(T):
-            noise = np.random.normal(0, self.noise_std, (N, 3))
-            noise = np.clip(noise, -self.clip_range, self.clip_range)
-            x[t, :, :3] += noise.astype(dtype)
+        xyz = x[..., :3]
+        xyz += clipped_gaussian_noise(xyz.shape, self.noise_std, self.clip_range, x.dtype)
 
 
 class PointColorNoise(Augmentation):
@@ -246,9 +240,7 @@ class PointColorNoise(Augmentation):
         if self.noise_std <= 0:
             return
         rgb = x[..., -3:]
-        noise = np.random.normal(0, self.noise_std, rgb.shape)
-        noise = np.clip(noise, -self.clip_range, self.clip_range)
-        rgb += noise.astype(x.dtype)
+        rgb += clipped_gaussian_noise(rgb.shape, self.noise_std, self.clip_range, x.dtype)
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
 
@@ -263,9 +255,7 @@ class StateNoise(Augmentation):
         self.clip_range = float(clip_range) if clip_range is not None else 2.0 * self.noise_std
 
     def augment(self, x):
-        noise = np.random.normal(0, self.noise_std, x.shape)
-        noise = np.clip(noise, -self.clip_range, self.clip_range)
-        x += noise.astype(x.dtype)
+        x += clipped_gaussian_noise(x.shape, self.noise_std, self.clip_range, x.dtype)
 
 
 class ImageAugmentation:

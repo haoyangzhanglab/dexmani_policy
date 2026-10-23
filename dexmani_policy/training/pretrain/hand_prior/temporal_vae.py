@@ -17,6 +17,7 @@ from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.hand_prior.temporal_codec_dataset import TemporalCodecDataset
 from dexmani_policy.training.common.hand_representation import (
     describe_hand_data,
+    shuffled_batches,
     validate_kl_schedule,
 )
 from dexmani_policy.training.validation import validate_config
@@ -67,7 +68,7 @@ def fit_relative_statistics(dataset, batch_size=4096, std_floor=1e-6):
     )
 
 
-def raw_batch(dataset, indices, device):
+def codec_batch(dataset, indices, device):
     actions, q0 = dataset.raw_hand_batch(indices)
     return torch.as_tensor(actions, device=device), torch.as_tensor(q0, device=device)
 
@@ -84,7 +85,7 @@ def evaluate(codec, dataset, batch_size):
     totals = torch.zeros(2, dtype=torch.float64, device=codec.action_mean.device)
     for start in range(0, len(dataset), batch_size):
         indices = np.arange(start, min(start + batch_size, len(dataset)))
-        actions, q0 = raw_batch(dataset, indices, codec.action_mean.device)
+        actions, q0 = codec_batch(dataset, indices, codec.action_mean.device)
         mu, log_var = codec.encode(actions, q0)
         decoded = codec.decode(mu, q0)
         physical = decoded * codec.action_std + codec.action_mean + q0[:, None]
@@ -190,13 +191,9 @@ def train(args):
     )
     print(f"Relative statistics: {statistics}")
     best_mae = float("inf")
-    order, cursor = rng.permutation(len(dataset)), 0
+    batches = shuffled_batches(len(dataset), args.batch_size, rng)
     for step in range(1, args.steps + 1):
-        if cursor >= len(order):
-            order, cursor = rng.permutation(len(dataset)), 0
-        indices = order[cursor : cursor + args.batch_size]
-        cursor += len(indices)
-        actions, q0 = raw_batch(dataset, indices, device)
+        actions, q0 = codec_batch(dataset, next(batches), device)
         mu, log_var = codec.encode(actions, q0)
         z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
         reconstruction = codec.reconstruction_loss(

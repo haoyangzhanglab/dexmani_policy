@@ -16,7 +16,7 @@ class MultiTaskSimRunner:
         self,
         task_configs: list[dict[str, Any]],
         n_obs_steps: int,
-        sensor_modalities: list[str] | None = None,
+        sensor_modalities: list[str],
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
     ):

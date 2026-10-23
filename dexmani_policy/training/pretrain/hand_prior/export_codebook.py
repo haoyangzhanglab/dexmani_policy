@@ -108,8 +108,8 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
     chunk_size = min(chunk_size, max(1, (16 * 1024 * 1024) // (codebook.num_codes * width * 4)))
     report = {
         "distance_space": "HandStateCodebook normalized squared Euclidean",
-        "source_checkpoint": codebook.artifact_metadata.get("source_checkpoint"),
-        "selection": codebook.artifact_metadata.get("selection"),
+        "source_checkpoint": codebook.artifact_metadata["source_checkpoint"],
+        "selection": codebook.artifact_metadata["selection"],
         "splits": {},
     }
     scale = codebook.hand_normalizer_scale.cpu().double()

@@ -80,7 +80,7 @@ class BasePolicy(nn.Module):
         return modes
 
     def set_normalization_spec(
-        self, spec: dict[str, str], feature_dims: dict[str, int] | None = None
+        self, spec: dict[str, str], feature_dims: dict[str, int]
     ) -> None:
         from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
         from dexmani_policy.common.config import validate_action_clipping
@@ -95,10 +95,9 @@ class BasePolicy(nn.Module):
         if isinstance(self.action_decoder, Diffusion):
             validate_action_clipping(spec, self.action_decoder.noise_scheduler.config.clip_sample)
         self.normalization_spec = dict(spec)
-        self.normalization_dims = dict(feature_dims or {})
-        if self.normalization_dims.get("action", self.action_dim) != self.action_dim:
+        self.normalization_dims = dict(feature_dims)
+        if self.normalization_dims["action"] != self.action_dim:
             raise ValueError("Normalizer action width must match the full prediction layout")
-        self.normalization_dims["action"] = self.action_dim
 
     def validate_normalizer(self) -> None:
         validate_normalizer_state(self.normalizer, self.normalization_spec, self.normalization_dims)

@@ -101,6 +101,18 @@ class WandbLogger:
             self.disable("finish", exc)
 
 
+def accumulate_metrics(totals, metrics):
+    """Accumulate detached scalars without synchronizing the device."""
+    for key, value in metrics.items():
+        if torch.is_tensor(value):
+            if value.numel() != 1:
+                continue
+            value = value.detach().to(dtype=torch.float64)
+        elif not isinstance(value, (int, float)):
+            continue
+        totals[key] = totals.get(key, 0.0) + value
+
+
 def to_log_scalars(metrics: dict[str, Any]) -> dict[str, float]:
     scalars = {}
     tensors = {}
@@ -121,9 +133,12 @@ def to_log_scalars(metrics: dict[str, Any]) -> dict[str, float]:
 
 
 def count_params(module) -> tuple[int, int]:
-    """Return (total, trainable) parameter counts for *module*."""
-    total = sum(p.numel() for p in module.parameters())
-    trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+    total = trainable = 0
+    for parameter in module.parameters():
+        count = parameter.numel()
+        total += count
+        if parameter.requires_grad:
+            trainable += count
     return total, trainable
 
 

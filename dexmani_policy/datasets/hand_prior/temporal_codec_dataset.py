@@ -1,21 +1,20 @@
 import numpy as np
 import torch
 
-from dexmani_policy.datasets.point_cloud_dataset import PointCloudDataset
+from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 
 
-class TemporalCodecDataset(PointCloudDataset):
-    """Point-cloud windows with the raw measured hand pose before the query action."""
+class TemporalCodecDataset(DemonstrationDataset):
+    """Demonstration windows with the measured hand pose before the query action."""
 
-    def __init__(self, zarr_path, **kwargs):
+    def __init__(self, zarr_path, *, sensor_modalities, **kwargs):
         if kwargs.get("action_key", "action") != "action" or kwargs.get("use_aux_ee", False):
             raise ValueError(
                 "TemporalCodecDataset requires joint action=7+12 without auxiliary targets"
             )
-        modalities = kwargs.get("sensor_modalities")
-        if modalities is not None and "joint_state" not in modalities:
+        if "joint_state" not in sensor_modalities:
             raise ValueError("Temporal codec reference requires joint_state observations")
-        super().__init__(zarr_path, **kwargs)
+        super().__init__(zarr_path, sensor_modalities=sensor_modalities, **kwargs)
         if self.horizon < 3:
             raise ValueError("Temporal codec horizon must be at least 3")
         buffer = self.replay_buffer

@@ -28,12 +28,11 @@ from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.hand_prior.temporal_codec_dataset import TemporalCodecDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset, observation_layout
 from dexmani_policy.training.builder import (
-    build_dataset_and_normalizer,
     build_training_components,
-    build_train_loader,
     build_trainer,
     compile_models,
 )
+from dexmani_policy.training.data import build_dataset_and_normalizer, build_train_loader
 from dexmani_policy.training.validation import validate_config
 
 set_project_root()

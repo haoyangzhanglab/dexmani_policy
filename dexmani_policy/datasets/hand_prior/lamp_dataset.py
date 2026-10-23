@@ -1,23 +1,22 @@
 import numpy as np
 import torch
 
-from dexmani_policy.datasets.point_cloud_dataset import PointCloudDataset
+from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 
 
-class LAMPDataset(PointCloudDataset):
-    """Point-cloud windows with pre-action observations and strictly past hand commands."""
+class LAMPDataset(DemonstrationDataset):
+    """Demonstration windows with strictly past hand commands."""
 
-    def __init__(self, zarr_path, *, history_steps=8, **kwargs):
+    def __init__(self, zarr_path, *, sensor_modalities, history_steps=8, **kwargs):
         if type(history_steps) is not int or history_steps < 1:
             raise ValueError("history_steps must be a positive integer")
         if kwargs.get("action_key", "action") != "action" or kwargs.get("use_aux_ee", False):
             raise ValueError("LAMPDataset requires joint action=7+12 without auxiliary targets")
-        modalities = kwargs.get("sensor_modalities")
-        if modalities is not None and "joint_state" not in modalities:
+        if "joint_state" not in sensor_modalities:
             raise ValueError("LAMP bootstrap requires joint_state observations")
         self.history_steps = history_steps
         self.history_valid = None
-        super().__init__(zarr_path, **kwargs)
+        super().__init__(zarr_path, sensor_modalities=sensor_modalities, **kwargs)
 
     def prepare_lamp_source(self):
         buffer = self.replay_buffer
@@ -51,7 +50,7 @@ class LAMPDataset(PointCloudDataset):
             self.history_valid[start:end] = valid
 
     def filter_sampler(self, sampler):
-        # BaseDataset construction dispatches here before valid source rows are known.
+        # DemonstrationDataset construction dispatches here before valid source rows are known.
         if self.history_valid is None:
             self.prepare_lamp_source()
         sampler.filter_valid(

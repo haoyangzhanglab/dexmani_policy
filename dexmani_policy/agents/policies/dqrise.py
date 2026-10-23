@@ -38,7 +38,7 @@ class DQRISEPolicy(BasePolicy):
         validate_unet_horizon(cfg.horizon, cfg.agent.get("down_dims", (256, 512)))
 
     def set_normalization_spec(
-        self, spec: dict[str, str], feature_dims: dict[str, int] | None = None
+        self, spec: dict[str, str], feature_dims: dict[str, int]
     ) -> None:
         validate_dq_normalization(spec)
         super().set_normalization_spec(spec, feature_dims)

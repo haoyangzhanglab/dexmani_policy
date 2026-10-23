@@ -7,7 +7,7 @@ from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 
 
 @numba.jit(nopython=True)
-def create_indices(
+def create_sequence_indices(
     episode_ends: np.ndarray,
     sequence_length: int,
     episode_mask: np.ndarray,
@@ -27,9 +27,7 @@ def create_indices(
         if not episode_mask[i]:
             continue
 
-        start_idx = 0
-        if i > 0:
-            start_idx = episode_ends[i - 1]
+        start_idx = episode_ends[i - 1] if i else 0
         end_idx = episode_ends[i]
         episode_length = end_idx - start_idx
 
@@ -79,7 +77,7 @@ class SequenceSampler:
         if episode_mask.shape != episode_ends.shape:
             raise ValueError("episode_mask must match episode_ends")
 
-        indices = create_indices(
+        indices = create_sequence_indices(
             episode_ends,
             sequence_length=sequence_length,
             pad_before=pad_before,

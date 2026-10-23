@@ -29,38 +29,25 @@ def validate_episode_metadata(episode_ends, data):
 class ReplayBuffer:
     """Selected read-only arrays; process-local Zarr handles and bounded reads."""
 
-    def __init__(self, root, *, keys=None):
-        self.field_names = tuple(dict.fromkeys(root["data"].keys() if keys is None else keys))
-        self.data = {key: root["data"][key] for key in self.field_names}
-        self.episode_ends = np.asarray(root["meta"]["episode_ends"])
+    def __init__(self, zarr_path, *, keys=None):
+        self.path = os.path.abspath(os.path.expanduser(zarr_path))
+        self.group = zarr.open_group(self.path, mode="r")
+        fields = self.group["data"]
+        self.field_names = tuple(dict.fromkeys(fields.keys() if keys is None else keys))
+        self.data = {key: fields[key] for key in self.field_names}
+        self.episode_ends = np.asarray(self.group["meta"]["episode_ends"])
         validate_episode_metadata(self.episode_ends, self.data)
-        self.attrs = dict(root.get("attrs", {}) if isinstance(root, dict) else root.attrs)
-        self.path = None
-        self.group = None
-        self.pid = None
+        self.attrs = dict(self.group.attrs)
+        self.pid = os.getpid()
         self.read_cache = {}
-
-    @classmethod
-    def open(cls, zarr_path, keys=None):
-        path = os.path.abspath(os.path.expanduser(zarr_path))
-        group = zarr.open_group(path, mode="r")
-        buffer = cls(group, keys=keys)
-        buffer.path = path
-        buffer.group = group
-        buffer.pid = os.getpid()
-        return buffer
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state["group"] = state["pid"] = None
+        state["group"] = state["pid"] = state["data"] = None
         state["read_cache"] = {}
-        if self.path is not None:
-            state["data"] = None
         return state
 
     def get_arrays(self):
-        if self.path is None:
-            return self.data
         if self.group is None or self.pid != os.getpid():
             self.group = zarr.open_group(self.path, mode="r")
             self.data = {key: self.group["data"][key] for key in self.field_names}
@@ -72,7 +59,7 @@ class ReplayBuffer:
         arr = self[key]
         selection = rows if columns is None else (rows, columns)
         dtype = np.float32 if np.issubdtype(arr.dtype, np.floating) else arr.dtype
-        if self.path is not None and cache and isinstance(rows, slice) and rows.step in (None, 1):
+        if cache and isinstance(rows, slice) and rows.step in (None, 1):
             start, stop, _ = rows.indices(arr.shape[0])
             step = self.chunk_rows(key)
             block_bytes = step * int(np.prod(arr.shape[1:])) * arr.dtype.itemsize
@@ -93,16 +80,11 @@ class ReplayBuffer:
                         result = np.empty((stop - start, *values.shape[1:]), dtype=dtype)
                     result[left - start : right - start] = values
                 return result
-        # No mutable alias escapes, including in-memory buffers and direct large-block reads.
+        # Augmentation must not mutate cached storage.
         return np.array(arr[selection], dtype=dtype, copy=True)
 
     def chunk_rows(self, key):
-        """Scan physical time blocks; only in-memory arrays need an artificial bound."""
-        arr = self[key]
-        if isinstance(arr, zarr.Array):
-            return arr.chunks[0]
-        row_bytes = max(1, int(np.prod(arr.shape[1:])) * arr.dtype.itemsize)
-        return max(1, READ_CACHE_BYTES // row_bytes)
+        return self[key].chunks[0]
 
     def iter_chunks(self, key, *, columns=None):
         step = self.chunk_rows(key)

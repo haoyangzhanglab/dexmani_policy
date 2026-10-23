@@ -23,12 +23,12 @@ class BaseRunner:
     def __init__(
         self,
         n_obs_steps: int,
-        sensor_modalities: list[str] | None = None,
+        sensor_modalities: list[str],
         clear_cache_freq: int = 25,
         env_video_fps: int | None = None,
     ):
         self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
-        self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
+        self.sensor_modalities = list(sensor_modalities)
         self.obs_buffer: dict[str, np.ndarray | torch.Tensor] = {}
         self.obs_cursor = 0
         self.obs_count = 0

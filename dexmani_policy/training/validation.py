@@ -13,12 +13,12 @@ from dexmani_policy.common.config import (
     validate_action_window,
 )
 from dexmani_policy.common.rgb_preprocessing import validate_rgb_preprocessing
-from dexmani_policy.datasets.base_dataset import BaseDataset
 from dexmani_policy.datasets.common.augmentation import (
     validate_pc_color_augmentation,
     validate_random_keep_points,
 )
 from dexmani_policy.datasets.common.episode_split import validate_split_options
+from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 
 
 def validate_ema_batchnorm(model) -> None:
@@ -38,7 +38,7 @@ def validate_ema_batchnorm(model) -> None:
 def resolve_numeric_observation_fields(cfg) -> set:
     """Require the same numeric observation fields across tasks."""
     fields = [
-        set(child.get("sensor_modalities", ("joint_state",))) - NON_NUMERIC_OBSERVATION_FIELDS
+        set(child.sensor_modalities) - NON_NUMERIC_OBSERVATION_FIELDS
         for child in cfg.dataset.get("datasets", [cfg.dataset])
     ]
     if any(child != fields[0] for child in fields[1:]):
@@ -53,7 +53,7 @@ def validate_model_config(cfg):
     rgb_transport = {
         bool(child.get("rgb_keep_uint8", False))
         for child in cfg.dataset.get("datasets", [cfg.dataset])
-        if "rgb" in child.get("sensor_modalities", [])
+        if "rgb" in child.sensor_modalities
     }
     if len(rgb_transport) > 1:
         raise ValueError("RGB child datasets must have consistent rgb_keep_uint8")
@@ -74,10 +74,12 @@ def validate_policy_layout(cfg):
     aux = cfg.get("use_aux_ee", False)
     if cfg.agent.get("use_aux_ee", False) != aux:
         raise ValueError("agent.use_aux_ee must match use_aux_ee")
-    dataset_defaults = inspect.signature(BaseDataset).parameters
+    dataset_defaults = inspect.signature(DemonstrationDataset).parameters
     for index, child in enumerate(cfg.dataset.get("datasets", [cfg.dataset])):
         layout = dict(child)
-        if issubclass(hydra.utils.get_class(child._target_), BaseDataset):
+        if issubclass(hydra.utils.get_class(child._target_), DemonstrationDataset):
+            if child.get("sensor_modalities") is None:
+                raise ValueError(f"dataset[{index}].sensor_modalities must be explicit")
             layout.setdefault("horizon", dataset_defaults["horizon"].default)
             if layout.get("obs_horizon") is None:
                 layout["obs_horizon"] = layout["horizon"]
@@ -117,19 +119,15 @@ def validate_config(cfg):
         )
         if child.get("pc_dim") is not None and child.pc_dim != agent_pc_dim:
             raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
-        validate_pc_color_augmentation(agent_pc_dim, child.get("augmentation_cfg"))
         augmentation = child.get("augmentation_cfg")
-        if "datasets" in cfg.dataset and cfg.dataset.get("augmentation_cfg") is not None:
-            # Hydra constructs each child before the shared augmentation is applied.
-            validate_random_keep_points(
-                ((augmentation or {}).get("pc") or {}).get("random_keep_points")
-            )
-            augmentation = cfg.dataset.augmentation_cfg
+        validate_pc_color_augmentation(agent_pc_dim, augmentation)
         keep_points = ((augmentation or {}).get("pc") or {}).get("random_keep_points")
         validate_random_keep_points(keep_points)
     if "datasets" in cfg.dataset:
-        # Hydra constructs children before MultiTaskDataset applies its shared augmentation.
-        validate_pc_color_augmentation(agent_pc_dim, cfg.dataset.get("augmentation_cfg"))
+        # Hydra constructs children before applying shared augmentation.
+        augmentation = cfg.dataset.get("augmentation_cfg")
+        validate_pc_color_augmentation(agent_pc_dim, augmentation)
+        validate_random_keep_points(((augmentation or {}).get("pc") or {}).get("random_keep_points"))
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
     for name in ("total_train_steps", "log_interval_steps", "gradient_accumulation_steps"):

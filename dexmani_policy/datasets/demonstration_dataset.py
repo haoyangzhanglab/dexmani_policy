@@ -4,7 +4,6 @@ import copy
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import ClassVar
 
 import numpy as np
 import torch
@@ -31,19 +30,20 @@ from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sequence_sampler import SequenceSampler
 
 
-class BaseDataset(torch.utils.data.Dataset):
-    DEFAULT_MODALITIES: ClassVar[list[str]] = ["joint_state"]
+class DemonstrationDataset(torch.utils.data.Dataset):
+    """Observation-action windows from episodic demonstrations."""
 
     def __init__(
         self,
         zarr_path: str,
+        *,
+        sensor_modalities: list[str],
         seed: int = 42,
         horizon: int = 1,
         pad_before: int = 0,
         pad_after: int = 0,
         val_ratio: float = 0.0,
         max_train_episodes: int | None = None,
-        sensor_modalities: list[str] | None = None,
         augmentation_cfg: dict | None = None,
         action_key: str = "action",
         use_aux_ee: bool = False,
@@ -64,8 +64,6 @@ class BaseDataset(torch.utils.data.Dataset):
             explicit=split_manifest is not None or saved_split is not None,
         )
 
-        if sensor_modalities is None:
-            sensor_modalities = self.DEFAULT_MODALITIES
         if "rgb" in sensor_modalities:
             validate_rgb_preprocessing(rgb_preprocess_size, rgb_random_crop_size, rgb_color_aug)
 
@@ -91,18 +89,17 @@ class BaseDataset(torch.utils.data.Dataset):
         if use_aux_ee:
             load_keys.append("action_ee")
 
-        self.replay_buffer = ReplayBuffer.open(
-            self.zarr_path,
-            keys=load_keys,
-        )
+        self.replay_buffer = ReplayBuffer(self.zarr_path, keys=load_keys)
 
         if "rgb" in sensor_modalities:
             rgb = self.replay_buffer["rgb"]
             if len(rgb.shape) != 4 or rgb.shape[-1] != 3 or rgb.dtype != np.uint8:
                 raise ValueError("Stored RGB must have shape (T, H, W, 3) and dtype uint8")
-        if "point_cloud" in sensor_modalities and pc_dim is not None:
+        if "point_cloud" in sensor_modalities:
             shape = self.replay_buffer["point_cloud"].shape
-            if len(shape) != 3 or shape[-1] < pc_dim:
+            if len(shape) != 3:
+                raise ValueError("Stored point_cloud must have shape [T,N,C]")
+            if pc_dim is not None and shape[-1] < pc_dim:
                 raise ValueError("Stored point_cloud does not satisfy configured pc_dim")
         self.sensor_modalities = sensor_modalities
         self.augmentation_cfg = augmentation_cfg
@@ -120,12 +117,10 @@ class BaseDataset(torch.utils.data.Dataset):
             self.role_lengths["action_ee"] = horizon
 
         self.data_recipe = {}
-        if "point_cloud" in sensor_modalities and self.pc_dim == 3:
-            self.data_recipe.update(point_cloud_channels=3)
-        elif (
+        if (
             "point_cloud" in sensor_modalities
             and self.pc_dim is not None
-            and self.pc_dim < self.replay_buffer["point_cloud"].shape[-1]
+            and (self.pc_dim == 3 or self.pc_dim < self.replay_buffer["point_cloud"].shape[-1])
         ):
             self.data_recipe.update(point_cloud_channels=self.pc_dim)
         if saved_split is not None or split_manifest is not None:
@@ -146,14 +141,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.val_mask = val_mask
         self.train_mask = train_mask
 
-        self.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer,
-            sequence_length=horizon,
-            pad_before=pad_before,
-            pad_after=pad_after,
-            episode_mask=train_mask,
-        )
-        self.filter_sampler(self.sampler)
+        self.sampler = self.build_sampler(train_mask)
         self.validation_dataset = None
 
     def finite_rows(self, key, columns=None):
@@ -174,6 +162,17 @@ class BaseDataset(torch.utils.data.Dataset):
             self.obs_horizon,
         )
 
+    def build_sampler(self, episode_mask):
+        sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer,
+            sequence_length=self.horizon,
+            pad_before=self.pad_before,
+            pad_after=self.pad_after,
+            episode_mask=episode_mask,
+        )
+        self.filter_sampler(sampler)
+        return sampler
+
     def get_validation_dataset(self):
         if self.is_validation:
             return self
@@ -185,14 +184,7 @@ class BaseDataset(torch.utils.data.Dataset):
         val_set = copy.copy(self)
         val_set.data_recipe = copy.deepcopy(self.data_recipe)
 
-        val_set.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer,
-            sequence_length=self.horizon,
-            pad_before=self.pad_before,
-            pad_after=self.pad_after,
-            episode_mask=self.val_mask,
-        )
-        self.filter_sampler(val_set.sampler)
+        val_set.sampler = self.build_sampler(self.val_mask)
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
         val_set.random_keep_points = None
@@ -250,7 +242,8 @@ class BaseDataset(torch.utils.data.Dataset):
     def build_augmentors(self):
         """Build NumPy transforms; RGB augmentation runs during preprocessing."""
         self.augmentors = {}
-        pc_cfg = (self.augmentation_cfg or {}).get("pc") or {}
+        augmentation = self.augmentation_cfg or {}
+        pc_cfg = augmentation.get("pc") or {}
         self.random_keep_points = pc_cfg.get("random_keep_points")
         pc_dim = None
         if "point_cloud" in self.sensor_modalities:
@@ -260,13 +253,11 @@ class BaseDataset(torch.utils.data.Dataset):
             if "point_cloud" not in self.sensor_modalities:
                 raise ValueError("random_keep_points requires the point_cloud modality")
             shape = self.replay_buffer["point_cloud"].shape
-            if len(shape) != 3:
-                raise ValueError("Stored point_cloud must have shape [T,N,C]")
             validate_random_keep_points(self.random_keep_points, num_points=shape[1])
         for section, cls, key, modality in AUGMENTATION_SPECS:
             if modality not in self.sensor_modalities:
                 continue
-            config = ((self.augmentation_cfg or {}).get(section) or {}).get(key)
+            config = (augmentation.get(section) or {}).get(key)
             if config:
                 if section == "pc" and key in {"color", "color_noise"} and pc_dim < 6:
                     continue
@@ -302,9 +293,4 @@ class BaseDataset(torch.utils.data.Dataset):
                     "action_ee", slice(start, end), columns=slice(0, 9), cache=False
                 )
                 values = np.concatenate((values, aux), axis=-1)
-            if not np.isfinite(values).all():
-                raise ValueError(
-                    f"Nonfinite normalization field {key!r} from {self.zarr_path}, "
-                    f"source {field!r}, rows [{start}, {end})"
-                )
             yield values

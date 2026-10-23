@@ -199,7 +199,7 @@ def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_ste
     if cfg["action_key"] not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     recipe = cfg.get("real_runtime")
-    fields = tuple(cfg["dataset"].get("sensor_modalities", ()))
+    fields = tuple(cfg["dataset"]["sensor_modalities"])
     if len(set(fields)) != len(fields):
         raise ValueError("Observation fields must be unique")
     links = recipe.get("fingertip_link_names") if recipe is not None else None

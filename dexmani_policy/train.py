@@ -10,12 +10,12 @@ import torch
 from dexmani_policy.common.config import register_resolvers, set_project_root
 from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.training.builder import (
-    build_dataset_and_normalizer,
     build_training_components,
     build_trainer,
     compile_models,
     prepare_training,
 )
+from dexmani_policy.training.data import build_dataset_and_normalizer
 from dexmani_policy.training.resume import restore_training_state
 
 register_resolvers()

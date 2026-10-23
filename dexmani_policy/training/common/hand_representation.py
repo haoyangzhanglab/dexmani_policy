@@ -5,6 +5,14 @@ import math
 import numpy as np
 
 
+def shuffled_batches(indices, batch_size, rng):
+    """Repeat shuffled passes, yielding the final partial batch before reshuffling."""
+    while True:
+        order = rng.permutation(indices)
+        for start in range(0, len(order), batch_size):
+            yield order[start : start + batch_size]
+
+
 def describe_hand_data(dataset):
     """Read dataset metadata and sampler counts without scanning action/state arrays."""
     buffer = dataset.replay_buffer

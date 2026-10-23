@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
-from dexmani_policy.datasets.base_dataset import BaseDataset
+from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 
 
 def observation_layout(dataset, field):
@@ -26,7 +26,7 @@ def observation_layout(dataset, field):
 class MultiTaskDataset(torch.utils.data.Dataset):
     def __init__(
         self,
-        datasets: list[BaseDataset],
+        datasets: list[DemonstrationDataset],
         task_names: list[str],
         sampling_strategy: str = "balanced",
         task_weights: list[float] | None = None,

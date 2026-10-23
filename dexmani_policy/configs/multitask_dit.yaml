@@ -54,7 +54,7 @@ dataset:
     - "open the box"
 
   datasets:
-    - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
+    - _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
       action_key: ${action_key}
       zarr_path: robot_data/pick_bottle.zarr
       seed: ${seed}
@@ -78,7 +78,7 @@ dataset:
         blur_prob: 0.0
         prob: 0.25
 
-    - _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
+    - _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
       action_key: ${action_key}
       zarr_path: robot_data/open_box.zarr
       seed: ${seed}

@@ -299,8 +299,10 @@ def normalization_dims_from_config(cfg):
     }
     if "state_dim" in agent:
         expected["joint_state"] = agent["state_dim"]
-    if cfg["dataset"].get("pc_dim") is not None:
-        expected["point_cloud"] = cfg["dataset"]["pc_dim"]
+    dataset = cfg["dataset"]
+    reference = dataset["datasets"][0] if "datasets" in dataset else dataset
+    if reference.get("pc_dim") is not None:
+        expected["point_cloud"] = reference["pc_dim"]
     for key, mode in cfg["normalization"].items():
         if mode != "identity" and key in expected and dims[key] != expected[key]:
             raise ValueError(f"Saved {key} feature width must be {expected[key]}")

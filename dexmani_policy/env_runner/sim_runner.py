@@ -14,7 +14,7 @@ class SimRunner(BaseRunner):
         self,
         task_name: str,
         n_obs_steps: int,
-        sensor_modalities: list[str] | None = None,
+        sensor_modalities: list[str],
         env_kwargs: dict[str, Any] | None = None,
         eval_seeds: list[int] | None = None,
         clear_cache_freq: int = 25,

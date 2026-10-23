@@ -35,7 +35,7 @@ dataloader:
 
 # ── Dataset ──
 dataset:
-  _target_: dexmani_policy.datasets.rgb_dataset.RGBDataset
+  _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
   seed: ${training.seed}
