@@ -84,6 +84,39 @@ class RegionSelfAttention(nn.Module):
         return tokens + self.gain.to(tokens.dtype) * update.to(tokens.dtype), attention
 
 
+class RoutingPriorCrossAttention(nn.Module):
+    """Perceiver-style refinement constrained by the existing region assignment."""
+
+    def __init__(self, channels: int, attention_dim: int = 128, heads: int = 4) -> None:
+        super().__init__()
+        if heads <= 0 or attention_dim <= 0 or attention_dim % heads:
+            raise ValueError("attention_dim must be positive and divisible by heads")
+        self.heads = heads
+        self.head_dim = attention_dim // heads
+        self.query_norm = nn.LayerNorm(channels)
+        self.memory_norm = nn.LayerNorm(channels)
+        self.q = nn.Linear(channels, attention_dim, bias=False)
+        self.kv = nn.Linear(channels, 2 * attention_dim, bias=False)
+        self.out = nn.Linear(attention_dim, channels)
+
+    def forward(self, query: Tensor, memory: Tensor, prior: Tensor) -> Tensor:
+        batch, regions, _ = query.shape
+        patches = memory.shape[1]
+        q = self.q(self.query_norm(query)).reshape(batch, regions, self.heads, self.head_dim)
+        k, v = self.kv(self.memory_norm(memory)).chunk(2, dim=-1)
+        k = k.reshape(batch, patches, self.heads, self.head_dim)
+        v = v.reshape(batch, patches, self.heads, self.head_dim)
+
+        with torch.autocast(device_type=query.device.type, enabled=False):
+            weights = prior.float()
+            bias = weights.clamp_min(1e-30).log().masked_fill(weights <= 0, -torch.inf)
+        refined = F.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+            attn_mask=bias[:, None].to(q.dtype), dropout_p=0.0,
+        )
+        return self.out(refined.transpose(1, 2).reshape(batch, regions, -1))
+
+
 class SceneAggregator(nn.Module):
     """Compress spatial patches into geometric regions, then encode inter-region relations."""
 
@@ -101,6 +134,9 @@ class SceneAggregator(nn.Module):
         relation_dim: int = 64,
         relation_heads: int = 4,
         mlp_ratio: float = 2.0,
+        use_cross_refinement: bool = False,
+        refinement_dim: int = 128,
+        refinement_heads: int = 4,
     ) -> None:
         super().__init__()
         for name, value in (
@@ -130,6 +166,11 @@ class SceneAggregator(nn.Module):
         self.route_projection = nn.Linear(token_channels, route_dim, bias=False)
         self.semantic_scale_logit = nn.Parameter(torch.zeros(()))
         self.geometry_embed = nn.Sequential(nn.Linear(9, 64), nn.GELU(), nn.Linear(64, token_channels))
+        self.cross_refinement = (
+            RoutingPriorCrossAttention(token_channels, refinement_dim, refinement_heads)
+            if use_cross_refinement else None
+        )
+        self.refinement_gain = nn.Parameter(torch.tensor(0.1)) if use_cross_refinement else None
         self.relation = (
             RegionSelfAttention(token_channels, relation_dim, relation_heads, self.geometry_scale)
             if use_relation
@@ -220,6 +261,10 @@ class SceneAggregator(nn.Module):
         geometry = self.geometry_embed(descriptor.to(self.geometry_embed[0].weight.dtype))
         base_tokens = pooled.to(geometry.dtype) + geometry
         scene_tokens = base_tokens
+        refinement_update = None
+        if self.cross_refinement is not None:
+            refinement_update = self.cross_refinement(scene_tokens, tokens, weight)
+            scene_tokens = scene_tokens + self.refinement_gain.to(scene_tokens.dtype) * refinement_update.to(scene_tokens.dtype)
         relation_attention = None
         if self.relation is not None:
             scene_tokens, relation_attention = self.relation(scene_tokens, centers)
@@ -243,6 +288,8 @@ class SceneAggregator(nn.Module):
                 "pooled_token": pooled,
                 "base_scene_token": base_tokens,
             }
+            if refinement_update is not None:
+                output["refinement_update"] = refinement_update
             if relation_attention is not None:
                 output["relation_attention"] = relation_attention
         return output
