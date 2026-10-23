@@ -85,12 +85,13 @@ class RegionSelfAttention(nn.Module):
 
 
 class RoutingPriorCrossAttention(nn.Module):
-    """Perceiver-style refinement constrained by the existing region assignment."""
+    """Refine geometrically routed regions using content-aware patch attention."""
 
-    def __init__(self, channels: int, attention_dim: int = 128, heads: int = 4) -> None:
+    def __init__(self, channels: int, attention_dim: int, heads: int) -> None:
         super().__init__()
-        if heads <= 0 or attention_dim <= 0 or attention_dim % heads:
+        if min(channels, attention_dim, heads) < 1 or attention_dim % heads:
             raise ValueError("attention_dim must be positive and divisible by heads")
+
         self.heads = heads
         self.head_dim = attention_dim // heads
         self.query_norm = nn.LayerNorm(channels)
@@ -102,20 +103,19 @@ class RoutingPriorCrossAttention(nn.Module):
     def forward(self, query: Tensor, memory: Tensor, prior: Tensor) -> Tensor:
         batch, regions, _ = query.shape
         patches = memory.shape[1]
-        q = self.q(self.query_norm(query)).reshape(batch, regions, self.heads, self.head_dim)
-        k, v = self.kv(self.memory_norm(memory)).chunk(2, dim=-1)
-        k = k.reshape(batch, patches, self.heads, self.head_dim)
-        v = v.reshape(batch, patches, self.heads, self.head_dim)
+        query = self.q(self.query_norm(query.to(self.q.weight.dtype)))
+        key, value = self.kv(self.memory_norm(memory.to(self.kv.weight.dtype))).chunk(2, dim=-1)
+        query = query.reshape(batch, regions, self.heads, self.head_dim).transpose(1, 2)
+        key = key.reshape(batch, patches, self.heads, self.head_dim).transpose(1, 2)
+        value = value.reshape(batch, patches, self.heads, self.head_dim).transpose(1, 2)
 
-        with torch.autocast(device_type=query.device.type, enabled=False):
-            weights = prior.float()
-            bias = weights.clamp_min(1e-30).log().masked_fill(weights <= 0, -torch.inf)
+        # Routing is trained through pooled tokens; detach its prior for efficient SDPA.
+        weight = prior.detach().float()
+        bias = weight.clamp_min(1e-30).log().masked_fill(weight <= 0, -torch.inf)
         refined = F.scaled_dot_product_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
-            attn_mask=bias[:, None].to(q.dtype), dropout_p=0.0,
+            query, key, value, attn_mask=bias[:, None].to(query.dtype), dropout_p=0.0
         )
         return self.out(refined.transpose(1, 2).reshape(batch, regions, -1))
-
 
 class SceneAggregator(nn.Module):
     """Compress spatial patches into geometric regions, then encode inter-region relations."""
@@ -170,7 +170,9 @@ class SceneAggregator(nn.Module):
             RoutingPriorCrossAttention(token_channels, refinement_dim, refinement_heads)
             if use_cross_refinement else None
         )
-        self.refinement_gain = nn.Parameter(torch.tensor(0.1)) if use_cross_refinement else None
+        self.refinement_gain = (
+            nn.Parameter(torch.full((token_channels,), 0.1)) if use_cross_refinement else None
+        )
         self.relation = (
             RegionSelfAttention(token_channels, relation_dim, relation_heads, self.geometry_scale)
             if use_relation
@@ -264,7 +266,9 @@ class SceneAggregator(nn.Module):
         refinement_update = None
         if self.cross_refinement is not None:
             refinement_update = self.cross_refinement(scene_tokens, tokens, weight)
-            scene_tokens = scene_tokens + self.refinement_gain.to(scene_tokens.dtype) * refinement_update.to(scene_tokens.dtype)
+            scene_tokens = scene_tokens + self.refinement_gain.to(scene_tokens.dtype) * refinement_update.to(
+                scene_tokens.dtype
+            )
         relation_attention = None
         if self.relation is not None:
             scene_tokens, relation_attention = self.relation(scene_tokens, centers)
