@@ -5,12 +5,16 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.config import load_experiment_config, register_resolvers, set_project_root
-from dexmani_policy.env_runner.evaluation import (
-    add_evaluation_arguments,
-    parse_eval_overrides,
+from dexmani_policy.common.config import (
+    load_experiment_config,
+    register_resolvers,
+    set_project_root,
 )
-from dexmani_policy.env_runner.selection import select_best_checkpoint
+from dexmani_policy.evaluation.config import (
+    add_evaluation_arguments,
+    parse_evaluation_overrides,
+)
+from dexmani_policy.evaluation.selection import select_best_checkpoint
 
 ROOT_DIR = set_project_root()
 register_resolvers()
@@ -45,7 +49,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
-    cfg = OmegaConf.merge(load_experiment_config(exp_dir), parse_eval_overrides(args.overrides))
+    cfg = OmegaConf.merge(
+        load_experiment_config(exp_dir), parse_evaluation_overrides(args.overrides)
+    )
     select_best_checkpoint(
         exp_dir,
         cfg,

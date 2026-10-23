@@ -60,7 +60,7 @@ dataset:
 
 # ── Agent ──
 agent:
-  _target_: dexmani_policy.agents.core.sat_policy.SATPolicy
+  _target_: dexmani_policy.agents.policies.sat.SATPolicy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}

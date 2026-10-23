@@ -4,26 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
 from termcolor import cprint
 
-from dexmani_policy.env_runner.common.metrics import compute_eval_stats
+from dexmani_policy.env_runner.common.metrics import compute_evaluation_statistics
 from dexmani_policy.env_runner.common.seeds import validate_task_seeds
 from dexmani_policy.env_runner.sim_runner import SimRunner
-
-
-class TaskTextSimRunner(SimRunner):
-    def __init__(self, task_text: str, **kwargs):
-        super().__init__(**kwargs)
-        self.task_text = task_text
-
-    def get_action_chunk(
-        self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int | None = None
-    ) -> np.ndarray:
-        obs_batch["task_text"] = [self.task_text]
-        return super().get_action_chunk(
-            obs_batch, agent, inference_steps=inference_steps, action_steps=action_steps
-        )
 
 
 class MultiTaskSimRunner:
@@ -38,7 +23,7 @@ class MultiTaskSimRunner:
         if not task_configs:
             raise ValueError("task_configs cannot be empty")
 
-        self.runners: dict[str, TaskTextSimRunner] = {}
+        self.task_runners: dict[str, SimRunner] = {}
         defaults = {
             "n_obs_steps": n_obs_steps,
             "sensor_modalities": sensor_modalities,
@@ -47,7 +32,7 @@ class MultiTaskSimRunner:
         }
         for cfg in task_configs:
             task_name = cfg["task_name"]
-            if task_name in self.runners:
+            if task_name in self.task_runners:
                 raise ValueError(f"Duplicate task: {task_name}")
             task_text = cfg.get("task_text")
             options = {
@@ -55,28 +40,28 @@ class MultiTaskSimRunner:
                 **cfg,
                 "task_text": task_name if task_text is None else task_text,
             }
-            self.runners[task_name] = TaskTextSimRunner(**options)
+            self.task_runners[task_name] = SimRunner(**options)
 
     def run(
         self,
         agent,
-        inference_steps: int | None = None,
-        video_save_dir=None,
         *,
         task_seeds: dict[str, list[int]],
+        inference_steps: int | None = None,
         action_steps: int | None = None,
+        video_save_dir=None,
     ) -> dict[str, Any]:
-        validate_task_seeds(task_seeds, self.runners)
+        validate_task_seeds(task_seeds, self.task_runners)
         per_task = {}
         videos = []
-        for task, runner in self.runners.items():
+        for task, runner in self.task_runners.items():
             cprint(f"Evaluating task: {task} (text={runner.task_text})", "cyan")
             task_video_dir = video_save_dir / task if video_save_dir is not None else None
             result = runner.run(
                 agent,
                 inference_steps=inference_steps,
                 action_steps=action_steps,
-                seeds=task_seeds[task],
+                task_seeds={task: task_seeds[task]},
                 video_save_dir=task_video_dir,
             )
             per_task[task] = result
@@ -86,7 +71,7 @@ class MultiTaskSimRunner:
                 for name, path in video.items()
             )
 
-        stats = compute_eval_stats({"per_task": per_task})
+        stats = compute_evaluation_statistics({"per_task": per_task})
         steps = [
             child["avg_steps"] for child in per_task.values() if child["avg_steps"] is not None
         ]
@@ -112,7 +97,7 @@ class MultiTaskSimRunner:
                 "yellow",
             )
         cprint(
-            f"  Macro ({len(self.runners)} tasks): {result['macro_success_rate']:.1%}",
+            f"  Macro ({len(self.task_runners)} tasks): {result['macro_success_rate']:.1%}",
             "yellow",
         )
         cprint(

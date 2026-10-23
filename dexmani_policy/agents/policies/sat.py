@@ -7,19 +7,21 @@ from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.sat import SAT
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.common.config import positive_int, validate_sparse3d_config
 
 
 class SATObservationEncoder(nn.Module):
     """Fuse frame features as [B,K+1,T*D]; patch slots need not match across frames."""
 
+    consumed_observation_fields = ("joint_state", "point_cloud")
+
     @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return ("joint_state", "point_cloud")
+    def warmup_num_points(self) -> int:
+        return self.num_points
 
     def __init__(
         self,
@@ -46,12 +48,9 @@ class SATObservationEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
 
-        patch_seq_len, pc_out_dim = self.pc_encoder.out_shape
-        self.num_obs_tokens = patch_seq_len + 1
-        self.obs_token_dim = n_obs_steps * (pc_out_dim + self.state_mlp.out_dim)
+        self.obs_token_dim = n_obs_steps * (self.pc_encoder.out_dim + self.state_mlp.out_dim)
 
     def forward(self, obs: dict) -> torch.Tensor:
-        """Encode [B*T,...] observations as [B,K+1,T*D] temporal features."""
         pc = preprocess_point_cloud(
             obs["point_cloud"],
             self.num_points,
@@ -60,19 +59,23 @@ class SATObservationEncoder(nn.Module):
             training=self.training,
         )
 
-        patch_token = self.pc_encoder(pc)["tokens"]
-        global_token = patch_token.mean(dim=1, keepdim=True)
-        pc_feat = torch.cat([global_token, patch_token], dim=1)
+        patch_tokens = self.pc_encoder(pc)["tokens"]
+        global_token = patch_tokens.mean(dim=1, keepdim=True)
+        pc_features = torch.cat([global_token, patch_tokens], dim=1)
 
-        state_feat = self.state_mlp(obs["joint_state"])
-        state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
-        feat = torch.cat([pc_feat, state_feat], dim=-1)
+        state_features = self.state_mlp(obs["joint_state"])
+        state_features = state_features.unsqueeze(1).expand(-1, pc_features.size(1), -1)
+        features = torch.cat([pc_features, state_features], dim=-1)
 
-        return feat.unflatten(0, (-1, self.n_obs_steps)).transpose(1, 2).flatten(2)
+        return features.unflatten(0, (-1, self.n_obs_steps)).transpose(1, 2).flatten(2)
 
 
 class SATPolicy(BasePolicy):
     """Structural Action Transformer with [B,Da,T] trajectory tokens."""
+
+    @classmethod
+    def validate_model_config(cls, cfg, spec) -> None:
+        validate_sparse3d_config(cfg, spec)
 
     def __init__(
         self,
@@ -160,34 +163,27 @@ class SATPolicy(BasePolicy):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    def compute_loss(
-        self, batch: dict, *, log_metrics: bool = True
-    ) -> tuple[torch.Tensor, dict]:
-        """Flow matching on joint-trajectory tokens [B, Da, T]."""
+    def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
-        cond = self.encode_observation(batch["obs"])
-        normed_actions = self.normalizer["action"].normalize(batch["action"])
+        condition = self.encode_observation(batch["obs"])
+        normalized_actions = self.normalizer["action"].normalize(batch["action"])
         return self.action_decoder.compute_loss(
-            cond, normed_actions.transpose(1, 2), log_metrics=log_metrics
+            condition, normalized_actions.transpose(1, 2), log_metrics=log_metrics
         )
 
     @torch.no_grad()
-    def predict_action_from_cond(
-        self, cond: torch.Tensor, inference_steps: int | None = None
+    def predict_action_from_condition(
+        self, condition: torch.Tensor, inference_steps: int | None = None
     ) -> dict[str, torch.Tensor]:
         """Sample joint trajectories [B, Da, T] and return physical actions [B, T, Da]."""
-        template = torch.zeros(
-            cond.shape[0],
-            self.action_dim,
-            self.horizon,
-            device=cond.device,
-            dtype=cond.dtype,
+        template = condition.new_zeros((condition.shape[0], self.action_dim, self.horizon))
+
+        prediction = self.action_decoder.predict_action(
+            condition, template, inference_steps=inference_steps
         )
-
-        pred = self.action_decoder.predict_action(cond, template, inference_steps=inference_steps)
-        if not torch.isfinite(pred).all():
+        if not torch.isfinite(prediction).all():
             raise RuntimeError("Non-finite SAT action prediction")
-        pred = pred.transpose(1, 2)
+        prediction = prediction.transpose(1, 2)
 
-        pred = self.normalizer["action"].unnormalize(pred)
-        return self.format_action_output(pred)
+        prediction = self.normalizer["action"].unnormalize(prediction)
+        return self.format_action_output(prediction)

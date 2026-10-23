@@ -33,11 +33,8 @@ def summarize_episodes(details: list[dict]) -> dict:
     }
 
 
-def compute_eval_stats(result: dict) -> dict:
+def compute_evaluation_statistics(result: dict) -> dict:
     """Micro averages episodes; macro averages tasks; Wilson describes micro uncertainty."""
-    details = collect_episode_details(result)
-    successes = sum(bool(detail["success"]) for detail in details)
-    count = len(details)
     per_task = None
     macro = None
     if result.get("per_task"):
@@ -56,6 +53,15 @@ def compute_eval_stats(result: dict) -> dict:
             task["success_rate"] for task in per_task.values() if task["success_rate"] is not None
         ]
         macro = sum(rates) / len(rates) if rates else None
+
+    if "episode_details" in result or not per_task:
+        details = collect_episode_details(result)
+        successes = sum(bool(detail["success"]) for detail in details)
+        count = len(details)
+    else:
+        successes = sum(task["n_success"] for task in per_task.values())
+        count = sum(task["n_valid"] for task in per_task.values())
+
     return {
         "micro_success_rate": successes / count if count else 0.0,
         "macro_success_rate": macro,
@@ -81,12 +87,13 @@ def wilson_interval(successes, n):
 
 def validate_episode_details(details, plan):
     """Require complete task/seed evidence and normalize NumPy booleans for JSON."""
-    if not isinstance(details, list) or any(not isinstance(d, dict) for d in details):
+    if not isinstance(details, list):
         raise RuntimeError("Evaluation episode_details must be a list of objects")
     actual = Counter()
     for detail in details:
         if (
-            not isinstance(detail.get("task_name"), str)
+            not isinstance(detail, dict)
+            or not isinstance(detail.get("task_name"), str)
             or type(detail.get("seed")) is not int
             or not isinstance(detail.get("success"), (bool, np.bool_))
             or "steps" not in detail

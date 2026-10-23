@@ -3,18 +3,92 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
+from torch import nn
+from torch.nn import functional as F
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_time_to_noise
-from dexmani_policy.agents.core.base_policy import BasePolicy
-from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.temporal_vae import TemporalHandVAE, load_temporal_vae
-from dexmani_policy.common.config import validate_action_window
+from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.common.config import (
+    positive_int,
+    validate_action_window,
+    validate_sparse3d_config,
+)
+
+
+class TemporalLatentFlowObservationEncoder(nn.Module):
+    """Keep frame-major global and patch tokens as [B, T*(K+1), D]."""
+
+    consumed_observation_fields = ("joint_state", "point_cloud")
+
+    @property
+    def warmup_num_points(self) -> int:
+        return self.num_points
+
+    def __init__(
+        self,
+        pc_dim: int,
+        state_dim: int,
+        num_points: int,
+        n_obs_steps: int,
+        state_out_dim: int = 64,
+        pc_encoder_config: dict | None = None,
+        fps_random_config: dict | None = None,
+    ) -> None:
+        super().__init__()
+        pc_encoder_config = dict(pc_encoder_config or {})
+        pc_encoder_config.setdefault("fps_random_config", fps_random_config)
+
+        positive_int(num_points, "num_points")
+        positive_int(n_obs_steps, "n_obs_steps")
+        pc_encoder_config.setdefault("num_patches", 96)
+        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **pc_encoder_config)
+        self.pc_encoder.effective_config = dict(pc_encoder_config)
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.num_points = num_points
+        self.use_coord_only = pc_dim == 3
+        self.n_obs_steps = n_obs_steps
+        self.fps_random_config = fps_random_config or {}
+
+        self.obs_token_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+
+    def forward(self, obs: dict) -> torch.Tensor:
+        pc = preprocess_point_cloud(
+            obs["point_cloud"],
+            self.num_points,
+            self.use_coord_only,
+            self.fps_random_config,
+            training=self.training,
+        )
+
+        patch_tokens = self.pc_encoder(pc)["tokens"]
+        global_token = patch_tokens.mean(dim=1, keepdim=True)
+        pc_features = torch.cat([global_token, patch_tokens], dim=1)
+
+        state_features = self.state_mlp(obs["joint_state"])
+        state_features = state_features.unsqueeze(1).expand(-1, pc_features.size(1), -1)
+        features = torch.cat([pc_features, state_features], dim=-1)
+
+        return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
 class TemporalLatentFlowPolicy(BasePolicy):
+    supported_execution_modes = ("sync",)
+    requires_hand_pretraining = True
+
+    @classmethod
+    def validate_model_config(cls, cfg, spec) -> None:
+        validate_sparse3d_config(cfg, spec)
+        if cfg.action_key != "action" or cfg.action_dim != 19 or cfg.agent.state_dim != 19:
+            raise ValueError("Temporal requires joint action/state=7+12")
+        if cfg.get("use_aux_ee", False):
+            raise ValueError("Temporal does not support auxiliary action targets")
+
     def __init__(
         self,
         horizon: int,
@@ -53,13 +127,11 @@ class TemporalLatentFlowPolicy(BasePolicy):
     ) -> None:
         validate_action_window(horizon, n_obs_steps, n_action_steps)
         if action_dim != 19 or state_dim != 19:
-            raise ValueError(
-                "Temporal codec requires joint actions/state: 7 arm + 12 hand"
-            )
+            raise ValueError("Temporal codec requires joint actions/state: 7 arm + 12 hand")
         for weight in (arm_loss_weight, latent_loss_weight, decoded_loss_weight):
             if not 0 <= weight < float("inf"):
                 raise ValueError("Temporal codec loss weights must be finite and nonnegative")
-        obs_encoder = SATObservationEncoder(
+        obs_encoder = TemporalLatentFlowObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,
@@ -72,7 +144,7 @@ class TemporalLatentFlowPolicy(BasePolicy):
             horizon=horizon,
             action_dim=7 + latent_dim,
             n_obs_steps=n_obs_steps,
-            obs_token_dim=obs_encoder.obs_token_dim // n_obs_steps,
+            obs_token_dim=obs_encoder.obs_token_dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,
             n_head=n_head,
@@ -146,10 +218,7 @@ class TemporalLatentFlowPolicy(BasePolicy):
             raise RuntimeError(
                 "Initialize the temporal codec or restore a complete policy checkpoint"
             )
-        cond = self.encode_observation(obs)
-        b, patches, _ = cond.shape
-        cond = cond.reshape(b, patches, self.n_obs_steps, -1).transpose(1, 2)
-        return cond.reshape(b, self.n_obs_steps * patches, -1)
+        return self.encode_observation(obs)
 
     def resolve_hand_reference(
         self, obs: dict, action_context: dict | None, *, required: bool = False
@@ -165,15 +234,13 @@ class TemporalLatentFlowPolicy(BasePolicy):
             raise ValueError("Temporal codec requires raw action_context.hand_reference [B,12]")
         return reference.float()
 
-    def compute_loss(
-        self, batch: dict, *, log_metrics: bool = True
-    ) -> tuple[torch.Tensor, dict]:
+    def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
         # Dataset supplies the measured query state before observation augmentation.
         reference = self.resolve_hand_reference(
             batch["obs"], batch.get("action_context"), required=True
         )
-        cond = self.encode_condition(batch["obs"])
+        condition = self.encode_condition(batch["obs"])
         actions = self.normalizer["action"].normalize(batch["action"])
         with torch.no_grad(), torch.autocast(device_type=actions.device.type, enabled=False):
             mu, _ = self.codec.encode(batch["action"][..., self.arm_dim :].float(), reference)
@@ -185,7 +252,7 @@ class TemporalLatentFlowPolicy(BasePolicy):
         t = shift_time_to_noise(t, flow.time_shift_alpha)
         weight = t[:, None, None]
         xt = (1 - weight) * noise + weight * target
-        pred_v = flow.model(x=xt, timestep=t, context=cond).float()
+        pred_v = flow.model(x=xt, timestep=t, context=condition).float()
         target_v = target - noise
         arm_loss = F.mse_loss(pred_v[..., : self.arm_dim], target_v[..., : self.arm_dim])
         latent_loss = F.mse_loss(pred_v[..., self.arm_dim :], target_v[..., self.arm_dim :])
@@ -228,26 +295,26 @@ class TemporalLatentFlowPolicy(BasePolicy):
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
-            raise NotImplementedError(
-                "Temporal codec supports synchronous chunk execution"
-            )
+            raise NotImplementedError("Temporal codec supports synchronous chunk execution")
         self.validate_observations(obs_dict)
         reference = self.resolve_hand_reference(obs_dict, action_context)
-        cond = self.encode_condition(obs_dict)
-        return self.predict_action_from_cond(cond, inference_steps, hand_reference=reference)
+        condition = self.encode_condition(obs_dict)
+        return self.predict_action_from_condition(
+            condition, inference_steps, hand_reference=reference
+        )
 
     @torch.no_grad()
-    def predict_action_from_cond(
+    def predict_action_from_condition(
         self,
-        cond: torch.Tensor,
+        condition: torch.Tensor,
         inference_steps: int | None = None,
         *,
         hand_reference: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        template = torch.zeros(
-            len(cond), self.horizon, self.model_action_dim, device=cond.device, dtype=torch.float32
+        template = condition.new_zeros(
+            (len(condition), self.horizon, self.model_action_dim), dtype=torch.float32
         )
-        native = self.action_decoder.predict_action(cond, template, inference_steps)
+        native = self.action_decoder.predict_action(condition, template, inference_steps)
         affine = self.normalizer["action"].params_dict
         scale = affine["scale"][: self.arm_dim]
         offset = affine["offset"][: self.arm_dim]
@@ -256,6 +323,6 @@ class TemporalLatentFlowPolicy(BasePolicy):
             hand = self.codec.decode_actions(
                 native[..., self.arm_dim :].float(), hand_reference.float()
             )
-        pred = torch.cat((arm, hand), dim=-1)
+        prediction = torch.cat((arm, hand), dim=-1)
         # Bidirectional codec attention requires decoding the full horizon first.
-        return self.format_action_output(pred)
+        return self.format_action_output(prediction)

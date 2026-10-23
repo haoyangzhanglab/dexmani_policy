@@ -2,7 +2,6 @@
 
 import os
 import socket
-from pathlib import Path
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -13,22 +12,18 @@ import torch.multiprocessing as mp
 from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from dexmani_policy.common.checkpoint import CheckpointStore
+from dexmani_policy.common.checkpoint import load_training_checkpoint
 from dexmani_policy.common.config import register_resolvers, set_project_root
 from dexmani_policy.common.normalization import AffineNormalizer
 from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.training.builder import (
-    TrainingComponents,
     build_dataset_and_normalizer,
-    build_model_and_ema,
-    build_optimizer_and_scheduler,
-    build_train_loader,
+    build_training_components,
     build_trainer,
     compile_models,
     prepare_training,
 )
-from dexmani_policy.training.common.logging import print_training_recipe
-from dexmani_policy.training.resume import build_resume_contract, restore_training_state
+from dexmani_policy.training.resume import restore_training_state
 
 register_resolvers()
 set_project_root()
@@ -53,65 +48,46 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
     torch.cuda.set_device(device)
     dist.init_process_group(backend="nccl", init_method="env://", world_size=world_size, rank=rank)
 
-    workspace = None
+    components = None
     try:
         # Use the same seed for model initialization on every rank.
         set_seed(cfg.training.seed)
 
         resume_from = cfg.get("resume_from")
-        checkpoint = (
-            CheckpointStore(Path(resume_from).parent).load(resume_from) if resume_from else None
-        )
+        checkpoint = load_training_checkpoint(resume_from) if resume_from else None
         normalizer = None
         if normalizer_state is not None:
             normalizer = AffineNormalizer()
             normalizer.load_state_dict(normalizer_state)
 
-        train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
-
-        model, ema_model, ema_updater = build_model_and_ema(
-            cfg, device, normalizer, rank=rank, checkpoint=checkpoint, dataset=dataset
+        components = build_training_components(
+            cfg,
+            device,
+            dataset,
+            normalizer,
+            rank=rank,
+            world_size=world_size,
+            checkpoint=checkpoint,
         )
-
-        # Use different seeds per rank for observation augmentation.
-        set_seed(cfg.training.seed + rank)
-
-        optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=rank == 0)
-
-        if rank == 0:
-            print_training_recipe(
-                cfg,
-                world_size=world_size,
-                batches_per_epoch=len(train_loader),
-                samples_per_rank=train_loader.sampler.num_samples,
-            )
-            workspace = hydra.utils.instantiate(cfg.workspace)
 
         resume_state = None
         if resume_from is not None:
-            resume_state = restore_training_state(
-                checkpoint,
-                resume_contract=build_resume_contract(train_loader),
-                effective_config=cfg,
-                ema_updater=ema_updater,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                device=device,
-                rank=rank,
-            )
+            resume_state = restore_training_state(checkpoint, components, effective_config=cfg)
 
         del checkpoint
         if rank == 0:
-            workspace.save_hydra_config(cfg)
+            components.workspace.save_hydra_config(cfg)
 
         # Compile restored backbones before DDP wrapping.
         if cfg.training.get("use_compile", False):
             compile_models(
-                model, ema_model, mode=cfg.training.get("compile_mode", "reduce-overhead")
+                components.model,
+                components.ema_model,
+                mode=cfg.training.get("compile_mode", "reduce-overhead"),
             )
 
-        ddp_model = DDP(
-            model,
+        components.model = DDP(
+            components.model,
             device_ids=[gpu_id],
             output_device=gpu_id,
             find_unused_parameters=False,
@@ -119,26 +95,16 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
             static_graph=True,
         )
 
-        if resume_from is None and ema_model is not None:
+        if resume_from is None and components.ema_model is not None:
             # Only fresh EMA follows the raw state synchronized by DDP.
-            ema_model.load_state_dict(model.state_dict(), strict=True)
+            components.ema_model.load_state_dict(components.model.module.state_dict(), strict=True)
 
-        components = TrainingComponents(
-            device=device,
-            model=ddp_model,
-            ema_model=ema_model,
-            ema_updater=ema_updater,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            workspace=workspace,
-        )
         trainer = build_trainer(cfg, components)
         trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
     finally:
         try:
-            if workspace is not None:
-                workspace.close()
+            if components is not None and components.workspace is not None:
+                components.workspace.close()
         finally:
             dist.destroy_process_group()
 

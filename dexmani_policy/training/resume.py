@@ -14,24 +14,19 @@ def build_resume_contract(train_loader):
     }
 
 
-def restore_training_state(
-    checkpoint,
-    *,
-    resume_contract,
-    effective_config,
-    ema_updater,
-    optimizer,
-    scheduler,
-    device,
-    rank=0,
-):
-    """Restore optimizer/scheduler/EMA-updater/RNG after model weights and optimizer construction."""
+def restore_training_state(checkpoint, components, *, effective_config):
+    """Restore optimizer, scheduler, EMA updater and RNG after model construction."""
+    resume_contract = build_resume_contract(components.train_loader)
+    rank = components.train_loader.sampler.rank
+    optimizer = components.optimizer
+    scheduler = components.scheduler
+    ema_updater = components.ema_updater
     validate_source_recipe(checkpoint.effective_config, effective_config)
     for key, value in resume_contract.items():
         if checkpoint.resume_contract[key] != value:
             raise ValueError(f"Resume DataLoader {key} changed")
     world_size = resume_contract["world_size"]
-    if len(checkpoint.rng_states) != world_size or not 0 <= rank < world_size:
+    if len(checkpoint.rng_states) != world_size:
         raise ValueError("Checkpoint RNG rank count does not match world_size")
     batches = resume_contract["batches_per_epoch"]
     loop = checkpoint.effective_config["training"]["loop"]
@@ -52,7 +47,7 @@ def restore_training_state(
     scheduler.load_state_dict(checkpoint.scheduler_state)
     if ema_updater is not None:
         ema_updater.optimization_step = checkpoint.ema_updater_step
-    set_rng_state(checkpoint.rng_states[rank], device=device)
+    set_rng_state(checkpoint.rng_states[rank], device=components.device)
     return checkpoint.global_step, checkpoint.epoch, cursor
 
 

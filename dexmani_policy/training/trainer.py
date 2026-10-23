@@ -18,7 +18,7 @@ from dexmani_policy.common.checkpoint import TrainCheckpoint, unwrap_state_dict
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.runtime import dict_apply, get_rng_state
 from dexmani_policy.training.common.logging import to_log_scalars
-from dexmani_policy.training.workspace import Workspace
+from dexmani_policy.training.resume import build_resume_contract
 
 
 @dataclass
@@ -33,33 +33,23 @@ class Trainer:
 
     def __init__(
         self,
-        device,
-        model,
-        ema_model,
-        ema_updater,
-        optimizer,
-        scheduler,
-        train_loader,
-        workspace: Workspace | None,
+        components,
         train_loop_cfg: TrainLoopConfig,
-        resume_contract: dict,
         effective_config,
         max_grad_norm: float = 1.0,
         use_bfloat16: bool = False,
-        is_main_process: bool = True,
-        distributed: bool = False,
     ):
-        self.device = device
+        self.device = components.device
 
-        self.model = model
-        self.ema_model = ema_model
-        self.ema_updater = ema_updater
+        self.model = components.model
+        self.ema_model = components.ema_model
+        self.ema_updater = components.ema_updater
 
-        self.optimizer = optimizer
-        self.scheduler = scheduler
+        self.optimizer = components.optimizer
+        self.scheduler = components.scheduler
 
-        self.train_loader = train_loader
-        self.workspace = workspace
+        self.train_loader = components.train_loader
+        self.workspace = components.workspace
 
         self.total_train_steps = train_loop_cfg.total_train_steps
         self.log_interval_steps = train_loop_cfg.log_interval_steps
@@ -70,13 +60,14 @@ class Trainer:
         self.use_bfloat16 = use_bfloat16
 
         self.gradient_accumulation_steps = train_loop_cfg.gradient_accumulation_steps
-        self.batches_per_epoch = resume_contract["batches_per_epoch"]
-        self.amp_device_type = torch.device(device).type
+        sampler = self.train_loader.sampler
+        self.resume_contract = build_resume_contract(self.train_loader)
+        self.batches_per_epoch = len(self.train_loader)
+        self.amp_device_type = torch.device(self.device).type
 
-        self.is_main_process = is_main_process
-        self.distributed = distributed
+        self.is_main_process = sampler.rank == 0
+        self.distributed = sampler.num_replicas > 1
         self.ddp_backward_initialized = False
-        self.resume_contract = resume_contract
         self.effective_config = copy.deepcopy(
             OmegaConf.to_container(effective_config, resolve=True)
             if OmegaConf.is_config(effective_config)

@@ -70,7 +70,7 @@ dataset:
 # ── Agent ──
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.core.diffusion_policy.DiffusionPolicy
+  _target_: dexmani_policy.agents.policies.dp.DPPolicy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}

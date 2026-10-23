@@ -5,15 +5,15 @@ import random
 from dexmani_policy.common.config import positive_int
 
 
-def validate_eval_seed(seed):
+def validate_evaluation_seed(seed):
     if type(seed) is not int or not 0 <= seed < 2**32:
         raise ValueError("Evaluation seed must be an integer in [0, 2**32)")
     return seed
 
 
-def resolve_eval_seed(cfg, cli_seed=None):
+def resolve_evaluation_seed(cfg, cli_seed=None):
     seed = cli_seed if cli_seed is not None else (cfg.get("eval") or {}).get("seed")
-    return validate_eval_seed(1024 if seed is None else seed)
+    return validate_evaluation_seed(1024 if seed is None else seed)
 
 
 def validate_seed_pool(task, pool):
@@ -22,12 +22,12 @@ def validate_seed_pool(task, pool):
     return sorted(set(pool))
 
 
-def split_eval_seeds(pools, eval_seed, episodes, selection_episodes=0):
+def split_evaluation_seeds(pools, eval_seed, episodes, selection_episodes=0):
     """Fix each task's test prefix before reserving any checkpoint selection seeds."""
     positive_int(episodes, "episodes")
     if type(selection_episodes) is not int or selection_episodes < 0:
         raise ValueError("selection_episodes must be a non-negative integer")
-    validate_eval_seed(eval_seed)
+    validate_evaluation_seed(eval_seed)
     if not pools:
         raise ValueError("Evaluation requires at least one task seed pool")
     test, selection = {}, {}
@@ -58,13 +58,13 @@ def selection_seed_counts(initial_episodes, batch_size, max_episodes):
 def plan_selection_seeds(pools, eval_seed, *, episodes, initial_episodes, batch_size, max_episodes):
     """Fix test, then reserve the initial and possible tie batch before any rollout."""
     initial_count, extra_count = selection_seed_counts(initial_episodes, batch_size, max_episodes)
-    test, reserved = split_eval_seeds(pools, eval_seed, episodes, initial_count + extra_count)
+    test, reserved = split_evaluation_seeds(pools, eval_seed, episodes, initial_count + extra_count)
     initial = {task: seeds[:initial_count] for task, seeds in reserved.items()}
     extra = {task: seeds[initial_count:] for task, seeds in reserved.items()}
     return test, initial, extra
 
 
-def plan_size(plan):
+def episodes_per_task(plan):
     """Equal per-task budgets retain the existing macro/micro comparison."""
     sizes = {len(seeds) for seeds in plan.values()}
     if len(sizes) != 1:
@@ -83,7 +83,7 @@ def validate_task_seeds(plan, tasks, *, allow_empty=False):
             or len(set(seeds)) != len(seeds)
         ):
             raise ValueError(f"{task}: invalid or duplicate seeds")
-    size = plan_size(plan)
+    size = episodes_per_task(plan)
     if not allow_empty and size == 0:
         raise ValueError("Task seed plan is empty")
     return size

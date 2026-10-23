@@ -5,18 +5,16 @@ from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
 from dexmani_policy.agents.action_decoders.flow import ConsistencyFlow
-from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNetDense
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.policies.base import BasePolicy
 
 
 class ManiFlowObservationEncoder(nn.Module):
     """Dense XYZRGB and state tokens in frame-major order [B,T*N,D]."""
 
-    @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return ("joint_state", "point_cloud")
+    consumed_observation_fields = ("joint_state", "point_cloud")
 
     def __init__(
         self,
@@ -51,18 +49,16 @@ class ManiFlowObservationEncoder(nn.Module):
             training=self.training,
         )
 
-        pc_feat = self.pc_encoder(pc)
+        pc_features = self.pc_encoder(pc)
 
-        state_feat = self.state_mlp(obs["joint_state"])
-        state_feat = state_feat.unsqueeze(1).expand(-1, pc_feat.size(1), -1)
-        feat = torch.cat([pc_feat, state_feat], dim=-1)
+        state_features = self.state_mlp(obs["joint_state"])
+        state_features = state_features.unsqueeze(1).expand(-1, pc_features.size(1), -1)
+        features = torch.cat([pc_features, state_features], dim=-1)
 
-        return feat.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
+        return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
 class ManiFlowPolicy(BasePolicy):
-    """ManiFlow policy using ConsistencyDiTX + ConsistencyFlow."""
-
     def __init__(
         self,
         horizon: int,

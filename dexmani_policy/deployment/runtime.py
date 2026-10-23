@@ -23,10 +23,6 @@ def load_policy(info, *, device="cuda:0", seed=0):
         return PolicyRuntime(agent, info, device=device, seed=seed)
     except BaseException:
         with suppress(Exception):
-            close = getattr(agent, "close", None)
-            if close is not None:
-                close()
-        with suppress(Exception):
             agent.to("cpu")
         raise
 
@@ -35,15 +31,14 @@ class PolicyRuntime:
     """Bridge raw observation histories to physical future action chunks."""
 
     def __init__(self, agent, info, *, device, seed):
-        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
         from dexmani_policy.common.config import validate_observation_fields
 
-        if isinstance(agent, LAMPPolicy):
+        if getattr(agent, "history_steps", None) != info.hand_history_steps:
+            raise ValueError("Agent hand history disagrees with saved configuration")
+        if info.hand_history_steps is not None:
             agent.validate_inference_steps(info.inference_steps)
-            if agent.history_steps != info.hand_history_steps or agent.hand_dim != 12:
+            if agent.hand_dim != 12:
                 raise ValueError("Agent hand history disagrees with saved configuration")
-        elif info.hand_history_steps is not None:
-            raise ValueError("Only LAMP accepts external hand history")
         for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
             if getattr(agent, name) != getattr(info, name):
                 raise ValueError(f"Restored policy differs from saved configuration: {name}")
@@ -61,7 +56,7 @@ class PolicyRuntime:
             and info.pc_dim != (3 if encoder.use_coord_only else 6)
         ):
             raise ValueError("Dataset and encoder point-cloud channels disagree")
-        validate_observation_fields(agent, info.observation_fields, require_declaration=True)
+        validate_observation_fields(agent, info.observation_fields)
 
         self.agent = agent
         self.info = info
@@ -79,41 +74,23 @@ class PolicyRuntime:
         torch.manual_seed(self.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.seed)
-        reset = getattr(self.agent, "reset_episode", None)
-        if reset is not None:
-            reset()
 
     def configure_execution(self, mode, guidance_cap=None):
-        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
-        from dexmani_policy.agents.core.temporal_latent_flow_policy import TemporalLatentFlowPolicy
-
-        if isinstance(self.agent, (LAMPPolicy, TemporalLatentFlowPolicy)) and mode in {
-            "async",
-            "rtc",
-        }:
-            raise NotImplementedError("LAMP and Temporal support sync execution only")
-        if mode == "rtc":
-            self.configure_rtc(guidance_cap)
-        elif mode in {"sync", "async"}:
-            self.rtc_guidance_cap = 0.0
-        else:
-            raise ValueError("Unsupported execution mode")
-
-    def configure_rtc(self, guidance_cap):
-        from dexmani_policy.agents.action_decoders.diffusion import Diffusion
         from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
-        from dexmani_policy.agents.core.base_policy import BasePolicy
 
-        if (
-            type(self.agent).predict_action is not BasePolicy.predict_action
-            or type(self.agent).predict_action_from_cond is not BasePolicy.predict_action_from_cond
-            or not isinstance(self.agent.action_decoder, Diffusion)
-        ):
-            raise NotImplementedError("RTC supports continuous BasePolicy DDIM agents only")
-        prepare_schedule(
-            self.agent.action_decoder.noise_scheduler, self.info.inference_steps, guidance_cap
-        )
-        self.rtc_guidance_cap = guidance_cap
+        if mode not in {"sync", "async", "rtc"}:
+            raise ValueError("Unsupported execution mode")
+        if mode not in self.agent.supported_execution_modes:
+            raise NotImplementedError(
+                f"{type(self.agent).__name__} does not support {mode} execution"
+            )
+        if mode == "rtc":
+            prepare_schedule(
+                self.agent.action_decoder.noise_scheduler, self.info.inference_steps, guidance_cap
+            )
+            self.rtc_guidance_cap = guidance_cap
+        else:
+            self.rtc_guidance_cap = 0.0
 
     def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0):
         import torch
@@ -151,9 +128,8 @@ class PolicyRuntime:
             tensors[name] = tensor.unsqueeze(0).to(self.device)
         dimensions = self.agent.control_action_dim
         kwargs = {}
-        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
 
-        if isinstance(self.agent, LAMPPolicy):
+        if self.info.hand_history_steps is not None:
             if not isinstance(action_context, dict) or set(action_context) != {"hand_history"}:
                 raise ValueError(
                     "LAMP requires only action_context.hand_history from past dispatched targets"
@@ -246,14 +222,11 @@ class PolicyRuntime:
                 if "num_points" in recipe:
                     num_points = positive_int(recipe["num_points"], "pointcloud.num_points")
                 else:
-                    from dexmani_policy.agents.core.dp3_policy import DP3ObservationEncoder
-                    from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
-
                     encoder = self.agent.obs_encoder
-                    if not isinstance(encoder, (DP3ObservationEncoder, SATObservationEncoder)):
+                    num_points = getattr(encoder, "warmup_num_points", None)
+                    if num_points is None:
                         raise ValueError("Point-cloud warmup requires saved pointcloud.num_points")
-                    # These encoders can warm up at their sampling size when no raw recipe was saved.
-                    num_points = positive_int(encoder.num_points, "encoder.num_points")
+                    num_points = positive_int(num_points, "encoder.warmup_num_points")
                 shape, dtype = (num_points, 6), np.float32
             else:
                 shape, dtype = shapes[name], np.float32
@@ -265,10 +238,8 @@ class PolicyRuntime:
                 else ((values % 101) / 100.0 - 0.5).astype(dtype)
             )
 
-        from dexmani_policy.agents.core.lamp_policy import LAMPPolicy
-
         context = None
-        if isinstance(self.agent, LAMPPolicy):
+        if self.info.hand_history_steps is not None:
             context = {
                 "hand_history": np.repeat(
                     observation["joint_state"][-1:, -12:], self.agent.history_steps, axis=0
@@ -302,11 +273,8 @@ class PolicyRuntime:
             return
         agent, self.agent = self.agent, None
         try:
-            close = getattr(agent, "close", None)
-            if close is not None:
-                close()
-        finally:
             agent.to("cpu")
+        finally:
             if str(self.device).startswith("cuda"):
                 import torch
 

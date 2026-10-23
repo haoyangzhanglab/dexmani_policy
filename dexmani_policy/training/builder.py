@@ -15,8 +15,8 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import (
-    CheckpointStore,
     checkpoint_agent_config,
+    load_training_checkpoint,
 )
 from dexmani_policy.common.config import (
     FINGER_VECTOR_FIELDS,
@@ -28,17 +28,16 @@ from dexmani_policy.common.config import (
     validate_observation_fields,
 )
 from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
-from dexmani_policy.common.runtime import worker_init_fn
+from dexmani_policy.common.runtime import set_seed, worker_init_fn
 from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.common.hand_representation import describe_hand_data
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
 from dexmani_policy.training.common.scheduler import get_scheduler
-from dexmani_policy.training.resume import build_resume_contract, restore_model_weights
+from dexmani_policy.training.resume import restore_model_weights
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 from dexmani_policy.training.validation import (
-    HAND_POLICY_TARGETS,
     validate_config,
     validate_ema_batchnorm,
 )
@@ -48,11 +47,9 @@ from dexmani_policy.training.workspace import Workspace, prepare_output_dir
 def prepare_training(cfg):
     """Resolve the saved recipe before validating and preparing a new run."""
     source = resolve_resume_source(cfg.get("resume_from"))
-    checkpoint = CheckpointStore(Path(source).parent).load(source) if source is not None else None
+    checkpoint = load_training_checkpoint(source) if source is not None else None
     overrides = HydraConfig.get().overrides.task if source is not None else []
-    effective_config = resolve_input_recipe(
-        cfg, overrides=overrides, resume_checkpoint=checkpoint
-    )
+    effective_config = resolve_input_recipe(cfg, overrides=overrides, resume_checkpoint=checkpoint)
     with open_dict(effective_config):
         effective_config.resume_from = source
         # Resume writes into this invocation's directory, never the source run.
@@ -193,21 +190,17 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
             )
     else:
         validate_observation_fields(model, cfg.dataset.get("sensor_modalities", ("joint_state",)))
-    rgb = getattr(getattr(model, "obs_encoder", None), "backbone", None)
+    rgb = getattr(model.obs_encoder, "backbone", None)
     bind_defaults(cfg.agent, type(model))
     with open_dict(cfg.agent):
         if checkpoint is None and hasattr(rgb, "effective_config"):
             cfg.agent.rgb_backbone_config = rgb.effective_config
-        pc_encoder = getattr(getattr(model, "obs_encoder", None), "pc_encoder", None)
-        if type(pc_encoder).__name__ in {"PointNetDense", "Sparse3DEncoder"}:
+        pc_encoder = getattr(model.obs_encoder, "pc_encoder", None)
+        if hasattr(pc_encoder, "effective_config"):
             config = dict(pc_encoder.effective_config)
             for name, parameter in inspect.signature(type(pc_encoder)).parameters.items():
-                if (
-                    name != "input_channels"
-                    and name not in config
-                    and parameter.default is not inspect.Parameter.empty
-                ):
-                    config[name] = getattr(pc_encoder, name, parameter.default)
+                if name != "input_channels" and parameter.default is not inspect.Parameter.empty:
+                    config.setdefault(name, parameter.default)
             cfg.agent.pc_encoder_config = config
         if hasattr(rgb, "architecture"):
             if cfg.agent.get("rgb_backbone_config") is None:
@@ -257,7 +250,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
 
 
 def validate_hand_pretraining(cfg, model, dataset, *, checkpoint=None):
-    if cfg.agent.get("_target_") not in HAND_POLICY_TARGETS:
+    if not model.requires_hand_pretraining:
         return
     current = describe_hand_data(dataset)
     saved = model.hand_data if checkpoint is None else checkpoint.effective_config["hand_data"]
@@ -289,9 +282,7 @@ def build_optimizer(
     if len(param_ids) != len(assigned):
         raise ValueError("Optimizer groups contain duplicate parameters")
     if assigned - names.keys():
-        raise ValueError(
-            "Optimizer groups must contain only this policy's trainable parameters"
-        )
+        raise ValueError("Optimizer groups must contain only this policy's trainable parameters")
     missing = names.keys() - assigned
     if missing:
         raise ValueError(
@@ -453,32 +444,29 @@ class TrainingComponents:
     workspace: Workspace | None
 
 
-def build_train_components(cfg, *, resume_checkpoint=None):
-    """Build components from the saved recipe and loaded checkpoint state."""
-    if cfg.training.get("num_gpus", 1) != 1:
-        raise ValueError("Single-device training requires num_gpus=1; use train_ddp.py for DDP")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. This training script requires GPU.")
-
-    device = torch.device(cfg.training.device)
-
-    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=resume_checkpoint)
-
-    train_loader = build_train_loader(cfg, dataset)
-
+def build_training_components(
+    cfg, device, dataset, normalizer, *, rank=0, world_size=1, checkpoint=None
+):
+    """Build one rank's components before compile or DDP wrapping."""
+    train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
     model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, checkpoint=resume_checkpoint, dataset=dataset
+        cfg, device, normalizer, rank=rank, checkpoint=checkpoint, dataset=dataset
     )
 
-    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model)
-    print_training_recipe(
-        cfg,
-        world_size=1,
-        batches_per_epoch=len(train_loader),
-        samples_per_rank=train_loader.sampler.num_samples,
-    )
+    # DDP initialization is shared; augmentation uses a separate seed on each rank.
+    if world_size > 1:
+        set_seed(cfg.training.seed + rank)
+    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=rank == 0)
 
-    workspace = hydra.utils.instantiate(cfg.workspace)
+    workspace = None
+    if rank == 0:
+        print_training_recipe(
+            cfg,
+            world_size=world_size,
+            batches_per_epoch=len(train_loader),
+            samples_per_rank=train_loader.sampler.num_samples,
+        )
+        workspace = hydra.utils.instantiate(cfg.workspace)
 
     return TrainingComponents(
         device=device,
@@ -493,22 +481,11 @@ def build_train_components(cfg, *, resume_checkpoint=None):
 
 
 def build_trainer(cfg, components):
-    sampler = components.train_loader.sampler
     trainer = Trainer(
-        device=components.device,
-        model=components.model,
-        ema_model=components.ema_model,
-        ema_updater=components.ema_updater,
-        optimizer=components.optimizer,
-        scheduler=components.scheduler,
-        train_loader=components.train_loader,
-        workspace=components.workspace,
+        components,
         train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),
         max_grad_norm=cfg.training.get("max_grad_norm", 1.0),
         use_bfloat16=cfg.training.get("use_bfloat16", False),
-        is_main_process=sampler.rank == 0,
-        distributed=sampler.num_replicas > 1,
-        resume_contract=build_resume_contract(components.train_loader),
         effective_config=cfg,
     )
     if components.ema_updater is not None:

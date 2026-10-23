@@ -7,16 +7,13 @@ from dexmani_policy.common.config import positive_int
 BT601_LUMA = (0.299, 0.587, 0.114)
 
 
-def validate_random_keep_points(keep_points, *, num_points=None, num_patches=None, group_size=None):
-    """Validate optional dataset subsampling and the receiving geometry sizes."""
+def validate_random_keep_points(keep_points, *, num_points=None):
+    """Require subsampling without replacement within the raw point count."""
     if keep_points is None:
         return
     positive_int(keep_points, "random_keep_points")
     if num_points is not None and num_points < keep_points:
         raise ValueError(f"point_cloud N={num_points} must be >= random_keep_points={keep_points}")
-    for name, size in (("num_patches", num_patches), ("group_size", group_size)):
-        if size is not None and keep_points < size:
-            raise ValueError(f"random_keep_points={keep_points} must be >= {name}={size}")
 
 
 def random_sample_points(pointcloud: np.ndarray, keep_points: int) -> np.ndarray:

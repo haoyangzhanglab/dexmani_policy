@@ -131,9 +131,7 @@ def print_param_count(agent) -> None:
     from termcolor import cprint
 
     total, _ = count_params(agent)
-    fields = getattr(agent, "consumed_observation_fields", None)
-    if fields is None:
-        fields = getattr(getattr(agent, "obs_encoder", None), "consumed_observation_fields", ())
+    fields = agent.consumed_observation_fields
     if fields:
         cprint(f"[Modalities] {', '.join(fields)}", "white")
     cprint(f"[{type(agent).__name__}] Parameter Count", "cyan", attrs=["bold"])

@@ -95,7 +95,8 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | `dexmani_policy/agents/` | Policy、观测编码、动作解码与手部表示 |
 | `dexmani_policy/datasets/` | 读取、窗口、划分、增强与多任务组合 |
 | `dexmani_policy/training/` | 训练构建、循环、预训练与恢复 |
-| `dexmani_policy/env_runner/` | 仿真、选点、评测、seed 与指标 |
+| `dexmani_policy/evaluation/` | 评测请求、checkpoint 选点与评测流水线 |
+| `dexmani_policy/env_runner/` | 环境交互、rollout、seed 与指标工具、录像 |
 | `dexmani_policy/deployment/` | 已保存策略的检查与推理接口 |
 | `dexmani_policy/common/` | 共享配置、checkpoint、归一化、RGB 预处理与运行工具 |
 | `scripts/` | 运行入口 |

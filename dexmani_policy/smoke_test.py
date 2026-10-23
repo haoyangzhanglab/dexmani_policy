@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import (
-    CheckpointStore,
+    load_training_checkpoint,
     restore_policy_agent,
     unwrap_state_dict,
 )
@@ -29,7 +29,7 @@ from dexmani_policy.datasets.hand_prior.temporal_codec_dataset import TemporalCo
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset, observation_layout
 from dexmani_policy.training.builder import (
     build_dataset_and_normalizer,
-    build_train_components,
+    build_training_components,
     build_train_loader,
     build_trainer,
     compile_models,
@@ -179,9 +179,11 @@ def check_data_loader(loader, cfg, *, split, max_batches):
                 }
             )
             summary = ", ".join(
-                f"{key}={tuple(value.shape)} {value.dtype}"
-                if torch.is_tensor(value)
-                else f"{key}=list[str]({len(value)})"
+                (
+                    f"{key}={tuple(value.shape)} {value.dtype}"
+                    if torch.is_tensor(value)
+                    else f"{key}=list[str]({len(value)})"
+                )
                 for key, value in fields.items()
             )
             checked += 1
@@ -234,7 +236,7 @@ def validate_parameter_updates(model, before):
 
 
 def validate_checkpoint(cfg, components, trainer, checkpoint_path):
-    checkpoint = CheckpointStore(checkpoint_path.parent).load(checkpoint_path)
+    checkpoint = load_training_checkpoint(checkpoint_path)
     assert checkpoint.global_step == trainer.global_step
     assert checkpoint.epoch == trainer.current_epoch
     assert checkpoint.next_micro_step == trainer.next_micro_step
@@ -322,7 +324,12 @@ def smoke_test(config_name: str, *, max_updates=4):
     with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as tmpdir:
         cfg.workspace.output_dir = tmpdir
         cfg.workspace.wandb_cfg = None
-        components = build_train_components(cfg)
+        if cfg.training.get("num_gpus", 1) != 1:
+            raise ValueError("Single-device smoke requires num_gpus=1")
+        dataset, normalizer = build_dataset_and_normalizer(cfg)
+        components = build_training_components(
+            cfg, torch.device(cfg.training.device), dataset, normalizer
+        )
         try:
             trainer = build_trainer(cfg, components)
             components.workspace.save_hydra_config(cfg)

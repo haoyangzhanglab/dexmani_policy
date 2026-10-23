@@ -96,7 +96,7 @@ def save_checkpoint(
 def build_policy_dataset(cfg):
     """Reuse Policy's actual Dataset, including observation/window qualification."""
     validate_config(cfg)
-    if cfg.agent._target_ != "dexmani_policy.agents.core.dqrise_policy.DQRISEPolicy":
+    if cfg.agent._target_ != "dexmani_policy.agents.policies.dqrise.DQRISEPolicy":
         raise ValueError("--policy-config requires a DQRISEPolicy configuration")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare a new codebook from a fresh Policy config, not resume_from")

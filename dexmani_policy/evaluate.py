@@ -3,11 +3,13 @@
 import argparse
 from pathlib import Path
 
-from dexmani_policy.common.config import load_experiment_config, register_resolvers, set_project_root
-from dexmani_policy.env_runner.evaluation import (
-    add_evaluation_arguments,
-    evaluate_checkpoint,
+from dexmani_policy.common.config import (
+    load_experiment_config,
+    register_resolvers,
+    set_project_root,
 )
+from dexmani_policy.evaluation.config import add_evaluation_arguments, parse_evaluation_overrides
+from dexmani_policy.evaluation.rollout import evaluate_checkpoint
 
 ROOT_DIR = set_project_root()
 register_resolvers()
@@ -40,7 +42,7 @@ def main(argv=None):
         use_ema=args.use_ema,
         action_steps=args.action_steps,
         inference_steps_list=[args.inference_steps] if args.inference_steps is not None else None,
-        overrides=args.overrides,
+        overrides=parse_evaluation_overrides(args.overrides),
         eval_seed=args.seed,
         selection_record=args.selection_record,
         record_video=False if args.no_videos else None,

@@ -6,9 +6,47 @@ from torch import nn
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.core.base_policy import BasePolicy, parameter_groups
-from dexmani_policy.agents.core.diffusion_policy import RGBObservationEncoder
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
+from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
 from dexmani_policy.agents.obs_encoder.text import CLIPTextEncoder
+from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
+from dexmani_policy.common.config import validate_action_clipping
+
+
+class MultiTaskDiTObservationEncoder(nn.Module):
+    consumed_observation_fields = ("joint_state", "rgb")
+
+    def __init__(
+        self,
+        rgb_backbone_name: str,
+        state_dim: int,
+        n_obs_steps: int,
+        state_out_dim: int = 64,
+        rgb_backbone_config: dict | None = None,
+    ) -> None:
+        super().__init__()
+        self.backbone, self.image_processor = build_rgb_encoder(
+            rgb_backbone_name, config=rgb_backbone_config
+        )
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.n_obs_steps = n_obs_steps
+        self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
+
+    def forward(self, obs: dict) -> torch.Tensor:
+        rgb = self.image_processor.process_images(obs["rgb"])
+
+        if isinstance(self.backbone, ResNetEncoder):
+            rgb = rgb.to(memory_format=torch.channels_last)
+
+        features = torch.cat(
+            [
+                self.backbone(rgb)["global_token"],
+                self.state_mlp(obs["joint_state"]),
+            ],
+            dim=-1,
+        )
+        return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
 def encode_task_embeddings(encoder: CLIPTextEncoder, task_texts: list[str]) -> torch.Tensor:
@@ -20,8 +58,13 @@ def encode_task_embeddings(encoder: CLIPTextEncoder, task_texts: list[str]) -> t
     )
 
 
-class MultiTaskPolicy(BasePolicy):
+class MultiTaskDiTPolicy(BasePolicy):
     """Language-conditioned RGB policy with cached task embeddings or online frozen CLIP."""
+
+    @classmethod
+    def validate_model_config(cls, cfg, spec) -> None:
+        if cfg.agent.get("action_decoder_type", "diffusion") == "diffusion":
+            validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
 
     def __init__(
         self,
@@ -65,7 +108,7 @@ class MultiTaskPolicy(BasePolicy):
             else None
         )
         text_dim = text_encoder.embed_dim if text_encoder is not None else text_embed_dim
-        obs_encoder = RGBObservationEncoder(
+        obs_encoder = MultiTaskDiTObservationEncoder(
             rgb_backbone_name=rgb_backbone_name,
             state_dim=state_dim,
             n_obs_steps=n_obs_steps,
@@ -151,24 +194,23 @@ class MultiTaskPolicy(BasePolicy):
 
     def encode_text(self, task_texts: list[str]) -> torch.Tensor:
         if self.task_emb_table is not None:
-            unknown = [t for t in task_texts if t not in self.task_to_idx]
-            if unknown:
-                raise ValueError(f"Unknown closed-set task text: {unknown}")
-            idx = torch.tensor(
-                [self.task_to_idx[t] for t in task_texts], device=self.task_emb_table.device
-            )
-            return self.text_proj(self.task_emb_table[idx].to(dtype=self.text_proj.weight.dtype))
-        emb = self.text_encoder(task_texts).squeeze(1)
-        return self.text_proj(emb.to(dtype=self.text_proj.weight.dtype))
+            try:
+                indices = [self.task_to_idx[text] for text in task_texts]
+            except KeyError as error:
+                raise ValueError(f"Unknown closed-set task text: {error.args[0]!r}") from error
+            indices = torch.tensor(indices, device=self.task_emb_table.device)
+            embedding = self.task_emb_table[indices]
+        else:
+            embedding = self.text_encoder(task_texts).squeeze(1)
+        return self.text_proj(embedding.to(dtype=self.text_proj.weight.dtype))
 
     def encode_observation(self, obs_dict: dict) -> torch.Tensor:
         task_texts = obs_dict["task_text"]
         obs_numerical = {k: v for k, v in obs_dict.items() if k not in ("task_text", "task_name")}
         obs = self.preprocess(obs_numerical)
-        cond = self.obs_encoder(obs)
+        condition = self.obs_encoder(obs)
         text_emb = self.encode_text(task_texts)
-        cond = torch.cat([cond, text_emb.to(device=cond.device, dtype=cond.dtype)], dim=-1)
-        return cond
+        return torch.cat([condition, text_emb.to(condition)], dim=-1)
 
     def optimizer_groups(
         self, lr: float, obs_lr: float, weight_decay: float, obs_weight_decay: float

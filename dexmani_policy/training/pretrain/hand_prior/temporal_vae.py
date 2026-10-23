@@ -26,7 +26,7 @@ def build_codec_dataset(cfg):
     validate_config(cfg)
     if (
         cfg.agent._target_
-        != "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy"
+        != "dexmani_policy.agents.policies.temporal_latent_flow.TemporalLatentFlowPolicy"
     ):
         raise ValueError("Codec preparation requires a TemporalLatentFlowPolicy configuration")
     if cfg.get("resume_from") is not None:

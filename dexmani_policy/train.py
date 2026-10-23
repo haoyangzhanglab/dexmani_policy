@@ -5,11 +5,13 @@ import os
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import hydra
+import torch
 
 from dexmani_policy.common.config import register_resolvers, set_project_root
 from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.training.builder import (
-    build_train_components,
+    build_dataset_and_normalizer,
+    build_training_components,
     build_trainer,
     compile_models,
     prepare_training,
@@ -24,20 +26,19 @@ set_project_root()
 def main(cfg):
     cfg, checkpoint = prepare_training(cfg)
     set_seed(cfg.training.seed)
-    components = build_train_components(cfg, resume_checkpoint=checkpoint)
+    if cfg.training.get("num_gpus", 1) != 1:
+        raise ValueError("Single-device training requires num_gpus=1; use train_ddp.py for DDP")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available. This training script requires GPU.")
+    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
+    components = build_training_components(
+        cfg, torch.device(cfg.training.device), dataset, normalizer, checkpoint=checkpoint
+    )
     try:
         trainer = build_trainer(cfg, components)
         resume_state = None
         if checkpoint is not None:
-            resume_state = restore_training_state(
-                checkpoint,
-                resume_contract=trainer.resume_contract,
-                effective_config=cfg,
-                ema_updater=components.ema_updater,
-                optimizer=components.optimizer,
-                scheduler=components.scheduler,
-                device=components.device,
-            )
+            resume_state = restore_training_state(checkpoint, components, effective_config=cfg)
         del checkpoint
 
         components.workspace.save_hydra_config(cfg)

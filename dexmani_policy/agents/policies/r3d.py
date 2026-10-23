@@ -7,17 +7,16 @@ from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.r3d import R3DTransformer
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.core.base_policy import BasePolicy
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.common.config import validate_action_clipping
 
 
 class R3DObservationEncoder(nn.Module):
     """Concatenate Uni3D features, broadcast state and XYZ encoding as [B, T*K, 2*D+D_s]."""
 
-    @property
-    def consumed_observation_fields(self) -> tuple[str, ...]:
-        return ("joint_state", "point_cloud")
+    consumed_observation_fields = ("joint_state", "point_cloud")
 
     def __init__(
         self,
@@ -55,7 +54,9 @@ class R3DObservationEncoder(nn.Module):
 
 
 class R3DPolicy(BasePolicy):
-    """R3D diffusion policy with optional auxiliary wrist-pose prediction."""
+    @classmethod
+    def validate_model_config(cls, cfg, spec) -> None:
+        validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
 
     def __init__(
         self,
@@ -77,11 +78,9 @@ class R3DPolicy(BasePolicy):
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
         modality_dropout_probs: dict | None = None,
-        # EE auxiliary loss — wrist pose (pos3 + rot6d6 = 9dim)
         use_aux_ee: bool = False,
         joint_dim: int = 19,
         ee_dim: int = 9,
-        # Weight applied to the auxiliary EE loss, leaving the joint loss unchanged.
         aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
     ) -> None:

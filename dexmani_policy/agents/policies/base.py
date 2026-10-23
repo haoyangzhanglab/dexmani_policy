@@ -5,7 +5,6 @@ from typing import Any
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
 
@@ -38,6 +37,8 @@ def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> li
 class BasePolicy(nn.Module):
     """Shared observation preprocessing, training and action-window interfaces."""
 
+    requires_hand_pretraining = False
+
     def __init__(
         self,
         obs_encoder: nn.Module,
@@ -58,6 +59,25 @@ class BasePolicy(nn.Module):
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = AffineNormalizer()
         self.normalization_dims = {}
+
+    @classmethod
+    def validate_model_config(cls, cfg, spec) -> None:
+        """Validate model-specific constraints before constructing data or weights."""
+
+    @property
+    def consumed_observation_fields(self) -> tuple[str, ...]:
+        return self.obs_encoder.consumed_observation_fields
+
+    @property
+    def supported_execution_modes(self) -> tuple[str, ...]:
+        modes = ("sync", "async")
+        if (
+            type(self).predict_action is BasePolicy.predict_action
+            and type(self).predict_action_from_condition is BasePolicy.predict_action_from_condition
+            and isinstance(self.action_decoder, Diffusion)
+        ):
+            return (*modes, "rtc")
+        return modes
 
     def set_normalization_spec(
         self, spec: dict[str, str], feature_dims: dict[str, int] | None = None
@@ -91,11 +111,9 @@ class BasePolicy(nn.Module):
 
     @property
     def requires_ema_for_loss(self) -> bool:
-        """Whether the action decoder needs a local EMA copy to build targets."""
         return bool(getattr(self.action_decoder, "requires_ema_for_loss", False))
 
     def get_training_loss_kwargs(self, ema_agent: BasePolicy | None = None) -> dict:
-        """Return decoder-specific training dependencies in a generic form."""
         if not self.requires_ema_for_loss:
             return {}
         if ema_agent is None:
@@ -105,7 +123,6 @@ class BasePolicy(nn.Module):
         return {"ema_decoder": ema_agent.action_decoder}
 
     def validate_batch(self, batch: dict) -> None:
-        """Check action windows and matching observation batches before normalization."""
         action = batch["action"]
         if action.shape[1:] != (self.horizon, self.action_dim):
             raise ValueError(
@@ -114,13 +131,13 @@ class BasePolicy(nn.Module):
         self.validate_observations(batch["obs"], expected_batch=action.shape[0])
 
     def validate_observations(self, obs_dict: dict, expected_batch: int | None = None) -> None:
-        """Require (B, T, ...) tensors with T >= n_obs_steps and a common B."""
+        """Require (B, T, ...) tensors with T == n_obs_steps and a common B."""
         for key, value in obs_dict.items():
             if not torch.is_tensor(value):
                 continue
-            if value.ndim < 2 or value.shape[1] < self.n_obs_steps:
+            if value.ndim < 2 or value.shape[1] != self.n_obs_steps:
                 raise ValueError(
-                    f"obs['{key}'] requires (B, T >= {self.n_obs_steps}, ...), "
+                    f"obs['{key}'] requires (B, T == {self.n_obs_steps}, ...), "
                     f"got {tuple(value.shape)}"
                 )
             if expected_batch is None:
@@ -134,7 +151,6 @@ class BasePolicy(nn.Module):
         result = {}
         for key, value in obs_dict.items():
             if torch.is_tensor(value):
-                value = value[:, : self.n_obs_steps]
                 # Runners may supply XYZRGB even when the policy consumes only XYZ.
                 if key == "point_cloud" and self.normalization_dims.get(key) == 3:
                     value = value[..., :3]
@@ -164,13 +180,13 @@ class BasePolicy(nn.Module):
         self, batch: dict, *, log_metrics: bool = True, **kwargs
     ) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
-        cond = self.encode_observation(batch["obs"])
-        normed_actions = self.normalizer["action"].normalize(batch["action"])
+        condition = self.encode_observation(batch["obs"])
+        normalized_actions = self.normalizer["action"].normalize(batch["action"])
         groups = self.loss_groups()
         if groups is not None:
             kwargs["dim_groups"] = groups
         return self.action_decoder.compute_loss(
-            cond, normed_actions, log_metrics=log_metrics, **kwargs
+            condition, normalized_actions, log_metrics=log_metrics, **kwargs
         )
 
     @torch.no_grad()
@@ -184,13 +200,13 @@ class BasePolicy(nn.Module):
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
         self.validate_observations(obs_dict)
-        cond = self.encode_observation(obs_dict)
+        condition = self.encode_observation(obs_dict)
         if rtc_prefix is None or rtc_guidance_cap == 0:
-            return self.predict_action_from_cond(cond, inference_steps=inference_steps)
-        if type(self).predict_action_from_cond is not BasePolicy.predict_action_from_cond:
+            return self.predict_action_from_condition(condition, inference_steps=inference_steps)
+        if type(self).predict_action_from_condition is not BasePolicy.predict_action_from_condition:
             raise NotImplementedError("RTC requires the continuous BasePolicy DDIM path")
-        return self.predict_action_from_cond(
-            cond,
+        return self.predict_action_from_condition(
+            condition,
             inference_steps=inference_steps,
             rtc_prefix=rtc_prefix,
             delay_steps=delay_steps,
@@ -203,22 +219,16 @@ class BasePolicy(nn.Module):
         return self.action_dim
 
     @torch.no_grad()
-    def predict_action_from_cond(
+    def predict_action_from_condition(
         self,
-        cond: torch.Tensor,
+        condition: torch.Tensor,
         inference_steps: int | None = None,
         *,
         rtc_prefix: torch.Tensor | None = None,
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
-        template = torch.zeros(
-            cond.shape[0],
-            self.horizon,
-            self.action_dim,
-            device=cond.device,
-            dtype=cond.dtype,
-        )
+        template = condition.new_zeros((condition.shape[0], self.horizon, self.action_dim))
         kwargs = {}
         if rtc_prefix is not None and rtc_guidance_cap != 0:
             if not isinstance(self.action_decoder, Diffusion):
@@ -233,11 +243,11 @@ class BasePolicy(nn.Module):
                 history_offset=self.n_obs_steps - 1,
                 rtc_guidance_cap=rtc_guidance_cap,
             )
-        pred = self.action_decoder.predict_action(
-            cond, template, inference_steps=inference_steps, **kwargs
+        prediction = self.action_decoder.predict_action(
+            condition, template, inference_steps=inference_steps, **kwargs
         )
-        pred = self.normalizer["action"].unnormalize(pred)
-        return self.format_action_output(pred)
+        prediction = self.normalizer["action"].unnormalize(prediction)
+        return self.format_action_output(prediction)
 
     def format_action_output(self, prediction: torch.Tensor) -> dict[str, torch.Tensor]:
         start = self.n_obs_steps - 1
@@ -257,49 +267,3 @@ class BasePolicy(nn.Module):
         return parameter_groups(
             self.action_decoder.model, lr=lr, weight_decay=weight_decay
         ) + parameter_groups(self.obs_encoder, lr=obs_lr, weight_decay=obs_weight_decay)
-
-
-class UNetDiffusionPolicy(BasePolicy):
-    def __init__(
-        self,
-        obs_encoder: nn.Module,
-        horizon: int,
-        n_obs_steps: int,
-        n_action_steps: int,
-        action_dim: int,
-        diffusion_step_embed_dim: int = 256,
-        down_dims: tuple[int, ...] = (256, 512, 1024),
-        kernel_size: int = 5,
-        n_groups: int = 8,
-        num_training_steps: int = 100,
-        num_inference_steps: int = 10,
-        prediction_type: str = "sample",
-        modality_dropout_probs: dict[str, float] | None = None,
-        cond_predict_scale: bool = True,
-        clip_sample: bool = True,
-    ) -> None:
-        backbone = ConditionalUNet1D(
-            input_dim=action_dim,
-            context_dim=obs_encoder.out_dim * n_obs_steps,
-            diffusion_step_embed_dim=diffusion_step_embed_dim,
-            down_dims=list(down_dims),
-            kernel_size=kernel_size,
-            n_groups=n_groups,
-            cond_predict_scale=cond_predict_scale,
-        )
-        action_decoder = Diffusion(
-            backbone,
-            num_training_steps,
-            num_inference_steps,
-            prediction_type,
-            clip_sample=clip_sample,
-        )
-        super().__init__(
-            obs_encoder,
-            action_decoder,
-            horizon,
-            n_obs_steps,
-            n_action_steps,
-            action_dim,
-            modality_dropout_probs=modality_dropout_probs,
-        )

@@ -60,7 +60,7 @@ dataset:
 # ── Agent ──
 agent:
   clip_sample: true
-  _target_: dexmani_policy.agents.core.dp3_policy.DP3Policy
+  _target_: dexmani_policy.agents.policies.dp3.DP3Policy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}

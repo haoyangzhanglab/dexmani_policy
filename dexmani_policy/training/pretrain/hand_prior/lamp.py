@@ -26,7 +26,7 @@ from dexmani_policy.training.validation import validate_config
 def build_prior_dataset(cfg):
     """Bootstrap the exact policy split/history rules without opening artifacts."""
     validate_config(cfg)
-    if cfg.agent._target_ != "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
+    if cfg.agent._target_ != "dexmani_policy.agents.policies.lamp.LAMPPolicy":
         raise ValueError("Prior preparation requires a LAMPPolicy configuration")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare prior artifacts from a fresh policy config, not resume_from")

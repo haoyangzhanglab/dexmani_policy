@@ -117,11 +117,9 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
     if source is None:
         return copy.deepcopy(cfg)
     if resume_checkpoint is None:
-        from dexmani_policy.common.checkpoint import CheckpointStore
+        from dexmani_policy.common.checkpoint import read_checkpoint
 
-        source_config = CheckpointStore(Path(source).parent).load_payload(source)[
-            "effective_config"
-        ]
+        source_config = read_checkpoint(source)["effective_config"]
     else:
         source_config = resume_checkpoint.effective_config
     result = OmegaConf.create(source_config)
@@ -246,7 +244,9 @@ def validate_action_key_consistency(cfg) -> None:
 
 def load_experiment_config(experiment_dir):
     """Read the resolved snapshot without composing current repository YAML."""
-    return OmegaConf.to_container(OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True)
+    return OmegaConf.to_container(
+        OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True
+    )
 
 
 def validate_normalization_spec(spec, *, observation_fields=None):
@@ -320,22 +320,41 @@ def validate_action_clipping(spec, clip_sample):
         raise ValueError("Gaussian action normalization requires agent.clip_sample=false.")
 
 
+def validate_sparse3d_config(cfg, spec):
+    """Preserve metric XYZ and enough points for Sparse3D patch geometry."""
+    if spec.get("point_cloud") != "identity":
+        raise ValueError(
+            "Sparse3DEncoder requires normalization.point_cloud: identity (metric XYZ)"
+        )
+    encoder = cfg.agent.get("pc_encoder_config") or {}
+    sizes = {
+        name: positive_int(encoder.get(name, default), name)
+        for name, default in (("num_patches", 96), ("group_size", 32))
+    }
+    point_limit = positive_int(cfg.agent.get("num_points", 1024), "agent.num_points")
+    if point_limit < max(sizes.values()):
+        raise ValueError("agent.num_points must be at least max(num_patches, group_size)")
+    for child in cfg.dataset.get("datasets", [cfg.dataset]):
+        augmentation = child.get("augmentation_cfg")
+        if "datasets" in cfg.dataset and cfg.dataset.get("augmentation_cfg") is not None:
+            augmentation = cfg.dataset.augmentation_cfg
+        augmentation = augmentation or {}
+        keep_points = (augmentation.get("pc") or {}).get("random_keep_points")
+        if keep_points is not None:
+            positive_int(keep_points, "random_keep_points")
+            for name, size in sizes.items():
+                if keep_points < size:
+                    raise ValueError(f"random_keep_points={keep_points} must be >= {name}={size}")
+
+
 def positive_int(value: int, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
     return value
 
 
-def validate_observation_fields(agent, declared, *, require_declaration=False):
-    consumed = getattr(agent, "consumed_observation_fields", None)
-    if consumed is None:
-        consumed = getattr(getattr(agent, "obs_encoder", None), "consumed_observation_fields", None)
-    if consumed is None:
-        if require_declaration:
-            raise ValueError(
-                "Real deployment requires consumed_observation_fields on Agent or encoder"
-            )
-        return
+def validate_observation_fields(agent, declared):
+    consumed = agent.consumed_observation_fields
     missing = set(consumed) - set(declared)
     unused = set(declared) - set(consumed)
     if missing or unused:

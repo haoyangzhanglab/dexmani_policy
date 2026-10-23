@@ -6,10 +6,64 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.agents.core.base_policy import BasePolicy
-from dexmani_policy.agents.core.sat_policy import SATObservationEncoder
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
-from dexmani_policy.common.config import validate_action_window
+from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.common.config import positive_int, validate_sparse3d_config
+
+
+class LAMPObservationEncoder(nn.Module):
+    """Pool patch features and concatenate state as [B, T*D]."""
+
+    consumed_observation_fields = ("joint_state", "point_cloud")
+
+    @property
+    def warmup_num_points(self) -> int:
+        return self.num_points
+
+    def __init__(
+        self,
+        pc_dim: int,
+        state_dim: int,
+        num_points: int,
+        n_obs_steps: int,
+        state_out_dim: int = 64,
+        pc_encoder_config: dict | None = None,
+        fps_random_config: dict | None = None,
+    ) -> None:
+        super().__init__()
+        pc_encoder_config = dict(pc_encoder_config or {})
+        pc_encoder_config.setdefault("fps_random_config", fps_random_config)
+
+        positive_int(num_points, "num_points")
+        positive_int(n_obs_steps, "n_obs_steps")
+        pc_encoder_config.setdefault("num_patches", 96)
+        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **pc_encoder_config)
+        self.pc_encoder.effective_config = dict(pc_encoder_config)
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.num_points = num_points
+        self.use_coord_only = pc_dim == 3
+        self.n_obs_steps = n_obs_steps
+        self.fps_random_config = fps_random_config or {}
+
+        self.out_dim = n_obs_steps * (self.pc_encoder.out_dim + self.state_mlp.out_dim)
+
+    def forward(self, obs: dict) -> torch.Tensor:
+        pc = preprocess_point_cloud(
+            obs["point_cloud"],
+            self.num_points,
+            self.use_coord_only,
+            self.fps_random_config,
+            training=self.training,
+        )
+
+        pc_features = self.pc_encoder(pc)["tokens"].mean(dim=1)
+        state_features = self.state_mlp(obs["joint_state"])
+        features = torch.cat([pc_features, state_features], dim=-1)
+
+        return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
 class LAMPRegressionHead(nn.Module):
@@ -26,6 +80,25 @@ class LAMPRegressionHead(nn.Module):
 
 
 class LAMPPolicy(BasePolicy):
+    supported_execution_modes = ("sync",)
+    requires_hand_pretraining = True
+
+    @classmethod
+    def validate_model_config(cls, cfg, spec) -> None:
+        validate_sparse3d_config(cfg, spec)
+        if cfg.action_key != "action" or cfg.action_dim != 19 or cfg.agent.state_dim != 19:
+            raise ValueError("LAMP requires joint action/state=7+12")
+        if cfg.get("use_aux_ee", False):
+            raise ValueError("LAMP does not support auxiliary action targets")
+        if (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps) != (1, 1, 1):
+            raise ValueError("LAMP requires H=Nobs=C=1")
+        if cfg.dataset.history_steps != cfg.agent.history_steps:
+            raise ValueError("LAMP dataset/policy history_steps must match")
+        if cfg.agent.get("num_inference_steps", 1) != 1 or cfg.eval.inference_steps != 1:
+            raise ValueError("LAMP requires inference_steps=1 in agent/eval")
+        if cfg.eval.get("inference_steps_list") not in (None, [1]):
+            raise ValueError("LAMP inference_steps_list must be null or [1]")
+
     def __init__(
         self,
         horizon: int,
@@ -47,23 +120,32 @@ class LAMPPolicy(BasePolicy):
         offset_reg_weight: float = 1e-3,
         modality_dropout_probs: dict | None = None,
     ) -> None:
-        validate_action_window(horizon, n_obs_steps, n_action_steps)
-        if (horizon, n_obs_steps, n_action_steps) != (1, 1, 1):
+        if any(
+            type(value) is not int or value != 1 for value in (horizon, n_obs_steps, n_action_steps)
+        ):
             raise ValueError("LAMP requires horizon=n_obs_steps=n_action_steps=1")
         if action_dim != 19 or state_dim != 19:
             raise ValueError("LAMP requires joint action/state: 7 arm + 12 hand")
         self.validate_inference_steps(num_inference_steps)
-        for name, weight in (("hand_loss_weight", hand_loss_weight),
-                             ("offset_reg_weight", offset_reg_weight)):
+        for name, weight in (
+            ("hand_loss_weight", hand_loss_weight),
+            ("offset_reg_weight", offset_reg_weight),
+        ):
             if not 0 <= weight < float("inf"):
                 raise ValueError(f"{name} must be finite and nonnegative")
-        encoder = SATObservationEncoder(
-            pc_dim, state_dim, num_points, n_obs_steps, state_out_dim,
-            pc_encoder_config, fps_random_config,
+        encoder = LAMPObservationEncoder(
+            pc_dim,
+            state_dim,
+            num_points,
+            n_obs_steps,
+            state_out_dim,
+            pc_encoder_config,
+            fps_random_config,
         )
-        head = LAMPRegressionHead(encoder.obs_token_dim + 2 * latent_dim, 7 + latent_dim)
-        super().__init__(encoder, head, horizon, n_obs_steps, n_action_steps,
-                         action_dim, modality_dropout_probs)
+        head = LAMPRegressionHead(encoder.out_dim + 2 * latent_dim, 7 + latent_dim)
+        super().__init__(
+            encoder, head, horizon, n_obs_steps, n_action_steps, action_dim, modality_dropout_probs
+        )
         self.arm_dim, self.hand_dim = 7, 12
         self.history_steps, self.latent_dim = history_steps, latent_dim
         self.prior_path = prior_path
@@ -103,9 +185,12 @@ class LAMPPolicy(BasePolicy):
             return
         params = self.normalizer["action"].params_dict
         for name in ("scale", "offset"):
-            if not torch.allclose(params[name][-12:].detach().cpu(),
-                                  getattr(self.prior, "hand_" + name).detach().cpu(),
-                                  rtol=1e-5, atol=1e-6):
+            if not torch.allclose(
+                params[name][-12:].detach().cpu(),
+                getattr(self.prior, "hand_" + name).detach().cpu(),
+                rtol=1e-5,
+                atol=1e-6,
+            ):
                 raise ValueError("LAMP prior/policy hand affine mismatch; regenerate the prior")
 
     def train(self, mode: bool = True) -> LAMPPolicy:
@@ -113,40 +198,41 @@ class LAMPPolicy(BasePolicy):
         self.prior.eval()
         return self
 
-    def encode_condition(self, obs: dict, action_context: dict | None):
+    def encode_condition(
+        self, obs: dict, action_context: dict | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.prior_initialized:
             raise RuntimeError("Initialize a LAMP prior or restore a complete policy checkpoint")
         context = {} if action_context is None else action_context
         if not isinstance(context, dict) or set(context) != {"hand_history"}:
             raise ValueError("LAMP requires only action_context.hand_history")
         history = context["hand_history"]
-        if (not isinstance(history, torch.Tensor)
-                or history.shape != (obs["joint_state"].shape[0], self.history_steps, 12)
-                or not torch.isfinite(history).all()):
+        if (
+            not isinstance(history, torch.Tensor)
+            or history.shape != (obs["joint_state"].shape[0], self.history_steps, self.hand_dim)
+            or not torch.isfinite(history).all()
+        ):
             raise ValueError("LAMP requires finite physical hand_history [B,K,12]")
         with torch.no_grad(), torch.autocast(device_type=history.device.type, enabled=False):
             mu, log_var = self.prior.encode_history(history.float())
             sigma = torch.exp(0.5 * log_var)
-            if not torch.isfinite(mu).all() or not torch.isfinite(sigma).all():
-                raise ValueError("LAMP prior produced nonfinite statistics")
-        global_token = self.encode_observation(obs)[:, 0, :]
-        condition = torch.cat((global_token, mu.to(global_token.dtype),
-                               sigma.to(global_token.dtype)), dim=-1)
+        global_token = self.encode_observation(obs)
+        condition = torch.cat(
+            (global_token, mu.to(global_token.dtype), sigma.to(global_token.dtype)), dim=-1
+        )
         return condition, mu
 
     def decode_hand(self, offset: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
         with torch.autocast(device_type=offset.device.type, enabled=False):
             return self.prior.decode(mu + offset.float())
 
-    def compute_loss(
-        self, batch: dict, *, log_metrics: bool = True
-    ) -> tuple[torch.Tensor, dict]:
+    def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
         condition, mu = self.encode_condition(batch["obs"], batch.get("action_context"))
         native = self.action_decoder(condition).float()
-        arm, offset = native[:, :7], native[:, 7:]
-        target = self.normalizer["action"].normalize(batch["action"])[:, 0, :7]
-        hand_target = self.prior.normalize_hand(batch["action"][:, 0, 7:].float())
+        arm, offset = native[:, : self.arm_dim], native[:, self.arm_dim :]
+        target = self.normalizer["action"].normalize(batch["action"])[:, 0, : self.arm_dim]
+        hand_target = self.prior.normalize_hand(batch["action"][:, 0, self.arm_dim :].float())
         hand = self.decode_hand(offset, mu)
         arm_loss = F.mse_loss(arm, target)
         hand_loss = F.mse_loss(hand, hand_target)
@@ -175,27 +261,31 @@ class LAMPPolicy(BasePolicy):
     @torch.no_grad()
     def predict_action(
         self,
-        obs_dict,
-        inference_steps=None,
+        obs_dict: dict,
+        inference_steps: int | None = None,
         *,
-        action_context=None,
-        rtc_prefix=None,
-        delay_steps=0,
-        rtc_guidance_cap=0.0,
-    ):
+        action_context: dict | None = None,
+        rtc_prefix: torch.Tensor | None = None,
+        delay_steps: int = 0,
+        rtc_guidance_cap: float = 0.0,
+    ) -> dict[str, torch.Tensor]:
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("LAMP supports synchronous execution only")
         self.validate_observations(obs_dict)
         condition, mu = self.encode_condition(obs_dict, action_context)
-        return self.predict_action_from_cond(condition, inference_steps, mu=mu)
+        return self.predict_action_from_condition(condition, inference_steps, mu=mu)
 
     @torch.no_grad()
-    def predict_action_from_cond(self, cond, inference_steps=None, *, mu):
+    def predict_action_from_condition(
+        self, condition: torch.Tensor, inference_steps: int | None = None, *, mu: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
         self.validate_inference_steps(inference_steps)
-        native = self.action_decoder(cond).float()
+        native = self.action_decoder(condition).float()
         params = self.normalizer["action"].params_dict
-        arm = (native[:, :7] - params["offset"][:7]) / params["scale"][:7]
-        hand = self.prior.unnormalize_hand(self.decode_hand(native[:, 7:], mu))
+        arm = (native[:, : self.arm_dim] - params["offset"][: self.arm_dim]) / params["scale"][
+            : self.arm_dim
+        ]
+        hand = self.prior.unnormalize_hand(self.decode_hand(native[:, self.arm_dim :], mu))
         prediction = torch.cat((arm, hand), dim=-1)[:, None]
         if not torch.isfinite(prediction).all():
             raise ValueError("LAMP produced a nonfinite action")

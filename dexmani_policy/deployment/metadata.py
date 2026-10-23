@@ -8,11 +8,15 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
-from dexmani_policy.common.checkpoint import (
+from dexmani_policy.common.experiments import (
     resolve_best_checkpoint,
     resolve_checkpoint_path,
 )
-from dexmani_policy.common.config import load_experiment_config, positive_int, validate_action_window
+from dexmani_policy.common.config import (
+    load_experiment_config,
+    positive_int,
+    validate_action_window,
+)
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 
 EXPERIMENTS_ROOT = Path(__file__).resolve().parents[2] / "experiments"
@@ -52,15 +56,6 @@ class PolicyInfo:
         OmegaConf.resolve(config)
         OmegaConf.set_readonly(config, True)
         object.__setattr__(self, "saved_config", config)
-
-    def validate_execution_mode(self, mode):
-        if mode not in {"sync", "async", "rtc"}:
-            raise ValueError("Unsupported execution mode")
-        if mode != "sync" and self.saved_config.agent.get("_target_") in {
-            "dexmani_policy.agents.core.lamp_policy.LAMPPolicy",
-            "dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy",
-        }:
-            raise NotImplementedError("LAMP and Temporal support sync execution only")
 
     def to_dict(self):
         """Serialize the deployment summary without duplicating the saved configuration."""
@@ -160,7 +155,7 @@ class PolicyInfo:
     def hand_history_steps(self):
         if (
             self.saved_config.agent.get("_target_")
-            == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy"
+            == "dexmani_policy.agents.policies.lamp.LAMPPolicy"
         ):
             return self.saved_config.agent.history_steps
         return None
@@ -171,7 +166,7 @@ def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_ste
     cfg = load_experiment_config(directory)
     if (
         cfg["agent"].get("_target_")
-        == "dexmani_policy.agents.core.multitask_policy.MultiTaskPolicy"
+        == "dexmani_policy.agents.policies.multitask_dit.MultiTaskDiTPolicy"
         or cfg["dataset"].get("_target_")
         == "dexmani_policy.datasets.multitask_dataset.MultiTaskDataset"
     ):
@@ -184,9 +179,7 @@ def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_ste
         if resolved_best is not None
         else resolve_checkpoint_path(directory, str(checkpoint))
     )
-    defaults = (
-        resolved_best[0]["inference"] if resolved_best is not None else cfg.get("eval", {})
-    )
+    defaults = resolved_best[0]["inference"] if resolved_best is not None else cfg.get("eval", {})
     if weights is None:
         if type(defaults.get("use_ema")) is not bool:
             raise ValueError("Inference defaults require boolean use_ema")
@@ -197,7 +190,7 @@ def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_ste
         defaults.get("inference_steps") if inference_steps is None else inference_steps,
         "inference_steps",
     )
-    if cfg["agent"].get("_target_") == "dexmani_policy.agents.core.lamp_policy.LAMPPolicy":
+    if cfg["agent"].get("_target_") == "dexmani_policy.agents.policies.lamp.LAMPPolicy":
         if steps != 1:
             raise ValueError("LAMP requires inference_steps=1")
         history = positive_int(cfg["agent"]["history_steps"], "agent.history_steps")

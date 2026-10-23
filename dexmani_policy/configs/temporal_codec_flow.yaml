@@ -57,7 +57,7 @@ dataset:
       noise: {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  _target_: dexmani_policy.agents.core.temporal_latent_flow_policy.TemporalLatentFlowPolicy
+  _target_: dexmani_policy.agents.policies.temporal_latent_flow.TemporalLatentFlowPolicy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}

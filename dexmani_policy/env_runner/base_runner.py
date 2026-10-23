@@ -30,7 +30,6 @@ class BaseRunner:
         self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
         self.sensor_modalities = sensor_modalities or ["point_cloud", "joint_state"]
         self.obs_buffer: dict[str, np.ndarray | torch.Tensor] = {}
-        self.obs_strings: dict[str, str] = {}
         self.obs_cursor = 0
         self.obs_count = 0
         self.hand_history = None
@@ -39,7 +38,11 @@ class BaseRunner:
         self.clear_cache_freq = clear_cache_freq
         self.rgb_preprocessing = None
 
-    def update_obs(self, observation: dict[str, Any]):
+    @property
+    def task_runners(self):
+        return {self.task_name: self}
+
+    def validate_observation(self, observation: dict[str, Any]):
         missing = set(self.sensor_modalities) - observation.keys()
         if missing:
             raise ValueError(f"Missing required observation frame fields: {sorted(missing)}")
@@ -58,24 +61,20 @@ class BaseRunner:
                     )
                 ):
                     raise ValueError(f"Observation {name} changed type, shape, dtype or device")
-            elif name in self.obs_strings:
-                if not isinstance(value, str):
-                    raise TypeError(f"Observation {name} changed from string to numeric")
             elif isinstance(value, np.ndarray):
                 if value.dtype.kind not in "buif":
                     raise TypeError(f"Observation {name} must be a numeric array")
             elif torch.is_tensor(value):
                 if value.layout != torch.strided or value.is_complex():
                     raise TypeError(f"Observation {name} must be a dense real tensor")
-            elif not isinstance(value, str):
+            else:
                 raise TypeError(f"Unsupported observation type for {name}: {type(value).__name__}")
 
+    def update_obs(self, observation: dict[str, Any]):
+        self.validate_observation(observation)
         position = self.obs_cursor % self.n_obs_steps
         for name in self.sensor_modalities:
             value = observation[name]
-            if isinstance(value, str):
-                self.obs_strings[name] = value
-                continue
             if name not in self.obs_buffer:
                 shape = (self.n_obs_steps, *value.shape)
                 self.obs_buffer[name] = (
@@ -104,9 +103,6 @@ class BaseRunner:
                 if buffer.device not in tensor_indices:
                     tensor_indices[buffer.device] = torch.as_tensor(indices, device=buffer.device)
                 stacked[name] = buffer[tensor_indices[buffer.device]]
-        stacked.update(
-            {name: [value] * self.n_obs_steps for name, value in self.obs_strings.items()}
-        )
         return stacked
 
     def get_obs_batch(self, device) -> dict[str, Any]:
@@ -116,24 +112,20 @@ class BaseRunner:
                 if self.rgb_preprocessing is None:
                     raise ValueError("RGB runner requires the saved Dataset preprocessing recipe")
                 value = preprocess_validation_rgb(value, **self.rgb_preprocessing)
-            if isinstance(value, (np.ndarray, torch.Tensor)):
-                dtype = None if name in {"rgb", "tactile_valid"} else torch.float32
-                value = torch.as_tensor(value, device=device, dtype=dtype).unsqueeze(0)
-            batch[name] = value
+            dtype = None if name in {"rgb", "tactile_valid"} else torch.float32
+            batch[name] = torch.as_tensor(value, device=device, dtype=dtype).unsqueeze(0)
         return batch
 
     def reset(self):
         self.obs_buffer.clear()
-        self.obs_strings.clear()
         self.obs_cursor = 0
         self.obs_count = 0
         self.hand_history = None
 
     @torch.no_grad()
     def get_action_chunk(
-        self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int | None = None
+        self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int
     ) -> np.ndarray:
-        steps = resolve_action_steps(agent, action_steps)
         kwargs = {}
         if getattr(agent, "history_steps", 0):
             if self.hand_history is None:
@@ -147,7 +139,7 @@ class BaseRunner:
         if prediction.shape != (1, agent.horizon, agent.action_dim):
             raise ValueError("pred_action must contain one complete physical action trajectory")
         start = agent.n_obs_steps - 1
-        actions = prediction[0, start : start + steps, : agent.control_action_dim]
+        actions = prediction[0, start : start + action_steps, : agent.control_action_dim]
         return np.ascontiguousarray(actions.detach().cpu().numpy())
 
     def run_one_episode(
@@ -157,7 +149,7 @@ class BaseRunner:
         episode_seed,
         inference_steps: int | None = None,
         *,
-        action_steps: int | None = None,
+        action_steps: int,
     ):
         """Record first raw success separately from the final hold/grace success."""
         obs, _ = env.reset(seed=episode_seed)
@@ -210,11 +202,11 @@ class BaseRunner:
     def run(
         self,
         agent,
-        inference_steps: int | None = None,
-        video_save_dir: Path | None = None,
         *,
-        seeds: list[int],
+        task_seeds: dict[str, list[int]],
+        inference_steps: int | None = None,
         action_steps: int | None = None,
+        video_save_dir: Path | None = None,
     ):
         details = []
         videos = []
@@ -225,8 +217,8 @@ class BaseRunner:
             action_steps = resolve_action_steps(agent, action_steps)
             if inference_steps is not None:
                 positive_int(inference_steps, "inference_steps")
-            seeds = list(seeds)
-            count = validate_task_seeds({task: seeds}, [task])
+            count = validate_task_seeds(task_seeds, self.task_runners)
+            seeds = task_seeds[task]
 
             for index, seed in enumerate(seeds):
                 if env is None or (

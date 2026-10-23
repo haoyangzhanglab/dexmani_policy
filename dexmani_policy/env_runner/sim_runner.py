@@ -22,6 +22,7 @@ class SimRunner(BaseRunner):
         record_video: bool = True,
         render_mode: str = "rgb_array",
         viewer_resolution: tuple[int, int] | None = None,
+        task_text: str | None = None,
     ):
         super().__init__(
             n_obs_steps=n_obs_steps,
@@ -30,11 +31,18 @@ class SimRunner(BaseRunner):
             clear_cache_freq=clear_cache_freq,
         )
         self.task_name = task_name
+        self.task_text = task_text
         self.env_kwargs = env_kwargs or {}
         self.eval_seeds = eval_seeds
         self.record_video = record_video
         self.render_mode = render_mode
         self.viewer_resolution = viewer_resolution
+
+    def get_obs_batch(self, device):
+        batch = super().get_obs_batch(device)
+        if self.task_text is not None:
+            batch["task_text"] = [self.task_text]
+        return batch
 
     @staticmethod
     def expand_env_kwargs(env_kwargs: dict[str, Any]) -> dict[str, Any]:
