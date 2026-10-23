@@ -73,7 +73,7 @@ def main(argv=None):
                 raise ValueError(f"Unavailable demo seeds for {task}")
     else:
         episodes = resolve_evaluation_parameter(
-            cfg, "episodes", "demo", override=args.episodes, default=5
+            cfg, "episodes", "demo", override=args.episodes
         )
         plan, _ = split_evaluation_seeds(pools, cfg.eval.seed, episodes)
 

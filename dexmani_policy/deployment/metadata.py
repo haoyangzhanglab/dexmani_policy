@@ -8,14 +8,15 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
-from dexmani_policy.common.experiments import (
-    resolve_best_checkpoint,
-    resolve_checkpoint_path,
-)
 from dexmani_policy.common.config import (
     load_experiment_config,
     positive_int,
     validate_action_window,
+    validate_depth_recipe,
+)
+from dexmani_policy.common.experiments import (
+    resolve_best_checkpoint,
+    resolve_checkpoint_path,
 )
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 
@@ -56,6 +57,13 @@ class PolicyInfo:
         OmegaConf.resolve(config)
         OmegaConf.set_readonly(config, True)
         object.__setattr__(self, "saved_config", config)
+        if "depth" in self.observation_fields:
+            validate_depth_recipe(self.depth_config)
+        if "hand_pointcloud" in self.observation_fields:
+            recipe = self.hand_pointcloud_config
+            if not isinstance(recipe, dict):
+                raise ValueError("Hand-pointcloud input requires the saved template recipe")
+            positive_int(recipe.get("num_points"), "hand_pointcloud.num_points")
 
     def to_dict(self):
         """Serialize the deployment summary without duplicating the saved configuration."""
@@ -75,6 +83,8 @@ class PolicyInfo:
                 "action_mode",
                 "control_dt_s",
                 "pointcloud_config",
+                "hand_pointcloud_config",
+                "depth_config",
                 "fingertip_link_names",
                 "weights",
                 "inference_steps",
@@ -127,11 +137,21 @@ class PolicyInfo:
     @cached_property
     def control_dt_s(self):
         runtime = self.saved_config.get("real_runtime") or {}
-        return runtime.get("dt", self.saved_config.get("hand_data", {}).get("dt"))
+        return runtime.get("dt")
 
     @property
     def pointcloud_config(self):
         recipe = (self.saved_config.get("real_runtime") or {}).get("pointcloud")
+        return OmegaConf.to_container(recipe, resolve=True) if recipe is not None else None
+
+    @property
+    def hand_pointcloud_config(self):
+        recipe = (self.saved_config.get("real_runtime") or {}).get("hand_pointcloud")
+        return OmegaConf.to_container(recipe, resolve=True) if recipe is not None else None
+
+    @property
+    def depth_config(self):
+        recipe = (self.saved_config.get("real_runtime") or {}).get("depth")
         return OmegaConf.to_container(recipe, resolve=True) if recipe is not None else None
 
     @cached_property

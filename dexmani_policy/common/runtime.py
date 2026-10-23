@@ -8,12 +8,9 @@ import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    import torch
 
 
 @contextmanager
@@ -94,9 +91,3 @@ def dict_apply(x: dict, func: Callable) -> dict:
         else:
             result[key] = func(value)
     return result
-
-
-def ensure_tensor(x: torch.Tensor | np.ndarray) -> torch.Tensor:
-    import torch
-
-    return x if isinstance(x, torch.Tensor) else torch.from_numpy(x)

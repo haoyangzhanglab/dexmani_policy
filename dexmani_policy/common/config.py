@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import math
 import os
 import re
 from datetime import datetime
@@ -336,10 +337,13 @@ def validate_sparse3d_config(cfg, spec, *, default_num_patches=96):
     point_limit = positive_int(cfg.agent.get("num_points", 1024), "agent.num_points")
     if point_limit < max(sizes.values()):
         raise ValueError("agent.num_points must be at least max(num_patches, group_size)")
+    shared_augmentation = cfg.dataset.get("augmentation_cfg") if "datasets" in cfg.dataset else None
     for child in cfg.dataset.get("datasets", [cfg.dataset]):
-        augmentation = child.get("augmentation_cfg")
-        if "datasets" in cfg.dataset and cfg.dataset.get("augmentation_cfg") is not None:
-            augmentation = cfg.dataset.augmentation_cfg
+        augmentation = (
+            shared_augmentation
+            if shared_augmentation is not None
+            else child.get("augmentation_cfg")
+        )
         augmentation = augmentation or {}
         keep_points = (augmentation.get("pc") or {}).get("random_keep_points")
         if keep_points is not None:
@@ -355,10 +359,33 @@ def positive_int(value: int, name: str) -> int:
     return value
 
 
+def validate_depth_recipe(recipe):
+    """Depth is stored as raw counts; the scale defines their physical unit."""
+    if not isinstance(recipe, dict):
+        raise ValueError("Depth requires a saved shape/dtype/unit/scale recipe")
+    shape = recipe["shape"]
+    if not isinstance(shape, (list, tuple)) or len(shape) != 2:
+        raise ValueError("Depth recipe shape must be [H,W]")
+    for value in shape:
+        positive_int(value, "depth.shape")
+    scale = recipe["depth_scale_m"]
+    if (
+        recipe["dtype"] != "uint16"
+        or recipe["unit"] != "raw_counts"
+        or isinstance(scale, bool)
+        or not isinstance(scale, (int, float))
+        or not math.isfinite(scale)
+        or scale <= 0
+    ):
+        raise ValueError("Depth requires uint16 raw_counts and finite positive depth_scale_m")
+    return recipe
+
+
 def validate_observation_fields(agent, declared):
-    consumed = agent.consumed_observation_fields
-    missing = set(consumed) - set(declared)
-    unused = set(declared) - set(consumed)
+    consumed = set(agent.consumed_observation_fields)
+    declared = set(declared)
+    missing = consumed - declared
+    unused = declared - consumed
     if missing or unused:
         raise ValueError(
             f"Model observation mismatch: missing={sorted(missing)}, unconsumed={sorted(unused)}"

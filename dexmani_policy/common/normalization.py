@@ -178,7 +178,8 @@ class AffineNormalizer(NormalizerState):
         width = None
         mean = m2 = low = high = None
         for index, chunk in enumerate(chunks):
-            values = torch.as_tensor(chunk).to(torch.float64)
+            # Own the workspace so in-place statistics cannot modify source data.
+            values = torch.as_tensor(chunk).to(dtype=torch.float64, copy=True)
             if key in FINGER_VECTOR_FIELDS:
                 if values.shape[-2:] != (5, 3):
                     raise ValueError(f"{key} requires trailing feature shape (5, 3)")
@@ -195,13 +196,13 @@ class AffineNormalizer(NormalizerState):
                 raise ValueError(f"Inconsistent feature width for {key}: expected {width}")
             values = values.reshape(-1, width)
             size = len(values)
-            chunk_min, chunk_max = values.min(0).values, values.max(0).values
+            chunk_min, chunk_max = torch.aminmax(values, dim=0)
             if not (torch.isfinite(chunk_min).all() and torch.isfinite(chunk_max).all()):
                 raise ValueError(f"Nonfinite normalization field {key!r}, chunk {index}")
             low = chunk_min if low is None else torch.minimum(low, chunk_min)
             high = chunk_max if high is None else torch.maximum(high, chunk_max)
             chunk_mean = values.mean(0)
-            chunk_m2 = (values - chunk_mean).square_().sum(0)
+            chunk_m2 = values.sub_(chunk_mean).square_().sum(0)
             delta = chunk_mean - mean
             total = count + size
             m2 = m2 + chunk_m2 + delta.square() * (count * size / total)

@@ -80,7 +80,6 @@ def evaluation_snapshot(cfg, runners, **request):
 def save_evaluation_snapshot(directory, cfg, runners, **request):
     snapshot = evaluation_snapshot(cfg, runners, **request)
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
     with atomic_path(directory / "eval_config.yaml", overwrite=False) as temporary:
         temporary.write_text(OmegaConf.to_yaml(OmegaConf.create(snapshot), resolve=True))
     return artifact_reference(directory / "eval_config.yaml", cfg.experiment_dir)

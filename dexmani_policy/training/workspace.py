@@ -4,7 +4,7 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from dexmani_policy.common.checkpoint import TrainCheckpoint, save_training_checkpoint
+from dexmani_policy.common.checkpoint import TrainingCheckpoint, save_training_checkpoint
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.training.common.logging import JsonlLogger, WandbLogger
 
@@ -63,7 +63,7 @@ class Workspace:
         if self.wandb_logger is not None:
             self.wandb_logger.log(data, step=step)
 
-    def save_checkpoint(self, tag: str, checkpoint: TrainCheckpoint) -> Path:
+    def save_checkpoint(self, tag: str, checkpoint: TrainingCheckpoint) -> Path:
         filename = tag if str(tag).endswith(".pt") else f"{tag}.pt"
         return save_training_checkpoint(self.checkpoint_dir / filename, checkpoint)
 

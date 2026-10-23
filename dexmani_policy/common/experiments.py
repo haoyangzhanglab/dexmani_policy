@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def resolve_record_path(root, relative, *, checkpoint=False, immutable=False):
+def resolve_record_path(root, relative, *, checkpoint=False):
     if not isinstance(relative, str) or not relative:
         raise ValueError("Record requires a nonempty relative file path")
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError("Record path must be relative to experiment")
-    if immutable and (path.name == "latest.pt" or (root / path).is_symlink()):
+    if checkpoint and (path.name == "latest.pt" or (root / path).is_symlink()):
         raise ValueError("Selection must name an immutable milestone checkpoint")
     resolved = (root / path).resolve(strict=True)
     directory = root / "checkpoints" if checkpoint else root
@@ -33,8 +33,9 @@ def validate_inference_settings(info):
     if inference["policy_seed_mode"] != "episode_seed":
         raise ValueError("Record requires inference.policy_seed_mode=episode_seed")
     agent = OmegaConf.create(info["evaluation"]["effective_config"]["agent"])
-    steps = positive_int(inference["action_steps"], "inference.action_steps")
-    resolve_action_steps(agent, steps)
+    if inference["action_steps"] is None:
+        raise ValueError("Record requires explicit inference.action_steps")
+    resolve_action_steps(agent, inference["action_steps"])
 
 
 def resolve_selection_record(experiment_dir, record_path):
@@ -46,7 +47,7 @@ def resolve_selection_record(experiment_dir, record_path):
     if info["status"] != "success":
         raise ValueError("Selection has not completed successfully")
     validate_inference_settings(info)
-    checkpoint = resolve_record_path(root, info["ckpt_relpath"], checkpoint=True, immutable=True)
+    checkpoint = resolve_record_path(root, info["ckpt_relpath"], checkpoint=True)
     info["selection_result"] = str(record_path.relative_to(root))
     return info, checkpoint
 

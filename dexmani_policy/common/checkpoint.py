@@ -10,7 +10,7 @@ from dexmani_policy.common.runtime import atomic_path
 
 
 @dataclass
-class TrainCheckpoint:
+class TrainingCheckpoint:
     epoch: int
     global_step: int
     next_micro_step: int
@@ -24,7 +24,7 @@ class TrainCheckpoint:
     effective_config: dict[str, Any]
 
 
-def save_training_checkpoint(path: Path, checkpoint: TrainCheckpoint) -> Path:
+def save_training_checkpoint(path: Path, checkpoint: TrainingCheckpoint) -> Path:
     import torch
 
     path = Path(path)
@@ -58,14 +58,14 @@ def read_checkpoint(path: Path) -> dict:
     return torch.load(Path(path), map_location="cpu", weights_only=False)
 
 
-def load_training_checkpoint(path: Path) -> TrainCheckpoint:
+def load_training_checkpoint(path: Path) -> TrainingCheckpoint:
     payload = read_checkpoint(path)
     state = payload["state"]
     weights = payload["weights"]
     for key in ("epoch", "global_step", "next_micro_step"):
         if type(state[key]) is not int or state[key] < 0:
             raise ValueError(f"Checkpoint {key} must be an int >= 0")
-    return TrainCheckpoint(
+    return TrainingCheckpoint(
         epoch=state["epoch"],
         global_step=state["global_step"],
         next_micro_step=state["next_micro_step"],
@@ -80,8 +80,7 @@ def load_training_checkpoint(path: Path) -> TrainCheckpoint:
     )
 
 
-def inference_weights(payload, *, use_ema):
-    """Select raw or EMA tensors from a loaded checkpoint."""
+def select_inference_weights(payload, *, use_ema):
     state = payload["weights"]["ema_model" if use_ema else "model"]
     if state is None and use_ema:
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
@@ -122,30 +121,28 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     )
 
     payload = read_checkpoint(checkpoint_path)
-    if inference_config(payload["effective_config"]) != inference_config(saved_config):
+    if inference_recipe(payload["effective_config"]) != inference_recipe(saved_config):
         raise ValueError("Checkpoint inference recipe mismatch with saved config")
     saved_config = payload["effective_config"]
     cfg = OmegaConf.create(saved_config)
     validate_action_window(cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps)
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
-    state, global_step = inference_weights(payload, use_ema=use_ema)
-    cfg = checkpoint_agent_config(cfg)
+    state, global_step = select_inference_weights(payload, use_ema=use_ema)
+    cfg = prepare_restore_config(cfg)
     agent = hydra.utils.instantiate(cfg.agent)
     agent.checkpoint_step = global_step
-    agent.action_key = cfg.action_key
     agent.set_normalization_spec(
         resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
     )
     load_policy_state(agent, state)
     agent.validate_normalizer()
-    agent.inference_config = saved_config
     agent.to(device)
     agent.eval()
     return agent
 
 
-def inference_config(config):
+def inference_recipe(config):
     """Compare inference semantics without training, data-location or initialization settings."""
     from omegaconf import OmegaConf
 
@@ -173,13 +170,10 @@ def inference_config(config):
         "action_key": config["action_key"],
         "task_name": config.get("task_name"),
         "real_runtime": config.get("real_runtime"),
-        "control_dt": (config.get("real_runtime") or {}).get(
-            "dt", (config.get("hand_data") or {}).get("dt")
-        ),
     }
 
 
-def checkpoint_agent_config(cfg):
+def prepare_restore_config(cfg):
     """Construct from saved weights without loading external initialization assets."""
     import copy
     from omegaconf import DictConfig, open_dict

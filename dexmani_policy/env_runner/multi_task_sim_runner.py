@@ -79,7 +79,7 @@ class MultiTaskSimRunner:
             "success_rate": stats["macro_success_rate"],
             "macro_success_rate": stats["macro_success_rate"],
             "micro_success_rate": stats["micro_success_rate"],
-            "avg_steps": int(round(sum(steps) / len(steps))) if steps else None,
+            "avg_steps": round(sum(steps) / len(steps)) if steps else None,
             "videos": videos,
             "per_task": per_task,
             "n_success": stats["n_success"],

@@ -31,7 +31,6 @@ class BaseRunner:
         self.sensor_modalities = list(sensor_modalities)
         self.obs_buffer: dict[str, np.ndarray | torch.Tensor] = {}
         self.obs_cursor = 0
-        self.obs_count = 0
         self.hand_history = None
 
         self.env_video_fps = env_video_fps
@@ -46,6 +45,7 @@ class BaseRunner:
         missing = set(self.sensor_modalities) - observation.keys()
         if missing:
             raise ValueError(f"Missing required observation frame fields: {sorted(missing)}")
+
         # Check the whole frame before writes; NumPy assignment can silently broadcast.
         for name in self.sensor_modalities:
             value = observation[name]
@@ -84,16 +84,16 @@ class BaseRunner:
                 )
             self.obs_buffer[name][position] = value
         self.obs_cursor += 1
-        self.obs_count = min(self.obs_count + 1, self.n_obs_steps)
 
     def get_stacked_obs(self) -> dict[str, Any]:
         """Return independent chronological copies, padding the first observed frame."""
-        if self.obs_count == 0:
+        if self.obs_cursor == 0:
             raise RuntimeError("No observation in buffer")
-        if self.obs_count < self.n_obs_steps:
-            indices = np.maximum(np.arange(self.n_obs_steps) - self.n_obs_steps + self.obs_count, 0)
+        if self.obs_cursor < self.n_obs_steps:
+            indices = np.maximum(np.arange(self.n_obs_steps) - self.n_obs_steps + self.obs_cursor, 0)
         else:
             indices = (self.obs_cursor + np.arange(self.n_obs_steps)) % self.n_obs_steps
+
         stacked = {}
         tensor_indices = {}
         for name, buffer in self.obs_buffer.items():
@@ -119,11 +119,10 @@ class BaseRunner:
     def reset(self):
         self.obs_buffer.clear()
         self.obs_cursor = 0
-        self.obs_count = 0
         self.hand_history = None
 
     @torch.no_grad()
-    def get_action_chunk(
+    def predict_action_chunk(
         self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int
     ) -> np.ndarray:
         kwargs = {}
@@ -142,7 +141,7 @@ class BaseRunner:
         actions = prediction[0, start : start + action_steps, : agent.control_action_dim]
         return np.ascontiguousarray(actions.detach().cpu().numpy())
 
-    def run_one_episode(
+    def run_episode(
         self,
         agent,
         env,
@@ -163,8 +162,6 @@ class BaseRunner:
 
         # Environment reset does not seed the policy sampling generator.
         torch.manual_seed(episode_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(episode_seed)
 
         done = False
         truncated = False
@@ -174,24 +171,24 @@ class BaseRunner:
 
         while not (done or truncated):
             obs_batch = self.get_obs_batch(device=device)
-            action_chunk = self.get_action_chunk(
+            action_chunk = self.predict_action_chunk(
                 obs_batch, agent, inference_steps=inference_steps, action_steps=action_steps
             )
             for action in action_chunk:
                 obs, _, done, truncated, info = env.step(action)
                 if self.hand_history is not None:
                     # History follows the command actually applied after environment clipping.
-                    executed = np.asarray(info.get("executed_joint_action"), dtype=np.float32)
+                    executed = np.asarray(info["executed_joint_action"], dtype=np.float32)
                     if executed.shape != (agent.action_dim,) or not np.isfinite(executed).all():
                         raise ValueError("LAMP requires env.step info['executed_joint_action']")
                     self.hand_history[:-1] = self.hand_history[1:]
                     self.hand_history[-1] = executed[-agent.hand_dim :]
                 self.update_obs(obs)
 
-                if info.get("success_condition") and task_done_step is None:
-                    task_done_step = getattr(env, "action_cnt", None)
+                if info["success_condition"] and task_done_step is None:
+                    task_done_step = env.action_cnt
 
-                if info.get("success", False):
+                if info["success"]:
                     episode_success = True
 
                 if done or truncated:
@@ -235,7 +232,7 @@ class BaseRunner:
                         else getattr(env, "video_fps", 15)
                     )
                 try:
-                    success, steps = self.run_one_episode(
+                    success, steps = self.run_episode(
                         agent, env, seed, inference_steps, action_steps=action_steps
                     )
                 except Exception:
@@ -248,7 +245,7 @@ class BaseRunner:
                         "seed": seed,
                         "success": success,
                         "steps": steps,
-                        "total_steps": getattr(env, "action_cnt", None),
+                        "total_steps": env.action_cnt,
                     }
                 )
                 video = save_episode_video(env, video_save_dir, f"episode_{seed}", video_fps)

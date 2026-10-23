@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
-from dexmani_policy.common.checkpoint import TrainCheckpoint, policy_state_dict
+from dexmani_policy.common.checkpoint import TrainingCheckpoint, policy_state_dict
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.runtime import dict_apply, get_rng_state
 from dexmani_policy.training.common.logging import accumulate_metrics, to_log_scalars
@@ -205,7 +205,7 @@ class Trainer:
         if self.workspace is None or not self.is_main_process:
             self.last_checkpoint_step = global_step
             return
-        checkpoint = TrainCheckpoint(
+        checkpoint = TrainingCheckpoint(
             epoch=self.current_epoch,
             global_step=global_step,
             next_micro_step=self.next_micro_step,

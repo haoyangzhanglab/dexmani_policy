@@ -13,7 +13,7 @@ from dexmani_policy.common.rgb_preprocessing import (
     preprocess_validation_rgb,
     validate_rgb_preprocessing,
 )
-from dexmani_policy.common.runtime import dict_apply, ensure_tensor
+from dexmani_policy.common.runtime import dict_apply
 from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
@@ -237,7 +237,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         if self.rgb_preprocess_size is not None and "rgb" in data["obs"]:
             data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"])
 
-        return dict_apply(data, ensure_tensor)
+        return dict_apply(data, torch.as_tensor)
 
     def build_augmentors(self):
         """Build NumPy transforms; RGB augmentation runs during preprocessing."""

@@ -21,15 +21,11 @@ def mean_success_steps(details):
 
 
 def summarize_episodes(details: list[dict]) -> dict:
-    successes = sum(bool(detail["success"]) for detail in details)
     avg_steps = mean_success_steps(details)
-    total_steps = [d["total_steps"] for d in details if d.get("total_steps") is not None]
     return {
-        "success_rate": successes / len(details) if details else None,
-        "n_success": successes,
-        "n_valid": len(details),
+        "success_rate": sum(detail["success"] for detail in details) / len(details),
         "avg_steps": round(avg_steps) if avg_steps is not None else None,
-        "avg_steps_all": round(sum(total_steps) / len(total_steps)) if total_steps else None,
+        "avg_steps_all": round(sum(detail["total_steps"] for detail in details) / len(details)),
     }
 
 

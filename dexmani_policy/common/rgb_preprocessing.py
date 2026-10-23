@@ -56,11 +56,7 @@ def raw_rgb_tensor(rgb, *, ndim=None):
 
 
 def resize_image_transform(input_hw, output_hw, *, device=None) -> torch.Tensor:
-    """FP32 3x3 input-pixel -> output-pixel affine for align_corners=False.
-
-    Sizes are (height,width); integer coordinates denote pixel centers.
-    Compose successive operations by left multiplication. No padding is modeled.
-    """
+    """Map pixel centers by an FP32 3x3 affine with (H, W) sizes and align_corners=False."""
     import torch
 
     if len(input_hw) != 2 or len(output_hw) != 2 or min(*input_hw, *output_hw) <= 0:
@@ -73,6 +69,17 @@ def resize_image_transform(input_hw, output_hw, *, device=None) -> torch.Tensor:
     )
 
 
+def convert_rgb_output(value: torch.Tensor, *, keep_uint8: bool) -> torch.Tensor:
+    import torch
+
+    if not value.dtype.is_floating_point:
+        return value.contiguous()
+    value = value.clamp_(0, 1)
+    if keep_uint8:
+        value = value.mul_(255).round_().to(torch.uint8)
+    return value
+
+
 def preprocess_training_rgb(
     rgb: np.ndarray | torch.Tensor,
     *,
@@ -82,20 +89,14 @@ def preprocess_training_rgb(
     color_augmentation: Callable | None = None,
     return_transform: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Share crop/color across time; optionally return a shared raw->output 3x3.
-
-    color_augmentation must preserve spatial geometry. Record the transform in
-    this call: random crop parameters cannot be reconstructed from output size.
-    """
+    """Share crop/color across time and track raw->output geometry; color must preserve it."""
     import torch
     import torchvision.transforms.functional as TVF
 
     value = raw_rgb_tensor(rgb, ndim=4).permute(0, 3, 1, 2).contiguous()
     if return_transform:
         validate_rgb_preprocessing(resize_hw, random_crop_hw)
-        transform = resize_image_transform(
-            value.shape[-2:], resize_hw, device=value.device
-        )
+        transform = resize_image_transform(value.shape[-2:], resize_hw, device=value.device)
     if not keep_uint8 or color_augmentation is not None:
         value = value.float().div_(255.0)
     value = TVF.resize(value, list(resize_hw), antialias=True)
@@ -109,12 +110,7 @@ def preprocess_training_rgb(
             transform[1, 2] -= top
     if color_augmentation is not None:
         value = color_augmentation(value)
-    if value.dtype.is_floating_point:
-        value = value.clamp_(0, 1)
-        if keep_uint8:
-            value = value.mul(255).round_().clamp_(0, 255).to(torch.uint8)
-    else:
-        value = value.contiguous()
+    value = convert_rgb_output(value, keep_uint8=keep_uint8)
     return (value, transform) if return_transform else value
 
 
@@ -127,12 +123,7 @@ def preprocess_validation_rgb(
     float_spatial_before_uint8: bool = False,
     return_transform: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Deterministic RGB recipe; optionally return shared raw->output 3x3.
-
-    The no-resize path retains its HWC layout. Tracked crops must fit the
-    resized image; padding would require an additional image support mask.
-    """
-    import torch
+    """Keep HWC without resize; otherwise return CHW with optional raw->output geometry."""
     import torchvision.transforms.functional as TVF
     from torchvision.transforms import InterpolationMode
 
@@ -167,9 +158,6 @@ def preprocess_validation_rgb(
             transform[0, 2] -= int(round((value.shape[-1] - center_crop_hw[1]) / 2))
             transform[1, 2] -= int(round((value.shape[-2] - center_crop_hw[0]) / 2))
         value = TVF.center_crop(value, list(center_crop_hw))
-    if value.dtype.is_floating_point:
-        value = value.clamp_(0, 1)
-        if keep_uint8:
-            value = value.mul(255).round_().clamp_(0, 255).to(torch.uint8)
+    value = convert_rgb_output(value, keep_uint8=keep_uint8)
     value = value.reshape(*leading_shape, *value.shape[-3:]).contiguous()
     return (value, transform) if return_transform else value

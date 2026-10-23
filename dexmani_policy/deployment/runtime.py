@@ -27,6 +27,59 @@ def load_policy(info, *, device="cuda:0", seed=0):
         raise
 
 
+def make_warmup_observation(info, *, rgb_hw=None):
+    """Synthetic inputs match the saved layouts and never substitute for live observations."""
+    shapes = {
+        "joint_state": (19,),
+        "eef_pose": (9,),
+        "finger_tactile_force": (5, 3),
+        "fingertip_xyz": (5, 3),
+        "taxel_tactile_force": (5, 120, 3),
+    }
+    observation = {}
+    for name in info.observation_fields:
+        if name == "tactile_valid":
+            observation[name] = np.ones((info.n_obs_steps, 5), dtype=np.bool_)
+            continue
+        if name in {"camera_intrinsic", "camera_extrinsic"}:
+            # Synthetic pinhole K / base-to-camera [R|t] is only used for warmup.
+            columns = 3 if name == "camera_intrinsic" else 4
+            matrix = np.eye(3, columns, dtype=np.float32)
+            observation[name] = np.tile(matrix.reshape(1, -1), (info.n_obs_steps, 1))
+            continue
+        if name == "rgb":
+            if rgb_hw is None:
+                raise ValueError("RGB warmup requires the current raw camera height/width")
+            shape, dtype = (*rgb_hw, 3), np.uint8
+        elif name == "depth":
+            recipe = info.depth_config
+            shape, dtype = tuple(recipe["shape"]), np.uint16
+            if rgb_hw is not None and tuple(rgb_hw) != shape:
+                raise ValueError("Depth warmup camera shape differs from saved raw counts")
+        elif name == "hand_pointcloud":
+            shape, dtype = (info.hand_pointcloud_config["num_points"], 6), np.float32
+        elif name == "point_cloud":
+            recipe = info.pointcloud_config
+            if not isinstance(recipe, dict):
+                raise ValueError("Point-cloud warmup requires the saved production recipe")
+            num_points = positive_int(recipe.get("num_points"), "pointcloud.num_points")
+            shape, dtype = (num_points, 6), np.float32
+        else:
+            shape, dtype = shapes[name], np.float32
+        shape = (info.n_obs_steps, *shape)
+        pattern = (
+            np.arange(1, 252, dtype=dtype)
+            if dtype in {np.uint8, np.uint16}
+            else (np.arange(101) / 100.0 - 0.5).astype(dtype)
+        )
+        observation[name] = np.resize(pattern, shape)
+
+        if name == "hand_pointcloud":
+            observation[name][..., 3:] = 0.5
+
+    return observation
+
+
 class PolicyRuntime:
     """Bridge raw observation histories to physical future action chunks."""
 
@@ -61,6 +114,13 @@ class PolicyRuntime:
         self.agent = agent
         self.info = info
         self.rgb_preprocessing = info.rgb_preprocessing
+        self.depth_shape = None
+        self.hand_pointcloud_shape = None
+        if "depth" in info.observation_fields:
+            self.depth_shape = tuple(info.depth_config["shape"])
+        if "hand_pointcloud" in info.observation_fields:
+            self.hand_pointcloud_shape = (info.hand_pointcloud_config["num_points"], 6)
+
         self.device = device
         self.seed = seed
         self.rtc_guidance_cap = 0.0
@@ -72,8 +132,6 @@ class PolicyRuntime:
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(self.seed)
 
     def configure_execution(self, mode, guidance_cap=None):
         from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
@@ -92,13 +150,11 @@ class PolicyRuntime:
         else:
             self.rtc_guidance_cap = 0.0
 
-    def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0):
+    def prepare_observations(self, observation):
         import torch
 
         from dexmani_policy.common.rgb_preprocessing import preprocess_validation_rgb
 
-        if self.agent is None:
-            raise RuntimeError("Policy is closed")
         missing = set(self.info.observation_fields) - observation.keys()
         if missing:
             raise ValueError(f"Missing policy observations: {sorted(missing)}")
@@ -110,9 +166,20 @@ class PolicyRuntime:
             lengths.add(len(value))
         if len(lengths) != 1 or next(iter(lengths), 0) < self.info.n_obs_steps:
             raise ValueError("Policy histories must have equal raw lengths >= n_obs_steps")
+
         tensors = {}
-        for name in self.info.observation_fields:
-            value = arrays[name][-self.info.n_obs_steps :]
+        for name, value in arrays.items():
+            value = value[-self.info.n_obs_steps :]
+            if name == "depth":
+                if value.shape[1:] != self.depth_shape or value.dtype != np.uint16:
+                    raise ValueError(
+                        "Depth input must be uint16 raw counts in the saved image shape"
+                    )
+            elif name == "hand_pointcloud":
+                if value.shape[1:] != self.hand_pointcloud_shape or value.dtype != np.float32:
+                    raise ValueError(
+                        "Hand-pointcloud input must be float32 XYZRGB in the saved template shape"
+                    )
             if name == "point_cloud" and self.info.pc_dim is not None:
                 if value.shape[-1] < self.info.pc_dim:
                     raise ValueError("Point cloud has fewer channels than the saved input recipe")
@@ -123,9 +190,17 @@ class PolicyRuntime:
                 tensor = preprocess_validation_rgb(value, **self.rgb_preprocessing)
             else:
                 tensor = torch.from_numpy(np.ascontiguousarray(value))
-                if name != "tactile_valid":
-                    tensor = tensor.to(dtype=torch.float32)
-            tensors[name] = tensor.unsqueeze(0).to(self.device)
+            dtype = None if name in {"rgb", "tactile_valid"} else torch.float32
+            tensors[name] = tensor.unsqueeze(0).to(device=self.device, dtype=dtype)
+
+        return tensors
+
+    def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0):
+        import torch
+
+        if self.agent is None:
+            raise RuntimeError("Policy is closed")
+        tensors = self.prepare_observations(observation)
         dimensions = self.agent.control_action_dim
         kwargs = {}
 
@@ -151,16 +226,15 @@ class PolicyRuntime:
             not isinstance(action_context, dict) or action_context
         ):
             raise ValueError("This runtime policy does not accept external action_context keys")
+
         if rtc_prefix is not None:
             prefix = np.asarray(rtc_prefix)
+            future_steps = self.info.horizon - self.info.n_obs_steps + 1
             if (
                 prefix.ndim != 2
                 or prefix.shape[1] != dimensions
                 or not np.isfinite(prefix).all()
-                or not 0
-                <= delay_steps
-                <= len(prefix)
-                <= self.info.horizon - self.info.n_obs_steps + 1
+                or not 0 <= delay_steps <= len(prefix) <= future_steps
             ):
                 raise ValueError("Invalid physical RTC prefix")
             kwargs.update(
@@ -172,10 +246,12 @@ class PolicyRuntime:
             )
         elif delay_steps:
             raise ValueError("No prefix requires delay_steps=0")
+
         with torch.inference_mode():
             result = self.agent.predict_action(
                 tensors, inference_steps=self.info.inference_steps, **kwargs
             )
+
         # Real consumes the full future after the query, without auxiliary dimensions.
         prediction = result.get("pred_action") if isinstance(result, dict) else None
         expected = (1, self.info.horizon, self.agent.action_dim)
@@ -195,48 +271,7 @@ class PolicyRuntime:
         future_steps = self.info.horizon - self.info.n_obs_steps + 1
         if type(rtc_delay) is not int or not 0 <= rtc_delay <= future_steps:
             raise ValueError(f"rtc_delay must be an integer in [0, {future_steps}]")
-        shapes = {
-            "joint_state": (19,),
-            "eef_pose": (9,),
-            "finger_tactile_force": (5, 3),
-            "fingertip_xyz": (5, 3),
-            "taxel_tactile_force": (5, 120, 3),
-        }
-        observation = {}
-        for name in self.info.observation_fields:
-            if name == "tactile_valid":
-                observation[name] = np.ones((self.info.n_obs_steps, 5), dtype=np.bool_)
-                continue
-            if name in {"camera_intrinsic", "camera_extrinsic"}:
-                # Synthetic pinhole K / base-to-camera [R|t], not a live calibration fallback.
-                columns = 3 if name == "camera_intrinsic" else 4
-                matrix = np.eye(3, columns, dtype=np.float32)
-                observation[name] = np.tile(matrix.reshape(1, -1), (self.info.n_obs_steps, 1))
-                continue
-            if name == "rgb":
-                if rgb_hw is None:
-                    raise ValueError("RGB warmup requires the current raw camera height/width")
-                shape, dtype = (*rgb_hw, 3), np.uint8
-            elif name == "point_cloud":
-                recipe = self.info.pointcloud_config or {}
-                if "num_points" in recipe:
-                    num_points = positive_int(recipe["num_points"], "pointcloud.num_points")
-                else:
-                    encoder = self.agent.obs_encoder
-                    num_points = getattr(encoder, "warmup_num_points", None)
-                    if num_points is None:
-                        raise ValueError("Point-cloud warmup requires saved pointcloud.num_points")
-                    num_points = positive_int(num_points, "encoder.warmup_num_points")
-                shape, dtype = (num_points, 6), np.float32
-            else:
-                shape, dtype = shapes[name], np.float32
-            shape = (self.info.n_obs_steps, *shape)
-            values = np.arange(np.prod(shape)).reshape(shape)
-            observation[name] = (
-                (values % 251 + 1).astype(dtype)
-                if dtype == np.uint8
-                else ((values % 101) / 100.0 - 0.5).astype(dtype)
-            )
+        observation = make_warmup_observation(self.info, rgb_hw=rgb_hw)
 
         context = None
         if self.info.hand_history_steps is not None:

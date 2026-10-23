@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -15,9 +15,8 @@ from dexmani_policy.common.experiments import (
     discover_milestone_checkpoints,
 )
 from dexmani_policy.common.runtime import set_seed
-from dexmani_policy.env_runner.common.metrics import collect_episode_details, mean_success_steps
+from dexmani_policy.env_runner.common.metrics import collect_episode_details
 from dexmani_policy.env_runner.common.seeds import (
-    episodes_per_task,
     plan_selection_seeds,
     resolve_evaluation_seed,
 )
@@ -37,15 +36,27 @@ from dexmani_policy.evaluation.rollout import (
 @dataclass
 class CheckpointEvaluation:
     checkpoint: MilestoneCheckpoint
-    episodes: list[dict] = field(default_factory=list)
+    n_episodes: int = 0
+    n_success: int = 0
+    success_steps: int = 0
+    measured_successes: int = 0
+
+    def add_episodes(self, details):
+        self.n_episodes += len(details)
+        for detail in details:
+            if detail["success"]:
+                self.n_success += 1
+                if detail["steps"] is not None:
+                    self.success_steps += detail["steps"]
+                    self.measured_successes += 1
 
     @property
     def success_rate(self):
-        return sum(d["success"] for d in self.episodes) / len(self.episodes)
+        return self.n_success / self.n_episodes
 
     @property
     def avg_steps(self):
-        return mean_success_steps(self.episodes)
+        return self.success_steps / self.measured_successes if self.measured_successes else None
 
     @property
     def rank(self):
@@ -72,21 +83,21 @@ def select_best_checkpoint(
     output_dir=None,
 ):
     initial_episodes = resolve_evaluation_parameter(
-        cfg, "initial_episodes", "select_best", override=initial_episodes, default=25
+        cfg, "initial_episodes", "select_best", override=initial_episodes
     )
     batch_size = resolve_evaluation_parameter(
-        cfg, "batch_size", "select_best", override=batch_size, default=5
+        cfg, "batch_size", "select_best", override=batch_size
     )
     max_episodes = resolve_evaluation_parameter(
-        cfg, "max_episodes", "select_best", override=max_episodes, default=100
+        cfg, "max_episodes", "select_best", override=max_episodes
     )
     inference_steps = resolve_evaluation_parameter(
-        cfg, "inference_steps", "select_best", override=inference_steps, default=10
+        cfg, "inference_steps", "select_best", override=inference_steps
     )
     use_ema = resolve_evaluation_parameter(
-        cfg, "use_ema", "select_best", override=use_ema, default=True
+        cfg, "use_ema", "select_best", override=use_ema
     )
-    episodes = resolve_evaluation_parameter(cfg, "episodes", "offline", default=100)
+    episodes = resolve_evaluation_parameter(cfg, "episodes", "offline")
     positive_int(inference_steps, "inference_steps")
     if type(use_ema) is not bool:
         raise ValueError("use_ema must be boolean")
@@ -174,7 +185,7 @@ def select_best_checkpoint(
             )
             details = collect_episode_details(result)
             stage.update(status="completed", episode_details=details)
-            candidate.episodes.extend(details)
+            candidate.add_episodes(details)
             write_json(result_path, record)
 
         candidates = [CheckpointEvaluation(checkpoint) for checkpoint in milestones]
@@ -182,7 +193,7 @@ def select_best_checkpoint(
             evaluate(candidate, initial, "initial")
         best_rate = max(candidate.success_rate for candidate in candidates)
         tied = [candidate for candidate in candidates if candidate.success_rate == best_rate]
-        if len(tied) > 1 and episodes_per_task(extra):
+        if len(tied) > 1 and any(extra.values()):
             for candidate in tied:
                 evaluate(candidate, extra, "tie_break")
         best = max(tied, key=lambda candidate: candidate.rank)
@@ -210,7 +221,7 @@ def select_best_checkpoint(
     for candidate in candidates:
         cprint(
             f"{candidate.checkpoint.label}: {candidate.success_rate:.1%}, "
-            f"episodes={len(candidate.episodes)}, avg_steps={candidate.avg_steps}",
+            f"episodes={candidate.n_episodes}, avg_steps={candidate.avg_steps}",
             "cyan",
         )
     cprint(f"Selected {best.checkpoint.label}; record: {result_path}", "green")

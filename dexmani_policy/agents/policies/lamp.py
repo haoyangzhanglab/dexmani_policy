@@ -19,10 +19,6 @@ class LAMPObservationEncoder(nn.Module):
 
     consumed_observation_fields = ("joint_state", "point_cloud")
 
-    @property
-    def warmup_num_points(self) -> int:
-        return self.num_points
-
     def __init__(
         self,
         pc_dim: int,

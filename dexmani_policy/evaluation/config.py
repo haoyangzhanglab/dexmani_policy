@@ -120,14 +120,26 @@ def parse_evaluation_overrides(overrides: list[str]):
     return cfg
 
 
-def validate_inference_steps(inference_steps_list) -> None:
-    """Require distinct positive NFEs so each output directory has one result."""
-    if not inference_steps_list:
+def resolve_inference_steps(*sources, override=None) -> list[int]:
+    """Choose the source before the NFE spelling; section scalars beat shared lists."""
+    steps = override
+    for source in sources:
+        if steps is not None:
+            break
+        steps = source.get("inference_steps_list")
+        if steps is None and source.get("inference_steps") is not None:
+            steps = [source["inference_steps"]]
+
+    if steps is None:
+        raise ValueError("Evaluation requires inference_steps or inference_steps_list")
+    steps = list(steps)
+    if not steps:
         raise ValueError("inference_steps_list must be non-empty")
-    for nfe in inference_steps_list:
+    for nfe in steps:
         positive_int(nfe, "inference_steps")
-    if len(set(inference_steps_list)) != len(inference_steps_list):
+    if len(set(steps)) != len(steps):
         raise ValueError("Inference steps must be distinct to preserve per-value results")
+    return steps
 
 
 def add_evaluation_arguments(parser) -> None:
@@ -214,68 +226,61 @@ def resolve_evaluation_request(
     override_cfg = overrides if overrides is not None else OmegaConf.create({})
     merged = OmegaConf.merge(cfg, override_cfg)
     merged.experiment_dir = str(exp_dir)
-    resolved = (
-        resolve_selection_record(exp_dir, selection_record)
-        if selection_record is not None
-        else resolve_best_checkpoint(exp_dir) if checkpoint == "best" else None
-    )
+    selection = None
+    checkpoint_path = None
+    if selection_record is not None:
+        selection, checkpoint_path = resolve_selection_record(exp_dir, selection_record)
+    elif checkpoint == "best":
+        selection, checkpoint_path = resolve_best_checkpoint(exp_dir)
 
     requested_episodes = resolve_evaluation_parameter(
         override_cfg, "episodes", section, override=episodes
     )
-    if resolved is not None and section == "offline":
-        request, count = resolve_test_request(resolved[0])
+    if selection is not None and section == "offline":
+        request, count = resolve_test_request(selection)
         explicit_seed = eval_seed is not None or "seed" in (override_cfg.get("eval") or {})
         if explicit_seed and resolve_evaluation_seed(merged, eval_seed) != request["shuffle_seed"]:
             raise ValueError(
                 "Explicit evaluation seed conflicts with selection record shuffle_seed"
             )
         seed = request["shuffle_seed"]
-        if requested_episodes is not None and requested_episodes != count:
-            raise ValueError("Explicit episodes conflicts with selection record test count")
+        if requested_episodes is not None:
+            positive_int(requested_episodes, "episodes")
+            if requested_episodes != count:
+                raise ValueError("Explicit episodes conflicts with selection record test count")
     else:
         seed = resolve_evaluation_seed(merged, eval_seed)
         if section == "offline":
-            count = resolve_evaluation_parameter(
-                merged, "episodes", section, override=requested_episodes, default=100
+            count = positive_int(
+                resolve_evaluation_parameter(
+                    merged, "episodes", section, override=requested_episodes
+                ),
+                "episodes",
             )
     if section == "offline":
-        count = positive_int(
-            count if requested_episodes is None else requested_episodes, "episodes"
-        )
         OmegaConf.update(merged, "eval.offline.episodes", count)
     OmegaConf.update(merged, "eval.seed", seed)
 
-    selected = resolved[0]["inference"] if resolved is not None else {}
+    selected = selection["inference"] if selection is not None else {}
     weights = resolve_evaluation_parameter(override_cfg, "use_ema", section, override=use_ema)
     if weights is None:
         weights = selected.get(
-            "use_ema", resolve_evaluation_parameter(cfg, "use_ema", section, default=True)
+            "use_ema", resolve_evaluation_parameter(cfg, "use_ema", section)
         )
 
-    # Choose the source before the NFE spelling; shared lists cannot beat section scalars.
+    if type(weights) is not bool:
+        raise ValueError("use_ema must be boolean")
+
     explicit_eval = override_cfg.get("eval") or {}
     saved_eval = cfg.get("eval") or {}
-    steps = inference_steps_list
-    for source in (
+    steps = resolve_inference_steps(
         explicit_eval.get(section) or {},
         explicit_eval,
         selected,
         saved_eval.get(section) or {},
         saved_eval,
-    ):
-        if steps is not None:
-            break
-        steps = source.get("inference_steps_list")
-        if steps is None and source.get("inference_steps") is not None:
-            steps = [source["inference_steps"]]
-    if steps is None:
-        steps = [10]
-    steps = list(steps)
-
-    if type(weights) is not bool:
-        raise ValueError("use_ema must be boolean")
-    validate_inference_steps(steps)
+        override=inference_steps_list,
+    )
     action_steps = resolve_evaluation_parameter(
         override_cfg, "action_steps", section, override=action_steps
     )
@@ -287,7 +292,7 @@ def resolve_evaluation_request(
     OmegaConf.update(merged, f"eval.{section}.action_steps", action_steps)
 
     if selection_record is not None:
-        if checkpoint != "best" and resolve_checkpoint_path(exp_dir, checkpoint) != resolved[1]:
+        if checkpoint != "best" and resolve_checkpoint_path(exp_dir, checkpoint) != checkpoint_path:
             raise ValueError("Checkpoint override differs from selection record")
         if (
             weights != selected["use_ema"]
@@ -295,11 +300,12 @@ def resolve_evaluation_request(
             or action_steps != selected["action_steps"]
         ):
             raise ValueError("Selection record cannot override raw/EMA, NFE or action_steps")
-    path = resolved[1] if resolved else resolve_checkpoint_path(exp_dir, checkpoint)
+    if checkpoint_path is None:
+        checkpoint_path = resolve_checkpoint_path(exp_dir, checkpoint)
     return EvaluationRequest(
         config=merged,
-        checkpoint=path,
-        selection=resolved[0] if resolved else None,
+        checkpoint=checkpoint_path,
+        selection=selection,
         section=section,
         use_ema=weights,
         inference_steps=steps,

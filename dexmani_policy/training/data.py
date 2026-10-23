@@ -15,6 +15,7 @@ from dexmani_policy.common.config import (
     normalization_dims_from_config,
     positive_int,
     resolve_normalization_spec,
+    validate_depth_recipe,
 )
 from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
 from dexmani_policy.common.runtime import worker_init_fn
@@ -160,6 +161,25 @@ def capture_real_runtime(dataset, cfg) -> dict | None:
             raise ValueError("Stored point count disagrees with pointcloud_config")
         # Preserve the stored point count; encoder FPS selects its own subset.
         runtime["pointcloud"] = dict(cloud)
+    if "hand_pointcloud" in dataset.sensor_modalities:
+        cloud = attrs.get("hand_pointcloud_config")
+        if not isinstance(cloud, Mapping):
+            raise ValueError("Real hand_pointcloud requires root hand_pointcloud_config")
+        count = positive_int(cloud.get("num_points"), "hand_pointcloud_config.num_points")
+        data = buffer["hand_pointcloud"]
+        if data.shape[1:] != (count, 6) or str(data.dtype) != "float32":
+            raise ValueError("Stored hand_pointcloud must match the saved XYZRGB template")
+        runtime["hand_pointcloud"] = dict(cloud)
+    if "depth" in dataset.sensor_modalities:
+        data = buffer["depth"]
+        runtime["depth"] = validate_depth_recipe(
+            {
+                "shape": list(data.shape[1:]),
+                "dtype": str(data.dtype),
+                "unit": "raw_counts",
+                "depth_scale_m": attrs["depth_scale_m_per_unit"],
+            }
+        )
     if "fingertip_xyz" in dataset.sensor_modalities:
         links = attrs.get("fingertip_link_names")
         if (

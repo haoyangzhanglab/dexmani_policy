@@ -12,8 +12,8 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import (
-    checkpoint_agent_config,
     load_training_checkpoint,
+    prepare_restore_config,
 )
 from dexmani_policy.common.config import (
     normalization_dims_from_config,
@@ -64,7 +64,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
     model_cfg = cfg
     if checkpoint is not None:
-        model_cfg = checkpoint_agent_config(cfg)
+        model_cfg = prepare_restore_config(cfg)
     model = hydra.utils.instantiate(model_cfg.agent)
     if "datasets" in cfg.dataset:
         for child in cfg.dataset.datasets:
@@ -90,14 +90,12 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
                 cfg.agent.rgb_backbone_config.architecture = rgb.architecture
         if getattr(model, "task_emb_table", None) is not None:
             cfg.agent.text_embed_dim = model.text_embed_dim
-    model.action_key = cfg.action_key
     model.set_normalization_spec(
         resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
     )
     if checkpoint is None:
         model.initialize_training()
         model.load_normalizer_from_dataset(normalizer)
-        model.validate_normalizer()
 
     validate_hand_pretraining(cfg, model, dataset, checkpoint=checkpoint)
     if checkpoint is None:
@@ -134,12 +132,12 @@ def validate_hand_pretraining(cfg, model, dataset, *, checkpoint=None):
     if not model.requires_hand_pretraining:
         return
     current = describe_hand_data(dataset)
-    saved = model.hand_data if checkpoint is None else checkpoint.effective_config["hand_data"]
-    changed = [key for key in current if saved[key] != current[key]]
-    if changed:
-        raise ValueError(
-            f"Hand pretraining data mismatch: {changed}; regenerate for this data recipe"
-        )
+    if checkpoint is None:
+        changed = [key for key in current if model.hand_data[key] != current[key]]
+        if changed:
+            raise ValueError(
+                f"Hand pretraining data mismatch: {changed}; regenerate for this data recipe"
+            )
     with open_dict(cfg):
         cfg.hand_data = current
 

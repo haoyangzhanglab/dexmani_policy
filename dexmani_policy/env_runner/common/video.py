@@ -2,6 +2,7 @@
 
 import subprocess
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 import numpy as np
@@ -40,7 +41,7 @@ def encode_video(path: Path, frames: np.ndarray, fps: int) -> None:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr)
         try:
             for frame in frames:
-                proc.stdin.write(frame.astype(np.uint8, copy=False).tobytes())
+                proc.stdin.write(memoryview(np.ascontiguousarray(frame, dtype=np.uint8)))
             proc.stdin.close()
             returncode = proc.wait(timeout=60)
             if returncode != 0:
@@ -51,10 +52,8 @@ def encode_video(path: Path, frames: np.ndarray, fps: int) -> None:
         finally:
             # Reap the encoder even after a broken pipe or timeout.
             if proc.poll() is None:
-                try:
+                with suppress(Exception):
                     proc.stdin.close()
-                except Exception:
-                    pass
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)

@@ -1,16 +1,23 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.checkpoint import load_training_checkpoint
-from dexmani_policy.common.config import normalization_dims_from_config
+from dexmani_policy.common.checkpoint import inference_recipe, load_training_checkpoint
+from dexmani_policy.common.config import (
+    normalization_dims_from_config,
+    validate_depth_recipe,
+    validate_source_recipe,
+)
 from dexmani_policy.deployment.metadata import inspect_policy
 from dexmani_policy.env_runner.base_runner import BaseRunner
+from dexmani_policy.training.builder import validate_hand_pretraining
 
 
 class InferenceContractTest(unittest.TestCase):
@@ -78,6 +85,44 @@ class InferenceContractTest(unittest.TestCase):
             torch.save({"state_dict": {}, "epoch": 0}, path)
             with self.assertRaises(KeyError):
                 load_training_checkpoint(path)
+
+    def test_inference_control_period_comes_only_from_real_runtime(self):
+        cfg = {
+            "agent": {"action_dim": 19},
+            "dataset": {"sensor_modalities": ["joint_state"]},
+            "normalization": {"joint_state": "limits", "action": "limits"},
+            "normalization_dims": {"joint_state": 19, "action": 19},
+            "action_key": "action",
+            "hand_data": {"dt": 0.04},
+            "real_runtime": {"dt": 0.02},
+        }
+        expected = inference_recipe(cfg)
+        cfg["hand_data"]["dt"] = 0.05
+        self.assertEqual(inference_recipe(cfg), expected)
+        cfg["real_runtime"]["dt"] = 0.03
+        self.assertNotEqual(inference_recipe(cfg), expected)
+
+    def test_hand_data_is_checked_at_fresh_and_resume_boundaries(self):
+        saved = {"hand_data": {"dt": 0.02}}
+        current = {"dt": 0.04}
+        model = SimpleNamespace(requires_hand_pretraining=True, hand_data=saved["hand_data"])
+        cfg = OmegaConf.create(saved)
+        with patch("dexmani_policy.training.builder.describe_hand_data", return_value=current):
+            with self.assertRaisesRegex(ValueError, "Hand pretraining data mismatch"):
+                validate_hand_pretraining(cfg, model, object())
+            validate_hand_pretraining(cfg, model, object(), checkpoint=object())
+        with self.assertRaisesRegex(ValueError, "hand_data.dt"):
+            validate_source_recipe(saved, cfg)
+
+    def test_depth_recipe_requires_numerical_fields_without_restricting_metadata(self):
+        recipe = {
+            "shape": [2, 3], "dtype": "uint16", "unit": "raw_counts",
+            "depth_scale_m": 0.001, "sensor_name": "depth_camera",
+        }
+        self.assertEqual(validate_depth_recipe(recipe), recipe)
+        del recipe["depth_scale_m"]
+        with self.assertRaises(KeyError):
+            validate_depth_recipe(recipe)
 
 
 if __name__ == "__main__":

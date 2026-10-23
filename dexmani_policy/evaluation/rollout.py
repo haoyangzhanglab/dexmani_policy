@@ -6,7 +6,7 @@ import hydra
 from termcolor import cprint
 
 from dexmani_policy.common.checkpoint import restore_policy_agent
-from dexmani_policy.common.config import resolve_action_steps, validate_action_key_consistency
+from dexmani_policy.common.config import validate_action_key_consistency
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.common.runtime import atomic_path, set_seed
 from dexmani_policy.env_runner.common.metrics import (
@@ -75,7 +75,7 @@ def evaluate_policy(
     agent = restore_policy_agent(
         cfg, request.checkpoint, use_ema=request.use_ema, device=cfg.training.device
     )
-    action_steps = resolve_action_steps(agent, request.action_steps)
+    action_steps = request.action_steps
     if selection is not None and agent.checkpoint_step != selection["global_step"]:
         raise ValueError("Selection global_step disagrees with checkpoint state")
     directory = create_run_directory(output_root, output_dir)
@@ -203,11 +203,11 @@ def evaluate_checkpoint(
             cfg.eval.seed,
             episodes=cfg.eval.offline.episodes,
             initial_episodes=resolve_evaluation_parameter(
-                cfg, "initial_episodes", "select_best", default=25
+                cfg, "initial_episodes", "select_best"
             ),
-            batch_size=resolve_evaluation_parameter(cfg, "batch_size", "select_best", default=5),
+            batch_size=resolve_evaluation_parameter(cfg, "batch_size", "select_best"),
             max_episodes=resolve_evaluation_parameter(
-                cfg, "max_episodes", "select_best", default=100
+                cfg, "max_episodes", "select_best"
             ),
         )
     if record_video is None:

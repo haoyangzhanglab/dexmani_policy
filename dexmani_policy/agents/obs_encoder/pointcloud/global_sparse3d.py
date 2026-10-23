@@ -71,10 +71,6 @@ class Sparse3DGlobalObservationEncoder(nn.Module):
             nn.Linear(fused_dim, self.out_dim),
         )
 
-    @property
-    def warmup_num_points(self) -> int:
-        return self.num_points
-
     def forward(self, obs: dict) -> torch.Tensor:
         pc, state = obs["point_cloud"], obs["joint_state"]
         pc = preprocess_point_cloud(
