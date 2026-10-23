@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from dexmani_policy.common.rgb_preprocessing import resize_image_transform
+
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -117,11 +119,51 @@ class ImageProcessor:
         mean, std = self.normalization_cache[key]
         return image_batch.sub(mean).div_(std)
 
-    def process_images(self, images: np.ndarray | torch.Tensor) -> torch.Tensor:
-        """Normalize RGB; floating-point inputs must already be finite and in [0,1]."""
+    def process_images(
+        self,
+        images: np.ndarray | torch.Tensor,
+        *,
+        return_transform: bool = False,
+        input_transform: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Normalize RGB; float inputs must be finite and in [0,1].
+
+        With return_transform, also return raw->final pixel matrices matching
+        the image leading dimensions. input_transform records any prior spatial
+        preprocessing and must broadcast to [...,3,3]. Omission means the input
+        images are the raw coordinate reference, not that past crops are inferred.
+        Tracked resizing supports bilinear/bicubic with align_corners=False.
+        """
+        if input_transform is not None and not return_transform:
+            raise ValueError("input_transform requires return_transform=True")
         images = to_rgb_tensor(images)
         leading_shape = images.shape[:-3]
         flat_images = images.reshape(-1, *images.shape[-3:])
+        if return_transform:
+            output_hw = self.image_size or images.shape[-2:]
+            if (
+                self.interpolation == "nearest"
+                and tuple(output_hw) != images.shape[-2:]
+            ):
+                raise ValueError(
+                    "tracked nearest resize does not use the half-pixel convention"
+                )
+            transform = resize_image_transform(
+                images.shape[-2:], output_hw, device=images.device
+            )
+            if input_transform is not None:
+                if input_transform.shape[-2:] != (3, 3):
+                    raise ValueError("input_transform must end in [3,3]")
+                with (
+                    torch.no_grad(),
+                    torch.autocast(device_type=images.device.type, enabled=False),
+                ):
+                    prior = input_transform.to(
+                        device=images.device, dtype=torch.float32
+                    )
+                    # Geometry must not inherit the trainer's global TF32 matmul precision.
+                    transform = (transform[:, :, None] * prior[..., None, :, :]).sum(-2)
+            transform = torch.broadcast_to(transform, (*leading_shape, 3, 3))
 
         if self.image_size is not None and self.image_size != images.shape[-2:]:
             flat_images = F.interpolate(
@@ -131,4 +173,5 @@ class ImageProcessor:
                 align_corners=None if self.interpolation == "nearest" else False,
             )
         flat_images = self.normalize(flat_images)
-        return flat_images.reshape(*leading_shape, *flat_images.shape[1:])
+        images = flat_images.reshape(*leading_shape, *flat_images.shape[1:])
+        return (images, transform) if return_transform else images

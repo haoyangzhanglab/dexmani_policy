@@ -69,7 +69,6 @@ RSYNC_OPTS=(
     --exclude='/.vscode'
     --exclude='/.ruff_cache'
     --exclude='/.mypy_cache'
-    --exclude='/.pytest_cache'
     --exclude='/data'
     --exclude='/robot_data'
     --exclude='/experiments'
