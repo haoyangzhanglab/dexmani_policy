@@ -1,5 +1,5 @@
 # SAT — local Structural Action Transformer adaptation
-# Encoder:  Sparse3DEncoder (384d spatial tokens + mean-pooled global token)
+# Encoder:  Sparse3DGlobalObservationEncoder (condition width 256)
 # Decoder:  SAT (joint trajectories with observation-prefix attention) + Flow Matching
 # Modality: point_cloud + joint_state → action
 # Key:      structural-centric action representation (Da as sequence, T as feature)
@@ -15,8 +15,8 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action                    # action | action_ee
-action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
+action_key: action
+action_dim: 19
 
 # ── Normalization ──
 normalization:
@@ -46,15 +46,16 @@ dataset:
   pad_after: ${eval:'${n_action_steps} - 1'}
   val_ratio: 0.0
   max_train_episodes: 80
+  split_manifest: null
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Shared R3D-derived sensor recipe; dataset dropout precedes encoder patch FPS.
+  # Same sensor recipe in SAT and DQ-RISE; no XYZ normalization.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
       color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
-      dropout:     {max_dropout_ratio: 0.8, prob: 1.0}
+      dropout:     {max_dropout_ratio: 0.5, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
@@ -66,22 +67,23 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  # Obs encoder: Sparse3DEncoder patches + mean global token; temporal feature fusion
+  # Per-frame global mean, then ordered time fusion: 2*(384+64) -> 256.
   pc_dim: 6
   state_dim: 19
+  state_out_dim: 64
   num_points: 1024
 
   fps_random_config:
     use_random: true
     use_random_start: true
+    use_shuffle_output: false
     random_noise_scale: 0.0
-    use_shuffle_output: true
 
   pc_encoder_config:
     channels: 384
-    num_patches: 96
+    num_patches: 64
     group_size: 32
-    depth: 6
+    depth: 4
     num_heads: 8
     mlp_ratio: 4.0
     geometry_scale: 0.10
@@ -90,28 +92,16 @@ agent:
 
   # SAT backbone (structural-centric DiT)
   n_layers: 8
-  hidden_dim: 768
+  hidden_dim: 256
   n_head: 8
   mlp_ratio: 4.0
-  p_drop_attn: 0.1
+  p_drop_attn: 0.0
   qkv_bias: true
   qk_norm: true
 
-  # EJC defaults identify joints without anatomical function or axis labels.
-  ejc_num_embodiments: 1
-  # ejc_num_functions defaults to action_dim.
-  ejc_num_axes: 1
-  ejc_embodiment_dim: 8
-  ejc_function_dim: 32
-  ejc_axis_dim: 8
-
   # Flow matching (standard CFM, no consistency training)
   num_inference_steps: 10
-  t_sample_mode_for_flow: beta
-  # Explicit local time-sampling recipe; matches SATPolicy defaults.
-  beta_s: 0.999
-  beta_alpha: 1.0
-  beta_beta: 1.5
+  t_sample_mode_for_flow: uniform
 
   modality_dropout_probs:
     joint_state: 0.0
@@ -167,7 +157,7 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
-    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
+    control_mode: joint
     texture_random: false
     instance_random: true
     table_random: true
@@ -175,7 +165,7 @@ env_runner:
 # ── Eval ──
 eval:
   seed: 1024
-  inference_steps: 10
+  inference_steps: ${agent.num_inference_steps}
   use_ema: true
 
   select_best:

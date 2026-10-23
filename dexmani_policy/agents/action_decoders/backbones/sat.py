@@ -4,6 +4,8 @@ import torch
 from torch import nn
 from timm.models.vision_transformer import Mlp, RmsNorm
 
+from dexmani_policy.common.config import positive_int
+
 from .modules import (
     AdaLNOutput,
     SelfAttention,
@@ -16,73 +18,57 @@ from .modules import (
 )
 
 
-class EmbodiedJointCodebook(nn.Module):
-    """Sum projected embodiment, function and rotation-axis embeddings."""
+class XHandJointEmbedding(nn.Module):
+    """Canonical xArm7/XHand control order; axes are in local URDF frames."""
 
-    def __init__(
-        self,
-        num_joints: int,
-        hidden_dim: int,
-        num_embodiments: int = 1,
-        num_functions: int | None = None,
-        num_axes: int = 1,
-        embodiment_dim: int = 8,
-        function_dim: int = 32,
-        axis_dim: int = 8,
-    ):
+    # Group: arm/thumb/index/middle/ring/pinky; role: arm/bend/joint1/joint2.
+    # Axis: +Z/+Y/+X/-X/-Z in local URDF frames, not world directions.
+    metadata = {
+        "joint_ids": tuple(range(19)),
+        "group_ids": (0,) * 7 + (1,) * 3 + (2,) * 3 + (3,) * 2 + (4,) * 2 + (5,) * 2,
+        "role_ids": (0,) * 7 + (1, 2, 3) + (1, 2, 3) + (2, 3) * 3,
+        "axis_ids": (0,) * 7 + (4, 2, 2) + (3, 1, 1) + (1, 1) * 3,
+    }
+
+    def __init__(self, hidden_dim: int = 256):
         super().__init__()
-        if num_functions is None:
-            num_functions = num_joints
-        if num_functions < num_joints:
-            raise ValueError(
-                "Default joint_function=arange(num_joints) requires num_functions >= num_joints"
-            )
+        self.joint = nn.Embedding(19, hidden_dim)
+        self.group = nn.Embedding(6, hidden_dim)
+        self.role = nn.Embedding(4, hidden_dim)
+        self.axis = nn.Embedding(5, hidden_dim)
+        for name, values in self.metadata.items():
+            self.register_buffer(name, torch.tensor(values, dtype=torch.long))
+        self.initialize_weights()
 
-        self.hidden_dim = hidden_dim
-
-        self.emb_emb = nn.Embedding(num_embodiments, embodiment_dim)
-        self.func_emb = nn.Embedding(num_functions, function_dim)
-        self.axis_emb = nn.Embedding(num_axes, axis_dim)
-
-        self.proj_emb = nn.Linear(embodiment_dim, hidden_dim)
-        self.proj_func = nn.Linear(function_dim, hidden_dim)
-        self.proj_axis = nn.Linear(axis_dim, hidden_dim)
-
-        # The local default identifies joints; it does not assign anatomical roles or axes.
-        self.register_buffer("joint_embodiment", torch.zeros(num_joints, dtype=torch.long))
-        self.register_buffer("joint_function", torch.arange(num_joints, dtype=torch.long))
-        self.register_buffer("joint_axis", torch.zeros(num_joints, dtype=torch.long))
+    def initialize_weights(self):
+        for embedding in (self.joint, self.group, self.role, self.axis):
+            nn.init.normal_(embedding.weight, mean=0.0, std=0.005)
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
-        for name, size in (
-            ("joint_embodiment", self.emb_emb.num_embeddings),
-            ("joint_function", self.func_emb.num_embeddings),
-            ("joint_axis", self.axis_emb.num_embeddings),
-        ):
+        for name, values in self.metadata.items():
             value = state_dict.get(prefix + name)
             if value is not None and (
-                value.dtype
-                not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64)
-                or bool(((value < 0) | (value >= size)).any())
+                value.dtype != torch.long
+                or not torch.equal(value.cpu(), torch.tensor(values, dtype=torch.long))
             ):
-                raise ValueError(
-                    f"Invalid EJC mapping {prefix + name}: expected integer joint indices in [0, {size})"
-                )
+                error_msgs.append(f"{prefix + name} must match canonical xArm7/XHand metadata")
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
     def forward(self) -> torch.Tensor:
-        emb = self.proj_emb(self.emb_emb(self.joint_embodiment))
-        func = self.proj_func(self.func_emb(self.joint_function))
-        axis = self.proj_axis(self.axis_emb(self.joint_axis))
-        return emb + func + axis
+        return (
+            self.joint(self.joint_ids)
+            + self.group(self.group_ids)
+            + self.role(self.role_ids)
+            + self.axis(self.axis_ids)
+        )
 
 
 class SATBlock(nn.Module):
-    """Attention updates both streams; the gated MLP updates only actions."""
+    """Read a fixed observation token and update only action trajectories."""
 
     def __init__(
         self,
@@ -127,7 +113,7 @@ class SATBlock(nn.Module):
         c_obs: torch.Tensor,
         time_c: torch.Tensor,
         attn_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_modulation(
             time_c
         ).chunk(6, dim=-1)
@@ -135,14 +121,13 @@ class SATBlock(nn.Module):
         x_norm = modulate(self.norm1(x_action), shift_msa, scale_msa)
         c_obs_norm = self.obs_norm(c_obs)
         combined = self.attn(torch.cat([c_obs_norm, x_norm], dim=1), attn_mask=attn_mask)
-        c_obs_out, x_attn_out = combined.split([c_obs.shape[1], x_action.shape[1]], dim=1)
+        x_attn_out = combined[:, c_obs.shape[1] :]
         x_action = x_action + gate_msa.unsqueeze(1) * x_attn_out
-        c_obs = c_obs + c_obs_out
 
         x_norm = modulate(self.norm2(x_action), shift_mlp, scale_mlp)
         x_action = x_action + gate_mlp.unsqueeze(1) * self.mlp(x_norm)
 
-        return x_action, c_obs
+        return x_action
 
 
 class SAT(nn.Module):
@@ -150,26 +135,20 @@ class SAT(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        obs_token_dim: int,
-        hidden_dim: int = 768,
-        n_layers: int = 12,
+        hidden_dim: int = 256,
+        n_layers: int = 8,
         n_head: int = 8,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
         qk_norm: bool = True,
-        p_drop_attn: float = 0.1,
-        ejc_num_embodiments: int = 1,
-        ejc_num_functions: int | None = None,
-        ejc_num_axes: int = 1,
-        ejc_embodiment_dim: int = 8,
-        ejc_function_dim: int = 32,
-        ejc_axis_dim: int = 8,
+        p_drop_attn: float = 0.0,
     ):
         super().__init__()
 
-        self.horizon = horizon
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
+        if (horizon, action_dim, hidden_dim) != (16, 19, 256):
+            raise ValueError("SAT requires horizon=16, action_dim=19, hidden_dim=256")
+
+        positive_int(n_layers, "n_layers")
 
         self.x_embedder = nn.Sequential(
             nn.Linear(horizon, 64),
@@ -177,25 +156,12 @@ class SAT(nn.Module):
             nn.Linear(64, hidden_dim),
         )
 
-        self.joint_codebook = EmbodiedJointCodebook(
-            num_joints=action_dim,
-            hidden_dim=hidden_dim,
-            num_embodiments=ejc_num_embodiments,
-            num_functions=ejc_num_functions,
-            num_axes=ejc_num_axes,
-            embodiment_dim=ejc_embodiment_dim,
-            function_dim=ejc_function_dim,
-            axis_dim=ejc_axis_dim,
-        )
-
-        self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
+        self.joint_embedding = XHandJointEmbedding(hidden_dim)
 
         self.timestep_embedder = TimestepMLP(
             pos_emb_dim=128,
             output_dim=hidden_dim,
         )
-
-        self.obs_pre_norm = ObservationAdaLN(dim=hidden_dim, cond_dim=hidden_dim)
 
         self.blocks = nn.ModuleList(
             [
@@ -218,21 +184,9 @@ class SAT(nn.Module):
     def initialize_weights(self):
         self.apply(initialize_linear)
 
-        for layer in self.x_embedder:
+        for layer in (*self.x_embedder, *self.timestep_embedder.net):
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
-
-        nn.init.normal_(self.context_embedder.weight, std=WEIGHT_INIT_STD)
-        if self.context_embedder.bias is not None:
-            nn.init.zeros_(self.context_embedder.bias)
-
-        for layer in self.timestep_embedder.net:
-            if isinstance(layer, nn.Linear):
-                nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
 
         for block in self.blocks:
             nn.init.zeros_(block.adaln_modulation[-1].weight)
@@ -243,47 +197,23 @@ class SAT(nn.Module):
         nn.init.zeros_(self.final_layer.linear.weight)
         nn.init.zeros_(self.final_layer.linear.bias)
 
-        self.obs_pre_norm.initialize_weights()
-
     def forward(
         self,
         x: torch.Tensor,
         timestep: torch.Tensor,
         context: torch.Tensor,
     ) -> torch.Tensor:
-        num_joints = x.shape[1]
-        x = self.x_embedder(x) + self.joint_codebook()
-        c_obs = self.context_embedder(context)
+        if x.ndim != 3 or x.shape[1:] != (19, 16):
+            raise ValueError("SAT action must be [B,19,16]")
+        if context.shape != (x.shape[0], 1, 256):
+            raise ValueError("SAT context must be [B,1,256]")
+        x = self.x_embedder(x) + self.joint_embedding()
         time_c = self.timestep_embedder(batch_timesteps(timestep, x))
-        c_obs = self.obs_pre_norm(c_obs, time_c)
 
         # Observations attend only to observations; actions attend to both streams.
-        num_obs = c_obs.shape[1]
-        attn_mask = x.new_zeros(num_obs + num_joints, num_obs + num_joints)
-        attn_mask[:num_obs, num_obs:] = float("-inf")
+        attn_mask = x.new_zeros(20, 20)
+        attn_mask[0, 1:] = float("-inf")
         for block in self.blocks:
-            x, c_obs = block(x, c_obs, time_c, attn_mask)
+            x = block(x, context, time_c, attn_mask)
 
         return self.final_layer(x, time_c)
-
-
-class ObservationAdaLN(nn.Module):
-    """SAT uses direct conditioning with identity affine initialization, without SiLU."""
-
-    def __init__(self, dim: int, cond_dim: int):
-        super().__init__()
-        self.dim = dim
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-        self.cond_linear = nn.Linear(cond_dim, dim * 2)
-        self.initialize_weights()
-
-    def initialize_weights(self):
-        nn.init.zeros_(self.cond_linear.weight)
-        nn.init.constant_(self.cond_linear.bias[: self.dim], 1.0)
-        nn.init.zeros_(self.cond_linear.bias[self.dim :])
-
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        x = self.norm(x)
-        gamma, beta = self.cond_linear(cond).chunk(2, dim=-1)
-
-        return x * gamma.unsqueeze(1) + beta.unsqueeze(1)

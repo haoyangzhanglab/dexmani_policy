@@ -1,72 +1,19 @@
-"""DQRISEPolicy — quantised hand state + TCP/index diffusion."""
+"""DQRISEPolicy — quantised hand action + arm-joint/index diffusion."""
 
 from __future__ import annotations
 
-import inspect
 from typing import Any
 
 import torch
-from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
-from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import MultiStagePointNet, PointNet
-from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.global_sparse3d import (
+    Sparse3DGlobalObservationEncoder,
+)
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import validate_action_clipping, validate_dq_normalization
-
-
-class DQRISEObservationEncoder(nn.Module):
-    consumed_observation_fields = ("joint_state", "point_cloud")
-
-    @property
-    def warmup_num_points(self) -> int:
-        return self.num_points
-
-    def __init__(
-        self,
-        encoder_type: str,
-        pc_dim: int,
-        pc_out_dim: int,
-        state_dim: int,
-        num_points: int,
-        n_obs_steps: int,
-        state_out_dim: int = 64,
-        fps_random_config: dict | None = None,
-    ) -> None:
-        super().__init__()
-        if encoder_type == "dp3":
-            encoder_cls = PointNet
-        elif encoder_type == "idp3":
-            encoder_cls = MultiStagePointNet
-        else:
-            raise ValueError(f"encoder_type must be 'dp3' or 'idp3', got {encoder_type!r}")
-        self.pc_encoder = encoder_cls(input_channels=pc_dim, output_channels=pc_out_dim)
-        self.state_mlp = StateEncoder(state_dim, state_out_dim)
-        self.num_points = num_points
-        self.use_coord_only = pc_dim == 3
-        self.n_obs_steps = n_obs_steps
-        self.fps_random_config = fps_random_config or {}
-        self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
-
-    def forward(self, obs: dict) -> torch.Tensor:
-        pc = preprocess_point_cloud(
-            obs["point_cloud"],
-            self.num_points,
-            self.use_coord_only,
-            self.fps_random_config,
-            training=self.training,
-        )
-        features = torch.cat(
-            [
-                self.pc_encoder(pc)["global_token"],
-                self.state_mlp(obs["joint_state"]),
-            ],
-            dim=-1,
-        )
-        return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
 class DQRISEPolicy(BasePolicy):
@@ -74,15 +21,18 @@ class DQRISEPolicy(BasePolicy):
 
     @classmethod
     def validate_model_config(cls, cfg, spec) -> None:
-        layout = {"action": (7, 19), "action_ee": (9, 21)}.get(cfg.action_key)
-        if (cfg.agent.tcp_dim, cfg.agent.action_dim) != layout:
-            raise ValueError("Supported DQ-RISE layouts are action=7+12 or action_ee=9+12")
+        Sparse3DGlobalObservationEncoder.validate_config(cfg, spec)
+        if cfg.action_key != "action" or (cfg.agent.tcp_dim, cfg.agent.action_dim) != (7, 19):
+            raise ValueError("DQ-RISE requires joint action=7+12")
+        if (cfg.horizon, cfg.n_action_steps) != (16, 8):
+            raise ValueError("DQ-RISE requires horizon=16, n_action_steps=8")
+        if cfg.env_runner.env_kwargs.control_mode != "joint":
+            raise ValueError("DQ-RISE requires joint control")
         if cfg.get("use_aux_ee", False):
             raise ValueError("DQ-RISE does not support auxiliary action targets")
         validate_dq_normalization(spec)
         validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
-        defaults = inspect.signature(cls).parameters["down_dims"].default
-        down_dims = cfg.agent.get("down_dims", defaults)
+        down_dims = cfg.agent.get("down_dims", (256, 512))
         if not down_dims:
             raise ValueError("UNet down_dims must be nonempty")
         divisor = 2 ** (len(down_dims) - 1)
@@ -101,54 +51,45 @@ class DQRISEPolicy(BasePolicy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        tcp_dim: int = 9,
+        tcp_dim: int = 7,
         codebook_path: str | None = None,
         codebook_num_groups: int = 2,
         codebook_size: int = 4,
-        encoder_type: str = "idp3",
         pc_dim: int = 6,
-        pc_out_dim: int = 128,
         state_dim: int = 19,
         num_points: int = 1024,
         state_out_dim: int = 64,
+        pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-        diffusion_step_embed_dim: int = 256,
-        down_dims: tuple[int, ...] = (256, 512, 1024),
+        diffusion_step_embed_dim: int = 128,
+        down_dims: tuple[int, ...] = (256, 512),
         kernel_size: int = 5,
         n_groups: int = 8,
         num_training_steps: int = 100,
-        num_inference_steps: int = 10,
-        prediction_type: str = "sample",
+        num_inference_steps: int = 20,
+        prediction_type: str = "epsilon",
         cond_predict_scale: bool = True,
         modality_dropout_probs: dict | None = None,
         clip_sample: bool = True,
     ) -> None:
-        if tcp_dim <= 0 or tcp_dim >= action_dim:
-            raise ValueError(f"Expected 0 < tcp_dim < action_dim, got {tcp_dim}, {action_dim}")
+        if (horizon, n_action_steps, action_dim, tcp_dim) != (16, 8, 19, 7):
+            raise ValueError("DQ-RISE requires horizon=16, n_action_steps=8 and joint action=7+12")
 
         hand_dim = action_dim - tcp_dim
         diffusion_action_dim = tcp_dim + 1
 
-        # Attach the codebook module only after BasePolicy initialises nn.Module.
-        hand_codebook = HandStateCodebook(
-            hand_dim=hand_dim,
-            num_groups=codebook_num_groups,
-            codebook_size=codebook_size,
-        )
-
-        obs_encoder = DQRISEObservationEncoder(
-            encoder_type=encoder_type,
+        obs_encoder = Sparse3DGlobalObservationEncoder(
             pc_dim=pc_dim,
-            pc_out_dim=pc_out_dim,
             state_dim=state_dim,
             num_points=num_points,
             n_obs_steps=n_obs_steps,
             state_out_dim=state_out_dim,
+            pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
         )
         backbone = ConditionalUNet1D(
             input_dim=diffusion_action_dim,
-            context_dim=obs_encoder.out_dim * n_obs_steps,
+            context_dim=obs_encoder.out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=list(down_dims),
             kernel_size=kernel_size,
@@ -175,7 +116,11 @@ class DQRISEPolicy(BasePolicy):
         self.tcp_dim = tcp_dim
         self.hand_dim = hand_dim
         self.diffusion_action_dim = diffusion_action_dim
-        self.hand_codebook = hand_codebook
+        self.hand_codebook = HandStateCodebook(
+            hand_dim=hand_dim,
+            num_groups=codebook_num_groups,
+            codebook_size=codebook_size,
+        )
         self.codebook_path = codebook_path
         self.register_load_state_dict_post_hook(self.validate_restored_codebook)
 
@@ -184,6 +129,8 @@ class DQRISEPolicy(BasePolicy):
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
         self.hand_codebook.load(self.codebook_path)
         self.hand_data = self.hand_codebook.artifact_metadata["hand_data"]
+        if self.hand_data.get("action_key") != "action":
+            raise ValueError("DQ-RISE requires a Codebook pretrained with action_key=action")
         self.validate_codebook_normalizer()
 
     def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:
@@ -233,12 +180,12 @@ class DQRISEPolicy(BasePolicy):
         condition = self.encode_observation(batch["obs"])
 
         normed = self.normalizer["action"].normalize(batch["action"])
-        tcp_part = normed[..., : self.tcp_dim]
+        arm_part = normed[..., : self.tcp_dim]
         hand_part = normed[..., self.tcp_dim :]
         index, discrete_idx = self.hand_codebook.encode(hand_part)
-        index = index.to(tcp_part.dtype)
+        index = index.to(arm_part.dtype)
 
-        diffusion_target = torch.cat([tcp_part, index], dim=-1)
+        diffusion_target = torch.cat([arm_part, index], dim=-1)
         action_loss, loss_dict = self.action_decoder.compute_loss(
             condition, diffusion_target, log_metrics=log_metrics
         )
@@ -268,12 +215,12 @@ class DQRISEPolicy(BasePolicy):
             condition, template, inference_steps=inference_steps
         )
 
-        tcp_pred = reduced_action[..., : self.tcp_dim]
+        arm_pred = reduced_action[..., : self.tcp_dim]
         idx_pred = reduced_action[..., -1]
         hand_pred, discrete_idx = self.hand_codebook.decode(idx_pred)
-        hand_pred = hand_pred.to(tcp_pred.dtype)
+        hand_pred = hand_pred.to(arm_pred.dtype)
 
-        normalized_full_action = torch.cat([tcp_pred, hand_pred], dim=-1)
+        normalized_full_action = torch.cat([arm_pred, hand_pred], dim=-1)
         prediction = self.normalizer["action"].unnormalize(normalized_full_action)
         return {
             **self.format_action_output(prediction),

@@ -320,7 +320,7 @@ def validate_action_clipping(spec, clip_sample):
         raise ValueError("Gaussian action normalization requires agent.clip_sample=false.")
 
 
-def validate_sparse3d_config(cfg, spec):
+def validate_sparse3d_config(cfg, spec, *, default_num_patches=96):
     """Preserve metric XYZ and enough points for Sparse3D patch geometry."""
     if spec.get("point_cloud") != "identity":
         raise ValueError(
@@ -329,7 +329,7 @@ def validate_sparse3d_config(cfg, spec):
     encoder = cfg.agent.get("pc_encoder_config") or {}
     sizes = {
         name: positive_int(encoder.get(name, default), name)
-        for name, default in (("num_patches", 96), ("group_size", 32))
+        for name, default in (("num_patches", default_num_patches), ("group_size", 32))
     }
     point_limit = positive_int(cfg.agent.get("num_points", 1024), "agent.num_points")
     if point_limit < max(sizes.values()):
