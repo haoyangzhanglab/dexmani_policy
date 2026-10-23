@@ -65,9 +65,7 @@ class ImageProcessor:
     ):
         if isinstance(image_size, int):
             image_size = (image_size, image_size)
-        self.image_size = (
-            tuple(map(int, image_size)) if image_size is not None else None
-        )
+        self.image_size = tuple(map(int, image_size)) if image_size is not None else None
         self.image_mean = torch.tensor(image_mean, dtype=torch.float32)
         self.image_std = torch.tensor(image_std, dtype=torch.float32)
         for name, value in (
@@ -128,11 +126,9 @@ class ImageProcessor:
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Normalize RGB; float inputs must be finite and in [0,1].
 
-        With return_transform, also return raw->final pixel matrices matching
-        the image leading dimensions. input_transform records any prior spatial
-        preprocessing and must broadcast to [...,3,3]. Omission means the input
-        images are the raw coordinate reference, not that past crops are inferred.
-        Tracked resizing supports bilinear/bicubic with align_corners=False.
+        return_transform adds raw->final matrices [...,3,3], matching image leading dimensions.
+        input_transform broadcasts to [...,3,3]; omission treats input pixels as raw.
+        Tracked resizing uses bilinear/bicubic with align_corners=False.
         """
         if input_transform is not None and not return_transform:
             raise ValueError("input_transform requires return_transform=True")
@@ -141,16 +137,9 @@ class ImageProcessor:
         flat_images = images.reshape(-1, *images.shape[-3:])
         if return_transform:
             output_hw = self.image_size or images.shape[-2:]
-            if (
-                self.interpolation == "nearest"
-                and tuple(output_hw) != images.shape[-2:]
-            ):
-                raise ValueError(
-                    "tracked nearest resize does not use the half-pixel convention"
-                )
-            transform = resize_image_transform(
-                images.shape[-2:], output_hw, device=images.device
-            )
+            if self.interpolation == "nearest" and tuple(output_hw) != images.shape[-2:]:
+                raise ValueError("tracked nearest resize does not use the half-pixel convention")
+            transform = resize_image_transform(images.shape[-2:], output_hw, device=images.device)
             if input_transform is not None:
                 if input_transform.shape[-2:] != (3, 3):
                     raise ValueError("input_transform must end in [3,3]")
@@ -158,9 +147,7 @@ class ImageProcessor:
                     torch.no_grad(),
                     torch.autocast(device_type=images.device.type, enabled=False),
                 ):
-                    prior = input_transform.to(
-                        device=images.device, dtype=torch.float32
-                    )
+                    prior = input_transform.to(device=images.device, dtype=torch.float32)
                     # Geometry must not inherit the trainer's global TF32 matmul precision.
                     transform = (transform[:, :, None] * prior[..., None, :, :]).sum(-2)
             transform = torch.broadcast_to(transform, (*leading_shape, 3, 3))

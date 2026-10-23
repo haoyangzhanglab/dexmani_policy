@@ -41,7 +41,7 @@ def restore_training_state(checkpoint, components, *, effective_config):
     if checkpoint.global_step > total:
         raise ValueError("Checkpoint global_step exceeds the saved total plan")
     for current, saved in zip(optimizer.param_groups, checkpoint.optimizer_state["param_groups"]):
-        if saved.get("param_names") != current["param_names"]:
+        if saved["param_names"] != current["param_names"]:
             raise ValueError("Optimizer parameter name/order mismatch")
     optimizer.load_state_dict(checkpoint.optimizer_state)
     scheduler.load_state_dict(checkpoint.scheduler_state)

@@ -37,8 +37,6 @@ class TemporalHandVAE(nn.Module):
         self.model_config = {key: positive_int(value, key) for key, value in dimensions.items()}
         if horizon < 3:
             raise ValueError("Temporal codec horizon must be at least 3 for second differences")
-        if hidden_dim % n_heads:
-            raise ValueError("hidden_dim must be divisible by n_heads")
         if not math.isfinite(mlp_ratio) or mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be positive and finite")
         feedforward_dim = positive_int(int(hidden_dim * mlp_ratio), "feedforward_dim")

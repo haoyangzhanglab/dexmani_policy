@@ -1,4 +1,4 @@
-"""DQRISEPolicy — quantised hand action + arm-joint/index diffusion."""
+"""DQ-RISE: diffusion over arm joints and quantized hand-state indices."""
 
 from __future__ import annotations
 
@@ -6,7 +6,10 @@ from typing import Any
 
 import torch
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
+from dexmani_policy.agents.action_decoders.backbones.unet1d import (
+    ConditionalUNet1D,
+    validate_unet_horizon,
+)
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.obs_encoder.pointcloud.global_sparse3d import (
@@ -32,12 +35,7 @@ class DQRISEPolicy(BasePolicy):
             raise ValueError("DQ-RISE does not support auxiliary action targets")
         validate_dq_normalization(spec)
         validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
-        down_dims = cfg.agent.get("down_dims", (256, 512))
-        if not down_dims:
-            raise ValueError("UNet down_dims must be nonempty")
-        divisor = 2 ** (len(down_dims) - 1)
-        if cfg.horizon % divisor:
-            raise ValueError(f"UNet horizon must be divisible by {divisor}, got {cfg.horizon}")
+        validate_unet_horizon(cfg.horizon, cfg.agent.get("down_dims", (256, 512)))
 
     def set_normalization_spec(
         self, spec: dict[str, str], feature_dims: dict[str, int] | None = None
@@ -91,7 +89,7 @@ class DQRISEPolicy(BasePolicy):
             input_dim=diffusion_action_dim,
             context_dim=obs_encoder.out_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
-            down_dims=list(down_dims),
+            down_dims=down_dims,
             kernel_size=kernel_size,
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,

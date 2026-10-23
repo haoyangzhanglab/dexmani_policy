@@ -53,7 +53,7 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<run>'
 
 ### 手部先验准备
 
-`sat` 与 `dqrise` 固定使用 19D Joint Action，并各自实例化相同的 Sparse3D Global 观测编码器。新 SAT 不兼容旧 SAT checkpoint。
+`sat` 与 `dqrise` 固定使用 19D Joint Action，并各自实例化相同的 Sparse3D Global 观测编码器。
 
 `dqrise` 默认 `codebook_path=null`，需先训练 VQ 并导出匹配当前 Joint Action 数据、normalizer 和划分的码本，再显式指定路径；`lamp` 和 `temporal_codec_flow` 需先准备 prior/codec。各阶段复用数据与划分设置，命令见 [手部动作表示](docs/手部动作表示.md)。LAMP/Temporal 仅支持 sync；完整策略 checkpoint 内嵌表示，推理无需原预训练产物。
 

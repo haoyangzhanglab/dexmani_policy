@@ -17,7 +17,9 @@ def prepare_tactile_input(
     """Mask missing fingers before encoding; valid inputs must be finite and normalized."""
     feature_dims = len(input_shape)
     if x.ndim not in (feature_dims + 1, feature_dims + 2) or x.shape[-feature_dims:] != input_shape:
-        raise ValueError(f"{input_key}: expected [B,{input_shape}] or [B,T,{input_shape}], got {tuple(x.shape)}")
+        raise ValueError(
+            f"{input_key}: expected [B,{input_shape}] or [B,T,{input_shape}], got {tuple(x.shape)}"
+        )
 
     if tactile_valid is not None:
         mask_shape = (*x.shape[:-feature_dims], input_shape[0])
@@ -47,7 +49,9 @@ class XHandForceEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
-        x = prepare_tactile_input(x, tactile_valid, self.input_shape, self.input_key, self.net[0].weight.dtype)
+        x = prepare_tactile_input(
+            x, tactile_valid, self.input_shape, self.input_key, self.net[0].weight.dtype
+        )
         features = self.net(x)
 
         if tactile_valid is not None:
@@ -82,10 +86,14 @@ class XHandTaxelEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
-        x = prepare_tactile_input(x, tactile_valid, self.input_shape, self.input_key, self.net[0].weight.dtype)
+        x = prepare_tactile_input(
+            x, tactile_valid, self.input_shape, self.input_key, self.net[0].weight.dtype
+        )
         batch_shape = x.shape[:-3]
         fingers = x.reshape(-1, 120, 3).transpose(1, 2)
-        features = self.net(fingers).squeeze(-1).reshape(*batch_shape, self.num_tokens, self.frame_dim)
+        features = (
+            self.net(fingers).squeeze(-1).reshape(*batch_shape, self.num_tokens, self.frame_dim)
+        )
 
         if tactile_valid is not None:
             features = torch.where(tactile_valid[..., None], features, 0.0)
@@ -172,7 +180,9 @@ class XHandPatchEncoder(nn.Module):
         self.token_norm = nn.LayerNorm(self.frame_dim)
 
     def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
-        x = prepare_tactile_input(x, tactile_valid, self.input_shape, self.input_key, self.patch_mlp[0].weight.dtype)
+        x = prepare_tactile_input(
+            x, tactile_valid, self.input_shape, self.input_key, self.patch_mlp[0].weight.dtype
+        )
         batch_shape = x.shape[:-3]
 
         # Force norms, contact weights and reductions use float32 under autocast.
@@ -184,19 +194,26 @@ class XHandPatchEncoder(nn.Module):
             patch_weights = contact_weights[:, :, None, :] * mask
             contact_mass = patch_weights.sum(dim=-1)
             mean_force = (
-                torch.einsum("bfpt,bftc->bfpc", patch_weights, force) / contact_mass.clamp_min(1e-6)[..., None]
+                torch.einsum("bfpt,bftc->bfpc", patch_weights, force)
+                / contact_mass.clamp_min(1e-6)[..., None]
             )
             peak_force = (force.abs()[:, :, None, :, :] * mask[..., None]).amax(dim=-2)
             contact_area = contact_mass / mask.sum(dim=-1)
             strength = (magnitude[:, :, None, :] * mask).amax(dim=-1)
-            descriptors = torch.cat((mean_force, peak_force, contact_area[..., None], strength[..., None]), dim=-1)
+            descriptors = torch.cat(
+                (mean_force, peak_force, contact_area[..., None], strength[..., None]), dim=-1
+            )
 
         patch_features = self.patch_mlp(descriptors)
         patch_features = (
-            patch_features + self.finger_embedding[None, :, None, :] + self.region_embedding[None, None, :, :]
+            patch_features
+            + self.finger_embedding[None, :, None, :]
+            + self.region_embedding[None, None, :, :]
         )
         # ReTouch Eq. (12): patch-level learned score + log contact-area prior.
-        logits = self.attention_score(F.silu(patch_features)).squeeze(-1).float() + torch.log(contact_area + 1e-6)
+        logits = self.attention_score(F.silu(patch_features)).squeeze(-1).float() + torch.log(
+            contact_area + 1e-6
+        )
         attention_weights = torch.softmax(logits, dim=-1)
         tokens = self.token_norm((attention_weights[..., None] * patch_features.float()).sum(dim=2))
         features = tokens.reshape(*batch_shape, self.num_tokens, self.frame_dim)

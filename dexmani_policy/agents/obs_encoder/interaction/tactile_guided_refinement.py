@@ -42,7 +42,9 @@ class TactileGuidedRefinement(nn.Module):
         self.tactile_encoder = XHandForceEncoder() if tactile_encoder is None else tactile_encoder
         self.input_shape = tuple(self.tactile_encoder.input_shape)
         if self.input_shape[0] != 5:
-            raise ValueError("tactile_encoder must implement the five-finger XHand encoder interface")
+            raise ValueError(
+                "tactile_encoder must implement the five-finger XHand encoder interface"
+            )
 
         self.token_channels = token_channels
         self.refinement_scale = float(refinement_scale)
@@ -108,7 +110,9 @@ class TactileGuidedRefinement(nn.Module):
             raise ValueError("geometry_descriptor must be [BT,6,7]")
         descriptor = descriptor.float()
 
-        tactile_tokens, present = self.encode_tactile(tactile, tactile_valid, relations.shape[0], relations.device)
+        tactile_tokens, present = self.encode_tactile(
+            tactile, tactile_valid, relations.shape[0], relations.device
+        )
         relation_direction, relation_magnitude = decompose_evidence(relations)
         tactile_direction, tactile_magnitude = decompose_evidence(tactile_tokens)
         local_input = torch.cat(
@@ -127,16 +131,21 @@ class TactileGuidedRefinement(nn.Module):
         # Ordered slots preserve finger identity; presence distinguishes missing from valid zero touch.
         grasp_context = torch.cat((local_evidence.float(), present[..., None]), -1).flatten(1)
         grasp_input = torch.cat(
-            (relation_direction[:, 0], descriptor[:, 0], relation_magnitude[:, 0], grasp_context), -1
+            (relation_direction[:, 0], descriptor[:, 0], relation_magnitude[:, 0], grasp_context),
+            -1,
         )
         grasp_evidence = self.grasp_evidence(grasp_input.to(self.grasp_evidence[0].weight.dtype))
 
         evidence = torch.cat((grasp_evidence[:, None], local_evidence), 1)
         available = torch.cat((present.any(-1, keepdim=True), present), -1)
-        refined, gate, residual = self.modulate_relations(relations, relation_direction, evidence, available)
+        refined, gate, residual = self.modulate_relations(
+            relations, relation_direction, evidence, available
+        )
 
         output = dict(hand_scene)
-        output.update(relation_update=refined, wrist_relation=refined[:, :1], finger_relation=refined[:, 1:])
+        output.update(
+            relation_update=refined, wrist_relation=refined[:, :1], finger_relation=refined[:, 1:]
+        )
         if return_intermediate:
             output.update(
                 geometry_relation=relations,

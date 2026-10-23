@@ -26,11 +26,9 @@ class DiTBlock(nn.Module):
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-
         self.mlp = Mlp(
             in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
+            hidden_features=int(hidden_size * mlp_ratio),
             act_layer=approximate_gelu,
             drop=0,
         )
@@ -129,7 +127,5 @@ class DiT(nn.Module):
         c = t_emb + cond_emb
 
         for block in self.blocks:
-            x = block(x, c, attn_mask=None)
-        x = self.final_layer(x, c)
-
-        return x
+            x = block(x, c)
+        return self.final_layer(x, c)

@@ -6,11 +6,10 @@ import torch
 
 
 class PointProjection(NamedTuple):
-    """Final image coordinates [BT,V,N,2] and FP32 confidence [BT,V,N].
+    """Final-image grid [BT,V,N,2] and FP32 confidence [BT,V,N].
 
-    Coordinates use align_corners=False and pixel centers at integer positions.
-    Valid image support is [-1,1); invalid points have zero confidence.
-    The point order must match the exact cloud passed to Sparse3DEncoder.
+    align_corners=False; support is [-1,1), with zero confidence for invalid points.
+    Point order must match the cloud passed to Sparse3DEncoder.
     """
 
     grid_xy: torch.Tensor
@@ -25,14 +24,8 @@ def projection_from_pixels(
     height, width = image_hw
     if min(height, width) <= 0:
         raise ValueError("image dimensions must be positive (height, width)")
-    if (
-        pixels.ndim != 4
-        or pixels.shape[-1] != 2
-        or confidence.shape != pixels.shape[:-1]
-    ):
+    if pixels.ndim != 4 or pixels.shape[-1] != 2 or confidence.shape != pixels.shape[:-1]:
         raise ValueError("pixels/confidence require [BT,V,N,2] / [BT,V,N]")
-    if pixels.device != confidence.device:
-        raise ValueError("pixels and confidence must share a device")
     with torch.autocast(device_type=pixels.device.type, enabled=False):
         pixels, confidence = pixels.float(), confidence.float()
         size = pixels.new_tensor((width, height))
@@ -61,18 +54,13 @@ def project_points(
     *,
     confidence: torch.Tensor | None = None,
 ) -> PointProjection:
-    """Project metric Base XYZ [BT,N,3] into final RGB input coordinates.
+    """Project Base XYZ [BT,N,3] into final RGB coordinates in detached FP32.
 
-    intrinsics [BT,V,3,3] describes the original, undistorted pinhole image.
-    T_camera_from_base [BT,V,4,4] acts on column vectors: p_cam = R p_base + t.
-    Camera x/y/z point right/down/forward; points and translation use meters.
-    image_transform [BT,V,3,3] is an affine raw-pixel -> final-pixel transform
-    from recorded resize/in-bounds crop operations (no padding). image_hw is
-    (height,width). Integer pixels are centers, normalized with align_corners=False.
-    Optional confidence [BT,V,N] multiplies frustum validity; this function does
-    not perform depth_consistency or infer calibration, distortion, or occlusion.
-    Nonfinite cameras/points, nonpositive depth and out-of-image points are invalid.
-    Geometry is FP32 and detached, including under BF16 autocast.
+    intrinsics [BT,V,3,3] uses undistorted pinhole pixels; camera axes are right/down/forward.
+    T_camera_from_base [BT,V,4,4]: p_cam = R p_base + t, with XYZ and t in meters.
+    image_transform [BT,V,3,3] records raw->final resize/in-bounds crop (no padding).
+    image_hw=(height,width); integer pixels are centers, with align_corners=False.
+    confidence [BT,V,N] weights finite, positive-depth, in-image points; no occlusion test.
     """
     if points_base.ndim != 3 or points_base.shape[-1] != 3:
         raise ValueError("points_base must be [BT,N,3]")
@@ -104,16 +92,12 @@ def project_points(
         # Explicit FP32 products avoid the trainer's global high/TF32 matmul mode.
         camera = (points[:, None, :, None, :] * transform[..., None, :3, :3]).sum(-1)
         camera = camera + transform[..., None, :3, 3]
-        homogeneous = (camera[..., None, :] * intrinsics.float()[..., None, :, :]).sum(
-            -1
-        )
+        homogeneous = (camera[..., None, :] * intrinsics.float()[..., None, :, :]).sum(-1)
         depth = camera[..., 2]
         denominator = homogeneous[..., 2:3]
         pixels = homogeneous[..., :2] / torch.where(denominator != 0, denominator, 1)
         pixels = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
-        pixels = (pixels[..., None, :] * image_transform.float()[..., None, :2, :]).sum(
-            -1
-        )
+        pixels = (pixels[..., None, :] * image_transform.float()[..., None, :2, :]).sum(-1)
         finite_camera = (
             torch.isfinite(transform).all(dim=(-1, -2))
             & torch.isfinite(intrinsics).all(dim=(-1, -2))

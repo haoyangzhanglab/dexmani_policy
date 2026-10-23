@@ -181,7 +181,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
     model_cfg = cfg
     if checkpoint is not None:
-        model_cfg = checkpoint_agent_config(cfg, checkpoint.model_state)
+        model_cfg = checkpoint_agent_config(cfg)
     model = hydra.utils.instantiate(model_cfg.agent)
     if "datasets" in cfg.dataset:
         for child in cfg.dataset.datasets:

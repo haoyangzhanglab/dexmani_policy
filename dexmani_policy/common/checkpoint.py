@@ -91,15 +91,9 @@ def inference_weights(payload, *, use_ema):
     return state, step
 
 
-def unwrap_state_dict(state_dict: dict) -> dict:
-    """Remove DDP/compile parameter prefixes before saving model weights."""
-    if any("_orig_mod." in k for k in state_dict):
-        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-
-    if next(iter(state_dict), "").startswith("module."):
-        return {k.removeprefix("module."): v for k, v in state_dict.items()}
-
-    return state_dict
+def policy_state_dict(model) -> dict:
+    """Save an unwrapped policy with eager parameter names, including compiled backbones."""
+    return {name.replace("_orig_mod.", ""): value for name, value in model.state_dict().items()}
 
 
 def load_policy_state(model, state):
@@ -128,16 +122,15 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     )
 
     payload = read_checkpoint(checkpoint_path)
-    if saved_config is not None:
-        if inference_config(payload["effective_config"]) != inference_config(saved_config):
-            raise ValueError("Checkpoint inference recipe mismatch with saved config")
+    if inference_config(payload["effective_config"]) != inference_config(saved_config):
+        raise ValueError("Checkpoint inference recipe mismatch with saved config")
     saved_config = payload["effective_config"]
     cfg = OmegaConf.create(saved_config)
     validate_action_window(cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps)
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     state, global_step = inference_weights(payload, use_ema=use_ema)
-    cfg = checkpoint_agent_config(cfg, state)
+    cfg = checkpoint_agent_config(cfg)
     agent = hydra.utils.instantiate(cfg.agent)
     agent.checkpoint_step = global_step
     agent.action_key = cfg.action_key
@@ -175,8 +168,8 @@ def inference_config(config):
     return {
         "agent": agent,
         "inputs": inputs(config["dataset"]),
-        "normalization": config.get("normalization"),
-        "normalization_dims": config.get("normalization_dims"),
+        "normalization": config["normalization"],
+        "normalization_dims": config["normalization_dims"],
         "action_key": config["action_key"],
         "task_name": config.get("task_name"),
         "real_runtime": config.get("real_runtime"),
@@ -186,11 +179,12 @@ def inference_config(config):
     }
 
 
-def checkpoint_agent_config(cfg, state):
+def checkpoint_agent_config(cfg):
     """Construct from saved weights without loading external initialization assets."""
     import copy
-    import torch
     from omegaconf import DictConfig, open_dict
+
+    from dexmani_policy.common.config import positive_int
 
     cfg = copy.deepcopy(cfg)
     agent = cfg.agent
@@ -210,17 +204,5 @@ def checkpoint_agent_config(cfg, state):
             == "dexmani_policy.agents.policies.multitask_dit.MultiTaskDiTPolicy"
             and agent.get("task_texts") is not None
         ):
-            table = state.get("task_emb_table")
-            texts = list(dict.fromkeys(agent.task_texts))
-            dim = agent.get("text_embed_dim")
-            if (
-                type(dim) is not int
-                or dim <= 0
-                or not isinstance(table, torch.Tensor)
-                or table.ndim != 2
-                or tuple(table.shape) != (len(texts), dim)
-            ):
-                raise ValueError(
-                    "Closed text checkpoint requires task_emb_table matching saved task_texts and text_embed_dim"
-                )
+            positive_int(agent.text_embed_dim, "saved text_embed_dim")
     return cfg

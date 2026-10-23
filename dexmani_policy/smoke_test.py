@@ -13,8 +13,8 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import (
     load_training_checkpoint,
+    policy_state_dict,
     restore_policy_agent,
-    unwrap_state_dict,
 )
 from dexmani_policy.common.config import (
     NON_NUMERIC_OBSERVATION_FIELDS,
@@ -253,7 +253,7 @@ def validate_checkpoint(cfg, components, trainer, checkpoint_path):
     ):
         if model is None:
             continue
-        actual = unwrap_state_dict(model.state_dict())
+        actual = policy_state_dict(model)
         assert actual.keys() == state.keys()
         for key, tensor in actual.items():
             torch.testing.assert_close(tensor.detach().cpu(), state[key], rtol=0, atol=0)

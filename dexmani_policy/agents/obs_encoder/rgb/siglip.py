@@ -37,9 +37,7 @@ class SigLIPEncoder(nn.Module):
         config._attn_implementation = "sdpa"
         self.architecture = config.to_dict()
         self.backbone = (
-            SiglipVisionModel.from_pretrained(
-                model_name, config=config, torch_dtype=torch.bfloat16
-            )
+            SiglipVisionModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
             if load_pretrained
             else SiglipVisionModel(config).to(dtype=torch.bfloat16)
         )
@@ -95,12 +93,8 @@ class SigLIPEncoder(nn.Module):
             global_token = self.project_features(outputs.pooler_output)
 
         return {
-            "patch_tokens": patch_tokens.reshape(
-                *leading_shape, *patch_tokens.shape[1:]
-            ),
-            "global_token": global_token.reshape(
-                *leading_shape, *global_token.shape[1:]
-            ),
+            "patch_tokens": patch_tokens.reshape(*leading_shape, *patch_tokens.shape[1:]),
+            "global_token": global_token.reshape(*leading_shape, *global_token.shape[1:]),
         }
 
     def tokens_to_feature_map(

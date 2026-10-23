@@ -43,9 +43,7 @@ def farthest_point_sample(
             K=num_samples,
         )
         sampled_points = (
-            sampled_xyz
-            if pointcloud.size(-1) == 3
-            else index_points(pointcloud, sample_idx)
+            sampled_xyz if pointcloud.size(-1) == 3 else index_points(pointcloud, sample_idx)
         )
         return sampled_points.contiguous(), sample_idx
 
@@ -80,9 +78,7 @@ def farthest_point_sample(
 
     shuffle_perm = None
     if use_shuffle_output:
-        shuffle_perm = torch.rand(B, num_samples, device=pointcloud.device).argsort(
-            dim=1
-        )
+        shuffle_perm = torch.rand(B, num_samples, device=pointcloud.device).argsort(dim=1)
         sample_idx = torch.gather(sample_idx, 1, shuffle_perm)
 
     # Reuse native XYZ output when sampling did not perturb coordinates.
@@ -94,11 +90,7 @@ def farthest_point_sample(
             )
         return sampled_xyz.contiguous(), sample_idx
 
-    sampled_points = torch.gather(
-        pointcloud,
-        1,
-        sample_idx.unsqueeze(-1).long().expand(-1, -1, pointcloud.shape[-1]),
-    )
+    sampled_points = index_points(pointcloud, sample_idx)
     return sampled_points.contiguous(), sample_idx
 
 

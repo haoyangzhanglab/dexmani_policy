@@ -22,6 +22,8 @@ class Diffusion(nn.Module):
     ) -> None:
         super().__init__()
         positive_int(num_inference_steps, "num_inference_steps")
+        if prediction_type not in ("epsilon", "sample", "v_prediction"):
+            raise ValueError(f"Unsupported prediction type: {prediction_type}")
 
         self.model = model
         self.aux_loss_weight = aux_loss_weight
@@ -47,7 +49,9 @@ class Diffusion(nn.Module):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         noise = torch.randn_like(actions)
         timestep = torch.randint(
-            self.noise_scheduler.config.num_train_timesteps, (actions.shape[0],), device=actions.device
+            self.noise_scheduler.config.num_train_timesteps,
+            (actions.shape[0],),
+            device=actions.device,
         )
 
         pred = self.model(
@@ -61,15 +65,13 @@ class Diffusion(nn.Module):
             target = noise
         elif pred_type == "sample":
             target = actions
-        elif pred_type == "v_prediction":
+        else:
             # add_noise places the schedule on-device; v-target coefficients stay in FP32.
             alpha_bar = self.noise_scheduler.alphas_cumprod[timestep].float()
             alpha_t = alpha_bar.sqrt()
             sigma_t = (1 - alpha_bar).sqrt()
             target = alpha_t.view(-1, 1, 1) * noise - sigma_t.view(-1, 1, 1) * actions
             target = target.to(dtype=actions.dtype)
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
 
         loss_dict = {}
         # R3D averages each action group separately and weights only auxiliary losses.

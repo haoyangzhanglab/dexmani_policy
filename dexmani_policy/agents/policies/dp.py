@@ -5,7 +5,10 @@ import inspect
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D
+from dexmani_policy.agents.action_decoders.backbones.unet1d import (
+    ConditionalUNet1D,
+    validate_unet_horizon,
+)
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
@@ -54,12 +57,7 @@ class DPPolicy(BasePolicy):
     def validate_model_config(cls, cfg, spec) -> None:
         validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
         defaults = inspect.signature(cls).parameters["down_dims"].default
-        down_dims = cfg.agent.get("down_dims", defaults)
-        if not down_dims:
-            raise ValueError("UNet down_dims must be nonempty")
-        divisor = 2 ** (len(down_dims) - 1)
-        if cfg.horizon % divisor:
-            raise ValueError(f"UNet horizon must be divisible by {divisor}, got {cfg.horizon}")
+        validate_unet_horizon(cfg.horizon, cfg.agent.get("down_dims", defaults))
 
     def __init__(
         self,
@@ -93,7 +91,7 @@ class DPPolicy(BasePolicy):
             input_dim=action_dim,
             context_dim=obs_encoder.out_dim * n_obs_steps,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
-            down_dims=list(down_dims),
+            down_dims=down_dims,
             kernel_size=kernel_size,
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,

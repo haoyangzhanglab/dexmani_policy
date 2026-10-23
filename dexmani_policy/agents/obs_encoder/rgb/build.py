@@ -33,9 +33,7 @@ def build_rgb_encoder(
     config = {**RGB_ENCODER_DEFAULTS[name], **(config or {})}
     processor = ImageProcessor.from_preset(name, config)
     preprocessing = processor.config
-    encoder_config = {
-        key: value for key, value in config.items() if key not in preprocessing
-    }
+    encoder_config = {key: value for key, value in config.items() if key not in preprocessing}
 
     if name == "resnet":
         from .resnet import ResNetEncoder
@@ -69,9 +67,7 @@ def example(name: str = "resnet") -> None:
     )
     with torch.no_grad():
         features = encoder(rgb)
-        feature_map = encoder.tokens_to_feature_map(
-            features["patch_tokens"], rgb.shape[-2:]
-        )
+        feature_map = encoder.tokens_to_feature_map(features["patch_tokens"], rgb.shape[-2:])
     for key, value in {**features, "feature_map": feature_map}.items():
         print(f"{key}: {tuple(value.shape)}")
 
@@ -79,10 +75,6 @@ def example(name: str = "resnet") -> None:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Extract spatial and global RGB features."
-    )
-    parser.add_argument(
-        "encoder", nargs="?", choices=RGB_ENCODER_DEFAULTS, default="resnet"
-    )
+    parser = argparse.ArgumentParser(description="Extract spatial and global RGB features.")
+    parser.add_argument("encoder", nargs="?", choices=RGB_ENCODER_DEFAULTS, default="resnet")
     example(parser.parse_args().encoder)

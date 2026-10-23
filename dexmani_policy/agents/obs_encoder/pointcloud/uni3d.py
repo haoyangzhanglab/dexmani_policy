@@ -171,9 +171,7 @@ class Uni3DEncoder(nn.Module):
 
     def initialize_training(self):
         if self.use_pretrained_weights:
-            self.load_pretrained_weights(
-                self.pretrained_weights_path, self.allow_random_init
-            )
+            self.load_pretrained_weights(self.pretrained_weights_path, self.allow_random_init)
         else:
             logger.info("[Uni3DEncoder] Random initialization (training from scratch)")
 
@@ -234,9 +232,7 @@ class Uni3DEncoder(nn.Module):
             if key.startswith("pc_encoder.")
         }
 
-        missing_keys, unexpected_keys = self.load_state_dict(
-            processed_state_dict, strict=False
-        )
+        missing_keys, unexpected_keys = self.load_state_dict(processed_state_dict, strict=False)
 
         total_expected = len(self.state_dict())
         loaded = total_expected - len(missing_keys)

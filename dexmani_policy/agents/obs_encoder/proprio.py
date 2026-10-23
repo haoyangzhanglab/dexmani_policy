@@ -67,9 +67,7 @@ class HandSpatialEncoder(nn.Module):
     ) -> None:
         super().__init__()
         if token_dim < 2 or hidden_dim < 1:
-            raise ValueError(
-                "token_dim >= 2 and hidden_dim >= 1 prevent degenerate features"
-            )
+            raise ValueError("token_dim >= 2 and hidden_dim >= 1 prevent degenerate features")
         for name, scale in (
             ("position_scale", position_scale),
             ("hand_scale", hand_scale),
@@ -80,17 +78,13 @@ class HandSpatialEncoder(nn.Module):
         self.token_dim = token_dim
         self.position_scale = float(position_scale)
         self.hand_scale = float(hand_scale)
-        self.position_pe = (
-            FourierPositionEmbedding3D(num_frequencies) if num_frequencies else None
-        )
+        self.position_pe = FourierPositionEmbedding3D(num_frequencies) if num_frequencies else None
         self.position_mlp = nn.Sequential(
             nn.Linear(3 + 6 * num_frequencies, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, token_dim),
         )
-        self.relative_proj = (
-            nn.Linear(3, token_dim, bias=False) if use_wrist_offset else None
-        )
+        self.relative_proj = nn.Linear(3, token_dim, bias=False) if use_wrist_offset else None
         if self.relative_proj is not None:
             # Start as the absolute-only model; the linear weights still learn.
             nn.init.zeros_(self.relative_proj.weight)

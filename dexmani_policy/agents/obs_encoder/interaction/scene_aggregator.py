@@ -16,7 +16,11 @@ def sample_region_seeds(points: Tensor, count: int, mask: Tensor | None = None) 
     """Centroid-initialized FPS with unique indices; masked coordinates must already be zero."""
     with torch.autocast(device_type=points.device.type, enabled=False):
         points = points.float()
-        excluded = torch.zeros(points.shape[:2], device=points.device, dtype=torch.bool) if mask is None else ~mask
+        excluded = (
+            torch.zeros(points.shape[:2], device=points.device, dtype=torch.bool)
+            if mask is None
+            else ~mask
+        )
         valid_count = points.shape[1] if mask is None else mask.sum(1)[:, None, None]
         centroid = points.sum(1, keepdim=True) / valid_count
         distance = (points - centroid).square().sum(-1)
@@ -70,7 +74,9 @@ class RegionSelfAttention(nn.Module):
             edge_input = torch.cat((relative, relative.norm(dim=-1, keepdim=True)), -1)
         edge = self.edge(edge_input.to(self.edge[0].weight.dtype))
         bias, edge_value = edge.split((self.heads, self.heads * self.head_dim), -1)
-        edge_value = edge_value.reshape(batch, regions, regions, self.heads, self.head_dim).permute(0, 3, 1, 2, 4)
+        edge_value = edge_value.reshape(batch, regions, regions, self.heads, self.head_dim).permute(
+            0, 3, 1, 2, 4
+        )
 
         with torch.autocast(device_type=tokens.device.type, enabled=False):
             logits = query.float() @ key.float().transpose(-2, -1)
@@ -116,6 +122,7 @@ class RoutingPriorCrossAttention(nn.Module):
             query, key, value, attn_mask=bias[:, None].to(query.dtype), dropout_p=0.0
         )
         return self.out(refined.transpose(1, 2).reshape(batch, regions, -1))
+
 
 class SceneAggregator(nn.Module):
     """Compress spatial patches into geometric regions, then encode inter-region relations."""
@@ -165,10 +172,13 @@ class SceneAggregator(nn.Module):
         self.route_norm = nn.LayerNorm(token_channels)
         self.route_projection = nn.Linear(token_channels, route_dim, bias=False)
         self.semantic_scale_logit = nn.Parameter(torch.zeros(()))
-        self.geometry_embed = nn.Sequential(nn.Linear(9, 64), nn.GELU(), nn.Linear(64, token_channels))
+        self.geometry_embed = nn.Sequential(
+            nn.Linear(9, 64), nn.GELU(), nn.Linear(64, token_channels)
+        )
         self.cross_refinement = (
             RoutingPriorCrossAttention(token_channels, refinement_dim, refinement_heads)
-            if use_cross_refinement else None
+            if use_cross_refinement
+            else None
         )
         self.refinement_gain = (
             nn.Parameter(torch.full((token_channels,), 0.1)) if use_cross_refinement else None
@@ -179,7 +189,9 @@ class SceneAggregator(nn.Module):
             else None
         )
         self.ffn_norm = nn.LayerNorm(token_channels)
-        self.ffn = nn.Sequential(nn.Linear(token_channels, hidden), nn.GELU(), nn.Linear(hidden, token_channels))
+        self.ffn = nn.Sequential(
+            nn.Linear(token_channels, hidden), nn.GELU(), nn.Linear(hidden, token_channels)
+        )
         self.ffn_gain = nn.Parameter(torch.full((token_channels,), 0.1))
         self.norm = nn.LayerNorm(token_channels)
 
@@ -255,7 +267,10 @@ class SceneAggregator(nn.Module):
             covariance = (weight[..., None] * delta).transpose(-2, -1) @ delta
             normalized_covariance = covariance / self.geometry_scale**2
             upper = torch.stack(
-                tuple(normalized_covariance[..., i, j] for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))),
+                tuple(
+                    normalized_covariance[..., i, j]
+                    for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
+                ),
                 -1,
             )
             descriptor = torch.cat((centers / self.position_scale, upper), -1)
@@ -266,13 +281,15 @@ class SceneAggregator(nn.Module):
         refinement_update = None
         if self.cross_refinement is not None:
             refinement_update = self.cross_refinement(scene_tokens, tokens, weight)
-            scene_tokens = scene_tokens + self.refinement_gain.to(scene_tokens.dtype) * refinement_update.to(
+            scene_tokens = scene_tokens + self.refinement_gain.to(
                 scene_tokens.dtype
-            )
+            ) * refinement_update.to(scene_tokens.dtype)
         relation_attention = None
         if self.relation is not None:
             scene_tokens, relation_attention = self.relation(scene_tokens, centers)
-        scene_tokens = scene_tokens + self.ffn_gain.to(scene_tokens.dtype) * self.ffn(self.ffn_norm(scene_tokens))
+        scene_tokens = scene_tokens + self.ffn_gain.to(scene_tokens.dtype) * self.ffn(
+            self.ffn_norm(scene_tokens)
+        )
 
         output = {
             "scene_token": self.norm(scene_tokens),
@@ -282,16 +299,15 @@ class SceneAggregator(nn.Module):
             "scene_mask": torch.ones_like(mass, dtype=torch.bool),
         }
         if return_intermediate:
-            output = {
-                **output,
-                "assignment": assignment,
-                "pool_weight": weight,
-                "anchor_indices": seed_indices,
-                "routing_anchors": anchors,
-                "routing_allowed": allowed,
-                "pooled_token": pooled,
-                "base_scene_token": base_tokens,
-            }
+            output.update(
+                assignment=assignment,
+                pool_weight=weight,
+                anchor_indices=seed_indices,
+                routing_anchors=anchors,
+                routing_allowed=allowed,
+                pooled_token=pooled,
+                base_scene_token=base_tokens,
+            )
             if refinement_update is not None:
                 output["refinement_update"] = refinement_update
             if relation_attention is not None:

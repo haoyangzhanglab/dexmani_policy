@@ -6,12 +6,20 @@ import torch.nn as nn
 from .modules import TimestepMLP, batch_timesteps
 
 
+def validate_unet_horizon(horizon: int, down_dims) -> None:
+    if not down_dims:
+        raise ValueError("UNet down_dims must be nonempty")
+    divisor = 2 ** (len(down_dims) - 1)
+    if horizon % divisor:
+        raise ValueError(f"UNet horizon must be divisible by {divisor}, got {horizon}")
+
+
 class ConvBlock1D(nn.Module):
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
+    def __init__(self, in_channels, out_channels, kernel_size, n_groups=8):
         super().__init__()
 
         self.block = nn.Sequential(
-            nn.Conv1d(inp_channels, out_channels, kernel_size, padding=kernel_size // 2),
+            nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size // 2),
             nn.GroupNorm(n_groups, out_channels),
             nn.Mish(),
         )
@@ -83,38 +91,30 @@ class ConditionalUNet1D(nn.Module):
         self.horizon_divisor = 2 ** (len(down_dims) - 1)
         self.cond_predict_scale = cond_predict_scale
 
-        dsed = diffusion_step_embed_dim
-        self.diffusion_step_encoder = TimestepMLP(pos_emb_dim=dsed, output_dim=dsed)
-        cond_dim = dsed + context_dim
+        self.diffusion_step_encoder = TimestepMLP(
+            pos_emb_dim=diffusion_step_embed_dim, output_dim=diffusion_step_embed_dim
+        )
+        cond_dim = diffusion_step_embed_dim + context_dim
 
         all_dims = [input_dim] + list(down_dims)
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
         mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList(
-            [
-                ConditionalResidualBlock1D(
-                    mid_dim,
-                    mid_dim,
-                    cond_dim=cond_dim,
-                    kernel_size=kernel_size,
-                    n_groups=n_groups,
-                    cond_predict_scale=cond_predict_scale,
-                ),
-                ConditionalResidualBlock1D(
-                    mid_dim,
-                    mid_dim,
-                    cond_dim=cond_dim,
-                    kernel_size=kernel_size,
-                    n_groups=n_groups,
-                    cond_predict_scale=cond_predict_scale,
-                ),
-            ]
+            ConditionalResidualBlock1D(
+                mid_dim,
+                mid_dim,
+                cond_dim=cond_dim,
+                kernel_size=kernel_size,
+                n_groups=n_groups,
+                cond_predict_scale=cond_predict_scale,
+            )
+            for _ in range(2)
         )
 
-        self.down_modules = nn.ModuleList([])
-        for ind, (dim_in, dim_out) in enumerate(in_out):
-            is_last = ind >= (len(in_out) - 1)
+        self.down_modules = nn.ModuleList()
+        for index, (dim_in, dim_out) in enumerate(in_out):
+            is_last = index == len(in_out) - 1
             self.down_modules.append(
                 nn.ModuleList(
                     [
@@ -139,9 +139,9 @@ class ConditionalUNet1D(nn.Module):
                 )
             )
 
-        up_modules = nn.ModuleList([])
+        self.up_modules = nn.ModuleList()
         for dim_in, dim_out in reversed(in_out[1:]):
-            up_modules.append(
+            self.up_modules.append(
                 nn.ModuleList(
                     [
                         ConditionalResidualBlock1D(
@@ -164,7 +164,6 @@ class ConditionalUNet1D(nn.Module):
                     ]
                 )
             )
-        self.up_modules = up_modules
 
         start_dim = down_dims[0]
         self.final_conv = nn.Sequential(
@@ -182,7 +181,7 @@ class ConditionalUNet1D(nn.Module):
         timestep = batch_timesteps(timestep, x)
         t_embed = self.diffusion_step_encoder(timestep)
 
-        cond = torch.cat([t_embed, context], axis=-1)
+        cond = torch.cat([t_embed, context], dim=-1)
 
         skips = []
         for resnet, resnet2, downsample in self.down_modules:

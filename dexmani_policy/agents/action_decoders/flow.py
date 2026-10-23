@@ -56,8 +56,6 @@ class RectifiedFlow(nn.Module):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch_size = actions.shape[0]
         x0 = torch.randn_like(actions)
-        x1 = actions
-
         t = self.time_sampler.sample(
             batch_size,
             self.t_sample_mode,
@@ -66,8 +64,8 @@ class RectifiedFlow(nn.Module):
         t = shift_time_to_noise(t, self.time_shift_alpha)
         t_view = t.view(batch_size, *([1] * (actions.ndim - 1)))
 
-        xt = interpolate_flow(x0, x1, t_view)
-        target_v = x1 - x0
+        xt = interpolate_flow(x0, actions, t_view)
+        target_v = actions - x0
 
         pred_v = self.model(x=xt, timestep=t, context=cond)
         loss = F.mse_loss(pred_v, target_v)
@@ -104,7 +102,7 @@ class RectifiedFlow(nn.Module):
 
         context_kwargs = {}
         prepare = getattr(self.model, "prepare_context_kv", None)
-        if not self.training and prepare is not None:
+        if not self.training and num_steps > 1 and prepare is not None:
             context_kv = prepare(cond)
             if context_kv is not None:
                 context_kwargs["context_kv"] = context_kv
@@ -160,12 +158,11 @@ class ConsistencyFlow(nn.Module):
         target_t = dt if self.target_t_sample_mode == "relative" else t
 
         x0 = torch.randn_like(actions)
-        x1 = actions
         return {
-            "xt": interpolate_flow(x0, x1, t_view),
+            "xt": interpolate_flow(x0, actions, t_view),
             "t": t,
             "target_t": target_t,
-            "vt_target": x1 - x0,
+            "vt_target": actions - x0,
         }
 
     def sample_consistency_targets(
@@ -188,8 +185,7 @@ class ConsistencyFlow(nn.Module):
         t_next = torch.clamp(t + dt, max=1.0)
 
         if self.target_t_sample_mode == "relative":
-            target_t_next = dt
-            target_t = dt
+            target_t = target_t_next = dt
         else:
             target_t_next = t_next + dt
             target_t = t_next
@@ -198,9 +194,8 @@ class ConsistencyFlow(nn.Module):
         t_next_view = t_next.view(batch_size, *([1] * (actions.ndim - 1)))
 
         x0 = torch.randn_like(actions)
-        x1 = actions
-        xt = interpolate_flow(x0, x1, t_view)
-        xt_next = interpolate_flow(x0, x1, t_next_view)
+        xt = interpolate_flow(x0, actions, t_view)
+        xt_next = interpolate_flow(x0, actions, t_next_view)
 
         with torch.no_grad():
             v_to_target = ema_model(

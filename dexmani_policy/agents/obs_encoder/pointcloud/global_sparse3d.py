@@ -77,10 +77,6 @@ class Sparse3DGlobalObservationEncoder(nn.Module):
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc, state = obs["point_cloud"], obs["joint_state"]
-        if pc.ndim != 3 or pc.shape[-1] != 6 or pc.shape[0] == 0 or pc.shape[0] % self.n_obs_steps:
-            raise ValueError("point_cloud must be nonempty [B*2,N,6]")
-        if state.shape != (pc.shape[0], 19):
-            raise ValueError("joint_state must be [B*2,19] aligned with point_cloud")
         pc = preprocess_point_cloud(
             pc,
             self.num_points,

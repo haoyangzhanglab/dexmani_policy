@@ -102,19 +102,14 @@ class MultiStagePointNet(nn.Module):
         self.input_channels = input_channels
         self.output_channels = output_channels
 
-        self.input_projection = nn.Conv1d(
-            input_channels, hidden_channels, kernel_size=1
-        )
+        self.input_projection = nn.Conv1d(input_channels, hidden_channels, kernel_size=1)
         self.activation = nn.ReLU(inplace=False)
         self.output_projection = nn.Conv1d(
             hidden_channels * num_layers, output_channels, kernel_size=1
         )
 
         self.point_layers = nn.ModuleList(
-            [
-                nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1)
-                for _ in range(num_layers)
-            ]
+            [nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1) for _ in range(num_layers)]
         )
         self.global_fusion_layers = nn.ModuleList(
             [
@@ -128,9 +123,7 @@ class MultiStagePointNet(nn.Module):
         point_feature = self.activation(self.input_projection(point_feature))
 
         stage_feature_list = []
-        for point_layer, global_fusion_layer in zip(
-            self.point_layers, self.global_fusion_layers
-        ):
+        for point_layer, global_fusion_layer in zip(self.point_layers, self.global_fusion_layers):
             point_feature = self.activation(point_layer(point_feature))
             global_point_feature = point_feature.amax(dim=-1, keepdim=True)
             point_feature = torch.cat(

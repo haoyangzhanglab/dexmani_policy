@@ -8,9 +8,7 @@ from torch import nn
 from .projection import PointProjection
 
 
-def gather_patch_members(
-    value: torch.Tensor, neighbor_idx: torch.Tensor
-) -> torch.Tensor:
+def gather_patch_members(value: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
     batch_size, num_points = value.shape[:2]
     flat = value.reshape(batch_size, num_points, -1)
     index = neighbor_idx.reshape(batch_size, -1, 1).expand(-1, -1, flat.shape[-1])
@@ -27,11 +25,10 @@ def build_patch_correspondence(
     member_weight: torch.Tensor | None = None,
     pooling: str = "uniform",
 ) -> dict[str, torch.Tensor]:
-    """Build FP32 pooling weights [BT,M,V*Hf*Wf] for a uniform image grid.
+    """Build FP32 pooling weights [BT,M,V*Hf*Wf] on a uniform final-image grid.
 
-    Projection coordinates are normalized final-image coordinates. Optional
-    image masks are bool [BT,V,Hf,Wf]; member weights are [BT,M,K]. Coverage
-    and confidence always use geometric weights, regardless of pooling mode.
+    image_token_valid is bool [BT,V,Hf,Wf]; member_weight is [BT,M,K].
+    Coverage and confidence always use geometric weights, regardless of pooling mode.
     """
     grid_xy, confidence = projection
     if grid_xy.ndim != 4 or grid_xy.shape[-1] != 2:
@@ -44,11 +41,7 @@ def build_patch_correspondence(
     grid_h, grid_w = patch_grid_size
     if min(views, points, grid_h, grid_w) <= 0:
         raise ValueError("views, points and grid dimensions must be positive")
-    if (
-        neighbor_idx.ndim != 3
-        or neighbor_idx.shape[0] != batch
-        or neighbor_idx.shape[-1] == 0
-    ):
+    if neighbor_idx.ndim != 3 or neighbor_idx.shape[0] != batch or neighbor_idx.shape[-1] == 0:
         raise ValueError("neighbor_idx must be [BT,M,K] with K > 0")
     if member_weight is not None and member_weight.shape != neighbor_idx.shape:
         raise ValueError("member_weight must match neighbor_idx [BT,M,K]")
@@ -85,9 +78,7 @@ def build_patch_correspondence(
         )
         if image_token_valid is not None:
             mask = image_token_valid.flatten(2)
-            bilinear = bilinear * mask.gather(2, token_idx.flatten(2)).reshape_as(
-                token_idx
-            )
+            bilinear = bilinear * mask.gather(2, token_idx.flatten(2)).reshape_as(token_idx)
 
         supported_confidence = confidence * bilinear.sum(-1)
         reliability = supported_confidence.amax(dim=1)
@@ -109,9 +100,7 @@ def build_patch_correspondence(
             coverage = count / neighbor_idx.shape[-1]
         else:
             weights = member_weight.float()
-            base_weight = torch.where(
-                torch.isfinite(weights) & (weights > 0), weights, 0.0
-            )
+            base_weight = torch.where(torch.isfinite(weights) & (weights > 0), weights, 0.0)
             maximum = base_weight.amax(-1, keepdim=True)
             base_weight = base_weight / torch.where(maximum > 0, maximum, 1)
             supported = base_weight * member_valid
@@ -125,20 +114,14 @@ def build_patch_correspondence(
         if pooling == "reliability":
             reliability_weight = torch.where(member_prior > 0, member_confidence, 0.0)
             maximum = reliability_weight.amax(-1, keepdim=True)
-            reliability_weight = reliability_weight / torch.where(
-                maximum > 0, maximum, 1
-            )
+            reliability_weight = reliability_weight / torch.where(maximum > 0, maximum, 1)
             weighted = member_prior * reliability_weight
             weight_sum = weighted.sum(-1, keepdim=True)
             member_prior = weighted / torch.where(weight_sum > 0, weight_sum, 1)
 
         member_idx = gather_patch_members(token_idx.permute(0, 2, 1, 3), neighbor_idx)
-        member_edges = gather_patch_members(
-            point_weight.permute(0, 2, 1, 3), neighbor_idx
-        )
-        pool_weight = coordinates.new_zeros(
-            batch, neighbor_idx.shape[1], views * grid_h * grid_w
-        )
+        member_edges = gather_patch_members(point_weight.permute(0, 2, 1, 3), neighbor_idx)
+        pool_weight = coordinates.new_zeros(batch, neighbor_idx.shape[1], views * grid_h * grid_w)
         # Scatter accumulates repeated corners/members without [BT,M,K,Di] features.
         pool_weight.scatter_add_(
             2,
@@ -169,8 +152,6 @@ class FeatureAlignment(nn.Module):
             raise ValueError("channel counts must be positive")
         if not 0 < gate_init < 1:
             raise ValueError("gate_init must be in (0,1)")
-        if pooling not in {"uniform", "reliability"}:
-            raise ValueError("pooling must be 'uniform' or 'reliability'")
 
         self.pooling = pooling
         self.image_norm = nn.LayerNorm(image_channels)
@@ -192,18 +173,13 @@ class FeatureAlignment(nn.Module):
         member_weight: torch.Tensor | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """Fuse [BT,M,D3] with a uniform image_grid [BT,V,Hf,Wf,Di].
+        """Fuse spatial tokens [BT,M,D3] with a uniform image grid [BT,V,Hf,Wf,Di].
 
-        Projection and neighbor indices refer to the same Sparse3D input points.
-        Native ResNet feature centers do not satisfy this uniform-grid contract.
+        Projection and neighbors share Sparse3D point order; native ResNet grids do not apply.
         """
-        if (
-            image_grid.ndim != 5
-            or image_grid.shape[:2] != projection.grid_xy.shape[:2]
-            or image_grid.shape[-1] != self.proj.in_features
-        ):
+        if image_grid.ndim != 5 or image_grid.shape[:2] != projection.grid_xy.shape[:2]:
             raise ValueError(
-                "image_grid must be [BT,V,Hf,Wf,Di] matching projection and image channels"
+                "image_grid must be [BT,V,Hf,Wf,Di] with the same batch and views as projection"
             )
         geometry = build_patch_correspondence(
             neighbor_idx,
@@ -213,13 +189,9 @@ class FeatureAlignment(nn.Module):
             member_weight=member_weight,
             pooling=self.pooling,
         )
-        if (
-            spatial_tokens.ndim != 3
-            or spatial_tokens.shape[:2] != neighbor_idx.shape[:2]
-            or spatial_tokens.shape[-1] != self.proj.out_features
-        ):
+        if spatial_tokens.ndim != 3 or spatial_tokens.shape[:2] != neighbor_idx.shape[:2]:
             raise ValueError(
-                "spatial_tokens must be [BT,M,D3] matching neighbor_idx and token channels"
+                "spatial_tokens must be [BT,M,D3] with the same batch and patches as neighbor_idx"
             )
 
         weight = geometry["pool_weight"]

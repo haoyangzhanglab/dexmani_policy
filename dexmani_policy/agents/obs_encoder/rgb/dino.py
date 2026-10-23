@@ -37,18 +37,14 @@ class DINOEncoder(nn.Module):
         config._attn_implementation = "sdpa"
         self.architecture = config.to_dict()
         self.backbone = (
-            AutoModel.from_pretrained(
-                model_name, config=config, torch_dtype=torch.bfloat16
-            )
+            AutoModel.from_pretrained(model_name, config=config, torch_dtype=torch.bfloat16)
             if load_pretrained
             else AutoModel.from_config(config, torch_dtype=torch.bfloat16)
         )
 
         self.patch_size = int(self.backbone.config.patch_size)
         self.hidden_dim = int(self.backbone.config.hidden_size)
-        self.num_register_tokens = int(
-            getattr(self.backbone.config, "num_register_tokens", 0)
-        )
+        self.num_register_tokens = int(getattr(self.backbone.config, "num_register_tokens", 0))
         self.num_prefix_tokens = 1 + self.num_register_tokens
         self.out_dim = self.hidden_dim if out_dim is None else int(out_dim)
 
@@ -95,9 +91,7 @@ class DINOEncoder(nn.Module):
         leading_shape = rgb.shape[:-3]
         flat_rgb = rgb.reshape(-1, *rgb.shape[-3:])
         outputs = self.backbone(pixel_values=flat_rgb, return_dict=True)
-        patch_tokens = self.project_features(
-            outputs.last_hidden_state[:, self.num_prefix_tokens :]
-        )
+        patch_tokens = self.project_features(outputs.last_hidden_state[:, self.num_prefix_tokens :])
         if self.global_token_type == "avg":
             global_token = patch_tokens.mean(dim=1)
         elif self.global_token_type == "cls":
@@ -108,12 +102,8 @@ class DINOEncoder(nn.Module):
             global_token = self.project_features(outputs.pooler_output)
 
         return {
-            "patch_tokens": patch_tokens.reshape(
-                *leading_shape, *patch_tokens.shape[1:]
-            ),
-            "global_token": global_token.reshape(
-                *leading_shape, *global_token.shape[1:]
-            ),
+            "patch_tokens": patch_tokens.reshape(*leading_shape, *patch_tokens.shape[1:]),
+            "global_token": global_token.reshape(*leading_shape, *global_token.shape[1:]),
         }
 
     def tokens_to_feature_map(

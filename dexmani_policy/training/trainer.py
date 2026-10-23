@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
-from dexmani_policy.common.checkpoint import TrainCheckpoint, unwrap_state_dict
+from dexmani_policy.common.checkpoint import TrainCheckpoint, policy_state_dict
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.runtime import dict_apply, get_rng_state
 from dexmani_policy.training.common.logging import to_log_scalars
@@ -208,11 +208,9 @@ class Trainer:
             epoch=self.current_epoch,
             global_step=global_step,
             next_micro_step=self.next_micro_step,
-            model_state=unwrap_state_dict(self.raw_model.state_dict()),
+            model_state=policy_state_dict(self.raw_model),
             ema_model_state=(
-                unwrap_state_dict(self.ema_model.state_dict())
-                if self.ema_model is not None
-                else None
+                policy_state_dict(self.ema_model) if self.ema_model is not None else None
             ),
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),

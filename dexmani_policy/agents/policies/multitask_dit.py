@@ -194,10 +194,7 @@ class MultiTaskDiTPolicy(BasePolicy):
 
     def encode_text(self, task_texts: list[str]) -> torch.Tensor:
         if self.task_emb_table is not None:
-            try:
-                indices = [self.task_to_idx[text] for text in task_texts]
-            except KeyError as error:
-                raise ValueError(f"Unknown closed-set task text: {error.args[0]!r}") from error
+            indices = [self.task_to_idx[text] for text in task_texts]
             indices = torch.tensor(indices, device=self.task_emb_table.device)
             embedding = self.task_emb_table[indices]
         else:
@@ -205,11 +202,9 @@ class MultiTaskDiTPolicy(BasePolicy):
         return self.text_proj(embedding.to(dtype=self.text_proj.weight.dtype))
 
     def encode_observation(self, obs_dict: dict) -> torch.Tensor:
-        task_texts = obs_dict["task_text"]
         obs_numerical = {k: v for k, v in obs_dict.items() if k not in ("task_text", "task_name")}
-        obs = self.preprocess(obs_numerical)
-        condition = self.obs_encoder(obs)
-        text_emb = self.encode_text(task_texts)
+        condition = super().encode_observation(obs_numerical)
+        text_emb = self.encode_text(obs_dict["task_text"])
         return torch.cat([condition, text_emb.to(condition)], dim=-1)
 
     def optimizer_groups(

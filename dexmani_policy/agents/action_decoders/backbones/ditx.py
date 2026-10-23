@@ -37,8 +37,7 @@ class ContextAdaLN(nn.Module):
     def forward(self, x, cond):
         x = self.norm(x)
         gamma, beta = self.cond_linear(F.silu(cond).unsqueeze(1)).chunk(2, dim=-1)
-        x = x * gamma + beta
-        return x
+        return x * gamma + beta
 
 
 class CrossAttention(nn.Module):
@@ -97,11 +96,9 @@ class DiTXBlock(nn.Module):
             qk_norm=qk_norm,
         )
 
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-
         self.mlp = Mlp(
             in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
+            hidden_features=int(hidden_size * mlp_ratio),
             act_layer=approximate_gelu,
             drop=0.0,
         )
@@ -110,18 +107,22 @@ class DiTXBlock(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
-        modulation_size = 9 * hidden_size
         self.adaln_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, modulation_size, bias=True)
+            nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size, bias=True)
         )
 
     def forward(self, x, time_c, context_c, *, context_kv=None):
-        modulation = self.adaln_modulation(time_c)
-
-        chunks = modulation.chunk(9, dim=-1)
-        shift_msa, scale_msa, gate_msa = chunks[0], chunks[1], chunks[2]
-        shift_cross, scale_cross, gate_cross = chunks[3], chunks[4], chunks[5]
-        shift_mlp, scale_mlp, gate_mlp = chunks[6], chunks[7], chunks[8]
+        (
+            shift_msa,
+            scale_msa,
+            gate_msa,
+            shift_cross,
+            scale_cross,
+            gate_cross,
+            shift_mlp,
+            scale_mlp,
+            gate_mlp,
+        ) = self.adaln_modulation(time_c).chunk(9, dim=-1)
 
         normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
         self_attn_output = self.self_attn(normed_x, normed_x, normed_x, need_weights=False)[0]
@@ -139,7 +140,7 @@ class DiTXBlock(nn.Module):
 
 
 class DiTXOutput(nn.Module):
-    def __init__(self, hidden_size, out_channels):
+    def __init__(self, hidden_size, output_dim):
         super().__init__()
 
         self.norm_final = RmsNorm(hidden_size, eps=1e-6)
@@ -147,15 +148,13 @@ class DiTXOutput(nn.Module):
         self.ffn_final = Mlp(
             in_features=hidden_size,
             hidden_features=hidden_size,
-            out_features=out_channels,
+            out_features=output_dim,
             act_layer=approximate_gelu,
             drop=0,
         )
 
     def forward(self, x):
-        x = self.norm_final(x)
-        x = self.ffn_final(x)
-        return x
+        return self.ffn_final(self.norm_final(x))
 
 
 class DiTX(nn.Module):
@@ -390,7 +389,4 @@ class ConsistencyDiTX(nn.Module):
                 context_kv=None if context_kv is None else context_kv[index],
             )
 
-        x = self.final_layer(x)
-
-        x = x[:, -self.horizon :]
-        return x
+        return self.final_layer(x)
