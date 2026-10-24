@@ -35,7 +35,7 @@ from dexmani_policy.training.builder import (
     build_trainer, build_training_components,
 )
 from dexmani_policy.training.common.ema import EMA
-from dexmani_policy.training.common.hand_representation import (
+from dexmani_policy.common.hand_representation import (
     HAND_ACTION_SEMANTICS, validate_hand_chunk_compatibility,
 )
 from dexmani_policy.training.data import build_dataset_and_normalizer, build_normalizer, build_train_loader

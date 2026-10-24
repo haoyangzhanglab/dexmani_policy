@@ -33,7 +33,7 @@ from dexmani_policy.training.builder import (
     build_model_and_ema,
     build_optimizer_and_scheduler,
 )
-from dexmani_policy.training.common.hand_representation import describe_hand_data
+from dexmani_policy.common.hand_representation import describe_hand_data
 from dexmani_policy.datasets.common.episode_split import build_index_manifest
 from dexmani_policy.training.builder import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.lamp import perturb_history

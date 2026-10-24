@@ -36,6 +36,10 @@ class DPObservationEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
+    @property
+    def effective_config(self):
+        return {"rgb_backbone_config": self.backbone.effective_config}
+
     def forward(self, obs: dict) -> torch.Tensor:
         rgb = self.image_processor.process_images(obs["rgb"])
 

@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.training.common.hand_representation import HAND_ACTION_SEMANTICS
+from dexmani_policy.common.hand_representation import HAND_ACTION_SEMANTICS
 
 
 class HandVAE(nn.Module):

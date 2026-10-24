@@ -31,7 +31,6 @@ class ManiFlowObservationEncoder(nn.Module):
             raise ValueError("n_obs_steps must be greater than 0")
         pc_encoder_config = dict(pc_encoder_config or {})
         self.pc_encoder = PointNetDense(input_channels=pc_dim, **pc_encoder_config)
-        self.pc_encoder.effective_config = dict(pc_encoder_config)
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
@@ -39,6 +38,10 @@ class ManiFlowObservationEncoder(nn.Module):
         self.fps_random_config = fps_random_config or {}
 
         self.obs_token_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+
+    @property
+    def effective_config(self):
+        return {"pc_encoder_config": self.pc_encoder.effective_config}
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(

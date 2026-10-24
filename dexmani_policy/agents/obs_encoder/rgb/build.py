@@ -54,6 +54,8 @@ def build_rgb_encoder(
         if parameter.default is not inspect.Parameter.empty
     }
     encoder.effective_config = {**defaults, **encoder_config, **preprocessing}
+    if hasattr(encoder, "architecture"):
+        encoder.effective_config["architecture"] = encoder.architecture
     return encoder, processor
 
 

@@ -59,13 +59,16 @@ class Sparse3DGlobalObservationEncoder(nn.Module):
             raise ValueError("Sparse3D patch FPS must match observation preprocessing FPS")
         config["fps_random_config"] = dict(self.fps_random_config)
         self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **config)
-        self.pc_encoder.effective_config = config
         self.state_mlp = StateEncoder(state_dim, positive_int(state_out_dim, "state_out_dim"))
         fused_dim = n_obs_steps * (self.pc_encoder.out_dim + state_out_dim)
         self.temporal_projection = nn.Sequential(
             nn.LayerNorm(fused_dim),
             nn.Linear(fused_dim, self.out_dim),
         )
+
+    @property
+    def effective_config(self):
+        return {"pc_encoder_config": self.pc_encoder.effective_config}
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc, state = obs["point_cloud"], obs["joint_state"]

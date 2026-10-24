@@ -37,7 +37,6 @@ class LAMPObservationEncoder(nn.Module):
         positive_int(n_obs_steps, "n_obs_steps")
         pc_encoder_config.setdefault("num_patches", 96)
         self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **pc_encoder_config)
-        self.pc_encoder.effective_config = dict(pc_encoder_config)
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
@@ -45,6 +44,10 @@ class LAMPObservationEncoder(nn.Module):
         self.fps_random_config = fps_random_config or {}
 
         self.out_dim = n_obs_steps * (self.pc_encoder.out_dim + self.state_mlp.out_dim)
+
+    @property
+    def effective_config(self):
+        return {"pc_encoder_config": self.pc_encoder.effective_config}
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(

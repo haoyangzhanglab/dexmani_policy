@@ -20,7 +20,7 @@ from dexmani_policy.common.config import (
     validate_action_window,
     validate_sparse3d_config,
 )
-from dexmani_policy.training.common.hand_representation import validate_hand_chunk_compatibility
+from dexmani_policy.common.hand_representation import validate_hand_chunk_compatibility
 
 
 class LatentFlowObservationEncoder(nn.Module):
@@ -46,7 +46,6 @@ class LatentFlowObservationEncoder(nn.Module):
         positive_int(n_obs_steps, "n_obs_steps")
         pc_encoder_config.setdefault("num_patches", 96)
         self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **pc_encoder_config)
-        self.pc_encoder.effective_config = dict(pc_encoder_config)
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.num_points = num_points
         self.use_coord_only = pc_dim == 3
@@ -54,6 +53,10 @@ class LatentFlowObservationEncoder(nn.Module):
         self.fps_random_config = fps_random_config or {}
 
         self.obs_token_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+
+    @property
+    def effective_config(self):
+        return {"pc_encoder_config": self.pc_encoder.effective_config}
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(
@@ -224,6 +227,25 @@ class LatentFlowPolicy(BasePolicy):
         self.codec.validate_state()
         validate_codec_metadata(self.codec_metadata, self.codec.model_config)
         self.codec_initialized = True
+
+    @property
+    def effective_config(self):
+        return {**super().effective_config, "codec_metadata": self.codec_metadata}
+
+    def training_data_config(self, dataset, *, restoring=False):
+        import copy
+
+        current = copy.deepcopy(dataset.hand_data)
+        validation = dataset.get_validation_dataset()
+        current.update(
+            train_windows=len(dataset),
+            val_windows=0 if validation is None else len(validation),
+            observation_rows=len(dataset.sampler.observation_source_rows),
+            action_rows=len(dataset.sampler.action_source_rows),
+        )
+        if not restoring:
+            self.validate_training_data(current)
+        return {"hand_data": current}
 
     def validate_training_data(self, hand_data):
         validate_hand_chunk_compatibility(self.codec_metadata["hand_data"], hand_data)

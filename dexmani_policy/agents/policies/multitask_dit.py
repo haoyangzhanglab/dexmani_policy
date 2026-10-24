@@ -33,6 +33,10 @@ class MultiTaskDiTObservationEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
 
+    @property
+    def effective_config(self):
+        return {"rgb_backbone_config": self.backbone.effective_config}
+
     def forward(self, obs: dict) -> torch.Tensor:
         rgb = self.image_processor.process_images(obs["rgb"])
 
@@ -178,6 +182,13 @@ class MultiTaskDiTPolicy(BasePolicy):
                 table = encode_task_embeddings(text_encoder, unique)
             self.register_buffer("task_emb_table", table)
             self.task_to_idx = {t: i for i, t in enumerate(unique)}
+
+    @property
+    def effective_config(self):
+        config = super().effective_config
+        if self.task_emb_table is not None:
+            config["text_embed_dim"] = self.text_embed_dim
+        return config
 
     def initialize_training(self) -> None:
         if self.needs_text_initialization:

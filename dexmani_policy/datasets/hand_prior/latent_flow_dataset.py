@@ -1,6 +1,6 @@
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
-from dexmani_policy.training.common.hand_representation import describe_hand_chunks
+from dexmani_policy.common.hand_representation import describe_hand_chunks
 
 
 class LatentFlowDataset(DemonstrationDataset):

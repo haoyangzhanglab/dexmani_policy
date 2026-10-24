@@ -67,6 +67,28 @@ class BasePolicy(nn.Module):
         """Validate model-specific constraints before constructing data or weights."""
 
     @property
+    def effective_config(self) -> dict:
+        return dict(getattr(self.obs_encoder, "effective_config", {}))
+
+    def training_data_config(self, dataset, *, restoring=False) -> dict:
+        if not self.requires_hand_pretraining:
+            return {}
+        from dexmani_policy.common.hand_representation import describe_hand_data
+
+        manifest = dataset.data_recipe.get("split_manifest")
+        if self.requires_split_manifest:
+            if manifest is None:
+                raise ValueError("DQ/LAMP training requires an explicit shared split_manifest")
+            if not restoring and self.pretraining_split != manifest:
+                raise ValueError("Pretraining/policy split manifest mismatch")
+        current = describe_hand_data(dataset)
+        if not restoring:
+            changed = [key for key in current if self.hand_data[key] != current[key]]
+            if changed:
+                raise ValueError(f"Hand pretraining data mismatch: {changed}")
+        return {"hand_data": current}
+
+    @property
     def action_start_index(self) -> int:
         return self.n_obs_steps - 1
 

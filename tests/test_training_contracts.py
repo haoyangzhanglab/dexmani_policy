@@ -29,7 +29,7 @@ from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.scheduler import get_scheduler
-from dexmani_policy.training.common.hand_representation import describe_hand_data
+from dexmani_policy.common.hand_representation import describe_hand_data
 from dexmani_policy.training.builder import build_model_and_ema, build_optimizer_and_scheduler
 from dexmani_policy.training.data import build_dataset_and_normalizer, build_normalizer, build_train_loader
 from dexmani_policy.training.pretrain.hand_prior.lamp import build_prior_dataset, kl_weight

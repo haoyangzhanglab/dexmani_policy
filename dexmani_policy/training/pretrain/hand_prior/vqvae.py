@@ -21,7 +21,7 @@ from dexmani_policy.common.config import load_policy_config, positive_int, resol
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
-from dexmani_policy.training.common.hand_representation import describe_hand_data
+from dexmani_policy.common.hand_representation import describe_hand_data
 from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.data import build_normalizer
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import (

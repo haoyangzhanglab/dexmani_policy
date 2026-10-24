@@ -194,7 +194,12 @@ class Sparse3DEncoder(nn.Module):
         rope_base: float = 100.0,
         fps_random_config: dict | None = None,
     ):
+        config = locals().copy()
         super().__init__()
+        self.effective_config = {
+            key: value for key, value in config.items()
+            if key not in {"self", "input_channels", "__class__"}
+        }
         if input_channels not in (3, 6):
             raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")
         sizes = (channels, num_patches, group_size, depth, num_heads)

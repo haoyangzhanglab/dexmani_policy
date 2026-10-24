@@ -24,7 +24,6 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.training.common.ema import EMA
-from dexmani_policy.training.common.hand_representation import describe_hand_data
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
 from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.data import build_train_loader, close_data_loader
@@ -70,26 +69,6 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
             validate_observation_fields(model, (*child.sensor_modalities, "task_text"))
     else:
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
-    rgb = getattr(model.obs_encoder, "backbone", None)
-    if checkpoint is None:
-        bind_defaults(cfg.agent, type(model))
-    with open_dict(cfg.agent):
-        if checkpoint is None and hasattr(rgb, "effective_config"):
-            cfg.agent.rgb_backbone_config = rgb.effective_config
-        pc_encoder = getattr(model.obs_encoder, "pc_encoder", None)
-        if hasattr(pc_encoder, "effective_config"):
-            config = dict(pc_encoder.effective_config)
-            for name, parameter in inspect.signature(type(pc_encoder)).parameters.items():
-                if name != "input_channels" and parameter.default is not inspect.Parameter.empty:
-                    config.setdefault(name, parameter.default)
-            cfg.agent.pc_encoder_config = config
-        if hasattr(rgb, "architecture"):
-            if cfg.agent.get("rgb_backbone_config") is None:
-                cfg.agent.rgb_backbone_config = {}
-            with open_dict(cfg.agent.rgb_backbone_config):
-                cfg.agent.rgb_backbone_config.architecture = rgb.architecture
-        if getattr(model, "task_emb_table", None) is not None:
-            cfg.agent.text_embed_dim = model.text_embed_dim
     model.set_normalization_spec(
         resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
     )
@@ -97,7 +76,13 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
         model.initialize_training()
         model.load_normalizer_from_dataset(normalizer)
 
-    validate_hand_pretraining(cfg, model, dataset, checkpoint=checkpoint)
+    data_config = model.training_data_config(dataset, restoring=checkpoint is not None)
+    if checkpoint is None:
+        bind_defaults(cfg.agent, type(model))
+        with open_dict(cfg.agent):
+            cfg.agent.update(model.effective_config)
+    with open_dict(cfg):
+        cfg.update(data_config)
     if checkpoint is None:
         model.to(device)
 
@@ -126,43 +111,6 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
         restore_model_weights(checkpoint, model, ema_model, device)
 
     return model, ema_model, ema_updater
-
-
-def validate_hand_pretraining(cfg, model, dataset, *, checkpoint=None):
-    if not model.requires_hand_pretraining:
-        return
-    from dexmani_policy.agents.policies.latent_flow import LatentFlowPolicy
-
-    if isinstance(model, LatentFlowPolicy):
-        current = copy.deepcopy(dataset.hand_data)
-        validation = dataset.get_validation_dataset()
-        current.update(
-            train_windows=len(dataset),
-            val_windows=0 if validation is None else len(validation),
-            observation_rows=len(dataset.sampler.observation_source_rows),
-            action_rows=len(dataset.sampler.action_source_rows),
-        )
-        if checkpoint is None:
-            model.validate_training_data(current)
-        with open_dict(cfg):
-            cfg.hand_data = current
-            cfg.agent.codec_metadata = model.codec_metadata
-        return
-    if model.requires_split_manifest:
-        manifest = dataset.data_recipe.get("split_manifest")
-        if manifest is None:
-            raise ValueError("DQ/LAMP training requires an explicit shared split_manifest")
-        if checkpoint is None and model.pretraining_split != manifest:
-            raise ValueError("Pretraining/policy split manifest mismatch")
-    current = describe_hand_data(dataset)
-    if checkpoint is None:
-        changed = [key for key in current if model.hand_data[key] != current[key]]
-        if changed:
-            raise ValueError(
-                f"Hand pretraining data mismatch: {changed}; regenerate for this data recipe"
-            )
-    with open_dict(cfg):
-        cfg.hand_data = current
 
 
 def build_optimizer(
