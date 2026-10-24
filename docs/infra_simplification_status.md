@@ -52,10 +52,13 @@
 | 类别 | 结果 | 实际覆盖与限制 |
 | --- | --- | --- |
 | 配置 | PASS | 9 个单卡配置 + 6 个 DDP overlay 的 config-only/target 导入；不表示 DDP 运行通过 |
-| 合成 CPU | PASS | 53 项 unittest：窗口/normalizer、DQ/LAMP/LF、raw/EMA/续训下一步、完整未来与 dtype、RTC 局部 autograd、固定预算/平局/全失败、精确 seeds、冻结、失败前缀与收尾、manifest 身份 |
+| 合成 CPU | PASS | 原 53 项 unittest；本次新增并定向通过 ManiFlow 默认/显式 encoder 配置往返检查。原套件覆盖：窗口/normalizer、DQ/LAMP/LF、raw/EMA/续训下一步、完整未来与 dtype、RTC 局部 autograd、固定预算/平局/全失败、精确 seeds、冻结、失败前缀与收尾、manifest 身份 |
 | 真实数据 | PASS | 原配置 dp3、latent_flow 各最多 2 个 train/val batch；DP3 12,994 训练窗口，LF 11,013 训练和 1,667 验证窗口；包含原始 reference 和完整统计总体 |
-| CUDA/BF16/compile | PASS（DP3） | RTX 4090、Torch 2.4.1+cu124，原配置 4 次更新、预测、raw/EMA 保存恢复；compiled/eager 最大绝对差约 0.00103/0.00121，在已有 smoke 容差内 |
-| 其他方法实际 CUDA | NOT VERIFIED | 未执行；缺少 DQ Codebook、LAMP prior、LF codec 等匹配实际产物，不能用合成资产代替 |
+| CUDA/BF16/compile | PASS（DP3、DP、SAT、ManiFlow） | sandbox 外 RTX 4090、Torch 2.4.1+cu124；各自原配置 4 次更新、有限预测、checkpoint 状态及 raw/EMA 推理恢复。compiled/eager 差值只输出诊断，不是等价容差断言 |
+| CUDA RTC | PASS（合成） | inference_mode 内局部 autograd、零指导逐位等价、有限 FP32 输出及 FP32 schedule；不替代真机 RTC |
+| R3D 原配置 CUDA | NOT VERIFIED（运行失败） | 首个 batch CUDA OOM；进程约占 20.22 GiB，另需 8 GiB，显卡总计 23.51 GiB；没有降低 batch/精度或修改正式配置 |
+| MultiTaskDiT 原配置 CUDA | NOT VERIFIED（数据阻塞） | 加载阶段 GroupNotFoundError；配置引用的 robot_data/pick_bottle.zarr 和 open_box.zarr 不存在，尚未进入训练 |
+| DQ/LAMP/LF 实际 CUDA | NOT VERIFIED | DQ codebook_path=null；LAMP prior.pt、LF codec.pt 不存在。未用合成资产冒充真实权重 |
 | 多卡 DDP | NOT VERIFIED | 本次仅确认 1 张可用 GPU；未启动多进程 DDP，CPU 模拟 rank 不替代 DDP |
 | 仿真闭环 | NOT VERIFIED | 未运行真实 dexmani_sim rollout；未准备匹配当前格式的已训练实验，合成环境仅验证流程与统计 |
 | Real 纯离线逻辑 | PASS | 6 项 unittest，隔离副本和实际配套仓库均通过：模式、迟到/过期/撤权、bootstrap/RTC/时钟、reset 旧结果、单在途/串行关闭、两种记录组合及写入失败 |
@@ -83,8 +86,31 @@ git diff --check
 
 初次真实数据 smoke 被 sandbox 的多 worker IPC 权限阻断，主动中断并清理；随后获自动审批在 sandbox 外使用原配置通过。sandbox 内 CUDA 不可见，外部探测确认 RTX 4090 并完成短 smoke，未把 sandbox 限制解释为无 GPU。Black 多进程退出受阻后停止，使用相同工具的串行 API 核对 AST 等价。
 
+## sandbox 外 CUDA 补充验证
+
+用户进一步明确授权后，在 sandbox 外确认 `torch.cuda.is_available()=True`、1 张 RTX 4090，测试前可用显存约 21.79 GiB。新增 SAT、ManiFlow、R3D、DP、MultiTaskDiT 原配置 smoke 均限定 4 次更新、每项 600 秒，顺序执行；R3D/DP/MultiTaskDiT 设置 HF_HUB_OFFLINE=1、TRANSFORMERS_OFFLINE=1，只读取本地权重，不下载或升级依赖。
+
+准备 ManiFlow 检查时复现了上轮 A 批次漏项：ManiFlowObservationEncoder.effective_config 引用的 PointNetDense.effective_config 未实现，导致默认构造值未正确回传。现由 PointNetDense 直接报告实际 out_channels；不改网络参数或计算。新增定向测试覆盖默认 128 和显式 24 两种宽度、保存配置重建、strict state 加载和输出逐位一致；修复后的真实 ManiFlow CUDA smoke 通过。
+
+实际补充命令（均使用前述 policy 解释器；CUDA 命令在 sandbox 外执行）：
+
+```bash
+# 按顺序分别执行，保留原配置
+timeout --signal=INT --kill-after=30s 600s python dexmani_policy/smoke_test.py sat --max-updates 4
+timeout --signal=INT --kill-after=30s 600s python dexmani_policy/smoke_test.py maniflow --max-updates 4
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout --signal=INT --kill-after=30s 600s python dexmani_policy/smoke_test.py r3d --max-updates 4
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout --signal=INT --kill-after=30s 600s python dexmani_policy/smoke_test.py dp --max-updates 4
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout --signal=INT --kill-after=30s 600s python dexmani_policy/smoke_test.py multitask_dit --max-updates 4
+PYTHONPATH=tests python -m unittest test_infrastructure.InfrastructureTests.test_maniflow_encoder_defaults_survive_config_roundtrip -v
+PYTHONPATH=/home/zhanghaoyang/Desktop/dexmani_policy python /tmp/dexmani_cuda_rtc.py
+PYTHONPYCACHEPREFIX=/tmp/dexmani-cuda-followup-pycache python -m py_compile dexmani_policy/agents/obs_encoder/pointcloud/pointnet.py tests/test_infrastructure.py
+git diff --check
+```
+
+新增日志为 `/tmp/dexmani-cuda-{sat,maniflow,r3d,dp,multitask_dit,rtc}.log`。SAT 的 raw/EMA compiled/eager 最大绝对差为 0 / 2.98e-8，ManiFlow 均为 4.77e-7，DP 为 0.00130 / 0.00109；这些只是观测差值。真正的恢复断言比较 eager 模型与恢复模型；没有将 compiled/eager 日志误报为容差验收。R3D OOM 与多任务缺数据明确保留失败记录，不归因于 sandbox，也不调整正式配方来获得 PASS。
+
 ## 跨仓库配套与剩余工作
 
 Real 改动先在 `/tmp/dexmani-infra-real` 隔离副本验证；重新核对原仓库 HEAD 与干净 diff 后，应用补丁到 `/home/zhanghaoyang/Desktop/dexmani_real`。涉及 deployment/run.py、preflight.py、session.py、episode.py、scripts/run_policy.py、新增 scripts/check_deployment.py 和 README。没有修改设备 SDK、schedule 算法、Raw 格式、物理标定或实验产物。
 
-后续需要匹配真实手部产物的 CUDA 检查、多卡恢复验证、真实模拟器短闭环及另行授权的真机验证。性能优化以测量为依据。本次不推送、不合并，不发布只有一侧的接口迁移。
+后续需要匹配真实手部产物的 CUDA 检查、足够显存下的 R3D 原配方检查、补齐多任务实际数据、多卡恢复验证、真实模拟器短闭环及另行授权的真机验证。性能优化以测量为依据。本次不推送、不合并，不发布只有一侧的接口迁移。

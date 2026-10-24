@@ -83,6 +83,19 @@ class SyntheticEnvironment:
 
 
 class InfrastructureTests(unittest.TestCase):
+    def test_maniflow_encoder_defaults_survive_config_roundtrip(self):
+        from dexmani_policy.agents.policies.maniflow import ManiFlowObservationEncoder
+
+        arguments = dict(pc_dim=6, state_dim=19, num_points=8, n_obs_steps=2, state_out_dim=4)
+        observation = {"point_cloud": torch.randn(4, 8, 6), "joint_state": torch.randn(4, 19)}
+        for config, width in (({}, 128), ({"out_channels": 24}, 24)):
+            encoder = ManiFlowObservationEncoder(**arguments, pc_encoder_config=config).eval()
+            restored = ManiFlowObservationEncoder(**arguments, **encoder.effective_config).eval()
+            restored.load_state_dict(encoder.state_dict(), strict=True)
+            actual = encoder(observation)
+            self.assertEqual(actual.shape, (2, 16, width + 4))
+            torch.testing.assert_close(restored(observation), actual, rtol=0, atol=0)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

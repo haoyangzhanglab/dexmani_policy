@@ -84,6 +84,10 @@ class PointNetDense(nn.Module):
     def out_dim(self) -> int:
         return self.out_channels
 
+    @property
+    def effective_config(self) -> dict:
+        return {"out_channels": self.out_channels}
+
 
 class MultiStagePointNet(nn.Module):
     """Fuse per-point and global features across successive PointNet stages."""
