@@ -84,7 +84,6 @@ def save_checkpoint(
     metrics: dict,
 ) -> None:
     payload = {
-        "format": HandVQVAE.artifact_format,
         "epoch": int(epoch),
         "model_state_dict": vqvae.state_dict(),
         "normalizer_state_dict": normalizer.state_dict(),

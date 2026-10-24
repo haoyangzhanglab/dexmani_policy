@@ -21,7 +21,7 @@ from dexmani_policy.datasets.common.augmentation import (
     validate_random_keep_points,
 )
 from dexmani_policy.datasets.common.episode_split import (
-    build_index_manifest,
+    build_split_manifest,
     downsample_mask,
     get_val_mask,
     validate_split_manifest,
@@ -131,7 +131,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             )
             self.data_recipe["split_manifest"] = manifest
         elif "trial_ids" in self.replay_buffer.attrs:
-            manifest = build_index_manifest(
+            manifest = build_split_manifest(
                 self.zarr_path, self.replay_buffer.episode_ends, self.replay_buffer.attrs,
                 val_ratio=val_ratio, seed=seed, max_train_episodes=max_train_episodes,
             )

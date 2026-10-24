@@ -60,7 +60,6 @@ def parse_evaluation_overrides(overrides):
 def resolve_tasks(cfg):
     validate_action_key_consistency(cfg)
     runner = dict(cfg["env_runner"])
-    runner.pop("_target_", None)
     task_configs = runner.pop("task_configs", None)
     configs = [runner] if task_configs is None else [{**runner, **task} for task in task_configs]
     dataset = cfg["dataset"]
@@ -133,6 +132,7 @@ def prepare_evaluation_config(cfg, overrides=None):
                 pending.extend(node)
             elif isinstance(node, dict):
                 if set(node) & {
+                    "_target_",
                     "n_obs_steps",
                     "sensor_modalities",
                     "task_text",

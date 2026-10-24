@@ -85,8 +85,8 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | 顺序 | 更新内容 |
 | --- | --- |
 | 1 | 下载新文件，保留已有不可变产物，排除临时文件及后续可变项 |
-| 2 | 按 size/mtime 更新 `metrics.jsonl`、`checkpoints/latest.pt`、`vqvae_hand_best.pt`，再按 checksum 更新 `selection_result.json` |
-| 3 | 按 checksum 更新 `best_ckpt.json` |
+| 2 | 按 size/mtime 更新 `metrics.jsonl`、`checkpoints/latest.pt`、`vqvae_hand_best.pt`、`prior.pt`、`codec.pt`、`codebook.npz`，再无条件传输 `result_details.json`，最后传 `selection_result.json` |
+| 3 | 无条件传输 `best_ckpt.json`，确保它引用的候选事实和选择记录已传输成功 |
 
 checkpoint/选择记录先于指针拉取。发布中的临时文件统一使用 `.dexmani-publish-*`，同步时排除；不识别旧版临时文件命名。新文件不组合 `--partial` 与 `--ignore-existing`；任一 rsync 非零退出（含 24）中止后续阶段。整个目录不是事务快照，远端发布中可能需重试；使用前确认 checkpoint 和选择证据齐全。先验产物放在 experiments 时由此拉取，放在 data 时使用数据同步。
 

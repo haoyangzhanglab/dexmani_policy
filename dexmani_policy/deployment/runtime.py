@@ -84,11 +84,6 @@ class PolicyRuntime:
     def __init__(self, agent, info, *, device, seed):
         from dexmani_policy.common.config import validate_observation_fields
 
-        if agent.inference_metadata != dict(info.saved_config.policy_metadata):
-            raise ValueError("Restored policy metadata differs from saved configuration")
-        for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
-            if getattr(agent, name) != getattr(info, name):
-                raise ValueError(f"Restored policy differs from saved configuration: {name}")
         validate_observation_fields(agent, info.observation_fields)
 
         self.agent = agent

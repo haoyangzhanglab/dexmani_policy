@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -394,9 +395,82 @@ class InfrastructureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decoder.predict_action(cond, template, rtc_prefix=prefix, rtc_guidance_cap=float("nan"))
 
+    def test_remote_sync_orders_records_and_stops_before_publishing_on_failure(self):
+        executable = self.root / "rsync"
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "with open(os.environ['SYNC_TEST_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if os.environ['SYNC_TEST_FAIL'] == '1' and '--include=**/result_details.json' in sys.argv:\n"
+            "    sys.exit(2)\n"
+        )
+        executable.chmod(0o755)
+        for fail in (False, True):
+            log = self.root / f"sync_{fail}.jsonl"
+            env = {
+                **os.environ,
+                "PATH": f"{self.root}:{os.environ['PATH']}",
+                "SYNC_TEST_LOG": str(log),
+                "SYNC_TEST_FAIL": str(int(fail)),
+            }
+            result = subprocess.run(
+                ["bash", "scripts/remote/sync_down.sh", "--dry-run", "test/task/run"],
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(result.returncode, 2 if fail else 0)
+            self.assertIn("--include=prior.pt", calls[2])
+            self.assertIn("--include=codec.pt", calls[2])
+            self.assertIn("--include=codebook.npz", calls[2])
+            self.assertIn("--include=**/result_details.json", calls[3])
+            if fail:
+                self.assertEqual(len(calls), 4)
+            else:
+                self.assertIn("--include=eval_ckpt_selector/**/selection_result.json", calls[4])
+                self.assertIn("--include=best_ckpt.json", calls[5])
+                self.assertTrue(all("--ignore-times" in call for call in calls[3:]))
+
+    def test_manifest_cli_handles_trial_and_episode_splits(self):
+        import zarr
+
+        for grouped in (False, True):
+            data = self.root / f"split_data_{grouped}.zarr"
+            root = zarr.open_group(str(data), mode="w")
+            root.create_dataset("meta/episode_ends", data=np.array([10, 20, 30, 40]))
+            if grouped:
+                root.attrs.update(
+                    episode_ids=["a1", "a2", "b1", "b2"],
+                    trial_ids={"a1": "a", "a2": "a", "b1": "b", "b2": "b"},
+                )
+            output = self.root / f"split_{grouped}.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "dexmani_policy.datasets.common.episode_split",
+                    "--zarr-path",
+                    str(data),
+                    "--output",
+                    str(output),
+                    "--val-ratio",
+                    "0.5",
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("train=2, validation=2", result.stdout)
+            manifest = json.loads(output.read_text())
+            self.assertNotIn("format", manifest)
+            self.assertEqual(len(manifest["train_indices"]), 2)
+            self.assertEqual(manifest["trial_ids"] is not None, grouped)
+
     def test_grouped_manifest_keeps_trials_whole_and_checks_sources(self):
         from dexmani_policy.datasets.common.episode_split import (
-            build_index_manifest,
+            build_split_manifest,
             validate_split_manifest,
         )
 
@@ -404,14 +478,14 @@ class InfrastructureTests(unittest.TestCase):
             "episode_ids": ["a1", "a2", "b1", "b2", "c1", "c2"],
             "trial_ids": {"a1": "a", "a2": "a", "b1": "b", "b2": "b", "c1": "c", "c2": "c"},
         }
-        manifest = build_index_manifest(
+        manifest = build_split_manifest(
             "/source", [10, 20, 30, 40, 50, 60], attrs, val_ratio=0.3, max_train_episodes=3
         )
-        train = {attrs["trial_ids"][key] for key in manifest["train_ids"]}
-        val = {attrs["trial_ids"][key] for key in manifest["val_ids"]}
+        train = {attrs["trial_ids"][attrs["episode_ids"][i]] for i in manifest["train_indices"]}
+        val = {attrs["trial_ids"][attrs["episode_ids"][i]] for i in manifest["val_indices"]}
         self.assertFalse(train & val)
-        self.assertEqual(len(manifest["train_ids"]), 2)
-        indexed = build_index_manifest("/source", [10, 20], {"source_id": "corpus"}, val_ratio=0)
+        self.assertEqual(len(manifest["train_indices"]), 2)
+        indexed = build_split_manifest("/source", [10, 20], {"source_id": "corpus"}, val_ratio=0)
         validate_split_manifest(
             indexed, {"source_id": "corpus"}, 2, episode_ends=[10, 20], zarr_path="/moved"
         )
@@ -432,6 +506,14 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(before, [c.pad_after for c in children_b])
             if name == "multitask_dit":
                 self.assertNotEqual(a.dataset.seed, b.dataset.seed)
+
+    def test_saved_recipe_requires_actual_split(self):
+        from dexmani_policy.training.data import build_dataset_and_normalizer
+
+        cfg = OmegaConf.create(self.cfg)
+        cfg.data_recipe = [{}]
+        with self.assertRaisesRegex(KeyError, "split_manifest"):
+            build_dataset_and_normalizer(cfg, verbose=False)
 
 
 if __name__ == "__main__":

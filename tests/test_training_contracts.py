@@ -20,7 +20,7 @@ from dexmani_policy.common.checkpoint import (
 from dexmani_policy.common.config import load_policy_config, resolve_input_recipe
 from dexmani_policy.common.runtime import get_rng_state
 from dexmani_policy.datasets.common.episode_split import (
-    build_index_manifest, get_val_mask, validate_split_manifest,
+    build_split_manifest, get_val_mask, validate_split_manifest,
 )
 from dexmani_policy.datasets.common.distributed_sampler import (
     ResumableDistributedSampler, multitask_indices,
@@ -58,7 +58,7 @@ class DataContractTests(unittest.TestCase):
                              ("action_ee", np.arange(30 * 21, dtype=np.float32).reshape(30, 21)),
                              ("point_cloud", np.random.default_rng(4).normal(size=(30, 8, 6)).astype(np.float32))):
             root.create_dataset("data/" + name, data=values, chunks=(4, *values.shape[1:]))
-        self.manifest = build_index_manifest(self.path, self.ends, dict(root.attrs), val_ratio=0)
+        self.manifest = build_split_manifest(self.path, self.ends, dict(root.attrs), val_ratio=0)
         self.manifest.update(train_indices=[0], val_indices=[1], exclusions=[2])
         self.split_path = Path(self.directory.name) / "split.json"
         self.split_path.write_text(json.dumps(self.manifest))
@@ -115,10 +115,10 @@ class DataContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_split_manifest(invalid, {}, 3, episode_ends=self.ends, zarr_path=self.path)
         with self.assertRaises(ValueError):
-            build_index_manifest(self.path, [10], {}, val_ratio=0.1)
+            build_split_manifest(self.path, [10], {}, val_ratio=0.1)
         for ends in ([], [0], [10, 10], [10.5], np.array([10, 9], dtype=np.uint64)):
             with self.assertRaises(ValueError):
-                build_index_manifest(self.path, ends, {}, val_ratio=0)
+                build_split_manifest(self.path, ends, {}, val_ratio=0)
 
     def test_history_and_dq_source_alignment(self):
         dataset = self.dataset(LAMPDataset, history_steps=8)
@@ -139,20 +139,19 @@ class DataContractTests(unittest.TestCase):
             torch.testing.assert_close(batch["action"][0], torch.from_numpy(self.action[i]))
             np.testing.assert_array_equal(batch["action"].numpy(), self.action[rows])
 
-    def test_explicit_trial_format_and_holdout(self):
+    def test_explicit_trial_split_and_holdout(self):
         ids = ["e0", "e1", "e2"]
-        manifest = dict(
-            format="dexmani.episode_trials.v1", episode_ids=ids,
-            trial_ids={"e0": "t0", "e1": "t1", "e2": "t2"},
-            train_ids=["e2", "e0"], val_ids=["e1"], exclusions=[],
-        )
+        trials = {"e0": "t0", "e1": "t1", "e2": "t2"}
+        attrs = {"episode_ids": ids, "trial_ids": trials}
+        manifest = build_split_manifest(self.path, self.ends, attrs, val_ratio=0)
+        manifest.update(train_indices=[2, 0], val_indices=[1], exclusions=[])
         kwargs = dict(episode_ends=self.ends, zarr_path=self.path)
-        train, val, normalized = validate_split_manifest(manifest, {"episode_ids": ids}, 3, **kwargs)
+        train, val, normalized = validate_split_manifest(manifest, attrs, 3, **kwargs)
         np.testing.assert_array_equal(train, [True, False, True])
         np.testing.assert_array_equal(val, [False, True, False])
-        self.assertEqual(normalized["train_ids"], ["e0", "e2"])
+        self.assertEqual(normalized["train_indices"], [0, 2])
         root = zarr.open_group(str(self.path), mode="a")
-        root.attrs["episode_ids"] = ids
+        root.attrs.update(attrs)
         self.split_path.write_text(json.dumps(manifest))
         dataset = self.dataset()
         np.testing.assert_array_equal(dataset.train_mask, train)
@@ -160,18 +159,16 @@ class DataContractTests(unittest.TestCase):
         self.assertEqual(dataset.data_recipe["split_manifest"], normalized)
         invalid = copy.deepcopy(manifest)
         invalid["trial_ids"]["e1"] = "t0"
+        with self.assertRaisesRegex(ValueError, "trial_ids differ"):
+            validate_split_manifest(invalid, attrs, 3, **kwargs)
         with self.assertRaisesRegex(ValueError, "trial cannot cross"):
             validate_split_manifest(invalid, {"episode_ids": ids}, 3, **kwargs)
-        for source in (manifest, self.manifest):
-            invalid = {key: value for key, value in source.items() if key != "format"}
-            with self.assertRaisesRegex(ValueError, "format"):
-                validate_split_manifest(invalid, {"episode_ids": ids}, 3, **kwargs)
         with self.assertRaisesRegex(ValueError, "Holdout"):
             get_val_mask(1, 0.1)
         np.testing.assert_array_equal(get_val_mask(1, 0), [False])
         self.split_path.write_text(json.dumps({"train_ids": ["e0"]}))
         with patch.object(DemonstrationDataset, "finite_rows") as scan:
-            with self.assertRaisesRegex(ValueError, "format"):
+            with self.assertRaises(KeyError):
                 self.dataset()
             scan.assert_not_called()
 
@@ -201,8 +198,7 @@ class DataContractTests(unittest.TestCase):
 
         loader = DataLoader(dataset, sampler=sampler, batch_size=2)
         contract = build_resume_contract(loader)
-        self.assertEqual(contract["multitask_sampling"], "numpy_seed_epoch")
-        previous = {key: value for key, value in contract.items() if key != "multitask_sampling"}
+        previous = {**contract, "batches_per_epoch": contract["batches_per_epoch"] + 1}
         checkpoint = SimpleNamespace(effective_config={}, resume_contract=previous)
         components = SimpleNamespace(
             train_loader=loader, optimizer=None, scheduler=None, ema_updater=None,

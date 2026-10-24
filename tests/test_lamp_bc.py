@@ -34,7 +34,7 @@ from dexmani_policy.training.builder import (
     build_optimizer_and_scheduler,
 )
 from dexmani_policy.common.hand_representation import describe_hand_data
-from dexmani_policy.datasets.common.episode_split import build_index_manifest
+from dexmani_policy.datasets.common.episode_split import build_split_manifest
 from dexmani_policy.training.builder import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.lamp import perturb_history
 from dexmani_policy.training.data import build_dataset_and_normalizer, build_train_loader
@@ -260,7 +260,7 @@ class LAMPBCTests(unittest.TestCase):
                 cfg.training.device = "cpu"
                 cfg.training.use_compile = False
                 cfg.training.use_bfloat16 = False
-            manifest = build_index_manifest(str(path / "data.zarr"), [7], dict(root.attrs), val_ratio=0)
+            manifest = build_split_manifest(str(path / "data.zarr"), [7], dict(root.attrs), val_ratio=0)
             (path / "split.json").write_text(json.dumps(manifest))
             OmegaConf.resolve(cfg)
             validate_config(cfg)
@@ -268,7 +268,7 @@ class LAMPBCTests(unittest.TestCase):
             prior = HandMotionPrior(12, 3, 2, 8)
             prior.ready.fill_(True)
             torch.save(dict(
-                format=prior.artifact_format, coordinate_space=prior.coordinate_space,
+                coordinate_space=prior.coordinate_space,
                 model_config=prior.model_config, model_state_dict=prior.state_dict(),
                 metadata={"hand_data": describe_hand_data(dataset), "split_manifest": manifest,
                           "hand_joint_order": prior.hand_joint_order},
@@ -458,7 +458,7 @@ class LAMPBCTests(unittest.TestCase):
         prior = HandMotionPrior()
         prior.ready.fill_(True)
         payload = dict(
-            format=prior.artifact_format, coordinate_space=prior.coordinate_space,
+            coordinate_space=prior.coordinate_space,
             model_config=prior.model_config, model_state_dict=prior.state_dict(),
             metadata={"hand_joint_order": prior.hand_joint_order},
         )
@@ -468,10 +468,9 @@ class LAMPBCTests(unittest.TestCase):
             loaded, _ = load_motion_prior(path)
             history = torch.randn(2, 8, 12)
             torch.testing.assert_close(loaded.encode_history(history), prior.encode_history(history))
-            for key, value in (("format", "old"), ("coordinate_space", "normalized")):
-                torch.save({**payload, key: value}, path)
-                with self.assertRaisesRegex(ValueError, "raw-radians"):
-                    load_motion_prior(path)
+            torch.save({**payload, "coordinate_space": "normalized"}, path)
+            with self.assertRaisesRegex(ValueError, "raw-radians"):
+                load_motion_prior(path)
             invalid = {**payload, "metadata": {"hand_joint_order": prior.hand_joint_order[::-1]}}
             torch.save(invalid, path)
             with self.assertRaisesRegex(ValueError, "joint order"):

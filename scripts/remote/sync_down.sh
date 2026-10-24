@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download experiments; conflicting configs abort before transfer.
 # Usage: bash scripts/remote/sync_down.sh [SUBPATH] [--dry-run|--list] [--with-wandb]
-# Passes: new immutable files; live metrics/latest/VQ best; checksummed best/selection.
+# Transfer immutable files, mutable training outputs, episode facts, selection, then best.
 
 set -euo pipefail
 
@@ -106,6 +106,9 @@ PASS1_OPTS=(
     --exclude='metrics.jsonl'
     --exclude='checkpoints/latest.pt'
     --exclude='vqvae_hand_best.pt'
+    --exclude='prior.pt'
+    --exclude='codec.pt'
+    --exclude='codebook.npz'
     --exclude='best_ckpt.json'
     --exclude='eval_ckpt_selector/**/selection_result.json'
     --exclude='**/result_details.json'
@@ -128,6 +131,9 @@ PASS2_OPTS=(
     --include='metrics.jsonl'
     --include='checkpoints/latest.pt'
     --include='vqvae_hand_best.pt'
+    --include='prior.pt'
+    --include='codec.pt'
+    --include='codebook.npz'
     --include='*/'
     --exclude='*'
     $DRY_RUN
@@ -145,14 +151,14 @@ rsync -av --ignore-times "${WANDB_EXCLUDE[@]}" \
     --exclude='*' $DRY_RUN "$REMOTE_PATH" "$LOCAL_PATH" || exit "$?"
 
 # Publish selection records before the best reference, even at equal size/mtime.
-rsync -av --checksum "${WANDB_EXCLUDE[@]}" \
+rsync -av --ignore-times "${WANDB_EXCLUDE[@]}" \
     --include='*/' --include='eval_ckpt_selector/**/selection_result.json' \
     --exclude='*' $DRY_RUN "$REMOTE_PATH" "$LOCAL_PATH" || exit "$?"
 
-# Compare small references by content without hashing large checkpoints.
-echo "--- Pass 3/3: best pointer (--checksum) ---"
+# Copy the small best pointer only after all referenced records succeeded.
+echo "--- Pass 3/3: best pointer (--ignore-times) ---"
 PASS3_OPTS=(
-    -av --checksum
+    -av --ignore-times
     "${WANDB_EXCLUDE[@]}"
     --include='*/'
     --include='best_ckpt.json'

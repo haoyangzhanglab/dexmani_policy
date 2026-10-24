@@ -13,7 +13,6 @@ from dexmani_policy.common.config import positive_int
 class HandMotionPrior(nn.Module):
     """History-conditioned hand prior with a differentiable pointwise decoder."""
 
-    artifact_format = "dexmani.lamp.raw_prior.v1"
     coordinate_space = "raw_joint_targets_radians"
     hand_joint_order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
 
@@ -78,10 +77,8 @@ class HandMotionPrior(nn.Module):
 
 def load_motion_prior(path: str | Path) -> tuple[HandMotionPrior, dict]:
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
-    if payload.get("format") != HandMotionPrior.artifact_format or payload.get(
-        "coordinate_space"
-    ) != HandMotionPrior.coordinate_space:
-        raise ValueError("LAMP requires a current raw-radians prior; retrain the prior")
+    if payload["coordinate_space"] != HandMotionPrior.coordinate_space:
+        raise ValueError("LAMP requires raw-radians prior coordinates")
     if payload["metadata"]["hand_joint_order"] != HandMotionPrior.hand_joint_order:
         raise ValueError("LAMP prior hand joint order differs from the local robot contract")
     prior = HandMotionPrior(**payload["model_config"])

@@ -188,15 +188,6 @@ def load_policy_config(config, overrides=()):
         return hydra.compose(config_name=name, overrides=list(overrides))
 
 
-def resolve_action_start(agent) -> int:
-    """Prediction-token origin; metadata inspection stays independent of Torch."""
-    if isinstance(agent, (dict, DictConfig)):
-        if agent.get("_target_") == "dexmani_policy.agents.policies.latent_flow.LatentFlowPolicy":
-            return 0
-        return agent["n_obs_steps"] - 1
-    return agent.action_start_index
-
-
 def validate_action_window(horizon, n_obs_steps, n_action_steps, *, action_start_index=None) -> None:
     for name, value in (
         ("horizon", horizon),
@@ -211,17 +202,6 @@ def validate_action_window(horizon, n_obs_steps, n_action_steps, *, action_start
             f"action_start_index + n_action_steps ({start + n_action_steps}) "
             f"exceeds horizon ({horizon})"
         )
-
-
-def resolve_action_steps(agent, action_steps=None) -> int:
-    """Resolve evaluation consumption from a Policy or its saved agent config."""
-    steps = positive_int(
-        agent.n_action_steps if action_steps is None else action_steps, "action_steps"
-    )
-    max_steps = agent.horizon - resolve_action_start(agent)
-    if steps > max_steps:
-        raise ValueError(f"action_steps must be in [1, {max_steps}], got {steps}")
-    return steps
 
 
 def validate_action_key_consistency(cfg) -> None:

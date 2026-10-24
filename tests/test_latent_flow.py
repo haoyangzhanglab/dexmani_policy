@@ -19,11 +19,11 @@ from dexmani_policy.common.checkpoint import (
     TrainingCheckpoint, load_training_checkpoint, restore_policy_agent, save_training_checkpoint,
 )
 from dexmani_policy.common.config import (
-    load_policy_config, resolve_action_steps, resolve_input_recipe, validate_source_recipe,
+    load_policy_config, resolve_input_recipe, validate_source_recipe,
 )
 from dexmani_policy.common.normalization import FieldNormalizer
 from dexmani_policy.common.runtime import get_rng_state
-from dexmani_policy.datasets.common.episode_split import build_index_manifest
+from dexmani_policy.datasets.common.episode_split import build_split_manifest
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
@@ -58,7 +58,7 @@ class LatentFlowTests(unittest.TestCase):
         cloud = np.random.default_rng(7).normal(size=(16, 8, 6)).astype(np.float32)
         for key, value in (("action", self.commands), ("joint_state", self.state), ("point_cloud", cloud)):
             root.create_dataset("data/" + key, data=value, chunks=(4, *value.shape[1:]))
-        manifest = build_index_manifest(self.zarr_path, [8, 16], dict(root.attrs), val_ratio=0)
+        manifest = build_split_manifest(self.zarr_path, [8, 16], dict(root.attrs), val_ratio=0)
         manifest.update(train_indices=[0], val_indices=[1], exclusions=[])
         self.split = self.path / "split.json"
         self.split.write_text(json.dumps(manifest))
@@ -156,7 +156,6 @@ class LatentFlowTests(unittest.TestCase):
         self.assertFalse(torch.equal(before["obs"]["joint_state"], after["obs"]["joint_state"]))
         np.testing.assert_array_equal(dataset.replay_buffer.read("joint_state", slice(0, 2)), self.state[:2])
         _, model, _, _ = self.prepare_model()
-        self.assertEqual(resolve_action_steps(model, 4), 4)
         sequence = torch.arange(76).reshape(1, 4, 19).float()
         torch.testing.assert_close(model.format_action_output(sequence)["future_actions"], sequence)
         with patch.object(model, "predict_action", return_value={"future_actions": sequence}):

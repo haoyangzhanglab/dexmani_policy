@@ -50,7 +50,7 @@ class DQLookupTests(unittest.TestCase):
 
     def checkpoint(self):
         return dict(
-            format=HandVQVAE.artifact_format, epoch=3, model_config=self.config, model_state_dict=self.model.state_dict(),
+            epoch=3, model_config=self.config, model_state_dict=self.model.state_dict(),
             normalizer_state_dict=self.normalizer.state_dict(),
             split_metadata={
                 "normalization_spec": {"action": "limits"},
@@ -144,14 +144,14 @@ class DQLookupTests(unittest.TestCase):
             loaded.load(path)
             torch.testing.assert_close(loaded.state_dict(), codebook.state_dict())
             with np.load(path, allow_pickle=False) as data:
-                old = {key: data[key] for key in data.files if key != "format"}
-            np.savez(path, **old)
-            with self.assertRaisesRegex(ValueError, "current codebook"):
+                incomplete = {key: data[key] for key in data.files if key != "pose_space"}
+            np.savez(path, **incomplete)
+            with self.assertRaises(KeyError):
                 loaded.load(path)
-        old_checkpoint = self.checkpoint()
-        del old_checkpoint["format"]
-        with self.assertRaisesRegex(ValueError, "current"):
-            HandVQVAE.from_checkpoint(old_checkpoint)
+        incomplete_checkpoint = self.checkpoint()
+        del incomplete_checkpoint["model_config"]
+        with self.assertRaises(KeyError):
+            HandVQVAE.from_checkpoint(incomplete_checkpoint)
 
     def test_selection_metadata(self):
         with warnings.catch_warnings():

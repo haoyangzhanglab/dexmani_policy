@@ -3,19 +3,15 @@
 from dexmani_policy.common.checkpoint import load_policy_state
 from dexmani_policy.common.config import validate_source_recipe
 from dexmani_policy.common.runtime import set_rng_state
-from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 
 
 def build_resume_contract(train_loader):
-    """Capture loader geometry and the multi-task ordering recipe."""
-    contract = {
+    """Capture the loader geometry required to interpret the saved training cursor."""
+    return {
         "dataset_length": len(train_loader.dataset),
         "batches_per_epoch": len(train_loader),
         "world_size": train_loader.sampler.num_replicas,
     }
-    if isinstance(train_loader.dataset, MultiTaskDataset):
-        contract["multitask_sampling"] = "numpy_seed_epoch"
-    return contract
 
 
 def restore_training_state(checkpoint, components, *, effective_config):

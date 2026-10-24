@@ -119,7 +119,6 @@ def save_prior(path, prior, hand_data, cfg, args, step, metrics, split_manifest)
         ),
     )
     payload = {
-        "format": prior.artifact_format,
         "coordinate_space": prior.coordinate_space,
         "model_config": dict(prior.model_config),
         "model_state_dict": {

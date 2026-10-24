@@ -120,12 +120,9 @@ workspace:
     mode: offline
 
 env_runner:
-  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
-  n_obs_steps: ${n_obs_steps}
   # Independent simulator state for each evaluation episode.
   clear_cache_freq: 1
-  sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: joint
     texture_random: false

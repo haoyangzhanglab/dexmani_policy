@@ -152,10 +152,7 @@ workspace:
 
 # ── Env Runner ──
 env_runner:
-  _target_: dexmani_policy.env_runner.sim_runner.SimRunner
   task_name: ${task_name}
-  n_obs_steps: ${n_obs_steps}
-  sensor_modalities: ${dataset.sensor_modalities}
   env_kwargs:
     control_mode: joint
     texture_random: false

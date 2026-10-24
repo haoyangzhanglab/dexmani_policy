@@ -10,7 +10,7 @@
 | B | Policy 完整解码后唯一输出 future_actions；Runtime/SimRunner 只适配或消费；保存自动生成的 policy_metadata 并在加载时核对；迁移 context、smoke 与测试 | 已实施。N=2/H=16 得到 P=15，辅助维度不泄漏；Real float64、SIM 原 dtype、LAMP/LF context 与 sync 限制保留 |
 | C | 平面 eval 配置、单次请求解析、一个 SimRunner、普通 rollout 与纯结果排名；原子 episode 前缀和单一统计；录像并入 evaluate；同步脚本先传候选事实再传指针 | 已实施。固定预算、冻结测试和均值修正是可见协议变化；真实仿真闭环未运行 |
 | D | 数据 seed 独立，固定原 padding；保存实际 manifest、恢复直接复用；已知 trial 整组划分，真实稳定 source_id 支持搬迁 | 已实施。MultiTask 运行采样 seed 仍跟随训练 seed；未修改历史数据、划分或实验产物 |
-| E | Real 入口解析 best/default、preflight 校验模式；RTC 参数按调用传递；Runtime 删除执行配置状态与 scheduler 访问；轻量结果必存、Raw 可选 | 已成对应用到实际 dexmani_real；6 项纯离线检查通过。设备连接前预热、单在途查询、动态授权/新鲜度/停止/失败收尾保留；真机未验证 |
+| E | Real 入口解析 best/default、preflight 校验模式；RTC 参数按调用传递；Runtime 删除执行配置状态与 scheduler 访问；轻量结果必存、Raw 可选 | 已成对应用到实际 dexmani_real；7 项纯离线检查通过。设备连接前预热、单在途查询、动态授权/新鲜度/停止/失败收尾保留；真机未验证 |
 | F | 审阅现有耗时与数值路径，未加入性能配置、缓存、精度或 compile 改动 | 无足够测量证据支持进一步优化，不宣称性能收益 |
 
 本地提交位于两个仓库的 `infra/simplification` 分支，原 main 保持基线，未推送或合并：
@@ -21,8 +21,10 @@
 | policy | `4ae573d` | B：完整未来动作与调用接口 |
 | policy | `52828c6` | C：评测结构、固定预算及冻结/统计协议 |
 | policy | `268924d` | D：固定数据划分、seed 与 padding |
+| policy | `3fe7db6` | ManiFlow encoder 默认值保存修复与主机 CUDA 补充验证 |
 | real | `dbd4610` | B/E：入口解析、模式准入与按调用 RTC 参数 |
 | real | `c0d4efc` | E：轻量结果必存、Raw 可选与离线检查 |
+| real | `c7936ca` | 清理：Session/Episode 结果记录必需、删除可选分支并修正 CLI |
 
 拆分后的 A/B/C/D 快照另在隔离副本逐批通过 41/41/51/53 项 CPU 检查；最终增加的 warmup 成功/失败后 RNG reset 断言也已定向通过。文档随单独提交维护。
 
@@ -52,7 +54,7 @@
 | 类别 | 结果 | 实际覆盖与限制 |
 | --- | --- | --- |
 | 配置 | PASS | 9 个单卡配置 + 6 个 DDP overlay 的 config-only/target 导入；不表示 DDP 运行通过 |
-| 合成 CPU | PASS | 原 53 项 unittest；本次新增并定向通过 ManiFlow 默认/显式 encoder 配置往返检查。原套件覆盖：窗口/normalizer、DQ/LAMP/LF、raw/EMA/续训下一步、完整未来与 dtype、RTC 局部 autograd、固定预算/平局/全失败、精确 seeds、冻结、失败前缀与收尾、manifest 身份 |
+| 合成 CPU | PASS | 清理后完整 57 项 unittest，包含 ManiFlow 配置往返、统一 manifest CLI、缺失保存 split 拒绝和离线同步顺序。其他覆盖：窗口/normalizer、DQ/LAMP/LF、raw/EMA/续训下一步、完整未来与 dtype、RTC 局部 autograd、固定预算/平局/全失败、精确 seeds、冻结、失败前缀与收尾、manifest 身份 |
 | 真实数据 | PASS | 原配置 dp3、latent_flow 各最多 2 个 train/val batch；DP3 12,994 训练窗口，LF 11,013 训练和 1,667 验证窗口；包含原始 reference 和完整统计总体 |
 | CUDA/BF16/compile | PASS（DP3、DP、SAT、ManiFlow） | sandbox 外 RTX 4090、Torch 2.4.1+cu124；各自原配置 4 次更新、有限预测、checkpoint 状态及 raw/EMA 推理恢复。compiled/eager 差值只输出诊断，不是等价容差断言 |
 | CUDA RTC | PASS（合成） | inference_mode 内局部 autograd、零指导逐位等价、有限 FP32 输出及 FP32 schedule；不替代真机 RTC |
@@ -61,7 +63,7 @@
 | DQ/LAMP/LF 实际 CUDA | NOT VERIFIED | DQ codebook_path=null；LAMP prior.pt、LF codec.pt 不存在。未用合成资产冒充真实权重 |
 | 多卡 DDP | NOT VERIFIED | 本次仅确认 1 张可用 GPU；未启动多进程 DDP，CPU 模拟 rank 不替代 DDP |
 | 仿真闭环 | NOT VERIFIED | 未运行真实 dexmani_sim rollout；未准备匹配当前格式的已训练实验，合成环境仅验证流程与统计 |
-| Real 纯离线逻辑 | PASS | 6 项 unittest，隔离副本和实际配套仓库均通过：模式、迟到/过期/撤权、bootstrap/RTC/时钟、reset 旧结果、单在途/串行关闭、两种记录组合及写入失败 |
+| Real 纯离线逻辑 | PASS | 清理后 7 项 unittest，隔离副本和实际配套仓库均通过，增加模型启动失败的必存结果检查：模式、迟到/过期/撤权、bootstrap/RTC/时钟、reset 旧结果、单在途/串行关闭、两种记录组合及写入失败 |
 | 真机 | NOT VERIFIED | 未获设备连接、HOME、运动、实时采集、回放或标定写入授权，均未执行 |
 | 性能/闭环质量 | NOT VERIFIED | 未做受控延迟/吞吐/成功率实验，不宣称提速、质量提升或硬件安全 |
 
@@ -108,6 +110,32 @@ git diff --check
 ```
 
 新增日志为 `/tmp/dexmani-cuda-{sat,maniflow,r3d,dp,multitask_dit,rtc}.log`。SAT 的 raw/EMA compiled/eager 最大绝对差为 0 / 2.98e-8，ManiFlow 均为 4.77e-7，DP 为 0.00130 / 0.00109；这些只是观测差值。真正的恢复断言比较 eager 模型与恢复模型；没有将 compiled/eager 日志误报为容差验收。R3D OOM 与多任务缺数据明确保留失败记录，不归因于 sandbox，也不调整正式配方来获得 PASS。
+
+## 上下游清理（2026-10-25）
+
+按后续清理要求完成以下收敛：
+
+- 所有 split 统一为不带 format/version 的索引 manifest，保留 source_id、episode_ends、episode_ids、trial_ids 等实际身份。build_split_manifest 同时处理普通和整 trial 划分；描述实际 masks 的实现由生成与训练共同使用。修复 trial 分组 CLI 写文件后仍按另一格式打印计数造成的错误。旧双格式不再分派或转换，缺必需字段直接失败。
+- 删除 DQ VQ/codebook、LAMP prior 的自定义版本标签及检查。实际坐标、关节顺序、normalizer、原型排列、有限值和 strict state 加载继续检查；缺字段不补齐，不改写既有产物。
+- 移除多任务恢复的固定算法标签，保留实际数据/采样配方、loader 几何、optimizer 参数顺序和训练游标检查。保存配方缺少实际 split 时直接失败，不重新生成划分。
+- 删除已无生产调用者的 resolve_action_steps、旧对象/字典双路 resolve_action_start，以及 Runtime 对加载阶段已经核对的静态模型元信息的重复检查。
+- 删除 env_runner 中被覆盖或忽略的 _target_、观测长度和模态配置；这些值只从保存的 Policy/Dataset 解析。拒绝入口覆盖模型输入或 runner target。
+- Real 的 results_dir、run_config 和 episode results 改为必需参数，删除结果可选分支、Raw 目录回退和固定 record_results=true 摘要字段。保留所有动态授权、新鲜度、失败记录和资源关闭路径。
+- 远端同步覆盖当前可变 prior.pt、codec.pt、codebook.npz；小结果和引用使用 --ignore-times，按 episode facts → selection → best 的顺序发布，失败停止。离线替身验证顺序与中断，没有访问 SSH。
+
+关联代码未发现自写 SHA256/hashlib/指纹实现。保留 rsync 原生 config.yaml 内容冲突检查及数据同步的显式 --checksum 选项，避免混合不同实验配置；未新增哈希逻辑。物理坐标、数据身份、恢复状态和产物防覆盖检查属于必要边界，未按“重复”删除。
+
+本轮实际通过：15 配置检查、完整 57 项 CPU unittest、Real 7 项离线检查；sandbox 外 DP3 原配置 CUDA/BF16/compile 4 次更新及 raw/EMA 恢复；LatentFlow 原配置 data-only（11,013 train / 1,667 validation 窗口，各 2 batch）。DP3 compiled/eager 差值仅记录诊断，raw/EMA 恢复断言通过。新日志：
+
+```text
+/tmp/dexmani-cleanup-config.log
+/tmp/dexmani-cleanup-cpu.log
+/tmp/dexmani-cleanup-real-paired.log
+/tmp/dexmani-cleanup-cuda.log
+/tmp/dexmani-cleanup-data.log
+```
+
+命令沿用上文；本轮完整 CPU 使用 unittest discover，Real 使用 scripts/check_deployment.py。两个仓库 compileall 和 diff 检查、四个 Shell 的 bash -n、五个 Policy CLI 与 Real run_policy 的 --help 均通过；检查了两仓 README 与七份改动文档的 88 个本地链接路径。Real CLI 的过时“结果可选”描述已同步修正。未改变正式数据、模型超参数、精度或 Raw 默认，未运行真机/SSH、完整训练、长评测；先前未验证项仍保持原状态。
 
 ## 跨仓库配套与剩余工作
 
