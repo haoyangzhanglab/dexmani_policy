@@ -1,16 +1,17 @@
 # DexMani_Policy
 
-个人灵巧手策略研究仓库，覆盖数据读取、训练、checkpoint selection、仿真评测与策略推理。新实验从 `dexmani_policy/configs/` 进入；历史实验使用保存的配置、checkpoint 和源码版本。方法名表示本地研究适配，行为以配置和调用链为准。
+面向论文实验与方法验证的个人灵巧手策略研究仓库，覆盖数据、训练、checkpoint selection、仿真评测与策略推理。新实验从 `dexmani_policy/configs/` 进入；历史实验使用保存配置、checkpoint 和对应源码。方法名表示本地研究适配，行为以配置和调用链为准。
 
-| 文档 | 内容 |
+| 需要了解 | 文档 |
 | --- | --- |
-| [项目架构](docs/项目架构.md) | 数据流、策略接口、归一化、恢复与部署 |
-| [手部动作表示](docs/手部动作表示.md) | DQ-RISE、LAMP、Temporal 的准备命令与机制 |
-| [验证指南](docs/验证指南.md) | 配置检查、smoke 与短训练 |
-| [仿真评测机制](docs/仿真评测机制.md) | 选点、固定测试 seeds、参数与结果 |
-| [SSH 服务器训练部署](docs/SSH服务器训练部署.md) | 远端启动、同步、监控与停止 |
+| 数据流、策略接口、恢复与部署 | [项目架构](docs/项目架构.md) |
+| 选择检查、运行 smoke 或短训练 | [验证指南](docs/验证指南.md) |
+| 准备 DQ-RISE、LAMP、Temporal 手部表示 | [手部动作表示](docs/手部动作表示.md) |
+| 选点、固定测试 seeds、解释评测结果 | [仿真评测机制](docs/仿真评测机制.md) |
+| 远端启动、同步、监控与停止 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) |
+| 修改代码与 AI 协作 | [AGENTS.md](AGENTS.md)、[仓库导航](#仓库导航) |
 
-以下命令从仓库根目录执行，`<...>` 替换为实际值；本地 Shell 入口使用 Conda `policy` 环境。
+以下命令从仓库根目录执行，`<...>` 替换为实际值。Python 命令使用 Conda `policy` 环境；本地训练和评测脚本自动通过该环境启动，远端环境另行配置。
 
 ## 安装与配置
 
@@ -35,7 +36,29 @@ python -m pip check
 python -m dexmani_policy.common.config --config-name dp3 'task_name=<task>' --check
 ```
 
-该检查不加载 Zarr。字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。通用 affine normalizer 使用完整 replay buffer，包含验证 episode 和 `max_train_episodes` 外的行；手部 codec 专用统计另有定义。重新生成数据需使用新路径；数据身份按 episode 结构与实际划分核对，不计算内容哈希。
+该命令只检查路径，不读取数据内容；字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。重新生成数据需使用新路径。通用 affine normalizer 按完整 replay buffer 拟合，包含验证 episode；统计总体与手部 codec 的区别见 [归一化](docs/项目架构.md#归一化)。
+
+### 手部先验准备
+
+使用 `dqrise`、`lamp` 或 `temporal_codec_flow` 开始新训练前，先按 [手部动作表示](docs/手部动作表示.md) 准备各自的 Codebook、prior 或 codec，并配置产物路径。产物必须匹配训练数据、动作坐标、normalizer 和划分。
+
+## 验证
+
+按当前任务选择检查，下面的 smoke 使用配置中的数据路径和任务设置：
+
+```bash
+python dexmani_policy/smoke_test.py --config-only dp3
+python dexmani_policy/smoke_test.py --data-only dp3 --max-batches 2
+python dexmani_policy/smoke_test.py dp3 --max-updates 4
+```
+
+| 模式 | 覆盖范围与前提 |
+| --- | --- |
+| config-only | 检查配置与 target 导入，不加载数据或执行 GPU 算子 |
+| data-only | 在 CPU 上检查实际数据批次，不构建模型；需配置对应的数据 |
+| 完整 smoke | 检查训练更新、预测及 raw/EMA 保存恢复；需 CUDA、数据和所需权重 |
+
+Smoke 接受配置名或独立 YAML 路径，不接受 Hydra 字段覆盖；data-only 的 batch 上限不限制数据扫描与统计。Python 语法检查、各模式的覆盖边界和可传 overrides 的短训练入口见 [验证指南](docs/验证指南.md)。
 
 ## 训练与续训
 
@@ -45,27 +68,11 @@ bash scripts/training/train_ddp.sh ddp/sat 'task_name=<task>' 'training.seed=42'
 bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
-训练入口转发 Hydra overrides。单卡要求 `training.num_gpus=1` 或不设置；DDP 需核对可见 GPU、`training.num_gpus` 和每卡 batch。训练按 optimizer update 推进，best 由离线选点产生。
+训练入口转发 Hydra overrides。单卡要求 `training.num_gpus=1` 或不设置；DDP 需核对可见 GPU、`training.num_gpus` 和每卡 batch。训练预算按 optimizer update 计数，`best` 由离线选点产生。
 
-新 run 默认写入 `experiments/<policy_name>/<task_name>/<时间戳>_seed<seed>/`，已有训练产物的目录拒绝重用。`metrics.jsonl` 保存标量日志；每次启动（含续训）尝试创建新的 W&B run，默认 `offline`，`workspace.wandb_cfg=null` 可关闭 W&B。服务异常时保留本地记录，详见[训练日志与可选远程服务](docs/项目架构.md#训练日志与可选远程服务)。
+新 run 默认写入 `experiments/<policy_name>/<task_name>/<时间戳>_seed<seed>/`，已有训练产物的目录拒绝重用。标量保存在 `metrics.jsonl`；W&B 默认 `offline`，可用 `workspace.wandb_cfg=null` 关闭，详见 [训练日志](docs/项目架构.md#训练日志与可选远程服务)。
 
-`resume_from` 接受实验目录或 checkpoint，支持 `~`，相对路径按项目根目录解析，恢复写入新 run。配方和状态来自 checkpoint 的 `effective_config`；任务、数据语义、模型、world size 和训练预算必须保持一致。允许覆盖项见 [完整恢复边界](docs/项目架构.md#完整恢复边界)。
-
-### 手部先验准备
-
-`sat` 与 `dqrise` 固定使用 19D Joint Action，并各自实例化相同的 Sparse3D Global 观测编码器。
-
-`dqrise` 默认 `codebook_path=null`，需先训练 VQ 并导出匹配当前 Joint Action 数据、normalizer 和划分的码本，再显式指定路径；`lamp` 和 `temporal_codec_flow` 需先准备 prior/codec。各阶段复用数据与划分设置，命令见 [手部动作表示](docs/手部动作表示.md)。LAMP/Temporal 仅支持 sync；完整策略 checkpoint 内嵌表示，推理无需原预训练产物。
-
-## 验证
-
-```bash
-python dexmani_policy/smoke_test.py --config-only dp3
-python dexmani_policy/smoke_test.py --data-only dp3 --max-batches 2
-python dexmani_policy/smoke_test.py dp3 --max-updates 4
-```
-
-config-only 检查配置；data-only 在 CPU 上检查生产数据路径，不构建模型；完整 smoke 检查训练更新、预测及 raw/EMA 保存恢复，需要 CUDA、数据和所需权重。各模式的覆盖边界、批量检查和保留短跑产物的命令见 [验证指南](docs/验证指南.md)。
+`resume_from` 接受实验目录或 checkpoint，恢复到新 run；相对路径按项目根目录解析。配方来自 checkpoint 的 `effective_config`，模型与训练状态从同一 checkpoint 恢复；任务、数据语义、模型、world size 和总训练预算必须一致。允许覆盖项见 [完整恢复边界](docs/项目架构.md#完整恢复边界)。
 
 ## 仿真评测
 
@@ -74,7 +81,9 @@ bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run> --seed 1024 -
 bash scripts/eval/record_demo.sh <policy_name> <task_name> <run>
 ```
 
-流水线固定 test/selection 计划后选点，再复用本次记录进行不录视频的 held-out eval。当前配置默认每任务 test 70 个、selection 预留 30 个，需至少 100 个不同有效 seeds；实际预算以实验保存配置和显式覆盖为准。分步入口、受限 dotlist、记录字段及参数优先级见 [仿真评测机制](docs/仿真评测机制.md)。实际 demo 录像需要 X11 或 XWayland。
+流水线先固定 test/selection 计划，再选点并复用记录进行不录视频的 held-out eval。Seed 池需同时满足 test 与 selection 的容量，预算以保存配置和显式覆盖为准；分步入口与参数规则见 [仿真评测机制](docs/仿真评测机制.md)。Demo 录像需要 X11 或 XWayland。
+
+比较实验需同时记录数据划分、有效 batch、训练预算、选点和最终评测协议。
 
 ## 远端与其他工作流
 
@@ -87,7 +96,7 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 
 远端运行使用独立源码副本，共享数据、权重与实验；dry-run 仍访问 SSH。详见 [SSH 服务器训练部署](docs/SSH服务器训练部署.md)。`scripts/utils/clean_experiments.sh` 只读盘点实验，`scripts/utils/wandb_sync.sh` 上传 offline runs。
 
-策略加载与真机调用接口见 [部署边界](docs/项目架构.md#部署边界)，真机执行由 `dexmani_real` 管理。比较实验需同时记录数据、有效 batch、训练预算、选点和最终评测协议。
+策略加载与真机调用接口见 [部署边界](docs/项目架构.md#部署边界)，真机执行由 `dexmani_real` 管理。
 
 ## 仓库导航
 
@@ -101,6 +110,7 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | `dexmani_policy/env_runner/` | 环境交互、rollout、seed 与指标工具、录像 |
 | `dexmani_policy/deployment/` | 已保存策略的检查与推理接口 |
 | `dexmani_policy/common/` | 共享配置、checkpoint、归一化、RGB 预处理与运行工具 |
+| `dexmani_policy/smoke_test.py` | 分层 smoke，覆盖范围见 [验证指南](docs/验证指南.md) |
 | `scripts/` | 运行入口 |
 | `robot_data/`、`data/`、`experiments/` | 数据、资源与实验产物 |
 | [AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md) | 研究协作规则及 Claude Code 加载入口 |

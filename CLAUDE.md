@@ -2,4 +2,4 @@
 
 @AGENTS.md
 
-使用入口与专题文档见 [README](README.md)。
+按任务查阅 [运行入口](README.md)、[代码导航](README.md#仓库导航) 或 [验证指南](docs/验证指南.md)。
