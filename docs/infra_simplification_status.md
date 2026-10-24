@@ -13,7 +13,7 @@
 | E | Real 入口解析 best/default、preflight 校验模式；RTC 参数按调用传递；Runtime 删除执行配置状态与 scheduler 访问；轻量结果必存、Raw 可选 | 已成对应用到实际 dexmani_real；7 项纯离线检查通过。设备连接前预热、单在途查询、动态授权/新鲜度/停止/失败收尾保留；真机未验证 |
 | F | 审阅现有耗时与数值路径，未加入性能配置、缓存、精度或 compile 改动 | 无足够测量证据支持进一步优化，不宣称性能收益 |
 
-本地提交位于两个仓库的 `infra/simplification` 分支，原 main 保持基线，未推送或合并：
+实现与离线验证先在两个仓库的 `infra/simplification` 分支完成。按后续明确授权，已将实现快进到两个仓库的本地及远端 main，未强制推送或改写历史；已删除合入后的本地实施分支。
 
 | 仓库 | 提交 | 范围 |
 | --- | --- | --- |
@@ -22,6 +22,7 @@
 | policy | `52828c6` | C：评测结构、固定预算及冻结/统计协议 |
 | policy | `268924d` | D：固定数据划分、seed 与 padding |
 | policy | `3fe7db6` | ManiFlow encoder 默认值保存修复与主机 CUDA 补充验证 |
+| policy | `3e4b03e` | 清理：统一 manifest、删除产物版本标签及冗余配置与校验 |
 | real | `dbd4610` | B/E：入口解析、模式准入与按调用 RTC 参数 |
 | real | `c0d4efc` | E：轻量结果必存、Raw 可选与离线检查 |
 | real | `c7936ca` | 清理：Session/Episode 结果记录必需、删除可选分支并修正 CLI |
@@ -141,4 +142,6 @@ git diff --check
 
 Real 改动先在 `/tmp/dexmani-infra-real` 隔离副本验证；重新核对原仓库 HEAD 与干净 diff 后，应用补丁到 `/home/zhanghaoyang/Desktop/dexmani_real`。涉及 deployment/run.py、preflight.py、session.py、episode.py、scripts/run_policy.py、新增 scripts/check_deployment.py 和 README。没有修改设备 SDK、schedule 算法、Raw 格式、物理标定或实验产物。
 
-后续需要匹配真实手部产物的 CUDA 检查、足够显存下的 R3D 原配方检查、补齐多任务实际数据、多卡恢复验证、真实模拟器短闭环及另行授权的真机验证。性能优化以测量为依据。本次不推送、不合并，不发布只有一侧的接口迁移。
+后续需要匹配真实手部产物的 CUDA 检查、足够显存下的 R3D 原配方检查、补齐多任务实际数据、多卡恢复验证、真实模拟器短闭环及另行授权的真机验证。性能优化以测量为依据。后续发布已将两个仓库的配套实现一并同步到远端 main；发布不增加验证覆盖或性能结论。
+
+方案 PR #21 已因实现落地而关闭；按用户要求关闭研究 PR #13、#15，保留其远端分支，未将这两项研究变更合入 main。Real 没有开放 PR。清理了 Real 三条指向已不存在目录的 worktree 记录，未删除实际工作目录、历史备份分支、数据或实验产物。
