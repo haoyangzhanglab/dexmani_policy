@@ -40,9 +40,13 @@ def restore_training_state(checkpoint, components, *, effective_config):
         raise ValueError("Checkpoint step/epoch/cursor disagree with full loader geometry")
     if checkpoint.global_step > total:
         raise ValueError("Checkpoint global_step exceeds the saved total plan")
+    if len(optimizer.param_groups) != len(checkpoint.optimizer_state["param_groups"]):
+        raise ValueError("Optimizer group count mismatch")
     for current, saved in zip(optimizer.param_groups, checkpoint.optimizer_state["param_groups"]):
         if saved["param_names"] != current["param_names"]:
             raise ValueError("Optimizer parameter name/order mismatch")
+        if saved.get("clip_group") != current.get("clip_group"):
+            raise ValueError("Optimizer clipping group mismatch")
     optimizer.load_state_dict(checkpoint.optimizer_state)
     scheduler.load_state_dict(checkpoint.scheduler_state)
     if ema_updater is not None:

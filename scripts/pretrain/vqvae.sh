@@ -1,6 +1,8 @@
 #!/bin/bash
 # Policy-aligned DQ codebook training.
 # Usage: vqvae.sh [task_name] [VQ training options...]
+# Required data overrides: --policy-override dataset.split_manifest=/path/to/split.json
+#                         --policy-override dataset.val_ratio=0
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

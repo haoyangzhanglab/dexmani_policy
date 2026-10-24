@@ -1,9 +1,11 @@
 import argparse
 import copy
+import io
 import itertools
 import tempfile
 import unittest
 import warnings
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,11 +50,12 @@ class DQLookupTests(unittest.TestCase):
 
     def checkpoint(self):
         return dict(
-            epoch=3, model_config=self.config, model_state_dict=self.model.state_dict(),
+            format=HandVQVAE.artifact_format, epoch=3, model_config=self.config, model_state_dict=self.model.state_dict(),
             normalizer_state_dict=self.normalizer.state_dict(),
             split_metadata={
                 "normalization_spec": {"action": "limits"},
                 "hand_data": {"val_episodes": [1]},
+                "split_manifest": {"train_indices": [0], "val_indices": [1]},
                 "selection_metric": "val_lookup_mse", "selection_split": "validation",
             },
             metrics={"val_lookup_mse": 0.125},
@@ -118,6 +121,38 @@ class DQLookupTests(unittest.TestCase):
             )
         torch.testing.assert_close(self.model.state_dict(), state, rtol=0, atol=0)
 
+    def test_all_indices_roundtrip_and_old_artifact_rejection(self):
+        codebook = HandStateCodebook(12, 2, 4)
+        poses = torch.linspace(-1, 1, 16)[:, None].expand(16, 12).clone()
+        codebook.set_buffers(dict(
+            sorted_hand_poses=poses, pca_permutation=torch.arange(15, -1, -1),
+            layer_weights=torch.tensor([0.1, 0.9]),
+            hand_normalizer_scale=torch.ones(12), hand_normalizer_offset=torch.zeros(12),
+        ))
+        continuous, indices = codebook.encode(poses)
+        torch.testing.assert_close(indices, torch.arange(16))
+        restored, decoded_indices = codebook.decode(continuous[:, 0])
+        torch.testing.assert_close(restored, poses)
+        torch.testing.assert_close(decoded_indices, indices)
+        # Points just below each exact code must round back, rather than truncate.
+        _, nearby_indices = codebook.decode(continuous[:, 0] - 0.01)
+        torch.testing.assert_close(nearby_indices, indices)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "codebook.npz"
+            codebook.save(path)
+            loaded = HandStateCodebook(12, 2, 4)
+            loaded.load(path)
+            torch.testing.assert_close(loaded.state_dict(), codebook.state_dict())
+            with np.load(path, allow_pickle=False) as data:
+                old = {key: data[key] for key in data.files if key != "format"}
+            np.savez(path, **old)
+            with self.assertRaisesRegex(ValueError, "current codebook"):
+                loaded.load(path)
+        old_checkpoint = self.checkpoint()
+        del old_checkpoint["format"]
+        with self.assertRaisesRegex(ValueError, "current"):
+            HandVQVAE.from_checkpoint(old_checkpoint)
+
     def test_selection_metadata(self):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -141,10 +176,10 @@ class DQLookupTests(unittest.TestCase):
             with self.subTest(holdout=holdout), tempfile.TemporaryDirectory() as directory:
                 args = argparse.Namespace(
                     **self.config, output_dir=directory, zarr_path="synthetic.zarr",
-                    device="cpu", seed=19, batch_size=4, num_workers=0, num_epochs=2,
-                    save_epochs=2, codebook_report_epochs=100, vq_decay=0.8,
+                    device="cpu", seed=19, batch_size=4, num_workers=0, num_epochs=4,
+                    save_epochs=4, codebook_report_epochs=100, vq_decay=0.8,
                     threshold_ema_dead_code=0, kmeans_init=False, kmeans_iters=2,
-                    lr=1e-3, betas=(0.9, 0.999), weight_decay=0, warmup_steps=0,
+                    lr=1e-2, betas=(0.9, 0.999), weight_decay=0, warmup_steps=0,
                     enc_loss_weight=1.0, vq_loss_weight=1.0, max_grad_norm=1.0,
                 )
                 val = self.rows[:5].numpy() if holdout else np.empty((0, 12), np.float32)
@@ -153,6 +188,7 @@ class DQLookupTests(unittest.TestCase):
                 data = (self.rows.numpy(), val, self.normalizer, metadata)
                 evaluate = training.evaluate_vq
                 scores = []
+                reconstruction_scores = []
 
                 def record_evaluation(model, loader, device, **kwargs):
                     self.assertFalse(loader.drop_last)
@@ -161,8 +197,7 @@ class DQLookupTests(unittest.TestCase):
                     result = evaluate(model, loader, device, **kwargs)
                     scores.append(result["lookup_mse"])
                     if holdout:
-                        # Force opposing rankings to test selection independently of optimization.
-                        result.update(lookup_mse=float(len(scores)), mse=3.0 - len(scores))
+                        reconstruction_scores.append(result["mse"])
                     return result
 
                 with (
@@ -173,17 +208,32 @@ class DQLookupTests(unittest.TestCase):
                     warnings.simplefilter("ignore", RuntimeWarning)
                     training.train(args, policy_cfg=None)
                 best = torch.load(Path(directory) / "vqvae_hand_best.pt", weights_only=False)
+                last = torch.load(Path(directory) / "vqvae_hand_last.pt", weights_only=True)
+                self.assertEqual(last["epoch"], args.num_epochs)
+                self.assertNotIn("optimizer_state_dict", last)
+                self.assertNotIn("scheduler_state_dict", last)
+                self.assertEqual("val_mse" in last["metrics"], holdout)
                 metric = "val_lookup_mse" if holdout else "train_lookup_mse"
                 self.assertEqual(best["split_metadata"]["selection_metric"], metric)
                 self.assertEqual(
                     best["split_metadata"]["selection_split"],
                     "validation" if holdout else "train_no_holdout",
                 )
-                self.assertEqual(best["epoch"], 1 if holdout else int(np.argmin(scores)) + 1)
-                if not holdout:
-                    model = HandVQVAE.from_checkpoint(best)
-                    actual = evaluate(model, self.loader(), "cpu", reconstruction=False)
-                    self.assertEqual(best["metrics"][metric], actual["lookup_mse"])
+                self.assertEqual(best["epoch"], int(np.argmin(scores)) + 1)
+                if holdout:
+                    self.assertNotEqual(np.argmin(scores), np.argmin(reconstruction_scores))
+                model = HandVQVAE.from_checkpoint(best)
+                rows = torch.from_numpy(val) if holdout else self.rows
+                actual = evaluate(model, self.loader(rows), "cpu", reconstruction=False)
+                self.assertEqual(best["metrics"][metric], actual["lookup_mse"])
+
+    def test_cli_boolean_flags_reject_implicit_fallback(self):
+        parser = training.build_arg_parser()
+        base = ["--policy-config", "dexmani_policy/configs/dqrise.yaml"]
+        self.assertTrue(parser.parse_args([*base, "--kmeans_init"]).kmeans_init)
+        self.assertFalse(parser.parse_args([*base, "--no-kmeans_init"]).kmeans_init)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([*base, "--kmeans_init", "invalid"])
 
 
 if __name__ == "__main__":

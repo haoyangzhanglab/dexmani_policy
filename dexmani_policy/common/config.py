@@ -263,8 +263,6 @@ def validate_normalization_spec(spec, *, observation_fields=None):
             raise ValueError("Normalization auto is only supported for action")
     if not {"joint_state", "action"} <= spec.keys():
         raise ValueError("Normalization must declare joint_state and action")
-    if spec["action"] == "identity":
-        raise ValueError("Action normalization requires fitted affine parameters")
     if spec.get("rgb", "identity") != "identity":
         raise ValueError("RGB preprocessing requires normalization.rgb=identity")
     if observation_fields is not None:

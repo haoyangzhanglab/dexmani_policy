@@ -20,14 +20,10 @@ class Sparse3DGlobalObservationEncoder(nn.Module):
     @staticmethod
     def validate_config(cfg, spec) -> None:
         validate_sparse3d_config(cfg, spec, default_num_patches=64)
-        if (cfg.n_obs_steps, cfg.agent.get("pc_dim", 6), cfg.agent.get("state_dim", 19)) != (
-            2,
-            6,
-            19,
-        ):
-            raise ValueError(
-                "Sparse3D global observations require 2 frames of XYZRGB and 19D state"
-            )
+        if cfg.n_obs_steps not in (1, 2) or (
+            cfg.agent.get("pc_dim", 6), cfg.agent.get("state_dim", 19)
+        ) != (6, 19):
+            raise ValueError("Sparse3D global observations require 1 or 2 XYZRGB/19D frames")
         if spec.get("joint_state") != "limits":
             raise ValueError(
                 "Sparse3D global observations require normalization.joint_state: limits"
@@ -44,8 +40,8 @@ class Sparse3DGlobalObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        if (pc_dim, state_dim, n_obs_steps) != (6, 19, 2):
-            raise ValueError("Expected pc_dim=6, state_dim=19, n_obs_steps=2")
+        if (pc_dim, state_dim) != (6, 19) or n_obs_steps not in (1, 2):
+            raise ValueError("Expected pc_dim=6, state_dim=19, n_obs_steps in (1, 2)")
         self.num_points = positive_int(num_points, "num_points")
         self.n_obs_steps = n_obs_steps
         self.fps_random_config = dict(

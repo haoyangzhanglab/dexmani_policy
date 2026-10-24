@@ -18,6 +18,8 @@ class SATPolicy(BasePolicy):
     @classmethod
     def validate_model_config(cls, cfg, spec) -> None:
         Sparse3DGlobalObservationEncoder.validate_config(cfg, spec)
+        if cfg.n_obs_steps != 2:
+            raise ValueError("SAT requires n_obs_steps=2")
         if cfg.action_key != "action" or (cfg.horizon, cfg.n_action_steps, cfg.action_dim) != (
             16,
             8,
@@ -56,8 +58,8 @@ class SATPolicy(BasePolicy):
         modality_dropout_probs: dict | None = None,
         num_flow_train_timesteps: int = 10,
     ) -> None:
-        if n_action_steps != 8:
-            raise ValueError("SAT requires n_action_steps=8")
+        if n_action_steps != 8 or n_obs_steps != 2:
+            raise ValueError("SAT requires n_action_steps=8, n_obs_steps=2")
         obs_encoder = Sparse3DGlobalObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,

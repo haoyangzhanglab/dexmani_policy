@@ -16,8 +16,8 @@ lamp:
   prior_path: experiments/lamp_prior/${task_name}/prior.pt
 
 normalization:
-  joint_state: limits
-  action: auto
+  joint_state: gaussian
+  action: identity
   point_cloud: identity
 
 dataloader:
@@ -39,8 +39,8 @@ dataset:
   obs_horizon: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
-  val_ratio: 0.0
-  max_train_episodes: 80
+  val_ratio: 0.1
+  max_train_episodes: null
   split_manifest: null
   sensor_modalities: [joint_state, point_cloud]
   history_steps: ${lamp.history_steps}
@@ -49,8 +49,6 @@ dataset:
       coord_noise: {noise_std: 0.002, prob: 1.0}
       color: {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
       dropout: {max_dropout_ratio: 0.8, prob: 1.0}
-    state:
-      noise: {noise_std: 0.0002, prob: 1.0}
 
 agent:
   _target_: dexmani_policy.agents.policies.lamp.LAMPPolicy
@@ -83,38 +81,31 @@ agent:
     rope_base: 100.0
   num_inference_steps: 1
   hand_loss_weight: 1.0
-  offset_reg_weight: 0.0
   drift_reg_weight: 1.0
-  history_noise_std: 0.01
+  history_noise_std: 0.10
+  arm_state_noise_std: 0.10
   modality_dropout_probs:
     joint_state: 0.0
 
 optimizer:
   lr: 1.0e-4
-  weight_decay: 1.0e-6
-  betas: [0.95, 0.999]
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6
-
-ema:
-  _target_: dexmani_policy.training.common.ema.EMA
-  update_after_step: 0
-  inv_gamma: 1.0
-  power: 0.75
-  min_value: 0.0
-  max_value: 0.9999
+  obs_weight_decay: 1.0e-4
 
 training:
   seed: ${seed}
   device: cuda:0
   use_bfloat16: true
   use_compile: true
-  use_ema: true
-  lr_scheduler: cosine
-  lr_warmup_steps: 500
+  use_ema: false
+  lr_scheduler: cosine_min_lr
+  lr_min_ratio: 0.01
+  lr_warmup_steps: 1000
   max_grad_norm: 1.0
   loop:
-    total_train_steps: 100000
+    total_train_steps: 20000
     log_interval_steps: 100
     gradient_accumulation_steps: 1
 
@@ -144,7 +135,7 @@ env_runner:
 eval:
   seed: 1024
   inference_steps: 1
-  use_ema: true
+  use_ema: false
   select_best:
     initial_episodes: 25
     batch_size: 5

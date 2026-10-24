@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
+from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
 from dexmani_policy.agents.policies.lamp import LAMPPolicy
 from dexmani_policy.common.checkpoint import (
     TrainingCheckpoint,
@@ -27,11 +28,15 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
 from dexmani_policy.common.runtime import get_rng_state
+from dexmani_policy.env_runner.base_runner import BaseRunner
 from dexmani_policy.training.builder import (
     build_model_and_ema,
     build_optimizer_and_scheduler,
 )
 from dexmani_policy.training.common.hand_representation import describe_hand_data
+from dexmani_policy.datasets.common.episode_split import build_index_manifest
+from dexmani_policy.training.builder import build_optimizer
+from dexmani_policy.training.pretrain.hand_prior.lamp import perturb_history
 from dexmani_policy.training.data import build_dataset_and_normalizer, build_train_loader
 from dexmani_policy.training.resume import build_resume_contract, restore_training_state
 from dexmani_policy.training.validation import validate_config
@@ -49,8 +54,8 @@ class LAMPBCTests(unittest.TestCase):
             fps_random_config={"use_random": False},
         )
         self.loss_config = dict(
-            history_noise_std=0.01, hand_loss_weight=1.0,
-            offset_reg_weight=0.0, drift_reg_weight=1.0,
+            history_noise_std=0.10, hand_loss_weight=1.0,
+            arm_state_noise_std=0.0, drift_reg_weight=1.0,
         )
         self.batch = dict(
             obs={"joint_state": torch.randn(2, 1, 19), "point_cloud": torch.randn(2, 1, 8, 6)},
@@ -60,26 +65,26 @@ class LAMPBCTests(unittest.TestCase):
 
     def model(self, **weights):
         model = LAMPPolicy(**self.kwargs, **{**self.loss_config, **weights})
-        scale, offset = torch.linspace(0.4, 2.5, 19), torch.linspace(-0.3, 0.2, 19)
         normalizer = AffineNormalizer()
-        normalizer["action"] = FieldNormalizer.from_parameters(scale, offset)
         normalizer["joint_state"] = FieldNormalizer.from_parameters(torch.ones(19), torch.zeros(19))
-        model.prior.hand_scale.copy_(scale[7:])
-        model.prior.hand_offset.copy_(offset[7:])
         model.prior.ready.fill_(True)
         model.prior_initialized = True
+        model.set_normalization_spec(
+            {"action": "identity", "joint_state": "gaussian", "point_cloud": "identity"},
+            {"action": 19, "joint_state": 19},
+        )
         model.load_normalizer_from_dataset(normalizer)
         return model
 
     def test_history_noise_scale_modes_and_input_preservation(self):
-        for training, std in ((True, 0.01), (False, 0.01), (True, 0.0)):
+        for training, std in ((True, 0.10), (False, 0.10), (True, 0.0)):
             with self.subTest(training=training, std=std):
                 model = self.model(history_noise_std=std).train(training)
                 self.assertFalse(model.prior.training)
                 saved = copy.deepcopy(self.batch)
                 history = self.batch["action_context"]["hand_history"]
                 rng = torch.get_rng_state().clone()
-                expected = model.prior.normalize_hand(history)
+                expected = history
                 if training and std:
                     expected = expected + torch.randn_like(history) * std
                 expected_rng = torch.get_rng_state().clone()
@@ -102,10 +107,10 @@ class LAMPBCTests(unittest.TestCase):
                     )
 
     def test_loss_formula_and_decoder_gradient(self):
-        for drift, latent, hand_weight in ((1.0, 0.0, 0.0), (0.0, 0.03, 0.7), (0.0, 0.0, 0.7)):
-            with self.subTest(drift=drift, latent=latent):
+        for drift, hand_weight in ((1.0, 0.0), (0.0, 0.7), (1.0, 1.0)):
+            with self.subTest(drift=drift, hand_weight=hand_weight):
                 model = self.model(
-                    drift_reg_weight=drift, offset_reg_weight=latent,
+                    drift_reg_weight=drift,
                     hand_loss_weight=hand_weight, history_noise_std=0.01,
                 ).train()
                 saved = copy.deepcopy(self.batch)
@@ -134,13 +139,13 @@ class LAMPBCTests(unittest.TestCase):
                 with torch.no_grad():
                     reference = model.prior.decode(mu)
                 action = self.batch["action"][:, 0]
-                hand_target = action[:, 7:] * model.prior.hand_scale + model.prior.hand_offset
-                arm_target = model.normalizer["action"].normalize(action)[:, :7]
+                hand_target = action[:, 7:]
+                arm_target = action[:, :7]
                 hand_mse = (predicted - hand_target).square().mean()
                 drift_mse = (predicted - reference).square().mean()
                 expected = (
                     (native[:, :7] - arm_target).square().mean() + hand_weight * hand_mse
-                    + drift * drift_mse + latent * offset.square().sum(-1).mean()
+                    + drift * drift_mse
                 )
                 torch.testing.assert_close(loss, expected)
                 torch.testing.assert_close(metrics["hand_drift_mse"], drift_mse)
@@ -159,7 +164,7 @@ class LAMPBCTests(unittest.TestCase):
     def test_logging_invariance_and_decode_counts(self):
         for drift in (0.0, 1.0):
             model = self.model(
-                drift_reg_weight=drift, offset_reg_weight=0.0, history_noise_std=0.01,
+                drift_reg_weight=drift, history_noise_std=0.10, arm_state_noise_std=0.10,
             ).train()
             rng = torch.get_rng_state().clone()
             results = []
@@ -174,7 +179,7 @@ class LAMPBCTests(unittest.TestCase):
                     torch.autocast("cpu", dtype=torch.bfloat16),
                 ):
                     loss, metrics = model.compute_loss(self.batch, log_metrics=log_metrics)
-                    self.assertEqual(decode.call_count, 2 if drift or log_metrics else 1)
+                    self.assertEqual(decode.call_count, 2)
                     self.assertEqual(encode.call_count, 1)
                     self.assertTrue(all(
                         call.args[0].dtype == torch.float32 for call in decode.call_args_list
@@ -200,9 +205,9 @@ class LAMPBCTests(unittest.TestCase):
         cfg = load_policy_config("lamp")
         validate_config(cfg)
         fields = (
-            "history_noise_std", "hand_loss_weight", "offset_reg_weight", "drift_reg_weight"
+            "history_noise_std", "hand_loss_weight", "arm_state_noise_std", "drift_reg_weight"
         )
-        self.assertEqual([cfg.agent[key] for key in fields], [0.01, 1.0, 0.0, 1.0])
+        self.assertEqual([cfg.agent[key] for key in fields], [0.10, 1.0, 0.10, 1.0])
         for key in fields:
             incomplete = {**self.kwargs, **self.loss_config}
             del incomplete[key]
@@ -217,11 +222,8 @@ class LAMPBCTests(unittest.TestCase):
                     invalid.agent[key] = value
                     with self.assertRaisesRegex(ValueError, key):
                         validate_config(invalid)
-        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+        with self.assertRaisesRegex(TypeError, "offset_reg_weight"):
             LAMPPolicy(**self.kwargs, **{**self.loss_config, "offset_reg_weight": 1e-3})
-        cfg.agent.offset_reg_weight = 1e-3
-        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
-            validate_config(cfg)
 
     def test_builder_resume_and_inference(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -246,6 +248,11 @@ class LAMPBCTests(unittest.TestCase):
                 cfg.agent.pc_encoder_config = self.kwargs["pc_encoder_config"]
                 cfg.agent.fps_random_config = self.kwargs["fps_random_config"]
                 cfg.dataset.augmentation_cfg = None
+                cfg.dataset.val_ratio = 0.0
+                cfg.dataset.split_manifest = str(path / "split.json")
+                cfg.agent.arm_state_noise_std = 0.10
+                cfg.training.lr_warmup_steps = 2
+                cfg.training.loop.total_train_steps = 6
                 cfg.dataloader.num_workers = 0
                 cfg.dataloader.persistent_workers = False
                 cfg.dataloader.prefetch_factor = None
@@ -253,16 +260,18 @@ class LAMPBCTests(unittest.TestCase):
                 cfg.training.device = "cpu"
                 cfg.training.use_compile = False
                 cfg.training.use_bfloat16 = False
+            manifest = build_index_manifest(str(path / "data.zarr"), [7], dict(root.attrs), val_ratio=0)
+            (path / "split.json").write_text(json.dumps(manifest))
             OmegaConf.resolve(cfg)
             validate_config(cfg)
             dataset, normalizer = build_dataset_and_normalizer(cfg, verbose=False)
             prior = HandMotionPrior(12, 3, 2, 8)
-            prior.hand_scale.copy_(normalizer["action"].params_dict["scale"][7:])
-            prior.hand_offset.copy_(normalizer["action"].params_dict["offset"][7:])
             prior.ready.fill_(True)
             torch.save(dict(
+                format=prior.artifact_format, coordinate_space=prior.coordinate_space,
                 model_config=prior.model_config, model_state_dict=prior.state_dict(),
-                metadata={"hand_data": describe_hand_data(dataset)},
+                metadata={"hand_data": describe_hand_data(dataset), "split_manifest": manifest,
+                          "hand_joint_order": prior.hand_joint_order},
             ), path / "prior.pt")
             batch = next(iter(DataLoader(dataset, batch_size=2)))
             model, ema, updater = build_model_and_ema(cfg, "cpu", normalizer, dataset=dataset)
@@ -280,14 +289,15 @@ class LAMPBCTests(unittest.TestCase):
             ))
             optimizer.step()
             scheduler.step()
-            updater.step(model)
+            self.assertIsNone(updater)
+            self.assertIsNone(ema)
             saved = OmegaConf.to_container(cfg, resolve=True)
             checkpoint = TrainingCheckpoint(
                 epoch=0, global_step=1, next_micro_step=1,
-                model_state=model.state_dict(), ema_model_state=ema.state_dict(),
+                model_state=model.state_dict(), ema_model_state=None,
                 optimizer_state=optimizer.state_dict(), scheduler_state=scheduler.state_dict(),
                 resume_contract=build_resume_contract(loader),
-                ema_updater_step=updater.optimization_step,
+                ema_updater_step=None,
                 rng_states=[get_rng_state()], effective_config=saved,
             )
             checkpoint_path = save_training_checkpoint(path / "policy.pt", checkpoint)
@@ -325,26 +335,184 @@ class LAMPBCTests(unittest.TestCase):
             self.assertEqual(resumed_scheduler.state_dict(), checkpoint.scheduler_state)
             self.assertTrue(torch.equal(torch.get_rng_state(), checkpoint.rng_states[0]["torch"]))
             for name, value in self.loss_config.items():
-                self.assertEqual(getattr(resumed, name), value)
-            for use_ema, expected, restored in ((False, model, resumed), (True, ema, resumed_ema)):
-                torch.testing.assert_close(
-                    expected.state_dict(), restored.state_dict(), rtol=0, atol=0
-                )
-                expected.eval()
-                inference = restore_policy_agent(
-                    saved, checkpoint_path, use_ema=use_ema, device="cpu"
-                )
-                kwargs = dict(action_context=batch["action_context"])
-                torch.testing.assert_close(
-                    expected.predict_action(batch["obs"], **kwargs),
-                    inference.predict_action(batch["obs"], **kwargs), rtol=0, atol=0,
-                )
+                self.assertEqual(getattr(resumed, name), cfg.agent[name])
+            torch.testing.assert_close(model.state_dict(), resumed.state_dict(), rtol=0, atol=0)
+            model.eval()
+            inference = restore_policy_agent(
+                saved, checkpoint_path, use_ema=False, device="cpu"
+            )
+            kwargs = dict(action_context=batch["action_context"])
+            torch.testing.assert_close(
+                model.predict_action(batch["obs"], **kwargs),
+                inference.predict_action(batch["obs"], **kwargs), rtol=0, atol=0,
+            )
             resumed.train()
             rng_state = torch.get_rng_state()
+            optimizer.zero_grad(set_to_none=True)
+            resumed_optimizer.zero_grad(set_to_none=True)
             expected_loss, _ = model.train().compute_loss(batch, log_metrics=False)
             torch.set_rng_state(rng_state)
             restored_loss, _ = resumed.compute_loss(batch, log_metrics=False)
             torch.testing.assert_close(expected_loss, restored_loss, rtol=0, atol=0)
+            expected_loss.backward()
+            restored_loss.backward()
+            optimizer.step()
+            resumed_optimizer.step()
+            scheduler.step()
+            resumed_scheduler.step()
+            torch.testing.assert_close(model.state_dict(), resumed.state_dict(), rtol=0, atol=0)
+            self.assertEqual(scheduler.state_dict(), resumed_scheduler.state_dict())
+
+    def test_prior_raw_math_and_noise(self):
+        prior = HandMotionPrior(12, 8, 2, 256)
+        with torch.no_grad():
+            prior.fc_mu.weight.zero_()
+            prior.fc_mu.bias.copy_(torch.tensor([1.0, -2.0]))
+            prior.fc_log_var.weight.zero_()
+            prior.fc_log_var.bias.copy_(torch.tensor([4.0, 0.25]).log())
+            prior.decoder[-1].bias.fill_(3.0)
+        history = torch.linspace(-3, 4, 2 * 8 * 12).reshape(2, 8, 12)
+        target = torch.linspace(-2, 3, 24).reshape(2, 12)
+        epsilon = torch.tensor([[0.25, -0.5], [1.0, 2.0]])
+        z = torch.tensor([[1.5, -2.25], [3.0, -1.0]])
+        prediction = prior.decode(z)
+        expected_recon = (prediction - target).square().sum() / 24
+        expected_kl = 0.5 * (torch.tensor([1.0, 4.0]) + torch.tensor([4.0, 0.25])
+                             - 1 - torch.tensor([4.0, 0.25]).log()).mean()
+        loss, recon, kl = prior.compute_loss(history, target, 0.001, epsilon=epsilon)
+        torch.testing.assert_close(recon, expected_recon)
+        torch.testing.assert_close(kl, expected_kl)
+        torch.testing.assert_close(loss, expected_recon + 0.001 * expected_kl)
+        self.assertTrue((prediction > 1).all())
+        self.assertFalse(any("scale" in key or "offset" in key for key in prior.state_dict()))
+        loss.backward()
+        self.assertGreater(float(prior.fc_log_var.bias.grad.abs().sum()), 0)
+
+        history = torch.full((4096, 8, 12), 2.5)
+        for std in (0.0, 0.01):
+            rng = torch.get_rng_state()
+            expected = history + torch.randn_like(history) * std if std else history
+            expected_rng = torch.get_rng_state()
+            torch.set_rng_state(rng)
+            noisy = perturb_history(history, std)
+            torch.testing.assert_close(noisy, expected, rtol=0, atol=0)
+            self.assertTrue(torch.equal(torch.get_rng_state(), expected_rng))
+            self.assertTrue(torch.equal(history, torch.full_like(history, 2.5)))
+            if std:
+                self.assertAlmostEqual(float((noisy - history).std()), std, delta=0.0001)
+
+    def test_arm_noise_after_normalization(self):
+        model = self.model(arm_state_noise_std=0.10)
+        scale = torch.linspace(0.2, 3, 19)
+        offset = torch.linspace(-1, 1, 19)
+        model.normalizer["joint_state"] = FieldNormalizer.from_parameters(scale, offset)
+        raw = torch.linspace(-2, 4, 4096 * 19).reshape(4096, 1, 19)
+        original = raw.clone()
+        for training, std in ((True, 0.10), (False, 0.10), (True, 0.0)):
+            model.train(training)
+            model.arm_state_noise_std = std
+            rng = torch.get_rng_state()
+            expected = (raw * scale + offset).flatten(0, 1)
+            if training and std:
+                expected[:, :7] += torch.randn_like(expected[:, :7]) * std
+            expected_rng = torch.get_rng_state()
+            torch.set_rng_state(rng)
+            actual = model.preprocess({"joint_state": raw})["joint_state"]
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(actual[:, 7:], (raw * scale + offset)[:, 0, 7:])
+            torch.testing.assert_close(raw, original, rtol=0, atol=0)
+            self.assertTrue(torch.equal(torch.get_rng_state(), expected_rng))
+
+    def test_prior_features_and_optimizer_update(self):
+        model = self.model(history_noise_std=0, arm_state_noise_std=0).train()
+        captured = []
+        handle = model.prior_feature_mlp.register_forward_pre_hook(
+            lambda module, args: captured.append(args[0].detach().clone())
+        )
+        before = copy.deepcopy(model.state_dict())
+        optimizer = build_optimizer(model, lr=1e-3, weight_decay=1e-4, obs_lr=2e-3)
+        params = [p for g in optimizer.param_groups for p in g["params"]]
+        self.assertEqual(len(params), len(set(map(id, params))))
+        self.assertEqual(set(map(id, params)), {id(p) for p in model.parameters() if p.requires_grad})
+        self.assertTrue(all(g["weight_decay"] == 1e-4 for g in optimizer.param_groups))
+        loss, _ = model.compute_loss(self.batch)
+        handle.remove()
+        mu, log_var = model.prior.encode_history(self.batch["action_context"]["hand_history"])
+        torch.testing.assert_close(captured[0], torch.cat((mu, log_var), dim=-1))
+        loss.backward()
+        for module in (model.prior_feature_mlp, model.action_decoder, model.obs_encoder):
+            gradients = [p.grad for p in module.parameters() if p.requires_grad]
+            self.assertTrue(all(g is not None and g.isfinite().all() for g in gradients))
+            self.assertGreater(sum(float(g.abs().sum()) for g in gradients), 0)
+        self.assertTrue(all(p.grad is None for p in model.prior.parameters()))
+        optimizer.step()
+        after = model.state_dict()
+        for prefix in ("prior_feature_mlp.", "action_decoder.", "obs_encoder."):
+            self.assertTrue(any(not torch.equal(before[k], after[k]) for k in before
+                                if k.startswith(prefix)))
+        for k in before:
+            if k.startswith("prior."):
+                torch.testing.assert_close(before[k], after[k], rtol=0, atol=0)
+
+    def test_prior_artifact_coordinates_and_joint_order(self):
+        prior = HandMotionPrior()
+        prior.ready.fill_(True)
+        payload = dict(
+            format=prior.artifact_format, coordinate_space=prior.coordinate_space,
+            model_config=prior.model_config, model_state_dict=prior.state_dict(),
+            metadata={"hand_joint_order": prior.hand_joint_order},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prior.pt"
+            torch.save(payload, path)
+            loaded, _ = load_motion_prior(path)
+            history = torch.randn(2, 8, 12)
+            torch.testing.assert_close(loaded.encode_history(history), prior.encode_history(history))
+            for key, value in (("format", "old"), ("coordinate_space", "normalized")):
+                torch.save({**payload, key: value}, path)
+                with self.assertRaisesRegex(ValueError, "raw-radians"):
+                    load_motion_prior(path)
+            invalid = {**payload, "metadata": {"hand_joint_order": prior.hand_joint_order[::-1]}}
+            torch.save(invalid, path)
+            with self.assertRaisesRegex(ValueError, "joint order"):
+                load_motion_prior(path)
+
+    def test_runner_history_records_executed_commands_and_resets(self):
+        model = self.model().eval()
+        runner = BaseRunner(1, ["joint_state", "point_cloud"])
+        captured = []
+        handle = model.prior.encoder.register_forward_pre_hook(
+            lambda module, args: captured.append(args[0].detach().reshape(3, 12).clone())
+        )
+        self.addCleanup(handle.remove)
+
+        class CommandEnvironment:
+            def reset(self, seed):
+                self.action_cnt = 0
+                self.initial = float(seed)
+                return self.observation(), {}
+
+            def observation(self):
+                return {"joint_state": np.full(19, self.initial, dtype=np.float32),
+                        "point_cloud": np.zeros((8, 6), dtype=np.float32)}
+
+            def step(self, prediction):
+                self.action_cnt += 1
+                # Simulate execution-side clipping/overrides, distinct from the prediction.
+                executed = np.full(19, self.initial + self.action_cnt, dtype=np.float32)
+                return self.observation(), 0, self.action_cnt == 3, False, {
+                    "executed_joint_action": executed, "success": False,
+                    "success_condition": False,
+                }
+
+        environment = CommandEnvironment()
+        for initial in (2, 9):
+            runner.run_episode(model, environment, initial, action_steps=1)
+            expected = torch.full((3, 12), float(initial))
+            for i, actual in enumerate(captured[-3:]):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                expected = torch.cat((expected[1:], torch.full((1, 12), initial + i + 1.0)))
+            np.testing.assert_array_equal(runner.hand_history, expected.numpy())
 
 
 if __name__ == "__main__":

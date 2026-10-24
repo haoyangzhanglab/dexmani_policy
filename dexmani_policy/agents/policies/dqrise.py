@@ -21,14 +21,15 @@ from dexmani_policy.common.config import validate_action_clipping, validate_dq_n
 
 class DQRISEPolicy(BasePolicy):
     requires_hand_pretraining = True
+    requires_split_manifest = True
 
     @classmethod
     def validate_model_config(cls, cfg, spec) -> None:
         Sparse3DGlobalObservationEncoder.validate_config(cfg, spec)
         if cfg.action_key != "action" or (cfg.agent.tcp_dim, cfg.agent.action_dim) != (7, 19):
             raise ValueError("DQ-RISE requires joint action=7+12")
-        if (cfg.horizon, cfg.n_action_steps) != (16, 8):
-            raise ValueError("DQ-RISE requires horizon=16, n_action_steps=8")
+        if (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps) != (20, 1, 16):
+            raise ValueError("DQ-RISE requires horizon=20, n_obs_steps=1, n_action_steps=16")
         if cfg.env_runner.env_kwargs.control_mode != "joint":
             raise ValueError("DQ-RISE requires joint control")
         if cfg.get("use_aux_ee", False):
@@ -59,7 +60,7 @@ class DQRISEPolicy(BasePolicy):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-        diffusion_step_embed_dim: int = 128,
+        diffusion_step_embed_dim: int = 256,
         down_dims: tuple[int, ...] = (256, 512),
         kernel_size: int = 5,
         n_groups: int = 8,
@@ -70,8 +71,8 @@ class DQRISEPolicy(BasePolicy):
         modality_dropout_probs: dict | None = None,
         clip_sample: bool = True,
     ) -> None:
-        if (horizon, n_action_steps, action_dim, tcp_dim) != (16, 8, 19, 7):
-            raise ValueError("DQ-RISE requires horizon=16, n_action_steps=8 and joint action=7+12")
+        if (horizon, n_obs_steps, n_action_steps, action_dim, tcp_dim) != (20, 1, 16, 19, 7):
+            raise ValueError("DQ-RISE requires horizon=20, n_obs_steps=1, n_action_steps=16 and joint action=7+12")
 
         hand_dim = action_dim - tcp_dim
         diffusion_action_dim = tcp_dim + 1
@@ -122,11 +123,25 @@ class DQRISEPolicy(BasePolicy):
         self.codebook_path = codebook_path
         self.register_load_state_dict_post_hook(self.validate_restored_codebook)
 
+    def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay) -> list[dict]:
+        return [
+            {
+                "params": [p for p in module.parameters() if p.requires_grad],
+                "lr": rate,
+                "weight_decay": decay,
+            }
+            for module, rate, decay in (
+                (self.action_decoder, lr, weight_decay),
+                (self.obs_encoder, obs_lr, obs_weight_decay),
+            )
+        ]
+
     def initialize_training(self) -> None:
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
         self.hand_codebook.load(self.codebook_path)
         self.hand_data = self.hand_codebook.artifact_metadata["hand_data"]
+        self.pretraining_split = self.hand_codebook.artifact_metadata["split_manifest"]
         if self.hand_data.get("action_key") != "action":
             raise ValueError("DQ-RISE requires a Codebook pretrained with action_key=action")
         self.validate_codebook_normalizer()

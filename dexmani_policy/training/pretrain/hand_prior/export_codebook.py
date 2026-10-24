@@ -72,6 +72,7 @@ def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
     codebook.artifact_metadata = {
         "model_config": checkpoint["model_config"],
         "hand_data": split["hand_data"],
+        "split_manifest": split["split_manifest"],
         "normalization_spec": split["normalization_spec"],
         "ordering": "decoded_prototype_pca1_ascending",
         "selection": {
@@ -100,7 +101,7 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
         raise ValueError("Codebook path must use the .npz suffix")
     if output.exists() and not overwrite:
         raise FileExistsError(f"Codebook already exists: {output}; use --overwrite explicitly")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     codebook = build_runtime_codebook(checkpoint, checkpoint_path, device=device)
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output, overwrite=overwrite, suffix=".tmp.npz") as temporary:

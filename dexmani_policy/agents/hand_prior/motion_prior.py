@@ -13,6 +13,10 @@ from dexmani_policy.common.config import positive_int
 class HandMotionPrior(nn.Module):
     """History-conditioned hand prior with a differentiable pointwise decoder."""
 
+    artifact_format = "dexmani.lamp.raw_prior.v1"
+    coordinate_space = "raw_joint_targets_radians"
+    hand_joint_order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
+
     def __init__(
         self, hand_dim: int = 12, history_steps: int = 8, latent_dim: int = 2, hidden_dim: int = 256
     ) -> None:
@@ -40,28 +44,25 @@ class HandMotionPrior(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hand_dim),
         )
-        self.register_buffer("hand_scale", torch.ones(hand_dim))
-        self.register_buffer("hand_offset", torch.zeros(hand_dim))
         self.register_buffer("ready", torch.tensor(False))
 
-    def normalize_hand(self, raw: Tensor) -> Tensor:
-        raw = torch.as_tensor(raw, device=self.hand_scale.device, dtype=self.hand_scale.dtype)
-        if raw.shape[-1:] != (self.hand_dim,):
-            raise ValueError(f"Expected hand coordinates with final dimension {self.hand_dim}")
-        return raw * self.hand_scale + self.hand_offset
-
-    def unnormalize_hand(self, normalized: Tensor) -> Tensor:
-        return (normalized - self.hand_offset) / self.hand_scale
-
     def encode_history(self, raw_history: Tensor) -> tuple[Tensor, Tensor]:
-        history = self.normalize_hand(raw_history)
-        if history.ndim < 3 or history.shape[-2:] != (self.history_steps, self.hand_dim):
+        if raw_history.ndim < 3 or raw_history.shape[-2:] != (self.history_steps, self.hand_dim):
             raise ValueError(f"Expected [..., {self.history_steps}, {self.hand_dim}] history")
-        hidden = self.encoder(history.flatten(start_dim=-2))
+        hidden = self.encoder(raw_history.flatten(start_dim=-2))
         return self.fc_mu(hidden), self.fc_log_var(hidden)
 
     def decode(self, z: Tensor) -> Tensor:
         return self.decoder(z)
+
+    def compute_loss(self, history: Tensor, target: Tensor, beta: float, *, epsilon=None):
+        with torch.autocast(device_type=history.device.type, enabled=False):
+            mu, log_var = self.encode_history(history.float())
+            epsilon = torch.randn_like(mu) if epsilon is None else epsilon
+            z = mu + torch.exp(0.5 * log_var) * epsilon
+            reconstruction = (self.decode(z) - target.float()).square().mean()
+            kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
+        return reconstruction + beta * kl, reconstruction, kl
 
     def freeze(self) -> HandMotionPrior:
         self.requires_grad_(False)
@@ -73,12 +74,16 @@ class HandMotionPrior(nn.Module):
             raise ValueError("Prior checkpoint is not ready")
         if not all(torch.isfinite(value).all() for value in self.state_dict().values()):
             raise ValueError("Prior checkpoint contains nonfinite tensors")
-        if (self.hand_scale <= 0).any():
-            raise ValueError("Prior normalization scales must be positive")
 
 
 def load_motion_prior(path: str | Path) -> tuple[HandMotionPrior, dict]:
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
+    if payload.get("format") != HandMotionPrior.artifact_format or payload.get(
+        "coordinate_space"
+    ) != HandMotionPrior.coordinate_space:
+        raise ValueError("LAMP requires a current raw-radians prior; retrain the prior")
+    if payload["metadata"]["hand_joint_order"] != HandMotionPrior.hand_joint_order:
+        raise ValueError("LAMP prior hand joint order differs from the local robot contract")
     prior = HandMotionPrior(**payload["model_config"])
     prior.load_state_dict(payload["model_state_dict"], strict=True)
     prior.validate_state()

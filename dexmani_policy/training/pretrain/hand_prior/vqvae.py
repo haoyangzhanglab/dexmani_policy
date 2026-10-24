@@ -22,6 +22,7 @@ from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalize
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.training.common.hand_representation import describe_hand_data
+from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.data import build_normalizer
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
     build_hand_prototypes,
@@ -76,8 +77,6 @@ def save_checkpoint(
     *,
     epoch: int,
     vqvae: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler,
     normalizer: AffineNormalizer,
     args: argparse.Namespace,
     train_history: list[float],
@@ -85,10 +84,9 @@ def save_checkpoint(
     metrics: dict,
 ) -> None:
     payload = {
+        "format": HandVQVAE.artifact_format,
         "epoch": int(epoch),
         "model_state_dict": vqvae.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
         "normalizer_state_dict": normalizer.state_dict(),
         "args": vars(args),
         "model_config": {
@@ -103,6 +101,7 @@ def save_checkpoint(
             "vq_decay": args.vq_decay,
             "threshold_ema_dead_code": args.threshold_ema_dead_code,
             "kmeans_iters": args.kmeans_iters,
+            "kmeans_init": args.kmeans_init,
         },
         "split_metadata": split_metadata,
         "metrics": metrics,
@@ -122,6 +121,8 @@ def build_policy_dataset(cfg):
         raise ValueError("--policy-config requires a DQRISEPolicy configuration")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare a new codebook from a fresh Policy config, not resume_from")
+    if cfg.dataset.split_manifest is None:
+        raise ValueError("Pretraining requires an explicit shared dataset.split_manifest")
     dataset = hydra.utils.instantiate(cfg.dataset)
     if not isinstance(dataset, DemonstrationDataset):
         raise TypeError("DQ-RISE VQ preparation requires a single DemonstrationDataset")
@@ -168,6 +169,7 @@ def prepare_policy_data(cfg):
     val_hand = policy_hand_rows(val, cfg.agent.tcp_dim)
     metadata = {
         "hand_data": hand_data,
+        "split_manifest": dataset.data_recipe["split_manifest"],
         "policy_config": OmegaConf.to_container(cfg, resolve=False),
         "resolved_dataset": OmegaConf.to_container(cfg.dataset, resolve=True),
         "normalization_spec": spec,
@@ -186,6 +188,8 @@ def prepare_policy_data(cfg):
 def train(args: argparse.Namespace, *, policy_cfg) -> None:
     for name in ("num_epochs", "batch_size", "save_epochs", "codebook_report_epochs"):
         positive_int(getattr(args, name), name)
+    if not 0 <= args.max_grad_norm < float("inf") or args.warmup_steps < 0:
+        raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
     if args.output_dir is None:
         run = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
         args.output_dir = str(Path("experiments/vq_hand") / Path(args.zarr_path).stem / run)
@@ -255,25 +259,10 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         betas=tuple(args.betas),
         weight_decay=args.weight_decay,
     )
-    total_steps = max(1, len(train_loader) * args.num_epochs)
-    warmup_steps = min(args.warmup_steps, max(total_steps - 1, 0))
-    if warmup_steps > 0:
-        warmup = torch.optim.lr_scheduler.LinearLR(
-            optimizer,
-            start_factor=1e-4,
-            end_factor=1.0,
-            total_iters=warmup_steps,
-        )
-        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=max(total_steps - warmup_steps, 1)
-        )
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[warmup, cosine],
-            milestones=[warmup_steps],
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    total_steps = len(train_loader) * args.num_epochs
+    scheduler = get_scheduler(
+        optimizer, "cosine", num_warmup_steps=args.warmup_steps, num_training_steps=total_steps
+    )
 
     selection_metric = "val_lookup_mse" if val_loader is not None else "train_lookup_mse"
     split_metadata["selection_metric"] = selection_metric
@@ -295,8 +284,18 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             enc_loss, vq_loss, indices, recon_mse = vqvae(batch)
             total_loss = args.enc_loss_weight * enc_loss + args.vq_loss_weight * vq_loss
             optimizer.zero_grad(set_to_none=True)
+            if not torch.isfinite(total_loss):
+                raise FloatingPointError("Nonfinite VQ training loss")
             total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(vqvae.parameters(), args.max_grad_norm)
+            if args.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    vqvae.parameters(), args.max_grad_norm, error_if_nonfinite=True
+                )
+            elif not all(
+                torch.isfinite(p.grad).all() for p in vqvae.parameters() if p.grad is not None
+            ):
+                raise FloatingPointError("Nonfinite VQ gradient")
+            lr = optimizer.param_groups[0]["lr"]
             optimizer.step()
             scheduler.step()
 
@@ -311,61 +310,47 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         )
         train_history.append(train_total)
 
-        val_metrics = {"enc": float("nan"), "vq": float("nan"), "mse": float("nan")}
         selection_metrics = evaluate_vq(
             vqvae, selection_loader, device, reconstruction=val_loader is not None
         )
-        if val_loader is not None:
-            val_metrics = selection_metrics
-
         metrics = {
             "train_enc": train_metrics["enc"],
             "train_vq": train_metrics["vq"],
             "train_mse": train_metrics["mse"],
             "train_total": train_total,
-            "val_enc": val_metrics["enc"],
-            "val_vq": val_metrics["vq"],
-            "val_mse": val_metrics["mse"],
             selection_metric: selection_metrics["lookup_mse"],
-            "lr": optimizer.param_groups[0]["lr"],
+            "lr": lr,
         }
         logger.info(
-            "epoch %4d | lr %.2e | train enc %.5f vq %.5f recon_mse %.5f"
-            " | val enc %.5f vq %.5f recon_mse %.5f",
+            "epoch %4d | lr %.2e | train enc %.5f vq %.5f recon_mse %.5f",
             epoch,
             metrics["lr"],
             metrics["train_enc"],
             metrics["train_vq"],
             metrics["train_mse"],
-            metrics["val_enc"],
-            metrics["val_vq"],
-            metrics["val_mse"],
         )
+        if val_loader is not None:
+            metrics.update({f"val_{key}": selection_metrics[key] for key in ("enc", "vq", "mse")})
+            logger.info(
+                "validation | enc %.5f vq %.5f recon_mse %.5f",
+                metrics["val_enc"], metrics["val_vq"], metrics["val_mse"],
+            )
         logger.info("%s %.7f", selection_metric, metrics[selection_metric])
 
+        checkpoint_paths = []
         if epoch % args.save_epochs == 0 or epoch == args.num_epochs:
-            save_checkpoint(
-                output_dir / f"vqvae_hand_epoch={epoch:04d}.pt",
-                epoch=epoch,
-                vqvae=vqvae,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                normalizer=normalizer,
-                args=args,
-                train_history=train_history,
-                split_metadata=split_metadata,
-                metrics=metrics,
-            )
-
+            checkpoint_paths.append(output_dir / f"vqvae_hand_epoch={epoch:04d}.pt")
         lookup_mse = metrics[selection_metric]
         if lookup_mse < best_lookup_mse:
             best_lookup_mse = lookup_mse
+            checkpoint_paths.append(output_dir / "vqvae_hand_best.pt")
+        if epoch == args.num_epochs:
+            checkpoint_paths.append(output_dir / "vqvae_hand_last.pt")
+        for checkpoint_path in checkpoint_paths:
             save_checkpoint(
-                output_dir / "vqvae_hand_best.pt",
+                checkpoint_path,
                 epoch=epoch,
                 vqvae=vqvae,
-                optimizer=optimizer,
-                scheduler=scheduler,
                 normalizer=normalizer,
                 args=args,
                 train_history=train_history,
@@ -384,22 +369,9 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
                 fig.savefig(output_dir / f"code_usage_g{group}_epoch{epoch:04d}.png")
                 plt.close(fig)
 
-    save_checkpoint(
-        output_dir / "vqvae_hand_last.pt",
-        epoch=args.num_epochs,
-        vqvae=vqvae,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        normalizer=normalizer,
-        args=args,
-        train_history=train_history,
-        split_metadata=split_metadata,
-        metrics=metrics,
-    )
-
     # Deployment diagnostics evaluate the selected best without changing selection.
     selected_path = output_dir / "vqvae_hand_best.pt"
-    selected = torch.load(selected_path, map_location="cpu", weights_only=False)
+    selected = torch.load(selected_path, map_location="cpu", weights_only=True)
     runtime_codebook = build_runtime_codebook(selected, selected_path, device="cpu")
     diagnostics = deployment_diagnostics(
         runtime_codebook, {"train": train_norm, "held_out": val_norm}
@@ -418,8 +390,6 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
 
 
 def parse_loss_weight(value):
-    if value is None:
-        return None
     return [float(item.strip()) for item in value.split(",")]
 
 
@@ -447,7 +417,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold_ema_dead_code", type=int, default=None)
     parser.add_argument(
         "--kmeans_init",
-        type=lambda value: value.lower() in ("true", "1", "yes"),
+        action=argparse.BooleanOptionalAction,
         default=None,
     )
     parser.add_argument("--kmeans_iters", type=int, default=None)
@@ -482,8 +452,6 @@ def main(argv: list[str] | None = None) -> None:
         policy_cfg.agent.codebook_size,
     ):
         parser.error("VQ num_groups/codebook_size must match the target Policy")
-    if args.loss_weight is None:
-        args.loss_weight = [1.0] * args.hand_dim
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(message)s",

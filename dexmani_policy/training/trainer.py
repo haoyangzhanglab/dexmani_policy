@@ -109,11 +109,24 @@ class Trainer:
         grad_nan_params = []
 
         if self.max_grad_norm > 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.raw_model.parameters(),
-                max_norm=self.max_grad_norm,
-                error_if_nonfinite=True,
-            )
+            if any("clip_group" in group for group in self.optimizer.param_groups):
+                clip_groups = {}
+                for group in self.optimizer.param_groups:
+                    clip_groups.setdefault(group["clip_group"], []).extend(group["params"])
+                norms = [
+                    torch.nn.utils.clip_grad_norm_(
+                        params, self.max_grad_norm, error_if_nonfinite=True
+                    )
+                    for params in clip_groups.values()
+                ]
+                # The largest independently clipped group determines the logged clip ratio.
+                grad_norm = torch.stack(norms).max()
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.raw_model.parameters(),
+                    max_norm=self.max_grad_norm,
+                    error_if_nonfinite=True,
+                )
         else:
             flags = [
                 torch.isfinite(self.gradient_values(p.grad)).all()

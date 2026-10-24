@@ -61,6 +61,8 @@ def validate_model_config(cfg):
         cfg, observation_fields=resolve_numeric_observation_fields(cfg)
     )
     agent_class = hydra.utils.get_class(cfg.agent._target_)
+    if agent_class.requires_action_affine and spec["action"] == "identity":
+        raise ValueError("This policy requires fitted action affine parameters")
     agent_class.validate_model_config(cfg, spec)
 
 

@@ -105,17 +105,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.augmentation_cfg = augmentation_cfg
         self.build_augmentors()
 
-        self.observation_valid = np.ones(int(self.replay_buffer.episode_ends[-1]), dtype=bool)
-        for key in sensor_modalities:
-            self.observation_valid &= self.finite_rows(key)
-        self.action_valid = self.finite_rows(action_key)
-        if use_aux_ee:
-            self.action_valid &= self.finite_rows("action_ee", slice(0, 9))
-        self.role_lengths = {key: self.obs_horizon for key in sensor_modalities}
-        self.role_lengths[action_key] = horizon
-        if use_aux_ee:
-            self.role_lengths["action_ee"] = horizon
-
         self.data_recipe = {}
         if (
             "point_cloud" in sensor_modalities
@@ -130,7 +119,8 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 else json.loads(Path(split_manifest).read_text())
             )
             train_mask, val_mask, manifest = validate_split_manifest(
-                manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes
+                manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes,
+                episode_ends=self.replay_buffer.episode_ends, zarr_path=self.zarr_path,
             )
             self.data_recipe["split_manifest"] = manifest
         else:
@@ -140,6 +130,17 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             train_mask = downsample_mask(seed=seed, mask=~val_mask, max_n=max_train_episodes)
         self.val_mask = val_mask
         self.train_mask = train_mask
+
+        self.observation_valid = np.ones(int(self.replay_buffer.episode_ends[-1]), dtype=bool)
+        for key in sensor_modalities:
+            self.observation_valid &= self.finite_rows(key)
+        self.action_valid = self.finite_rows(action_key)
+        if use_aux_ee:
+            self.action_valid &= self.finite_rows("action_ee", slice(0, 9))
+        self.role_lengths = {key: self.obs_horizon for key in sensor_modalities}
+        self.role_lengths[action_key] = horizon
+        if use_aux_ee:
+            self.role_lengths["action_ee"] = horizon
 
         self.sampler = self.build_sampler(train_mask)
         self.validation_dataset = None
@@ -272,25 +273,27 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                     aug.augment(x)
 
     def iter_normalization_data(self, key: str):
-        """Stream unaugmented fields from the complete loaded replay buffer."""
+        """Stream each selected training episode once, without augmentation or padding."""
         if self.is_validation:
             raise ValueError("Validation must reuse the training normalizer")
         if key != "action" and key not in self.sensor_modalities:
             raise KeyError(f"Not an enabled observation field: {key}")
         action = key == "action"
         field = self.action_key if action else key
-        num_rows = int(self.replay_buffer.episode_ends[-1])
         step = self.replay_buffer.chunk_rows(field)
         if action and self.use_aux_ee:
             step = min(step, self.replay_buffer.chunk_rows("action_ee"))
-        for start in range(0, num_rows, step):
-            end = min(start + step, num_rows)
-            values = self.replay_buffer.read(field, slice(start, end), cache=False)
-            if field == "point_cloud" and self.pc_dim is not None:
-                values = values[..., : self.pc_dim]
-            if action and self.use_aux_ee:
-                aux = self.replay_buffer.read(
-                    "action_ee", slice(start, end), columns=slice(0, 9), cache=False
-                )
-                values = np.concatenate((values, aux), axis=-1)
-            yield values
+        ends = np.asarray(self.replay_buffer.episode_ends)
+        starts = np.r_[0, ends[:-1]]
+        for episode in np.flatnonzero(self.train_mask):
+            for start in range(int(starts[episode]), int(ends[episode]), step):
+                end = min(start + step, int(ends[episode]))
+                values = self.replay_buffer.read(field, slice(start, end), cache=False)
+                if field == "point_cloud" and self.pc_dim is not None:
+                    values = values[..., : self.pc_dim]
+                if action and self.use_aux_ee:
+                    aux = self.replay_buffer.read(
+                        "action_ee", slice(start, end), columns=slice(0, 9), cache=False
+                    )
+                    values = np.concatenate((values, aux), axis=-1)
+                yield values

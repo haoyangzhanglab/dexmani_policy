@@ -131,6 +131,12 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
 def validate_hand_pretraining(cfg, model, dataset, *, checkpoint=None):
     if not model.requires_hand_pretraining:
         return
+    if model.requires_split_manifest:
+        manifest = dataset.data_recipe.get("split_manifest")
+        if manifest is None:
+            raise ValueError("DQ/LAMP training requires an explicit shared split_manifest")
+        if checkpoint is None and model.pretraining_split != manifest:
+            raise ValueError("Pretraining/policy split manifest mismatch")
     current = describe_hand_data(dataset)
     if checkpoint is None:
         changed = [key for key in current if model.hand_data[key] != current[key]]
@@ -155,6 +161,10 @@ def build_optimizer(
     obs_weight_decay = obs_weight_decay if obs_weight_decay is not None else weight_decay
     groups = model.optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
     groups = [group for group in groups if group["params"]]
+    if any("clip_group" in group for group in groups) and not all(
+        isinstance(group.get("clip_group"), str) and group["clip_group"] for group in groups
+    ):
+        raise ValueError("Every optimizer group must name its clipping group")
     names = {id(param): name for name, param in model.named_parameters() if param.requires_grad}
     param_ids = [id(param) for group in groups for param in group["params"]]
     assigned = set(param_ids)

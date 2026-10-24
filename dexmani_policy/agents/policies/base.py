@@ -38,6 +38,8 @@ class BasePolicy(nn.Module):
     """Shared observation preprocessing, training and action-window interfaces."""
 
     requires_hand_pretraining = False
+    requires_split_manifest = False
+    requires_action_affine = True
 
     def __init__(
         self,
@@ -85,6 +87,8 @@ class BasePolicy(nn.Module):
         from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
         from dexmani_policy.common.config import validate_action_clipping
 
+        if self.requires_action_affine and spec["action"] == "identity":
+            raise ValueError("This policy requires fitted action affine parameters")
         if (
             isinstance(getattr(self.obs_encoder, "pc_encoder", None), Sparse3DEncoder)
             and spec.get("point_cloud") != "identity"

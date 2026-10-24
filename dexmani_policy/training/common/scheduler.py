@@ -11,11 +11,15 @@ def cosine_with_min_lr(
     lr_min_ratio: float = 0.1,
     last_epoch: int = -1,
 ):
-    """Linear warmup followed by cosine decay to lr_min_ratio times the initial LR."""
+    """LAMP's zero-based linspace warmup followed by its discrete cosine schedule."""
+    if num_training_steps < 1 or num_warmup_steps < 0 or not 0 <= lr_min_ratio <= 1:
+        raise ValueError("Invalid cosine schedule length, warmup or minimum LR ratio")
+    num_warmup_steps = min(num_warmup_steps, num_training_steps)
 
     def lr_lambda(step: int) -> float:
+        step = min(step, num_training_steps - 1)
         if step < num_warmup_steps:
-            return float(step) / float(max(1, num_warmup_steps))
+            return float(step) / float(max(1, num_warmup_steps - 1))
         progress = float(step - num_warmup_steps) / float(
             max(1, num_training_steps - num_warmup_steps)
         )

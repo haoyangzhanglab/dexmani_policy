@@ -171,6 +171,8 @@ class ResidualVectorQuantizer(nn.Module):
 class HandVQVAE(nn.Module):
     """Residual VQ-VAE for individual hand states, independent of action chunks."""
 
+    artifact_format = "dexmani.dq.vqvae.v2"
+
     def __init__(
         self,
         hand_dim: int,
@@ -179,7 +181,7 @@ class HandVQVAE(nn.Module):
         hidden_dim: int = 512,
         num_groups: int = 2,
         codebook_size: int = 4,
-        num_layers: int = 1,
+        num_layers: int = 6,
         act_scale: float = 1.0,
         vq_decay: float = 0.8,
         threshold_ema_dead_code: float = 0,
@@ -229,6 +231,8 @@ class HandVQVAE(nn.Module):
 
     @classmethod
     def from_checkpoint(cls, checkpoint: dict, *, device: str | torch.device = "cpu") -> HandVQVAE:
-        model = cls(**checkpoint["model_config"], kmeans_init=False).to(device)
+        if checkpoint.get("format") != cls.artifact_format:
+            raise ValueError("DQ requires a current VQ checkpoint; retrain the VQ-VAE")
+        model = cls(**checkpoint["model_config"]).to(device)
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         return model

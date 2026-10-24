@@ -14,9 +14,9 @@ zarr_path: robot_data/${task_name}.zarr
 
 # ── Core ──
 seed: 42
-horizon: 16
-n_obs_steps: 2
-n_action_steps: 8
+horizon: 20
+n_obs_steps: 1
+n_action_steps: 16
 action_key: action
 action_dim: 19
 
@@ -56,8 +56,8 @@ dataset:
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
-  val_ratio: 0.0
-  max_train_episodes: 80
+  val_ratio: 0.1
+  max_train_episodes: null
   split_manifest: null
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
@@ -86,7 +86,7 @@ agent:
   codebook_num_groups: 2
   codebook_size: 4
 
-  # Per-frame global mean, then ordered time fusion: 2*(384+64) -> 256.
+  # Per-frame global mean, then ordered time fusion: 1*(384+64) -> 256.
   pc_dim: 6
   state_dim: 19
   state_out_dim: 64
@@ -110,7 +110,7 @@ agent:
     rope_base: 100.0
 
   # ConditionalUNet1D backbone
-  diffusion_step_embed_dim: 128
+  diffusion_step_embed_dim: 256
   down_dims: [256, 512]
   kernel_size: 5
   n_groups: 8
@@ -127,18 +127,9 @@ agent:
 optimizer:
   lr: 3.0e-4
   weight_decay: 1.0e-6
-  betas: [0.95, 0.999]
+  betas: [0.9, 0.999]
   obs_lr: 3.0e-4
   obs_weight_decay: 1.0e-6
-
-# ── EMA ──
-ema:
-  _target_: dexmani_policy.training.common.ema.EMA
-  update_after_step: 0
-  inv_gamma: 1.0
-  power: 0.75
-  min_value: 0.0
-  max_value: 0.9999
 
 # ── Training ──
 training:
@@ -146,10 +137,10 @@ training:
   device: cuda:0
   use_bfloat16: true
   use_compile: true
-  use_ema: true
+  use_ema: false
   lr_scheduler: cosine
   lr_warmup_steps: 2000
-  max_grad_norm: 1.0
+  max_grad_norm: 0.0
   loop:
     total_train_steps: 100000
     log_interval_steps: 100
@@ -183,7 +174,7 @@ env_runner:
 eval:
   seed: 1024
   inference_steps: ${agent.num_inference_steps}
-  use_ema: true
+  use_ema: false
 
   select_best:
     initial_episodes: 25
@@ -206,11 +197,11 @@ vq_vae:
   hidden_dim: 512
   num_groups: 2               # residual VQ layers → total = codebook_size ^ num_groups
   codebook_size: 4            # 4² = 16 discrete hand poses
-  num_layers: 3
+  num_layers: 6
   act_scale: 1.0              # data already in [-1,1]
   vq_decay: 0.8
-  threshold_ema_dead_code: 2  # dead-code replacement enabled (0=disabled)
-  kmeans_init: true           # k-means codebook initialisation (reduces collapse risk)
+  threshold_ema_dead_code: 0
+  kmeans_init: false
   kmeans_iters: 10
 
   # Per-finger L1 loss weights: thumb+index+middle=1.0, ring+pinky=0.5.
@@ -224,7 +215,7 @@ vq_vae:
   weight_decay: 1.0e-6
   enc_loss_weight: 3.0         # L1 reconstruction multiplier
   vq_loss_weight: 5.0          # VQ commitment multiplier
-  max_grad_norm: 1.0
+  max_grad_norm: 0.0
   warmup_steps: 150
   save_epochs: 100
   codebook_report_epochs: 200

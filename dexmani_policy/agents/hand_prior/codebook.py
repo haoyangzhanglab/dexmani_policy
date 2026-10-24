@@ -16,6 +16,8 @@ from dexmani_policy.common.config import positive_int
 class HandStateCodebook(nn.Module):
     """Store normalized prototypes and their Policy normalization as persistent buffers."""
 
+    artifact_format = "dexmani.dq.codebook.v2"
+
     BUFFER_NAMES = (
         "sorted_hand_poses",
         "pca_permutation",
@@ -141,6 +143,7 @@ class HandStateCodebook(nn.Module):
         payload = {name: value.cpu().numpy() for name, value in values.items()}
         metadata = json.dumps(self.artifact_metadata, sort_keys=True, allow_nan=False)
         payload.update(
+            format=np.asarray(self.artifact_format),
             pose_space=np.asarray("normalized"),
             hand_dim=np.asarray(self.hand_dim),
             num_groups=np.asarray(self.num_groups),
@@ -153,6 +156,8 @@ class HandStateCodebook(nn.Module):
 
     def load(self, path: str | Path) -> None:
         with np.load(Path(path).expanduser(), allow_pickle=False) as data:
+            if "format" not in data or data["format"].item() != self.artifact_format:
+                raise ValueError("DQ requires a current codebook; retrain and export the VQ-VAE")
             if data["pose_space"].item() != "normalized":
                 raise ValueError("Hand codebook requires normalized poses; regenerate the codebook")
             dimensions = tuple(
