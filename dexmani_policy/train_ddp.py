@@ -2,6 +2,7 @@
 
 import os
 import socket
+from contextlib import ExitStack
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -19,7 +20,7 @@ from dexmani_policy.common.runtime import set_seed
 from dexmani_policy.training.builder import (
     build_training_components,
     build_trainer,
-    compile_models,
+    compile_training_models,
     prepare_training,
 )
 from dexmani_policy.training.data import build_dataset_and_normalizer
@@ -29,32 +30,32 @@ register_resolvers()
 set_project_root()
 
 
-def validate_gpu_ids(num_gpus, gpu_ids, available_gpus):
+def resolve_gpu_ids(num_gpus, gpu_ids, available_gpus):
     if type(num_gpus) is not int or num_gpus <= 1:
         raise ValueError("DDP num_gpus must be an integer > 1")
     ids = list(range(num_gpus)) if gpu_ids is None else list(gpu_ids)
-    if len(ids) != num_gpus:
-        raise ValueError("Length of gpu_ids must match num_gpus")
     if any(type(i) is not int or i < 0 or i >= available_gpus for i in ids):
         raise ValueError(f"gpu_ids must contain integers in [0, {available_gpus})")
-    if len(set(ids)) != len(ids):
-        raise ValueError("gpu_ids must not contain duplicates")
+    if len(ids) != num_gpus or len(set(ids)) != num_gpus:
+        raise ValueError("gpu_ids must specify num_gpus distinct GPUs")
     return ids
 
 
-def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_state):
+def train_distributed(rank: int, cfg, gpu_ids, dataset, normalizer_state):
+    world_size = len(gpu_ids)
     gpu_id = gpu_ids[rank]
     device = torch.device(f"cuda:{gpu_id}")
     torch.cuda.set_device(device)
     dist.init_process_group(backend="nccl", init_method="env://", world_size=world_size, rank=rank)
 
-    components = None
-    try:
+    with ExitStack() as resources:
+        resources.callback(dist.destroy_process_group)
         # Use the same seed for model initialization on every rank.
         set_seed(cfg.training.seed)
 
         resume_from = cfg.get("resume_from")
-        checkpoint = load_training_checkpoint(resume_from) if resume_from else None
+        resuming = resume_from is not None
+        checkpoint = load_training_checkpoint(resume_from) if resuming else None
         normalizer = None
         if normalizer_state is not None:
             normalizer = AffineNormalizer()
@@ -69,9 +70,10 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
             world_size=world_size,
             checkpoint=checkpoint,
         )
+        resources.callback(components.close)
 
         resume_state = None
-        if resume_from is not None:
+        if resuming:
             resume_state = restore_training_state(checkpoint, components, effective_config=cfg)
 
         del checkpoint
@@ -79,12 +81,7 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
             components.workspace.save_hydra_config(cfg)
 
         # Compile restored backbones before DDP wrapping.
-        if cfg.training.get("use_compile", False):
-            compile_models(
-                components.model,
-                components.ema_model,
-                mode=cfg.training.get("compile_mode", "reduce-overhead"),
-            )
+        compile_training_models(cfg, components)
 
         components.model = DDP(
             components.model,
@@ -95,29 +92,20 @@ def ddp_worker(rank: int, world_size: int, cfg, gpu_ids, dataset, normalizer_sta
             static_graph=True,
         )
 
-        if resume_from is None and components.ema_model is not None:
+        if not resuming and components.ema_model is not None:
             # Only fresh EMA follows the raw state synchronized by DDP.
             components.ema_model.load_state_dict(components.model.module.state_dict(), strict=True)
 
         trainer = build_trainer(cfg, components)
         trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
-    finally:
-        try:
-            if components is not None and components.workspace is not None:
-                components.workspace.close()
-        finally:
-            dist.destroy_process_group()
 
 
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     cfg, checkpoint = prepare_training(cfg)
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. DDP training requires GPU.")
-
     num_gpus = cfg.training.get("num_gpus")
-    gpu_ids = validate_gpu_ids(num_gpus, cfg.training.get("gpu_ids"), torch.cuda.device_count())
+    gpu_ids = resolve_gpu_ids(num_gpus, cfg.training.get("gpu_ids"), torch.cuda.device_count())
     print(f"Using GPUs: {gpu_ids}")
 
     os.environ.setdefault("MASTER_ADDR", "localhost")
@@ -138,8 +126,8 @@ def main(cfg):
             os.environ["MASTER_PORT"] = str(sock.getsockname()[1])
 
     mp.spawn(
-        ddp_worker,
-        args=(num_gpus, cfg, gpu_ids, dataset, normalizer_state),
+        train_distributed,
+        args=(cfg, gpu_ids, dataset, normalizer_state),
         nprocs=num_gpus,
         join=True,
     )

@@ -29,7 +29,7 @@ class TrainLoopConfig:
 
 
 class Trainer:
-    """Optimizer-step training; callers own model construction and workspace cleanup."""
+    """Optimizer-step training; entry points own the component lifetime."""
 
     def __init__(
         self,

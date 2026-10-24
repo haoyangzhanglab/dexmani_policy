@@ -13,7 +13,7 @@ def validate_evaluation_seed(seed):
 
 def resolve_evaluation_seed(cfg, cli_seed=None):
     seed = cli_seed if cli_seed is not None else (cfg.get("eval") or {}).get("seed")
-    return validate_evaluation_seed(1024 if seed is None else seed)
+    return validate_evaluation_seed(seed)
 
 
 def validate_seed_pool(task, pool):

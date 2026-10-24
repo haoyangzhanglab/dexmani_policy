@@ -49,8 +49,6 @@ class Workspace:
                 self.json_logger.close()
                 raise
 
-        self.closed = False
-
     def save_hydra_config(self, hydra_config):
         with atomic_path(self.output_dir / "config.yaml") as temporary:
             OmegaConf.save(hydra_config, temporary, resolve=True)
@@ -64,8 +62,7 @@ class Workspace:
             self.wandb_logger.log(data, step=step)
 
     def save_checkpoint(self, tag: str, checkpoint: TrainingCheckpoint) -> Path:
-        filename = tag if str(tag).endswith(".pt") else f"{tag}.pt"
-        return save_training_checkpoint(self.checkpoint_dir / filename, checkpoint)
+        return save_training_checkpoint(self.checkpoint_dir / f"{tag}.pt", checkpoint)
 
     def save_latest(self, checkpoint_path: Path) -> Path:
         latest_path = self.checkpoint_dir / "latest.pt"
@@ -75,9 +72,6 @@ class Workspace:
         return latest_path
 
     def close(self):
-        if self.closed:
-            return
-        self.closed = True
         try:
             self.json_logger.close()
         finally:

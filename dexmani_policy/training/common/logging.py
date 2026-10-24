@@ -22,12 +22,7 @@ class JsonlLogger:
         self.file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def close(self):
-        if self.file is None:
-            return
-        try:
-            self.file.close()
-        finally:
-            self.file = None
+        self.file.close()
 
 
 class WandbLogger:

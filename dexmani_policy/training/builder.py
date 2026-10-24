@@ -27,18 +27,18 @@ from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.common.hand_representation import describe_hand_data
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
 from dexmani_policy.training.common.scheduler import get_scheduler
-from dexmani_policy.training.data import build_train_loader
+from dexmani_policy.training.data import build_train_loader, close_data_loader
 from dexmani_policy.training.resume import restore_model_weights
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
 from dexmani_policy.training.validation import (
     validate_config,
     validate_ema_batchnorm,
 )
-from dexmani_policy.training.workspace import Workspace, prepare_output_dir
+from dexmani_policy.training.workspace import Workspace
 
 
 def prepare_training(cfg):
-    """Resolve the saved recipe before validating and preparing a new run."""
+    """Resolve the saved recipe before validating the training configuration."""
     source = resolve_resume_source(cfg.get("resume_from"))
     checkpoint = load_training_checkpoint(source) if source is not None else None
     overrides = HydraConfig.get().overrides.task if source is not None else []
@@ -48,7 +48,6 @@ def prepare_training(cfg):
         # Resume writes into this invocation's directory, never the source run.
         effective_config.workspace.output_dir = cfg.workspace.output_dir
     validate_config(effective_config)
-    prepare_output_dir(effective_config.workspace.output_dir)
     return effective_config, checkpoint
 
 
@@ -202,11 +201,12 @@ def build_optimizer_and_scheduler(cfg, model, *, verbose=True):
     return optimizer, scheduler
 
 
-def compile_models(model, ema_model=None, **compile_kwargs):
-    compile_kwargs.setdefault("mode", "reduce-overhead")
-    model.compile_backbone(**compile_kwargs)
-    if ema_model is not None:
-        ema_model.compile_backbone(**compile_kwargs)
+def compile_training_models(cfg, components):
+    if cfg.training.get("use_compile", False):
+        mode = cfg.training.get("compile_mode", "reduce-overhead")
+        for model in (components.model, components.ema_model):
+            if model is not None:
+                model.compile_backbone(mode=mode)
 
 
 @dataclass
@@ -221,6 +221,13 @@ class TrainingComponents:
     scheduler: Any
     train_loader: DataLoader
     workspace: Workspace | None
+
+    def close(self):
+        try:
+            close_data_loader(self.train_loader)
+        finally:
+            if self.workspace is not None:
+                self.workspace.close()
 
 
 def build_training_components(

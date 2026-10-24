@@ -7,6 +7,7 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint import load_training_checkpoint
+from dexmani_policy.smoke_test import validate_checkpoint_state
 from dexmani_policy.training.builder import TrainingComponents, build_trainer
 from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.data import build_train_loader
@@ -76,7 +77,7 @@ class TrainingStateTest(unittest.TestCase):
 
     def run_components(self, name, **kwargs):
         cfg, components = regression_run(self.root / name, **kwargs)
-        self.addCleanup(components.workspace.close)
+        self.addCleanup(components.close)
         return cfg, components, build_trainer(cfg, components)
 
     def assert_model_equal(self, actual, expected):
@@ -145,6 +146,17 @@ class TrainingStateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dataset_length"):
             restore_training_state(checkpoint, resumed, effective_config=cfg)
 
+    def test_workspace_refuses_existing_training_artifacts(self):
+        for name in ("config.yaml", "metrics.jsonl", "checkpoints"):
+            with self.subTest(name=name):
+                directory = self.root / name
+                directory.mkdir()
+                artifact = directory / name
+                artifact.write_text("existing artifact")
+                with self.assertRaises(FileExistsError):
+                    Workspace(str(directory))
+                self.assertEqual(artifact.read_text(), "existing artifact")
+
     def test_nonfinite_loss_does_not_update_parameters(self):
         cfg, components, trainer = self.run_components("nonfinite")
         before = copy.deepcopy(components.model)
@@ -153,6 +165,22 @@ class TrainingStateTest(unittest.TestCase):
             trainer.train_microbatch(batch)
         self.assert_model_equal(components.model, before)
         self.assertEqual(components.ema_updater.optimization_step, 0)
+
+    def test_smoke_checkpoint_comparison_covers_raw_and_ema(self):
+        cfg, components, trainer = self.run_components("smoke", total_steps=2)
+        trainer.train(max_updates=1)
+        path = components.workspace.checkpoint_dir / "latest.pt"
+        validate_checkpoint_state(cfg, components, trainer, path)
+        for model in (components.model, components.ema_model):
+            with self.subTest(model=model):
+                parameter = next(model.parameters())
+                before = parameter.detach().clone()
+                with torch.no_grad():
+                    parameter.add_(1)
+                with self.assertRaises(AssertionError):
+                    validate_checkpoint_state(cfg, components, trainer, path)
+                with torch.no_grad():
+                    parameter.copy_(before)
 
 
 if __name__ == "__main__":

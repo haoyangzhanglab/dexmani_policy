@@ -1,31 +1,27 @@
 """Freeze test seeds, select a checkpoint, then evaluate the saved plan without video."""
 
-import argparse
-from pathlib import Path
-
 from dexmani_policy.common.config import (
+    PROJECT_ROOT,
     load_experiment_config,
     register_resolvers,
     set_project_root,
 )
-from dexmani_policy.evaluation.config import add_evaluation_arguments, parse_evaluation_overrides
+from dexmani_policy.evaluation.config import build_evaluation_parser, parse_evaluation_overrides
 from dexmani_policy.evaluation.pipeline import run_pipeline
-
-ROOT_DIR = set_project_root()
-register_resolvers()
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    add_evaluation_arguments(parser)
+    parser = build_evaluation_parser(__doc__)
     parser.add_argument(
         "--episodes",
         type=int,
         help="Test episodes per task, reserved before selection; otherwise saved config.",
     )
-    parser.add_argument("overrides", nargs="*", help="Evaluation/environment dotlist overrides.")
     args = parser.parse_args(argv)
-    exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
+
+    set_project_root()
+    register_resolvers()
+    exp_dir = PROJECT_ROOT / "experiments" / args.policy_name / args.task_name / args.exp_name
     cfg = load_experiment_config(exp_dir)
     run_pipeline(
         exp_dir,

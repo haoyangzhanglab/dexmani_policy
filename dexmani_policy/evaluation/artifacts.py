@@ -22,10 +22,8 @@ from dexmani_policy.env_runner.common.seeds import (
 
 def artifact_reference(path, exp_dir):
     path = Path(path).resolve()
-    try:
-        return str(path.relative_to(Path(exp_dir).resolve()))
-    except ValueError:
-        return str(path)
+    root = Path(exp_dir).resolve()
+    return str(path.relative_to(root) if path.is_relative_to(root) else path)
 
 
 def code_version(directory):
@@ -42,7 +40,6 @@ def code_version(directory):
 
 def evaluation_snapshot(cfg, runners, **request):
     """Capture the actual environment, inputs and request once per run."""
-    exp_dir = Path(cfg.experiment_dir)
     sim = {"commit": "unknown", "dirty": "unknown", "version": "unknown"}
     try:
         spec = importlib.util.find_spec("dexmani_sim")
@@ -66,8 +63,8 @@ def evaluation_snapshot(cfg, runners, **request):
         for leaf in runners
     }
     snapshot = {
-        "model_config_source": artifact_reference(exp_dir / "config.yaml", exp_dir),
-        "effective_config": OmegaConf.to_container(cfg, resolve=True),
+        "model_config_source": "config.yaml",
+        "effective_config": cfg,
         "runner_inputs": inputs,
         "request": request,
         "argv": list(sys.argv),

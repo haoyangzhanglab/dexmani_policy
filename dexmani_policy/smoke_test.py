@@ -4,7 +4,8 @@ import argparse
 import importlib
 import importlib.util
 import tempfile
-import traceback
+from contextlib import closing
+from itertools import islice
 
 import numpy as np
 import torch
@@ -30,12 +31,14 @@ from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset, observat
 from dexmani_policy.training.builder import (
     build_training_components,
     build_trainer,
-    compile_models,
+    compile_training_models,
 )
-from dexmani_policy.training.data import build_dataset_and_normalizer, build_train_loader
+from dexmani_policy.training.data import (
+    build_dataset_and_normalizer,
+    build_train_loader,
+    close_data_loader,
+)
 from dexmani_policy.training.validation import validate_config
-
-set_project_root()
 
 
 def load_smoke_config(config_name: str):
@@ -43,71 +46,56 @@ def load_smoke_config(config_name: str):
     # Hydra compose does not create a runtime output directory.
     cfg.workspace.output_dir = "/tmp/smoke_test_output"
     OmegaConf.resolve(cfg)
+    validate_config(cfg)
     return cfg
 
 
-def iter_targets(node, path: str = "$"):
-    if OmegaConf.is_config(node):
-        node = OmegaConf.to_container(node, resolve=True)
-
+def iter_hydra_targets(node):
     if isinstance(node, dict):
-        target = node.get("_target_")
-        if isinstance(target, str):
-            yield path, target
-        for key, value in node.items():
-            yield from iter_targets(value, f"{path}.{key}")
+        if "_target_" in node:
+            yield node["_target_"]
+        for value in node.values():
+            yield from iter_hydra_targets(value)
     elif isinstance(node, list):
-        for index, value in enumerate(node):
-            yield from iter_targets(value, f"{path}[{index}]")
+        for value in node:
+            yield from iter_hydra_targets(value)
 
 
-def validate_target_references(cfg) -> int:
-    """Resolve policy, training and dataset classes; locate optional simulation modules."""
-    agent_target = cfg.get("agent", {}).get("_target_")
-    count = 0
-    for path, target in iter_targets(cfg):
-        module_name, separator, attribute = target.rpartition(".")
-        if not separator:
-            raise ImportError(f"Invalid Hydra target {target!r} at {path}")
-        try:
-            if target == agent_target or module_name.startswith(
-                ("dexmani_policy.training.", "dexmani_policy.datasets.")
-            ):
-                module = importlib.import_module(module_name)
-                getattr(module, attribute)
-            elif importlib.util.find_spec(module_name) is None:
-                raise ModuleNotFoundError(module_name)
-        except Exception as exc:
-            raise ImportError(f"Failed to resolve Hydra target {target!r} at {path}") from exc
-        count += 1
-    return count
+def validate_target_imports(cfg) -> int:
+    """Import training targets; only locate optional simulation modules."""
+    targets = list(iter_hydra_targets(OmegaConf.to_container(cfg, resolve=True)))
+    for target in targets:
+        module_name, attribute = target.rsplit(".", 1)
+        if target == cfg.agent._target_ or module_name.startswith(
+            ("dexmani_policy.training.", "dexmani_policy.datasets.")
+        ):
+            getattr(importlib.import_module(module_name), attribute)
+        elif importlib.util.find_spec(module_name) is None:
+            raise ModuleNotFoundError(f"Hydra target module not found: {target}")
+    return len(targets)
 
 
-def validate_config_only(config_name: str):
-    print(f"\nConfig check: {config_name}")
-    cfg = load_smoke_config(config_name)
-    validate_config(cfg)
-    target_count = validate_target_references(cfg)
-    print(f"✓ {config_name}: {target_count} Hydra targets checked, config check PASSED")
-
-
-def validate_data_tensor(value, shape, name, dtype=None):
+def validate_tensor_layout(value, shape, name, dtype=None):
     if not isinstance(value, torch.Tensor) or tuple(value.shape) != tuple(shape):
         raise ValueError(
             f"{name}: expected tensor shape {tuple(shape)}, got {getattr(value, 'shape', None)}"
         )
-    if value.device.type != "cpu" or not torch.isfinite(value).all():
-        raise ValueError(f"{name}: expected finite CPU data")
     if dtype is not None and value.dtype != dtype:
         raise ValueError(f"{name}: expected {dtype}, got {value.dtype}")
+
+
+def iter_batch_fields(batch):
+    yield "action", batch["action"]
+    for section in ("obs", "action_context"):
+        for key, value in batch.get(section, {}).items():
+            yield f"{section}.{key}", value
 
 
 def validate_data_batch(batch, dataset, cfg):
     action = batch["action"]
     batch_size = len(action)
-    if batch_size == 0:
-        raise ValueError("Empty data batch")
-    validate_data_tensor(action, (batch_size, cfg.horizon, cfg.agent.action_dim), "action")
+    validate_tensor_layout(action, (batch_size, cfg.horizon, cfg.agent.action_dim), "action")
+
     obs = batch["obs"]
     for key in NON_NUMERIC_OBSERVATION_FIELDS.intersection(obs):
         if (
@@ -119,73 +107,66 @@ def validate_data_batch(batch, dataset, cfg):
     if isinstance(dataset, MultiTaskDataset):
         if not NON_NUMERIC_OBSERVATION_FIELDS <= obs.keys():
             raise ValueError("Multitask batch requires task_text and task_name")
-        children = dict(zip(dataset.task_names, dataset.datasets))
-        texts = dict(zip(dataset.task_names, dataset.task_texts))
+        datasets_by_task = dict(zip(dataset.task_names, dataset.datasets))
+        task_texts = dict(zip(dataset.task_names, dataset.task_texts))
         for name, text in zip(obs["task_name"], obs["task_text"]):
-            if name not in children or text != texts[name]:
+            if name not in datasets_by_task or text != task_texts[name]:
                 raise ValueError("Multitask batch task name/text mismatch")
-        children = [children[name] for name in dict.fromkeys(obs["task_name"])]
+        children = [datasets_by_task[name] for name in dict.fromkeys(obs["task_name"])]
     else:
         children = [dataset]
+
+    numeric_fields = obs.keys() - NON_NUMERIC_OBSERVATION_FIELDS
+    context = batch.get("action_context", {})
     for child in children:
-        if set(obs) - NON_NUMERIC_OBSERVATION_FIELDS != set(child.sensor_modalities):
+        if numeric_fields != set(child.sensor_modalities):
             raise ValueError("Batch observation fields differ from the dataset recipe")
         for key in child.sensor_modalities:
             shape, _ = observation_layout(child, key)
             source_dtype = child.replay_buffer[key].dtype
-            dtype = torch.from_numpy(np.empty((), dtype=source_dtype)).dtype
-            if np.issubdtype(source_dtype, np.floating):
-                dtype = torch.float32
             if key == "rgb" and child.rgb_preprocess_size is not None:
                 dtype = torch.uint8 if child.rgb_keep_uint8 else torch.float32
-            validate_data_tensor(obs[key], (batch_size, *shape), f"obs.{key}", dtype)
+            elif np.issubdtype(source_dtype, np.floating):
+                dtype = torch.float32
+            else:
+                dtype = torch.from_numpy(np.empty((), dtype=source_dtype)).dtype
+            validate_tensor_layout(obs[key], (batch_size, *shape), f"obs.{key}", dtype)
+
         context_shapes = {}
         if isinstance(child, LAMPDataset):
             context_shapes["hand_history"] = (batch_size, child.history_steps, 12)
         elif isinstance(child, TemporalCodecDataset):
             context_shapes["hand_reference"] = (batch_size, 12)
-        context = batch.get("action_context", {})
         if not isinstance(context, dict) or context.keys() != context_shapes.keys():
             raise ValueError("Batch action_context differs from the dataset recipe")
         for key, shape in context_shapes.items():
-            validate_data_tensor(context[key], shape, f"action_context.{key}", torch.float32)
+            validate_tensor_layout(context[key], shape, f"action_context.{key}", torch.float32)
+
+    # Scan each tensor once, independent of the number of tasks in the batch.
+    for name, value in iter_batch_fields(batch):
+        if not isinstance(value, torch.Tensor):
+            continue
+        if value.device.type != "cpu":
+            raise ValueError(f"{name}: expected CPU data")
+        if (value.is_floating_point() or value.is_complex()) and not torch.isfinite(value).all():
+            raise ValueError(f"{name}: expected finite data")
 
 
-def close_data_loader(loader, iterator=None):
-    # PyTorch retains persistent iterators after early exits, including exceptions.
-    iterator = loader._iterator if iterator is None else iterator
-    try:
-        if iterator is not None and loader.num_workers > 0:
-            iterator._shutdown_workers()
-    finally:
-        loader._iterator = None
-
-
-def check_data_loader(loader, cfg, *, split, max_batches):
+def validate_data_loader(loader, cfg, *, split, max_batches):
     iterator = None
     checked = 0
     try:
         iterator = iter(loader)
-        for _ in range(min(max_batches, len(loader))):
-            batch = next(iterator)
+        for checked, batch in enumerate(islice(iterator, max_batches), start=1):
             validate_data_batch(batch, loader.dataset, cfg)
-            fields = {"action": batch["action"]}
-            fields.update({f"obs.{key}": value for key, value in batch["obs"].items()})
-            fields.update(
-                {
-                    f"action_context.{key}": value
-                    for key, value in batch.get("action_context", {}).items()
-                }
-            )
             summary = ", ".join(
                 (
                     f"{key}={tuple(value.shape)} {value.dtype}"
                     if torch.is_tensor(value)
                     else f"{key}=list[str]({len(value)})"
                 )
-                for key, value in fields.items()
+                for key, value in iter_batch_fields(batch)
             )
-            checked += 1
             print(f"[{split} batch {checked}] {summary}")
         if checked == 0:
             raise ValueError(f"{split}: no batches to check")
@@ -194,34 +175,28 @@ def check_data_loader(loader, cfg, *, split, max_batches):
     print(f"[{split}] windows={len(loader.dataset):,}, checked batches={checked}")
 
 
-def validate_data_only(config_name: str, *, max_batches=2):
+def validate_dataset(cfg, *, max_batches=2):
     positive_int(max_batches, "max_batches")
-    print(f"\nData check (CPU): {config_name}")
-    cfg = load_smoke_config(config_name)
-    validate_config(cfg)
-    if cfg.get("resume_from") is not None:
-        raise ValueError("data-only checks current configs, not resume checkpoints")
     if cfg.training.get("num_gpus", 1) != 1:
         print("DDP config: single-process data check only; DDP NOT VERIFIED")
     set_seed(cfg.training.seed)
     cfg.dataloader.pin_memory = False
     dataset, _ = build_dataset_and_normalizer(cfg)
     loader = build_train_loader(cfg, dataset, rank=0, world_size=1)
-    check_data_loader(loader, cfg, split="train", max_batches=max_batches)
+    validate_data_loader(loader, cfg, split="train", max_batches=max_batches)
     validation = dataset.get_validation_dataset()
     if validation is None:
         print("[validation] 无 holdout")
     else:
         loader = DataLoader(validation, batch_size=cfg.dataloader.batch_size, num_workers=0)
-        check_data_loader(loader, cfg, split="validation", max_batches=max_batches)
-    print(f"✓ {config_name}: data check PASSED (no model/training execution)")
+        validate_data_loader(loader, cfg, split="validation", max_batches=max_batches)
 
 
 def validate_parameter_updates(model, before):
     changed = None
     for name, parameter in model.named_parameters():
         # Compilation inserts a wrapper into parameter names.
-        name = name.replace("._orig_mod.", ".")
+        name = name.replace("_orig_mod.", "")
         if name not in before:
             continue
         current = parameter.detach().cpu()
@@ -230,11 +205,11 @@ def validate_parameter_updates(model, before):
         if changed is None and not torch.equal(before[name], current):
             changed = name
     if changed is None:
-        raise AssertionError("No finite learning-parameter update observed within the smoke budget")
+        raise AssertionError("No trainable parameter changed within the smoke budget")
     return changed
 
 
-def validate_checkpoint(cfg, components, trainer, checkpoint_path):
+def validate_checkpoint_state(cfg, components, trainer, checkpoint_path):
     checkpoint = load_training_checkpoint(checkpoint_path)
     assert checkpoint.global_step == trainer.global_step
     assert checkpoint.epoch == trainer.current_epoch
@@ -250,16 +225,14 @@ def validate_checkpoint(cfg, components, trainer, checkpoint_path):
         (components.model, checkpoint.model_state),
         (components.ema_model, checkpoint.ema_model_state),
     ):
-        if model is None:
-            continue
-        actual = policy_state_dict(model)
-        assert actual.keys() == state.keys()
-        for key, tensor in actual.items():
-            torch.testing.assert_close(tensor.detach().cpu(), state[key], rtol=0, atol=0)
+        if model is not None:
+            torch.testing.assert_close(
+                policy_state_dict(model), state, rtol=0, atol=0, check_device=False
+            )
 
 
-def validate_prediction_roundtrip(cfg, components, trainer, checkpoint_path):
-    """Compare raw/EMA predictions with restored policies after training has finished."""
+def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
+    """Compare raw/EMA predictions with restored policies after training."""
     components.train_loader.sampler.set_epoch(trainer.current_epoch, 0)
     batch = next(iter(components.train_loader))
     obs = dict_apply(
@@ -312,24 +285,23 @@ def validate_prediction_roundtrip(cfg, components, trainer, checkpoint_path):
         del restored
 
 
-def smoke_test(config_name: str, *, max_updates=4):
-    """Run the production single-device Trainer with an execution-only budget."""
+def validate_training(cfg, *, max_updates=4):
+    """Exercise training and checkpoint restoration within an update budget."""
     positive_int(max_updates, "max_updates")
-    cfg = load_smoke_config(config_name)
-    validate_config(cfg)
+    if cfg.training.get("num_gpus", 1) != 1:
+        raise ValueError("Single-device smoke requires num_gpus=1")
     if not torch.cuda.is_available():
         raise RuntimeError("NOT VERIFIED: original training configuration requires CUDA")
+
     set_seed(cfg.training.seed)
     with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as tmpdir:
         cfg.workspace.output_dir = tmpdir
         cfg.workspace.wandb_cfg = None
-        if cfg.training.get("num_gpus", 1) != 1:
-            raise ValueError("Single-device smoke requires num_gpus=1")
         dataset, normalizer = build_dataset_and_normalizer(cfg)
         components = build_training_components(
             cfg, torch.device(cfg.training.device), dataset, normalizer
         )
-        try:
+        with closing(components):
             trainer = build_trainer(cfg, components)
             components.workspace.save_hydra_config(cfg)
             before = {
@@ -337,40 +309,24 @@ def smoke_test(config_name: str, *, max_updates=4):
                 for name, parameter in components.model.named_parameters()
                 if parameter.requires_grad and parameter.is_floating_point()
             }
-            if cfg.training.get("use_compile", False):
-                compile_models(
-                    components.model,
-                    components.ema_model,
-                    mode=cfg.training.get("compile_mode", "reduce-overhead"),
-                )
+            compile_training_models(cfg, components)
             trainer.train(max_updates=max_updates)
             changed = validate_parameter_updates(components.model, before)
             del before
             print(f"Observed parameter update: {changed} (step={trainer.global_step})")
 
             checkpoint_path = components.workspace.checkpoint_dir / "latest.pt"
-            validate_checkpoint(cfg, components, trainer, checkpoint_path)
-            validate_prediction_roundtrip(cfg, components, trainer, checkpoint_path)
-        finally:
-            try:
-                close_data_loader(components.train_loader)
-            finally:
-                components.workspace.close()
-    print(f"✓ {config_name}: Trainer updates, prediction and raw/EMA roundtrip PASSED")
+            validate_checkpoint_state(cfg, components, trainer, checkpoint_path)
+            validate_policy_restoration(cfg, components, trainer, checkpoint_path)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Validate one or more DexMani Hydra policy configs."
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
         "--config-only",
         action="store_true",
-        help=(
-            "Resolve/validate config, check Hydra target modules, and import the "
-            "agent and training targets without data or GPU execution."
-        ),
+        help="Validate configs and target imports without data or GPU execution.",
     )
     modes.add_argument(
         "--data-only", action="store_true", help="Check CPU data batches without building a model."
@@ -392,21 +348,19 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    set_project_root()
     for config_name in args.config_names:
-        try:
-            if args.config_only:
-                mode = "config check"
-                validate_config_only(config_name)
-            elif args.data_only:
-                mode = "data check"
-                validate_data_only(config_name, max_batches=args.max_batches)
-            else:
-                mode = "smoke test"
-                smoke_test(config_name, max_updates=args.max_updates)
-        except Exception as exc:
-            print(f"\n✗ {config_name} {mode} FAILED: {exc}\n")
-            traceback.print_exc()
-            raise SystemExit(1) from exc
+        print(f"\nValidating {config_name}", flush=True)
+        cfg = load_smoke_config(config_name)
+        if args.config_only:
+            summary = f"config and {validate_target_imports(cfg)} Hydra targets"
+        elif args.data_only:
+            validate_dataset(cfg, max_batches=args.max_batches)
+            summary = "CPU data batches"
+        else:
+            validate_training(cfg, max_updates=args.max_updates)
+            summary = "training, prediction and raw/EMA restoration"
+        print(f"✓ {config_name}: {summary} PASSED")
 
 
 if __name__ == "__main__":

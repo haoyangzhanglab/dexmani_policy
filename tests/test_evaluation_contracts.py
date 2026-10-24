@@ -20,6 +20,8 @@ from dexmani_policy.evaluation.config import (
     parse_evaluation_overrides,
     resolve_evaluation_request,
 )
+from dexmani_policy.evaluation.pipeline import run_pipeline
+from dexmani_policy.evaluation.rollout import evaluate_checkpoint
 from dexmani_policy.evaluation.selection import CheckpointEvaluation, select_best_checkpoint
 
 
@@ -164,6 +166,7 @@ class EvaluationRequestTest(unittest.TestCase):
 
     def test_missing_settings_require_an_explicit_source(self):
         cases = (
+            (["eval.seed"], "seed", {"eval_seed": 42}),
             (["eval.inference_steps_list", "eval.offline.inference_steps"],
              "inference_steps", {"inference_steps_list": [5]}),
             (["eval.use_ema", "eval.offline.use_ema"], "use_ema", {"use_ema": False}),
@@ -179,6 +182,80 @@ class EvaluationRequestTest(unittest.TestCase):
                     resolve_evaluation_request(cfg, self.directory, "latest")
                 resolve_evaluation_request(cfg, self.directory, "latest", **override)
                 resolve_evaluation_request(cfg, self.directory, "best")
+
+    def test_selection_requires_recorded_offline_budget(self):
+        record = json.loads(self.record.read_text())
+        record["evaluation"]["effective_config"]["eval"] = {"episodes": 2}
+        self.record.write_text(json.dumps(record))
+        with self.assertRaises(KeyError):
+            resolve_evaluation_request(self.cfg, self.directory, "best")
+
+    def test_video_settings_use_saved_config_or_explicit_override(self):
+        self.cfg.eval.select_best = {"initial_episodes": 1, "batch_size": 0, "max_episodes": 1}
+        runner = Mock(task_runners={"task": SimpleNamespace(get_seed_list=lambda: list(range(20)))})
+        for saved, explicit, expected in (
+            (True, None, True), (False, None, False), (True, False, False), (None, False, False),
+        ):
+            with self.subTest(saved=saved, explicit=explicit):
+                self.cfg.eval.video = {"enabled": saved}
+                arguments = {} if explicit is None else {"record_video": explicit}
+                with patch(
+                    "dexmani_policy.evaluation.rollout.build_evaluation_runner", return_value=runner,
+                ), patch("dexmani_policy.evaluation.rollout.evaluate_policy") as evaluate:
+                    evaluate_checkpoint(self.directory, self.cfg, checkpoint="latest", **arguments)
+                self.assertIs(evaluate.call_args.kwargs["record_video"], expected)
+
+        for saved in (None, "false", 1):
+            with self.subTest(saved=saved):
+                self.cfg.eval.video = {"enabled": saved}
+                with patch("dexmani_policy.evaluation.rollout.build_evaluation_runner") as build:
+                    with self.assertRaisesRegex(ValueError, "eval.video.enabled"):
+                        evaluate_checkpoint(self.directory, self.cfg, checkpoint="latest")
+                build.assert_not_called()
+
+    def test_pipeline_reuses_its_saved_selection_plan_and_inference_settings(self):
+        self.cfg.training = {"device": "cpu"}
+        self.cfg.eval.select_best = {"initial_episodes": 1, "batch_size": 0, "max_episodes": 1}
+        leaf = SimpleNamespace(
+            task_name="task", n_obs_steps=2, sensor_modalities=["joint_state"], task_text=None,
+            rgb_preprocessing={}, record_video=False, render_mode="rgb_array",
+            viewer_resolution=None, env_video_fps=None, env_kwargs={},
+            expand_env_kwargs=dict, get_seed_list=lambda: list(range(20)),
+        )
+
+        def run(agent, *, task_seeds, **kwargs):
+            return {"episode_details": [
+                {"task_name": task, "seed": seed, "success": True, "steps": 3, "total_steps": 5}
+                for task, seeds in task_seeds.items() for seed in seeds
+            ]}
+
+        runner = Mock(task_runners={"task": leaf}, run=Mock(side_effect=run))
+        agent = SimpleNamespace(checkpoint_step=8)
+        with patch("dexmani_policy.evaluation.selection.build_evaluation_runner", return_value=runner), \
+             patch("dexmani_policy.evaluation.rollout.build_evaluation_runner", return_value=runner), \
+             patch("dexmani_policy.evaluation.selection.restore_policy_agent", return_value=agent), \
+             patch("dexmani_policy.evaluation.rollout.restore_policy_agent", return_value=agent):
+            results = run_pipeline(
+                self.directory, self.cfg, episodes=2, eval_seed=19,
+                inference_steps=4, action_steps=2, use_ema=False,
+            )
+
+        selection, _ = resolve_selection_record(
+            self.directory,
+            next((self.directory / "eval_ckpt_selector").glob("*/selection_result.json")),
+        )
+        self.assertEqual(
+            results[0]["evaluation_seeds"], selection["evaluation"]["request"]["test_task_seeds"],
+        )
+        self.assertTrue(results[0]["heldout_from_selection"])
+        self.assertTrue(results[0]["matches_selection_inference"])
+        self.assertEqual(self.cfg.eval.offline.episodes, 4)
+        snapshot = OmegaConf.load(self.directory / results[0]["eval_config"])
+        self.assertEqual(snapshot.request.effective_episodes, 2)
+        self.assertEqual(snapshot.request.shuffle_seed, 19)
+        self.assertEqual(snapshot.request.action_steps, 2)
+        self.assertEqual(snapshot.request.inference_steps_list, [4])
+        self.assertFalse(snapshot.runner_inputs.task.record_video)
 
     def test_selection_does_not_fill_missing_budgets(self):
         runner = Mock(task_runners={"task": Mock(get_seed_list=lambda: list(range(100)))})

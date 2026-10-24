@@ -97,16 +97,10 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
                 windows=child.sampler.validity_summary,
                 observation_rows=len(child.sampler.observation_source_rows),
                 action_rows=len(child.sampler.action_source_rows),
+                normalization={"population": "full_replay_buffer"},
             )
             for child in children
         ]
-        for index, recipe in enumerate(cfg.data_recipe):
-            if saved_recipes is None:
-                recipe.normalization = {
-                    "population": "full_replay_buffer",
-                }
-            else:
-                recipe.normalization = saved_recipes[index]["normalization"]
         if runtime is not None:
             cfg.real_runtime = runtime
         else:
@@ -208,6 +202,14 @@ def capture_data_identity(dataset):
         "train_episodes": dataset.train_mask.nonzero()[0].tolist(),
         "val_episodes": dataset.val_mask.nonzero()[0].tolist(),
     }
+
+
+def close_data_loader(loader, iterator=None):
+    # Persistent workers survive early exits until their iterator is shut down.
+    iterator = loader._iterator if iterator is None else iterator
+    loader._iterator = None
+    if iterator is not None and loader.num_workers > 0:
+        iterator._shutdown_workers()
 
 
 def loader_options(cfg):

@@ -88,7 +88,7 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 | 2 | 按 size/mtime 更新 `metrics.jsonl`、`checkpoints/latest.pt`、`vqvae_hand_best.pt`，再按 checksum 更新 `selection_result.json` |
 | 3 | 按 checksum 更新 `best_ckpt.json` |
 
-checkpoint/选择记录先于指针拉取。新文件不组合 `--partial` 与 `--ignore-existing`；任一 rsync 非零退出（含 24）中止后续阶段。整个目录不是事务快照，远端发布中可能需重试；使用前确认 checkpoint 和选择证据齐全。先验产物放在 experiments 时由此拉取，放在 data 时使用数据同步。
+checkpoint/选择记录先于指针拉取。发布中的临时文件统一使用 `.dexmani-publish-*`，同步时排除；不识别旧版临时文件命名。新文件不组合 `--partial` 与 `--ignore-existing`；任一 rsync 非零退出（含 24）中止后续阶段。整个目录不是事务快照，远端发布中可能需重试；使用前确认 checkpoint 和选择证据齐全。先验产物放在 experiments 时由此拉取，放在 data 时使用数据同步。
 
 ### W&B
 

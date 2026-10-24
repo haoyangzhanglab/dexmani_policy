@@ -1,19 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Download experiments; conflicting configs abort before transfer.
 # Usage: bash scripts/remote/sync_down.sh [SUBPATH] [--dry-run|--list] [--with-wandb]
 # Passes: new immutable files; live metrics/latest/VQ best; checksummed best/selection.
-# No pass retains partial files.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# ---- Config ----
 SERVER="${DEX_SERVER:-dexserver}"
 REMOTE_EXP="$SERVER:/data_ssd/ZHY/experiments"
 LOCAL_EXP="$PROJECT_ROOT/experiments"
-# ---- End Config ----
 
 DRY_RUN=""
 WITH_WANDB=false
@@ -35,7 +32,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate SUBPATH: clean relative path (no absolute, .., empty, or bad components).
 if [[ -n "$SUBPATH" ]]; then
     if [[ ! "$SUBPATH" =~ ^[a-zA-Z0-9_.-]+(\+[a-zA-Z0-9_.-]+)*(/[a-zA-Z0-9_.-]+(\+[a-zA-Z0-9_.-]+)*)*$ ]] || [[ "$SUBPATH" =~ (^|/)\.\.?(/|$) ]]; then
         echo "Error: invalid SUBPATH '$SUBPATH' (must be a clean relative path like 'dp3/pour')" >&2
@@ -43,11 +39,9 @@ if [[ -n "$SUBPATH" ]]; then
     fi
 fi
 
-# ---- List mode ----
 if $LIST_MODE; then
     echo "=== Experiments on server ==="
-    # List run dirs by their config.yaml marker — handles both non-DDP
-    # (<policy>/<task>/<ts>) and DDP (ddp/<policy>/<task>/<ts>) depths.
+    # DDP adds one directory level under experiments.
     if listing=$(ssh "$SERVER" "find /data_ssd/ZHY/experiments -maxdepth 5 -name config.yaml -printf '%h\n'"); then
         if [[ -n "$listing" ]]; then
             printf '%s\n' "$listing" | sort
@@ -60,11 +54,9 @@ if $LIST_MODE; then
     exit 0
 fi
 
-# ---- Build paths ----
 REMOTE_PATH="$REMOTE_EXP${SUBPATH:+/$SUBPATH}"
 LOCAL_PATH="$LOCAL_EXP${SUBPATH:+/$SUBPATH}"
 
-# Ensure trailing / for rsync directory semantics
 [[ "$REMOTE_PATH" != */ ]] && REMOTE_PATH="$REMOTE_PATH/"
 [[ "$LOCAL_PATH" != */ ]] && LOCAL_PATH="$LOCAL_PATH/"
 
@@ -77,7 +69,6 @@ if [[ ! -d "$LOCAL_PARENT" ]]; then
     fi
 fi
 
-# ---- Wandb handling ----
 WANDB_EXCLUDE=()
 if ! $WITH_WANDB; then
     WANDB_EXCLUDE=(--exclude='wandb/')
@@ -88,9 +79,7 @@ echo "  Remote: $REMOTE_PATH"
 echo "  Local:  $LOCAL_PATH"
 echo ""
 
-# Compare existing training configs before publishing anything.
-# Byte differences are conservatively treated as conflicts, including formatting
-# changes. This does not authenticate same-named large binary artifacts.
+# Refuse any config byte difference before transferring experiment artifacts.
 if config_changes=$(rsync -rclni --existing --out-format='%i %n' \
     "${WANDB_EXCLUDE[@]}" --include='*/' \
     --include='config.yaml' --exclude='*' \
@@ -104,9 +93,6 @@ else
     exit "$?"
 fi
 
-# ═══════════════════════════════════════════════════════════════════
-# Pass 1: Download new files only
-# ═══════════════════════════════════════════════════════════════════
 # --partial would leave incomplete files that --ignore-existing skips on retry.
 echo "--- Pass 1/3: new files (--ignore-existing) ---"
 
@@ -116,14 +102,7 @@ PASS1_OPTS=(
     --progress
     "${WANDB_EXCLUDE[@]}"
     --include='*/'
-    --exclude='.dexmani-publish-*.tmp'
-    --exclude='.dexmani-publish-*.tmp.npz'
-    --exclude='checkpoints/*.pt.tmp'
-    --exclude='checkpoints/latest.tmp.pt'
-    --exclude='vqvae_hand_*.pt.tmp'
-    --exclude='.best_ckpt.json*.tmp'
-    --exclude='.selection_result.json*.tmp'
-    --exclude='.result_details.json*.tmp'
+    --exclude='.dexmani-publish-*'
     --exclude='metrics.jsonl'
     --exclude='checkpoints/latest.pt'
     --exclude='vqvae_hand_best.pt'
@@ -138,9 +117,6 @@ rsync "${PASS1_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     exit "$rc"
 }
 
-# ═══════════════════════════════════════════════════════════════════
-# Pass 2: Update explicitly mutable training files
-# ═══════════════════════════════════════════════════════════════════
 # rsync's temporary transfer preserves the previous complete file on failure.
 echo ""
 echo "--- Pass 2/3: training state and selection results ---"
@@ -183,7 +159,6 @@ rsync "${PASS3_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     exit "$rc"
 }
 
-# ---- Done ----
 if [[ -z "$DRY_RUN" ]]; then
     echo ""
     echo "=== sync_down: done ==="

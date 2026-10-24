@@ -142,7 +142,8 @@ def resolve_inference_steps(*sources, override=None) -> list[int]:
     return steps
 
 
-def add_evaluation_arguments(parser) -> None:
+def build_evaluation_parser(description: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--policy-name", required=True, help="Experiment policy path, e.g. ddp/sat."
     )
@@ -157,7 +158,7 @@ def add_evaluation_arguments(parser) -> None:
         type=int,
         action=EvaluationSeedAction,
         help=(
-            "Evaluation seed: CLI > eval.seed dotlist > saved eval.seed > 1024. "
+            "Evaluation seed: CLI > eval.seed dotlist > saved eval.seed. "
             "Final eval with a selection record reuses its seed and rejects conflicts."
         ),
     )
@@ -178,6 +179,8 @@ def add_evaluation_arguments(parser) -> None:
     weights.add_argument(
         "--no-ema", dest="use_ema", action="store_false", help="Use raw model weights."
     )
+    parser.add_argument("overrides", nargs="*", help="Evaluation/environment dotlist overrides.")
+    return parser
 
 
 def resolve_evaluation_parameter(
@@ -201,9 +204,7 @@ def resolve_test_request(record):
     request = evaluation["request"]
     validate_evaluation_seed(request["shuffle_seed"])
     saved_cfg = evaluation["effective_config"]
-    episodes = positive_int(
-        resolve_evaluation_parameter(saved_cfg, "episodes", "offline"), "saved test episodes"
-    )
+    episodes = positive_int(saved_cfg["eval"]["offline"]["episodes"], "saved test episodes")
     return request, episodes
 
 

@@ -1,9 +1,9 @@
 """Record viewer videos for explicit or deterministically selected task seeds."""
 
-import argparse
 from pathlib import Path
 
 from dexmani_policy.common.config import (
+    PROJECT_ROOT,
     load_experiment_config,
     register_resolvers,
     set_project_root,
@@ -13,7 +13,7 @@ from dexmani_policy.env_runner.common.seeds import (
     validate_task_seeds,
 )
 from dexmani_policy.evaluation.config import (
-    add_evaluation_arguments,
+    build_evaluation_parser,
     parse_evaluation_overrides,
     resolve_evaluation_parameter,
     resolve_evaluation_request,
@@ -24,13 +24,9 @@ from dexmani_policy.evaluation.rollout import (
     task_seed_pools,
 )
 
-ROOT_DIR = set_project_root()
-register_resolvers()
-
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    add_evaluation_arguments(parser)
+    parser = build_evaluation_parser(__doc__)
     parser.add_argument("--ckpt-tag", default="best", help="best, latest, or 20pct..100pct.")
     parser.add_argument("--episodes", type=int, help="Episodes per task; defaults to saved config.")
     parser.add_argument(
@@ -46,10 +42,11 @@ def main(argv=None):
     )
     parser.add_argument("--fps", type=int, help="Override saved video or environment FPS.")
     parser.add_argument("--selection-record", help="Path to a completed selection_result.json.")
-    parser.add_argument("overrides", nargs="*", help="Evaluation/environment dotlist overrides.")
     args = parser.parse_args(argv)
 
-    exp_dir = Path(ROOT_DIR) / "experiments" / args.policy_name / args.task_name / args.exp_name
+    set_project_root()
+    register_resolvers()
+    exp_dir = PROJECT_ROOT / "experiments" / args.policy_name / args.task_name / args.exp_name
     request = resolve_evaluation_request(
         load_experiment_config(exp_dir),
         exp_dir,

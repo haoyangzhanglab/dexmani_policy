@@ -177,7 +177,7 @@ def evaluate_checkpoint(
     overrides=None,
     selection_record=None,
     output_dir=None,
-    record_video=False,
+    record_video=None,
     eval_seed=None,
 ):
     request = resolve_evaluation_request(
@@ -193,6 +193,11 @@ def evaluate_checkpoint(
         episodes=episodes,
     )
     cfg = request.config
+    if record_video is None:
+        record_video = resolve_evaluation_parameter(cfg, "enabled", "video")
+    if type(record_video) is not bool:
+        raise ValueError("Evaluation requires boolean eval.video.enabled or record_video")
+
     runner = build_evaluation_runner(cfg)
     pools = task_seed_pools(runner)
     if request.selection is not None:
@@ -210,8 +215,6 @@ def evaluate_checkpoint(
                 cfg, "max_episodes", "select_best"
             ),
         )
-    if record_video is None:
-        record_video = resolve_evaluation_parameter(cfg, "enabled", "video", default=True)
     return evaluate_policy(
         request,
         runner,

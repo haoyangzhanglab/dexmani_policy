@@ -1,19 +1,28 @@
+import copy
+import io
 import pickle
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
 import zarr
+from omegaconf import OmegaConf, open_dict
+from torch.utils.data import default_collate
 
+from dexmani_policy import smoke_test
+from dexmani_policy.common.config import load_policy_config, validate_source_recipe
 from dexmani_policy.datasets.common.augmentation import PointColorNoise, PointCoordinateNoise
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.hand_prior.temporal_codec_dataset import TemporalCodecDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.hand_representation import shuffled_batches
-from dexmani_policy.training.data import build_normalizer
+from dexmani_policy.training.data import build_dataset_and_normalizer, build_normalizer
 
 
 class DataPipelineTest(unittest.TestCase):
@@ -141,6 +150,91 @@ class DataPipelineTest(unittest.TestCase):
         self.root.create_dataset("data/point_cloud", data=np.zeros((12, 6), dtype=np.float32))
         with self.assertRaisesRegex(ValueError, r"\[T,N,C\]"):
             DemonstrationDataset(**self.options)
+
+    def test_smoke_preserves_multitask_layout_text_and_finiteness_checks(self):
+        options = {**self.options, "sensor_modalities": ["joint_state", "point_cloud", "rgb"]}
+        first, second = (DemonstrationDataset(**options) for _ in range(2))
+        dataset = MultiTaskDataset([first, second], ["a", "b"], task_texts=["task a", "task b"])
+        batch = default_collate([dataset[0], dataset[len(first)]])
+        cfg = SimpleNamespace(horizon=4, agent=SimpleNamespace(action_dim=19))
+        smoke_test.validate_data_batch(batch, dataset, cfg)
+
+        for field in ("action", "joint_state", "point_cloud"):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(batch)
+                value = invalid["action"] if field == "action" else invalid["obs"][field]
+                value[1].fill_(float("nan"))
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    smoke_test.validate_data_batch(invalid, dataset, cfg)
+
+        invalid = copy.deepcopy(batch)
+        invalid["obs"]["task_text"][1] = "task a"
+        with self.assertRaisesRegex(ValueError, "name/text mismatch"):
+            smoke_test.validate_data_batch(invalid, dataset, cfg)
+        invalid = copy.deepcopy(batch)
+        invalid["obs"]["rgb"] = invalid["obs"]["rgb"].float()
+        with self.assertRaisesRegex(ValueError, "torch.uint8"):
+            smoke_test.validate_data_batch(invalid, dataset, cfg)
+        invalid = copy.deepcopy(batch)
+        invalid["action"] = invalid["action"][:, :-1]
+        with self.assertRaisesRegex(ValueError, "shape"):
+            smoke_test.validate_data_batch(invalid, dataset, cfg)
+
+    def test_smoke_checks_hand_context_finiteness(self):
+        cfg = SimpleNamespace(horizon=4, agent=SimpleNamespace(action_dim=19))
+        for dataset in (LAMPDataset(**self.options), TemporalCodecDataset(**self.options)):
+            with self.subTest(dataset=type(dataset).__name__):
+                batch = default_collate([dataset[0], dataset[1]])
+                smoke_test.validate_data_batch(batch, dataset, cfg)
+                next(iter(batch["action_context"].values())).fill_(float("inf"))
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    smoke_test.validate_data_batch(batch, dataset, cfg)
+
+    def test_data_only_cli_checks_train_and_holdout_without_training_artifacts(self):
+        cfg = load_policy_config("dp3", overrides=[
+            "horizon=4", "n_action_steps=2", "dataloader.batch_size=2", "dataloader.num_workers=0",
+            "dataset.max_train_episodes=null",
+        ])
+        cfg.dataset.zarr_path = str(self.path)
+        with open_dict(cfg.dataset):
+            cfg.dataset.saved_split = self.options["saved_split"]
+        output_dir = self.path.parent / "unused-workspace"
+        cfg.workspace.output_dir = str(output_dir)
+        config_path = self.path.parent / "smoke.yaml"
+        OmegaConf.save(cfg, config_path, resolve=True)
+        output = io.StringIO()
+        with redirect_stdout(output), patch.object(smoke_test, "build_training_components") as build:
+            smoke_test.main(["--data-only", str(config_path), "--max-batches", "1"])
+        build.assert_not_called()
+        self.assertIn("[train batch 1]", output.getvalue())
+        self.assertIn("[validation batch 1]", output.getvalue())
+        self.assertNotIn("batch 2", output.getvalue())
+        self.assertFalse(output_dir.exists())
+
+    def test_resume_rejects_a_different_normalization_population(self):
+        cfg = load_policy_config("dp3", overrides=[
+            "horizon=4", "n_action_steps=2", "dataset.max_train_episodes=null",
+        ])
+        cfg.dataset.zarr_path = str(self.path)
+        cfg.workspace.output_dir = str(self.path.parent / "unused-workspace")
+        with open_dict(cfg.dataset):
+            cfg.dataset.saved_split = self.options["saved_split"]
+        build_dataset_and_normalizer(cfg, verbose=False)
+        saved = OmegaConf.to_container(cfg, resolve=True)
+
+        for population in ("full_replay_buffer", "training_rows"):
+            with self.subTest(population=population):
+                saved["data_recipe"][0]["normalization"]["population"] = population
+                resumed = OmegaConf.create(saved)
+                _, normalizer = build_dataset_and_normalizer(
+                    resumed, resume_checkpoint=SimpleNamespace(effective_config=saved), verbose=False,
+                )
+                self.assertIsNone(normalizer)
+                if population == "full_replay_buffer":
+                    validate_source_recipe(saved, resumed)
+                else:
+                    with self.assertRaisesRegex(ValueError, "normalization.population"):
+                        validate_source_recipe(saved, resumed)
 
 
 class AugmentationAndBatchesTest(unittest.TestCase):
