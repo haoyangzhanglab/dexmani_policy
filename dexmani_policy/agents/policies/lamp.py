@@ -94,6 +94,12 @@ class LAMPPolicy(BasePolicy):
             raise ValueError("LAMP requires inference_steps=1 in agent/eval")
         if cfg.eval.get("inference_steps_list") not in (None, [1]):
             raise ValueError("LAMP inference_steps_list must be null or [1]")
+        cls.validate_loss_config(
+            cfg.agent.hand_loss_weight,
+            cfg.agent.offset_reg_weight,
+            cfg.agent.drift_reg_weight,
+            cfg.agent.history_noise_std,
+        )
 
     def __init__(
         self,
@@ -112,9 +118,12 @@ class LAMPPolicy(BasePolicy):
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
         num_inference_steps: int = 1,
-        hand_loss_weight: float = 1.0,
-        offset_reg_weight: float = 1e-3,
         modality_dropout_probs: dict | None = None,
+        *,
+        history_noise_std: float,
+        hand_loss_weight: float,
+        offset_reg_weight: float,
+        drift_reg_weight: float,
     ) -> None:
         if any(
             type(value) is not int or value != 1 for value in (horizon, n_obs_steps, n_action_steps)
@@ -123,12 +132,9 @@ class LAMPPolicy(BasePolicy):
         if action_dim != 19 or state_dim != 19:
             raise ValueError("LAMP requires joint action/state: 7 arm + 12 hand")
         self.validate_inference_steps(num_inference_steps)
-        for name, weight in (
-            ("hand_loss_weight", hand_loss_weight),
-            ("offset_reg_weight", offset_reg_weight),
-        ):
-            if not 0 <= weight < float("inf"):
-                raise ValueError(f"{name} must be finite and nonnegative")
+        self.validate_loss_config(
+            hand_loss_weight, offset_reg_weight, drift_reg_weight, history_noise_std
+        )
         encoder = LAMPObservationEncoder(
             pc_dim,
             state_dim,
@@ -146,9 +152,26 @@ class LAMPPolicy(BasePolicy):
         self.history_steps, self.latent_dim = history_steps, latent_dim
         self.prior_path = prior_path
         self.hand_loss_weight, self.offset_reg_weight = hand_loss_weight, offset_reg_weight
+        self.drift_reg_weight = drift_reg_weight
+        self.history_noise_std = history_noise_std
         self.prior = HandMotionPrior(12, history_steps, latent_dim, prior_hidden_dim).freeze()
         self.prior_initialized = False
         self.register_load_state_dict_post_hook(self.validate_restored_prior)
+
+    @staticmethod
+    def validate_loss_config(
+        hand_loss_weight, offset_reg_weight, drift_reg_weight, history_noise_std
+    ) -> None:
+        for name, value in (
+            ("hand_loss_weight", hand_loss_weight),
+            ("offset_reg_weight", offset_reg_weight),
+            ("drift_reg_weight", drift_reg_weight),
+            ("history_noise_std", history_noise_std),
+        ):
+            if not 0 <= value < float("inf"):
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if offset_reg_weight > 0 and drift_reg_weight > 0:
+            raise ValueError("LAMP offset_reg_weight and drift_reg_weight are mutually exclusive")
 
     @staticmethod
     def validate_inference_steps(steps) -> None:
@@ -210,7 +233,13 @@ class LAMPPolicy(BasePolicy):
         ):
             raise ValueError("LAMP requires finite physical hand_history [B,K,12]")
         with torch.no_grad(), torch.autocast(device_type=history.device.type, enabled=False):
-            mu, log_var = self.prior.encode_history(history.float())
+            history = history.float()
+            if self.training and self.history_noise_std > 0:
+                # Noise is specified in normalized hand coordinates; encode_history applies affine.
+                history = history + (
+                    torch.randn_like(history) * self.history_noise_std / self.prior.hand_scale
+                )
+            mu, log_var = self.prior.encode_history(history)
             sigma = torch.exp(0.5 * log_var)
         global_token = self.encode_observation(obs)
         condition = torch.cat(
@@ -218,9 +247,9 @@ class LAMPPolicy(BasePolicy):
         )
         return condition, mu
 
-    def decode_hand(self, offset: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
-        with torch.autocast(device_type=offset.device.type, enabled=False):
-            return self.prior.decode(mu + offset.float())
+    def decode_hand(self, latent: torch.Tensor) -> torch.Tensor:
+        with torch.autocast(device_type=latent.device.type, enabled=False):
+            return self.prior.decode(latent.float())
 
     def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
         self.validate_batch(batch)
@@ -229,16 +258,22 @@ class LAMPPolicy(BasePolicy):
         arm, offset = native[:, : self.arm_dim], native[:, self.arm_dim :]
         target = self.normalizer["action"].normalize(batch["action"])[:, 0, : self.arm_dim]
         hand_target = self.prior.normalize_hand(batch["action"][:, 0, self.arm_dim :].float())
-        hand = self.decode_hand(offset, mu)
+        hand = self.decode_hand(mu + offset)
         arm_loss = F.mse_loss(arm, target)
         hand_loss = F.mse_loss(hand, hand_target)
         offset_l2 = offset.square().sum(-1).mean()
         loss = arm_loss + self.hand_loss_weight * hand_loss + self.offset_reg_weight * offset_l2
+        if self.drift_reg_weight > 0 or log_metrics:
+            with torch.no_grad():
+                hand_ref = self.decode_hand(mu)
+            hand_drift_mse = F.mse_loss(hand, hand_ref)
+            if self.drift_reg_weight > 0:
+                loss = loss + self.drift_reg_weight * hand_drift_mse
         if not log_metrics:
             return loss, {}
 
         with torch.no_grad():
-            prior_error = F.mse_loss(self.decode_hand(torch.zeros_like(offset), mu), hand_target)
+            prior_error = F.mse_loss(hand_ref, hand_target)
             physical_mae = ((hand - hand_target) / self.prior.hand_scale).abs().mean()
             metrics = dict(
                 loss=loss.detach(),
@@ -246,6 +281,8 @@ class LAMPPolicy(BasePolicy):
                 loss_arm=arm_loss.detach(),
                 loss_decoded_hand=hand_loss.detach(),
                 loss_offset=self.offset_reg_weight * offset_l2,
+                hand_drift_mse=hand_drift_mse.detach(),
+                loss_drift=self.drift_reg_weight * hand_drift_mse,
                 offset_l2=offset_l2.detach(),
                 offset_rms=offset.square().mean().sqrt(),
                 prior_hand_mse=prior_error,
@@ -281,7 +318,7 @@ class LAMPPolicy(BasePolicy):
         arm = (native[:, : self.arm_dim] - params["offset"][: self.arm_dim]) / params["scale"][
             : self.arm_dim
         ]
-        hand = self.prior.unnormalize_hand(self.decode_hand(native[:, self.arm_dim :], mu))
+        hand = self.prior.unnormalize_hand(self.decode_hand(mu + native[:, self.arm_dim :]))
         prediction = torch.cat((arm, hand), dim=-1)[:, None]
         if not torch.isfinite(prediction).all():
             raise ValueError("LAMP produced a nonfinite action")

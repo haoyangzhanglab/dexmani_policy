@@ -18,23 +18,34 @@ from dexmani_policy.common.runtime import atomic_path
 
 
 @torch.no_grad()
+def build_hand_prototypes(model: HandVQVAE) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode the runtime table; retain unclamped poses for export diagnostics."""
+    embeddings = model.codebooks
+    weights = model.quantizer.layer_weights.softmax(0)
+    combinations = torch.cartesian_prod(
+        *[
+            torch.arange(model.codebook_size, device=embeddings.device)
+            for _ in range(model.num_groups)
+        ]
+    ).reshape(-1, model.num_groups)
+    latent = embeddings.new_zeros(len(combinations), model.latent_dim)
+    for group, weight in enumerate(weights):
+        latent = latent + weight * embeddings[group, combinations[:, group]]
+    decoded = model.decode(latent).float()
+    if not torch.isfinite(decoded).all():
+        raise ValueError("VQ decoder produced non-finite hand states")
+    return decoded.clamp(-1, 1), decoded
+
+
+@torch.no_grad()
 def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
     split = checkpoint["split_metadata"]
     validate_dq_normalization(split["normalization_spec"])
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
     codebook = HandStateCodebook(model.hand_dim, model.num_groups, model.codebook_size)
-    embeddings = model.codebooks
+    poses, decoded = build_hand_prototypes(model)
+    poses, decoded = poses.cpu(), decoded.cpu()
     weights = model.quantizer.layer_weights.softmax(0)
-    combinations = torch.cartesian_prod(
-        *[torch.arange(model.codebook_size, device=device) for _ in range(model.num_groups)]
-    ).reshape(-1, model.num_groups)
-    latent = embeddings.new_zeros(len(combinations), model.latent_dim)
-    for group, weight in enumerate(weights):
-        latent = latent + weight * embeddings[group, combinations[:, group]]
-    decoded = model.decode(latent).float().cpu()
-    if not torch.isfinite(decoded).all():
-        raise ValueError("VQ decoder produced non-finite hand states")
-    poses = decoded.clamp(-1, 1)
     pca = PCA(n_components=1)
     projection = pca.fit_transform(poses.numpy())[:, 0]
     permutation = torch.from_numpy(np.argsort(projection))
@@ -66,7 +77,7 @@ def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
         "selection": {
             "selection_step": int(checkpoint["epoch"]),
             "unit": "epoch",
-            "split": "validation" if split["hand_data"]["val_episodes"] else "train_no_holdout",
+            "split": split["selection_split"],
             "metric": split["selection_metric"],
             "value": checkpoint["metrics"][split["selection_metric"]],
         },
@@ -141,6 +152,7 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
                 )
         result = {
             "count": count,
+            "lookup_mse": float(sums["normalized"][1].sum() / (count * width)),
             "prototype_counts": utilization.tolist(),
             "used_prototypes": int((utilization > 0).sum()),
         }

@@ -24,6 +24,7 @@ from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.training.common.hand_representation import describe_hand_data
 from dexmani_policy.training.data import build_normalizer
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
+    build_hand_prototypes,
     build_runtime_codebook,
     deployment_diagnostics,
 )
@@ -34,19 +35,40 @@ logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()
-def evaluate_vq(vqvae, loader, device):
-    """Sample means, independent of validation batch partitioning."""
-    sums = torch.zeros(3, device=device, dtype=torch.float64)
-    count = 0
-    for (batch,) in loader:
-        batch = batch.to(device, non_blocking=True)
-        enc, vq, _, mse = vqvae(batch)
-        n = batch.shape[0]
-        count += n
-        sums += torch.stack((enc, vq, mse)).double() * n
-    if not count:
-        raise ValueError("VQ validation loader is empty")
-    return dict(zip(("enc", "vq", "mse"), (sums / count).tolist()))
+def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
+    """Evaluate a fixed model's runtime lookup and optional VQ reconstruction."""
+    positive_int(chunk_size, "chunk_size")
+    training = vqvae.training
+    vqvae.eval()
+    try:
+        prototypes, _ = build_hand_prototypes(vqvae)
+        chunk_size = min(
+            chunk_size, max(1, (16 * 1024 * 1024) // (prototypes.numel() * 4))
+        )
+        sums = torch.zeros(3, device=device, dtype=torch.float64)
+        lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
+        count = 0
+        for (batch,) in loader:
+            batch = batch.to(device, non_blocking=True)
+            n = batch.shape[0]
+            count += n
+            if reconstruction:
+                enc, vq, _, mse = vqvae(batch)
+                sums += torch.stack((enc, vq, mse)).double() * n
+            for values in batch.float().split(chunk_size):
+                distances = (values[:, None] - prototypes).square_().sum(-1)
+                lookup_sum += distances.amin(-1).double().sum()
+        if not count:
+            raise ValueError("VQ evaluation loader is empty")
+        lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
+        if not np.isfinite(lookup_mse):
+            raise FloatingPointError("Non-finite lookup_mse during VQ evaluation")
+        metrics = {"lookup_mse": lookup_mse}
+        if reconstruction:
+            metrics.update(zip(("enc", "vq", "mse"), (sums / count).tolist()))
+        return metrics
+    finally:
+        vqvae.train(training)
 
 
 def save_checkpoint(
@@ -201,6 +223,17 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         if len(val_ds) > 0
         else None
     )
+    selection_loader = val_loader
+    if selection_loader is None:
+        selection_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            drop_last=False,
+            pin_memory=device.type == "cuda",
+            generator=torch.Generator().manual_seed(args.seed),
+        )
     vqvae = HandVQVAE(
         hand_dim=args.hand_dim,
         latent_dim=args.latent_dim,
@@ -242,10 +275,14 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
     else:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
-    selection_metric = "val_mse" if val_loader is not None else "train_mse"
+    selection_metric = "val_lookup_mse" if val_loader is not None else "train_lookup_mse"
     split_metadata["selection_metric"] = selection_metric
+    split_metadata["selection_split"] = (
+        "validation" if val_loader is not None else "train_no_holdout"
+    )
+    logger.info("VQ selection: %s (%s)", selection_metric, split_metadata["selection_split"])
     train_history: list[float] = []
-    best_mse = float("inf")
+    best_lookup_mse = float("inf")
 
     for epoch in range(1, args.num_epochs + 1):
         vqvae.train()
@@ -275,9 +312,11 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         train_history.append(train_total)
 
         val_metrics = {"enc": float("nan"), "vq": float("nan"), "mse": float("nan")}
+        selection_metrics = evaluate_vq(
+            vqvae, selection_loader, device, reconstruction=val_loader is not None
+        )
         if val_loader is not None:
-            vqvae.eval()
-            val_metrics = evaluate_vq(vqvae, val_loader, device)
+            val_metrics = selection_metrics
 
         metrics = {
             "train_enc": train_metrics["enc"],
@@ -287,10 +326,12 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             "val_enc": val_metrics["enc"],
             "val_vq": val_metrics["vq"],
             "val_mse": val_metrics["mse"],
+            selection_metric: selection_metrics["lookup_mse"],
             "lr": optimizer.param_groups[0]["lr"],
         }
         logger.info(
-            "epoch %4d | lr %.2e | train enc %.5f vq %.5f mse %.5f | val enc %.5f vq %.5f mse %.5f",
+            "epoch %4d | lr %.2e | train enc %.5f vq %.5f recon_mse %.5f"
+            " | val enc %.5f vq %.5f recon_mse %.5f",
             epoch,
             metrics["lr"],
             metrics["train_enc"],
@@ -300,6 +341,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             metrics["val_vq"],
             metrics["val_mse"],
         )
+        logger.info("%s %.7f", selection_metric, metrics[selection_metric])
 
         if epoch % args.save_epochs == 0 or epoch == args.num_epochs:
             save_checkpoint(
@@ -315,13 +357,9 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
                 metrics=metrics,
             )
 
-        selection_mse = metrics[selection_metric]
-        if not np.isfinite(selection_mse):
-            raise FloatingPointError(
-                f"Non-finite {selection_metric} at epoch {epoch}; previous best preserved"
-            )
-        if selection_mse < best_mse:
-            best_mse = selection_mse
+        lookup_mse = metrics[selection_metric]
+        if lookup_mse < best_lookup_mse:
+            best_lookup_mse = lookup_mse
             save_checkpoint(
                 output_dir / "vqvae_hand_best.pt",
                 epoch=epoch,

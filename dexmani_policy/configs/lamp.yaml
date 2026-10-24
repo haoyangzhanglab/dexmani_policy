@@ -83,7 +83,9 @@ agent:
     rope_base: 100.0
   num_inference_steps: 1
   hand_loss_weight: 1.0
-  offset_reg_weight: 1.0e-3
+  offset_reg_weight: 0.0
+  drift_reg_weight: 1.0
+  history_noise_std: 0.01
   modality_dropout_probs:
     joint_state: 0.0
 

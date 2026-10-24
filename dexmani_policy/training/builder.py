@@ -71,7 +71,8 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
     else:
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
     rgb = getattr(model.obs_encoder, "backbone", None)
-    bind_defaults(cfg.agent, type(model))
+    if checkpoint is None:
+        bind_defaults(cfg.agent, type(model))
     with open_dict(cfg.agent):
         if checkpoint is None and hasattr(rgb, "effective_config"):
             cfg.agent.rgb_backbone_config = rgb.effective_config
