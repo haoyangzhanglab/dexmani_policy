@@ -134,11 +134,12 @@ class BaseRunner:
             )
             kwargs["action_context"] = {"hand_history": history.unsqueeze(0)}
         result = agent.predict_action(obs_dict=obs_batch, inference_steps=inference_steps, **kwargs)
-        prediction = result["pred_action"]
-        if prediction.shape != (1, agent.horizon, agent.action_dim):
-            raise ValueError("pred_action must contain one complete physical action trajectory")
-        start = agent.action_start_index
-        actions = prediction[0, start : start + action_steps, : agent.control_action_dim]
+        prediction = result["future_actions"]
+        if prediction.shape != (1, agent.future_steps, agent.control_action_dim):
+            raise ValueError("future_actions must contain the complete physical future")
+        if not torch.isfinite(prediction).all():
+            raise ValueError("Nonfinite policy future_actions")
+        actions = prediction[0, :action_steps]
         return np.ascontiguousarray(actions.detach().cpu().numpy())
 
     def run_episode(

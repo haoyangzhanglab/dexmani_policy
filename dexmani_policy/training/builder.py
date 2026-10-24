@@ -83,6 +83,10 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
             cfg.agent.update(model.effective_config)
     with open_dict(cfg):
         cfg.update(data_config)
+        metadata = model.inference_metadata
+        if checkpoint is not None and dict(cfg.policy_metadata) != metadata:
+            raise ValueError("Restored policy metadata differs from saved construction")
+        cfg.policy_metadata = metadata
     if checkpoint is None:
         model.to(device)
 

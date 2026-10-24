@@ -11,13 +11,8 @@ from omegaconf import DictConfig, OmegaConf
 from dexmani_policy.common.config import (
     load_experiment_config,
     positive_int,
-    resolve_action_start,
     validate_action_window,
     validate_depth_recipe,
-)
-from dexmani_policy.common.experiments import (
-    resolve_best_checkpoint,
-    resolve_checkpoint_path,
 )
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 
@@ -97,6 +92,8 @@ class PolicyInfo:
                 "normalization",
                 "pc_dim",
                 "hand_history_steps",
+                "supported_execution_modes",
+                "action_context_shapes",
             )
         )
         return OmegaConf.to_container(OmegaConf.create(values), resolve=True)
@@ -127,7 +124,7 @@ class PolicyInfo:
 
     @cached_property
     def action_start_index(self):
-        return resolve_action_start(self.saved_config.agent)
+        return self.saved_config.policy_metadata.action_start_index
 
     @cached_property
     def future_steps(self):
@@ -143,7 +140,7 @@ class PolicyInfo:
 
     @cached_property
     def control_action_dim(self):
-        return 19 if self.action_mode == "joint" else 21
+        return self.saved_config.policy_metadata.control_action_dim
 
     @cached_property
     def control_dt_s(self):
@@ -182,51 +179,35 @@ class PolicyInfo:
     def pc_dim(self):
         return self.saved_config.dataset.get("pc_dim")
 
+    @property
+    def supported_execution_modes(self):
+        return tuple(self.saved_config.policy_metadata.supported_execution_modes)
+
+    @property
+    def action_context_shapes(self):
+        return OmegaConf.to_container(self.saved_config.policy_metadata.action_context_shapes)
+
     @cached_property
     def hand_history_steps(self):
-        if (
-            self.saved_config.agent.get("_target_")
-            == "dexmani_policy.agents.policies.lamp.LAMPPolicy"
-        ):
-            return self.saved_config.agent.history_steps
-        return None
+        shape = self.action_context_shapes.get("hand_history")
+        return shape[0] if shape is not None else None
 
 
-def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_steps=None):
+def inspect_policy(experiment, *, checkpoint, weights, inference_steps):
     directory = resolve_experiment(experiment)
     cfg = load_experiment_config(directory)
-    if (
-        cfg["agent"].get("_target_")
-        == "dexmani_policy.agents.policies.multitask_dit.MultiTaskDiTPolicy"
-        or cfg["dataset"].get("_target_")
-        == "dexmani_policy.datasets.multitask_dataset.MultiTaskDataset"
-    ):
-        raise NotImplementedError(
-            "MultiTask Real deployment lacks task selection and child numerical recipe restoration"
-        )
-    resolved_best = resolve_best_checkpoint(directory) if checkpoint == "best" else None
-    path = (
-        resolved_best[1]
-        if resolved_best is not None
-        else resolve_checkpoint_path(directory, str(checkpoint))
-    )
-    defaults = resolved_best[0]["inference"] if resolved_best is not None else cfg.get("eval", {})
-    if weights is None:
-        if type(defaults.get("use_ema")) is not bool:
-            raise ValueError("Inference defaults require boolean use_ema")
-        weights = "ema" if defaults["use_ema"] else "raw"
+    if "datasets" in cfg["dataset"]:
+        raise NotImplementedError("MultiTask Real deployment requires task/child input selection")
+    path = Path(checkpoint).expanduser().resolve(strict=True)
+    if not path.is_file() or not path.is_relative_to(directory / "checkpoints"):
+        raise ValueError("Provide a resolved checkpoint inside experiment/checkpoints")
     if weights not in {"ema", "raw"}:
         raise ValueError("weights must be ema or raw")
-    steps = positive_int(
-        defaults.get("inference_steps") if inference_steps is None else inference_steps,
-        "inference_steps",
-    )
-    if cfg["agent"].get("_target_") == "dexmani_policy.agents.policies.lamp.LAMPPolicy":
-        if steps != 1:
-            raise ValueError("LAMP requires inference_steps=1")
-        history = positive_int(cfg["agent"]["history_steps"], "agent.history_steps")
-        if cfg["dataset"]["history_steps"] != history:
-            raise ValueError("LAMP dataset/policy history_steps must match")
+    steps = positive_int(inference_steps, "inference_steps")
+    shapes = cfg["policy_metadata"]["action_context_shapes"]
+    if "hand_history" in shapes:
+        if steps != 1 or cfg["dataset"]["history_steps"] != shapes["hand_history"][0]:
+            raise ValueError("LAMP requires NFE=1 and matching dataset/policy history")
     if cfg["action_key"] not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     recipe = cfg.get("real_runtime")
@@ -239,7 +220,7 @@ def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_ste
     positive_int(cfg["agent"]["action_dim"], "action_dim")
     validate_action_window(
         cfg["agent"]["horizon"], cfg["agent"]["n_obs_steps"], cfg["agent"]["n_action_steps"],
-        action_start_index=resolve_action_start(cfg["agent"]),
+        action_start_index=cfg["policy_metadata"]["action_start_index"],
     )
     rgb_preprocessing_kwargs(cfg["dataset"])
     return PolicyInfo(directory, path, cfg, weights, steps)

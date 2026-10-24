@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import random
 import time
-from contextlib import suppress
 
 import numpy as np
 
@@ -22,8 +21,7 @@ def load_policy(info, *, device="cuda:0", seed=0):
     try:
         return PolicyRuntime(agent, info, device=device, seed=seed)
     except BaseException:
-        with suppress(Exception):
-            agent.to("cpu")
+        agent.to("cpu")
         raise
 
 
@@ -86,29 +84,11 @@ class PolicyRuntime:
     def __init__(self, agent, info, *, device, seed):
         from dexmani_policy.common.config import validate_observation_fields
 
-        if getattr(agent, "history_steps", None) != info.hand_history_steps:
-            raise ValueError("Agent hand history disagrees with saved configuration")
-        if info.hand_history_steps is not None:
-            agent.validate_inference_steps(info.inference_steps)
-            if agent.hand_dim != 12:
-                raise ValueError("Agent hand history disagrees with saved configuration")
+        if agent.inference_metadata != dict(info.saved_config.policy_metadata):
+            raise ValueError("Restored policy metadata differs from saved configuration")
         for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
             if getattr(agent, name) != getattr(info, name):
                 raise ValueError(f"Restored policy differs from saved configuration: {name}")
-        aux = bool(getattr(agent, "use_aux_ee", False))
-        if (
-            agent.control_action_dim != info.control_action_dim
-            or agent.action_dim != info.control_action_dim + (9 if aux else 0)
-            or (aux and (info.action_mode != "joint" or agent.ee_dim != 9))
-        ):
-            raise ValueError("Invalid control action layout or auxiliary tail")
-        encoder = agent.obs_encoder
-        if (
-            hasattr(encoder, "use_coord_only")
-            and info.pc_dim is not None
-            and info.pc_dim != (3 if encoder.use_coord_only else 6)
-        ):
-            raise ValueError("Dataset and encoder point-cloud channels disagree")
         validate_observation_fields(agent, info.observation_fields)
 
         self.agent = agent
@@ -123,7 +103,6 @@ class PolicyRuntime:
 
         self.device = device
         self.seed = seed
-        self.rtc_guidance_cap = 0.0
         self.reset_episode()
 
     def reset_episode(self):
@@ -132,23 +111,6 @@ class PolicyRuntime:
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
-
-    def configure_execution(self, mode, guidance_cap=None):
-        from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
-
-        if mode not in {"sync", "async", "rtc"}:
-            raise ValueError("Unsupported execution mode")
-        if mode not in self.agent.supported_execution_modes:
-            raise NotImplementedError(
-                f"{type(self.agent).__name__} does not support {mode} execution"
-            )
-        if mode == "rtc":
-            prepare_schedule(
-                self.agent.action_decoder.noise_scheduler, self.info.inference_steps, guidance_cap
-            )
-            self.rtc_guidance_cap = guidance_cap
-        else:
-            self.rtc_guidance_cap = 0.0
 
     def prepare_observations(self, observation):
         import torch
@@ -195,7 +157,7 @@ class PolicyRuntime:
 
         return tensors
 
-    def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0):
+    def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
         import torch
 
         if self.agent is None:
@@ -204,45 +166,19 @@ class PolicyRuntime:
         dimensions = self.agent.control_action_dim
         kwargs = {}
 
-        if self.info.hand_history_steps is not None:
-            if not isinstance(action_context, dict) or set(action_context) != {"hand_history"}:
-                raise ValueError(
-                    "LAMP requires only action_context.hand_history from past dispatched targets"
-                )
-            history = action_context["hand_history"]
-            if (
-                not isinstance(history, np.ndarray)
-                or history.dtype.kind not in "fiu"
-                or history.shape != (self.agent.history_steps, self.agent.hand_dim)
-                or not np.isfinite(history).all()
-            ):
-                raise ValueError("hand_history must be finite physical NumPy [K,12]")
-            kwargs["action_context"] = {
-                "hand_history": torch.tensor(
-                    history, device=self.device, dtype=torch.float32
-                ).unsqueeze(0)
-            }
-        elif (
-            self.info.saved_config.agent._target_
-            == "dexmani_policy.agents.policies.latent_flow.LatentFlowPolicy"
-            and action_context is not None
-        ):
-            if not isinstance(action_context, dict) or set(action_context) != {"reference_state"}:
-                raise ValueError("LatentFlow accepts only action_context.reference_state")
-            reference = np.asarray(action_context["reference_state"])
-            if (
-                reference.shape != (19,)
-                or reference.dtype.kind not in "fiu"
-                or not np.isfinite(reference).all()
-            ):
-                raise ValueError("reference_state must be finite physical [19]")
-            kwargs["action_context"] = {
-                "reference_state": torch.tensor(reference, device=self.device, dtype=torch.float32)[None]
-            }
-        elif action_context is not None and (
-            not isinstance(action_context, dict) or action_context
-        ):
-            raise ValueError("This runtime policy does not accept external action_context keys")
+        if action_context is not None:
+            shapes = self.info.action_context_shapes
+            if not isinstance(action_context, dict) or set(action_context) - shapes.keys():
+                raise ValueError("Unsupported action_context fields")
+            context = {}
+            for name, value in action_context.items():
+                value = np.asarray(value)
+                if (value.shape != tuple(shapes[name]) or value.dtype.kind not in "fiu"
+                        or not np.isfinite(value).all()):
+                    raise ValueError(f"Invalid physical action_context.{name}")
+                context[name] = torch.tensor(value, device=self.device, dtype=torch.float32)[None]
+            if context:
+                kwargs["action_context"] = context
 
         if rtc_prefix is not None:
             prefix = np.asarray(rtc_prefix)
@@ -259,7 +195,7 @@ class PolicyRuntime:
                     prefix, device=self.device, dtype=torch.float32
                 ).unsqueeze(0),
                 delay_steps=delay_steps,
-                rtc_guidance_cap=self.rtc_guidance_cap,
+                rtc_guidance_cap=rtc_guidance_cap,
             )
         elif delay_steps:
             raise ValueError("No prefix requires delay_steps=0")
@@ -270,20 +206,20 @@ class PolicyRuntime:
             )
 
         # Real consumes the full future after the query, without auxiliary dimensions.
-        prediction = result.get("pred_action") if isinstance(result, dict) else None
-        expected = (1, self.info.horizon, self.agent.action_dim)
+        prediction = result.get("future_actions") if isinstance(result, dict) else None
+        expected = (1, self.info.future_steps, dimensions)
         if (
             not torch.is_tensor(prediction)
             or prediction.shape != expected
             or not prediction.is_floating_point()
         ):
-            raise ValueError(f"Policy future requires floating pred_action {expected}")
+            raise ValueError(f"Policy future requires floating future_actions {expected}")
         prediction = prediction.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
         if not np.isfinite(prediction).all():
             raise ValueError("Nonfinite policy prediction")
-        return np.ascontiguousarray(prediction[self.info.action_start_index :, :dimensions])
+        return np.ascontiguousarray(prediction)
 
-    def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0):
+    def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0, rtc_guidance_cap=None):
         positive_int(samples, "samples")
         future_steps = self.info.future_steps
         if type(rtc_delay) is not int or not 0 <= rtc_delay <= future_steps:
@@ -312,8 +248,8 @@ class PolicyRuntime:
             prefix = self.predict(observation, action_context=context)
             bootstrap = measure()
             steady = bootstrap
-            if self.rtc_guidance_cap > 0:
-                kwargs = {"rtc_prefix": prefix, "delay_steps": rtc_delay}
+            if rtc_guidance_cap is not None:
+                kwargs = {"rtc_prefix": prefix, "delay_steps": rtc_delay, "rtc_guidance_cap": rtc_guidance_cap}
                 self.predict(observation, action_context=context, **kwargs)
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}

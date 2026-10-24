@@ -35,9 +35,7 @@ from dexmani_policy.training.builder import (
     build_trainer, build_training_components,
 )
 from dexmani_policy.training.common.ema import EMA
-from dexmani_policy.common.hand_representation import (
-    HAND_ACTION_SEMANTICS, validate_hand_chunk_compatibility,
-)
+from dexmani_policy.common.hand_representation import HAND_ACTION_SEMANTICS, validate_hand_chunk_compatibility
 from dexmani_policy.training.data import build_dataset_and_normalizer, build_normalizer, build_train_loader
 from dexmani_policy.training.pretrain.hand_prior import hand_vae as pretrain
 from dexmani_policy.training.resume import build_resume_contract, restore_training_state
@@ -160,8 +158,8 @@ class LatentFlowTests(unittest.TestCase):
         _, model, _, _ = self.prepare_model()
         self.assertEqual(resolve_action_steps(model, 4), 4)
         sequence = torch.arange(76).reshape(1, 4, 19).float()
-        torch.testing.assert_close(model.format_action_output(sequence)["control_action"], sequence)
-        with patch.object(model, "predict_action", return_value={"pred_action": sequence}):
+        torch.testing.assert_close(model.format_action_output(sequence)["future_actions"], sequence)
+        with patch.object(model, "predict_action", return_value={"future_actions": sequence}):
             runner = BaseRunner.__new__(BaseRunner)
             np.testing.assert_array_equal(runner.predict_action_chunk({}, model, action_steps=4), sequence[0])
 
@@ -216,10 +214,10 @@ class LatentFlowTests(unittest.TestCase):
         model.n_action_steps = 2
         with patch.object(model.action_decoder, "predict_action", return_value=native), patch.object(model.codec, "decode", wraps=model.codec.decode) as decode:
             result = model.predict_action(batch["obs"], action_context=batch["action_context"])
-        torch.testing.assert_close(result["pred_action"][..., :7], reference[:, None, :7].expand(-1, 4, -1) + 2)
-        torch.testing.assert_close(result["pred_action"][..., 7:], reference[:, None, 7:].expand(-1, 4, -1) + 3.3)
+        torch.testing.assert_close(result["future_actions"][..., :7], reference[:, None, :7].expand(-1, 4, -1) + 2)
+        torch.testing.assert_close(result["future_actions"][..., 7:], reference[:, None, 7:].expand(-1, 4, -1) + 3.3)
         self.assertEqual(decode.call_args.args[0].shape[1], 4)
-        torch.testing.assert_close(result["control_action"], result["pred_action"][:, :2])
+        self.assertEqual(result["future_actions"].shape, (2, 4, 19))
         torch.testing.assert_close(model.resolve_reference_state(batch["obs"], None), reference)
         # An exact velocity oracle must give zero arm/latent FM and decode the true target estimate.
         model.arm_loss_weight, model.latent_loss_weight, model.decoded_loss_weight = 1, 1, 1
@@ -380,13 +378,13 @@ class LatentFlowTests(unittest.TestCase):
         expected = restored.predict_action(
             {key: value[:1] for key, value in batch["obs"].items()},
             action_context={"reference_state": reference},
-        )["pred_action"][0].numpy()
+        )["future_actions"][0].numpy()
         torch.manual_seed(51)
         actual = runtime.predict(observation, action_context={"reference_state": reference[0].numpy()})
         np.testing.assert_array_equal(actual, expected)
         other = copy.deepcopy(self.cfg)
         other.agent._target_ = "dexmani_policy.agents.policies.dp3.DP3Policy"
-        self.assertEqual(PolicyInfo(self.path, path, other, "raw", 10).future_steps, 3)
+        self.assertEqual(PolicyInfo(self.path, path, other, "raw", 10).future_steps, 4)
 
     def test_relocated_dataset_resume_next_update(self):
         base_cfg = copy.deepcopy(self.cfg)

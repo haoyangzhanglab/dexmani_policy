@@ -298,7 +298,7 @@ class DataContractTests(unittest.TestCase):
         self.assertEqual(scheduler.state_dict(), restored_scheduler.state_dict())
         inference = restore_policy_agent(saved, checkpoint_path, use_ema=False, device="cpu")
         torch.testing.assert_close(inference.state_dict(), checkpoint.model_state, rtol=0, atol=0)
-        self.assertEqual(inference.predict_action(batch["obs"])["control_action"].shape, (2, 16, 19))
+        self.assertEqual(inference.predict_action(batch["obs"])["future_actions"].shape, (2, 20, 19))
 
 
 class LAMPPriorBatchTests(unittest.TestCase):

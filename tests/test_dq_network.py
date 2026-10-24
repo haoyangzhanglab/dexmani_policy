@@ -109,15 +109,14 @@ class DQNetworkTests(unittest.TestCase):
         obs = {k: v[:1] for k, v in obs.items()}
         rng = torch.get_rng_state()
         result = model.predict_action(obs)
-        self.assertEqual(result["pred_action"].shape, (1, 20, 19))
-        self.assertEqual(result["control_action"].shape, (1, 16, 19))
+        self.assertEqual(result["future_actions"].shape, (1, 20, 19))
+        self.assertEqual(set(result), {"future_actions", "pred_code_index", "pred_code_continuous"})
         self.assertEqual(len(noise.timesteps), 20)
-        torch.testing.assert_close(result["control_action"], result["pred_action"][:, :16])
         runner = BaseRunner(1, ["joint_state", "point_cloud"])
         torch.set_rng_state(rng)
         executed = runner.predict_action_chunk(obs, model, action_steps=16)
-        torch.testing.assert_close(torch.from_numpy(executed), result["pred_action"][0, :16])
-        torch.testing.assert_close(torch.from_numpy(executed[0]), result["pred_action"][0, 0])
+        torch.testing.assert_close(torch.from_numpy(executed), result["future_actions"][0, :16])
+        torch.testing.assert_close(torch.from_numpy(executed[0]), result["future_actions"][0, 0])
         sat = SATPolicy(horizon=16, n_obs_steps=2, n_action_steps=8, action_dim=19,
                         num_points=8, state_out_dim=8, n_layers=1,
                         pc_encoder_config=dict(channels=24, num_patches=2, group_size=4, depth=1, num_heads=4),

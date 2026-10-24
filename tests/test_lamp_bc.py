@@ -198,7 +198,7 @@ class LAMPBCTests(unittest.TestCase):
                     self.batch["obs"], action_context=self.batch["action_context"]
                 )
                 self.assertEqual(decode.call_count, 1)
-            self.assertTrue(prediction["control_action"].isfinite().all())
+            self.assertTrue(prediction["future_actions"].isfinite().all())
             self.assertTrue(torch.equal(rng, torch.get_rng_state()))
 
     def test_invalid_parameters_and_new_config(self):

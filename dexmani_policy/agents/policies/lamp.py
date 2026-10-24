@@ -186,6 +186,10 @@ class LAMPPolicy(BasePolicy):
         if steps is not None and (type(steps) is not int or steps != 1):
             raise ValueError("LAMP direct regression requires inference_steps=None or 1")
 
+    @property
+    def action_context_shapes(self):
+        return {"hand_history": [self.history_steps, self.hand_dim]}
+
     def initialize_training(self) -> None:
         self.prior_initialized = False
         if not self.prior_path:

@@ -116,7 +116,6 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
 
     from dexmani_policy.common.config import (
         normalization_dims_from_config,
-        resolve_action_start,
         resolve_normalization_spec,
         validate_action_window,
     )
@@ -128,13 +127,15 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     cfg = OmegaConf.create(saved_config)
     validate_action_window(
         cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps,
-        action_start_index=resolve_action_start(cfg.agent),
+        action_start_index=cfg.policy_metadata.action_start_index,
     )
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     state, global_step = select_inference_weights(payload, use_ema=use_ema)
     cfg = prepare_restore_config(cfg)
     agent = hydra.utils.instantiate(cfg.agent)
+    if agent.inference_metadata != OmegaConf.to_container(cfg.policy_metadata, resolve=True):
+        raise ValueError("Restored policy metadata differs from saved construction")
     agent.checkpoint_step = global_step
     agent.set_normalization_spec(
         resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
@@ -168,6 +169,7 @@ def inference_recipe(config):
 
     return {
         "agent": agent,
+        "policy_metadata": config["policy_metadata"],
         "inputs": inputs(config["dataset"]),
         "normalization": config["normalization"],
         "normalization_dims": config["normalization_dims"],

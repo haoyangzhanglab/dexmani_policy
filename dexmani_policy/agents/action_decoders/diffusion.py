@@ -130,6 +130,10 @@ class Diffusion(nn.Module):
                 beta=rtc_guidance_cap,
                 steps=num_steps,
             )
+        if rtc_prefix is not None:
+            from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
+
+            prepare_schedule(self.noise_scheduler, num_steps, rtc_guidance_cap)
         sample = torch.randn_like(action_template)
         self.noise_scheduler.set_timesteps(num_steps)
         timesteps = self.noise_scheduler.timesteps.to(sample.device)

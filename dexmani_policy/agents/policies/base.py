@@ -234,7 +234,7 @@ class BasePolicy(nn.Module):
     ) -> dict[str, torch.Tensor]:
         self.validate_observations(obs_dict)
         condition = self.encode_observation(obs_dict)
-        if rtc_prefix is None or rtc_guidance_cap == 0:
+        if rtc_prefix is None:
             return self.predict_action_from_condition(condition, inference_steps=inference_steps)
         if type(self).predict_action_from_condition is not BasePolicy.predict_action_from_condition:
             raise NotImplementedError("RTC requires the continuous BasePolicy DDIM path")
@@ -263,7 +263,7 @@ class BasePolicy(nn.Module):
     ) -> dict[str, torch.Tensor]:
         template = condition.new_zeros((condition.shape[0], self.horizon, self.action_dim))
         kwargs = {}
-        if rtc_prefix is not None and rtc_guidance_cap != 0:
+        if rtc_prefix is not None:
             if not isinstance(self.action_decoder, Diffusion):
                 raise NotImplementedError("RTC requires the DDIM decoder")
             params = self.normalizer["action"].params_dict
@@ -283,12 +283,21 @@ class BasePolicy(nn.Module):
         return self.format_action_output(prediction)
 
     def format_action_output(self, prediction: torch.Tensor) -> dict[str, torch.Tensor]:
-        start = self.action_start_index
-        stop = start + self.n_action_steps
-        control_dim = self.control_action_dim
+        if not torch.isfinite(prediction).all():
+            raise ValueError("Nonfinite physical policy prediction")
+        return {"future_actions": prediction[:, self.action_start_index :, : self.control_action_dim]}
+
+    @property
+    def action_context_shapes(self) -> dict:
+        return {}
+
+    @property
+    def inference_metadata(self) -> dict:
         return {
-            "pred_action": prediction,
-            "control_action": prediction[:, start:stop, :control_dim],
+            "action_start_index": self.action_start_index,
+            "control_action_dim": self.control_action_dim,
+            "supported_execution_modes": list(self.supported_execution_modes),
+            "action_context_shapes": self.action_context_shapes,
         }
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:

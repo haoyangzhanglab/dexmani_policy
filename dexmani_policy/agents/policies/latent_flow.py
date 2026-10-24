@@ -211,6 +211,10 @@ class LatentFlowPolicy(BasePolicy):
         self.codec_initialized = False
         self.register_load_state_dict_post_hook(self.validate_restored_codec)
 
+    @property
+    def action_context_shapes(self):
+        return {"reference_state": [self.action_dim]}
+
     def initialize_training(self) -> None:
         self.codec_initialized = False
         if not self.codec_path:

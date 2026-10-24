@@ -253,15 +253,15 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
         set_seed(cfg.training.seed)
         with torch.inference_mode():
             result = model.predict_action(obs, **prediction_kwargs)
-            prediction = result["control_action"]
+            prediction = result["future_actions"]
             if isinstance(components.train_loader.dataset, LatentFlowDataset):
-                error = result["pred_action"][..., 7:] - batch["action"][:1, :, 7:].to(components.device)
+                error = result["future_actions"][..., 7:] - batch["action"][:1, :, 7:].to(components.device)
                 print(
                     f"{'EMA' if use_ema else 'raw'} full noise sampling: "
                     f"sampled_hand_mae={error.abs().mean().item():.6g}, "
                     f"sampled_hand_rmse={error.square().mean().sqrt().item():.6g} radians"
                 )
-        assert prediction.shape == (1, cfg.n_action_steps, model.control_action_dim)
+        assert prediction.shape == (1, model.future_steps, model.control_action_dim)
         assert torch.isfinite(prediction).all()
 
         # Eager kernels isolate checkpoint roundtrips from compile rounding differences.
@@ -270,7 +270,7 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
             model.action_decoder.model = backbone._orig_mod
             set_seed(cfg.training.seed)
             with torch.inference_mode():
-                eager = model.predict_action(obs, **prediction_kwargs)["control_action"]
+                eager = model.predict_action(obs, **prediction_kwargs)["future_actions"]
             print(
                 f"{'EMA' if use_ema else 'raw'} compiled/eager prediction max abs diff: "
                 f"{(prediction - eager).abs().max().item():.8g}"
@@ -288,7 +288,7 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
         )
         set_seed(cfg.training.seed)
         with torch.inference_mode():
-            actual = restored.predict_action(obs, **prediction_kwargs)["control_action"].cpu()
+            actual = restored.predict_action(obs, **prediction_kwargs)["future_actions"].cpu()
         torch.testing.assert_close(actual, expected)
         del restored
 
