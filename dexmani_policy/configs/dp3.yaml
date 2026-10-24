@@ -154,17 +154,10 @@ eval:
   inference_steps: 10
   use_ema: true
 
-  select_best:
-    initial_episodes: 25
-    batch_size: 5
-    max_episodes: 100
-
-  offline:
-    episodes: 70
-
-  demo:
-    episodes: 5
-    viewer_resolution: [1280, 960]
+  action_steps: null
+  episodes: 70
+  selection_episodes: 25
+  task_seeds: null
 
   video:
     enabled: true

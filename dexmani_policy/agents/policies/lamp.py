@@ -98,8 +98,6 @@ class LAMPPolicy(BasePolicy):
             raise ValueError("LAMP dataset/policy history_steps must match")
         if cfg.agent.get("num_inference_steps", 1) != 1 or cfg.eval.inference_steps != 1:
             raise ValueError("LAMP requires inference_steps=1 in agent/eval")
-        if cfg.eval.get("inference_steps_list") not in (None, [1]):
-            raise ValueError("LAMP inference_steps_list must be null or [1]")
         cls.validate_loss_config(
             cfg.agent.hand_loss_weight,
             cfg.agent.drift_reg_weight,

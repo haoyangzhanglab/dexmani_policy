@@ -29,7 +29,7 @@ from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDatas
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.deployment.metadata import PolicyInfo
 from dexmani_policy.deployment.runtime import PolicyRuntime
-from dexmani_policy.env_runner.base_runner import BaseRunner
+from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.training.builder import (
     TrainingComponents, build_model_and_ema, build_optimizer_and_scheduler,
     build_trainer, build_training_components,
@@ -160,7 +160,7 @@ class LatentFlowTests(unittest.TestCase):
         sequence = torch.arange(76).reshape(1, 4, 19).float()
         torch.testing.assert_close(model.format_action_output(sequence)["future_actions"], sequence)
         with patch.object(model, "predict_action", return_value={"future_actions": sequence}):
-            runner = BaseRunner.__new__(BaseRunner)
+            runner = SimRunner.__new__(SimRunner)
             np.testing.assert_array_equal(runner.predict_action_chunk({}, model, action_steps=4), sequence[0])
 
     def test_consumed_rows_relative_statistics_and_hand_only_eligibility(self):

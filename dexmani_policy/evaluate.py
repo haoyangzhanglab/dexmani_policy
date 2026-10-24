@@ -1,47 +1,51 @@
-"""Evaluate a checkpoint on held-out task seeds, optionally sweeping NFE."""
+"""Evaluate one resolved checkpoint or a frozen selection record."""
 
+import argparse
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
     load_experiment_config,
     register_resolvers,
     set_project_root,
 )
-from dexmani_policy.evaluation.config import build_evaluation_parser, parse_evaluation_overrides
-from dexmani_policy.evaluation.rollout import evaluate_checkpoint
+from dexmani_policy.evaluation.config import parse_evaluation_overrides, resolve_evaluation_request
+from dexmani_policy.evaluation.rollout import evaluate_policy
+
+
+def build_parser(description):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--policy-name", required=True)
+    parser.add_argument("--task-name", required=True)
+    parser.add_argument("--exp-name", required=True)
+    parser.add_argument("--output-dir")
+    parser.add_argument(
+        "overrides", nargs="*", help="Canonical eval.*, env_runner.* and training.device dotlist"
+    )
+    return parser
 
 
 def main(argv=None):
-    parser = build_evaluation_parser(__doc__)
-    parser.add_argument("--ckpt-tag", default="best", help="best, latest, or 20pct..100pct.")
-    parser.add_argument(
-        "--ckpt-path", help="Path inside experiment/checkpoints; overrides --ckpt-tag."
+    parser = build_parser(__doc__)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
+        "--checkpoint",
+        default="best",
+        help="best, latest, percentage tag or concrete checkpoint path",
     )
-    parser.add_argument(
-        "--episodes",
-        type=int,
-        help="Test episodes per task; defaults to selection record, then saved config. Conflicts fail.",
+    source.add_argument(
+        "--selection-record", help="Completed selection result; freezes all research settings"
     )
-    parser.add_argument("--no-videos", action="store_true", help="Override saved video settings.")
-    parser.add_argument("--selection-record", help="Path to a completed selection_result.json.")
     args = parser.parse_args(argv)
-
     set_project_root()
     register_resolvers()
     exp_dir = PROJECT_ROOT / "experiments" / args.policy_name / args.task_name / args.exp_name
-    cfg = load_experiment_config(exp_dir)
-    evaluate_checkpoint(
+    request = resolve_evaluation_request(
+        load_experiment_config(exp_dir),
         exp_dir,
-        cfg,
-        checkpoint=args.ckpt_path or args.ckpt_tag,
-        episodes=args.episodes,
-        use_ema=args.use_ema,
-        action_steps=args.action_steps,
-        inference_steps_list=[args.inference_steps] if args.inference_steps is not None else None,
-        overrides=parse_evaluation_overrides(args.overrides),
-        eval_seed=args.seed,
+        args.checkpoint,
+        parse_evaluation_overrides(args.overrides),
         selection_record=args.selection_record,
-        record_video=False if args.no_videos else None,
     )
+    evaluate_policy(request, output_root=exp_dir / "eval_dexsim", output_dir=args.output_dir)
 
 
 if __name__ == "__main__":

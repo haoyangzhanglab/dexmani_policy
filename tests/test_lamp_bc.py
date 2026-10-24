@@ -28,7 +28,7 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
 from dexmani_policy.common.runtime import get_rng_state
-from dexmani_policy.env_runner.base_runner import BaseRunner
+from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.training.builder import (
     build_model_and_ema,
     build_optimizer_and_scheduler,
@@ -479,7 +479,7 @@ class LAMPBCTests(unittest.TestCase):
 
     def test_runner_history_records_executed_commands_and_resets(self):
         model = self.model().eval()
-        runner = BaseRunner(1, ["joint_state", "point_cloud"])
+        runner = SimRunner("synthetic", 1, ["joint_state", "point_cloud"])
         captured = []
         handle = model.prior.encoder.register_forward_pre_hook(
             lambda module, args: captured.append(args[0].detach().reshape(3, 12).clone())

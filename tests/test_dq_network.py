@@ -10,7 +10,7 @@ from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
 from dexmani_policy.agents.policies.sat import SATPolicy
 from dexmani_policy.common.config import load_policy_config
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
-from dexmani_policy.env_runner.base_runner import BaseRunner
+from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.training.builder import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import build_hand_prototypes
 
@@ -112,7 +112,7 @@ class DQNetworkTests(unittest.TestCase):
         self.assertEqual(result["future_actions"].shape, (1, 20, 19))
         self.assertEqual(set(result), {"future_actions", "pred_code_index", "pred_code_continuous"})
         self.assertEqual(len(noise.timesteps), 20)
-        runner = BaseRunner(1, ["joint_state", "point_cloud"])
+        runner = SimRunner("synthetic", 1, ["joint_state", "point_cloud"])
         torch.set_rng_state(rng)
         executed = runner.predict_action_chunk(obs, model, action_steps=16)
         torch.testing.assert_close(torch.from_numpy(executed), result["future_actions"][0, :16])

@@ -108,6 +108,7 @@ PASS1_OPTS=(
     --exclude='vqvae_hand_best.pt'
     --exclude='best_ckpt.json'
     --exclude='eval_ckpt_selector/**/selection_result.json'
+    --exclude='**/result_details.json'
     $DRY_RUN
 )
 
@@ -137,6 +138,11 @@ rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     echo "[sync_down] Pass 2: rsync error (code $rc)" >&2
     exit "$rc"
 }
+
+# Publish complete episode records before selection records and the best pointer.
+rsync -av --ignore-times "${WANDB_EXCLUDE[@]}" \
+    --include='*/' --include='**/result_details.json' \
+    --exclude='*' $DRY_RUN "$REMOTE_PATH" "$LOCAL_PATH" || exit "$?"
 
 # Publish selection records before the best reference, even at equal size/mtime.
 rsync -av --checksum "${WANDB_EXCLUDE[@]}" \
