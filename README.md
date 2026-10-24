@@ -38,6 +38,8 @@ python -m dexmani_policy.common.config --config-name dp3 'task_name=<task>' --ch
 
 该命令只检查路径，不读取数据内容；字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。重新生成数据需使用新路径。通用 affine normalizer 仅按有效训练窗口实际消费的源行流式拟合，排除 validation、未消费行和子集 exclusions；LatentFlow relative action 按窗口/q0 统计；统计总体与手部 codec 的区别见 [归一化](docs/项目架构.md#归一化)。
 
+新训练将实际划分保存为 `data_recipe[].split_manifest`，并导出 `split_manifest_<index>.json` 供跨 run 复用；数据划分 seed 与训练 seed 分离。已有 trial 身份按 trial 分组，无身份时按 episode 索引，不声称 trial 独立。历史划分与产物不自动迁移。
+
 ### 手部先验准备
 
 使用 `dqrise`、`lamp` 或 `latent_flow` 开始新训练前，先按 [手部动作表示](docs/手部动作表示.md) 准备各自的 Codebook、prior 或 codec，并配置产物路径。DQ/LAMP 沿用各自的数据与划分检查；DQ 还需匹配手部 action affine，LAMP raw prior 不依赖观测 normalizer。LatentFlow codec 可来自独立同构语料，须匹配动作、时间和模型接口；同源数据须共享 holdout，避免验证泄漏。
@@ -77,11 +79,11 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<run>'
 ## 仿真评测
 
 ```bash
-bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run> --seed 1024 --episodes 70
-bash scripts/eval/record_demo.sh <policy_name> <task_name> <run>
+bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run> eval.seed=1024 eval.episodes=70
+bash scripts/eval/evaluate.sh <policy_name> <task_name> <run> --checkpoint best eval.video.enabled=true
 ```
 
-流水线先固定 test/selection 计划，再选点并复用记录进行不录视频的 held-out eval。Seed 池需同时满足 test 与 selection 的容量，预算以保存配置和显式覆盖为准；分步入口与参数规则见 [仿真评测机制](docs/仿真评测机制.md)。Demo 录像需要 X11 或 XWayland。
+流水线先固定 test/selection 计划，对所有候选使用相同预算，再执行冻结的 held-out test；默认每任务 test=70、每候选 selection=25，默认不录像。普通 evaluate 支持录像和研究覆盖，但不作为正式测试证据；正式测试使用 `--selection-record`，研究参数不能覆盖。Seed 来源、分步入口与参数规则见 [仿真评测机制](docs/仿真评测机制.md)。开启 human viewer 需要 X11 或 XWayland。
 
 比较实验需同时记录数据划分、有效 batch、训练预算、选点和最终评测协议。
 
