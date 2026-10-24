@@ -1,9 +1,9 @@
 import copy
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import hydra
@@ -18,18 +18,22 @@ from dexmani_policy.agents.hand_prior.hand_vae import HandVAE, load_hand_vae
 from dexmani_policy.common.checkpoint import (
     TrainingCheckpoint, load_training_checkpoint, restore_policy_agent, save_training_checkpoint,
 )
-from dexmani_policy.common.config import load_policy_config, resolve_action_steps, resolve_input_recipe
+from dexmani_policy.common.config import (
+    load_policy_config, resolve_action_steps, resolve_input_recipe, validate_source_recipe,
+)
 from dexmani_policy.common.normalization import FieldNormalizer
-from dexmani_policy.common.runtime import get_rng_state, set_rng_state
+from dexmani_policy.common.runtime import get_rng_state
 from dexmani_policy.datasets.common.episode_split import build_index_manifest
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
-from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.deployment.metadata import PolicyInfo
 from dexmani_policy.deployment.runtime import PolicyRuntime
 from dexmani_policy.env_runner.base_runner import BaseRunner
-from dexmani_policy.training.builder import build_model_and_ema, build_optimizer_and_scheduler
+from dexmani_policy.training.builder import (
+    TrainingComponents, build_model_and_ema, build_optimizer_and_scheduler,
+    build_trainer, build_training_components,
+)
 from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.common.hand_representation import (
     HAND_ACTION_SEMANTICS, validate_hand_chunk_compatibility,
@@ -105,7 +109,7 @@ class LatentFlowTests(unittest.TestCase):
         codec.action_mean.fill_(0.7)
         codec.action_std.fill_(1.3)
         metadata = dict(
-            model_config=codec.model_config, hand_data=self.hand_dataset().hand_data,
+            model_config=codec.model_config, hand_data=dataset.hand_data,
             loss_reduction=dict(kl="mean_over_batch_time_latent"),
         )
         torch.save(dict(model_config=codec.model_config, state_dict=codec.state_dict(), metadata=metadata), self.cfg.codec.path)
@@ -281,19 +285,31 @@ class LatentFlowTests(unittest.TestCase):
             "training.kl_ramp=1", "training.eval_every=1",
         ])
         real_evaluate = pretrain.evaluate
-        seen = []
+        evaluated_parameters = []
         def ranked_evaluation(model, dataset, batch_size):
             self.assertTrue(dataset.is_validation)
             value = real_evaluate(model, dataset, batch_size)
-            seen.append(value)
-            value["physical_mae"] = float(len(seen))
+            evaluated_parameters.append({
+                name: p.detach().clone() for name, p in model.named_parameters()
+            })
+            value["physical_mae"] = float(len(evaluated_parameters))
             return value
         with patch.object(pretrain, "evaluate", side_effect=ranked_evaluation):
             payload = pretrain.train(cfg)
         self.assertEqual(payload["metadata"]["selection"]["step"], 1)
         self.assertEqual(payload["metadata"]["selection"]["beta"], 0)
         self.assertEqual(payload["metadata"]["completed_updates"], 3)
+        self.assertEqual(len(evaluated_parameters), 3)
+        disk = torch.load(cfg.codec.path, map_location="cpu", weights_only=False)
+        self.assertEqual(disk["metadata"], payload["metadata"])
+        self.assertEqual(disk["metrics"], payload["metrics"])
+        torch.testing.assert_close(disk["state_dict"], payload["state_dict"], rtol=0, atol=0)
         loaded, _ = load_hand_vae(cfg.codec.path)
+        torch.testing.assert_close(dict(loaded.named_parameters()), evaluated_parameters[0], rtol=0, atol=0)
+        self.assertTrue(any(
+            not torch.equal(evaluated_parameters[0][name], parameter)
+            for name, parameter in evaluated_parameters[-1].items()
+        ))
         self.assertTrue(all(not p.requires_grad for p in loaded.parameters()))
         self.assertEqual(len(payload["metrics"]["physical_joint_mae"]), 12)
         cfg.dataset.split_manifest = None
@@ -325,7 +341,7 @@ class LatentFlowTests(unittest.TestCase):
         self.assertAlmostEqual(float(averaged.weight), 0.199, places=6)
         self.assertEqual(EMA(copy.deepcopy(raw)).get_decay(0), 0)
 
-    def test_checkpoint_without_codec_resume_and_metadata(self):
+    def test_checkpoint_without_codec_inference_and_metadata(self):
         dataset, model, ema, updater = self.prepare_model()
         optimizer, scheduler = build_optimizer_and_scheduler(self.cfg, model, verbose=False)
         loader = build_train_loader(self.cfg, dataset)
@@ -346,7 +362,6 @@ class LatentFlowTests(unittest.TestCase):
             rng_states=[get_rng_state()], effective_config=saved,
         )
         path = save_training_checkpoint(self.path / "policy.pt", checkpoint)
-        checkpoint = load_training_checkpoint(path)
         Path(self.cfg.codec.path).unlink()
         for use_ema, expected in ((False, model), (True, ema)):
             restored = restore_policy_agent(saved, path, use_ema=use_ema, device="cpu")
@@ -355,35 +370,9 @@ class LatentFlowTests(unittest.TestCase):
             prediction = expected.predict_action(batch["obs"])
             torch.manual_seed(100)
             torch.testing.assert_close(restored.predict_action(batch["obs"]), prediction, rtol=0, atol=0)
-        invocation = copy.deepcopy(self.cfg)
-        with open_dict(invocation):
-            invocation.resume_from = str(path)
-        cfg = resolve_input_recipe(invocation, overrides=[], resume_checkpoint=checkpoint)
-        ds, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint, verbose=False)
-        self.assertIsNone(normalizer)
-        restored, restored_ema, restored_updater = build_model_and_ema(cfg, "cpu", None, dataset=ds, checkpoint=checkpoint)
-        restored_optimizer, restored_scheduler = build_optimizer_and_scheduler(cfg, restored, verbose=False)
-        components = SimpleNamespace(train_loader=loader, optimizer=restored_optimizer, scheduler=restored_scheduler, ema_updater=restored_updater, device="cpu")
-        self.assertEqual(restore_training_state(checkpoint, components, effective_config=cfg), (1, 0, 1))
-        for agent, opt, sched, avg in ((model, optimizer, scheduler, updater), (restored, restored_optimizer, restored_scheduler, restored_updater)):
-            set_rng_state(checkpoint.rng_states[0])
-            agent.train()
-            loss, _ = agent.compute_loss(batch)
-            loss.backward()
-            opt.step()
-            sched.step()
-            opt.zero_grad(set_to_none=True)
-            avg.step(agent)
-        torch.testing.assert_close(restored.state_dict(), model.state_dict(), rtol=0, atol=0)
-        torch.testing.assert_close(restored_ema.state_dict(), ema.state_dict(), rtol=0, atol=0)
-        bad = copy.deepcopy(cfg)
-        bad.training.loop.total_train_steps += 1
-        with self.assertRaisesRegex(ValueError, "recipe mismatch"):
-            restore_training_state(checkpoint, components, effective_config=bad)
-        info = PolicyInfo(self.path, path, cfg, "ema", 10)
+        info = PolicyInfo(self.path, path, self.cfg, "ema", 10)
         self.assertEqual(info.future_steps, 4)
         self.assertEqual(info.action_start_index, 0)
-        restored.eval()
         runtime = PolicyRuntime(restored, info, device="cpu", seed=0)
         observation = {key: value[0].numpy() for key, value in batch["obs"].items()}
         reference = batch["action_context"]["reference_state"][:1]
@@ -395,9 +384,123 @@ class LatentFlowTests(unittest.TestCase):
         torch.manual_seed(51)
         actual = runtime.predict(observation, action_context={"reference_state": reference[0].numpy()})
         np.testing.assert_array_equal(actual, expected)
-        old = copy.deepcopy(cfg)
-        old.agent._target_ = "dexmani_policy.agents.policies.dp3.DP3Policy"
-        self.assertEqual(PolicyInfo(self.path, path, old, "raw", 10).future_steps, 3)
+        other = copy.deepcopy(self.cfg)
+        other.agent._target_ = "dexmani_policy.agents.policies.dp3.DP3Policy"
+        self.assertEqual(PolicyInfo(self.path, path, other, "raw", 10).future_steps, 3)
+
+    def test_relocated_dataset_resume_next_update(self):
+        base_cfg = copy.deepcopy(self.cfg)
+        for stable_source in (True, False):
+            with self.subTest(stable_source=stable_source):
+                self.cfg = copy.deepcopy(base_cfg)
+                self.cfg.dataset.split_manifest = None
+                self.cfg.dataset.val_ratio = 0.5
+                self.cfg.training.loop.total_train_steps = 5
+                self.cfg.workspace.output_dir = str(self.path / f"continuous_{stable_source}")
+                if not stable_source:
+                    del zarr.open_group(str(self.zarr_path), mode="a").attrs["source_id"]
+                dataset, model, ema, updater = self.prepare_model()
+                optimizer, scheduler = build_optimizer_and_scheduler(self.cfg, model, verbose=False)
+                components = TrainingComponents(
+                    device=torch.device("cpu"), model=model, ema_model=ema, ema_updater=updater,
+                    optimizer=optimizer, scheduler=scheduler,
+                    train_loader=build_train_loader(self.cfg, dataset),
+                    workspace=hydra.utils.instantiate(self.cfg.workspace),
+                )
+                self.addCleanup(components.close)
+                trainer = build_trainer(self.cfg, components)
+                trainer.train(max_updates=2)
+                continuous_rng = get_rng_state()
+                checkpoint_path = next(components.workspace.checkpoint_dir.glob("*-step=00000001-*.pt"))
+                checkpoint = load_training_checkpoint(checkpoint_path)
+                Path(self.cfg.codec.path).unlink()
+                source_config = copy.deepcopy(checkpoint.effective_config)
+                self.assertEqual(
+                    (checkpoint.global_step, checkpoint.epoch, checkpoint.next_micro_step), (1, 0, 1)
+                )
+
+                moved_path = self.path / f"moved_{stable_source}.zarr"
+                shutil.copytree(self.zarr_path, moved_path)
+                invocation = copy.deepcopy(self.cfg)
+                with open_dict(invocation):
+                    invocation.resume_from = str(checkpoint_path)
+                cfg = resolve_input_recipe(
+                    invocation, overrides=[
+                        f"dataset.zarr_path={moved_path}",
+                        f"workspace.output_dir={self.path / f'resumed_{stable_source}'}",
+                    ], resume_checkpoint=checkpoint,
+                )
+                ds, normalizer = build_dataset_and_normalizer(
+                    cfg, resume_checkpoint=checkpoint, verbose=False
+                )
+                self.assertIsNone(normalizer)
+                resumed = build_training_components(cfg, "cpu", ds, normalizer, checkpoint=checkpoint)
+                self.addCleanup(resumed.close)
+                self.assertIs(resumed.train_loader.dataset, ds)
+                self.assertEqual(cfg.hand_data.provenance.zarr_path, str(moved_path))
+                self.assertEqual(checkpoint.effective_config, source_config)
+                old_source = source_config["hand_data"]["provenance"]["source_id"]
+                if not stable_source:
+                    self.assertEqual(old_source, str(self.zarr_path))
+                    self.assertEqual(cfg.hand_data.provenance.source_id, str(moved_path))
+                    with self.assertRaisesRegex(ValueError, "hand_data.provenance.source_id"):
+                        restore_training_state(checkpoint, resumed, effective_config=cfg)
+                    continue
+                self.assertEqual(cfg.hand_data.provenance.source_id, old_source)
+                state = restore_training_state(checkpoint, resumed, effective_config=cfg)
+                self.assertEqual(state, (1, 0, 1))
+                resumed_trainer = build_trainer(cfg, resumed)
+                # Only restore_training_state restores the process RNG for this branch.
+                resumed_trainer.train(resume_state=state, max_updates=1)
+                resumed_rng = get_rng_state()
+                for actual, expected in (
+                    (resumed.model.state_dict(), model.state_dict()),
+                    (resumed.ema_model.state_dict(), ema.state_dict()),
+                    (resumed.optimizer.state_dict()["state"], optimizer.state_dict()["state"]),
+                ):
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                self.assertEqual(
+                    resumed.optimizer.state_dict()["param_groups"], optimizer.state_dict()["param_groups"]
+                )
+                self.assertEqual(resumed.scheduler.state_dict(), scheduler.state_dict())
+                self.assertEqual(resumed.ema_updater.optimization_step, updater.optimization_step)
+                for loop in (trainer, resumed_trainer):
+                    self.assertEqual((loop.global_step, loop.current_epoch, loop.next_micro_step), (2, 1, 0))
+                self.assertEqual(resumed_rng["python"], continuous_rng["python"])
+                np.testing.assert_equal(resumed_rng["numpy"], continuous_rng["numpy"])
+                torch.testing.assert_close(resumed_rng["torch"], continuous_rng["torch"], rtol=0, atol=0)
+                self.assertEqual(resumed_rng["torch_cuda"], continuous_rng["torch_cuda"])
+                self.assertEqual(load_training_checkpoint(checkpoint_path).effective_config, source_config)
+
+    def test_recipe_location_exclusion_is_narrow(self):
+        self.prepare_model()
+        saved = OmegaConf.to_container(self.cfg, resolve=True)
+        current = copy.deepcopy(saved)
+        current["dataset"]["zarr_path"] = "/relocated/data.zarr"
+        current["hand_data"]["provenance"]["zarr_path"] = "/relocated/data.zarr"
+        before = copy.deepcopy(current)
+        validate_source_recipe(saved, current)
+        self.assertEqual(current, before)
+        self.assertEqual(saved, OmegaConf.to_container(self.cfg, resolve=True))
+        for key, value in (
+            ("hand_data.provenance.source_id", "different"),
+            ("hand_data.provenance.episode_ids", ["first", "second"]),
+            ("hand_data.provenance.episode_ends", [7, 16]),
+            ("hand_data.provenance.train_episodes", [1]),
+            ("hand_data.provenance.val_episodes", [0]),
+            ("hand_data.train_windows", 4),
+            ("hand_data.val_windows", 4),
+            ("hand_data.contract.units", "degrees"),
+            ("hand_data.contract.dt", 0.1),
+            ("agent.codec_metadata.hand_data.provenance.zarr_path", "/changed/codec_source.zarr"),
+            ("data_recipe.0.split_manifest.zarr_path", "/changed/manifest_source.zarr"),
+            ("training.loop.total_train_steps", 7),
+        ):
+            with self.subTest(field=key):
+                changed = OmegaConf.create(current)
+                OmegaConf.update(changed, key, value, merge=False)
+                with self.assertRaisesRegex(ValueError, "recipe mismatch"):
+                    validate_source_recipe(saved, changed)
 
 
 if __name__ == "__main__":

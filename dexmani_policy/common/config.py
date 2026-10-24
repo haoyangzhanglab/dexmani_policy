@@ -74,6 +74,7 @@ def recipe_content(config):
                 if (
                     child_path in RESUME_OPERATIONAL_FIELDS
                     or child_path in ARTIFACT_LOCATION_FIELDS
+                    or child_path == "hand_data.provenance.zarr_path"
                     or re.fullmatch(r"dataset\.(?:datasets\.\d+\.)?zarr_path", child_path)
                 ):
                     continue

@@ -74,7 +74,7 @@ HAND_ACTION_SEMANTICS = {
 
 
 def describe_hand_chunks(dataset, data_semantics, source_id):
-    """Bind declared coordinates to stored evidence; old Zarr declarations stay explicit."""
+    """Record stored semantics separately from explicit configuration declarations."""
     semantics = (
         OmegaConf.to_container(data_semantics, resolve=True)
         if OmegaConf.is_config(data_semantics) else dict(data_semantics)
