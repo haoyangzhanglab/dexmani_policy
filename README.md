@@ -9,6 +9,7 @@
 | 准备 DQ-RISE、LAMP、LatentFlow/HandVAE 手部表示 | [手部动作表示](docs/手部动作表示.md) |
 | 选点、固定测试 seeds、解释评测结果 | [仿真评测机制](docs/仿真评测机制.md) |
 | 远端启动、同步、监控与停止 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) |
+| 基础设施简化目标与分批实施（待实施） | [完整方案](docs/infra_simplification_plan.md)、[Codex 执行 prompt](docs/infra_refactor_codex_prompt.md) |
 | 修改代码与 AI 协作 | [AGENTS.md](AGENTS.md)、[仓库导航](#仓库导航) |
 
 以下命令从仓库根目录执行，`<...>` 替换为实际值。Python 命令使用 Conda `policy` 环境；本地训练和评测脚本自动通过该环境启动，远端环境另行配置。
