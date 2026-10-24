@@ -34,11 +34,11 @@ dataset:
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}
-  seed: ${training.seed}
+  seed: 42
   horizon: ${horizon}
   obs_horizon: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps} - 1'}
-  pad_after: ${eval:'${n_action_steps} - 1'}
+  pad_after: 0
   val_ratio: 0.1
   max_train_episodes: null
   split_manifest: null

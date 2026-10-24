@@ -20,6 +20,7 @@ from dexmani_policy.common.config import (
 from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
 from dexmani_policy.common.runtime import worker_init_fn
 from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
+from dexmani_policy.datasets.common.episode_split import validate_split_manifest
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 
 
@@ -53,7 +54,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     spec = resolve_normalization_spec(cfg)
     dataset_cfg = copy.deepcopy(cfg.dataset)
     saved_recipes = (
-        resume_checkpoint.effective_config["data_recipe"] if resume_checkpoint is not None else None
+        resume_checkpoint.effective_config["data_recipe"] if resume_checkpoint is not None else cfg.get("data_recipe")
     )
     if saved_recipes is not None:
         children = dataset_cfg.get("datasets", [dataset_cfg])
@@ -63,8 +64,30 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
             if "split_manifest" in recipe:
                 with open_dict(child):
                     child.saved_split = recipe["split_manifest"]
+                    child.val_ratio = 0.0
+                    child.max_train_episodes = None
     dataset = hydra.utils.instantiate(dataset_cfg)
     children = dataset.datasets if isinstance(dataset, MultiTaskDataset) else [dataset]
+    # Freeze actual masks before normalizer/model construction; never resample a saved run.
+    if resume_checkpoint is None:
+        agent_class = hydra.utils.get_class(cfg.agent._target_)
+        for child in children:
+            if "split_manifest" in child.data_recipe or agent_class.requires_split_manifest:
+                continue
+            buffer = child.replay_buffer
+            manifest = {
+                "format": "dexmani.episode_indices.v1", "zarr_path": child.zarr_path,
+                "episode_ends": buffer.episode_ends.tolist(), "episode_ids": buffer.attrs.get("episode_ids"),
+                "train_indices": child.train_mask.nonzero()[0].tolist(),
+                "val_indices": child.val_mask.nonzero()[0].tolist(),
+                "exclusions": (~(child.train_mask | child.val_mask)).nonzero()[0].tolist(),
+            }
+            if buffer.attrs.get("source_id") is not None:
+                manifest["source_id"] = buffer.attrs["source_id"]
+            child.data_recipe["split_manifest"] = validate_split_manifest(
+                manifest, buffer.attrs, buffer.n_episodes,
+                episode_ends=buffer.episode_ends, zarr_path=child.zarr_path,
+            )[2]
     reference = children[0]
     runtime = capture_real_runtime(dataset, cfg)
     with open_dict(cfg):

@@ -428,6 +428,10 @@ class LatentFlowTests(unittest.TestCase):
                         f"workspace.output_dir={self.path / f'resumed_{stable_source}'}",
                     ], resume_checkpoint=checkpoint,
                 )
+                if not stable_source:
+                    with self.assertRaisesRegex(hydra.errors.InstantiationException, "manifest data path/episode identity"):
+                        build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint, verbose=False)
+                    continue
                 ds, normalizer = build_dataset_and_normalizer(
                     cfg, resume_checkpoint=checkpoint, verbose=False
                 )
@@ -438,12 +442,6 @@ class LatentFlowTests(unittest.TestCase):
                 self.assertEqual(cfg.hand_data.provenance.zarr_path, str(moved_path))
                 self.assertEqual(checkpoint.effective_config, source_config)
                 old_source = source_config["hand_data"]["provenance"]["source_id"]
-                if not stable_source:
-                    self.assertEqual(old_source, str(self.zarr_path))
-                    self.assertEqual(cfg.hand_data.provenance.source_id, str(moved_path))
-                    with self.assertRaisesRegex(ValueError, "hand_data.provenance.source_id"):
-                        restore_training_state(checkpoint, resumed, effective_config=cfg)
-                    continue
                 self.assertEqual(cfg.hand_data.provenance.source_id, old_source)
                 state = restore_training_state(checkpoint, resumed, effective_config=cfg)
                 self.assertEqual(state, (1, 0, 1))

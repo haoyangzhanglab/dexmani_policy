@@ -40,10 +40,10 @@ dataset:
   _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
-  seed: ${training.seed}
+  seed: 42
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
-  pad_after: ${eval:'${n_action_steps} - 1'}
+  pad_after: 7
   val_ratio: 0.0
   max_train_episodes: 80
   split_manifest: null

@@ -381,6 +381,44 @@ class InfrastructureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decoder.predict_action(cond, template, rtc_prefix=prefix, rtc_guidance_cap=float("nan"))
 
+    def test_grouped_manifest_keeps_trials_whole_and_checks_sources(self):
+        from dexmani_policy.datasets.common.episode_split import (
+            build_index_manifest,
+            validate_split_manifest,
+        )
+
+        attrs = {
+            "episode_ids": ["a1", "a2", "b1", "b2", "c1", "c2"],
+            "trial_ids": {"a1": "a", "a2": "a", "b1": "b", "b2": "b", "c1": "c", "c2": "c"},
+        }
+        manifest = build_index_manifest(
+            "/source", [10, 20, 30, 40, 50, 60], attrs, val_ratio=0.3, max_train_episodes=3
+        )
+        train = {attrs["trial_ids"][key] for key in manifest["train_ids"]}
+        val = {attrs["trial_ids"][key] for key in manifest["val_ids"]}
+        self.assertFalse(train & val)
+        self.assertEqual(len(manifest["train_ids"]), 2)
+        indexed = build_index_manifest("/source", [10, 20], {"source_id": "corpus"}, val_ratio=0)
+        validate_split_manifest(
+            indexed, {"source_id": "corpus"}, 2, episode_ends=[10, 20], zarr_path="/moved"
+        )
+        with self.assertRaises(ValueError):
+            validate_split_manifest(
+                indexed, {"source_id": "different"}, 2, episode_ends=[10, 20], zarr_path="/source"
+            )
+
+    def test_training_seed_does_not_change_child_split_seed_or_padding(self):
+        for name in ("dp3", "dqrise", "lamp", "latent_flow", "multitask_dit"):
+            a = load_policy_config(name, ["training.seed=1"])
+            b = load_policy_config(name, ["training.seed=9"])
+            children_a = a.dataset.get("datasets", [a.dataset])
+            children_b = b.dataset.get("datasets", [b.dataset])
+            self.assertEqual([c.seed for c in children_a], [c.seed for c in children_b])
+            before = [c.pad_after for c in children_b]
+            b.n_action_steps = 2
+            self.assertEqual(before, [c.pad_after for c in children_b])
+            if name == "multitask_dit":
+                self.assertNotEqual(a.dataset.seed, b.dataset.seed)
 
 
 if __name__ == "__main__":

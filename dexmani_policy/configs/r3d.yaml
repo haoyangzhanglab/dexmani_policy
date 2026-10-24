@@ -50,10 +50,10 @@ dataset:
   action_key: ${action_key}
   use_aux_ee: ${use_aux_ee}
   zarr_path: ${zarr_path}
-  seed: ${training.seed}
+  seed: 42
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
-  pad_after: ${eval:'${n_action_steps} - 1'}
+  pad_after: 7
   val_ratio: 0.0
   max_train_episodes: 80
   sensor_modalities: ["joint_state", "point_cloud"]

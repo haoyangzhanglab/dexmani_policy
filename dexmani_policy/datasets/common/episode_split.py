@@ -13,8 +13,12 @@ def validate_split_manifest(manifest, attrs, episode_count, *, episode_ends, zar
         manifest = OmegaConf.to_container(manifest, resolve=True)
     manifest_format = manifest.get("format")
     if manifest_format == "dexmani.episode_indices.v1":
+        source = manifest.get("source_id")
+        if source is not None and (not isinstance(source, str) or not source or source != attrs.get("source_id")):
+            raise ValueError("Indexed split manifest source identity mismatch")
         if (
-            manifest["zarr_path"] != str(Path(zarr_path).expanduser().resolve())
+            (manifest["zarr_path"] != str(Path(zarr_path).expanduser().resolve())
+             and not (manifest.get("source_id") is not None and manifest["source_id"] == attrs.get("source_id")))
             or manifest["episode_ends"] != np.asarray(episode_ends).tolist()
             or manifest["episode_ids"] != attrs.get("episode_ids")
         ):
@@ -129,6 +133,29 @@ def build_index_manifest(
         or episode_ends[0] <= 0 or np.any(episode_ends[1:] <= episode_ends[:-1])
     ):
         raise ValueError("episode_ends must be nonempty, positive, strictly increasing integers")
+    if "trial_ids" in attrs:
+        ids, trials = attrs.get("episode_ids"), attrs["trial_ids"]
+        if (not isinstance(ids, list) or len(ids) != len(episode_ends)
+                or not isinstance(trials, dict) or set(trials) != set(ids)
+                or any(not isinstance(value, str) or not value for value in trials.values())):
+            raise ValueError("Trial grouping requires confirmed episode_ids and trial_ids")
+        groups = list(dict.fromkeys(trials[i] for i in ids))
+        val_groups = get_val_mask(len(groups), val_ratio, seed)
+        validation = {group for group, selected in zip(groups, val_groups) if selected}
+        eligible = [group for group in groups if group not in validation]
+        train_groups, count = set(), 0
+        for group in np.random.default_rng(seed).permutation(eligible):
+            size = sum(trials[i] == group for i in ids)
+            if max_train_episodes is None or count + size <= max_train_episodes:
+                train_groups.add(group)
+                count += size
+        manifest = {
+            "format": "dexmani.episode_trials.v1", "episode_ids": ids, "trial_ids": trials,
+            "train_ids": [i for i in ids if trials[i] in train_groups],
+            "val_ids": [i for i in ids if trials[i] in validation],
+            "exclusions": [i for i in ids if trials[i] not in train_groups | validation],
+        }
+        return validate_split_manifest(manifest, attrs, len(episode_ends), episode_ends=episode_ends, zarr_path=zarr_path)[2]
     val = get_val_mask(len(episode_ends), val_ratio, seed)
     train = downsample_mask(~val, max_train_episodes, seed)
     manifest = dict(
@@ -140,6 +167,8 @@ def build_index_manifest(
         val_indices=np.flatnonzero(val).tolist(),
         exclusions=np.flatnonzero(~(train | val)).tolist(),
     )
+    if attrs.get("source_id") is not None:
+        manifest["source_id"] = attrs["source_id"]
     return validate_split_manifest(
         manifest, attrs, len(episode_ends), episode_ends=episode_ends, zarr_path=zarr_path
     )[2]
