@@ -105,7 +105,7 @@ class SequenceSampler:
             end[:, None] - 1,
         )
 
-    def filter_valid(self, obs_valid, action_valid, n_obs_steps):
+    def filter_valid(self, obs_valid, action_valid, n_obs_steps, *, action_offset=0):
         # Bound temporary source-row arrays independently of dataset length.
         kept = []
         counts = {
@@ -119,7 +119,8 @@ class SequenceSampler:
             indices = self.indices[offset : offset + 8192]
             rows = self.source_rows(indices)
             obs_ok = obs_valid[rows[:, :n_obs_steps]].all(axis=1)
-            action_ok = action_valid[rows].all(axis=1)
+            future_rows = rows[:, action_offset:]
+            action_ok = action_valid[future_rows].all(axis=1)
             for name, ok in (
                 ("observation", obs_ok),
                 ("action", action_ok),
@@ -128,7 +129,7 @@ class SequenceSampler:
             keep = obs_ok & action_ok
             kept.append(indices[keep])
             obs_rows[rows[keep, :n_obs_steps].reshape(-1)] = True
-            action_rows[rows[keep].reshape(-1)] = True
+            action_rows[future_rows[keep].reshape(-1)] = True
         self.indices = np.concatenate(kept, axis=0)
         counts["valid"] = len(self.indices)
         self.validity_summary = counts
@@ -140,20 +141,14 @@ class SequenceSampler:
     def sample_source_rows(self, idx):
         return self.source_rows(self.indices[idx][None])[0]
 
-    def sample_sequence(self, idx, *, key_lengths=None):
+    def sample_sequence(self, idx, *, key_lengths=None, key_offsets=None):
         result = {}
-        start, end, sample_start, sample_end = map(int, self.indices[idx])
+        rows = self.sample_source_rows(idx)
         for key in self.keys:
             length = self.sequence_length if key_lengths is None else key_lengths[key]
-            read_end = min(end, start + max(1, length - sample_start))
-            values = self.replay_buffer.read(key, slice(start, read_end))
-            if sample_start == 0 and len(values) == length:
-                result[key] = values
-                continue
-            left, right = min(sample_start, length), min(sample_end, length)
-            padded = np.empty((length, *values.shape[1:]), dtype=values.dtype)
-            padded[:left] = values[0]
-            padded[left:right] = values[: right - left]
-            padded[right:] = values[-1]
-            result[key] = padded
+            offset = 0 if key_offsets is None else key_offsets.get(key, 0)
+            selected = rows[offset : offset + length]
+            start, end = int(selected[0]), int(selected[-1]) + 1
+            values = self.replay_buffer.read(key, slice(start, end))
+            result[key] = values if end - start == length else values[selected - start]
         return result

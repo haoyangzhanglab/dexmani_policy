@@ -1,0 +1,48 @@
+# Standalone hand corpus; no policy model or visual eligibility.
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+seed: 0
+horizon: 32
+
+data_semantics:
+  action_space: joint
+  action_coordinates: absolute_joint_command
+  joint_order: ['arm:7', 'thumb:3', 'index:3', 'middle:2', 'ring:2', 'pinky:2']
+  units: radians
+  obs_alignment: 'obs[t]_before_action[t]'
+  reference: measured_query_state
+  window: query_future_full_horizon
+
+dataset:
+  _target_: dexmani_policy.datasets.hand_prior.hand_chunk_dataset.HandChunkDataset
+  zarr_path: ${zarr_path}
+  data_semantics: ${data_semantics}
+  source_id: null
+  horizon: ${horizon}
+  seed: ${seed}
+  val_ratio: 0.1
+  max_train_episodes: null
+  split_manifest: null
+
+codec:
+  path: experiments/hand_vae/${task_name}/codec.pt
+  latent_dim: 9
+  hidden_dim: 128
+  n_layers: 3
+  n_heads: 4
+  mlp_ratio: 2.0
+  joint_weights: [1, 1, 1, 1, 1, 1, 1, 1, 0.5, 0.5, 0.5, 0.5]
+
+training:
+  device: cuda:0
+  steps: 30000
+  batch_size: 4096
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  beta: 3.0e-4
+  kl_warmup: 4000
+  kl_ramp: 4000
+  clip_grad: 1.0
+  eval_every: 1000
+  print_every: 200
+  kl_reduction: mean_over_batch_time_latent

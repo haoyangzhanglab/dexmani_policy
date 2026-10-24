@@ -137,7 +137,7 @@ class BaseRunner:
         prediction = result["pred_action"]
         if prediction.shape != (1, agent.horizon, agent.action_dim):
             raise ValueError("pred_action must contain one complete physical action trajectory")
-        start = agent.n_obs_steps - 1
+        start = agent.action_start_index
         actions = prediction[0, start : start + action_steps, : agent.control_action_dim]
         return np.ascontiguousarray(actions.detach().cpu().numpy())
 

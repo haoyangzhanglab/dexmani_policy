@@ -11,6 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 from dexmani_policy.common.config import (
     load_experiment_config,
     positive_int,
+    resolve_action_start,
     validate_action_window,
     validate_depth_recipe,
 )
@@ -80,6 +81,8 @@ class PolicyInfo:
                 "n_obs_steps",
                 "n_action_steps",
                 "horizon",
+                "action_start_index",
+                "future_steps",
                 "action_mode",
                 "control_dt_s",
                 "pointcloud_config",
@@ -121,6 +124,14 @@ class PolicyInfo:
     @cached_property
     def horizon(self):
         return self.saved_config.agent.horizon
+
+    @cached_property
+    def action_start_index(self):
+        return resolve_action_start(self.saved_config.agent)
+
+    @cached_property
+    def future_steps(self):
+        return self.horizon - self.action_start_index
 
     @cached_property
     def action_dim(self):
@@ -227,7 +238,8 @@ def inspect_policy(experiment, *, checkpoint="best", weights=None, inference_ste
         raise ValueError("Saved fingertip_link_names must be a list of link names")
     positive_int(cfg["agent"]["action_dim"], "action_dim")
     validate_action_window(
-        cfg["agent"]["horizon"], cfg["agent"]["n_obs_steps"], cfg["agent"]["n_action_steps"]
+        cfg["agent"]["horizon"], cfg["agent"]["n_obs_steps"], cfg["agent"]["n_action_steps"],
+        action_start_index=resolve_action_start(cfg["agent"]),
     )
     rgb_preprocessing_kwargs(cfg["dataset"])
     return PolicyInfo(directory, path, cfg, weights, steps)

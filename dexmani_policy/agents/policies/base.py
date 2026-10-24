@@ -67,6 +67,14 @@ class BasePolicy(nn.Module):
         """Validate model-specific constraints before constructing data or weights."""
 
     @property
+    def action_start_index(self) -> int:
+        return self.n_obs_steps - 1
+
+    @property
+    def future_steps(self) -> int:
+        return self.horizon - self.action_start_index
+
+    @property
     def consumed_observation_fields(self) -> tuple[str, ...]:
         return self.obs_encoder.consumed_observation_fields
 
@@ -253,7 +261,7 @@ class BasePolicy(nn.Module):
         return self.format_action_output(prediction)
 
     def format_action_output(self, prediction: torch.Tensor) -> dict[str, torch.Tensor]:
-        start = self.n_obs_steps - 1
+        start = self.action_start_index
         stop = start + self.n_action_steps
         control_dim = self.control_action_dim
         return {

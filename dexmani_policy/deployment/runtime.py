@@ -222,6 +222,23 @@ class PolicyRuntime:
                     history, device=self.device, dtype=torch.float32
                 ).unsqueeze(0)
             }
+        elif (
+            self.info.saved_config.agent._target_
+            == "dexmani_policy.agents.policies.latent_flow.LatentFlowPolicy"
+            and action_context is not None
+        ):
+            if not isinstance(action_context, dict) or set(action_context) != {"reference_state"}:
+                raise ValueError("LatentFlow accepts only action_context.reference_state")
+            reference = np.asarray(action_context["reference_state"])
+            if (
+                reference.shape != (19,)
+                or reference.dtype.kind not in "fiu"
+                or not np.isfinite(reference).all()
+            ):
+                raise ValueError("reference_state must be finite physical [19]")
+            kwargs["action_context"] = {
+                "reference_state": torch.tensor(reference, device=self.device, dtype=torch.float32)[None]
+            }
         elif action_context is not None and (
             not isinstance(action_context, dict) or action_context
         ):
@@ -229,7 +246,7 @@ class PolicyRuntime:
 
         if rtc_prefix is not None:
             prefix = np.asarray(rtc_prefix)
-            future_steps = self.info.horizon - self.info.n_obs_steps + 1
+            future_steps = self.info.future_steps
             if (
                 prefix.ndim != 2
                 or prefix.shape[1] != dimensions
@@ -264,11 +281,11 @@ class PolicyRuntime:
         prediction = prediction.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
         if not np.isfinite(prediction).all():
             raise ValueError("Nonfinite policy prediction")
-        return np.ascontiguousarray(prediction[self.info.n_obs_steps - 1 :, :dimensions])
+        return np.ascontiguousarray(prediction[self.info.action_start_index :, :dimensions])
 
     def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0):
         positive_int(samples, "samples")
-        future_steps = self.info.horizon - self.info.n_obs_steps + 1
+        future_steps = self.info.future_steps
         if type(rtc_delay) is not int or not 0 <= rtc_delay <= future_steps:
             raise ValueError(f"rtc_delay must be an integer in [0, {future_steps}]")
         observation = make_warmup_observation(self.info, rgb_hw=rgb_hw)

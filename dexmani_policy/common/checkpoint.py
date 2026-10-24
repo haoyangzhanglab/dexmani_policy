@@ -116,6 +116,7 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
 
     from dexmani_policy.common.config import (
         normalization_dims_from_config,
+        resolve_action_start,
         resolve_normalization_spec,
         validate_action_window,
     )
@@ -125,7 +126,10 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
         raise ValueError("Checkpoint inference recipe mismatch with saved config")
     saved_config = payload["effective_config"]
     cfg = OmegaConf.create(saved_config)
-    validate_action_window(cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps)
+    validate_action_window(
+        cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps,
+        action_start_index=resolve_action_start(cfg.agent),
+    )
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     state, global_step = select_inference_weights(payload, use_ema=use_ema)

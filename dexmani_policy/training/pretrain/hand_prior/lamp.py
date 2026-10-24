@@ -163,6 +163,14 @@ def train(args):
     dataset = build_prior_dataset(cfg)
     hand_data = describe_hand_data(dataset)
     train_rows, val_rows = source_rows(dataset)
+    if not len(train_rows):
+        raise ValueError("LAMP prior training requires nonempty training source rows")
+    drop_last = len(train_rows) >= args.batch_size
+    if not drop_last:
+        print(
+            f"LAMP prior small-data smoke exception: actual batch size={len(train_rows)} "
+            f"< configured batch size={args.batch_size}; keeping one partial batch per pass"
+        )
     prior = HandMotionPrior(
         hand_dim=12,
         history_steps=int(cfg.agent.history_steps),
@@ -181,7 +189,7 @@ def train(args):
     if initial is not None:
         print(f"Initial validation: {initial}")
     best_mse = float("inf")
-    batches = shuffled_batches(train_rows, args.batch_size, rng)
+    batches = shuffled_batches(train_rows, args.batch_size, rng, drop_last=drop_last)
     for update in range(args.steps):
         step = update + 1
         prior.train()

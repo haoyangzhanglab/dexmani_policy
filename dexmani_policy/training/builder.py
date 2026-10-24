@@ -131,6 +131,23 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
 def validate_hand_pretraining(cfg, model, dataset, *, checkpoint=None):
     if not model.requires_hand_pretraining:
         return
+    from dexmani_policy.agents.policies.latent_flow import LatentFlowPolicy
+
+    if isinstance(model, LatentFlowPolicy):
+        current = copy.deepcopy(dataset.hand_data)
+        validation = dataset.get_validation_dataset()
+        current.update(
+            train_windows=len(dataset),
+            val_windows=0 if validation is None else len(validation),
+            observation_rows=len(dataset.sampler.observation_source_rows),
+            action_rows=len(dataset.sampler.action_source_rows),
+        )
+        if checkpoint is None:
+            model.validate_training_data(current)
+        with open_dict(cfg):
+            cfg.hand_data = current
+            cfg.agent.codec_metadata = model.codec_metadata
+        return
     if model.requires_split_manifest:
         manifest = dataset.data_recipe.get("split_manifest")
         if manifest is None:
@@ -155,6 +172,7 @@ def build_optimizer(
     obs_lr: float | None = None,
     obs_weight_decay: float | None = None,
     betas: tuple[float, float] = (0.95, 0.999),
+    eps: float = 1e-8,
 ) -> torch.optim.AdamW:
     """Require each trainable parameter once and retain its name for resume checks."""
     obs_lr = obs_lr if obs_lr is not None else lr
@@ -185,6 +203,7 @@ def build_optimizer(
         groups,
         lr=lr,
         betas=betas,
+        eps=eps,
         fused=torch.cuda.is_available(),
     )
 
@@ -192,7 +211,8 @@ def build_optimizer(
 def build_optimizer_and_scheduler(cfg, model, *, verbose=True):
     """Build initial optimizer/scheduler; resume loads their complete saved states."""
     optimizer = build_optimizer(model, **cfg.optimizer)
-    bind_defaults(cfg.optimizer, build_optimizer)
+    if cfg.get("resume_from") is None:
+        bind_defaults(cfg.optimizer, build_optimizer)
     if cfg.training.lr_scheduler == "cosine_min_lr":
         with open_dict(cfg.training):
             cfg.training.lr_min_ratio = cfg.training.get("lr_min_ratio", 0.1)

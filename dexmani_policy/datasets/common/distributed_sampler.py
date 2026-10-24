@@ -1,7 +1,5 @@
 """Deterministic distributed ordering with a consumed-batch cursor."""
 
-import hashlib
-
 import numpy as np
 from torch.utils.data.distributed import DistributedSampler
 
@@ -12,9 +10,7 @@ def multitask_indices(
     task_lengths, sample_probs, seed, epoch, *, deterministic=False, sampling_strategy="balanced"
 ):
     """Map logical positions to task samples with deterministic seed/epoch quotas."""
-    parts = (seed, "fixed") if deterministic else (seed, epoch)
-    raw = "_".join(str(p) for p in parts)
-    rng = np.random.default_rng(int(hashlib.md5(raw.encode()).hexdigest(), 16) % (2**32))
+    rng = np.random.default_rng([seed, 0 if deterministic else epoch])
     total = sum(task_lengths)
     offsets = np.cumsum([0] + list(task_lengths))
     if deterministic and sampling_strategy == "proportional":
@@ -28,7 +24,6 @@ def multitask_indices(
             cumulative[np.flatnonzero(probs)[-1] + 1 :] = total
             counts = np.diff(np.floor(cumulative + rng.random())).astype(np.int64)
         else:
-            # Preserve balanced/proportional quota rounding and RNG consumption.
             counts = np.round(np.asarray(sample_probs) * total).astype(int)
             diff = total - counts.sum()
             if diff > 0:

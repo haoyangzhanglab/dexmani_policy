@@ -10,15 +10,16 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.training.common.hand_representation import HAND_ACTION_SEMANTICS
 
 
-class TemporalHandVAE(nn.Module):
-    """Bidirectional temporal VAE conditioned on the measured initial hand pose."""
+class HandVAE(nn.Module):
+    """Bidirectional VAE; callers supply FP32 tensors and disable autocast."""
 
     def __init__(
         self,
         hand_dim: int = 12,
-        horizon: int = 16,
+        horizon: int = 32,
         latent_dim: int = 9,
         hidden_dim: int = 128,
         n_layers: int = 3,
@@ -36,7 +37,7 @@ class TemporalHandVAE(nn.Module):
         )
         self.model_config = {key: positive_int(value, key) for key, value in dimensions.items()}
         if horizon < 3:
-            raise ValueError("Temporal codec horizon must be at least 3 for second differences")
+            raise ValueError("HandVAE horizon must be at least 3 for second differences")
         if not math.isfinite(mlp_ratio) or mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be positive and finite")
         feedforward_dim = positive_int(int(hidden_dim * mlp_ratio), "feedforward_dim")
@@ -95,23 +96,20 @@ class TemporalHandVAE(nn.Module):
         if chunk.ndim != 3 or chunk.shape[1:] != (self.horizon, width):
             raise ValueError(f"{name} must have shape [B,{self.horizon},{width}]")
 
-    def prepare_reference(self, q0: Tensor, batch_size: int) -> Tensor:
-        q0 = torch.as_tensor(q0, device=self.action_mean.device, dtype=self.action_mean.dtype)
+    def validate_reference(self, q0: Tensor, batch_size: int) -> None:
         if q0.shape != (batch_size, self.hand_dim):
             raise ValueError(f"q0 must have shape [B,{self.hand_dim}]")
-        return q0
 
     def normalize_actions(self, actions: Tensor, q0: Tensor) -> Tensor:
         """Physical commands -> standardized displacement from measured q0."""
-        actions = torch.as_tensor(
-            actions, device=self.action_mean.device, dtype=self.action_mean.dtype
-        )
-        self.validate_chunk(actions, self.hand_dim, "actions")
-        q0 = self.prepare_reference(q0, len(actions))
         return (actions - q0[:, None] - self.action_mean) / self.action_std
 
+    def denormalize_actions(self, relative: Tensor, q0: Tensor) -> Tensor:
+        return relative * self.action_std + self.action_mean + q0[:, None]
+
     def encode(self, actions: Tensor, q0: Tensor) -> tuple[Tensor, Tensor]:
-        q0 = torch.as_tensor(q0, device=self.action_mean.device, dtype=self.action_mean.dtype)
+        self.validate_chunk(actions, self.hand_dim, "actions")
+        self.validate_reference(q0, len(actions))
         relative = self.normalize_actions(actions, q0)
         tokens = torch.cat((self.encoder_q0(q0)[:, None], self.encoder_input(relative)), dim=1)
         tokens = tokens + self.encoder_position
@@ -122,9 +120,8 @@ class TemporalHandVAE(nn.Module):
 
     def decode(self, z: Tensor, q0: Tensor) -> Tensor:
         """Latent chunk -> standardized relative commands, with latent gradients."""
-        z = torch.as_tensor(z, device=self.action_mean.device, dtype=self.action_mean.dtype)
         self.validate_chunk(z, self.latent_dim, "z")
-        q0 = self.prepare_reference(q0, len(z))
+        self.validate_reference(q0, len(z))
         tokens = torch.cat((self.decoder_q0(q0)[:, None], self.decoder_input(z)), dim=1)
         tokens = tokens + self.decoder_position
         for layer in self.decoder:
@@ -132,9 +129,7 @@ class TemporalHandVAE(nn.Module):
         return self.decoder_output(self.decoder_norm(tokens[:, 1:]))
 
     def decode_actions(self, z: Tensor, q0: Tensor) -> Tensor:
-        q0 = torch.as_tensor(q0, device=self.action_mean.device, dtype=self.action_mean.dtype)
-        decoded = self.decode(z, q0)
-        return decoded * self.action_std + self.action_mean + q0[:, None]
+        return self.denormalize_actions(self.decode(z, q0), q0)
 
     def reconstruction_terms(self, pred: Tensor, target: Tensor) -> dict[str, Tensor]:
         """Joint-weighted Huber means for position, velocity, and acceleration."""
@@ -154,25 +149,42 @@ class TemporalHandVAE(nn.Module):
         terms = self.reconstruction_terms(pred, target)
         return terms["position"] + 0.2 * terms["velocity"] + 0.05 * terms["acceleration"]
 
-    def freeze(self) -> TemporalHandVAE:
+    def freeze(self) -> HandVAE:
         self.requires_grad_(False)
         self.eval()
         return self
 
     def validate_state(self) -> None:
         if not bool(self.ready):
-            raise ValueError("Temporal codec checkpoint is not ready")
+            raise ValueError("HandVAE checkpoint is not ready")
         if not all(torch.isfinite(value).all() for value in self.state_dict().values()):
-            raise ValueError("Temporal codec contains nonfinite tensors")
+            raise ValueError("HandVAE contains nonfinite tensors")
         if not (self.action_std > 0).all():
-            raise ValueError("Temporal codec action_std must be positive")
+            raise ValueError("HandVAE action_std must be positive")
         if not (self.joint_weights > 0).all():
-            raise ValueError("Temporal codec joint_weights must be positive")
+            raise ValueError("HandVAE joint_weights must be positive")
 
 
-def load_temporal_vae(path: str | Path) -> tuple[TemporalHandVAE, dict]:
+def load_hand_vae(path: str | Path) -> tuple[HandVAE, dict]:
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
-    codec = TemporalHandVAE(**payload["model_config"])
+    codec = HandVAE(**payload["model_config"])
     codec.load_state_dict(payload["state_dict"], strict=True)
     codec.validate_state()
+    validate_codec_metadata(payload["metadata"], codec.model_config)
     return codec.freeze(), payload
+
+
+def validate_codec_metadata(metadata, model_config):
+    if not isinstance(metadata, dict):
+        raise ValueError("HandVAE checkpoint requires embedded metadata")
+    if metadata["model_config"] != model_config:
+        raise ValueError("HandVAE metadata/model architecture mismatch")
+    contract = metadata["hand_data"]["contract"]
+    if any(contract[key] != value for key, value in HAND_ACTION_SEMANTICS.items()):
+        raise ValueError("HandVAE action semantics mismatch")
+    if contract["horizon"] != model_config["horizon"]:
+        raise ValueError("HandVAE metadata horizon mismatch")
+    if not math.isfinite(contract["dt"]) or contract["dt"] <= 0:
+        raise ValueError("HandVAE requires positive finite dt")
+    if metadata["loss_reduction"]["kl"] != "mean_over_batch_time_latent":
+        raise ValueError("HandVAE KL reduction mismatch")

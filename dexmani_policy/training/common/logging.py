@@ -209,6 +209,14 @@ def print_training_recipe(
         ("torch.compile", cfg.training.get("use_compile", False)),
         ("EMA", cfg.training.use_ema),
     ]
+    if "contract" in cfg.get("hand_data", {}):
+        dt = cfg.hand_data.contract.dt
+        rows.extend([
+            ("recorded dt (s)", dt),
+            ("prediction control duration (s)", cfg.horizon * dt),
+            ("execution control duration (s)", cfg.n_action_steps * dt),
+            ("codec precision", "fp32; policy master parameters fp32, autocast as above"),
+        ])
     print("=" * 60)
     print("Training Recipe")
     print("-" * 60)

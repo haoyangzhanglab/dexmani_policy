@@ -26,7 +26,7 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.runtime import dict_apply, set_seed
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
-from dexmani_policy.datasets.hand_prior.temporal_codec_dataset import TemporalCodecDataset
+from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset, observation_layout
 from dexmani_policy.training.builder import (
     build_training_components,
@@ -135,8 +135,8 @@ def validate_data_batch(batch, dataset, cfg):
         context_shapes = {}
         if isinstance(child, LAMPDataset):
             context_shapes["hand_history"] = (batch_size, child.history_steps, 12)
-        elif isinstance(child, TemporalCodecDataset):
-            context_shapes["hand_reference"] = (batch_size, 12)
+        elif isinstance(child, LatentFlowDataset):
+            context_shapes["reference_state"] = (batch_size, 19)
         if not isinstance(context, dict) or context.keys() != context_shapes.keys():
             raise ValueError("Batch action_context differs from the dataset recipe")
         for key, shape in context_shapes.items():
@@ -252,7 +252,15 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
         model.eval()
         set_seed(cfg.training.seed)
         with torch.inference_mode():
-            prediction = model.predict_action(obs, **prediction_kwargs)["control_action"]
+            result = model.predict_action(obs, **prediction_kwargs)
+            prediction = result["control_action"]
+            if isinstance(components.train_loader.dataset, LatentFlowDataset):
+                error = result["pred_action"][..., 7:] - batch["action"][:1, :, 7:].to(components.device)
+                print(
+                    f"{'EMA' if use_ema else 'raw'} full noise sampling: "
+                    f"sampled_hand_mae={error.abs().mean().item():.6g}, "
+                    f"sampled_hand_rmse={error.square().mean().sqrt().item():.6g} radians"
+                )
         assert prediction.shape == (1, cfg.n_action_steps, model.control_action_dim)
         assert torch.isfinite(prediction).all()
 

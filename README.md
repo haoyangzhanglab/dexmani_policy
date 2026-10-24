@@ -6,7 +6,7 @@
 | --- | --- |
 | 数据流、策略接口、恢复与部署 | [项目架构](docs/项目架构.md) |
 | 选择检查、运行 smoke 或短训练 | [验证指南](docs/验证指南.md) |
-| 准备 DQ-RISE、LAMP、Temporal 手部表示 | [手部动作表示](docs/手部动作表示.md) |
+| 准备 DQ-RISE、LAMP、LatentFlow/HandVAE 手部表示 | [手部动作表示](docs/手部动作表示.md) |
 | 选点、固定测试 seeds、解释评测结果 | [仿真评测机制](docs/仿真评测机制.md) |
 | 远端启动、同步、监控与停止 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) |
 | 修改代码与 AI 协作 | [AGENTS.md](AGENTS.md)、[仓库导航](#仓库导航) |
@@ -36,11 +36,11 @@ python -m pip check
 python -m dexmani_policy.common.config --config-name dp3 'task_name=<task>' --check
 ```
 
-该命令只检查路径，不读取数据内容；字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。重新生成数据需使用新路径。通用 affine normalizer 仅按最终选中的 train episodes 流式拟合，排除 validation 和子集 exclusions；统计总体与手部 codec 的区别见 [归一化](docs/项目架构.md#归一化)。
+该命令只检查路径，不读取数据内容；字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。重新生成数据需使用新路径。通用 affine normalizer 仅按有效训练窗口实际消费的源行流式拟合，排除 validation、未消费行和子集 exclusions；LatentFlow relative action 按窗口/q0 统计；统计总体与手部 codec 的区别见 [归一化](docs/项目架构.md#归一化)。
 
 ### 手部先验准备
 
-使用 `dqrise`、`lamp` 或 `temporal_codec_flow` 开始新训练前，先按 [手部动作表示](docs/手部动作表示.md) 准备各自的 Codebook、prior 或 codec，并配置产物路径。产物必须匹配训练数据、动作坐标和划分；DQ 还需匹配手部 action affine，LAMP raw prior 不依赖观测 normalizer。
+使用 `dqrise`、`lamp` 或 `latent_flow` 开始新训练前，先按 [手部动作表示](docs/手部动作表示.md) 准备各自的 Codebook、prior 或 codec，并配置产物路径。DQ/LAMP 沿用各自的数据与划分检查；DQ 还需匹配手部 action affine，LAMP raw prior 不依赖观测 normalizer。LatentFlow codec 可来自独立同构语料，须匹配动作、时间和模型接口；同源数据须共享 holdout，避免验证泄漏。
 
 ## 验证
 

@@ -1,24 +1,31 @@
 # State-conditioned temporal hand codec (arXiv:2609.19666) + flow matching.
 # Pretrain the codec once; frozen encoder means supply BC targets online.
-policy_name: temporal_codec_flow
+policy_name: latent_flow
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 seed: 42
-horizon: 16
+horizon: 32
 n_obs_steps: 2
-n_action_steps: 8
+n_action_steps: 25
 action_key: action
 action_dim: 19
 
+data_semantics:
+  action_space: joint
+  action_coordinates: absolute_joint_command
+  joint_order: ['arm:7', 'thumb:3', 'index:3', 'middle:2', 'ring:2', 'pinky:2']
+  units: radians
+  obs_alignment: 'obs[t]_before_action[t]'
+  reference: measured_query_state
+  window: query_future_full_horizon
+
 codec:
-  path: experiments/temporal_codec/${task_name}/codec.pt
+  path: experiments/hand_vae/${task_name}/codec.pt
   latent_dim: 9             # Paper default; configurable for the 12-DoF hand.
   hidden_dim: 128
   n_layers: 3
   n_heads: 4
   mlp_ratio: 2.0
-  # XHand order: thumb x3, index x3, middle x2, ring x2, pinky x2.
-  joint_weights: [1, 1, 1, 1, 1, 1, 1, 1, 0.5, 0.5, 0.5, 0.5]
 
 normalization:
   joint_state: limits
@@ -26,7 +33,7 @@ normalization:
   point_cloud: identity
 
 dataloader:
-  batch_size: 128
+  batch_size: 64
   shuffle: true
   num_workers: 8
   pin_memory: true
@@ -35,16 +42,18 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.hand_prior.temporal_codec_dataset.TemporalCodecDataset
+  _target_: dexmani_policy.datasets.hand_prior.latent_flow_dataset.LatentFlowDataset
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}
-  seed: ${training.seed}
+  seed: 0                 # Split/subset seed; independent of model training seed.
+  data_semantics: ${data_semantics}
+  source_id: null
   horizon: ${horizon}
   obs_horizon: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps} - 1'}
-  pad_after: ${eval:'${n_action_steps} - 1'}
-  val_ratio: 0.0
+  pad_after: 0
+  val_ratio: 0.1
   max_train_episodes: 80
   split_manifest: null
   sensor_modalities: [joint_state, point_cloud]
@@ -57,7 +66,7 @@ dataset:
       noise: {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  _target_: dexmani_policy.agents.policies.temporal_latent_flow.TemporalLatentFlowPolicy
+  _target_: dexmani_policy.agents.policies.latent_flow.LatentFlowPolicy
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
@@ -108,19 +117,16 @@ agent:
     joint_state: 0.0
 
 optimizer:
-  lr: 1.0e-4
-  weight_decay: 1.0e-6
-  betas: [0.95, 0.999]
-  obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6
+  lr: 5.0e-5
+  weight_decay: 1.0e-10
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  obs_lr: 5.0e-5
+  obs_weight_decay: 1.0e-10
 
 ema:
   _target_: dexmani_policy.training.common.ema.EMA
-  update_after_step: 0
-  inv_gamma: 1.0
-  power: 0.75
-  min_value: 0.0
-  max_value: 0.9999
+  fixed_decay: 0.99
 
 training:
   seed: ${seed}
@@ -128,11 +134,12 @@ training:
   use_bfloat16: true
   use_compile: true
   use_ema: true
-  lr_scheduler: cosine
-  lr_warmup_steps: 500
+  lr_scheduler: cosine_min_lr
+  lr_min_ratio: 0.1
+  lr_warmup_steps: 1000
   max_grad_norm: 1.0
   loop:
-    total_train_steps: 100000
+    total_train_steps: 30000
     log_interval_steps: 100
     gradient_accumulation_steps: 1
 

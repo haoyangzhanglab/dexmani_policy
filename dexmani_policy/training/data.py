@@ -24,7 +24,7 @@ from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
-    """Fit selected train episodes, preserving rot6d coordinates for action_ee auto mode."""
+    """Fit consumed training data, preserving rot6d coordinates for action_ee auto mode."""
     normalizer = AffineNormalizer()
 
     for key, mode in spec.items():
@@ -97,7 +97,10 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
                 windows=child.sampler.validity_summary,
                 observation_rows=len(child.sampler.observation_source_rows),
                 action_rows=len(child.sampler.action_source_rows),
-                normalization={"population": "train_episodes"},
+                normalization={
+                    "observations": "valid_train_windows_unique_source_rows",
+                    "action": child.action_normalization_population,
+                },
             )
             for child in children
         ]
@@ -123,7 +126,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
             summaries.append(summary)
         print(f"[Dataset] {' | '.join(summaries)}")
         if resume_checkpoint is None:
-            print("[Normalizer] train_episodes (excludes validation and unselected episodes)")
+            print("[Normalizer] consumed training rows; relative actions count each window/reference")
     return dataset, normalizer
 
 

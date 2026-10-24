@@ -2,7 +2,7 @@ import torch
 
 
 class EMA:
-    """Exponential moving average with a power-law decay warmup."""
+    """Exponential moving average with power-law warmup or a fixed decay."""
 
     def __init__(
         self,
@@ -12,7 +12,11 @@ class EMA:
         power=2 / 3,
         min_value=0.0,
         max_value=0.9999,
+        fixed_decay=None,
     ):
+        if fixed_decay is not None and not 0 <= fixed_decay < 1:
+            raise ValueError("fixed_decay must be finite and in [0,1)")
+        self.fixed_decay = fixed_decay
         for parameter in model.parameters():
             if parameter.requires_grad and parameter.dtype in (torch.float16, torch.bfloat16):
                 parameter.data = parameter.data.float()
@@ -27,6 +31,8 @@ class EMA:
         self.optimization_step = 0
 
     def get_decay(self, optimization_step):
+        if self.fixed_decay is not None:
+            return self.fixed_decay
         step = max(0, optimization_step - self.update_after_step - 1)
         if step == 0:
             return 0.0

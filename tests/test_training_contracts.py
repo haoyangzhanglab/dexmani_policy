@@ -22,6 +22,9 @@ from dexmani_policy.common.runtime import get_rng_state
 from dexmani_policy.datasets.common.episode_split import (
     build_index_manifest, get_val_mask, validate_split_manifest,
 )
+from dexmani_policy.datasets.common.distributed_sampler import (
+    ResumableDistributedSampler, multitask_indices,
+)
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
@@ -30,6 +33,7 @@ from dexmani_policy.training.common.hand_representation import describe_hand_dat
 from dexmani_policy.training.builder import build_model_and_ema, build_optimizer_and_scheduler
 from dexmani_policy.training.data import build_dataset_and_normalizer, build_normalizer, build_train_loader
 from dexmani_policy.training.pretrain.hand_prior.lamp import build_prior_dataset, kl_weight
+from dexmani_policy.training.pretrain.hand_prior import lamp as lamp_pretrain
 from dexmani_policy.training.pretrain.hand_prior.vqvae import build_policy_dataset
 from dexmani_policy.training.trainer import Trainer
 from dexmani_policy.training.resume import build_resume_contract, restore_training_state
@@ -171,6 +175,41 @@ class DataContractTests(unittest.TestCase):
                 self.dataset()
             scan.assert_not_called()
 
+    def test_multitask_sampling_cursor_and_recipe(self):
+        dataset = MultiTaskDataset([self.dataset(), self.dataset()], ["first", "second"])
+        for rank in range(2):
+            sampler = ResumableDistributedSampler(
+                dataset, batch_size=2, num_replicas=2, rank=rank, seed=42,
+            )
+            sampler.set_epoch(3)
+            complete = list(sampler)
+            sampler.set_epoch(3, next_micro_step=1)
+            self.assertEqual(list(sampler), complete[2:])
+            sampler.set_epoch(3)
+            self.assertEqual(list(sampler), complete)
+            sampler.set_epoch(4)
+            self.assertNotEqual(list(sampler), complete)
+        validation = dataset.get_validation_dataset()
+        args = (validation.task_lengths, validation.sample_probs, validation.seed)
+        first = multitask_indices(*args, epoch=0, deterministic=True, sampling_strategy="proportional")
+        later = multitask_indices(*args, epoch=5, deterministic=True, sampling_strategy="proportional")
+        self.assertEqual(first, later)
+        self.assertEqual(sorted(first), list(range(len(validation))))
+        weighted = multitask_indices([10, 10], [0, 1], seed=42, epoch=0, sampling_strategy="weighted")
+        self.assertEqual(len(weighted), 20)
+        self.assertTrue(all(10 <= index < 20 for index in weighted))
+
+        loader = DataLoader(dataset, sampler=sampler, batch_size=2)
+        contract = build_resume_contract(loader)
+        self.assertEqual(contract["multitask_sampling"], "numpy_seed_epoch")
+        previous = {key: value for key, value in contract.items() if key != "multitask_sampling"}
+        checkpoint = SimpleNamespace(effective_config={}, resume_contract=previous)
+        components = SimpleNamespace(
+            train_loader=loader, optimizer=None, scheduler=None, ema_updater=None,
+        )
+        with self.assertRaisesRegex(ValueError, "sampling recipe changed"):
+            restore_training_state(checkpoint, components, effective_config={})
+
     def test_dq_checkpoint_resume_next_update(self):
         directory = Path(self.directory.name)
         cfg = load_policy_config("dqrise", [f"zarr_path={self.path}",
@@ -260,6 +299,61 @@ class DataContractTests(unittest.TestCase):
         inference = restore_policy_agent(saved, checkpoint_path, use_ema=False, device="cpu")
         torch.testing.assert_close(inference.state_dict(), checkpoint.model_state, rtol=0, atol=0)
         self.assertEqual(inference.predict_action(batch["obs"])["control_action"].shape, (2, 16, 19))
+
+
+class LAMPPriorBatchTests(unittest.TestCase):
+    def test_source_row_batch_sizes_and_update_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                steps=5, batch_size=256, eval_every=2, print_every=1,
+                beta=0.001, beta_warmup=2, warmup_steps=2, noise_std=0.01,
+                weight_decay=1e-4, lr=2e-3, min_lr=1e-5, clip_grad=1.0,
+                policy_config=None, config="lamp", overrides=[],
+                output=str(Path(directory) / "prior.pt"), overwrite=False,
+                device="cpu", seed=42,
+            )
+            cfg = SimpleNamespace(agent=SimpleNamespace(
+                history_steps=3, latent_dim=2, prior_hidden_dim=8,
+            ))
+            for count in (257, 3, 0):
+                with self.subTest(count=count):
+                    dataset = SimpleNamespace(
+                        sampler=SimpleNamespace(action_source_rows=np.arange(count)),
+                        get_validation_dataset=lambda: None,
+                        history_for_rows=lambda rows: np.zeros((len(rows), 3, 12), np.float32),
+                        hand_actions=np.zeros((count, 12), np.float32),
+                        data_recipe={"split_manifest": {}},
+                    )
+                    prior = lamp_pretrain.HandMotionPrior(12, 3, 2, 8)
+                    optimizer = torch.optim.AdamW(prior.parameters(), lr=args.lr)
+                    with (
+                        patch.object(lamp_pretrain, "load_policy_config", return_value=cfg),
+                        patch.object(lamp_pretrain, "build_prior_dataset", return_value=dataset),
+                        patch.object(lamp_pretrain, "describe_hand_data", return_value={}),
+                        patch.object(lamp_pretrain, "HandMotionPrior", return_value=prior) as model,
+                        patch.object(torch.optim, "AdamW", return_value=optimizer),
+                        patch.object(lamp_pretrain, "prior_batch", wraps=lamp_pretrain.prior_batch) as batch,
+                        patch.object(lamp_pretrain, "kl_weight", wraps=kl_weight) as beta,
+                        patch.object(lamp_pretrain, "save_prior") as save,
+                        patch("builtins.print") as log,
+                    ):
+                        if count == 0:
+                            with self.assertRaisesRegex(ValueError, "nonempty training source rows"):
+                                lamp_pretrain.train(args)
+                            model.assert_not_called()
+                            batch.assert_not_called()
+                            continue
+                        lamp_pretrain.train(args)
+                    # The remaining calls belong to final evaluation, which keeps the tail.
+                    sizes = [len(call.args[1]) for call in batch.call_args_list]
+                    self.assertEqual(sizes[:args.steps], [min(count, args.batch_size)] * args.steps)
+                    self.assertEqual(sizes[args.steps:], [256, 1] if count == 257 else [3])
+                    self.assertTrue(all(int(state["step"]) == args.steps for state in optimizer.state.values()))
+                    self.assertEqual([call.args[0] for call in beta.call_args_list], list(range(args.steps)))
+                    self.assertEqual(save.call_args.args[5], args.steps)
+                    if count < args.batch_size:
+                        messages = "\n".join(str(call.args[0]) for call in log.call_args_list)
+                        self.assertIn("small-data smoke exception: actual batch size=3", messages)
 
 
 class ScheduleAndClipTests(unittest.TestCase):

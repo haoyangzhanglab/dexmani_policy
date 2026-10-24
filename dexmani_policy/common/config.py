@@ -187,7 +187,16 @@ def load_policy_config(config, overrides=()):
         return hydra.compose(config_name=name, overrides=list(overrides))
 
 
-def validate_action_window(horizon, n_obs_steps, n_action_steps) -> None:
+def resolve_action_start(agent) -> int:
+    """Prediction-token origin; metadata inspection stays independent of Torch."""
+    if isinstance(agent, (dict, DictConfig)):
+        if agent.get("_target_") == "dexmani_policy.agents.policies.latent_flow.LatentFlowPolicy":
+            return 0
+        return agent["n_obs_steps"] - 1
+    return agent.action_start_index
+
+
+def validate_action_window(horizon, n_obs_steps, n_action_steps, *, action_start_index=None) -> None:
     for name, value in (
         ("horizon", horizon),
         ("n_obs_steps", n_obs_steps),
@@ -195,9 +204,10 @@ def validate_action_window(horizon, n_obs_steps, n_action_steps) -> None:
     ):
         if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    if n_obs_steps - 1 + n_action_steps > horizon:
+    start = n_obs_steps - 1 if action_start_index is None else action_start_index
+    if start + n_action_steps > horizon:
         raise ValueError(
-            f"n_obs_steps - 1 + n_action_steps ({n_obs_steps - 1 + n_action_steps}) "
+            f"action_start_index + n_action_steps ({start + n_action_steps}) "
             f"exceeds horizon ({horizon})"
         )
 
@@ -207,7 +217,7 @@ def resolve_action_steps(agent, action_steps=None) -> int:
     steps = positive_int(
         agent.n_action_steps if action_steps is None else action_steps, "action_steps"
     )
-    max_steps = agent.horizon - agent.n_obs_steps + 1
+    max_steps = agent.horizon - resolve_action_start(agent)
     if steps > max_steps:
         raise ValueError(f"action_steps must be in [1, {max_steps}], got {steps}")
     return steps

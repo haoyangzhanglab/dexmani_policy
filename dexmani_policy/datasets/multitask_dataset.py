@@ -79,9 +79,11 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                 tuple(child.replay_buffer[action_key].shape[1:]) != action_shape
                 or child.use_aux_ee != reference.use_aux_ee
                 or child.horizon != reference.horizon
+                or child.action_offset != reference.action_offset
+                or child.action_normalization_population != reference.action_normalization_population
             ):
                 raise ValueError(
-                    "Child datasets must share the same action shape and auxiliary layout"
+                    "Child datasets must share action shape, time origin, normalization and auxiliary layout"
                 )
             if set(child.sensor_modalities) != fields:
                 raise ValueError("Child datasets must share the complete observation modality set")

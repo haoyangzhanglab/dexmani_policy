@@ -8,6 +8,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from dexmani_policy.common.config import (
     NON_NUMERIC_OBSERVATION_FIELDS,
     positive_int,
+    resolve_action_start,
     resolve_normalization_spec,
     validate_action_key_consistency,
     validate_action_window,
@@ -68,7 +69,10 @@ def validate_model_config(cfg):
 
 def validate_policy_layout(cfg):
     """Check shared windows and action layouts before opening data."""
-    validate_action_window(cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps)
+    validate_action_window(
+        cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps,
+        action_start_index=resolve_action_start(cfg.agent),
+    )
     positive_int(cfg.action_dim, "action_dim")
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
         if type(cfg.agent[name]) is not type(cfg[name]) or cfg.agent[name] != cfg[name]:
@@ -77,7 +81,14 @@ def validate_policy_layout(cfg):
     if cfg.agent.get("use_aux_ee", False) != aux:
         raise ValueError("agent.use_aux_ee must match use_aux_ee")
     dataset_defaults = inspect.signature(DemonstrationDataset).parameters
+    latent_policy = cfg.agent._target_ == "dexmani_policy.agents.policies.latent_flow.LatentFlowPolicy"
     for index, child in enumerate(cfg.dataset.get("datasets", [cfg.dataset])):
+        latent_dataset = (
+            child._target_
+            == "dexmani_policy.datasets.hand_prior.latent_flow_dataset.LatentFlowDataset"
+        )
+        if latent_policy != latent_dataset:
+            raise ValueError("LatentFlowPolicy and LatentFlowDataset must be used together")
         layout = dict(child)
         if issubclass(hydra.utils.get_class(child._target_), DemonstrationDataset):
             if child.get("sensor_modalities") is None:

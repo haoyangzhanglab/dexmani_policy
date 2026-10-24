@@ -33,6 +33,12 @@ from dexmani_policy.datasets.common.sequence_sampler import SequenceSampler
 class DemonstrationDataset(torch.utils.data.Dataset):
     """Observation-action windows from episodic demonstrations."""
 
+    action_normalization_population = "valid_train_windows_unique_source_rows"
+
+    @property
+    def action_offset(self):
+        return 0
+
     def __init__(
         self,
         zarr_path: str,
@@ -139,8 +145,10 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             self.action_valid &= self.finite_rows("action_ee", slice(0, 9))
         self.role_lengths = {key: self.obs_horizon for key in sensor_modalities}
         self.role_lengths[action_key] = horizon
+        self.role_offsets = {action_key: self.action_offset}
         if use_aux_ee:
             self.role_lengths["action_ee"] = horizon
+            self.role_offsets["action_ee"] = self.action_offset
 
         self.sampler = self.build_sampler(train_mask)
         self.validation_dataset = None
@@ -161,12 +169,13 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             self.observation_valid,
             self.action_valid,
             self.obs_horizon,
+            action_offset=self.action_offset,
         )
 
     def build_sampler(self, episode_mask):
         sampler = SequenceSampler(
             replay_buffer=self.replay_buffer,
-            sequence_length=self.horizon,
+            sequence_length=self.horizon + self.action_offset,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=episode_mask,
@@ -226,7 +235,9 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         )
 
     def __getitem__(self, idx):
-        sample = self.sampler.sample_sequence(idx, key_lengths=self.role_lengths)
+        sample = self.sampler.sample_sequence(
+            idx, key_lengths=self.role_lengths, key_offsets=self.role_offsets
+        )
         data = self.sample_to_data(sample)
         self.apply_augmentation(data)
         if self.random_keep_points is not None:
@@ -273,7 +284,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                     aug.augment(x)
 
     def iter_normalization_data(self, key: str):
-        """Stream each selected training episode once, without augmentation or padding."""
+        """Stream only source rows consumed by valid training windows, once per field."""
         if self.is_validation:
             raise ValueError("Validation must reuse the training normalizer")
         if key != "action" and key not in self.sensor_modalities:
@@ -283,17 +294,17 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         step = self.replay_buffer.chunk_rows(field)
         if action and self.use_aux_ee:
             step = min(step, self.replay_buffer.chunk_rows("action_ee"))
-        ends = np.asarray(self.replay_buffer.episode_ends)
-        starts = np.r_[0, ends[:-1]]
-        for episode in np.flatnonzero(self.train_mask):
-            for start in range(int(starts[episode]), int(ends[episode]), step):
-                end = min(start + step, int(ends[episode]))
-                values = self.replay_buffer.read(field, slice(start, end), cache=False)
-                if field == "point_cloud" and self.pc_dim is not None:
-                    values = values[..., : self.pc_dim]
-                if action and self.use_aux_ee:
-                    aux = self.replay_buffer.read(
-                        "action_ee", slice(start, end), columns=slice(0, 9), cache=False
-                    )
-                    values = np.concatenate((values, aux), axis=-1)
-                yield values
+        rows = self.sampler.action_source_rows if action else self.sampler.observation_source_rows
+        for block in np.unique(rows // step):
+            start = int(block * step)
+            selected = rows[np.searchsorted(rows, start) : np.searchsorted(rows, start + step)]
+            end = int(selected[-1]) + 1
+            values = self.replay_buffer.read(field, slice(start, end), cache=False)[selected - start]
+            if field == "point_cloud" and self.pc_dim is not None:
+                values = values[..., : self.pc_dim]
+            if action and self.use_aux_ee:
+                aux = self.replay_buffer.read(
+                    "action_ee", slice(start, end), columns=slice(0, 9), cache=False
+                )[selected - start]
+                values = np.concatenate((values, aux), axis=-1)
+            yield values
