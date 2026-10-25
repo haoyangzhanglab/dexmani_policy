@@ -13,6 +13,12 @@ from torch import Tensor, nn
 from dexmani_policy.common.config import positive_int
 
 
+def validate_dq_normalization(spec):
+    """DQ/VQ hand prototypes require the existing bounded action coordinates."""
+    if spec.get("action") not in {"auto", "limits"}:
+        raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
+
+
 class HandStateCodebook(nn.Module):
     """Store normalized prototypes and their Policy normalization as persistent buffers."""
 

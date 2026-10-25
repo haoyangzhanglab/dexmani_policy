@@ -16,20 +16,18 @@ class SATPolicy(BasePolicy):
     """Structural Action Transformer with [B,Da,T] trajectory tokens."""
 
     @classmethod
-    def validate_model_config(cls, cfg, spec) -> None:
-        Sparse3DGlobalObservationEncoder.validate_config(cfg, spec)
+    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
+        Sparse3DGlobalObservationEncoder.validate_config(cfg, spec, dataset=dataset)
         if cfg.n_obs_steps != 2:
             raise ValueError("SAT requires n_obs_steps=2")
-        if cfg.action_key != "action" or (cfg.horizon, cfg.n_action_steps, cfg.action_dim) != (
+        if dataset.action_key != "action" or (cfg.horizon, cfg.n_action_steps, cfg.action_dim) != (
             16,
             8,
             19,
         ):
             raise ValueError("SAT requires joint action=19, horizon=16, n_action_steps=8")
-        if cfg.get("use_aux_ee", False) or cfg.agent.get("hidden_dim", 256) != 256:
+        if cfg.get("use_aux_ee", False) or cfg.get("hidden_dim", 256) != 256:
             raise ValueError("SAT requires hidden_dim=256 without auxiliary actions")
-        if cfg.env_runner.env_kwargs.control_mode != "joint":
-            raise ValueError("SAT requires joint control")
 
     def __init__(
         self,

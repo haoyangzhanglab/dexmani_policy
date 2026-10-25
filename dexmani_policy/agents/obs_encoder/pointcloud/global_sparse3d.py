@@ -6,22 +6,23 @@ import torch
 from torch import nn
 
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.common.config import positive_int, validate_sparse3d_config
+from dexmani_policy.common.config import positive_int
 
 from .ops import preprocess_point_cloud
-from .sparse3d_encoder import Sparse3DEncoder
+from .sparse3d_encoder import Sparse3DEncoder, validate_sparse3d_config
 
 
 class Sparse3DGlobalObservationEncoder(nn.Module):
     consumed_observation_fields = ("joint_state", "point_cloud")
     out_dim = 256
     use_coord_only = False
+    validate_normalization = staticmethod(Sparse3DEncoder.validate_normalization)
 
     @staticmethod
-    def validate_config(cfg, spec) -> None:
-        validate_sparse3d_config(cfg, spec, default_num_patches=64)
+    def validate_config(cfg, spec, *, dataset) -> None:
+        validate_sparse3d_config(cfg, spec, dataset=dataset, default_num_patches=64)
         if cfg.n_obs_steps not in (1, 2) or (
-            cfg.agent.get("pc_dim", 6), cfg.agent.get("state_dim", 19)
+            cfg.get("pc_dim", 6), cfg.get("state_dim", 19)
         ) != (6, 19):
             raise ValueError("Sparse3D global observations require 1 or 2 XYZRGB/19D frames")
         if spec.get("joint_state") != "limits":

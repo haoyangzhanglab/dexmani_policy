@@ -8,16 +8,17 @@ from torch.nn import functional as F
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder, validate_sparse3d_config
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import positive_int, validate_sparse3d_config
+from dexmani_policy.common.config import positive_int
 
 
 class LAMPObservationEncoder(nn.Module):
     """Pool patch features and concatenate state as [B, T*D]."""
 
     consumed_observation_fields = ("joint_state", "point_cloud")
+    validate_normalization = staticmethod(Sparse3DEncoder.validate_normalization)
 
     def __init__(
         self,
@@ -95,24 +96,24 @@ class LAMPPolicy(BasePolicy):
         return {"hand_data": current}
 
     @classmethod
-    def validate_model_config(cls, cfg, spec) -> None:
-        validate_sparse3d_config(cfg, spec)
+    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
+        validate_sparse3d_config(cfg, spec, dataset=dataset)
         cls.validate_normalization(spec)
-        if cfg.action_key != "action" or cfg.action_dim != 19 or cfg.agent.state_dim != 19:
+        if dataset.action_key != "action" or cfg.action_dim != 19 or cfg.state_dim != 19:
             raise ValueError("LAMP requires joint action/state=7+12")
         if cfg.get("use_aux_ee", False):
             raise ValueError("LAMP does not support auxiliary action targets")
         if (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps) != (1, 1, 1):
             raise ValueError("LAMP requires H=Nobs=C=1")
-        if cfg.dataset.history_steps != cfg.agent.history_steps:
+        if dataset.history_steps != cfg.history_steps:
             raise ValueError("LAMP dataset/policy history_steps must match")
-        if cfg.agent.get("num_inference_steps", 1) != 1 or cfg.eval.inference_steps != 1:
+        if cfg.get("num_inference_steps", 1) != 1 or inference_steps != 1:
             raise ValueError("LAMP requires inference_steps=1 in agent/eval")
         cls.validate_loss_config(
-            cfg.agent.hand_loss_weight,
-            cfg.agent.drift_reg_weight,
-            cfg.agent.history_noise_std,
-            cfg.agent.arm_state_noise_std,
+            cfg.hand_loss_weight,
+            cfg.drift_reg_weight,
+            cfg.history_noise_std,
+            cfg.arm_state_noise_std,
         )
 
     def __init__(

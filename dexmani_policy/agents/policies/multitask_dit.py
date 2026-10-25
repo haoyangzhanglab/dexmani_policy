@@ -4,14 +4,13 @@ import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
 from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
 from dexmani_policy.agents.obs_encoder.text import CLIPTextEncoder
 from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
-from dexmani_policy.common.config import validate_action_clipping
 
 
 class MultiTaskDiTObservationEncoder(nn.Module):
@@ -66,9 +65,9 @@ class MultiTaskDiTPolicy(BasePolicy):
     """Language-conditioned RGB policy with cached task embeddings or online frozen CLIP."""
 
     @classmethod
-    def validate_model_config(cls, cfg, spec) -> None:
-        if cfg.agent.get("action_decoder_type", "diffusion") == "diffusion":
-            validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
+    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
+        if cfg.get("action_decoder_type", "diffusion") == "diffusion":
+            validate_action_clipping(spec, cfg.get("clip_sample", True))
 
     def __init__(
         self,
@@ -165,6 +164,9 @@ class MultiTaskDiTPolicy(BasePolicy):
             modality_dropout_probs=modality_dropout_probs,
         )
 
+        self.supported_execution_modes = (
+            ("sync", "async", "rtc") if action_decoder_type == "diffusion" else ("sync", "async")
+        )
         self.text_embed_dim = text_dim
         self.text_encoder_model = text_encoder_model
         self.needs_text_initialization = text_encoder is None

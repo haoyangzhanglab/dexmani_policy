@@ -10,13 +10,12 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     ConditionalUNet1D,
     validate_unet_horizon,
 )
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_dq_normalization
 from dexmani_policy.agents.obs_encoder.pointcloud.global_sparse3d import (
     Sparse3DGlobalObservationEncoder,
 )
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import validate_action_clipping, validate_dq_normalization
 
 
 class DQRISEPolicy(BasePolicy):
@@ -34,19 +33,17 @@ class DQRISEPolicy(BasePolicy):
         return {"hand_data": current}
 
     @classmethod
-    def validate_model_config(cls, cfg, spec) -> None:
-        Sparse3DGlobalObservationEncoder.validate_config(cfg, spec)
-        if cfg.action_key != "action" or (cfg.agent.tcp_dim, cfg.agent.action_dim) != (7, 19):
+    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
+        Sparse3DGlobalObservationEncoder.validate_config(cfg, spec, dataset=dataset)
+        if dataset.action_key != "action" or (cfg.tcp_dim, cfg.action_dim) != (7, 19):
             raise ValueError("DQ-RISE requires joint action=7+12")
         if (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps) != (20, 1, 16):
             raise ValueError("DQ-RISE requires horizon=20, n_obs_steps=1, n_action_steps=16")
-        if cfg.env_runner.env_kwargs.control_mode != "joint":
-            raise ValueError("DQ-RISE requires joint control")
         if cfg.get("use_aux_ee", False):
             raise ValueError("DQ-RISE does not support auxiliary action targets")
         validate_dq_normalization(spec)
-        validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
-        validate_unet_horizon(cfg.horizon, cfg.agent.get("down_dims", (256, 512)))
+        validate_action_clipping(spec, cfg.get("clip_sample", True))
+        validate_unet_horizon(cfg.horizon, cfg.get("down_dims", (256, 512)))
 
     def set_normalization_spec(
         self, spec: dict[str, str], feature_dims: dict[str, int]

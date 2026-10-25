@@ -8,8 +8,37 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from dexmani_policy.common.config import positive_int
+
 from .ops import index_points, sample_point_patches
 from .pointnet import build_mlp
+
+
+def validate_sparse3d_config(cfg, spec, *, dataset, default_num_patches=96):
+    """Preserve metric XYZ and enough points for Sparse3D patch geometry."""
+    Sparse3DEncoder.validate_normalization(spec)
+    encoder = cfg.get("pc_encoder_config") or {}
+    sizes = {
+        name: positive_int(encoder.get(name, default), name)
+        for name, default in (("num_patches", default_num_patches), ("group_size", 32))
+    }
+    point_limit = positive_int(cfg.get("num_points", 1024), "agent.num_points")
+    if point_limit < max(sizes.values()):
+        raise ValueError("agent.num_points must be at least max(num_patches, group_size)")
+    shared_augmentation = dataset.get("augmentation_cfg") if "datasets" in dataset else None
+    for child in dataset.get("datasets", [dataset]):
+        augmentation = (
+            shared_augmentation
+            if shared_augmentation is not None
+            else child.get("augmentation_cfg")
+        )
+        augmentation = augmentation or {}
+        keep_points = (augmentation.get("pc") or {}).get("random_keep_points")
+        if keep_points is not None:
+            positive_int(keep_points, "random_keep_points")
+            for name, size in sizes.items():
+                if keep_points < size:
+                    raise ValueError(f"random_keep_points={keep_points} must be >= {name}={size}")
 
 
 class GeometricPatchEmbedding(nn.Module):
@@ -179,6 +208,11 @@ class GlobalTransformerBlock(nn.Module):
 
 class Sparse3DEncoder(nn.Module):
     """Encode finite, unpadded metric point clouds into sparse contextual tokens."""
+
+    @staticmethod
+    def validate_normalization(spec):
+        if spec.get("point_cloud") != "identity":
+            raise ValueError("Sparse3DEncoder requires normalization.point_cloud: identity (metric XYZ)")
 
     def __init__(
         self,

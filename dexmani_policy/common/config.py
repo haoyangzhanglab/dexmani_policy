@@ -327,49 +327,6 @@ def normalization_dims_from_config(cfg):
     return dims
 
 
-def validate_dq_normalization(spec):
-    """DQ/VQ hand prototypes require the existing bounded action coordinates."""
-    if spec.get("action") not in {"auto", "limits"}:
-        raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
-
-
-def validate_action_clipping(spec, clip_sample):
-    if type(clip_sample) is not bool:
-        raise TypeError("agent.clip_sample must be a bool")
-    if spec.get("action") == "gaussian" and clip_sample:
-        raise ValueError("Gaussian action normalization requires agent.clip_sample=false.")
-
-
-def validate_sparse3d_config(cfg, spec, *, default_num_patches=96):
-    """Preserve metric XYZ and enough points for Sparse3D patch geometry."""
-    if spec.get("point_cloud") != "identity":
-        raise ValueError(
-            "Sparse3DEncoder requires normalization.point_cloud: identity (metric XYZ)"
-        )
-    encoder = cfg.agent.get("pc_encoder_config") or {}
-    sizes = {
-        name: positive_int(encoder.get(name, default), name)
-        for name, default in (("num_patches", default_num_patches), ("group_size", 32))
-    }
-    point_limit = positive_int(cfg.agent.get("num_points", 1024), "agent.num_points")
-    if point_limit < max(sizes.values()):
-        raise ValueError("agent.num_points must be at least max(num_patches, group_size)")
-    shared_augmentation = cfg.dataset.get("augmentation_cfg") if "datasets" in cfg.dataset else None
-    for child in cfg.dataset.get("datasets", [cfg.dataset]):
-        augmentation = (
-            shared_augmentation
-            if shared_augmentation is not None
-            else child.get("augmentation_cfg")
-        )
-        augmentation = augmentation or {}
-        keep_points = (augmentation.get("pc") or {}).get("random_keep_points")
-        if keep_points is not None:
-            positive_int(keep_points, "random_keep_points")
-            for name, size in sizes.items():
-                if keep_points < size:
-                    raise ValueError(f"random_keep_points={keep_points} must be >= {name}={size}")
-
-
 def positive_int(value: int, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")

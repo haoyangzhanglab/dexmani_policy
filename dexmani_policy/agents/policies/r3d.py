@@ -6,11 +6,10 @@ import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.r3d import R3DTransformer
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import validate_action_clipping
 
 
 class R3DObservationEncoder(nn.Module):
@@ -54,9 +53,11 @@ class R3DObservationEncoder(nn.Module):
 
 
 class R3DPolicy(BasePolicy):
+    supported_execution_modes = ("sync", "async", "rtc")
+
     @classmethod
-    def validate_model_config(cls, cfg, spec) -> None:
-        validate_action_clipping(spec, cfg.agent.get("clip_sample", True))
+    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
+        validate_action_clipping(spec, cfg.get("clip_sample", True))
 
     def __init__(
         self,

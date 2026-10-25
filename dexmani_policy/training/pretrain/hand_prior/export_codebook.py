@@ -11,9 +11,9 @@ import numpy as np
 import torch
 from sklearn.decomposition import PCA
 
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import positive_int, validate_dq_normalization
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.runtime import atomic_path
 
 

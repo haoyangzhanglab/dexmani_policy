@@ -61,7 +61,9 @@ def validate_model_config(cfg):
     agent_class = hydra.utils.get_class(cfg.agent._target_)
     if agent_class.requires_action_affine and spec["action"] == "identity":
         raise ValueError("This policy requires fitted action affine parameters")
-    agent_class.validate_model_config(cfg, spec)
+    agent_class.validate_model_config(
+        cfg.agent, spec, dataset=cfg.dataset, inference_steps=cfg.eval.inference_steps
+    )
 
 
 def validate_policy_layout(cfg):

@@ -81,6 +81,12 @@ class DQNetworkTests(unittest.TestCase):
         model.set_normalization_spec({"action": "auto", "joint_state": "limits", "point_cloud": "identity"},
                                      {"action": 19, "joint_state": 19})
         model.load_normalizer_from_dataset(normalizer)
+        self.assertEqual(model.supported_execution_modes, ("sync", "async"))
+        with self.assertRaisesRegex(ValueError, "metric XYZ"):
+            model.set_normalization_spec(
+                {"action": "auto", "joint_state": "limits", "point_cloud": "limits"},
+                {"action": 19, "joint_state": 19, "point_cloud": 6},
+            )
         model.hand_codebook.set_buffers(dict(
             sorted_hand_poses=torch.linspace(-1, 1, 16)[:, None].expand(16, 12).clone(),
             pca_permutation=torch.arange(16), layer_weights=torch.tensor([0.2, 0.8]),
@@ -99,6 +105,8 @@ class DQNetworkTests(unittest.TestCase):
         self.assertEqual(noise.config.prediction_type, "epsilon")
         obs = {"point_cloud": torch.randn(2, 1, 8, 6), "joint_state": torch.randn(2, 1, 19)}
         batch = dict(obs=obs, action=torch.randn(2, 20, 19))
+        with self.assertRaisesRegex(NotImplementedError, "RTC"):
+            model.predict_action(obs, rtc_prefix=torch.zeros(2, 3, 19))
         loss, _ = model.compute_loss(batch)
         self.assertTrue(loss.isfinite())
         loss.backward()

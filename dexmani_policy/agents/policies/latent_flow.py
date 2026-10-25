@@ -12,13 +12,12 @@ from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_time_to_noise
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE, load_hand_vae, validate_codec_metadata
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder, validate_sparse3d_config
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import (
     positive_int,
     validate_action_window,
-    validate_sparse3d_config,
 )
 from dexmani_policy.common.hand_representation import validate_hand_chunk_compatibility
 
@@ -27,6 +26,7 @@ class LatentFlowObservationEncoder(nn.Module):
     """Keep frame-major global and patch tokens as [B, T*(K+1), D]."""
 
     consumed_observation_fields = ("joint_state", "point_cloud")
+    validate_normalization = staticmethod(Sparse3DEncoder.validate_normalization)
 
     def __init__(
         self,
@@ -84,16 +84,16 @@ class LatentFlowPolicy(BasePolicy):
     future_action_window = True
 
     @classmethod
-    def validate_model_config(cls, cfg, spec) -> None:
-        validate_sparse3d_config(cfg, spec)
+    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
+        validate_sparse3d_config(cfg, spec, dataset=dataset)
         if cfg.horizon < 3 or not 1 <= cfg.n_obs_steps <= cfg.horizon:
             raise ValueError("LatentFlow requires H>=3 and 1<=n_obs_steps<=H")
         if (
-            cfg.dataset.get("pad_after", 0) != 0
-            or cfg.dataset.get("pad_before", cfg.n_obs_steps - 1) != cfg.n_obs_steps - 1
+            dataset.get("pad_after", 0) != 0
+            or dataset.get("pad_before", cfg.n_obs_steps - 1) != cfg.n_obs_steps - 1
         ):
             raise ValueError("LatentFlow pads only observation history")
-        if cfg.action_key != "action" or cfg.action_dim != 19 or cfg.agent.state_dim != 19:
+        if dataset.action_key != "action" or cfg.action_dim != 19 or cfg.state_dim != 19:
             raise ValueError("LatentFlow requires joint action/state=7+12")
         if cfg.get("use_aux_ee", False):
             raise ValueError("LatentFlow does not support auxiliary action targets")

@@ -5,7 +5,6 @@ from typing import Any
 import torch
 from torch import nn
 
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
 
 
@@ -64,7 +63,7 @@ class BasePolicy(nn.Module):
         self.normalization_dims = {}
 
     @classmethod
-    def validate_model_config(cls, cfg, spec) -> None:
+    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
         """Validate model-specific constraints before constructing data or weights."""
 
     @property
@@ -86,34 +85,17 @@ class BasePolicy(nn.Module):
     def consumed_observation_fields(self) -> tuple[str, ...]:
         return self.obs_encoder.consumed_observation_fields
 
-    @property
-    def supported_execution_modes(self) -> tuple[str, ...]:
-        modes = ("sync", "async")
-        if (
-            type(self).predict_action is BasePolicy.predict_action
-            and type(self).predict_action_from_condition is BasePolicy.predict_action_from_condition
-            and isinstance(self.action_decoder, Diffusion)
-        ):
-            return (*modes, "rtc")
-        return modes
+    supported_execution_modes = ("sync", "async")
 
     def set_normalization_spec(
         self, spec: dict[str, str], feature_dims: dict[str, int]
     ) -> None:
-        from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
-        from dexmani_policy.common.config import validate_action_clipping
-
         if self.requires_action_affine and spec["action"] == "identity":
             raise ValueError("This policy requires fitted action affine parameters")
-        if (
-            isinstance(getattr(self.obs_encoder, "pc_encoder", None), Sparse3DEncoder)
-            and spec.get("point_cloud") != "identity"
-        ):
-            raise ValueError(
-                "Sparse3DEncoder requires normalization.point_cloud: identity (metric XYZ)"
-            )
-        if isinstance(self.action_decoder, Diffusion):
-            validate_action_clipping(spec, self.action_decoder.noise_scheduler.config.clip_sample)
+        for component in (self.obs_encoder, self.action_decoder):
+            validate = getattr(component, "validate_normalization", None)
+            if validate is not None:
+                validate(spec)
         self.normalization_spec = dict(spec)
         self.normalization_dims = dict(feature_dims)
         if self.normalization_dims["action"] != self.action_dim:
@@ -222,8 +204,8 @@ class BasePolicy(nn.Module):
         condition = self.encode_observation(obs_dict)
         if rtc_prefix is None:
             return self.predict_action_from_condition(condition, inference_steps=inference_steps)
-        if type(self).predict_action_from_condition is not BasePolicy.predict_action_from_condition:
-            raise NotImplementedError("RTC requires the continuous BasePolicy DDIM path")
+        if "rtc" not in self.supported_execution_modes:
+            raise NotImplementedError("This policy does not support RTC")
         return self.predict_action_from_condition(
             condition,
             inference_steps=inference_steps,
@@ -250,8 +232,8 @@ class BasePolicy(nn.Module):
         template = condition.new_zeros((condition.shape[0], self.horizon, self.action_dim))
         kwargs = {}
         if rtc_prefix is not None:
-            if not isinstance(self.action_decoder, Diffusion):
-                raise NotImplementedError("RTC requires the DDIM decoder")
+            if "rtc" not in self.supported_execution_modes:
+                raise NotImplementedError("This policy does not support RTC")
             params = self.normalizer["action"].params_dict
             scale = params["scale"][: self.control_action_dim]
             offset = params["offset"][: self.control_action_dim]
