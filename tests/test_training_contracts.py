@@ -75,13 +75,14 @@ class DataContractTests(unittest.TestCase):
         self.assertNotIn("hand_data", description)
         recipe = description["data_recipe"][0]
         self.assertEqual(recipe["split_manifest"], dataset.data_recipe["split_manifest"])
-        self.assertEqual(description["data_identity"]["train_episodes"], recipe["split_manifest"]["train_indices"])
+        self.assertNotIn("data_identity", description)
+        self.assertEqual(recipe["split_manifest"]["train_indices"], [0])
         self.assertEqual(recipe["action_rows"], len(dataset.sampler.action_source_rows))
         multi = MultiTaskDataset([dataset, self.dataset()], ["a", "b"],
                                 sampling_strategy="weighted", task_weights=[1, 0])
         combined = multi.describe_training_data(spec, task_name="a+b")
         self.assertEqual(combined["data_recipe"], [recipe, recipe])
-        self.assertEqual(list(combined["data_identity"]["tasks"]), ["a", "b"])
+        self.assertNotIn("data_identity", combined)
 
     def test_layout_overrides_reject_conflicting_sources(self):
         from dexmani_policy.training.validation import validate_policy_layout

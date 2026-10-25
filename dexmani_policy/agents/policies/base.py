@@ -70,9 +70,6 @@ class BasePolicy(nn.Module):
     def effective_config(self) -> dict:
         return dict(getattr(self.obs_encoder, "effective_config", {}))
 
-    def training_data_config(self, description, *, restoring=False) -> dict:
-        return {}
-
     @property
     def action_start_index(self) -> int:
         return 0 if self.future_action_window else self.n_obs_steps - 1

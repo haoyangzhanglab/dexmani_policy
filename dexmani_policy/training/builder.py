@@ -75,20 +75,17 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     if checkpoint is None:
         model.initialize_training()
         model.load_normalizer_from_dataset(normalizer)
-
-    description = {}
-    if model.requires_hand_pretraining:
-        description = {
-            "hand_data": OmegaConf.to_container(cfg.hand_data, resolve=True),
-            "split_manifest": OmegaConf.to_container(cfg.data_recipe[0].split_manifest, resolve=True),
-        }
-    data_config = model.training_data_config(description, restoring=checkpoint is not None)
-    if checkpoint is None:
+        if model.requires_hand_pretraining:
+            kwargs = {}
+            if model.requires_split_manifest:
+                kwargs["split_manifest"] = OmegaConf.to_container(
+                    cfg.data_recipe[0].split_manifest, resolve=True
+                )
+            model.validate_training_data(OmegaConf.to_container(cfg.hand_data, resolve=True), **kwargs)
         bind_defaults(cfg.agent, type(model))
         with open_dict(cfg.agent):
             cfg.agent.update(model.effective_config)
     with open_dict(cfg):
-        cfg.update(data_config)
         metadata = model.inference_metadata
         if checkpoint is not None and dict(cfg.policy_metadata) != metadata:
             raise ValueError("Restored policy metadata differs from saved construction")

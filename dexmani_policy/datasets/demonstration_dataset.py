@@ -197,12 +197,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             widths["point_cloud"] = self.pc_dim
         widths["action"] = int(buffer[self.action_key].shape[-1]) + (9 if self.use_aux_ee else 0)
         description = {
-            "data_identity": {
-                "episode_ids": manifest["episode_ids"],
-                "episode_ends": manifest["episode_ends"],
-                "train_episodes": manifest["train_indices"],
-                "val_episodes": manifest["val_indices"],
-            },
             "normalization_dims": widths,
             "data_recipe": [dict(
                 self.data_recipe,
@@ -264,7 +258,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             "val_action_rows": 0 if validation is None else len(validation.sampler.action_source_rows),
         }
 
-
     def describe_real_runtime(self, task_name) -> dict | None:
         """Capture numerical deployment inputs from the buffer actually used to train."""
         buffer = self.replay_buffer
@@ -321,7 +314,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 raise ValueError("Real fingertip_xyz requires five distinct non-empty link names")
             runtime["fingertip_link_names"] = list(links)
         return runtime
-
 
     def finite_rows(self, key, columns=None):
         valid = np.ones(int(self.replay_buffer.episode_ends[-1]), dtype=bool)

@@ -126,10 +126,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             for child in self.datasets
         ]
         return {
-            "data_identity": {"tasks": {
-                name: description["data_identity"]
-                for name, description in zip(self.task_names, descriptions)
-            }},
             "normalization_dims": descriptions[0]["normalization_dims"],
             "data_recipe": [description["data_recipe"][0] for description in descriptions],
         }

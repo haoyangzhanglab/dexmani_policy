@@ -233,12 +233,6 @@ class LatentFlowPolicy(BasePolicy):
     def effective_config(self):
         return {**super().effective_config, "codec_metadata": self.codec_metadata}
 
-    def training_data_config(self, description, *, restoring=False):
-        current = description["hand_data"]
-        if not restoring:
-            self.validate_training_data(current)
-        return {"hand_data": current}
-
     def validate_training_data(self, hand_data):
         validate_hand_chunk_compatibility(self.codec_metadata["hand_data"], hand_data)
 

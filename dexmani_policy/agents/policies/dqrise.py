@@ -22,15 +22,10 @@ class DQRISEPolicy(BasePolicy):
     requires_hand_pretraining = True
     requires_split_manifest = True
 
-    def training_data_config(self, description, *, restoring=False):
+    def validate_training_data(self, hand_data, *, split_manifest):
         from dexmani_policy.common.hand_representation import validate_pretraining_data
 
-        current = description["hand_data"]
-        if not restoring:
-            validate_pretraining_data(
-                current, description["split_manifest"], self.hand_data, self.pretraining_split
-            )
-        return {"hand_data": current}
+        validate_pretraining_data(hand_data, split_manifest, self.hand_data, self.pretraining_split)
 
     @classmethod
     def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
