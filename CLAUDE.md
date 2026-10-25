@@ -2,4 +2,4 @@
 
 @AGENTS.md
 
-项目简介与代码导航见 [README.md](README.md)，按任务需要查阅相关源码和文档。
+按需查阅 [README.md](README.md) 和相关源码；不预先加载无关文档。
