@@ -67,7 +67,7 @@ class WandbLogger:
             try:
                 run.finish()
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("W&B cleanup also failed after %s", stage)
 
     def log(self, data: dict[str, Any], step: int | None = None):
         if self.run is None:
@@ -90,10 +90,7 @@ class WandbLogger:
         if self.run is None:
             return
         run, self.run = self.run, None
-        try:
-            run.finish()
-        except Exception as exc:
-            self.disable("finish", exc)
+        run.finish()
 
 
 def accumulate_metrics(totals, metrics):

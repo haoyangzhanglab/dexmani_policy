@@ -11,7 +11,7 @@ from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.experiments import discover_milestone_checkpoints, resolve_record_path
 from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds
 from dexmani_policy.evaluation.artifacts import (
-    artifact_reference, create_run_directory, write_json, resolve_selection_record, validate_selection_plan,
+    artifact_reference, create_run_directory, write_json, write_failure, resolve_selection_record, validate_selection_plan,
 )
 from dexmani_policy.evaluation.config import (
     make_request,
@@ -97,7 +97,7 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
         write_json(path, record)
     except BaseException:
         record.update(status="failed", error=traceback.format_exc())
-        write_json(path, record)
+        write_failure(path, record)
         raise
     publish_best(root, {**record, "selection_result": artifact_reference(path, root)})
     return path

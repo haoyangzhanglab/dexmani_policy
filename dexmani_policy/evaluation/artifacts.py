@@ -4,6 +4,7 @@ import json
 import platform
 import subprocess
 import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -55,6 +56,14 @@ def write_json(path, record, *, overwrite=True):
         temporary.write_text(
             json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         )
+
+
+def write_failure(path, record):
+    """Record an active failure without replacing it with a secondary I/O error."""
+    try:
+        write_json(path, record)
+    except BaseException:
+        traceback.print_exc()
 
 
 def create_run_directory(root, directory=None):

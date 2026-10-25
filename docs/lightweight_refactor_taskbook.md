@@ -1,6 +1,6 @@
 # DexMani Policy 轻量化重构：Codex CLI 任务书
 
-> 状态：设计完成，等待代码实施。本文不是实施报告，不表示训练、推理或性能验证已经通过。
+> 状态：四批核心改动已实施；实际验证与未覆盖范围见[验收记录](验证指南.md#本轮轻量化重构验收)。下文保留设计依据与约束，不表示所有方法、设备或性能均已验证。
 >
 > 审阅基线：[dexmani_policy@332cf9167debb75fee14b02125bd69a06569066b](https://github.com/haoyangzhanglab/dexmani_policy/commit/332cf9167debb75fee14b02125bd69a06569066b)。执行时以实际 HEAD、调用链与保存产物为准。本轮接续[上一轮实施状态](infra_simplification_status.md)，不重复已完成的迁移。[配套 prompt](lightweight_refactor_prompt.md) 可直接交给 Codex CLI。
 

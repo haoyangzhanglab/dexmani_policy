@@ -10,7 +10,7 @@
 | 选点、固定测试 seeds、解释评测结果 | [仿真评测机制](docs/仿真评测机制.md) |
 | 远端启动、同步、监控与停止 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) |
 | 修改代码与 AI 协作 | [AGENTS.md](AGENTS.md)、[仓库导航](#仓库导航) |
-| 下一轮轻量化重构 | [Codex CLI 任务书](docs/lightweight_refactor_taskbook.md)、[执行 prompt](docs/lightweight_refactor_prompt.md) |
+| 轻量化重构 | [任务书与边界](docs/lightweight_refactor_taskbook.md)、[验收范围](docs/验证指南.md#本轮轻量化重构验收) |
 
 以下命令从仓库根目录执行，`<...>` 替换为实际值。Python 命令使用 Conda `policy` 环境；本地训练和评测脚本自动通过该环境启动，远端环境另行配置。
 

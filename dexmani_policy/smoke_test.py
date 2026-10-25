@@ -24,7 +24,7 @@ from dexmani_policy.common.config import (
     positive_int,
     set_project_root,
 )
-from dexmani_policy.common.runtime import dict_apply, set_seed
+from dexmani_policy.common.runtime import close_resources, dict_apply, set_seed
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset, observation_layout
@@ -171,7 +171,7 @@ def validate_data_loader(loader, cfg, *, split, max_batches):
         if checked == 0:
             raise ValueError(f"{split}: no batches to check")
     finally:
-        close_data_loader(loader, iterator)
+        close_resources(lambda: close_data_loader(loader, iterator))
     print(f"[{split}] windows={len(loader.dataset):,}, checked batches={checked}")
 
 

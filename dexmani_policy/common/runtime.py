@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import random
+import sys
 import tempfile
+import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,7 +32,23 @@ def atomic_path(path, *, overwrite=True, suffix=".tmp"):
             # A hard link publishes atomically without replacing an existing target.
             os.link(temporary, path)
     finally:
-        temporary.unlink(missing_ok=True)
+        close_resources(lambda: temporary.unlink(missing_ok=True))
+
+
+def close_resources(*callbacks):
+    """Close owned resources; report secondary errors and propagate the first failure."""
+    primary = sys.exc_info()[1]
+    failure = None
+    for close in callbacks:
+        try:
+            close()
+        except BaseException as error:
+            if primary is None and failure is None:
+                failure = error
+            else:
+                traceback.print_exc()
+    if failure is not None:
+        raise failure
 
 
 def set_seed(seed: int):

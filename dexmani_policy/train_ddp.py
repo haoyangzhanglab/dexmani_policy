@@ -2,7 +2,7 @@
 
 import os
 import socket
-from contextlib import ExitStack
+from contextlib import closing
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -16,7 +16,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from dexmani_policy.common.checkpoint import load_training_checkpoint
 from dexmani_policy.common.config import register_resolvers, set_project_root
 from dexmani_policy.common.normalization import AffineNormalizer
-from dexmani_policy.common.runtime import set_seed
+from dexmani_policy.common.runtime import close_resources, set_seed
 from dexmani_policy.training.builder import (
     build_training_components,
     build_trainer,
@@ -48,8 +48,7 @@ def train_distributed(rank: int, cfg, gpu_ids, dataset, normalizer_state):
     torch.cuda.set_device(device)
     dist.init_process_group(backend="nccl", init_method="env://", world_size=world_size, rank=rank)
 
-    with ExitStack() as resources:
-        resources.callback(dist.destroy_process_group)
+    try:
         # Use the same seed for model initialization on every rank.
         set_seed(cfg.training.seed)
 
@@ -70,34 +69,36 @@ def train_distributed(rank: int, cfg, gpu_ids, dataset, normalizer_state):
             world_size=world_size,
             checkpoint=checkpoint,
         )
-        resources.callback(components.close)
+        with closing(components):
+            resume_state = None
+            if resuming:
+                resume_state = restore_training_state(checkpoint, components, effective_config=cfg)
 
-        resume_state = None
-        if resuming:
-            resume_state = restore_training_state(checkpoint, components, effective_config=cfg)
+            del checkpoint
+            if rank == 0:
+                components.workspace.save_hydra_config(cfg)
 
-        del checkpoint
-        if rank == 0:
-            components.workspace.save_hydra_config(cfg)
+            # Compile restored backbones before DDP wrapping.
+            compile_training_models(cfg, components)
 
-        # Compile restored backbones before DDP wrapping.
-        compile_training_models(cfg, components)
+            components.model = DDP(
+                components.model,
+                device_ids=[gpu_id],
+                output_device=gpu_id,
+                find_unused_parameters=False,
+                gradient_as_bucket_view=True,
+                static_graph=True,
+            )
 
-        components.model = DDP(
-            components.model,
-            device_ids=[gpu_id],
-            output_device=gpu_id,
-            find_unused_parameters=False,
-            gradient_as_bucket_view=True,
-            static_graph=True,
-        )
+            if not resuming and components.ema_model is not None:
+                # Only fresh EMA follows the raw state synchronized by DDP.
+                components.ema_model.load_state_dict(components.model.module.state_dict(), strict=True)
 
-        if not resuming and components.ema_model is not None:
-            # Only fresh EMA follows the raw state synchronized by DDP.
-            components.ema_model.load_state_dict(components.model.module.state_dict(), strict=True)
+            trainer = build_trainer(cfg, components)
+            trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
 
-        trainer = build_trainer(cfg, components)
-        trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
+    finally:
+        close_resources(dist.destroy_process_group)
 
 
 @hydra.main(version_base=None, config_path="configs")

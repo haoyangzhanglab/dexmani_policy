@@ -5,7 +5,7 @@ from typing import Any
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.checkpoint import TrainingCheckpoint, save_training_checkpoint
-from dexmani_policy.common.runtime import atomic_path
+from dexmani_policy.common.runtime import atomic_path, close_resources
 from dexmani_policy.training.common.logging import JsonlLogger, WandbLogger
 
 
@@ -45,8 +45,8 @@ class Workspace:
                     group=wandb_cfg.group,
                     mode=wandb_cfg.mode,
                 )
-            except Exception:
-                self.json_logger.close()
+            except BaseException:
+                self.close()
                 raise
 
     def save_hydra_config(self, hydra_config):
@@ -79,8 +79,7 @@ class Workspace:
         return latest_path
 
     def close(self):
-        try:
-            self.json_logger.close()
-        finally:
-            if self.wandb_logger is not None:
-                self.wandb_logger.close()
+        callbacks = [self.json_logger.close]
+        if self.wandb_logger is not None:
+            callbacks.append(self.wandb_logger.close)
+        close_resources(*callbacks)

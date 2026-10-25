@@ -1,6 +1,7 @@
 """Infrastructure regressions with real request/rollout code and synthetic environments."""
 
 import copy
+import io
 import json
 import os
 import subprocess
@@ -8,7 +9,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from contextlib import closing, redirect_stderr
+from unittest.mock import patch, Mock
 
 import numpy as np
 import torch
@@ -405,11 +408,128 @@ class InfrastructureTests(unittest.TestCase):
         self.assertIsNone(result["statistics"])
         self.assertIn("cleanup failed", result["cleanup_error"])
 
+    def test_primary_rollout_error_survives_record_and_cleanup_errors(self):
+        self.cfg["eval"]["task_seeds"] = {self.cfg["task_name"]: [1, 2]}
+        request = resolve_evaluation_request(self.cfg, self.root, str(self.path))
+        for fail_write in (False, True):
+            output = self.root / f"secondary_{fail_write}"
+            env = SyntheticEnvironment(failing_seed=2)
+            model = self.load_model(self.cfg, self.path)
+            stderr = io.StringIO()
+            def record(path, value, **kwargs):
+                if fail_write and value["status"] == "failed":
+                    raise OSError("failure record unavailable")
+                write_json(path, value, **kwargs)
+            with (patch.object(SimRunner, "make_env", return_value=env),
+                  patch.object(env, "close", side_effect=OSError("environment close failed")) as env_close,
+                  patch.object(model, "to", side_effect=OSError("model close failed")) as model_close,
+                  patch("dexmani_policy.evaluation.rollout.restore_policy_agent", return_value=model),
+                  patch("dexmani_policy.evaluation.artifacts.write_json", side_effect=record),
+                  redirect_stderr(stderr),
+                  self.assertRaisesRegex(RuntimeError, "synthetic environment error")):
+                evaluate_policy(request, output_root=self.root, output_dir=output)
+            env_close.assert_called_once()
+            model_close.assert_called_once()
+            self.assertIn("environment close failed", stderr.getvalue())
+            self.assertIn("model close failed", stderr.getvalue())
+            result = json.loads((output / "result_details.json").read_text())
+            self.assertEqual([episode["seed"] for episode in result["episodes"]], [1])
+            self.assertIsNone(result["statistics"])
+            if fail_write:
+                self.assertIn("failure record unavailable", stderr.getvalue())
+            else:
+                self.assertEqual(result["status"], "failed")
+                self.assertIn("synthetic environment error", result["error"])
+                self.assertIn("model close failed", result["cleanup_error"])
+
+    def test_record_failure_closes_generator_without_masking_io_error(self):
+        self.cfg["eval"]["task_seeds"] = {self.cfg["task_name"]: [1, 2]}
+        request = resolve_evaluation_request(self.cfg, self.root, str(self.path))
+        env = SyntheticEnvironment()
+        def record(path, value, **kwargs):
+            if value["episodes"]:
+                raise OSError("episode write failed")
+            write_json(path, value, **kwargs)
+        with (patch.object(SimRunner, "make_env", return_value=env),
+              patch.object(env, "close", side_effect=RuntimeError("generator close failed")) as close,
+              patch("dexmani_policy.evaluation.rollout.restore_policy_agent", side_effect=self.load_model),
+              patch("dexmani_policy.evaluation.rollout.write_json", side_effect=record),
+              redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaisesRegex(OSError, "episode write failed")):
+            evaluate_policy(request, output_root=self.root, output_dir=self.root / "io_failed")
+        close.assert_called_once()
+        self.assertIn("generator close failed", stderr.getvalue())
+        self.assertEqual(env.seeds, [1])
+
+    def test_selection_primary_error_survives_failed_record_write(self):
+        def record(path, value, **kwargs):
+            if value["status"] == "failed":
+                raise OSError("selection record unavailable")
+            write_json(path, value, **kwargs)
+        with (patch("dexmani_policy.evaluation.rollout.evaluate_policy", side_effect=RuntimeError("candidate failed")),
+              patch("dexmani_policy.evaluation.artifacts.write_json", side_effect=record),
+              redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaisesRegex(RuntimeError, "candidate failed")):
+            select_best_checkpoint(self.root, self.cfg)
+        self.assertIn("selection record unavailable", stderr.getvalue())
+        self.assertFalse((self.root / "best_ckpt.json").exists())
+
+    def test_training_resources_close_all_and_preserve_first_error(self):
+        from dexmani_policy.training.builder import TrainingComponents
+        from dexmani_policy.training.workspace import Workspace
+        for primary in (False, True):
+            workspace = object.__new__(Workspace)
+            workspace.json_logger = SimpleNamespace(close=Mock(side_effect=OSError("json close failed")))
+            workspace.wandb_logger = SimpleNamespace(close=Mock(side_effect=OSError("wandb close failed")))
+            components = TrainingComponents("cpu", None, None, None, None, None, None, workspace)
+            with (patch("dexmani_policy.training.builder.close_data_loader", side_effect=OSError("loader close failed")) as close,
+                  redirect_stderr(io.StringIO()) as stderr,
+                  self.assertRaisesRegex(Exception, "training failed" if primary else "loader close failed")):
+                with closing(components):
+                    if primary:
+                        raise RuntimeError("training failed")
+            close.assert_called_once()
+            workspace.json_logger.close.assert_called_once()
+            workspace.wandb_logger.close.assert_called_once()
+            self.assertIn("json close failed", stderr.getvalue())
+            self.assertIn("wandb close failed", stderr.getvalue())
+
     def test_exact_coverage_rejects_duplicate_missing_and_extra(self):
         row = dict(task_name="a", seed=1, success=True, steps=1, total_steps=2)
         for rows in ([], [row, row], [row, {**row, "seed": 3}]):
             with self.assertRaises(RuntimeError):
                 validate_episodes(rows, {"a": [1, 2]})
+
+    def test_atomic_write_preserves_primary_when_temporary_cleanup_fails(self):
+        from dexmani_policy.common.runtime import atomic_path
+
+        destination = self.root / "unpublished.json"
+        with (patch.object(Path, "unlink", side_effect=OSError("temporary cleanup failed")),
+              redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaisesRegex(RuntimeError, "write failed")):
+            with atomic_path(destination):
+                raise RuntimeError("write failed")
+        self.assertFalse(destination.exists())
+        self.assertIn("temporary cleanup failed", stderr.getvalue())
+
+    def test_video_encoding_failure_reaps_process_and_preserves_primary(self):
+        from dexmani_policy.env_runner.common.video import encode_video
+
+        proc = Mock()
+        proc.stdin.write.side_effect = BrokenPipeError("encoding failed")
+        proc.stdin.close.side_effect = OSError("pipe close failed")
+        proc.poll.return_value = None
+        proc.wait.side_effect = [subprocess.TimeoutExpired("ffmpeg", 5), -9]
+        with (patch("dexmani_policy.env_runner.common.video.get_ffmpeg_exe", return_value="ffmpeg"),
+              patch("dexmani_policy.env_runner.common.video.subprocess.Popen", return_value=proc),
+              redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaisesRegex(BrokenPipeError, "encoding failed")):
+            encode_video(self.root / "unused.mp4", np.zeros((1, 2, 2, 3), dtype=np.uint8), 10)
+        proc.stdin.close.assert_called_once()
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        self.assertEqual(proc.wait.call_count, 2)
+        self.assertIn("pipe close failed", stderr.getvalue())
 
     def test_inspection_has_no_torch_and_runner_has_no_sim_import(self):
         subprocess.run(

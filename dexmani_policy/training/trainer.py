@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import TrainingCheckpoint, policy_state_dict
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.runtime import dict_apply, get_rng_state
+from dexmani_policy.common.runtime import close_resources, dict_apply, get_rng_state
 from dexmani_policy.training.common.logging import accumulate_metrics, to_log_scalars
 from dexmani_policy.training.resume import build_resume_contract
 
@@ -465,15 +465,18 @@ class Trainer:
                 print(f"Bounded run stopped at step {self.global_step}/{self.total_train_steps}")
 
         finally:
-            signal.signal(signal.SIGINT, prev_sigint)
-            signal.signal(signal.SIGTERM, prev_sigterm)
+            callbacks = [
+                lambda: signal.signal(signal.SIGINT, prev_sigint),
+                lambda: signal.signal(signal.SIGTERM, prev_sigterm),
+            ]
 
             if self.step_pbar is not None:
                 if self.step_pbar.n != self.global_step:
                     # Show the actual stop step without metrics from an older step.
                     self.step_pbar.set_postfix({}, refresh=False)
                     self.step_pbar.n = self.global_step
-                self.step_pbar.close()
+                callbacks.append(self.step_pbar.close)
 
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                callbacks.append(torch.cuda.empty_cache)
+            close_resources(*callbacks)

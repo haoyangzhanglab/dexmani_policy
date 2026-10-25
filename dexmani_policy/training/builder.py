@@ -22,7 +22,7 @@ from dexmani_policy.common.config import (
     resolve_resume_source,
     validate_observation_fields,
 )
-from dexmani_policy.common.runtime import set_seed
+from dexmani_policy.common.runtime import close_resources, set_seed
 from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
 from dexmani_policy.training.common.scheduler import get_scheduler
@@ -212,11 +212,10 @@ class TrainingComponents:
     workspace: Workspace | None
 
     def close(self):
-        try:
-            close_data_loader(self.train_loader)
-        finally:
-            if self.workspace is not None:
-                self.workspace.close()
+        callbacks = [lambda: close_data_loader(self.train_loader)]
+        if self.workspace is not None:
+            callbacks.append(self.workspace.close)
+        close_resources(*callbacks)
 
 
 def build_training_components(
@@ -224,24 +223,29 @@ def build_training_components(
 ):
     """Build one rank's components before compile or DDP wrapping."""
     train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
-    model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, rank=rank, checkpoint=checkpoint
-    )
-
-    # DDP initialization is shared; augmentation uses a separate seed on each rank.
-    if world_size > 1:
-        set_seed(cfg.training.seed + rank)
-    optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=rank == 0)
-
-    workspace = None
-    if rank == 0:
-        print_training_recipe(
-            cfg,
-            world_size=world_size,
-            batches_per_epoch=len(train_loader),
-            samples_per_rank=train_loader.sampler.num_samples,
+    try:
+        model, ema_model, ema_updater = build_model_and_ema(
+            cfg, device, normalizer, rank=rank, checkpoint=checkpoint
         )
-        workspace = hydra.utils.instantiate(cfg.workspace)
+
+        # DDP initialization is shared; augmentation uses a separate seed on each rank.
+        if world_size > 1:
+            set_seed(cfg.training.seed + rank)
+        optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=rank == 0)
+
+        workspace = None
+        if rank == 0:
+            print_training_recipe(
+                cfg,
+                world_size=world_size,
+                batches_per_epoch=len(train_loader),
+                samples_per_rank=train_loader.sampler.num_samples,
+            )
+            workspace = hydra.utils.instantiate(cfg.workspace)
+
+    except BaseException:
+        close_resources(lambda: close_data_loader(train_loader))
+        raise
 
     return TrainingComponents(
         device=device,

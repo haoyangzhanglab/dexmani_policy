@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import traceback
 from typing import Any
 
 import numpy as np
 import torch
 
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.runtime import close_resources
 from dexmani_policy.common.rgb_preprocessing import preprocess_validation_rgb
 from dexmani_policy.env_runner.common.video import save_episode_video
 
@@ -226,7 +228,10 @@ class SimRunner:
                         agent, env, seed, inference_steps, action_steps=action_steps
                     )
                 except BaseException:
-                    save_episode_video(env, video_save_dir, f"episode_{seed}_crash", fps)
+                    try:
+                        save_episode_video(env, video_save_dir, f"episode_{seed}_crash", fps)
+                    except BaseException:
+                        traceback.print_exc()
                     raise
                 video = save_episode_video(env, video_save_dir, f"episode_{seed}", fps)
                 yield {
@@ -239,7 +244,7 @@ class SimRunner:
                 }
         finally:
             if env is not None:
-                env.close()
+                close_resources(env.close)
 
     @staticmethod
     def expand_env_kwargs(env_kwargs: dict[str, Any]) -> dict[str, Any]:

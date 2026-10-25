@@ -1,8 +1,9 @@
 """Best-effort episode video export, independent of evaluation metrics."""
 
 import subprocess
+import sys
 import tempfile
-from contextlib import suppress
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -52,14 +53,21 @@ def encode_video(path: Path, frames: np.ndarray, fps: int) -> None:
         finally:
             # Reap the encoder even after a broken pipe or timeout.
             if proc.poll() is None:
-                with suppress(Exception):
-                    proc.stdin.close()
-                proc.terminate()
+                primary = sys.exc_info()[1]
                 try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+                    try:
+                        proc.stdin.close()
+                    finally:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+                except BaseException:
+                    if primary is None:
+                        raise
+                    traceback.print_exc()
 
 
 def save_episode_video(env, directory, name, fps):
