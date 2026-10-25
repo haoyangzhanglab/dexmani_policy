@@ -1,5 +1,7 @@
 # Codex 执行 prompt
 
+> 这是上一轮的历史 prompt。新的代码任务请使用[轻量化执行 prompt](lightweight_refactor_prompt.md)及其链接的任务书。
+
 将下面的完整提示复制到能够访问 dexmani_policy 工作区的 Codex。方案覆盖 dexmani_real 的必要配套修改；若该工作区不可访问，按提示完成独立部分并报告跨仓库缺口。下文保留原执行要求；本轮已执行范围、验证结果与剩余缺口见 [实施状态](infra_simplification_status.md)，重新执行前先核对当前源码，避免重复迁移。
 
 ---
