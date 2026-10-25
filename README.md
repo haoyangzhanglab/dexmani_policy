@@ -1,22 +1,12 @@
 # DexMani_Policy
 
-面向论文实验与方法验证的个人灵巧手策略研究仓库，覆盖数据、训练、checkpoint selection、仿真评测与策略推理。新实验从 `dexmani_policy/configs/` 进入；历史实验使用保存配置、checkpoint 和对应源码。方法名表示本地研究适配，行为以配置和调用链为准。
+灵巧手策略学习研究仓库，覆盖数据读取、训练、checkpoint 选点、仿真评测与策略推理。实验配置位于 `dexmani_policy/configs/`，DDP 配置位于其 `ddp/` 子目录；历史实验使用保存配置、checkpoint 和对应源码。
 
-| 需要了解 | 文档 |
-| --- | --- |
-| 数据流、策略接口、恢复与部署 | [项目架构](docs/项目架构.md) |
-| 选择检查、运行 smoke 或短训练 | [验证指南](docs/验证指南.md) |
-| 准备 DQ-RISE、LAMP、LatentFlow/HandVAE 手部表示 | [手部动作表示](docs/手部动作表示.md) |
-| 选点、固定测试 seeds、解释评测结果 | [仿真评测机制](docs/仿真评测机制.md) |
-| 远端启动、同步、监控与停止 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) |
-| 修改代码与 AI 协作 | [AGENTS.md](AGENTS.md)、[仓库导航](#仓库导航) |
-| 精简改动与验证范围 | [验收记录](docs/验证指南.md#显式失败与冗余清理验收) |
-
-以下命令从仓库根目录执行，`<...>` 替换为实际值。Python 命令使用 Conda `policy` 环境；本地训练和评测脚本自动通过该环境启动，远端环境另行配置。
+以下命令从仓库根目录执行，`<...>` 替换为实际值。Python 使用 Conda `policy` 环境，本地训练和评测脚本自动调用该环境。
 
 ## 安装与配置
 
-要求 Python 3.10+。准备 `policy` 环境并安装与设备匹配的 Torch / torchvision，再安装依赖；版本见 [requirements.txt](requirements.txt) 和 [pyproject.toml](pyproject.toml)。
+要求 Python 3.10+。先准备 `policy` 环境和匹配设备的 Torch / torchvision，再安装依赖：
 
 ```bash
 conda activate policy
@@ -25,43 +15,30 @@ python -m pip install -e .
 python -m pip check
 ```
 
-部分点云算子另需匹配 Torch/CUDA 的 PyTorch3D，仿真评测需 `dexmani_sim`。启用 Uni3D 预训练时，先用 `bash scripts/utils/download_pretrained.sh` 将权重准备到 `data/pretrained/uni3d/`；训练仅加载本地文件，加载规则见 [Uni3D 说明](docs/项目架构.md#观测编码)。其他权重以配置和 encoder 加载逻辑为准。
-
-配置位于 `dexmani_policy/configs/*.yaml`，DDP overlay 位于 `dexmani_policy/configs/ddp/`。`agent._target_` 决定策略；`policy_name` 只表示方法身份（如 `dp`、`sat`），用于实验目录和日志分组。`ddp/sat` 是 Hydra 配置选择器，继承基础方法名 `sat`，分布式事实由训练配置与 world size 表达；对应关系见 [策略接口](docs/项目架构.md#策略接口)。
+依赖版本见 [requirements.txt](requirements.txt) 和 [pyproject.toml](pyproject.toml)。部分点云算子另需匹配 Torch/CUDA 的 PyTorch3D，仿真评测需 `dexmani_sim`。启用 Uni3D 预训练时，先运行 `bash scripts/utils/download_pretrained.sh` 准备本地权重。
 
 ## 数据准备
 
-数据通常位于 `robot_data/<task>.zarr`，实际路径由 resolved Dataset 配置决定。解析路径并检查目录存在：
+数据通常位于 `robot_data/<task>.zarr`，实际路径由 Dataset 配置决定。检查路径：
 
 ```bash
 python -m dexmani_policy.common.config --config-name dp3 'task_name=<task>' --check
 ```
 
-该命令只检查路径，不读取数据内容；字段、窗口、split manifest 和预处理见 [数据接口](docs/项目架构.md#数据接口)。重新生成数据需使用新路径。通用 affine normalizer 仅按有效训练窗口实际消费的源行流式拟合，排除 validation、未消费行和子集 exclusions；LatentFlow relative action 按窗口/q0 统计；统计总体与手部 codec 的区别见 [归一化](docs/项目架构.md#归一化)。
-
-新训练将实际划分保存为 `data_recipe[].split_manifest`，并导出 `split_manifest_<index>.json` 供跨 run 复用；数据划分 seed 与训练 seed 分离。已有 trial 身份按 trial 分组，无身份时按 episode 索引，不声称 trial 独立。历史划分与产物不自动迁移。
-
-### 手部先验准备
-
-使用 `dqrise`、`lamp` 或 `latent_flow` 开始新训练前，先按 [手部动作表示](docs/手部动作表示.md) 准备各自的 Codebook、prior 或 codec，并配置产物路径。DQ/LAMP 沿用各自的数据与划分检查；DQ 还需匹配手部 action affine，LAMP raw prior 不依赖观测 normalizer。LatentFlow codec 可来自独立同构语料，须匹配动作、时间和模型接口；同源数据须共享 holdout，避免验证泄漏。
+该命令只检查目录，不读取数据。数据字段、划分和归一化见 [数据接口](docs/项目架构.md#数据接口)。使用 `dqrise`、`lamp` 或 `latent_flow` 前，按 [手部动作表示](docs/手部动作表示.md) 准备 Codebook、prior 或 codec。
 
 ## 验证
 
-按当前任务选择检查，下面的 smoke 使用配置中的数据路径和任务设置：
-
 ```bash
+# 配置与导入检查
 python dexmani_policy/smoke_test.py --config-only dp3
+# CPU 数据检查，需实际数据
 python dexmani_policy/smoke_test.py --data-only dp3 --max-batches 2
+# 训练更新、预测及 raw/EMA 推理恢复，需 CUDA、数据和所需权重
 python dexmani_policy/smoke_test.py dp3 --max-updates 4
 ```
 
-| 模式 | 覆盖范围与前提 |
-| --- | --- |
-| config-only | 检查配置与 target 导入，不加载数据或执行 GPU 算子 |
-| data-only | 在 CPU 上检查实际数据批次，不构建模型；需配置对应的数据 |
-| 完整 smoke | 检查训练更新、预测及 raw/EMA 保存恢复；需 CUDA、数据和所需权重 |
-
-Smoke 接受配置名或独立 YAML 路径，不接受 Hydra 字段覆盖；data-only 的 batch 上限不限制数据扫描与统计。Python 语法检查、各模式的覆盖边界和可传 overrides 的短训练入口见 [验证指南](docs/验证指南.md)。
+Smoke 接受配置名或独立 YAML 路径，不接受 Hydra 字段覆盖；data-only 的 batch 上限不限制数据扫描与统计。
 
 ## 训练与续训
 
@@ -71,13 +48,7 @@ bash scripts/training/train_ddp.sh ddp/sat 'task_name=<task>' 'training.seed=42'
 bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
-训练入口转发 Hydra overrides。单卡要求 `training.num_gpus=1` 或不设置；DDP 需核对可见 GPU、`training.num_gpus` 和每卡 batch。训练预算按 optimizer update 计数，`best` 由离线选点产生。
-
-例如 `ddp/sat` 的新 run 位于 `experiments/sat/<task>/<run>/`；评测、选点、日志跟随、下载和 Real 部署均使用方法名 `sat`，启动仍传 `ddp/sat`。现有实验不迁移或改写。
-
-新 run 默认写入 `experiments/<policy_name>/<task_name>/<时间戳>_seed<seed>/`，已有训练产物的目录拒绝重用。标量保存在 `metrics.jsonl`；W&B 默认 `offline`，可用 `workspace.wandb_cfg=null` 关闭，详见 [训练日志](docs/项目架构.md#训练日志与可选远程服务)。
-
-`resume_from` 接受实验目录或 checkpoint，恢复到新 run；相对路径按项目根目录解析。配方来自 checkpoint 的 `effective_config`，模型与训练状态从同一 checkpoint 恢复；任务、数据语义、模型、world size 和总训练预算必须一致。允许覆盖项见 [完整恢复边界](docs/项目架构.md#完整恢复边界)。
+入口支持 Hydra overrides；DDP 需核对 GPU 数与每卡 batch。产物位于 `experiments/<policy_name>/<task_name>/<run>/`，`ddp/sat` 的方法名为 `sat`。`resume_from` 接受实验目录或 checkpoint，恢复到新 run；约束见 [完整恢复边界](docs/项目架构.md#完整恢复边界)。
 
 ## 仿真评测
 
@@ -86,36 +57,16 @@ bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run> eval.seed=102
 bash scripts/eval/evaluate.sh <policy_name> <task_name> <run> --checkpoint best eval.video.enabled=true
 ```
 
-流水线先固定 test/selection 计划，对所有候选使用相同预算，再执行冻结的 held-out test；默认每任务 test=70、每候选 selection=25，默认不录像。普通 evaluate 支持录像和研究覆盖，但不作为正式测试证据；正式测试使用 `--selection-record`，研究参数不能覆盖。直接 best、当前产物要求、离线验真、Seed 来源与分步入口见 [仿真评测机制](docs/仿真评测机制.md)。开启 human viewer 需要 X11 或 XWayland。
-
-比较实验需同时记录数据划分、有效 batch、训练预算、选点和最终评测协议。
-
-## 远端与其他工作流
-
-```bash
-bash scripts/remote/train_remote.sh --dry-run <config> <task>
-bash scripts/remote/train_remote.sh --gpus 0 <config> <task> 'training.seed=42'
-bash scripts/remote/tail_log.sh <policy> <task>
-bash scripts/remote/sync_down.sh <policy>/<task>/<run>
-```
-
-远端运行使用独立源码副本，共享数据、权重与实验；dry-run 仍访问 SSH。详见 [SSH 服务器训练部署](docs/SSH服务器训练部署.md)。`scripts/utils/clean_experiments.sh` 只读盘点实验，`scripts/utils/wandb_sync.sh` 上传 offline runs。
-
-策略加载与真机调用接口见 [部署边界](docs/项目架构.md#部署边界)，真机执行由 `dexmani_real` 管理。
+流水线执行选点和冻结的 held-out test；普通 `--checkpoint best` 评测用于研究，不作为正式测试证据。评测协议、seeds 和录像设置见 [仿真评测机制](docs/仿真评测机制.md)。真机执行由 `dexmani_real` 管理，接口见 [部署边界](docs/项目架构.md#部署边界)。
 
 ## 仓库导航
 
-| 路径 | 职责 |
+| 入口 | 内容 |
 | --- | --- |
 | `dexmani_policy/configs/` | 实验配置与 DDP overlay |
-| `dexmani_policy/agents/` | Policy、观测编码、动作解码与手部表示 |
-| `dexmani_policy/datasets/` | 读取、窗口、划分、增强与多任务组合 |
-| `dexmani_policy/training/` | 训练构建、循环、预训练与恢复 |
-| `dexmani_policy/evaluation/` | 评测请求、checkpoint 选点与评测流水线 |
-| `dexmani_policy/env_runner/` | 环境交互、rollout、seed 与指标工具、录像 |
-| `dexmani_policy/deployment/` | 已保存策略的检查与推理接口 |
-| `dexmani_policy/common/` | 共享配置、checkpoint、归一化、RGB 预处理与运行工具 |
-| `dexmani_policy/smoke_test.py` | 分层 smoke，覆盖范围见 [验证指南](docs/验证指南.md) |
-| `scripts/` | 运行入口 |
-| `robot_data/`、`data/`、`experiments/` | 数据、资源与实验产物 |
-| [AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md) | 研究协作规则及 Claude Code 加载入口 |
+| `scripts/` | 训练、评测、远端与工具脚本 |
+| [项目架构](docs/项目架构.md) | 数据流、策略接口、训练恢复与部署 |
+| [手部动作表示](docs/手部动作表示.md) | DQ-RISE、LAMP、LatentFlow/HandVAE 的准备与实现 |
+| [仿真评测机制](docs/仿真评测机制.md) | 选点、固定 seeds、评测记录与录像 |
+| [SSH 服务器训练部署](docs/SSH服务器训练部署.md) | 远端启动、同步、监控与停止 |
+| [AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md) | AI 协作规则与加载入口 |
