@@ -22,7 +22,7 @@ from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import load_policy_config
 from dexmani_policy.common.experiments import resolve_best_checkpoint
 from dexmani_policy.deployment.metadata import PolicyInfo
-from dexmani_policy.deployment.runtime import PolicyRuntime
+from dexmani_policy.deployment.runtime import PolicyRuntime, load_policy
 from dexmani_policy.env_runner.common.metrics import (
     compute_evaluation_statistics,
     validate_episodes,
@@ -121,6 +121,50 @@ class InfrastructureTests(unittest.TestCase):
         model = WindowPolicy()
         model.checkpoint_step = int(Path(path).name.split("-step=")[1].split("-")[0])
         return model
+
+    def test_deployment_initialization_preserves_primary_failure(self):
+        model = WindowPolicy()
+        info = PolicyInfo(self.root, self.path, OmegaConf.create(self.cfg), "raw", 10)
+        with (patch("dexmani_policy.common.checkpoint.restore_policy_agent", return_value=model),
+              patch.object(model, "to", side_effect=OSError("model cleanup failed")) as cleanup,
+              patch("dexmani_policy.deployment.runtime.PolicyRuntime", side_effect=ValueError("invalid policy inputs")),
+              redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaisesRegex(ValueError, "invalid policy inputs")):
+            load_policy(info, device="cpu")
+        cleanup.assert_called_once_with("cpu")
+        self.assertIn("model cleanup failed", stderr.getvalue())
+
+    def test_deployment_close_attempts_all_cleanup_and_preserves_first_failure(self):
+        info = PolicyInfo(self.root, self.path, OmegaConf.create(self.cfg), "raw", 10)
+        for primary in (False, True):
+            model = WindowPolicy()
+            runtime = PolicyRuntime(model, info, device="cuda:0", seed=0)
+            expected = ValueError if primary else OSError
+            message = "prediction failed" if primary else "model cleanup failed"
+            with (self.subTest(primary=primary),
+                  patch.object(model, "to", side_effect=OSError("model cleanup failed")) as cleanup,
+                  patch("torch.cuda.empty_cache", side_effect=RuntimeError("cache cleanup failed")) as cache,
+                  redirect_stderr(io.StringIO()) as stderr,
+                  self.assertRaisesRegex(expected, message)):
+                with closing(runtime):
+                    if primary:
+                        raise ValueError("prediction failed")
+            cleanup.assert_called_once_with("cpu")
+            cache.assert_called_once()
+            self.assertIsNone(runtime.agent)
+            self.assertIn("cache cleanup failed", stderr.getvalue())
+
+    def test_warmup_reset_failure_preserves_prediction_error(self):
+        info = PolicyInfo(self.root, self.path, OmegaConf.create(self.cfg), "raw", 10)
+        runtime = PolicyRuntime(WindowPolicy(), info, device="cpu", seed=0)
+        with (patch("dexmani_policy.deployment.runtime.make_warmup_observation", return_value={}),
+              patch.object(runtime, "predict", side_effect=ValueError("warmup prediction failed")),
+              patch.object(runtime, "reset_episode", side_effect=[None, OSError("RNG reset failed")]) as reset,
+              redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaisesRegex(ValueError, "warmup prediction failed")):
+            runtime.warmup(samples=1)
+        self.assertEqual(reset.call_count, 2)
+        self.assertIn("RNG reset failed", stderr.getvalue())
 
     def test_multitask_request_matches_dataset_text_and_environment_defaults(self):
         cfg = copy.deepcopy(self.cfg)
@@ -554,6 +598,52 @@ class InfrastructureTests(unittest.TestCase):
         proc.kill.assert_called_once()
         self.assertEqual(proc.wait.call_count, 2)
         self.assertIn("pipe close failed", stderr.getvalue())
+
+    def test_video_failure_marks_evaluation_failed_and_preserves_prefix(self):
+        self.cfg["eval"]["video"]["enabled"] = True
+        self.cfg["eval"]["task_seeds"] = {self.cfg["task_name"]: [1, 2]}
+        request = resolve_evaluation_request(self.cfg, self.root, str(self.path))
+        frames = np.zeros((1, 2, 2, 3), dtype=np.uint8)
+        for stage in ("missing", "empty", "encode", "write"):
+            env = SyntheticEnvironment()
+            second_frames = {"missing": None, "empty": frames[:0]}.get(stage, frames)
+            env.get_video = Mock(side_effect=[frames, second_frames])
+            output = self.root / stage
+            error = ValueError if stage in {"missing", "empty"} else OSError
+            def encode(path, frames, fps):
+                if path.stem == "episode_2":
+                    if stage == "encode":
+                        raise OSError("encoding failed")
+                    path.mkdir()
+                path.write_bytes(b"synthetic video")
+            with (patch.object(SimRunner, "make_env", return_value=env),
+                  patch("dexmani_policy.evaluation.rollout.restore_policy_agent", side_effect=self.load_model),
+                  patch("dexmani_policy.env_runner.common.video.encode_video", side_effect=encode),
+                  self.subTest(stage=stage), self.assertRaises(error)):
+                evaluate_policy(request, output_root=self.root, output_dir=output)
+            record = json.loads((output / "result_details.json").read_text())
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual([episode["seed"] for episode in record["episodes"]], [1])
+            self.assertIsNone(record["statistics"])
+            self.assertTrue(env.closed)
+
+    def test_crash_video_failure_preserves_rollout_error(self):
+        self.cfg["eval"]["video"]["enabled"] = True
+        self.cfg["eval"]["task_seeds"] = {self.cfg["task_name"]: [1]}
+        request = resolve_evaluation_request(self.cfg, self.root, str(self.path))
+        env = SyntheticEnvironment(failing_seed=1)
+        env.get_video = Mock(side_effect=OSError("crash video unavailable"))
+        output = self.root / "crash_video"
+        with (patch.object(SimRunner, "make_env", return_value=env),
+              patch("dexmani_policy.evaluation.rollout.restore_policy_agent", side_effect=self.load_model),
+              redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaisesRegex(RuntimeError, "synthetic environment error")):
+            evaluate_policy(request, output_root=self.root, output_dir=output)
+        record = json.loads((output / "result_details.json").read_text())
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("synthetic environment error", record["error"])
+        self.assertIn("crash video unavailable", stderr.getvalue())
+        self.assertTrue(env.closed)
 
     def test_inspection_has_no_torch_and_runner_has_no_sim_import(self):
         subprocess.run(

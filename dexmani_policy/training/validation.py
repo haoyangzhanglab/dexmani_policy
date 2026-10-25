@@ -33,8 +33,8 @@ def validate_ema_batchnorm(model) -> None:
         raise ValueError(f"EMA requires frozen BatchNorm or GroupNorm; active modules: {unsafe}")
 
 
-def resolve_numeric_observation_fields(cfg) -> set:
-    """Require the same numeric observation fields across tasks."""
+def validate_model_config(cfg):
+    """Check normalization and the selected policy's encoder/decoder constraints."""
     fields = [
         set(child.sensor_modalities) - NON_NUMERIC_OBSERVATION_FIELDS
         for child in cfg.dataset.get("datasets", [cfg.dataset])
@@ -43,11 +43,6 @@ def resolve_numeric_observation_fields(cfg) -> set:
         raise ValueError(
             f"Shared normalization requires matching numeric fields: {[sorted(s) for s in fields]}"
         )
-    return fields[0]
-
-
-def validate_model_config(cfg):
-    """Check normalization and the selected policy's encoder/decoder constraints."""
     rgb_transport = {
         bool(child.get("rgb_keep_uint8", False))
         for child in cfg.dataset.get("datasets", [cfg.dataset])
@@ -55,9 +50,7 @@ def validate_model_config(cfg):
     }
     if len(rgb_transport) > 1:
         raise ValueError("RGB child datasets must have consistent rgb_keep_uint8")
-    spec = resolve_normalization_spec(
-        cfg, observation_fields=resolve_numeric_observation_fields(cfg)
-    )
+    spec = resolve_normalization_spec(cfg, observation_fields=fields[0])
     agent_class = hydra.utils.get_class(cfg.agent._target_)
     if agent_class.requires_action_affine and spec["action"] == "identity":
         raise ValueError("This policy requires fitted action affine parameters")

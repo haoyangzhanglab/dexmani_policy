@@ -8,6 +8,7 @@ import time
 import numpy as np
 
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.runtime import close_resources
 
 
 def load_policy(info, *, device="cuda:0", seed=0):
@@ -21,7 +22,7 @@ def load_policy(info, *, device="cuda:0", seed=0):
     try:
         return PolicyRuntime(agent, info, device=device, seed=seed)
     except BaseException:
-        agent.to("cpu")
+        close_resources(lambda: agent.to("cpu"))
         raise
 
 
@@ -249,16 +250,15 @@ class PolicyRuntime:
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}
         finally:
-            self.reset_episode()
+            close_resources(self.reset_episode)
 
     def close(self):
         if self.agent is None:
             return
         agent, self.agent = self.agent, None
-        try:
-            agent.to("cpu")
-        finally:
-            if str(self.device).startswith("cuda"):
-                import torch
+        callbacks = [lambda: agent.to("cpu")]
+        if str(self.device).startswith("cuda"):
+            import torch
 
-                torch.cuda.empty_cache()
+            callbacks.append(torch.cuda.empty_cache)
+        close_resources(*callbacks)

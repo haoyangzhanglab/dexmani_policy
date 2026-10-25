@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import uuid
 from pathlib import Path
@@ -13,7 +12,6 @@ os.environ.setdefault("WANDB_SILENT", "true")
 class JsonlLogger:
     def __init__(self, output_dir: Path, filename: str = "metrics.jsonl"):
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.file = open(self.output_dir / filename, "a", buffering=1, encoding="utf-8")
 
     def log(self, data: dict[str, Any], step: int | None = None):
@@ -34,11 +32,12 @@ class WandbLogger:
         group: str,
         mode: str,
     ):
+        import wandb
+
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Checkpoint continuation belongs to a new logging run, including repeated sweep names.
-        init_kwargs = dict(
+        self.run = wandb.init(
             dir=str(self.output_dir),
             project=project,
             name=name,
@@ -47,61 +46,25 @@ class WandbLogger:
             resume="never",
             mode=mode,
         )
-        self.run = None
-        try:
-            import wandb
-        except Exception as exc:
-            self.disable("import", exc)
-            return
-        try:
-            self.run = wandb.init(**init_kwargs)
-        except Exception as exc:
-            self.disable("init", exc)
-
-    def disable(self, stage: str, error: Exception):
-        run, self.run = self.run, None
-        logging.getLogger(__name__).warning(
-            "W&B disabled during %s: %s: %s", stage, type(error).__name__, error
-        )
-        if run is not None:
-            try:
-                run.finish()
-            except Exception:
-                logging.getLogger(__name__).exception("W&B cleanup also failed after %s", stage)
 
     def log(self, data: dict[str, Any], step: int | None = None):
-        if self.run is None:
-            return
-        try:
-            self.run.log(data, step=step)
-        except Exception as exc:
-            self.disable("log", exc)
+        self.run.log(data, step=step)
 
     def log_config(self, cfg_dict: dict[str, Any]):
-        if self.run is None:
-            return
         config = {**cfg_dict, "output_dir": str(self.output_dir)}
-        try:
-            self.run.config.update(config)
-        except Exception as exc:
-            self.disable("config update", exc)
+        self.run.config.update(config)
 
     def close(self):
-        if self.run is None:
-            return
-        run, self.run = self.run, None
-        run.finish()
+        self.run.finish()
 
 
 def accumulate_metrics(totals, metrics):
     """Accumulate detached scalars without synchronizing the device."""
     for key, value in metrics.items():
         if torch.is_tensor(value):
-            if value.numel() != 1:
-                continue
-            value = value.detach().to(dtype=torch.float64)
-        elif not isinstance(value, (int, float)):
-            continue
+            value = value.detach().reshape(()).to(dtype=torch.float64)
+        else:
+            value = float(value)
         totals[key] = totals.get(key, 0.0) + value
 
 
@@ -110,15 +73,11 @@ def to_log_scalars(metrics: dict[str, Any]) -> dict[str, float]:
     tensors = {}
     for key, value in metrics.items():
         if torch.is_tensor(value):
-            if value.numel() == 1:
-                keys, values = tensors.setdefault(value.device, ([], []))
-                keys.append(key)
-                values.append(value.detach().reshape(()).to(dtype=torch.float64))
+            keys, values = tensors.setdefault(value.device, ([], []))
+            keys.append(key)
+            values.append(value.detach().reshape(()).to(dtype=torch.float64))
         else:
-            try:
-                scalars[key] = float(value)
-            except (TypeError, ValueError):
-                pass
+            scalars[key] = float(value)
     for keys, values in tensors.values():
         scalars.update(zip(keys, torch.stack(values).cpu().tolist()))
     return scalars

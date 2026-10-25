@@ -98,10 +98,9 @@ def policy_state_dict(model) -> dict:
 def load_policy_state(model, state):
     """Restore saved parameter precision before strict copying, including FP32 EMA."""
     for name, parameter in model.named_parameters():
-        saved = state.get(name)
+        saved = state[name]
         if (
-            saved is not None
-            and parameter.is_floating_point()
+            parameter.is_floating_point()
             and saved.is_floating_point()
             and parameter.dtype != saved.dtype
         ):
@@ -190,7 +189,7 @@ def prepare_restore_config(cfg):
     agent = cfg.agent
     with open_dict(agent):
         if agent.get("rgb_backbone_name") is not None:
-            rgb = dict(agent.get("rgb_backbone_config") or {})
+            rgb = dict(agent.rgb_backbone_config)
             if agent.rgb_backbone_name == "resnet" and not {"tune_mode", "norm_mode"} <= rgb.keys():
                 raise ValueError("Saved ResNet requires explicit tune_mode and norm_mode")
             if agent.rgb_backbone_name in {"dino", "siglip"} and not isinstance(

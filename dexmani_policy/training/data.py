@@ -89,16 +89,11 @@ def close_data_loader(loader, iterator=None):
         iterator._shutdown_workers()
 
 
-def loader_options(cfg):
+def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
     options = OmegaConf.to_container(cfg.dataloader, resolve=True)
     if options.get("num_workers", 0) == 0:
         options["persistent_workers"] = False
         options.pop("prefetch_factor", None)
-    return options
-
-
-def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
-    options = loader_options(cfg)
     sampler = ResumableDistributedSampler(
         dataset,
         batch_size=options["batch_size"],

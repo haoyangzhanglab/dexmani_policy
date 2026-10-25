@@ -251,9 +251,7 @@ def validate_action_key_consistency(cfg) -> None:
                 f"control_mode={expected_control!r}, got {actual_control!r}"
             )
 
-    dataset = cfg.get("dataset")
-    if dataset is None:
-        return
+    dataset = cfg["dataset"]
     for child in [dataset, *dataset.get("datasets", ())]:
         ds_action_key = child.get("action_key", "action")
         if ds_action_key != action_key:

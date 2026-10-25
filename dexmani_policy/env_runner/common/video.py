@@ -1,4 +1,4 @@
-"""Best-effort episode video export, independent of evaluation metrics."""
+"""Episode video export with explicit failures and encoder cleanup."""
 
 import subprocess
 import sys
@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 from imageio_ffmpeg import get_ffmpeg_exe
-from termcolor import cprint
 
 
 def encode_video(path: Path, frames: np.ndarray, fps: int) -> None:
@@ -73,14 +72,10 @@ def encode_video(path: Path, frames: np.ndarray, fps: int) -> None:
 def save_episode_video(env, directory, name, fps):
     if directory is None:
         return None
-    try:
-        frames = env.get_video()
-        if frames is None:
-            return None
-        path = Path(directory) / f"{name}.mp4"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        encode_video(path, frames, fps)
-        return {name: str(path)}
-    except Exception as exc:
-        cprint(f"Video export failed for {name}: {exc}", "yellow")
-        return None
+    frames = env.get_video()
+    if frames is None or len(frames) == 0:
+        raise ValueError(f"No video frames for {name}")
+    path = Path(directory) / f"{name}.mp4"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encode_video(path, frames, fps)
+    return {name: str(path)}

@@ -52,12 +52,12 @@ class Workspace:
     def save_hydra_config(self, hydra_config):
         import json
 
-        for index, recipe in enumerate(hydra_config.get("data_recipe", ())):
-            if "split_manifest" in recipe:
-                path = self.output_dir / f"split_manifest_{index}.json"
-                with atomic_path(path, overwrite=False) as temporary:
-                    temporary.write_text(json.dumps(OmegaConf.to_container(recipe.split_manifest), indent=2) + "\n")
-        with atomic_path(self.output_dir / "config.yaml") as temporary:
+        for index, recipe in enumerate(hydra_config["data_recipe"]):
+            path = self.output_dir / f"split_manifest_{index}.json"
+            with atomic_path(path, overwrite=False) as temporary:
+                manifest = OmegaConf.to_container(recipe["split_manifest"])
+                temporary.write_text(json.dumps(manifest, indent=2) + "\n")
+        with atomic_path(self.output_dir / "config.yaml", overwrite=False) as temporary:
             OmegaConf.save(hydra_config, temporary, resolve=True)
         if self.wandb_logger is not None:
             cfg_dict = OmegaConf.to_container(hydra_config, resolve=True)

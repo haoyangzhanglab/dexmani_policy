@@ -95,14 +95,8 @@ class Trainer:
         return [
             name
             for name, param in self.raw_model.named_parameters()
-            if param.grad is not None and not torch.isfinite(self.gradient_values(param.grad)).all()
+            if param.grad is not None and not torch.isfinite(param.grad).all()
         ]
-
-    @staticmethod
-    def gradient_values(grad):
-        if grad.layout == torch.sparse_coo:
-            return grad._values()
-        return grad if grad.layout == torch.strided else grad.values()
 
     def optimizer_step(self):
         grad_norm = None
@@ -129,7 +123,7 @@ class Trainer:
                 )
         else:
             flags = [
-                torch.isfinite(self.gradient_values(p.grad)).all()
+                torch.isfinite(p.grad).all()
                 for p in self.raw_model.parameters()
                 if p.grad is not None
             ]

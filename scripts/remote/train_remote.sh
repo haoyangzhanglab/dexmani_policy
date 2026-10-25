@@ -5,7 +5,7 @@
 # Usage: bash scripts/remote/train_remote.sh [--fg] [--dry-run] [--sync-data]
 #          [--gpus IDS] <config> <task> [hydra_overrides...]
 # DDP visible GPU count must match training.num_gpus; resume task must match saved identity.
-# GPU/space status is informational; requested GPU IDs are checked when count is available.
+# Resource queries must succeed; requested GPU IDs must appear in the server index list.
 
 set -euo pipefail
 
@@ -107,19 +107,12 @@ remote_bash_invocation() {
 }
 
 # This runs on the client; CONDA_PYTHON names an interpreter on the server.
-launch_uuid=""
-for local_python in python3 python; do
-    if command -v "$local_python" >/dev/null 2>&1 && \
-       launch_uuid=$("$local_python" -c 'import uuid; print(uuid.uuid4().hex)' 2>/dev/null) && \
-       [[ "$launch_uuid" =~ ^[0-9a-f]{32}$ ]]; then
-        break
-    fi
-    launch_uuid=""
-done
-if [[ -z "$launch_uuid" ]]; then
-    echo "Error: a working local python3 or python with the standard-library uuid module is required to generate the session name." >&2
-    exit 1
+if command -v python3 >/dev/null 2>&1; then
+    local_python=python3
+else
+    local_python=python
 fi
+launch_uuid=$("$local_python" -c 'import uuid; print(uuid.uuid4().hex)')
 SESSION="dex_${CONFIG//\//_}_${TASK//+/_}_$(date +%Y%m%d_%H%M%S)_${launch_uuid}"
 
 # Append an explicit seed for readability; the launch suffix ensures uniqueness.
@@ -220,28 +213,30 @@ echo "OK"
 
 # 4. GPU check
 echo "[4/5] GPU status:"
-ssh "$SERVER" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader" 2>/dev/null || echo "  UNKNOWN: could not query GPUs"
+gpu_status=$(ssh "$SERVER" "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader")
+printf '%s\n' "$gpu_status"
 
-# Validate requested GPU ids are in range (best-effort).
+# Check the actual indices, including hosts whose index list is not contiguous.
 if [[ -n "$GPU_IDS" ]]; then
-    _gpu_count=$(ssh "$SERVER" "nvidia-smi --query-gpu=count --format=csv,noheader" 2>/dev/null || true)
-    if [[ -n "$_gpu_count" && "$_gpu_count" =~ ^[0-9]+$ ]]; then
-        _max_id=$((_gpu_count - 1))
-        for _gid in $(echo "$GPU_IDS" | tr ',' ' '); do
-            if [[ $_gid -gt $_max_id ]]; then
-                echo "Error: GPU id $_gid out of range (server has $_gpu_count GPUs: 0..$_max_id)" >&2
+    mapfile -t available_gpu_ids < <(cut -d, -f1 <<< "$gpu_status")
+    IFS=, read -r -a requested_gpu_ids <<< "$GPU_IDS"
+    for gpu_id in "${requested_gpu_ids[@]}"; do
+        case " ${available_gpu_ids[*]} " in
+            *" $gpu_id "*) ;;
+            *)
+                echo "Error: GPU id $gpu_id is unavailable (server GPU indices: ${available_gpu_ids[*]})" >&2
                 exit 1
-            fi
-        done
-    fi
+                ;;
+        esac
+    done
 fi
 
 # 5. Disk space
 echo -n "[5/5] Disk space /data_ssd ... "
-ssh "$SERVER" "df -h /data_ssd" 2>/dev/null || echo "  UNKNOWN: could not query disk"
+ssh "$SERVER" "df -h /data_ssd"
 
 echo ""
-echo "Connection and dataset checks completed; GPU/disk output is informational, not a training validation."
+echo "Connection, dataset paths and resource queries succeeded; training requirements still depend on the selected configuration."
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════

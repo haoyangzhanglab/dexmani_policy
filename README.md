@@ -10,7 +10,7 @@
 | 选点、固定测试 seeds、解释评测结果 | [仿真评测机制](docs/仿真评测机制.md) |
 | 远端启动、同步、监控与停止 | [SSH 服务器训练部署](docs/SSH服务器训练部署.md) |
 | 修改代码与 AI 协作 | [AGENTS.md](AGENTS.md)、[仓库导航](#仓库导航) |
-| 轻量化重构 | [任务书与边界](docs/lightweight_refactor_taskbook.md)、[验收范围](docs/验证指南.md#本轮轻量化重构验收) |
+| 精简改动与验证范围 | [验收记录](docs/验证指南.md#显式失败与冗余清理验收) |
 
 以下命令从仓库根目录执行，`<...>` 替换为实际值。Python 命令使用 Conda `policy` 环境；本地训练和评测脚本自动通过该环境启动，远端环境另行配置。
 
@@ -25,7 +25,7 @@ python -m pip install -e .
 python -m pip check
 ```
 
-部分点云算子另需匹配 Torch/CUDA 的 PyTorch3D，仿真评测需 `dexmani_sim`。Uni3D 权重可用 `bash scripts/utils/download_pretrained.sh` 下载至 `data/pretrained/uni3d/`；其他权重以配置和 encoder 加载逻辑为准。
+部分点云算子另需匹配 Torch/CUDA 的 PyTorch3D，仿真评测需 `dexmani_sim`。启用 Uni3D 预训练时，先用 `bash scripts/utils/download_pretrained.sh` 将权重准备到 `data/pretrained/uni3d/`；训练仅加载本地文件，加载规则见 [Uni3D 说明](docs/项目架构.md#观测编码)。其他权重以配置和 encoder 加载逻辑为准。
 
 配置位于 `dexmani_policy/configs/*.yaml`，DDP overlay 位于 `dexmani_policy/configs/ddp/`。`agent._target_` 决定策略，`policy_name` 决定实验目录；对应关系见 [策略接口](docs/项目架构.md#策略接口)。
 

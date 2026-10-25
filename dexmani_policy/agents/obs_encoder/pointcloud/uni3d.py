@@ -123,7 +123,6 @@ class Uni3DEncoder(nn.Module):
         drop_path_rate=0.0,
         use_pretrained_weights=False,
         pretrained_weights_path=None,
-        allow_random_init=False,
         fps_random_config=None,
     ):
         super().__init__()
@@ -167,60 +166,26 @@ class Uni3DEncoder(nn.Module):
 
         self.use_pretrained_weights = use_pretrained_weights
         self.pretrained_weights_path = pretrained_weights_path
-        self.allow_random_init = allow_random_init
 
     def initialize_training(self):
         if self.use_pretrained_weights:
-            self.load_pretrained_weights(self.pretrained_weights_path, self.allow_random_init)
+            self.load_pretrained_weights(self.pretrained_weights_path)
         else:
             logger.info("[Uni3DEncoder] Random initialization (training from scratch)")
 
-    def load_pretrained_weights(self, pretrained_weights_path, allow_random_init=False):
-        """Load R3D weights, downloading missing files; require an explicit random-init opt-in."""
+    def load_pretrained_weights(self, pretrained_weights_path):
+        """Load local R3D weights; fresh random initialization is an explicit training choice."""
         if pretrained_weights_path is None:
-            if allow_random_init:
-                logger.warning(
-                    "[Uni3DEncoder] pretrained_weights_path is None; "
-                    "training from scratch (allow_random_init=True)."
-                )
-                return
             raise ValueError(
                 "[Uni3DEncoder] use_pretrained_weights=True but "
                 "pretrained_weights_path is None. Provide the path or set "
-                "allow_random_init=True to train from scratch."
+                "use_pretrained_weights=False to train from scratch."
             )
 
         weights_dir = Path(pretrained_weights_path)
         if not weights_dir.is_absolute():
             weights_dir = Path(__file__).resolve().parents[4] / weights_dir
         safetensors_path = weights_dir / "model.safetensors"
-        if not safetensors_path.exists():
-            logger.info(
-                "[Uni3DEncoder] Local weights not found, downloading from HuggingFace Hub..."
-            )
-            try:
-                from huggingface_hub import hf_hub_download
-
-                weights_dir.mkdir(parents=True, exist_ok=True)
-                hf_hub_download(
-                    "eddie-cui/r3d-weights",
-                    "model.safetensors",
-                    local_dir=str(weights_dir),
-                )
-            except Exception as e:
-                if allow_random_init:
-                    logger.warning(
-                        "[Uni3DEncoder] Auto-download failed (%s); "
-                        "training from scratch (allow_random_init=True).",
-                        e,
-                    )
-                    return
-                raise RuntimeError(
-                    f"[Uni3DEncoder] pretrained weights missing and "
-                    f"auto-download failed: {e}. Run "
-                    f"'bash scripts/utils/download_pretrained.sh' or set "
-                    f"allow_random_init=True."
-                ) from e
 
         from safetensors.torch import load_file
 
@@ -245,18 +210,11 @@ class Uni3DEncoder(nn.Module):
 
         # Reject checkpoints that miss most of this encoder.
         if ratio < 0.5:
-            msg = (
+            raise ValueError(
                 f"[Uni3DEncoder] Only {loaded}/{total_expected} ({ratio:.1%}) "
                 f"expected keys loaded from {safetensors_path} — checkpoint is likely "
                 f"for a different model."
             )
-            if allow_random_init:
-                logger.warning(
-                    "%s Continuing with partial/random init (allow_random_init=True).",
-                    msg,
-                )
-                return
-            raise ValueError(msg)
 
         logger.info(
             "[Uni3DEncoder] Pretrained weights loaded from %s (%d/%d keys, %.1f%%)",

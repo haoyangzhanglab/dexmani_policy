@@ -114,10 +114,6 @@ class BasePolicy(nn.Module):
     def get_training_loss_kwargs(self, ema_agent: BasePolicy | None = None) -> dict:
         if not self.requires_ema_for_loss:
             return {}
-        if ema_agent is None:
-            raise RuntimeError(
-                f"{type(self.action_decoder).__name__} requires an EMA model for training"
-            )
         return {"ema_decoder": ema_agent.action_decoder}
 
     def validate_batch(self, batch: dict) -> None:

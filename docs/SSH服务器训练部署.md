@@ -29,7 +29,9 @@ bash scripts/remote/train_remote.sh --fg --gpus 0 dp3 <task> '+max_updates=4'
 bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/sat <task>
 ```
 
-`--sync-data` 在启动前同步数据。正式流程为：检查 SSH → 创建唯一 `outputs/remote_sources/<id>/` → 同步源码/可选数据 → 链接共享目录 → 检查 Dataset 目录 → 显示 GPU/磁盘并提交训练。前置检查失败不启动训练；数据检查只验证目录，GPU/磁盘输出不保证权重、OOM 或剩余空间满足训练。
+`--sync-data` 在启动前同步数据。正式流程为：检查 SSH → 创建唯一 `outputs/remote_sources/<id>/` → 同步源码/可选数据 → 链接共享目录 → 检查 Dataset 目录 → 查询 GPU/磁盘并提交训练。GPU 只查询一次，`--gpus` 必须属于返回的实际 index 列表；资源查询失败直接退出，不启动训练。数据检查只验证目录，查询成功不保证权重、显存或剩余空间满足训练。
+
+客户端优先使用已有 `python3`，否则使用 `python` 生成唯一 session ID；解释器执行失败直接报错，不自动换解释器重试。命令失败后已创建的独立源码副本保留，便于排查。
 
 训练以副本中的 `python -m dexmani_policy.train` / `train_ddp` 启动。副本共享 `robot_data`、`data`、`experiments`、`pretrained_models`、`logs`；同步主源码不影响运行中的副本，修改共享数据仍会影响实验。副本不自动清理。
 
