@@ -9,8 +9,8 @@ from dexmani_policy.common.config import positive_int, validate_action_key_consi
 from dexmani_policy.common.experiments import (
     resolve_best_checkpoint,
     resolve_checkpoint_path,
-    resolve_selection_record,
 )
+from dexmani_policy.evaluation.artifacts import resolve_selection_record
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.env_runner.common.seeds import (
     split_evaluation_seeds,
@@ -214,6 +214,7 @@ def resolve_evaluation_request(
         selected, path = resolve_best_checkpoint(exp_dir)
         cfg = OmegaConf.merge(cfg, {"eval": selected["inference"]})
         source["selection_result"] = selected["selection_result"]
+        source["global_step"] = selected["global_step"]
     else:
         path = resolve_checkpoint_path(exp_dir, checkpoint)
     cfg = prepare_evaluation_config(cfg, overrides)

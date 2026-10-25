@@ -17,7 +17,7 @@ from torch import nn
 
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import load_policy_config
-from dexmani_policy.common.experiments import rank_selection_results, resolve_best_checkpoint
+from dexmani_policy.common.experiments import resolve_best_checkpoint
 from dexmani_policy.deployment.metadata import PolicyInfo
 from dexmani_policy.deployment.runtime import PolicyRuntime
 from dexmani_policy.env_runner.common.metrics import (
@@ -28,7 +28,8 @@ from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds, valid
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.config import parse_evaluation_overrides, resolve_evaluation_request
 from dexmani_policy.evaluation.rollout import evaluate_policy
-from dexmani_policy.evaluation.selection import select_best_checkpoint
+from dexmani_policy.evaluation.selection import rank_selection_results, select_best_checkpoint, verify_selection_record, main as verify_main
+from dexmani_policy.evaluation.artifacts import write_json
 
 
 class WindowPolicy(BasePolicy):
@@ -260,7 +261,9 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual(loader.call_count, 2)
         self.assertEqual([len(env.seeds) for env in environments], [25, 25])
         self.assertEqual(environments[0].seeds, environments[1].seeds)
-        record, checkpoint = resolve_best_checkpoint(self.root)
+        pointer, checkpoint = resolve_best_checkpoint(self.root)
+        self.assertEqual(set(pointer), {"ckpt_relpath", "global_step", "inference", "selection_result"})
+        record = json.loads(path.read_text())
         self.assertEqual(checkpoint, second)
         self.assertEqual(record["status"], "completed")
         results = [json.loads((self.root / ref).read_text()) for ref in record["candidate_results"]]
@@ -297,12 +300,80 @@ class InfrastructureTests(unittest.TestCase):
             overrides=parse_evaluation_overrides(["training.device=cuda:1"]),
         )
         self.assertEqual(moved_device.device, "cuda:1")
+        for field, value in (("global_step", 100), ("status", "running")):
+            write_json(path, {**record, field: value})
+            with self.assertRaises(ValueError):
+                resolve_evaluation_request(self.cfg, self.root, selection_record=path)
+        overlapping = copy.deepcopy(record)
+        overlapping["selection_task_seeds"][self.cfg["task_name"]][0] = test.task_seeds[self.cfg["task_name"]][0]
+        write_json(path, overlapping)
+        with self.assertRaisesRegex(ValueError, "disjoint"):
+            resolve_evaluation_request(self.cfg, self.root, selection_record=path)
+        write_json(path, record)
         result_path = self.root / record["candidate_results"][0]
         result = json.loads(result_path.read_text())
         result["episodes"].pop()
         result_path.write_text(json.dumps(result))
         with self.assertRaises(RuntimeError):
+            verify_selection_record(self.root, path)
+        result_path.unlink()
+        self.assertEqual(resolve_best_checkpoint(self.root)[1], second)
+        self.assertEqual(resolve_evaluation_request(self.cfg, self.root, selection_record=path).checkpoint, str(second))
+        with self.assertRaises(FileNotFoundError):
+            verify_selection_record(self.root, path)
+        path.unlink()
+        ordinary = resolve_evaluation_request(self.cfg, self.root)
+        self.assertEqual(ordinary.source["global_step"], 2)
+        self.assertFalse(ordinary.source["heldout_from_selection"])
+
+    def test_best_pointer_paths_and_legacy_migration(self):
+        pointer = dict(ckpt_relpath=str(self.path.relative_to(self.root)), global_step=1,
+                       inference=dict(use_ema=False, inference_steps=2, action_steps=8),
+                       selection_result="missing/selection_result.json")
+        best = self.root / "best_ckpt.json"
+        write_json(best, pointer)
+        self.assertEqual(resolve_best_checkpoint(self.root)[1], self.path)
+        for key, value in (("global_step", True), ("ckpt_relpath", "../outside.pt"),
+                           ("ckpt_relpath", "checkpoints/latest.pt"), ("ckpt_relpath", str(self.path))):
+            write_json(best, {**pointer, key: value})
+            with self.assertRaises(ValueError):
+                resolve_best_checkpoint(self.root)
+        alias = self.root / "checkpoints/alias.pt"
+        alias.symlink_to(self.path)
+        write_json(best, {**pointer, "ckpt_relpath": "checkpoints/alias.pt"})
+        with self.assertRaises(ValueError):
             resolve_best_checkpoint(self.root)
+        write_json(best, {**pointer, "ckpt_relpath": "checkpoints/missing.pt"})
+        with self.assertRaises(FileNotFoundError):
+            resolve_best_checkpoint(self.root)
+        write_json(best, {"selection_result": pointer["selection_result"]})
+        with self.assertRaisesRegex(ValueError, "--publish-best"):
+            resolve_best_checkpoint(self.root)
+
+    def test_best_publication_failure_preserves_completed_evidence(self):
+        best = self.root / "best_ckpt.json"
+        write_json(best, {"previous": True})
+        def publish(path, record, **kwargs):
+            if Path(path) == best:
+                raise OSError("publication failed")
+            write_json(path, record, **kwargs)
+        with (patch.object(SimRunner, "make_env", return_value=SyntheticEnvironment()),
+              patch("dexmani_policy.evaluation.rollout.restore_policy_agent", side_effect=self.load_model),
+              patch("dexmani_policy.evaluation.selection.write_json", side_effect=publish),
+              self.assertRaisesRegex(OSError, "publication failed")):
+            select_best_checkpoint(self.root, self.cfg)
+        record_path = next((self.root / "eval_ckpt_selector").glob("*/selection_result.json"))
+        self.assertEqual(json.loads(record_path.read_text())["status"], "completed")
+        self.assertEqual(json.loads(best.read_text()), {"previous": True})
+        write_json(best, {"selection_result": str(record_path.relative_to(self.root))})
+        argv = ["verify", "--experiment-dir", str(self.root), "--selection-record", str(record_path)]
+        original = best.read_bytes()
+        with patch.object(sys, "argv", argv):
+            verify_main()
+        self.assertEqual(best.read_bytes(), original)
+        with patch.object(sys, "argv", [*argv, "--publish-best"]):
+            verify_main()
+        self.assertEqual(resolve_best_checkpoint(self.root)[1], self.path)
 
     def test_load_and_cleanup_failures_never_publish_success(self):
         self.cfg["eval"]["task_seeds"] = {self.cfg["task_name"]: [1]}

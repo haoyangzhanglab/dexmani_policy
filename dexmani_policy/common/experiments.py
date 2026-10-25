@@ -1,4 +1,4 @@
-"""Experiment checkpoints and selection records without loading policy weights."""
+"""Experiment checkpoint paths and direct best pointers without loading weights."""
 
 import json
 import re
@@ -21,95 +21,34 @@ def resolve_record_path(root, relative, *, checkpoint=False):
     return resolved
 
 
-def rank_selection_results(record, results):
-    """Validate complete candidate evidence, then rank without file or environment I/O."""
-    from dexmani_policy.env_runner.common.metrics import (
-        compute_evaluation_statistics,
-        validate_episodes,
-    )
-    from dexmani_policy.env_runner.common.seeds import validate_task_seeds, validate_seed_pool
+def validate_best_info(info):
+    from dexmani_policy.common.config import positive_int
 
-    candidates = record["candidates"]
-    if not candidates or len(results) != len(candidates):
-        raise ValueError("Selection requires complete results for every declared candidate")
-    if len({c["checkpoint"] for c in candidates}) != len(candidates):
-        raise ValueError("Duplicate selection candidate")
-    protocol = record["test_request"]
-    tasks = [task["task_name"] for task in protocol["tasks"]]
-    selection, test = record["selection_task_seeds"], protocol["task_seeds"]
-    if validate_task_seeds(selection, tasks) != protocol["config"]["eval"]["selection_episodes"]:
-        raise ValueError("Selection plan differs from declared fixed budget")
-    if validate_task_seeds(test, tasks) != protocol["config"]["eval"]["episodes"]:
-        raise ValueError("Frozen test plan differs from declared budget")
-    if set(record["seed_pools"]) != set(tasks):
-        raise ValueError("Selection source pools differ from tasks")
-    for task in tasks:
-        pool = set(validate_seed_pool(task, record["seed_pools"][task]))
-        if set(selection[task]) & set(test[task]) or not set(selection[task] + test[task]) <= pool:
-            raise ValueError("Test and selection seeds must be disjoint and inside the source pool")
-    ranks = []
-    for candidate, result in zip(candidates, results, strict=True):
-        if result["status"] != "completed" or result["global_step"] != candidate["global_step"]:
-            raise ValueError("Candidate is incomplete or global_step differs")
-        request = result["request"]
-        expected_checkpoint = str(Path(record["experiment_dir"]) / candidate["checkpoint"])
-        if request["checkpoint"] != expected_checkpoint or request["task_seeds"] != selection:
-            raise ValueError("Candidate checkpoint or fixed selection plan differs")
-        for key in ("config", "tasks", "use_ema", "inference_steps", "action_steps", "numerics"):
-            if request[key] != protocol[key]:
-                raise ValueError(f"Candidate research conditions differ: {key}")
-        for key in ("policy_code", "simulator_code", "torch", "cuda", "parameter_dtypes"):
-            if result["runtime"][key] != results[0]["runtime"][key]:
-                raise ValueError(f"Candidate runtime conditions differ: {key}")
-        validate_episodes(result["episodes"], selection)
-        stats = compute_evaluation_statistics(result["episodes"])
-        if result["statistics"] != stats:
-            raise ValueError("Candidate statistics disagree with episode facts")
-        avg = stats["avg_steps"]
-        ranks.append(
-            (
-                stats["micro_success_rate"],
-                -(avg if avg is not None else float("inf")),
-                candidate["global_step"],
-            )
-        )
-    return max(range(len(candidates)), key=ranks.__getitem__)
-
-
-def resolve_selection_record(experiment_dir, record_path):
-    root = Path(experiment_dir).resolve()
-    record_path = Path(record_path).expanduser().resolve(strict=True)
-    if not record_path.is_relative_to(root):
-        raise ValueError("Selection record must be inside the experiment")
-    info = json.loads(record_path.read_text())
-    if info["status"] != "completed":
-        raise ValueError("Selection has not completed successfully")
-    references = info["candidate_results"]
-    if len(set(references)) != len(references):
-        raise ValueError("Duplicate candidate result reference")
-    results = [
-        json.loads(resolve_record_path(root, reference).read_text()) for reference in references
-    ]
-    best = info["candidates"][rank_selection_results(info, results)]
-    if info["ckpt_relpath"] != best["checkpoint"] or info["global_step"] != best["global_step"]:
-        raise ValueError("Selected checkpoint disagrees with complete candidate ranking")
-    request = info["test_request"]
-    if request["checkpoint"] != str(Path(info["experiment_dir"]) / best["checkpoint"]):
-        raise ValueError("Frozen test checkpoint differs from selection")
-    if info["inference"] != {
-        key: request[key] for key in ("use_ema", "inference_steps", "action_steps")
-    }:
-        raise ValueError("Selected inference settings differ from frozen test")
-    checkpoint = resolve_record_path(root, info["ckpt_relpath"], checkpoint=True)
-    info["selection_result"] = str(record_path.relative_to(root))
-    return info, checkpoint
+    if type(info["global_step"]) is not int or info["global_step"] < 0:
+        raise ValueError("Selected global_step must be an int >= 0")
+    inference = info["inference"]
+    if set(inference) != {"use_ema", "inference_steps", "action_steps"}:
+        raise ValueError("Best requires explicit use_ema, inference_steps and action_steps")
+    if type(inference["use_ema"]) is not bool:
+        raise ValueError("Best use_ema must be boolean")
+    for key in ("inference_steps", "action_steps"):
+        positive_int(inference[key], key)
 
 
 def resolve_best_checkpoint(experiment_dir):
     root = Path(experiment_dir).resolve()
-    pointer = json.loads((root / "best_ckpt.json").read_text())
-    record = resolve_record_path(root, pointer["selection_result"])
-    return resolve_selection_record(root, record)
+    info = json.loads((root / "best_ckpt.json").read_text())
+    if set(info) == {"selection_result"}:
+        raise ValueError(
+            "Legacy best pointer: verify its selection record with "
+            "python -m dexmani_policy.evaluation.selection --experiment-dir <run> "
+            "--selection-record <record> --publish-best; or select an explicit checkpoint"
+        )
+    validate_best_info(info)
+    source = info["selection_result"]
+    if not isinstance(source, str) or not source or Path(source).is_absolute() or ".." in Path(source).parts:
+        raise ValueError("selection_result must be a relative source path")
+    return info, resolve_record_path(root, info["ckpt_relpath"], checkpoint=True)
 
 
 def resolve_checkpoint_path(exp_dir, selector="best"):
