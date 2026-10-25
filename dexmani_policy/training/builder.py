@@ -58,7 +58,7 @@ def bind_defaults(config, constructor):
                 config[name] = parameter.default
 
 
-def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=None):
+def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
     model_cfg = cfg
     if checkpoint is not None:
@@ -76,7 +76,13 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, dataset, checkpoint=
         model.initialize_training()
         model.load_normalizer_from_dataset(normalizer)
 
-    data_config = model.training_data_config(dataset, restoring=checkpoint is not None)
+    description = {}
+    if model.requires_hand_pretraining:
+        description = {
+            "hand_data": OmegaConf.to_container(cfg.hand_data, resolve=True),
+            "split_manifest": OmegaConf.to_container(cfg.data_recipe[0].split_manifest, resolve=True),
+        }
+    data_config = model.training_data_config(description, restoring=checkpoint is not None)
     if checkpoint is None:
         bind_defaults(cfg.agent, type(model))
         with open_dict(cfg.agent):
@@ -219,7 +225,7 @@ def build_training_components(
     """Build one rank's components before compile or DDP wrapping."""
     train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
     model, ema_model, ema_updater = build_model_and_ema(
-        cfg, device, normalizer, rank=rank, checkpoint=checkpoint, dataset=dataset
+        cfg, device, normalizer, rank=rank, checkpoint=checkpoint
     )
 
     # DDP initialization is shared; augmentation uses a separate seed on each rank.

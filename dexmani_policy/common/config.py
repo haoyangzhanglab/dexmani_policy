@@ -188,6 +188,34 @@ def load_policy_config(config, overrides=()):
         return hydra.compose(config_name=name, overrides=list(overrides))
 
 
+def validate_config_references(cfg):
+    """Reject detached overrides of the public input references used by fresh runs."""
+    if cfg.get("resume_from") is not None:
+        return  # Saved recipes allow the existing explicit asset/data relocation overrides.
+    references = []
+    for name in ("tcp_dim", "joint_dim", "ee_dim", "codebook_path"):
+        if name in cfg and name in cfg.agent:
+            references.append((f"agent.{name}", name))
+    if "datasets" not in cfg.dataset and "zarr_path" in cfg:
+        references.append(("dataset.zarr_path", "zarr_path"))
+    if "lamp" in cfg:
+        references.extend((f"agent.{target}", f"lamp.{source}") for target, source in (
+            ("prior_path", "prior_path"), ("history_steps", "history_steps"),
+            ("latent_dim", "latent_dim"), ("prior_hidden_dim", "hidden_dim"),
+        ))
+        references.append(("dataset.history_steps", "lamp.history_steps"))
+    if "codec" in cfg:
+        references.extend((f"agent.{target}", f"codec.{source}") for target, source in (
+            ("codec_path", "path"), ("latent_dim", "latent_dim"), ("codec_hidden_dim", "hidden_dim"),
+            ("codec_n_layers", "n_layers"), ("codec_n_heads", "n_heads"), ("codec_mlp_ratio", "mlp_ratio"),
+        ))
+    if "data_semantics" in cfg:
+        references.append(("dataset.data_semantics", "data_semantics"))
+    for target, source in references:
+        if OmegaConf.select(cfg, target) != OmegaConf.select(cfg, source):
+            raise ValueError(f"{target} must reference {source}; override {source} instead")
+
+
 def validate_action_window(horizon, n_obs_steps, n_action_steps, *, action_start_index=None) -> None:
     for name, value in (
         ("horizon", horizon),

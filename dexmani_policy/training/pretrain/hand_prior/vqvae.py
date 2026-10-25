@@ -21,7 +21,6 @@ from dexmani_policy.common.config import load_policy_config, positive_int, resol
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
-from dexmani_policy.common.hand_representation import describe_hand_data
 from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.data import build_normalizer
 from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
@@ -153,7 +152,7 @@ def policy_hand_rows(dataset, tcp_dim):
 
 def prepare_policy_data(cfg):
     dataset = build_policy_dataset(cfg)
-    hand_data = describe_hand_data(dataset)
+    hand_data = dataset.describe_hand_data()
     spec = resolve_normalization_spec(cfg)
     action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)["action"]
     hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))

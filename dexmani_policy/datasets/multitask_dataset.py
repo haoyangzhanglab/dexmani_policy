@@ -120,6 +120,23 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                 f"Set sampling_strategy='weighted' to use task weights."
             )
 
+    def describe_training_data(self, spec, *, task_name, **requirements):
+        descriptions = [
+            child.describe_training_data(spec, task_name=None, **requirements)
+            for child in self.datasets
+        ]
+        return {
+            "data_identity": {"tasks": {
+                name: description["data_identity"]
+                for name, description in zip(self.task_names, descriptions)
+            }},
+            "normalization_dims": descriptions[0]["normalization_dims"],
+            "data_recipe": [description["data_recipe"][0] for description in descriptions],
+        }
+
+    def training_summary(self):
+        return " | ".join(child.training_summary() for child in self.datasets)
+
     def iter_normalization_data(self, key: str):
         """Stream all child statistics, including tasks with zero sampling weight."""
         for dataset in self.datasets:

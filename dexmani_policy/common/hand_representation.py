@@ -6,40 +6,6 @@ import numpy as np
 from omegaconf import OmegaConf
 
 
-def describe_hand_data(dataset):
-    """Read dataset metadata and sampler counts without scanning action/state arrays."""
-    buffer = dataset.replay_buffer
-    attrs = buffer.attrs
-    dt = attrs.get("dt")
-    if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
-        raise ValueError("Hand representation data requires finite positive dt")
-    order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
-    if (
-        attrs.get("hand_joint_order", order) != order
-        or attrs.get("hand_units", "radians") != "radians"
-    ):
-        raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
-
-    validation = dataset.get_validation_dataset()
-    return {
-        "episode_ids": attrs.get("episode_ids"),
-        "episode_ends": buffer.episode_ends.tolist(),
-        "train_episodes": np.flatnonzero(dataset.train_mask).tolist(),
-        "val_episodes": np.flatnonzero(dataset.val_mask).tolist(),
-        "action_key": dataset.action_key,
-        "dt": float(dt),
-        "horizon": dataset.horizon,
-        "obs_horizon": dataset.obs_horizon,
-        "pad_before": dataset.pad_before,
-        "pad_after": dataset.pad_after,
-        "history_steps": getattr(dataset, "history_steps", None),
-        "train_windows": len(dataset),
-        "val_windows": 0 if validation is None else len(validation),
-        "train_action_rows": len(dataset.sampler.action_source_rows),
-        "val_action_rows": 0 if validation is None else len(validation.sampler.action_source_rows),
-    }
-
-
 HAND_ACTION_SEMANTICS = {
     "action_space": "joint",
     "action_coordinates": "absolute_joint_command",
@@ -126,3 +92,11 @@ def validate_hand_chunk_compatibility(codec_data, policy_data):
     shared = set(source_ids) & set(target_ids)
     if source_train & target_val or source_val & target_train or (source_val & shared) != (target_val & shared):
         raise ValueError("Same-source codec/policy split mismatch or validation leakage")
+
+
+def validate_pretraining_data(current, manifest, pretrained, pretrained_split):
+    if manifest != pretrained_split:
+        raise ValueError("Pretraining/policy split manifest mismatch")
+    changed = [key for key in current if pretrained[key] != current[key]]
+    if changed:
+        raise ValueError(f"Hand pretraining data mismatch: {changed}")

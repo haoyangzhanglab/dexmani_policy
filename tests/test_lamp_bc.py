@@ -33,7 +33,6 @@ from dexmani_policy.training.builder import (
     build_model_and_ema,
     build_optimizer_and_scheduler,
 )
-from dexmani_policy.common.hand_representation import describe_hand_data
 from dexmani_policy.datasets.common.episode_split import build_split_manifest
 from dexmani_policy.training.builder import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.lamp import perturb_history
@@ -270,11 +269,11 @@ class LAMPBCTests(unittest.TestCase):
             torch.save(dict(
                 coordinate_space=prior.coordinate_space,
                 model_config=prior.model_config, model_state_dict=prior.state_dict(),
-                metadata={"hand_data": describe_hand_data(dataset), "split_manifest": manifest,
+                metadata={"hand_data": dataset.describe_hand_data(), "split_manifest": manifest,
                           "hand_joint_order": prior.hand_joint_order},
             ), path / "prior.pt")
             batch = next(iter(DataLoader(dataset, batch_size=2)))
-            model, ema, updater = build_model_and_ema(cfg, "cpu", normalizer, dataset=dataset)
+            model, ema, updater = build_model_and_ema(cfg, "cpu", normalizer)
             optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=False)
             loader = build_train_loader(cfg, dataset)
             model.train()
@@ -310,7 +309,7 @@ class LAMPBCTests(unittest.TestCase):
                 invocation, overrides=[], resume_checkpoint=checkpoint
             )
             resumed, resumed_ema, resumed_updater = build_model_and_ema(
-                resumed_cfg, "cpu", None, dataset=dataset, checkpoint=checkpoint,
+                resumed_cfg, "cpu", None, checkpoint=checkpoint,
             )
             resumed_optimizer, resumed_scheduler = build_optimizer_and_scheduler(
                 resumed_cfg, resumed, verbose=False,

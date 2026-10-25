@@ -111,7 +111,7 @@ class LatentFlowTests(unittest.TestCase):
             loss_reduction=dict(kl="mean_over_batch_time_latent"),
         )
         torch.save(dict(model_config=codec.model_config, state_dict=codec.state_dict(), metadata=metadata), self.cfg.codec.path)
-        model, ema, updater = build_model_and_ema(self.cfg, "cpu", normalizer, dataset=dataset)
+        model, ema, updater = build_model_and_ema(self.cfg, "cpu", normalizer)
         return dataset, model, ema, updater
 
     def test_policy_dataset_pairing_and_mixed_action_origins(self):

@@ -6,6 +6,7 @@ from dexmani_policy.common.hand_representation import describe_hand_chunks
 class LatentFlowDataset(DemonstrationDataset):
     """Historical observations paired with full future commands at the query state."""
 
+    future_action_window = True
     action_normalization_population = "relative_commands_over_train_windows"
 
     @property
@@ -26,6 +27,16 @@ class LatentFlowDataset(DemonstrationDataset):
         kwargs.update(horizon=horizon, obs_horizon=obs_horizon, pad_before=obs_horizon - 1, pad_after=0)
         super().__init__(zarr_path, sensor_modalities=sensor_modalities, **kwargs)
         self.hand_data = describe_hand_chunks(self, data_semantics, source_id)
+
+    def describe_hand_data(self):
+        validation = self.get_validation_dataset()
+        return dict(
+            self.hand_data,
+            train_windows=len(self),
+            val_windows=0 if validation is None else len(validation),
+            observation_rows=len(self.sampler.observation_source_rows),
+            action_rows=len(self.sampler.action_source_rows),
+        )
 
     def sample_to_data(self, sample):
         data = super().sample_to_data(sample)

@@ -29,7 +29,6 @@ from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset
 from dexmani_policy.training.common.scheduler import get_scheduler
-from dexmani_policy.common.hand_representation import describe_hand_data
 from dexmani_policy.training.builder import build_model_and_ema, build_optimizer_and_scheduler
 from dexmani_policy.training.data import build_dataset_and_normalizer, build_normalizer, build_train_loader
 from dexmani_policy.training.pretrain.hand_prior.lamp import build_prior_dataset, kl_weight
@@ -66,6 +65,40 @@ class DataContractTests(unittest.TestCase):
     def dataset(self, cls=DemonstrationDataset, **kwargs):
         return cls(str(self.path), sensor_modalities=["joint_state", "point_cloud"],
                    split_manifest=str(self.split_path), val_ratio=0, pc_dim=6, **kwargs)
+
+    def test_dataset_description_reuses_split_and_does_not_scan(self):
+        dataset = self.dataset()
+        spec = {"action": "auto", "joint_state": "limits", "point_cloud": "identity"}
+        with (patch.object(dataset, "finite_rows", side_effect=AssertionError("rescan")),
+              patch.object(dataset, "get_validation_dataset", side_effect=AssertionError("extra validation"))):
+            description = dataset.describe_training_data(spec, task_name="test")
+        self.assertNotIn("hand_data", description)
+        recipe = description["data_recipe"][0]
+        self.assertEqual(recipe["split_manifest"], dataset.data_recipe["split_manifest"])
+        self.assertEqual(description["data_identity"]["train_episodes"], recipe["split_manifest"]["train_indices"])
+        self.assertEqual(recipe["action_rows"], len(dataset.sampler.action_source_rows))
+        multi = MultiTaskDataset([dataset, self.dataset()], ["a", "b"],
+                                sampling_strategy="weighted", task_weights=[1, 0])
+        combined = multi.describe_training_data(spec, task_name="a+b")
+        self.assertEqual(combined["data_recipe"], [recipe, recipe])
+        self.assertEqual(list(combined["data_identity"]["tasks"]), ["a", "b"])
+
+    def test_layout_overrides_reject_conflicting_sources(self):
+        from dexmani_policy.training.validation import validate_policy_layout
+        for override in ("agent.horizon=8", "dataset.horizon=8", "dataset.obs_horizon=1"):
+            cfg = load_policy_config("dp3", [override])
+            with self.assertRaisesRegex(ValueError, "must match"):
+                validate_policy_layout(cfg)
+        cfg = load_policy_config("dp3", ["horizon=24", "n_action_steps=4"])
+        validate_policy_layout(cfg)
+        self.assertEqual(cfg.dataset.pad_after, 7)
+        self.assertEqual(cfg.agent.horizon, 24)
+        from dexmani_policy.common.config import validate_config_references
+        for name, override in (("lamp", "agent.history_steps=9"),
+                               ("latent_flow", "agent.codec_hidden_dim=64"),
+                               ("dqrise", "agent.tcp_dim=6")):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "must reference"):
+                validate_config_references(load_policy_config(name, [override]))
 
     def test_train_only_streaming_stats_and_validation(self):
         dataset = self.dataset()
@@ -241,10 +274,10 @@ class DataContractTests(unittest.TestCase):
             hand_normalizer_scale=params["scale"][7:], hand_normalizer_offset=params["offset"][7:],
         ))
         codebook.artifact_metadata = dict(
-            hand_data=describe_hand_data(dataset), split_manifest=self.manifest,
+            hand_data=dataset.describe_hand_data(), split_manifest=self.manifest,
         )
         codebook.save(cfg.codebook_path)
-        model, ema, updater = build_model_and_ema(cfg, "cpu", normalizer, dataset=dataset)
+        model, ema, updater = build_model_and_ema(cfg, "cpu", normalizer)
         self.assertIsNone(ema)
         self.assertIsNone(updater)
         optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=False)
@@ -268,7 +301,7 @@ class DataContractTests(unittest.TestCase):
             invocation.resume_from = str(checkpoint_path)
         restored_cfg = resolve_input_recipe(invocation, overrides=[], resume_checkpoint=checkpoint)
         restored, _, _ = build_model_and_ema(
-            restored_cfg, "cpu", None, dataset=dataset, checkpoint=checkpoint,
+            restored_cfg, "cpu", None, checkpoint=checkpoint,
         )
         restored_optimizer, restored_scheduler = build_optimizer_and_scheduler(
             restored_cfg, restored, verbose=False,
@@ -319,13 +352,13 @@ class LAMPPriorBatchTests(unittest.TestCase):
                         history_for_rows=lambda rows: np.zeros((len(rows), 3, 12), np.float32),
                         hand_actions=np.zeros((count, 12), np.float32),
                         data_recipe={"split_manifest": {}},
+                        describe_hand_data=lambda: {},
                     )
                     prior = lamp_pretrain.HandMotionPrior(12, 3, 2, 8)
                     optimizer = torch.optim.AdamW(prior.parameters(), lr=args.lr)
                     with (
                         patch.object(lamp_pretrain, "load_policy_config", return_value=cfg),
                         patch.object(lamp_pretrain, "build_prior_dataset", return_value=dataset),
-                        patch.object(lamp_pretrain, "describe_hand_data", return_value={}),
                         patch.object(lamp_pretrain, "HandMotionPrior", return_value=prior) as model,
                         patch.object(torch.optim, "AdamW", return_value=optimizer),
                         patch.object(lamp_pretrain, "prior_batch", wraps=lamp_pretrain.prior_batch) as batch,

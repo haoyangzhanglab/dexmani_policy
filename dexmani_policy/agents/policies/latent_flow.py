@@ -81,10 +81,7 @@ class LatentFlowObservationEncoder(nn.Module):
 class LatentFlowPolicy(BasePolicy):
     supported_execution_modes = ("sync",)
     requires_hand_pretraining = True
-
-    @property
-    def action_start_index(self):
-        return 0
+    future_action_window = True
 
     @classmethod
     def validate_model_config(cls, cfg, spec) -> None:
@@ -236,17 +233,8 @@ class LatentFlowPolicy(BasePolicy):
     def effective_config(self):
         return {**super().effective_config, "codec_metadata": self.codec_metadata}
 
-    def training_data_config(self, dataset, *, restoring=False):
-        import copy
-
-        current = copy.deepcopy(dataset.hand_data)
-        validation = dataset.get_validation_dataset()
-        current.update(
-            train_windows=len(dataset),
-            val_windows=0 if validation is None else len(validation),
-            observation_rows=len(dataset.sampler.observation_source_rows),
-            action_rows=len(dataset.sampler.action_source_rows),
-        )
+    def training_data_config(self, description, *, restoring=False):
+        current = description["hand_data"]
         if not restoring:
             self.validate_training_data(current)
         return {"hand_data": current}

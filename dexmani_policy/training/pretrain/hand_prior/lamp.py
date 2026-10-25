@@ -15,7 +15,6 @@ from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
-from dexmani_policy.common.hand_representation import describe_hand_data
 from dexmani_policy.training.common.hand_representation import shuffled_batches, validate_kl_schedule
 from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.validation import validate_config
@@ -157,7 +156,7 @@ def train(args):
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     dataset = build_prior_dataset(cfg)
-    hand_data = describe_hand_data(dataset)
+    hand_data = dataset.describe_hand_data()
     train_rows, val_rows = source_rows(dataset)
     if not len(train_rows):
         raise ValueError("LAMP prior training requires nonempty training source rows")

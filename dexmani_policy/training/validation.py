@@ -1,7 +1,5 @@
 """Configuration and model checks at training boundaries."""
 
-import inspect
-
 import hydra
 from torch.nn.modules.batchnorm import _BatchNorm
 
@@ -11,6 +9,7 @@ from dexmani_policy.common.config import (
     resolve_normalization_spec,
     validate_action_key_consistency,
     validate_action_window,
+    validate_config_references,
 )
 from dexmani_policy.common.rgb_preprocessing import validate_rgb_preprocessing
 from dexmani_policy.datasets.common.augmentation import (
@@ -18,7 +17,6 @@ from dexmani_policy.datasets.common.augmentation import (
     validate_random_keep_points,
 )
 from dexmani_policy.datasets.common.episode_split import validate_split_options
-from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
 
 
 def validate_ema_batchnorm(model) -> None:
@@ -68,10 +66,10 @@ def validate_model_config(cfg):
 
 def validate_policy_layout(cfg):
     """Check shared windows and action layouts before opening data."""
-    latent_policy = cfg.agent._target_ == "dexmani_policy.agents.policies.latent_flow.LatentFlowPolicy"
+    agent_class = hydra.utils.get_class(cfg.agent._target_)
     validate_action_window(
         cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps,
-        action_start_index=0 if latent_policy else cfg.n_obs_steps - 1,
+        action_start_index=0 if agent_class.future_action_window else cfg.n_obs_steps - 1,
     )
     positive_int(cfg.action_dim, "action_dim")
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
@@ -80,25 +78,16 @@ def validate_policy_layout(cfg):
     aux = cfg.get("use_aux_ee", False)
     if cfg.agent.get("use_aux_ee", False) != aux:
         raise ValueError("agent.use_aux_ee must match use_aux_ee")
-    dataset_defaults = inspect.signature(DemonstrationDataset).parameters
     for index, child in enumerate(cfg.dataset.get("datasets", [cfg.dataset])):
-        latent_dataset = (
-            child._target_
-            == "dexmani_policy.datasets.hand_prior.latent_flow_dataset.LatentFlowDataset"
-        )
-        if latent_policy != latent_dataset:
-            raise ValueError("LatentFlowPolicy and LatentFlowDataset must be used together")
-        layout = dict(child)
-        if issubclass(hydra.utils.get_class(child._target_), DemonstrationDataset):
-            if child.get("sensor_modalities") is None:
-                raise ValueError(f"dataset[{index}].sensor_modalities must be explicit")
-            layout.setdefault("horizon", dataset_defaults["horizon"].default)
-            if layout.get("obs_horizon") is None:
-                layout["obs_horizon"] = layout["horizon"]
+        dataset_class = hydra.utils.get_class(child._target_)
+        if agent_class.future_action_window != dataset_class.future_action_window:
+            raise ValueError("Policy and Dataset action windows must be used together")
+        if child.get("sensor_modalities") is None:
+            raise ValueError(f"dataset[{index}].sensor_modalities must be explicit")
         for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
-            if field in layout and (
-                type(layout[field]) is not type(cfg[name]) or layout[field] != cfg[name]
-            ):
+            if field not in child:
+                raise ValueError(f"dataset[{index}].{field} must explicitly reference {name}")
+            if type(child[field]) is not type(cfg[name]) or child[field] != cfg[name]:
                 raise ValueError(f"dataset[{index}].{field} must match {name}")
         if child.get("use_aux_ee", False) != aux:
             raise ValueError(f"dataset[{index}].use_aux_ee must match use_aux_ee")
@@ -147,6 +136,7 @@ def validate_config(cfg):
     if cfg.training.lr_warmup_steps < 0:
         raise ValueError("training.lr_warmup_steps must be nonnegative")
     validate_policy_layout(cfg)
+    validate_config_references(cfg)
 
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")

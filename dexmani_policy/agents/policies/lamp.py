@@ -84,6 +84,16 @@ class LAMPPolicy(BasePolicy):
     requires_split_manifest = True
     requires_action_affine = False
 
+    def training_data_config(self, description, *, restoring=False):
+        from dexmani_policy.common.hand_representation import validate_pretraining_data
+
+        current = description["hand_data"]
+        if not restoring:
+            validate_pretraining_data(
+                current, description["split_manifest"], self.hand_data, self.pretraining_split
+            )
+        return {"hand_data": current}
+
     @classmethod
     def validate_model_config(cls, cfg, spec) -> None:
         validate_sparse3d_config(cfg, spec)

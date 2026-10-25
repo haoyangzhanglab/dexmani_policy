@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ from dexmani_policy.common.rgb_preprocessing import (
     validate_rgb_preprocessing,
 )
 from dexmani_policy.common.runtime import dict_apply
+from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, positive_int, validate_depth_recipe
 from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
@@ -22,6 +24,7 @@ from dexmani_policy.datasets.common.augmentation import (
 )
 from dexmani_policy.datasets.common.episode_split import (
     build_split_manifest,
+    describe_split,
     downsample_mask,
     get_val_mask,
     validate_split_manifest,
@@ -35,6 +38,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
     """Observation-action windows from episodic demonstrations."""
 
     action_normalization_population = "valid_train_windows_unique_source_rows"
+    future_action_window = False
 
     @property
     def action_offset(self):
@@ -163,6 +167,161 @@ class DemonstrationDataset(torch.utils.data.Dataset):
 
         self.sampler = self.build_sampler(train_mask)
         self.validation_dataset = None
+
+    def describe_training_data(
+        self, spec, *, task_name, requires_split_manifest=False, requires_hand_pretraining=False,
+    ):
+        buffer = self.replay_buffer
+        manifest = self.data_recipe.get("split_manifest")
+        if manifest is None:
+            if requires_split_manifest:
+                raise ValueError("DQ/LAMP training requires an explicit shared split_manifest")
+            manifest = describe_split(
+                self.zarr_path, buffer.episode_ends, buffer.attrs, self.train_mask, self.val_mask
+            )
+            self.data_recipe["split_manifest"] = validate_split_manifest(
+                manifest, buffer.attrs, buffer.n_episodes,
+                episode_ends=buffer.episode_ends, zarr_path=self.zarr_path,
+            )[2]
+        widths = {
+            key: int(buffer[key].shape[-1])
+            for key, mode in spec.items() if key != "action" and mode != "identity"
+        }
+        for key in FINGER_VECTOR_FIELDS.intersection(self.sensor_modalities):
+            shape = buffer[key].shape
+            if shape[1:] != (5, 3):
+                raise ValueError(f"{key} requires stored shape (T, 5, 3), got {shape}")
+            if key in widths:
+                widths[key] = 15
+        if "point_cloud" in widths and self.pc_dim is not None:
+            widths["point_cloud"] = self.pc_dim
+        widths["action"] = int(buffer[self.action_key].shape[-1]) + (9 if self.use_aux_ee else 0)
+        description = {
+            "data_identity": {
+                "episode_ids": manifest["episode_ids"],
+                "episode_ends": manifest["episode_ends"],
+                "train_episodes": manifest["train_indices"],
+                "val_episodes": manifest["val_indices"],
+            },
+            "normalization_dims": widths,
+            "data_recipe": [dict(
+                self.data_recipe,
+                windows=self.sampler.validity_summary,
+                observation_rows=len(self.sampler.observation_source_rows),
+                action_rows=len(self.sampler.action_source_rows),
+                normalization={
+                    "observations": "valid_train_windows_unique_source_rows",
+                    "action": self.action_normalization_population,
+                },
+            )],
+        }
+        runtime = self.describe_real_runtime(task_name) if task_name is not None else None
+        if runtime is not None:
+            description["real_runtime"] = runtime
+        if requires_hand_pretraining:
+            description["hand_data"] = self.describe_hand_data()
+        return description
+
+    def training_summary(self):
+        counts = self.sampler.validity_summary
+        summary = (
+            f"{Path(self.zarr_path).name}: "
+            f"train episodes={int(self.train_mask.sum()):,}, windows={len(self):,}"
+        )
+        rejected = counts["candidate"] - counts["valid"]
+        return summary + (f", rejected={rejected:,}" if rejected else "")
+
+    def describe_hand_data(self):
+        """Read dataset metadata and sampler counts without scanning action/state arrays."""
+        buffer = self.replay_buffer
+        attrs = buffer.attrs
+        dt = attrs.get("dt")
+        if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
+            raise ValueError("Hand representation data requires finite positive dt")
+        order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
+        if (
+            attrs.get("hand_joint_order", order) != order
+            or attrs.get("hand_units", "radians") != "radians"
+        ):
+            raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
+
+        validation = self.get_validation_dataset()
+        return {
+            "episode_ids": attrs.get("episode_ids"),
+            "episode_ends": buffer.episode_ends.tolist(),
+            "train_episodes": np.flatnonzero(self.train_mask).tolist(),
+            "val_episodes": np.flatnonzero(self.val_mask).tolist(),
+            "action_key": self.action_key,
+            "dt": float(dt),
+            "horizon": self.horizon,
+            "obs_horizon": self.obs_horizon,
+            "pad_before": self.pad_before,
+            "pad_after": self.pad_after,
+            "history_steps": getattr(self, "history_steps", None),
+            "train_windows": len(self),
+            "val_windows": 0 if validation is None else len(validation),
+            "train_action_rows": len(self.sampler.action_source_rows),
+            "val_action_rows": 0 if validation is None else len(validation.sampler.action_source_rows),
+        }
+
+
+    def describe_real_runtime(self, task_name) -> dict | None:
+        """Capture numerical deployment inputs from the buffer actually used to train."""
+        buffer = self.replay_buffer
+        attrs = buffer.attrs
+        if attrs.get("format") != "dexmani.real.canonical":
+            if attrs.get("domain") == "real" or str(attrs.get("format", "")).startswith(
+                "dexmani.real."
+            ):
+                raise ValueError("Real training requires format='dexmani.real.canonical'")
+            return None
+        if attrs.get("task_name") != task_name:
+            raise ValueError("Real canonical task_name differs from the training task")
+        dt = attrs.get("dt")
+        if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
+            raise ValueError("Real canonical dt must be finite and positive")
+        runtime = {"dt": float(dt)}
+        if "point_cloud" in self.sensor_modalities:
+            cloud = attrs.get("pointcloud_config")
+            if not isinstance(cloud, Mapping):
+                raise ValueError("Real point_cloud requires root pointcloud_config")
+            count = positive_int(cloud.get("num_points"), "pointcloud_config.num_points")
+            shape = buffer["point_cloud"].shape
+            if shape[1] != count:
+                raise ValueError("Stored point count disagrees with pointcloud_config")
+            # Preserve the stored point count; encoder FPS selects its own subset.
+            runtime["pointcloud"] = dict(cloud)
+        if "hand_pointcloud" in self.sensor_modalities:
+            cloud = attrs.get("hand_pointcloud_config")
+            if not isinstance(cloud, Mapping):
+                raise ValueError("Real hand_pointcloud requires root hand_pointcloud_config")
+            count = positive_int(cloud.get("num_points"), "hand_pointcloud_config.num_points")
+            data = buffer["hand_pointcloud"]
+            if data.shape[1:] != (count, 6) or str(data.dtype) != "float32":
+                raise ValueError("Stored hand_pointcloud must match the saved XYZRGB template")
+            runtime["hand_pointcloud"] = dict(cloud)
+        if "depth" in self.sensor_modalities:
+            data = buffer["depth"]
+            runtime["depth"] = validate_depth_recipe(
+                {
+                    "shape": list(data.shape[1:]),
+                    "dtype": str(data.dtype),
+                    "unit": "raw_counts",
+                    "depth_scale_m": attrs["depth_scale_m_per_unit"],
+                }
+            )
+        if "fingertip_xyz" in self.sensor_modalities:
+            links = attrs.get("fingertip_link_names")
+            if (
+                not isinstance(links, (list, tuple))
+                or len(links) != 5
+                or any(not isinstance(link, str) or not link.strip() for link in links)
+                or len(set(links)) != 5
+            ):
+                raise ValueError("Real fingertip_xyz requires five distinct non-empty link names")
+            runtime["fingertip_link_names"] = list(links)
+        return runtime
+
 
     def finite_rows(self, key, columns=None):
         valid = np.ones(int(self.replay_buffer.episode_ends[-1]), dtype=bool)
