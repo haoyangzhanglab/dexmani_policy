@@ -93,6 +93,49 @@ elif "pwd -P" in command or "printf" in command:
             for call in calls
         ))
 
+    def test_ddp_selectors_reach_training_and_preflight_unchanged(self):
+        configs = self.script.parents[2] / "dexmani_policy/configs/ddp"
+        for path in sorted(configs.glob("*.yaml")):
+            selector = f"ddp/{path.stem}"
+            with self.subTest(selector=selector):
+                result, calls = self.run_launcher("--gpus", "0,2", selector, "pour", "training.seed=7")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                launch = shlex.split(shlex.split(calls[-1][-1])[-1])
+                training = shlex.split(launch[-1])
+                self.assertIn("dexmani_policy.train_ddp", training)
+                self.assertIn(f"--config-name={selector}", training)
+                preflight = next(call for call in calls if "-m dexmani_policy.common.config" in call[-1])
+                arguments = shlex.split(shlex.split(preflight[-1])[-1])
+                self.assertIn(f"--config-name={selector}", arguments)
+                self.assertIn("task_name=pour", arguments)
+                self.assertIn("training.seed=7", arguments)
+                self.assertIn("Console:", result.stdout)
+                self.assertNotIn(f"tail_log.sh {selector}", result.stdout)
+
+    def test_monitoring_and_download_use_method_directories(self):
+        self.script = self.script.with_name("tail_log.sh")
+        result, calls = self.run_launcher("sat", "pour", "run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split(calls[-1][-1]),
+                         ["tail", "-F", "--", "/data_ssd/ZHY/experiments/sat/pour/run/metrics.jsonl"])
+        result, calls = self.run_launcher("ddp/sat", "pour", "run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+        self.script = self.script.with_name("sync_down.sh")
+        result, calls = self.run_launcher("sat/pour/run", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        transfers = [call for call in calls if call[0] == "rsync"]
+        self.assertTrue(transfers)
+        for call in transfers:
+            self.assertIn("dexserver:/data_ssd/ZHY/experiments/sat/pour/run/", call)
+        self.assertIn("-rclni", transfers[0])
+        for call in transfers[1:]:
+            self.assertIn("--dry-run", call)
+        result, calls = self.run_launcher("--list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("-maxdepth 4", calls[-1][-1])
+
 
 if __name__ == "__main__":
     unittest.main()

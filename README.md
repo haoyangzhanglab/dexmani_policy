@@ -27,7 +27,7 @@ python -m pip check
 
 部分点云算子另需匹配 Torch/CUDA 的 PyTorch3D，仿真评测需 `dexmani_sim`。启用 Uni3D 预训练时，先用 `bash scripts/utils/download_pretrained.sh` 将权重准备到 `data/pretrained/uni3d/`；训练仅加载本地文件，加载规则见 [Uni3D 说明](docs/项目架构.md#观测编码)。其他权重以配置和 encoder 加载逻辑为准。
 
-配置位于 `dexmani_policy/configs/*.yaml`，DDP overlay 位于 `dexmani_policy/configs/ddp/`。`agent._target_` 决定策略，`policy_name` 决定实验目录；对应关系见 [策略接口](docs/项目架构.md#策略接口)。
+配置位于 `dexmani_policy/configs/*.yaml`，DDP overlay 位于 `dexmani_policy/configs/ddp/`。`agent._target_` 决定策略；`policy_name` 只表示方法身份（如 `dp`、`sat`），用于实验目录和日志分组。`ddp/sat` 是 Hydra 配置选择器，继承基础方法名 `sat`，分布式事实由训练配置与 world size 表达；对应关系见 [策略接口](docs/项目架构.md#策略接口)。
 
 ## 数据准备
 
@@ -72,6 +72,8 @@ bash scripts/training/train.sh dp3 '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
 训练入口转发 Hydra overrides。单卡要求 `training.num_gpus=1` 或不设置；DDP 需核对可见 GPU、`training.num_gpus` 和每卡 batch。训练预算按 optimizer update 计数，`best` 由离线选点产生。
+
+例如 `ddp/sat` 的新 run 位于 `experiments/sat/<task>/<run>/`；评测、选点、日志跟随、下载和 Real 部署均使用方法名 `sat`，启动仍传 `ddp/sat`。现有实验不迁移或改写。
 
 新 run 默认写入 `experiments/<policy_name>/<task_name>/<时间戳>_seed<seed>/`，已有训练产物的目录拒绝重用。标量保存在 `metrics.jsonl`；W&B 默认 `offline`，可用 `workspace.wandb_cfg=null` 关闭，详见 [训练日志](docs/项目架构.md#训练日志与可选远程服务)。
 

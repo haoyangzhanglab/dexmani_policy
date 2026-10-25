@@ -9,8 +9,6 @@ defaults:
   - /dp
   - _self_
 
-policy_name: ddp/dp
-
 training:
   num_gpus: 4
   gpu_ids: null

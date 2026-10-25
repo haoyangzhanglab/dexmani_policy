@@ -115,7 +115,7 @@
 ### D2. 只修实际不便，不扩展功能矩阵
 
 - 同步 README、架构、评测和验证文档中的已变入口，保留一处权威说明，其他位置链接。明确新 best 与旧指针的使用方式、普通评测与正式测试的差别。
-- 盘点 `policy_name=ddp/dp` 这样的“方法名包含启动方式”问题。本轮不强制重命名所有实验，也不在本仓库单方面改变 Real 的路径契约；没有配套工作区时保留现有公共接口并记录实际缺口。若进行新 run 命名修复，必须核对目录、远端脚本、日志与真实消费者，保持历史路径身份和 batch 配方；禁止简单把 `/` 替换成可能碰撞的名字。
+- 新 run 的 `policy_name` 只表示基础方法身份，`ddp/<method>` 保留为配置选择器；对应的跨仓库验证见[验证指南](验证指南.md#基础设施与跨仓库离线检查)。历史产物不迁移，DDP batch 配方不变。
 - 不把训练日志采样值改名成区间均值而不改计算。发现口径错误就如实修正说明，改变统计计算须单独说明。
 
 ### D3. 条件性性能工作
@@ -161,7 +161,7 @@ python dexmani_policy/smoke_test.py --data-only latent_flow --max-batches 2
 python dexmani_policy/smoke_test.py dp3 --max-updates 4
 ```
 
-smoke 不接收 Hydra 字段 override；data-only 的 batch 上限不限制前置扫描/统计；DDP config-only 不等于多卡运行验证。不要通过改正式数据、精度、NFE、总预算或有效 batch 来让检查通过。短训练最多 4 个更新；实际 DDP 验证仅在改动需要且现有资源可用时进行，不启动完整实验。Real 工作区可用时按其自身说明运行 `python scripts/check_deployment.py` 等离线检查，不连接或驱动设备。
+smoke 不接收 Hydra 字段 override；data-only 的 batch 上限不限制前置扫描/统计；DDP config-only 不等于多卡运行验证。不要通过改正式数据、精度、NFE、总预算或有效 batch 来让检查通过。短训练最多 4 个更新；实际 DDP 验证仅在改动需要且现有资源可用时进行，不启动完整实验。Real 工作区可用时按[当前跨仓库检查说明](验证指南.md#基础设施与跨仓库离线检查)执行，不连接或驱动设备。
 
 受依赖、数据、权重、GPU、模拟器或另一个仓库限制的项目标为 **NOT VERIFIED**，写清缺口与最短补验命令；只有实际执行并通过的检查才标 **PASS**。语法检查、mock 或本次文档审阅不能冒充训练/数值/成功率/性能证明。
 

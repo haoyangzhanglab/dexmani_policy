@@ -39,7 +39,9 @@ bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/sat <task>
 
 ### 配置与并行运行
 
-`ddp/` 选择多卡入口，可见 GPU 数需与 `training.num_gpus` 一致。有效 batch = 每卡 batch × world size × gradient accumulation。config 名与输出 `policy_name` 可不同，多任务名用 `+` 连接，复杂 override 整体引用。
+`ddp/` 选择多卡入口，可见 GPU 数需与 `training.num_gpus` 一致。有效 batch = 每卡 batch × world size × gradient accumulation。`ddp/sat` 是配置选择器，继承基础方法的 `policy_name: sat`，新实验写入 `experiments/sat/<task>/<run>/`，W&B group 同为 `sat`。启动的 tmux session 与控制台日志名仍包含配置选择器；多任务名用 `+` 连接，复杂 override 整体引用。
+
+跟随指标用 `bash scripts/remote/tail_log.sh sat <task> <run>`，下载用 `bash scripts/remote/sync_down.sh sat/<task>/<run>`。评测、选点与 Real 同样按方法名查找；不要在这些位置传 `ddp/sat`。本地名称与接口离线检查见[验证指南](验证指南.md#基础设施与跨仓库离线检查)。
 
 后台使用 `tmux -L dexmani_policy`，每次创建唯一 session 和 `logs/<session>.log`；任务退出后 session 消失，日志保留。`--fg` 使用前台 SSH，便于查看启动错误。
 

@@ -74,7 +74,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     )
     if checkpoint is None:
         model.initialize_training()
-        model.load_normalizer_from_dataset(normalizer)
+        model.load_normalizer(normalizer)
         if model.requires_hand_pretraining:
             kwargs = {}
             if model.requires_split_manifest:

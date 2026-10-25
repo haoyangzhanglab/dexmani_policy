@@ -72,7 +72,7 @@ class LAMPBCTests(unittest.TestCase):
             {"action": "identity", "joint_state": "gaussian", "point_cloud": "identity"},
             {"action": 19, "joint_state": 19},
         )
-        model.load_normalizer_from_dataset(normalizer)
+        model.load_normalizer(normalizer)
         return model
 
     def test_history_noise_scale_modes_and_input_preservation(self):

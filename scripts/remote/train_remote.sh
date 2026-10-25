@@ -218,7 +218,10 @@ printf '%s\n' "$gpu_status"
 
 # Check the actual indices, including hosts whose index list is not contiguous.
 if [[ -n "$GPU_IDS" ]]; then
-    mapfile -t available_gpu_ids < <(cut -d, -f1 <<< "$gpu_status")
+    available_gpu_ids=()
+    while IFS=, read -r available_gpu_id gpu_status_remainder; do
+        available_gpu_ids+=("$available_gpu_id")
+    done <<< "$gpu_status"
     IFS=, read -r -a requested_gpu_ids <<< "$GPU_IDS"
     for gpu_id in "${requested_gpu_ids[@]}"; do
         case " ${available_gpu_ids[*]} " in
@@ -265,7 +268,6 @@ else
     echo "║  Launch submitted (tmux: $SESSION)"
     echo "╠══════════════════════════════════════════╣"
     echo "║  Attach:  ssh $SERVER -t tmux -L $TMUX_SOCKET attach -t '$SESSION'"
-    echo "║  Log:     bash scripts/remote/tail_log.sh $CONFIG $TASK"
     echo "║  Console: ssh $SERVER \"tail -f $SERVER_PROJ/logs/${SESSION}.log\""
     echo "║  Stop:    bash scripts/remote/stop_remote.sh $SESSION"
     echo "╚══════════════════════════════════════════╝"

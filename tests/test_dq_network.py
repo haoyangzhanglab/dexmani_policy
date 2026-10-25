@@ -80,7 +80,7 @@ class DQNetworkTests(unittest.TestCase):
         normalizer["joint_state"] = FieldNormalizer.from_parameters(torch.ones(19), torch.zeros(19))
         model.set_normalization_spec({"action": "auto", "joint_state": "limits", "point_cloud": "identity"},
                                      {"action": 19, "joint_state": 19})
-        model.load_normalizer_from_dataset(normalizer)
+        model.load_normalizer(normalizer)
         self.assertEqual(model.supported_execution_modes, ("sync", "async"))
         with self.assertRaisesRegex(ValueError, "metric XYZ"):
             model.set_normalization_spec(

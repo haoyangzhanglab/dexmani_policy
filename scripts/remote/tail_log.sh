@@ -19,8 +19,8 @@ RUN_NAME="${3:-}"
 [[ $# -le 3 ]] || { echo "Error: unexpected extra argument" >&2; exit 1; }
 
 # These identify saved experiments, including policies whose config was removed.
-if [[ ! "$POLICY" =~ ^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*$ ]] || [[ "$POLICY" =~ (^|/)\.\.?(/|$) ]]; then
-    echo "Error: invalid policy path '$POLICY'" >&2
+if [[ ! "$POLICY" =~ ^[a-zA-Z0-9_.-]+$ ]] || [[ "$POLICY" == . || "$POLICY" == .. ]]; then
+    echo "Error: invalid policy name '$POLICY'" >&2
     exit 1
 fi
 if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+(\+[a-zA-Z0-9_-]+)*$ ]]; then

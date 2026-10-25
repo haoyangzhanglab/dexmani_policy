@@ -6,8 +6,6 @@ defaults:
   - /r3d
   - _self_
 
-policy_name: ddp/r3d
-
 training:
   num_gpus: 4
   gpu_ids: null

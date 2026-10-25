@@ -9,8 +9,6 @@ defaults:
   - /dqrise
   - _self_
 
-policy_name: ddp/dqrise
-
 training:
   num_gpus: 4
   gpu_ids: null

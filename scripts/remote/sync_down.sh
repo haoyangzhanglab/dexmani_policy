@@ -41,8 +41,7 @@ fi
 
 if $LIST_MODE; then
     echo "=== Experiments on server ==="
-    # DDP adds one directory level under experiments.
-    if listing=$(ssh "$SERVER" "find /data_ssd/ZHY/experiments -maxdepth 5 -name config.yaml -printf '%h\n'"); then
+    if listing=$(ssh "$SERVER" "find /data_ssd/ZHY/experiments -maxdepth 4 -name config.yaml -printf '%h\n'"); then
         if [[ -n "$listing" ]]; then
             printf '%s\n' "$listing" | sort
         else

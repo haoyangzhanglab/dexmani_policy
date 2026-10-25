@@ -104,7 +104,7 @@ class BasePolicy(nn.Module):
     def initialize_training(self) -> None:
         """Initialize fresh training weights; complete checkpoints skip this step."""
 
-    def load_normalizer_from_dataset(self, normalizer: AffineNormalizer) -> None:
+    def load_normalizer(self, normalizer: AffineNormalizer) -> None:
         self.normalizer.load_state_dict(normalizer.state_dict())
 
     @property

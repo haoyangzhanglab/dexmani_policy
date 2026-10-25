@@ -9,8 +9,6 @@ defaults:
   - /multitask_dit
   - _self_
 
-policy_name: ddp/multitask_dit
-
 training:
   num_gpus: 4
   gpu_ids: null

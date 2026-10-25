@@ -151,8 +151,8 @@ class DQRISEPolicy(BasePolicy):
     def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:
         self.validate_codebook_normalizer()
 
-    def load_normalizer_from_dataset(self, normalizer) -> None:
-        super().load_normalizer_from_dataset(normalizer)
+    def load_normalizer(self, normalizer) -> None:
+        super().load_normalizer(normalizer)
         self.validate_codebook_normalizer()
 
     def validate_codebook_normalizer(self, *, rtol: float = 1e-5, atol: float = 1e-6) -> None:
