@@ -10,7 +10,6 @@ from dexmani_policy.common.experiments import (
     resolve_best_checkpoint,
     resolve_checkpoint_path,
 )
-from dexmani_policy.evaluation.artifacts import resolve_selection_record
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 from dexmani_policy.env_runner.common.seeds import (
     split_evaluation_seeds,
@@ -18,6 +17,7 @@ from dexmani_policy.env_runner.common.seeds import (
     validate_seed_pool,
     validate_task_seeds,
 )
+from dexmani_policy.evaluation.artifacts import resolve_selection_record
 
 
 @dataclass(frozen=True)
@@ -63,14 +63,10 @@ def resolve_tasks(cfg):
     task_configs = runner.pop("task_configs", None)
     configs = [runner] if task_configs is None else [{**runner, **task} for task in task_configs]
     dataset = cfg["dataset"]
-    children = dict(zip(dataset.get("task_names", ()), dataset.get("datasets", ()), strict=True))
-    texts = dict(
-        zip(
-            dataset.get("task_names", ()),
-            dataset.get("task_texts", dataset.get("task_names", ())),
-            strict=True,
-        )
-    )
+    names = dataset.get("task_names", ())
+    children = dict(zip(names, dataset.get("datasets", ()), strict=True))
+    texts = dataset.get("task_texts")
+    texts = dict(zip(names, names if texts is None else texts, strict=True))
     tasks = []
     from dexmani_policy.env_runner.sim_runner import SimRunner
 
@@ -116,7 +112,7 @@ def task_seed_pools(tasks):
 
             path = DATA_DIR / "eval_seeds" / f"{name}.txt"
             seeds = [int(value) for value in path.read_text().split()]
-        pools[name] = validate_seed_pool(name, list(seeds))
+        pools[name] = list(seeds)
     return pools
 
 

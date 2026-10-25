@@ -13,7 +13,7 @@ https://github.com/haoyangzhanglab/dexmani_policy/blob/main/docs/lightweight_ref
 
 按任务书依次完成：
 
-1. 将普通 best 加载与完整候选证据验真分离；写直接 best 指针，保留冻结测试计划与显式验真，提供清楚的旧指针处理方式。
+1. 将普通 best 加载与完整候选证据验真分离；写直接 best 指针，保留冻结测试计划与显式验真。只读取当前字段，不保留旧格式识别或迁移；历史格式使用对应源码。
 2. 配置只保留一个可修改来源；数据事实由 Dataset 产生，Policy 不再接收 Dataset 或遍历 buffer/sampler。复用现有 data_recipe、hand_data、effective_config 和 policy_metadata。
 3. 把 Sparse3D、Diffusion/RTC、手部先验等特定约束放回所属方法/组件，使 BasePolicy 变薄，保留已共享的数值路径。
 4. 清理相关异常处理和使用文档，保留主异常与资源关闭；仅在测量支持时做局部性能优化。

@@ -1,9 +1,9 @@
 """Equal-budget candidate evaluation followed by pure evidence-based ranking."""
 
 import json
+import traceback
 from dataclasses import replace
 from pathlib import Path
-import traceback
 
 from omegaconf import OmegaConf
 
@@ -11,7 +11,12 @@ from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.experiments import discover_milestone_checkpoints, resolve_record_path
 from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds
 from dexmani_policy.evaluation.artifacts import (
-    artifact_reference, create_run_directory, write_json, write_failure, resolve_selection_record, validate_selection_plan,
+    artifact_reference,
+    create_run_directory,
+    resolve_selection_record,
+    validate_selection_plan,
+    write_failure,
+    write_json,
 )
 from dexmani_policy.evaluation.config import (
     make_request,
@@ -56,7 +61,6 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
     record = {
         "status": "running",
         "experiment_dir": str(root),
-        "selection_id": directory.name,
         "seed_pools": pools,
         "selection_task_seeds": selection,
         "test_request": replace(
@@ -148,9 +152,10 @@ def rank_selection_results(record, results):
 
 
 def publish_best(root, record):
-    write_json(Path(root) / "best_ckpt.json", {
-        key: record[key] for key in ("ckpt_relpath", "global_step", "inference", "selection_result")
-    })
+    write_json(
+        Path(root) / "best_ckpt.json",
+        {key: record[key] for key in ("ckpt_relpath", "global_step", "inference", "selection_result")},
+    )
 
 
 def verify_selection_record(experiment_dir, record_path):

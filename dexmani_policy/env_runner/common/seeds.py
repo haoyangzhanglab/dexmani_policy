@@ -42,15 +42,7 @@ def split_evaluation_seeds(pools, eval_seed, episodes, selection_episodes=0):
     return test, selection
 
 
-def episodes_per_task(plan):
-    """Equal per-task budgets retain the existing macro/micro comparison."""
-    sizes = {len(seeds) for seeds in plan.values()}
-    if len(sizes) != 1:
-        raise ValueError("Task seed plans require equal per-task episode counts")
-    return sizes.pop()
-
-
-def validate_task_seeds(plan, tasks, *, allow_empty=False):
+def validate_task_seeds(plan, tasks):
     """Validate equal per-task budgets and return the episode count."""
     if not isinstance(plan, dict) or set(plan) != set(tasks):
         raise ValueError("Task seed plan does not match expected tasks")
@@ -61,7 +53,10 @@ def validate_task_seeds(plan, tasks, *, allow_empty=False):
             or len(set(seeds)) != len(seeds)
         ):
             raise ValueError(f"{task}: invalid or duplicate seeds")
-    size = episodes_per_task(plan)
-    if not allow_empty and size == 0:
+    sizes = {len(seeds) for seeds in plan.values()}
+    if len(sizes) != 1:
+        raise ValueError("Task seed plans require equal per-task episode counts")
+    size = sizes.pop()
+    if size == 0:
         raise ValueError("Task seed plan is empty")
     return size

@@ -62,7 +62,7 @@
 3. 保留必要检查：指针字段/数值有效，权重存在且位于当前 experiment/checkpoints 内，禁止路径逃逸和将 latest/符号链接当作不可变选点结果。实际权重加载沿用配置、normalizer、EMA 等一致性核对；普通仿真 best 将预期 global_step 传入既有 request.source 检查，不额外加载一遍权重。
 4. `resolve_selection_record` 负责读入完整、内部一致的选点结论和冻结测试计划：校验状态、选中项、checkpoint、推理设置、任务/seeds、预算及 selection/test 分离。它不在每次正式测试前重新打开所有候选 episode 文件。使用现有种子检查函数；需要复用的小段逻辑才提取函数。
 5. 完整候选检查与重排名留在选点生成时和显式离线验真路径。将这些选点专属逻辑移到 evaluation 的自然位置，通用 checkpoint 路径解析不导入它。沿用现有纯排名计算，不新增 audit 管理器。
-6. 提供一个小型离线入口：只验证已有 selection record 时只读；用户显式选择“发布 best”时，完整验真后写出新直接指针。它同时解决现有仅含 `selection_result` 的旧指针迁移。命令与参数由实际 CLI 风格确定并写入文档；不要维护永久双协议自动回退，不自动批量改写历史产物。旧指针应给出明确的迁移/显式 checkpoint 使用提示。
+6. 提供一个小型离线入口：只验证已有 selection record 时只读；用户显式选择“发布 best”时，完整验真后写出直接指针。入口只读取当前记录结构，不保留旧格式识别、迁移或自动回退；历史格式使用对应源码。命令与参数由实际 CLI 风格确定并写入文档，不自动批量改写历史产物。
 7. 先保存完成的 selection record，再原子发布 best。`scripts/remote/sync_down.sh` 现有“权重/事实 → selection → best”顺序保留并核对；普通加载依赖减少不等于可以不保存科研证据。
 
 验收：一份新 best 在候选日志缺失时仍能普通加载；缺权重或非法路径失败；显式验真缺候选证据失败；冻结测试拒绝不一致计划与研究参数覆盖；旧指针不能悄悄使用当前默认推理参数。不得把普通 evaluate 标为 held-out test。
@@ -83,7 +83,7 @@
 
 - Dataset 负责产生自身实际数据描述：布局/时间、split manifest、有效窗口/源行统计、动作统计总体，以及必要的手部/真机数值配方。优先复用 `data_recipe`、`hand_data` 和已有函数；确需聚合时只用一个小型只读视图或普通 dict，不创建通用 DatasetSpec。
 - 将 `training/data.py` 里读取 buffer、sampler、子 Dataset 内部状态的事实提取移到相应 Dataset。训练构建层保留数据创建、normalizer 拟合、loader 和保存配置等职责；不得为生成描述再次扫描全量 Zarr、额外构造验证 Dataset 或重复统计。
-- 将 `training_data_config(dataset, ...)` 改为接收已经提取的最小描述；同步 DQ-RISE、LAMP、LatentFlow 和 builder。Policy 不再知道 Zarr 路径组织、sampler 或 `get_validation_dataset()`，仍检查实际需要的先验/codec 兼容性。
+- 新训练的 `validate_training_data` 仅接收已经提取的 hand_data，DQ/LAMP 另接收 split_manifest；同步 DQ-RISE、LAMP、LatentFlow 和 builder。Policy 不再知道 Zarr 路径组织、sampler 或 `get_validation_dataset()`，也不原样回写 Dataset 已保存的事实。
 - MultiTaskDataset 在自身构建处验证共享布局并汇总子任务事实；输入任务顺序、采样权重、normalizer 总体和训练增强语义保持不变。不要给单任务和多任务各加一套相似协议。
 - 逐字段核对 `data_identity` 与 `data_recipe` 的使用。完全重复的部分合并；独有的防止静默错配事实须保留。路径用于定位，物理/时间/布局与 split 用于语义比较，不能因为数据搬家就发明哈希身份，也不能仅凭路径相同认定数据没变。重生成数据仍使用新路径。
 

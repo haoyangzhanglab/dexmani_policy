@@ -8,15 +8,15 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.common.experiments import resolve_record_path, validate_best_info
-from dexmani_policy.env_runner.common.seeds import validate_task_seeds, validate_seed_pool
+from dexmani_policy.common.runtime import atomic_path
+from dexmani_policy.env_runner.common.seeds import validate_seed_pool, validate_task_seeds
 
 
 def artifact_reference(path, exp_dir):
     path = Path(path).resolve()
     root = Path(exp_dir).resolve()
-    return str(path.relative_to(root) if path.is_relative_to(root) else path)
+    return str(path.relative_to(root))
 
 
 def code_version(directory):

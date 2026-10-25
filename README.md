@@ -84,7 +84,7 @@ bash scripts/eval/eval_pipeline.sh <policy_name> <task_name> <run> eval.seed=102
 bash scripts/eval/evaluate.sh <policy_name> <task_name> <run> --checkpoint best eval.video.enabled=true
 ```
 
-流水线先固定 test/selection 计划，对所有候选使用相同预算，再执行冻结的 held-out test；默认每任务 test=70、每候选 selection=25，默认不录像。普通 evaluate 支持录像和研究覆盖，但不作为正式测试证据；正式测试使用 `--selection-record`，研究参数不能覆盖。直接 best、旧指针迁移、离线验真、Seed 来源与分步入口见 [仿真评测机制](docs/仿真评测机制.md)。开启 human viewer 需要 X11 或 XWayland。
+流水线先固定 test/selection 计划，对所有候选使用相同预算，再执行冻结的 held-out test；默认每任务 test=70、每候选 selection=25，默认不录像。普通 evaluate 支持录像和研究覆盖，但不作为正式测试证据；正式测试使用 `--selection-record`，研究参数不能覆盖。直接 best、当前产物要求、离线验真、Seed 来源与分步入口见 [仿真评测机制](docs/仿真评测机制.md)。开启 human viewer 需要 X11 或 XWayland。
 
 比较实验需同时记录数据划分、有效 batch、训练预算、选点和最终评测协议。
 

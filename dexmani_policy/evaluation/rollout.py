@@ -1,9 +1,8 @@
 """Execute a resolved request; no selection logic or configuration precedence."""
 
-from contextlib import closing
-from pathlib import Path
-import traceback
 import sys
+import traceback
+from contextlib import closing
 
 from dexmani_policy.common.checkpoint import restore_policy_agent
 from dexmani_policy.common.runtime import set_seed
@@ -12,7 +11,12 @@ from dexmani_policy.env_runner.common.metrics import (
     validate_episodes,
 )
 from dexmani_policy.env_runner.sim_runner import SimRunner
-from dexmani_policy.evaluation.artifacts import create_run_directory, runtime_provenance, write_json, write_failure
+from dexmani_policy.evaluation.artifacts import (
+    create_run_directory,
+    runtime_provenance,
+    write_failure,
+    write_json,
+)
 
 
 def evaluate_policy(request, *, output_root, output_dir=None):

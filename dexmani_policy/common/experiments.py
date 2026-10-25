@@ -38,12 +38,6 @@ def validate_best_info(info):
 def resolve_best_checkpoint(experiment_dir):
     root = Path(experiment_dir).resolve()
     info = json.loads((root / "best_ckpt.json").read_text())
-    if set(info) == {"selection_result"}:
-        raise ValueError(
-            "Legacy best pointer: verify its selection record with "
-            "python -m dexmani_policy.evaluation.selection --experiment-dir <run> "
-            "--selection-record <record> --publish-best; or select an explicit checkpoint"
-        )
     validate_best_info(info)
     source = info["selection_result"]
     if not isinstance(source, str) or not source or Path(source).is_absolute() or ".." in Path(source).parts:
@@ -84,10 +78,6 @@ class MilestoneCheckpoint:
     path: Path
     pct: int
     global_step: int
-
-    @property
-    def label(self) -> str:
-        return f"{self.pct}% (step={self.global_step})"
 
 
 def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:

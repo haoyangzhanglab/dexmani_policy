@@ -242,7 +242,7 @@ def validate_action_key_consistency(cfg) -> None:
     env_runner = cfg.get("env_runner", {})
     tasks = env_runner.get("task_configs")
     for index, task in enumerate([env_runner] if tasks is None else tasks):
-        env_kwargs = task.get("env_kwargs") or {}
+        env_kwargs = task.get("env_kwargs", env_runner.get("env_kwargs")) or {}
         actual_control = env_kwargs.get("control_mode", "joint")
         if actual_control != expected_control:
             name = task.get("task_name", f"index {index}")

@@ -122,6 +122,30 @@ class InfrastructureTests(unittest.TestCase):
         model.checkpoint_step = int(Path(path).name.split("-step=")[1].split("-")[0])
         return model
 
+    def test_multitask_request_matches_dataset_text_and_environment_defaults(self):
+        cfg = copy.deepcopy(self.cfg)
+        names = ["first", "second"]
+        child = {**cfg["dataset"], "action_key": "action_ee"}
+        cfg["action_key"] = "action_ee"
+        cfg["dataset"] = {
+            "action_key": "action_ee",
+            "task_names": names,
+            "datasets": [child, copy.deepcopy(child)],
+        }
+        cfg["env_runner"]["env_kwargs"]["control_mode"] = "ee"
+        cfg["env_runner"]["task_configs"] = [{"task_name": name} for name in names]
+        for texts in (None, ["pick first", "pick second"]):
+            cfg["dataset"]["task_texts"] = texts
+            request = resolve_evaluation_request(cfg, self.root, str(self.path))
+            self.assertEqual([task["task_text"] for task in request.tasks], names if texts is None else texts)
+            self.assertEqual([task["env_kwargs"]["control_mode"] for task in request.tasks], ["ee", "ee"])
+        del cfg["dataset"]["task_texts"]
+        request = resolve_evaluation_request(cfg, self.root, str(self.path))
+        self.assertEqual([task["task_text"] for task in request.tasks], names)
+        cfg["env_runner"]["task_configs"][0]["env_kwargs"] = {"control_mode": "joint"}
+        with self.assertRaisesRegex(ValueError, "control_mode"):
+            resolve_evaluation_request(cfg, self.root, str(self.path))
+
     def test_complete_future_and_real_dtype_without_second_crop(self):
         model = WindowPolicy()
         cfg = copy.deepcopy(self.cfg)
@@ -329,7 +353,7 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual(ordinary.source["global_step"], 2)
         self.assertFalse(ordinary.source["heldout_from_selection"])
 
-    def test_best_pointer_paths_and_legacy_migration(self):
+    def test_best_pointer_requires_current_fields_and_immutable_path(self):
         pointer = dict(ckpt_relpath=str(self.path.relative_to(self.root)), global_step=1,
                        inference=dict(use_ema=False, inference_steps=2, action_steps=8),
                        selection_result="missing/selection_result.json")
@@ -350,7 +374,7 @@ class InfrastructureTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             resolve_best_checkpoint(self.root)
         write_json(best, {"selection_result": pointer["selection_result"]})
-        with self.assertRaisesRegex(ValueError, "--publish-best"):
+        with self.assertRaises(KeyError):
             resolve_best_checkpoint(self.root)
 
     def test_best_publication_failure_preserves_completed_evidence(self):
