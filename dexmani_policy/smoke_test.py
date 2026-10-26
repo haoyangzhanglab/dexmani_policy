@@ -24,19 +24,15 @@ from dexmani_policy.common.config import (
     set_project_root,
 )
 from dexmani_policy.common.runtime import close_resources, dict_apply, set_seed
-from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
-from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
-from dexmani_policy.training.builder import (
-    build_training_components,
-    build_trainer,
-    compile_training_models,
-)
+from dexmani_policy.datasets.lamp_dataset import LAMPDataset
+from dexmani_policy.datasets.latent_flow_dataset import LatentFlowDataset
+from dexmani_policy.training.trainer import PolicyTrainer
 from dexmani_policy.training.data import (
     build_dataset_and_normalizer,
     build_train_loader,
     close_data_loader,
 )
-from dexmani_policy.training.validation import validate_config
+from dexmani_policy.training.config import validate_config
 
 
 def load_smoke_config(config_name: str):
@@ -119,7 +115,7 @@ def validate_data_batch(batch, dataset, cfg):
         validate_tensor_layout(obs[key], (batch_size, *shape), f"obs.{key}", dtype)
 
     context = batch.get("action_context", {})
-    context_shapes = {}
+    context_shapes: dict[str, tuple[int, ...]] = {}
     if isinstance(dataset, LAMPDataset):
         context_shapes["hand_history"] = (batch_size, dataset.history_steps, 12)
     elif isinstance(dataset, LatentFlowDataset):
@@ -187,21 +183,20 @@ def validate_parameter_updates(model, before):
     return changed
 
 
-def validate_checkpoint_state(cfg, components, trainer, checkpoint_path):
+def validate_checkpoint_state(cfg, trainer, checkpoint_path):
     checkpoint = load_training_checkpoint(checkpoint_path)
     assert checkpoint.global_step == trainer.global_step
     assert checkpoint.epoch == trainer.current_epoch
-    assert checkpoint.next_micro_step == trainer.next_micro_step
-    assert components.scheduler.state_dict() == checkpoint.scheduler_state
+    assert trainer.scheduler.state_dict() == checkpoint.scheduler_state
     assert (
         checkpoint.effective_config["training"]["loop"]["total_train_steps"]
         == cfg.training.loop.total_train_steps
     )
-    if components.ema_updater is not None:
-        assert checkpoint.ema_updater_step == components.ema_updater.optimization_step
+    if trainer.ema_updater is not None:
+        assert checkpoint.ema_updater_step == trainer.ema_updater.optimization_step
     for model, state in (
-        (components.model, checkpoint.model_state),
-        (components.ema_model, checkpoint.ema_model_state),
+        (trainer.model, checkpoint.model_state),
+        (trainer.ema_model, checkpoint.ema_model_state),
     ):
         if model is not None:
             torch.testing.assert_close(
@@ -209,22 +204,22 @@ def validate_checkpoint_state(cfg, components, trainer, checkpoint_path):
             )
 
 
-def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
+def validate_policy_restoration(cfg, trainer, checkpoint_path):
     """Compare raw/EMA predictions with restored policies after training."""
-    components.train_loader.sampler.set_epoch(trainer.current_epoch, 0)
-    batch = next(iter(components.train_loader))
+    trainer.train_loader.generator.manual_seed(cfg.training.seed + trainer.current_epoch)
+    batch = next(iter(trainer.train_loader))
     obs = dict_apply(
         {key: value[:1] for key, value in batch["obs"].items()},
-        lambda value: value.to(components.device),
+        lambda value: value.to(trainer.device),
     )
     prediction_kwargs = {}
     if "action_context" in batch:
         prediction_kwargs["action_context"] = dict_apply(
-            batch["action_context"], lambda value: value[:1].to(components.device)
+            batch["action_context"], lambda value: value[:1].to(trainer.device)
         )
 
     predictions = {}
-    for use_ema, model in ((False, components.model), (True, components.ema_model)):
+    for use_ema, model in ((False, trainer.model), (True, trainer.ema_model)):
         if model is None:
             continue
         model.eval()
@@ -232,8 +227,8 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
         with torch.inference_mode():
             result = model.predict_action(obs, **prediction_kwargs)
             prediction = result["future_actions"]
-            if isinstance(components.train_loader.dataset, LatentFlowDataset):
-                error = result["future_actions"][..., 7:] - batch["action"][:1, :, 7:].to(components.device)
+            if isinstance(trainer.train_loader.dataset, LatentFlowDataset):
+                error = result["future_actions"][..., 7:] - batch["action"][:1, :, 7:].to(trainer.device)
                 print(
                     f"{'EMA' if use_ema else 'raw'} full noise sampling: "
                     f"sampled_hand_mae={error.abs().mean().item():.6g}, "
@@ -258,11 +253,11 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
         model.to("cpu")
 
     # Release training tensors before loading inference copies.
-    components.optimizer.state.clear()
-    saved = load_experiment_config(components.workspace.output_dir)
+    trainer.optimizer.state.clear()
+    saved = load_experiment_config(trainer.logger.output_dir)
     for use_ema, expected in predictions.items():
         restored = restore_policy_agent(
-            saved, checkpoint_path, use_ema=use_ema, device=components.device
+            saved, checkpoint_path, use_ema=use_ema, device=trainer.device
         )
         set_seed(cfg.training.seed)
         with torch.inference_mode():
@@ -274,35 +269,27 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
 def validate_training(cfg, *, max_updates=4):
     """Exercise training and checkpoint restoration within an update budget."""
     positive_int(max_updates, "max_updates")
-    if not torch.cuda.is_available():
-        raise RuntimeError("NOT VERIFIED: original training configuration requires CUDA")
-
     set_seed(cfg.training.seed)
     with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as tmpdir:
         cfg.workspace.output_dir = tmpdir
         cfg.workspace.wandb_cfg = None
         dataset, normalizer, data_description = build_dataset_and_normalizer(cfg)
-        components = build_training_components(
-            cfg, torch.device(cfg.training.device), dataset, normalizer, data_description=data_description
-        )
-        cfg = components.effective_config
-        with closing(components):
-            trainer = build_trainer(components)
-            components.workspace.save_hydra_config(cfg)
+        with closing(PolicyTrainer(cfg, dataset, normalizer, data_description)) as trainer:
+            cfg = trainer.cfg
             before = {
                 name: parameter.detach().to(device="cpu", copy=True)
-                for name, parameter in components.model.named_parameters()
+                for name, parameter in trainer.model.named_parameters()
                 if parameter.requires_grad and parameter.is_floating_point()
             }
-            compile_training_models(cfg, components)
+            trainer.compile_models()
             trainer.train(max_updates=max_updates)
-            changed = validate_parameter_updates(components.model, before)
+            changed = validate_parameter_updates(trainer.model, before)
             del before
             print(f"Observed parameter update: {changed} (step={trainer.global_step})")
 
-            checkpoint_path = components.workspace.checkpoint_dir / "latest.pt"
-            validate_checkpoint_state(cfg, components, trainer, checkpoint_path)
-            validate_policy_restoration(cfg, components, trainer, checkpoint_path)
+            checkpoint_path = trainer.checkpoint_dir / "latest.pt"
+            validate_checkpoint_state(cfg, trainer, checkpoint_path)
+            validate_policy_restoration(cfg, trainer, checkpoint_path)
 
 
 def main(argv=None):

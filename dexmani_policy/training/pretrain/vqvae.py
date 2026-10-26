@@ -20,17 +20,16 @@ from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
-from dexmani_policy.common.runtime import atomic_path
-from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
-from dexmani_policy.training.common.scheduler import get_scheduler
+from dexmani_policy.common.runtime import atomic_path, set_seed
+from dexmani_policy.datasets.robot_dataset import RobotDataset
+from dexmani_policy.training.optimization import get_scheduler
 from dexmani_policy.training.data import build_normalizer
-from dexmani_policy.training.pretrain.hand_prior.export_codebook import (
+from dexmani_policy.training.pretrain.export_codebook import (
     build_hand_prototypes,
     build_runtime_codebook,
     deployment_diagnostics,
 )
-from dexmani_policy.training.validation import validate_config
-from dexmani_policy.training.workspace import prepare_output_dir
+from dexmani_policy.training.config import validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +77,7 @@ def save_checkpoint(
     epoch: int,
     vqvae: torch.nn.Module,
     normalizer: AffineNormalizer,
-    args: argparse.Namespace,
-    train_history: list[float],
+    recipe,
     split_metadata: dict,
     metrics: dict,
 ) -> None:
@@ -87,7 +85,7 @@ def save_checkpoint(
         "epoch": int(epoch),
         "model_state_dict": vqvae.state_dict(),
         "normalizer_state_dict": normalizer.state_dict(),
-        "args": vars(args),
+        "training_config": OmegaConf.to_container(recipe, resolve=True),
         "model_config": {
             "hand_dim": vqvae.hand_dim,
             "latent_dim": vqvae.latent_dim,
@@ -97,14 +95,13 @@ def save_checkpoint(
             "num_layers": vqvae.num_layers,
             "act_scale": float(vqvae.act_scale.detach().cpu()),
             "loss_weight": vqvae.loss_weight.detach().cpu().tolist(),
-            "vq_decay": args.vq_decay,
-            "threshold_ema_dead_code": args.threshold_ema_dead_code,
-            "kmeans_iters": args.kmeans_iters,
-            "kmeans_init": args.kmeans_init,
+            "vq_decay": recipe.vq_decay,
+            "threshold_ema_dead_code": recipe.threshold_ema_dead_code,
+            "kmeans_iters": recipe.kmeans_iters,
+            "kmeans_init": recipe.kmeans_init,
         },
         "split_metadata": split_metadata,
         "metrics": metrics,
-        "train_history": train_history,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,14 +114,14 @@ def build_policy_dataset(cfg):
     """Reuse Policy's actual Dataset, including observation/window qualification."""
     validate_config(cfg)
     if cfg.agent._target_ != "dexmani_policy.agents.policies.dqrise.DQRISEPolicy":
-        raise ValueError("--policy-config requires a DQRISEPolicy configuration")
+        raise ValueError("VQ pretraining requires a DQRISEPolicy configuration")
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare a new codebook from a fresh Policy config, not resume_from")
     if cfg.dataset.split_manifest is None:
         raise ValueError("Pretraining requires an explicit shared dataset.split_manifest")
     dataset = hydra.utils.instantiate(cfg.dataset)
-    if not isinstance(dataset, DemonstrationDataset):
-        raise TypeError("DQ-RISE VQ preparation requires a single DemonstrationDataset")
+    if not isinstance(dataset, RobotDataset):
+        raise TypeError("DQ-RISE VQ preparation requires a single RobotDataset")
     if dataset.replay_buffer[dataset.action_key].shape[1:] != (cfg.agent.action_dim,):
         raise ValueError("Dataset action shape does not match the Policy layout")
     return dataset
@@ -138,17 +135,13 @@ def policy_hand_rows(dataset, tcp_dim):
     buffer = dataset.replay_buffer
     blocks = []
     step = buffer.chunk_rows(dataset.action_key)
-    for start in range(0, int(buffer.episode_ends[-1]), step):
+    for block in np.unique(rows // step):
+        start = int(block * step)
         selected = rows[np.searchsorted(rows, start) : np.searchsorted(rows, start + step)] - start
-        if len(selected):
-            blocks.append(
-                buffer.read(
-                    dataset.action_key,
-                    slice(start, start + step),
-                    columns=slice(tcp_dim, tcp_dim + 12),
-                )[selected]
-            )
-    return np.concatenate(blocks) if blocks else np.empty((0, 12), dtype=np.float32)
+        blocks.append(buffer.read(
+            dataset.action_key, slice(start, start + step), columns=slice(tcp_dim, tcp_dim + 12),
+        )[selected])
+    return np.concatenate(blocks)
 
 
 def prepare_policy_data(cfg):
@@ -185,113 +178,97 @@ def prepare_policy_data(cfg):
     )
 
 
-def train(args: argparse.Namespace, *, policy_cfg) -> None:
+def train(cfg):
+    recipe = cfg.vq_vae
+    hand_dim = cfg.agent.action_dim - cfg.agent.tcp_dim
+    if (recipe.num_groups, recipe.codebook_size) != (cfg.agent.codebook_num_groups, cfg.agent.codebook_size):
+        raise ValueError("VQ num_groups/codebook_size must match the target policy")
     for name in ("num_epochs", "batch_size", "save_epochs", "codebook_report_epochs"):
-        positive_int(getattr(args, name), name)
-    if not 0 <= args.max_grad_norm < float("inf") or args.warmup_steps < 0:
+        positive_int(recipe[name], name)
+    if not 0 <= recipe.max_grad_norm < float("inf") or recipe.warmup_steps < 0:
         raise ValueError("max_grad_norm and warmup_steps must be finite/nonnegative")
-    if args.output_dir is None:
+    output_dir = recipe.output_dir
+    if output_dir is None:
         run = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
-        args.output_dir = str(Path("experiments/vq_hand") / Path(args.zarr_path).stem / run)
-    output_dir = Path(args.output_dir)
-    prepare_output_dir(output_dir)
-    for pattern in ("vqvae_hand_*.pt", "*.npz", "code_usage_*.png", "loss_curve.png"):
-        if any(output_dir.glob(pattern)):
-            raise FileExistsError(
-                f"VQ output already exists in {output_dir}; use a new output directory"
-            )
+        output_dir = Path("experiments/vq_hand") / Path(cfg.dataset.zarr_path).stem / run
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=False)
     logger.info("VQ run: %s", output_dir.resolve())
-    device = torch.device(args.device)
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(policy_cfg)
+    device = torch.device(recipe.device)
+    set_seed(recipe.seed)
+    train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(cfg)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
+    if len(train_ds) < recipe.batch_size:
+        raise ValueError("VQ training requires a full batch; reduce vq_vae.batch_size")
     train_loader = DataLoader(
         train_ds,
-        batch_size=args.batch_size,
+        batch_size=recipe.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
-        drop_last=len(train_ds) >= args.batch_size,
+        drop_last=True,
         pin_memory=device.type == "cuda",
     )
-    val_loader = (
-        DataLoader(
-            val_ds,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            drop_last=False,
-            pin_memory=device.type == "cuda",
-        )
-        if len(val_ds) > 0
-        else None
+    has_validation = len(val_ds) > 0
+    selection_loader = DataLoader(
+        val_ds if has_validation else train_ds,
+        batch_size=recipe.batch_size,
+        pin_memory=device.type == "cuda",
+        generator=torch.Generator().manual_seed(recipe.seed),
     )
-    selection_loader = val_loader
-    if selection_loader is None:
-        selection_loader = DataLoader(
-            train_ds,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=0,
-            drop_last=False,
-            pin_memory=device.type == "cuda",
-            generator=torch.Generator().manual_seed(args.seed),
-        )
     vqvae = HandVQVAE(
-        hand_dim=args.hand_dim,
-        latent_dim=args.latent_dim,
-        hidden_dim=args.hidden_dim,
-        num_groups=args.num_groups,
-        codebook_size=args.codebook_size,
-        num_layers=args.num_layers,
-        act_scale=args.act_scale,
-        loss_weight=args.loss_weight,
-        vq_decay=args.vq_decay,
-        threshold_ema_dead_code=args.threshold_ema_dead_code,
-        kmeans_init=args.kmeans_init,
-        kmeans_iters=args.kmeans_iters,
+        hand_dim=hand_dim,
+        latent_dim=recipe.latent_dim,
+        hidden_dim=recipe.hidden_dim,
+        num_groups=recipe.num_groups,
+        codebook_size=recipe.codebook_size,
+        num_layers=recipe.num_layers,
+        act_scale=recipe.act_scale,
+        loss_weight=recipe.loss_weight,
+        vq_decay=recipe.vq_decay,
+        threshold_ema_dead_code=recipe.threshold_ema_dead_code,
+        kmeans_init=recipe.kmeans_init,
+        kmeans_iters=recipe.kmeans_iters,
     ).to(device)
 
     optimizer = torch.optim.AdamW(
         vqvae.parameters(),
-        lr=args.lr,
-        betas=tuple(args.betas),
-        weight_decay=args.weight_decay,
+        lr=recipe.lr,
+        betas=tuple(recipe.betas),
+        weight_decay=recipe.weight_decay,
     )
-    total_steps = len(train_loader) * args.num_epochs
+    total_steps = len(train_loader) * recipe.num_epochs
     scheduler = get_scheduler(
-        optimizer, "cosine", num_warmup_steps=args.warmup_steps, num_training_steps=total_steps
+        optimizer, "cosine", num_warmup_steps=recipe.warmup_steps, num_training_steps=total_steps
     )
 
-    selection_metric = "val_lookup_mse" if val_loader is not None else "train_lookup_mse"
+    selection_metric = "val_lookup_mse" if has_validation else "train_lookup_mse"
     split_metadata["selection_metric"] = selection_metric
     split_metadata["selection_split"] = (
-        "validation" if val_loader is not None else "train_no_holdout"
+        "validation" if has_validation else "train_no_holdout"
     )
     logger.info("VQ selection: %s (%s)", selection_metric, split_metadata["selection_split"])
     train_history: list[float] = []
     best_lookup_mse = float("inf")
 
-    for epoch in range(1, args.num_epochs + 1):
+    for epoch in range(1, recipe.num_epochs + 1):
         vqvae.train()
         sums = torch.zeros(3, device=device, dtype=torch.float64)
         train_count = 0
-        report_usage = epoch % args.codebook_report_epochs == 0
+        report_usage = epoch % recipe.codebook_report_epochs == 0
         if report_usage:
-            usage = torch.zeros(args.num_groups, args.codebook_size, dtype=torch.long, device=device)
+            usage = torch.zeros(recipe.num_groups, recipe.codebook_size, dtype=torch.long, device=device)
 
         for (batch,) in train_loader:
             batch = batch.to(device, non_blocking=True)
             enc_loss, vq_loss, indices, recon_mse = vqvae(batch)
-            total_loss = args.enc_loss_weight * enc_loss + args.vq_loss_weight * vq_loss
+            total_loss = recipe.enc_loss_weight * enc_loss + recipe.vq_loss_weight * vq_loss
             optimizer.zero_grad(set_to_none=True)
             if not torch.isfinite(total_loss):
                 raise FloatingPointError("Nonfinite VQ training loss")
             total_loss.backward()
-            if args.max_grad_norm > 0:
+            if recipe.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(
-                    vqvae.parameters(), args.max_grad_norm, error_if_nonfinite=True
+                    vqvae.parameters(), recipe.max_grad_norm, error_if_nonfinite=True
                 )
             elif not all(
                 torch.isfinite(p.grad).all() for p in vqvae.parameters() if p.grad is not None
@@ -309,12 +286,12 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
 
         train_metrics = dict(zip(("enc", "vq", "mse"), (sums / train_count).tolist()))
         train_total = (
-            args.enc_loss_weight * train_metrics["enc"] + args.vq_loss_weight * train_metrics["vq"]
+            recipe.enc_loss_weight * train_metrics["enc"] + recipe.vq_loss_weight * train_metrics["vq"]
         )
         train_history.append(train_total)
 
         selection_metrics = evaluate_vq(
-            vqvae, selection_loader, device, reconstruction=val_loader is not None
+            vqvae, selection_loader, device, reconstruction=has_validation
         )
         metrics = {
             "train_enc": train_metrics["enc"],
@@ -332,7 +309,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             metrics["train_vq"],
             metrics["train_mse"],
         )
-        if val_loader is not None:
+        if has_validation:
             metrics.update({f"val_{key}": selection_metrics[key] for key in ("enc", "vq", "mse")})
             logger.info(
                 "validation | enc %.5f vq %.5f recon_mse %.5f",
@@ -341,13 +318,13 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         logger.info("%s %.7f", selection_metric, metrics[selection_metric])
 
         checkpoint_paths = []
-        if epoch % args.save_epochs == 0 or epoch == args.num_epochs:
+        if epoch % recipe.save_epochs == 0 or epoch == recipe.num_epochs:
             checkpoint_paths.append(output_dir / f"vqvae_hand_epoch={epoch:04d}.pt")
         lookup_mse = metrics[selection_metric]
         if lookup_mse < best_lookup_mse:
             best_lookup_mse = lookup_mse
             checkpoint_paths.append(output_dir / "vqvae_hand_best.pt")
-        if epoch == args.num_epochs:
+        if epoch == recipe.num_epochs:
             checkpoint_paths.append(output_dir / "vqvae_hand_last.pt")
         for checkpoint_path in checkpoint_paths:
             save_checkpoint(
@@ -355,16 +332,15 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
                 epoch=epoch,
                 vqvae=vqvae,
                 normalizer=normalizer,
-                args=args,
-                train_history=train_history,
+                recipe=recipe,
                 split_metadata=split_metadata,
                 metrics=metrics,
             )
 
         if report_usage:
-            for group in range(args.num_groups):
+            for group in range(recipe.num_groups):
                 fig, ax = plt.subplots(figsize=(6, 3))
-                ax.bar(np.arange(args.codebook_size), usage[group].cpu().numpy())
+                ax.bar(np.arange(recipe.codebook_size), usage[group].cpu().numpy())
                 ax.set_title(f"Group {group} code usage — epoch {epoch}")
                 ax.set_xlabel("Code index")
                 ax.set_ylabel("Count")
@@ -392,75 +368,13 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
     plt.close(fig)
 
 
-def parse_loss_weight(value):
-    return [float(item.strip()) for item in value.split(",")]
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--policy-config",
-        required=True,
-        help="Target DQ-RISE Policy YAML providing data and VQ defaults",
-    )
-    parser.add_argument(
-        "--policy-override",
-        action="append",
-        default=[],
-        help="Hydra override for the target Policy (repeatable)",
-    )
-    parser.add_argument("--latent_dim", type=int, default=None)
-    parser.add_argument("--hidden_dim", type=int, default=None)
-    parser.add_argument("--num_groups", type=int, default=None)
-    parser.add_argument("--codebook_size", type=int, default=None)
-    parser.add_argument("--num_layers", type=int, default=None)
-    parser.add_argument("--act_scale", type=float, default=None)
-    parser.add_argument("--loss_weight", type=parse_loss_weight, default=None)
-    parser.add_argument("--vq_decay", type=float, default=None)
-    parser.add_argument("--threshold_ema_dead_code", type=int, default=None)
-    parser.add_argument(
-        "--kmeans_init",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-    )
-    parser.add_argument("--kmeans_iters", type=int, default=None)
-    parser.add_argument("--num_epochs", type=int, default=None)
-    parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--betas", type=float, nargs=2, default=None)
-    parser.add_argument("--weight_decay", type=float, default=None)
-    parser.add_argument("--enc_loss_weight", type=float, default=None)
-    parser.add_argument("--vq_loss_weight", type=float, default=None)
-    parser.add_argument("--max_grad_norm", type=float, default=None)
-    parser.add_argument("--warmup_steps", type=int, default=None)
-    parser.add_argument("--output_dir", default=None)
-    parser.add_argument("--save_epochs", type=int, default=None)
-    parser.add_argument("--codebook_report_epochs", type=int, default=None)
-    parser.add_argument("--device", default=None)
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--num_workers", type=int, default=None)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = build_arg_parser()
-    initial = parser.parse_args(argv)
-    policy_cfg = load_policy_config(initial.policy_config, initial.policy_override)
-    parser.set_defaults(**OmegaConf.to_container(policy_cfg.vq_vae, resolve=True))
-    args = parser.parse_args(argv)
-    args.zarr_path = str(policy_cfg.dataset.zarr_path)
-    args.hand_dim = int(policy_cfg.agent.action_dim) - int(policy_cfg.agent.tcp_dim)
-    if (args.num_groups, args.codebook_size) != (
-        policy_cfg.agent.codebook_num_groups,
-        policy_cfg.agent.codebook_size,
-    ):
-        parser.error("VQ num_groups/codebook_size must match the target Policy")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    train(args, policy_cfg=policy_cfg)
+    parser.add_argument("--config", default="dqrise", help="Hydra config name or YAML path")
+    parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. vq_vae.device=cpu")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    train(load_policy_config(args.config, args.overrides))
 
 
 if __name__ == "__main__":

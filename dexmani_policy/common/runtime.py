@@ -80,21 +80,12 @@ def set_rng_state(state: dict[str, Any], device="cpu") -> None:
     device = torch.device(device)
     cuda_state = state["torch_cuda"]
     if (cuda_state is not None) != (device.type == "cuda"):
-        raise ValueError("Checkpoint CUDA RNG and target device must agree for exact resume")
+        raise ValueError("Checkpoint CUDA RNG state must match the target device type")
     if cuda_state is not None:
         torch.cuda.set_rng_state(cuda_state.cpu(), device=device)
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch"].cpu())
-
-
-def worker_init_fn(worker_id):
-    import torch
-
-    seed = torch.initial_seed() % 2**32
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 
 def dict_apply(x: dict, func: Callable) -> dict:

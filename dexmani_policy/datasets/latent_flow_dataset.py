@@ -1,9 +1,9 @@
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
-from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import describe_hand_chunks
+from dexmani_policy.datasets.robot_dataset import RobotDataset
+from dexmani_policy.datasets.metadata import describe_hand_chunks
 
 
-class LatentFlowDataset(DemonstrationDataset):
+class LatentFlowDataset(RobotDataset):
     """Historical observations paired with full future commands at the query state."""
 
     future_action_window = True
@@ -27,6 +27,9 @@ class LatentFlowDataset(DemonstrationDataset):
         kwargs.update(horizon=horizon, obs_horizon=obs_horizon, pad_before=obs_horizon - 1, pad_after=0)
         super().__init__(zarr_path, sensor_modalities=sensor_modalities, **kwargs)
         self.hand_data = describe_hand_chunks(self, data_semantics, source_id)
+        self.commands = self.replay_buffer.read("action", slice(None))
+        self.states = self.replay_buffer.read("joint_state", slice(None))
+        self.commands.flags.writeable = self.states.flags.writeable = False
 
     def describe_hand_data(self):
         validation = self.get_validation_dataset()
@@ -52,6 +55,6 @@ class LatentFlowDataset(DemonstrationDataset):
         for start in range(0, len(self), 1024):
             rows = self.sampler.source_rows(self.sampler.indices[start : start + 1024])
             future = rows[:, self.action_offset :]
-            commands = self.replay_buffer.read("action", future.reshape(-1), cache=False)
-            reference = self.replay_buffer.read("joint_state", future[:, 0], cache=False)
-            yield (commands.reshape(-1, self.horizon, 19) - reference[:, None]).reshape(-1, 19)
+            commands = self.commands[future]
+            reference = self.states[future[:, 0]]
+            yield (commands - reference[:, None]).reshape(-1, 19)

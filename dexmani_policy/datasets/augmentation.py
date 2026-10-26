@@ -26,8 +26,6 @@ def random_sample_points(pointcloud: np.ndarray, keep_points: int) -> np.ndarray
 class Augmentation:
     """In-place transform; the dataset applies probability gating to owned sample arrays."""
 
-    __slots__ = ("prob",)
-
     def __init__(self, prob=1.0):
         self.prob = prob
 
@@ -37,8 +35,6 @@ class Augmentation:
 
 class PointColorJitter(Augmentation):
     """Additive brightness and shared contrast, saturation and hue on the last RGB channels."""
-
-    __slots__ = ("brightness", "contrast", "saturation", "hue")
 
     def __init__(self, brightness=0.125, contrast=0.5, saturation=0.5, hue=0.08, prob=1.0):
         super().__init__(prob=prob)
@@ -159,8 +155,6 @@ class PointColorJitter(Augmentation):
 class PointDropout(Augmentation):
     """Replace dropped rows with the first point, sampling a dropout ratio per frame."""
 
-    __slots__ = ("max_dropout_ratio",)
-
     def __init__(self, max_dropout_ratio=0.8, prob=1.0):
         if not 0 <= max_dropout_ratio <= 1:
             raise ValueError("max_dropout_ratio must be between 0 and 1")
@@ -186,8 +180,6 @@ class PointDropout(Augmentation):
 class PointCoordinateNoise(Augmentation):
     """Clipped Gaussian noise on all XYZ coordinates, in raw coordinate units."""
 
-    __slots__ = ("noise_std", "clip_range")
-
     def __init__(self, noise_std=0.002, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
         self.noise_std = float(noise_std)
@@ -204,8 +196,6 @@ class PointCoordinateNoise(Augmentation):
 class PointColorNoise(Augmentation):
     """Clipped Gaussian noise on the last RGB channels, clamped to [0, 1]."""
 
-    __slots__ = ("noise_std", "clip_range")
-
     def __init__(self, noise_std=0.01, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
         self.noise_std = float(noise_std)
@@ -220,9 +210,7 @@ class PointColorNoise(Augmentation):
 
 
 class StateNoise(Augmentation):
-    """Clipped Gaussian noise on proprioception, in raw state units."""
-
-    __slots__ = ("noise_std", "clip_range")
+    """Noise is applied in raw state units."""
 
     def __init__(self, noise_std=0.0002, clip_range=None, prob=1.0):
         super().__init__(prob=prob)
@@ -235,8 +223,6 @@ class StateNoise(Augmentation):
 
 class ImageAugmentation:
     """Color jitter, grayscale, pixel noise and blur on float32 observation windows."""
-
-    __slots__ = ("prob", "color_jitter", "grayscale", "noise", "noise_prob", "blur", "blur_prob")
 
     def __init__(
         self,

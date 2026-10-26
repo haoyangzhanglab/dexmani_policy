@@ -1,25 +1,39 @@
-"""Configuration and model checks at training boundaries."""
+import copy
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import OmegaConf, open_dict
 
+from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.common.checkpoint import load_training_checkpoint
 from dexmani_policy.common.config import (
+    normalization_dims_from_config,
     positive_int,
+    resolve_input_recipe,
     resolve_normalization_spec,
+    resolve_resume_source,
     validate_action_key_consistency,
 )
+from dexmani_policy.datasets.robot_dataset import RobotDataset
+
+
+def prepare_training(cfg):
+    source = resolve_resume_source(cfg.get("resume_from"))
+    checkpoint = load_training_checkpoint(source) if source is not None else None
+    overrides = HydraConfig.get().overrides.task if source is not None else []
+    effective_config = resolve_input_recipe(cfg, overrides=overrides, resume_checkpoint=checkpoint)
+    with open_dict(effective_config):
+        effective_config.resume_from = source
+        # Resume writes into this invocation's directory, never the source run.
+        effective_config.workspace.output_dir = cfg.workspace.output_dir
+    validate_config(effective_config)
+    return effective_config, checkpoint
 
 
 def validate_config(cfg):
-    """Check shared training constraints before opening data or model artifacts."""
-    for field in ("num_gpus", "gpu_ids"):
-        if field in cfg.training:
-            raise ValueError(
-                f"training.{field} is no longer supported; "
-                "select one device with training.device"
-            )
-    agent_class = hydra.utils.get_class(cfg.agent._target_)
+    agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
-        if type(cfg.agent[name]) is not type(cfg[name]) or cfg.agent[name] != cfg[name]:
+        if cfg.agent[name] != cfg[name]:
             raise ValueError(f"agent.{name} must match {name}")
     aux = cfg.get("use_aux_ee", False)
     if cfg.agent.get("use_aux_ee", False) != aux:
@@ -31,7 +45,7 @@ def validate_config(cfg):
         raise ValueError("Dataset/policy history_steps must match")
     if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
         raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
-    dataset_class = hydra.utils.get_class(dataset._target_)
+    dataset_class: type[RobotDataset] = hydra.utils.get_class(dataset._target_)
     if agent_class.future_action_window != dataset_class.future_action_window:
         raise ValueError("Policy and Dataset action windows must be used together")
     if dataset.get("sensor_modalities") is None:
@@ -39,7 +53,7 @@ def validate_config(cfg):
     for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
         if field not in dataset:
             raise ValueError(f"dataset.{field} must explicitly reference {name}")
-        if type(dataset[field]) is not type(cfg[name]) or dataset[field] != cfg[name]:
+        if dataset[field] != cfg[name]:
             raise ValueError(f"dataset.{field} must match {name}")
     if dataset.get("use_aux_ee", False) != aux:
         raise ValueError("dataset.use_aux_ee must match use_aux_ee")
@@ -68,3 +82,20 @@ def validate_config(cfg):
     validate_action_key_consistency(cfg)
 
     print("Config validation passed")
+
+
+def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
+    effective = copy.deepcopy(cfg)
+    with open_dict(effective):
+        effective.update(data_description)
+        if "real_runtime" not in data_description:
+            effective.pop("real_runtime", None)
+        effective.policy_metadata = model.inference_metadata
+        if checkpoint is None:
+            effective.agent.update(model.effective_config)
+        if effective.training.lr_scheduler == "cosine_min_lr":
+            effective.training.lr_min_ratio = effective.training.get("lr_min_ratio", 0.1)
+    normalization_dims_from_config(effective)
+    OmegaConf.resolve(effective)
+    OmegaConf.set_readonly(effective, True)
+    return effective

@@ -42,7 +42,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.hand_prior.latent_flow_dataset.LatentFlowDataset
+  _target_: dexmani_policy.datasets.latent_flow_dataset.LatentFlowDataset
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}
@@ -125,7 +125,7 @@ optimizer:
   obs_weight_decay: 1.0e-10
 
 ema:
-  _target_: dexmani_policy.training.common.ema.EMA
+  _target_: dexmani_policy.training.optimization.EMA
   fixed_decay: 0.99
 
 training:
@@ -144,7 +144,6 @@ training:
     gradient_accumulation_steps: 1
 
 workspace:
-  _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
   wandb_cfg:
     project: dexmani_policy

@@ -13,10 +13,10 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int
-from dexmani_policy.common.runtime import atomic_path
-from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
-from dexmani_policy.training.common.scheduler import get_scheduler
-from dexmani_policy.training.validation import validate_config
+from dexmani_policy.common.runtime import atomic_path, set_seed
+from dexmani_policy.datasets.lamp_dataset import LAMPDataset
+from dexmani_policy.training.optimization import get_scheduler
+from dexmani_policy.training.config import validate_config
 
 
 def build_prior_dataset(cfg):
@@ -49,10 +49,6 @@ def prior_batch(dataset, rows, device):
     history = torch.as_tensor(dataset.history_for_rows(rows), device=device)
     target = torch.as_tensor(dataset.hand_actions[rows], device=device)
     return history, target
-
-
-def perturb_history(history, noise_std):
-    return history + torch.randn_like(history) * noise_std if noise_std > 0 else history
 
 
 def kl_weight(update, beta, warmup_steps):
@@ -101,7 +97,7 @@ def evaluate(prior, dataset, rows, batch_size):
         prior.train(training)
 
 
-def save_prior(path, prior, hand_data, cfg, args, step, metrics, split_manifest):
+def save_prior(path, prior, hand_data, cfg, step, metrics, split_manifest):
     prior.ready.fill_(True)
     prior.validate_state()
     evaluation = metrics["evaluation"]
@@ -124,7 +120,7 @@ def save_prior(path, prior, hand_data, cfg, args, step, metrics, split_manifest)
         },
         "metadata": metadata,
         "policy_config": OmegaConf.to_container(cfg, resolve=False),
-        "train_args": vars(args),
+        "training_config": OmegaConf.to_container(cfg.prior_training, resolve=True),
         "step": int(step),
         "metrics": metrics,
     }
@@ -133,38 +129,33 @@ def save_prior(path, prior, hand_data, cfg, args, step, metrics, split_manifest)
         torch.save(payload, temporary)
 
 
-def train(args):
+def train(cfg, *, overwrite=False):
+    recipe = cfg.prior_training
     for key in ("steps", "batch_size", "eval_every", "print_every"):
-        positive_int(getattr(args, key), key)
-    if args.beta_warmup < 0 or args.warmup_steps < 0:
+        positive_int(recipe[key], key)
+    if recipe.beta_warmup < 0 or recipe.warmup_steps < 0:
         raise ValueError("Warmup steps must be nonnegative")
     for key in ("noise_std", "weight_decay", "min_lr"):
-        if not 0 <= getattr(args, key) < float("inf"):
+        if not 0 <= recipe[key] < float("inf"):
             raise ValueError(f"{key} must be nonnegative and finite")
-    if not 0 < args.lr < float("inf") or not 0 < args.clip_grad < float("inf"):
+    if not 0 < recipe.lr < float("inf") or not 0 < recipe.clip_grad < float("inf"):
         raise ValueError("lr and clip_grad must be positive and finite")
-    if args.min_lr > args.lr:
+    if recipe.min_lr > recipe.lr:
         raise ValueError("min_lr must not exceed lr")
-    eligible_step = max(2, args.beta_warmup) if args.beta_warmup else 1
-    if not 0 < args.beta < float("inf") or args.steps < eligible_step:
+    eligible_step = max(2, recipe.beta_warmup) if recipe.beta_warmup else 1
+    if not 0 < recipe.beta < float("inf") or recipe.steps < eligible_step:
         raise ValueError(f"LAMP prior requires positive finite beta and steps >= {eligible_step}")
-    cfg = load_policy_config(args.policy_config or args.config, args.overrides)
-    output = Path(args.output or cfg.agent.prior_path).expanduser()
-    if output.exists() and not args.overwrite:
+    output = Path(cfg.agent.prior_path).expanduser()
+    if output.exists() and not overwrite:
         raise FileExistsError(f"Prior already exists: {output}; use --overwrite to replace it")
-    device = torch.device(args.device)
-    torch.manual_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
+    device = torch.device(recipe.device)
+    set_seed(recipe.seed)
+    rng = np.random.default_rng(recipe.seed)
     dataset = build_prior_dataset(cfg)
     hand_data = dataset.describe_hand_data()
     train_rows, val_rows = source_rows(dataset)
-    if not len(train_rows):
-        raise ValueError("LAMP prior training requires nonempty training source rows")
-    if len(train_rows) < args.batch_size:
-        print(
-            f"LAMP prior small-data smoke exception: actual batch size={len(train_rows)} "
-            f"< configured batch size={args.batch_size}; keeping one partial batch per pass"
-        )
+    if len(train_rows) < recipe.batch_size:
+        raise ValueError("LAMP prior training requires a full batch; reduce prior_training.batch_size")
     prior = HandMotionPrior(
         hand_dim=12,
         history_steps=int(cfg.agent.history_steps),
@@ -172,39 +163,40 @@ def train(args):
         hidden_dim=int(cfg.agent.prior_hidden_dim),
     ).to(device)
     optimizer = torch.optim.AdamW(
-        prior.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay
+        prior.parameters(), lr=recipe.lr, betas=(0.9, 0.999), weight_decay=recipe.weight_decay
     )
     scheduler = get_scheduler(
-        optimizer, "cosine_min_lr", num_warmup_steps=args.warmup_steps,
-        num_training_steps=args.steps, lr_min_ratio=args.min_lr / args.lr,
+        optimizer, "cosine_min_lr", num_warmup_steps=recipe.warmup_steps,
+        num_training_steps=recipe.steps, lr_min_ratio=recipe.min_lr / recipe.lr,
     )
     print(f"Prior rows: train={len(train_rows)}, validation={len(val_rows)}; output={output}")
-    initial = evaluate(prior, dataset, val_rows, args.batch_size)
+    initial = evaluate(prior, dataset, val_rows, recipe.batch_size)
     if initial is not None:
         print(f"Initial validation: {initial}")
     best_mse = float("inf")
-    batches_per_pass = max(1, len(train_rows) // args.batch_size)
-    for update in range(args.steps):
+    batches_per_pass = len(train_rows) // recipe.batch_size
+    for update in range(recipe.steps):
         step = update + 1
         prior.train()
         batch = update % batches_per_pass
         if batch == 0:
             order = rng.permutation(train_rows)
-        start = batch * args.batch_size
-        history, target = prior_batch(dataset, order[start : start + args.batch_size], device)
-        history = perturb_history(history, args.noise_std)
-        beta = kl_weight(update, args.beta, args.beta_warmup)
+        start = batch * recipe.batch_size
+        history, target = prior_batch(dataset, order[start : start + recipe.batch_size], device)
+        if recipe.noise_std > 0:
+            history = history + torch.randn_like(history) * recipe.noise_std
+        beta = kl_weight(update, recipe.beta, recipe.beta_warmup)
         loss, reconstruction, kl = prior.compute_loss(history, target, beta)
         if not torch.isfinite(loss):
             raise ValueError(f"Prior loss became nonfinite at step {step}")
         lr = optimizer.param_groups[0]["lr"]
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(prior.parameters(), args.clip_grad, error_if_nonfinite=True)
+        torch.nn.utils.clip_grad_norm_(prior.parameters(), recipe.clip_grad, error_if_nonfinite=True)
         optimizer.step()
         scheduler.step()
-        report = step == 1 or step % args.print_every == 0
-        select = (step % args.eval_every == 0 or step == args.steps) and step >= eligible_step
+        report = step == 1 or step % recipe.print_every == 0
+        select = (step % recipe.eval_every == 0 or step == recipe.steps) and step >= eligible_step
         if report or select:
             last_metrics = {
                 "loss": float(loss.detach()),
@@ -214,12 +206,12 @@ def train(args):
                 "lr": lr,
             }
         if report:
-            print(f"Step {step}/{args.steps}: {last_metrics}")
+            print(f"Step {step}/{recipe.steps}: {last_metrics}")
         if select:
-            if not len(val_rows) and step != args.steps:
+            if not len(val_rows) and step != recipe.steps:
                 continue
             evaluation = evaluate(
-                prior, dataset, val_rows if len(val_rows) else train_rows, args.batch_size
+                prior, dataset, val_rows if len(val_rows) else train_rows, recipe.batch_size
             )
             last_metrics["evaluation"] = evaluation
             split = "Validation" if len(val_rows) else "Train (no holdout)"
@@ -227,7 +219,7 @@ def train(args):
             if evaluation["mse"] < best_mse:
                 best_mse = evaluation["mse"]
                 save_prior(
-                    output, prior, hand_data, cfg, args, step, last_metrics,
+                    output, prior, hand_data, cfg, step, last_metrics,
                     dataset.data_recipe["split_manifest"],
                 )
     print(f"Saved {'best validation' if len(val_rows) else 'final'} prior: {output}")
@@ -235,32 +227,11 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--config", default="lamp", help="Hydra policy config name")
-    group.add_argument("--policy-config", help="Policy YAML path instead of a config name")
-    parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. zarr_path=...")
-    parser.add_argument("--output", help="Defaults to agent.prior_path")
-    parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--steps", type=int, default=20000)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=2e-3)
-    parser.add_argument("--min-lr", type=float, default=1e-5)
-    parser.add_argument("--warmup-steps", type=int, default=500)
-    parser.add_argument("--beta", type=float, default=0.001)
-    parser.add_argument("--beta-warmup", type=int, default=2000)
-    parser.add_argument(
-        "--noise-std",
-        type=float,
-        default=0.01,
-        help="Gaussian history noise in raw hand radians",
-    )
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--clip-grad", type=float, default=1.0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--eval-every", type=int, default=1000)
-    parser.add_argument("--print-every", type=int, default=200)
+    parser.add_argument("--config", default="lamp", help="Hydra config name or YAML path")
     parser.add_argument("--overwrite", action="store_true")
-    train(parser.parse_args())
+    parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. prior_training.device=cpu")
+    args = parser.parse_args()
+    train(load_policy_config(args.config, args.overrides), overwrite=args.overwrite)
 
 
 if __name__ == "__main__":

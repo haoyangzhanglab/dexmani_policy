@@ -49,7 +49,7 @@ bash scripts/remote/train_remote.sh --gpus 0 dp3 <task> \
   '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
-相对路径经共享 `experiments/` 解析；恢复到**新 run**，任务身份须匹配，允许更改的字段见 [完整恢复边界](项目架构.md#完整恢复边界)。
+相对路径经共享 `experiments/` 解析；恢复到**新 run**，任务身份须匹配，允许更改的字段见 [Epoch 级恢复](项目架构.md#epoch-级恢复)。
 
 ## 同步边界
 

@@ -1,5 +1,3 @@
-"""Dataset, normalization and DataLoader construction shared by training and smoke."""
-
 import copy
 
 import hydra
@@ -8,12 +6,8 @@ from omegaconf import open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import (
-    resolve_normalization_spec,
-)
+from dexmani_policy.common.config import resolve_normalization_spec
 from dexmani_policy.common.normalization import AffineNormalizer
-from dexmani_policy.common.runtime import worker_init_fn
-from dexmani_policy.datasets.common.resumable_sampler import ResumableSampler
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
@@ -49,17 +43,14 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         resume_checkpoint.effective_config["data_recipe"] if resume_checkpoint is not None else cfg.get("data_recipe")
     )
     if saved_recipes is not None:
-        if len(saved_recipes) != 1:
-            raise ValueError("Saved data_recipe must contain exactly one dataset")
         with open_dict(dataset_cfg):
-            dataset_cfg.saved_split = saved_recipes[0]["split_manifest"]
-            dataset_cfg.val_ratio = 0.0
-            dataset_cfg.max_train_episodes = None
-    dataset = hydra.utils.instantiate(dataset_cfg)
+            dataset_cfg.split_manifest = saved_recipes[0]["split_manifest"]
     agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
+    if agent_class.requires_split_manifest and dataset_cfg.get("split_manifest") is None:
+        raise ValueError("Hand pretraining requires an explicit shared split_manifest")
+    dataset = hydra.utils.instantiate(dataset_cfg)
     description = dataset.describe_training_data(
         spec, task_name=cfg.task_name,
-        requires_split_manifest=agent_class.requires_split_manifest,
         requires_hand_pretraining=agent_class.requires_hand_pretraining,
     )
     if description["normalization_dims"]["action"] != cfg.agent.action_dim:
@@ -87,13 +78,7 @@ def build_train_loader(cfg, dataset):
     if options.get("num_workers", 0) == 0:
         options["persistent_workers"] = False
         options.pop("prefetch_factor", None)
-    sampler = ResumableSampler(
-        dataset,
-        batch_size=options["batch_size"],
-        shuffle=options.pop("shuffle", False),
-        seed=cfg.training.seed,
-    )
-    samples = sampler.num_samples
+    samples = len(dataset)
     batch_size = options["batch_size"]
     accumulation = cfg.training.loop.gradient_accumulation_steps
     batches = (samples + batch_size - 1) // batch_size
@@ -109,13 +94,7 @@ def build_train_loader(cfg, dataset):
             "use drop_last=True or gradient_accumulation_steps=1"
         )
     generator = torch.Generator().manual_seed(cfg.training.seed)
-    loader = DataLoader(
-        dataset,
-        sampler=sampler,
-        generator=generator,
-        worker_init_fn=worker_init_fn,
-        **options,
-    )
+    loader = DataLoader(dataset, generator=generator, **options)
     if len(loader) == 0:
         raise ValueError(
             "Training DataLoader is empty; check dataset length, batch_size and drop_last"

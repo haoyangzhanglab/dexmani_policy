@@ -1,140 +1,180 @@
-from __future__ import annotations
-
 import copy
 import os
 import signal
 import time
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
+import hydra
 import torch
 from omegaconf import OmegaConf
+from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
-from dexmani_policy.common.checkpoint import TrainingCheckpoint, policy_state_dict
-from dexmani_policy.common.experiments import milestone_steps
-from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.runtime import close_resources, dict_apply, get_rng_state
-from dexmani_policy.training.common.logging import accumulate_metrics, to_log_scalars
-from dexmani_policy.training.resume import build_resume_contract
+from dexmani_policy.common.checkpoint import (
+    TrainingCheckpoint, load_policy_state, policy_state_dict,
+    prepare_restore_config, save_training_checkpoint,
+)
+from dexmani_policy.common.config import (
+    positive_int, resolve_normalization_spec, validate_observation_fields, validate_source_recipe,
+)
+from dexmani_policy.common.experiments import archive_resume_milestones, milestone_steps
+from dexmani_policy.common.runtime import (
+    atomic_path, close_resources, dict_apply, get_rng_state, set_rng_state,
+)
+from dexmani_policy.training.config import assemble_effective_config
+from dexmani_policy.training.data import build_train_loader, close_data_loader
+from dexmani_policy.training.logging import (
+    ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
+)
+from dexmani_policy.training.optimization import build_optimizer, get_scheduler
 
 
-@dataclass
-class TrainLoopConfig:
-    total_train_steps: int
-    log_interval_steps: int
-    gradient_accumulation_steps: int
-
-
-class Trainer:
-    """Optimizer-step training; entry points own the component lifetime."""
-
-    def __init__(
-        self,
-        components,
-        train_loop_cfg: TrainLoopConfig,
-        effective_config,
-        max_grad_norm: float = 1.0,
-        use_bfloat16: bool = False,
-    ):
-        self.device = components.device
-
-        self.model = components.model
-        self.ema_model = components.ema_model
-        self.ema_updater = components.ema_updater
-
-        self.optimizer = components.optimizer
-        self.scheduler = components.scheduler
-
-        self.train_loader = components.train_loader
-        self.workspace = components.workspace
-
-        self.total_train_steps = train_loop_cfg.total_train_steps
-        self.log_interval_steps = train_loop_cfg.log_interval_steps
-        self.max_grad_norm = max_grad_norm
-        self.last_grad_norm: torch.Tensor | None = None
-        self.last_clip_ratio: torch.Tensor | None = None
-
-        self.use_bfloat16 = use_bfloat16
-
-        self.gradient_accumulation_steps = train_loop_cfg.gradient_accumulation_steps
-        self.resume_contract = build_resume_contract(self.train_loader)
-        self.batches_per_epoch = len(self.train_loader)
-        self.amp_device_type = torch.device(self.device).type
-
-        self.effective_config = copy.deepcopy(
-            OmegaConf.to_container(effective_config, resolve=True)
-            if OmegaConf.is_config(effective_config)
-            else effective_config
+class PolicyTrainer:
+    def __init__(self, cfg, dataset, normalizer, data_description, *, checkpoint=None):
+        device = torch.device(cfg.training.device)
+        model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
+        model = hydra.utils.instantiate(model_cfg)
+        validate_observation_fields(model, cfg.dataset.sensor_modalities)
+        model.set_normalization_spec(
+            resolve_normalization_spec(cfg), data_description["normalization_dims"]
         )
-        self.next_micro_step = 0
-        self.current_epoch = 0
-        self.global_step = 0
+        if checkpoint is None:
+            model.initialize_training(data_description)
+            model.load_normalizer(normalizer)
+        if checkpoint is not None and dict(cfg.policy_metadata) != model.inference_metadata:
+            raise ValueError("Restored policy metadata differs from saved construction")
 
+        if model.requires_ema_for_loss and not cfg.training.use_ema:
+            raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
+
+        if cfg.training.use_ema:
+            active_batchnorm = [
+                name or "<root>" for name, module in model.named_modules()
+                if isinstance(module, _BatchNorm) and (
+                    any(p.requires_grad for p in module.parameters(recurse=False))
+                    or (module.training and module.track_running_stats)
+                )
+            ]
+            if active_batchnorm:
+                raise ValueError(
+                    f"EMA requires frozen BatchNorm or GroupNorm; active modules: {active_batchnorm}"
+                )
+
+        # Freeze before EMA chooses which parameters need FP32 accumulation.
+        obs_lr = cfg.optimizer.get("obs_lr")
+        if (cfg.optimizer.lr if obs_lr is None else obs_lr) == 0:
+            model.obs_encoder.requires_grad_(False)
+        ema_model = None
+        ema_updater = None
+        if cfg.training.use_ema:
+            # Copy before compile; resume restores raw and EMA independently below.
+            ema_model = copy.deepcopy(model)
+            ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
+
+        if checkpoint is not None:
+            load_policy_state(model, checkpoint.model_state)
+            if ema_model is not None:
+                if checkpoint.ema_model_state is None or checkpoint.ema_updater_step is None:
+                    raise ValueError("Resume checkpoint is missing EMA state")
+                load_policy_state(ema_model, checkpoint.ema_model_state)
+                averaged = dict(ema_model.named_parameters())
+                for name, parameter in model.named_parameters():
+                    if not parameter.requires_grad and (
+                        parameter.dtype != averaged[name].dtype
+                        or not torch.equal(parameter, averaged[name])
+                    ):
+                        raise ValueError(f"Raw/EMA frozen parameter mismatch: {name}")
+        model.to(device)
+        if ema_model is not None:
+            ema_model.to(device)
+
+        self.device = device
+        self.model, self.ema_model, self.ema_updater = model, ema_model, ema_updater
+        self.train_loader = build_train_loader(cfg, dataset)
+        self.optimizer = build_optimizer(model, **cfg.optimizer)
+        self.scheduler = get_scheduler(
+            self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
+            cfg.training.loop.total_train_steps, cfg.training.get("lr_min_ratio", 0.1),
+        )
+        self.cfg = assemble_effective_config(cfg, data_description, model, checkpoint=checkpoint)
+        self.total_train_steps = cfg.training.loop.total_train_steps
+        self.log_interval_steps = cfg.training.loop.log_interval_steps
+        self.gradient_accumulation_steps = cfg.training.loop.gradient_accumulation_steps
+        self.max_grad_norm = cfg.training.get("max_grad_norm", 1.0)
+        self.use_bfloat16 = cfg.training.get("use_bfloat16", False)
+        self.amp_device_type = device.type
+        self.batches_per_epoch = len(self.train_loader)
+        self.current_epoch = self.global_step = 0
+
+        if checkpoint is not None:
+            validate_source_recipe(checkpoint.effective_config, self.cfg)
+            groups, saved = self.optimizer.param_groups, checkpoint.optimizer_state["param_groups"]
+            if len(groups) != len(saved) or any(
+                a["param_names"] != b["param_names"] or a.get("clip_group") != b.get("clip_group")
+                for a, b in zip(groups, saved)
+            ):
+                raise ValueError("Optimizer parameter or clipping groups changed")
+            self.optimizer.load_state_dict(checkpoint.optimizer_state)
+            self.scheduler.load_state_dict(checkpoint.scheduler_state)
+            if ema_updater is not None:
+                ema_updater.optimization_step = checkpoint.ema_updater_step
+            self.current_epoch, self.global_step = checkpoint.epoch, checkpoint.global_step
+            if self.global_step > self.total_train_steps:
+                raise ValueError("Checkpoint global_step exceeds the training budget")
+
+        self.clip_groups: dict[str | None, list[torch.nn.Parameter]] = {}
+        for group in self.optimizer.param_groups:
+            self.clip_groups.setdefault(group.get("clip_group"), []).extend(group["params"])
+        self.last_grad_norm = self.last_clip_ratio = None
         self.stop_requested = False
         self.step_pbar = None
         self.last_checkpoint_step = None
-        # Integer targets round up; colliding steps retain the largest percentage.
         self.milestone_steps = milestone_steps(self.total_train_steps)
 
-    def find_nonfinite_gradients(self) -> list:
-        return [
-            name
-            for name, param in self.model.named_parameters()
-            if param.grad is not None and not torch.isfinite(param.grad).all()
-        ]
+        print_param_count(model)
+        print_training_recipe(
+            self.cfg, batches_per_epoch=self.batches_per_epoch, samples_per_epoch=len(dataset)
+        )
+        self.logger = ExperimentLogger(**cfg.workspace)
+        self.checkpoint_dir = self.logger.output_dir / "checkpoints"
+        try:
+            if checkpoint is not None:
+                archive_resume_milestones(cfg.resume_from, self.logger.output_dir, checkpoint)
+            self.logger.save_config(self.cfg)
+        except BaseException:
+            self.logger.close()
+            raise
+        if checkpoint is not None:
+            set_rng_state(checkpoint.rng_state, device=device)
+
+    def compile_models(self):
+        if self.cfg.training.get("use_compile", False):
+            mode = self.cfg.training.get("compile_mode", "reduce-overhead")
+            for model in (self.model, self.ema_model):
+                if model is not None:
+                    model.compile_backbone(mode=mode)
+
+    def close(self):
+        close_resources(lambda: close_data_loader(self.train_loader), self.logger.close)
 
     def optimizer_step(self):
-        grad_norm = None
-        grad_nan_params = []
-
         if self.max_grad_norm > 0:
-            if any("clip_group" in group for group in self.optimizer.param_groups):
-                clip_groups = {}
-                for group in self.optimizer.param_groups:
-                    clip_groups.setdefault(group["clip_group"], []).extend(group["params"])
-                norms = [
-                    torch.nn.utils.clip_grad_norm_(
-                        params, self.max_grad_norm, error_if_nonfinite=True
-                    )
-                    for params in clip_groups.values()
-                ]
-                # The largest independently clipped group determines the logged clip ratio.
-                grad_norm = torch.stack(norms).max()
-            else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    max_norm=self.max_grad_norm,
-                    error_if_nonfinite=True,
-                )
-        else:
-            flags = [
-                torch.isfinite(p.grad).all()
-                for p in self.model.parameters()
-                if p.grad is not None
+            norms = [
+                torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm, error_if_nonfinite=True)
+                for params in self.clip_groups.values()
             ]
-            if flags and not bool(torch.stack(flags).all()):
-                grad_nan_params = self.find_nonfinite_gradients()
-
-        if grad_nan_params:
-            self.optimizer.zero_grad(set_to_none=True)
-            raise RuntimeError(
-                f"Non-finite gradient at epoch={self.current_epoch}, step={self.global_step} "
-                f"in {len(grad_nan_params)} parameter(s): {grad_nan_params[:5]}"
-                f"{'...' if len(grad_nan_params) > 5 else ''}"
-            )
-
-        if grad_norm is not None:
-            self.last_grad_norm = grad_norm.detach()
+            self.last_grad_norm = torch.stack(norms).max().detach()
             self.last_clip_ratio = self.last_grad_norm / self.max_grad_norm
         else:
-            self.last_grad_norm = None
-            self.last_clip_ratio = None
+            finite = [
+                torch.isfinite(p.grad).all() for p in self.model.parameters() if p.grad is not None
+            ]
+            if finite and not torch.stack(finite).all():
+                raise RuntimeError(f"Non-finite gradient at step {self.global_step}")
 
         self.optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
-
         if self.ema_updater is not None:
             self.ema_updater.step(self.model)
 
@@ -146,7 +186,6 @@ class Trainer:
         loss_divisor: int = 1,
         log_metrics: bool = True,
     ):
-        """Backpropagate one micro-batch, updating weights at accumulation boundaries."""
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
         loss_kwargs = self.model.get_training_loss_kwargs(self.ema_model)
         with torch.amp.autocast(
@@ -177,27 +216,26 @@ class Trainer:
         checkpoint = TrainingCheckpoint(
             epoch=self.current_epoch,
             global_step=global_step,
-            next_micro_step=self.next_micro_step,
             model_state=policy_state_dict(self.model),
             ema_model_state=(
                 policy_state_dict(self.ema_model) if self.ema_model is not None else None
             ),
             optimizer_state=self.optimizer.state_dict(),
             scheduler_state=self.scheduler.state_dict(),
-            resume_contract=self.resume_contract,
-            effective_config=self.effective_config,
+            effective_config=cast(dict[str, Any], OmegaConf.to_container(self.cfg, resolve=True)),
             ema_updater_step=(
                 self.ema_updater.optimization_step if self.ema_updater is not None else None
             ),
             rng_state=get_rng_state(self.device),
         )
         tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"
-        checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
-        self.workspace.save_latest(checkpoint_path)
+        checkpoint_path = save_training_checkpoint(self.checkpoint_dir / f"{tag}.pt", checkpoint)
+        with atomic_path(self.checkpoint_dir / "latest.pt") as temporary:
+            temporary.unlink()
+            temporary.symlink_to(checkpoint_path.name)
         self.last_checkpoint_step = global_step
 
     def signal_handler(self, signum, frame):
-        """Minimal signal handler: set flag on first signal, force-exit on second."""
         if self.stop_requested:
             signame = signal.Signals(signum).name
             print(f"\nSecond {signame} — forcing exit.", flush=True)
@@ -215,16 +253,9 @@ class Trainer:
             self.save_checkpoint(f"milestone={pct:02d}pct")
 
     def log_step(self, group_metrics, samples, elapsed, data_wait):
-        epoch_samples = min(
-            self.train_loader.sampler.num_samples,
-            self.batches_per_epoch * self.train_loader.batch_size,
-        )
         metrics = {
             "train/lr": self.scheduler.get_last_lr()[0],
-            "train/processed_windows": (
-                self.current_epoch * epoch_samples
-                + min(self.next_micro_step * self.train_loader.batch_size, epoch_samples)
-            ),
+            "train/epoch": self.current_epoch,
         }
         if self.last_grad_norm is not None:
             metrics.update(
@@ -246,16 +277,12 @@ class Trainer:
                 refresh=False,
             )
             self.step_pbar.update(self.global_step - self.step_pbar.n)
-        self.workspace.log(metrics, step=self.global_step)
+        self.logger.log(metrics, step=self.global_step)
 
-    def train(self, *, resume_state=None, max_updates=None):
+    def train(self, *, max_updates=None):
         if max_updates is not None:
             positive_int(max_updates, "max_updates")
         torch.set_float32_matmul_precision("high")
-
-        self.global_step, start_epoch, self.next_micro_step = (
-            (0, 0, 0) if resume_state is None else resume_state
-        )
 
         stop_step = (
             self.total_train_steps
@@ -263,10 +290,9 @@ class Trainer:
             else min(self.total_train_steps, self.global_step + max_updates)
         )
         if self.global_step >= self.total_train_steps:
-            self.current_epoch = start_epoch
             return
-        if start_epoch > 0:
-            print(f"Resuming training from epoch {start_epoch}, step {self.global_step}")
+        if self.global_step:
+            print(f"Resuming epoch {self.current_epoch} from its beginning, step {self.global_step}")
 
         if self.ema_model is not None:
             self.ema_model.eval()
@@ -275,8 +301,7 @@ class Trainer:
         prev_sigint = signal.signal(signal.SIGINT, self.signal_handler)
         prev_sigterm = signal.signal(signal.SIGTERM, self.signal_handler)
 
-        epoch = start_epoch
-        self.current_epoch = epoch
+        epoch = self.current_epoch
         self.step_pbar = tqdm(
             initial=self.global_step,
             total=self.total_train_steps,
@@ -288,19 +313,19 @@ class Trainer:
 
         try:
             while self.global_step < stop_step:
-                self.train_loader.sampler.set_epoch(epoch, self.next_micro_step)
+                self.train_loader.generator.manual_seed(self.cfg.training.seed + epoch)
                 self.model.train()
                 self.optimizer.zero_grad(set_to_none=True)
 
                 num_batches = self.batches_per_epoch
-                group_metric_sums = {}
+                group_metric_sums: dict[str, torch.Tensor | float] = {}
                 group_metric_count = 0
                 group_samples = 0
                 group_data_wait = 0.0
                 # Start before iterator creation, including the epoch's first data wait.
                 group_start_time = time.perf_counter()
                 data_wait_start = group_start_time
-                for micro_step, batch in enumerate(self.train_loader, start=self.next_micro_step):
+                for micro_step, batch in enumerate(self.train_loader):
                     group_data_wait += time.perf_counter() - data_wait_start
                     self.current_epoch = epoch
                     group_samples += batch["action"].shape[0]
@@ -337,10 +362,8 @@ class Trainer:
                         group_metric_sums = {}
                         group_metric_count = 0
                         self.global_step += 1
-                        self.next_micro_step = micro_step + 1
-                        if self.next_micro_step == num_batches:
+                        if micro_step + 1 == num_batches:
                             self.current_epoch = epoch + 1
-                            self.next_micro_step = 0
                         if record_group:
                             self.log_step(
                                 group_metrics, group_samples, group_elapsed, group_data_wait
@@ -384,6 +407,4 @@ class Trainer:
                     self.step_pbar.n = self.global_step
                 callbacks.append(self.step_pbar.close)
 
-            if torch.cuda.is_available():
-                callbacks.append(torch.cuda.empty_cache)
             close_resources(*callbacks)

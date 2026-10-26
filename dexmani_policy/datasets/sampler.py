@@ -1,9 +1,7 @@
-from numbers import Integral
-
 import numba
 import numpy as np
 
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.replay_buffer import ReplayBuffer
 
 
 @numba.jit(nopython=True)
@@ -54,28 +52,14 @@ class SequenceSampler:
         pad_after: int = 0,
         episode_mask: np.ndarray | None = None,
     ):
-        if (
-            isinstance(sequence_length, bool)
-            or not isinstance(sequence_length, Integral)
-            or sequence_length < 1
-        ):
-            raise ValueError("sequence_length must be a positive integer (not bool)")
-        for name, value in (("pad_before", pad_before), ("pad_after", pad_after)):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, Integral)
-                or not 0 <= value < sequence_length
-            ):
-                raise ValueError(f"{name} must be an integer with 0 <= {name} < sequence_length")
-        sequence_length, pad_before, pad_after = map(int, (sequence_length, pad_before, pad_after))
+        if sequence_length < 1 or not 0 <= pad_before < sequence_length or not 0 <= pad_after < sequence_length:
+            raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
 
         episode_ends = np.asarray(replay_buffer.episode_ends, dtype=np.int64)
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
         else:
             episode_mask = np.asarray(episode_mask, dtype=bool)
-        if episode_mask.shape != episode_ends.shape:
-            raise ValueError("episode_mask must match episode_ends")
 
         indices = create_sequence_indices(
             episode_ends,

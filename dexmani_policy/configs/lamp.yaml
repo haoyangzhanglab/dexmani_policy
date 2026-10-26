@@ -30,7 +30,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.hand_prior.lamp_dataset.LAMPDataset
+  _target_: dexmani_policy.datasets.lamp_dataset.LAMPDataset
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}
@@ -110,7 +110,6 @@ training:
     gradient_accumulation_steps: 1
 
 workspace:
-  _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
   wandb_cfg:
     project: dexmani_policy
@@ -138,6 +137,22 @@ eval:
 
   video:
     enabled: true
+
+prior_training:
+  device: cuda:0
+  steps: 20000
+  batch_size: 256
+  lr: 2.0e-3
+  min_lr: 1.0e-5
+  warmup_steps: 500
+  beta: 0.001
+  beta_warmup: 2000
+  noise_std: 0.01
+  weight_decay: 1.0e-4
+  clip_grad: 1.0
+  seed: 42
+  eval_every: 1000
+  print_every: 200
 
 hydra:
   job:

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 def rgb_preprocessing_kwargs(dataset_config):
-    """The exact deterministic DemonstrationDataset validation recipe."""
+    """The exact deterministic RobotDataset validation recipe."""
     validate_rgb_preprocessing(
         dataset_config.get("rgb_preprocess_size"),
         dataset_config.get("rgb_random_crop_size"),

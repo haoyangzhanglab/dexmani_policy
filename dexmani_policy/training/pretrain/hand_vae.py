@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.runtime import atomic_path, set_seed
-from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
+from dexmani_policy.datasets.hand_chunk_dataset import HandChunkDataset
 
 
 def build_codec_dataset(cfg):
@@ -99,8 +99,6 @@ def train(cfg, *, overwrite=False):
         raise ValueError("weight_decay must be nonnegative and finite")
     if not 0 < recipe.lr < float("inf") or not 0 < recipe.clip_grad < float("inf"):
         raise ValueError("lr and clip_grad must be positive and finite")
-    if recipe.kl_reduction != "mean_over_batch_time_latent":
-        raise ValueError("HandVAE requires mean_over_batch_time_latent KL reduction")
     kl_end_step = recipe.kl_warmup + max(1, recipe.kl_ramp)
     if not 0 < recipe.beta < float("inf") or recipe.steps < kl_end_step:
         raise ValueError(f"HandVAE requires positive finite beta and steps >= {kl_end_step}")
@@ -130,7 +128,6 @@ def train(cfg, *, overwrite=False):
     print(f"HandVAE: train={len(dataset)}, validation={len(validation)}, dt={dt:g}s, H*dt={dataset.horizon * dt:g}s")
     batches_per_pass = len(dataset) // recipe.batch_size
     best_mae = float("inf")
-    best_payload = None
     output.parent.mkdir(parents=True, exist_ok=True)
     for step in range(1, recipe.steps + 1):
         batch = (step - 1) % batches_per_pass
@@ -163,7 +160,7 @@ def train(cfg, *, overwrite=False):
                     model_config=codec.model_config, hand_data=dataset.hand_data,
                     relative_statistics=statistics,
                     loss_reduction={
-                        "kl": recipe.kl_reduction,
+                        "kl": "mean_over_batch_time_latent",
                         "reconstruction": "weighted_huber_mean_over_batch_valid_frames_joints",
                         "joint_weights": "multiply_numerator_only_do_not_change_denominator",
                     },
@@ -175,7 +172,7 @@ def train(cfg, *, overwrite=False):
                     state_dict={k: v.detach().cpu().clone() for k, v in codec.state_dict().items()},
                     metadata=metadata, config=OmegaConf.to_container(cfg, resolve=True), metrics=metrics,
                 )
-                with atomic_path(output, overwrite=overwrite or best_payload is not None) as temporary:
+                with atomic_path(output, overwrite=overwrite or best_mae < float("inf")) as temporary:
                     torch.save(payload, temporary)
                 best_payload, best_mae = payload, metrics["physical_mae"]
     best_payload["metadata"]["completed_updates"] = recipe.steps

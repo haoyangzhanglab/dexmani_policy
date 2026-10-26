@@ -38,7 +38,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
+  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
   action_key: ${action_key}
   use_aux_ee: ${use_aux_ee}
   zarr_path: ${zarr_path}
@@ -116,7 +116,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 ema:
-  _target_: dexmani_policy.training.common.ema.EMA
+  _target_: dexmani_policy.training.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -138,7 +138,6 @@ training:
     gradient_accumulation_steps: 1
 
 workspace:
-  _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:

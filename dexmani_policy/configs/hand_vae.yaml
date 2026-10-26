@@ -14,7 +14,7 @@ data_semantics:
   window: query_future_full_horizon
 
 dataset:
-  _target_: dexmani_policy.datasets.hand_prior.hand_chunk_dataset.HandChunkDataset
+  _target_: dexmani_policy.datasets.hand_chunk_dataset.HandChunkDataset
   zarr_path: ${zarr_path}
   data_semantics: ${data_semantics}
   source_id: null
@@ -45,4 +45,3 @@ training:
   clip_grad: 1.0
   eval_every: 1000
   print_every: 200
-  kl_reduction: mean_over_batch_time_latent

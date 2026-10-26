@@ -51,7 +51,9 @@ bash scripts/training/train.sh dp3 \
 
 入口支持 Hydra 配置覆盖。续训使用 Checkpoint 保存的训练配方，并创建新的运行目录；首次 update 前归档恢复点及之前实际存在的有效 milestone。缺历史 milestone 不阻止恢复，已有候选损坏、冲突或配方不一致仍报错；不复制未来候选。附加 `source_evidence` 不参与恢复配方比较，数据划分、normalizer、模型和优化参数仍须一致。完整训练 `.pt` 仅接受可信项目产物。
 
-训练只使用 `training.device` 指定的一张 GPU；`training.num_gpus/gpu_ids` 已移除。Checkpoint 训练状态使用单个 `rng_state`，旧 `rng_states` 格式需用原源码续训，不自动转换；旧模型权重的评估与部署读取不受此训练状态变更影响。
+恢复采用 epoch 级语义：中途 checkpoint 从当前 epoch 开头重读，权重及 global_step 不回退；完成 epoch 后的 checkpoint 从下一 epoch 开始。不保存 batch 游标，不保证逐位重放；训练预算、scheduler、EMA 和 milestone 仍按实际 optimizer update 计数。
+
+训练使用 `training.device` 指定的单个设备，默认 GPU；小规模验证可设为 `cpu`，同时关闭 `training.use_compile` 和 `training.use_bfloat16`。Checkpoint 保存该设备的单进程 RNG，续训保持 CPU/CUDA 设备类型一致。
 
 R3D 默认 B=128 在 24 GiB GPU 上可能 OOM。单卡可使用现有梯度累积配置：
 
@@ -103,7 +105,7 @@ experiments/<policy_name>/<task_name>/<run>/
 
 每次实验保存配置、Checkpoint 和相关运行记录。评测结果与选点记录保存在对应实验目录中。
 
-历史实验应使用对应的保存配置、Checkpoint 和源码复现，不自动迁移旧类路径或配置字段。`workspace.wandb_cfg` 使用普通参数映射（不含 `_target_`），设为 null 仅保留本地 JSONL。具体算法实现、参数与运行约束以代码、配置及技术文档为准。
+实验复现使用保存的配置、Checkpoint 和对应源码。`workspace` 和 `workspace.wandb_cfg` 使用普通参数映射（不含 `_target_`），设置 `workspace.wandb_cfg=null` 仅保留本地 JSONL 日志。具体算法实现、参数与运行约束以代码、配置及技术文档为准。
 
 ## 技术文档
 

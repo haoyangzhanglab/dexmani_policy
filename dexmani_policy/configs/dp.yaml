@@ -27,7 +27,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
+  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
   seed: 42
@@ -44,7 +44,7 @@ dataset:
 
   # Color augmentation selects float interpolation for both training and validation.
   rgb_color_aug:
-    _target_: dexmani_policy.datasets.common.augmentation.ImageAugmentation
+    _target_: dexmani_policy.datasets.augmentation.ImageAugmentation
     brightness: 0.3
     contrast: 0.2
     saturation: 0.2
@@ -99,7 +99,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 ema:
-  _target_: dexmani_policy.training.common.ema.EMA
+  _target_: dexmani_policy.training.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -121,7 +121,6 @@ training:
     gradient_accumulation_steps: 1
 
 workspace:
-  _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:

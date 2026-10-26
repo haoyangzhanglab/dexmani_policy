@@ -13,12 +13,10 @@ from dexmani_policy.common.runtime import atomic_path
 class TrainingCheckpoint:
     epoch: int
     global_step: int
-    next_micro_step: int
     model_state: dict[str, Any]
     ema_model_state: dict[str, Any] | None
     optimizer_state: dict[str, Any]
     scheduler_state: dict[str, Any]
-    resume_contract: dict[str, Any]
     ema_updater_step: int | None
     rng_state: dict[str, Any]
     effective_config: dict[str, Any]
@@ -34,8 +32,6 @@ def save_training_checkpoint(path: Path, checkpoint: TrainingCheckpoint) -> Path
         "state": {
             "epoch": checkpoint.epoch,
             "global_step": checkpoint.global_step,
-            "next_micro_step": checkpoint.next_micro_step,
-            "resume_contract": checkpoint.resume_contract,
             "ema_updater_step": checkpoint.ema_updater_step,
             "rng_state": checkpoint.rng_state,
         },
@@ -61,20 +57,13 @@ def read_checkpoint(path: Path, *, mmap=False) -> dict:
 def load_training_checkpoint(path: Path) -> TrainingCheckpoint:
     payload = read_checkpoint(path)
     state = payload["state"]
-    if "rng_state" not in state:
-        raise ValueError(
-            "Unsupported training checkpoint format: expected single-process rng_state. "
-            "Use the original source version to resume older checkpoints."
-        )
     weights = payload["weights"]
-    for key in ("epoch", "global_step", "next_micro_step"):
+    for key in ("epoch", "global_step"):
         if type(state[key]) is not int or state[key] < 0:
             raise ValueError(f"Checkpoint {key} must be an int >= 0")
     return TrainingCheckpoint(
         epoch=state["epoch"],
         global_step=state["global_step"],
-        next_micro_step=state["next_micro_step"],
-        resume_contract=state["resume_contract"],
         ema_updater_step=state["ema_updater_step"],
         rng_state=state["rng_state"],
         model_state=weights["model"],
@@ -188,7 +177,10 @@ def prepare_restore_config(agent_cfg):
     import hydra
     from omegaconf import open_dict
 
+    from dexmani_policy.agents.policies.base import BasePolicy
+
     agent_cfg = copy.deepcopy(agent_cfg)
+    agent_class: type[BasePolicy] = hydra.utils.get_class(agent_cfg._target_)
     with open_dict(agent_cfg):
-        hydra.utils.get_class(agent_cfg._target_).prepare_restore_config(agent_cfg)
+        agent_class.prepare_restore_config(agent_cfg)
     return agent_cfg

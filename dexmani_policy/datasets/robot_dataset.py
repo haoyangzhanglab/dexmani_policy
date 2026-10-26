@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import copy
-import json
-import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -15,25 +14,18 @@ from dexmani_policy.common.rgb_preprocessing import (
     validate_rgb_preprocessing,
 )
 from dexmani_policy.common.runtime import dict_apply
-from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, positive_int, validate_depth_recipe
-from dexmani_policy.datasets.common.augmentation import (
+from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, positive_int
+from dexmani_policy.datasets.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
 )
-from dexmani_policy.datasets.common.episode_split import (
-    build_split_manifest,
-    describe_split,
-    downsample_mask,
-    get_val_mask,
-    validate_split_manifest,
-    validate_split_options,
-)
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.common.sequence_sampler import SequenceSampler
+from dexmani_policy.datasets.metadata import describe_hand_data, describe_real_runtime
+from dexmani_policy.datasets.split import split_episodes
+from dexmani_policy.datasets.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.sampler import SequenceSampler
 
 
-class DemonstrationDataset(torch.utils.data.Dataset):
-    """Observation-action windows from episodic demonstrations."""
+class RobotDataset(torch.utils.data.Dataset):
 
     action_normalization_population = "valid_train_windows_unique_source_rows"
     future_action_window = False
@@ -61,8 +53,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: Callable | None = None,
         rgb_keep_uint8: bool = False,
-        split_manifest: str | None = None,
-        saved_split: dict | None = None,
+        split_manifest: str | dict | None = None,
         pc_dim: int | None = None,
     ) -> None:
         super().__init__()
@@ -70,7 +61,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         if "rgb" in sensor_modalities:
             validate_rgb_preprocessing(rgb_preprocess_size, rgb_random_crop_size, rgb_color_aug)
 
-        self.zarr_path = str(Path(zarr_path).expanduser().resolve())
         self.action_key = action_key
         self.use_aux_ee = use_aux_ee
         if pc_dim is not None and (type(pc_dim) is not int or pc_dim not in (3, 6)):
@@ -92,7 +82,8 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         if use_aux_ee:
             load_keys.append("action_ee")
 
-        self.replay_buffer = ReplayBuffer(self.zarr_path, keys=load_keys)
+        self.replay_buffer = ReplayBuffer(zarr_path, keys=load_keys)
+        self.zarr_path = self.replay_buffer.path
 
         if "rgb" in sensor_modalities:
             rgb = self.replay_buffer["rgb"]
@@ -108,40 +99,18 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         self.augmentation_cfg = augmentation_cfg
         self.build_augmentors()
 
-        self.data_recipe = {}
+        self.data_recipe: dict[str, Any] = {}
         if (
             "point_cloud" in sensor_modalities
             and self.pc_dim is not None
             and (self.pc_dim == 3 or self.pc_dim < self.replay_buffer["point_cloud"].shape[-1])
         ):
             self.data_recipe.update(point_cloud_channels=self.pc_dim)
-        if (
-            saved_split is not None
-            or split_manifest is not None
-            or "trial_ids" in self.replay_buffer.attrs
-        ):
-            if saved_split is not None or split_manifest is not None:
-                validate_split_options(val_ratio, max_train_episodes, explicit=True)
-                manifest = (
-                    saved_split if saved_split is not None
-                    else json.loads(Path(split_manifest).read_text())
-                )
-                train_mask, val_mask, manifest = validate_split_manifest(
-                    manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes,
-                    episode_ends=self.replay_buffer.episode_ends, zarr_path=self.zarr_path,
-                )
-            else:
-                train_mask, val_mask, manifest = build_split_manifest(
-                    self.zarr_path, self.replay_buffer.episode_ends, self.replay_buffer.attrs,
-                    val_ratio=val_ratio, seed=seed, max_train_episodes=max_train_episodes,
-                )
-            self.data_recipe["split_manifest"] = manifest
-        else:
-            validate_split_options(val_ratio, max_train_episodes)
-            val_mask = get_val_mask(
-                seed=seed, val_ratio=val_ratio, n_episodes=self.replay_buffer.n_episodes
-            )
-            train_mask = downsample_mask(seed=seed, mask=~val_mask, max_n=max_train_episodes)
+        train_mask, val_mask, manifest = split_episodes(
+            self.replay_buffer, manifest=split_manifest, val_ratio=val_ratio,
+            seed=seed, max_train_episodes=max_train_episodes,
+        )
+        self.data_recipe["split_manifest"] = manifest
         self.val_mask = val_mask
         self.train_mask = train_mask
 
@@ -159,23 +128,12 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             self.role_offsets["action_ee"] = self.action_offset
 
         self.sampler = self.build_sampler(train_mask)
-        self.validation_dataset = None
+        self.validation_dataset: RobotDataset | None = None
 
     def describe_training_data(
-        self, spec, *, task_name, requires_split_manifest=False, requires_hand_pretraining=False,
+        self, spec, *, task_name, requires_hand_pretraining=False,
     ):
         buffer = self.replay_buffer
-        manifest = self.data_recipe.get("split_manifest")
-        if manifest is None:
-            if requires_split_manifest:
-                raise ValueError("DQ/LAMP training requires an explicit shared split_manifest")
-            manifest = describe_split(
-                self.zarr_path, buffer.episode_ends, buffer.attrs, self.train_mask, self.val_mask
-            )
-            self.data_recipe["split_manifest"] = validate_split_manifest(
-                manifest, buffer.attrs, buffer.n_episodes,
-                episode_ends=buffer.episode_ends, zarr_path=self.zarr_path,
-            )[2]
         widths = {
             key: int(buffer[key].shape[-1])
             for key, mode in spec.items() if key != "action" and mode != "identity"
@@ -189,7 +147,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         if "point_cloud" in widths and self.pc_dim is not None:
             widths["point_cloud"] = self.pc_dim
         widths["action"] = int(buffer[self.action_key].shape[-1]) + (9 if self.use_aux_ee else 0)
-        description = {
+        description: dict[str, Any] = {
             "normalization_dims": widths,
             "data_recipe": [dict(
                 self.data_recipe,
@@ -213,7 +171,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         description['data_recipe'][0]['source_evidence'] = {
             'task_name': buffer.attrs.get('task_name'), 'episode_seeds': seeds,
         }
-        runtime = self.describe_real_runtime(task_name)
+        runtime = describe_real_runtime(self, task_name)
         if runtime is not None:
             description["real_runtime"] = runtime
         if requires_hand_pretraining:
@@ -230,94 +188,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         return summary + (f", rejected={rejected:,}" if rejected else "")
 
     def describe_hand_data(self):
-        """Read dataset metadata and sampler counts without scanning action/state arrays."""
-        buffer = self.replay_buffer
-        attrs = buffer.attrs
-        dt = attrs.get("dt")
-        if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
-            raise ValueError("Hand representation data requires finite positive dt")
-        order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
-        if (
-            attrs.get("hand_joint_order", order) != order
-            or attrs.get("hand_units", "radians") != "radians"
-        ):
-            raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
-
-        validation = self.get_validation_dataset()
-        return {
-            "episode_ids": attrs.get("episode_ids"),
-            "episode_ends": buffer.episode_ends.tolist(),
-            "train_episodes": np.flatnonzero(self.train_mask).tolist(),
-            "val_episodes": np.flatnonzero(self.val_mask).tolist(),
-            "action_key": self.action_key,
-            "dt": float(dt),
-            "horizon": self.horizon,
-            "obs_horizon": self.obs_horizon,
-            "pad_before": self.pad_before,
-            "pad_after": self.pad_after,
-            "history_steps": getattr(self, "history_steps", None),
-            "train_windows": len(self),
-            "val_windows": 0 if validation is None else len(validation),
-            "train_action_rows": len(self.sampler.action_source_rows),
-            "val_action_rows": 0 if validation is None else len(validation.sampler.action_source_rows),
-        }
-
-    def describe_real_runtime(self, task_name) -> dict | None:
-        """Capture numerical deployment inputs from the buffer actually used to train."""
-        buffer = self.replay_buffer
-        attrs = buffer.attrs
-        if attrs.get("format") != "dexmani.real.canonical":
-            if attrs.get("domain") == "real" or str(attrs.get("format", "")).startswith(
-                "dexmani.real."
-            ):
-                raise ValueError("Real training requires format='dexmani.real.canonical'")
-            return None
-        if attrs.get("task_name") != task_name:
-            raise ValueError("Real canonical task_name differs from the training task")
-        dt = attrs.get("dt")
-        if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
-            raise ValueError("Real canonical dt must be finite and positive")
-        runtime = {"dt": float(dt)}
-        if "point_cloud" in self.sensor_modalities:
-            cloud = attrs.get("pointcloud_config")
-            if not isinstance(cloud, Mapping):
-                raise ValueError("Real point_cloud requires root pointcloud_config")
-            count = positive_int(cloud.get("num_points"), "pointcloud_config.num_points")
-            shape = buffer["point_cloud"].shape
-            if shape[1] != count:
-                raise ValueError("Stored point count disagrees with pointcloud_config")
-            # Preserve the stored point count; encoder FPS selects its own subset.
-            runtime["pointcloud"] = dict(cloud)
-        if "hand_pointcloud" in self.sensor_modalities:
-            cloud = attrs.get("hand_pointcloud_config")
-            if not isinstance(cloud, Mapping):
-                raise ValueError("Real hand_pointcloud requires root hand_pointcloud_config")
-            count = positive_int(cloud.get("num_points"), "hand_pointcloud_config.num_points")
-            data = buffer["hand_pointcloud"]
-            if data.shape[1:] != (count, 6) or str(data.dtype) != "float32":
-                raise ValueError("Stored hand_pointcloud must match the saved XYZRGB template")
-            runtime["hand_pointcloud"] = dict(cloud)
-        if "depth" in self.sensor_modalities:
-            data = buffer["depth"]
-            runtime["depth"] = validate_depth_recipe(
-                {
-                    "shape": list(data.shape[1:]),
-                    "dtype": str(data.dtype),
-                    "unit": "raw_counts",
-                    "depth_scale_m": attrs["depth_scale_m_per_unit"],
-                }
-            )
-        if "fingertip_xyz" in self.sensor_modalities:
-            links = attrs.get("fingertip_link_names")
-            if (
-                not isinstance(links, (list, tuple))
-                or len(links) != 5
-                or any(not isinstance(link, str) or not link.strip() for link in links)
-                or len(set(links)) != 5
-            ):
-                raise ValueError("Real fingertip_xyz requires five distinct non-empty link names")
-            runtime["fingertip_link_names"] = list(links)
-        return runtime
+        return describe_hand_data(self)
 
     def finite_rows(self, key, columns=None):
         valid = np.repeat(self.train_mask | self.val_mask,
@@ -386,18 +257,18 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             "action": action,
         }
 
-    def preprocess_rgb(self, rgb):
+    def preprocess_rgb(self, rgb, resize_hw: tuple[int, int]):
         if self.is_validation:
             return preprocess_validation_rgb(
                 rgb,
-                resize_hw=self.rgb_preprocess_size,
+                resize_hw=resize_hw,
                 center_crop_hw=self.rgb_random_crop_size,
                 keep_uint8=self.rgb_keep_uint8,
                 float_spatial_before_uint8=self.rgb_color_aug is not None,
             )
         return preprocess_training_rgb(
             rgb,
-            resize_hw=self.rgb_preprocess_size,
+            resize_hw=resize_hw,
             random_crop_hw=self.rgb_random_crop_size,
             keep_uint8=self.rgb_keep_uint8,
             color_augmentation=self.rgb_color_aug,
@@ -416,19 +287,15 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             )
 
         if self.rgb_preprocess_size is not None and "rgb" in data["obs"]:
-            data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"])
+            data["obs"]["rgb"] = self.preprocess_rgb(data["obs"]["rgb"], self.rgb_preprocess_size)
 
         return dict_apply(data, torch.as_tensor)
 
     def build_augmentors(self):
-        """Build NumPy transforms; RGB augmentation runs during preprocessing."""
-        self.augmentors = {}
+        self.augmentors: dict[str, list[Any]] = {}
         augmentation = self.augmentation_cfg or {}
         pc_cfg = augmentation.get("pc") or {}
         self.random_keep_points = pc_cfg.get("random_keep_points")
-        pc_dim = None
-        if "point_cloud" in self.sensor_modalities:
-            pc_dim = self.pc_dim or self.replay_buffer["point_cloud"].shape[-1]
         if self.random_keep_points is not None:
             if "point_cloud" not in self.sensor_modalities:
                 raise ValueError("random_keep_points requires the point_cloud modality")
@@ -443,7 +310,10 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 continue
             config = (augmentation.get(section) or {}).get(key)
             if config:
-                if section == "pc" and key in {"color", "color_noise"} and pc_dim < 6:
+                if (
+                    section == "pc" and key in {"color", "color_noise"}
+                    and (self.pc_dim or self.replay_buffer["point_cloud"].shape[-1]) < 6
+                ):
                     if config.get("prob", 1) > 0:
                         raise ValueError(
                             f"XYZ-only or incomplete RGB point clouds cannot use color augmentation ({key}); "
@@ -476,12 +346,12 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             start = int(block * step)
             selected = rows[np.searchsorted(rows, start) : np.searchsorted(rows, start + step)]
             end = int(selected[-1]) + 1
-            values = self.replay_buffer.read(field, slice(start, end), cache=False)[selected - start]
+            values = self.replay_buffer.read(field, slice(start, end))[selected - start]
             if field == "point_cloud" and self.pc_dim is not None:
                 values = values[..., : self.pc_dim]
             if action and self.use_aux_ee:
                 aux = self.replay_buffer.read(
-                    "action_ee", slice(start, end), columns=slice(0, 9), cache=False
+                    "action_ee", slice(start, end), columns=slice(0, 9)
                 )[selected - start]
                 values = np.concatenate((values, aux), axis=-1)
             yield values

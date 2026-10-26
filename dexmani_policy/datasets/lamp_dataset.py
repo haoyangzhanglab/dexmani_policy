@@ -1,10 +1,10 @@
 import numpy as np
 import torch
 
-from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
+from dexmani_policy.datasets.robot_dataset import RobotDataset
 
 
-class LAMPDataset(DemonstrationDataset):
+class LAMPDataset(RobotDataset):
     """Demonstration windows with strictly past hand commands."""
 
     def __init__(self, zarr_path, *, sensor_modalities, history_steps=8, **kwargs):
@@ -33,7 +33,7 @@ class LAMPDataset(DemonstrationDataset):
         for episode in np.flatnonzero(selected):
             start, end = self.episode_starts[episode], self.episode_ends[episode]
             self.hand_state_bootstrap[episode] = buffer.read(
-                "joint_state", slice(int(start), int(start) + 1), columns=slice(7, 19), cache=False,
+                "joint_state", slice(int(start), int(start) + 1), columns=slice(7, 19),
             )[0]
             finite_hand = np.isfinite(self.hand_actions[start:end]).all(axis=-1)
             local_rows = np.arange(end - start)
@@ -46,7 +46,7 @@ class LAMPDataset(DemonstrationDataset):
             self.history_valid[start:end] = valid
 
     def filter_sampler(self, sampler):
-        # DemonstrationDataset construction dispatches here before valid source rows are known.
+        # RobotDataset construction dispatches here before valid source rows are known.
         if self.history_valid is None:
             self.prepare_lamp_source()
         sampler.filter_valid(
@@ -55,17 +55,8 @@ class LAMPDataset(DemonstrationDataset):
 
     def history_for_rows(self, rows):
         rows = np.asarray(rows)
-        if (
-            rows.ndim != 1
-            or rows.dtype.kind not in "iu"
-            or (rows < 0).any()
-            or (rows >= len(self.hand_actions)).any()
-        ):
-            raise ValueError("History rows must be one-dimensional source-frame indices")
         rows = rows.astype(np.int64, copy=False)
         episode = np.searchsorted(self.episode_ends, rows, side="right")
-        if not (self.train_mask | self.val_mask)[episode].all():
-            raise ValueError("History cannot consume an excluded episode")
         starts = self.episode_starts[episode]
         indices = rows[:, None] + np.arange(-self.history_steps, 0)
         past = indices >= starts[:, None]
