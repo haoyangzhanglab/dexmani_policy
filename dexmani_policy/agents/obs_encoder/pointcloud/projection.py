@@ -6,11 +6,7 @@ import torch
 
 
 class PointProjection(NamedTuple):
-    """Final-image grid [BT,V,N,2] and FP32 confidence [BT,V,N].
-
-    align_corners=False; support is [-1,1), with zero confidence for invalid points.
-    Point order must match the cloud passed to Sparse3DEncoder.
-    """
+    """align_corners=False grids [BT,V,N,2] and FP32 confidence [BT,V,N]."""
 
     grid_xy: torch.Tensor
     confidence: torch.Tensor
@@ -20,24 +16,21 @@ class PointProjection(NamedTuple):
 def projection_from_pixels(
     pixels: torch.Tensor, confidence: torch.Tensor, image_hw: tuple[int, int]
 ) -> PointProjection:
-    """Convert final-image pixel centers into the FP32 projection contract."""
+    """Normalize pixel centers to FP32 grids with support in [-1,1)."""
     height, width = image_hw
     if min(height, width) <= 0:
         raise ValueError("image dimensions must be positive (height, width)")
-    if pixels.ndim != 4 or pixels.shape[-1] != 2 or confidence.shape != pixels.shape[:-1]:
-        raise ValueError("pixels/confidence require [BT,V,N,2] / [BT,V,N]")
+
     with torch.autocast(device_type=pixels.device.type, enabled=False):
         pixels, confidence = pixels.float(), confidence.float()
         size = pixels.new_tensor((width, height))
         valid = (
-            torch.isfinite(pixels).all(-1)
+            ((pixels >= -0.5) & (pixels < size - 0.5)).all(-1)
             & torch.isfinite(confidence)
-            & (pixels >= -0.5).all(-1)
-            & (pixels < size - 0.5).all(-1)
         )
-        grid = 2 * ((pixels + 0.5) / size) - 1
+        grid = (pixels + 0.5).div_(size).mul_(2).sub_(1)
         # A valid pixel just inside the right edge can round to exactly +1.
-        grid = grid.clamp(-1, 1 - torch.finfo(torch.float32).eps / 2)
+        grid.clamp_(-1, 1 - torch.finfo(torch.float32).eps / 2)
         return PointProjection(
             torch.where(valid[..., None], grid, 0.0),
             torch.where(valid, confidence.clamp(0, 1), 0.0),
@@ -54,50 +47,22 @@ def project_points(
     *,
     confidence: torch.Tensor | None = None,
 ) -> PointProjection:
-    """Project Base XYZ [BT,N,3] into final RGB coordinates in detached FP32.
-
-    intrinsics [BT,V,3,3] uses undistorted pinhole pixels; camera axes are right/down/forward.
-    T_camera_from_base [BT,V,4,4]: p_cam = R p_base + t, with XYZ and t in meters.
-    image_transform [BT,V,3,3] records raw->final resize/in-bounds crop (no padding).
-    image_hw=(height,width); integer pixels are centers, with align_corners=False.
-    confidence [BT,V,N] weights finite, positive-depth, in-image points; no occlusion test.
-    """
-    if points_base.ndim != 3 or points_base.shape[-1] != 3:
-        raise ValueError("points_base must be [BT,N,3]")
-    if intrinsics.ndim != 4 or intrinsics.shape[-2:] != (3, 3):
-        raise ValueError("intrinsics must be [BT,V,3,3]")
-    batch, views = intrinsics.shape[:2]
-    if points_base.shape[0] != batch or views == 0:
-        raise ValueError("camera and point batches must match, with at least one view")
-    if T_camera_from_base.shape != (batch, views, 4, 4):
-        raise ValueError("T_camera_from_base must be [BT,V,4,4]")
-    if image_transform.shape != (batch, views, 3, 3):
-        raise ValueError("image_transform must be [BT,V,3,3]")
-    if confidence is not None and confidence.shape != (
-        batch,
-        views,
-        points_base.shape[1],
-    ):
-        raise ValueError("confidence must be [BT,V,N]")
-    values = (points_base, intrinsics, T_camera_from_base, image_transform, confidence)
-    if any(
-        t is not None and (not t.is_floating_point() or t.device != points_base.device)
-        for t in values
-    ):
-        raise ValueError("geometry must be floating point on one device")
-
+    """Project base XYZ [BT,N,3] through cameras [BT,V,...] into detached FP32 grids."""
     with torch.autocast(device_type=points_base.device.type, enabled=False):
         points = points_base.float()
         transform = T_camera_from_base.float()
-        # Explicit FP32 products avoid the trainer's global high/TF32 matmul mode.
+        # Explicit FP32 products avoid TF32 rounding at image boundaries.
         camera = (points[:, None, :, None, :] * transform[..., None, :3, :3]).sum(-1)
-        camera = camera + transform[..., None, :3, 3]
+        camera.add_(transform[..., None, :3, 3])
+
         homogeneous = (camera[..., None, :] * intrinsics.float()[..., None, :, :]).sum(-1)
         depth = camera[..., 2]
         denominator = homogeneous[..., 2:3]
         pixels = homogeneous[..., :2] / torch.where(denominator != 0, denominator, 1)
+
         pixels = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
         pixels = (pixels[..., None, :] * image_transform.float()[..., None, :2, :]).sum(-1)
+
         finite_camera = (
             torch.isfinite(transform).all(dim=(-1, -2))
             & torch.isfinite(intrinsics).all(dim=(-1, -2))
@@ -109,6 +74,5 @@ def project_points(
             & (depth > 0)
             & (denominator[..., 0] != 0)
         )
-        weight = torch.ones_like(depth) if confidence is None else confidence.float()
-        weight = torch.where(valid, weight, 0.0)
+        weight = valid.float() if confidence is None else torch.where(valid, confidence.float(), 0.0)
         return projection_from_pixels(pixels, weight, image_hw)

@@ -39,14 +39,10 @@ def build_rgb_encoder(
         from .resnet import ResNetEncoder
 
         encoder = ResNetEncoder(**encoder_config)
-    elif name == "dino":
-        from .dino import DINOEncoder
-
-        encoder = DINOEncoder(**encoder_config)
     else:
-        from .siglip import SigLIPEncoder
+        from .vit import ViTEncoder
 
-        encoder = SigLIPEncoder(**encoder_config)
+        encoder = ViTEncoder(name, **encoder_config)
 
     defaults = {
         key: parameter.default

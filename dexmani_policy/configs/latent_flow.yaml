@@ -147,7 +147,6 @@ workspace:
   _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
   wandb_cfg:
-    _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${run_id:}_seed${training.seed}

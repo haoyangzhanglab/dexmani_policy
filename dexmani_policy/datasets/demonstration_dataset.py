@@ -123,22 +123,20 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             and (self.pc_dim == 3 or self.pc_dim < self.replay_buffer["point_cloud"].shape[-1])
         ):
             self.data_recipe.update(point_cloud_channels=self.pc_dim)
-        if saved_split is not None or split_manifest is not None:
-            manifest = (
-                saved_split
-                if saved_split is not None
-                else json.loads(Path(split_manifest).read_text())
-            )
-            train_mask, val_mask, manifest = validate_split_manifest(
-                manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes,
-                episode_ends=self.replay_buffer.episode_ends, zarr_path=self.zarr_path,
-            )
-            self.data_recipe["split_manifest"] = manifest
-        elif "trial_ids" in self.replay_buffer.attrs:
-            manifest = build_split_manifest(
-                self.zarr_path, self.replay_buffer.episode_ends, self.replay_buffer.attrs,
-                val_ratio=val_ratio, seed=seed, max_train_episodes=max_train_episodes,
-            )
+        if (
+            saved_split is not None
+            or split_manifest is not None
+            or "trial_ids" in self.replay_buffer.attrs
+        ):
+            if saved_split is not None:
+                manifest = saved_split
+            elif split_manifest is not None:
+                manifest = json.loads(Path(split_manifest).read_text())
+            else:
+                manifest = build_split_manifest(
+                    self.zarr_path, self.replay_buffer.episode_ends, self.replay_buffer.attrs,
+                    val_ratio=val_ratio, seed=seed, max_train_episodes=max_train_episodes,
+                )
             train_mask, val_mask, manifest = validate_split_manifest(
                 manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes,
                 episode_ends=self.replay_buffer.episode_ends, zarr_path=self.zarr_path,

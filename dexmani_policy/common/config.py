@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-TASK_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_-]+(?:\+[a-zA-Z0-9_-]+)*")
+DATASET_PATH_PATTERN = re.compile(r"dataset\.(?:datasets\.\d+\.)?zarr_path")
 FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
 NON_NUMERIC_OBSERVATION_FIELDS = frozenset({"task_text", "task_name"})
 ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
@@ -44,10 +44,9 @@ RESUME_OPERATIONAL_FIELDS = {
 }
 
 
-def set_project_root() -> str:
+def set_project_root() -> None:
     """Resolve entry-point relative paths from the repository root."""
     os.chdir(PROJECT_ROOT)
-    return str(PROJECT_ROOT)
 
 
 def resolve_resume_source(source):
@@ -62,52 +61,38 @@ def resolve_resume_source(source):
     return str(path)
 
 
-def recipe_content(config):
-    """Compare training semantics, excluding run locations and acquisition notes."""
-    plain = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
+def validate_source_recipe(saved, current):
+    """Require the same experiment recipe, allowing supported run/location changes."""
+    if OmegaConf.is_config(saved):
+        saved = OmegaConf.to_container(saved, resolve=True)
+    if OmegaConf.is_config(current):
+        current = OmegaConf.to_container(current, resolve=True)
+    ignored = RESUME_OPERATIONAL_FIELDS | ARTIFACT_LOCATION_FIELDS | {"hand_data.provenance.zarr_path"}
+    differences = []
 
-    def visit(value, path=""):
-        if isinstance(value, dict):
-            result = {}
-            for key, child in value.items():
+    def compare(left, right, path=""):
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(left.keys() | right.keys()):
                 child_path = f"{path}.{key}" if path else key
                 if (
-                    child_path in RESUME_OPERATIONAL_FIELDS
-                    or child_path in ARTIFACT_LOCATION_FIELDS
-                    or child_path == "hand_data.provenance.zarr_path"
-                    or re.fullmatch(r"dataset\.(?:datasets\.\d+\.)?zarr_path", child_path)
+                    child_path in ignored
+                    or DATASET_PATH_PATTERN.fullmatch(child_path)
                     or re.fullmatch(r"data_recipe\.\d+\.source_evidence", child_path)
                 ):
                     continue
-                result[key] = visit(child, child_path)
-            return result
-        if isinstance(value, (list, tuple)):
-            return [visit(child, f"{path}.{i}") for i, child in enumerate(value)]
-        return value
-
-    return visit(plain)
-
-
-def validate_source_recipe(saved, current):
-    """Require the same experiment recipe, allowing supported run/location changes."""
-    differences = []
-
-    def compare(left, right, path):
-        if isinstance(left, dict) and isinstance(right, dict):
-            for key in sorted(left.keys() | right.keys()):
                 if key not in left or key not in right:
-                    differences.append(f"{path}.{key}: missing field")
+                    differences.append(f"config.{child_path}: missing field")
                 else:
-                    compare(left[key], right[key], f"{path}.{key}")
-        elif isinstance(left, list) and isinstance(right, list):
+                    compare(left[key], right[key], child_path)
+        elif isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
             if len(left) != len(right):
-                differences.append(f"{path}: different lengths")
+                differences.append(f"config.{path}: different lengths")
             for i, (a, b) in enumerate(zip(left, right)):
-                compare(a, b, f"{path}[{i}]")
+                compare(a, b, f"{path}.{i}")
         elif type(left) is not type(right) or left != right:
-            differences.append(f"{path}: checkpoint={left!r}, config={right!r}")
+            differences.append(f"config.{path}: checkpoint={left!r}, config={right!r}")
 
-    compare(recipe_content(saved), recipe_content(current), "config")
+    compare(saved, current)
     if differences:
         raise ValueError("Checkpoint source recipe mismatch:\n" + "\n".join(differences))
 
@@ -137,21 +122,16 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
                 raise ValueError(f"Unsupported resume override: {override.input_line}")
             if key == "task_name":
                 requested, identity = override.value(), result.get("task_name")
-                if (
-                    not isinstance(requested, str)
-                    or not TASK_NAME_PATTERN.fullmatch(requested)
-                    or requested != identity
-                ):
+                if requested != identity:
                     raise ValueError(
                         f"Resume task identity mismatch: requested={requested!r}, saved={identity!r}"
                     )
                 continue
-            data_path = re.fullmatch(r"dataset\.(?:datasets\.\d+\.)?zarr_path", key) is not None
             if (
                 key not in RESUME_OPERATIONAL_FIELDS
                 and key not in ARTIFACT_LOCATION_FIELDS
                 and not key.startswith("workspace.wandb_cfg.")
-                and not data_path
+                and not DATASET_PATH_PATTERN.fullmatch(key)
             ):
                 raise ValueError(
                     f"Resume recipe is owned by saved config; forbidden override: {key}"
@@ -268,14 +248,17 @@ def load_experiment_config(experiment_dir):
     )
 
 
-def validate_normalization_spec(spec, *, observation_fields=None):
-    """Validate declared modes and optional exact numeric-field coverage."""
+def resolve_normalization_spec(cfg, *, observation_fields=None):
+    """Resolve normalization modes and check the consumed numeric fields."""
+    spec = cfg["normalization"]
+    if isinstance(spec, DictConfig):
+        spec = OmegaConf.to_container(spec, resolve=True)
     if not isinstance(spec, dict):
         raise ValueError("Normalization must map field names to modes")
     for key, mode in spec.items():
         if not isinstance(key, str) or not key or key in NON_NUMERIC_OBSERVATION_FIELDS:
             raise ValueError(f"Invalid numeric normalization field: {key!r}")
-        if not isinstance(mode, str) or mode not in ALLOWED_NORMALIZATION_MODES:
+        if mode not in ALLOWED_NORMALIZATION_MODES:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}")
         if mode == "auto" and key != "action":
             raise ValueError("Normalization auto is only supported for action")
@@ -285,19 +268,12 @@ def validate_normalization_spec(spec, *, observation_fields=None):
         raise ValueError("RGB preprocessing requires normalization.rgb=identity")
     if observation_fields is not None:
         expected = set(observation_fields) | {"action"}
-        if set(spec) != expected:
+        if spec.keys() != expected:
             raise ValueError(
                 f"Normalization field mismatch: missing={sorted(expected - spec.keys())}, "
                 f"extra={sorted(spec.keys() - expected)}"
             )
     return dict(spec)
-
-
-def resolve_normalization_spec(cfg, *, observation_fields=None):
-    spec = cfg.get("normalization")
-    if isinstance(spec, DictConfig):
-        spec = OmegaConf.to_container(spec, resolve=True)
-    return validate_normalization_spec(spec, observation_fields=observation_fields)
 
 
 def normalization_dims_from_config(cfg):

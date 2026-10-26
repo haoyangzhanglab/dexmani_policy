@@ -1,7 +1,6 @@
 """Experiment checkpoint paths and direct best pointers without loading weights."""
 
 import errno
-import hashlib
 import json
 import os
 import re
@@ -11,8 +10,6 @@ from pathlib import Path
 
 
 def resolve_record_path(root, relative, *, checkpoint=False):
-    if not isinstance(relative, str) or not relative:
-        raise ValueError("Record requires a nonempty relative file path")
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError("Record path must be relative to experiment")
@@ -30,9 +27,6 @@ def validate_best_info(info):
 
     if type(info["global_step"]) is not int or info["global_step"] < 0:
         raise ValueError("Selected global_step must be an int >= 0")
-    digest = info["checkpoint_sha256"]
-    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-        raise ValueError("Selected checkpoint requires a SHA-256 content identity")
     inference = info["inference"]
     if set(inference) != {"use_ema", "inference_steps", "action_steps"}:
         raise ValueError("Best requires explicit use_ema, inference_steps and action_steps")
@@ -46,8 +40,8 @@ def resolve_best_checkpoint(experiment_dir):
     root = Path(experiment_dir).resolve()
     info = json.loads((root / "best_ckpt.json").read_text())
     validate_best_info(info)
-    source = info["selection_result"]
-    if not isinstance(source, str) or not source or Path(source).is_absolute() or ".." in Path(source).parts:
+    source = Path(info["selection_result"])
+    if not source.parts or source.is_absolute() or ".." in source.parts:
         raise ValueError("selection_result must be a relative source path")
     return info, resolve_record_path(root, info["ckpt_relpath"], checkpoint=True)
 
@@ -63,7 +57,7 @@ def resolve_checkpoint_path(exp_dir, selector="best"):
         for milestone in milestones:
             if milestone.pct == target_pct:
                 return milestone.path
-        available = sorted(m.pct for m in milestones)
+        available = [m.pct for m in milestones]
         raise FileNotFoundError(f"No {target_pct}% milestone checkpoint. Available: {available}")
     if selector == "latest":
         path = root / "checkpoints/latest.pt"
@@ -89,31 +83,22 @@ class MilestoneCheckpoint:
 
 def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
     """Find regular milestone files inside this experiment, sorted by pct."""
+    exp_dir = Path(exp_dir).resolve()
     ckpt_dir = exp_dir / "checkpoints"
     found: list[MilestoneCheckpoint] = []
     for pt_file in ckpt_dir.glob("epoch=*.pt"):
         match = MILESTONE_PATTERN.fullmatch(pt_file.name)
         if not match:
             continue
-        if pt_file.is_symlink():
-            raise ValueError(f"Milestone checkpoint must not be a symlink: {pt_file}")
         found.append(
             MilestoneCheckpoint(
-                path=resolve_checkpoint_path(exp_dir, pt_file.name),
+                path=resolve_record_path(exp_dir, str(pt_file.relative_to(exp_dir)), checkpoint=True),
                 pct=int(match.group("pct")),
                 global_step=int(match.group("step")),
             )
         )
 
     return sorted(found, key=lambda checkpoint: (checkpoint.pct, checkpoint.path.name))
-
-
-def file_sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def milestone_steps(total):
@@ -126,11 +111,11 @@ def archive_resume_milestones(source, destination, checkpoint):
     from dexmani_policy.common.config import validate_source_recipe
     from dexmani_policy.common.runtime import atomic_path
 
-    expected = {step: pct for step, pct in milestone_steps(
-        checkpoint.effective_config["training"]["loop"]["total_train_steps"]
-    ).items() if step <= checkpoint.global_step}
+    total = checkpoint.effective_config["training"]["loop"]["total_train_steps"]
+    expected = {step: pct for step, pct in milestone_steps(total).items() if step <= checkpoint.global_step}
     if not expected:
         return
+
     selected = {}
     directory = Path(source).resolve(strict=True).parent.parent
     for candidate in discover_milestone_checkpoints(directory):

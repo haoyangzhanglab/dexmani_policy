@@ -1,26 +1,17 @@
 """Evaluate one resolved checkpoint or a frozen selection record."""
 
-import argparse
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
     load_experiment_config,
     register_resolvers,
     set_project_root,
 )
-from dexmani_policy.evaluation.config import parse_evaluation_overrides, resolve_evaluation_request
+from dexmani_policy.evaluation.config import (
+    build_parser,
+    parse_evaluation_overrides,
+    resolve_evaluation_request,
+)
 from dexmani_policy.evaluation.rollout import evaluate_policy
-
-
-def build_parser(description):
-    parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--policy-name", required=True)
-    parser.add_argument("--task-name", required=True)
-    parser.add_argument("--exp-name", required=True)
-    parser.add_argument("--output-dir")
-    parser.add_argument(
-        "overrides", nargs="*", help="Canonical eval.*, env_runner.* and training.device dotlist"
-    )
-    return parser
 
 
 def main(argv=None):

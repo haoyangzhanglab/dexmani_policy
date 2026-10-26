@@ -37,23 +37,25 @@ def denoised_estimate(output, sample, alpha, sigma, prediction_type):
 
 @torch.inference_mode(False)
 @torch.no_grad()
-def guided_inference(decoder, cond, template, prefix, *, delay, offset, beta, steps, generator=None):
-    if prefix.ndim != 3 or prefix.shape[0] != template.shape[0]:
+def guided_inference(
+    decoder, cond, action_shape, prefix, *, delay, offset, beta, steps, dtype, generator=None
+):
+    if prefix.ndim != 3 or prefix.shape[0] != action_shape[0]:
         raise ValueError("RTC prefix must be (batch, length, control_dim)")
     length, control_dim = prefix.shape[1:]
     if (
         offset < 0
-        or not 0 <= delay <= length <= template.shape[1] - offset
-        or not 0 < control_dim <= template.shape[2]
+        or not 0 <= delay <= length <= action_shape[1] - offset
+        or not 0 < control_dim <= action_shape[2]
     ):
         raise ValueError("Invalid RTC prefix horizon/control dimensions")
 
     scheduler = decoder.noise_scheduler
     alpha_bar = prepare_schedule(scheduler, steps, beta)
-    timesteps = scheduler.timesteps.to(template.device)
+    timesteps = scheduler.timesteps.to(cond.device)
     previous = scheduler.timesteps - scheduler.config.num_train_timesteps // steps
     alpha_bar_previous = torch.where(
-        previous.to(template.device) >= 0,
+        previous.to(cond.device) >= 0,
         scheduler.alphas_cumprod[previous.clamp(min=0)],
         scheduler.final_alpha_cumprod,
     )
@@ -64,9 +66,9 @@ def guided_inference(decoder, cond, template, prefix, *, delay, offset, beta, st
 
     # Deployment conditions may be inference tensors, which autograd cannot save.
     cond = cond.detach().clone()
-    prefix = prefix.to(template).detach()
-    weights = soft_mask(length, delay, device=template.device, dtype=template.dtype)[None, :, None]
-    sample = torch.randn(template.shape, device=template.device, dtype=template.dtype, generator=generator)
+    prefix = prefix.to(device=cond.device, dtype=dtype).detach()
+    weights = soft_mask(length, delay, device=cond.device, dtype=dtype)[None, :, None]
+    sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
 
     for i, timestep in enumerate(scheduler.timesteps.tolist()):
         with torch.enable_grad():

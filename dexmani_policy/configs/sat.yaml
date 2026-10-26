@@ -1,16 +1,11 @@
 # SAT — local Structural Action Transformer adaptation
-# Encoder:  Sparse3DGlobalObservationEncoder (condition width 256)
-# Decoder:  SAT (joint trajectories with observation-prefix attention) + Flow Matching
-# Modality: point_cloud + joint_state → action
 # Key:      structural-centric action representation (Da as sequence, T as feature)
 
 policy_name: sat
 
-# ── Task ──
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 
-# ── Core ──
 seed: 42
 horizon: 16
 n_obs_steps: 2
@@ -18,13 +13,11 @@ n_action_steps: 8
 action_key: action
 action_dim: 19
 
-# ── Normalization ──
 normalization:
   joint_state: limits
   action: auto
   point_cloud: identity
 
-# ── Dataloader ──
 dataloader:
   batch_size: 128
   shuffle: true
@@ -34,7 +27,6 @@ dataloader:
   prefetch_factor: 2
   drop_last: true
 
-# ── Dataset ──
 dataset:
   pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
@@ -59,7 +51,6 @@ dataset:
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
-# ── Agent ──
 agent:
   _target_: dexmani_policy.agents.policies.sat.SATPolicy
   horizon: ${horizon}
@@ -106,7 +97,6 @@ agent:
   modality_dropout_probs:
     joint_state: 0.0
 
-# ── Optimizer ──
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
@@ -114,7 +104,6 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
-# ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema.EMA
   update_after_step: 0
@@ -123,7 +112,6 @@ ema:
   min_value: 0.0
   max_value: 0.9999
 
-# ── Training ──
 training:
   seed: ${seed}
   device: cuda:0
@@ -138,19 +126,16 @@ training:
     log_interval_steps: 100
     gradient_accumulation_steps: 1
 
-# ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:
-    _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${run_id:}_seed${training.seed}
     mode: offline
 
-# ── Env Runner ──
 env_runner:
   task_name: ${task_name}
   env_kwargs:
@@ -159,7 +144,6 @@ env_runner:
     instance_random: true
     table_random: true
 
-# ── Eval ──
 eval:
   seed: 1024
   inference_steps: ${agent.num_inference_steps}
@@ -172,7 +156,6 @@ eval:
 
   video:
     enabled: true
-# ── Hydra ──
 hydra:
   job:
     override_dirname: ${policy_name}_${task_name}

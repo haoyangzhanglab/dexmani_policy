@@ -15,7 +15,6 @@ from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
-from dexmani_policy.training.common.hand_representation import shuffled_batches, validate_kl_schedule
 from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.validation import validate_config
 
@@ -147,7 +146,8 @@ def train(args):
     if args.min_lr > args.lr:
         raise ValueError("min_lr must not exceed lr")
     eligible_step = max(2, args.beta_warmup) if args.beta_warmup else 1
-    validate_kl_schedule(args.steps, args.beta, eligible_step)
+    if not 0 < args.beta < float("inf") or args.steps < eligible_step:
+        raise ValueError(f"LAMP prior requires positive finite beta and steps >= {eligible_step}")
     cfg = load_policy_config(args.policy_config or args.config, args.overrides)
     output = Path(args.output or cfg.agent.prior_path).expanduser()
     if output.exists() and not args.overwrite:
@@ -160,8 +160,7 @@ def train(args):
     train_rows, val_rows = source_rows(dataset)
     if not len(train_rows):
         raise ValueError("LAMP prior training requires nonempty training source rows")
-    drop_last = len(train_rows) >= args.batch_size
-    if not drop_last:
+    if len(train_rows) < args.batch_size:
         print(
             f"LAMP prior small-data smoke exception: actual batch size={len(train_rows)} "
             f"< configured batch size={args.batch_size}; keeping one partial batch per pass"
@@ -184,11 +183,15 @@ def train(args):
     if initial is not None:
         print(f"Initial validation: {initial}")
     best_mse = float("inf")
-    batches = shuffled_batches(train_rows, args.batch_size, rng, drop_last=drop_last)
+    batches_per_pass = max(1, len(train_rows) // args.batch_size)
     for update in range(args.steps):
         step = update + 1
         prior.train()
-        history, target = prior_batch(dataset, next(batches), device)
+        batch = update % batches_per_pass
+        if batch == 0:
+            order = rng.permutation(train_rows)
+        start = batch * args.batch_size
+        history, target = prior_batch(dataset, order[start : start + args.batch_size], device)
         history = perturb_history(history, args.noise_std)
         beta = kl_weight(update, args.beta, args.beta_warmup)
         loss, reconstruction, kl = prior.compute_loss(history, target, beta)

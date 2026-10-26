@@ -275,7 +275,9 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
         vqvae.train()
         sums = torch.zeros(3, device=device, dtype=torch.float64)
         train_count = 0
-        usage = torch.zeros(args.num_groups, args.codebook_size, dtype=torch.long, device=device)
+        report_usage = epoch % args.codebook_report_epochs == 0
+        if report_usage:
+            usage = torch.zeros(args.num_groups, args.codebook_size, dtype=torch.long, device=device)
 
         for (batch,) in train_loader:
             batch = batch.to(device, non_blocking=True)
@@ -298,7 +300,8 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
             scheduler.step()
 
             with torch.no_grad():
-                usage.scatter_add_(1, indices.T, torch.ones_like(indices.T))
+                if report_usage:
+                    usage.scatter_add_(1, indices.T, torch.ones_like(indices.T))
                 sums += torch.stack((enc_loss, vq_loss, recon_mse)).double() * batch.shape[0]
             train_count += batch.shape[0]
 
@@ -356,7 +359,7 @@ def train(args: argparse.Namespace, *, policy_cfg) -> None:
                 metrics=metrics,
             )
 
-        if epoch % args.codebook_report_epochs == 0:
+        if report_usage:
             for group in range(args.num_groups):
                 fig, ax = plt.subplots(figsize=(6, 3))
                 ax.bar(np.arange(args.codebook_size), usage[group].cpu().numpy())

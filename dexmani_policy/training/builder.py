@@ -61,10 +61,8 @@ def bind_defaults(config, constructor):
 
 def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, checkpoint=None):
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
-    model_cfg = cfg
-    if checkpoint is not None:
-        model_cfg = prepare_restore_config(cfg)
-    model = hydra.utils.instantiate(model_cfg.agent)
+    model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
+    model = hydra.utils.instantiate(model_cfg)
     if "datasets" in cfg.dataset:
         for child in cfg.dataset.datasets:
             validate_observation_fields(model, (*child.sensor_modalities, "task_text"))

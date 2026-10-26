@@ -6,8 +6,7 @@ from dexmani_policy.common.config import (
     register_resolvers,
     set_project_root,
 )
-from dexmani_policy.evaluate import build_parser
-from dexmani_policy.evaluation.config import parse_evaluation_overrides
+from dexmani_policy.evaluation.config import build_parser, parse_evaluation_overrides
 from dexmani_policy.evaluation.pipeline import run_pipeline
 
 

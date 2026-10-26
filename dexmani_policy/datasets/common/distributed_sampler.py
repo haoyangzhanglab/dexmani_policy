@@ -14,7 +14,7 @@ def multitask_indices(
     total = sum(task_lengths)
     offsets = np.cumsum([0] + list(task_lengths))
     if deterministic and sampling_strategy == "proportional":
-        indices = list(range(total))
+        indices = np.arange(total, dtype=np.int64)
     else:
         if sampling_strategy == "weighted":
             probs = np.asarray(sample_probs, dtype=np.float64)
@@ -32,7 +32,7 @@ def multitask_indices(
                 valid = np.where(counts > 0)[0]
                 counts[valid[rng.choice(len(valid))]] -= 1
                 diff += 1
-        indices = []
+        parts = []
         for task, (length, count) in enumerate(zip(task_lengths, counts)):
             if count == 0:
                 continue
@@ -43,7 +43,8 @@ def multitask_indices(
                 if count % length:
                     chunks.append(rng.permutation(length)[: count % length])
                 local = np.concatenate(chunks)
-            indices.extend(int(offsets[task] + i) for i in local)
+            parts.append(local + offsets[task])
+        indices = np.concatenate(parts)
     rng.shuffle(indices)
     return indices
 
@@ -61,7 +62,7 @@ class ResumableDistributedSampler(DistributedSampler):
         self.next_micro_step = next_micro_step
 
     def __iter__(self):
-        indices = list(super().__iter__())
+        indices = list(super().__iter__())[self.next_micro_step * self.batch_size :]
         if isinstance(self.dataset, MultiTaskDataset):
             ds = self.dataset
             mapping = multitask_indices(
@@ -72,8 +73,8 @@ class ResumableDistributedSampler(DistributedSampler):
                 deterministic=ds.deterministic,
                 sampling_strategy=ds.sampling_strategy,
             )
-            indices = [mapping[position] for position in indices]
-        return iter(indices[self.next_micro_step * self.batch_size :])
+            indices = mapping[np.asarray(indices, dtype=np.int64)].tolist()
+        return iter(indices)
 
     def __len__(self):
         return max(0, self.num_samples - self.next_micro_step * self.batch_size)

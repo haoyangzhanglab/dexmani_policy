@@ -15,7 +15,6 @@ from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.runtime import atomic_path, set_seed
 from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
-from dexmani_policy.training.common.hand_representation import shuffled_batches, validate_kl_schedule
 
 
 def build_codec_dataset(cfg):
@@ -102,7 +101,9 @@ def train(cfg, *, overwrite=False):
         raise ValueError("lr and clip_grad must be positive and finite")
     if recipe.kl_reduction != "mean_over_batch_time_latent":
         raise ValueError("HandVAE requires mean_over_batch_time_latent KL reduction")
-    validate_kl_schedule(recipe.steps, recipe.beta, recipe.kl_warmup + max(1, recipe.kl_ramp))
+    kl_end_step = recipe.kl_warmup + max(1, recipe.kl_ramp)
+    if not 0 < recipe.beta < float("inf") or recipe.steps < kl_end_step:
+        raise ValueError(f"HandVAE requires positive finite beta and steps >= {kl_end_step}")
     output = Path(cfg.codec.path).expanduser()
     if output.exists() and not overwrite:
         raise FileExistsError(f"Codec already exists: {output}; use --overwrite to replace it")
@@ -127,12 +128,16 @@ def train(cfg, *, overwrite=False):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=recipe.steps)
     dt = dataset.hand_data["contract"]["dt"]
     print(f"HandVAE: train={len(dataset)}, validation={len(validation)}, dt={dt:g}s, H*dt={dataset.horizon * dt:g}s")
-    batches = shuffled_batches(len(dataset), recipe.batch_size, rng, drop_last=True)
+    batches_per_pass = len(dataset) // recipe.batch_size
     best_mae = float("inf")
     best_payload = None
     output.parent.mkdir(parents=True, exist_ok=True)
     for step in range(1, recipe.steps + 1):
-        actions, q0 = codec_batch(dataset, next(batches), recipe.device)
+        batch = (step - 1) % batches_per_pass
+        if batch == 0:
+            order = rng.permutation(len(dataset))
+        start = batch * recipe.batch_size
+        actions, q0 = codec_batch(dataset, order[start : start + recipe.batch_size], recipe.device)
         mu, log_var = codec.encode(actions, q0)
         z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
         reconstruction = codec.reconstruction_loss(codec.decode(z, q0), codec.normalize_actions(actions, q0))

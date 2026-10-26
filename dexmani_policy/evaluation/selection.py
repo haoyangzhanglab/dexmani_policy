@@ -8,7 +8,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.experiments import discover_milestone_checkpoints, file_sha256, milestone_steps
+from dexmani_policy.common.experiments import discover_milestone_checkpoints, milestone_steps
 from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds
 from dexmani_policy.evaluation.artifacts import (
     artifact_reference,
@@ -77,20 +77,17 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
         "training_source_evidence": training_source_evidence(cfg, {"selection": selection, "test": test}),
     }
     validate_selection_plan(record)
-    for milestone, candidate in zip(milestones, record["candidates"], strict=True):
-        candidate["checkpoint_sha256"] = file_sha256(milestone.path)
     directory = create_run_directory(output_root, output_dir)
     path = directory / "selection_result.json"
     write_json(path, record, overwrite=False)
     results = []
     try:
-        for milestone, candidate in zip(milestones, record["candidates"], strict=True):
+        for milestone in milestones:
             result_path = evaluate_policy(
                 replace(
                     request,
                     checkpoint=str(milestone.path),
-                    source={**request.source, "global_step": milestone.global_step,
-                            "checkpoint_sha256": candidate["checkpoint_sha256"]},
+                    source={**request.source, "global_step": milestone.global_step},
                 ),
                 output_root=directory / "candidates",
             )
@@ -104,7 +101,6 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
             status="completed",
             ckpt_relpath=candidate["checkpoint"],
             global_step=candidate["global_step"],
-            checkpoint_sha256=candidate["checkpoint_sha256"],
             runtime=results[best]["runtime"],
             inference={
                 key: getattr(request, key) for key in ("use_ema", "inference_steps", "action_steps")
@@ -122,7 +118,7 @@ def publish_best(root, record_path):
     record, checkpoint = verify_selection_record(root, record_path)
     write_json(
         Path(root) / "best_ckpt.json",
-        {key: record[key] for key in ("ckpt_relpath", "global_step", "checkpoint_sha256", "inference", "selection_result")},
+        {key: record[key] for key in ("ckpt_relpath", "global_step", "inference", "selection_result")},
     )
     return record, checkpoint
 

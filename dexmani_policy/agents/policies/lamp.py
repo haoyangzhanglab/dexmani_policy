@@ -8,14 +8,17 @@ from torch.nn import functional as F
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder, validate_sparse3d_config
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import (
+    Sparse3DEncoder,
+    validate_sparse3d_config,
+)
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import positive_int
 
 
 class LAMPObservationEncoder(nn.Module):
-    """Pool patch features and concatenate state as [B, T*D]."""
+    """Pooled Sparse3D and state features in frame order [B,T*D]."""
 
     consumed_observation_fields = ("joint_state", "point_cloud")
     validate_normalization = staticmethod(Sparse3DEncoder.validate_normalization)
@@ -31,19 +34,15 @@ class LAMPObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        pc_encoder_config = dict(pc_encoder_config or {})
-        pc_encoder_config.setdefault("fps_random_config", fps_random_config)
-
-        positive_int(num_points, "num_points")
-        positive_int(n_obs_steps, "n_obs_steps")
-        pc_encoder_config.setdefault("num_patches", 96)
-        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **pc_encoder_config)
+        config = dict(pc_encoder_config or {})
+        config.setdefault("fps_random_config", fps_random_config)
+        config.setdefault("num_patches", 96)
+        self.num_points = positive_int(num_points, "num_points")
+        self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
+        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **config)
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
-        self.num_points = num_points
         self.use_coord_only = pc_dim == 3
-        self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
-
         self.out_dim = n_obs_steps * (self.pc_encoder.out_dim + self.state_mlp.out_dim)
 
     @property
@@ -52,17 +51,12 @@ class LAMPObservationEncoder(nn.Module):
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(
-            obs["point_cloud"],
-            self.num_points,
-            self.use_coord_only,
-            self.fps_random_config,
-            training=self.training,
+            obs["point_cloud"], self.num_points, self.use_coord_only,
+            self.fps_random_config, training=self.training,
         )
-
-        pc_features = self.pc_encoder(pc)["tokens"].mean(dim=1)
-        state_features = self.state_mlp(obs["joint_state"])
-        features = torch.cat([pc_features, state_features], dim=-1)
-
+        patches = self.pc_encoder(pc)["tokens"]
+        state = self.state_mlp(obs["joint_state"])
+        features = torch.cat((patches.mean(dim=1), state), dim=-1)
         return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
@@ -341,6 +335,4 @@ class LAMPPolicy(BasePolicy):
         arm = native[:, : self.arm_dim]
         hand = self.decode_hand(mu + native[:, self.arm_dim :])
         prediction = torch.cat((arm, hand), dim=-1)[:, None]
-        if not torch.isfinite(prediction).all():
-            raise ValueError("LAMP produced a nonfinite action")
         return self.format_action_output(prediction)

@@ -1,61 +1,6 @@
-import json
-import os
-import uuid
-from pathlib import Path
 from typing import Any
 
 import torch
-
-os.environ.setdefault("WANDB_SILENT", "true")
-
-
-class JsonlLogger:
-    def __init__(self, output_dir: Path, filename: str = "metrics.jsonl"):
-        self.output_dir = Path(output_dir)
-        self.file = open(self.output_dir / filename, "a", buffering=1, encoding="utf-8")
-
-    def log(self, data: dict[str, Any], step: int | None = None):
-        record = {"step": int(step) if step is not None else None}
-        record.update(data)
-        self.file.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def close(self):
-        self.file.close()
-
-
-class WandbLogger:
-    def __init__(
-        self,
-        output_dir: Path,
-        project: str,
-        name: str,
-        group: str,
-        mode: str,
-    ):
-        import wandb
-
-        self.output_dir = Path(output_dir)
-
-        # Checkpoint continuation belongs to a new logging run, including repeated sweep names.
-        self.run = wandb.init(
-            dir=str(self.output_dir),
-            project=project,
-            name=name,
-            group=group,
-            id=uuid.uuid4().hex,
-            resume="never",
-            mode=mode,
-        )
-
-    def log(self, data: dict[str, Any], step: int | None = None):
-        self.run.log(data, step=step)
-
-    def log_config(self, cfg_dict: dict[str, Any]):
-        config = {**cfg_dict, "output_dir": str(self.output_dir)}
-        self.run.config.update(config)
-
-    def close(self):
-        self.run.finish()
 
 
 def accumulate_metrics(totals, metrics):
@@ -94,22 +39,19 @@ def count_params(module) -> tuple[int, int]:
 
 
 def print_param_count(agent) -> None:
-    from termcolor import cprint
-
     total, _ = count_params(agent)
     fields = agent.consumed_observation_fields
     if fields:
-        cprint(f"[Modalities] {', '.join(fields)}", "white")
-    cprint(f"[{type(agent).__name__}] Parameter Count", "cyan", attrs=["bold"])
-    cprint(f"  Total: {total / 1e6:.2f} M", "white")
+        print(f"[Modalities] {', '.join(fields)}")
+    print(f"[{type(agent).__name__}] Parameter Count")
+    print(f"  Total: {total / 1e6:.2f} M")
 
     for name, child in agent.named_children():
         t, tr = count_params(child)
         frozen = t - tr
-        color = "green" if tr > 0 else "white"
-        cprint(
-            f"  {name:<20}: {t / 1e6:.2f} M  (trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)",
-            color,
+        print(
+            f"  {name:<20}: {t / 1e6:.2f} M  "
+            f"(trainable={tr / 1e6:.2f} M  frozen={frozen / 1e6:.2f} M)"
         )
 
 

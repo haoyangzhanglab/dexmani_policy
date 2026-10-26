@@ -1,29 +1,21 @@
 # MultiTask DiT — Multi-task policy with text-conditioned DiT backbone
-# Encoder:  CLIP ViT-B/16 text encoder (frozen) + regular ResNet-18 vision backbone (resnet preset, scratch + GroupNorm)
-# Decoder:  DiT Diffusion (self-attention + AdaLN conditioning)
-# Modality: RGB + joint_state + task_text → action
-# Tasks:    pick_bottle, open_box
 
 policy_name: multitask_dit
 
-# ── Tasks ──
 task_name: pick_bottle+open_box
 seed: 42
 
-# ── Core ──
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
 action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
-# ── Normalization ──
 normalization:
   joint_state: limits
   action: auto
   rgb: identity
 
-# ── Dataloader ──
 dataloader:
   batch_size: 64
   num_workers: 8
@@ -33,7 +25,6 @@ dataloader:
   prefetch_factor: 2
   drop_last: true
 
-# ── Dataset ──
 dataset:
   _target_: dexmani_policy.datasets.multitask_dataset.MultiTaskDataset
   seed: ${training.seed}
@@ -102,7 +93,6 @@ dataset:
         blur_prob: 0.0
         prob: 0.25
 
-# ── Agent ──
 agent:
   clip_sample: true
   _target_: dexmani_policy.agents.policies.multitask_dit.MultiTaskDiTPolicy
@@ -163,7 +153,6 @@ ema:
   min_value: 0.0
   max_value: 0.9999
 
-# ── Training ──
 training:
   seed: ${seed}
   device: cuda:0
@@ -184,7 +173,6 @@ workspace:
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:
-    _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${run_id:}_seed${training.seed}
@@ -207,7 +195,6 @@ env_runner:
         instance_random: true
         table_random: true
 
-# ── Eval ──
 eval:
   seed: 1024
   inference_steps: 10

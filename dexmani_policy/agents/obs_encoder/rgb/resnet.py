@@ -80,12 +80,8 @@ class ResNetEncoder(nn.Module):
             )
         )
 
-        self.configure_finetuning(tune_mode)
-
-    def configure_finetuning(self, tune_mode: Literal["freeze", "full"]) -> None:
         if tune_mode not in ("freeze", "full"):
             raise ValueError(f"Unsupported tune_mode: {tune_mode}")
-        self.tune_mode = tune_mode
         self.backbone.requires_grad_(tune_mode == "full")
         self.backbone.train(self.training and tune_mode != "freeze")
 

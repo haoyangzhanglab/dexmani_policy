@@ -1,4 +1,6 @@
-# 本轮修复与验证结果
+# 历史修复与验证记录
+
+本文记录当时的实现与验证，不作为当前接口规范；文中的测试结果来自已移除的测试套件。权重 SHA-256 机制现已移除，当前行为见[仿真评测机制](仿真评测机制.md#checkpoint-selection)。
 
 本轮基线为 `d349a878fb3fd9802e17a120aa5fab51ec9dac82`，开始时工作区干净。以下仅记录本轮实际修改与验证；未修改 AGENTS.md、默认 YAML、外部仿真仓库或依赖，未提交数据、模型和日志，未 push 或创建 PR。
 
@@ -39,14 +41,11 @@ SAT 关节 token、DQ-RISE 码本 lookup、LAMP 历史命令与单步预测、La
 | 真实开发仿真 | 小型 DP3 使用真实数据训练 2 updates，普通 latest 评测在正式 seed 池外的 **420001** 运行 1 episode，动作上限 4；结果 `completed`、4 steps、success=false，无视频。仅证明实际恢复与仿真调用链连通，不是任务成功率实验。 |
 | 静态检查 | `compileall`、`git diff --check` 通过；AGENTS.md 与默认 configs 无改动。 |
 
-主要命令（激活 `policy` 环境后）：
+仍可使用的基础检查命令（激活 `policy` 环境后）：
 
 ```bash
-python -m unittest discover -s tests -v
 python dexmani_policy/smoke_test.py --config-only dp dp3 sat r3d maniflow multitask_dit dqrise lamp latent_flow
-python -m tests.cuda_checks
-python -m tests.ddp_checks
-python -m compileall -q dexmani_policy tests
+python -m compileall -q dexmani_policy
 git diff --check
 ```
 

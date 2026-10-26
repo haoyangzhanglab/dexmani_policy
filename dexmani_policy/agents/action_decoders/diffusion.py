@@ -106,9 +106,10 @@ class Diffusion(nn.Module):
     def predict_action(
         self,
         cond: torch.Tensor,
-        action_template: torch.Tensor,
+        action_shape: tuple[int, ...],
         inference_steps: int | None = None,
         *,
+        dtype: torch.dtype | None = None,
         generator: torch.Generator | None = None,
         rtc_prefix=None,
         delay_steps=0,
@@ -120,13 +121,14 @@ class Diffusion(nn.Module):
             if inference_steps is None
             else positive_int(inference_steps, "inference_steps")
         )
+        dtype = cond.dtype if dtype is None else dtype
 
         # Scheduler tensors are not module buffers; restored and trained instances need the same device.
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
-            action_template.device
+            cond.device
         )
         self.noise_scheduler.final_alpha_cumprod = self.noise_scheduler.final_alpha_cumprod.to(
-            action_template.device
+            cond.device
         )
         if rtc_prefix is not None and rtc_prefix.shape[-2] and rtc_guidance_cap != 0:
             from dexmani_policy.agents.action_decoders.sampling.rtc import guided_inference
@@ -134,20 +136,20 @@ class Diffusion(nn.Module):
             return guided_inference(
                 self,
                 cond,
-                action_template,
+                action_shape,
                 rtc_prefix,
                 delay=delay_steps,
                 offset=history_offset,
                 beta=rtc_guidance_cap,
                 steps=num_steps,
+                dtype=dtype,
                 generator=generator,
             )
         if rtc_prefix is not None:
             from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
 
             prepare_schedule(self.noise_scheduler, num_steps, rtc_guidance_cap)
-        sample = torch.randn(action_template.shape, device=action_template.device,
-                             dtype=action_template.dtype, generator=generator)
+        sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
         self.noise_scheduler.set_timesteps(num_steps)
         timesteps = self.noise_scheduler.timesteps.to(sample.device)
         for index, timestep in enumerate(self.noise_scheduler.timesteps.tolist()):

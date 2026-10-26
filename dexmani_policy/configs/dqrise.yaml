@@ -1,18 +1,11 @@
 # DQ-RISE — VQ-VAE Hand Quantisation + Arm Joint/Index Diffusion
-# Encoder:  Sparse3DGlobalObservationEncoder (condition width 256)
-# Decoder:  ConditionalUNet1D (FiLM conditioning) + DDIM
-#           Output width: tcp_dim + 1 (nearest-prototype index).
-# Hand:     Lookup of RVQ-decoded, PCA-sorted hand poses.
-
-# point_cloud + joint_state -> arm joints(7) + prototype index(1).
+# Output: arm joints + index into RVQ-decoded, PCA-sorted hand poses.
 
 policy_name: dqrise
 
-# ── Task ──
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 
-# ── Core ──
 seed: 42
 horizon: 20
 n_obs_steps: 1
@@ -20,7 +13,6 @@ n_action_steps: 16
 action_key: action
 action_dim: 19
 
-# ── Normalization ──
 normalization:
   joint_state: limits
   action: auto
@@ -36,7 +28,6 @@ tcp_dim: 7
 # Fresh training requires an explicitly supplied, matching joint-action codebook.
 codebook_path: null
 
-# ── Dataloader ──
 dataloader:
   batch_size: 128
   shuffle: true
@@ -46,7 +37,6 @@ dataloader:
   prefetch_factor: 2
   drop_last: true
 
-# ── Dataset ──
 dataset:
   pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
@@ -71,7 +61,6 @@ dataset:
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
-# ── Agent ──
 agent:
   clip_sample: true
   _target_: dexmani_policy.agents.policies.dqrise.DQRISEPolicy
@@ -123,7 +112,6 @@ agent:
   modality_dropout_probs:
     joint_state: 0.0
 
-# ── Optimizer ──
 optimizer:
   lr: 3.0e-4
   weight_decay: 1.0e-6
@@ -131,7 +119,6 @@ optimizer:
   obs_lr: 3.0e-4
   obs_weight_decay: 1.0e-6
 
-# ── Training ──
 training:
   seed: ${seed}
   device: cuda:0
@@ -146,19 +133,16 @@ training:
     log_interval_steps: 100
     gradient_accumulation_steps: 1
 
-# ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:
-    _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${run_id:}_seed${training.seed}
     mode: offline
 
-# ── Env Runner ──
 env_runner:
   task_name: ${task_name}
   env_kwargs:
@@ -167,7 +151,6 @@ env_runner:
     instance_random: true
     table_random: true
 
-# ── Eval ──
 eval:
   seed: 1024
   inference_steps: ${agent.num_inference_steps}
@@ -213,7 +196,6 @@ vq_vae:
   num_workers: 4
   device: cuda
 
-# ── Hydra ──
 hydra:
   job:
     override_dirname: ${policy_name}_${task_name}

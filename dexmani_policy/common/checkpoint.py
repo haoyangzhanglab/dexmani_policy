@@ -32,8 +32,8 @@ def save_training_checkpoint(path: Path, checkpoint: TrainingCheckpoint) -> Path
     payload = {
         "effective_config": checkpoint.effective_config,
         "state": {
-            "epoch": int(checkpoint.epoch),
-            "global_step": int(checkpoint.global_step),
+            "epoch": checkpoint.epoch,
+            "global_step": checkpoint.global_step,
             "next_micro_step": checkpoint.next_micro_step,
             "resume_contract": checkpoint.resume_contract,
             "ema_updater_step": checkpoint.ema_updater_step,
@@ -80,16 +80,6 @@ def load_training_checkpoint(path: Path) -> TrainingCheckpoint:
     )
 
 
-def select_inference_weights(payload, *, use_ema):
-    state = payload["weights"]["ema_model" if use_ema else "model"]
-    if state is None and use_ema:
-        raise ValueError("Requested EMA weights are absent; select raw explicitly")
-    step = payload["state"]["global_step"]
-    if type(step) is not int or step < 0:
-        raise ValueError("Checkpoint global_step must be an int >= 0")
-    return state, step
-
-
 def policy_state_dict(model) -> dict:
     """Save an unwrapped policy with eager parameter names, including compiled backbones."""
     return {name.replace("_orig_mod.", ""): value for name, value in model.state_dict().items()}
@@ -100,9 +90,9 @@ def load_policy_state(model, state):
     for name, parameter in model.named_parameters():
         saved = state[name]
         if (
-            parameter.is_floating_point()
+            parameter.dtype != saved.dtype
+            and parameter.is_floating_point()
             and saved.is_floating_point()
-            and parameter.dtype != saved.dtype
         ):
             parameter.data = parameter.data.to(dtype=saved.dtype)
     model.load_state_dict(state, strict=True)
@@ -118,30 +108,34 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
         resolve_normalization_spec,
         validate_action_window,
     )
+    from dexmani_policy.common.runtime import get_rng_state, set_rng_state
 
     payload = read_checkpoint(checkpoint_path, mmap=True)
     if inference_recipe(payload["effective_config"]) != inference_recipe(saved_config):
         raise ValueError("Checkpoint inference recipe mismatch with saved config")
-    saved_config = payload["effective_config"]
-    cfg = OmegaConf.create(saved_config)
+    cfg = OmegaConf.create(payload["effective_config"])
+    state = payload["weights"]["ema_model" if use_ema else "model"]
+    if state is None and use_ema:
+        raise ValueError("Requested EMA weights are absent; select raw explicitly")
+    global_step = payload["state"]["global_step"]
+    if type(global_step) is not int or global_step < 0:
+        raise ValueError("Checkpoint global_step must be an int >= 0")
+    # Release unselected weights and optimizer state before model construction.
+    del payload
+
     validate_action_window(
         cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps,
         action_start_index=cfg.policy_metadata.action_start_index,
     )
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
-    state, global_step = select_inference_weights(payload, use_ema=use_ema)
-    # Unselected weights and optimizer state are not needed during construction/device transfer.
-    del payload
-    cfg = prepare_restore_config(cfg)
-    # Constructors initialize temporary CPU weights before strict restoration.
-    from dexmani_policy.common.runtime import get_rng_state, set_rng_state
-
+    agent_cfg = prepare_restore_config(cfg.agent)
     rng_state = get_rng_state()
     try:
-        agent = hydra.utils.instantiate(cfg.agent)
+        agent = hydra.utils.instantiate(agent_cfg)
     finally:
         set_rng_state(rng_state)
+
     if agent.inference_metadata != OmegaConf.to_container(cfg.policy_metadata, resolve=True):
         raise ValueError("Restored policy metadata differs from saved construction")
     agent.checkpoint_step = global_step
@@ -162,7 +156,8 @@ def inference_recipe(config):
 
     from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
 
-    config = OmegaConf.to_container(OmegaConf.create(config), resolve=True)
+    if OmegaConf.is_config(config):
+        config = OmegaConf.to_container(config, resolve=True)
     agent = dict(config["agent"])
     for key in ("prior_path", "codec_path", "codebook_path"):
         agent.pop(key, None)
@@ -188,13 +183,13 @@ def inference_recipe(config):
     }
 
 
-def prepare_restore_config(cfg):
-    """Let the policy own initialization details; never mutate the saved recipe."""
+def prepare_restore_config(agent_cfg):
+    """Copy only policy constructor settings; keep the saved recipe unchanged."""
     import copy
     import hydra
     from omegaconf import open_dict
 
-    cfg = copy.deepcopy(cfg)
-    with open_dict(cfg.agent):
-        hydra.utils.get_class(cfg.agent._target_).prepare_restore_config(cfg.agent)
-    return cfg
+    agent_cfg = copy.deepcopy(agent_cfg)
+    with open_dict(agent_cfg):
+        hydra.utils.get_class(agent_cfg._target_).prepare_restore_config(agent_cfg)
+    return agent_cfg

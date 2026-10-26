@@ -2,13 +2,58 @@ from __future__ import annotations
 
 import inspect
 
+import torch
+from omegaconf import DictConfig
+from torch import nn
+
 from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     ConditionalUNet1D,
     validate_unet_horizon,
 )
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
-from dexmani_policy.agents.obs_encoder.rgb_state import RGBStateObservationEncoder
+from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
+from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
+from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
+
+
+class DPObservationEncoder(nn.Module):
+    consumed_observation_fields = ("joint_state", "rgb")
+
+    def __init__(
+        self,
+        rgb_backbone_name: str,
+        state_dim: int,
+        n_obs_steps: int,
+        state_out_dim: int = 64,
+        rgb_backbone_config: dict | None = None,
+    ) -> None:
+        super().__init__()
+        self.backbone, self.image_processor = build_rgb_encoder(
+            rgb_backbone_name, config=rgb_backbone_config
+        )
+        self.state_mlp = StateEncoder(state_dim, state_out_dim)
+        self.n_obs_steps = n_obs_steps
+        self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
+
+    @property
+    def effective_config(self):
+        return {"rgb_backbone_config": self.backbone.effective_config}
+
+    def forward(self, obs: dict) -> torch.Tensor:
+        rgb = self.image_processor.process_images(obs["rgb"])
+
+        if isinstance(self.backbone, ResNetEncoder):
+            rgb = rgb.to(memory_format=torch.channels_last)
+
+        features = torch.cat(
+            [
+                self.backbone(rgb)["global_token"],
+                self.state_mlp(obs["joint_state"]),
+            ],
+            dim=-1,
+        )
+        return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
 class DPPolicy(BasePolicy):
@@ -16,7 +61,15 @@ class DPPolicy(BasePolicy):
 
     @classmethod
     def prepare_restore_config(cls, config) -> None:
-        RGBStateObservationEncoder.prepare_restore_config(config)
+        rgb = dict(config.rgb_backbone_config)
+        if config.rgb_backbone_name == "resnet" and not {"tune_mode", "norm_mode"} <= rgb.keys():
+            raise ValueError("Saved ResNet requires explicit tune_mode and norm_mode")
+        if config.rgb_backbone_name in {"dino", "siglip"} and not isinstance(
+            rgb.get("architecture"), (dict, DictConfig)
+        ):
+            raise ValueError("Saved HF backbone requires an architecture mapping")
+        rgb["load_pretrained"] = False
+        config.rgb_backbone_config = rgb
 
     @classmethod
     def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
@@ -45,7 +98,7 @@ class DPPolicy(BasePolicy):
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
     ) -> None:
-        obs_encoder = RGBStateObservationEncoder(
+        obs_encoder = DPObservationEncoder(
             rgb_backbone_name,
             state_dim,
             n_obs_steps,

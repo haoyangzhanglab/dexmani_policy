@@ -12,18 +12,18 @@ from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_time_to_noise
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE, load_hand_vae, validate_codec_metadata
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder, validate_sparse3d_config
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import (
+    Sparse3DEncoder,
+    validate_sparse3d_config,
+)
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import (
-    positive_int,
-    validate_action_window,
-)
+from dexmani_policy.common.config import positive_int, validate_action_window
 from dexmani_policy.common.hand_representation import validate_hand_chunk_compatibility
 
 
 class LatentFlowObservationEncoder(nn.Module):
-    """Keep frame-major global and patch tokens as [B, T*(K+1), D]."""
+    """Frame-major Sparse3D global/patch tokens with state [B,T*(K+1),D]."""
 
     consumed_observation_fields = ("joint_state", "point_cloud")
     validate_normalization = staticmethod(Sparse3DEncoder.validate_normalization)
@@ -39,20 +39,16 @@ class LatentFlowObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        pc_encoder_config = dict(pc_encoder_config or {})
-        pc_encoder_config.setdefault("fps_random_config", fps_random_config)
-
-        positive_int(num_points, "num_points")
-        positive_int(n_obs_steps, "n_obs_steps")
-        pc_encoder_config.setdefault("num_patches", 96)
-        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **pc_encoder_config)
+        config = dict(pc_encoder_config or {})
+        config.setdefault("fps_random_config", fps_random_config)
+        config.setdefault("num_patches", 96)
+        self.num_points = positive_int(num_points, "num_points")
+        self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
+        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **config)
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
-        self.num_points = num_points
         self.use_coord_only = pc_dim == 3
-        self.n_obs_steps = n_obs_steps
         self.fps_random_config = fps_random_config or {}
-
-        self.obs_token_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
+        self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
     @property
     def effective_config(self):
@@ -60,21 +56,14 @@ class LatentFlowObservationEncoder(nn.Module):
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(
-            obs["point_cloud"],
-            self.num_points,
-            self.use_coord_only,
-            self.fps_random_config,
-            training=self.training,
+            obs["point_cloud"], self.num_points, self.use_coord_only,
+            self.fps_random_config, training=self.training,
         )
-
-        patch_tokens = self.pc_encoder(pc)["tokens"]
-        global_token = patch_tokens.mean(dim=1, keepdim=True)
-        pc_features = torch.cat([global_token, patch_tokens], dim=1)
-
-        state_features = self.state_mlp(obs["joint_state"])
-        state_features = state_features.unsqueeze(1).expand(-1, pc_features.size(1), -1)
-        features = torch.cat([pc_features, state_features], dim=-1)
-
+        patches = self.pc_encoder(pc)["tokens"]
+        state = self.state_mlp(obs["joint_state"])
+        pc_features = torch.cat((patches.mean(dim=1, keepdim=True), patches), dim=1)
+        state = state.unsqueeze(1).expand(-1, pc_features.shape[1], -1)
+        features = torch.cat((pc_features, state), dim=-1)
         return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1, 2)
 
 
@@ -156,7 +145,7 @@ class LatentFlowPolicy(BasePolicy):
             horizon=horizon,
             action_dim=7 + latent_dim,
             n_obs_steps=n_obs_steps,
-            obs_token_dim=obs_encoder.obs_token_dim,
+            obs_token_dim=obs_encoder.out_dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,
             n_head=n_head,
@@ -343,10 +332,10 @@ class LatentFlowPolicy(BasePolicy):
         reference_state: torch.Tensor,
         generator: torch.Generator | None = None,
     ) -> dict[str, torch.Tensor]:
-        template = condition.new_zeros(
-            (len(condition), self.horizon, self.model_action_dim), dtype=torch.float32
+        native = self.action_decoder.predict_action(
+            condition, (len(condition), self.horizon, self.model_action_dim),
+            inference_steps, dtype=torch.float32, generator=generator,
         )
-        native = self.action_decoder.predict_action(condition, template, inference_steps, generator=generator)
         affine = self.normalizer["action"].params_dict
         scale = affine["scale"][: self.arm_dim]
         offset = affine["offset"][: self.arm_dim]

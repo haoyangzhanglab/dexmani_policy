@@ -229,7 +229,7 @@ class BasePolicy(nn.Module):
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
-        template = condition.new_zeros((condition.shape[0], self.horizon, self.action_dim))
+        action_shape = (condition.shape[0], self.horizon, self.action_dim)
         kwargs = {}
         if rtc_prefix is not None:
             if "rtc" not in self.supported_execution_modes:
@@ -237,7 +237,7 @@ class BasePolicy(nn.Module):
             params = self.normalizer["action"].params_dict
             scale = params["scale"][: self.control_action_dim]
             offset = params["offset"][: self.control_action_dim]
-            normalized = rtc_prefix.to(template) * scale + offset
+            normalized = rtc_prefix.to(condition) * scale + offset
             kwargs = dict(
                 rtc_prefix=normalized,
                 delay_steps=delay_steps,
@@ -245,7 +245,7 @@ class BasePolicy(nn.Module):
                 rtc_guidance_cap=rtc_guidance_cap,
             )
         prediction = self.action_decoder.predict_action(
-            condition, template, inference_steps=inference_steps, generator=generator, **kwargs
+            condition, action_shape, inference_steps=inference_steps, generator=generator, **kwargs
         )
         prediction = self.normalizer["action"].unnormalize(prediction)
         return self.format_action_output(prediction)

@@ -74,7 +74,7 @@ bash scripts/eval/evaluate.sh <policy_name> <task_name> <run> \
   --checkpoint best
 ```
 
-正式选点在仿真前要求训练预算对应的完整 milestone 集合（通常为 20/40/60/80/100%）；缺失时列出 step，不能以部分候选代替。普通研究评测仍可指定单个 Checkpoint；`best` 在加载前检查实际权重 SHA-256，但不重跑排名。正式测试使用冻结的选点与评测协议，普通研究评测不作为正式 held-out 测试证据。
+正式选点在仿真前要求训练预算对应的完整 milestone 集合（通常为 20/40/60/80/100%）；缺失时列出 step，不能以部分候选代替。普通研究评测仍可指定单个 Checkpoint；`best` 直接读取选中路径和推理配置，加载后核对 checkpoint step，不重跑排名。正式测试使用冻结的选点与评测协议，普通研究评测不作为正式 held-out 测试证据。
 
 ## 项目结构
 
@@ -102,7 +102,7 @@ experiments/<policy_name>/<task_name>/<run>/
 
 每次实验保存配置、Checkpoint 和相关运行记录。评测结果与选点记录保存在对应实验目录中。
 
-历史实验应使用对应的保存配置、Checkpoint 和源码复现。具体算法实现、参数与运行约束以代码、配置及技术文档为准。
+历史实验应使用对应的保存配置、Checkpoint 和源码复现，不自动迁移旧类路径或配置字段。`workspace.wandb_cfg` 使用普通参数映射（不含 `_target_`），设为 null 仅保留本地 JSONL。具体算法实现、参数与运行约束以代码、配置及技术文档为准。
 
 ## 技术文档
 
@@ -110,4 +110,4 @@ experiments/<policy_name>/<task_name>/<run>/
 - [手部动作表示](docs/手部动作表示.md)：手部动作建模及预训练
 - [仿真评测机制](docs/仿真评测机制.md)：Checkpoint 选点、评测协议与结果记录
 - [SSH 服务器训练部署](docs/SSH服务器训练部署.md)：远程训练、同步与管理
-- [本轮修复与验证结果](docs/CODEX_REFACTOR_RESULTS.md)：定向修复、验证结果与未验证范围
+- [历史修复与验证记录](docs/CODEX_REFACTOR_RESULTS.md)：历史检查结果与当时的未验证范围

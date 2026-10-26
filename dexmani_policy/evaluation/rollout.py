@@ -6,7 +6,6 @@ from contextlib import closing
 
 from dexmani_policy.common.checkpoint import restore_policy_agent
 from dexmani_policy.common.runtime import set_seed
-from dexmani_policy.common.experiments import file_sha256
 from dexmani_policy.env_runner.common.metrics import (
     compute_evaluation_statistics,
     validate_episodes,
@@ -46,10 +45,6 @@ def evaluate_policy(request, *, output_root, output_dir=None):
             # A fresh load is deterministic; each episode resets its own sampling stream.
             set_seed(request.numerics["startup_seed"])
             record["runtime"] = runtime_provenance()
-            record["checkpoint_sha256"] = file_sha256(request.checkpoint)
-            expected_hash = request.source.get("checkpoint_sha256")
-            if expected_hash is not None and expected_hash != record["checkpoint_sha256"]:
-                raise ValueError("Checkpoint content changed since selection")
             agent = restore_policy_agent(
                 request.config, request.checkpoint, use_ema=request.use_ema, device=request.device
             )

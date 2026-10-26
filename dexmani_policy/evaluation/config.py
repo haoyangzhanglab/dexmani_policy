@@ -1,5 +1,6 @@
 """Resolve evaluation inputs once; execution receives concrete tasks and seeds."""
 
+import argparse
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -18,6 +19,18 @@ from dexmani_policy.env_runner.common.seeds import (
     validate_task_seeds,
 )
 from dexmani_policy.evaluation.artifacts import verify_selection_record
+
+
+def build_parser(description):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--policy-name", required=True)
+    parser.add_argument("--task-name", required=True)
+    parser.add_argument("--exp-name", required=True)
+    parser.add_argument("--output-dir")
+    parser.add_argument(
+        "overrides", nargs="*", help="Canonical eval.*, env_runner.* and training.device dotlist"
+    )
+    return parser
 
 
 @dataclass(frozen=True)
@@ -193,7 +206,6 @@ def frozen_test_request(exp_dir, record, checkpoint, *, device=None):
             "selection_result": str(Path(exp_dir).resolve() / record["selection_result"]),
             "heldout_from_selection": True,
             "global_step": record["global_step"],
-            "checkpoint_sha256": record["checkpoint_sha256"],
             "expected_runtime": record["runtime"],
         },
     )
@@ -220,7 +232,6 @@ def resolve_evaluation_request(
         cfg = OmegaConf.merge(cfg, {"eval": selected["inference"]})
         source["selection_result"] = selected["selection_result"]
         source["global_step"] = selected["global_step"]
-        source["checkpoint_sha256"] = selected["checkpoint_sha256"]
     else:
         path = resolve_checkpoint_path(exp_dir, checkpoint)
     cfg = prepare_evaluation_config(cfg, overrides)

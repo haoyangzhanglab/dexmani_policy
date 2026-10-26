@@ -87,9 +87,11 @@ class RectifiedFlow(nn.Module):
     def predict_action(
         self,
         cond: torch.Tensor,
-        action_template: torch.Tensor,
+        action_shape: tuple[int, ...],
         inference_steps: int | None = None,
-        *, generator: torch.Generator | None = None,
+        *,
+        dtype: torch.dtype | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         num_steps = (
             self.num_inference_steps
@@ -97,9 +99,9 @@ class RectifiedFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        batch_size = action_template.shape[0]
-        x = torch.randn(action_template.shape, device=action_template.device,
-                        dtype=action_template.dtype, generator=generator)
+        dtype = cond.dtype if dtype is None else dtype
+        batch_size = action_shape[0]
+        x = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
         dt = 1.0 / num_steps
 
         context_kwargs = {}
@@ -284,9 +286,11 @@ class ConsistencyFlow(nn.Module):
     def predict_action(
         self,
         cond: torch.Tensor,
-        action_template: torch.Tensor,
+        action_shape: tuple[int, ...],
         inference_steps: int | None = None,
-        *, generator: torch.Generator | None = None,
+        *,
+        dtype: torch.dtype | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         num_steps = (
             self.num_inference_steps
@@ -294,9 +298,9 @@ class ConsistencyFlow(nn.Module):
             else positive_int(inference_steps, "inference_steps")
         )
 
-        batch_size = action_template.shape[0]
-        x = torch.randn(action_template.shape, device=action_template.device,
-                        dtype=action_template.dtype, generator=generator)
+        dtype = cond.dtype if dtype is None else dtype
+        batch_size = action_shape[0]
+        x = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
         dt = 1.0 / num_steps
         context_kv = self.model.prepare_context_kv(cond) if num_steps > 1 else None
         timesteps = euler_time_grid(num_steps, x)

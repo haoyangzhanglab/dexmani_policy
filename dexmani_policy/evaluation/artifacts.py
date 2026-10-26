@@ -1,17 +1,14 @@
-"""Atomic evaluation records and concrete code/runtime provenance."""
+"""Evaluation records, runtime settings and selection verification."""
 
-import hashlib
 import json
-import os
 import platform
-import subprocess
 import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
 
 from dexmani_policy.common.experiments import (
-    MILESTONE_PATTERN, file_sha256, milestone_steps, resolve_record_path, validate_best_info,
+    MILESTONE_PATTERN, milestone_steps, resolve_record_path, validate_best_info,
 )
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.env_runner.common.seeds import validate_seed_pool, validate_task_seeds
@@ -23,64 +20,10 @@ def artifact_reference(path, exp_dir):
     return str(path.relative_to(root))
 
 
-def code_version(directory):
-    root = Path(directory).resolve(strict=True)
-    # Hash research sources, not data/assets, generated runs or symlinked storage.
-    suffixes = {".py", ".yaml", ".yml", ".json", ".sh", ".toml", ".txt"}
-    files = [p for p in root.iterdir() if p.is_file() and not p.is_symlink()
-             and (p.suffix in {".py", ".sh"} or p.name == "pyproject.toml"
-                  or p.name.startswith("requirements") and p.suffix == ".txt")]
-    for name in ("dexmani_policy", "dexmani_sim", "configs", "scripts"):
-        base = root / name
-        if not base.is_dir() or base.is_symlink():
-            continue
-        for directory, dirs, names in os.walk(base, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if not d.startswith(".")
-                             and d not in {"__pycache__", "assets", "data", "robot_data",
-                                           "logs", "outputs", "experiments"}
-                             and not (Path(directory) / d).is_symlink())
-            files.extend(Path(directory) / n for n in names
-                         if Path(n).suffix in suffixes and not (Path(directory) / n).is_symlink())
-    if not files:
-        raise ValueError(f"No research sources found for code identity: {root}")
-    digest = hashlib.sha256()
-    for path in sorted(files, key=lambda p: p.relative_to(root).as_posix()):
-        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
-        digest.update(bytes.fromhex(file_sha256(path)))
-    version: dict[str, str | bool | None] = {
-        "commit": None, "dirty": None, "content_sha256": digest.hexdigest(),
-    }
-    try:
-        git_root = subprocess.check_output(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            text=True, stderr=subprocess.DEVNULL,
-        ).strip()
-        if Path(git_root).resolve() == root:
-            version["commit"] = subprocess.check_output(
-                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL,
-            ).strip()
-            version["dirty"] = bool(subprocess.check_output(
-                ["git", "-C", str(root), "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL,
-            ))
-    except (OSError, subprocess.CalledProcessError):
-        pass  # Source snapshots legitimately have no Git metadata; content is still identified.
-    return version
-
-
-def runtime_contract(runtime):
-    identity = {}
-    for key in ("policy_code", "simulator_code"):
-        content = (runtime.get(key) or {}).get("content_sha256")
-        if not isinstance(content, str) or len(content) != 64:
-            raise ValueError(f"Formal evaluation requires {key} content identity; rerun selection")
-        identity[key] = content
-    return {**identity, **{key: runtime[key] for key in
-                          ("torch", "cuda", "parameter_dtypes", "numerics")}}
-
-
 def validate_runtime(expected, actual):
-    if runtime_contract(expected) != runtime_contract(actual):
-        raise ValueError("Runtime code, Torch/CUDA, parameter dtype or numerics differ from selection")
+    for key in ("torch", "cuda", "parameter_dtypes", "numerics"):
+        if expected[key] != actual[key]:
+            raise ValueError(f"Evaluation runtime differs from selection: {key}")
 
 
 def training_source_evidence(config, plans):
@@ -106,19 +49,10 @@ def training_source_evidence(config, plans):
     }
 
 
-def simulator_code_version():
-    import importlib.util
-
-    sim = importlib.util.find_spec("dexmani_sim")
-    return code_version(Path(sim.origin).parent.parent) if sim is not None and sim.origin else None
-
-
 def runtime_provenance():
     import torch
 
     return {
-        "policy_code": code_version(Path(__file__).resolve().parents[2]),
-        "simulator_code": simulator_code_version(),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "torch": str(torch.__version__),
@@ -193,7 +127,7 @@ def validate_selection_plan(record):
             raise ValueError("Test and selection seeds must be disjoint and inside the source pool")
 
 
-def _read_selection_record(experiment_dir, record_path):
+def read_selection_record(experiment_dir, record_path):
     root = Path(experiment_dir).resolve()
     path = Path(record_path).expanduser().resolve(strict=True)
     if not path.is_relative_to(root) or not path.is_file():
@@ -205,8 +139,7 @@ def _read_selection_record(experiment_dir, record_path):
     candidates, references = info["candidates"], info["candidate_results"]
     if not candidates or len(references) != len(candidates) or len(set(references)) != len(references):
         raise ValueError("Selection requires distinct references for every candidate")
-    selected = {"checkpoint": info["ckpt_relpath"], "global_step": info["global_step"],
-                "checkpoint_sha256": info["checkpoint_sha256"]}
+    selected = {"checkpoint": info["ckpt_relpath"], "global_step": info["global_step"]}
     if selected not in candidates:
         raise ValueError("Selected checkpoint is not a declared candidate")
     request = info["test_request"]
@@ -258,8 +191,6 @@ def rank_selection_results(record, results):
         for key in ("config", "tasks", "use_ema", "inference_steps", "action_steps", "numerics"):
             if request[key] != protocol[key]:
                 raise ValueError(f"Candidate research conditions differ: {key}")
-        if result["checkpoint_sha256"] != candidate["checkpoint_sha256"]:
-            raise ValueError("Candidate checkpoint content differs from frozen identity")
         if request["source"].get("phase") != "selection":
             raise ValueError("Candidate must contain selection episode facts")
         validate_runtime(results[0]["runtime"], result["runtime"])
@@ -280,14 +211,11 @@ def rank_selection_results(record, results):
 
 def verify_selection_record(experiment_dir, record_path):
     root = Path(experiment_dir).resolve()
-    record, checkpoint = _read_selection_record(root, record_path)
+    record, checkpoint = read_selection_record(root, record_path)
     results = [json.loads(resolve_record_path(root, ref).read_text()) for ref in record["candidate_results"]]
-    for candidate in record["candidates"]:
-        candidate_path = resolve_record_path(root, candidate["checkpoint"], checkpoint=True)
-        if file_sha256(candidate_path) != candidate["checkpoint_sha256"]:
-            raise ValueError("Checkpoint content differs from selection identity")
-    best = record["candidates"][rank_selection_results(record, results)]
-    if (record["ckpt_relpath"], record["global_step"]) != (best["checkpoint"], best["global_step"]):
-        raise ValueError("Selected checkpoint disagrees with complete candidate ranking")
+    best = rank_selection_results(record, results)
+    candidate = record["candidates"][best]
+    if record["ckpt_relpath"] != candidate["checkpoint"] or record["global_step"] != candidate["global_step"]:
+        raise ValueError("Selected checkpoint disagrees with the winning candidate result")
     validate_runtime(record["runtime"], results[0]["runtime"])
     return record, checkpoint

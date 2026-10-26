@@ -1,15 +1,10 @@
 # DP — Diffusion Policy with RGB observation
-# Encoder:  DINOv2-small + LoRA (384d, 1.3M trainable params)
-# Decoder:  ConditionalUNet1D (FiLM conditioning) + DDIM
-# Modality: RGB + joint_state → action
 
 policy_name: dp
 
-# ── Task ──
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
 
-# ── Core ──
 seed: 42
 horizon: 16
 n_obs_steps: 2
@@ -17,13 +12,11 @@ n_action_steps: 8
 action_key: action                    # action | action_ee
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
-# ── Normalization ──
 normalization:
   joint_state: limits
   action: auto
   rgb: identity
 
-# ── Dataloader ──
 dataloader:
   batch_size: 64
   shuffle: true
@@ -33,7 +26,6 @@ dataloader:
   prefetch_factor: 2
   drop_last: true
 
-# ── Dataset ──
 dataset:
   _target_: dexmani_policy.datasets.demonstration_dataset.DemonstrationDataset
   action_key: ${action_key}
@@ -67,7 +59,6 @@ dataset:
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
-# ── Agent ──
 agent:
   clip_sample: true
   _target_: dexmani_policy.agents.policies.dp.DPPolicy
@@ -100,7 +91,6 @@ agent:
   num_inference_steps: 10
   prediction_type: sample
 
-# ── Optimizer ──
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-6
@@ -108,7 +98,6 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
-# ── EMA ──
 ema:
   _target_: dexmani_policy.training.common.ema.EMA
   update_after_step: 0
@@ -117,7 +106,6 @@ ema:
   min_value: 0.0
   max_value: 0.9999
 
-# ── Training ──
 training:
   seed: ${seed}
   device: cuda:0
@@ -132,19 +120,16 @@ training:
     log_interval_steps: 100
     gradient_accumulation_steps: 1
 
-# ── Workspace ──
 workspace:
   _target_: dexmani_policy.training.workspace.Workspace
   output_dir: ${hydra:runtime.output_dir}
 
   wandb_cfg:
-    _target_: dexmani_policy.training.workspace.WandbConfig
     project: dexmani_policy
     group: ${policy_name}
     name: ${task_name}_${run_id:}_seed${training.seed}
     mode: offline
 
-# ── Env Runner ──
 env_runner:
   task_name: ${task_name}
   env_kwargs:
@@ -153,7 +138,6 @@ env_runner:
     instance_random: true
     table_random: true
 
-# ── Eval ──
 eval:
   seed: 1024
   inference_steps: 10
@@ -166,7 +150,6 @@ eval:
 
   video:
     enabled: true
-# ── Hydra ──
 hydra:
   job:
     override_dirname: ${policy_name}_${task_name}
