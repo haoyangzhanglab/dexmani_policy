@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.r3d import R3DTransformer
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
@@ -55,11 +55,10 @@ class R3DObservationEncoder(nn.Module):
 class R3DPolicy(BasePolicy):
     supported_execution_modes = ("sync", "async", "rtc")
 
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        validate_action_clipping(spec, cfg.get("clip_sample", True))
+    def set_normalization_spec(self, spec, feature_dims) -> None:
         if spec["point_cloud"] != "limits":
             raise ValueError("R3D fixed normalized point-cloud clamp requires limits normalization")
+        super().set_normalization_spec(spec, feature_dims)
 
     def __init__(
         self,
@@ -135,7 +134,7 @@ class R3DPolicy(BasePolicy):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    def initialize_training(self) -> None:
+    def initialize_training(self, data_description) -> None:
         self.obs_encoder.pc_encoder.initialize_training()
 
     def loss_groups(self) -> dict[str, tuple[int, int]] | None:

@@ -61,10 +61,8 @@ def restore_model_weights(checkpoint, model, ema_model, device):
         if type(checkpoint.ema_updater_step) is not int or checkpoint.ema_updater_step < 0:
             raise RuntimeError("Resume checkpoint ema_updater_step must be an int >= 0")
     load_policy_state(model, checkpoint.model_state)
-    model.validate_normalizer()
     # Normalizer restoration creates parameters on CPU; move them before DDP wrapping.
     model.to(device)
     if ema_model is not None:
         load_policy_state(ema_model, checkpoint.ema_model_state)
-        ema_model.validate_normalizer()
         ema_model.to(device)

@@ -168,7 +168,7 @@ def read_selection_record(experiment_dir, record_path):
 
 
 def rank_selection_results(record, results):
-    """Validate complete candidate evidence, then rank without file or environment I/O."""
+    """Check candidate evidence against a validated plan and rank without I/O."""
     from dexmani_policy.env_runner.common.metrics import (
         compute_evaluation_statistics,
         validate_episodes,
@@ -177,7 +177,6 @@ def rank_selection_results(record, results):
     candidates = record["candidates"]
     if not candidates or len(results) != len(candidates):
         raise ValueError("Selection requires complete results for every declared candidate")
-    validate_selection_plan(record)
     protocol = record["test_request"]
     selection = record["selection_task_seeds"]
     ranks = []
@@ -212,6 +211,7 @@ def rank_selection_results(record, results):
 def verify_selection_record(experiment_dir, record_path):
     root = Path(experiment_dir).resolve()
     record, checkpoint = read_selection_record(root, record_path)
+    validate_selection_plan(record)
     results = [json.loads(resolve_record_path(root, ref).read_text()) for ref in record["candidate_results"]]
     best = rank_selection_results(record, results)
     candidate = record["candidates"][best]

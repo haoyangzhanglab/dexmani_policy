@@ -9,6 +9,7 @@ import hydra
 import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
+from torch.nn.modules.batchnorm import _BatchNorm
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import (
@@ -30,10 +31,7 @@ from dexmani_policy.training.common.scheduler import get_scheduler
 from dexmani_policy.training.data import build_train_loader, close_data_loader
 from dexmani_policy.training.resume import restore_model_weights
 from dexmani_policy.training.trainer import Trainer, TrainLoopConfig
-from dexmani_policy.training.validation import (
-    validate_config,
-    validate_ema_batchnorm,
-)
+from dexmani_policy.training.validation import validate_config
 from dexmani_policy.training.workspace import Workspace
 
 
@@ -72,13 +70,8 @@ def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, ch
         resolve_normalization_spec(cfg), data_description["normalization_dims"]
     )
     if checkpoint is None:
-        model.initialize_training()
+        model.initialize_training(data_description)
         model.load_normalizer(normalizer)
-        if model.requires_hand_pretraining:
-            kwargs = {}
-            if model.requires_split_manifest:
-                kwargs["split_manifest"] = data_description["data_recipe"][0]["split_manifest"]
-            model.validate_training_data(data_description["hand_data"], **kwargs)
     if checkpoint is not None and dict(cfg.policy_metadata) != model.inference_metadata:
         raise ValueError("Restored policy metadata differs from saved construction")
     if checkpoint is None:
@@ -89,7 +82,17 @@ def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, ch
         raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
 
     if cfg.training.use_ema:
-        validate_ema_batchnorm(model)
+        active_batchnorm = [
+            name or "<root>" for name, module in model.named_modules()
+            if isinstance(module, _BatchNorm) and (
+                any(p.requires_grad for p in module.parameters(recurse=False))
+                or (module.training and module.track_running_stats)
+            )
+        ]
+        if active_batchnorm:
+            raise ValueError(
+                f"EMA requires frozen BatchNorm or GroupNorm; active modules: {active_batchnorm}"
+            )
 
     # Freeze before EMA chooses which parameters need FP32 accumulation.
     obs_lr = cfg.optimizer.get("obs_lr")
@@ -293,6 +296,13 @@ def build_trainer(components):
         use_bfloat16=cfg.training.get("use_bfloat16", False),
         effective_config=cfg,
     )
-    if components.ema_updater is not None:
-        components.ema_updater.validate_frozen_parameters(trainer.raw_model)
+    if components.ema_updater is not None and cfg.get("resume_from") is not None:
+        # DDP may have synchronized raw weights after restoring raw/EMA independently.
+        averaged = dict(components.ema_model.named_parameters())
+        for name, parameter in trainer.raw_model.named_parameters():
+            if not parameter.requires_grad and (
+                parameter.dtype != averaged[name].dtype
+                or not torch.equal(parameter, averaged[name])
+            ):
+                raise ValueError(f"Raw/EMA frozen parameter mismatch: {name}")
     return trainer

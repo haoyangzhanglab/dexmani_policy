@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import inspect
-
 import torch
 from omegaconf import DictConfig
 from torch import nn
@@ -10,7 +8,7 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     ConditionalUNet1D,
     validate_unet_horizon,
 )
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
 from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
@@ -71,12 +69,6 @@ class DPPolicy(BasePolicy):
         rgb["load_pretrained"] = False
         config.rgb_backbone_config = rgb
 
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        validate_action_clipping(spec, cfg.get("clip_sample", True))
-        defaults = inspect.signature(cls).parameters["down_dims"].default
-        validate_unet_horizon(cfg.horizon, cfg.get("down_dims", defaults))
-
     def __init__(
         self,
         horizon: int,
@@ -98,6 +90,7 @@ class DPPolicy(BasePolicy):
         cond_predict_scale: bool = True,
         clip_sample: bool = True,
     ) -> None:
+        validate_unet_horizon(horizon, down_dims)
         obs_encoder = DPObservationEncoder(
             rgb_backbone_name,
             state_dim,

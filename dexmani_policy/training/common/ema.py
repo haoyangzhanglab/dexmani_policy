@@ -40,24 +40,9 @@ class EMA:
         return max(self.min_value, min(value, self.max_value))
 
     @torch.no_grad()
-    def validate_frozen_parameters(self, model):
-        """Check final restored/synchronized parameters before the first forward."""
-        averaged = dict(self.averaged_model.named_parameters())
-        for name, parameter in model.named_parameters():
-            if parameter.requires_grad:
-                continue
-            ema_parameter = averaged.get(name)
-            if (
-                ema_parameter is None
-                or parameter.dtype != ema_parameter.dtype
-                or not torch.equal(parameter, ema_parameter)
-            ):
-                raise ValueError(f"Raw/EMA frozen parameter mismatch: {name}")
-
-    @torch.no_grad()
     def step(self, new_model):
         decay = self.get_decay(self.optimization_step)
-        # Frozen parameters were checked once after restoration and DDP synchronization.
+        # Fresh EMA copies raw weights; restored frozen parameters were checked before training.
         for param, ema_param in zip(new_model.parameters(), self.averaged_model.parameters()):
             if not param.requires_grad:
                 continue

@@ -11,7 +11,7 @@ from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import (
     resolve_normalization_spec,
 )
-from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
+from dexmani_policy.common.normalization import AffineNormalizer
 from dexmani_policy.common.runtime import worker_init_fn
 from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
 
@@ -69,7 +69,6 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     normalizer = None
     if resume_checkpoint is None:
         normalizer = build_normalizer(dataset, spec, cfg.action_key)
-        validate_normalizer_state(normalizer, spec, description["normalization_dims"])
     if verbose:
         print(f"[Dataset] {dataset.training_summary()}")
         if resume_checkpoint is None:

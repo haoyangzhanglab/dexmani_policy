@@ -132,6 +132,7 @@ def validate_split_options(val_ratio, max_train_episodes, *, explicit=False):
 def build_split_manifest(
     zarr_path, episode_ends, attrs, *, val_ratio=0.1, seed=42, max_train_episodes=None
 ):
+    """Return train/validation masks and their validated manifest."""
     validate_split_options(val_ratio, max_train_episodes)
     episode_ends = np.asarray(episode_ends)
     if (
@@ -170,7 +171,7 @@ def build_split_manifest(
     manifest = describe_split(zarr_path, episode_ends, attrs, train, val)
     return validate_split_manifest(
         manifest, attrs, len(episode_ends), episode_ends=episode_ends, zarr_path=zarr_path
-    )[2]
+    )
 
 
 def main():
@@ -191,7 +192,7 @@ def main():
     parser.add_argument("--max-train-episodes", type=int)
     args = parser.parse_args()
     root = zarr.open_group(str(Path(args.zarr_path).expanduser()), mode="r")
-    manifest = build_split_manifest(
+    _, _, manifest = build_split_manifest(
         args.zarr_path,
         root["meta/episode_ends"][:],
         dict(root.attrs),

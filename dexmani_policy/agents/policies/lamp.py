@@ -8,13 +8,11 @@ from torch.nn import functional as F
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior, load_motion_prior
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import (
-    Sparse3DEncoder,
-    validate_sparse3d_config,
-)
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.hand_representation import validate_pretraining_data
 
 
 class LAMPObservationEncoder(nn.Module):
@@ -78,32 +76,7 @@ class LAMPPolicy(BasePolicy):
     requires_hand_pretraining = True
     requires_split_manifest = True
     requires_action_affine = False
-
-    def validate_training_data(self, hand_data, *, split_manifest):
-        from dexmani_policy.common.hand_representation import validate_pretraining_data
-
-        validate_pretraining_data(hand_data, split_manifest, self.hand_data, self.pretraining_split)
-
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        validate_sparse3d_config(cfg, spec, dataset=dataset)
-        cls.validate_normalization(spec)
-        if dataset.action_key != "action" or cfg.action_dim != 19 or cfg.state_dim != 19:
-            raise ValueError("LAMP requires joint action/state=7+12")
-        if cfg.get("use_aux_ee", False):
-            raise ValueError("LAMP does not support auxiliary action targets")
-        if (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps) != (1, 1, 1):
-            raise ValueError("LAMP requires H=Nobs=C=1")
-        if dataset.history_steps != cfg.history_steps:
-            raise ValueError("LAMP dataset/policy history_steps must match")
-        if cfg.get("num_inference_steps", 1) != 1 or inference_steps != 1:
-            raise ValueError("LAMP requires inference_steps=1 in agent/eval")
-        cls.validate_loss_config(
-            cfg.hand_loss_weight,
-            cfg.drift_reg_weight,
-            cfg.history_noise_std,
-            cfg.arm_state_noise_std,
-        )
+    supported_action_keys = ("action",)
 
     def __init__(
         self,
@@ -135,10 +108,18 @@ class LAMPPolicy(BasePolicy):
             raise ValueError("LAMP requires horizon=n_obs_steps=n_action_steps=1")
         if action_dim != 19 or state_dim != 19:
             raise ValueError("LAMP requires joint action/state: 7 arm + 12 hand")
-        self.validate_inference_steps(num_inference_steps)
-        self.validate_loss_config(
-            hand_loss_weight, drift_reg_weight, history_noise_std, arm_state_noise_std
-        )
+        if num_inference_steps is not None and (
+            type(num_inference_steps) is not int or num_inference_steps != 1
+        ):
+            raise ValueError("LAMP direct regression requires num_inference_steps=None or 1")
+        for name, value in (
+            ("hand_loss_weight", hand_loss_weight),
+            ("arm_state_noise_std", arm_state_noise_std),
+            ("drift_reg_weight", drift_reg_weight),
+            ("history_noise_std", history_noise_std),
+        ):
+            if not 0 <= value < float("inf"):
+                raise ValueError(f"{name} must be finite and nonnegative")
         encoder = LAMPObservationEncoder(
             pc_dim,
             state_dim,
@@ -166,29 +147,11 @@ class LAMPPolicy(BasePolicy):
         self.prior_initialized = False
         self.register_load_state_dict_post_hook(self.validate_restored_prior)
 
-    @staticmethod
-    def validate_loss_config(
-        hand_loss_weight, drift_reg_weight, history_noise_std, arm_state_noise_std
-    ) -> None:
-        for name, value in (
-            ("hand_loss_weight", hand_loss_weight),
-            ("arm_state_noise_std", arm_state_noise_std),
-            ("drift_reg_weight", drift_reg_weight),
-            ("history_noise_std", history_noise_std),
-        ):
-            if not 0 <= value < float("inf"):
-                raise ValueError(f"{name} must be finite and nonnegative")
-
-    @staticmethod
-    def validate_inference_steps(steps) -> None:
-        if steps is not None and (type(steps) is not int or steps != 1):
-            raise ValueError("LAMP direct regression requires inference_steps=None or 1")
-
     @property
     def action_context_shapes(self):
         return {"hand_history": [self.history_steps, self.hand_dim]}
 
-    def initialize_training(self) -> None:
+    def initialize_training(self, data_description) -> None:
         self.prior_initialized = False
         if not self.prior_path:
             raise ValueError("Fresh LAMP training requires prior_path")
@@ -196,8 +159,11 @@ class LAMPPolicy(BasePolicy):
         if prior.model_config != self.prior.model_config:
             raise ValueError("LAMP prior architecture differs from the policy configuration")
         self.prior = prior
-        self.hand_data = payload["metadata"]["hand_data"]
-        self.pretraining_split = payload["metadata"]["split_manifest"]
+        metadata = payload["metadata"]
+        validate_pretraining_data(
+            data_description["hand_data"], data_description["data_recipe"][0]["split_manifest"],
+            metadata["hand_data"], metadata["split_manifest"],
+        )
         self.prior_initialized = True
 
     def validate_restored_prior(self, module, incompatible_keys) -> None:
@@ -206,13 +172,9 @@ class LAMPPolicy(BasePolicy):
         self.prior_initialized = True
 
     def set_normalization_spec(self, spec, feature_dims) -> None:
-        self.validate_normalization(spec)
-        super().set_normalization_spec(spec, feature_dims)
-
-    @staticmethod
-    def validate_normalization(spec) -> None:
         if spec.get("action") != "identity" or spec.get("joint_state") != "gaussian":
             raise ValueError("LAMP requires identity action and gaussian joint_state normalization")
+        super().set_normalization_spec(spec, feature_dims)
 
     def preprocess(self, obs_dict: dict) -> dict:
         result = super().preprocess(obs_dict)
@@ -275,7 +237,6 @@ class LAMPPolicy(BasePolicy):
             return self.prior.decode(latent.float())
 
     def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
-        self.validate_batch(batch)
         condition, mu = self.encode_condition(batch["obs"], batch.get("action_context"))
         native = self.action_decoder(condition).float()
         arm, offset = native[:, : self.arm_dim], native[:, self.arm_dim :]
@@ -321,7 +282,6 @@ class LAMPPolicy(BasePolicy):
     ) -> dict[str, torch.Tensor]:
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("LAMP supports synchronous execution only")
-        self.validate_observations(obs_dict)
         condition, mu = self.encode_condition(obs_dict, action_context)
         return self.predict_action_from_condition(condition, inference_steps, mu=mu, generator=generator)
 
@@ -330,7 +290,8 @@ class LAMPPolicy(BasePolicy):
         self, condition: torch.Tensor, inference_steps: int | None = None, *, mu: torch.Tensor,
         generator: torch.Generator | None = None,
     ) -> dict[str, torch.Tensor]:
-        self.validate_inference_steps(inference_steps)
+        if inference_steps is not None and (type(inference_steps) is not int or inference_steps != 1):
+            raise ValueError("LAMP direct regression requires inference_steps=None or 1")
         native = self.action_decoder(condition).float()
         arm = native[:, : self.arm_dim]
         hand = self.decode_hand(mu + native[:, self.arm_dim :])

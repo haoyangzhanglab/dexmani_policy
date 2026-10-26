@@ -2,8 +2,6 @@ import numpy as np
 import torch
 import torchvision.transforms.v2 as v2
 
-from dexmani_policy.common.config import positive_int
-
 BT601_LUMA = (0.299, 0.587, 0.114)
 
 
@@ -17,35 +15,12 @@ def sample_range(bounds):
     return bounds[0] if bounds[0] == bounds[1] else np.random.uniform(*bounds)
 
 
-def validate_random_keep_points(keep_points, *, num_points=None):
-    """Require subsampling without replacement within the raw point count."""
-    if keep_points is None:
-        return
-    positive_int(keep_points, "random_keep_points")
-    if num_points is not None and num_points < keep_points:
-        raise ValueError(f"point_cloud N={num_points} must be >= random_keep_points={keep_points}")
-
-
 def random_sample_points(pointcloud: np.ndarray, keep_points: int) -> np.ndarray:
     """Sample each frame without replacement, using shared indices for all channels."""
     t, n, _ = pointcloud.shape
     scores = np.random.random((t, n))
     indices = np.argpartition(scores, kth=keep_points - 1, axis=1)[:, :keep_points]
     return np.ascontiguousarray(np.take_along_axis(pointcloud, indices[..., None], axis=1))
-
-
-def validate_pc_color_augmentation(pc_dim, augmentation_cfg):
-    """Require XYZRGB channels for enabled point color transforms."""
-    if pc_dim is None or pc_dim >= 6:
-        return
-    pc = (augmentation_cfg or {}).get("pc") or {}
-    for key in ("color", "color_noise"):
-        config = pc.get(key)
-        if config and config.get("prob", 1) > 0:
-            raise ValueError(
-                f"XYZ-only or incomplete RGB point clouds cannot use color augmentation ({key}); "
-                "set prob=0 or use XYZRGB channels"
-            )
 
 
 class Augmentation:

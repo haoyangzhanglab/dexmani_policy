@@ -19,8 +19,6 @@ from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, positive_int, val
 from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
-    validate_pc_color_augmentation,
-    validate_random_keep_points,
 )
 from dexmani_policy.datasets.common.episode_split import (
     build_split_manifest,
@@ -68,12 +66,6 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         pc_dim: int | None = None,
     ) -> None:
         super().__init__()
-
-        validate_split_options(
-            val_ratio,
-            max_train_episodes,
-            explicit=split_manifest is not None or saved_split is not None,
-        )
 
         if "rgb" in sensor_modalities:
             validate_rgb_preprocessing(rgb_preprocess_size, rgb_random_crop_size, rgb_color_aug)
@@ -128,21 +120,24 @@ class DemonstrationDataset(torch.utils.data.Dataset):
             or split_manifest is not None
             or "trial_ids" in self.replay_buffer.attrs
         ):
-            if saved_split is not None:
-                manifest = saved_split
-            elif split_manifest is not None:
-                manifest = json.loads(Path(split_manifest).read_text())
+            if saved_split is not None or split_manifest is not None:
+                validate_split_options(val_ratio, max_train_episodes, explicit=True)
+                manifest = (
+                    saved_split if saved_split is not None
+                    else json.loads(Path(split_manifest).read_text())
+                )
+                train_mask, val_mask, manifest = validate_split_manifest(
+                    manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes,
+                    episode_ends=self.replay_buffer.episode_ends, zarr_path=self.zarr_path,
+                )
             else:
-                manifest = build_split_manifest(
+                train_mask, val_mask, manifest = build_split_manifest(
                     self.zarr_path, self.replay_buffer.episode_ends, self.replay_buffer.attrs,
                     val_ratio=val_ratio, seed=seed, max_train_episodes=max_train_episodes,
                 )
-            train_mask, val_mask, manifest = validate_split_manifest(
-                manifest, self.replay_buffer.attrs, self.replay_buffer.n_episodes,
-                episode_ends=self.replay_buffer.episode_ends, zarr_path=self.zarr_path,
-            )
             self.data_recipe["split_manifest"] = manifest
         else:
+            validate_split_options(val_ratio, max_train_episodes)
             val_mask = get_val_mask(
                 seed=seed, val_ratio=val_ratio, n_episodes=self.replay_buffer.n_episodes
             )
@@ -434,18 +429,26 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         pc_dim = None
         if "point_cloud" in self.sensor_modalities:
             pc_dim = self.pc_dim or self.replay_buffer["point_cloud"].shape[-1]
-            validate_pc_color_augmentation(pc_dim, self.augmentation_cfg)
         if self.random_keep_points is not None:
             if "point_cloud" not in self.sensor_modalities:
                 raise ValueError("random_keep_points requires the point_cloud modality")
+            positive_int(self.random_keep_points, "random_keep_points")
             shape = self.replay_buffer["point_cloud"].shape
-            validate_random_keep_points(self.random_keep_points, num_points=shape[1])
+            if shape[1] < self.random_keep_points:
+                raise ValueError(
+                    f"point_cloud N={shape[1]} must be >= random_keep_points={self.random_keep_points}"
+                )
         for section, cls, key, modality in AUGMENTATION_SPECS:
             if modality not in self.sensor_modalities:
                 continue
             config = (augmentation.get(section) or {}).get(key)
             if config:
                 if section == "pc" and key in {"color", "color_noise"} and pc_dim < 6:
+                    if config.get("prob", 1) > 0:
+                        raise ValueError(
+                            f"XYZ-only or incomplete RGB point clouds cannot use color augmentation ({key}); "
+                            "set prob=0 or use XYZRGB channels"
+                        )
                     continue
                 self.augmentors.setdefault(modality, []).append(cls(**config))
 

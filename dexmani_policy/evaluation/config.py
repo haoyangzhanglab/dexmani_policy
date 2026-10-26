@@ -157,8 +157,7 @@ def prepare_evaluation_config(cfg, overrides=None):
 
 
 def make_request(cfg, checkpoint, tasks, seeds, *, source):
-    validate_task_seeds(seeds, [task["task_name"] for task in tasks])
-    validate_evaluation_seed(cfg["eval"]["seed"])
+    """Bind inference settings to tasks and seed plans already checked by the resolver."""
     use_ema = cfg["eval"]["use_ema"]
     if type(use_ema) is not bool:
         raise ValueError("eval.use_ema must be boolean")
@@ -242,6 +241,8 @@ def resolve_evaluation_request(
             task_seed_pools(tasks), cfg["eval"]["seed"], cfg["eval"]["episodes"]
         )
     else:
+        validate_task_seeds(seeds, [task["task_name"] for task in tasks])
+        validate_evaluation_seed(cfg["eval"]["seed"])
         for task in tasks:
             pool = task.get("eval_seeds")
             if pool is not None and set(seeds.get(task["task_name"], ())) - set(

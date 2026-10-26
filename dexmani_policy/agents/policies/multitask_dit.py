@@ -5,7 +5,7 @@ from omegaconf import DictConfig
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
@@ -79,11 +79,6 @@ class MultiTaskDiTPolicy(BasePolicy):
         config.rgb_backbone_config = rgb
         if config.get("task_texts") is not None:
             positive_int(config.text_embed_dim, "saved text_embed_dim")
-
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        if cfg.get("action_decoder_type", "diffusion") == "diffusion":
-            validate_action_clipping(spec, cfg.get("clip_sample", True))
 
     def __init__(
         self,
@@ -208,7 +203,7 @@ class MultiTaskDiTPolicy(BasePolicy):
             config["text_embed_dim"] = self.text_embed_dim
         return config
 
-    def initialize_training(self) -> None:
+    def initialize_training(self, data_description) -> None:
         if self.needs_text_initialization:
             encoder = CLIPTextEncoder(model_name=self.text_encoder_model)
             if encoder.embed_dim != self.text_embed_dim:

@@ -25,7 +25,7 @@ Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与�
 实验配置位于 `dexmani_policy/configs/`，其中 `ddp/` 存放多卡配置。
 
 ```bash
-# 配置及导入检查（无需数据或 GPU）
+# 配置接口及导入检查（无需数据或 GPU）
 python dexmani_policy/smoke_test.py --config-only dp3
 
 # 检查指定任务的数据路径
@@ -35,6 +35,8 @@ python -m dexmani_policy.common.config \
 # 检查默认配置的数据内容
 python dexmani_policy/smoke_test.py --data-only dp3
 ```
+
+`--config-only` 检查配置解析、组件之间的必要一致性和 target 导入；模型自身参数及 normalization 兼容性在实际构造或绑定时检查，数据配方在 Dataset 构建时检查。它不保证完整训练配置可运行。
 
 ### 2. 训练
 
@@ -110,4 +112,3 @@ experiments/<policy_name>/<task_name>/<run>/
 - [手部动作表示](docs/手部动作表示.md)：手部动作建模及预训练
 - [仿真评测机制](docs/仿真评测机制.md)：Checkpoint 选点、评测协议与结果记录
 - [SSH 服务器训练部署](docs/SSH服务器训练部署.md)：远程训练、同步与管理
-- [历史修复与验证记录](docs/CODEX_REFACTOR_RESULTS.md)：历史检查结果与当时的未验证范围

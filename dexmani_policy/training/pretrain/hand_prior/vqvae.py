@@ -16,6 +16,7 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
+from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
 from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
@@ -151,9 +152,10 @@ def policy_hand_rows(dataset, tcp_dim):
 
 
 def prepare_policy_data(cfg):
+    spec = resolve_normalization_spec(cfg)
+    validate_dq_normalization(spec)
     dataset = build_policy_dataset(cfg)
     hand_data = dataset.describe_hand_data()
-    spec = resolve_normalization_spec(cfg)
     action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)["action"]
     hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))
     normalizer = AffineNormalizer()

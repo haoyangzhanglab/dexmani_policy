@@ -92,14 +92,6 @@ class HandVAE(nn.Module):
         self.register_buffer("joint_weights", torch.ones(hand_dim))
         self.register_buffer("ready", torch.tensor(False))
 
-    def validate_chunk(self, chunk: Tensor, width: int, name: str) -> None:
-        if chunk.ndim != 3 or chunk.shape[1:] != (self.horizon, width):
-            raise ValueError(f"{name} must have shape [B,{self.horizon},{width}]")
-
-    def validate_reference(self, q0: Tensor, batch_size: int) -> None:
-        if q0.shape != (batch_size, self.hand_dim):
-            raise ValueError(f"q0 must have shape [B,{self.hand_dim}]")
-
     def normalize_actions(self, actions: Tensor, q0: Tensor) -> Tensor:
         """Physical commands -> standardized displacement from measured q0."""
         return (actions - q0[:, None] - self.action_mean) / self.action_std
@@ -108,8 +100,6 @@ class HandVAE(nn.Module):
         return relative * self.action_std + self.action_mean + q0[:, None]
 
     def encode(self, actions: Tensor, q0: Tensor) -> tuple[Tensor, Tensor]:
-        self.validate_chunk(actions, self.hand_dim, "actions")
-        self.validate_reference(q0, len(actions))
         relative = self.normalize_actions(actions, q0)
         tokens = torch.cat((self.encoder_q0(q0)[:, None], self.encoder_input(relative)), dim=1)
         tokens = tokens + self.encoder_position
@@ -120,8 +110,6 @@ class HandVAE(nn.Module):
 
     def decode(self, z: Tensor, q0: Tensor) -> Tensor:
         """Latent chunk -> standardized relative commands, with latent gradients."""
-        self.validate_chunk(z, self.latent_dim, "z")
-        self.validate_reference(q0, len(z))
         tokens = torch.cat((self.decoder_q0(q0)[:, None], self.decoder_input(z)), dim=1)
         tokens = tokens + self.decoder_position
         for layer in self.decoder:
@@ -133,10 +121,6 @@ class HandVAE(nn.Module):
 
     def reconstruction_terms(self, pred: Tensor, target: Tensor) -> dict[str, Tensor]:
         """Joint-weighted Huber means for position, velocity, and acceleration."""
-        self.validate_chunk(pred, self.hand_dim, "pred")
-        if pred.shape != target.shape:
-            raise ValueError("Reconstruction prediction and target shapes must match")
-
         terms = {}
         for order, name in enumerate(("position", "velocity", "acceleration")):
             if order:

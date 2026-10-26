@@ -10,13 +10,6 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from dexmani_policy.common.config import positive_int
 
 
-def validate_action_clipping(spec, clip_sample):
-    if type(clip_sample) is not bool:
-        raise TypeError("agent.clip_sample must be a bool")
-    if spec.get("action") == "gaussian" and clip_sample:
-        raise ValueError("Gaussian action normalization requires agent.clip_sample=false.")
-
-
 class Diffusion(nn.Module):
     def __init__(
         self,
@@ -29,6 +22,8 @@ class Diffusion(nn.Module):
     ) -> None:
         super().__init__()
         positive_int(num_inference_steps, "num_inference_steps")
+        if type(clip_sample) is not bool:
+            raise TypeError("agent.clip_sample must be a bool")
         if prediction_type not in ("epsilon", "sample", "v_prediction"):
             raise ValueError(f"Unsupported prediction type: {prediction_type}")
 
@@ -47,7 +42,8 @@ class Diffusion(nn.Module):
         self.num_inference_steps = num_inference_steps
 
     def validate_normalization(self, spec):
-        validate_action_clipping(spec, self.noise_scheduler.config.clip_sample)
+        if spec.get("action") == "gaussian" and self.noise_scheduler.config.clip_sample:
+            raise ValueError("Gaussian action normalization requires agent.clip_sample=false.")
 
     def compute_loss(
         self,

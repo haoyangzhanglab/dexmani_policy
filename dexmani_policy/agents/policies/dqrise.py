@@ -11,16 +11,14 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     ConditionalUNet1D,
     validate_unet_horizon,
 )
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
+from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_dq_normalization
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import (
-    Sparse3DEncoder,
-    validate_sparse3d_config,
-)
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.hand_representation import validate_pretraining_data
 
 
 class DQRISEObservationEncoder(nn.Module):
@@ -89,37 +87,16 @@ class DQRISEObservationEncoder(nn.Module):
 class DQRISEPolicy(BasePolicy):
     requires_hand_pretraining = True
     requires_split_manifest = True
-
-    def validate_training_data(self, hand_data, *, split_manifest):
-        from dexmani_policy.common.hand_representation import validate_pretraining_data
-
-        validate_pretraining_data(hand_data, split_manifest, self.hand_data, self.pretraining_split)
-
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        validate_sparse3d_config(cfg, spec, dataset=dataset, default_num_patches=64)
-        if cfg.n_obs_steps not in (1, 2) or (
-            cfg.get("pc_dim", 6), cfg.get("state_dim", 19)
-        ) != (6, 19):
-            raise ValueError("Sparse3D global observations require 1 or 2 XYZRGB/19D frames")
-        if spec.get("joint_state") != "limits":
-            raise ValueError(
-                "Sparse3D global observations require normalization.joint_state: limits"
-            )
-        if dataset.action_key != "action" or (cfg.tcp_dim, cfg.action_dim) != (7, 19):
-            raise ValueError("DQ-RISE requires joint action=7+12")
-        if (cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps) != (20, 1, 16):
-            raise ValueError("DQ-RISE requires horizon=20, n_obs_steps=1, n_action_steps=16")
-        if cfg.get("use_aux_ee", False):
-            raise ValueError("DQ-RISE does not support auxiliary action targets")
-        validate_dq_normalization(spec)
-        validate_action_clipping(spec, cfg.get("clip_sample", True))
-        validate_unet_horizon(cfg.horizon, cfg.get("down_dims", (256, 512)))
+    supported_action_keys = ("action",)
 
     def set_normalization_spec(
         self, spec: dict[str, str], feature_dims: dict[str, int]
     ) -> None:
         validate_dq_normalization(spec)
+        if spec.get("joint_state") != "limits":
+            raise ValueError(
+                "Sparse3D global observations require normalization.joint_state: limits"
+            )
         super().set_normalization_spec(spec, feature_dims)
 
     def __init__(
@@ -151,6 +128,7 @@ class DQRISEPolicy(BasePolicy):
     ) -> None:
         if (horizon, n_obs_steps, n_action_steps, action_dim, tcp_dim) != (20, 1, 16, 19, 7):
             raise ValueError("DQ-RISE requires horizon=20, n_obs_steps=1, n_action_steps=16 and joint action=7+12")
+        validate_unet_horizon(horizon, down_dims)
 
         hand_dim = action_dim - tcp_dim
         diffusion_action_dim = tcp_dim + 1
@@ -214,15 +192,17 @@ class DQRISEPolicy(BasePolicy):
             )
         ]
 
-    def initialize_training(self) -> None:
+    def initialize_training(self, data_description) -> None:
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
         self.hand_codebook.load(self.codebook_path)
-        self.hand_data = self.hand_codebook.artifact_metadata["hand_data"]
-        self.pretraining_split = self.hand_codebook.artifact_metadata["split_manifest"]
-        if self.hand_data.get("action_key") != "action":
+        metadata = self.hand_codebook.artifact_metadata
+        if metadata["hand_data"]["action_key"] != "action":
             raise ValueError("DQ-RISE requires a Codebook pretrained with action_key=action")
-        self.validate_codebook_normalizer()
+        validate_pretraining_data(
+            data_description["hand_data"], data_description["data_recipe"][0]["split_manifest"],
+            metadata["hand_data"], metadata["split_manifest"],
+        )
 
     def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:
         self.validate_codebook_normalizer()
@@ -232,11 +212,6 @@ class DQRISEPolicy(BasePolicy):
         self.validate_codebook_normalizer()
 
     def validate_codebook_normalizer(self, *, rtol: float = 1e-5, atol: float = 1e-6) -> None:
-        if not self.hand_codebook.is_loaded:
-            return
-        if "action" not in self.normalizer.params_dict:
-            return
-
         params = self.normalizer["action"].params_dict
         policy_scale = params["scale"][-self.hand_dim :].detach().cpu()
         policy_offset = params["offset"][-self.hand_dim :].detach().cpu()
@@ -266,7 +241,6 @@ class DQRISEPolicy(BasePolicy):
     def compute_loss(
         self, batch: dict[str, Any], *, log_metrics: bool = True
     ) -> tuple[torch.Tensor, dict]:
-        self.validate_batch(batch)
         self.require_codebook()
         condition = self.encode_observation(batch["obs"])
 

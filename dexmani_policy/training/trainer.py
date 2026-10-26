@@ -169,35 +169,31 @@ class Trainer:
         ):
             raw_loss, log_dict = self.model(batch, log_metrics=log_metrics, **loss_kwargs)
 
-        self.validate_loss(raw_loss)
+        # Every rank must reject a nonfinite loss before entering backward.
+        value = raw_loss.detach()
+        finite = torch.isfinite(value)
+        context = ""
+        if self.distributed:
+            world_size = dist.get_world_size()
+            failed_rank = torch.where(finite, world_size, dist.get_rank())
+            dist.all_reduce(failed_rank, op=dist.ReduceOp.MIN)
+            rank = int(failed_rank.item())
+            finite = rank == world_size
+            if not finite:
+                dist.broadcast(value, src=rank)
+                context = f"rank={rank}, "
+        if not finite:
+            self.optimizer.zero_grad(set_to_none=True)
+            raise RuntimeError(
+                f"Non-finite loss at epoch={self.current_epoch}, step={self.global_step} "
+                f"({context}raw_loss={value.item()})"
+            )
         (raw_loss / loss_divisor).backward()
 
         if is_accumulation_boundary:
             self.optimizer_step()
 
         return log_dict
-
-    def validate_loss(self, loss):
-        """Make every rank reject a nonfinite loss before entering backward."""
-        value = loss.detach()
-        if self.distributed:
-            world_size = dist.get_world_size()
-            failed_rank = torch.where(torch.isfinite(value), world_size, dist.get_rank())
-            dist.all_reduce(failed_rank, op=dist.ReduceOp.MIN)
-            rank = int(failed_rank.item())
-            if rank == world_size:
-                return
-            dist.broadcast(value, src=rank)
-            context = f"rank={rank}, "
-        else:
-            if torch.isfinite(value):
-                return
-            context = ""
-        self.optimizer.zero_grad(set_to_none=True)
-        raise RuntimeError(
-            f"Non-finite loss at epoch={self.current_epoch}, step={self.global_step} "
-            f"({context}raw_loss={value.item()})"
-        )
 
     def save_checkpoint(self, tag_suffix: str):
         global_step = self.global_step

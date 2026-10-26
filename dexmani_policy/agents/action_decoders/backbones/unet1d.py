@@ -88,7 +88,6 @@ class ConditionalUNet1D(nn.Module):
 
         if type(kernel_size) is not int or kernel_size <= 0 or kernel_size % 2 == 0:
             raise ValueError("UNet kernel_size must be a positive odd integer")
-        self.horizon_divisor = 2 ** (len(down_dims) - 1)
         self.cond_predict_scale = cond_predict_scale
 
         self.diffusion_step_encoder = TimestepMLP(
@@ -172,10 +171,6 @@ class ConditionalUNet1D(nn.Module):
         )
 
     def forward(self, x, timestep, context):
-        if x.shape[1] % self.horizon_divisor:
-            raise ValueError(
-                f"UNet horizon must be divisible by {self.horizon_divisor}, got {x.shape[1]}"
-            )
         x = x.transpose(1, 2)
 
         timestep = batch_timesteps(timestep, x)

@@ -6,26 +6,6 @@ import zarr
 READ_CACHE_BYTES = 16 * 1024 * 1024
 
 
-def validate_episode_metadata(episode_ends, data):
-    ends = np.asarray(episode_ends)
-    if (
-        ends.ndim != 1
-        or ends.size == 0
-        or ends.dtype.kind not in "iu"
-        or ends[0] <= 0
-        or np.any(ends[1:] <= ends[:-1])
-    ):
-        raise ValueError(
-            "episode_ends must be nonempty 1D positive, strictly increasing integers (not bool)"
-        )
-    for key, values in data.items():
-        shape = values.shape
-        if not shape or shape[0] != ends[-1]:
-            raise ValueError(
-                f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
-            )
-
-
 class ReplayBuffer:
     """Selected read-only arrays; process-local Zarr handles and bounded reads."""
 
@@ -36,7 +16,23 @@ class ReplayBuffer:
         self.field_names = tuple(dict.fromkeys(fields.keys() if keys is None else keys))
         self.data = {key: fields[key] for key in self.field_names}
         self.episode_ends = np.asarray(self.group["meta"]["episode_ends"])
-        validate_episode_metadata(self.episode_ends, self.data)
+        ends = self.episode_ends
+        if (
+            ends.ndim != 1
+            or ends.size == 0
+            or ends.dtype.kind not in "iu"
+            or ends[0] <= 0
+            or np.any(ends[1:] <= ends[:-1])
+        ):
+            raise ValueError(
+                "episode_ends must be nonempty 1D positive, strictly increasing integers (not bool)"
+            )
+        for key, values in self.data.items():
+            shape = values.shape
+            if not shape or shape[0] != ends[-1]:
+                raise ValueError(
+                    f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
+                )
         self.attrs = dict(self.group.attrs)
         self.pid = os.getpid()
         self.read_cache = {}

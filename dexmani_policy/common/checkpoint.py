@@ -87,6 +87,8 @@ def policy_state_dict(model) -> dict:
 
 def load_policy_state(model, state):
     """Restore saved parameter precision before strict copying, including FP32 EMA."""
+    from dexmani_policy.common.normalization import validate_normalizer_state
+
     for name, parameter in model.named_parameters():
         saved = state[name]
         if (
@@ -96,6 +98,7 @@ def load_policy_state(model, state):
         ):
             parameter.data = parameter.data.to(dtype=saved.dtype)
     model.load_state_dict(state, strict=True)
+    validate_normalizer_state(model.normalizer, model.normalization_spec, model.normalization_dims)
 
 
 def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
@@ -106,7 +109,6 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     from dexmani_policy.common.config import (
         normalization_dims_from_config,
         resolve_normalization_spec,
-        validate_action_window,
     )
     from dexmani_policy.common.runtime import get_rng_state, set_rng_state
 
@@ -123,10 +125,6 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     # Release unselected weights and optimizer state before model construction.
     del payload
 
-    validate_action_window(
-        cfg.agent.horizon, cfg.agent.n_obs_steps, cfg.agent.n_action_steps,
-        action_start_index=cfg.policy_metadata.action_start_index,
-    )
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     agent_cfg = prepare_restore_config(cfg.agent)
@@ -144,7 +142,6 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     )
     load_policy_state(agent, state)
     del state
-    agent.validate_normalizer()
     agent.to(device)
     agent.eval()
     return agent

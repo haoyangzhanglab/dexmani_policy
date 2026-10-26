@@ -47,7 +47,7 @@ class SimRunner:
         self.render_mode = render_mode
         self.viewer_resolution = viewer_resolution
 
-    def validate_observation(self, observation: dict[str, Any]):
+    def update_obs(self, observation: dict[str, Any]):
         missing = set(self.sensor_modalities) - observation.keys()
         if missing:
             raise ValueError(f"Missing required observation frame fields: {sorted(missing)}")
@@ -76,8 +76,6 @@ class SimRunner:
             else:
                 raise TypeError(f"Unsupported observation type for {name}: {type(value).__name__}")
 
-    def update_obs(self, observation: dict[str, Any]):
-        self.validate_observation(observation)
         position = self.obs_cursor % self.n_obs_steps
         for name in self.sensor_modalities:
             value = observation[name]

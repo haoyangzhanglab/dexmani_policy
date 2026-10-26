@@ -5,7 +5,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
+from dexmani_policy.common.config import positive_int, validate_action_window
+from dexmani_policy.common.normalization import AffineNormalizer
 
 
 def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> list[dict]:
@@ -40,6 +41,7 @@ class BasePolicy(nn.Module):
     requires_split_manifest = False
     requires_action_affine = True
     future_action_window = False
+    supported_action_keys = ("action", "action_ee")
 
     def __init__(
         self,
@@ -52,6 +54,11 @@ class BasePolicy(nn.Module):
         modality_dropout_probs: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
+        validate_action_window(
+            horizon, n_obs_steps, n_action_steps,
+            action_start_index=0 if self.future_action_window else n_obs_steps - 1,
+        )
+        positive_int(action_dim, "action_dim")
         self.obs_encoder = obs_encoder
         self.action_decoder = action_decoder
         self.horizon = horizon
@@ -61,10 +68,6 @@ class BasePolicy(nn.Module):
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = AffineNormalizer()
         self.normalization_dims = {}
-
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        """Validate model-specific constraints before constructing data or weights."""
 
     @classmethod
     def prepare_restore_config(cls, config) -> None:
@@ -102,11 +105,8 @@ class BasePolicy(nn.Module):
         if self.normalization_dims["action"] != self.action_dim:
             raise ValueError("Normalizer action width must match the full prediction layout")
 
-    def validate_normalizer(self) -> None:
-        validate_normalizer_state(self.normalizer, self.normalization_spec, self.normalization_dims)
-
-    def initialize_training(self) -> None:
-        """Initialize fresh training weights; complete checkpoints skip this step."""
+    def initialize_training(self, data_description) -> None:
+        """Initialize fresh weights against the data recipe; checkpoints skip this step."""
 
     def load_normalizer(self, normalizer: AffineNormalizer) -> None:
         self.normalizer.load_state_dict(normalizer.state_dict())
@@ -119,31 +119,6 @@ class BasePolicy(nn.Module):
         if not self.requires_ema_for_loss:
             return {}
         return {"ema_decoder": ema_agent.action_decoder}
-
-    def validate_batch(self, batch: dict) -> None:
-        action = batch["action"]
-        if action.shape[1:] != (self.horizon, self.action_dim):
-            raise ValueError(
-                f"action must be (B, {self.horizon}, {self.action_dim}), got {tuple(action.shape)}"
-            )
-        self.validate_observations(batch["obs"], expected_batch=action.shape[0])
-
-    def validate_observations(self, obs_dict: dict, expected_batch: int | None = None) -> None:
-        """Require (B, T, ...) tensors with T == n_obs_steps and a common B."""
-        for key, value in obs_dict.items():
-            if not torch.is_tensor(value):
-                continue
-            if value.ndim < 2 or value.shape[1] != self.n_obs_steps:
-                raise ValueError(
-                    f"obs['{key}'] requires (B, T == {self.n_obs_steps}, ...), "
-                    f"got {tuple(value.shape)}"
-                )
-            if expected_batch is None:
-                expected_batch = value.shape[0]
-            elif value.shape[0] != expected_batch:
-                raise ValueError(
-                    f"obs['{key}'] batch size {value.shape[0]} differs from {expected_batch}"
-                )
 
     def preprocess(self, obs_dict: dict) -> dict:
         result = {}
@@ -177,7 +152,6 @@ class BasePolicy(nn.Module):
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, **kwargs
     ) -> tuple[torch.Tensor, dict]:
-        self.validate_batch(batch)
         condition = self.encode_observation(batch["obs"])
         normalized_actions = self.normalizer["action"].normalize(batch["action"])
         groups = self.loss_groups()
@@ -198,7 +172,6 @@ class BasePolicy(nn.Module):
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
-        self.validate_observations(obs_dict)
         condition = self.encode_observation(obs_dict)
         if rtc_prefix is None:
             return self.predict_action_from_condition(condition, inference_steps=inference_steps, generator=generator)

@@ -12,13 +12,10 @@ from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_time_to_noise
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE, load_hand_vae, validate_codec_metadata
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import (
-    Sparse3DEncoder,
-    validate_sparse3d_config,
-)
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import positive_int, validate_action_window
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.hand_representation import validate_hand_chunk_compatibility
 
 
@@ -72,21 +69,6 @@ class LatentFlowPolicy(BasePolicy):
     requires_hand_pretraining = True
     future_action_window = True
 
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        validate_sparse3d_config(cfg, spec, dataset=dataset)
-        if cfg.horizon < 3 or not 1 <= cfg.n_obs_steps <= cfg.horizon:
-            raise ValueError("LatentFlow requires H>=3 and 1<=n_obs_steps<=H")
-        if (
-            dataset.get("pad_after", 0) != 0
-            or dataset.get("pad_before", cfg.n_obs_steps - 1) != cfg.n_obs_steps - 1
-        ):
-            raise ValueError("LatentFlow pads only observation history")
-        if dataset.action_key != "action" or cfg.action_dim != 19 or cfg.state_dim != 19:
-            raise ValueError("LatentFlow requires joint action/state=7+12")
-        if cfg.get("use_aux_ee", False):
-            raise ValueError("LatentFlow does not support auxiliary action targets")
-
     def __init__(
         self,
         horizon: int,
@@ -124,7 +106,6 @@ class LatentFlowPolicy(BasePolicy):
         modality_dropout_probs: dict | None = None,
         codec_metadata: dict | None = None,
     ) -> None:
-        validate_action_window(horizon, n_obs_steps, n_action_steps, action_start_index=0)
         if horizon < 3 or n_obs_steps > horizon:
             raise ValueError("LatentFlow requires H>=3 and n_obs_steps<=H")
         if action_dim != 19 or state_dim != 19:
@@ -201,7 +182,7 @@ class LatentFlowPolicy(BasePolicy):
     def action_context_shapes(self):
         return {"reference_state": [self.action_dim]}
 
-    def initialize_training(self) -> None:
+    def initialize_training(self, data_description) -> None:
         self.codec_initialized = False
         if not self.codec_path:
             raise ValueError("Fresh LatentFlow training requires codec_path")
@@ -210,6 +191,9 @@ class LatentFlowPolicy(BasePolicy):
             raise ValueError("LatentFlow codec architecture differs from the policy configuration")
         self.codec.load_state_dict(codec.state_dict(), strict=True)
         self.codec_metadata = payload["metadata"]
+        validate_hand_chunk_compatibility(
+            self.codec_metadata["hand_data"], data_description["hand_data"]
+        )
         self.codec_initialized = True
 
     def validate_restored_codec(self, module: torch.nn.Module, incompatible_keys) -> None:
@@ -221,9 +205,6 @@ class LatentFlowPolicy(BasePolicy):
     @property
     def effective_config(self):
         return {**super().effective_config, "codec_metadata": self.codec_metadata}
-
-    def validate_training_data(self, hand_data):
-        validate_hand_chunk_compatibility(self.codec_metadata["hand_data"], hand_data)
 
     def train(self, mode: bool = True) -> LatentFlowPolicy:
         super().train(mode)
@@ -252,7 +233,6 @@ class LatentFlowPolicy(BasePolicy):
         return reference.float()
 
     def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
-        self.validate_batch(batch)
         # Dataset supplies the measured query state before observation augmentation.
         reference = self.resolve_reference_state(
             batch["obs"], batch.get("action_context"), required=True
@@ -316,7 +296,6 @@ class LatentFlowPolicy(BasePolicy):
     ) -> dict[str, torch.Tensor]:
         if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
             raise NotImplementedError("LatentFlow codec supports synchronous chunk execution")
-        self.validate_observations(obs_dict)
         reference = self.resolve_reference_state(obs_dict, action_context)
         condition = self.encode_condition(obs_dict)
         return self.predict_action_from_condition(

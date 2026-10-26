@@ -8,13 +8,10 @@ from torch import nn
 from dexmani_policy.agents.action_decoders.backbones.sat import SAT
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import (
-    Sparse3DEncoder,
-    validate_sparse3d_config,
-)
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import positive_int, validate_action_window
+from dexmani_policy.common.config import positive_int
 
 
 class SATObservationEncoder(nn.Module):
@@ -83,23 +80,14 @@ class SATObservationEncoder(nn.Module):
 class SATPolicy(BasePolicy):
     """Structural Action Transformer with [B,Da,T] trajectory tokens."""
 
-    @classmethod
-    def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        validate_sparse3d_config(cfg, spec, dataset=dataset, default_num_patches=64)
-        if cfg.n_obs_steps not in (1, 2) or (
-            cfg.get("pc_dim", 6), cfg.get("state_dim", 19)
-        ) != (6, 19):
-            raise ValueError("Sparse3D global observations require 1 or 2 XYZRGB/19D frames")
+    supported_action_keys = ("action",)
+
+    def set_normalization_spec(self, spec, feature_dims) -> None:
         if spec.get("joint_state") != "limits":
             raise ValueError(
                 "Sparse3D global observations require normalization.joint_state: limits"
             )
-        if cfg.n_obs_steps != 2:
-            raise ValueError("SAT requires n_obs_steps=2")
-        if dataset.action_key != "action" or (cfg.horizon, cfg.action_dim) != (16, 19):
-            raise ValueError("SAT requires joint action=19, horizon=16")
-        if cfg.get("use_aux_ee", False) or cfg.get("hidden_dim", 256) != 256:
-            raise ValueError("SAT requires hidden_dim=256 without auxiliary actions")
+        super().set_normalization_spec(spec, feature_dims)
 
     def __init__(
         self,
@@ -128,7 +116,6 @@ class SATPolicy(BasePolicy):
         modality_dropout_probs: dict | None = None,
         num_flow_train_timesteps: int = 10,
     ) -> None:
-        validate_action_window(horizon, n_obs_steps, n_action_steps)
         if n_obs_steps != 2:
             raise ValueError("SAT requires n_obs_steps=2")
         obs_encoder = SATObservationEncoder(
@@ -174,7 +161,6 @@ class SATPolicy(BasePolicy):
         )
 
     def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
-        self.validate_batch(batch)
         condition = self.encode_observation(batch["obs"])
         normalized_actions = self.normalizer["action"].normalize(batch["action"])
         return self.action_decoder.compute_loss(

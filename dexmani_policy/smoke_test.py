@@ -335,7 +335,7 @@ def main(argv=None):
     modes.add_argument(
         "--config-only",
         action="store_true",
-        help="Validate configs and target imports without data or GPU execution.",
+        help="Check config interfaces and target imports; model constraints are checked at construction/binding.",
     )
     modes.add_argument(
         "--data-only", action="store_true", help="Check CPU data batches without building a model."
