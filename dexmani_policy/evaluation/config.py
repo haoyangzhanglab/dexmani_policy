@@ -181,6 +181,24 @@ def make_request(cfg, checkpoint, tasks, seeds, *, source):
     )
 
 
+def frozen_test_request(exp_dir, record, checkpoint, *, device=None):
+    """Build a held-out request from the caller's verified selection result."""
+    request = EvaluationRequest(**record["test_request"])
+    return replace(
+        request,
+        checkpoint=str(checkpoint),
+        device=request.device if device is None else device,
+        source={
+            "phase": "test",
+            "selection_result": str(Path(exp_dir).resolve() / record["selection_result"]),
+            "heldout_from_selection": True,
+            "global_step": record["global_step"],
+            "checkpoint_sha256": record["checkpoint_sha256"],
+            "expected_runtime": record["runtime"],
+        },
+    )
+
+
 def resolve_evaluation_request(
     cfg, exp_dir, checkpoint="best", overrides=None, *, selection_record=None
 ):
@@ -193,19 +211,8 @@ def resolve_evaluation_request(
         if checkpoint != "best":
             raise ValueError("Frozen test checkpoint comes exclusively from selection_record")
         record, path = verify_selection_record(exp_dir, selection_record)
-        request = EvaluationRequest(**record["test_request"])
-        return replace(
-            request,
-            checkpoint=str(path),
-            device=override.get("training", {}).get("device", request.device),
-            source={
-                "phase": "test",
-                "selection_result": str(Path(selection_record).resolve()),
-                "heldout_from_selection": True,
-                "global_step": record["global_step"],
-                "checkpoint_sha256": record["checkpoint_sha256"],
-                "expected_runtime": record["runtime"],
-            },
+        return frozen_test_request(
+            exp_dir, record, path, device=override.get("training", {}).get("device"),
         )
     source = {"phase": "ordinary", "heldout_from_selection": False}
     if checkpoint == "best":
@@ -213,6 +220,7 @@ def resolve_evaluation_request(
         cfg = OmegaConf.merge(cfg, {"eval": selected["inference"]})
         source["selection_result"] = selected["selection_result"]
         source["global_step"] = selected["global_step"]
+        source["checkpoint_sha256"] = selected["checkpoint_sha256"]
     else:
         path = resolve_checkpoint_path(exp_dir, checkpoint)
     cfg = prepare_evaluation_config(cfg, overrides)

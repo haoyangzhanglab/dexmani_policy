@@ -10,7 +10,9 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from dexmani_policy.common.experiments import file_sha256, resolve_record_path, validate_best_info
+from dexmani_policy.common.experiments import (
+    MILESTONE_PATTERN, file_sha256, milestone_steps, resolve_record_path, validate_best_info,
+)
 from dexmani_policy.common.runtime import atomic_path
 from dexmani_policy.env_runner.common.seeds import validate_seed_pool, validate_task_seeds
 
@@ -104,16 +106,19 @@ def training_source_evidence(config, plans):
     }
 
 
-def runtime_provenance():
+def simulator_code_version():
     import importlib.util
-    import torch
 
     sim = importlib.util.find_spec("dexmani_sim")
+    return code_version(Path(sim.origin).parent.parent) if sim is not None and sim.origin else None
+
+
+def runtime_provenance():
+    import torch
+
     return {
         "policy_code": code_version(Path(__file__).resolve().parents[2]),
-        "simulator_code": (
-            code_version(Path(sim.origin).parent.parent) if sim is not None and sim.origin else None
-        ),
+        "simulator_code": simulator_code_version(),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "torch": str(torch.__version__),
@@ -158,6 +163,20 @@ def create_run_directory(root, directory=None):
 
 def validate_selection_plan(record):
     protocol = record["test_request"]
+    candidates = record["candidates"]
+    expected = milestone_steps(protocol["config"]["training"]["loop"]["total_train_steps"])
+    steps = [candidate["global_step"] for candidate in candidates]
+    if any(type(step) is not int for step in steps) or len(set(steps)) != len(steps):
+        raise ValueError("Selection requires distinct integer milestone steps")
+    missing = expected.keys() - set(steps)
+    if missing:
+        raise ValueError(f"Missing selection milestone steps: {sorted(missing)}")
+    for candidate in candidates:
+        match = MILESTONE_PATTERN.fullmatch(Path(candidate["checkpoint"]).name)
+        step = candidate["global_step"]
+        if (match is None or int(match["step"]) != step
+                or expected.get(step) != int(match["pct"])):
+            raise ValueError("Selection milestone filename/step differs from training budget")
     tasks = [task["task_name"] for task in protocol["tasks"]]
     if not tasks or len(set(tasks)) != len(tasks):
         raise ValueError("Selection requires distinct tasks")
@@ -225,8 +244,6 @@ def rank_selection_results(record, results):
     candidates = record["candidates"]
     if not candidates or len(results) != len(candidates):
         raise ValueError("Selection requires complete results for every declared candidate")
-    if len({c["checkpoint"] for c in candidates}) != len(candidates):
-        raise ValueError("Duplicate selection candidate")
     validate_selection_plan(record)
     protocol = record["test_request"]
     selection = record["selection_task_seeds"]

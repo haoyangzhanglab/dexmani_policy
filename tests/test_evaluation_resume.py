@@ -14,8 +14,8 @@ from dexmani_policy.env_runner.common.metrics import compute_evaluation_statisti
 from dexmani_policy.evaluation.artifacts import (
     code_version, training_source_evidence, validate_runtime, verify_selection_record,
 )
-from dexmani_policy.evaluation.config import resolve_evaluation_request
-from dexmani_policy.evaluation.selection import publish_best
+from dexmani_policy.evaluation.config import make_request, resolve_evaluation_request, resolve_tasks
+from dexmani_policy.evaluation.selection import publish_best, select_best_checkpoint
 from tests.helpers import checkpoint_fixture
 
 
@@ -27,7 +27,7 @@ def selection_fixture(root):
         'torch': 'fixture', 'cuda': None, 'parameter_dtypes': ['torch.float32'],
         'numerics': {'float32_matmul_precision': 'highest'},
     }
-    for step in (20, 40):
+    for step in (20, 40, 60, 80, 100):
         checkpoint, _, info, _ = checkpoint_fixture(root, step=step, pct=step)
         path = info.checkpoint_path
         candidates.append({'checkpoint': str(path.relative_to(root)), 'global_step': step,
@@ -35,12 +35,10 @@ def selection_fixture(root):
     inference = {'use_ema': True, 'inference_steps': 2, 'action_steps': 3}
     cfg = copy.deepcopy(checkpoint.effective_config)
     cfg['eval'].update(inference, selection_episodes=2, episodes=1)
-    request = {
-        'config': cfg, 'checkpoint': str(info.checkpoint_path), **inference,
-        'device': 'cpu', 'tasks': [{'task_name': 'fixture'}],
-        'task_seeds': {'fixture': [3]}, 'numerics': {},
-        'source': {'phase': 'test', 'heldout_from_selection': True},
-    }
+    cfg['eval']['video']['enabled'] = False
+    cfg['env_runner']['task_name'] = 'fixture'
+    request = make_request(cfg, info.checkpoint_path, resolve_tasks(cfg), {'fixture': [3]},
+        source={'phase': 'test', 'heldout_from_selection': True}).to_dict()
     for i, candidate in enumerate(candidates):
         episodes = [dict(task_name='fixture', seed=seed, success=bool(i),
                          steps=2 if i else None, total_steps=4) for seed in (1, 2)]
@@ -60,8 +58,8 @@ def selection_fixture(root):
         'status': 'completed', 'experiment_dir': str(root),
         'seed_pools': {'fixture': [1, 2, 3]}, 'selection_task_seeds': {'fixture': [1, 2]},
         'test_request': request, 'candidates': candidates, 'candidate_results': references,
-        'ckpt_relpath': candidates[1]['checkpoint'], 'global_step': 40,
-        'checkpoint_sha256': candidates[1]['checkpoint_sha256'],
+        'ckpt_relpath': candidates[-1]['checkpoint'], 'global_step': 100,
+        'checkpoint_sha256': candidates[-1]['checkpoint_sha256'],
         'inference': inference, 'runtime': runtime,
     }
     path = root / 'selection_result.json'
@@ -70,15 +68,27 @@ def selection_fixture(root):
 
 
 class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        # Only the external simulator's source identity is synthetic.
+        source = patch('dexmani_policy.evaluation.artifacts.simulator_code_version',
+                       return_value={'content_sha256': 'b' * 64, 'commit': None, 'dirty': None})
+        source.start()
+        self.addCleanup(source.stop)
+        absent = patch.dict('sys.modules', {'dexmani_sim': None})
+        absent.start()
+        self.addCleanup(absent.stop)
+
     def test_selection_publication_and_frozen_rollout(self):
         from dexmani_policy.evaluation.pipeline import run_pipeline
+        from dexmani_policy.evaluation.rollout import evaluate_policy
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for step in (20, 40):
+            for step in (20, 40, 60, 80, 100):
                 checkpoint, _, _, obs = checkpoint_fixture(root, step=step, pct=step)
             cfg = copy.deepcopy(checkpoint.effective_config)
             cfg['eval'].update(selection_episodes=2, episodes=1)
+            cfg['eval']['video']['enabled'] = False
             cfg['env_runner']['eval_seeds'] = [420001, 420002, 420003]
             frame = {key: value[-1].copy() for key, value in obs.items()}
             episodes, closed = [], []
@@ -99,22 +109,39 @@ class EvidenceTests(unittest.TestCase):
                 def close(self):
                     closed.append(self)
 
-            # Only replace external environment creation; model, runner, records and verifier are real.
+            # Wrappers count real verification calls; no internal result is replaced.
             with patch('dexmani_policy.env_runner.sim_runner.SimRunner.make_env',
-                       side_effect=Environment):
+                       side_effect=Environment), \
+                 patch('dexmani_policy.evaluation.selection.verify_selection_record',
+                       wraps=verify_selection_record) as publication, \
+                 patch('dexmani_policy.evaluation.config.verify_selection_record',
+                       wraps=verify_selection_record) as frozen:
                 result_path = run_pipeline(root, cfg)
+                self.assertEqual(publication.call_count, 1)
+                self.assertEqual(frozen.call_count, 0)
+                pointer = json.loads((root / 'best_ckpt.json').read_text())
+                request = resolve_evaluation_request(None, root,
+                    selection_record=root / pointer['selection_result'])
+                self.assertEqual(frozen.call_count, 1)
+                repeated = evaluate_policy(request, output_root=root / 'independent_test')
+                ordinary = resolve_evaluation_request(cfg, root)
+                ordinary_result = evaluate_policy(ordinary, output_root=root / 'ordinary')
             result = json.loads(result_path.read_text())
             pointer = json.loads((root / 'best_ckpt.json').read_text())
             record, checkpoint_path = verify_selection_record(root, root / pointer['selection_result'])
-            self.assertEqual(record['global_step'], 40)
+            self.assertEqual(record['global_step'], 100)
             self.assertEqual(result['status'], 'completed')
             self.assertEqual(result['request']['checkpoint'], str(checkpoint_path))
             self.assertEqual(result['checkpoint_sha256'], record['checkpoint_sha256'])
             self.assertTrue(result['request']['source']['heldout_from_selection'])
-            self.assertEqual(episodes[:2], episodes[2:4])
-            self.assertNotIn(episodes[-1], episodes[:2])
-            self.assertEqual(len(episodes), 5)
-            self.assertEqual(len(closed), 3)
+            for start in range(2, 10, 2):
+                self.assertEqual(episodes[:2], episodes[start:start + 2])
+            self.assertNotIn(episodes[10], episodes[:2])
+            self.assertEqual(episodes[10:], [episodes[10]] * 3)
+            self.assertEqual(len(episodes), 13)
+            self.assertEqual(len(closed), 8)
+            self.assertEqual(json.loads(repeated.read_text())['request'], result['request'])
+            self.assertFalse(json.loads(ordinary_result.read_text())['request']['source']['heldout_from_selection'])
 
     def test_runtime_identity_and_data_guarantee_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,9 +163,92 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(evidence['training_test_independence'], 'unverified')
             self.assertEqual(training_source_evidence({}, {})['training_test_independence'], 'unverified')
 
+    def test_selection_rejects_incomplete_set_before_episodes(self):
+        for steps in ((), (20, 40)):
+            with self.subTest(steps=steps), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                checkpoint, _, info, _ = checkpoint_fixture(root, step=100, pct=100)
+                info.checkpoint_path.unlink()
+                for step in steps:
+                    checkpoint_fixture(root, step=step, pct=step)
+                cfg = checkpoint.effective_config
+                cfg['eval'].update(selection_episodes=1, episodes=1)
+                cfg['env_runner']['eval_seeds'] = [1, 2]
+                missing = [step for step in (20, 40, 60, 80, 100) if step not in steps]
+                with patch('dexmani_policy.env_runner.sim_runner.SimRunner.make_env') as env:
+                    with self.assertRaises(ValueError) as error:
+                        select_best_checkpoint(root, cfg)
+                    self.assertIn(f'Missing selection milestone steps: {missing}', str(error.exception))
+                    env.assert_not_called()
+                self.assertFalse((root / 'best_ckpt.json').exists())
+
+    def test_best_identity_and_load_time_replacement(self):
+        from dexmani_policy.common.checkpoint import load_training_checkpoint, save_training_checkpoint
+        from dexmani_policy.evaluation.rollout import evaluate_policy
+
+        for entry in ('best_before_request', 'best_after_request', 'frozen_after_request'):
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path, record = selection_fixture(root)
+                _, checkpoint = publish_best(root, path)
+                cfg = record['test_request']['config']
+                cfg['env_runner']['eval_seeds'] = [1, 2, 3]
+                cfg['eval']['video']['enabled'] = False
+                if entry == 'frozen_after_request':
+                    request = resolve_evaluation_request(None, root, selection_record=path)
+                elif entry == 'best_after_request':
+                    request = resolve_evaluation_request(cfg, root)
+                replaced = load_training_checkpoint(checkpoint)
+                next(iter(replaced.ema_model_state.values())).add_(.25)
+                save_training_checkpoint(checkpoint, replaced)
+                self.assertEqual(load_training_checkpoint(checkpoint).global_step, record['global_step'])
+                if entry == 'best_before_request':
+                    request = resolve_evaluation_request(cfg, root)
+                with patch('dexmani_policy.env_runner.sim_runner.SimRunner.make_env') as env:
+                    with self.assertRaisesRegex(ValueError, 'Checkpoint content changed'):
+                        evaluate_policy(request, output_root=root / 'replaced')
+                    env.assert_not_called()
+                failure = json.loads(next((root / 'replaced').glob('*/result_details.json')).read_text())
+                self.assertEqual(failure['status'], 'failed')
+                self.assertEqual(failure['episodes'], [])
+
+    def test_selection_rejects_conflicting_milestones_before_episodes(self):
+        for damage in ('duplicate', 'percentage'):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _, record = selection_fixture(root)
+                candidate = root / record['candidates'][0]['checkpoint']
+                if damage == 'duplicate':
+                    shutil.copyfile(candidate, candidate.with_name('epoch=1-step=20-milestone=20pct.pt'))
+                else:
+                    candidate.rename(candidate.with_name('epoch=0-step=20-milestone=40pct.pt'))
+                cfg = record['test_request']['config']
+                cfg['env_runner']['eval_seeds'] = [1, 2, 3]
+                with patch('dexmani_policy.env_runner.sim_runner.SimRunner.make_env') as env:
+                    with self.assertRaises(ValueError):
+                        select_best_checkpoint(root, cfg)
+                    env.assert_not_called()
+
+    def test_best_requires_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, record = selection_fixture(root)
+            publish_best(root, path)
+            pointer = root / 'best_ckpt.json'
+            info = json.loads(pointer.read_text())
+            for digest in (None, 'invalid'):
+                if digest is None:
+                    info.pop('checkpoint_sha256')
+                else:
+                    info['checkpoint_sha256'] = digest
+                pointer.write_text(json.dumps(info))
+                with self.assertRaises((KeyError, ValueError)):
+                    resolve_evaluation_request(record['test_request']['config'], root)
+
     def test_full_evidence_required_by_frozen_entry(self):
         for damage in ('missing_result', 'statistics', 'winner', 'duplicate_episode',
-                       'missing_episode', 'overlap', 'replaced_weights', 'runtime', 'old_identity'):
+                       'missing_episode', 'overlap', 'replaced_weights', 'runtime',
+                       'missing_identity', 'partial_candidates'):
             with self.subTest(damage=damage), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 path, record = selection_fixture(root)
@@ -162,6 +272,9 @@ class EvidenceTests(unittest.TestCase):
                     shutil.copyfile(root / record['candidates'][0]['checkpoint'], root / record['ckpt_relpath'])
                 elif damage == 'runtime':
                     result['runtime']['torch'] = 'different'
+                elif damage == 'partial_candidates':
+                    record['candidates'].pop(0)
+                    record['candidate_results'].pop(0)
                 else:
                     record.pop('checkpoint_sha256')
                 if damage in {'statistics', 'duplicate_episode', 'missing_episode', 'runtime'}:
@@ -234,11 +347,11 @@ class ResumeArchiveTests(unittest.TestCase):
             parent, first, second = (root / name for name in ('parent', 'first', 'second'))
             for step in (20, 40, 60):
                 checkpoint_fixture(parent, step=step, pct=step)
-            checkpoint, _, source, _ = checkpoint_fixture(parent, step=50, pct=50)
+            checkpoint, _, source, _ = checkpoint_fixture(parent, step=50, pct=None)
             archive_resume_milestones(source.checkpoint_path, first, checkpoint)
             self.assertEqual([m.global_step for m in discover_milestone_checkpoints(first)], [20, 40])
             checkpoint_fixture(first, step=60, pct=60, resume_from=str(source.checkpoint_path))
-            later, _, later_info, _ = checkpoint_fixture(first, step=70, pct=70, resume_from=str(source.checkpoint_path))
+            later, _, later_info, _ = checkpoint_fixture(first, step=70, pct=None, resume_from=str(source.checkpoint_path))
             shutil.rmtree(parent)
             archive_resume_milestones(later_info.checkpoint_path, second, later)
             shutil.rmtree(first)
@@ -246,37 +359,47 @@ class ResumeArchiveTests(unittest.TestCase):
             self.assertEqual([m.global_step for m in discover_milestone_checkpoints(moved)], [20, 40, 60])
             self.assertTrue(all(not m.path.is_symlink() for m in discover_milestone_checkpoints(moved)))
 
-    def test_source_requires_complete_unambiguous_prefix(self):
-        from dexmani_policy.common.experiments import archive_resume_milestones
+    def test_source_allows_missing_but_rejects_conflicting_prefix(self):
+        from dexmani_policy.common.experiments import archive_resume_milestones, discover_milestone_checkpoints
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             parent, child = root / 'parent', root / 'child'
             checkpoint_fixture(parent, step=20, pct=20)
-            _, _, old_info, _ = checkpoint_fixture(parent, step=30, pct=30)
+            _, _, old_info, _ = checkpoint_fixture(parent, step=30, pct=None)
             checkpoint_fixture(child, step=40, pct=40, resume_from=str(old_info.checkpoint_path))
-            current, _, info, _ = checkpoint_fixture(child, step=50, pct=50, resume_from=str(old_info.checkpoint_path))
-            # Even an accessible ancestor cannot repair an incomplete source run.
-            with self.assertRaisesRegex(FileNotFoundError, 'Missing'):
-                archive_resume_milestones(info.checkpoint_path, root / 'missing', current)
-            self.assertFalse((root / 'missing').exists())
+            current, _, info, _ = checkpoint_fixture(child, step=50, pct=None, resume_from=str(old_info.checkpoint_path))
+            # Preserve only available candidates; never search accessible ancestors.
+            archive_resume_milestones(info.checkpoint_path, root / 'missing', current)
+            self.assertEqual([m.global_step for m in discover_milestone_checkpoints(root / 'missing')], [40])
             _, _, prefix, _ = checkpoint_fixture(child, step=20, pct=20)
             shutil.copyfile(prefix.checkpoint_path, child / 'checkpoints/epoch=1-step=20-milestone=20pct.pt')
             with self.assertRaisesRegex(ValueError, 'Conflicting'):
                 archive_resume_milestones(info.checkpoint_path, root / 'conflict', current)
 
+    def test_source_without_any_milestones(self):
+        from dexmani_policy.common.experiments import archive_resume_milestones, discover_milestone_checkpoints
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint, _, info, _ = checkpoint_fixture(root / 'source', step=50, pct=None)
+            archive_resume_milestones(info.checkpoint_path, root / 'resumed', checkpoint)
+            self.assertEqual(discover_milestone_checkpoints(root / 'resumed'), [])
+
     def test_archive_rejects_state_and_recipe_mismatch_before_writing(self):
         from dexmani_policy.common.checkpoint import save_training_checkpoint
         from dexmani_policy.common.experiments import archive_resume_milestones
 
-        for damage in ('step', 'recipe'):
+        for damage in ('step', 'recipe', 'percentage'):
             with self.subTest(damage=damage), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 checkpoint, _, info, _ = checkpoint_fixture(root / 'parent')
                 changed = copy.deepcopy(checkpoint)
                 if damage == 'step':
                     changed.global_step += 1
-                else:
+                elif damage == 'recipe':
                     changed.effective_config['agent']['horizon'] += 1
+                else:
+                    info.checkpoint_path = info.checkpoint_path.rename(
+                        info.checkpoint_path.with_name('epoch=0-step=20-milestone=40pct.pt'))
                 save_training_checkpoint(info.checkpoint_path, changed)
                 with self.assertRaises(ValueError):
                     archive_resume_milestones(info.checkpoint_path, root / 'new', checkpoint)

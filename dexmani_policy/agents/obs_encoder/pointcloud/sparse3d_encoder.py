@@ -16,7 +16,6 @@ from .pointnet import build_mlp
 
 def validate_sparse3d_config(cfg, spec, *, dataset, default_num_patches=96):
     """Preserve metric XYZ and enough points for Sparse3D patch geometry."""
-    load_pointcloud_ops()
     Sparse3DEncoder.validate_normalization(spec)
     encoder = cfg.get("pc_encoder_config") or {}
     sizes = {

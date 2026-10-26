@@ -1,6 +1,5 @@
 from contextlib import closing
 import copy
-from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,7 +20,10 @@ class TrainingTests(unittest.TestCase):
     def test_cpu_training_resume_raw_ema_and_effective_updates(self):
         self.check_training("cpu")
 
-    def check_training(self, device):
+    def test_cpu_resume_without_historical_milestone(self):
+        self.check_training("cpu", missing_history=True)
+
+    def check_training(self, device, *, missing_history=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path, group, _ = zarr_fixture(root)
@@ -69,29 +71,40 @@ class TrainingTests(unittest.TestCase):
                         a = expected.predict_action(tensors, generator=torch.Generator(device=device).manual_seed(7))
                         b = restored.predict_action(tensors, generator=torch.Generator(device=device).manual_seed(7))
                     torch.testing.assert_close(a['future_actions'], b['future_actions'], rtol=0, atol=0)
+            if missing_history:
+                next((root / 'first/checkpoints').glob('*milestone=20pct.pt')).unlink()
+            # Acquisition notes can change without changing training rows or normalization.
+            group['meta/episode_seeds'][:] = [101, 102, 103, 104]
             resume_cfg = OmegaConf.create(saved.effective_config)
             resume_cfg.workspace.output_dir = str(root / 'second')
             resume_cfg.resume_from = str((root / 'first/checkpoints/latest.pt').resolve())
             ds, norm, facts = build_dataset_and_normalizer(resume_cfg, resume_checkpoint=saved, verbose=False)
+            self.assertIsNone(norm)
+            self.assertNotEqual(facts['data_recipe'][0]['source_evidence'],
+                                saved.effective_config['data_recipe'][0]['source_evidence'])
             resumed = build_training_components(resume_cfg, torch.device(device), ds, norm,
                                                 data_description=facts, checkpoint=saved)
             with closing(resumed):
                 inherited = list((root / 'second/checkpoints').glob('*milestone*'))
-                self.assertEqual(len(inherited), 2)
-                incomplete_config = copy.deepcopy(saved.effective_config)
-                del incomplete_config['data_recipe'][0]['source_evidence']
-                incomplete = replace(saved, effective_config=incomplete_config)
-                _, _, current_facts = build_dataset_and_normalizer(
-                    resume_cfg, resume_checkpoint=incomplete, verbose=False)
-                self.assertEqual(current_facts, facts)
-                with self.assertRaisesRegex(ValueError, 'source_evidence'):
-                    restore_training_state(incomplete, resumed, effective_config=resumed.effective_config)
+                self.assertEqual(len(inherited), 1 if missing_history else 2)
+                for model, state in ((resumed.model, saved.model_state),
+                                     (resumed.ema_model, saved.ema_model_state)):
+                    torch.testing.assert_close({k: v.cpu() for k, v in model.state_dict().items()},
+                                               state, rtol=0, atol=0)
+                for field, value in (('agent.horizon', 9), ('optimizer.lr', .002),
+                                     ('normalization.action', 'identity'),
+                                     ('data_recipe.0.split_manifest.train_indices', [0])):
+                    changed = copy.deepcopy(resume_cfg)
+                    OmegaConf.update(changed, field, value, merge=False)
+                    with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'recipe mismatch'):
+                        restore_training_state(saved, resumed, effective_config=changed)
                 state = restore_training_state(saved, resumed, effective_config=resumed.effective_config)
                 build_trainer(resumed).train(resume_state=state, max_updates=2)
                 self.assertEqual(resumed.ema_updater.optimization_step, 6)
                 self.assertEqual(resumed.scheduler.last_epoch, 6)
                 self.assertEqual(load_training_checkpoint(root / 'second/checkpoints/latest.pt').global_step, 6)
-                self.assertEqual(len(list((root / 'second/checkpoints').glob('*milestone*'))), 3)
+                self.assertEqual(len(list((root / 'second/checkpoints').glob('*milestone*'))),
+                                 2 if missing_history else 3)
 
 
 if __name__ == '__main__':

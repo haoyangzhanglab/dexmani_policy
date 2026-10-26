@@ -8,12 +8,13 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.experiments import discover_milestone_checkpoints, file_sha256
+from dexmani_policy.common.experiments import discover_milestone_checkpoints, file_sha256, milestone_steps
 from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds
 from dexmani_policy.evaluation.artifacts import (
     artifact_reference,
     create_run_directory,
     rank_selection_results,
+    validate_selection_plan,
     verify_selection_record,
     training_source_evidence,
     write_failure,
@@ -45,6 +46,9 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
         positive_int(cfg["eval"]["selection_episodes"], "eval.selection_episodes"),
     )
     milestones = discover_milestone_checkpoints(root)
+    if not milestones:
+        expected = milestone_steps(cfg["training"]["loop"]["total_train_steps"])
+        raise ValueError(f"Missing selection milestone steps: {sorted(expected)}")
     request = make_request(
         cfg,
         milestones[0].path,
@@ -57,8 +61,6 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
         output_root
     ):
         raise ValueError("Selection output must remain inside experiment/eval_ckpt_selector")
-    directory = create_run_directory(output_root, output_dir)
-    path = directory / "selection_result.json"
     record = {
         "status": "running",
         "experiment_dir": str(root),
@@ -68,13 +70,17 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
             request, task_seeds=test, source={"phase": "test", "heldout_from_selection": True}
         ).to_dict(),
         "candidates": [
-            {"checkpoint": artifact_reference(m.path, root), "global_step": m.global_step,
-             "checkpoint_sha256": file_sha256(m.path)}
+            {"checkpoint": artifact_reference(m.path, root), "global_step": m.global_step}
             for m in milestones
         ],
         "candidate_results": [],
         "training_source_evidence": training_source_evidence(cfg, {"selection": selection, "test": test}),
     }
+    validate_selection_plan(record)
+    for milestone, candidate in zip(milestones, record["candidates"], strict=True):
+        candidate["checkpoint_sha256"] = file_sha256(milestone.path)
+    directory = create_run_directory(output_root, output_dir)
+    path = directory / "selection_result.json"
     write_json(path, record, overwrite=False)
     results = []
     try:
@@ -105,12 +111,11 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
             },
         )
         write_json(path, record)
-        publish_best(root, path)
+        return publish_best(root, path)
     except BaseException:
         record.update(status="failed", error=traceback.format_exc())
         write_failure(path, record)
         raise
-    return path
 
 
 def publish_best(root, record_path):
@@ -119,7 +124,7 @@ def publish_best(root, record_path):
         Path(root) / "best_ckpt.json",
         {key: record[key] for key in ("ckpt_relpath", "global_step", "checkpoint_sha256", "inference", "selection_result")},
     )
-    return checkpoint
+    return record, checkpoint
 
 
 def main():
@@ -131,7 +136,7 @@ def main():
     parser.add_argument("--publish-best", action="store_true", help="Publish a direct best pointer after verification")
     args = parser.parse_args()
     if args.publish_best:
-        checkpoint = publish_best(args.experiment_dir, args.selection_record)
+        _, checkpoint = publish_best(args.experiment_dir, args.selection_record)
     else:
         _, checkpoint = verify_selection_record(args.experiment_dir, args.selection_record)
     print(f"Selection verified: {checkpoint}")

@@ -1,4 +1,7 @@
 from pathlib import Path
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -6,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import zarr
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.datasets.common.episode_split import describe_split
 from dexmani_policy.datasets.demonstration_dataset import DemonstrationDataset
@@ -162,6 +165,54 @@ class DataConfigTests(unittest.TestCase):
         for name in ('dp', 'dp3', 'sat', 'r3d', 'maniflow', 'multitask_dit', 'dqrise', 'lamp', 'latent_flow'):
             with self.subTest(name=name):
                 validate_target_imports(load_smoke_config(name))
+
+    def test_config_imports_without_pointcloud_backend(self):
+        result = subprocess.run([sys.executable, '-c', '''
+import sys
+sys.modules['pytorch3d'] = None
+from dexmani_policy.smoke_test import main
+main(['--config-only', 'dp', 'dp3', 'sat', 'r3d', 'maniflow',
+      'multitask_dit', 'dqrise', 'lamp', 'latent_flow'])
+from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
+from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import PointNetPatchEmbedding
+for build in (lambda: Sparse3DEncoder(), lambda: PointNetPatchEmbedding(6, 32, 4, 4)):
+    try:
+        build()
+    except ImportError as error:
+        assert 'requires PyTorch3D' in str(error)
+    else:
+        raise AssertionError('Point-cloud model accepted a missing backend')
+'''], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_hand_preparation_without_pointcloud_backend(self):
+        from dexmani_policy.training.pretrain.hand_prior.vqvae import prepare_policy_data
+        from dexmani_policy.training.pretrain.hand_prior.lamp import build_prior_dataset, source_rows
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {'pytorch3d': None, 'pytorch3d.ops': None}):
+            path, group, manifest = zarr_fixture(tmp)
+            group.create_dataset('data/point_cloud', data=np.zeros((26, 16, 6), np.float32))
+            split = Path(tmp) / 'split.json'
+            split.write_text(json.dumps(manifest))
+            for name in ('dqrise', 'lamp'):
+                cfg = load_smoke_config(name)
+                with open_dict(cfg):
+                    cfg.zarr_path = cfg.dataset.zarr_path = str(path)
+                    cfg.dataset.split_manifest = str(split)
+                    cfg.dataset.val_ratio = 0
+                    cfg.dataset.max_train_episodes = None
+                    cfg.dataset.augmentation_cfg = None
+                if name == 'dqrise':
+                    train, val, _, _ = prepare_policy_data(cfg)
+                    self.assertEqual(train.shape[1], 12)
+                    self.assertEqual(val.shape[1], 12)
+                    self.assertGreater(len(train), 0)
+                    self.assertGreater(len(val), 0)
+                else:
+                    dataset = build_prior_dataset(cfg)
+                    train, val = source_rows(dataset)
+                    self.assertGreater(len(train), 0)
+                    self.assertGreater(len(val), 0)
 
 
 if __name__ == '__main__':

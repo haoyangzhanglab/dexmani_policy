@@ -54,7 +54,8 @@ def checkpoint_fixture(root, *, step=20, pct=20, total=100, resume_from=None):
         optimizer_state={}, scheduler_state={}, resume_contract={},
         ema_updater_step=step, rng_states=[], effective_config=config,
     )
-    path = Path(root) / 'checkpoints' / f'epoch=0-step={step}-milestone={pct}pct.pt'
+    tag = 'bounded' if pct is None else f'milestone={pct}pct'
+    path = Path(root) / 'checkpoints' / f'epoch=0-step={step}-{tag}.pt'
     save_training_checkpoint(path, checkpoint)
     info.saved_config = config
     info.checkpoint_path = path

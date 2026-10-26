@@ -30,6 +30,9 @@ def validate_best_info(info):
 
     if type(info["global_step"]) is not int or info["global_step"] < 0:
         raise ValueError("Selected global_step must be an int >= 0")
+    digest = info["checkpoint_sha256"]
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("Selected checkpoint requires a SHA-256 content identity")
     inference = info["inference"]
     if set(inference) != {"use_ema", "inference_steps", "action_steps"}:
         raise ValueError("Best requires explicit use_ema, inference_steps and action_steps")
@@ -102,9 +105,6 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
             )
         )
 
-    if not found:
-        raise FileNotFoundError(f"No milestone checkpoints found in {ckpt_dir}")
-
     return sorted(found, key=lambda checkpoint: (checkpoint.pct, checkpoint.path.name))
 
 
@@ -121,7 +121,7 @@ def milestone_steps(total):
 
 
 def archive_resume_milestones(source, destination, checkpoint):
-    """Make the resumed run self-contained before its first optimizer update."""
+    """Preserve available valid milestones up to the resume point."""
     from dexmani_policy.common.checkpoint import read_checkpoint
     from dexmani_policy.common.config import validate_source_recipe
     from dexmani_policy.common.runtime import atomic_path
@@ -135,8 +135,10 @@ def archive_resume_milestones(source, destination, checkpoint):
     directory = Path(source).resolve(strict=True).parent.parent
     for candidate in discover_milestone_checkpoints(directory):
         step = candidate.global_step
-        if expected.get(step) != candidate.pct:
+        if step > checkpoint.global_step:
             continue
+        if expected.get(step) != candidate.pct:
+            raise ValueError(f"Milestone step/percentage differs from training budget: {candidate.path}")
         if step in selected:
             raise ValueError(f"Conflicting milestones at step {step}")
         payload = read_checkpoint(candidate.path, mmap=True)
@@ -145,9 +147,8 @@ def archive_resume_milestones(source, destination, checkpoint):
             raise ValueError(f"Milestone filename/state step mismatch: {candidate.path}")
         del payload
         selected[step] = candidate
-    missing = expected.keys() - selected.keys()
-    if missing:
-        raise FileNotFoundError(f"Missing source-run milestones: {sorted(missing)}")
+    if not selected:
+        return
 
     target = Path(destination) / "checkpoints"
     target.mkdir(parents=True, exist_ok=True)

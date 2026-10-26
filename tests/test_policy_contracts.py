@@ -112,8 +112,14 @@ class PolicyContractsTests(unittest.TestCase):
                 with self.subTest(policy=name):
                     self.check_policy(name, root)
 
-    def check_policy(self, name, root, device="cpu"):
+    def test_r3d_auxiliary_action_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.check_policy('r3d', Path(tmp), use_aux_ee=True)
+
+    def check_policy(self, name, root, device="cpu", *, use_aux_ee=False):
         config = small_agent_config(name, root)
+        if use_aux_ee:
+            config.update(use_aux_ee=True, action_dim=28, joint_dim=19, ee_dim=9, aux_loss_weight=.3)
         agent = hydra.utils.instantiate(config)
         if name in ('lamp', 'latent_flow'):
             agent.initialize_training()
@@ -122,7 +128,7 @@ class PolicyContractsTests(unittest.TestCase):
                 pca_permutation=torch.arange(16), layer_weights=torch.ones(2),
                 hand_normalizer_scale=torch.ones(12), hand_normalizer_offset=torch.zeros(12)))
         spec = dict(action='limits', joint_state='limits')
-        widths = dict(action=19, joint_state=19)
+        widths = dict(action=agent.action_dim, joint_state=19)
         if name == 'lamp':
             spec.update(action='identity', joint_state='gaussian')
         if 'point_cloud' in agent.consumed_observation_fields:
@@ -147,7 +153,7 @@ class PolicyContractsTests(unittest.TestCase):
             context['hand_history'] = torch.zeros(batch_size, 3, 12)
         elif name == 'latent_flow':
             context['reference_state'] = obs['joint_state'][:, -1].clone()
-        batch = dict(obs=obs, action=torch.randn(batch_size, agent.horizon, 19) * .1,
+        batch = dict(obs=obs, action=torch.randn(batch_size, agent.horizon, agent.action_dim) * .1,
                      action_context=context)
         batch = dict_apply(batch, lambda value: value.to(device))
         obs, context = batch['obs'], batch['action_context']
@@ -161,6 +167,9 @@ class PolicyContractsTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
         self.assertTrue(any(p.grad is not None and p.grad.count_nonzero() for p in agent.parameters()))
+        if use_aux_ee:
+            self.assertEqual(agent.loss_groups(), {'joint': (0, 19), 'ee': (19, 28)})
+            torch.testing.assert_close(loss, metrics['loss_joint'] + .3 * metrics['loss_ee'])
         if teacher is not None:
             self.assertEqual((metrics['flow_batch_size'], metrics['consistency_batch_size']), (2, 1))
             torch.testing.assert_close(loss, metrics['loss_flow'] + metrics['loss_consistency'], rtol=0, atol=0)

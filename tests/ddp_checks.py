@@ -50,7 +50,7 @@ def worker(rank, root, config):
                 if rank == 0:
                     components.workspace.save_hydra_config(cfg)
                     if stage == 'resumed':
-                        assert len(list((root / stage / 'checkpoints').glob('*milestone*'))) == 2
+                        assert len(list((root / stage / 'checkpoints').glob('*milestone*'))) == 1
                 components.model = DistributedDataParallel(components.model,
                     static_graph=True, gradient_as_bucket_view=True, find_unused_parameters=False)
                 if checkpoint is None and components.ema_model is not None:
@@ -66,11 +66,13 @@ def worker(rank, root, config):
                     reference = parameter.detach().clone()
                     dist.broadcast(reference, src=0)
                     torch.testing.assert_close(parameter, reference, rtol=0, atol=0)
+            if rank == 0 and stage == 'first':
+                next((root / stage / 'checkpoints').glob('*milestone=20pct.pt')).unlink()
             dist.barrier()
         if rank == 0:
             saved = load_training_checkpoint(root / 'resumed/checkpoints/latest.pt')
             assert saved.global_step == 6 and len(saved.rng_states) == 2
-            assert len(list((root / 'resumed/checkpoints').glob('*milestone*'))) == 3
+            assert len(list((root / 'resumed/checkpoints').glob('*milestone*'))) == 2
     finally:
         dist.destroy_process_group()
 
@@ -90,7 +92,7 @@ def main():
             cfg.training.loop.update(total_train_steps=10, gradient_accumulation_steps=3)
             cfg.workspace.wandb_cfg = None
         mp.spawn(worker, args=(tmp, OmegaConf.to_container(cfg, resolve=True)), nprocs=2, join=True)
-    print('CPU/Gloo two-rank fresh/resume/tail accumulation/archive PASSED')
+    print('CPU/Gloo two-rank fresh/resume/tail accumulation/missing-milestone archive PASSED')
 
 
 if __name__ == '__main__':

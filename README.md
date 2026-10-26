@@ -14,7 +14,7 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与已装 Torch/CUDA 匹配的 PyTorch3D 原生扩展；通用依赖不自动安装它。本次 CPU 环境验证为 Torch 2.4.1+cu124 / torchvision 0.19.1 / PyTorch3D 0.7.8。请在目标环境构建匹配的 PyTorch3D，先执行 `python -c 'import pytorch3d.ops'`，再运行对应方法检查。DP3 输入点数无需下采样时不需要该后端；触发 FPS 的其他路径同样需要它。
+Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与已装 Torch/CUDA 匹配的 PyTorch3D 原生扩展；通用依赖不自动安装它。构造这些点云模型前可用 `python -c 'import pytorch3d.ops'` 检查后端。纯配置检查及 VQ/LAMP 手部预训练数据准备不需要 PyTorch3D；DP3 输入点数无需下采样时也不需要。实际 FPS/kNN 使用点缺少后端会明确报错，不自动替换算法。
 
 ## 快速开始
 
@@ -50,7 +50,16 @@ bash scripts/training/train.sh dp3 \
   '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
-入口支持 Hydra 配置覆盖。续训使用保存的实验配置，并创建新的运行目录；首次 update 前归档恢复点之前的 milestone，缺失或冲突时失败。完整训练 `.pt` 仅接受可信项目产物。
+入口支持 Hydra 配置覆盖。续训使用 Checkpoint 保存的训练配方，并创建新的运行目录；首次 update 前归档恢复点及之前实际存在的有效 milestone。缺历史 milestone 不阻止恢复，已有候选损坏、冲突或配方不一致仍报错；不复制未来候选。附加 `source_evidence` 不参与恢复配方比较，数据划分、normalizer、模型和优化参数仍须一致。完整训练 `.pt` 仅接受可信项目产物。
+
+R3D 默认 B=128 在 24 GiB GPU 上可能 OOM。单卡可使用现有梯度累积配置：
+
+```bash
+bash scripts/training/train.sh r3d 'task_name=<task>' \
+  dataloader.batch_size=4 training.loop.gradient_accumulation_steps=32
+```
+
+该配方的 nominal batch 为 4×32=128；实际 microbatch、累积及 epoch 尾组会记录在训练输出中。默认 YAML 不变，尾组和随机采样过程不保证与 B=128、accumulation=1 逐位一致。模型结构、动作布局和 loss 不变；恢复这个实验时继续使用保存的 4/32 配方。
 
 ### 3. 仿真评测
 
@@ -65,7 +74,7 @@ bash scripts/eval/evaluate.sh <policy_name> <task_name> <run> \
   --checkpoint best
 ```
 
-正式测试使用冻结的选点与评测协议；普通研究评测不作为正式 held-out 测试证据。
+正式选点在仿真前要求训练预算对应的完整 milestone 集合（通常为 20/40/60/80/100%）；缺失时列出 step，不能以部分候选代替。普通研究评测仍可指定单个 Checkpoint；`best` 在加载前检查实际权重 SHA-256，但不重跑排名。正式测试使用冻结的选点与评测协议，普通研究评测不作为正式 held-out 测试证据。
 
 ## 项目结构
 
@@ -101,4 +110,4 @@ experiments/<policy_name>/<task_name>/<run>/
 - [手部动作表示](docs/手部动作表示.md)：手部动作建模及预训练
 - [仿真评测机制](docs/仿真评测机制.md)：Checkpoint 选点、评测协议与结果记录
 - [SSH 服务器训练部署](docs/SSH服务器训练部署.md)：远程训练、同步与管理
-- [本轮修复与验证结果](docs/CODEX_REFACTOR_RESULTS.md)：R01–R20 的实际处理、CPU 验证和外部阻塞
+- [本轮修复与验证结果](docs/CODEX_REFACTOR_RESULTS.md)：定向修复、验证结果与未验证范围

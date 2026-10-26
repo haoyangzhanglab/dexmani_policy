@@ -63,7 +63,7 @@ def resolve_resume_source(source):
 
 
 def recipe_content(config):
-    """Compare research settings, excluding supported run and location changes."""
+    """Compare training semantics, excluding run locations and acquisition notes."""
     plain = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
 
     def visit(value, path=""):
@@ -76,6 +76,7 @@ def recipe_content(config):
                     or child_path in ARTIFACT_LOCATION_FIELDS
                     or child_path == "hand_data.provenance.zarr_path"
                     or re.fullmatch(r"dataset\.(?:datasets\.\d+\.)?zarr_path", child_path)
+                    or re.fullmatch(r"data_recipe\.\d+\.source_evidence", child_path)
                 ):
                     continue
                 result[key] = visit(child, child_path)

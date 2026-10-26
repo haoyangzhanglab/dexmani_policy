@@ -8,7 +8,6 @@ from torch import nn
 from dexmani_policy.agents.action_decoders.backbones.r3d import R3DTransformer
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
 from dexmani_policy.agents.obs_encoder.pointcloud.uni3d import Uni3DEncoder
-from dexmani_policy.agents.obs_encoder.pointcloud.ops import load_pointcloud_ops
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 
@@ -58,7 +57,6 @@ class R3DPolicy(BasePolicy):
 
     @classmethod
     def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
-        load_pointcloud_ops()
         validate_action_clipping(spec, cfg.get("clip_sample", True))
         if spec["point_cloud"] != "limits":
             raise ValueError("R3D fixed normalized point-cloud clamp requires limits normalization")

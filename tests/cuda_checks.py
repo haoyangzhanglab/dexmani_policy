@@ -34,6 +34,7 @@ class CudaChecks(unittest.TestCase):
                          'dqrise', 'lamp', 'latent_flow'):
                 with self.subTest(policy=name):
                     checks.check_policy(name, root, device='cuda:0')
+            checks.check_policy('r3d', root, device='cuda:0', use_aux_ee=True)
 
     def test_runtime_load_interleaving_warmup_and_rtc(self):
         checks = NumericsRuntimeTests()
@@ -72,7 +73,7 @@ class CudaChecks(unittest.TestCase):
                 self.assertTrue(torch.equal(old, current))
 
     def test_training_and_resume(self):
-        TrainingTests().check_training('cuda:0')
+        TrainingTests().check_training('cuda:0', missing_history=True)
 
     def test_clip_explicit_device_and_vq(self):
         model = CLIPTextModelWithProjection(CLIPTextConfig(hidden_size=8, intermediate_size=16,
