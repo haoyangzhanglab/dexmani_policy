@@ -212,9 +212,9 @@ class DQRISEPolicy(BasePolicy):
         self.validate_codebook_normalizer()
 
     def validate_codebook_normalizer(self, *, rtol: float = 1e-5, atol: float = 1e-6) -> None:
-        params = self.normalizer["action"].params_dict
-        policy_scale = params["scale"][-self.hand_dim :].detach().cpu()
-        policy_offset = params["offset"][-self.hand_dim :].detach().cpu()
+        field = self.normalizer["action"]
+        policy_scale = field.scale[-self.hand_dim :].detach().cpu()
+        policy_offset = field.offset[-self.hand_dim :].detach().cpu()
         code_scale = self.hand_codebook.hand_normalizer_scale.detach().cpu()
         code_offset = self.hand_codebook.hand_normalizer_offset.detach().cpu()
 

@@ -16,7 +16,7 @@ from dexmani_policy.common.experiments import (
     resolve_checkpoint_path,
     resolve_milestone_path,
 )
-from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
+from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.evaluation.seeds import (
     split_evaluation_seeds,
     validate_evaluation_seed,

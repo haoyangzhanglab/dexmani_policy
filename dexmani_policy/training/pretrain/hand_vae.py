@@ -13,7 +13,8 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
 from dexmani_policy.common.config import load_policy_config, positive_int
-from dexmani_policy.common.runtime import atomic_path, set_seed
+from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.hand_chunk_dataset import HandChunkDataset
 
 

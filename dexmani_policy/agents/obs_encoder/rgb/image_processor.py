@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from dexmani_policy.common.rgb_preprocessing import resize_image_transform
+from dexmani_policy.common.image_util import resize_image_transform
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)

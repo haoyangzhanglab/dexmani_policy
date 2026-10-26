@@ -9,7 +9,7 @@ import torch
 from imageio_ffmpeg import read_frames
 
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.rgb_preprocessing import preprocess_validation_rgb
+from dexmani_policy.common.image_util import preprocess_rgb_eval
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.env_runner.video import save_episode_video
 
@@ -109,7 +109,7 @@ def test_rgb_batch_matches_dataset_recipe(resize, keep_uint8):
     rgb = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
     runner.update_obs({"joint_state": np.ones(3, np.float64), "rgb": rgb})
     batch = runner.get_obs_batch("cpu")
-    expected = preprocess_validation_rgb(np.stack([rgb, rgb]), **recipe)
+    expected = preprocess_rgb_eval(np.stack([rgb, rgb]), **recipe)
     torch.testing.assert_close(batch["rgb"], expected.unsqueeze(0))
     assert batch["joint_state"].shape == (1, 2, 3)
     assert batch["joint_state"].dtype == torch.float32

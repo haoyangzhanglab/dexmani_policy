@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from dexmani_policy.common.runtime import atomic_path
+from dexmani_policy.common.io_util import atomic_path
 
 
 def runtime_provenance():

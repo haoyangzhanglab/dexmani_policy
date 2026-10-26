@@ -240,9 +240,9 @@ class LatentFlowPolicy(BasePolicy):
         condition = self.encode_condition(batch["obs"])
         actions = batch["action"].float()
         hand_reference = reference[:, self.arm_dim :]
-        affine = self.normalizer["action"].params_dict
+        affine = self.normalizer["action"]
         arm = actions[..., : self.arm_dim] - reference[:, None, : self.arm_dim]
-        arm = arm * affine["scale"][: self.arm_dim] + affine["offset"][: self.arm_dim]
+        arm = arm * affine.scale[: self.arm_dim] + affine.offset[: self.arm_dim]
         with torch.no_grad(), torch.autocast(device_type=actions.device.type, enabled=False):
             mu, _ = self.codec.encode(actions[..., self.arm_dim :], hand_reference)
         target = torch.cat((arm, mu), dim=-1)
@@ -315,9 +315,9 @@ class LatentFlowPolicy(BasePolicy):
             condition, (len(condition), self.horizon, self.model_action_dim),
             inference_steps, dtype=torch.float32, generator=generator,
         )
-        affine = self.normalizer["action"].params_dict
-        scale = affine["scale"][: self.arm_dim]
-        offset = affine["offset"][: self.arm_dim]
+        affine = self.normalizer["action"]
+        scale = affine.scale[: self.arm_dim]
+        offset = affine.offset[: self.arm_dim]
         arm = (native[..., : self.arm_dim] - offset) / scale + reference_state[:, None, : self.arm_dim]
         with torch.autocast(device_type=native.device.type, enabled=False):
             hand = self.codec.decode_actions(

@@ -130,7 +130,7 @@ def split_episodes(buffer, *, manifest=None, val_ratio=0.1, seed=42, max_train_e
 
 def main():
     import argparse
-    from dexmani_policy.common.runtime import atomic_path
+    from dexmani_policy.common.io_util import atomic_path
 
     parser = argparse.ArgumentParser(
         description="Create a shared episode split, keeping known trials together"

@@ -5,7 +5,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.checkpoint import load_training_checkpoint
+from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import (
     normalization_dims_from_config,
     positive_int,
@@ -19,7 +19,7 @@ from dexmani_policy.datasets.robot_dataset import RobotDataset
 
 def prepare_training(cfg):
     source = resolve_resume_source(cfg.get("resume_from"))
-    checkpoint = load_training_checkpoint(source) if source is not None else None
+    checkpoint = load_checkpoint(source) if source is not None else None
     overrides = HydraConfig.get().overrides.task if source is not None else []
     effective_config = resolve_input_recipe(cfg, overrides=overrides, resume_checkpoint=checkpoint)
     with open_dict(effective_config):

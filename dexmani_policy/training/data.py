@@ -7,12 +7,12 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import resolve_normalization_spec
-from dexmani_policy.common.normalization import AffineNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer
 
 
-def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
+def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
     """Fit consumed training data, preserving rot6d coordinates for action_ee auto mode."""
-    normalizer = AffineNormalizer()
+    normalizer = LinearNormalizer()
 
     for key, mode in spec.items():
         if mode == "identity":
@@ -23,10 +23,10 @@ def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
         normalizer.fit_field(key, dataset.iter_normalization_data(key), mode=mode)
         if mixed_action:
             field = normalizer[key]
-            if field.params_dict["scale"].numel() <= 9:
+            if field.scale.numel() <= 9:
                 raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
-            field.params_dict["scale"][3:9] = 1
-            field.params_dict["offset"][3:9] = 0
+            field.scale[3:9] = 1
+            field.offset[3:9] = 0
             for name, value in (("min", -1), ("max", 1), ("mean", 0), ("std", 1)):
                 field.input_stats[name][3:9] = value
 

@@ -8,12 +8,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.rgb_preprocessing import (
-    preprocess_training_rgb,
-    preprocess_validation_rgb,
+from dexmani_policy.common.image_util import (
+    preprocess_rgb_train,
+    preprocess_rgb_eval,
     validate_rgb_preprocessing,
 )
-from dexmani_policy.common.runtime import dict_apply
+from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, positive_int
 from dexmani_policy.datasets.augmentation import (
     AUGMENTATION_SPECS,
@@ -259,14 +259,14 @@ class RobotDataset(torch.utils.data.Dataset):
 
     def preprocess_rgb(self, rgb, resize_hw: tuple[int, int]):
         if self.is_validation:
-            return preprocess_validation_rgb(
+            return preprocess_rgb_eval(
                 rgb,
                 resize_hw=resize_hw,
                 center_crop_hw=self.rgb_random_crop_size,
                 keep_uint8=self.rgb_keep_uint8,
                 float_spatial_before_uint8=self.rgb_color_aug is not None,
             )
-        return preprocess_training_rgb(
+        return preprocess_rgb_train(
             rgb,
             resize_hw=resize_hw,
             random_crop_hw=self.rgb_random_crop_size,

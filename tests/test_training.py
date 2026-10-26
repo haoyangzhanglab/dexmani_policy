@@ -12,10 +12,10 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.checkpoint import load_training_checkpoint, restore_policy_agent
+from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy_agent
 from dexmani_policy.common.config import PROJECT_ROOT
 from dexmani_policy.common.experiments import discover_milestone_checkpoints, milestone_steps
-from dexmani_policy.common.runtime import set_seed
+from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.training.data import build_dataset_and_normalizer
 from dexmani_policy.training.optimization import build_optimizer, get_scheduler
 from dexmani_policy.training.trainer import PolicyTrainer
@@ -96,7 +96,7 @@ def test_epoch_resume_and_checkpoint_selection(demonstrations, tmp_path, one_thr
         trainer.train(max_updates=updates)
         path = (trainer.checkpoint_dir / "latest.pt").resolve()
         saved_epoch = trainer.current_epoch
-        checkpoint = load_training_checkpoint(path)
+        checkpoint = load_checkpoint(path)
         obs = next(iter(DataLoader(dataset, batch_size=2)))["obs"]
         for use_ema, model in ((False, trainer.model), (True, trainer.ema_model)):
             restored = restore_policy_agent(trainer.cfg, path, use_ema=use_ema, device="cpu")
@@ -139,7 +139,7 @@ def test_nonfinite_loss_and_signal_stop_at_update(demonstrations, tmp_path, one_
         trainer.train()
         handle.remove()
         assert trainer.global_step == 1 and trainer.current_epoch == 0
-        assert load_training_checkpoint(trainer.checkpoint_dir / "latest.pt").global_step == 1
+        assert load_checkpoint(trainer.checkpoint_dir / "latest.pt").global_step == 1
         batch = next(iter(DataLoader(dataset, batch_size=2)))
         batch["action"].fill_(float("nan"))
         with pytest.raises(RuntimeError, match="Non-finite loss"):
@@ -163,13 +163,13 @@ def test_dp3_cpu_cli_training_and_resume(demonstrations, tmp_path):
     ]
     first = subprocess.run(command + overrides, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True)
     assert first.returncode == 0, first.stdout + first.stderr
-    saved = load_training_checkpoint(source / "checkpoints/latest.pt")
+    saved = load_checkpoint(source / "checkpoints/latest.pt")
     assert saved.global_step == 1
     second = subprocess.run(
         command + [f"+resume_from={source}", f"hydra.run.dir={resumed}"],
         cwd=PROJECT_ROOT, env=env, capture_output=True, text=True,
     )
     assert second.returncode == 0, second.stdout + second.stderr
-    final = load_training_checkpoint(resumed / "checkpoints/latest.pt")
+    final = load_checkpoint(resumed / "checkpoints/latest.pt")
     assert final.global_step == final.ema_updater_step == 2
     assert any(not torch.equal(value, final.model_state[name]) for name, value in saved.model_state.items())

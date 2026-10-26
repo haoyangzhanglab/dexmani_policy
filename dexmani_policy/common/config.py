@@ -1,5 +1,3 @@
-"""Configuration loading, numerical settings and dataset path resolution."""
-
 import argparse
 import copy
 import json
@@ -42,7 +40,6 @@ RESUME_OPERATIONAL_FIELDS = {
 
 
 def set_project_root() -> None:
-    """Resolve entry-point relative paths from the repository root."""
     os.chdir(PROJECT_ROOT)
 
 
@@ -102,9 +99,9 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
     if source is None:
         return copy.deepcopy(cfg)
     if resume_checkpoint is None:
-        from dexmani_policy.common.checkpoint import read_checkpoint
+        from dexmani_policy.common.checkpoint import load_checkpoint
 
-        source_config = read_checkpoint(source)["effective_config"]
+        source_config = load_checkpoint(source, mmap=True).effective_config
     else:
         source_config = resume_checkpoint.effective_config
     result = OmegaConf.create(source_config)
@@ -213,15 +210,10 @@ def load_experiment_config(experiment_dir):
 
 
 def resolve_normalization_spec(cfg, *, observation_fields=None):
-    """Resolve normalization modes and check the consumed numeric fields."""
     spec = cfg["normalization"]
     if isinstance(spec, DictConfig):
         spec = OmegaConf.to_container(spec, resolve=True)
-    if not isinstance(spec, dict):
-        raise ValueError("Normalization must map field names to modes")
     for key, mode in spec.items():
-        if not isinstance(key, str) or not key:
-            raise ValueError(f"Invalid numeric normalization field: {key!r}")
         if mode not in ALLOWED_NORMALIZATION_MODES:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}")
         if mode == "auto" and key != "action":
@@ -241,7 +233,6 @@ def resolve_normalization_spec(cfg, *, observation_fields=None):
 
 
 def normalization_dims_from_config(cfg):
-    """Check recorded affine widths against the policy's observation and action layout."""
     dims = dict(cfg["normalization_dims"])
     agent = cfg["agent"]
     expected = {

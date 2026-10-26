@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import (
-    load_training_checkpoint,
+    load_checkpoint,
     policy_state_dict,
     restore_policy_agent,
 )
@@ -23,7 +23,8 @@ from dexmani_policy.common.config import (
     positive_int,
     set_project_root,
 )
-from dexmani_policy.common.runtime import close_resources, dict_apply, set_seed
+from dexmani_policy.common.io_util import close_resources
+from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.datasets.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.latent_flow_dataset import LatentFlowDataset
 from dexmani_policy.training.trainer import PolicyTrainer
@@ -184,7 +185,7 @@ def validate_parameter_updates(model, before):
 
 
 def validate_checkpoint_state(cfg, trainer, checkpoint_path):
-    checkpoint = load_training_checkpoint(checkpoint_path)
+    checkpoint = load_checkpoint(checkpoint_path)
     assert checkpoint.global_step == trainer.global_step
     assert checkpoint.epoch == trainer.current_epoch
     assert trainer.scheduler.state_dict() == checkpoint.scheduler_state

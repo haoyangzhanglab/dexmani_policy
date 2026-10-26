@@ -19,8 +19,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
-from dexmani_policy.common.normalization import AffineNormalizer, FieldNormalizer
-from dexmani_policy.common.runtime import atomic_path, set_seed
+from dexmani_policy.common.normalizer import LinearNormalizer, FieldNormalizer
+from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.robot_dataset import RobotDataset
 from dexmani_policy.training.optimization import get_scheduler
 from dexmani_policy.training.data import build_normalizer
@@ -76,7 +77,7 @@ def save_checkpoint(
     *,
     epoch: int,
     vqvae: torch.nn.Module,
-    normalizer: AffineNormalizer,
+    normalizer: LinearNormalizer,
     recipe,
     split_metadata: dict,
     metrics: dict,
@@ -151,10 +152,10 @@ def prepare_policy_data(cfg):
     hand_data = dataset.describe_hand_data()
     action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)["action"]
     hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))
-    normalizer = AffineNormalizer()
-    normalizer["hand"] = FieldNormalizer.from_parameters(
-        action.params_dict["scale"][hand_slice].clone(),
-        action.params_dict["offset"][hand_slice].clone(),
+    normalizer = LinearNormalizer()
+    normalizer["hand"] = FieldNormalizer(
+        action.scale[hand_slice].clone(),
+        action.offset[hand_slice].clone(),
         {key: value[hand_slice].clone() for key, value in action.input_stats.items()},
     )
     val = dataset.get_validation_dataset()

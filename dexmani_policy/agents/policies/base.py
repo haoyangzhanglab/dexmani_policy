@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from dexmani_policy.common.config import positive_int, validate_action_window
-from dexmani_policy.common.normalization import AffineNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer
 
 
 def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> list[dict]:
@@ -66,7 +66,7 @@ class BasePolicy(nn.Module):
         self.n_action_steps = n_action_steps
         self.action_dim = action_dim
         self.modality_dropout_probs = modality_dropout_probs or {}
-        self.normalizer = AffineNormalizer()
+        self.normalizer = LinearNormalizer()
         self.normalization_dims = {}
 
     @classmethod
@@ -104,11 +104,14 @@ class BasePolicy(nn.Module):
         self.normalization_dims = dict(feature_dims)
         if self.normalization_dims["action"] != self.action_dim:
             raise ValueError("Normalizer action width must match the full prediction layout")
+        self.normalizer = LinearNormalizer({
+            key: feature_dims[key] for key, mode in spec.items() if mode != "identity"
+        })
 
     def initialize_training(self, data_description) -> None:
         """Initialize fresh weights against the data recipe; checkpoints skip this step."""
 
-    def load_normalizer(self, normalizer: AffineNormalizer) -> None:
+    def load_normalizer(self, normalizer: LinearNormalizer) -> None:
         self.normalizer.load_state_dict(normalizer.state_dict())
 
     @property
@@ -127,7 +130,7 @@ class BasePolicy(nn.Module):
                 # Runners may supply XYZRGB even when the policy consumes only XYZ.
                 if key == "point_cloud" and self.normalization_dims.get(key) == 3:
                     value = value[..., :3]
-                if key in self.normalizer.params_dict:
+                if key in self.normalizer.fields:
                     value = self.normalizer[key].normalize(value)
                 probability = self.modality_dropout_probs.get(key, 0.0)
                 if self.training and probability > 0:
@@ -207,9 +210,9 @@ class BasePolicy(nn.Module):
         if rtc_prefix is not None:
             if "rtc" not in self.supported_execution_modes:
                 raise NotImplementedError("This policy does not support RTC")
-            params = self.normalizer["action"].params_dict
-            scale = params["scale"][: self.control_action_dim]
-            offset = params["offset"][: self.control_action_dim]
+            field = self.normalizer["action"]
+            scale = field.scale[: self.control_action_dim]
+            offset = field.offset[: self.control_action_dim]
             normalized = rtc_prefix.to(condition) * scale + offset
             kwargs = dict(
                 rtc_prefix=normalized,

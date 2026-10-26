@@ -8,7 +8,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import hydra
 
 from dexmani_policy.common.config import register_resolvers, set_project_root
-from dexmani_policy.common.runtime import set_seed
+from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.training.config import prepare_training
 from dexmani_policy.training.data import build_dataset_and_normalizer
 from dexmani_policy.training.trainer import PolicyTrainer

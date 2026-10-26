@@ -1,5 +1,3 @@
-"""Milestone discovery, checkpoint paths and resume archives."""
-
 import errno
 import os
 import re
@@ -54,7 +52,6 @@ class MilestoneCheckpoint:
 
 
 def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
-    """Find regular milestone files inside this experiment, sorted by pct."""
     ckpt_dir = exp_dir / "checkpoints"
     found: list[MilestoneCheckpoint] = []
     for pt_file in ckpt_dir.glob("epoch=*.pt"):
@@ -78,9 +75,9 @@ def milestone_steps(total):
 
 def archive_resume_milestones(source, destination, checkpoint):
     """Preserve available valid milestones up to the resume point."""
-    from dexmani_policy.common.checkpoint import read_checkpoint
+    from dexmani_policy.common.checkpoint import load_checkpoint
     from dexmani_policy.common.config import validate_source_recipe
-    from dexmani_policy.common.runtime import atomic_path
+    from dexmani_policy.common.io_util import atomic_path
 
     total = checkpoint.effective_config["training"]["loop"]["total_train_steps"]
     expected = {step: pct for step, pct in milestone_steps(total).items() if step <= checkpoint.global_step}
@@ -97,11 +94,11 @@ def archive_resume_milestones(source, destination, checkpoint):
             raise ValueError(f"Milestone step/percentage differs from training budget: {candidate.path}")
         if step in selected:
             raise ValueError(f"Conflicting milestones at step {step}")
-        payload = read_checkpoint(candidate.path, mmap=True)
-        validate_source_recipe(checkpoint.effective_config, payload["effective_config"])
-        if payload["state"]["global_step"] != step:
+        candidate_state = load_checkpoint(candidate.path, mmap=True)
+        validate_source_recipe(checkpoint.effective_config, candidate_state.effective_config)
+        if candidate_state.global_step != step:
             raise ValueError(f"Milestone filename/state step mismatch: {candidate.path}")
-        del payload
+        del candidate_state
         selected[step] = candidate
     if not selected:
         return

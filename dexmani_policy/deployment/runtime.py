@@ -1,13 +1,21 @@
-"""Load saved policies and predict physical actions from NumPy observations."""
-
-from __future__ import annotations
-
 import time
+from typing import Any
 
 import numpy as np
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.runtime import close_resources
+
+
+_OBSERVATION_SHAPES = {
+    "joint_state": (19,),
+    "eef_pose": (9,),
+    "finger_tactile_force": (5, 3),
+    "fingertip_xyz": (5, 3),
+    "taxel_tactile_force": (5, 120, 3),
+    "camera_intrinsic": (9,),
+    "camera_extrinsic": (12,),
+    "tactile_valid": (5,),
+}
 
 
 def load_policy(info, *, device="cuda:0", seed=0):
@@ -18,23 +26,12 @@ def load_policy(info, *, device="cuda:0", seed=0):
     agent = restore_policy_agent(
         info.saved_config, info.checkpoint_path, use_ema=info.weights == "ema", device=device
     )
-    try:
-        return PolicyRuntime(agent, info, device=device, seed=seed)
-    except BaseException:
-        close_resources(lambda: agent.to("cpu"))
-        raise
+    return PolicyRuntime(agent, info, device=device, seed=seed)
 
 
 def make_warmup_observation(info, *, rgb_hw=None):
-    """Synthetic inputs match the saved layouts and never substitute for live observations."""
-    shapes = {
-        "joint_state": (19,),
-        "eef_pose": (9,),
-        "finger_tactile_force": (5, 3),
-        "fingertip_xyz": (5, 3),
-        "taxel_tactile_force": (5, 120, 3),
-    }
     observation = {}
+    dtype: type[np.generic]
     for name in info.observation_fields:
         if name == "tactile_valid":
             observation[name] = np.ones((info.n_obs_steps, 5), dtype=np.bool_)
@@ -57,13 +54,9 @@ def make_warmup_observation(info, *, rgb_hw=None):
         elif name == "hand_pointcloud":
             shape, dtype = (info.hand_pointcloud_config["num_points"], 6), np.float32
         elif name == "point_cloud":
-            recipe = info.pointcloud_config
-            if not isinstance(recipe, dict):
-                raise ValueError("Point-cloud warmup requires the saved production recipe")
-            num_points = positive_int(recipe.get("num_points"), "pointcloud.num_points")
-            shape, dtype = (num_points, 6), np.float32
+            shape, dtype = (info.pointcloud_config["num_points"], 6), np.float32
         else:
-            shape, dtype = shapes[name], np.float32
+            shape, dtype = _OBSERVATION_SHAPES[name], np.float32
         shape = (info.n_obs_steps, *shape)
         pattern = (
             np.arange(1, 252, dtype=dtype)
@@ -79,9 +72,9 @@ def make_warmup_observation(info, *, rgb_hw=None):
 
 
 class PolicyRuntime:
-    """Bridge raw observation histories to physical future action chunks."""
-
     def __init__(self, agent, info, *, device, seed):
+        import torch
+
         from dexmani_policy.common.config import validate_observation_fields
 
         validate_observation_fields(agent, info.observation_fields)
@@ -96,8 +89,6 @@ class PolicyRuntime:
         if "hand_pointcloud" in info.observation_fields:
             self.hand_pointcloud_shape = (info.hand_pointcloud_config["num_points"], 6)
 
-        import torch
-
         self.generator = torch.Generator(device=device)
         self.device = device
         self.seed = seed
@@ -109,23 +100,21 @@ class PolicyRuntime:
     def prepare_observations(self, observation):
         import torch
 
-        from dexmani_policy.common.rgb_preprocessing import preprocess_validation_rgb
-
-        missing = set(self.info.observation_fields) - observation.keys()
-        if missing:
-            raise ValueError(f"Missing policy observations: {sorted(missing)}")
-        arrays = {name: np.asarray(observation[name]) for name in self.info.observation_fields}
-        lengths = set()
-        for name, value in arrays.items():
-            if value.ndim < 2 or value.dtype.kind not in "buif":
-                raise ValueError(f"Policy history {name} requires numeric (T, ...) input")
-            lengths.add(len(value))
-        if len(lengths) != 1 or next(iter(lengths), 0) < self.info.n_obs_steps:
-            raise ValueError("Policy histories must have equal raw lengths >= n_obs_steps")
+        from dexmani_policy.common.image_util import preprocess_rgb_eval
 
         tensors = {}
-        for name, value in arrays.items():
+        history_length = None
+        for name in self.info.observation_fields:
+            value = np.asarray(observation[name])
+            if value.ndim < 2 or value.dtype.kind not in "buif":
+                raise ValueError(f"Policy history {name} requires numeric (T, ...) input")
+            if history_length is None:
+                history_length = len(value)
+            if len(value) != history_length or len(value) < self.info.n_obs_steps:
+                raise ValueError("Policy histories must have equal raw lengths >= n_obs_steps")
             value = value[-self.info.n_obs_steps :]
+            if name in _OBSERVATION_SHAPES and value.shape[1:] != _OBSERVATION_SHAPES[name]:
+                raise ValueError(f"Policy history {name} requires trailing shape {_OBSERVATION_SHAPES[name]}")
             if name == "depth":
                 if value.shape[1:] != self.depth_shape or value.dtype != np.uint16:
                     raise ValueError(
@@ -136,14 +125,18 @@ class PolicyRuntime:
                     raise ValueError(
                         "Hand-pointcloud input must be float32 XYZRGB in the saved template shape"
                     )
-            if name == "point_cloud" and self.info.pc_dim is not None:
-                if value.shape[-1] < self.info.pc_dim:
+            if name == "point_cloud":
+                if value.ndim != 3:
+                    raise ValueError("Point cloud requires shape (T, N, C)")
+                if self.info.pc_dim is not None and value.shape[-1] < self.info.pc_dim:
                     raise ValueError("Point cloud has fewer channels than the saved input recipe")
                 value = value[..., : self.info.pc_dim]
             if value.dtype.kind == "f" and not np.isfinite(value).all():
                 raise ValueError(f"Nonfinite policy observation: {name}")
             if name == "rgb":
-                tensor = preprocess_validation_rgb(value, **self.rgb_preprocessing)
+                if value.ndim != 4:
+                    raise ValueError("RGB input requires shape (T, H, W, 3)")
+                tensor = preprocess_rgb_eval(value, **self.rgb_preprocessing)
             else:
                 tensor = torch.from_numpy(np.ascontiguousarray(value))
             dtype = None if name in {"rgb", "tactile_valid"} else torch.float32
@@ -154,11 +147,9 @@ class PolicyRuntime:
     def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
         import torch
 
-        if self.agent is None:
-            raise RuntimeError("Policy is closed")
         tensors = self.prepare_observations(observation)
         dimensions = self.agent.control_action_dim
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
 
         if action_context is not None:
             shapes = self.info.action_context_shapes
@@ -167,10 +158,13 @@ class PolicyRuntime:
             context = {}
             for name, value in action_context.items():
                 value = np.asarray(value)
-                if (value.shape != tuple(shapes[name]) or value.dtype.kind not in "fiu"
-                        or not np.isfinite(value).all()):
+                if (
+                    value.shape != tuple(shapes[name])
+                    or value.dtype.kind not in "fiu"
+                    or not np.isfinite(value).all()
+                ):
                     raise ValueError(f"Invalid physical action_context.{name}")
-                context[name] = torch.tensor(value, device=self.device, dtype=torch.float32)[None]
+                context[name] = torch.as_tensor(value, device=self.device, dtype=torch.float32)[None]
             if context:
                 kwargs["action_context"] = context
 
@@ -200,17 +194,7 @@ class PolicyRuntime:
             )
 
         # Real consumes the full future after the query, without auxiliary dimensions.
-        prediction = result.get("future_actions") if isinstance(result, dict) else None
-        expected = (1, self.info.future_steps, dimensions)
-        if (
-            not torch.is_tensor(prediction)
-            or prediction.shape != expected
-            or not prediction.is_floating_point()
-        ):
-            raise ValueError(f"Policy future requires floating future_actions {expected}")
-        prediction = prediction.detach().squeeze(0).to(device="cpu", dtype=torch.float64).numpy()
-        if not np.isfinite(prediction).all():
-            raise ValueError("Nonfinite policy prediction")
+        prediction = result["future_actions"][0].to(device="cpu", dtype=torch.float64).numpy()
         return np.ascontiguousarray(prediction)
 
     def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0, rtc_guidance_cap=None):
@@ -243,7 +227,7 @@ class PolicyRuntime:
             bootstrap = measure()
             steady = bootstrap
             if rtc_guidance_cap is not None:
-                kwargs = {"rtc_prefix": prefix, "delay_steps": rtc_delay, "rtc_guidance_cap": rtc_guidance_cap}
+                kwargs = dict(rtc_prefix=prefix, delay_steps=rtc_delay, rtc_guidance_cap=rtc_guidance_cap)
                 self.predict(observation, action_context=context, **kwargs)
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}
@@ -251,12 +235,4 @@ class PolicyRuntime:
             self.generator.set_state(generator_state)
 
     def close(self):
-        if self.agent is None:
-            return
-        agent, self.agent = self.agent, None
-        callbacks = [lambda: agent.to("cpu")]
-        if str(self.device).startswith("cuda"):
-            import torch
-
-            callbacks.append(torch.cuda.empty_cache)
-        close_resources(*callbacks)
+        self.agent = None

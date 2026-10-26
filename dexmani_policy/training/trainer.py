@@ -11,16 +11,15 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import (
-    TrainingCheckpoint, load_policy_state, policy_state_dict,
-    prepare_restore_config, save_training_checkpoint,
+    Checkpoint, load_policy_state, policy_state_dict,
+    prepare_restore_config, save_checkpoint,
 )
 from dexmani_policy.common.config import (
     positive_int, resolve_normalization_spec, validate_observation_fields, validate_source_recipe,
 )
 from dexmani_policy.common.experiments import archive_resume_milestones, milestone_steps
-from dexmani_policy.common.runtime import (
-    atomic_path, close_resources, dict_apply, get_rng_state, set_rng_state,
-)
+from dexmani_policy.common.io_util import atomic_path, close_resources
+from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.config import assemble_effective_config
 from dexmani_policy.training.data import build_train_loader, close_data_loader
 from dexmani_policy.training.logging import (
@@ -84,6 +83,9 @@ class PolicyTrainer:
                         or not torch.equal(parameter, averaged[name])
                     ):
                         raise ValueError(f"Raw/EMA frozen parameter mismatch: {name}")
+                for name, value in model.normalizer.named_buffers():
+                    if not torch.equal(value, ema_model.normalizer.get_buffer(name)):
+                        raise ValueError(f"Raw/EMA normalizer mismatch: {name}")
         model.to(device)
         if ema_model is not None:
             ema_model.to(device)
@@ -213,7 +215,7 @@ class PolicyTrainer:
         global_step = self.global_step
         if self.last_checkpoint_step == global_step:
             return
-        checkpoint = TrainingCheckpoint(
+        checkpoint = Checkpoint(
             epoch=self.current_epoch,
             global_step=global_step,
             model_state=policy_state_dict(self.model),
@@ -229,7 +231,7 @@ class PolicyTrainer:
             rng_state=get_rng_state(self.device),
         )
         tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"
-        checkpoint_path = save_training_checkpoint(self.checkpoint_dir / f"{tag}.pt", checkpoint)
+        checkpoint_path = save_checkpoint(self.checkpoint_dir / f"{tag}.pt", checkpoint)
         with atomic_path(self.checkpoint_dir / "latest.pt") as temporary:
             temporary.unlink()
             temporary.symlink_to(checkpoint_path.name)

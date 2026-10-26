@@ -5,8 +5,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from dexmani_policy.common.rgb_preprocessing import preprocess_validation_rgb
-from dexmani_policy.common.runtime import close_resources
+from dexmani_policy.common.image_util import preprocess_rgb_eval
+from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.env_runner.video import save_episode_video
 
 
@@ -56,7 +56,7 @@ class SimRunner:
         batch = {}
         for name, observation in self.get_stacked_obs().items():
             value = (
-                preprocess_validation_rgb(observation, **self.rgb_preprocessing)
+                preprocess_rgb_eval(observation, **self.rgb_preprocessing)
                 if name == "rgb" else observation
             )
             dtype = None if name == "rgb" else torch.float32

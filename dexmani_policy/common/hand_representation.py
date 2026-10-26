@@ -1,5 +1,3 @@
-"""Physical hand data semantics shared by datasets, policies and pretraining."""
-
 import math
 
 HAND_ACTION_SEMANTICS = {

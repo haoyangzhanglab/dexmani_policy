@@ -1,5 +1,3 @@
-"""Training and deterministic evaluation RGB recipes; Torch loads only on use."""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -12,7 +10,6 @@ if TYPE_CHECKING:
 
 
 def rgb_preprocessing_kwargs(dataset_config):
-    """The exact deterministic RobotDataset validation recipe."""
     validate_rgb_preprocessing(
         dataset_config.get("rgb_preprocess_size"),
         dataset_config.get("rgb_random_crop_size"),
@@ -80,23 +77,19 @@ def convert_rgb_output(value: torch.Tensor, *, keep_uint8: bool) -> torch.Tensor
     return value
 
 
-def preprocess_training_rgb(
+def preprocess_rgb_train(
     rgb: np.ndarray | torch.Tensor,
     *,
     resize_hw: tuple[int, int],
     random_crop_hw: tuple[int, int] | None,
     keep_uint8: bool,
     color_augmentation: Callable | None = None,
-    return_transform: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Share crop/color across time and track raw->output geometry; color must preserve it."""
+) -> torch.Tensor:
+    # Apply the same crop and color augmentation to every frame.
     import torch
     import torchvision.transforms.functional as TVF
 
     value = raw_rgb_tensor(rgb, ndim=4).permute(0, 3, 1, 2).contiguous()
-    if return_transform:
-        validate_rgb_preprocessing(resize_hw, random_crop_hw)
-        transform = resize_image_transform(value.shape[-2:], resize_hw, device=value.device)
     if not keep_uint8 or color_augmentation is not None:
         value = value.float().div_(255.0)
     value = TVF.resize(value, list(resize_hw), antialias=True)
@@ -105,41 +98,28 @@ def preprocess_training_rgb(
         top = torch.randint(0, value.shape[-2] - height + 1, (1,)).item()
         left = torch.randint(0, value.shape[-1] - width + 1, (1,)).item()
         value = TVF.crop(value, top, left, height, width)
-        if return_transform:
-            transform[0, 2] -= left
-            transform[1, 2] -= top
     if color_augmentation is not None:
         value = color_augmentation(value)
-    value = convert_rgb_output(value, keep_uint8=keep_uint8)
-    return (value, transform) if return_transform else value
+    return convert_rgb_output(value, keep_uint8=keep_uint8)
 
 
-def preprocess_validation_rgb(
+def preprocess_rgb_eval(
     rgb: np.ndarray | torch.Tensor,
     *,
     resize_hw: tuple[int, int] | None,
     center_crop_hw: tuple[int, int] | None,
     keep_uint8: bool,
     float_spatial_before_uint8: bool = False,
-    return_transform: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Keep HWC without resize; otherwise return CHW with optional raw->output geometry."""
+) -> torch.Tensor:
+    # Without CPU resize, the encoder receives raw uint8 HWC images.
     import torchvision.transforms.functional as TVF
     from torchvision.transforms import InterpolationMode
 
     value = raw_rgb_tensor(rgb)
-    if return_transform:
-        validate_rgb_preprocessing(resize_hw, center_crop_hw)
-        transform = resize_image_transform(
-            value.shape[-3:-1],
-            resize_hw or value.shape[-3:-1],
-            device=value.device,
-        )
     if resize_hw is None:
         if center_crop_hw is not None:
             raise ValueError("validation RGB center crop requires a resize")
-        value = value.contiguous()
-        return (value, transform) if return_transform else value
+        return value.contiguous()
 
     leading_shape = tuple(value.shape[:-3])
     value = value.movedim(-1, -3).contiguous()
@@ -153,11 +133,6 @@ def preprocess_validation_rgb(
         antialias=True,
     )
     if center_crop_hw is not None:
-        if return_transform:
-            # Match torchvision center_crop, including round-to-even for odd gaps.
-            transform[0, 2] -= int(round((value.shape[-1] - center_crop_hw[1]) / 2))
-            transform[1, 2] -= int(round((value.shape[-2] - center_crop_hw[0]) / 2))
         value = TVF.center_crop(value, list(center_crop_hw))
     value = convert_rgb_output(value, keep_uint8=keep_uint8)
-    value = value.reshape(*leading_shape, *value.shape[-3:]).contiguous()
-    return (value, transform) if return_transform else value
+    return value.reshape(*leading_shape, *value.shape[-3:]).contiguous()

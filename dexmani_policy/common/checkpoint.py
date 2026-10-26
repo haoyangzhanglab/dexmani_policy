@@ -1,16 +1,12 @@
-"""Atomic checkpoint persistence and policy restoration."""
-
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dexmani_policy.common.runtime import atomic_path
+from dexmani_policy.common.io_util import atomic_path
 
 
 @dataclass
-class TrainingCheckpoint:
+class Checkpoint:
     epoch: int
     global_step: int
     model_state: dict[str, Any]
@@ -22,56 +18,22 @@ class TrainingCheckpoint:
     effective_config: dict[str, Any]
 
 
-def save_training_checkpoint(path: Path, checkpoint: TrainingCheckpoint) -> Path:
+def save_checkpoint(path: Path, checkpoint: Checkpoint) -> Path:
     import torch
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "effective_config": checkpoint.effective_config,
-        "state": {
-            "epoch": checkpoint.epoch,
-            "global_step": checkpoint.global_step,
-            "ema_updater_step": checkpoint.ema_updater_step,
-            "rng_state": checkpoint.rng_state,
-        },
-        "weights": {
-            "model": checkpoint.model_state,
-            "ema_model": checkpoint.ema_model_state,
-            "optimizer": checkpoint.optimizer_state,
-            "scheduler": checkpoint.scheduler_state,
-        },
-    }
     with atomic_path(path) as temporary:
-        torch.save(payload, temporary)
+        torch.save(vars(checkpoint), temporary)
     return path
 
 
-def read_checkpoint(path: Path, *, mmap=False) -> dict:
-    """Read a trusted project .pt container; this is not an untrusted upload format."""
+def load_checkpoint(path: Path, *, mmap=False) -> Checkpoint:
+    # Project checkpoints are trusted pickle containers.
     import torch
 
-    return torch.load(Path(path), map_location="cpu", weights_only=False, mmap=mmap)
-
-
-def load_training_checkpoint(path: Path) -> TrainingCheckpoint:
-    payload = read_checkpoint(path)
-    state = payload["state"]
-    weights = payload["weights"]
-    for key in ("epoch", "global_step"):
-        if type(state[key]) is not int or state[key] < 0:
-            raise ValueError(f"Checkpoint {key} must be an int >= 0")
-    return TrainingCheckpoint(
-        epoch=state["epoch"],
-        global_step=state["global_step"],
-        ema_updater_step=state["ema_updater_step"],
-        rng_state=state["rng_state"],
-        model_state=weights["model"],
-        ema_model_state=weights["ema_model"],
-        optimizer_state=weights["optimizer"],
-        scheduler_state=weights["scheduler"],
-        effective_config=payload["effective_config"],
-    )
+    payload = torch.load(Path(path), map_location="cpu", weights_only=False, mmap=mmap)
+    return Checkpoint(**payload)
 
 
 def policy_state_dict(model) -> dict:
@@ -81,7 +43,7 @@ def policy_state_dict(model) -> dict:
 
 def load_policy_state(model, state):
     """Restore saved parameter precision before strict copying, including FP32 EMA."""
-    from dexmani_policy.common.normalization import validate_normalizer_state
+    from dexmani_policy.common.normalizer import validate_normalizer_state
 
     for name, parameter in model.named_parameters():
         saved = state[name]
@@ -92,11 +54,10 @@ def load_policy_state(model, state):
         ):
             parameter.data = parameter.data.to(dtype=saved.dtype)
     model.load_state_dict(state, strict=True)
-    validate_normalizer_state(model.normalizer, model.normalization_spec, model.normalization_dims)
+    validate_normalizer_state(model.normalizer)
 
 
 def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
-    """Restore inference from config and tensors, independent of resume semantics."""
     import hydra
     from omegaconf import OmegaConf
 
@@ -104,23 +65,19 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
         normalization_dims_from_config,
         resolve_normalization_spec,
     )
-    from dexmani_policy.common.runtime import get_rng_state, set_rng_state
+    from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 
-    payload = read_checkpoint(checkpoint_path, mmap=True)
-    if inference_recipe(payload["effective_config"]) != inference_recipe(saved_config):
+    checkpoint = load_checkpoint(checkpoint_path, mmap=True)
+    if inference_recipe(checkpoint.effective_config) != inference_recipe(saved_config):
         raise ValueError("Checkpoint inference recipe mismatch with saved config")
-    cfg = OmegaConf.create(payload["effective_config"])
-    state = payload["weights"]["ema_model" if use_ema else "model"]
+    cfg = OmegaConf.create(checkpoint.effective_config)
+    state = checkpoint.ema_model_state if use_ema else checkpoint.model_state
     if state is None and use_ema:
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
-    global_step = payload["state"]["global_step"]
-    if type(global_step) is not int or global_step < 0:
-        raise ValueError("Checkpoint global_step must be an int >= 0")
+    global_step = checkpoint.global_step
     # Release unselected weights and optimizer state before model construction.
-    del payload
+    del checkpoint
 
-    if cfg.action_key not in {"action", "action_ee"}:
-        raise ValueError("action_key must be action or action_ee")
     agent_cfg = prepare_restore_config(cfg.agent)
     rng_state = get_rng_state()
     try:
@@ -145,7 +102,7 @@ def inference_recipe(config):
     """Compare inference semantics without training, data-location or initialization settings."""
     from omegaconf import OmegaConf
 
-    from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
+    from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 
     if OmegaConf.is_config(config):
         config = OmegaConf.to_container(config, resolve=True)

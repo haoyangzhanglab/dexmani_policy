@@ -14,7 +14,7 @@ from sklearn.decomposition import PCA
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.runtime import atomic_path
+from dexmani_policy.common.io_util import atomic_path
 
 
 @torch.no_grad()
@@ -50,8 +50,8 @@ def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
     projection = pca.fit_transform(poses.numpy())[:, 0]
     permutation = torch.from_numpy(np.argsort(projection))
     state = checkpoint["normalizer_state_dict"]
-    scale = state["params_dict.hand.scale"].detach().float().cpu()
-    offset = state["params_dict.hand.offset"].detach().float().cpu()
+    scale = state["fields.hand.scale"].detach().float().cpu()
+    offset = state["fields.hand.offset"].detach().float().cpu()
     codebook.set_buffers(
         {
             "sorted_hand_poses": poses[permutation],

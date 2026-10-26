@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from dexmani_policy.common.checkpoint import restore_policy_agent
-from dexmani_policy.common.runtime import set_seed
+from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.artifacts import (
     create_run_directory,
