@@ -159,19 +159,16 @@ def inference_recipe(config):
     for key in ("prior_path", "codec_path", "codebook_path"):
         agent.pop(key, None)
 
-    def inputs(dataset):
-        values = {
-            key: dataset.get(key)
-            for key in ("sensor_modalities", "pc_dim", "history_steps", "task_names", "task_texts")
-        }
-        values["rgb"] = rgb_preprocessing_kwargs(dataset)
-        values["datasets"] = [inputs(child) for child in dataset.get("datasets", ())]
-        return values
+    dataset = config["dataset"]
+    inputs = {
+        key: dataset.get(key) for key in ("sensor_modalities", "pc_dim", "history_steps")
+    }
+    inputs["rgb"] = rgb_preprocessing_kwargs(dataset)
 
     return {
         "agent": agent,
         "policy_metadata": config["policy_metadata"],
-        "inputs": inputs(config["dataset"]),
+        "inputs": inputs,
         "normalization": config["normalization"],
         "normalization_dims": config["normalization_dims"],
         "action_key": config["action_key"],

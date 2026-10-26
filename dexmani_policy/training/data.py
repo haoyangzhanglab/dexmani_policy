@@ -49,14 +49,12 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         resume_checkpoint.effective_config["data_recipe"] if resume_checkpoint is not None else cfg.get("data_recipe")
     )
     if saved_recipes is not None:
-        children = dataset_cfg.get("datasets", [dataset_cfg])
-        if len(children) != len(saved_recipes):
-            raise ValueError("Saved data_recipe task count does not match dataset")
-        for child, recipe in zip(children, saved_recipes):
-            with open_dict(child):
-                child.saved_split = recipe["split_manifest"]
-                child.val_ratio = 0.0
-                child.max_train_episodes = None
+        if len(saved_recipes) != 1:
+            raise ValueError("Saved data_recipe must contain exactly one dataset")
+        with open_dict(dataset_cfg):
+            dataset_cfg.saved_split = saved_recipes[0]["split_manifest"]
+            dataset_cfg.val_ratio = 0.0
+            dataset_cfg.max_train_episodes = None
     dataset = hydra.utils.instantiate(dataset_cfg)
     agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
     description = dataset.describe_training_data(

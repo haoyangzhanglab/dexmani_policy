@@ -213,7 +213,7 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         description['data_recipe'][0]['source_evidence'] = {
             'task_name': buffer.attrs.get('task_name'), 'episode_seeds': seeds,
         }
-        runtime = self.describe_real_runtime(task_name) if task_name is not None else None
+        runtime = self.describe_real_runtime(task_name)
         if runtime is not None:
             description["real_runtime"] = runtime
         if requires_hand_pretraining:

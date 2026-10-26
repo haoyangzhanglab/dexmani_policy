@@ -14,9 +14,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-DATASET_PATH_PATTERN = re.compile(r"dataset\.(?:datasets\.\d+\.)?zarr_path")
 FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
-NON_NUMERIC_OBSERVATION_FIELDS = frozenset({"task_text", "task_name"})
 ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
 
 ARTIFACT_LOCATION_FIELDS = {
@@ -76,7 +74,7 @@ def validate_source_recipe(saved, current):
                 child_path = f"{path}.{key}" if path else key
                 if (
                     child_path in ignored
-                    or DATASET_PATH_PATTERN.fullmatch(child_path)
+                    or child_path == "dataset.zarr_path"
                     or re.fullmatch(r"data_recipe\.\d+\.source_evidence", child_path)
                 ):
                     continue
@@ -131,7 +129,7 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
                 key not in RESUME_OPERATIONAL_FIELDS
                 and key not in ARTIFACT_LOCATION_FIELDS
                 and not key.startswith("workspace.wandb_cfg.")
-                and not DATASET_PATH_PATTERN.fullmatch(key)
+                and key != "dataset.zarr_path"
             ):
                 raise ValueError(
                     f"Resume recipe is owned by saved config; forbidden override: {key}"
@@ -193,24 +191,19 @@ def validate_action_key_consistency(cfg) -> None:
 
     expected_control = "ee" if action_key == "action_ee" else "joint"
     env_runner = cfg.get("env_runner", {})
-    tasks = env_runner.get("task_configs")
-    for index, task in enumerate([env_runner] if tasks is None else tasks):
-        env_kwargs = task.get("env_kwargs", env_runner.get("env_kwargs")) or {}
-        actual_control = env_kwargs.get("control_mode", "joint")
-        if actual_control != expected_control:
-            name = task.get("task_name", f"index {index}")
-            raise ValueError(
-                f"Task {name!r}: action_key={action_key!r} requires "
-                f"control_mode={expected_control!r}, got {actual_control!r}"
-            )
+    env_kwargs = env_runner.get("env_kwargs") or {}
+    actual_control = env_kwargs.get("control_mode", "joint")
+    if actual_control != expected_control:
+        raise ValueError(
+            f"Task {env_runner.get('task_name')!r}: action_key={action_key!r} requires "
+            f"control_mode={expected_control!r}, got {actual_control!r}"
+        )
 
-    dataset = cfg["dataset"]
-    for child in [dataset, *dataset.get("datasets", ())]:
-        ds_action_key = child.get("action_key", "action")
-        if ds_action_key != action_key:
-            raise ValueError(
-                f"dataset.action_key={ds_action_key!r} differs from action_key={action_key!r}"
-            )
+    ds_action_key = cfg["dataset"].get("action_key", "action")
+    if ds_action_key != action_key:
+        raise ValueError(
+            f"dataset.action_key={ds_action_key!r} differs from action_key={action_key!r}"
+        )
 
 
 def load_experiment_config(experiment_dir):
@@ -228,7 +221,7 @@ def resolve_normalization_spec(cfg, *, observation_fields=None):
     if not isinstance(spec, dict):
         raise ValueError("Normalization must map field names to modes")
     for key, mode in spec.items():
-        if not isinstance(key, str) or not key or key in NON_NUMERIC_OBSERVATION_FIELDS:
+        if not isinstance(key, str) or not key:
             raise ValueError(f"Invalid numeric normalization field: {key!r}")
         if mode not in ALLOWED_NORMALIZATION_MODES:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}")
@@ -265,9 +258,8 @@ def normalization_dims_from_config(cfg):
     if "state_dim" in agent:
         expected["joint_state"] = agent["state_dim"]
     dataset = cfg["dataset"]
-    reference = dataset["datasets"][0] if "datasets" in dataset else dataset
-    if reference.get("pc_dim") is not None:
-        expected["point_cloud"] = reference["pc_dim"]
+    if dataset.get("pc_dim") is not None:
+        expected["point_cloud"] = dataset["pc_dim"]
     for key, mode in cfg["normalization"].items():
         if mode != "identity" and key in expected and dims[key] != expected[key]:
             raise ValueError(f"Saved {key} feature width must be {expected[key]}")
@@ -317,12 +309,7 @@ def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
     """Resolve fresh or saved dataset paths without opening data or importing models."""
     cfg = load_policy_config(config_name, overrides)
     cfg = resolve_input_recipe(cfg, overrides=overrides)
-    datasets = cfg.dataset.get("datasets", [cfg.dataset])
-    return list(
-        dict.fromkeys(
-            (PROJECT_ROOT / Path(child.zarr_path).expanduser()).resolve() for child in datasets
-        )
-    )
+    return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
 
 
 def main():

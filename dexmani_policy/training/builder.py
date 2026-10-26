@@ -61,11 +61,7 @@ def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, ch
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
     model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
     model = hydra.utils.instantiate(model_cfg)
-    if "datasets" in cfg.dataset:
-        for child in cfg.dataset.datasets:
-            validate_observation_fields(model, (*child.sensor_modalities, "task_text"))
-    else:
-        validate_observation_fields(model, cfg.dataset.sensor_modalities)
+    validate_observation_fields(model, cfg.dataset.sensor_modalities)
     model.set_normalization_spec(
         resolve_normalization_spec(cfg), data_description["normalization_dims"]
     )

@@ -196,8 +196,6 @@ class PolicyInfo:
 def inspect_policy(experiment, *, checkpoint, weights, inference_steps):
     directory = resolve_experiment(experiment)
     cfg = load_experiment_config(directory)
-    if "datasets" in cfg["dataset"]:
-        raise NotImplementedError("MultiTask Real deployment requires task/child input selection")
     path = Path(checkpoint).expanduser().resolve(strict=True)
     if not path.is_file() or not path.is_relative_to(directory / "checkpoints"):
         raise ValueError("Provide a resolved checkpoint inside experiment/checkpoints")

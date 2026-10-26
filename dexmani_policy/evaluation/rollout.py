@@ -66,6 +66,9 @@ def evaluate_policy(request, *, output_root, output_dir=None):
             for options in request.tasks:
                 options = dict(options)
                 rgb_preprocessing = options.pop("rgb_preprocessing")
+                # Older single-task selection records included an empty text field.
+                if options.get("task_text") is None:
+                    options.pop("task_text", None)
                 runner = SimRunner(**options)
                 runner.rgb_preprocessing = rgb_preprocessing
                 with closing(

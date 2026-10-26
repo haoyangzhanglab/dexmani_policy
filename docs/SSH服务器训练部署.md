@@ -41,7 +41,7 @@ bash scripts/remote/tail_log.sh sat <task> <run>
 bash scripts/remote/sync_down.sh sat/<task>/<run>
 ```
 
-后台使用 `tmux -L dexmani_policy`，每次创建唯一 session 和 `logs/<session>.log`；任务退出后 session 消失但日志保留。多任务以 `+` 连接，复杂 overrides 应整体引用。
+后台使用 `tmux -L dexmani_policy`，每次创建唯一 session 和 `logs/<session>.log`；任务退出后 session 消失但日志保留。每次启动指定一个任务，复杂 overrides 应整体引用。
 
 ### 续训
 

@@ -18,7 +18,6 @@ from dexmani_policy.common.checkpoint import (
     restore_policy_agent,
 )
 from dexmani_policy.common.config import (
-    NON_NUMERIC_OBSERVATION_FIELDS,
     load_experiment_config,
     load_policy_config,
     positive_int,
@@ -27,7 +26,6 @@ from dexmani_policy.common.config import (
 from dexmani_policy.common.runtime import close_resources, dict_apply, set_seed
 from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
 from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
-from dexmani_policy.datasets.multitask_dataset import MultiTaskDataset, observation_layout
 from dexmani_policy.training.builder import (
     build_training_components,
     build_trainer,
@@ -91,61 +89,47 @@ def iter_batch_fields(batch):
             yield f"{section}.{key}", value
 
 
+def observation_shape(dataset, field):
+    shape = tuple(dataset.replay_buffer[field].shape[1:])
+    if field == "rgb" and dataset.rgb_preprocess_size is not None:
+        spatial_shape = dataset.rgb_random_crop_size or dataset.rgb_preprocess_size
+        shape = (3, *spatial_shape)
+    elif field == "point_cloud":
+        shape = (dataset.random_keep_points or shape[0], dataset.pc_dim or shape[-1])
+    return (dataset.obs_horizon, *shape)
+
+
 def validate_data_batch(batch, dataset, cfg):
     action = batch["action"]
     batch_size = len(action)
     validate_tensor_layout(action, (batch_size, cfg.horizon, cfg.agent.action_dim), "action")
 
     obs = batch["obs"]
-    for key in NON_NUMERIC_OBSERVATION_FIELDS.intersection(obs):
-        if (
-            not isinstance(obs[key], (list, tuple))
-            or len(obs[key]) != batch_size
-            or not all(isinstance(value, str) for value in obs[key])
-        ):
-            raise ValueError(f"obs.{key}: expected one string per sample")
-    if isinstance(dataset, MultiTaskDataset):
-        if not NON_NUMERIC_OBSERVATION_FIELDS <= obs.keys():
-            raise ValueError("Multitask batch requires task_text and task_name")
-        datasets_by_task = dict(zip(dataset.task_names, dataset.datasets))
-        task_texts = dict(zip(dataset.task_names, dataset.task_texts))
-        for name, text in zip(obs["task_name"], obs["task_text"]):
-            if name not in datasets_by_task or text != task_texts[name]:
-                raise ValueError("Multitask batch task name/text mismatch")
-        children = [datasets_by_task[name] for name in dict.fromkeys(obs["task_name"])]
-    else:
-        children = [dataset]
+    if obs.keys() != set(dataset.sensor_modalities):
+        raise ValueError("Batch observation fields differ from the dataset recipe")
+    for key in dataset.sensor_modalities:
+        shape = observation_shape(dataset, key)
+        source_dtype = dataset.replay_buffer[key].dtype
+        if key == "rgb" and dataset.rgb_preprocess_size is not None:
+            dtype = torch.uint8 if dataset.rgb_keep_uint8 else torch.float32
+        elif np.issubdtype(source_dtype, np.floating):
+            dtype = torch.float32
+        else:
+            dtype = torch.from_numpy(np.empty((), dtype=source_dtype)).dtype
+        validate_tensor_layout(obs[key], (batch_size, *shape), f"obs.{key}", dtype)
 
-    numeric_fields = obs.keys() - NON_NUMERIC_OBSERVATION_FIELDS
     context = batch.get("action_context", {})
-    for child in children:
-        if numeric_fields != set(child.sensor_modalities):
-            raise ValueError("Batch observation fields differ from the dataset recipe")
-        for key in child.sensor_modalities:
-            shape, _ = observation_layout(child, key)
-            source_dtype = child.replay_buffer[key].dtype
-            if key == "rgb" and child.rgb_preprocess_size is not None:
-                dtype = torch.uint8 if child.rgb_keep_uint8 else torch.float32
-            elif np.issubdtype(source_dtype, np.floating):
-                dtype = torch.float32
-            else:
-                dtype = torch.from_numpy(np.empty((), dtype=source_dtype)).dtype
-            validate_tensor_layout(obs[key], (batch_size, *shape), f"obs.{key}", dtype)
+    context_shapes = {}
+    if isinstance(dataset, LAMPDataset):
+        context_shapes["hand_history"] = (batch_size, dataset.history_steps, 12)
+    elif isinstance(dataset, LatentFlowDataset):
+        context_shapes["reference_state"] = (batch_size, 19)
+    if not isinstance(context, dict) or context.keys() != context_shapes.keys():
+        raise ValueError("Batch action_context differs from the dataset recipe")
+    for key, shape in context_shapes.items():
+        validate_tensor_layout(context[key], shape, f"action_context.{key}", torch.float32)
 
-        context_shapes = {}
-        if isinstance(child, LAMPDataset):
-            context_shapes["hand_history"] = (batch_size, child.history_steps, 12)
-        elif isinstance(child, LatentFlowDataset):
-            context_shapes["reference_state"] = (batch_size, 19)
-        if not isinstance(context, dict) or context.keys() != context_shapes.keys():
-            raise ValueError("Batch action_context differs from the dataset recipe")
-        for key, shape in context_shapes.items():
-            validate_tensor_layout(context[key], shape, f"action_context.{key}", torch.float32)
-
-    # Scan each tensor once, independent of the number of tasks in the batch.
     for name, value in iter_batch_fields(batch):
-        if not isinstance(value, torch.Tensor):
-            continue
         if value.device.type != "cpu":
             raise ValueError(f"{name}: expected CPU data")
         if (value.is_floating_point() or value.is_complex()) and not torch.isfinite(value).all():
@@ -160,11 +144,7 @@ def validate_data_loader(loader, cfg, *, split, max_batches):
         for checked, batch in enumerate(islice(iterator, max_batches), start=1):
             validate_data_batch(batch, loader.dataset, cfg)
             summary = ", ".join(
-                (
-                    f"{key}={tuple(value.shape)} {value.dtype}"
-                    if torch.is_tensor(value)
-                    else f"{key}=list[str]({len(value)})"
-                )
+                f"{key}={tuple(value.shape)} {value.dtype}"
                 for key, value in iter_batch_fields(batch)
             )
             print(f"[{split} batch {checked}] {summary}")

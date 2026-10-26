@@ -3,7 +3,6 @@
 import hydra
 
 from dexmani_policy.common.config import (
-    NON_NUMERIC_OBSERVATION_FIELDS,
     positive_int,
     resolve_normalization_spec,
     validate_action_key_consistency,
@@ -19,28 +18,26 @@ def validate_config(cfg):
     aux = cfg.get("use_aux_ee", False)
     if cfg.agent.get("use_aux_ee", False) != aux:
         raise ValueError("agent.use_aux_ee must match use_aux_ee")
-    for index, child in enumerate(cfg.dataset.get("datasets", [cfg.dataset])):
-        if child.action_key not in agent_class.supported_action_keys:
-            raise ValueError(f"{agent_class.__name__} does not support action_key={child.action_key}")
-        if "history_steps" in cfg.agent and child.get("history_steps") != cfg.agent.history_steps:
-            raise ValueError("Dataset/policy history_steps must match")
-        if child.get("pc_dim") is not None and child.pc_dim != cfg.agent.get("pc_dim"):
-            raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
-        dataset_class = hydra.utils.get_class(child._target_)
-        if agent_class.future_action_window != dataset_class.future_action_window:
-            raise ValueError("Policy and Dataset action windows must be used together")
-        if child.get("sensor_modalities") is None:
-            raise ValueError(f"dataset[{index}].sensor_modalities must be explicit")
-        for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
-            if field not in child:
-                raise ValueError(f"dataset[{index}].{field} must explicitly reference {name}")
-            if type(child[field]) is not type(cfg[name]) or child[field] != cfg[name]:
-                raise ValueError(f"dataset[{index}].{field} must match {name}")
-        if child.get("use_aux_ee", False) != aux:
-            raise ValueError(f"dataset[{index}].use_aux_ee must match use_aux_ee")
-    reference = cfg.dataset.get("datasets", [cfg.dataset])[0]
-    fields = set(reference.sensor_modalities) - NON_NUMERIC_OBSERVATION_FIELDS
-    resolve_normalization_spec(cfg, observation_fields=fields)
+    dataset = cfg.dataset
+    if dataset.action_key not in agent_class.supported_action_keys:
+        raise ValueError(f"{agent_class.__name__} does not support action_key={dataset.action_key}")
+    if "history_steps" in cfg.agent and dataset.get("history_steps") != cfg.agent.history_steps:
+        raise ValueError("Dataset/policy history_steps must match")
+    if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
+        raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
+    dataset_class = hydra.utils.get_class(dataset._target_)
+    if agent_class.future_action_window != dataset_class.future_action_window:
+        raise ValueError("Policy and Dataset action windows must be used together")
+    if dataset.get("sensor_modalities") is None:
+        raise ValueError("dataset.sensor_modalities must be explicit")
+    for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
+        if field not in dataset:
+            raise ValueError(f"dataset.{field} must explicitly reference {name}")
+        if type(dataset[field]) is not type(cfg[name]) or dataset[field] != cfg[name]:
+            raise ValueError(f"dataset.{field} must match {name}")
+    if dataset.get("use_aux_ee", False) != aux:
+        raise ValueError("dataset.use_aux_ee must match use_aux_ee")
+    resolve_normalization_spec(cfg, observation_fields=dataset.sensor_modalities)
     if aux:
         if cfg.action_key != "action":
             raise ValueError("use_aux_ee=true requires action_key='action' (joint primary)")

@@ -28,7 +28,6 @@ class SimRunner:
         record_video: bool = True,
         render_mode: str = "rgb_array",
         viewer_resolution: tuple[int, int] | None = None,
-        task_text: str | None = None,
     ):
         self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
         self.sensor_modalities = list(sensor_modalities)
@@ -41,7 +40,6 @@ class SimRunner:
         self.rgb_preprocessing = None
 
         self.task_name = task_name
-        self.task_text = task_text
         self.env_kwargs = env_kwargs or {}
         self.record_video = record_video
         self.render_mode = render_mode
@@ -120,8 +118,6 @@ class SimRunner:
                 value = preprocess_validation_rgb(value, **self.rgb_preprocessing)
             dtype = None if name in {"rgb", "tactile_valid"} else torch.float32
             batch[name] = torch.as_tensor(value, device=device, dtype=dtype).unsqueeze(0)
-        if self.task_text is not None:
-            batch["task_text"] = [self.task_text]
         return batch
 
     def reset(self):

@@ -64,9 +64,8 @@ if [[ ! "$CONFIG" =~ ^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*$ ]] || [[ "$CONFIG" =~ 
     exit 1
 fi
 
-# Canonical composite tasks join ordinary task components with +.
-if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+(\+[a-zA-Z0-9_-]+)*$ ]]; then
-    echo "Error: invalid task name '$TASK' (allowed: task components joined by +; letters, digits, _, -)" >&2
+if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: invalid task name '$TASK' (allowed: letters, digits, _, -)" >&2
     exit 1
 fi
 
@@ -113,7 +112,7 @@ else
     local_python=python
 fi
 launch_uuid=$("$local_python" -c 'import uuid; print(uuid.uuid4().hex)')
-SESSION="dex_${CONFIG//\//_}_${TASK//+/_}_$(date +%Y%m%d_%H%M%S)_${launch_uuid}"
+SESSION="dex_${CONFIG//\//_}_${TASK}_$(date +%Y%m%d_%H%M%S)_${launch_uuid}"
 
 # Append an explicit seed for readability; the launch suffix ensures uniqueness.
 _seed=""

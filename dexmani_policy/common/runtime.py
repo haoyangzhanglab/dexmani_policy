@@ -98,14 +98,10 @@ def worker_init_fn(worker_id):
 
 
 def dict_apply(x: dict, func: Callable) -> dict:
-    import torch
-
     result = {}
     for key, value in x.items():
         if isinstance(value, dict):
             result[key] = dict_apply(value, func)
-        elif isinstance(value, list):
-            result[key] = [func(item) if isinstance(item, torch.Tensor) else item for item in value]
         else:
             result[key] = func(value)
     return result
