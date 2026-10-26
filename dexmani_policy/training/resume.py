@@ -10,23 +10,18 @@ def build_resume_contract(train_loader):
     return {
         "dataset_length": len(train_loader.dataset),
         "batches_per_epoch": len(train_loader),
-        "world_size": train_loader.sampler.num_replicas,
     }
 
 
 def restore_training_state(checkpoint, components, *, effective_config):
     """Restore optimizer, scheduler, EMA updater and RNG after model construction."""
     resume_contract = build_resume_contract(components.train_loader)
-    rank = components.train_loader.sampler.rank
     optimizer = components.optimizer
     scheduler = components.scheduler
     ema_updater = components.ema_updater
     validate_source_recipe(checkpoint.effective_config, effective_config)
     if checkpoint.resume_contract != resume_contract:
         raise ValueError("Resume DataLoader geometry or sampling recipe changed")
-    world_size = resume_contract["world_size"]
-    if len(checkpoint.rng_states) != world_size:
-        raise ValueError("Checkpoint RNG rank count does not match world_size")
     batches = resume_contract["batches_per_epoch"]
     loop = checkpoint.effective_config["training"]["loop"]
     accum = loop["gradient_accumulation_steps"]
@@ -50,7 +45,7 @@ def restore_training_state(checkpoint, components, *, effective_config):
     scheduler.load_state_dict(checkpoint.scheduler_state)
     if ema_updater is not None:
         ema_updater.optimization_step = checkpoint.ema_updater_step
-    set_rng_state(checkpoint.rng_states[rank], device=components.device)
+    set_rng_state(checkpoint.rng_state, device=components.device)
     return checkpoint.global_step, checkpoint.epoch, cursor
 
 
@@ -61,7 +56,7 @@ def restore_model_weights(checkpoint, model, ema_model, device):
         if type(checkpoint.ema_updater_step) is not int or checkpoint.ema_updater_step < 0:
             raise RuntimeError("Resume checkpoint ema_updater_step must be an int >= 0")
     load_policy_state(model, checkpoint.model_state)
-    # Normalizer restoration creates parameters on CPU; move them before DDP wrapping.
+    # Normalizer restoration creates parameters on CPU; move them with the model.
     model.to(device)
     if ema_model is not None:
         load_policy_state(ema_model, checkpoint.ema_model_state)

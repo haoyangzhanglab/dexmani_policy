@@ -32,7 +32,6 @@ RESUME_OPERATIONAL_FIELDS = {
     "workspace.output_dir",
     "workspace.wandb_cfg",
     "training.device",
-    "training.gpu_ids",
     "training.use_compile",
     "training.compile_mode",
     "training.loop.log_interval_steps",

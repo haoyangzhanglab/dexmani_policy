@@ -3,9 +3,9 @@
 # shellcheck disable=SC2029
 # Launch from a private source copy after validating fresh/resume datasets.
 # Usage: bash scripts/remote/train_remote.sh [--fg] [--dry-run] [--sync-data]
-#          [--gpus IDS] <config> <task> [hydra_overrides...]
-# DDP visible GPU count must match training.num_gpus; resume task must match saved identity.
-# Resource queries must succeed; requested GPU IDs must appear in the server index list.
+#          [--gpus ID] <config> <task> [hydra_overrides...]
+# Resume task must match saved identity.
+# Resource queries must succeed; the requested GPU ID must appear in the server index list.
 
 set -euo pipefail
 
@@ -23,7 +23,7 @@ TMUX_SOCKET=dexmani_policy
 
 FOREGROUND=false
 DRY_RUN=false
-GPU_IDS=""
+GPU_ID=""
 SYNC_DATA=false
 
 # Parse options
@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run|-n)  DRY_RUN=true; shift ;;
         --sync-data)   SYNC_DATA=true; shift ;;
         --gpus)
-            GPU_IDS="${2:?Error: --gpus requires a value (e.g., --gpus 0,1,2,3)}"
+            GPU_ID="${2:?Error: --gpus requires one GPU ID (e.g., --gpus 0)}"
             shift 2
             ;;
         -*) echo "Error: unknown option '$1'" >&2; exit 1 ;;
@@ -41,20 +41,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate --gpus: comma-separated non-negative integers, no duplicates.
-if [[ -n "$GPU_IDS" ]]; then
-    if [[ ! "$GPU_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-        echo "Error: --gpus must be a comma-separated list of integers (e.g. 0,1,2,3), got '$GPU_IDS'" >&2
-        exit 1
-    fi
-    if echo "$GPU_IDS" | tr ',' '\n' | sort -n | uniq -d | grep -q .; then
-        echo "Error: --gpus contains duplicate ids: '$GPU_IDS'" >&2
-        exit 1
-    fi
+# Keep the existing option name, but accept only one non-negative GPU index.
+if [[ -n "$GPU_ID" && ! "$GPU_ID" =~ ^[0-9]+$ ]]; then
+    echo "Error: --gpus requires one non-negative integer GPU ID, got '$GPU_ID'" >&2
+    exit 1
 fi
 
 # Validate positional args
-CONFIG="${1:?Error: specify config name (e.g., dp3, ddp/maniflow)}"
+CONFIG="${1:?Error: specify config name (e.g., dp3, maniflow)}"
 TASK="${2:?Error: specify task name (e.g., pour)}"
 shift 2
 
@@ -70,17 +64,11 @@ if [[ ! "$TASK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
 fi
 
 # ---- Build remote command ----
-if [[ "$CONFIG" == ddp/* ]]; then
-    ENTRY="dexmani_policy.train_ddp"
-else
-    ENTRY="dexmani_policy.train"
-fi
-
 # The remote command crosses SSH and, for background jobs, tmux. Quote every
 # argument for the final remote Bash instead of concatenating user input into a
 # command string. The outer SSH transport uses POSIX single quotes, while the
 # remote interpreter is explicitly Bash so printf %q has defined semantics.
-REMOTE_ARGS=(-m "$ENTRY" "--config-name=$CONFIG" "task_name=$TASK" "$@")
+REMOTE_ARGS=(-m dexmani_policy.train "--config-name=$CONFIG" "task_name=$TASK" "$@")
 build_remote_commands() {
     REMOTE_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\""
     for remote_arg in "${REMOTE_ARGS[@]}"; do
@@ -93,9 +81,9 @@ build_remote_commands() {
         printf -v remote_arg_q '%q' "$remote_arg"
         PREFLIGHT_CMD+=" $remote_arg_q"
     done
-    if [[ -n "$GPU_IDS" ]]; then
-        printf -v gpu_ids_q '%q' "$GPU_IDS"
-        REMOTE_CMD="export CUDA_VISIBLE_DEVICES=$gpu_ids_q && $REMOTE_CMD"
+    if [[ -n "$GPU_ID" ]]; then
+        printf -v gpu_id_q '%q' "$GPU_ID"
+        REMOTE_CMD="export CUDA_VISIBLE_DEVICES=$gpu_id_q && $REMOTE_CMD"
     fi
 }
 
@@ -147,7 +135,7 @@ if $DRY_RUN; then
     printf "Overrides:"
     printf " %q" "${REMOTE_ARGS[@]:3}"
     printf "\n"
-    echo "GPU:       ${GPU_IDS:-auto}"
+    echo "GPU:       ${GPU_ID:-auto}"
     echo "Command:   $REMOTE_CMD"
     echo "Datasets:  $PREFLIGHT_CMD"
     echo ""
@@ -216,21 +204,18 @@ gpu_status=$(ssh "$SERVER" "nvidia-smi --query-gpu=index,name,memory.used,memory
 printf '%s\n' "$gpu_status"
 
 # Check the actual indices, including hosts whose index list is not contiguous.
-if [[ -n "$GPU_IDS" ]]; then
+if [[ -n "$GPU_ID" ]]; then
     available_gpu_ids=()
     while IFS=, read -r available_gpu_id gpu_status_remainder; do
         available_gpu_ids+=("$available_gpu_id")
     done <<< "$gpu_status"
-    IFS=, read -r -a requested_gpu_ids <<< "$GPU_IDS"
-    for gpu_id in "${requested_gpu_ids[@]}"; do
-        case " ${available_gpu_ids[*]} " in
-            *" $gpu_id "*) ;;
-            *)
-                echo "Error: GPU id $gpu_id is unavailable (server GPU indices: ${available_gpu_ids[*]})" >&2
-                exit 1
-                ;;
-        esac
-    done
+    case " ${available_gpu_ids[*]} " in
+        *" $GPU_ID "*) ;;
+        *)
+            echo "Error: GPU id $GPU_ID is unavailable (server GPU indices: ${available_gpu_ids[*]})" >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # 5. Disk space

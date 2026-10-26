@@ -26,8 +26,6 @@ set_project_root()
 @hydra.main(version_base=None, config_path="configs")
 def main(cfg):
     cfg, checkpoint = prepare_training(cfg)
-    if cfg.training.get("num_gpus", 1) != 1:
-        raise ValueError("Single-device training requires num_gpus=1; use train_ddp.py for DDP")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. This training script requires GPU.")
 

@@ -13,7 +13,7 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.normalization import AffineNormalizer
 from dexmani_policy.common.runtime import worker_init_fn
-from dexmani_policy.datasets.common.distributed_sampler import ResumableDistributedSampler
+from dexmani_policy.datasets.common.resumable_sampler import ResumableSampler
 
 
 def build_normalizer(dataset, spec: dict, action_key: str) -> AffineNormalizer:
@@ -82,19 +82,16 @@ def close_data_loader(loader, iterator=None):
         iterator._shutdown_workers()
 
 
-def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
+def build_train_loader(cfg, dataset):
     options = dict(cfg.dataloader)
     if options.get("num_workers", 0) == 0:
         options["persistent_workers"] = False
         options.pop("prefetch_factor", None)
-    sampler = ResumableDistributedSampler(
+    sampler = ResumableSampler(
         dataset,
         batch_size=options["batch_size"],
-        num_replicas=world_size,
-        rank=rank,
         shuffle=options.pop("shuffle", False),
         seed=cfg.training.seed,
-        drop_last=False,
     )
     samples = sampler.num_samples
     batch_size = options["batch_size"]
@@ -111,7 +108,7 @@ def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
             f"N={samples}, B={batch_size}, A={accumulation}; "
             "use drop_last=True or gradient_accumulation_steps=1"
         )
-    generator = torch.Generator().manual_seed(cfg.training.seed + rank)
+    generator = torch.Generator().manual_seed(cfg.training.seed)
     loader = DataLoader(
         dataset,
         sampler=sampler,

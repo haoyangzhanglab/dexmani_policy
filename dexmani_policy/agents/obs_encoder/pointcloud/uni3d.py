@@ -160,7 +160,7 @@ class Uni3DEncoder(nn.Module):
 
         self.patch_dropout = PatchDropout(patch_dropout)
 
-        # Freeze unused image-embedding parameters so DDP sees no unused gradients.
+        # Image-embedding parameters are unused by the point-cloud encoder.
         for name, p in self.transformer.named_parameters():
             if name in ("cls_token", "pos_embed") or name.startswith("patch_embed."):
                 p.requires_grad_(False)

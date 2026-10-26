@@ -23,7 +23,7 @@ from dexmani_policy.common.config import (
     resolve_resume_source,
     validate_observation_fields,
 )
-from dexmani_policy.common.runtime import close_resources, set_seed
+from dexmani_policy.common.runtime import close_resources
 from dexmani_policy.common.experiments import archive_resume_milestones
 from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
@@ -57,8 +57,8 @@ def bind_defaults(config, constructor):
                 config[name] = parameter.default
 
 
-def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, checkpoint=None):
-    """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
+def build_model_and_ema(cfg, device, normalizer, data_description, *, checkpoint=None):
+    """Build raw weights and EMA for training and checkpoint restoration."""
     model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
     model = hydra.utils.instantiate(model_cfg)
     validate_observation_fields(model, cfg.dataset.sensor_modalities)
@@ -73,8 +73,7 @@ def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, ch
     if checkpoint is None:
         model.to(device)
 
-    requires_ema_for_loss = model.requires_ema_for_loss
-    if requires_ema_for_loss and not cfg.training.use_ema:
+    if model.requires_ema_for_loss and not cfg.training.use_ema:
         raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
 
     if cfg.training.use_ema:
@@ -96,9 +95,8 @@ def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, ch
         model.obs_encoder.requires_grad_(False)
     ema_model = None
     ema_updater = None
-    need_local_ema = cfg.training.use_ema and (rank == 0 or requires_ema_for_loss)
-    if need_local_ema:
-        # Copy before compile/DDP; resume restores raw and EMA independently below.
+    if cfg.training.use_ema:
+        # Copy before compile; resume restores raw and EMA independently below.
         ema_model = copy.deepcopy(model)
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
@@ -151,11 +149,10 @@ def build_optimizer(
     )
 
 
-def build_optimizer_and_scheduler(cfg, model, *, verbose=True):
+def build_optimizer_and_scheduler(cfg, model):
     """Build initial optimizer/scheduler; resume loads their complete saved states."""
     optimizer = build_optimizer(model, **cfg.optimizer)
-    if verbose:
-        print_param_count(model)
+    print_param_count(model)
     scheduler = get_scheduler(
         optimizer=optimizer,
         name=cfg.training.lr_scheduler,
@@ -180,7 +177,7 @@ def compile_training_models(cfg, components):
 
 @dataclass
 class TrainingComponents:
-    """Per-process training components; only rank 0 owns a workspace."""
+    """Training components and their owned resources."""
 
     device: torch.device
     model: torch.nn.Module
@@ -189,14 +186,11 @@ class TrainingComponents:
     optimizer: torch.optim.Optimizer
     scheduler: Any
     train_loader: DataLoader
-    workspace: Workspace | None
+    workspace: Workspace
     effective_config: Any
 
     def close(self):
-        callbacks = [lambda: close_data_loader(self.train_loader)]
-        if self.workspace is not None:
-            callbacks.append(self.workspace.close)
-        close_resources(*callbacks)
+        close_resources(lambda: close_data_loader(self.train_loader), self.workspace.close)
 
 
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
@@ -221,47 +215,28 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
 
 
 def build_training_components(
-    cfg, device, dataset, normalizer, *, data_description, rank=0, world_size=1, checkpoint=None
+    cfg, device, dataset, normalizer, *, data_description, checkpoint=None
 ):
-    """Build one rank's components before compile or DDP wrapping."""
-    train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
+    """Build training components before compiling model backbones."""
+    train_loader = build_train_loader(cfg, dataset)
     workspace = None
     try:
         model, ema_model, ema_updater = build_model_and_ema(
-            cfg, device, normalizer, data_description, rank=rank, checkpoint=checkpoint
+            cfg, device, normalizer, data_description, checkpoint=checkpoint
         )
 
-        # DDP initialization is shared; augmentation uses a separate seed on each rank.
-        if world_size > 1:
-            set_seed(cfg.training.seed + rank)
-        optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=rank == 0)
+        optimizer, scheduler = build_optimizer_and_scheduler(cfg, model)
 
         cfg = assemble_effective_config(cfg, data_description, model, checkpoint=checkpoint)
-        if rank == 0:
-            print_training_recipe(
-                cfg,
-                world_size=world_size,
-                batches_per_epoch=len(train_loader),
-                samples_per_rank=train_loader.sampler.num_samples,
-            )
-            workspace = hydra.utils.instantiate(cfg.workspace)
+        print_training_recipe(
+            cfg,
+            batches_per_epoch=len(train_loader),
+            samples_per_epoch=train_loader.sampler.num_samples,
+        )
+        workspace = hydra.utils.instantiate(cfg.workspace)
 
         if checkpoint is not None:
-            archive_error = None
-            if rank == 0:
-                try:
-                    archive_resume_milestones(cfg.resume_from, workspace.output_dir, checkpoint)
-                except Exception as error:
-                    archive_error = error
-            if world_size > 1:
-                import torch.distributed as dist
-
-                status = [str(archive_error) if archive_error is not None else None]
-                dist.broadcast_object_list(status, src=0)
-                if rank != 0 and status[0] is not None:
-                    raise RuntimeError(f"Rank 0 milestone archive failed: {status[0]}")
-            if archive_error is not None:
-                raise archive_error
+            archive_resume_milestones(cfg.resume_from, workspace.output_dir, checkpoint)
 
     except BaseException:
         callbacks = [lambda: close_data_loader(train_loader)]
@@ -293,9 +268,9 @@ def build_trainer(components):
         effective_config=cfg,
     )
     if components.ema_updater is not None and cfg.get("resume_from") is not None:
-        # DDP may have synchronized raw weights after restoring raw/EMA independently.
+        # EMA updates skip frozen parameters, so restored copies must already agree.
         averaged = dict(components.ema_model.named_parameters())
-        for name, parameter in trainer.raw_model.named_parameters():
+        for name, parameter in trainer.model.named_parameters():
             if not parameter.requires_grad and (
                 parameter.dtype != averaged[name].dtype
                 or not torch.equal(parameter, averaged[name])

@@ -157,12 +157,10 @@ def validate_data_loader(loader, cfg, *, split, max_batches):
 
 def validate_dataset(cfg, *, max_batches=2):
     positive_int(max_batches, "max_batches")
-    if cfg.training.get("num_gpus", 1) != 1:
-        print("DDP config: single-process data check only; DDP NOT VERIFIED")
     set_seed(cfg.training.seed)
     cfg.dataloader.pin_memory = False
     dataset, _, _ = build_dataset_and_normalizer(cfg)
-    loader = build_train_loader(cfg, dataset, rank=0, world_size=1)
+    loader = build_train_loader(cfg, dataset)
     validate_data_loader(loader, cfg, split="train", max_batches=max_batches)
     validation = dataset.get_validation_dataset()
     if validation is None:
@@ -276,8 +274,6 @@ def validate_policy_restoration(cfg, components, trainer, checkpoint_path):
 def validate_training(cfg, *, max_updates=4):
     """Exercise training and checkpoint restoration within an update budget."""
     positive_int(max_updates, "max_updates")
-    if cfg.training.get("num_gpus", 1) != 1:
-        raise ValueError("Single-device smoke requires num_gpus=1")
     if not torch.cuda.is_available():
         raise RuntimeError("NOT VERIFIED: original training configuration requires CUDA")
 

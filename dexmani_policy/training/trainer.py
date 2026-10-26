@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import copy
 import os
 import signal
@@ -9,9 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import torch.distributed as dist
 from omegaconf import OmegaConf
-from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import TrainingCheckpoint, policy_state_dict
@@ -61,14 +58,10 @@ class Trainer:
         self.use_bfloat16 = use_bfloat16
 
         self.gradient_accumulation_steps = train_loop_cfg.gradient_accumulation_steps
-        sampler = self.train_loader.sampler
         self.resume_contract = build_resume_contract(self.train_loader)
         self.batches_per_epoch = len(self.train_loader)
         self.amp_device_type = torch.device(self.device).type
 
-        self.is_main_process = sampler.rank == 0
-        self.distributed = sampler.num_replicas > 1
-        self.ddp_backward_initialized = False
         self.effective_config = copy.deepcopy(
             OmegaConf.to_container(effective_config, resolve=True)
             if OmegaConf.is_config(effective_config)
@@ -78,22 +71,16 @@ class Trainer:
         self.current_epoch = 0
         self.global_step = 0
 
-        self.interrupted = False
         self.stop_requested = False
         self.step_pbar = None
         self.last_checkpoint_step = None
         # Integer targets round up; colliding steps retain the largest percentage.
         self.milestone_steps = milestone_steps(self.total_train_steps)
 
-    @property
-    def raw_model(self):
-        """DDP wraps the policy; compilation only wraps its action backbone."""
-        return self.model.module if isinstance(self.model, DDP) else self.model
-
     def find_nonfinite_gradients(self) -> list:
         return [
             name
-            for name, param in self.raw_model.named_parameters()
+            for name, param in self.model.named_parameters()
             if param.grad is not None and not torch.isfinite(param.grad).all()
         ]
 
@@ -116,14 +103,14 @@ class Trainer:
                 grad_norm = torch.stack(norms).max()
             else:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.raw_model.parameters(),
+                    self.model.parameters(),
                     max_norm=self.max_grad_norm,
                     error_if_nonfinite=True,
                 )
         else:
             flags = [
                 torch.isfinite(p.grad).all()
-                for p in self.raw_model.parameters()
+                for p in self.model.parameters()
                 if p.grad is not None
             ]
             if flags and not bool(torch.stack(flags).all()):
@@ -149,7 +136,7 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         if self.ema_updater is not None:
-            self.ema_updater.step(self.raw_model)
+            self.ema_updater.step(self.model)
 
     def train_microbatch(
         self,
@@ -161,7 +148,7 @@ class Trainer:
     ):
         """Backpropagate one micro-batch, updating weights at accumulation boundaries."""
         batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
-        loss_kwargs = self.raw_model.get_training_loss_kwargs(self.ema_model)
+        loss_kwargs = self.model.get_training_loss_kwargs(self.ema_model)
         with torch.amp.autocast(
             device_type=self.amp_device_type,
             dtype=torch.bfloat16,
@@ -169,24 +156,12 @@ class Trainer:
         ):
             raw_loss, log_dict = self.model(batch, log_metrics=log_metrics, **loss_kwargs)
 
-        # Every rank must reject a nonfinite loss before entering backward.
         value = raw_loss.detach()
-        finite = torch.isfinite(value)
-        context = ""
-        if self.distributed:
-            world_size = dist.get_world_size()
-            failed_rank = torch.where(finite, world_size, dist.get_rank())
-            dist.all_reduce(failed_rank, op=dist.ReduceOp.MIN)
-            rank = int(failed_rank.item())
-            finite = rank == world_size
-            if not finite:
-                dist.broadcast(value, src=rank)
-                context = f"rank={rank}, "
-        if not finite:
+        if not torch.isfinite(value):
             self.optimizer.zero_grad(set_to_none=True)
             raise RuntimeError(
                 f"Non-finite loss at epoch={self.current_epoch}, step={self.global_step} "
-                f"({context}raw_loss={value.item()})"
+                f"(raw_loss={value.item()})"
             )
         (raw_loss / loss_divisor).backward()
 
@@ -199,19 +174,11 @@ class Trainer:
         global_step = self.global_step
         if self.last_checkpoint_step == global_step:
             return
-        rng_states = [get_rng_state(self.device)]
-        if self.distributed:
-            local_rng = rng_states[0]
-            rng_states = [None] * dist.get_world_size()
-            dist.all_gather_object(rng_states, local_rng)
-        if self.workspace is None or not self.is_main_process:
-            self.last_checkpoint_step = global_step
-            return
         checkpoint = TrainingCheckpoint(
             epoch=self.current_epoch,
             global_step=global_step,
             next_micro_step=self.next_micro_step,
-            model_state=policy_state_dict(self.raw_model),
+            model_state=policy_state_dict(self.model),
             ema_model_state=(
                 policy_state_dict(self.ema_model) if self.ema_model is not None else None
             ),
@@ -222,7 +189,7 @@ class Trainer:
             ema_updater_step=(
                 self.ema_updater.optimization_step if self.ema_updater is not None else None
             ),
-            rng_states=rng_states,
+            rng_state=get_rng_state(self.device),
         )
         tag = f"epoch={self.current_epoch:04d}-step={global_step:08d}-{tag_suffix}"
         checkpoint_path = self.workspace.save_checkpoint(tag, checkpoint)
@@ -247,46 +214,6 @@ class Trainer:
         if pct is not None:
             self.save_checkpoint(f"milestone={pct:02d}pct")
 
-    def step_performance_metrics(self, samples: int, elapsed: float, data_wait: float) -> dict:
-        """Approximate update wall time, including data waits and excluding logging/saving."""
-        if self.distributed:
-            local = torch.tensor(
-                [samples, elapsed, data_wait], dtype=torch.float64, device=self.device
-            )
-            gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]
-            dist.all_gather(gathered, local)
-            values = torch.stack(gathered).cpu()
-            samples = values[:, 0].sum().item()
-            elapsed = values[:, 1].max().item()
-            data_wait = values[:, 2].max().item()
-        return {
-            "train/step_time": elapsed,
-            "train/data_wait_time": data_wait,
-            "train/samples_per_sec": samples / elapsed,
-            "train/samples_per_step": samples,
-        }
-
-    def stop_requested_on_any_rank(self):
-        if not self.distributed:
-            return self.stop_requested
-        stop = torch.tensor(int(self.stop_requested), device=self.device)
-        dist.all_reduce(stop, op=dist.ReduceOp.MAX)
-        return bool(stop.item())
-
-    def reduce_metrics(self, metrics):
-        if not self.distributed:
-            return to_log_scalars(metrics)
-        keys = sorted(metrics)
-        packed = torch.stack(
-            [
-                torch.as_tensor(metrics[key], dtype=torch.float64, device=self.device).reshape(())
-                for key in keys
-            ]
-        )
-        dist.all_reduce(packed, op=dist.ReduceOp.SUM)
-        packed /= dist.get_world_size()
-        return dict(zip(keys, packed.cpu().tolist()))
-
     def log_step(self, group_metrics, samples, elapsed, data_wait):
         epoch_samples = min(
             self.train_loader.sampler.num_samples,
@@ -294,8 +221,7 @@ class Trainer:
         )
         metrics = {
             "train/lr": self.scheduler.get_last_lr()[0],
-            "train/processed_windows": self.resume_contract["world_size"]
-            * (
+            "train/processed_windows": (
                 self.current_epoch * epoch_samples
                 + min(self.next_micro_step * self.train_loader.batch_size, epoch_samples)
             ),
@@ -305,19 +231,22 @@ class Trainer:
                 {"train/grad_norm": self.last_grad_norm, "train/clip_ratio": self.last_clip_ratio}
             )
         metrics.update({f"train/{key}": value for key, value in group_metrics.items()})
-        metrics = self.reduce_metrics(metrics)
-        metrics.update(self.step_performance_metrics(samples, elapsed, data_wait))
-        if self.is_main_process:
-            if self.step_pbar is not None:
-                self.step_pbar.set_postfix(
-                    loss=f"{metrics['train/loss']:.5f}",
-                    step=f"{self.global_step:,}",
-                    lr=f"{metrics['train/lr']:.2e}",
-                    refresh=False,
-                )
-                self.step_pbar.update(self.global_step - self.step_pbar.n)
-            if self.workspace is not None:
-                self.workspace.log(metrics, step=self.global_step)
+        metrics = to_log_scalars(metrics)
+        metrics.update({
+            "train/step_time": elapsed,
+            "train/data_wait_time": data_wait,
+            "train/samples_per_sec": samples / elapsed,
+            "train/samples_per_step": samples,
+        })
+        if self.step_pbar is not None:
+            self.step_pbar.set_postfix(
+                loss=f"{metrics['train/loss']:.5f}",
+                step=f"{self.global_step:,}",
+                lr=f"{metrics['train/lr']:.2e}",
+                refresh=False,
+            )
+            self.step_pbar.update(self.global_step - self.step_pbar.n)
+        self.workspace.log(metrics, step=self.global_step)
 
     def train(self, *, resume_state=None, max_updates=None):
         if max_updates is not None:
@@ -342,22 +271,20 @@ class Trainer:
         if self.ema_model is not None:
             self.ema_model.eval()
 
-        self.interrupted = False
         self.stop_requested = False
         prev_sigint = signal.signal(signal.SIGINT, self.signal_handler)
         prev_sigterm = signal.signal(signal.SIGTERM, self.signal_handler)
 
         epoch = start_epoch
         self.current_epoch = epoch
-        if self.is_main_process:
-            self.step_pbar = tqdm(
-                initial=self.global_step,
-                total=self.total_train_steps,
-                desc="Steps",
-                position=0,
-                mininterval=5.0,
-                miniters=1,
-            )
+        self.step_pbar = tqdm(
+            initial=self.global_step,
+            total=self.total_train_steps,
+            desc="Steps",
+            position=0,
+            mininterval=5.0,
+            miniters=1,
+        )
 
         try:
             while self.global_step < stop_step:
@@ -388,24 +315,16 @@ class Trainer:
                     group_pos = micro_step - group_start
                     is_boundary = group_pos + 1 == group_size
 
-                    # PyTorch 2.4 static_graph needs one synchronized backward before no_sync.
-                    if self.distributed and not is_boundary and self.ddp_backward_initialized:
-                        sync_ctx = self.model.no_sync()
-                    else:
-                        sync_ctx = contextlib.nullcontext()
-
                     record_group = (self.global_step + 1) % self.log_interval_steps == 0
-                    with sync_ctx:
-                        log_dict = self.train_microbatch(
-                            batch,
-                            is_accumulation_boundary=is_boundary,
-                            loss_divisor=group_size,
-                            log_metrics=record_group,
-                        )
+                    log_dict = self.train_microbatch(
+                        batch,
+                        is_accumulation_boundary=is_boundary,
+                        loss_divisor=group_size,
+                        log_metrics=record_group,
+                    )
 
                     if is_boundary:
                         group_elapsed = time.perf_counter() - group_start_time
-                    self.ddp_backward_initialized = True
                     if record_group:
                         accumulate_metrics(group_metric_sums, log_dict)
                         group_metric_count += 1
@@ -422,7 +341,6 @@ class Trainer:
                         if self.next_micro_step == num_batches:
                             self.current_epoch = epoch + 1
                             self.next_micro_step = 0
-                        self.interrupted = self.stop_requested_on_any_rank()
                         if record_group:
                             self.log_step(
                                 group_metrics, group_samples, group_elapsed, group_data_wait
@@ -434,16 +352,16 @@ class Trainer:
                         # Exclude this update's logging/checkpoint work from the next one.
                         group_start_time = time.perf_counter()
 
-                    if is_boundary and (self.global_step >= stop_step or self.interrupted):
+                    if is_boundary and (self.global_step >= stop_step or self.stop_requested):
                         break
                     data_wait_start = time.perf_counter()
 
                 self.model.eval()
                 epoch = self.current_epoch
-                if self.interrupted:
+                if self.stop_requested:
                     break
 
-            if self.interrupted and self.global_step > 0:
+            if self.stop_requested and self.global_step > 0:
                 print(
                     f"Training interrupted at step {self.global_step}/{self.total_train_steps}",
                     flush=True,

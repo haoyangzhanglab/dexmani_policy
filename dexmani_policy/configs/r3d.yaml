@@ -27,7 +27,7 @@ normalization:
   point_cloud: limits
 
 # NOTE: R3D ViT encoder is memory-intensive (512 patch tokens × N samples).
-# Single-GPU: batch_size=128; DDP: 32/GPU × 4 (see ddp/r3d.yaml).
+# Effective batch size = batch_size × gradient_accumulation_steps.
 dataloader:
   batch_size: 128
   shuffle: true

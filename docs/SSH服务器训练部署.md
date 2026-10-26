@@ -25,16 +25,15 @@ launcher 选项位于 config/task **之前**，Hydra overrides 位于其后：
 bash scripts/remote/train_remote.sh --dry-run dp3 <task>
 bash scripts/remote/train_remote.sh --gpus 0 dp3 <task> 'training.seed=42'
 bash scripts/remote/train_remote.sh --fg --gpus 0 dp3 <task> '+max_updates=4'
-bash scripts/remote/train_remote.sh --gpus 0,1,2,3 ddp/sat <task>
 ```
 
-流程：SSH 检查 → 创建唯一 `outputs/remote_sources/<id>/` → 同步源码（可选 `--sync-data`）→ 链接共享目录 → 检查 Dataset 路径 → 查询 GPU/磁盘 → 启动训练。`--gpus` 必须在查询得到的 GPU index 内；查询失败中止。**目录与资源检查通过，不代表权重、显存或剩余空间足够。**
+流程：SSH 检查 → 创建唯一 `outputs/remote_sources/<id>/` → 同步源码（可选 `--sync-data`）→ 链接共享目录 → 检查 Dataset 路径 → 查询 GPU/磁盘 → 启动训练。`--gpus` 只接受一个非负整数 ID，必须在查询得到的 GPU index 内；多 ID 输入在连接 SSH 前报错，查询失败中止。该选项通过 `CUDA_VISIBLE_DEVICES` 选卡，所选 GPU 在训练进程内编号为 `cuda:0`；不传时使用 `training.device`。**目录与资源检查通过，不代表权重、显存或剩余空间足够。**
 
 远端使用副本中的 Python module 入口训练；副本共享 `robot_data/`、`data/`、`experiments/`、`pretrained_models/` 和 `logs/`。主源码后续同步**不会改变**运行中的副本，但修改共享数据会影响实验；副本不自动清理，失败后也保留。`--dry-run` 仍连接 SSH 并预览 rsync，但不创建副本、不验证数据/GPU。`--fg` 为前台 SSH，适合排查启动错误。
 
 ### 配置与并行运行
 
-DDP 需使可见 GPU 数与 `training.num_gpus` 一致，有效 batch = 每卡 batch × world size × gradient accumulation。`ddp/sat` 选择 DDP 配置，但实验、W&B group、评测和同步路径均按基础方法 `sat` 命名：
+每次启动单卡训练，有效 batch = `dataloader.batch_size` × `training.loop.gradient_accumulation_steps`，epoch 尾组以实际样本数为准。可分别选卡启动独立实验；实验、W&B group、评测和同步路径按方法名（例如 `sat`）命名：
 
 ```bash
 bash scripts/remote/tail_log.sh sat <task> <run>

@@ -11,6 +11,12 @@ from dexmani_policy.common.config import (
 
 def validate_config(cfg):
     """Check shared training constraints before opening data or model artifacts."""
+    for field in ("num_gpus", "gpu_ids"):
+        if field in cfg.training:
+            raise ValueError(
+                f"training.{field} is no longer supported; "
+                "select one device with training.device"
+            )
     agent_class = hydra.utils.get_class(cfg.agent._target_)
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
         if type(cfg.agent[name]) is not type(cfg[name]) or cfg.agent[name] != cfg[name]:

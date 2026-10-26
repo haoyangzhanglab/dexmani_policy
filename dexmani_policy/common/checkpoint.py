@@ -20,7 +20,7 @@ class TrainingCheckpoint:
     scheduler_state: dict[str, Any]
     resume_contract: dict[str, Any]
     ema_updater_step: int | None
-    rng_states: list[dict[str, Any]]
+    rng_state: dict[str, Any]
     effective_config: dict[str, Any]
 
 
@@ -37,7 +37,7 @@ def save_training_checkpoint(path: Path, checkpoint: TrainingCheckpoint) -> Path
             "next_micro_step": checkpoint.next_micro_step,
             "resume_contract": checkpoint.resume_contract,
             "ema_updater_step": checkpoint.ema_updater_step,
-            "rng_states": checkpoint.rng_states,
+            "rng_state": checkpoint.rng_state,
         },
         "weights": {
             "model": checkpoint.model_state,
@@ -61,6 +61,11 @@ def read_checkpoint(path: Path, *, mmap=False) -> dict:
 def load_training_checkpoint(path: Path) -> TrainingCheckpoint:
     payload = read_checkpoint(path)
     state = payload["state"]
+    if "rng_state" not in state:
+        raise ValueError(
+            "Unsupported training checkpoint format: expected single-process rng_state. "
+            "Use the original source version to resume older checkpoints."
+        )
     weights = payload["weights"]
     for key in ("epoch", "global_step", "next_micro_step"):
         if type(state[key]) is not int or state[key] < 0:
@@ -71,7 +76,7 @@ def load_training_checkpoint(path: Path) -> TrainingCheckpoint:
         next_micro_step=state["next_micro_step"],
         resume_contract=state["resume_contract"],
         ema_updater_step=state["ema_updater_step"],
-        rng_states=state["rng_states"],
+        rng_state=state["rng_state"],
         model_state=weights["model"],
         ema_model_state=weights["ema_model"],
         optimizer_state=weights["optimizer"],

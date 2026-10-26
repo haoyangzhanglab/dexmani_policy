@@ -56,24 +56,22 @@ def print_param_count(agent) -> None:
 
 
 def print_training_recipe(
-    cfg, *, world_size: int, batches_per_epoch: int, samples_per_rank: int
+    cfg, *, batches_per_epoch: int, samples_per_epoch: int
 ) -> None:
     """Distinguish nominal batches from the windows actually processed."""
-    per_device_batch = int(cfg.dataloader.batch_size)
+    batch_size = int(cfg.dataloader.batch_size)
     grad_accum = cfg.training.loop.gradient_accumulation_steps
     total_train_steps = int(cfg.training.loop.total_train_steps)
-    nominal_global_batch = per_device_batch * world_size * grad_accum
+    nominal_batch = batch_size * grad_accum
     updates_per_epoch = (batches_per_epoch + grad_accum - 1) // grad_accum
     remainder = batches_per_epoch % grad_accum
     last_group_microbatches = grad_accum if remainder == 0 else remainder
-    epoch_samples = min(samples_per_rank, batches_per_epoch * per_device_batch)
-    last_group_global_batch = world_size * (
-        epoch_samples - (updates_per_epoch - 1) * grad_accum * per_device_batch
-    )
+    epoch_samples = min(samples_per_epoch, batches_per_epoch * batch_size)
+    last_group_batch = epoch_samples - (updates_per_epoch - 1) * grad_accum * batch_size
     full_epochs, partial_updates = divmod(total_train_steps, updates_per_epoch)
-    processed_budget = world_size * (
+    processed_budget = (
         full_epochs * epoch_samples
-        + min(partial_updates * grad_accum * per_device_batch, epoch_samples)
+        + min(partial_updates * grad_accum * batch_size, epoch_samples)
     )
     has_partial_accumulation_group = last_group_microbatches != grad_accum
     lr = cfg.optimizer.lr
@@ -85,19 +83,18 @@ def print_training_recipe(
             "temporal sampling",
             "recorded_rows (no interpolation; eligibility follows data_recipe)",
         ),
-        ("per-device batch", per_device_batch),
-        ("world size", world_size),
+        ("micro-batch size", batch_size),
         ("gradient accumulation", grad_accum),
-        ("nominal global batch", nominal_global_batch),
+        ("nominal effective batch", nominal_batch),
         ("batches / epoch", batches_per_epoch),
         ("optimizer updates / epoch", updates_per_epoch),
         ("partial accum group", "yes" if has_partial_accumulation_group else "no"),
         ("last group micro-batches", last_group_microbatches),
-        ("last group global batch", last_group_global_batch),
+        ("last group batch", last_group_batch),
         ("total optimizer updates", total_train_steps),
-        ("nominal sample budget", nominal_global_batch * total_train_steps),
+        ("nominal sample budget", nominal_batch * total_train_steps),
         ("processed window budget", processed_budget),
-        ("window counting", "includes sampler repeats / DDP padding; not unique source rows"),
+        ("window counting", "counts processed windows across epochs; not unique source rows"),
         ("drop_last", cfg.dataloader.drop_last),
         ("learning rate", f"{lr:.3e}"),
         ("obs learning rate", f"{obs_lr:.3e}"),

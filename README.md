@@ -2,7 +2,7 @@
 
 灵巧手操作策略学习研究仓库，支持多种策略架构的训练、Checkpoint 恢复、仿真评测与推理部署。
 
-项目采用统一的数据、策略和实验接口，支持单卡与分布式训练，并提供标准化的 Checkpoint 选点与评测流程。
+项目采用统一的数据、策略和实验接口，支持单卡训练，并提供标准化的 Checkpoint 选点与评测流程。
 
 ## 环境准备
 
@@ -22,7 +22,7 @@ Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与�
 
 ### 1. 检查配置与数据
 
-实验配置位于 `dexmani_policy/configs/`，其中 `ddp/` 存放多卡配置。
+实验配置位于 `dexmani_policy/configs/`。
 
 ```bash
 # 配置接口及导入检查（无需数据或 GPU）
@@ -44,15 +44,14 @@ python dexmani_policy/smoke_test.py --data-only dp3
 # 单卡训练
 bash scripts/training/train.sh dp3 'task_name=<task>'
 
-# 多卡 DDP 训练
-bash scripts/training/train_ddp.sh ddp/sat 'task_name=<task>'
-
 # 从已有实验恢复训练
 bash scripts/training/train.sh dp3 \
   '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
 入口支持 Hydra 配置覆盖。续训使用 Checkpoint 保存的训练配方，并创建新的运行目录；首次 update 前归档恢复点及之前实际存在的有效 milestone。缺历史 milestone 不阻止恢复，已有候选损坏、冲突或配方不一致仍报错；不复制未来候选。附加 `source_evidence` 不参与恢复配方比较，数据划分、normalizer、模型和优化参数仍须一致。完整训练 `.pt` 仅接受可信项目产物。
+
+训练只使用 `training.device` 指定的一张 GPU；`training.num_gpus/gpu_ids` 已移除。Checkpoint 训练状态使用单个 `rng_state`，旧 `rng_states` 格式需用原源码续训，不自动转换；旧模型权重的评估与部署读取不受此训练状态变更影响。
 
 R3D 默认 B=128 在 24 GiB GPU 上可能 OOM。单卡可使用现有梯度累积配置：
 
