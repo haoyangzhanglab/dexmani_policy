@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 import time
 
 import numpy as np
@@ -97,16 +96,15 @@ class PolicyRuntime:
         if "hand_pointcloud" in info.observation_fields:
             self.hand_pointcloud_shape = (info.hand_pointcloud_config["num_points"], 6)
 
+        import torch
+
+        self.generator = torch.Generator(device=device)
         self.device = device
         self.seed = seed
         self.reset_episode()
 
     def reset_episode(self):
-        import torch
-
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
+        self.generator.manual_seed(self.seed)
 
     def prepare_observations(self, observation):
         import torch
@@ -198,7 +196,7 @@ class PolicyRuntime:
 
         with torch.inference_mode():
             result = self.agent.predict_action(
-                tensors, inference_steps=self.info.inference_steps, **kwargs
+                tensors, inference_steps=self.info.inference_steps, generator=self.generator, **kwargs
             )
 
         # Real consumes the full future after the query, without auxiliary dimensions.
@@ -238,7 +236,7 @@ class PolicyRuntime:
                 durations.append((time.perf_counter_ns() - start) / 1e9)
             return tuple(durations)
 
-        self.reset_episode()
+        generator_state = self.generator.get_state()
         try:
             # Exclude initialization and reuse its physical prediction for RTC warmup.
             prefix = self.predict(observation, action_context=context)
@@ -250,7 +248,7 @@ class PolicyRuntime:
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}
         finally:
-            close_resources(self.reset_episode)
+            self.generator.set_state(generator_state)
 
     def close(self):
         if self.agent is None:

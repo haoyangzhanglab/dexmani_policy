@@ -10,12 +10,13 @@ from torch import nn
 
 from dexmani_policy.common.config import positive_int
 
-from .ops import index_points, sample_point_patches
+from .ops import index_points, sample_point_patches, load_pointcloud_ops
 from .pointnet import build_mlp
 
 
 def validate_sparse3d_config(cfg, spec, *, dataset, default_num_patches=96):
     """Preserve metric XYZ and enough points for Sparse3D patch geometry."""
+    load_pointcloud_ops()
     Sparse3DEncoder.validate_normalization(spec)
     encoder = cfg.get("pc_encoder_config") or {}
     sizes = {
@@ -230,6 +231,7 @@ class Sparse3DEncoder(nn.Module):
     ):
         config = locals().copy()
         super().__init__()
+        load_pointcloud_ops()
         self.effective_config = {
             key: value for key, value in config.items()
             if key not in {"self", "input_channels", "__class__"}

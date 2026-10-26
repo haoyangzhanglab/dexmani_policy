@@ -220,14 +220,15 @@ class DQRISEPolicy(BasePolicy):
 
     @torch.no_grad()
     def predict_action_from_condition(
-        self, condition: torch.Tensor, inference_steps: int | None = None
+        self, condition: torch.Tensor, inference_steps: int | None = None,
+        *, generator: torch.Generator | None = None,
     ) -> dict:
         self.require_codebook()
         template = condition.new_zeros(
             (condition.shape[0], self.horizon, self.diffusion_action_dim)
         )
         reduced_action = self.action_decoder.predict_action(
-            condition, template, inference_steps=inference_steps
+            condition, template, inference_steps=inference_steps, generator=generator
         )
 
         arm_pred = reduced_action[..., : self.tcp_dim]

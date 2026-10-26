@@ -89,6 +89,7 @@ class RectifiedFlow(nn.Module):
         cond: torch.Tensor,
         action_template: torch.Tensor,
         inference_steps: int | None = None,
+        *, generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         num_steps = (
             self.num_inference_steps
@@ -97,7 +98,8 @@ class RectifiedFlow(nn.Module):
         )
 
         batch_size = action_template.shape[0]
-        x = torch.randn_like(action_template)
+        x = torch.randn(action_template.shape, device=action_template.device,
+                        dtype=action_template.dtype, generator=generator)
         dt = 1.0 / num_steps
 
         context_kwargs = {}
@@ -284,6 +286,7 @@ class ConsistencyFlow(nn.Module):
         cond: torch.Tensor,
         action_template: torch.Tensor,
         inference_steps: int | None = None,
+        *, generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         num_steps = (
             self.num_inference_steps
@@ -292,7 +295,8 @@ class ConsistencyFlow(nn.Module):
         )
 
         batch_size = action_template.shape[0]
-        x = torch.randn_like(action_template)
+        x = torch.randn(action_template.shape, device=action_template.device,
+                        dtype=action_template.dtype, generator=generator)
         dt = 1.0 / num_steps
         context_kv = self.model.prepare_context_kv(cond) if num_steps > 1 else None
         timesteps = euler_time_grid(num_steps, x)

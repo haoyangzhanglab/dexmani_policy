@@ -41,7 +41,7 @@ def resolve_gpu_ids(num_gpus, gpu_ids, available_gpus):
     return ids
 
 
-def train_distributed(rank: int, cfg, gpu_ids, dataset, normalizer_state):
+def train_distributed(rank: int, cfg, gpu_ids, dataset, normalizer_state, data_description):
     world_size = len(gpu_ids)
     gpu_id = gpu_ids[rank]
     device = torch.device(f"cuda:{gpu_id}")
@@ -65,10 +65,12 @@ def train_distributed(rank: int, cfg, gpu_ids, dataset, normalizer_state):
             device,
             dataset,
             normalizer,
+            data_description=data_description,
             rank=rank,
             world_size=world_size,
             checkpoint=checkpoint,
         )
+        cfg = components.effective_config
         with closing(components):
             resume_state = None
             if resuming:
@@ -94,7 +96,7 @@ def train_distributed(rank: int, cfg, gpu_ids, dataset, normalizer_state):
                 # Only fresh EMA follows the raw state synchronized by DDP.
                 components.ema_model.load_state_dict(components.model.module.state_dict(), strict=True)
 
-            trainer = build_trainer(cfg, components)
+            trainer = build_trainer(components)
             trainer.train(resume_state=resume_state, max_updates=cfg.get("max_updates"))
 
     finally:
@@ -112,7 +114,7 @@ def main(cfg):
     os.environ.setdefault("MASTER_ADDR", "localhost")
 
     set_seed(cfg.training.seed)
-    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
+    dataset, normalizer, data_description = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
     normalizer_state = normalizer.state_dict() if normalizer is not None else None
     del normalizer, checkpoint
 
@@ -128,7 +130,7 @@ def main(cfg):
 
     mp.spawn(
         train_distributed,
-        args=(cfg, gpu_ids, dataset, normalizer_state),
+        args=(cfg, gpu_ids, dataset, normalizer_state, data_description),
         nprocs=num_gpus,
         join=True,
     )

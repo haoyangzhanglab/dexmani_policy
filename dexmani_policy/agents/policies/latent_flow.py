@@ -319,6 +319,7 @@ class LatentFlowPolicy(BasePolicy):
         obs_dict: dict,
         inference_steps: int | None = None,
         *,
+        generator: torch.Generator | None = None,
         action_context: dict | None = None,
         rtc_prefix: torch.Tensor | None = None,
         delay_steps: int = 0,
@@ -330,7 +331,7 @@ class LatentFlowPolicy(BasePolicy):
         reference = self.resolve_reference_state(obs_dict, action_context)
         condition = self.encode_condition(obs_dict)
         return self.predict_action_from_condition(
-            condition, inference_steps, reference_state=reference
+            condition, inference_steps, reference_state=reference, generator=generator
         )
 
     @torch.no_grad()
@@ -340,11 +341,12 @@ class LatentFlowPolicy(BasePolicy):
         inference_steps: int | None = None,
         *,
         reference_state: torch.Tensor,
+        generator: torch.Generator | None = None,
     ) -> dict[str, torch.Tensor]:
         template = condition.new_zeros(
             (len(condition), self.horizon, self.model_action_dim), dtype=torch.float32
         )
-        native = self.action_decoder.predict_action(condition, template, inference_steps)
+        native = self.action_decoder.predict_action(condition, template, inference_steps, generator=generator)
         affine = self.normalizer["action"].params_dict
         scale = affine["scale"][: self.arm_dim]
         offset = affine["offset"][: self.arm_dim]

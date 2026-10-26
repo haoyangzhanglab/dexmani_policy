@@ -133,7 +133,7 @@ class SimRunner:
 
     @torch.no_grad()
     def predict_action_chunk(
-        self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int
+        self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int, generator=None
     ) -> np.ndarray:
         kwargs = {}
         if getattr(agent, "history_steps", 0):
@@ -143,7 +143,7 @@ class SimRunner:
                 self.hand_history, dtype=torch.float32, device=obs_batch["joint_state"].device
             )
             kwargs["action_context"] = {"hand_history": history.unsqueeze(0)}
-        result = agent.predict_action(obs_dict=obs_batch, inference_steps=inference_steps, **kwargs)
+        result = agent.predict_action(obs_dict=obs_batch, inference_steps=inference_steps, generator=generator, **kwargs)
         prediction = result["future_actions"]
         if prediction.shape != (1, agent.future_steps, agent.control_action_dim):
             raise ValueError("future_actions must contain the complete physical future")
@@ -171,8 +171,8 @@ class SimRunner:
                 raise ValueError("LAMP reset requires a finite measured hand pose")
             self.hand_history = np.repeat(initial_hand[None], agent.history_steps, axis=0)
 
-        # Environment reset does not seed the policy sampling generator.
-        torch.manual_seed(episode_seed)
+        # Environment and policy own separate random streams.
+        generator = torch.Generator(device=next(agent.parameters()).device).manual_seed(episode_seed)
 
         done = False
         truncated = False
@@ -183,7 +183,7 @@ class SimRunner:
         while not (done or truncated):
             obs_batch = self.get_obs_batch(device=device)
             action_chunk = self.predict_action_chunk(
-                obs_batch, agent, inference_steps=inference_steps, action_steps=action_steps
+                obs_batch, agent, inference_steps=inference_steps, action_steps=action_steps, generator=generator
             )
             for action in action_chunk:
                 obs, _, done, truncated, info = env.step(action)

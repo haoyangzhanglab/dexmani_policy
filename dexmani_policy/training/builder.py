@@ -23,6 +23,7 @@ from dexmani_policy.common.config import (
     validate_observation_fields,
 )
 from dexmani_policy.common.runtime import close_resources, set_seed
+from dexmani_policy.common.experiments import archive_resume_milestones
 from dexmani_policy.training.common.ema import EMA
 from dexmani_policy.training.common.logging import print_param_count, print_training_recipe
 from dexmani_policy.training.common.scheduler import get_scheduler
@@ -58,7 +59,7 @@ def bind_defaults(config, constructor):
                 config[name] = parameter.default
 
 
-def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
+def build_model_and_ema(cfg, device, normalizer, data_description, rank=0, *, checkpoint=None):
     """Build raw weights and EMA for rank-0 checkpoints or per-rank training targets."""
     model_cfg = cfg
     if checkpoint is not None:
@@ -70,7 +71,7 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
     else:
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
     model.set_normalization_spec(
-        resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
+        resolve_normalization_spec(cfg), data_description["normalization_dims"]
     )
     if checkpoint is None:
         model.initialize_training()
@@ -78,18 +79,10 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         if model.requires_hand_pretraining:
             kwargs = {}
             if model.requires_split_manifest:
-                kwargs["split_manifest"] = OmegaConf.to_container(
-                    cfg.data_recipe[0].split_manifest, resolve=True
-                )
-            model.validate_training_data(OmegaConf.to_container(cfg.hand_data, resolve=True), **kwargs)
-        bind_defaults(cfg.agent, type(model))
-        with open_dict(cfg.agent):
-            cfg.agent.update(model.effective_config)
-    with open_dict(cfg):
-        metadata = model.inference_metadata
-        if checkpoint is not None and dict(cfg.policy_metadata) != metadata:
-            raise ValueError("Restored policy metadata differs from saved construction")
-        cfg.policy_metadata = metadata
+                kwargs["split_manifest"] = data_description["data_recipe"][0]["split_manifest"]
+            model.validate_training_data(data_description["hand_data"], **kwargs)
+    if checkpoint is not None and dict(cfg.policy_metadata) != model.inference_metadata:
+        raise ValueError("Restored policy metadata differs from saved construction")
     if checkpoint is None:
         model.to(device)
 
@@ -111,8 +104,6 @@ def build_model_and_ema(cfg, device, normalizer, rank=0, *, checkpoint=None):
         # Copy before compile/DDP; resume restores raw and EMA independently below.
         ema_model = copy.deepcopy(model)
         ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
-        if checkpoint is None:
-            bind_defaults(cfg.ema, type(ema_updater))
 
     if checkpoint is not None:
         restore_model_weights(checkpoint, model, ema_model, device)
@@ -166,11 +157,6 @@ def build_optimizer(
 def build_optimizer_and_scheduler(cfg, model, *, verbose=True):
     """Build initial optimizer/scheduler; resume loads their complete saved states."""
     optimizer = build_optimizer(model, **cfg.optimizer)
-    if cfg.get("resume_from") is None:
-        bind_defaults(cfg.optimizer, build_optimizer)
-    if cfg.training.lr_scheduler == "cosine_min_lr":
-        with open_dict(cfg.training):
-            cfg.training.lr_min_ratio = cfg.training.get("lr_min_ratio", 0.1)
     if verbose:
         print_param_count(model)
     scheduler = get_scheduler(
@@ -207,6 +193,7 @@ class TrainingComponents:
     scheduler: Any
     train_loader: DataLoader
     workspace: Workspace | None
+    effective_config: Any
 
     def close(self):
         callbacks = [lambda: close_data_loader(self.train_loader)]
@@ -215,14 +202,36 @@ class TrainingComponents:
         close_resources(*callbacks)
 
 
+def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
+    effective = copy.deepcopy(cfg)
+    with open_dict(effective):
+        effective.update(data_description)
+        if "real_runtime" not in data_description:
+            effective.pop("real_runtime", None)
+        effective.policy_metadata = model.inference_metadata
+        if checkpoint is None:
+            bind_defaults(effective.agent, type(model))
+            effective.agent.update(model.effective_config)
+            bind_defaults(effective.optimizer, build_optimizer)
+            if cfg.training.use_ema:
+                bind_defaults(effective.ema, hydra.utils.get_class(cfg.ema._target_))
+        if effective.training.lr_scheduler == "cosine_min_lr":
+            effective.training.lr_min_ratio = effective.training.get("lr_min_ratio", 0.1)
+    normalization_dims_from_config(effective)
+    OmegaConf.resolve(effective)
+    OmegaConf.set_readonly(effective, True)
+    return effective
+
+
 def build_training_components(
-    cfg, device, dataset, normalizer, *, rank=0, world_size=1, checkpoint=None
+    cfg, device, dataset, normalizer, *, data_description, rank=0, world_size=1, checkpoint=None
 ):
     """Build one rank's components before compile or DDP wrapping."""
     train_loader = build_train_loader(cfg, dataset, rank=rank, world_size=world_size)
+    workspace = None
     try:
         model, ema_model, ema_updater = build_model_and_ema(
-            cfg, device, normalizer, rank=rank, checkpoint=checkpoint
+            cfg, device, normalizer, data_description, rank=rank, checkpoint=checkpoint
         )
 
         # DDP initialization is shared; augmentation uses a separate seed on each rank.
@@ -230,7 +239,7 @@ def build_training_components(
             set_seed(cfg.training.seed + rank)
         optimizer, scheduler = build_optimizer_and_scheduler(cfg, model, verbose=rank == 0)
 
-        workspace = None
+        cfg = assemble_effective_config(cfg, data_description, model, checkpoint=checkpoint)
         if rank == 0:
             print_training_recipe(
                 cfg,
@@ -240,8 +249,28 @@ def build_training_components(
             )
             workspace = hydra.utils.instantiate(cfg.workspace)
 
+        if checkpoint is not None:
+            archive_error = None
+            if rank == 0:
+                try:
+                    archive_resume_milestones(cfg.resume_from, workspace.output_dir, checkpoint)
+                except Exception as error:
+                    archive_error = error
+            if world_size > 1:
+                import torch.distributed as dist
+
+                status = [str(archive_error) if archive_error is not None else None]
+                dist.broadcast_object_list(status, src=0)
+                if rank != 0 and status[0] is not None:
+                    raise RuntimeError(f"Rank 0 milestone archive failed: {status[0]}")
+            if archive_error is not None:
+                raise archive_error
+
     except BaseException:
-        close_resources(lambda: close_data_loader(train_loader))
+        callbacks = [lambda: close_data_loader(train_loader)]
+        if workspace is not None:
+            callbacks.append(workspace.close)
+        close_resources(*callbacks)
         raise
 
     return TrainingComponents(
@@ -253,10 +282,12 @@ def build_training_components(
         scheduler=scheduler,
         train_loader=train_loader,
         workspace=workspace,
+        effective_config=cfg,
     )
 
 
-def build_trainer(cfg, components):
+def build_trainer(components):
+    cfg = components.effective_config
     trainer = Trainer(
         components,
         train_loop_cfg=TrainLoopConfig(**OmegaConf.to_container(cfg.training.loop, resolve=True)),

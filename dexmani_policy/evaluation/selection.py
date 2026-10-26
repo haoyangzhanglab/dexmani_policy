@@ -8,13 +8,14 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.experiments import discover_milestone_checkpoints, resolve_record_path
+from dexmani_policy.common.experiments import discover_milestone_checkpoints, file_sha256
 from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds
 from dexmani_policy.evaluation.artifacts import (
     artifact_reference,
     create_run_directory,
-    resolve_selection_record,
-    validate_selection_plan,
+    rank_selection_results,
+    verify_selection_record,
+    training_source_evidence,
     write_failure,
     write_json,
 )
@@ -67,20 +68,23 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
             request, task_seeds=test, source={"phase": "test", "heldout_from_selection": True}
         ).to_dict(),
         "candidates": [
-            {"checkpoint": artifact_reference(m.path, root), "global_step": m.global_step}
+            {"checkpoint": artifact_reference(m.path, root), "global_step": m.global_step,
+             "checkpoint_sha256": file_sha256(m.path)}
             for m in milestones
         ],
         "candidate_results": [],
+        "training_source_evidence": training_source_evidence(cfg, {"selection": selection, "test": test}),
     }
     write_json(path, record, overwrite=False)
     results = []
     try:
-        for milestone in milestones:
+        for milestone, candidate in zip(milestones, record["candidates"], strict=True):
             result_path = evaluate_policy(
                 replace(
                     request,
                     checkpoint=str(milestone.path),
-                    source={**request.source, "global_step": milestone.global_step},
+                    source={**request.source, "global_step": milestone.global_step,
+                            "checkpoint_sha256": candidate["checkpoint_sha256"]},
                 ),
                 output_root=directory / "candidates",
             )
@@ -94,80 +98,28 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
             status="completed",
             ckpt_relpath=candidate["checkpoint"],
             global_step=candidate["global_step"],
+            checkpoint_sha256=candidate["checkpoint_sha256"],
+            runtime=results[best]["runtime"],
             inference={
                 key: getattr(request, key) for key in ("use_ema", "inference_steps", "action_steps")
             },
         )
         write_json(path, record)
+        publish_best(root, path)
     except BaseException:
         record.update(status="failed", error=traceback.format_exc())
         write_failure(path, record)
         raise
-    publish_best(root, {**record, "selection_result": artifact_reference(path, root)})
     return path
 
 
-def rank_selection_results(record, results):
-    """Validate complete candidate evidence, then rank without file or environment I/O."""
-    from dexmani_policy.env_runner.common.metrics import (
-        compute_evaluation_statistics,
-        validate_episodes,
-    )
-
-    candidates = record["candidates"]
-    if not candidates or len(results) != len(candidates):
-        raise ValueError("Selection requires complete results for every declared candidate")
-    if len({c["checkpoint"] for c in candidates}) != len(candidates):
-        raise ValueError("Duplicate selection candidate")
-    validate_selection_plan(record)
-    protocol = record["test_request"]
-    selection = record["selection_task_seeds"]
-    ranks = []
-    for candidate, result in zip(candidates, results, strict=True):
-        if result["status"] != "completed" or result["global_step"] != candidate["global_step"]:
-            raise ValueError("Candidate is incomplete or global_step differs")
-        request = result["request"]
-        expected_checkpoint = str(Path(record["experiment_dir"]) / candidate["checkpoint"])
-        if request["checkpoint"] != expected_checkpoint or request["task_seeds"] != selection:
-            raise ValueError("Candidate checkpoint or fixed selection plan differs")
-        for key in ("config", "tasks", "use_ema", "inference_steps", "action_steps", "numerics"):
-            if request[key] != protocol[key]:
-                raise ValueError(f"Candidate research conditions differ: {key}")
-        for key in ("policy_code", "simulator_code", "torch", "cuda", "parameter_dtypes"):
-            if result["runtime"][key] != results[0]["runtime"][key]:
-                raise ValueError(f"Candidate runtime conditions differ: {key}")
-        validate_episodes(result["episodes"], selection)
-        stats = compute_evaluation_statistics(result["episodes"])
-        if result["statistics"] != stats:
-            raise ValueError("Candidate statistics disagree with episode facts")
-        avg = stats["avg_steps"]
-        ranks.append(
-            (
-                stats["micro_success_rate"],
-                -(avg if avg is not None else float("inf")),
-                candidate["global_step"],
-            )
-        )
-    return max(range(len(candidates)), key=ranks.__getitem__)
-
-
-def publish_best(root, record):
+def publish_best(root, record_path):
+    record, checkpoint = verify_selection_record(root, record_path)
     write_json(
         Path(root) / "best_ckpt.json",
-        {key: record[key] for key in ("ckpt_relpath", "global_step", "inference", "selection_result")},
+        {key: record[key] for key in ("ckpt_relpath", "global_step", "checkpoint_sha256", "inference", "selection_result")},
     )
-
-
-def verify_selection_record(experiment_dir, record_path):
-    root = Path(experiment_dir).resolve()
-    record, checkpoint = resolve_selection_record(root, record_path)
-    results = [json.loads(resolve_record_path(root, ref).read_text()) for ref in record["candidate_results"]]
-    for candidate in record["candidates"]:
-        resolve_record_path(root, candidate["checkpoint"], checkpoint=True)
-    best = record["candidates"][rank_selection_results(record, results)]
-    if (record["ckpt_relpath"], record["global_step"]) != (best["checkpoint"], best["global_step"]):
-        raise ValueError("Selected checkpoint disagrees with complete candidate ranking")
-    return record, checkpoint
+    return checkpoint
 
 
 def main():
@@ -178,9 +130,10 @@ def main():
     parser.add_argument("--selection-record", required=True)
     parser.add_argument("--publish-best", action="store_true", help="Publish a direct best pointer after verification")
     args = parser.parse_args()
-    record, checkpoint = verify_selection_record(args.experiment_dir, args.selection_record)
     if args.publish_best:
-        publish_best(args.experiment_dir, record)
+        checkpoint = publish_best(args.experiment_dir, args.selection_record)
+    else:
+        _, checkpoint = verify_selection_record(args.experiment_dir, args.selection_record)
     print(f"Selection verified: {checkpoint}")
 
 

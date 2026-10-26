@@ -209,6 +209,17 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 },
             )],
         }
+        # Episode seeds are acquisition facts, not a hash or proof of scene independence.
+        meta = buffer.group['meta']
+        seeds = None
+        if 'episode_seeds' in meta:
+            values = np.asarray(meta['episode_seeds'])
+            if values.shape != buffer.episode_ends.shape or values.dtype.kind not in 'iu':
+                raise ValueError('episode_seeds must be integer metadata aligned with episodes')
+            seeds = values.tolist()
+        description['data_recipe'][0]['source_evidence'] = {
+            'task_name': buffer.attrs.get('task_name'), 'episode_seeds': seeds,
+        }
         runtime = self.describe_real_runtime(task_name) if task_name is not None else None
         if runtime is not None:
             description["real_runtime"] = runtime
@@ -316,9 +327,12 @@ class DemonstrationDataset(torch.utils.data.Dataset):
         return runtime
 
     def finite_rows(self, key, columns=None):
-        valid = np.ones(int(self.replay_buffer.episode_ends[-1]), dtype=bool)
+        valid = np.repeat(self.train_mask | self.val_mask,
+                          np.diff(np.r_[0, self.replay_buffer.episode_ends]))
         if np.issubdtype(self.replay_buffer[key].dtype, np.floating):
-            for start, values in self.replay_buffer.iter_chunks(key, columns=columns):
+            for start, values in self.replay_buffer.iter_chunks(
+                key, columns=columns, episode_mask=self.train_mask | self.val_mask
+            ):
                 if key == "point_cloud" and self.pc_dim is not None:
                     values = values[..., : self.pc_dim]
                 valid[start : start + len(values)] = (

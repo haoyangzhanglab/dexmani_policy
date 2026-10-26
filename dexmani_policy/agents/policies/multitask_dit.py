@@ -6,50 +6,9 @@ from torch import nn
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion, validate_action_clipping
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
-from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
+from dexmani_policy.agents.obs_encoder.rgb_state import RGBStateObservationEncoder
 from dexmani_policy.agents.obs_encoder.text import CLIPTextEncoder
 from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
-
-
-class MultiTaskDiTObservationEncoder(nn.Module):
-    consumed_observation_fields = ("joint_state", "rgb")
-
-    def __init__(
-        self,
-        rgb_backbone_name: str,
-        state_dim: int,
-        n_obs_steps: int,
-        state_out_dim: int = 64,
-        rgb_backbone_config: dict | None = None,
-    ) -> None:
-        super().__init__()
-        self.backbone, self.image_processor = build_rgb_encoder(
-            rgb_backbone_name, config=rgb_backbone_config
-        )
-        self.state_mlp = StateEncoder(state_dim, state_out_dim)
-        self.n_obs_steps = n_obs_steps
-        self.out_dim = self.backbone.out_dim + self.state_mlp.out_dim
-
-    @property
-    def effective_config(self):
-        return {"rgb_backbone_config": self.backbone.effective_config}
-
-    def forward(self, obs: dict) -> torch.Tensor:
-        rgb = self.image_processor.process_images(obs["rgb"])
-
-        if isinstance(self.backbone, ResNetEncoder):
-            rgb = rgb.to(memory_format=torch.channels_last)
-
-        features = torch.cat(
-            [
-                self.backbone(rgb)["global_token"],
-                self.state_mlp(obs["joint_state"]),
-            ],
-            dim=-1,
-        )
-        return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
 
 
 def encode_task_embeddings(encoder: CLIPTextEncoder, task_texts: list[str]) -> torch.Tensor:
@@ -63,6 +22,14 @@ def encode_task_embeddings(encoder: CLIPTextEncoder, task_texts: list[str]) -> t
 
 class MultiTaskDiTPolicy(BasePolicy):
     """Language-conditioned RGB policy with cached task embeddings or online frozen CLIP."""
+
+    @classmethod
+    def prepare_restore_config(cls, config) -> None:
+        from dexmani_policy.common.config import positive_int
+
+        RGBStateObservationEncoder.prepare_restore_config(config)
+        if config.get("task_texts") is not None:
+            positive_int(config.text_embed_dim, "saved text_embed_dim")
 
     @classmethod
     def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
@@ -111,7 +78,7 @@ class MultiTaskDiTPolicy(BasePolicy):
             else None
         )
         text_dim = text_encoder.embed_dim if text_encoder is not None else text_embed_dim
-        obs_encoder = MultiTaskDiTObservationEncoder(
+        obs_encoder = RGBStateObservationEncoder(
             rgb_backbone_name=rgb_backbone_name,
             state_dim=state_dim,
             n_obs_steps=n_obs_steps,

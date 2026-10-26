@@ -319,6 +319,7 @@ class LAMPPolicy(BasePolicy):
         obs_dict: dict,
         inference_steps: int | None = None,
         *,
+        generator: torch.Generator | None = None,
         action_context: dict | None = None,
         rtc_prefix: torch.Tensor | None = None,
         delay_steps: int = 0,
@@ -328,11 +329,12 @@ class LAMPPolicy(BasePolicy):
             raise NotImplementedError("LAMP supports synchronous execution only")
         self.validate_observations(obs_dict)
         condition, mu = self.encode_condition(obs_dict, action_context)
-        return self.predict_action_from_condition(condition, inference_steps, mu=mu)
+        return self.predict_action_from_condition(condition, inference_steps, mu=mu, generator=generator)
 
     @torch.no_grad()
     def predict_action_from_condition(
-        self, condition: torch.Tensor, inference_steps: int | None = None, *, mu: torch.Tensor
+        self, condition: torch.Tensor, inference_steps: int | None = None, *, mu: torch.Tensor,
+        generator: torch.Generator | None = None,
     ) -> dict[str, torch.Tensor]:
         self.validate_inference_steps(inference_steps)
         native = self.action_decoder(condition).float()

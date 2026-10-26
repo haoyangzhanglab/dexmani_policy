@@ -181,7 +181,7 @@ def validate_dataset(cfg, *, max_batches=2):
         print("DDP config: single-process data check only; DDP NOT VERIFIED")
     set_seed(cfg.training.seed)
     cfg.dataloader.pin_memory = False
-    dataset, _ = build_dataset_and_normalizer(cfg)
+    dataset, _, _ = build_dataset_and_normalizer(cfg)
     loader = build_train_loader(cfg, dataset, rank=0, world_size=1)
     validate_data_loader(loader, cfg, split="train", max_batches=max_batches)
     validation = dataset.get_validation_dataset()
@@ -305,12 +305,13 @@ def validate_training(cfg, *, max_updates=4):
     with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as tmpdir:
         cfg.workspace.output_dir = tmpdir
         cfg.workspace.wandb_cfg = None
-        dataset, normalizer = build_dataset_and_normalizer(cfg)
+        dataset, normalizer, data_description = build_dataset_and_normalizer(cfg)
         components = build_training_components(
-            cfg, torch.device(cfg.training.device), dataset, normalizer
+            cfg, torch.device(cfg.training.device), dataset, normalizer, data_description=data_description
         )
+        cfg = components.effective_config
         with closing(components):
-            trainer = build_trainer(cfg, components)
+            trainer = build_trainer(components)
             components.workspace.save_hydra_config(cfg)
             before = {
                 name: parameter.detach().to(device="cpu", copy=True)

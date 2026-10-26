@@ -37,7 +37,7 @@ def denoised_estimate(output, sample, alpha, sigma, prediction_type):
 
 @torch.inference_mode(False)
 @torch.no_grad()
-def guided_inference(decoder, cond, template, prefix, *, delay, offset, beta, steps):
+def guided_inference(decoder, cond, template, prefix, *, delay, offset, beta, steps, generator=None):
     if prefix.ndim != 3 or prefix.shape[0] != template.shape[0]:
         raise ValueError("RTC prefix must be (batch, length, control_dim)")
     length, control_dim = prefix.shape[1:]
@@ -66,7 +66,7 @@ def guided_inference(decoder, cond, template, prefix, *, delay, offset, beta, st
     cond = cond.detach().clone()
     prefix = prefix.to(template).detach()
     weights = soft_mask(length, delay, device=template.device, dtype=template.dtype)[None, :, None]
-    sample = torch.randn_like(template)
+    sample = torch.randn(template.shape, device=template.device, dtype=template.dtype, generator=generator)
 
     for i, timestep in enumerate(scheduler.timesteps.tolist()):
         with torch.enable_grad():
@@ -82,7 +82,7 @@ def guided_inference(decoder, cond, template, prefix, *, delay, offset, beta, st
                 if denoised.requires_grad else None
             )
 
-        sample = scheduler.step(output.detach(), timestep, sample).prev_sample
+        sample = scheduler.step(output.detach(), timestep, sample, generator=generator).prev_sample
         if correction is not None:
             sample.add_(guidance[i] * correction)
 

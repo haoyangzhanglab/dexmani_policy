@@ -4,11 +4,11 @@ import copy
 
 import hydra
 import torch
-from omegaconf import OmegaConf, open_dict
+from omegaconf import open_dict
 from torch.utils.data import DataLoader
 
+from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import (
-    normalization_dims_from_config,
     resolve_normalization_spec,
 )
 from dexmani_policy.common.normalization import AffineNormalizer, validate_normalizer_state
@@ -58,7 +58,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
                 child.val_ratio = 0.0
                 child.max_train_episodes = None
     dataset = hydra.utils.instantiate(dataset_cfg)
-    agent_class = hydra.utils.get_class(cfg.agent._target_)
+    agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
     description = dataset.describe_training_data(
         spec, task_name=cfg.task_name,
         requires_split_manifest=agent_class.requires_split_manifest,
@@ -66,19 +66,15 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     )
     if description["normalization_dims"]["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
-    with open_dict(cfg):
-        cfg.update(description)
-        if "real_runtime" not in description:
-            cfg.pop("real_runtime", None)
     normalizer = None
     if resume_checkpoint is None:
         normalizer = build_normalizer(dataset, spec, cfg.action_key)
-        validate_normalizer_state(normalizer, spec, normalization_dims_from_config(cfg))
+        validate_normalizer_state(normalizer, spec, description["normalization_dims"])
     if verbose:
         print(f"[Dataset] {dataset.training_summary()}")
         if resume_checkpoint is None:
             print("[Normalizer] consumed training rows; relative actions count each window/reference")
-    return dataset, normalizer
+    return dataset, normalizer, description
 
 
 def close_data_loader(loader, iterator=None):
@@ -90,7 +86,7 @@ def close_data_loader(loader, iterator=None):
 
 
 def build_train_loader(cfg, dataset, *, rank=0, world_size=1):
-    options = OmegaConf.to_container(cfg.dataloader, resolve=True)
+    options = dict(cfg.dataloader)
     if options.get("num_workers", 0) == 0:
         options["persistent_workers"] = False
         options.pop("prefetch_factor", None)

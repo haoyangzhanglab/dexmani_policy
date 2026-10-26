@@ -15,6 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import TrainingCheckpoint, policy_state_dict
+from dexmani_policy.common.experiments import milestone_steps
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.runtime import close_resources, dict_apply, get_rng_state
 from dexmani_policy.training.common.logging import accumulate_metrics, to_log_scalars
@@ -82,9 +83,7 @@ class Trainer:
         self.step_pbar = None
         self.last_checkpoint_step = None
         # Integer targets round up; colliding steps retain the largest percentage.
-        self.milestone_steps = {
-            (pct * self.total_train_steps + 99) // 100: pct for pct in (20, 40, 60, 80, 100)
-        }
+        self.milestone_steps = milestone_steps(self.total_train_steps)
 
     @property
     def raw_model(self):

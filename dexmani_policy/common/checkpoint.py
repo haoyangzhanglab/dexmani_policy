@@ -51,11 +51,11 @@ def save_training_checkpoint(path: Path, checkpoint: TrainingCheckpoint) -> Path
     return path
 
 
-def read_checkpoint(path: Path) -> dict:
-    """Read one .pt container; purpose-specific readers validate required fields."""
+def read_checkpoint(path: Path, *, mmap=False) -> dict:
+    """Read a trusted project .pt container; this is not an untrusted upload format."""
     import torch
 
-    return torch.load(Path(path), map_location="cpu", weights_only=False)
+    return torch.load(Path(path), map_location="cpu", weights_only=False, mmap=mmap)
 
 
 def load_training_checkpoint(path: Path) -> TrainingCheckpoint:
@@ -119,7 +119,7 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
         validate_action_window,
     )
 
-    payload = read_checkpoint(checkpoint_path)
+    payload = read_checkpoint(checkpoint_path, mmap=True)
     if inference_recipe(payload["effective_config"]) != inference_recipe(saved_config):
         raise ValueError("Checkpoint inference recipe mismatch with saved config")
     saved_config = payload["effective_config"]
@@ -131,8 +131,17 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
     if cfg.action_key not in {"action", "action_ee"}:
         raise ValueError("action_key must be action or action_ee")
     state, global_step = select_inference_weights(payload, use_ema=use_ema)
+    # Unselected weights and optimizer state are not needed during construction/device transfer.
+    del payload
     cfg = prepare_restore_config(cfg)
-    agent = hydra.utils.instantiate(cfg.agent)
+    # Constructors initialize temporary CPU weights before strict restoration.
+    from dexmani_policy.common.runtime import get_rng_state, set_rng_state
+
+    rng_state = get_rng_state()
+    try:
+        agent = hydra.utils.instantiate(cfg.agent)
+    finally:
+        set_rng_state(rng_state)
     if agent.inference_metadata != OmegaConf.to_container(cfg.policy_metadata, resolve=True):
         raise ValueError("Restored policy metadata differs from saved construction")
     agent.checkpoint_step = global_step
@@ -140,6 +149,7 @@ def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
         resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
     )
     load_policy_state(agent, state)
+    del state
     agent.validate_normalizer()
     agent.to(device)
     agent.eval()
@@ -179,29 +189,12 @@ def inference_recipe(config):
 
 
 def prepare_restore_config(cfg):
-    """Construct from saved weights without loading external initialization assets."""
+    """Let the policy own initialization details; never mutate the saved recipe."""
     import copy
-    from omegaconf import DictConfig, open_dict
-
-    from dexmani_policy.common.config import positive_int
+    import hydra
+    from omegaconf import open_dict
 
     cfg = copy.deepcopy(cfg)
-    agent = cfg.agent
-    with open_dict(agent):
-        if agent.get("rgb_backbone_name") is not None:
-            rgb = dict(agent.rgb_backbone_config)
-            if agent.rgb_backbone_name == "resnet" and not {"tune_mode", "norm_mode"} <= rgb.keys():
-                raise ValueError("Saved ResNet requires explicit tune_mode and norm_mode")
-            if agent.rgb_backbone_name in {"dino", "siglip"} and not isinstance(
-                rgb.get("architecture"), (dict, DictConfig)
-            ):
-                raise ValueError("Saved HF backbone requires an architecture mapping")
-            rgb["load_pretrained"] = False
-            agent.rgb_backbone_config = rgb
-        if (
-            agent.get("_target_")
-            == "dexmani_policy.agents.policies.multitask_dit.MultiTaskDiTPolicy"
-            and agent.get("task_texts") is not None
-        ):
-            positive_int(agent.text_embed_dim, "saved text_embed_dim")
+    with open_dict(cfg.agent):
+        hydra.utils.get_class(cfg.agent._target_).prepare_restore_config(cfg.agent)
     return cfg

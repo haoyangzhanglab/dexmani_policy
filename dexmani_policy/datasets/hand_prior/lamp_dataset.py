@@ -24,24 +24,20 @@ class LAMPDataset(DemonstrationDataset):
             raise ValueError("LAMP requires action and joint_state with shape [T,19]")
         self.episode_ends = np.asarray(buffer.episode_ends, dtype=np.int64)
         self.episode_starts = np.r_[0, self.episode_ends[:-1]]
-        self.hand_actions = buffer.read("action", slice(None), columns=slice(7, 19)).astype(
-            np.float32, copy=False
-        )
-        self.hand_state_bootstrap = np.concatenate(
-            [
-                buffer.read(
-                    "joint_state",
-                    slice(int(start), int(start) + 1),
-                    columns=slice(7, 19),
-                )
-                for start in self.episode_starts
-            ]
-        ).astype(np.float32, copy=False)
-        finite_hand = np.isfinite(self.hand_actions).all(axis=-1)
-        self.history_valid = np.empty(len(self.hand_actions), dtype=bool)
-        for episode, (start, end) in enumerate(zip(self.episode_starts, self.episode_ends)):
+        selected = self.train_mask | self.val_mask
+        self.hand_actions = np.zeros((int(self.episode_ends[-1]), 12), dtype=np.float32)
+        for start, values in buffer.iter_chunks("action", columns=slice(7, 19), episode_mask=selected):
+            self.hand_actions[start:start + len(values)] = values
+        self.hand_state_bootstrap = np.zeros((len(self.episode_ends), 12), dtype=np.float32)
+        self.history_valid = np.zeros(len(self.hand_actions), dtype=bool)
+        for episode in np.flatnonzero(selected):
+            start, end = self.episode_starts[episode], self.episode_ends[episode]
+            self.hand_state_bootstrap[episode] = buffer.read(
+                "joint_state", slice(int(start), int(start) + 1), columns=slice(7, 19), cache=False,
+            )[0]
+            finite_hand = np.isfinite(self.hand_actions[start:end]).all(axis=-1)
             local_rows = np.arange(end - start)
-            invalid_prefix = np.r_[0, np.cumsum(~finite_hand[start:end])]
+            invalid_prefix = np.r_[0, np.cumsum(~finite_hand)]
             valid = (
                 invalid_prefix[local_rows]
                 == invalid_prefix[np.maximum(0, local_rows - self.history_steps)]
@@ -68,6 +64,8 @@ class LAMPDataset(DemonstrationDataset):
             raise ValueError("History rows must be one-dimensional source-frame indices")
         rows = rows.astype(np.int64, copy=False)
         episode = np.searchsorted(self.episode_ends, rows, side="right")
+        if not (self.train_mask | self.val_mask)[episode].all():
+            raise ValueError("History cannot consume an excluded episode")
         starts = self.episode_starts[episode]
         indices = rows[:, None] + np.arange(-self.history_steps, 0)
         past = indices >= starts[:, None]

@@ -6,6 +6,7 @@ from contextlib import closing
 
 from dexmani_policy.common.checkpoint import restore_policy_agent
 from dexmani_policy.common.runtime import set_seed
+from dexmani_policy.common.experiments import file_sha256
 from dexmani_policy.env_runner.common.metrics import (
     compute_evaluation_statistics,
     validate_episodes,
@@ -14,6 +15,8 @@ from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.artifacts import (
     create_run_directory,
     runtime_provenance,
+    validate_runtime,
+    training_source_evidence,
     write_failure,
     write_json,
 )
@@ -23,6 +26,9 @@ def evaluate_policy(request, *, output_root, output_dir=None):
     directory = create_run_directory(output_root, output_dir)
     path = directory / "result_details.json"
     record = {"request": request.to_dict(), "status": "running", "episodes": [], "statistics": None}
+    record['training_source_evidence'] = training_source_evidence(
+        request.config, {request.source['phase']: request.task_seeds}
+    )
     write_json(path, record, overwrite=False)
     agent = None
     try:
@@ -37,9 +43,13 @@ def evaluate_policy(request, *, output_root, output_dir=None):
 
                     if not os.environ.get("DISPLAY"):
                         raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
-            record["runtime"] = runtime_provenance()
             # A fresh load is deterministic; each episode resets its own sampling stream.
             set_seed(request.numerics["startup_seed"])
+            record["runtime"] = runtime_provenance()
+            record["checkpoint_sha256"] = file_sha256(request.checkpoint)
+            expected_hash = request.source.get("checkpoint_sha256")
+            if expected_hash is not None and expected_hash != record["checkpoint_sha256"]:
+                raise ValueError("Checkpoint content changed since selection")
             agent = restore_policy_agent(
                 request.config, request.checkpoint, use_ema=request.use_ema, device=request.device
             )
@@ -55,6 +65,8 @@ def evaluate_policy(request, *, output_root, output_dir=None):
                 import torch
 
                 record["runtime"]["device_name"] = torch.cuda.get_device_name(request.device)
+            if request.source.get("heldout_from_selection"):
+                validate_runtime(request.source["expected_runtime"], record["runtime"])
             write_json(path, record)
             for options in request.tasks:
                 options = dict(options)

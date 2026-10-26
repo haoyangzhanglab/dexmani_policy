@@ -32,12 +32,14 @@ def main(cfg):
         raise RuntimeError("CUDA is not available. This training script requires GPU.")
 
     set_seed(cfg.training.seed)
-    dataset, normalizer = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
+    dataset, normalizer, data_description = build_dataset_and_normalizer(cfg, resume_checkpoint=checkpoint)
     components = build_training_components(
-        cfg, torch.device(cfg.training.device), dataset, normalizer, checkpoint=checkpoint
+        cfg, torch.device(cfg.training.device), dataset, normalizer,
+        data_description=data_description, checkpoint=checkpoint
     )
+    cfg = components.effective_config
     with closing(components):
-        trainer = build_trainer(cfg, components)
+        trainer = build_trainer(components)
         resume_state = None
         if checkpoint is not None:
             resume_state = restore_training_state(checkpoint, components, effective_config=cfg)

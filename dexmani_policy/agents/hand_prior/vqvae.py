@@ -82,8 +82,10 @@ class EMAVectorQuantizer(nn.Module):
             nn.init.kaiming_uniform_(embed.unsqueeze(0))
         self.register_buffer("initialized", torch.tensor(not kmeans_init))
         self.register_buffer("embed", embed)
-        self.register_buffer("embed_avg", embed.clone())
-        self.register_buffer("cluster_size", torch.zeros(codebook_size))
+        # Random centers and their accumulated sums use the same unit pseudocount.
+        counts = torch.zeros(codebook_size) if kmeans_init else torch.ones(codebook_size)
+        self.register_buffer("embed_avg", embed * counts[:, None])
+        self.register_buffer("cluster_size", counts)
         self.register_load_state_dict_post_hook(self.restore_initialization)
 
     def restore_initialization(self, module: nn.Module, incompatible_keys) -> None:

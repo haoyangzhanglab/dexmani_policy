@@ -1,7 +1,11 @@
 """Experiment checkpoint paths and direct best pointers without loading weights."""
 
+import errno
+import hashlib
 import json
+import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,3 +106,59 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
         raise FileNotFoundError(f"No milestone checkpoints found in {ckpt_dir}")
 
     return sorted(found, key=lambda checkpoint: (checkpoint.pct, checkpoint.path.name))
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def milestone_steps(total):
+    return {(pct * total + 99) // 100: pct for pct in (20, 40, 60, 80, 100)}
+
+
+def archive_resume_milestones(source, destination, checkpoint):
+    """Make the resumed run self-contained before its first optimizer update."""
+    from dexmani_policy.common.checkpoint import read_checkpoint
+    from dexmani_policy.common.config import validate_source_recipe
+    from dexmani_policy.common.runtime import atomic_path
+
+    expected = {step: pct for step, pct in milestone_steps(
+        checkpoint.effective_config["training"]["loop"]["total_train_steps"]
+    ).items() if step <= checkpoint.global_step}
+    if not expected:
+        return
+    selected = {}
+    directory = Path(source).resolve(strict=True).parent.parent
+    for candidate in discover_milestone_checkpoints(directory):
+        step = candidate.global_step
+        if expected.get(step) != candidate.pct:
+            continue
+        if step in selected:
+            raise ValueError(f"Conflicting milestones at step {step}")
+        payload = read_checkpoint(candidate.path, mmap=True)
+        validate_source_recipe(checkpoint.effective_config, payload["effective_config"])
+        if payload["state"]["global_step"] != step:
+            raise ValueError(f"Milestone filename/state step mismatch: {candidate.path}")
+        del payload
+        selected[step] = candidate
+    missing = expected.keys() - selected.keys()
+    if missing:
+        raise FileNotFoundError(f"Missing source-run milestones: {sorted(missing)}")
+
+    target = Path(destination) / "checkpoints"
+    target.mkdir(parents=True, exist_ok=True)
+    for step in sorted(selected):
+        candidate = selected[step]
+        path = target / candidate.path.name
+        with atomic_path(path, overwrite=False) as temporary:
+            temporary.unlink()
+            try:
+                os.link(candidate.path, temporary)
+            except OSError as error:
+                if error.errno != errno.EXDEV:
+                    raise
+                shutil.copyfile(candidate.path, temporary)

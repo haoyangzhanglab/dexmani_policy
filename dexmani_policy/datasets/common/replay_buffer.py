@@ -86,10 +86,19 @@ class ReplayBuffer:
     def chunk_rows(self, key):
         return self[key].chunks[0]
 
-    def iter_chunks(self, key, *, columns=None):
+    def iter_chunks(self, key, *, columns=None, episode_mask=None):
         step = self.chunk_rows(key)
-        for start in range(0, int(self.episode_ends[-1]), step):
-            yield start, self.read(key, slice(start, start + step), columns=columns, cache=False)
+        mask = np.ones(self.n_episodes, dtype=bool) if episode_mask is None else episode_mask
+        # Merge adjacent episodes, then bound reads by both selected spans and chunks.
+        first = np.flatnonzero(mask & ~np.r_[False, mask[:-1]])
+        last = np.flatnonzero(mask & ~np.r_[mask[1:], False])
+        starts = np.r_[0, self.episode_ends[:-1]]
+        for left, right in zip(starts[first], self.episode_ends[last]):
+            start = int(left)
+            while start < right:
+                stop = min(int(right), (start // step + 1) * step)
+                yield start, self.read(key, slice(start, stop), columns=columns, cache=False)
+                start = stop
 
     @property
     def n_episodes(self):

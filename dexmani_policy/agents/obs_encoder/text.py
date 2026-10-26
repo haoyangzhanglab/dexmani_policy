@@ -12,10 +12,9 @@ class CLIPTextEncoder(nn.Module):
         self,
         model_name: str = "openai/clip-vit-base-patch32",
         max_length: int = 32,
-        device: str | torch.device | None = None,
+        device: str | torch.device = "cpu",
     ) -> None:
         super().__init__()
-        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.max_length = max_length
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)

@@ -109,6 +109,7 @@ class Diffusion(nn.Module):
         action_template: torch.Tensor,
         inference_steps: int | None = None,
         *,
+        generator: torch.Generator | None = None,
         rtc_prefix=None,
         delay_steps=0,
         history_offset=0,
@@ -139,16 +140,18 @@ class Diffusion(nn.Module):
                 offset=history_offset,
                 beta=rtc_guidance_cap,
                 steps=num_steps,
+                generator=generator,
             )
         if rtc_prefix is not None:
             from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
 
             prepare_schedule(self.noise_scheduler, num_steps, rtc_guidance_cap)
-        sample = torch.randn_like(action_template)
+        sample = torch.randn(action_template.shape, device=action_template.device,
+                             dtype=action_template.dtype, generator=generator)
         self.noise_scheduler.set_timesteps(num_steps)
         timesteps = self.noise_scheduler.timesteps.to(sample.device)
         for index, timestep in enumerate(self.noise_scheduler.timesteps.tolist()):
             output = self.model(x=sample, timestep=timesteps[index], context=cond)
-            sample = self.noise_scheduler.step(output, timestep, sample).prev_sample
+            sample = self.noise_scheduler.step(output, timestep, sample, generator=generator).prev_sample
 
         return sample

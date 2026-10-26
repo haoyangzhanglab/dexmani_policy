@@ -14,6 +14,8 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
+Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与已装 Torch/CUDA 匹配的 PyTorch3D 原生扩展；通用依赖不自动安装它。本次 CPU 环境验证为 Torch 2.4.1+cu124 / torchvision 0.19.1 / PyTorch3D 0.7.8。请在目标环境构建匹配的 PyTorch3D，先执行 `python -c 'import pytorch3d.ops'`，再运行对应方法检查。DP3 输入点数无需下采样时不需要该后端；触发 FPS 的其他路径同样需要它。
+
 ## 快速开始
 
 以下命令均从仓库根目录执行。训练数据通常位于 `robot_data/<task>.zarr`，实际路径由配置决定。
@@ -48,7 +50,7 @@ bash scripts/training/train.sh dp3 \
   '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
-入口支持 Hydra 配置覆盖。续训使用保存的实验配置，并创建新的运行目录。
+入口支持 Hydra 配置覆盖。续训使用保存的实验配置，并创建新的运行目录；首次 update 前归档恢复点之前的 milestone，缺失或冲突时失败。完整训练 `.pt` 仅接受可信项目产物。
 
 ### 3. 仿真评测
 
@@ -99,3 +101,4 @@ experiments/<policy_name>/<task_name>/<run>/
 - [手部动作表示](docs/手部动作表示.md)：手部动作建模及预训练
 - [仿真评测机制](docs/仿真评测机制.md)：Checkpoint 选点、评测协议与结果记录
 - [SSH 服务器训练部署](docs/SSH服务器训练部署.md)：远程训练、同步与管理
+- [本轮修复与验证结果](docs/CODEX_REFACTOR_RESULTS.md)：R01–R20 的实际处理、CPU 验证和外部阻塞

@@ -17,7 +17,7 @@ from dexmani_policy.env_runner.common.seeds import (
     validate_seed_pool,
     validate_task_seeds,
 )
-from dexmani_policy.evaluation.artifacts import resolve_selection_record
+from dexmani_policy.evaluation.artifacts import verify_selection_record
 
 
 @dataclass(frozen=True)
@@ -192,7 +192,7 @@ def resolve_evaluation_request(
             )
         if checkpoint != "best":
             raise ValueError("Frozen test checkpoint comes exclusively from selection_record")
-        record, path = resolve_selection_record(exp_dir, selection_record)
+        record, path = verify_selection_record(exp_dir, selection_record)
         request = EvaluationRequest(**record["test_request"])
         return replace(
             request,
@@ -203,6 +203,8 @@ def resolve_evaluation_request(
                 "selection_result": str(Path(selection_record).resolve()),
                 "heldout_from_selection": True,
                 "global_step": record["global_step"],
+                "checkpoint_sha256": record["checkpoint_sha256"],
+                "expected_runtime": record["runtime"],
             },
         )
     source = {"phase": "ordinary", "heldout_from_selection": False}

@@ -10,6 +10,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.global_sparse3d import (
     Sparse3DGlobalObservationEncoder,
 )
 from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.common.config import validate_action_window
 
 
 class SATPolicy(BasePolicy):
@@ -20,12 +21,8 @@ class SATPolicy(BasePolicy):
         Sparse3DGlobalObservationEncoder.validate_config(cfg, spec, dataset=dataset)
         if cfg.n_obs_steps != 2:
             raise ValueError("SAT requires n_obs_steps=2")
-        if dataset.action_key != "action" or (cfg.horizon, cfg.n_action_steps, cfg.action_dim) != (
-            16,
-            8,
-            19,
-        ):
-            raise ValueError("SAT requires joint action=19, horizon=16, n_action_steps=8")
+        if dataset.action_key != "action" or (cfg.horizon, cfg.action_dim) != (16, 19):
+            raise ValueError("SAT requires joint action=19, horizon=16")
         if cfg.get("use_aux_ee", False) or cfg.get("hidden_dim", 256) != 256:
             raise ValueError("SAT requires hidden_dim=256 without auxiliary actions")
 
@@ -56,8 +53,9 @@ class SATPolicy(BasePolicy):
         modality_dropout_probs: dict | None = None,
         num_flow_train_timesteps: int = 10,
     ) -> None:
-        if n_action_steps != 8 or n_obs_steps != 2:
-            raise ValueError("SAT requires n_action_steps=8, n_obs_steps=2")
+        validate_action_window(horizon, n_obs_steps, n_action_steps)
+        if n_obs_steps != 2:
+            raise ValueError("SAT requires n_obs_steps=2")
         obs_encoder = Sparse3DGlobalObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
@@ -110,13 +108,14 @@ class SATPolicy(BasePolicy):
 
     @torch.no_grad()
     def predict_action_from_condition(
-        self, condition: torch.Tensor, inference_steps: int | None = None
+        self, condition: torch.Tensor, inference_steps: int | None = None,
+        *, generator: torch.Generator | None = None,
     ) -> dict[str, torch.Tensor]:
         """Sample joint trajectories [B, Da, T] and return physical actions [B, T, Da]."""
         template = condition.new_zeros((condition.shape[0], self.action_dim, self.horizon))
 
         prediction = self.action_decoder.predict_action(
-            condition.unsqueeze(1), template, inference_steps=inference_steps
+            condition.unsqueeze(1), template, inference_steps=inference_steps, generator=generator
         )
         if not torch.isfinite(prediction).all():
             raise RuntimeError("Non-finite SAT action prediction")

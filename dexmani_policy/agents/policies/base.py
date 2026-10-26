@@ -66,6 +66,10 @@ class BasePolicy(nn.Module):
     def validate_model_config(cls, cfg, spec, *, dataset, inference_steps) -> None:
         """Validate model-specific constraints before constructing data or weights."""
 
+    @classmethod
+    def prepare_restore_config(cls, config) -> None:
+        """Adjust only external initialization options on a private constructor config."""
+
     @property
     def effective_config(self) -> dict:
         return dict(getattr(self.obs_encoder, "effective_config", {}))
@@ -189,6 +193,7 @@ class BasePolicy(nn.Module):
         obs_dict: dict,
         inference_steps: int | None = None,
         *,
+        generator: torch.Generator | None = None,
         rtc_prefix: torch.Tensor | None = None,
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
@@ -196,12 +201,13 @@ class BasePolicy(nn.Module):
         self.validate_observations(obs_dict)
         condition = self.encode_observation(obs_dict)
         if rtc_prefix is None:
-            return self.predict_action_from_condition(condition, inference_steps=inference_steps)
+            return self.predict_action_from_condition(condition, inference_steps=inference_steps, generator=generator)
         if "rtc" not in self.supported_execution_modes:
             raise NotImplementedError("This policy does not support RTC")
         return self.predict_action_from_condition(
             condition,
             inference_steps=inference_steps,
+            generator=generator,
             rtc_prefix=rtc_prefix,
             delay_steps=delay_steps,
             rtc_guidance_cap=rtc_guidance_cap,
@@ -218,6 +224,7 @@ class BasePolicy(nn.Module):
         condition: torch.Tensor,
         inference_steps: int | None = None,
         *,
+        generator: torch.Generator | None = None,
         rtc_prefix: torch.Tensor | None = None,
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
@@ -238,7 +245,7 @@ class BasePolicy(nn.Module):
                 rtc_guidance_cap=rtc_guidance_cap,
             )
         prediction = self.action_decoder.predict_action(
-            condition, template, inference_steps=inference_steps, **kwargs
+            condition, template, inference_steps=inference_steps, generator=generator, **kwargs
         )
         prediction = self.normalizer["action"].unnormalize(prediction)
         return self.format_action_output(prediction)
