@@ -17,7 +17,7 @@ from dexmani_policy.common.experiments import (
     resolve_milestone_path,
 )
 from dexmani_policy.common.rgb_preprocessing import rgb_preprocessing_kwargs
-from dexmani_policy.env_runner.common.seeds import (
+from dexmani_policy.evaluation.seeds import (
     split_evaluation_seeds,
     validate_evaluation_seed,
     validate_seed_pool,
@@ -59,7 +59,6 @@ def parse_evaluation_overrides(overrides):
         "eval.action_steps",
         "eval.use_ema",
         "eval.video.enabled",
-        "eval.video.fps",
         "training.device",
     }
     for override in overrides:
@@ -93,8 +92,6 @@ def prepare_evaluation_config(cfg, overrides=None):
 
 
 def make_request(cfg, checkpoint, seeds, *, source) -> EvaluationRequest:
-    from dexmani_policy.env_runner.sim_runner import SimRunner
-
     validate_action_key_consistency(cfg)
     options = dict(cfg["env_runner"])
     options.pop("eval_seeds", None)
@@ -102,13 +99,9 @@ def make_request(cfg, checkpoint, seeds, *, source) -> EvaluationRequest:
         n_obs_steps=cfg["agent"]["n_obs_steps"],
         sensor_modalities=cfg["dataset"]["sensor_modalities"],
         rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]),
-        env_kwargs=SimRunner.expand_env_kwargs(options.get("env_kwargs", {})),
-        record_video=cfg["eval"]["video"]["enabled"],
     )
-    if type(options["record_video"]) is not bool:
+    if type(cfg["eval"]["video"]["enabled"]) is not bool:
         raise ValueError("eval.video.enabled must be boolean")
-    if "fps" in cfg["eval"]["video"]:
-        options["env_video_fps"] = cfg["eval"]["video"]["fps"]
 
     use_ema = cfg["eval"]["use_ema"]
     if type(use_ema) is not bool:

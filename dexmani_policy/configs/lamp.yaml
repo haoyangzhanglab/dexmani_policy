@@ -121,12 +121,11 @@ workspace:
 env_runner:
   task_name: ${task_name}
   # Independent simulator state for each evaluation episode.
-  clear_cache_freq: 1
+  env_rebuild_interval: 1
   env_kwargs:
     control_mode: joint
-    texture_random: false
-    instance_random: true
-    table_random: true
+    randomize_model_id: true
+    randomize_table_height: true
 
 eval:
   seed: 1024

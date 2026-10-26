@@ -126,9 +126,8 @@ env_runner:
   task_name: ${task_name}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
-    texture_random: false  # Randomize textures, skybox, lights and camera pose.
-    instance_random: true
-    table_random: true
+    randomize_model_id: true
+    randomize_table_height: true
 
 eval:
   seed: 1024

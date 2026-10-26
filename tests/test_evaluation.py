@@ -7,6 +7,7 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy import eval_pipeline as pipeline, evaluate
+from dexmani_policy.common.config import load_policy_config
 from dexmani_policy.common.experiments import (
     MILESTONE_PATTERN,
     milestone_steps,
@@ -14,6 +15,7 @@ from dexmani_policy.common.experiments import (
 )
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation import artifacts, config, rollout, selection
+from dexmani_policy.evaluation.seeds import split_evaluation_seeds, validate_task_seeds
 
 
 @pytest.fixture
@@ -77,13 +79,13 @@ def simulation(monkeypatch):
         state["episodes"].append((agent.checkpoint_step, seed, inference_steps, action_steps))
         return state["success"], 2 if state["success"] else None
 
-    def video(env, directory, name, fps):
+    def video(env, directory, name):
         if state["fault"] == "video" and len(state["episodes"]) == 2:
             raise OSError("video failure")
         return None
 
     monkeypatch.setattr(rollout, "restore_policy_agent", restore)
-    monkeypatch.setattr(SimRunner, "make_env", lambda self: Env())
+    monkeypatch.setattr(SimRunner, "make_env", lambda self, *, record_video: Env())
     monkeypatch.setattr(SimRunner, "run_episode", episode)
     monkeypatch.setattr("dexmani_policy.env_runner.sim_runner.save_episode_video", video)
     return state
@@ -392,3 +394,43 @@ def test_small_training_budget(experiment, simulation, total):
     record, _ = selection.select_best_checkpoint(root, cfg)
     assert record["global_step"] == total
     assert len(record["candidates"]) == total
+
+
+@pytest.mark.parametrize("policy_name", ["dp", "dp3", "dqrise", "lamp", "latent_flow", "maniflow", "r3d", "sat"])
+def test_native_runner_configs(policy_name):
+    cfg = config.prepare_evaluation_config(load_policy_config(policy_name, ["workspace.output_dir=."]))
+    cfg["policy_metadata"] = {
+        "action_start_index": 0 if policy_name == "latent_flow" else cfg["agent"]["n_obs_steps"] - 1
+    }
+    request = config.make_request(cfg, "checkpoint.pt", {cfg["task_name"]: [7]}, source={})
+    runner = SimRunner(**request.tasks[0])
+    assert runner.env_kwargs == {
+        "control_mode": "joint", "randomize_model_id": True, "randomize_table_height": True,
+    }
+    assert runner.env_rebuild_interval == (1 if policy_name in {"lamp", "latent_flow"} else 25)
+    assert runner.n_obs_steps == cfg["agent"]["n_obs_steps"]
+    assert runner.sensor_modalities == cfg["dataset"]["sensor_modalities"]
+    assert runner.rgb_preprocessing == config.rgb_preprocessing_kwargs(cfg["dataset"])
+
+
+def test_seed_split_preserves_test_prefix_and_inputs():
+    pools = {"task": list(reversed(range(20)))}
+    original = copy.deepcopy(pools)
+    test, selection = split_evaluation_seeds(pools, 42, 5, 3)
+    other_test, other_selection = split_evaluation_seeds(pools, 42, 5, 7)
+    assert test == other_test and selection["task"] == other_selection["task"][:3]
+    assert not set(test["task"]) & set(other_selection["task"])
+    assert pools == original
+
+    explicit = {"task": [9, 2, 7]}
+    validate_task_seeds(explicit, ["task"])
+    assert explicit == {"task": [9, 2, 7]}
+
+
+@pytest.mark.parametrize("pool, episodes, selection_episodes", [
+    ([1, 1], 1, 0), ([-1, 2], 1, 0), ([True, 2], 1, 0),
+    ([2**32, 2], 1, 0), ([1, 2], 2, 1),
+])
+def test_seed_pool_boundaries(pool, episodes, selection_episodes):
+    with pytest.raises(ValueError):
+        split_evaluation_seeds({"task": pool}, 42, episodes, selection_episodes)

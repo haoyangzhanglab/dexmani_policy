@@ -7,10 +7,6 @@ from pathlib import Path
 
 from dexmani_policy.common.checkpoint import restore_policy_agent
 from dexmani_policy.common.runtime import set_seed
-from dexmani_policy.env_runner.common.metrics import (
-    compute_evaluation_statistics,
-    validate_episodes,
-)
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.artifacts import (
     create_run_directory,
@@ -19,6 +15,7 @@ from dexmani_policy.evaluation.artifacts import (
     write_json,
 )
 from dexmani_policy.evaluation.config import EvaluationRequest
+from dexmani_policy.evaluation.metrics import compute_evaluation_statistics, validate_episodes
 
 
 def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None) -> tuple[dict, Path]:
@@ -29,7 +26,8 @@ def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None)
 
     try:
         for task in request.tasks:
-            if task.get("render_mode") == "human" and not os.environ.get("DISPLAY"):
+            render_mode = (task.get("env_kwargs") or {}).get("render_mode")
+            if render_mode == "human" and not os.environ.get("DISPLAY"):
                 raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
 
         set_seed(request.config["eval"]["seed"])
@@ -48,10 +46,7 @@ def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None)
             record["runtime"]["device_name"] = torch.cuda.get_device_name(request.device)
 
         for options in request.tasks:
-            options = dict(options)
-            rgb_preprocessing = options.pop("rgb_preprocessing")
             runner = SimRunner(**options)
-            runner.rgb_preprocessing = rgb_preprocessing
             with closing(
                 runner.run(
                     agent,
@@ -59,7 +54,8 @@ def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None)
                     inference_steps=request.inference_steps,
                     action_steps=request.action_steps,
                     video_save_dir=(
-                        directory / "videos" / runner.task_name if runner.record_video else None
+                        directory / "videos" / runner.task_name
+                        if request.config["eval"]["video"]["enabled"] else None
                     ),
                 )
             ) as episodes:

@@ -8,7 +8,6 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.experiments import discover_milestone_checkpoints, milestone_steps
-from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds
 from dexmani_policy.evaluation.artifacts import (
     create_run_directory,
     write_failure,
@@ -19,6 +18,7 @@ from dexmani_policy.evaluation.config import (
     prepare_evaluation_config,
     task_seed_pools,
 )
+from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
 
 def rank_selection_results(results):

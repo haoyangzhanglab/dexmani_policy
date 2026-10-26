@@ -1,5 +1,3 @@
-"""Flat episode completeness and shared evaluation statistics."""
-
 import math
 from collections import Counter
 
@@ -8,6 +6,7 @@ def compute_evaluation_statistics(episodes):
     tasks: dict[str, list[dict]] = {}
     for episode in episodes:
         tasks.setdefault(episode["task_name"], []).append(episode)
+
     per_task = {}
     for task, rows in tasks.items():
         successes = sum(row["success"] for row in rows)
@@ -19,6 +18,7 @@ def compute_evaluation_statistics(episodes):
             "avg_steps": sum(steps) / len(steps) if steps else None,
             "wilson_95": wilson_interval(successes, len(rows)),
         }
+
     count = len(episodes)
     successes = sum(row["success"] for row in episodes)
     steps = [row["steps"] for row in episodes if row["success"] and row["steps"] is not None]

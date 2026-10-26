@@ -1,5 +1,3 @@
-"""Deterministic sampling and validation of physical task seed plans."""
-
 import random
 
 from dexmani_policy.common.config import positive_int
@@ -16,7 +14,7 @@ def validate_seed_pool(task, pool):
         raise ValueError(f"{task}: seed pool requires nonnegative integer seeds")
     if len(set(pool)) != len(pool):
         raise ValueError(f"{task}: duplicate seeds in source pool")
-    return sorted(pool)
+    return pool
 
 
 def split_evaluation_seeds(pools, eval_seed, episodes, selection_episodes=0):
@@ -27,9 +25,10 @@ def split_evaluation_seeds(pools, eval_seed, episodes, selection_episodes=0):
     validate_evaluation_seed(eval_seed)
     if not pools:
         raise ValueError("Evaluation requires at least one task seed pool")
+
     test, selection = {}, {}
     for task, pool in pools.items():
-        pool = validate_seed_pool(task, pool)
+        pool = sorted(validate_seed_pool(task, pool))
         if len(pool) < episodes + selection_episodes:
             raise ValueError(
                 f"{task}: seed pool size={len(pool)}, reserved selection={selection_episodes}, "
@@ -43,19 +42,15 @@ def split_evaluation_seeds(pools, eval_seed, episodes, selection_episodes=0):
 
 
 def validate_task_seeds(plan, tasks) -> None:
-    """Require nonempty, equally sized seed lists for every task."""
     if not isinstance(plan, dict) or set(plan) != set(tasks):
         raise ValueError("Task seed plan does not match expected tasks")
     for task, seeds in plan.items():
-        if (
-            not isinstance(seeds, list)
-            or any(type(seed) is not int or not 0 <= seed < 2**32 for seed in seeds)
-            or len(set(seeds)) != len(seeds)
-        ):
-            raise ValueError(f"{task}: invalid or duplicate seeds")
+        if not isinstance(seeds, list):
+            raise ValueError(f"{task}: seeds must be a list")
+        validate_seed_pool(task, seeds)
+
     sizes = {len(seeds) for seeds in plan.values()}
     if len(sizes) != 1:
         raise ValueError("Task seed plans require equal per-task episode counts")
-    size = sizes.pop()
-    if size == 0:
+    if sizes == {0}:
         raise ValueError("Task seed plan is empty")
