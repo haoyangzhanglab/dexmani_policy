@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import traceback
 from typing import Any
 
 import numpy as np
@@ -217,16 +216,9 @@ class SimRunner:
                     if self.env_video_fps is not None
                     else getattr(env, "video_fps", 15)
                 )
-                try:
-                    success, steps = self.run_episode(
-                        agent, env, seed, inference_steps, action_steps=action_steps
-                    )
-                except BaseException:
-                    try:
-                        save_episode_video(env, video_save_dir, f"episode_{seed}_crash", fps)
-                    except BaseException:
-                        traceback.print_exc()
-                    raise
+                success, steps = self.run_episode(
+                    agent, env, seed, inference_steps, action_steps=action_steps
+                )
                 video = save_episode_video(env, video_save_dir, f"episode_{seed}", fps)
                 yield {
                     "task_name": self.task_name,

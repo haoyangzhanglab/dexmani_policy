@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Freeze test seeds and selection capacity, then select and evaluate without video.
+# Select a checkpoint and evaluate its frozen test plan.
 
 set -euo pipefail
 
@@ -12,7 +12,7 @@ for arg in "$@"; do
     if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
         echo "$USAGE"
         echo
-        exec conda run --no-capture-output -n policy python dexmani_policy/eval_pipeline.py --help
+        exec conda run --no-capture-output -n policy python -m dexmani_policy.eval_pipeline --help
     fi
 done
 
@@ -36,7 +36,7 @@ if ! flock -n 9; then
     exit 1
 fi
 
-exec conda run --no-capture-output -n policy python dexmani_policy/eval_pipeline.py \
+exec conda run --no-capture-output -n policy python -m dexmani_policy.eval_pipeline \
     --policy-name="$1" \
     --task-name="$2" \
     --exp-name="$3" \

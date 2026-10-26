@@ -83,9 +83,9 @@ bash scripts/remote/sync_down.sh <policy>/<task>/<run>
 
 只从远端拉取，**不删除本地结果**；不带子路径时拉取全部实验。`--list`/`--dry-run` 也会连接 SSH。双方已有 `config.yaml` 必须 checksum 完全一致，否则中止；同名大权重不做完整内容身份校验。
 
-同步分阶段完成：① 新文件及不可变产物；② 按 size/mtime 更新可变的 `metrics.jsonl`、`latest.pt` 与先验权重，并无条件传输 `result_details.json`、最后传 `selection_result.json`；③ 无条件更新 `best_ckpt.json`。**先同步候选事实/选点记录，再同步 best 指针**，避免指针领先证据。
+同步分阶段完成：① 新文件及不可变产物；② 按 size/mtime 更新可变的 `metrics.jsonl`、`latest.pt` 与先验权重，再一起无条件传输 `result_details.json` 和 `selection_result.json`；③ 无条件更新 `best_ckpt.json`。**先同步权重及运行记录，再更新 best 指针**。
 
-同步排除 `.dexmani-publish-*` 临时文件；任一 rsync 非零返回（包括 24）都中止后续阶段。整个目录不是事务快照，发布过程中可能需要重试；使用前检查 Checkpoint 和 selection 证据齐全。先验权重在 `experiments/` 时由此下载，在 `data/` 时用数据同步。
+同步排除 `.dexmani-publish-*` 临时文件；任一 rsync 非零返回（包括 24）都中止后续阶段。整个目录不是事务快照，发布过程中可能需要重试；普通 best 评测需要对应权重，冻结测试还需要已完成的选点记录。先验权重在 `experiments/` 时由此下载，在 `data/` 时用数据同步。
 
 ### W&B
 

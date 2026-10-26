@@ -9,7 +9,7 @@ cd "$ROOT_DIR"
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: bash scripts/eval/select_checkpoint.sh <policy_name> <task_name> <exp_name> [args...]"
     echo
-    exec conda run --no-capture-output -n policy python dexmani_policy/select_checkpoint.py --help
+    exec conda run --no-capture-output -n policy python -m dexmani_policy.select_checkpoint --help
 fi
 
 if [[ $# -lt 3 ]]; then
@@ -17,7 +17,7 @@ if [[ $# -lt 3 ]]; then
     exit 1
 fi
 
-exec conda run --no-capture-output -n policy python dexmani_policy/select_checkpoint.py \
+exec conda run --no-capture-output -n policy python -m dexmani_policy.select_checkpoint \
     --policy-name="$1" \
     --task-name="$2" \
     --exp-name="$3" \

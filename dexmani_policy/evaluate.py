@@ -2,7 +2,6 @@
 
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
-    load_experiment_config,
     register_resolvers,
     set_project_root,
 )
@@ -16,6 +15,7 @@ from dexmani_policy.evaluation.rollout import evaluate_policy
 
 def main(argv=None):
     parser = build_parser(__doc__)
+    parser.add_argument("--output-dir")
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--checkpoint",
@@ -30,7 +30,6 @@ def main(argv=None):
     register_resolvers()
     exp_dir = PROJECT_ROOT / "experiments" / args.policy_name / args.task_name / args.exp_name
     request = resolve_evaluation_request(
-        load_experiment_config(exp_dir),
         exp_dir,
         args.checkpoint,
         parse_evaluation_overrides(args.overrides),

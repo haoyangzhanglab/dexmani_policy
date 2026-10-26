@@ -42,8 +42,8 @@ def split_evaluation_seeds(pools, eval_seed, episodes, selection_episodes=0):
     return test, selection
 
 
-def validate_task_seeds(plan, tasks):
-    """Validate equal per-task budgets and return the episode count."""
+def validate_task_seeds(plan, tasks) -> None:
+    """Require nonempty, equally sized seed lists for every task."""
     if not isinstance(plan, dict) or set(plan) != set(tasks):
         raise ValueError("Task seed plan does not match expected tasks")
     for task, seeds in plan.items():
@@ -59,4 +59,3 @@ def validate_task_seeds(plan, tasks):
     size = sizes.pop()
     if size == 0:
         raise ValueError("Task seed plan is empty")
-    return size

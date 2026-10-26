@@ -1,7 +1,6 @@
-"""Experiment checkpoint paths and direct best pointers without loading weights."""
+"""Milestone discovery, checkpoint paths and resume archives."""
 
 import errno
-import json
 import os
 import re
 import shutil
@@ -9,48 +8,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def resolve_record_path(root, relative, *, checkpoint=False):
+def resolve_milestone_path(root: Path, relative: str) -> Path:
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
-        raise ValueError("Record path must be relative to experiment")
-    if checkpoint and (path.name == "latest.pt" or (root / path).is_symlink()):
+        raise ValueError("Checkpoint path must be relative to experiment")
+    if path.name == "latest.pt" or (root / path).is_symlink():
         raise ValueError("Selection must name an immutable milestone checkpoint")
-    resolved = (root / path).resolve(strict=True)
-    directory = root / "checkpoints" if checkpoint else root
+    resolved = (root / path).resolve()
+    directory = root / "checkpoints"
     if not resolved.is_relative_to(directory) or not resolved.is_file():
-        raise ValueError(f"Record path must be a file inside {directory}")
+        raise ValueError(f"Checkpoint must be a file inside {directory}")
     return resolved
 
 
-def validate_best_info(info):
-    from dexmani_policy.common.config import positive_int
-
-    if type(info["global_step"]) is not int or info["global_step"] < 0:
-        raise ValueError("Selected global_step must be an int >= 0")
-    inference = info["inference"]
-    if set(inference) != {"use_ema", "inference_steps", "action_steps"}:
-        raise ValueError("Best requires explicit use_ema, inference_steps and action_steps")
-    if type(inference["use_ema"]) is not bool:
-        raise ValueError("Best use_ema must be boolean")
-    for key in ("inference_steps", "action_steps"):
-        positive_int(inference[key], key)
-
-
-def resolve_best_checkpoint(experiment_dir):
-    root = Path(experiment_dir).resolve()
-    info = json.loads((root / "best_ckpt.json").read_text())
-    validate_best_info(info)
-    source = Path(info["selection_result"])
-    if not source.parts or source.is_absolute() or ".." in source.parts:
-        raise ValueError("selection_result must be a relative source path")
-    return info, resolve_record_path(root, info["ckpt_relpath"], checkpoint=True)
-
-
-def resolve_checkpoint_path(exp_dir, selector="best"):
+def resolve_checkpoint_path(root: Path, selector: str) -> Path:
     """Resolve a tag or path to a file inside the experiment/checkpoints directory."""
-    root = Path(exp_dir).resolve()
-    if selector == "best":
-        return resolve_best_checkpoint(root)[1]
     if selector.endswith("pct"):
         milestones = discover_milestone_checkpoints(root)
         target_pct = int(selector.removesuffix("pct"))
@@ -65,7 +37,7 @@ def resolve_checkpoint_path(exp_dir, selector="best"):
         path = Path(selector)
         if not path.is_absolute():
             path = root / "checkpoints" / path
-    path = path.resolve(strict=True)
+    path = path.resolve()
     if not path.is_file() or not path.is_relative_to(root / "checkpoints"):
         raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
     return path
@@ -83,7 +55,6 @@ class MilestoneCheckpoint:
 
 def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
     """Find regular milestone files inside this experiment, sorted by pct."""
-    exp_dir = Path(exp_dir).resolve()
     ckpt_dir = exp_dir / "checkpoints"
     found: list[MilestoneCheckpoint] = []
     for pt_file in ckpt_dir.glob("epoch=*.pt"):
@@ -92,7 +63,7 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
             continue
         found.append(
             MilestoneCheckpoint(
-                path=resolve_record_path(exp_dir, str(pt_file.relative_to(exp_dir)), checkpoint=True),
+                path=resolve_milestone_path(exp_dir, str(pt_file.relative_to(exp_dir))),
                 pct=int(match.group("pct")),
                 global_step=int(match.group("step")),
             )

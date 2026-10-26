@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download experiments; conflicting configs abort before transfer.
 # Usage: bash scripts/remote/sync_down.sh [SUBPATH] [--dry-run|--list] [--with-wandb]
-# Transfer immutable files, mutable training outputs, episode facts, selection, then best.
+# Transfer weights and run records before updating best.
 
 set -euo pipefail
 
@@ -144,14 +144,10 @@ rsync "${PASS2_OPTS[@]}" "$REMOTE_PATH" "$LOCAL_PATH" || {
     exit "$rc"
 }
 
-# Publish complete episode records before selection records and the best pointer.
+# Run records may change at completion even if their size and mtime match.
 rsync -av --ignore-times "${WANDB_EXCLUDE[@]}" \
     --include='*/' --include='**/result_details.json' \
-    --exclude='*' $DRY_RUN "$REMOTE_PATH" "$LOCAL_PATH" || exit "$?"
-
-# Publish selection records before the best reference, even at equal size/mtime.
-rsync -av --ignore-times "${WANDB_EXCLUDE[@]}" \
-    --include='*/' --include='eval_ckpt_selector/**/selection_result.json' \
+    --include='eval_ckpt_selector/**/selection_result.json' \
     --exclude='*' $DRY_RUN "$REMOTE_PATH" "$LOCAL_PATH" || exit "$?"
 
 # Copy the small best pointer only after all referenced records succeeded.

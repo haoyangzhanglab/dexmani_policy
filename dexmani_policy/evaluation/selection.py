@@ -1,6 +1,5 @@
-"""Equal-budget candidate evaluation followed by pure evidence-based ranking."""
+"""Evaluate milestone checkpoints with a fixed budget and publish the best."""
 
-import json
 import traceback
 from dataclasses import replace
 from pathlib import Path
@@ -11,79 +10,91 @@ from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.experiments import discover_milestone_checkpoints, milestone_steps
 from dexmani_policy.env_runner.common.seeds import split_evaluation_seeds
 from dexmani_policy.evaluation.artifacts import (
-    artifact_reference,
     create_run_directory,
-    rank_selection_results,
-    validate_selection_plan,
-    verify_selection_record,
-    training_source_evidence,
     write_failure,
     write_json,
 )
 from dexmani_policy.evaluation.config import (
     make_request,
     prepare_evaluation_config,
-    resolve_tasks,
     task_seed_pools,
 )
 
 
-def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
+def rank_selection_results(results):
+    ranks = []
+    for result in results:
+        stats = result["statistics"]
+        avg = stats["avg_steps"]
+        ranks.append(
+            (
+                stats["micro_success_rate"],
+                -(avg if avg is not None else float("inf")),
+                result["global_step"],
+            )
+        )
+    return max(range(len(results)), key=ranks.__getitem__)
+
+
+def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> tuple[dict, Path]:
     from dexmani_policy.evaluation.rollout import evaluate_policy
 
-    root = Path(exp_dir).resolve()
+    root = Path(exp_dir).expanduser().resolve()
     cfg = prepare_evaluation_config(
         cfg, OmegaConf.merge({"eval": {"video": {"enabled": False}}}, overrides or {})
     )
     if cfg["eval"].get("task_seeds") is not None:
         raise ValueError("Selection uses its predeclared test/selection split, not eval.task_seeds")
-    tasks = resolve_tasks(cfg)
-    pools = task_seed_pools(tasks)
     test, selection = split_evaluation_seeds(
-        pools,
+        task_seed_pools(cfg),
         cfg["eval"]["seed"],
-        positive_int(cfg["eval"]["episodes"], "eval.episodes"),
+        cfg["eval"]["episodes"],
         positive_int(cfg["eval"]["selection_episodes"], "eval.selection_episodes"),
     )
+
     milestones = discover_milestone_checkpoints(root)
-    if not milestones:
-        expected = milestone_steps(cfg["training"]["loop"]["total_train_steps"])
-        raise ValueError(f"Missing selection milestone steps: {sorted(expected)}")
+    expected = milestone_steps(cfg["training"]["loop"]["total_train_steps"])
+    actual = {m.global_step: m.pct for m in milestones}
+    if actual != expected or len(milestones) != len(expected):
+        raise ValueError(
+            f"Selection requires milestones {expected}; found {actual}; "
+            f"missing steps: {sorted(expected.keys() - actual.keys())}"
+        )
     request = make_request(
         cfg,
         milestones[0].path,
-        tasks,
         selection,
         source={"phase": "selection", "heldout_from_selection": False},
     )
+
     output_root = root / "eval_ckpt_selector"
     if output_dir is not None and not Path(output_dir).expanduser().resolve().is_relative_to(
         output_root
     ):
         raise ValueError("Selection output must remain inside experiment/eval_ckpt_selector")
+    directory = create_run_directory(output_root, output_dir)
+    path = directory / "selection_result.json"
+    test_request = replace(
+        request, task_seeds=test, source={"phase": "test", "heldout_from_selection": True}
+    )
     record = {
         "status": "running",
         "experiment_dir": str(root),
-        "seed_pools": pools,
+        "selection_result": str(path.relative_to(root)),
         "selection_task_seeds": selection,
-        "test_request": replace(
-            request, task_seeds=test, source={"phase": "test", "heldout_from_selection": True}
-        ).to_dict(),
+        "test_request": vars(test_request).copy(),
         "candidates": [
-            {"checkpoint": artifact_reference(m.path, root), "global_step": m.global_step}
+            {"checkpoint": str(m.path.relative_to(root)), "global_step": m.global_step}
             for m in milestones
         ],
         "candidate_results": [],
-        "training_source_evidence": training_source_evidence(cfg, {"selection": selection, "test": test}),
     }
-    validate_selection_plan(record)
-    directory = create_run_directory(output_root, output_dir)
-    path = directory / "selection_result.json"
     write_json(path, record, overwrite=False)
+
     results = []
     try:
         for milestone in milestones:
-            result_path = evaluate_policy(
+            result, result_path = evaluate_policy(
                 replace(
                     request,
                     checkpoint=str(milestone.path),
@@ -91,52 +102,29 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None):
                 ),
                 output_root=directory / "candidates",
             )
-            record["candidate_results"].append(artifact_reference(result_path, root))
-            results.append(json.loads(result_path.read_text()))
-            write_json(path, record)
-        best = rank_selection_results(record, results)
+            record["candidate_results"].append(str(result_path.relative_to(root)))
+            results.append(result)
+
+        best = rank_selection_results(results)
         candidate = record["candidates"][best]
-        record["test_request"]["checkpoint"] = str(root / candidate["checkpoint"])
+        checkpoint = root / candidate["checkpoint"]
+        record["test_request"]["checkpoint"] = str(checkpoint)
         record.update(
             status="completed",
             ckpt_relpath=candidate["checkpoint"],
             global_step=candidate["global_step"],
-            runtime=results[best]["runtime"],
             inference={
                 key: getattr(request, key) for key in ("use_ema", "inference_steps", "action_steps")
             },
         )
         write_json(path, record)
-        return publish_best(root, path)
+        write_json(
+            root / "best_ckpt.json",
+            {key: record[key] for key in ("ckpt_relpath", "global_step", "inference", "selection_result")},
+        )
     except BaseException:
         record.update(status="failed", error=traceback.format_exc())
         write_failure(path, record)
         raise
 
-
-def publish_best(root, record_path):
-    record, checkpoint = verify_selection_record(root, record_path)
-    write_json(
-        Path(root) / "best_ckpt.json",
-        {key: record[key] for key in ("ckpt_relpath", "global_step", "inference", "selection_result")},
-    )
     return record, checkpoint
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Verify saved selection evidence without running evaluation")
-    parser.add_argument("--experiment-dir", required=True)
-    parser.add_argument("--selection-record", required=True)
-    parser.add_argument("--publish-best", action="store_true", help="Publish a direct best pointer after verification")
-    args = parser.parse_args()
-    if args.publish_best:
-        _, checkpoint = publish_best(args.experiment_dir, args.selection_record)
-    else:
-        _, checkpoint = verify_selection_record(args.experiment_dir, args.selection_record)
-    print(f"Selection verified: {checkpoint}")
-
-
-if __name__ == "__main__":
-    main()

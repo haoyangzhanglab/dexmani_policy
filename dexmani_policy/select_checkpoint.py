@@ -11,7 +11,9 @@ from dexmani_policy.evaluation.selection import select_best_checkpoint
 
 
 def main(argv=None):
-    args = build_parser(__doc__).parse_args(argv)
+    parser = build_parser(__doc__)
+    parser.add_argument("--output-dir")
+    args = parser.parse_args(argv)
     set_project_root()
     register_resolvers()
     exp_dir = PROJECT_ROOT / "experiments" / args.policy_name / args.task_name / args.exp_name

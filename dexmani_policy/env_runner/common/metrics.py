@@ -3,11 +3,9 @@
 import math
 from collections import Counter
 
-import numpy as np
-
 
 def compute_evaluation_statistics(episodes):
-    tasks = {}
+    tasks: dict[str, list[dict]] = {}
     for episode in episodes:
         tasks.setdefault(episode["task_name"], []).append(episode)
     per_task = {}
@@ -51,33 +49,12 @@ def wilson_interval(successes, n):
     return [max(0.0, center - half), min(1.0, center + half)]
 
 
-def validate_episodes(details, plan):
-    """Require complete task/seed evidence and normalize NumPy booleans for JSON."""
-    if not isinstance(details, list):
-        raise RuntimeError("Evaluation episodes must be a list of objects")
-    actual = Counter()
-    for detail in details:
-        if (
-            not isinstance(detail, dict)
-            or not isinstance(detail.get("task_name"), str)
-            or type(detail.get("seed")) is not int
-            or not isinstance(detail.get("success"), (bool, np.bool_))
-            or type(detail.get("total_steps")) is not int
-            or detail["total_steps"] < 0
-            or "steps" not in detail
-            or (
-                detail["steps"] is not None
-                and (
-                    type(detail["steps"]) is not int
-                    or not 0 <= detail["steps"] <= detail["total_steps"]
-                )
-            )
-            or "error" in detail
-            or "error_category" in detail
-        ):
-            raise RuntimeError(f"Invalid or exceptional evaluation episode: {detail}")
-        detail["success"] = bool(detail["success"])
-        actual[detail["task_name"], detail["seed"]] += 1
+def validate_episodes(episodes, plan):
+    actual = Counter((row["task_name"], row["seed"]) for row in episodes)
     expected = Counter((task, seed) for task, seeds in plan.items() for seed in seeds)
     if actual != expected:
         raise RuntimeError("Evaluation episodes do not match the requested task/seed plan")
+    for row in episodes:
+        steps, total = row["steps"], row["total_steps"]
+        if total < 0 or (steps is not None and not 0 <= steps <= total):
+            raise RuntimeError(f"Invalid evaluation step counts: {row}")
