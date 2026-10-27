@@ -3,8 +3,6 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import FINGER_VECTOR_FIELDS
-
 
 class FieldNormalizer(nn.Module):
     def __init__(self, scale, offset, input_stats=None):
@@ -28,15 +26,15 @@ class FieldNormalizer(nn.Module):
 
 
 class LinearNormalizer(nn.Module):
-    def __init__(self, feature_dims=None):
+    def __init__(self, feature_shapes=None):
         super().__init__()
         self.fields = nn.ModuleDict()
-        for key, width in (feature_dims or {}).items():
-            shape = (5, 3) if key in FINGER_VECTOR_FIELDS else (width,)
+        for key, shape in (feature_shapes or {}).items():
+            shape = (shape,) if isinstance(shape, int) else tuple(shape)
             self.fields[key] = FieldNormalizer(torch.ones(shape), torch.zeros(shape))
 
     @torch.no_grad()
-    def fit_field(self, key: str, chunks: Iterable, *, mode="limits"):
+    def fit_field(self, key: str, chunks: Iterable, *, mode="limits", last_n_dims=1):
         # Merge in FP64; store affine parameters in FP32 without clipping outputs.
         if mode not in {"limits", "gaussian"}:
             raise ValueError(f"Unknown normalization mode: {mode}")
@@ -47,13 +45,10 @@ class LinearNormalizer(nn.Module):
         high: torch.Tensor
         for index, chunk in enumerate(chunks):
             values = torch.as_tensor(chunk, dtype=torch.float64)
-            if key in FINGER_VECTOR_FIELDS:
-                if values.shape[-2:] != (5, 3):
-                    raise ValueError(f"{key} requires trailing feature shape (5, 3)")
-                values = values.flatten(-2)
+            feature_shape = values.shape[-last_n_dims:]
             if not values.numel():
                 continue
-            values = values.reshape(-1, values.shape[-1])
+            values = values.reshape(-1, feature_shape.numel())
             size = len(values)
             chunk_min, chunk_max = torch.aminmax(values, dim=0)
             if not (torch.isfinite(chunk_min).all() and torch.isfinite(chunk_max).all()):
@@ -79,8 +74,7 @@ class LinearNormalizer(nn.Module):
             "mean": mean.float(),
             "std": (m2 / max(count - 1, 1)).sqrt().float(),
         }
-        if key in FINGER_VECTOR_FIELDS:
-            stats = {name: value.reshape(5, 3) for name, value in stats.items()}
+        stats = {name: value.reshape(feature_shape) for name, value in stats.items()}
         if mode == "limits":
             span = stats["max"] - stats["min"]
             constant = span < 1e-4

@@ -50,6 +50,8 @@ class SequenceSampler:
         pad_before: int = 0,
         pad_after: int = 0,
         episode_mask: np.ndarray | None = None,
+        keys=None,
+        key_first_k=None,
     ):
         if sequence_length < 1 or not 0 <= pad_before < sequence_length or not 0 <= pad_after < sequence_length:
             raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
@@ -67,19 +69,19 @@ class SequenceSampler:
             pad_after=pad_after,
             episode_mask=episode_mask,
         )
-        if not len(indices):
-            raise ValueError("No sequence windows: selected episodes are empty or too short")
-
         self.indices = indices
         self.replay_buffer = replay_buffer
         self.sequence_length = sequence_length
+        self.keys = tuple(replay_buffer.keys() if keys is None else keys)
+        self.key_first_k = dict(key_first_k or {})
+        if any(key not in self.keys or not 1 <= k <= sequence_length for key, k in self.key_first_k.items()):
+            raise ValueError("key_first_k requires selected keys and 1 <= K <= sequence_length")
 
     def __len__(self):
         return len(self.indices)
 
-    def source_rows(self, indices=None):
+    def source_rows(self, indices):
         """Original source rows, including repeated boundary rows used by padding."""
-        indices = self.indices if indices is None else indices
         start, end, sample_start = np.asarray(indices).T
         return np.clip(
             start[:, None] + np.arange(self.sequence_length) - sample_start[:, None],
@@ -87,49 +89,15 @@ class SequenceSampler:
             end[:, None] - 1,
         )
 
-    def filter_valid(self, obs_valid, action_valid, n_obs_steps, *, action_offset=0):
-        # Bound temporary source-row arrays independently of dataset length.
-        kept = []
-        counts = {
-            "candidate": len(self.indices),
-            "observation": 0,
-            "action": 0,
-        }
-        obs_rows = np.zeros(len(obs_valid), dtype=bool)
-        action_rows = np.zeros(len(action_valid), dtype=bool)
-        for offset in range(0, len(self.indices), 8192):
-            indices = self.indices[offset : offset + 8192]
-            rows = self.source_rows(indices)
-            obs_ok = obs_valid[rows[:, :n_obs_steps]].all(axis=1)
-            future_rows = rows[:, action_offset:]
-            action_ok = action_valid[future_rows].all(axis=1)
-            for name, ok in (
-                ("observation", obs_ok),
-                ("action", action_ok),
-            ):
-                counts[name] += int((~ok).sum())
-            keep = obs_ok & action_ok
-            kept.append(indices[keep])
-            obs_rows[rows[keep, :n_obs_steps].reshape(-1)] = True
-            action_rows[future_rows[keep].reshape(-1)] = True
-        self.indices = np.concatenate(kept, axis=0)
-        counts["valid"] = len(self.indices)
-        self.validity_summary = counts
-        self.observation_source_rows = np.flatnonzero(obs_rows)
-        self.action_source_rows = np.flatnonzero(action_rows)
-        if not len(self.indices):
-            raise ValueError(f"Zero valid training/validation windows: {counts}")
-
     def sample_source_rows(self, idx):
         return self.source_rows(self.indices[idx][None])[0]
 
-    def sample_sequence(self, idx, *, key_lengths=None, key_offsets=None):
+    def sample_sequence(self, idx):
         result = {}
         rows = self.sample_source_rows(idx)
-        for key in self.replay_buffer.keys():
-            length = self.sequence_length if key_lengths is None else key_lengths[key]
-            offset = 0 if key_offsets is None else key_offsets.get(key, 0)
-            selected = rows[offset : offset + length]
+        for key in self.keys:
+            length = self.key_first_k.get(key, self.sequence_length)
+            selected = rows[:length]
             start, end = int(selected[0]), int(selected[-1]) + 1
             values = self.replay_buffer.read(key, slice(start, end))
             result[key] = values if end - start == length else values[selected - start]

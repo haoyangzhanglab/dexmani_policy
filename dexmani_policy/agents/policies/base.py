@@ -5,7 +5,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import positive_int, validate_action_window
+from dexmani_policy.common.config import positive_int, validate_action_window, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
 
 
@@ -104,9 +104,9 @@ class BasePolicy(nn.Module):
         self.normalization_dims = dict(feature_dims)
         if self.normalization_dims["action"] != self.action_dim:
             raise ValueError("Normalizer action width must match the full prediction layout")
-        self.normalizer = LinearNormalizer({
+        self.normalizer = LinearNormalizer(normalization_feature_shapes({
             key: feature_dims[key] for key, mode in spec.items() if mode != "identity"
-        })
+        }))
 
     def initialize_training(self, data_description) -> None:
         """Initialize fresh weights against the data recipe; checkpoints skip this step."""

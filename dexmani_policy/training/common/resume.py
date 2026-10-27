@@ -1,7 +1,6 @@
 import copy
 import errno
 import os
-import re
 import shutil
 from pathlib import Path
 
@@ -61,11 +60,7 @@ def validate_source_recipe(saved, current):
         if isinstance(left, dict) and isinstance(right, dict):
             for key in sorted(left.keys() | right.keys()):
                 child_path = f"{path}.{key}" if path else key
-                if (
-                    child_path in ignored
-                    or child_path == "dataset.zarr_path"
-                    or re.fullmatch(r"data_recipe\.\d+\.source_evidence", child_path)
-                ):
+                if child_path in ignored or child_path == "dataset.zarr_path":
                     continue
                 if key not in left or key not in right:
                     differences.append(f"config.{child_path}: missing field")
@@ -84,18 +79,25 @@ def validate_source_recipe(saved, current):
         raise ValueError("Checkpoint source recipe mismatch:\n" + "\n".join(differences))
 
 
-def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
+def validate_resume_protocol(saved):
+    if "data_recipe" in saved:
+        raise ValueError(
+            "Legacy full resume uses window filtering/source-row statistics. "
+            "Resume with the original code or start a new experiment; no automatic warm start or refit."
+        )
+    split = saved["dataset"].get("split_manifest")
+    if not isinstance(split, dict) and not OmegaConf.is_dict(split):
+        raise ValueError("Full resume requires the saved actual episode split in dataset.split_manifest")
+
+
+def resolve_input_recipe(cfg, *, overrides, saved_config=None):
     """Use the saved recipe on resume, applying only explicit operational/location overrides."""
     from hydra.core.override_parser.overrides_parser import OverridesParser
 
-    source = resolve_resume_source(cfg.get("resume_from"))
-    if source is None:
+    if saved_config is None:
         return copy.deepcopy(cfg)
-    if resume_checkpoint is None:
-        source_config = load_checkpoint(source, mmap=True).effective_config
-    else:
-        source_config = resume_checkpoint.effective_config
-    result = OmegaConf.create(source_config)
+    validate_resume_protocol(saved_config)
+    result = OmegaConf.create(saved_config)
     with open_dict(result):
         # The execution limit belongs to this invocation.
         result.pop("max_updates", None)
@@ -124,7 +126,7 @@ def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
             if key == "resume_from":
                 continue
             OmegaConf.update(result, key, override.value(), merge=False, force_add=True)
-        result.resume_from = source
+        result.resume_from = cfg.get("resume_from")
     return result
 
 

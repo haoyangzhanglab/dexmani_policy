@@ -161,7 +161,7 @@ def validate_dataset(cfg, *, max_batches=2):
     validate_data_loader(loader, cfg, split="train", max_batches=max_batches)
     validation = dataset.get_validation_dataset()
     if validation is None:
-        print("[validation] 无 holdout")
+        print("[validation] 无可用验证窗口")
     else:
         loader = DataLoader(validation, batch_size=cfg.dataloader.batch_size, num_workers=0)
         validate_data_loader(loader, cfg, split="validation", max_batches=max_batches)

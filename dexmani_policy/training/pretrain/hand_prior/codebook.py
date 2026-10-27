@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.decomposition import PCA
 
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
@@ -34,6 +33,8 @@ def build_hand_prototypes(model: HandVQVAE) -> tuple[torch.Tensor, torch.Tensor]
 
 @torch.no_grad()
 def build_runtime_codebook(checkpoint, checkpoint_path, *, device):
+    from sklearn.decomposition import PCA
+
     split = checkpoint["split_metadata"]
     validate_dq_normalization(split["normalization_spec"])
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()

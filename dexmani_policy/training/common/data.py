@@ -1,67 +1,59 @@
-import copy
-
 import hydra
 import torch
-from omegaconf import open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.config import resolve_normalization_spec
+from dexmani_policy.common.config import resolve_normalization_spec, FINGER_VECTOR_FIELDS, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
-
-
-def build_normalizer(dataset, spec: dict, action_key: str) -> LinearNormalizer:
-    """Fit consumed training data, preserving rot6d coordinates for action_ee auto mode."""
-    normalizer = LinearNormalizer()
-
-    for key, mode in spec.items():
-        if mode == "identity":
-            continue
-
-        mixed_action = key == "action" and mode == "auto" and action_key == "action_ee"
-        mode = "limits" if mode == "auto" else mode
-        normalizer.fit_field(key, dataset.iter_normalization_data(key), mode=mode)
-        if mixed_action:
-            field = normalizer[key]
-            if field.scale.numel() <= 9:
-                raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
-            field.scale[3:9] = 1
-            field.offset[3:9] = 0
-            for name, value in (("min", -1), ("max", 1), ("mean", 0), ("std", 1)):
-                field.input_stats[name][3:9] = value
-
-    return normalizer
+from dexmani_policy.datasets.hand_prior.metadata import describe_hand_data
+from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
+from dexmani_policy.deployment.metadata import describe_real_runtime
 
 
 def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
-    """Build data and fit fresh statistics; full resume restores the model's normalizer."""
+    """Construct one admitted train/val source; resume only restores saved affine."""
     if cfg.get("resume_from") is not None and resume_checkpoint is None:
         raise ValueError("Resume requires the checkpoint loaded by the training entry point")
+    if resume_checkpoint is not None:
+        from dexmani_policy.training.common.resume import validate_resume_protocol
+        validate_resume_protocol(resume_checkpoint.effective_config)
     spec = resolve_normalization_spec(cfg)
-    dataset_cfg = copy.deepcopy(cfg.dataset)
-    saved_recipes = (
-        resume_checkpoint.effective_config["data_recipe"] if resume_checkpoint is not None else cfg.get("data_recipe")
-    )
-    if saved_recipes is not None:
-        with open_dict(dataset_cfg):
-            dataset_cfg.split_manifest = saved_recipes[0]["split_manifest"]
     agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
-    if agent_class.requires_split_manifest and dataset_cfg.get("split_manifest") is None:
+    if agent_class.requires_split_manifest and cfg.dataset.get("split_manifest") is None:
         raise ValueError("Hand pretraining requires an explicit shared split_manifest")
-    dataset = hydra.utils.instantiate(dataset_cfg)
-    description = dataset.describe_training_data(
-        spec, task_name=cfg.task_name,
-        requires_hand_pretraining=agent_class.requires_hand_pretraining,
-    )
-    if description["normalization_dims"]["action"] != cfg.agent.action_dim:
+    dataset = hydra.utils.instantiate(cfg.dataset)
+    buffer = dataset.replay_buffer
+    dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
+    for key in FINGER_VECTOR_FIELDS.intersection(dims):
+        dims[key] = 15
+    if "point_cloud" in dims and dataset.pc_dim is not None:
+        dims["point_cloud"] = dataset.pc_dim
+    dims["action"] = dataset.action_dim
+    if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
-    normalizer = None
+    description = {"normalization_dims": dims, "split_manifest": dataset.split_manifest}
+    runtime = describe_real_runtime(buffer, dataset.sensor_modalities, cfg.task_name)
+    if runtime is not None:
+        description["real_runtime"] = runtime
+    if agent_class.requires_hand_pretraining:
+        description["hand_data"] = dataset.hand_data if isinstance(dataset, LatentFlowDataset) else describe_hand_data(
+            buffer, action_key=dataset.action_key, horizon=dataset.horizon,
+            obs_horizon=dataset.obs_horizon, pad_before=dataset.pad_before, pad_after=dataset.pad_after,
+            history_steps=getattr(dataset, "history_steps", None),
+        )
     if resume_checkpoint is None:
-        normalizer = build_normalizer(dataset, spec, cfg.action_key)
+        normalizer = dataset.get_normalizer(spec)
+    else:
+        normalizer = LinearNormalizer(normalization_feature_shapes({key: dims[key] for key, mode in spec.items() if mode != "identity"}))
+        normalizer.load_state_dict({
+            key.removeprefix("normalizer."): value
+            for key, value in resume_checkpoint.model_state.items() if key.startswith("normalizer.")
+        }, strict=True)
+        dataset._normalizer = normalizer
     if verbose:
         print(f"[Dataset] {dataset.training_summary()}")
         if resume_checkpoint is None:
-            print("[Normalizer] consumed training rows; relative actions count each window/reference")
+            print("[Normalizer] all real train-episode frames; relative actions retain each window/reference")
     return dataset, normalizer, description
 
 

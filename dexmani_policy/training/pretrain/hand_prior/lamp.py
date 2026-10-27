@@ -6,7 +6,6 @@ import argparse
 import math
 from pathlib import Path
 
-import hydra
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -15,40 +14,16 @@ from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
+from dexmani_policy.datasets.hand_prior.lamp_dataset import hand_history_for_rows
+from dexmani_policy.datasets.hand_prior.data import prepare_prior_data
 from dexmani_policy.training.common.optimization import get_scheduler
-from dexmani_policy.training.common.config import validate_config
-
-
-def build_prior_dataset(cfg):
-    """Bootstrap the exact policy split/history rules without opening artifacts."""
-    validate_config(cfg)
-    if cfg.agent._target_ != "dexmani_policy.agents.policies.lamp.LAMPPolicy":
-        raise ValueError("Prior preparation requires a LAMPPolicy configuration")
-    if cfg.get("resume_from") is not None:
-        raise ValueError("Prepare prior artifacts from a fresh policy config, not resume_from")
-    if cfg.dataset.split_manifest is None:
-        raise ValueError("Pretraining requires an explicit shared dataset.split_manifest")
-    dataset = hydra.utils.instantiate(cfg.dataset)
-    if not isinstance(dataset, LAMPDataset):
-        raise TypeError("LAMP prior preparation requires LAMPDataset")
-    return dataset
-
-
-def source_rows(dataset):
-    train = np.asarray(dataset.sampler.action_source_rows, dtype=np.int64)
-    validation = dataset.get_validation_dataset()
-    val = (
-        np.asarray(validation.sampler.action_source_rows, dtype=np.int64)
-        if validation is not None
-        else np.empty(0, dtype=np.int64)
-    )
-    return train, val
 
 
 def prior_batch(dataset, rows, device):
-    history = torch.as_tensor(dataset.history_for_rows(rows), device=device)
-    target = torch.as_tensor(dataset.hand_actions[rows], device=device)
+    history = torch.as_tensor(hand_history_for_rows(
+        dataset["hand_actions"], dataset["bootstrap"], dataset["episode_ends"], rows, dataset["history_steps"],
+    ), device=device)
+    target = torch.as_tensor(dataset["hand_actions"][rows], device=device)
     return history, target
 
 
@@ -108,7 +83,7 @@ def save_prior(path, prior, hand_data, cfg, step, metrics, split_manifest):
         hand_joint_order=prior.hand_joint_order,
         selection=dict(
             selection_step=int(step),
-            split="validation" if hand_data["val_episodes"] else "final_no_holdout",
+            split="validation" if split_manifest["val_indices"] else "final_no_holdout",
             metric="prior_mean_mse",
             value=evaluation["mse"],
         ),
@@ -152,9 +127,9 @@ def train(cfg, *, overwrite=False):
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
     rng = np.random.default_rng(recipe.seed)
-    dataset = build_prior_dataset(cfg)
-    hand_data = dataset.describe_hand_data()
-    train_rows, val_rows = source_rows(dataset)
+    dataset = prepare_prior_data(cfg)
+    hand_data = dataset["hand_data"]
+    train_rows, val_rows = dataset["train_rows"], dataset["val_rows"]
     if len(train_rows) < recipe.batch_size:
         raise ValueError("LAMP prior training requires a full batch; reduce prior_training.batch_size")
     prior = HandMotionPrior(
@@ -221,7 +196,7 @@ def train(cfg, *, overwrite=False):
                 best_mse = evaluation["mse"]
                 save_prior(
                     output, prior, hand_data, cfg, step, last_metrics,
-                    dataset.data_recipe["split_manifest"],
+                    dataset["split_manifest"],
                 )
     print(f"Saved {'best validation' if len(val_rows) else 'final'} prior: {output}")
 

@@ -28,7 +28,9 @@ def prepare_training(cfg):
     source = resolve_resume_source(cfg.get("resume_from"))
     checkpoint = load_checkpoint(source) if source is not None else None
     overrides = HydraConfig.get().overrides.task if source is not None else []
-    effective_config = resolve_input_recipe(cfg, overrides=overrides, resume_checkpoint=checkpoint)
+    effective_config = resolve_input_recipe(
+        cfg, overrides=overrides, saved_config=None if checkpoint is None else checkpoint.effective_config,
+    )
     with open_dict(effective_config):
         effective_config.resume_from = source
         # Resume writes into this invocation's directory, never the source run.
@@ -53,7 +55,9 @@ def validate_config(cfg):
     if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
         raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
     dataset_class: type[RobotDataset] = hydra.utils.get_class(dataset._target_)
-    if agent_class.future_action_window != dataset_class.future_action_window:
+    from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
+    from dexmani_policy.datasets.r3d_dataset import R3DAuxDataset
+    if agent_class.future_action_window != issubclass(dataset_class, LatentFlowDataset):
         raise ValueError("Policy and Dataset action windows must be used together")
     if dataset.get("sensor_modalities") is None:
         raise ValueError("dataset.sensor_modalities must be explicit")
@@ -62,8 +66,8 @@ def validate_config(cfg):
             raise ValueError(f"dataset.{field} must explicitly reference {name}")
         if dataset[field] != cfg[name]:
             raise ValueError(f"dataset.{field} must match {name}")
-    if dataset.get("use_aux_ee", False) != aux:
-        raise ValueError("dataset.use_aux_ee must match use_aux_ee")
+    if issubclass(dataset_class, R3DAuxDataset) != aux:
+        raise ValueError("R3D auxiliary targets require R3DAuxDataset")
     resolve_normalization_spec(cfg, observation_fields=dataset.sensor_modalities)
     if aux:
         if cfg.action_key != "action":
@@ -94,7 +98,8 @@ def validate_config(cfg):
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
-        effective.update(data_description)
+        effective.update({key: value for key, value in data_description.items() if key != "split_manifest"})
+        effective.dataset.split_manifest = data_description["split_manifest"]
         if "real_runtime" not in data_description:
             effective.pop("real_runtime", None)
         effective.policy_metadata = model.inference_metadata
@@ -111,7 +116,9 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
 def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
     """Resolve fresh or saved dataset paths without opening data or importing models."""
     cfg = load_policy_config(config_name, overrides)
-    cfg = resolve_input_recipe(cfg, overrides=overrides)
+    source = resolve_resume_source(cfg.get("resume_from"))
+    saved = load_checkpoint(source, mmap=True).effective_config if source is not None else None
+    cfg = resolve_input_recipe(cfg, overrides=overrides, saved_config=saved)
     return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
 
 

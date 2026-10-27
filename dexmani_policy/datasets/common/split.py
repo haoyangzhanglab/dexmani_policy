@@ -28,20 +28,19 @@ def validate_episode_metadata(metadata, count):
 
 
 def validate_split_manifest(manifest, buffer):
-    source = manifest["source_id"]
+    source = manifest.get("source_id")
     if source != buffer.attrs.get("source_id"):
         raise ValueError("Split manifest source identity mismatch")
     if (
-        (source is None and manifest["zarr_path"] != buffer.path)
-        or manifest["episode_ends"] != buffer.episode_ends.tolist()
-        or manifest["episode_ids"] != buffer.attrs.get("episode_ids")
+        manifest["episode_ends"] != buffer.episode_ends.tolist()
+        or manifest.get("episode_ids") != buffer.attrs.get("episode_ids")
     ):
-        raise ValueError("Split manifest data path/episode identity mismatch")
+        raise ValueError("Split manifest episode identity mismatch")
     ids, trials = validate_episode_metadata(manifest, buffer.n_episodes)
     if buffer.attrs.get("trial_ids") is not None and trials != buffer.attrs["trial_ids"]:
         raise ValueError("Split manifest trial_ids differ from the dataset")
 
-    keys = ("train_indices", "val_indices", "exclusions")
+    keys = ("train_indices", "val_indices")
     canonical = set(range(buffer.n_episodes))
     groups = []
     for key in keys:
@@ -52,15 +51,18 @@ def validate_split_manifest(manifest, buffer):
         ):
             raise ValueError(f"Invalid {key} in split manifest")
         groups.append(set(values))
-    train, val, excluded = groups
-    if (
-        not train or train & val or train & excluded or val & excluded
-        or train | val | excluded != canonical
-    ):
-        raise ValueError("train/val/exclusions must partition every episode, with nonempty train")
+    train, val = groups
+    if not train or train & val:
+        raise ValueError("train/val must be disjoint, with nonempty train")
+    if "exclusions" in manifest and set(manifest["exclusions"]) != canonical - train - val:
+        raise ValueError("Legacy exclusions disagree with train/val indices")
     if trials is not None and {trials[ids[i]] for i in train} & {trials[ids[i]] for i in val}:
         raise ValueError("a trial cannot cross train/val")
-    manifest = dict(manifest, **{key: sorted(group) for key, group in zip(keys, groups)})
+    manifest = {
+        "episode_ends": buffer.episode_ends.tolist(), "episode_ids": ids,
+        "source_id": source, "trial_ids": trials,
+        **{key: sorted(group) for key, group in zip(keys, groups)},
+    }
     return (
         np.isin(np.arange(buffer.n_episodes), list(train)),
         np.isin(np.arange(buffer.n_episodes), list(val)),
@@ -116,14 +118,12 @@ def split_episodes(buffer, *, manifest=None, val_ratio=0.1, seed=42, max_train_e
     if not train.any():
         raise ValueError("No training episodes fit the requested split")
     manifest = {
-        "zarr_path": buffer.path,
         "episode_ends": buffer.episode_ends.tolist(),
         "episode_ids": ids,
         "source_id": buffer.attrs.get("source_id"),
         "trial_ids": trials,
         "train_indices": np.flatnonzero(train).tolist(),
         "val_indices": np.flatnonzero(val).tolist(),
-        "exclusions": np.flatnonzero(~(train | val)).tolist(),
     }
     return train, val, manifest
 

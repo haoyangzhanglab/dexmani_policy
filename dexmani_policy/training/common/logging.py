@@ -37,11 +37,6 @@ class ExperimentLogger:
                 raise
 
     def save_config(self, hydra_config):
-        for index, recipe in enumerate(hydra_config["data_recipe"]):
-            path = self.output_dir / f"split_manifest_{index}.json"
-            with atomic_path(path, overwrite=False) as temporary:
-                manifest = OmegaConf.to_container(recipe["split_manifest"])
-                temporary.write_text(json.dumps(manifest, indent=2) + "\n")
         with atomic_path(self.output_dir / "config.yaml", overwrite=False) as temporary:
             OmegaConf.save(hydra_config, temporary, resolve=True)
         if self.wandb_run is not None:

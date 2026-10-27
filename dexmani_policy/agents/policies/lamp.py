@@ -156,7 +156,7 @@ class LAMPPolicy(BasePolicy):
         self.prior = prior
         metadata = payload["metadata"]
         validate_pretraining_data(
-            data_description["hand_data"], data_description["data_recipe"][0]["split_manifest"],
+            data_description["hand_data"], data_description["split_manifest"],
             metadata["hand_data"], metadata["split_manifest"],
         )
         self.prior_initialized = True

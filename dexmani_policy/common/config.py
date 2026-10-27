@@ -111,6 +111,10 @@ def resolve_normalization_spec(cfg, *, observation_fields=None):
     return dict(spec)
 
 
+def normalization_feature_shapes(dims):
+    return {key: (5, 3) if key in FINGER_VECTOR_FIELDS else (width,) for key, width in dims.items()}
+
+
 def normalization_dims_from_config(cfg):
     dims = dict(cfg["normalization_dims"])
     agent = cfg["agent"]

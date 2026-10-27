@@ -1,4 +1,4 @@
-"""Train single-step hand-state quantization using the target DQ-RISE Policy data recipe."""
+"""Train single-step hand-state quantization using the target DQ-RISE episode split."""
 
 from __future__ import annotations
 
@@ -9,27 +9,23 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-import hydra
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.common.robot_dataset import RobotDataset
+from dexmani_policy.datasets.hand_prior.data import prepare_policy_data
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
     build_runtime_codebook,
     deployment_diagnostics,
 )
-from dexmani_policy.training.common.config import validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -110,72 +106,9 @@ def save_checkpoint(
     logger.info("checkpoint saved: %s", path)
 
 
-def build_policy_dataset(cfg):
-    """Reuse Policy's actual Dataset, including observation/window qualification."""
-    validate_config(cfg)
-    if cfg.agent._target_ != "dexmani_policy.agents.policies.dqrise.DQRISEPolicy":
-        raise ValueError("VQ pretraining requires a DQRISEPolicy configuration")
-    if cfg.get("resume_from") is not None:
-        raise ValueError("Prepare a new codebook from a fresh Policy config, not resume_from")
-    if cfg.dataset.split_manifest is None:
-        raise ValueError("Pretraining requires an explicit shared dataset.split_manifest")
-    dataset = hydra.utils.instantiate(cfg.dataset)
-    if not isinstance(dataset, RobotDataset):
-        raise TypeError("DQ-RISE VQ preparation requires a single RobotDataset")
-    if dataset.replay_buffer[dataset.action_key].shape[1:] != (cfg.agent.action_dim,):
-        raise ValueError("Dataset action shape does not match the Policy layout")
-    return dataset
-
-
-def policy_hand_rows(dataset, tcp_dim):
-    """Read each split's already-qualified unique action rows, without augmentation."""
-    if dataset is None:
-        return np.empty((0, 12), dtype=np.float32)
-    rows = dataset.sampler.action_source_rows
-    buffer = dataset.replay_buffer
-    blocks = []
-    step = buffer.chunk_rows(dataset.action_key)
-    for block in np.unique(rows // step):
-        start = int(block * step)
-        selected = rows[np.searchsorted(rows, start) : np.searchsorted(rows, start + step)] - start
-        blocks.append(buffer.read(
-            dataset.action_key, slice(start, start + step), columns=slice(tcp_dim, tcp_dim + 12),
-        )[selected])
-    return np.concatenate(blocks)
-
-
-def prepare_policy_data(cfg):
-    spec = resolve_normalization_spec(cfg)
-    validate_dq_normalization(spec)
-    dataset = build_policy_dataset(cfg)
-    hand_data = dataset.describe_hand_data()
-    val = dataset.get_validation_dataset()
-    train_hand = policy_hand_rows(dataset, cfg.agent.tcp_dim)
-    val_hand = policy_hand_rows(val, cfg.agent.tcp_dim)
-    normalizer = LinearNormalizer()
-    normalizer.fit_field(
-        "hand", (train_hand[start : start + 8192] for start in range(0, len(train_hand), 8192)),
-        mode="limits",
-    )
-    metadata = {
-        "hand_data": hand_data,
-        "split_manifest": dataset.data_recipe["split_manifest"],
-        "policy_config": OmegaConf.to_container(cfg, resolve=False),
-        "resolved_dataset": OmegaConf.to_container(cfg.dataset, resolve=True),
-        "normalization_spec": spec,
-        "train_windows": dataset.sampler.validity_summary,
-        "val_windows": val.sampler.validity_summary if val is not None else None,
-    }
-    metadata["resolved_dataset"]["zarr_path"] = dataset.zarr_path
-    return (
-        normalizer["hand"].normalize(train_hand).numpy(),
-        normalizer["hand"].normalize(val_hand).numpy(),
-        normalizer,
-        metadata,
-    )
-
-
 def train(cfg):
+    import matplotlib.pyplot as plt
+
     recipe = cfg.vq_vae
     hand_dim = cfg.agent.action_dim - cfg.agent.tcp_dim
     if (recipe.num_groups, recipe.codebook_size) != (cfg.agent.codebook_num_groups, cfg.agent.codebook_size):

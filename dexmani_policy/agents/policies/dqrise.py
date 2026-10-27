@@ -200,7 +200,7 @@ class DQRISEPolicy(BasePolicy):
         if metadata["hand_data"]["action_key"] != "action":
             raise ValueError("DQ-RISE requires a Codebook pretrained with action_key=action")
         validate_pretraining_data(
-            data_description["hand_data"], data_description["data_recipe"][0]["split_manifest"],
+            data_description["hand_data"], data_description["split_manifest"],
             metadata["hand_data"], metadata["split_manifest"],
         )
 

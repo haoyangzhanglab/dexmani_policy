@@ -28,6 +28,8 @@ class ReplayBuffer:
             )
         for key, values in self.data.items():
             shape = values.shape
+            if values.dtype.kind not in "buif":
+                raise ValueError(f"Data field {key!r} must be real numeric, got {values.dtype}")
             if not shape or shape[0] != ends[-1]:
                 raise ValueError(
                     f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
@@ -49,7 +51,7 @@ class ReplayBuffer:
 
     def read(self, key, rows, *, columns=None):
         arr = self[key]
-        selection = rows if columns is None else (rows, columns)
+        selection = rows if columns is None else (rows,) + (slice(None),) * (arr.ndim - 2) + (columns,)
         dtype = np.float32 if np.issubdtype(arr.dtype, np.floating) else arr.dtype
         return np.asarray(arr[selection], dtype=dtype)
 

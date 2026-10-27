@@ -1,3 +1,7 @@
+import math
+from collections.abc import Mapping
+from typing import Any
+
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -109,3 +113,56 @@ def inspect_policy(experiment, *, checkpoint, weights, inference_steps):
         action_context_shapes=shapes,
         hand_history_steps=history_steps,
     )
+
+
+def describe_real_runtime(buffer, sensor_modalities, task_name) -> dict | None:
+    """Capture numerical deployment inputs from the buffer actually used to train."""
+    attrs = buffer.attrs
+    if attrs.get("format") != "dexmani.real.canonical":
+        return None
+    if attrs.get("task_name") != task_name:
+        raise ValueError("Real canonical task_name differs from the training task")
+    dt = attrs.get("dt")
+    if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
+        raise ValueError("Real canonical dt must be finite and positive")
+    runtime: dict[str, Any] = {"dt": float(dt)}
+    if "point_cloud" in sensor_modalities:
+        cloud = attrs.get("pointcloud_config")
+        if not isinstance(cloud, Mapping):
+            raise ValueError("Real point_cloud requires root pointcloud_config")
+        count = positive_int(cloud["num_points"], "pointcloud_config.num_points")
+        shape = buffer["point_cloud"].shape
+        if shape[1] != count:
+            raise ValueError("Stored point count disagrees with pointcloud_config")
+        # Preserve the stored point count; encoder FPS selects its own subset.
+        runtime["pointcloud"] = dict(cloud)
+    if "hand_pointcloud" in sensor_modalities:
+        cloud = attrs.get("hand_pointcloud_config")
+        if not isinstance(cloud, Mapping):
+            raise ValueError("Real hand_pointcloud requires root hand_pointcloud_config")
+        count = positive_int(cloud["num_points"], "hand_pointcloud_config.num_points")
+        data = buffer["hand_pointcloud"]
+        if data.shape[1:] != (count, 6) or str(data.dtype) != "float32":
+            raise ValueError("Stored hand_pointcloud must match the saved XYZRGB template")
+        runtime["hand_pointcloud"] = dict(cloud)
+    if "depth" in sensor_modalities:
+        data = buffer["depth"]
+        runtime["depth"] = validate_depth_recipe(
+            {
+                "shape": list(data.shape[1:]),
+                "dtype": str(data.dtype),
+                "unit": "raw_counts",
+                "depth_scale_m": attrs["depth_scale_m_per_unit"],
+            }
+        )
+    if "fingertip_xyz" in sensor_modalities:
+        links = attrs.get("fingertip_link_names")
+        if (
+            not isinstance(links, (list, tuple))
+            or len(links) != 5
+            or any(not isinstance(link, str) or not link.strip() for link in links)
+            or len(set(links)) != 5
+        ):
+            raise ValueError("Real fingertip_xyz requires five distinct non-empty link names")
+        runtime["fingertip_link_names"] = list(links)
+    return runtime
