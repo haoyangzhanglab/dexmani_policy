@@ -1,4 +1,4 @@
-"""Resolve evaluation inputs once; execution receives concrete tasks and seeds."""
+"""Resolve evaluation inputs once; execution receives one runner and its seeds."""
 
 import argparse
 import json
@@ -21,7 +21,6 @@ from dexmani_policy.evaluation.seeds import (
     split_evaluation_seeds,
     validate_evaluation_seed,
     validate_seed_pool,
-    validate_task_seeds,
 )
 
 
@@ -44,8 +43,8 @@ class EvaluationRequest:
     inference_steps: int
     action_steps: int
     device: str
-    tasks: list[dict]
-    task_seeds: dict[str, list[int]]
+    runner_options: dict
+    seeds: list[int]
     source: dict
 
 
@@ -54,7 +53,7 @@ def parse_evaluation_overrides(overrides):
         "eval.seed",
         "eval.episodes",
         "eval.selection_episodes",
-        "eval.task_seeds",
+        "eval.seeds",
         "eval.inference_steps",
         "eval.action_steps",
         "eval.use_ema",
@@ -68,7 +67,7 @@ def parse_evaluation_overrides(overrides):
     return OmegaConf.from_dotlist(overrides)
 
 
-def task_seed_pools(cfg):
+def evaluation_seed_pool(cfg):
     task = cfg["env_runner"]
     name = task["task_name"]
     seeds = task.get("eval_seeds")
@@ -77,7 +76,7 @@ def task_seed_pools(cfg):
 
         path = DATA_DIR / "eval_seeds" / f"{name}.txt"
         seeds = [int(value) for value in path.read_text().split()]
-    return {name: seeds}
+    return seeds
 
 
 def prepare_evaluation_config(cfg, overrides=None):
@@ -122,8 +121,8 @@ def make_request(cfg, checkpoint, seeds, *, source) -> EvaluationRequest:
         inference_steps=steps,
         action_steps=action_steps,
         device=cfg["training"]["device"],
-        tasks=[options],
-        task_seeds=seeds,
+        runner_options=options,
+        seeds=seeds,
         source=source,
     )
 
@@ -200,16 +199,17 @@ def resolve_evaluation_request(
     else:
         path = resolve_checkpoint_path(root, checkpoint)
     cfg = prepare_evaluation_config(cfg, overrides)
-    seeds = cfg["eval"].get("task_seeds")
+    seeds = cfg["eval"].get("seeds")
     if seeds is None:
         seeds, _ = split_evaluation_seeds(
-            task_seed_pools(cfg), cfg["eval"]["seed"], cfg["eval"]["episodes"]
+            evaluation_seed_pool(cfg), cfg["eval"]["seed"], cfg["eval"]["episodes"]
         )
     else:
-        task = cfg["env_runner"]["task_name"]
-        validate_task_seeds(seeds, [task])
+        validate_seed_pool(seeds)
+        if not seeds:
+            raise ValueError("eval.seeds must be nonempty")
         validate_evaluation_seed(cfg["eval"]["seed"])
         pool = cfg["env_runner"].get("eval_seeds")
-        if pool is not None and set(seeds[task]) - set(validate_seed_pool(task, pool)):
+        if pool is not None and set(seeds) - set(validate_seed_pool(pool)):
             raise ValueError("Requested seed is outside the declared task pool")
     return make_request(cfg, path, seeds, source=source)

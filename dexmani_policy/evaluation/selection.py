@@ -14,10 +14,10 @@ from dexmani_policy.evaluation.artifacts import (
     write_json,
 )
 from dexmani_policy.evaluation.config import (
+    evaluation_seed_pool,
     frozen_test_request,
     make_request,
     prepare_evaluation_config,
-    task_seed_pools,
 )
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
@@ -29,7 +29,7 @@ def rank_selection_results(results):
         avg = stats["avg_steps"]
         ranks.append(
             (
-                stats["micro_success_rate"],
+                stats["success_rate"],
                 -(avg if avg is not None else float("inf")),
                 result["global_step"],
             )
@@ -44,10 +44,10 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
     cfg = prepare_evaluation_config(
         cfg, OmegaConf.merge({"eval": {"video": {"enabled": False}}}, overrides or {})
     )
-    if cfg["eval"].get("task_seeds") is not None:
-        raise ValueError("Selection uses its predeclared test/selection split, not eval.task_seeds")
+    if cfg["eval"].get("seeds") is not None:
+        raise ValueError("Selection uses its predeclared test/selection split, not eval.seeds")
     test, selection = split_evaluation_seeds(
-        task_seed_pools(cfg),
+        evaluation_seed_pool(cfg),
         cfg["eval"]["seed"],
         cfg["eval"]["episodes"],
         positive_int(cfg["eval"]["selection_episodes"], "eval.selection_episodes"),
@@ -76,13 +76,15 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
     directory = create_run_directory(output_root, output_dir)
     path = directory / "selection_result.json"
     test_request = replace(
-        request, task_seeds=test, source={"phase": "test", "heldout_from_selection": True}
+        request, seeds=test, source={"phase": "test", "heldout_from_selection": True}
+    )
+    request = replace(
+        request, config={**cfg, "eval": {**cfg["eval"], "video": {"enabled": False}}}
     )
     record = {
         "status": "running",
-        "experiment_dir": str(root),
         "selection_result": str(path.relative_to(root)),
-        "selection_task_seeds": selection,
+        "selection_seeds": selection,
         "test_request": vars(test_request).copy(),
         "candidates": [
             {"checkpoint": str(m.path.relative_to(root)), "global_step": m.global_step}
@@ -104,7 +106,7 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
                 output_root=directory / "candidates",
             )
             record["candidate_results"].append(str(result_path.relative_to(root)))
-            results.append(result)
+            results.append({key: result[key] for key in ("statistics", "global_step")})
 
         best = rank_selection_results(results)
         candidate = record["candidates"][best]

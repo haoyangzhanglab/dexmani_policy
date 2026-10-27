@@ -25,10 +25,9 @@ def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None)
     write_json(path, record, overwrite=False)
 
     try:
-        for task in request.tasks:
-            render_mode = (task.get("env_kwargs") or {}).get("render_mode")
-            if render_mode == "human" and not os.environ.get("DISPLAY"):
-                raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
+        render_mode = (request.runner_options.get("env_kwargs") or {}).get("render_mode")
+        if render_mode == "human" and not os.environ.get("DISPLAY"):
+            raise RuntimeError("Viewer requires an X11/XWayland DISPLAY")
 
         set_seed(request.config["eval"]["seed"])
         record["runtime"] = runtime_provenance()
@@ -45,23 +44,22 @@ def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None)
 
             record["runtime"]["device_name"] = torch.cuda.get_device_name(request.device)
 
-        for options in request.tasks:
-            runner = SimRunner(**options)
-            with closing(
-                runner.run(
-                    agent,
-                    seeds=request.task_seeds[runner.task_name],
-                    inference_steps=request.inference_steps,
-                    action_steps=request.action_steps,
-                    video_save_dir=(
-                        directory / "videos" / runner.task_name
-                        if request.config["eval"]["video"]["enabled"] else None
-                    ),
-                )
-            ) as episodes:
-                record["episodes"].extend(episodes)
+        runner = SimRunner(**request.runner_options)
+        with closing(
+            runner.run(
+                agent,
+                seeds=request.seeds,
+                inference_steps=request.inference_steps,
+                action_steps=request.action_steps,
+                video_save_dir=(
+                    directory / "videos" / runner.task_name
+                    if request.config["eval"]["video"]["enabled"] else None
+                ),
+            )
+        ) as episodes:
+            record["episodes"].extend(episodes)
 
-        validate_episodes(record["episodes"], request.task_seeds)
+        validate_episodes(record["episodes"], runner.task_name, request.seeds)
         record["statistics"] = compute_evaluation_statistics(record["episodes"])
         record["status"] = "completed"
         write_json(path, record)
@@ -72,7 +70,7 @@ def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None)
 
     stats = record["statistics"]
     print(
-        f"{stats['n_success']}/{stats['n_valid_episodes']}; micro={stats['micro_success_rate']:.1%}, "
-        f"macro={stats['macro_success_rate']:.1%}, avg_steps={stats['avg_steps']}; {path}"
+        f"{stats['n_success']}/{stats['n_valid_episodes']}; success_rate={stats['success_rate']:.1%}, "
+        f"avg_steps={stats['avg_steps']}; {path}"
     )
     return record, path

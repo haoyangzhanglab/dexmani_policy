@@ -98,9 +98,6 @@ class LinearNormalizer(nn.Module):
     def __getitem__(self, key):
         return self.fields[key]
 
-    def __setitem__(self, key, value):
-        self.fields[key] = value
-
 
 def validate_normalizer_state(normalizer):
     # Strict state loading already checks field names and shapes.

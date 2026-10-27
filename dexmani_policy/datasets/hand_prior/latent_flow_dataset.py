@@ -27,9 +27,6 @@ class LatentFlowDataset(RobotDataset):
         kwargs.update(horizon=horizon, obs_horizon=obs_horizon, pad_before=obs_horizon - 1, pad_after=0)
         super().__init__(zarr_path, sensor_modalities=sensor_modalities, **kwargs)
         self.hand_data = describe_hand_chunks(self, data_semantics, source_id)
-        self.commands = self.replay_buffer.read("action", slice(None))
-        self.states = self.replay_buffer.read("joint_state", slice(None))
-        self.commands.flags.writeable = self.states.flags.writeable = False
 
     def describe_hand_data(self):
         validation = self.get_validation_dataset()
@@ -52,9 +49,10 @@ class LatentFlowDataset(RobotDataset):
             return
         if self.is_validation:
             raise ValueError("Validation must reuse the training normalizer")
+        commands = self.replay_buffer.read("action", slice(None))
+        states = self.replay_buffer.read("joint_state", slice(None))
         for start in range(0, len(self), 1024):
             rows = self.sampler.source_rows(self.sampler.indices[start : start + 1024])
             future = rows[:, self.action_offset :]
-            commands = self.commands[future]
-            reference = self.states[future[:, 0]]
-            yield (commands - reference[:, None]).reshape(-1, 19)
+            reference = states[future[:, 0]]
+            yield (commands[future] - reference[:, None]).reshape(-1, 19)

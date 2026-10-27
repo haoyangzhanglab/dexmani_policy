@@ -164,7 +164,7 @@ eval:
   action_steps: null
   episodes: 70
   selection_episodes: 25
-  task_seeds: null
+  seeds: null
 
   video:
     enabled: true

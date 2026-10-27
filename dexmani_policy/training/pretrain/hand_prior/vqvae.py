@@ -19,12 +19,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
-from dexmani_policy.common.normalizer import LinearNormalizer, FieldNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 from dexmani_policy.training.common.optimization import get_scheduler
-from dexmani_policy.training.common.data import build_normalizer
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
     build_runtime_codebook,
@@ -150,17 +149,14 @@ def prepare_policy_data(cfg):
     validate_dq_normalization(spec)
     dataset = build_policy_dataset(cfg)
     hand_data = dataset.describe_hand_data()
-    action = build_normalizer(dataset, {"action": spec["action"]}, cfg.action_key)["action"]
-    hand_slice = slice(int(cfg.agent.tcp_dim), int(cfg.agent.action_dim))
-    normalizer = LinearNormalizer()
-    normalizer["hand"] = FieldNormalizer(
-        action.scale[hand_slice].clone(),
-        action.offset[hand_slice].clone(),
-        {key: value[hand_slice].clone() for key, value in action.input_stats.items()},
-    )
     val = dataset.get_validation_dataset()
     train_hand = policy_hand_rows(dataset, cfg.agent.tcp_dim)
     val_hand = policy_hand_rows(val, cfg.agent.tcp_dim)
+    normalizer = LinearNormalizer()
+    normalizer.fit_field(
+        "hand", (train_hand[start : start + 8192] for start in range(0, len(train_hand), 8192)),
+        mode="limits",
+    )
     metadata = {
         "hand_data": hand_data,
         "split_manifest": dataset.data_recipe["split_manifest"],

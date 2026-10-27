@@ -19,7 +19,7 @@ def create_sequence_indices(
             count += max(0, end - start - sequence_length + pad_before + pad_after + 1)
         start = end
 
-    indices = np.empty((count, 4), dtype=np.int64)
+    indices = np.empty((count, 3), dtype=np.int64)
     cursor = 0
     for i in range(len(episode_ends)):
         if not episode_mask[i]:
@@ -36,8 +36,7 @@ def create_sequence_indices(
             buffer_start_idx = max(idx, 0) + start_idx
             buffer_end_idx = min(idx + sequence_length, episode_length) + start_idx
             sample_start_idx = buffer_start_idx - (idx + start_idx)
-            sample_end_idx = sample_start_idx + buffer_end_idx - buffer_start_idx
-            indices[cursor] = (buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx)
+            indices[cursor] = (buffer_start_idx, buffer_end_idx, sample_start_idx)
             cursor += 1
 
     return indices
@@ -71,7 +70,6 @@ class SequenceSampler:
         if not len(indices):
             raise ValueError("No sequence windows: selected episodes are empty or too short")
 
-        self.keys = list(replay_buffer.keys())
         self.indices = indices
         self.replay_buffer = replay_buffer
         self.sequence_length = sequence_length
@@ -82,7 +80,7 @@ class SequenceSampler:
     def source_rows(self, indices=None):
         """Original source rows, including repeated boundary rows used by padding."""
         indices = self.indices if indices is None else indices
-        start, end, sample_start, _ = np.asarray(indices).T
+        start, end, sample_start = np.asarray(indices).T
         return np.clip(
             start[:, None] + np.arange(self.sequence_length) - sample_start[:, None],
             start[:, None],
@@ -128,7 +126,7 @@ class SequenceSampler:
     def sample_sequence(self, idx, *, key_lengths=None, key_offsets=None):
         result = {}
         rows = self.sample_source_rows(idx)
-        for key in self.keys:
+        for key in self.replay_buffer.keys():
             length = self.sequence_length if key_lengths is None else key_lengths[key]
             offset = 0 if key_offsets is None else key_offsets.get(key, 0)
             selected = rows[offset : offset + length]
