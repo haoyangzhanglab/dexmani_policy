@@ -15,11 +15,13 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import load_policy_config, positive_int
+from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.data import prepare_policy_data
+from dexmani_policy.datasets.hand_prior.data import prepare_hand_source
+from dexmani_policy.datasets.common.validation import validate_fields
+from dexmani_policy.common.hand_representation import validate_hand_coordinates
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
@@ -28,6 +30,35 @@ from dexmani_policy.training.pretrain.hand_prior.codebook import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def prepare_policy_data(cfg):
+    spec = resolve_normalization_spec(cfg)
+    if spec["action"] not in {"auto", "limits"}:
+        raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
+    if cfg.agent.tcp_dim != 7:
+        raise ValueError("DQ/VQ requires tcp_dim=7")
+    buffer, train, val, split = prepare_hand_source(cfg, ["action"])
+    validate_hand_coordinates(buffer.attrs)
+    validate_fields(buffer, train | val, {"action": slice(7, 19)})
+
+    def read_hand(mask):
+        chunks = [values for _, values in buffer.iter_chunks("action", columns=slice(7, 19), episode_mask=mask)]
+        return np.concatenate(chunks) if chunks else np.empty((0, 12), dtype=np.float32)
+
+    train_hand, val_hand = read_hand(train), read_hand(val)
+    normalizer = LinearNormalizer()
+    normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
+    metadata = dict(
+        hand_data={"action_key": cfg.dataset.action_key}, split_manifest=split,
+        dataset_config={key: cfg.dataset[key] for key in (
+            "zarr_path", "action_key", "seed", "val_ratio", "max_train_episodes",
+        )}, normalization_spec={"action": spec["action"]},
+    )
+    metadata["dataset_config"]["zarr_path"] = buffer.path
+    train_hand = normalizer["hand"].normalize(train_hand).numpy()
+    val_hand = normalizer["hand"].normalize(val_hand).numpy()
+    return train_hand, val_hand, normalizer, metadata
 
 
 @torch.no_grad()
@@ -82,20 +113,7 @@ def save_checkpoint(
         "model_state_dict": vqvae.state_dict(),
         "normalizer_state_dict": normalizer.state_dict(),
         "training_config": OmegaConf.to_container(recipe, resolve=True),
-        "model_config": {
-            "hand_dim": vqvae.hand_dim,
-            "latent_dim": vqvae.latent_dim,
-            "hidden_dim": vqvae.hidden_dim,
-            "num_groups": vqvae.num_groups,
-            "codebook_size": vqvae.codebook_size,
-            "num_layers": vqvae.num_layers,
-            "act_scale": float(vqvae.act_scale.detach().cpu()),
-            "loss_weight": vqvae.loss_weight.detach().cpu().tolist(),
-            "vq_decay": recipe.vq_decay,
-            "threshold_ema_dead_code": recipe.threshold_ema_dead_code,
-            "kmeans_iters": recipe.kmeans_iters,
-            "kmeans_init": recipe.kmeans_init,
-        },
+        "model_config": vqvae.model_config,
         "split_metadata": split_metadata,
         "metrics": metrics,
     }
@@ -282,6 +300,10 @@ def train(cfg):
     selected_path = output_dir / "vqvae_hand_best.pt"
     selected = torch.load(selected_path, map_location="cpu", weights_only=True)
     runtime_codebook = build_runtime_codebook(selected, selected_path, device="cpu")
+    codebook_path = output_dir / "codebook.npz"
+    with atomic_path(codebook_path) as temporary:
+        runtime_codebook.save(temporary)
+    print(f"Saved selected runtime codebook: {codebook_path}")
     diagnostics = deployment_diagnostics(
         runtime_codebook, {"train": train_norm, "held_out": val_norm}
     )

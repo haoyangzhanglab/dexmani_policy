@@ -66,7 +66,6 @@ class LatentFlowObservationEncoder(nn.Module):
 
 class LatentFlowPolicy(BasePolicy):
     supported_execution_modes = ("sync",)
-    requires_hand_pretraining = True
     future_action_window = True
 
     def __init__(
@@ -182,14 +181,15 @@ class LatentFlowPolicy(BasePolicy):
     def action_context_shapes(self):
         return {"reference_state": [self.action_dim]}
 
+    @classmethod
+    def prepare_restore_config(cls, config) -> None:
+        config.codec_path = None
+
     def initialize_training(self, data_description) -> None:
         self.codec_initialized = False
         if not self.codec_path:
             raise ValueError("Fresh LatentFlow training requires codec_path")
-        codec, payload = load_hand_vae(self.codec_path)
-        if codec.model_config != self.codec.model_config:
-            raise ValueError("LatentFlow codec architecture differs from the policy configuration")
-        self.codec.load_state_dict(codec.state_dict(), strict=True)
+        payload = load_hand_vae(self.codec_path, self.codec)
         self.codec_metadata = payload["metadata"]
         validate_hand_chunk_compatibility(
             self.codec_metadata["hand_data"], data_description["hand_data"]

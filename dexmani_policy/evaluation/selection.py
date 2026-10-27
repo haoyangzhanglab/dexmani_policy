@@ -1,5 +1,6 @@
 """Evaluate milestone checkpoints with a fixed budget and publish the best."""
 
+import fcntl
 import traceback
 from dataclasses import replace
 from pathlib import Path
@@ -23,18 +24,15 @@ from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
 
 def rank_selection_results(results):
-    ranks = []
-    for result in results:
+    def rank(result):
         stats = result["statistics"]
         avg = stats["avg_steps"]
-        ranks.append(
-            (
-                stats["success_rate"],
-                -(avg if avg is not None else float("inf")),
-                result["global_step"],
-            )
+        return (
+            stats["success_rate"],
+            -(avg if avg is not None else float("inf")),
+            result["global_step"],
         )
-    return max(range(len(results)), key=ranks.__getitem__)
+    return max(results, key=rank)
 
 
 def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> tuple[dict, Path]:
@@ -106,10 +104,12 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
                 output_root=directory / "candidates",
             )
             record["candidate_results"].append(str(result_path.relative_to(root)))
-            results.append({key: result[key] for key in ("statistics", "global_step")})
+            results.append({
+                "checkpoint": str(milestone.path.relative_to(root)),
+                **{key: result[key] for key in ("statistics", "global_step")},
+            })
 
-        best = rank_selection_results(results)
-        candidate = record["candidates"][best]
+        candidate = rank_selection_results(results)
         checkpoint = root / candidate["checkpoint"]
         record["test_request"]["checkpoint"] = str(checkpoint)
         record.update(
@@ -136,7 +136,14 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
 def run_pipeline(exp_dir, cfg, *, overrides=None) -> Path:
     from dexmani_policy.evaluation.rollout import evaluate_policy
 
-    record, checkpoint = select_best_checkpoint(exp_dir, cfg, overrides=overrides)
-    request = frozen_test_request(record, checkpoint)
-    _, result_path = evaluate_policy(request, output_root=Path(exp_dir) / "eval_dexsim")
-    return result_path
+    root = Path(exp_dir).expanduser().resolve()
+    # Keep the inode so shell and direct Python invocations share the same lock.
+    with (root / ".pipeline.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(f"Another eval pipeline is running for {root}") from error
+        record, checkpoint = select_best_checkpoint(root, cfg, overrides=overrides)
+        request = frozen_test_request(record, checkpoint)
+        _, result_path = evaluate_policy(request, output_root=root / "eval_dexsim")
+        return result_path

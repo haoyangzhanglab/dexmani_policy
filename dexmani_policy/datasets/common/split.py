@@ -54,8 +54,6 @@ def validate_split_manifest(manifest, buffer):
     train, val = groups
     if not train or train & val:
         raise ValueError("train/val must be disjoint, with nonempty train")
-    if "exclusions" in manifest and set(manifest["exclusions"]) != canonical - train - val:
-        raise ValueError("Legacy exclusions disagree with train/val indices")
     if trials is not None and {trials[ids[i]] for i in train} & {trials[ids[i]] for i in val}:
         raise ValueError("a trial cannot cross train/val")
     manifest = {

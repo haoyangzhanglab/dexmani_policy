@@ -12,7 +12,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.hand_representation import validate_pretraining_data
+from dexmani_policy.common.hand_representation import validate_pretraining_split
 
 
 class LAMPObservationEncoder(nn.Module):
@@ -73,8 +73,6 @@ class LAMPRegressionHead(nn.Module):
 
 class LAMPPolicy(BasePolicy):
     supported_execution_modes = ("sync",)
-    requires_hand_pretraining = True
-    requires_split_manifest = True
     requires_action_affine = False
     supported_action_keys = ("action",)
 
@@ -146,17 +144,21 @@ class LAMPPolicy(BasePolicy):
     def action_context_shapes(self):
         return {"hand_history": [self.history_steps, self.hand_dim]}
 
+    @classmethod
+    def prepare_restore_config(cls, config) -> None:
+        config.prior_path = None
+
     def initialize_training(self, data_description) -> None:
         self.prior_initialized = False
         if not self.prior_path:
             raise ValueError("Fresh LAMP training requires prior_path")
-        prior, payload = load_motion_prior(self.prior_path)
-        if prior.model_config != self.prior.model_config:
-            raise ValueError("LAMP prior architecture differs from the policy configuration")
-        self.prior = prior
+        payload = load_motion_prior(self.prior_path, self.prior)
         metadata = payload["metadata"]
-        validate_pretraining_data(
-            data_description["hand_data"], data_description["split_manifest"],
+        current, pretrained = data_description["hand_data"], metadata["hand_data"]
+        if any(current[key] != pretrained[key] for key in ("action_key", "dt", "history_steps")):
+            raise ValueError("LAMP prior/policy action history or time semantics mismatch")
+        validate_pretraining_split(
+            data_description["split_manifest"],
             metadata["hand_data"], metadata["split_manifest"],
         )
         self.prior_initialized = True

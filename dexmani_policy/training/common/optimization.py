@@ -2,7 +2,6 @@ import math
 
 import torch
 import torch.optim.lr_scheduler as lr_scheduler
-from diffusers.optimization import get_scheduler as diffusion_scheduler
 
 
 def build_optimizer(
@@ -118,6 +117,8 @@ def cosine_with_min_lr(
 def get_scheduler(optimizer, name, num_warmup_steps, num_training_steps, lr_min_ratio=0.1):
     if name == "cosine_min_lr":
         return cosine_with_min_lr(optimizer, num_warmup_steps, num_training_steps, lr_min_ratio)
+    from diffusers.optimization import get_scheduler as diffusion_scheduler
+
     return diffusion_scheduler(
         name, optimizer=optimizer, num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,

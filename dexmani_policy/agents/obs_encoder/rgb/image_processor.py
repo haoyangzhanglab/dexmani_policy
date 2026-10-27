@@ -53,7 +53,7 @@ def to_rgb_tensor(images: np.ndarray | torch.Tensor) -> torch.Tensor:
     return images.contiguous()
 
 
-class ImageProcessor:
+class ImageProcessor(torch.nn.Module):
     """Resize and normalize uint8 or floating-point RGB for policy inputs."""
 
     def __init__(
@@ -63,11 +63,12 @@ class ImageProcessor:
         image_std: Sequence[float] = IMAGENET_STD,
         interpolation: str = "bilinear",
     ):
+        super().__init__()
         if isinstance(image_size, int):
             image_size = (image_size, image_size)
         self.image_size = tuple(map(int, image_size)) if image_size is not None else None
-        self.image_mean = torch.tensor(image_mean, dtype=torch.float32)
-        self.image_std = torch.tensor(image_std, dtype=torch.float32)
+        self.register_buffer("image_mean", torch.tensor(image_mean, dtype=torch.float32), persistent=False)
+        self.register_buffer("image_std", torch.tensor(image_std, dtype=torch.float32), persistent=False)
         for name, value in (
             ("image_mean", self.image_mean),
             ("image_std", self.image_std),
@@ -80,11 +81,6 @@ class ImageProcessor:
         self.interpolation = interpolation.lower()
         if self.interpolation not in ("nearest", "bilinear", "bicubic"):
             raise ValueError(f"Unsupported interpolation: {interpolation}")
-        self.normalization_cache = {}
-
-    def __getstate__(self):
-        # Device copies are disposable constants, not serialized model state.
-        return {**self.__dict__, "normalization_cache": {}}
 
     @classmethod
     def from_preset(cls, name: str, config: dict | None = None) -> "ImageProcessor":
@@ -108,13 +104,8 @@ class ImageProcessor:
 
     def normalize(self, image_batch: torch.Tensor) -> torch.Tensor:
         device, dtype = image_batch.device, image_batch.dtype
-        key = (device, dtype)
-        if key not in self.normalization_cache:
-            self.normalization_cache[key] = (
-                self.image_mean.to(device=device, dtype=dtype).view(1, 3, 1, 1),
-                self.image_std.to(device=device, dtype=dtype).view(1, 3, 1, 1),
-            )
-        mean, std = self.normalization_cache[key]
+        mean = self.image_mean.to(device=device, dtype=dtype).view(1, 3, 1, 1)
+        std = self.image_std.to(device=device, dtype=dtype).view(1, 3, 1, 1)
         return image_batch.sub(mean).div_(std)
 
     def process_images(

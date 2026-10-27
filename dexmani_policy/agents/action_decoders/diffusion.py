@@ -17,7 +17,6 @@ class Diffusion(nn.Module):
         num_training_steps: int = 100,
         num_inference_steps: int = 10,
         prediction_type: str = "sample",
-        aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
     ) -> None:
         super().__init__()
@@ -28,7 +27,6 @@ class Diffusion(nn.Module):
             raise ValueError(f"Unsupported prediction type: {prediction_type}")
 
         self.model = model
-        self.aux_loss_weight = aux_loss_weight
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_training_steps,
             beta_start=0.0001,
@@ -49,7 +47,7 @@ class Diffusion(nn.Module):
         self,
         cond: torch.Tensor,
         actions: torch.Tensor,
-        dim_groups: dict[str, tuple[int, int]] | None = None,
+        dim_groups: dict[str, tuple[int, int, float]] | None = None,
         *,
         log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -80,16 +78,14 @@ class Diffusion(nn.Module):
             target = target.to(dtype=actions.dtype)
 
         loss_dict = {}
-        # R3D averages each action group separately and weights only auxiliary losses.
+        # Each group retains its own mean before applying its explicit weight.
         if dim_groups is not None:
             group_losses = []
-            for name, (start, end) in dim_groups.items():
+            for name, (start, end, weight) in dim_groups.items():
                 group_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
                 if log_metrics:
                     loss_dict[f"loss_{name}"] = group_loss.detach()
-                if name != "joint":
-                    group_loss = group_loss * self.aux_loss_weight
-                group_losses.append(group_loss)
+                group_losses.append(group_loss * weight)
             loss = sum(group_losses)
         else:
             loss = F.mse_loss(pred, target)

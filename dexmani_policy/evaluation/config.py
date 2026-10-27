@@ -13,7 +13,7 @@ from dexmani_policy.common.config import (
     validate_action_key_consistency,
 )
 from dexmani_policy.common.experiments import (
-    discover_milestone_checkpoints,
+    resolve_policy_checkpoint,
     resolve_milestone_path,
 )
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
@@ -142,28 +142,6 @@ def frozen_test_request(record, checkpoint, *, device=None) -> EvaluationRequest
     )
 
 
-def resolve_checkpoint_path(root: Path, selector: str) -> Path:
-    """Resolve a tag or path to a file inside the experiment/checkpoints directory."""
-    if selector.endswith("pct"):
-        milestones = discover_milestone_checkpoints(root)
-        target_pct = int(selector.removesuffix("pct"))
-        for milestone in milestones:
-            if milestone.pct == target_pct:
-                return milestone.path
-        available = [m.pct for m in milestones]
-        raise FileNotFoundError(f"No {target_pct}% milestone checkpoint. Available: {available}")
-    if selector == "latest":
-        path = root / "checkpoints/latest.pt"
-    else:
-        path = Path(selector)
-        if not path.is_absolute():
-            path = root / "checkpoints" / path
-    path = path.resolve()
-    if not path.is_file() or not path.is_relative_to(root / "checkpoints"):
-        raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
-    return path
-
-
 def resolve_evaluation_request(
     exp_dir, checkpoint="best", overrides=None, *, selection_record=None
 ) -> EvaluationRequest:
@@ -187,17 +165,16 @@ def resolve_evaluation_request(
 
     cfg = load_experiment_config(root)
     source = {"phase": "ordinary", "heldout_from_selection": False}
+    checkpoint = str(checkpoint)
+    path, defaults, selection_source = resolve_policy_checkpoint(
+        root, checkpoint, cfg, relative_to=root / "checkpoints",
+    )
+    if not path.is_relative_to(root / "checkpoints"):
+        raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
     if checkpoint == "best":
-        selected = json.loads((root / "best_ckpt.json").read_text())
-        path = resolve_milestone_path(root, selected["ckpt_relpath"])
-        inference = {
-            key: selected["inference"][key] for key in ("use_ema", "inference_steps", "action_steps")
-        }
+        inference = {key: defaults[key] for key in ("use_ema", "inference_steps", "action_steps")}
         overrides = OmegaConf.merge({"eval": inference}, overrides or {})
-        source["selection_result"] = selected["selection_result"]
-        source["global_step"] = selected["global_step"]
-    else:
-        path = resolve_checkpoint_path(root, checkpoint)
+        source.update(selection_source)
     cfg = prepare_evaluation_config(cfg, overrides)
     seeds = cfg["eval"].get("seeds")
     if seeds is None:

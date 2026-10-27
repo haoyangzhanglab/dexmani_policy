@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -7,7 +8,6 @@ import torch
 
 from dexmani_policy.common.image_util import preprocess_rgb_eval
 from dexmani_policy.common.io_util import close_resources
-from dexmani_policy.env_runner.video import save_episode_video
 
 
 class SimRunner:
@@ -97,9 +97,12 @@ class SimRunner:
         obs, _ = env.reset(seed=episode_seed)
         self.reset()
         self.update_obs(obs)
-        if getattr(agent, "history_steps", 0):
-            initial_hand = obs["joint_state"][-agent.hand_dim :]
-            self.hand_history = np.repeat(initial_hand[None], agent.history_steps, axis=0)
+        shapes = agent.inference_metadata["action_context_shapes"]
+        if "hand_history" in shapes:
+            from dexmani_policy.agents.hand_prior.motion_prior import initial_hand_history
+
+            history_steps, hand_dim = shapes["hand_history"]
+            self.hand_history = initial_hand_history(obs["joint_state"][-hand_dim:], history_steps)
 
         device = next(agent.parameters()).device
         # Environment and policy own separate random streams.
@@ -116,9 +119,11 @@ class SimRunner:
             for action in action_chunk:
                 obs, _, done, truncated, info = env.step(action)
                 if self.hand_history is not None:
-                    # History follows the command actually applied after environment clipping.
-                    self.hand_history[:-1] = self.hand_history[1:]
-                    self.hand_history[-1] = info["executed_joint_action"][-agent.hand_dim :]
+                    from dexmani_policy.agents.hand_prior.motion_prior import append_hand_history
+
+                    self.hand_history = append_hand_history(
+                        self.hand_history, info["executed_joint_action"][-self.hand_history.shape[-1]:],
+                    )
                 self.update_obs(obs)
 
                 if info["success_condition"] and task_done_step is None:
@@ -142,10 +147,13 @@ class SimRunner:
                 success, steps = self.run_episode(
                     agent, env, seed, inference_steps, action_steps=action_steps
                 )
-                video = (
-                    save_episode_video(env, video_save_dir, f"episode_{seed}")
-                    if video_save_dir is not None else None
-                )
+                video = None
+                if video_save_dir is not None:
+                    from dexmani_policy.env_runner.video import save_episode_video
+
+                    video = save_episode_video(
+                        env.get_video(), env.video_fps, Path(video_save_dir) / f"episode_{seed}.mp4",
+                    )
                 yield {
                     "task_name": self.task_name,
                     "seed": seed,

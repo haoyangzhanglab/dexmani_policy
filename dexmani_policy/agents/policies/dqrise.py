@@ -18,7 +18,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.hand_representation import validate_pretraining_data
+from dexmani_policy.common.hand_representation import validate_hand_coordinates, validate_pretraining_split
 
 
 class DQRISEObservationEncoder(nn.Module):
@@ -85,8 +85,6 @@ class DQRISEObservationEncoder(nn.Module):
 
 
 class DQRISEPolicy(BasePolicy):
-    requires_hand_pretraining = True
-    requires_split_manifest = True
     supported_action_keys = ("action",)
 
     def set_normalization_spec(
@@ -126,8 +124,8 @@ class DQRISEPolicy(BasePolicy):
         modality_dropout_probs: dict | None = None,
         clip_sample: bool = True,
     ) -> None:
-        if (horizon, n_obs_steps, n_action_steps, action_dim, tcp_dim) != (20, 1, 16, 19, 7):
-            raise ValueError("DQ-RISE requires horizon=20, n_obs_steps=1, n_action_steps=16 and joint action=7+12")
+        if (n_obs_steps, action_dim, tcp_dim) != (1, 19, 7):
+            raise ValueError("DQ-RISE requires n_obs_steps=1 and joint action=7+12")
         validate_unet_horizon(horizon, down_dims)
 
         hand_dim = action_dim - tcp_dim
@@ -192,15 +190,20 @@ class DQRISEPolicy(BasePolicy):
             )
         ]
 
+    @classmethod
+    def prepare_restore_config(cls, config) -> None:
+        config.codebook_path = None
+
     def initialize_training(self, data_description) -> None:
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
+        validate_hand_coordinates(data_description["attrs"])
         self.hand_codebook.load(self.codebook_path)
         metadata = self.hand_codebook.artifact_metadata
-        if metadata["hand_data"]["action_key"] != "action":
-            raise ValueError("DQ-RISE requires a Codebook pretrained with action_key=action")
-        validate_pretraining_data(
-            data_description["hand_data"], data_description["split_manifest"],
+        if data_description["action_key"] != "action" or metadata["hand_data"]["action_key"] != "action":
+            raise ValueError("DQ-RISE requires joint policy data and a codebook pretrained with action_key=action")
+        validate_pretraining_split(
+            data_description["split_manifest"],
             metadata["hand_data"], metadata["split_manifest"],
         )
 

@@ -7,23 +7,9 @@ from torch import nn
 from .image_processor import ImageProcessor
 
 RGB_ENCODER_DEFAULTS = {
-    "resnet": {
-        "model_name": "resnet18",
-        "tune_mode": "full",
-        "norm_mode": "group_norm",
-        "global_token_type": "avg",
-        "weights": None,
-    },
-    "dino": {
-        "model_name": "facebook/dinov2-base",
-        "tune_mode": "freeze",
-        "global_token_type": "avg",
-    },
-    "siglip": {
-        "model_name": "google/siglip-base-patch16-224",
-        "tune_mode": "freeze",
-        "global_token_type": "avg",
-    },
+    "resnet": {},
+    "dino": {"model_name": "facebook/dinov2-base"},
+    "siglip": {"model_name": "google/siglip-base-patch16-224"},
 }
 
 
@@ -55,7 +41,7 @@ def build_rgb_encoder(
     return encoder, processor
 
 
-def example(name: str = "resnet") -> None:
+def example(name: Literal["resnet", "dino", "siglip"] = "resnet") -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     encoder, processor = build_rgb_encoder(name)
     encoder.to(device).eval()

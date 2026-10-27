@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 from omegaconf import DictConfig
 from torch import nn
@@ -11,7 +13,6 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.obs_encoder.rgb.build import build_rgb_encoder
-from dexmani_policy.agents.obs_encoder.rgb.resnet import ResNetEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 
 
@@ -20,7 +21,7 @@ class DPObservationEncoder(nn.Module):
 
     def __init__(
         self,
-        rgb_backbone_name: str,
+        rgb_backbone_name: Literal["resnet", "dino", "siglip"],
         state_dim: int,
         n_obs_steps: int,
         state_out_dim: int = 64,
@@ -41,9 +42,6 @@ class DPObservationEncoder(nn.Module):
     def forward(self, obs: dict) -> torch.Tensor:
         rgb = self.image_processor.process_images(obs["rgb"])
 
-        if isinstance(self.backbone, ResNetEncoder):
-            rgb = rgb.to(memory_format=torch.channels_last)
-
         features = torch.cat(
             [
                 self.backbone(rgb)["global_token"],
@@ -60,8 +58,10 @@ class DPPolicy(BasePolicy):
     @classmethod
     def prepare_restore_config(cls, config) -> None:
         rgb = dict(config.rgb_backbone_config)
-        if config.rgb_backbone_name == "resnet" and not {"tune_mode", "norm_mode"} <= rgb.keys():
-            raise ValueError("Saved ResNet requires explicit tune_mode and norm_mode")
+        if config.rgb_backbone_name == "resnet":
+            if not {"tune_mode", "norm_mode"} <= rgb.keys():
+                raise ValueError("Saved ResNet requires explicit tune_mode and norm_mode")
+            rgb["weights"] = None
         if config.rgb_backbone_name in {"dino", "siglip"} and not isinstance(
             rgb.get("architecture"), (dict, DictConfig)
         ):
@@ -75,7 +75,7 @@ class DPPolicy(BasePolicy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        rgb_backbone_name: str,
+        rgb_backbone_name: Literal["resnet", "dino", "siglip"],
         state_dim: int,
         state_out_dim: int = 64,
         rgb_backbone_config: dict | None = None,

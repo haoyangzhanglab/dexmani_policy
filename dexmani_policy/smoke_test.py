@@ -24,9 +24,7 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
-from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
-from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
-from dexmani_policy.deployment.runtime import restore_policy_agent
+from dexmani_policy.common.checkpoint import restore_policy_agent
 from dexmani_policy.training.common.config import validate_config
 from dexmani_policy.training.common.data import (
     build_dataset_and_normalizer,
@@ -116,15 +114,13 @@ def validate_data_batch(batch, dataset, cfg):
         validate_tensor_layout(obs[key], (batch_size, *shape), f"obs.{key}", dtype)
 
     context = batch.get("action_context", {})
-    context_shapes: dict[str, tuple[int, ...]] = {}
-    if isinstance(dataset, LAMPDataset):
-        context_shapes["hand_history"] = (batch_size, dataset.history_steps, 12)
-    elif isinstance(dataset, LatentFlowDataset):
-        context_shapes["reference_state"] = (batch_size, 19)
-    if not isinstance(context, dict) or context.keys() != context_shapes.keys():
-        raise ValueError("Batch action_context differs from the dataset recipe")
-    for key, shape in context_shapes.items():
-        validate_tensor_layout(context[key], shape, f"action_context.{key}", torch.float32)
+    if not isinstance(context, dict):
+        raise ValueError("Batch action_context must be a dict")
+    for key, value in context.items():
+        if not isinstance(value, torch.Tensor) or value.ndim < 1 or len(value) != batch_size:
+            raise ValueError(f"action_context.{key}: expected batched tensor")
+        if value.dtype != torch.float32:
+            raise ValueError(f"action_context.{key}: expected float32")
 
     for name, value in iter_batch_fields(batch):
         if value.device.type != "cpu":
@@ -228,13 +224,6 @@ def validate_policy_restoration(cfg, trainer, checkpoint_path):
         with torch.inference_mode():
             result = model.predict_action(obs, **prediction_kwargs)
             prediction = result["future_actions"]
-            if isinstance(trainer.train_loader.dataset, LatentFlowDataset):
-                error = result["future_actions"][..., 7:] - batch["action"][:1, :, 7:].to(trainer.device)
-                print(
-                    f"{'EMA' if use_ema else 'raw'} full noise sampling: "
-                    f"sampled_hand_mae={error.abs().mean().item():.6g}, "
-                    f"sampled_hand_rmse={error.square().mean().sqrt().item():.6g} radians"
-                )
         assert prediction.shape == (1, model.future_steps, model.control_action_dim)
         assert torch.isfinite(prediction).all()
 

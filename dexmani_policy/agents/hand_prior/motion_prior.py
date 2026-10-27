@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 
@@ -75,13 +76,25 @@ class HandMotionPrior(nn.Module):
             raise ValueError("Prior checkpoint contains nonfinite tensors")
 
 
-def load_motion_prior(path: str | Path) -> tuple[HandMotionPrior, dict]:
+def load_motion_prior(path: str | Path, prior: HandMotionPrior) -> dict:
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
     if payload["coordinate_space"] != HandMotionPrior.coordinate_space:
         raise ValueError("LAMP requires raw-radians prior coordinates")
     if payload["metadata"]["hand_joint_order"] != HandMotionPrior.hand_joint_order:
         raise ValueError("LAMP prior hand joint order differs from the local robot contract")
-    prior = HandMotionPrior(**payload["model_config"])
+    if payload["model_config"] != prior.model_config:
+        raise ValueError("LAMP prior architecture differs from the policy configuration")
     prior.load_state_dict(payload["model_state_dict"], strict=True)
     prior.validate_state()
-    return prior.freeze(), payload
+    prior.freeze()
+    return payload
+
+
+def initial_hand_history(initial_hand, history_steps):
+    return np.repeat(np.asarray(initial_hand, dtype=np.float32)[None], history_steps, axis=0)
+
+
+def append_hand_history(history, command):
+    # Allocate a new history so an in-flight inference keeps its original snapshot.
+    command = np.asarray(command, dtype=history.dtype)
+    return np.concatenate((history[1:], command[None]), axis=0)

@@ -119,9 +119,10 @@ def preprocess_point_cloud(
 
 
 def index_points(points: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-    batch_index = torch.arange(points.size(0), device=points.device, dtype=torch.long)
-    view_shape = (points.size(0),) + (1,) * (index.ndim - 1)
-    return points[batch_index.view(*view_shape), index]
+    batch_size, num_points = points.shape[:2]
+    flat = points.reshape(batch_size, num_points, -1)
+    expanded = index.reshape(batch_size, -1, 1).expand(-1, -1, flat.shape[-1])
+    return flat.gather(1, expanded).reshape(*index.shape, *points.shape[2:])
 
 
 def knn_indices(

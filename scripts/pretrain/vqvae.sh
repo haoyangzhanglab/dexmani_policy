@@ -1,6 +1,7 @@
 #!/bin/bash
 # DQ-RISE 码本预训练：vqvae.sh [task_name] [key=value ...]
-# 必须提供 dataset.split_manifest=/path/to/split.json。
+# 结束后自动保存所选 best 的 codebook.npz；独立 exporter 仅用于重导出。
+# 可选传入 dataset.split_manifest；两阶段默认使用相同的显式 split 参数。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 
+from dexmani_policy.common.checkpoint import restore_policy_agent
 from dexmani_policy.common.config import positive_int
 
 
@@ -16,78 +17,6 @@ _OBSERVATION_SHAPES = {
     "camera_extrinsic": (12,),
     "tactile_valid": (5,),
 }
-
-
-def restore_policy_agent(saved_config, checkpoint_path, *, use_ema, device):
-    import hydra
-    from omegaconf import OmegaConf
-
-    from dexmani_policy.common.checkpoint import load_checkpoint, load_policy_state, prepare_restore_config
-    from dexmani_policy.common.config import (
-        normalization_dims_from_config,
-        resolve_normalization_spec,
-    )
-    from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
-
-    checkpoint = load_checkpoint(checkpoint_path, mmap=True)
-    if inference_recipe(checkpoint.effective_config) != inference_recipe(saved_config):
-        raise ValueError("Checkpoint inference recipe mismatch with saved config")
-    cfg = OmegaConf.create(checkpoint.effective_config)
-    state = checkpoint.ema_model_state if use_ema else checkpoint.model_state
-    if state is None and use_ema:
-        raise ValueError("Requested EMA weights are absent; select raw explicitly")
-    global_step = checkpoint.global_step
-    # Release unselected weights and optimizer state before model construction.
-    del checkpoint
-
-    agent_cfg = prepare_restore_config(cfg.agent)
-    rng_state = get_rng_state()
-    try:
-        agent = hydra.utils.instantiate(agent_cfg)
-    finally:
-        set_rng_state(rng_state)
-
-    if agent.inference_metadata != OmegaConf.to_container(cfg.policy_metadata, resolve=True):
-        raise ValueError("Restored policy metadata differs from saved construction")
-    agent.checkpoint_step = global_step
-    agent.set_normalization_spec(
-        resolve_normalization_spec(cfg), normalization_dims_from_config(cfg)
-    )
-    load_policy_state(agent, state)
-    del state
-    agent.to(device)
-    agent.eval()
-    return agent
-
-
-def inference_recipe(config):
-    """Compare inference semantics without training, data-location or initialization settings."""
-    from omegaconf import OmegaConf
-
-    from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
-
-    if OmegaConf.is_config(config):
-        config = OmegaConf.to_container(config, resolve=True)
-    agent = dict(config["agent"])
-    for key in ("prior_path", "codec_path", "codebook_path"):
-        agent.pop(key, None)
-
-    dataset = config["dataset"]
-    inputs = {
-        key: dataset.get(key) for key in ("sensor_modalities", "pc_dim", "history_steps")
-    }
-    inputs["rgb"] = rgb_preprocessing_kwargs(dataset)
-
-    return {
-        "agent": agent,
-        "policy_metadata": config["policy_metadata"],
-        "inputs": inputs,
-        "normalization": config["normalization"],
-        "normalization_dims": config["normalization_dims"],
-        "action_key": config["action_key"],
-        "task_name": config.get("task_name"),
-        "real_runtime": config.get("real_runtime"),
-    }
 
 
 def load_policy(info, *, device="cuda:0", seed=0):
@@ -267,38 +196,30 @@ class PolicyRuntime:
         prediction = result["future_actions"][0].to(device="cpu", dtype=torch.float64).numpy()
         return np.ascontiguousarray(prediction)
 
-    def warmup(self, *, samples=5, rgb_hw=None, rtc_delay=0, rtc_guidance_cap=None):
+    def warmup(self, *, samples=5, rgb_hw=None, action_context=None, rtc_delay=0, rtc_guidance_cap=None):
         positive_int(samples, "samples")
         future_steps = self.info.future_steps
         if type(rtc_delay) is not int or not 0 <= rtc_delay <= future_steps:
             raise ValueError(f"rtc_delay must be an integer in [0, {future_steps}]")
         observation = make_warmup_observation(self.info, rgb_hw=rgb_hw)
 
-        context = None
-        if self.info.hand_history_steps is not None:
-            context = {
-                "hand_history": np.repeat(
-                    observation["joint_state"][-1:, -12:], self.agent.history_steps, axis=0
-                )
-            }
-
         def measure(**kwargs):
             durations = []
             for _ in range(samples):
                 start = time.perf_counter_ns()
-                self.predict(observation, action_context=context, **kwargs)
+                self.predict(observation, action_context=action_context, **kwargs)
                 durations.append((time.perf_counter_ns() - start) / 1e9)
             return tuple(durations)
 
         generator_state = self.generator.get_state()
         try:
             # Exclude initialization and reuse its physical prediction for RTC warmup.
-            prefix = self.predict(observation, action_context=context)
+            prefix = self.predict(observation, action_context=action_context)
             bootstrap = measure()
             steady = bootstrap
             if rtc_guidance_cap is not None:
                 kwargs = dict(rtc_prefix=prefix, delay_steps=rtc_delay, rtc_guidance_cap=rtc_guidance_cap)
-                self.predict(observation, action_context=context, **kwargs)
+                self.predict(observation, action_context=action_context, **kwargs)
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}
         finally:

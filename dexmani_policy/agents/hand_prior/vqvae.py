@@ -200,6 +200,7 @@ class HandVQVAE(nn.Module):
         self.num_groups = num_groups
         self.codebook_size = codebook_size
         self.num_layers = num_layers
+        self.kmeans_init = kmeans_init
         self.register_buffer("act_scale", torch.tensor(float(act_scale)))
         self.register_buffer("loss_weight", torch.tensor(loss_weight, dtype=torch.float32))
         self.encoder = HandStateMLP(hand_dim, latent_dim, hidden_dim, num_layers)
@@ -213,6 +214,20 @@ class HandVQVAE(nn.Module):
             kmeans_init=kmeans_init,
             kmeans_iters=kmeans_iters,
         )
+
+    @property
+    def model_config(self) -> dict:
+        layer = self.quantizer.layers[0]
+        return {
+            "hand_dim": self.hand_dim, "latent_dim": self.latent_dim,
+            "hidden_dim": self.hidden_dim, "num_groups": self.num_groups,
+            "codebook_size": self.codebook_size, "num_layers": self.num_layers,
+            "act_scale": float(self.act_scale.detach().cpu()),
+            "loss_weight": self.loss_weight.detach().cpu().tolist(),
+            "vq_decay": layer.decay,
+            "threshold_ema_dead_code": layer.threshold_ema_dead_code,
+            "kmeans_iters": layer.kmeans_iters, "kmeans_init": self.kmeans_init,
+        }
 
     def forward(self, hand: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         target = hand / self.act_scale

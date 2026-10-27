@@ -1,7 +1,24 @@
+import math
+
 import numpy as np
 import torch
 
 from dexmani_policy.datasets.common.robot_dataset import RobotDataset
+from dexmani_policy.common.hand_representation import validate_hand_coordinates
+
+
+def describe_lamp_data(attrs, *, action_key, horizon, obs_horizon, pad_before, pad_after, history_steps):
+    validate_hand_coordinates(attrs)
+    dt = attrs.get("dt")
+    if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
+        raise ValueError("LAMP hand history requires finite positive dt")
+
+    return {
+        "action_key": action_key, "dt": float(dt),
+        "horizon": horizon, "obs_horizon": obs_horizon,
+        "pad_before": pad_before, "pad_after": pad_after,
+        "history_steps": history_steps,
+    }
 
 
 def load_hand_history(buffer, episode_mask):
@@ -44,6 +61,11 @@ class LAMPDataset(RobotDataset):
             raise ValueError("LAMP requires horizon=obs_horizon=1")
         self.history_steps = history_steps
         super().__init__(zarr_path, sensor_modalities=sensor_modalities, **kwargs)
+        self.hand_data = describe_lamp_data(
+            self.replay_buffer.attrs, action_key=self.action_key, horizon=self.horizon,
+            obs_horizon=self.obs_horizon, pad_before=self.pad_before, pad_after=self.pad_after,
+            history_steps=self.history_steps,
+        )
         self.hand_actions, self.hand_state_bootstrap = load_hand_history(
             self.replay_buffer, self.train_mask | self.val_mask,
         )

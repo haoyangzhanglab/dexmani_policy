@@ -22,7 +22,7 @@ Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与�
 
 ### 1. 检查配置与数据
 
-实验配置位于 `dexmani_policy/configs/`。
+实验配置位于 `dexmani_policy/configs/`；八个 Policy 仅共享一层相同的 workspace/hydra 默认设置。
 
 ```bash
 # 配置接口及导入检查（无需数据或 GPU）
@@ -66,6 +66,8 @@ bash scripts/training/train.sh r3d 'task_name=<task>' \
 
 该配方的 nominal batch 为 4×32=128；实际 microbatch、累积及 epoch 尾组会记录在训练输出中。默认 YAML 不变，尾组和随机采样过程不保证与 B=128、accumulation=1 逐位一致。模型结构、动作布局和 loss 不变；恢复这个实验时继续使用保存的 4/32 配方。
 
+DQ/LAMP 使用相同的显式 split 默认参数，也可复用已有 manifest。DQ 的 VQ 预训练自动保存 `codebook.npz`，随后直接训练 Policy；完整命令见 [手部动作表示](docs/手部动作表示.md)。
+
 ### 3. 仿真评测
 
 仿真评测依赖 `dexmani_sim`。
@@ -80,6 +82,17 @@ bash scripts/eval/evaluate.sh <policy_name> <task_name> <run> \
 ```
 
 正式选点在仿真前要求训练预算对应的完整 milestone 集合（通常为 20/40/60/80/100%）；缺失时列出 step，不能以部分候选代替。普通研究评测仍可指定单个 Checkpoint；`best` 直接读取选中路径和推理配置，加载后核对 checkpoint step，不重跑排名。正式测试使用冻结的选点与评测协议，普通研究评测不作为正式 held-out 测试证据。
+
+公开推理入口直接解析保存的实验：
+
+```python
+from dexmani_policy.deployment import inspect_policy, load_policy
+
+info = inspect_policy(experiment, checkpoint="best")  # 无 Torch 的需求预览
+policy = load_policy(info, device="cuda:0", seed=0)
+```
+
+inspect 支持 best/latest/百分比 tag/显式路径；weights 和 inference_steps 可显式覆盖。load 使用已解析结果，完整模型无需原 prior、codec、codebook 或训练数据。Real 执行长度仍由 execution 配置或模型 n_action_steps 决定。
 
 ## 项目结构
 

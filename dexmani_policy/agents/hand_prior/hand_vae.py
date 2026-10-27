@@ -149,13 +149,15 @@ class HandVAE(nn.Module):
             raise ValueError("HandVAE joint_weights must be positive")
 
 
-def load_hand_vae(path: str | Path) -> tuple[HandVAE, dict]:
+def load_hand_vae(path: str | Path, codec: HandVAE) -> dict:
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
-    codec = HandVAE(**payload["model_config"])
+    if payload["model_config"] != codec.model_config:
+        raise ValueError("LatentFlow codec architecture differs from the policy configuration")
     codec.load_state_dict(payload["state_dict"], strict=True)
     codec.validate_state()
     validate_codec_metadata(payload["metadata"], codec.model_config)
-    return codec.freeze(), payload
+    codec.freeze()
+    return payload
 
 
 def validate_codec_metadata(metadata, model_config):

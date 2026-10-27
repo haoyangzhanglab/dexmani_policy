@@ -2,15 +2,14 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
-from imageio_ffmpeg import get_ffmpeg_exe
 
 
-def save_episode_video(env, directory, name) -> str:
-    frames = env.get_video()
+def save_episode_video(frames, fps, path) -> str:
+    from imageio_ffmpeg import get_ffmpeg_exe
     if frames is None or len(frames) == 0:
-        raise ValueError(f"No video frames for {name}")
+        raise ValueError(f"No video frames for {path}")
 
-    path = Path(directory) / f"{name}.mp4"
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _, height, width, _ = frames.shape
     cmd = [
@@ -25,7 +24,7 @@ def save_episode_video(env, directory, name) -> str:
         "-video_size",
         f"{width}x{height}",
         "-framerate",
-        str(env.video_fps),
+        str(fps),
         "-i",
         "-",
         "-pix_fmt",

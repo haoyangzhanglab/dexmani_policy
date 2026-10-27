@@ -6,13 +6,7 @@ import torch
 from torch import nn
 
 from .projection import PointProjection
-
-
-def gather_patch_members(value: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
-    batch_size, num_points = value.shape[:2]
-    flat = value.reshape(batch_size, num_points, -1)
-    index = neighbor_idx.reshape(batch_size, -1, 1).expand(-1, -1, flat.shape[-1])
-    return flat.gather(1, index).reshape(*neighbor_idx.shape, *value.shape[2:])
+from .ops import index_points
 
 
 @torch.no_grad()
@@ -93,7 +87,7 @@ def build_patch_correspondence(
         view_offset = torch.arange(views, device=grid_xy.device) * (grid_h * grid_w)
         token_idx = token_idx + view_offset[None, :, None, None]
 
-        member_valid = gather_patch_members(point_valid, neighbor_idx)
+        member_valid = index_points(point_valid, neighbor_idx)
         if member_weight is None:
             supported = member_valid.float()
             count = supported.sum(-1)
@@ -109,7 +103,7 @@ def build_patch_correspondence(
             coverage = count / torch.where(total > 0, total, 1)
 
         member_prior = supported / torch.where(count > 0, count, 1)[..., None]
-        member_confidence = gather_patch_members(reliability, neighbor_idx)
+        member_confidence = index_points(reliability, neighbor_idx)
         quality_confidence = (member_confidence * member_prior).sum(-1)
         if pooling == "reliability":
             reliability_weight = torch.where(member_prior > 0, member_confidence, 0.0)
@@ -119,8 +113,8 @@ def build_patch_correspondence(
             weight_sum = weighted.sum(-1, keepdim=True)
             member_prior = weighted / torch.where(weight_sum > 0, weight_sum, 1)
 
-        member_idx = gather_patch_members(token_idx.permute(0, 2, 1, 3), neighbor_idx)
-        member_edges = gather_patch_members(point_weight.permute(0, 2, 1, 3), neighbor_idx)
+        member_idx = index_points(token_idx.permute(0, 2, 1, 3), neighbor_idx)
+        member_edges = index_points(point_weight.permute(0, 2, 1, 3), neighbor_idx)
         pool_weight = coordinates.new_zeros(batch, neighbor_idx.shape[1], views * grid_h * grid_w)
         # Scatter accumulates repeated corners/members without [BT,M,K,Di] features.
         pool_weight.scatter_add_(

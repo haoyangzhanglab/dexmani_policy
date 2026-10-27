@@ -10,6 +10,10 @@ class LatentFlowDataset(RobotDataset):
     """Historical observations paired with full future commands at the query state."""
 
     @property
+    def action_start_index(self):
+        return 0
+
+    @property
     def action_offset(self):
         return self.obs_horizon - 1
 

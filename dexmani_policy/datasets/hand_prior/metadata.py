@@ -2,27 +2,7 @@ import math
 
 import numpy as np
 
-from dexmani_policy.common.hand_representation import HAND_ACTION_SEMANTICS
-
-
-def describe_hand_data(buffer, *, action_key, horizon, obs_horizon, pad_before, pad_after, history_steps=None):
-    attrs = buffer.attrs
-    dt = attrs.get("dt")
-    if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
-        raise ValueError("Hand representation data requires finite positive dt")
-    order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
-    if (
-        attrs.get("hand_joint_order", order) != order
-        or attrs.get("hand_units", "radians") != "radians"
-    ):
-        raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
-
-    return {
-        "action_key": action_key, "dt": float(dt),
-        "horizon": horizon, "obs_horizon": obs_horizon,
-        "pad_before": pad_before, "pad_after": pad_after,
-        "history_steps": history_steps,
-    }
+from dexmani_policy.common.hand_representation import HAND_ACTION_SEMANTICS, validate_hand_coordinates
 
 
 def describe_hand_chunks(dataset, data_semantics, source_id):
@@ -40,10 +20,7 @@ def describe_hand_chunks(dataset, data_semantics, source_id):
         if key in attrs and attrs[key] != expected:
             raise ValueError(f"Stored {key} conflicts with declared hand action semantics")
         evidence[key] = "zarr" if key in attrs else "config_declaration"
-    if attrs.get("hand_joint_order", semantics["joint_order"][1:]) != semantics["joint_order"][1:]:
-        raise ValueError("Stored hand_joint_order differs from XHand order")
-    if attrs.get("hand_units", "radians") != "radians":
-        raise ValueError("Stored hand_units must be radians")
+    validate_hand_coordinates(attrs)
     dt = attrs.get("dt")
     if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
         raise ValueError("Hand chunks require finite positive recorded dt")

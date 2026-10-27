@@ -37,11 +37,9 @@ def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> li
 class BasePolicy(nn.Module):
     """Shared observation preprocessing, training and action-window interfaces."""
 
-    requires_hand_pretraining = False
-    requires_split_manifest = False
     requires_action_affine = True
     future_action_window = False
-    supported_action_keys = ("action", "action_ee")
+    supported_action_keys: tuple[str, ...] = ("action", "action_ee")
 
     def __init__(
         self,
@@ -89,7 +87,7 @@ class BasePolicy(nn.Module):
     def consumed_observation_fields(self) -> tuple[str, ...]:
         return self.obs_encoder.consumed_observation_fields
 
-    supported_execution_modes = ("sync", "async")
+    supported_execution_modes: tuple[str, ...] = ("sync", "async")
 
     def set_normalization_spec(
         self, spec: dict[str, str], feature_dims: dict[str, int]
@@ -143,7 +141,7 @@ class BasePolicy(nn.Module):
     def encode_observation(self, obs_dict: dict) -> torch.Tensor:
         return self.obs_encoder(self.preprocess(obs_dict))
 
-    def loss_groups(self) -> dict[str, tuple[int, int]] | None:
+    def loss_groups(self) -> dict[str, tuple[int, int, float]] | None:
         """Optional named action slices for separate diffusion losses."""
         return None
 

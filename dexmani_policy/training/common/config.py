@@ -21,7 +21,6 @@ from dexmani_policy.training.common.resume import resolve_input_recipe, resolve_
 
 if TYPE_CHECKING:
     from dexmani_policy.agents.policies.base import BasePolicy
-    from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 
 
 def prepare_training(cfg):
@@ -44,9 +43,6 @@ def validate_config(cfg):
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
         if cfg.agent[name] != cfg[name]:
             raise ValueError(f"agent.{name} must match {name}")
-    aux = cfg.get("use_aux_ee", False)
-    if cfg.agent.get("use_aux_ee", False) != aux:
-        raise ValueError("agent.use_aux_ee must match use_aux_ee")
     dataset = cfg.dataset
     if dataset.action_key not in agent_class.supported_action_keys:
         raise ValueError(f"{agent_class.__name__} does not support action_key={dataset.action_key}")
@@ -54,11 +50,6 @@ def validate_config(cfg):
         raise ValueError("Dataset/policy history_steps must match")
     if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
         raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
-    dataset_class: type[RobotDataset] = hydra.utils.get_class(dataset._target_)
-    from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
-    from dexmani_policy.datasets.r3d_dataset import R3DAuxDataset
-    if agent_class.future_action_window != issubclass(dataset_class, LatentFlowDataset):
-        raise ValueError("Policy and Dataset action windows must be used together")
     if dataset.get("sensor_modalities") is None:
         raise ValueError("dataset.sensor_modalities must be explicit")
     for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
@@ -66,19 +57,7 @@ def validate_config(cfg):
             raise ValueError(f"dataset.{field} must explicitly reference {name}")
         if dataset[field] != cfg[name]:
             raise ValueError(f"dataset.{field} must match {name}")
-    if issubclass(dataset_class, R3DAuxDataset) != aux:
-        raise ValueError("R3D auxiliary targets require R3DAuxDataset")
     resolve_normalization_spec(cfg, observation_fields=dataset.sensor_modalities)
-    if aux:
-        if cfg.action_key != "action":
-            raise ValueError("use_aux_ee=true requires action_key='action' (joint primary)")
-        if cfg.get("joint_dim") is None or cfg.get("ee_dim") is None:
-            raise ValueError("use_aux_ee=true requires joint_dim and ee_dim")
-        if cfg.ee_dim != 9 or cfg.action_dim != cfg.joint_dim + cfg.ee_dim:
-            raise ValueError("Auxiliary actions require joint_dim + 9 full prediction dimensions")
-        for name in ("joint_dim", "ee_dim"):
-            if cfg.agent.get(name) != cfg[name]:
-                raise ValueError(f"agent.{name} must match {name}")
 
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
@@ -98,7 +77,9 @@ def validate_config(cfg):
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
-        effective.update({key: value for key, value in data_description.items() if key != "split_manifest"})
+        for key in ("normalization_dims", "real_runtime", "hand_data"):
+            if key in data_description:
+                effective[key] = data_description[key]
         effective.dataset.split_manifest = data_description["split_manifest"]
         if "real_runtime" not in data_description:
             effective.pop("real_runtime", None)

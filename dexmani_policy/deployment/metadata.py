@@ -11,6 +11,7 @@ from dexmani_policy.common.config import (
     positive_int,
     validate_depth_recipe,
 )
+from dexmani_policy.common.experiments import resolve_policy_checkpoint
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 
 
@@ -61,13 +62,17 @@ class PolicyInfo:
         return result
 
 
-def inspect_policy(experiment, *, checkpoint, weights, inference_steps):
+def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=None):
     # Inspect sensor requirements without importing Torch or constructing a model.
     directory = resolve_experiment(experiment)
     cfg = load_experiment_config(directory)
-    path = Path(checkpoint).expanduser().resolve(strict=True)
-    if not path.is_file():
-        raise ValueError(f"Checkpoint must be a file: {path}")
+    path, defaults, _ = resolve_policy_checkpoint(directory, checkpoint, cfg)
+    if weights is None:
+        if type(defaults["use_ema"]) is not bool:
+            raise ValueError("Saved use_ema must be boolean")
+        weights = "ema" if defaults["use_ema"] else "raw"
+    if inference_steps is None:
+        inference_steps = defaults["inference_steps"]
     if weights not in {"ema", "raw"}:
         raise ValueError("weights must be ema or raw")
     steps = positive_int(inference_steps, "inference_steps")

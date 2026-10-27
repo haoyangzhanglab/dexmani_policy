@@ -35,6 +35,10 @@ class PolicyTrainer:
         model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
         model = hydra.utils.instantiate(model_cfg)
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
+        if data_description["action_start_index"] != model.action_start_index:
+            raise ValueError("Dataset/policy action_start_index mismatch")
+        if data_description["control_action_dim"] != model.control_action_dim:
+            raise ValueError("Dataset primary action width must match policy control output")
         model.set_normalization_spec(
             resolve_normalization_spec(cfg), data_description["normalization_dims"]
         )
@@ -185,7 +189,6 @@ class PolicyTrainer:
         self,
         batch: dict[str, Any],
         *,
-        is_accumulation_boundary: bool = True,
         loss_divisor: int = 1,
         log_metrics: bool = True,
     ):
@@ -206,9 +209,6 @@ class PolicyTrainer:
                 f"(raw_loss={value.item()})"
             )
         (raw_loss / loss_divisor).backward()
-
-        if is_accumulation_boundary:
-            self.optimizer_step()
 
         return log_dict
 
@@ -322,7 +322,6 @@ class PolicyTrainer:
 
                 num_batches = self.batches_per_epoch
                 group_metric_sums: dict[str, torch.Tensor | float] = {}
-                group_metric_count = 0
                 group_samples = 0
                 group_data_wait = 0.0
                 # Start before iterator creation, including the epoch's first data wait.
@@ -346,24 +345,22 @@ class PolicyTrainer:
                     record_group = (self.global_step + 1) % self.log_interval_steps == 0
                     log_dict = self.train_microbatch(
                         batch,
-                        is_accumulation_boundary=is_boundary,
                         loss_divisor=group_size,
                         log_metrics=record_group,
                     )
 
                     if is_boundary:
+                        self.optimizer_step()
                         group_elapsed = time.perf_counter() - group_start_time
                     if record_group:
                         accumulate_metrics(group_metric_sums, log_dict)
-                        group_metric_count += 1
 
                     if is_boundary:
                         group_metrics = {
-                            key: value / group_metric_count
+                            key: value / group_size
                             for key, value in group_metric_sums.items()
                         }
                         group_metric_sums = {}
-                        group_metric_count = 0
                         self.global_step += 1
                         if micro_step + 1 == num_batches:
                             self.current_epoch = epoch + 1

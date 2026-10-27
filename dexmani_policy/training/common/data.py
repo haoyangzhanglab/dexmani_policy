@@ -2,11 +2,8 @@ import hydra
 import torch
 from torch.utils.data import DataLoader
 
-from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import resolve_normalization_spec, FINGER_VECTOR_FIELDS, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.datasets.hand_prior.metadata import describe_hand_data
-from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
 from dexmani_policy.deployment.metadata import describe_real_runtime
 
 
@@ -14,13 +11,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     """Construct one admitted train/val source; resume only restores saved affine."""
     if cfg.get("resume_from") is not None and resume_checkpoint is None:
         raise ValueError("Resume requires the checkpoint loaded by the training entry point")
-    if resume_checkpoint is not None:
-        from dexmani_policy.training.common.resume import validate_resume_protocol
-        validate_resume_protocol(resume_checkpoint.effective_config)
     spec = resolve_normalization_spec(cfg)
-    agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
-    if agent_class.requires_split_manifest and cfg.dataset.get("split_manifest") is None:
-        raise ValueError("Hand pretraining requires an explicit shared split_manifest")
     dataset = hydra.utils.instantiate(cfg.dataset)
     buffer = dataset.replay_buffer
     dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
@@ -31,16 +22,17 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     dims["action"] = dataset.action_dim
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
-    description = {"normalization_dims": dims, "split_manifest": dataset.split_manifest}
+    description = {
+        "normalization_dims": dims, "split_manifest": dataset.split_manifest,
+        "action_key": dataset.action_key, "attrs": buffer.attrs,
+        "action_start_index": dataset.action_start_index,
+        "control_action_dim": buffer[dataset.action_key].shape[-1],
+    }
     runtime = describe_real_runtime(buffer, dataset.sensor_modalities, cfg.task_name)
     if runtime is not None:
         description["real_runtime"] = runtime
-    if agent_class.requires_hand_pretraining:
-        description["hand_data"] = dataset.hand_data if isinstance(dataset, LatentFlowDataset) else describe_hand_data(
-            buffer, action_key=dataset.action_key, horizon=dataset.horizon,
-            obs_horizon=dataset.obs_horizon, pad_before=dataset.pad_before, pad_after=dataset.pad_after,
-            history_steps=getattr(dataset, "history_steps", None),
-        )
+    if hasattr(dataset, "hand_data"):
+        description["hand_data"] = dataset.hand_data
     if resume_checkpoint is None:
         normalizer = dataset.get_normalizer(spec)
     else:

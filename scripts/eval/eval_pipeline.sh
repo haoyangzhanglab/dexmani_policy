@@ -28,14 +28,6 @@ if [[ ! -d "$EXP_DIR" ]]; then
     exit 1
 fi
 
-LOCK_FILE="${EXP_DIR}/.pipeline.lock"
-# Keep the inode so concurrent invocations share the same flock.
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-    echo "Error: another eval pipeline is running for ${EXP_DIR}" >&2
-    exit 1
-fi
-
 exec conda run --no-capture-output -n policy python -m dexmani_policy.eval_pipeline \
     --policy-name="$1" \
     --task-name="$2" \

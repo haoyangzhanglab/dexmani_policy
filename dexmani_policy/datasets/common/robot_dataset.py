@@ -118,6 +118,10 @@ class RobotDataset(torch.utils.data.Dataset):
     def action_dim(self):
         return self.replay_buffer[self.action_key].shape[-1]
 
+    @property
+    def action_start_index(self):
+        return self.obs_horizon - 1
+
     def training_summary(self):
         return (
             f"{Path(self.zarr_path).name}: train episodes={int(self.train_mask.sum()):,}, "

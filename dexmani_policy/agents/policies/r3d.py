@@ -55,6 +55,12 @@ class R3DObservationEncoder(nn.Module):
 class R3DPolicy(BasePolicy):
     supported_execution_modes = ("sync", "async", "rtc")
 
+    @classmethod
+    def prepare_restore_config(cls, config) -> None:
+        pc = dict(config.get("pc_encoder_config") or {})
+        pc.update(use_pretrained_weights=False, pretrained_weights_path=None)
+        config.pc_encoder_config = pc
+
     def set_normalization_spec(self, spec, feature_dims) -> None:
         if spec["point_cloud"] != "limits":
             raise ValueError("R3D fixed normalized point-cloud clamp requires limits normalization")
@@ -86,9 +92,12 @@ class R3DPolicy(BasePolicy):
         aux_loss_weight: float = 1.0,
         clip_sample: bool = True,
     ) -> None:
+        if use_aux_ee and (joint_dim != 19 or ee_dim != 9 or action_dim != joint_dim + ee_dim):
+            raise ValueError("R3D auxiliary prediction requires joint19 + ee9")
         self.use_aux_ee = use_aux_ee
         self.joint_dim = joint_dim
         self.ee_dim = ee_dim
+        self.aux_loss_weight = aux_loss_weight
 
         obs_encoder = R3DObservationEncoder(
             state_dim=state_dim,
@@ -120,7 +129,6 @@ class R3DPolicy(BasePolicy):
             num_training_steps=num_training_steps,
             num_inference_steps=num_inference_steps,
             prediction_type=prediction_type,
-            aux_loss_weight=aux_loss_weight,
             clip_sample=clip_sample,
         )
 
@@ -137,12 +145,12 @@ class R3DPolicy(BasePolicy):
     def initialize_training(self, data_description) -> None:
         self.obs_encoder.pc_encoder.initialize_training()
 
-    def loss_groups(self) -> dict[str, tuple[int, int]] | None:
+    def loss_groups(self) -> dict[str, tuple[int, int, float]] | None:
         if not self.use_aux_ee:
             return None
         return {
-            "joint": (0, self.joint_dim),
-            "ee": (self.joint_dim, self.joint_dim + self.ee_dim),
+            "joint": (0, self.joint_dim, 1.0),
+            "ee": (self.joint_dim, self.joint_dim + self.ee_dim, self.aux_loss_weight),
         }
 
     @property

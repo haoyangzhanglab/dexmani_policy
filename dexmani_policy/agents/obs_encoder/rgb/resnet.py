@@ -93,7 +93,7 @@ class ResNetEncoder(nn.Module):
 
     def forward(self, rgb: torch.Tensor) -> dict[str, torch.Tensor]:
         leading_shape = rgb.shape[:-3]
-        flat_rgb = rgb.reshape(-1, *rgb.shape[-3:])
+        flat_rgb = rgb.reshape(-1, *rgb.shape[-3:]).to(memory_format=torch.channels_last)
         feature_map = self.backbone(flat_rgb)
         feature_map = self.proj(feature_map)
 

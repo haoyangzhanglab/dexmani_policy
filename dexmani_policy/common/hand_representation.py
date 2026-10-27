@@ -39,20 +39,18 @@ def validate_hand_chunk_compatibility(codec_data, policy_data):
         raise ValueError("Same-source codec/policy split mismatch or validation leakage")
 
 
-def validate_pretraining_data(current, manifest, pretrained, pretrained_split):
-    # Paths and diagnostic counters are not identity or action semantics.
+def validate_pretraining_split(manifest, pretrained, pretrained_split):
+    if "train_action_rows" in pretrained or "val_action_rows" in pretrained:
+        raise ValueError("Source-row hand artifacts are unsupported; regenerate from all training-episode frames")
     for key in ("source_id", "episode_ids", "episode_ends", "trial_ids", "train_indices", "val_indices"):
         if manifest.get(key) != pretrained_split.get(key):
             raise ValueError(f"Pretraining/policy split mismatch: {key}")
-    changed = [key for key, value in current.items() if key not in pretrained or pretrained[key] != value]
-    if changed:
-        raise ValueError(f"Hand pretraining data mismatch: {changed}")
-    # Old artifacts recorded unique qualified rows. Full coverage proves that their
-    # population matches the new episode population; otherwise require a new artifact.
-    ends = manifest["episode_ends"]
-    lengths = [end - start for start, end in zip([0] + ends[:-1], ends)]
-    for split in ("train", "val"):
-        key = f"{split}_action_rows"
-        expected = sum(lengths[i] for i in manifest[f"{split}_indices"])
-        if key in pretrained and pretrained[key] != expected:
-            raise ValueError("Legacy hand artifact used window-filtered rows; rebuild with the episode population")
+
+
+def validate_hand_coordinates(attrs):
+    order = HAND_ACTION_SEMANTICS["joint_order"][1:]
+    if (
+        attrs.get("hand_joint_order", order) != order
+        or attrs.get("hand_units", "radians") != "radians"
+    ):
+        raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")

@@ -1,3 +1,4 @@
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,3 +47,34 @@ def discover_milestone_checkpoints(exp_dir: Path) -> list[MilestoneCheckpoint]:
 
 def milestone_steps(total):
     return {(pct * total + 99) // 100: pct for pct in (20, 40, 60, 80, 100)}
+
+
+def resolve_policy_checkpoint(
+    root: Path, selector: str | Path, cfg: dict, *, relative_to: Path | None = None,
+) -> tuple[Path, dict, dict]:
+    """Return the concrete file, saved inference defaults and selection source once."""
+    selector = str(selector)
+    source = {}
+    defaults = cfg["eval"]
+    if selector == "best":
+        selected = json.loads((root / "best_ckpt.json").read_text())
+        path = resolve_milestone_path(root, selected["ckpt_relpath"])
+        defaults = selected["inference"]
+        source = {key: selected[key] for key in ("selection_result", "global_step")}
+    elif selector == "latest":
+        path = root / "checkpoints/latest.pt"
+    elif selector.endswith("pct") and selector[:-3].isdigit():
+        milestones = discover_milestone_checkpoints(root)
+        target = int(selector.removesuffix("pct"))
+        found = next((item for item in milestones if item.pct == target), None)
+        if found is None:
+            raise FileNotFoundError(f"No {target}% milestone; available: {[m.pct for m in milestones]}")
+        path = found.path
+    else:
+        path = Path(selector).expanduser()
+        if relative_to is not None and not path.is_absolute():
+            path = relative_to / path
+    path = path.resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"Checkpoint must be a file: {path}")
+    return path, defaults, source

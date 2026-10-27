@@ -11,12 +11,47 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
-from dexmani_policy.common.config import load_policy_config, positive_int
+from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.lamp_dataset import hand_history_for_rows
-from dexmani_policy.datasets.hand_prior.data import prepare_prior_data
+from dexmani_policy.datasets.hand_prior.lamp_dataset import (
+    describe_lamp_data, hand_history_for_rows, load_hand_history,
+)
+from dexmani_policy.datasets.hand_prior.data import prepare_hand_source
+from dexmani_policy.datasets.common.validation import check_finite, validate_fields
 from dexmani_policy.training.common.optimization import get_scheduler
+
+
+def prepare_prior_data(cfg):
+    if (cfg.dataset.horizon, cfg.dataset.obs_horizon, cfg.agent.n_action_steps) != (1, 1, 1):
+        raise ValueError("LAMP requires H=To=Ta=1")
+    if cfg.dataset.history_steps != cfg.agent.history_steps or cfg.dataset.history_steps < 1:
+        raise ValueError("LAMP history_steps must match and be positive")
+    spec = resolve_normalization_spec(cfg)
+    if spec["action"] != "identity" or spec["joint_state"] != "gaussian":
+        raise ValueError("LAMP requires identity action and gaussian joint_state")
+    buffer, train, val, split = prepare_hand_source(cfg, ["action", "joint_state"])
+    hand_data = describe_lamp_data(
+        buffer.attrs, action_key=cfg.dataset.action_key, horizon=cfg.dataset.horizon,
+        obs_horizon=cfg.dataset.obs_horizon, pad_before=cfg.dataset.pad_before,
+        pad_after=cfg.dataset.pad_after, history_steps=cfg.dataset.history_steps,
+    )
+    validate_fields(buffer, train | val, {"action": slice(7, 19)})
+    actions, bootstrap = load_hand_history(buffer, train | val)
+    starts = np.r_[0, buffer.episode_ends[:-1]]
+    for episode in np.flatnonzero(train | val):
+        check_finite(buffer, "joint_state", int(starts[episode]), bootstrap[episode:episode + 1], slice(7, 19))
+
+    def rows(mask):
+        if not mask.any():
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate([np.arange(starts[i], buffer.episode_ends[i]) for i in np.flatnonzero(mask)])
+
+    return dict(
+        hand_actions=actions, bootstrap=bootstrap, episode_ends=buffer.episode_ends,
+        history_steps=cfg.dataset.history_steps, train_rows=rows(train), val_rows=rows(val),
+        hand_data=hand_data, split_manifest=split,
+    )
 
 
 def prior_batch(dataset, rows, device):
@@ -95,7 +130,11 @@ def save_prior(path, prior, hand_data, cfg, step, metrics, split_manifest):
             key: value.detach().cpu().clone() for key, value in prior.state_dict().items()
         },
         "metadata": metadata,
-        "policy_config": OmegaConf.to_container(cfg, resolve=False),
+        "dataset_config": {
+            key: cfg.dataset[key] for key in (
+                "zarr_path", "action_key", "seed", "val_ratio", "max_train_episodes",
+            )
+        },
         "training_config": OmegaConf.to_container(cfg.prior_training, resolve=True),
         "step": int(step),
         "metrics": metrics,
