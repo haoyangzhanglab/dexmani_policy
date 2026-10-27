@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from dexmani_policy.agents.hand_prior.losses import diagonal_gaussian_kl
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
 from dexmani_policy.common.io_util import atomic_path
@@ -89,7 +90,7 @@ def evaluate(prior, dataset, rows, batch_size):
             physical_absolute += error.abs().sum(0)
             frame_rmse.append(error.square().mean(-1).sqrt().cpu())
             copy_error = (history[:, -1] - target).square().mean()
-            kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
+            kl = diagonal_gaussian_kl(mu, log_var)
             totals += torch.stack((reconstruction, copy_error, kl)).double() * len(selected)
         mse, copy_mse, kl = (totals / len(rows)).tolist()
         metrics = {

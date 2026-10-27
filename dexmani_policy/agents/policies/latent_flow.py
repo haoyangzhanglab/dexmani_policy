@@ -9,7 +9,6 @@ from torch.nn import functional as F
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.action_decoders.sampling.time_sampling import shift_time_to_noise
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE, load_hand_vae, validate_codec_metadata
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
@@ -66,6 +65,7 @@ class LatentFlowObservationEncoder(nn.Module):
 
 class LatentFlowPolicy(BasePolicy):
     supported_execution_modes = ("sync",)
+    supported_action_keys = ("action",)
     future_action_window = True
 
     def __init__(
@@ -74,7 +74,7 @@ class LatentFlowPolicy(BasePolicy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        codec_path: str,
+        codec_path: str | None,
         latent_dim: int = 9,
         codec_hidden_dim: int = 128,
         codec_n_layers: int = 3,
@@ -232,6 +232,30 @@ class LatentFlowPolicy(BasePolicy):
             raise ValueError("LatentFlow codec requires raw action_context.reference_state [B,19]")
         return reference.float()
 
+    def _encode_training_target(
+        self, actions: torch.Tensor, reference: torch.Tensor
+    ) -> torch.Tensor:
+        hand_reference = reference[:, self.arm_dim :]
+        affine = self.normalizer["action"]
+        arm = actions[..., : self.arm_dim] - reference[:, None, : self.arm_dim]
+        arm = arm * affine.scale[: self.arm_dim] + affine.offset[: self.arm_dim]
+        with torch.no_grad(), torch.autocast(device_type=actions.device.type, enabled=False):
+            mu = self.codec.encode_mean(actions[..., self.arm_dim :], hand_reference)
+        return torch.cat((arm, mu), dim=-1)
+
+    def _decode_physical_actions(
+        self, native: torch.Tensor, reference: torch.Tensor
+    ) -> torch.Tensor:
+        affine = self.normalizer["action"]
+        scale = affine.scale[: self.arm_dim]
+        offset = affine.offset[: self.arm_dim]
+        arm = (native[..., : self.arm_dim] - offset) / scale + reference[:, None, : self.arm_dim]
+        with torch.autocast(device_type=native.device.type, enabled=False):
+            hand = self.codec.decode_actions(
+                native[..., self.arm_dim :].float(), reference[:, self.arm_dim :].float()
+            )
+        return torch.cat((arm, hand), dim=-1)
+
     def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
         # Dataset supplies the measured query state before observation augmentation.
         reference = self.resolve_reference_state(
@@ -239,30 +263,20 @@ class LatentFlowPolicy(BasePolicy):
         )
         condition = self.encode_condition(batch["obs"])
         actions = batch["action"].float()
-        hand_reference = reference[:, self.arm_dim :]
-        affine = self.normalizer["action"]
-        arm = actions[..., : self.arm_dim] - reference[:, None, : self.arm_dim]
-        arm = arm * affine.scale[: self.arm_dim] + affine.offset[: self.arm_dim]
-        with torch.no_grad(), torch.autocast(device_type=actions.device.type, enabled=False):
-            mu, _ = self.codec.encode(actions[..., self.arm_dim :], hand_reference)
-        target = torch.cat((arm, mu), dim=-1)
+        target = self._encode_training_target(actions, reference)
 
         flow = self.action_decoder
-        noise = torch.randn_like(target)
-        t = flow.time_sampler.sample(len(target), flow.t_sample_mode, device=target.device)
-        t = shift_time_to_noise(t, flow.time_shift_alpha)
-        weight = t[:, None, None]
-        xt = (1 - weight) * noise + weight * target
+        xt, t, target_v = flow.sample_training_pair(target)
         pred_v = flow.model(x=xt, timestep=t, context=condition).float()
-        target_v = target - noise
         arm_loss = F.mse_loss(pred_v[..., : self.arm_dim], target_v[..., : self.arm_dim])
         latent_loss = F.mse_loss(pred_v[..., self.arm_dim :], target_v[..., self.arm_dim :])
         flow_loss = self.arm_loss_weight * arm_loss + self.latent_loss_weight * latent_loss
         loss = flow_loss
         metrics = {}
         if self.decoded_loss_weight:
+            hand_reference = reference[:, self.arm_dim :]
             # Our flow goes noise -> data, reversing the paper's time coordinate.
-            clean = xt + (1 - weight) * pred_v
+            clean = xt + (1 - t[:, None, None]) * pred_v
             with torch.autocast(device_type=actions.device.type, enabled=False):
                 decoded = self.codec.decode(clean[..., self.arm_dim :].float(), hand_reference)
                 hand_target = self.codec.normalize_actions(actions[..., self.arm_dim :], hand_reference)
@@ -315,14 +329,6 @@ class LatentFlowPolicy(BasePolicy):
             condition, (len(condition), self.horizon, self.model_action_dim),
             inference_steps, dtype=torch.float32, generator=generator,
         )
-        affine = self.normalizer["action"]
-        scale = affine.scale[: self.arm_dim]
-        offset = affine.offset[: self.arm_dim]
-        arm = (native[..., : self.arm_dim] - offset) / scale + reference_state[:, None, : self.arm_dim]
-        with torch.autocast(device_type=native.device.type, enabled=False):
-            hand = self.codec.decode_actions(
-                native[..., self.arm_dim :].float(), reference_state[:, self.arm_dim :].float()
-            )
-        prediction = torch.cat((arm, hand), dim=-1)
+        prediction = self._decode_physical_actions(native, reference_state)
         # Bidirectional codec attention requires decoding the full horizon first.
         return self.format_action_output(prediction)

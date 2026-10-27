@@ -76,11 +76,10 @@ def farthest_point_sample(
 
     # Undo the initial swap to recover indices into the original cloud.
     if use_random_start:
-        mask_0 = sample_idx == 0
-        si_expanded = start_indices.unsqueeze(1)
-        mask_si = sample_idx == si_expanded
-        sample_idx[mask_0] = si_expanded.expand(B, num_samples)[mask_0]
-        sample_idx[mask_si] = 0
+        start = start_indices.unsqueeze(1)
+        is_zero = sample_idx == 0
+        is_start = sample_idx == start
+        sample_idx = torch.where(is_start, 0, torch.where(is_zero, start, sample_idx))
 
     shuffle_perm = None
     if use_shuffle_output:

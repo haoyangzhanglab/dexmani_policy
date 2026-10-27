@@ -10,6 +10,8 @@ from torch import Tensor, nn
 
 from dexmani_policy.common.config import positive_int
 
+from .losses import diagonal_gaussian_kl
+
 
 class HandMotionPrior(nn.Module):
     """History-conditioned hand prior with a differentiable pointwise decoder."""
@@ -61,7 +63,7 @@ class HandMotionPrior(nn.Module):
             epsilon = torch.randn_like(mu) if epsilon is None else epsilon
             z = mu + torch.exp(0.5 * log_var) * epsilon
             reconstruction = (self.decode(z) - target.float()).square().mean()
-            kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
+            kl = diagonal_gaussian_kl(mu, log_var)
         return reconstruction + beta * kl, reconstruction, kl
 
     def freeze(self) -> HandMotionPrior:

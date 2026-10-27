@@ -12,6 +12,7 @@ import torch
 from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
+from dexmani_policy.agents.hand_prior.losses import diagonal_gaussian_kl
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
@@ -75,7 +76,7 @@ def evaluate(codec, dataset, batch_size):
         physical = codec.denormalize_actions(decoded, q0)
         absolute += (physical - actions).abs().double().sum(dim=(0, 1))
         reconstruction = codec.reconstruction_loss(decoded, codec.normalize_actions(actions, q0))
-        kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
+        kl = diagonal_gaussian_kl(mu, log_var)
         totals += torch.stack((reconstruction, kl)).double() * len(indices)
     reconstruction, kl = (totals / len(dataset)).tolist()
     joint_mae = absolute / (len(dataset) * dataset.horizon)
@@ -139,7 +140,7 @@ def train(cfg, *, overwrite=False):
         mu, log_var = codec.encode(actions, q0)
         z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
         reconstruction = codec.reconstruction_loss(codec.decode(z, q0), codec.normalize_actions(actions, q0))
-        kl = -0.5 * (1 + log_var - mu.square() - log_var.exp()).mean()
+        kl = diagonal_gaussian_kl(mu, log_var)
         beta = kl_coefficient(step, recipe.beta, recipe.kl_warmup, recipe.kl_ramp)
         loss = reconstruction + beta * kl
         if not torch.isfinite(loss):

@@ -28,9 +28,6 @@ Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与�
 # 配置接口及导入检查（无需数据或 GPU）
 python dexmani_policy/smoke_test.py --config-only dp3
 
-# 合成数据上的 RGB、辅助目标、归一化与 CPU 训练/恢复回归
-OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
-
 # 检查指定任务的数据路径
 python -m dexmani_policy.training.common.config \
   --config-name dp3 'task_name=<task>' --check

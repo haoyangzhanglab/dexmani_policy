@@ -12,6 +12,23 @@ from .ops import index_points, sample_point_patches, load_pointcloud_ops
 from .pointnet import build_mlp
 
 
+def _build_local_graph(
+    centers: torch.Tensor, geometry_scale: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # A single MxM distance matrix for a small, fixed anchor graph.
+    num_patches = centers.shape[1]
+    distances = torch.cdist(centers, centers, compute_mode="donot_use_mm_for_euclid_dist")
+    diagonal = torch.eye(num_patches, dtype=torch.bool, device=centers.device)
+    local_indices = (
+        distances.masked_fill(diagonal[None], float("inf"))
+        .topk(min(12, num_patches - 1), largest=False, sorted=False)
+        .indices
+    )
+    offsets = (index_points(centers, local_indices) - centers.unsqueeze(2)) / geometry_scale
+    edges = torch.cat((offsets, torch.linalg.vector_norm(offsets, dim=-1, keepdim=True)), dim=-1)
+    return local_indices, edges
+
+
 class GeometricPatchEmbedding(nn.Module):
     """Member features, Gaussian pooling on shared kNN support, and geometric moments."""
 
@@ -266,25 +283,7 @@ class Sparse3DEncoder(nn.Module):
                 self.fps_random_config,
                 self.training,
             )
-            # A single MxM distance matrix for a small, fixed anchor graph.
-            distances = torch.cdist(centers, centers, compute_mode="donot_use_mm_for_euclid_dist")
-            diagonal = torch.eye(self.num_patches, dtype=torch.bool, device=xyz.device)
-            local_indices = (
-                distances.masked_fill(diagonal[None], float("inf"))
-                .topk(
-                    min(12, self.num_patches - 1),
-                    largest=False,
-                    sorted=False,
-                )
-                .indices
-            )
-            offsets = (
-                index_points(centers, local_indices) - centers.unsqueeze(2)
-            ) / self.geometry_scale
-            edges = torch.cat(
-                (offsets, torch.linalg.vector_norm(offsets, dim=-1, keepdim=True)),
-                dim=-1,
-            )
+            local_indices, edges = _build_local_graph(centers, self.geometry_scale)
             cos, sin = self.rope(centers)
 
         relative_xyz = index_points(xyz, neighbors) - centers.unsqueeze(2)

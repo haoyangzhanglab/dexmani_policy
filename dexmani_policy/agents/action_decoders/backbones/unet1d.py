@@ -88,26 +88,24 @@ class ConditionalUNet1D(nn.Module):
 
         if type(kernel_size) is not int or kernel_size <= 0 or kernel_size % 2 == 0:
             raise ValueError("UNet kernel_size must be a positive odd integer")
-        self.cond_predict_scale = cond_predict_scale
 
         self.diffusion_step_encoder = TimestepMLP(
             pos_emb_dim=diffusion_step_embed_dim, output_dim=diffusion_step_embed_dim
         )
         cond_dim = diffusion_step_embed_dim + context_dim
+        block_kwargs = dict(
+            cond_dim=cond_dim,
+            kernel_size=kernel_size,
+            n_groups=n_groups,
+            cond_predict_scale=cond_predict_scale,
+        )
 
         all_dims = [input_dim] + list(down_dims)
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
         mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList(
-            ConditionalResidualBlock1D(
-                mid_dim,
-                mid_dim,
-                cond_dim=cond_dim,
-                kernel_size=kernel_size,
-                n_groups=n_groups,
-                cond_predict_scale=cond_predict_scale,
-            )
+            ConditionalResidualBlock1D(mid_dim, mid_dim, **block_kwargs)
             for _ in range(2)
         )
 
@@ -117,22 +115,8 @@ class ConditionalUNet1D(nn.Module):
             self.down_modules.append(
                 nn.ModuleList(
                     [
-                        ConditionalResidualBlock1D(
-                            dim_in,
-                            dim_out,
-                            cond_dim=cond_dim,
-                            kernel_size=kernel_size,
-                            n_groups=n_groups,
-                            cond_predict_scale=cond_predict_scale,
-                        ),
-                        ConditionalResidualBlock1D(
-                            dim_out,
-                            dim_out,
-                            cond_dim=cond_dim,
-                            kernel_size=kernel_size,
-                            n_groups=n_groups,
-                            cond_predict_scale=cond_predict_scale,
-                        ),
+                        ConditionalResidualBlock1D(dim_in, dim_out, **block_kwargs),
+                        ConditionalResidualBlock1D(dim_out, dim_out, **block_kwargs),
                         nn.Conv1d(dim_out, dim_out, 3, 2, 1) if not is_last else nn.Identity(),
                     ]
                 )
@@ -143,22 +127,8 @@ class ConditionalUNet1D(nn.Module):
             self.up_modules.append(
                 nn.ModuleList(
                     [
-                        ConditionalResidualBlock1D(
-                            dim_out * 2,
-                            dim_in,
-                            cond_dim=cond_dim,
-                            kernel_size=kernel_size,
-                            n_groups=n_groups,
-                            cond_predict_scale=cond_predict_scale,
-                        ),
-                        ConditionalResidualBlock1D(
-                            dim_in,
-                            dim_in,
-                            cond_dim=cond_dim,
-                            kernel_size=kernel_size,
-                            n_groups=n_groups,
-                            cond_predict_scale=cond_predict_scale,
-                        ),
+                        ConditionalResidualBlock1D(dim_out * 2, dim_in, **block_kwargs),
+                        ConditionalResidualBlock1D(dim_in, dim_in, **block_kwargs),
                         nn.ConvTranspose1d(dim_in, dim_in, 4, 2, 1),
                     ]
                 )
@@ -179,10 +149,11 @@ class ConditionalUNet1D(nn.Module):
         cond = torch.cat([t_embed, context], dim=-1)
 
         skips = []
-        for resnet, resnet2, downsample in self.down_modules:
+        for index, (resnet, resnet2, downsample) in enumerate(self.down_modules):
             x = resnet(x, cond)
             x = resnet2(x, cond)
-            skips.append(x)
+            if index > 0:
+                skips.append(x)
             x = downsample(x)
 
         for mid_module in self.mid_modules:

@@ -47,6 +47,23 @@ class RectifiedFlow(nn.Module):
             beta_beta=beta_beta,
         )
 
+    def sample_training_pair(
+        self, target: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size = target.shape[0]
+        noise = torch.randn_like(target)
+        t = self.time_sampler.sample(
+            batch_size,
+            self.t_sample_mode,
+            device=target.device,
+        )
+        t = shift_time_to_noise(t, self.time_shift_alpha)
+        t_view = t.view(batch_size, *([1] * (target.ndim - 1)))
+
+        xt = interpolate_flow(noise, target, t_view)
+        target_v = target - noise
+        return xt, t, target_v
+
     def compute_loss(
         self,
         cond: torch.Tensor,
@@ -54,19 +71,7 @@ class RectifiedFlow(nn.Module):
         *,
         log_metrics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        batch_size = actions.shape[0]
-        x0 = torch.randn_like(actions)
-        t = self.time_sampler.sample(
-            batch_size,
-            self.t_sample_mode,
-            device=actions.device,
-        )
-        t = shift_time_to_noise(t, self.time_shift_alpha)
-        t_view = t.view(batch_size, *([1] * (actions.ndim - 1)))
-
-        xt = interpolate_flow(x0, actions, t_view)
-        target_v = actions - x0
-
+        xt, t, target_v = self.sample_training_pair(actions)
         pred_v = self.model(x=xt, timestep=t, context=cond)
         loss = F.mse_loss(pred_v, target_v)
 

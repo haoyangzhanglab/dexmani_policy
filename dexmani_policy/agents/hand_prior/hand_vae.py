@@ -99,14 +99,20 @@ class HandVAE(nn.Module):
     def denormalize_actions(self, relative: Tensor, q0: Tensor) -> Tensor:
         return relative * self.action_std + self.action_mean + q0[:, None]
 
-    def encode(self, actions: Tensor, q0: Tensor) -> tuple[Tensor, Tensor]:
+    def _encode_features(self, actions: Tensor, q0: Tensor) -> Tensor:
         relative = self.normalize_actions(actions, q0)
         tokens = torch.cat((self.encoder_q0(q0)[:, None], self.encoder_input(relative)), dim=1)
         tokens = tokens + self.encoder_position
         for layer in self.encoder:
             tokens = layer(tokens)
-        encoded = self.encoder_norm(tokens[:, 1:])
+        return self.encoder_norm(tokens[:, 1:])
+
+    def encode(self, actions: Tensor, q0: Tensor) -> tuple[Tensor, Tensor]:
+        encoded = self._encode_features(actions, q0)
         return self.fc_mu(encoded), self.fc_log_var(encoded)
+
+    def encode_mean(self, actions: Tensor, q0: Tensor) -> Tensor:
+        return self.fc_mu(self._encode_features(actions, q0))
 
     def decode(self, z: Tensor, q0: Tensor) -> Tensor:
         """Latent chunk -> standardized relative commands, with latent gradients."""

@@ -234,7 +234,8 @@ class HandVQVAE(nn.Module):
         quantized, indices, losses = self.quantizer(self.encoder(target))
         reconstruction = self.decoder(quantized)
         reconstruction_loss = ((target - reconstruction).abs() * self.loss_weight).mean()
-        mse = F.mse_loss(target, reconstruction)
+        with torch.no_grad():
+            mse = F.mse_loss(target, reconstruction)
         return reconstruction_loss, losses.sum(), indices, mse
 
     def decode(self, latent: Tensor) -> Tensor:

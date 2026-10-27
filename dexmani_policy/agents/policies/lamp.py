@@ -82,7 +82,7 @@ class LAMPPolicy(BasePolicy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
-        prior_path: str,
+        prior_path: str | None,
         history_steps: int = 8,
         latent_dim: int = 2,
         prior_hidden_dim: int = 256,
@@ -242,10 +242,14 @@ class LAMPPolicy(BasePolicy):
         hand = self.decode_hand(mu + offset)
         arm_loss = F.mse_loss(arm, target)
         hand_loss = F.mse_loss(hand, hand_target)
+        action_loss = arm_loss + self.hand_loss_weight * hand_loss
+        if self.drift_reg_weight == 0 and not log_metrics:
+            return action_loss, {}
+
         with torch.no_grad():
             hand_ref = self.decode_hand(mu)
         hand_drift_mse = F.mse_loss(hand, hand_ref)
-        loss = arm_loss + self.hand_loss_weight * hand_loss + self.drift_reg_weight * hand_drift_mse
+        loss = action_loss + self.drift_reg_weight * hand_drift_mse
         if not log_metrics:
             return loss, {}
 
@@ -254,7 +258,7 @@ class LAMPPolicy(BasePolicy):
             physical_mae = (hand - hand_target).abs().mean()
             metrics = dict(
                 loss=loss.detach(),
-                loss_action=arm_loss + self.hand_loss_weight * hand_loss,
+                loss_action=action_loss.detach(),
                 loss_arm=arm_loss.detach(),
                 loss_decoded_hand=hand_loss.detach(),
                 hand_drift_mse=hand_drift_mse.detach(),
