@@ -79,25 +79,15 @@ def validate_source_recipe(saved, current):
         raise ValueError("Checkpoint source recipe mismatch:\n" + "\n".join(differences))
 
 
-def validate_resume_protocol(saved):
-    if "data_recipe" in saved:
-        raise ValueError(
-            "Legacy full resume uses window filtering/source-row statistics. "
-            "Resume with the original code or start a new experiment; no automatic warm start or refit."
-        )
-    split = saved["dataset"].get("split_manifest")
-    if not isinstance(split, dict) and not OmegaConf.is_dict(split):
-        raise ValueError("Full resume requires the saved actual episode split in dataset.split_manifest")
-
-
 def resolve_input_recipe(cfg, *, overrides, saved_config=None):
     """Use the saved recipe on resume, applying only explicit operational/location overrides."""
     from hydra.core.override_parser.overrides_parser import OverridesParser
 
     if saved_config is None:
         return copy.deepcopy(cfg)
-    validate_resume_protocol(saved_config)
     result = OmegaConf.create(saved_config)
+    if not OmegaConf.is_dict(result.dataset.get("split_manifest")):
+        raise ValueError("Resume requires an embedded dataset.split_manifest")
     with open_dict(result):
         # The execution limit belongs to this invocation.
         result.pop("max_updates", None)

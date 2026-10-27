@@ -28,6 +28,9 @@ Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与�
 # 配置接口及导入检查（无需数据或 GPU）
 python dexmani_policy/smoke_test.py --config-only dp3
 
+# 合成数据上的 RGB、辅助目标、归一化与 CPU 训练/恢复回归
+OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
+
 # 检查指定任务的数据路径
 python -m dexmani_policy.training.common.config \
   --config-name dp3 'task_name=<task>' --check
@@ -49,9 +52,9 @@ bash scripts/training/train.sh dp3 \
   '+resume_from=experiments/dp3/<task>/<run>'
 ```
 
-入口支持 Hydra 配置覆盖。续训使用 Checkpoint 保存的训练配方，并创建新的运行目录；首次 update 前归档恢复点及之前实际存在的有效 milestone。缺历史 milestone 不阻止恢复，已有候选损坏、冲突或配方不一致仍报错；不复制未来候选。当前数据协议将实际划分内嵌于 `dataset.split_manifest`；恢复复用保存的 split 和 normalizer，禁止重新拟合。含旧 `data_recipe` 的完整续训明确拒绝，应使用对应旧代码继续或另开实验；旧推理权重的 affine 不变。完整训练 `.pt` 仅接受可信项目产物。
+入口支持 Hydra 配置覆盖。续训使用 Checkpoint 保存的训练配方，并创建新的运行目录；首次 update 前归档恢复点及之前实际存在的有效 milestone。缺历史 milestone 不阻止恢复，已有候选损坏、冲突或配方不一致仍报错；不复制未来候选。实际划分内嵌于 `dataset.split_manifest`；恢复复用保存的 split 和 normalizer，禁止重新拟合。完整训练 `.pt` 仅接受可信项目产物。
 
-数据装配对所选 train/val episodes 的消费字段和列做一次分块有限值检查，坏值报出路径、字段、episode、row 和通道后停止。普通归一化使用训练 episodes 的全部真实帧，每帧一次；LatentFlow 的相对动作仍按窗口及 query reference 统计。这两项分别替代旧的坏窗口过滤和窗口覆盖源帧统计，不保证与旧数据准入和旧统计等价。详见 [数据接口](docs/项目架构.md#数据接口)。
+数据装配对所选 train/val episodes 的消费字段和列做一次分块有限值检查，坏值报出路径、字段、episode、row 和通道后停止。普通归一化使用训练 episodes 的全部真实帧，每帧一次；LatentFlow 的相对动作按窗口及 query reference 统计。详见 [数据接口](docs/项目架构.md#数据接口)。
 
 恢复采用 epoch 级语义：中途 checkpoint 从当前 epoch 开头重读，权重及 global_step 不回退；完成 epoch 后的 checkpoint 从下一 epoch 开始。不保存 batch 游标，不保证逐位重放；训练预算、scheduler、EMA 和 milestone 仍按实际 optimizer update 计数。
 

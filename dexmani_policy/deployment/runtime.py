@@ -133,8 +133,8 @@ class PolicyRuntime:
             if value.dtype.kind == "f" and not np.isfinite(value).all():
                 raise ValueError(f"Nonfinite policy observation: {name}")
             if name == "rgb":
-                if value.ndim != 4:
-                    raise ValueError("RGB input requires shape (T, H, W, 3)")
+                if value.ndim != 4 or value.shape[-1] != 3 or value.dtype != np.uint8:
+                    raise ValueError("RGB input requires shape (T, H, W, 3) and dtype uint8")
                 tensor = preprocess_rgb_eval(value, **self.rgb_preprocessing)
             else:
                 tensor = torch.from_numpy(np.ascontiguousarray(value))

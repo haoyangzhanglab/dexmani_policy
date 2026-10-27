@@ -3,22 +3,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 if TYPE_CHECKING:
+    import numpy as np
     import torch
 
 
 def rgb_preprocessing_kwargs(dataset_config):
-    validate_rgb_preprocessing(
-        dataset_config.get("rgb_preprocess_size"),
-        dataset_config.get("rgb_random_crop_size"),
-        dataset_config.get("rgb_color_aug"),
-    )
     return {
         "resize_hw": dataset_config.get("rgb_preprocess_size"),
         "center_crop_hw": dataset_config.get("rgb_random_crop_size"),
-        "keep_uint8": bool(dataset_config.get("rgb_keep_uint8", False)),
+        "keep_uint8": dataset_config.get("rgb_keep_uint8", False),
         "float_spatial_before_uint8": dataset_config.get("rgb_color_aug") is not None,
     }
 
@@ -26,38 +20,17 @@ def rgb_preprocessing_kwargs(dataset_config):
 def validate_rgb_preprocessing(resize_hw, crop_hw, color_augmentation=None):
     if resize_hw is None and (crop_hw is not None or color_augmentation is not None):
         raise ValueError("RGB crop and color augmentation require rgb_preprocess_size")
-    if crop_hw is not None and (
-        len(crop_hw) != 2
-        or len(resize_hw) != 2
-        or any(not 0 < crop <= size for crop, size in zip(crop_hw, resize_hw))
-    ):
-        raise ValueError("RGB crop must fit within the resize dimensions")
-
-
-def raw_rgb_tensor(rgb, *, ndim=None):
-    """Validate raw uint8 HWC input without copying its storage."""
-    import torch
-
-    value = torch.from_numpy(rgb) if isinstance(rgb, np.ndarray) else rgb
-    if not torch.is_tensor(value):
-        raise TypeError("raw RGB must be a NumPy array or torch tensor")
-    if (
-        value.ndim < 3
-        or value.shape[-1] != 3
-        or value.dtype != torch.uint8
-        or (ndim is not None and value.ndim != ndim)
-    ):
-        shape = "(T, H, W, 3)" if ndim == 4 else "[..., H, W, 3]"
-        raise ValueError(f"raw RGB must have shape {shape} and dtype uint8")
-    return value
+    if crop_hw is not None:
+        crop_h, crop_w = crop_hw
+        resize_h, resize_w = resize_hw
+        if not (0 < crop_h <= resize_h and 0 < crop_w <= resize_w):
+            raise ValueError("RGB crop must fit within the resize dimensions")
 
 
 def resize_image_transform(input_hw, output_hw, *, device=None) -> torch.Tensor:
-    """Map pixel centers by an FP32 3x3 affine with (H, W) sizes and align_corners=False."""
+    """FP32 pixel-center affine for (H, W) resize with align_corners=False."""
     import torch
 
-    if len(input_hw) != 2 or len(output_hw) != 2 or min(*input_hw, *output_hw) <= 0:
-        raise ValueError("resize requires positive (height,width) sizes")
     sy, sx = (dst / src for src, dst in zip(input_hw, output_hw))
     return torch.tensor(
         ((sx, 0, (sx - 1) / 2), (0, sy, (sy - 1) / 2), (0, 0, 1)),
@@ -85,15 +58,16 @@ def preprocess_rgb_train(
     keep_uint8: bool,
     color_augmentation: Callable | None = None,
 ) -> torch.Tensor:
-    # Apply the same crop and color augmentation to every frame.
     import torch
     import torchvision.transforms.functional as TVF
 
-    value = raw_rgb_tensor(rgb, ndim=4).permute(0, 3, 1, 2).contiguous()
+    value = torch.as_tensor(rgb).permute(0, 3, 1, 2)
     if not keep_uint8 or color_augmentation is not None:
-        value = value.float().div_(255.0)
-    value = TVF.resize(value, list(resize_hw), antialias=True)
+        value = value.to(dtype=torch.float32, memory_format=torch.contiguous_format).div_(255.0)
+    value = TVF.resize(value.contiguous(), list(resize_hw), antialias=True)
+
     if random_crop_hw is not None:
+        # Share crop coordinates across the observation window.
         height, width = random_crop_hw
         top = torch.randint(0, value.shape[-2] - height + 1, (1,)).item()
         left = torch.randint(0, value.shape[-1] - width + 1, (1,)).item()
@@ -111,27 +85,19 @@ def preprocess_rgb_eval(
     keep_uint8: bool,
     float_spatial_before_uint8: bool = False,
 ) -> torch.Tensor:
-    # Without CPU resize, the encoder receives raw uint8 HWC images.
+    import torch
     import torchvision.transforms.functional as TVF
-    from torchvision.transforms import InterpolationMode
 
-    value = raw_rgb_tensor(rgb)
+    value = torch.as_tensor(rgb)
     if resize_hw is None:
-        if center_crop_hw is not None:
-            raise ValueError("validation RGB center crop requires a resize")
         return value.contiguous()
 
-    leading_shape = tuple(value.shape[:-3])
-    value = value.movedim(-1, -3).contiguous()
-    value = value.reshape(-1, *value.shape[-3:])
+    leading_shape = value.shape[:-3]
+    value = value.reshape(-1, *value.shape[-3:]).permute(0, 3, 1, 2)
     if not keep_uint8 or float_spatial_before_uint8:
-        value = value.float().div_(255.0)
-    value = TVF.resize(
-        value,
-        list(resize_hw),
-        interpolation=InterpolationMode.BILINEAR,
-        antialias=True,
-    )
+        value = value.to(dtype=torch.float32, memory_format=torch.contiguous_format).div_(255.0)
+    value = TVF.resize(value.contiguous(), list(resize_hw), antialias=True)
+
     if center_crop_hw is not None:
         value = TVF.center_crop(value, list(center_crop_hw))
     value = convert_rgb_output(value, keep_uint8=keep_uint8)

@@ -148,11 +148,11 @@ class PolicyTrainer:
             if checkpoint is not None:
                 archive_resume_milestones(cfg.resume_from, self.logger.output_dir, checkpoint)
             self.logger.save_config(self.cfg)
+            if checkpoint is not None:
+                set_rng_state(checkpoint.rng_state, device=device)
         except BaseException:
             self.logger.close()
             raise
-        if checkpoint is not None:
-            set_rng_state(checkpoint.rng_state, device=device)
 
     def compile_models(self):
         if self.cfg.training.get("use_compile", False):
