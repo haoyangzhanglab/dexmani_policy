@@ -12,23 +12,6 @@ from .ops import index_points, sample_point_patches, load_pointcloud_ops
 from .pointnet import build_mlp
 
 
-def _build_local_graph(
-    centers: torch.Tensor, geometry_scale: float
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # A single MxM distance matrix for a small, fixed anchor graph.
-    num_patches = centers.shape[1]
-    distances = torch.cdist(centers, centers, compute_mode="donot_use_mm_for_euclid_dist")
-    diagonal = torch.eye(num_patches, dtype=torch.bool, device=centers.device)
-    local_indices = (
-        distances.masked_fill(diagonal[None], float("inf"))
-        .topk(min(12, num_patches - 1), largest=False, sorted=False)
-        .indices
-    )
-    offsets = (index_points(centers, local_indices) - centers.unsqueeze(2)) / geometry_scale
-    edges = torch.cat((offsets, torch.linalg.vector_norm(offsets, dim=-1, keepdim=True)), dim=-1)
-    return local_indices, edges
-
-
 class GeometricPatchEmbedding(nn.Module):
     """Member features, Gaussian pooling on shared kNN support, and geometric moments."""
 
@@ -70,8 +53,15 @@ class GeometricPatchEmbedding(nn.Module):
             moments = torch.cat((covariance, radius / self.geometry_scale), dim=-1)
 
         member = self.member_mlp(features.to(self.member_mlp[0].weight.dtype))
-        context = member.amax(dim=2, keepdim=True).expand_as(member)
-        member = self.refine(torch.cat((member, context), dim=-1))
+        context = member.amax(dim=2, keepdim=True)
+        # Project the shared context once per patch, keeping the existing refine parameters.
+        linear = self.refine[0]
+        d = member.shape[-1]
+        member = F.linear(member, linear.weight[:, :d], linear.bias) + F.linear(
+            context, linear.weight[:, d:], None
+        )
+        for i in range(1, len(self.refine)):
+            member = self.refine[i](member)
 
         with torch.autocast(device_type=member.device.type, enabled=False):
             weighted = torch.einsum("bmks,bmkd->bmsd", weights, member.float()).flatten(-2)
@@ -111,56 +101,6 @@ class RotaryPositionEmbedding3D(nn.Module):
         pairs = x.float().unflatten(-1, (-1, 2))
         rotated = torch.stack((-pairs[..., 1], pairs[..., 0]), dim=-1).flatten(-2)
         return (x.float() * cos + rotated * sin).to(x.dtype)
-
-
-class LocalGeometricTransformerBlock(nn.Module):
-    """Local geometric attention over distinct patch indices, with pre-gather QKV."""
-
-    def __init__(self, channels: int):
-        super().__init__()
-        self.heads = 4
-        self.head_dim = 32
-        self.norm1 = nn.LayerNorm(channels)
-        self.qkv = nn.Linear(channels, 3 * 128)
-        self.q_norm = nn.LayerNorm(self.head_dim)
-        self.k_norm = nn.LayerNorm(self.head_dim)
-        self.edge_mlp = build_mlp([4, 64, 128 + self.heads], normalize=False)
-        self.projection = nn.Linear(128, channels)
-        self.norm2 = nn.LayerNorm(channels)
-        self.ffn = build_mlp([channels, 2 * channels, channels], normalize=False)
-        self.attention_gain = nn.Parameter(torch.full((channels,), 0.1))
-        self.ffn_gain = nn.Parameter(torch.full((channels,), 0.1))
-
-    def forward(self, tokens: torch.Tensor, indices: torch.Tensor, edges: torch.Tensor):
-        b, m, _ = tokens.shape
-        neighbors = indices.shape[-1]
-
-        q, k, v = self.qkv(self.norm1(tokens)).chunk(3, dim=-1)
-        q = self.q_norm(q.reshape(b, m, self.heads, self.head_dim))
-        k = self.k_norm(k.reshape(b, m, self.heads, self.head_dim))
-        k = index_points(k, indices).permute(0, 1, 3, 2, 4)
-        v = (
-            index_points(v, indices)
-            .reshape(b, m, neighbors, self.heads, self.head_dim)
-            .permute(0, 1, 3, 2, 4)
-        )
-
-        relative_value, bias = self.edge_mlp(edges.to(self.edge_mlp[0].weight.dtype)).split(
-            (128, self.heads), dim=-1
-        )
-        relative_value = relative_value.reshape(b, m, neighbors, self.heads, self.head_dim).permute(
-            0, 1, 3, 2, 4
-        )
-
-        logits = (q.float().unsqueeze(-2) * k.float()).sum(-1) / math.sqrt(self.head_dim)
-        logits = logits + bias.float().permute(0, 1, 3, 2)
-        weights = logits.softmax(dim=-1).to(v.dtype)
-        update = (
-            (weights.unsqueeze(-1) * (v + relative_value.to(v.dtype))).sum(-2).reshape(b, m, 128)
-        )
-
-        tokens = tokens + self.attention_gain * self.projection(update)
-        return tokens + self.ffn_gain * self.ffn(self.norm2(tokens))
 
 
 class GlobalTransformerBlock(nn.Module):
@@ -206,11 +146,11 @@ class Sparse3DEncoder(nn.Module):
         self,
         input_channels: int = 6,
         channels: int = 384,
-        num_patches: int = 192,
+        num_patches: int = 96,
         group_size: int = 32,
-        depth: int = 6,
+        depth: int = 4,
         num_heads: int = 8,
-        mlp_ratio: float = 4.0,
+        mlp_ratio: float = 2.0,
         geometry_scale: float = 0.10,
         rope_scale: float = 0.05,
         rope_base: float = 100.0,
@@ -226,10 +166,12 @@ class Sparse3DEncoder(nn.Module):
         if input_channels not in (3, 6):
             raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")
         sizes = (channels, num_patches, group_size, depth, num_heads)
-        if any(type(value) is not int or value <= 0 for value in sizes) or num_patches < 2:
-            raise ValueError("sizes must be positive integers and num_patches >= 2")
+        if any(type(value) is not int or value <= 0 for value in sizes):
+            raise ValueError("sizes must be positive integers")
         if channels % num_heads:
             raise ValueError("channels must be divisible by num_heads")
+        if (channels // num_heads) % 6:
+            raise ValueError("channels // num_heads must be divisible by 6")
         if int(channels * mlp_ratio) < 1:
             raise ValueError("mlp_ratio must produce a positive hidden dimension")
         if not math.isfinite(geometry_scale) or geometry_scale <= 0:
@@ -239,11 +181,9 @@ class Sparse3DEncoder(nn.Module):
         self.channels = channels
         self.num_patches = num_patches
         self.group_size = group_size
-        self.geometry_scale = float(geometry_scale)
         self.fps_random_config = dict(fps_random_config or {})
 
         self.patch_embedding = GeometricPatchEmbedding(input_channels, channels, geometry_scale)
-        self.local_relation = LocalGeometricTransformerBlock(channels)
         self.position_embedding = build_mlp([3, 128, channels], normalize=False)
         self.rope = RotaryPositionEmbedding3D(channels // num_heads, rope_scale, rope_base)
         self.blocks = nn.ModuleList(
@@ -283,13 +223,11 @@ class Sparse3DEncoder(nn.Module):
                 self.fps_random_config,
                 self.training,
             )
-            local_indices, edges = _build_local_graph(centers, self.geometry_scale)
             cos, sin = self.rope(centers)
 
         relative_xyz = index_points(xyz, neighbors) - centers.unsqueeze(2)
         attributes = index_points(pointcloud[..., 3 : self.input_channels], neighbors)
         tokens, radius = self.patch_embedding(relative_xyz, attributes)
-        tokens = self.local_relation(tokens, local_indices, edges)
         # Preserve absolute metric position as content alongside relative geometry/RoPE.
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
         tokens = tokens + position.to(tokens.dtype)

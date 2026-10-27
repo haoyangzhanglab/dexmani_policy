@@ -34,7 +34,6 @@ class LAMPObservationEncoder(nn.Module):
         super().__init__()
         config = dict(pc_encoder_config or {})
         config.setdefault("fps_random_config", fps_random_config)
-        config.setdefault("num_patches", 96)
         self.num_points = positive_int(num_points, "num_points")
         self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
         self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **config)

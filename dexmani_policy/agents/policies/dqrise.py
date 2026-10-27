@@ -51,7 +51,7 @@ class DQRISEObservationEncoder(nn.Module):
         if fps_random_config is not None:
             self.fps_random_config.update(fps_random_config)
 
-        config = {"num_patches": 64, "depth": 4, **(pc_encoder_config or {})}
+        config = dict(pc_encoder_config or {})
         nested_fps = config.get("fps_random_config")
         if nested_fps is not None and dict(nested_fps) != self.fps_random_config:
             raise ValueError("Sparse3D patch FPS must match observation preprocessing FPS")

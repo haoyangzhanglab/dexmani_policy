@@ -52,7 +52,6 @@ dataset:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
       color: {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
-      dropout: {max_dropout_ratio: 0.8, prob: 1.0}
 
 agent:
   _target_: dexmani_policy.agents.policies.lamp.LAMPPolicy
@@ -77,9 +76,9 @@ agent:
     channels: 384
     num_patches: 96
     group_size: 32
-    depth: 6
+    depth: 4
     num_heads: 8
-    mlp_ratio: 4.0
+    mlp_ratio: 2.0
     geometry_scale: 0.10
     rope_scale: 0.05
     rope_base: 100.0
