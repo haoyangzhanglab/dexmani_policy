@@ -22,15 +22,15 @@ from dexmani_policy.common.config import load_policy_config, positive_int, resol
 from dexmani_policy.common.normalizer import LinearNormalizer, FieldNormalizer
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.robot_dataset import RobotDataset
-from dexmani_policy.training.optimization import get_scheduler
-from dexmani_policy.training.data import build_normalizer
-from dexmani_policy.training.pretrain.export_codebook import (
+from dexmani_policy.datasets.common.robot_dataset import RobotDataset
+from dexmani_policy.training.common.optimization import get_scheduler
+from dexmani_policy.training.common.data import build_normalizer
+from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
     build_runtime_codebook,
     deployment_diagnostics,
 )
-from dexmani_policy.training.config import validate_config
+from dexmani_policy.training.common.config import validate_config
 
 logger = logging.getLogger(__name__)
 

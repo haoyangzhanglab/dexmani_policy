@@ -6,7 +6,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from dexmani_policy import eval_pipeline as pipeline, evaluate
+from dexmani_policy import evaluate
 from dexmani_policy.common.config import load_policy_config
 from dexmani_policy.common.experiments import (
     MILESTONE_PATTERN,
@@ -255,7 +255,7 @@ def test_milestones_checked_before_load(experiment, simulation, mode):
 
 def test_pipeline_and_ordinary_best_overrides(experiment, simulation):
     root, cfg = experiment
-    path = pipeline.run_pipeline(root, cfg, overrides={"eval": {"inference_steps": 6}})
+    path = selection.run_pipeline(root, cfg, overrides={"eval": {"inference_steps": 6}})
     result = json.loads(path.read_text())
     assert result["request"]["source"]["heldout_from_selection"]
     assert result["request"]["inference_steps"] == 6

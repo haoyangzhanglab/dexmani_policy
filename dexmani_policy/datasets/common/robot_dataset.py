@@ -15,14 +15,14 @@ from dexmani_policy.common.image_util import (
 )
 from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, positive_int
-from dexmani_policy.datasets.augmentation import (
+from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
 )
-from dexmani_policy.datasets.metadata import describe_hand_data, describe_real_runtime
-from dexmani_policy.datasets.split import split_episodes
-from dexmani_policy.datasets.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.sampler import SequenceSampler
+from dexmani_policy.datasets.common.metadata import describe_hand_data, describe_real_runtime
+from dexmani_policy.datasets.common.split import split_episodes
+from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.common.sampler import SequenceSampler
 
 
 class RobotDataset(torch.utils.data.Dataset):

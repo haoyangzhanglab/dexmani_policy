@@ -14,6 +14,7 @@ from dexmani_policy.evaluation.artifacts import (
     write_json,
 )
 from dexmani_policy.evaluation.config import (
+    frozen_test_request,
     make_request,
     prepare_evaluation_config,
     task_seed_pools,
@@ -128,3 +129,12 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
         raise
 
     return record, checkpoint
+
+
+def run_pipeline(exp_dir, cfg, *, overrides=None) -> Path:
+    from dexmani_policy.evaluation.rollout import evaluate_policy
+
+    record, checkpoint = select_best_checkpoint(exp_dir, cfg, overrides=overrides)
+    request = frozen_test_request(record, checkpoint)
+    _, result_path = evaluate_policy(request, output_root=Path(exp_dir) / "eval_dexsim")
+    return result_path

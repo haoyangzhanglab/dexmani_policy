@@ -15,7 +15,7 @@ from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.common.pytorch_util import get_rng_state
-from dexmani_policy.datasets.robot_dataset import RobotDataset
+from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 from dexmani_policy.deployment import PolicyRuntime, inspect_policy, load_policy
 
 

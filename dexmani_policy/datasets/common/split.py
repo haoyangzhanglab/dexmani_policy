@@ -6,7 +6,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.datasets.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 
 
 def validate_episode_metadata(metadata, count):

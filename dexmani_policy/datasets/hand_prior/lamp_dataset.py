@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from dexmani_policy.datasets.robot_dataset import RobotDataset
+from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 
 
 class LAMPDataset(RobotDataset):

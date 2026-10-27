@@ -15,9 +15,9 @@ from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.lamp_dataset import LAMPDataset
-from dexmani_policy.training.optimization import get_scheduler
-from dexmani_policy.training.config import validate_config
+from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
+from dexmani_policy.training.common.optimization import get_scheduler
+from dexmani_policy.training.common.config import validate_config
 
 
 def build_prior_dataset(cfg):

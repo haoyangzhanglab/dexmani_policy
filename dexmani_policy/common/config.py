@@ -1,140 +1,19 @@
-import argparse
-import copy
-import json
 import math
 import os
-import re
 from datetime import datetime
 from numbers import Integral
 from pathlib import Path
 
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
 ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
 
-ARTIFACT_LOCATION_FIELDS = {
-    "lamp.prior_path",
-    "codec.path",
-    "codebook_path",
-    "agent.prior_path",
-    "agent.codec_path",
-    "agent.codebook_path",
-}
-
-RESUME_OPERATIONAL_FIELDS = {
-    "resume_from",
-    "max_updates",
-    "workspace.output_dir",
-    "workspace.wandb_cfg",
-    "training.device",
-    "training.use_compile",
-    "training.compile_mode",
-    "training.loop.log_interval_steps",
-    "dataloader.num_workers",
-    "dataloader.persistent_workers",
-    "dataloader.prefetch_factor",
-}
-
 
 def set_project_root() -> None:
     os.chdir(PROJECT_ROOT)
-
-
-def resolve_resume_source(source):
-    if source is None:
-        return None
-    path = PROJECT_ROOT / Path(source).expanduser()
-    if path.is_dir():
-        path = path / "checkpoints" / "latest.pt"
-    path = path.resolve(strict=True)
-    if not path.is_file():
-        raise ValueError(f"Resume source must be a checkpoint file: {path}")
-    return str(path)
-
-
-def validate_source_recipe(saved, current):
-    """Require the same experiment recipe, allowing supported run/location changes."""
-    if OmegaConf.is_config(saved):
-        saved = OmegaConf.to_container(saved, resolve=True)
-    if OmegaConf.is_config(current):
-        current = OmegaConf.to_container(current, resolve=True)
-    ignored = RESUME_OPERATIONAL_FIELDS | ARTIFACT_LOCATION_FIELDS | {"hand_data.provenance.zarr_path"}
-    differences = []
-
-    def compare(left, right, path=""):
-        if isinstance(left, dict) and isinstance(right, dict):
-            for key in sorted(left.keys() | right.keys()):
-                child_path = f"{path}.{key}" if path else key
-                if (
-                    child_path in ignored
-                    or child_path == "dataset.zarr_path"
-                    or re.fullmatch(r"data_recipe\.\d+\.source_evidence", child_path)
-                ):
-                    continue
-                if key not in left or key not in right:
-                    differences.append(f"config.{child_path}: missing field")
-                else:
-                    compare(left[key], right[key], child_path)
-        elif isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
-            if len(left) != len(right):
-                differences.append(f"config.{path}: different lengths")
-            for i, (a, b) in enumerate(zip(left, right)):
-                compare(a, b, f"{path}.{i}")
-        elif type(left) is not type(right) or left != right:
-            differences.append(f"config.{path}: checkpoint={left!r}, config={right!r}")
-
-    compare(saved, current)
-    if differences:
-        raise ValueError("Checkpoint source recipe mismatch:\n" + "\n".join(differences))
-
-
-def resolve_input_recipe(cfg, *, overrides, resume_checkpoint=None):
-    """Use the saved recipe on resume, applying only explicit operational/location overrides."""
-    from hydra.core.override_parser.overrides_parser import OverridesParser
-
-    source = resolve_resume_source(cfg.get("resume_from"))
-    if source is None:
-        return copy.deepcopy(cfg)
-    if resume_checkpoint is None:
-        from dexmani_policy.common.checkpoint import load_checkpoint
-
-        source_config = load_checkpoint(source, mmap=True).effective_config
-    else:
-        source_config = resume_checkpoint.effective_config
-    result = OmegaConf.create(source_config)
-    with open_dict(result):
-        # The execution limit belongs to this invocation.
-        result.pop("max_updates", None)
-        for override in OverridesParser.create().parse_overrides(list(overrides)):
-            key = override.key_or_group
-            if key.startswith("hydra."):
-                continue
-            if override.is_delete() or override.is_sweep_override():
-                raise ValueError(f"Unsupported resume override: {override.input_line}")
-            if key == "task_name":
-                requested, identity = override.value(), result.get("task_name")
-                if requested != identity:
-                    raise ValueError(
-                        f"Resume task identity mismatch: requested={requested!r}, saved={identity!r}"
-                    )
-                continue
-            if (
-                key not in RESUME_OPERATIONAL_FIELDS
-                and key not in ARTIFACT_LOCATION_FIELDS
-                and not key.startswith("workspace.wandb_cfg.")
-                and key != "dataset.zarr_path"
-            ):
-                raise ValueError(
-                    f"Resume recipe is owned by saved config; forbidden override: {key}"
-                )
-            if key == "resume_from":
-                continue
-            OmegaConf.update(result, key, override.value(), merge=False, force_add=True)
-        result.resume_from = source
-    return result
 
 
 def register_resolvers():
@@ -293,30 +172,3 @@ def validate_observation_fields(agent, declared):
         raise ValueError(
             f"Model observation mismatch: missing={sorted(missing)}, unconsumed={sorted(unused)}"
         )
-
-
-def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
-    """Resolve fresh or saved dataset paths without opening data or importing models."""
-    cfg = load_policy_config(config_name, overrides)
-    cfg = resolve_input_recipe(cfg, overrides=overrides)
-    return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Resolve training dataset paths.")
-    parser.add_argument("--config-name", required=True)
-    parser.add_argument(
-        "--check", action="store_true", help="Require existing dataset directories."
-    )
-    parser.add_argument("overrides", nargs="*", help="Hydra overrides passed to training.")
-    args = parser.parse_args()
-    paths = resolve_dataset_paths(args.config_name, args.overrides)
-    print(json.dumps({"dataset_paths": [str(path) for path in paths]}, indent=2))
-    if args.check:
-        missing = [str(path) for path in paths if not path.is_dir()]
-        if missing:
-            raise SystemExit("Missing dataset directories:\n  " + "\n  ".join(missing))
-
-
-if __name__ == "__main__":
-    main()

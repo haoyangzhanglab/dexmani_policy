@@ -15,17 +15,18 @@ from dexmani_policy.common.checkpoint import (
     prepare_restore_config, save_checkpoint,
 )
 from dexmani_policy.common.config import (
-    positive_int, resolve_normalization_spec, validate_observation_fields, validate_source_recipe,
+    positive_int, resolve_normalization_spec, validate_observation_fields,
 )
-from dexmani_policy.common.experiments import archive_resume_milestones, milestone_steps
+from dexmani_policy.common.experiments import milestone_steps
 from dexmani_policy.common.io_util import atomic_path, close_resources
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
-from dexmani_policy.training.config import assemble_effective_config
-from dexmani_policy.training.data import build_train_loader, close_data_loader
-from dexmani_policy.training.logging import (
+from dexmani_policy.training.common.config import assemble_effective_config
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader
+from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
-from dexmani_policy.training.optimization import build_optimizer, get_scheduler
+from dexmani_policy.training.common.optimization import build_optimizer, get_scheduler
+from dexmani_policy.training.common.resume import archive_resume_milestones, validate_source_recipe
 
 
 class PolicyTrainer:

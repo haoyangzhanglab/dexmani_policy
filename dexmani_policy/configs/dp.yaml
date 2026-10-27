@@ -1,4 +1,4 @@
-# DP — Diffusion Policy with RGB observation
+# DP：基于 RGB 观测的扩散策略。
 
 policy_name: dp
 
@@ -9,7 +9,7 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action                    # action | action_ee
+action_key: action  # action：关节；action_ee：末端。
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 normalization:
@@ -27,10 +27,10 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
-  seed: 42
+  seed: 42  # 数据划分/子集 seed，独立于训练 seed。
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
@@ -42,9 +42,9 @@ dataset:
   rgb_random_crop_size: [224, 224]
   rgb_keep_uint8: true
 
-  # Color augmentation selects float interpolation for both training and validation.
+  # 配置颜色增强时，训练与评测均使用浮点插值。
   rgb_color_aug:
-    _target_: dexmani_policy.datasets.augmentation.ImageAugmentation
+    _target_: dexmani_policy.datasets.common.augmentation.ImageAugmentation
     brightness: 0.3
     contrast: 0.2
     saturation: 0.2
@@ -54,7 +54,6 @@ dataset:
     blur_prob: 0.0
     prob: 0.25
 
-  # Joint-state augmentation — mild Gaussian noise, always-on (prob 1.0).
   augmentation_cfg:
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
@@ -69,7 +68,7 @@ agent:
 
   rgb_backbone_name: dino
   rgb_backbone_config:
-    model_name: facebook/dinov2-small  # 384d
+    model_name: facebook/dinov2-small
     tune_mode: lora
     lora_dtype: float32
     global_token_type: avg
@@ -79,14 +78,12 @@ agent:
   modality_dropout_probs:
     joint_state: 0.0
 
-  # UNet backbone
   diffusion_step_embed_dim: 128
   down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: true
 
-  # Diffusion
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
@@ -99,7 +96,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 ema:
-  _target_: dexmani_policy.training.optimization.EMA
+  _target_: dexmani_policy.training.common.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -148,9 +145,8 @@ eval:
 
   video:
     enabled: true
+
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

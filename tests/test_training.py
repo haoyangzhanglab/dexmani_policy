@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -12,12 +13,13 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.checkpoint import load_checkpoint, restore_policy_agent
+from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import PROJECT_ROOT
 from dexmani_policy.common.experiments import discover_milestone_checkpoints, milestone_steps
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.training.data import build_dataset_and_normalizer
-from dexmani_policy.training.optimization import build_optimizer, get_scheduler
+from dexmani_policy.deployment.runtime import restore_policy_agent
+from dexmani_policy.training.common.data import build_dataset_and_normalizer
+from dexmani_policy.training.common.optimization import build_optimizer, get_scheduler
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
@@ -45,7 +47,7 @@ def training_config(path, output):
         "n_obs_steps": 1, "n_action_steps": 1, "action_dim": 19,
         "normalization": {"joint_state": "limits", "action": "limits"},
         "dataset": {
-            "_target_": "dexmani_policy.datasets.robot_dataset.RobotDataset",
+            "_target_": "dexmani_policy.datasets.common.robot_dataset.RobotDataset",
             "zarr_path": str(path), "sensor_modalities": ["joint_state"],
             "horizon": 1, "obs_horizon": 1, "max_train_episodes": 1,
         },
@@ -54,7 +56,7 @@ def training_config(path, output):
             "n_obs_steps": 1, "n_action_steps": 1, "action_dim": 19,
         },
         "optimizer": {"lr": 0.01, "weight_decay": 0.0},
-        "ema": {"_target_": "dexmani_policy.training.optimization.EMA"},
+        "ema": {"_target_": "dexmani_policy.training.common.optimization.EMA"},
         "dataloader": {"batch_size": 2, "num_workers": 0, "shuffle": False, "drop_last": True},
         "training": {
             "seed": 42, "device": "cpu", "use_ema": True, "max_grad_norm": 0.0,
@@ -147,6 +149,53 @@ def test_nonfinite_loss_and_signal_stop_at_update(demonstrations, tmp_path, one_
         assert trainer.global_step == 1
 
 
+def test_train_import_preserves_process_state(tmp_path):
+    code = """
+import os, sys
+from omegaconf import OmegaConf
+sys.path.insert(0, sys.argv[1])
+for name in ('run_id', 'eval', 'eq'):
+    OmegaConf.register_new_resolver(name, lambda *args: 'existing', replace=True)
+directory = os.getcwd()
+import dexmani_policy.train
+assert os.getcwd() == directory
+assert 'TOKENIZERS_PARALLELISM' not in os.environ
+for name in ('run_id', 'eval', 'eq'):
+    assert OmegaConf.create({'value': '${' + name + ':}'}).value == 'existing'
+"""
+    env = dict(os.environ)
+    env.pop("TOKENIZERS_PARALLELISM", None)
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(PROJECT_ROOT)], cwd=tmp_path, env=env,
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_dataset_path_cli_without_data_or_models(tmp_path):
+    path = tmp_path / "unopened.zarr"
+    code = """
+import runpy, sys
+sys.argv = ['config', '--config-name', 'dp3', 'zarr_path=' + sys.argv[1]]
+runpy.run_module('dexmani_policy.training.common.config', run_name='__main__')
+assert 'torch' not in sys.modules
+assert not any(name.startswith(('dexmani_policy.agents.', 'dexmani_policy.datasets.')) for name in sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(path)], cwd=PROJECT_ROOT,
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {"dataset_paths": [str(path)]}
+    missing = subprocess.run(
+        [sys.executable, "-m", "dexmani_policy.training.common.config", "--config-name", "dp3",
+         "--check", f"zarr_path={path}"],
+        cwd=PROJECT_ROOT, capture_output=True, text=True,
+    )
+    assert missing.returncode != 0
+    assert "Missing dataset directories" in missing.stderr
+
+
 def test_dp3_cpu_cli_training_and_resume(demonstrations, tmp_path):
     source, resumed = tmp_path / "source", tmp_path / "resumed"
     command = [sys.executable, "-m", "dexmani_policy.train", "--config-name=dp3"]
@@ -165,6 +214,25 @@ def test_dp3_cpu_cli_training_and_resume(demonstrations, tmp_path):
     assert first.returncode == 0, first.stdout + first.stderr
     saved = load_checkpoint(source / "checkpoints/latest.pt")
     assert saved.global_step == 1
+    path_command = [
+        sys.executable, "-m", "dexmani_policy.training.common.config", "--config-name=dp3",
+        f"+resume_from={source}",
+    ]
+    for extra, expected in (
+        (["--check"], demonstrations),
+        ([f"dataset.zarr_path={tmp_path / 'relocated.zarr'}"], tmp_path / "relocated.zarr"),
+    ):
+        resolved = subprocess.run(
+            path_command + extra, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True,
+        )
+        assert resolved.returncode == 0, resolved.stdout + resolved.stderr
+        assert json.loads(resolved.stdout) == {"dataset_paths": [str(expected)]}
+    forbidden = subprocess.run(
+        path_command + ["training.loop.total_train_steps=10"],
+        cwd=PROJECT_ROOT, env=env, capture_output=True, text=True,
+    )
+    assert forbidden.returncode != 0
+    assert "forbidden override: training.loop.total_train_steps" in forbidden.stderr
     second = subprocess.run(
         command + [f"+resume_from={source}", f"hydra.run.dir={resumed}"],
         cwd=PROJECT_ROOT, env=env, capture_output=True, text=True,

@@ -1,8 +1,8 @@
 import numpy as np
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.datasets.metadata import describe_hand_chunks
-from dexmani_policy.datasets.robot_dataset import RobotDataset
+from dexmani_policy.datasets.hand_prior.metadata import describe_hand_chunks
+from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 
 
 class HandChunkDataset(RobotDataset):

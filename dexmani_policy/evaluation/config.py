@@ -13,7 +13,7 @@ from dexmani_policy.common.config import (
     validate_action_key_consistency,
 )
 from dexmani_policy.common.experiments import (
-    resolve_checkpoint_path,
+    discover_milestone_checkpoints,
     resolve_milestone_path,
 )
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
@@ -141,6 +141,28 @@ def frozen_test_request(record, checkpoint, *, device=None) -> EvaluationRequest
             "global_step": record["global_step"],
         },
     )
+
+
+def resolve_checkpoint_path(root: Path, selector: str) -> Path:
+    """Resolve a tag or path to a file inside the experiment/checkpoints directory."""
+    if selector.endswith("pct"):
+        milestones = discover_milestone_checkpoints(root)
+        target_pct = int(selector.removesuffix("pct"))
+        for milestone in milestones:
+            if milestone.pct == target_pct:
+                return milestone.path
+        available = [m.pct for m in milestones]
+        raise FileNotFoundError(f"No {target_pct}% milestone checkpoint. Available: {available}")
+    if selector == "latest":
+        path = root / "checkpoints/latest.pt"
+    else:
+        path = Path(selector)
+        if not path.is_absolute():
+            path = root / "checkpoints" / path
+    path = path.resolve()
+    if not path.is_file() or not path.is_relative_to(root / "checkpoints"):
+        raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
+    return path
 
 
 def resolve_evaluation_request(

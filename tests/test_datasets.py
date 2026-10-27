@@ -10,14 +10,14 @@ import zarr
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.hand_representation import HAND_ACTION_SEMANTICS
-from dexmani_policy.datasets.hand_chunk_dataset import HandChunkDataset
-from dexmani_policy.datasets.lamp_dataset import LAMPDataset
-from dexmani_policy.datasets.latent_flow_dataset import LatentFlowDataset
-from dexmani_policy.datasets.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.robot_dataset import RobotDataset
-from dexmani_policy.datasets.split import split_episodes
-from dexmani_policy.training.data import build_normalizer, close_data_loader
-from dexmani_policy.training.pretrain.hand_vae import fit_relative_statistics
+from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
+from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
+from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
+from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.common.robot_dataset import RobotDataset
+from dexmani_policy.datasets.common.split import split_episodes
+from dexmani_policy.training.common.data import build_normalizer, close_data_loader
+from dexmani_policy.training.pretrain.hand_prior.hand_vae import fit_relative_statistics
 
 
 def test_padding_and_training_statistics(demonstrations):

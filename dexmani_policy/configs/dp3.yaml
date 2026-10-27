@@ -1,4 +1,4 @@
-# DP3 — 3D Diffusion Policy with point cloud observation
+# DP3：基于点云观测的扩散策略。
 
 policy_name: dp3
 
@@ -9,7 +9,7 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action                    # action | action_ee
+action_key: action  # action：关节；action_ee：末端。
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 normalization:
@@ -28,10 +28,10 @@ dataloader:
 
 dataset:
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
-  seed: 42
+  seed: 42  # 数据划分/子集 seed，独立于训练 seed。
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
@@ -40,7 +40,7 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Shared R3D-derived sensor recipe with dataset-level first-point dropout.
+  # 点 dropout 在 Dataset 中执行。
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
@@ -57,7 +57,7 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  encoder_type: dp3                  # dp3 (MLP) | idp3 (Conv)
+  encoder_type: dp3  # dp3：MLP；idp3：Conv。
   pc_dim: 6
   pc_out_dim: 128
   state_dim: 19
@@ -67,9 +67,8 @@ agent:
     use_random: true
     use_random_start: true
     random_noise_scale: 0.0
-    use_shuffle_output: false  # PointNet/MultiStagePointNet FPS output order.
+    use_shuffle_output: false
 
-  # Diffusion backbone
   diffusion_step_embed_dim: 128
   down_dims: [256, 512, 1024]
   kernel_size: 5
@@ -91,7 +90,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 ema:
-  _target_: dexmani_policy.training.optimization.EMA
+  _target_: dexmani_policy.training.common.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -140,9 +139,8 @@ eval:
 
   video:
     enabled: true
+
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

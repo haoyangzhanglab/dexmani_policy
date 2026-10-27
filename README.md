@@ -29,7 +29,7 @@ Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与�
 python dexmani_policy/smoke_test.py --config-only dp3
 
 # 检查指定任务的数据路径
-python -m dexmani_policy.common.config \
+python -m dexmani_policy.training.common.config \
   --config-name dp3 'task_name=<task>' --check
 
 # 检查默认配置的数据内容
@@ -85,8 +85,14 @@ bash scripts/eval/evaluate.sh <policy_name> <task_name> <run> \
 dexmani_policy/
 ├── dexmani_policy/
 │   ├── agents/        # 策略与模型
-│   ├── datasets/      # 数据读取与处理
-│   ├── training/      # 训练流程
+│   ├── datasets/
+│   │   ├── common/       # 通用 Dataset、Zarr 读取、窗口、划分与增强
+│   │   └── hand_prior/   # 手部动作窗口、历史与专用元数据
+│   ├── training/
+│   │   ├── trainer.py    # 主策略训练循环
+│   │   ├── common/       # 配置、数据构建、优化、日志与续训
+│   │   └── pretrain/
+│   │       └── hand_prior/  # 手部先验预训练、码本计算与导出
 │   ├── evaluation/    # 仿真评测与选点
 │   ├── deployment/    # 推理部署
 │   └── configs/       # 实验配置

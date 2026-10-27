@@ -1,5 +1,4 @@
-# SAT — local Structural Action Transformer adaptation
-# Key:      structural-centric action representation (Da as sequence, T as feature)
+# SAT：将动作维度作为 token 的结构化 flow 策略。
 
 policy_name: sat
 
@@ -16,7 +15,7 @@ action_dim: 19
 normalization:
   joint_state: limits
   action: auto
-  point_cloud: identity
+  point_cloud: identity  # 保留 XYZ 物理坐标。
 
 dataloader:
   batch_size: 128
@@ -29,10 +28,10 @@ dataloader:
 
 dataset:
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
-  seed: 42
+  seed: 42  # 数据划分/子集 seed，独立于训练 seed。
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
@@ -42,7 +41,6 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Same sensor recipe in SAT and DQ-RISE; no XYZ normalization.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
@@ -58,7 +56,6 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  # Per-frame global mean, then ordered time fusion: 2*(384+64) -> 256.
   pc_dim: 6
   state_dim: 19
   state_out_dim: 64
@@ -81,7 +78,6 @@ agent:
     rope_scale: 0.05
     rope_base: 100.0
 
-  # SAT backbone (structural-centric DiT)
   n_layers: 8
   hidden_dim: 256
   n_head: 8
@@ -90,7 +86,6 @@ agent:
   qkv_bias: true
   qk_norm: true
 
-  # Flow matching (standard CFM, no consistency training)
   num_inference_steps: 10
   t_sample_mode_for_flow: uniform
 
@@ -105,7 +100,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 ema:
-  _target_: dexmani_policy.training.optimization.EMA
+  _target_: dexmani_policy.training.common.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -154,9 +149,8 @@ eval:
 
   video:
     enabled: true
+
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

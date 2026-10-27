@@ -1,6 +1,4 @@
-# ManiFlow — Flow Matching with rectified flow + consistency training
-# Context: 192d dense tokens; DiTX adds frame-only PE after projection
-# Key:      EMA consistency targets with target_t-conditioned DiT-X
+# ManiFlow：结合 flow matching 与 EMA 一致性训练。
 
 policy_name: maniflow
 
@@ -11,13 +9,13 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action                    # action | action_ee
+action_key: action  # action：关节；action_ee：末端。
 action_dim: ${eval:'21 if ${eq:${action_key},action_ee} else 19'}
 
 normalization:
   joint_state: limits
   action: auto
-  point_cloud: identity             # keep physical XYZ and RGB in [0, 1]
+  point_cloud: identity  # XYZ 保留物理坐标，RGB 保持 [0, 1]。
 
 dataloader:
   batch_size: 128
@@ -30,10 +28,10 @@ dataloader:
 
 dataset:
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
-  seed: 42
+  seed: 42  # 数据划分/子集 seed，独立于训练 seed。
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
@@ -42,8 +40,7 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Shared R3D-derived sensor recipe; no point dropout because repeated dense
-  # tokens change cross-attention weights through their multiplicity.
+  # 不使用点 dropout，避免重复 token 改变交叉注意力权重。
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
@@ -58,39 +55,37 @@ agent:
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
-  pc_dim: 6                       # xyz+rgb
+  pc_dim: 6
   state_dim: 19
   state_out_dim: 64
-  num_points: 1024                # per-point token count per frame
+  num_points: 1024  # 每帧点 token 数。
 
-  # FPS runs only for N_raw > num_points. Current stored DexMani clouds
-  # already contain 1024 points, so this random FPS path is inactive for them.
+  # 输入点数超过 num_points 时才执行 FPS。
   fps_random_config:
     use_random: true
     use_random_start: true
     random_noise_scale: 0.0
     use_shuffle_output: true
 
-  # PointNetDense encoder — per-point MLP, no pooling
+  # PointNetDense 保留逐点 token。
   pc_encoder_config:
     out_channels: 128
 
-  # DiTX backbone
   n_layers: 12
   hidden_dim: 768
   n_head: 8
   mlp_ratio: 4.0
   p_drop_attn: 0.1
-  qkv_bias: false                # cross-attention only; self-attention uses biased MHA
-  qk_norm: false                 # cross-attention only; MHA has no QK normalization
+  # qkv_bias 和 qk_norm 仅作用于交叉注意力。
+  qkv_bias: false
+  qk_norm: false
   pre_norm_modality: false
 
   timestep_embed_dim: 128
   target_t_embed_dim: 128
 
-  # Flow matching
-  denoise_timesteps: 10          # consistency training discrete grid
-  num_inference_steps: 10        # default Euler inference NFE
+  denoise_timesteps: 10  # 一致性训练的离散时间网格。
+  num_inference_steps: 10  # 默认 Euler 推理步数。
   flow_batch_ratio: 0.75
   t_sample_mode_for_flow: beta
   t_sample_mode_for_consistency: discrete
@@ -98,17 +93,17 @@ agent:
   target_t_sample_mode: relative
 
   modality_dropout_probs:
-    joint_state: 0.0                # modality dropout disabled
+    joint_state: 0.0
 
 optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-3
   betas: [0.9, 0.95]
   obs_lr: 1.0e-4
-  obs_weight_decay: 1.0e-6        # observation encoder (PointNet and state MLP)
+  obs_weight_decay: 1.0e-6
 
 ema:
-  _target_: dexmani_policy.training.optimization.EMA
+  _target_: dexmani_policy.training.common.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -147,7 +142,7 @@ env_runner:
 
 eval:
   seed: 1024
-  inference_steps: 4               # inference NFE only; leaves the training grid unchanged
+  inference_steps: 4  # 评测 NFE，独立于训练时间网格。
   use_ema: true
 
   action_steps: null
@@ -157,9 +152,8 @@ eval:
 
   video:
     enabled: true
+
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

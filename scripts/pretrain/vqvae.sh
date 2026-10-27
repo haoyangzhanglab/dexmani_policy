@@ -1,27 +1,28 @@
 #!/bin/bash
-# Policy-aligned DQ codebook training.
-# Usage: vqvae.sh [task_name] [key=value ...]
-# Supply dataset.split_manifest=/path/to/split.json.
+# DQ-RISE 码本预训练：vqvae.sh [task_name] [key=value ...]
+# 必须提供 dataset.split_manifest=/path/to/split.json。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+VQ_OVERRIDES=()
 if [[ $# -gt 0 && ! "$1" =~ ^- && "$1" != *=* ]]; then
-    TASK_NAME="$1"
+    VQ_OVERRIDES+=("task_name=$1")
     shift
-else
-    TASK_NAME="${TASK_NAME:-pick_apple_messy}"
+elif [[ -n "${TASK_NAME:-}" ]]; then
+    VQ_OVERRIDES+=("task_name=$TASK_NAME")
+fi
+if [[ -n "${ZARR_PATH:-}" ]]; then
+    VQ_OVERRIDES+=("zarr_path=$ZARR_PATH")
+fi
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+    VQ_OVERRIDES+=("vq_vae.output_dir=$OUTPUT_DIR")
 fi
 
-ZARR_PATH="${ZARR_PATH:-robot_data/${TASK_NAME}.zarr}"
-OUTPUT_DIR="${OUTPUT_DIR:-experiments/vq_hand/${TASK_NAME}/$(date +%Y%m%d_%H%M%S)_${RANDOM}}"
-
-# Keep Conda activation hooks outside this shell's nounset mode and stream logs.
+# conda run 避免激活脚本受 nounset 影响，并实时输出日志。
 exec conda run --no-capture-output -n policy \
-    python -u -m dexmani_policy.training.pretrain.vqvae \
+    python -u -m dexmani_policy.training.pretrain.hand_prior.vqvae \
     --config dqrise \
-    "task_name=${TASK_NAME}" \
-    "dataset.zarr_path=${ZARR_PATH}" \
-    "vq_vae.output_dir=${OUTPUT_DIR}" \
+    "${VQ_OVERRIDES[@]}" \
     "$@"

@@ -1,5 +1,4 @@
-# State-conditioned temporal hand codec (arXiv:2609.19666) + flow matching.
-# Pretrain the codec once; frozen encoder means supply BC targets online.
+# LatentFlow：使用冻结的时序 HandVAE 进行 flow matching。
 policy_name: latent_flow
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
@@ -20,8 +19,8 @@ data_semantics:
   window: query_future_full_horizon
 
 codec:
-  path: experiments/hand_vae/${task_name}/codec.pt
-  latent_dim: 9             # Paper default; configurable for the 12-DoF hand.
+  path: experiments/hand_vae/${task_name}/codec.pt  # 新训练须先生成匹配的 HandVAE。
+  latent_dim: 9
   hidden_dim: 128
   n_layers: 3
   n_heads: 4
@@ -29,7 +28,7 @@ codec:
 
 normalization:
   joint_state: limits
-  action: auto
+  action: auto  # 相对 query state 的动作归一化。
   point_cloud: identity
 
 dataloader:
@@ -42,17 +41,17 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.latent_flow_dataset.LatentFlowDataset
+  _target_: dexmani_policy.datasets.hand_prior.latent_flow_dataset.LatentFlowDataset
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}
-  seed: 0                 # Split/subset seed; independent of model training seed.
+  seed: 0  # 数据划分/子集 seed，独立于训练 seed。
   data_semantics: ${data_semantics}
   source_id: null
   horizon: ${horizon}
   obs_horizon: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps} - 1'}
-  pad_after: 0
+  pad_after: 0  # 仅补齐观测历史，不对未来动作做 padding。
   val_ratio: 0.1
   max_train_episodes: 80
   split_manifest: null
@@ -108,11 +107,10 @@ agent:
   beta_s: 0.999
   beta_alpha: 1.0
   beta_beta: 1.5
-  # Each loss is a mean over its own coordinates and full horizon.
+  # 各损失按各自维度与完整 horizon 取均值。
   arm_loss_weight: 1.0
   latent_loss_weight: 0.25
-  # Decoded MSE is always in standardized relative coordinates.
-  decoded_loss_weight: 0.75
+  decoded_loss_weight: 0.75  # 标准化相对坐标中的 MSE。
   modality_dropout_probs:
     joint_state: 0.0
 
@@ -125,7 +123,7 @@ optimizer:
   obs_weight_decay: 1.0e-10
 
 ema:
-  _target_: dexmani_policy.training.optimization.EMA
+  _target_: dexmani_policy.training.common.optimization.EMA
   fixed_decay: 0.99
 
 training:
@@ -153,8 +151,7 @@ workspace:
 
 env_runner:
   task_name: ${task_name}
-  # Independent simulator state for each evaluation episode.
-  env_rebuild_interval: 1
+  env_rebuild_interval: 1  # 每个 episode 重建环境。
   env_kwargs:
     control_mode: joint
     randomize_model_id: true
@@ -173,8 +170,6 @@ eval:
     enabled: true
 
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

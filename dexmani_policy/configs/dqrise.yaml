@@ -1,5 +1,4 @@
-# DQ-RISE — VQ-VAE Hand Quantisation + Arm Joint/Index Diffusion
-# Output: arm joints + index into RVQ-decoded, PCA-sorted hand poses.
+# DQ-RISE：扩散预测手臂关节与量化手姿索引。
 
 policy_name: dqrise
 
@@ -16,17 +15,11 @@ action_dim: 19
 normalization:
   joint_state: limits
   action: auto
-  point_cloud: identity
+  point_cloud: identity  # 保留 XYZ 物理坐标。
 
-# DQ-RISE specific: action-space decomposition
-# tcp_dim names the continuous arm slice (7 joint positions).
-tcp_dim: 7
+tcp_dim: 7  # 手臂关节维度。
 
-# VQ codebook path (output of dexmani_policy.training.pretrain.export_codebook / PCA re-indexing, stage 2).
-# New codebooks: python -m dexmani_policy.training.pretrain.vqvae --config dqrise
-# VQ optimizer/model defaults are in vq_vae; data comes from dataset.
-# Fresh training requires an explicitly supplied, matching joint-action codebook.
-codebook_path: null
+codebook_path: null  # 新训练须提供与数据配方和归一化匹配的码本。
 
 dataloader:
   batch_size: 128
@@ -39,20 +32,16 @@ dataloader:
 
 dataset:
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
   action_key: ${action_key}
   zarr_path: ${zarr_path}
-  seed: 42
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
-  pad_after: 15
-  val_ratio: 0.1
-  max_train_episodes: null
-  split_manifest: null
+  pad_after: 15  # 在 episode 末尾重复动作。
+  split_manifest: null  # 必填，预训练与策略训练共用。
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Same sensor recipe in SAT and DQ-RISE; no XYZ normalization.
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
@@ -71,11 +60,9 @@ agent:
   tcp_dim: ${tcp_dim}
   codebook_path: ${codebook_path}
 
-  # Codebook config (must match VQ-VAE pretraining params)
-  codebook_num_groups: 2
-  codebook_size: 4
+  codebook_num_groups: ${vq_vae.num_groups}
+  codebook_size: ${vq_vae.codebook_size}
 
-  # Per-frame global mean, then ordered time fusion: 1*(384+64) -> 256.
   pc_dim: 6
   state_dim: 19
   state_out_dim: 64
@@ -98,7 +85,6 @@ agent:
     rope_scale: 0.05
     rope_base: 100.0
 
-  # ConditionalUNet1D backbone
   diffusion_step_embed_dim: 256
   down_dims: [256, 512]
   kernel_size: 5
@@ -162,22 +148,21 @@ eval:
   video:
     enabled: true
 
-# VQ-VAE model and optimization; data and normalization come from the policy configuration.
+# VQ-VAE 预训练复用策略的数据与归一化配置。
 vq_vae:
   output_dir: null
   latent_dim: 256
   hidden_dim: 512
-  num_groups: 2               # residual VQ layers → total = codebook_size ^ num_groups
-  codebook_size: 4            # 4² = 16 discrete hand poses
+  num_groups: 2  # 码本总大小为 codebook_size ** num_groups。
+  codebook_size: 4
   num_layers: 6
-  act_scale: 1.0              # data already in [-1,1]
+  act_scale: 1.0  # 训练输入已归一化到 [-1, 1]。
   vq_decay: 0.8
   threshold_ema_dead_code: 0
   kmeans_init: false
   kmeans_iters: 10
 
-  # Per-finger L1 loss weights: thumb+index+middle=1.0, ring+pinky=0.5.
-  # 12-DOF mapping: [thumb×3, index×3, middle×2, ring×2, pinky×2]
+  # 关节顺序：拇指×3、食指×3、中指×2、无名指×2、小指×2。
   loss_weight: [1.0, 1.0, 1.0,  1.0, 1.0, 1.0,  1.0, 1.0,  0.5, 0.5,  0.5, 0.5]
 
   num_epochs: 1500
@@ -185,8 +170,8 @@ vq_vae:
   lr: 3.0e-4
   betas: [0.95, 0.999]
   weight_decay: 1.0e-6
-  enc_loss_weight: 3.0         # L1 reconstruction multiplier
-  vq_loss_weight: 5.0          # VQ commitment multiplier
+  enc_loss_weight: 3.0  # L1 重建损失权重。
+  vq_loss_weight: 5.0  # commitment loss 权重。
   max_grad_norm: 0.0
   warmup_steps: 150
   save_epochs: 100
@@ -195,8 +180,6 @@ vq_vae:
   device: cuda
 
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

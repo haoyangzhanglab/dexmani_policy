@@ -1,4 +1,4 @@
-# Single-step LAMP BC with a frozen history-conditioned prior.
+# LAMP：使用冻结的历史条件 prior 进行单步行为克隆。
 policy_name: lamp
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr
@@ -13,7 +13,7 @@ lamp:
   history_steps: 8
   latent_dim: 2
   hidden_dim: 256
-  prior_path: experiments/lamp_prior/${task_name}/prior.pt
+  prior_path: experiments/lamp_prior/${task_name}/prior.pt  # 新训练须先生成匹配的 prior。
 
 normalization:
   joint_state: gaussian
@@ -30,18 +30,15 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.lamp_dataset.LAMPDataset
+  _target_: dexmani_policy.datasets.hand_prior.lamp_dataset.LAMPDataset
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}
-  seed: 42
   horizon: ${horizon}
   obs_horizon: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 0
-  val_ratio: 0.1
-  max_train_episodes: null
-  split_manifest: null
+  split_manifest: null  # 必填，预训练与策略训练共用。
   sensor_modalities: [joint_state, point_cloud]
   history_steps: ${lamp.history_steps}
   augmentation_cfg:
@@ -79,7 +76,6 @@ agent:
     geometry_scale: 0.10
     rope_scale: 0.05
     rope_base: 100.0
-  num_inference_steps: 1
   hand_loss_weight: 1.0
   drift_reg_weight: 1.0
   history_noise_std: 0.10
@@ -119,8 +115,7 @@ workspace:
 
 env_runner:
   task_name: ${task_name}
-  # Independent simulator state for each evaluation episode.
-  env_rebuild_interval: 1
+  env_rebuild_interval: 1  # 每个 episode 重建环境。
   env_kwargs:
     control_mode: joint
     randomize_model_id: true
@@ -128,7 +123,7 @@ env_runner:
 
 eval:
   seed: 1024
-  inference_steps: 1
+  inference_steps: 1  # 单步回归，固定为 1。
   use_ema: false
   action_steps: null
   episodes: 70
@@ -155,8 +150,6 @@ prior_training:
   print_every: 200
 
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

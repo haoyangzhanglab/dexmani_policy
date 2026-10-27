@@ -41,7 +41,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Keep the existing option name, but accept only one non-negative GPU index.
 if [[ -n "$GPU_ID" && ! "$GPU_ID" =~ ^[0-9]+$ ]]; then
     echo "Error: --gpus requires one non-negative integer GPU ID, got '$GPU_ID'" >&2
     exit 1
@@ -76,7 +75,7 @@ build_remote_commands() {
         REMOTE_CMD+=" $remote_arg_q"
     done
     # Run this source copy even when the environment has another editable install.
-    PREFLIGHT_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\" -m dexmani_policy.common.config --check"
+    PREFLIGHT_CMD="cd \"$SOURCE_DIR\" && \"$CONDA_PYTHON\" -m dexmani_policy.training.common.config --check"
     for remote_arg in "${REMOTE_ARGS[@]:2}"; do
         printf -v remote_arg_q '%q' "$remote_arg"
         PREFLIGHT_CMD+=" $remote_arg_q"

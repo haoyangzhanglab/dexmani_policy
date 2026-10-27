@@ -61,7 +61,7 @@ class LAMPObservationEncoder(nn.Module):
 class LAMPRegressionHead(nn.Module):
     def __init__(self, input_dim: int, output_dim: int) -> None:
         super().__init__()
-        layers = []
+        layers: list[nn.Module] = []
         widths = [input_dim, 512, 512, 256]
         for source, target in zip(widths, widths[1:]):
             layers.extend((nn.Linear(source, target), nn.ReLU()))
@@ -94,7 +94,6 @@ class LAMPPolicy(BasePolicy):
         state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-        num_inference_steps: int = 1,
         modality_dropout_probs: dict | None = None,
         *,
         history_noise_std: float,
@@ -108,10 +107,6 @@ class LAMPPolicy(BasePolicy):
             raise ValueError("LAMP requires horizon=n_obs_steps=n_action_steps=1")
         if action_dim != 19 or state_dim != 19:
             raise ValueError("LAMP requires joint action/state: 7 arm + 12 hand")
-        if num_inference_steps is not None and (
-            type(num_inference_steps) is not int or num_inference_steps != 1
-        ):
-            raise ValueError("LAMP direct regression requires num_inference_steps=None or 1")
         for name, value in (
             ("hand_loss_weight", hand_loss_weight),
             ("arm_state_noise_std", arm_state_noise_std),

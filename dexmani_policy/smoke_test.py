@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 from dexmani_policy.common.checkpoint import (
     load_checkpoint,
     policy_state_dict,
-    restore_policy_agent,
 )
 from dexmani_policy.common.config import (
     load_experiment_config,
@@ -25,15 +24,16 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
-from dexmani_policy.datasets.lamp_dataset import LAMPDataset
-from dexmani_policy.datasets.latent_flow_dataset import LatentFlowDataset
-from dexmani_policy.training.trainer import PolicyTrainer
-from dexmani_policy.training.data import (
+from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
+from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
+from dexmani_policy.deployment.runtime import restore_policy_agent
+from dexmani_policy.training.common.config import validate_config
+from dexmani_policy.training.common.data import (
     build_dataset_and_normalizer,
     build_train_loader,
     close_data_loader,
 )
-from dexmani_policy.training.config import validate_config
+from dexmani_policy.training.trainer import PolicyTrainer
 
 
 def load_smoke_config(config_name: str):

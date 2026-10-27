@@ -1,10 +1,4 @@
-# R3D — 3D Diffusion Policy with Uni3D encoder
-# Note:     pc_in_channels=6 (internal XYZRGB patch width), use_compile=true (backbone only)
-#
-# Auxiliary loss: use_aux_ee predicts wrist pose (pos3+rot6d6=9dim) from
-# action_ee[:9] alongside the primary joint action.  Matches official
-# R3D-Policy use_target_ee design.
-# With use_aux_ee, control slices the primary joint dims; otherwise it follows action_key.
+# R3D：使用 Uni3D 编码器的三维扩散策略。
 
 policy_name: r3d
 
@@ -15,10 +9,10 @@ seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action                    # action | action_ee
-use_aux_ee: false                     # wrist pose auxiliary loss (requires action_key='action')
-joint_dim: 19                         # joint action dims
-ee_dim: 9                             # wrist pose dims: pos(3) + rot6d(6), from action_ee[:9]
+action_key: action  # action：关节；action_ee：末端。
+use_aux_ee: false  # 启用时要求 action_key=action，末端姿态仅作辅助预测。
+joint_dim: 19
+ee_dim: 9  # action_ee[:9]：位置 3 维 + rot6d 6 维。
 action_dim: ${eval:'${joint_dim} + ${ee_dim} if ${use_aux_ee} else (21 if ${eq:${action_key},action_ee} else ${joint_dim})'}
 
 normalization:
@@ -26,8 +20,6 @@ normalization:
   action: auto
   point_cloud: limits
 
-# NOTE: R3D ViT encoder is memory-intensive (512 patch tokens × N samples).
-# Effective batch size = batch_size × gradient_accumulation_steps.
 dataloader:
   batch_size: 128
   shuffle: true
@@ -38,11 +30,11 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
   action_key: ${action_key}
   use_aux_ee: ${use_aux_ee}
   zarr_path: ${zarr_path}
-  seed: 42
+  seed: 42  # 数据划分/子集 seed，独立于训练 seed。
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
@@ -51,7 +43,7 @@ dataset:
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
-  # Shared R3D-derived sensor recipe; point dropout runs only in the encoder.
+  # 点 dropout 在 Uni3D 内执行。
   augmentation_cfg:
     pc:
       coord_noise: {noise_std: 0.002, prob: 1.0}
@@ -69,10 +61,9 @@ agent:
   use_aux_ee: ${use_aux_ee}
   joint_dim: ${joint_dim}
   ee_dim: ${ee_dim}
-  aux_loss_weight: 1.0              # auxiliary loss weight (matches official R3D-Policy)
+  aux_loss_weight: 1.0
 
-  # Uni3D encoder
-  state_dim: 19                      # joint_state from zarr is always 19-dim
+  state_dim: 19
   state_out_dim: 256
 
   pc_encoder_config:
@@ -80,7 +71,7 @@ agent:
     embed_dim: 256
     num_group: 512
     group_size: 32
-    pc_in_channels: 6
+    pc_in_channels: 6  # Uni3D 内部 XYZRGB 特征维度，固定为 6。
     patch_dropout: 0.0
     drop_path_rate: 0.2
     use_pretrained_weights: true
@@ -92,7 +83,6 @@ agent:
     random_noise_scale: 0.0
     use_shuffle_output: true
 
-  # R3DTransformer backbone
   timestep_embed_dim: 128
   embedding_dim: 256
   depth: 4
@@ -103,7 +93,6 @@ agent:
   modality_dropout_probs:
     joint_state: 0.0
 
-  # Diffusion
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
@@ -116,7 +105,7 @@ optimizer:
   obs_weight_decay: 1.0e-6
 
 ema:
-  _target_: dexmani_policy.training.optimization.EMA
+  _target_: dexmani_policy.training.common.optimization.EMA
   update_after_step: 0
   inv_gamma: 1.0
   power: 0.75
@@ -127,7 +116,7 @@ training:
   seed: ${seed}
   device: cuda:0
   use_bfloat16: true
-  use_compile: true                # compile_backbone() compiles R3DTransformer only, not ViT
+  use_compile: true  # 仅编译 R3DTransformer。
   use_ema: true
   lr_scheduler: cosine
   lr_warmup_steps: 500
@@ -165,9 +154,8 @@ eval:
 
   video:
     enabled: true
+
 hydra:
-  job:
-    override_dirname: ${policy_name}_${task_name}
   run:
     dir: experiments/${policy_name}/${task_name}/${run_id:}_seed${training.seed}
   sweep:

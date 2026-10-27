@@ -1,20 +1,27 @@
+import argparse
 import copy
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
-from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import (
+    PROJECT_ROOT,
+    load_policy_config,
     normalization_dims_from_config,
     positive_int,
-    resolve_input_recipe,
     resolve_normalization_spec,
-    resolve_resume_source,
     validate_action_key_consistency,
 )
-from dexmani_policy.datasets.robot_dataset import RobotDataset
+from dexmani_policy.training.common.resume import resolve_input_recipe, resolve_resume_source
+
+if TYPE_CHECKING:
+    from dexmani_policy.agents.policies.base import BasePolicy
+    from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 
 
 def prepare_training(cfg):
@@ -99,3 +106,30 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     OmegaConf.resolve(effective)
     OmegaConf.set_readonly(effective, True)
     return effective
+
+
+def resolve_dataset_paths(config_name: str, overrides: list[str]) -> list[Path]:
+    """Resolve fresh or saved dataset paths without opening data or importing models."""
+    cfg = load_policy_config(config_name, overrides)
+    cfg = resolve_input_recipe(cfg, overrides=overrides)
+    return [(PROJECT_ROOT / Path(cfg.dataset.zarr_path).expanduser()).resolve()]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Resolve training dataset paths.")
+    parser.add_argument("--config-name", required=True)
+    parser.add_argument(
+        "--check", action="store_true", help="Require existing dataset directories."
+    )
+    parser.add_argument("overrides", nargs="*", help="Hydra overrides passed to training.")
+    args = parser.parse_args()
+    paths = resolve_dataset_paths(args.config_name, args.overrides)
+    print(json.dumps({"dataset_paths": [str(path) for path in paths]}, indent=2))
+    if args.check:
+        missing = [str(path) for path in paths if not path.is_dir()]
+        if missing:
+            raise SystemExit("Missing dataset directories:\n  " + "\n  ".join(missing))
+
+
+if __name__ == "__main__":
+    main()
