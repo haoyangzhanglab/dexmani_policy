@@ -14,7 +14,7 @@ from dexmani_policy.common.image_util import (
     validate_rgb_preprocessing,
 )
 from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, positive_int
+from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, POINT_CLOUD_FIELDS, positive_int
 from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
@@ -27,6 +27,8 @@ from dexmani_policy.datasets.common.validation import validate_fields
 
 
 class RobotDataset(torch.utils.data.Dataset):
+    training_dataset: "RobotDataset"
+
 
     def __init__(
         self,
@@ -78,12 +80,12 @@ class RobotDataset(torch.utils.data.Dataset):
             rgb = self.replay_buffer["rgb"]
             if len(rgb.shape) != 4 or rgb.shape[-1] != 3 or rgb.dtype != np.uint8:
                 raise ValueError("Stored RGB must have shape (T, H, W, 3) and dtype uint8")
-        if "point_cloud" in sensor_modalities:
-            shape = self.replay_buffer["point_cloud"].shape
+        for key in POINT_CLOUD_FIELDS.intersection(sensor_modalities):
+            shape = self.replay_buffer[key].shape
             if len(shape) != 3:
-                raise ValueError("Stored point_cloud must have shape [T,N,C]")
+                raise ValueError(f"Stored {key} must have shape [T,N,C]")
             if pc_dim is not None and shape[-1] < pc_dim:
-                raise ValueError("Stored point_cloud does not satisfy configured pc_dim")
+                raise ValueError(f"Stored {key} does not satisfy configured pc_dim")
         self.augmentation_cfg = augmentation_cfg
         self.build_augmentors()
 
@@ -100,8 +102,8 @@ class RobotDataset(torch.utils.data.Dataset):
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
             raise ValueError("No training sequence windows: selected episodes are too short")
-        self.validation_dataset = None
-        self._normalizer = None
+        self.validation_dataset: RobotDataset | None = None
+        self._normalizer: LinearNormalizer | None = None
 
     @property
     def data_keys(self):
@@ -110,8 +112,9 @@ class RobotDataset(torch.utils.data.Dataset):
     @property
     def consumed_fields(self):
         fields = dict.fromkeys(self.data_keys)
-        if "point_cloud" in fields and self.pc_dim is not None:
-            fields["point_cloud"] = slice(0, self.pc_dim)
+        if self.pc_dim is not None:
+            for key in POINT_CLOUD_FIELDS.intersection(fields):
+                fields[key] = slice(0, self.pc_dim)
         return fields
 
     @property
@@ -160,8 +163,9 @@ class RobotDataset(torch.utils.data.Dataset):
         return len(self.sampler)
 
     def sample_to_data(self, sample):
-        if "point_cloud" in sample and self.pc_dim is not None:
-            sample["point_cloud"] = sample["point_cloud"][..., : self.pc_dim]
+        if self.pc_dim is not None:
+            for key in POINT_CLOUD_FIELDS.intersection(sample):
+                sample[key] = sample[key][..., : self.pc_dim]
         action = sample[self.action_key]
         return {
             "obs": {m: sample[m] for m in self.sensor_modalities},

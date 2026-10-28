@@ -1,0 +1,95 @@
+defaults:
+  - common
+  - _self_
+
+policy_name: afro
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+seed: 42
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+action_key: action
+action_dim: 19
+normalization:
+  joint_state: limits
+  action: auto
+  point_cloud: limits
+dataloader:
+  batch_size: 128
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
+dataset:
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+  zarr_path: ${zarr_path}
+  action_key: ${action_key}
+  pc_dim: ${agent.pc_dim}
+  horizon: ${horizon}
+  obs_horizon: ${n_obs_steps}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null
+  split_manifest: null
+  sensor_modalities: [point_cloud, joint_state]
+  augmentation_cfg: null
+agent:
+  _target_: dexmani_policy.agents.policies.afro.AFROPolicy
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+  state_dim: 19
+  pc_dim: 3
+  pretrained_path: null
+  freeze_visual: true
+  down_dims: [512, 1024, 2048]
+  diffusion_step_embed_dim: 128
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+  num_training_steps: 100
+  num_inference_steps: 10
+  prediction_type: sample
+  clip_sample: true
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: false
+  use_compile: false
+  use_ema: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 0
+  max_grad_norm: 0
+  loop:
+    total_train_steps: 100000
+    log_interval_steps: 100
+    gradient_accumulation_steps: 1
+env_runner:
+  task_name: ${task_name}
+  env_kwargs:
+    control_mode: joint
+    randomize_model_id: false
+    randomize_table_height: false
+eval:
+  seed: 1024
+  inference_steps: 10
+  use_ema: false
+  action_steps: null
+  episodes: 70
+  selection_episodes: 25
+  seeds: null
+  video:
+    enabled: false

@@ -22,7 +22,7 @@ Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与�
 
 ### 1. 检查配置与数据
 
-实验配置位于 `dexmani_policy/configs/`；八个 Policy 仅共享一层相同的 workspace/hydra 默认设置。
+实验配置位于 `dexmani_policy/configs/`；Policy 仅共享一层相同的 workspace/hydra 默认设置。
 
 ```bash
 # 配置接口及导入检查（无需数据或 GPU）
@@ -68,6 +68,8 @@ bash scripts/training/train.sh r3d 'task_name=<task>' \
 
 DQ/LAMP 使用相同的显式 split 默认参数，也可复用已有 manifest。DQ 的 VQ 预训练自动保存 `codebook.npz`，随后直接训练 Policy；完整命令见 [手部动作表示](docs/手部动作表示.md)。
 
+AFRO/CordViP 使用独立观测预训练入口导出 `encoder.pt`，再训练原生19维关节策略。数据要求、contact 标签、两阶段共享 split、短跑与恢复命令见 [观测预训练](docs/观测预训练.md)。普通训练/推理无需 Open3D；只有离线 contact 工具使用它。
+
 ### 3. 仿真评测
 
 仿真评测依赖 `dexmani_sim`。
@@ -94,6 +96,8 @@ policy = load_policy(info, device="cuda:0", seed=0)
 
 inspect 支持 best/latest/百分比 tag/显式路径；weights 和 inference_steps 可显式覆盖。load 使用已解析结果，完整模型无需原 prior、codec、codebook 或训练数据。Real 执行长度仍由 execution 配置或模型 n_action_steps 决定。
 
+AFRO/CordViP 首版按仿真观测配方验收；CordViP 双点云走 `restore_policy_agent → SimRunner`，尚未接入上述真机部署入口。
+
 ## 项目结构
 
 ```text
@@ -102,12 +106,14 @@ dexmani_policy/
 │   ├── agents/        # 策略与模型
 │   ├── datasets/
 │   │   ├── common/       # 通用 Dataset、Zarr 读取、窗口、划分与增强
-│   │   └── hand_prior/   # 手部动作窗口、历史与专用元数据
+│   │   ├── hand_prior/   # 手部动作窗口、历史与专用元数据
+│   │   └── obs/          # AFRO/CordViP 观测预训练数据
 │   ├── training/
 │   │   ├── trainer.py    # 主策略训练循环
 │   │   ├── common/       # 配置、数据构建、优化、日志与续训
 │   │   └── pretrain/
-│   │       └── hand_prior/  # 手部先验预训练、码本计算与导出
+│   │       ├── hand_prior/  # 手部先验预训练、码本计算与导出
+│   │       └── obs/         # 观测预训练、contact 标签与 encoder 导出
 │   ├── evaluation/    # 仿真评测与选点
 │   ├── deployment/    # 推理部署
 │   └── configs/       # 实验配置
@@ -132,5 +138,6 @@ experiments/<policy_name>/<task_name>/<run>/
 
 - [项目架构](docs/项目架构.md)：整体设计、数据接口、训练恢复与部署
 - [手部动作表示](docs/手部动作表示.md)：手部动作建模及预训练
+- [观测预训练](docs/观测预训练.md)：AFRO/CordViP 配方、训练恢复与实测结果
 - [仿真评测机制](docs/仿真评测机制.md)：Checkpoint 选点、评测协议与结果记录
 - [SSH 服务器训练部署](docs/SSH服务器训练部署.md)：远程训练、同步与管理

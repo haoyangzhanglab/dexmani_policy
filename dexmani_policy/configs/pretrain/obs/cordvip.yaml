@@ -1,0 +1,51 @@
+# @package _global_
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+n_obs_steps: 4
+normalization:
+  hand_pointcloud: limits
+  object_pointcloud: limits
+  joint_state: limits
+model:
+  n_obs_steps: ${n_obs_steps}
+  contact_loss_weight: 1.0
+  arm_loss_weight: 1.0
+  hand_loss_weight: 1.0
+dataset:
+  _target_: dexmani_policy.datasets.obs.cordvip_dataset.CordViPDataset
+  zarr_path: ${zarr_path}
+  contact_map_path: robot_data/${task_name}.contact.zarr
+  horizon: 12
+  obs_horizon: ${n_obs_steps}
+  pad_before: 3
+  pad_after: 5
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null
+  split_manifest: null
+dataloader:
+  batch_size: 256
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: false
+  drop_last: false
+optimizer:
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+training:
+  seed: 42
+  device: cuda:0
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  val_every_epochs: 50
+  save_every_epochs: 1000
+  loop:
+    total_train_steps: 100000
+    gradient_accumulation_steps: 1
+    log_interval_steps: 100
+workspace:
+  output_dir: experiments/pretrain/obs/cordvip/${task_name}/${run_id:}_seed${training.seed}
+  wandb_cfg: null

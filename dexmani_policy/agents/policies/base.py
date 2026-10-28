@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import positive_int, validate_action_window, normalization_feature_shapes
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int, validate_action_window, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
 
 
@@ -21,7 +21,7 @@ def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> li
         nn.ConvTranspose3d,
         nn.MultiheadAttention,
     )
-    groups = [
+    groups: list[dict[str, Any]] = [
         {"params": [], "lr": lr, "weight_decay": weight_decay},
         {"params": [], "lr": lr, "weight_decay": 0.0},
     ]
@@ -65,7 +65,7 @@ class BasePolicy(nn.Module):
         self.action_dim = action_dim
         self.modality_dropout_probs = modality_dropout_probs or {}
         self.normalizer = LinearNormalizer()
-        self.normalization_dims = {}
+        self.normalization_dims: dict[str, int] = {}
 
     @classmethod
     def prepare_restore_config(cls, config) -> None:
@@ -119,14 +119,14 @@ class BasePolicy(nn.Module):
     def get_training_loss_kwargs(self, ema_agent: BasePolicy | None = None) -> dict:
         if not self.requires_ema_for_loss:
             return {}
-        return {"ema_decoder": ema_agent.action_decoder}
+        return {"ema_decoder": cast(BasePolicy, ema_agent).action_decoder}
 
     def preprocess(self, obs_dict: dict) -> dict:
         result = {}
         for key, value in obs_dict.items():
             if torch.is_tensor(value):
                 # Runners may supply XYZRGB even when the policy consumes only XYZ.
-                if key == "point_cloud" and self.normalization_dims.get(key) == 3:
+                if key in POINT_CLOUD_FIELDS and self.normalization_dims.get(key) == 3:
                     value = value[..., :3]
                 if key in self.normalizer.fields:
                     value = self.normalizer[key].normalize(value)
@@ -243,7 +243,7 @@ class BasePolicy(nn.Module):
         }
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:
-        self.action_decoder.model = torch.compile(self.action_decoder.model, **compile_kwargs)
+        self.action_decoder.model = cast(nn.Module, torch.compile(self.action_decoder.model, **compile_kwargs))
 
     def optimizer_groups(
         self, lr: float, obs_lr: float, weight_decay: float, obs_weight_decay: float

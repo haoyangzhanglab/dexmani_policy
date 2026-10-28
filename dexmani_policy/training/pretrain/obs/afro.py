@@ -1,0 +1,183 @@
+"""AFRO observation pretraining, adapted from KolaKivy/AFRO.
+
+Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
+Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
+Changes: native observation-only data/affine; explicit pre-optimizer teacher update;
+local PointNet and epoch-boundary checkpoint resume. Active losses are unchanged.
+MIT, Copyright (c) 2025 Qiwei Liang; see licenses/AFRO.txt.
+"""
+
+import copy
+import signal
+
+import torch
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from omegaconf import open_dict
+from torch import nn
+from torch.nn import functional as F
+
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
+from dexmani_policy.agents.obs_encoder.pretrained import AFRO_ENCODER_CONFIG, AFRO_SHA
+from dexmani_policy.common.io_util import close_resources
+from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
+from dexmani_policy.training.common.data import close_data_loader
+from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
+from dexmani_policy.training.common.optimization import get_scheduler
+from dexmani_policy.training.common.resume import validate_source_recipe
+from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
+from dexmani_policy.training.pretrain.obs.runtime import evaluate, parse_run, prepare_data, save_run
+
+
+def vicreg_loss(prediction, target):
+    with torch.autocast(device_type=prediction.device.type, enabled=False):
+        prediction, target = prediction.float(), target.float()
+        invariance = F.mse_loss(prediction, target)
+        centered = [value - value.mean(0, keepdim=True) for value in (prediction, target)]
+        std = [(value.var(0, unbiased=False) + 1e-4).sqrt() for value in centered]
+        variance = 0.5 * (F.relu(1 - std[0]).mean() + F.relu(1 - std[1]).mean())
+        covariance = prediction.new_zeros(())
+        for value in centered:
+            n, dim = value.shape
+            if n > 1:
+                cov = value.T @ value / (n - 1.0)
+                covariance = covariance + (cov.square().sum() - cov.diagonal().square().sum()) / dim
+        return 25 * invariance + 25 * variance + covariance, invariance, variance, covariance
+
+
+class AFROPretrain(nn.Module):
+    def __init__(self, frame_stride=2):
+        super().__init__()
+        if frame_stride not in (2, 4):
+            raise ValueError("AFRO frame_stride must be 2 (official code) or 4 (paper ablation)")
+        self.frame_stride = frame_stride
+        self.visual = PointNet(3, 64, pooling="max")
+        self.teacher = PointNet(3, 64, pooling="max")
+        self.teacher.requires_grad_(False)
+        self.idm = nn.Sequential(nn.Linear(64, 256), nn.GELU(), nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 16))
+        self.fdm = DiTFeaturePredictor(64)
+        self.normalizer = LinearNormalizer()
+        self.noise_scheduler = DDIMScheduler(
+            num_train_timesteps=100, beta_start=0.0001, beta_end=0.02,
+            beta_schedule="squaredcos_cap_v2", prediction_type="sample",
+            clip_sample=True, set_alpha_to_one=True, steps_offset=0,
+        )
+
+    def forward(self, batch):
+        points = batch["obs"]["point_cloud"]
+        if "point_cloud" in self.normalizer.fields:
+            points = self.normalizer["point_cloud"].normalize(points)
+        points = points[:, ::self.frame_stride]
+        batch_size, frames = points.shape[:2]
+        points = points.flatten(0, 1)
+        online = self.visual(points)["global_token"].reshape(batch_size, frames, 64)
+        with torch.no_grad():
+            teacher = self.teacher(points)["global_token"].reshape(batch_size, frames, 64)
+        losses, metrics = [], {}
+        for name, current, following, target in (
+            ("forward", online[:, :-1], online[:, 1:], teacher[:, 1:]),
+            ("reverse", online[:, 1:], online[:, :-1], teacher[:, :-1]),
+        ):
+            latent = self.idm(following - current).reshape(-1, 16)
+            target = target.reshape(-1, 64)
+            timestep = torch.randint(0, 100, (len(target),), device=target.device, dtype=torch.long)
+            noise = torch.randn_like(target)
+            prediction = self.fdm(self.noise_scheduler.add_noise(target, noise, timestep),
+                                  timestep, current.reshape(-1, 64), latent)
+            loss, inv, var, cov = vicreg_loss(prediction, target)
+            losses.append(loss)
+            metrics.update({f"{name}_{key}": value.detach()
+                            for key, value in zip(("invariance", "variance", "covariance"), (inv, var, cov))})
+        loss = losses[0] + losses[1]
+        return loss, {"loss": loss.detach(), **metrics}
+
+    @torch.no_grad()
+    def update_teacher(self, epoch):
+        momentum = 0.996 + 0.004 * min(max(epoch, 0), 300) / 300
+        for target, online in zip(self.teacher.parameters(), self.visual.parameters()):
+            target.mul_(momentum).add_(online, alpha=1 - momentum)
+
+
+def train(cfg, checkpoint=None, max_updates=None):
+    if cfg.training.loop.gradient_accumulation_steps != 1:
+        raise ValueError("AFRO VICReg requires accumulation=1; a smaller batch is an explicit recipe change")
+    set_seed(cfg.training.seed)
+    dataset, normalizer, loader = prepare_data(cfg, checkpoint)
+    cfg.training.loop.total_train_steps = cfg.training.num_epochs * len(loader)
+    with open_dict(cfg):
+        cfg.data_summary = {"samples": len(dataset), "batches_per_epoch": len(loader), "updates_per_epoch": len(loader)}
+    model = AFROPretrain(**cfg.model)
+    model.normalizer = copy.deepcopy(normalizer)
+    model.to(cfg.training.device)
+    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
+    scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
+                              cfg.training.loop.total_train_steps)
+    epoch = step = 0
+    if checkpoint is not None:
+        validate_source_recipe(checkpoint["effective_config"], cfg)
+        model.load_state_dict(checkpoint["model_state"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+        epoch, step = checkpoint["epoch"], checkpoint["global_step"]
+        set_rng_state(checkpoint["rng_state"], cfg.training.device)
+        print(f"[AFRO] Resume epoch {epoch} from its beginning; global_step={step}")
+    total = cfg.training.loop.total_train_steps
+    stop_step = total if max_updates is None else min(total, step + max_updates)
+    logger = ExperimentLogger(**cfg.workspace)
+    print(f"[AFRO] {dict(cfg.data_summary)}, batch={cfg.dataloader.batch_size}, total_updates={total}")
+    stop_requested = False
+
+    def request_stop(signum, frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    previous = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    metadata = {"method": "afro", "encoder_config": AFRO_ENCODER_CONFIG, "upstream_sha": AFRO_SHA}
+    try:
+        logger.save_config(cfg)
+        while step < stop_step and not stop_requested:
+            loader.generator.manual_seed(cfg.training.seed + epoch)
+            model.train()
+            current_epoch = epoch
+            for index, batch in enumerate(loader):
+                batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
+                optimizer.zero_grad(set_to_none=True)
+                loss, metrics = model(batch)
+                if not torch.isfinite(loss):
+                    raise RuntimeError(f"Nonfinite AFRO loss at step {step}")
+                loss.backward()
+                gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
+                if not torch.stack(gradients).all():
+                    raise RuntimeError(f"Nonfinite AFRO gradient at step {step}")
+                model.update_teacher(current_epoch)
+                optimizer.step()
+                scheduler.step()
+                step += 1
+                if index + 1 == len(loader):
+                    epoch = current_epoch + 1
+                if step == 1 or step % cfg.training.loop.log_interval_steps == 0 or step == stop_step:
+                    logger.log(to_log_scalars({"train/" + key: value for key, value in metrics.items()}
+                                             | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch}), step)
+                if step >= stop_step or stop_requested:
+                    break
+            if epoch > current_epoch:
+                if epoch % cfg.training.val_every_epochs == 0:
+                    validation = dataset.get_validation_dataset()
+                    if validation is not None:
+                        logger.log(to_log_scalars(evaluate(model, validation, cfg.dataloader.batch_size, cfg.training.device)), step)
+                if epoch % cfg.training.save_every_epochs == 0:
+                    save_run(model, model.visual, metadata, dataset, optimizer, scheduler, cfg, epoch, step)
+        save_run(model, model.visual, metadata, dataset, optimizer, scheduler, cfg, epoch, step)
+        print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        close_resources(lambda: close_data_loader(loader), logger.close)
+
+
+def main():
+    train(*parse_run("afro"))
+
+
+if __name__ == "__main__":
+    main()

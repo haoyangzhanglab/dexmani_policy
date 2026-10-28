@@ -77,7 +77,7 @@ def validate_config(cfg):
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
-        for key in ("normalization_dims", "real_runtime", "hand_data"):
+        for key in ("normalization_dims", "real_runtime", "hand_data", "observation_geometry"):
             if key in data_description:
                 effective[key] = data_description[key]
         effective.dataset.split_manifest = data_description["split_manifest"]

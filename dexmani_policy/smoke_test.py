@@ -17,6 +17,7 @@ from dexmani_policy.common.checkpoint import (
     policy_state_dict,
 )
 from dexmani_policy.common.config import (
+    POINT_CLOUD_FIELDS,
     load_experiment_config,
     load_policy_config,
     positive_int,
@@ -89,8 +90,9 @@ def observation_shape(dataset, field):
     if field == "rgb" and dataset.rgb_preprocess_size is not None:
         spatial_shape = dataset.rgb_random_crop_size or dataset.rgb_preprocess_size
         shape = (3, *spatial_shape)
-    elif field == "point_cloud":
-        shape = (dataset.random_keep_points or shape[0], dataset.pc_dim or shape[-1])
+    elif field in POINT_CLOUD_FIELDS:
+        points = dataset.random_keep_points if field == "point_cloud" else None
+        shape = (points or shape[0], dataset.pc_dim or shape[-1])
     return (dataset.obs_horizon, *shape)
 
 
@@ -201,10 +203,11 @@ def validate_checkpoint_state(cfg, trainer, checkpoint_path):
             )
 
 
-def validate_policy_restoration(cfg, trainer, checkpoint_path):
+def validate_policy_restoration(cfg, trainer, checkpoint_path, *, batch=None):
     """Compare raw/EMA predictions with restored policies after training."""
-    trainer.train_loader.generator.manual_seed(cfg.training.seed + trainer.current_epoch)
-    batch = next(iter(trainer.train_loader))
+    if batch is None:
+        trainer.train_loader.generator.manual_seed(cfg.training.seed + trainer.current_epoch)
+        batch = next(iter(trainer.train_loader))
     obs = dict_apply(
         {key: value[:1] for key, value in batch["obs"].items()},
         lambda value: value.to(trainer.device),

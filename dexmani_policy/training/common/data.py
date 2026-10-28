@@ -2,7 +2,7 @@ import hydra
 import torch
 from torch.utils.data import DataLoader
 
-from dexmani_policy.common.config import resolve_normalization_spec, FINGER_VECTOR_FIELDS, normalization_feature_shapes
+from dexmani_policy.common.config import resolve_normalization_spec, FINGER_VECTOR_FIELDS, POINT_CLOUD_FIELDS, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.deployment.metadata import describe_real_runtime
 
@@ -17,17 +17,25 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
     for key in FINGER_VECTOR_FIELDS.intersection(dims):
         dims[key] = 15
-    if "point_cloud" in dims and dataset.pc_dim is not None:
-        dims["point_cloud"] = dataset.pc_dim
+    if dataset.pc_dim is not None:
+        for key in POINT_CLOUD_FIELDS.intersection(dims):
+            dims[key] = dataset.pc_dim
     dims["action"] = dataset.action_dim
     if dims["action"] != cfg.agent.action_dim:
         raise ValueError("Dataset action width including auxiliary targets must match agent.action_dim")
     description = {
         "normalization_dims": dims, "split_manifest": dataset.split_manifest,
         "action_key": dataset.action_key, "attrs": buffer.attrs,
+        "zarr_path": buffer.path,
+        "point_counts": {key: int(buffer[key].shape[1])
+                         for key in POINT_CLOUD_FIELDS.intersection(dataset.sensor_modalities)},
         "action_start_index": dataset.action_start_index,
         "control_action_dim": buffer[dataset.action_key].shape[-1],
     }
+    if {"hand_pointcloud", "object_pointcloud"} <= set(dataset.sensor_modalities):
+        from dexmani_policy.datasets.common.geometry import observation_geometry, selected_geometry
+
+        description["observation_geometry"] = selected_geometry(observation_geometry(buffer), dataset.train_mask | dataset.val_mask)
     runtime = describe_real_runtime(buffer, dataset.sensor_modalities, cfg.task_name)
     if runtime is not None:
         description["real_runtime"] = runtime

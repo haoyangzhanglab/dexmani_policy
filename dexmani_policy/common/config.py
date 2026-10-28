@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
+POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
 ALLOWED_NORMALIZATION_MODES = frozenset({"identity", "limits", "gaussian", "auto"})
 
 
@@ -132,7 +133,7 @@ def normalization_dims_from_config(cfg):
         expected["joint_state"] = agent["state_dim"]
     dataset = cfg["dataset"]
     if dataset.get("pc_dim") is not None:
-        expected["point_cloud"] = dataset["pc_dim"]
+        expected.update({key: dataset["pc_dim"] for key in POINT_CLOUD_FIELDS})
     for key, mode in cfg["normalization"].items():
         if mode != "identity" and key in expected and dims[key] != expected[key]:
             raise ValueError(f"Saved {key} feature width must be {expected[key]}")

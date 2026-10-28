@@ -10,7 +10,7 @@ def build_mlp(
     activate_last: bool = False,
 ) -> nn.Sequential:
     """Linear layers with optional LayerNorm and activation after hidden layers."""
-    layers = []
+    layers: list[nn.Module] = []
     for index, (in_dim, out_dim) in enumerate(zip(channels, channels[1:])):
         layers.append(nn.Linear(in_dim, out_dim))
         if index < len(channels) - 2 or activate_last:
@@ -36,10 +36,14 @@ class PointNet(nn.Module):
         self,
         input_channels: int = 3,
         output_channels: int = 256,
+        pooling: str = "amax",
     ):
         super().__init__()
         self.input_channels = input_channels
         self.output_channels = output_channels
+        if pooling not in {"amax", "max"}:
+            raise ValueError("pooling must be 'amax' or 'max'")
+        self.pooling = pooling
 
         self.mlp = build_point_mlp(input_channels)
         self.output_projection = nn.Sequential(
@@ -49,7 +53,7 @@ class PointNet(nn.Module):
 
     def forward(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
         point_feature = self.mlp(pointcloud[..., : self.input_channels])
-        global_token = point_feature.amax(dim=1)
+        global_token = point_feature.max(dim=1).values if self.pooling == "max" else point_feature.amax(dim=1)
         global_token = self.output_projection(global_token)
         return {"global_token": global_token}
 
