@@ -9,7 +9,7 @@ class ForceGuidedAttentionFusion(nn.Module):
         self,
         visual_dim: int,
         tactile_dim: int,
-        force_dim: int,
+        guide_dim: int,
         hidden_dim: int = 512,
         num_heads: int = 8,
         dropout: float = 0.1,
@@ -17,7 +17,7 @@ class ForceGuidedAttentionFusion(nn.Module):
         super().__init__()
         self.visual_proj = nn.Linear(visual_dim, hidden_dim)
         self.tactile_proj = nn.Linear(tactile_dim, hidden_dim)
-        self.force_proj = nn.Linear(force_dim, hidden_dim)
+        self.force_proj = nn.Linear(guide_dim, hidden_dim)
         self.cross_attn = nn.TransformerDecoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,

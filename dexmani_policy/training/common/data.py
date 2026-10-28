@@ -1,4 +1,5 @@
 from itertools import islice
+from math import prod
 
 import hydra
 import torch
@@ -18,7 +19,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     buffer = dataset.replay_buffer
     dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
     for key in FINGER_VECTOR_FIELDS.intersection(dims):
-        dims[key] = 15
+        dims[key] = prod(buffer[key].shape[1:])
     if dataset.pc_dim is not None:
         for key in POINT_CLOUD_FIELDS.intersection(dims):
             dims[key] = dataset.pc_dim

@@ -20,6 +20,9 @@ from dexmani_policy.agents.obs_encoder.interaction.future_tactile.force_guided_a
 from dexmani_policy.agents.obs_encoder.interaction.future_tactile.force_prediction_transformer import (
     ForcePredictionTransformer,
 )
+from dexmani_policy.agents.obs_encoder.interaction.future_tactile.visuo_tactile_interaction import (
+    VisuoTactileInteraction,
+)
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
@@ -49,6 +52,9 @@ class AdapTacObservationEncoder(nn.Module):
         )
         self.visual_projection = nn.Linear(self.pc_encoder.out_dim, feature_dim)
         self.tactile_encoder = XHandForceEncoder()
+        self.interaction = VisuoTactileInteraction(
+            self.pc_encoder.out_dim, self.tactile_encoder.out_dim, self.tactile_encoder.num_tokens,
+        )
         self.tactile_projection = nn.Linear(
             self.tactile_encoder.num_tokens * self.tactile_encoder.out_dim, feature_dim
         )
@@ -69,10 +75,11 @@ class AdapTacObservationEncoder(nn.Module):
             self.pc_encoder.fps_random_config,
             training=self.training,
         )
-        visual = self.visual_projection(self.pc_encoder(pc)["tokens"].mean(dim=1))
-        tactile = self.tactile_projection(
-            self.tactile_encoder(obs["finger_tactile_force"]).flatten(1)
+        visual, tactile = self.interaction(
+            self.pc_encoder(pc)["tokens"], self.tactile_encoder(obs["finger_tactile_force"]),
         )
+        visual = self.visual_projection(visual.mean(dim=1))
+        tactile = self.tactile_projection(tactile.flatten(1))
         state = self.state_mlp(obs["joint_state"])
         return visual, tactile, state
 
@@ -139,10 +146,12 @@ class AdapTacPolicy(BasePolicy):
             clip_sample=clip_sample,
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim)
+        self.force_dim = math.prod(obs_encoder.tactile_encoder.input_shape)
         self.force_predictor = DiffusionForceHead(
             ForcePredictionTransformer(
                 horizon=self.future_steps,
                 cond_dim=2 * feature_dim,
+                force_dim=self.force_dim,
                 **(force_predictor_config or {}),
             ),
             num_training_steps,
@@ -151,7 +160,7 @@ class AdapTacPolicy(BasePolicy):
         self.force_fusion = ForceGuidedAttentionFusion(
             visual_dim=feature_dim,
             tactile_dim=feature_dim,
-            force_dim=3 * (n_obs_steps + self.future_steps),
+            guide_dim=self.force_dim * (n_obs_steps + self.future_steps),
             hidden_dim=feature_dim,
             num_heads=fusion_num_heads,
             dropout=fusion_dropout,
@@ -160,7 +169,7 @@ class AdapTacPolicy(BasePolicy):
         self.force_loss_weight = force_loss_weight
 
     def current_force(self, obs: dict) -> torch.Tensor:
-        return obs["finger_tactile_force"].float().sum(dim=-2) / self.force_scale
+        return obs["finger_tactile_force"].float().flatten(-2) / self.force_scale
 
     def action_condition(self, features, current_force, predicted_force) -> torch.Tensor:
         visual, tactile, state = features
@@ -175,7 +184,7 @@ class AdapTacPolicy(BasePolicy):
         features = self.obs_encoder(self.preprocess(batch["obs"]))
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
             torch.cat(features[:2], dim=-1).unsqueeze(1),
-            batch["future_force"].float() / self.force_scale,
+            batch["future_force"].float().flatten(-2) / self.force_scale,
         )
         # The action objective also trains the force predictor through this prediction.
         condition = self.action_condition(features, current_force, predicted_force)
@@ -209,7 +218,8 @@ class AdapTacPolicy(BasePolicy):
         current_force = self.current_force(obs_dict)
         features = self.obs_encoder(self.preprocess(obs_dict))
         predicted_force = self.force_predictor.predict_action(
-            torch.cat(features[:2], dim=-1).unsqueeze(1), (current_force.shape[0], self.future_steps, 3),
+            torch.cat(features[:2], dim=-1).unsqueeze(1),
+            (current_force.shape[0], self.future_steps, self.force_dim),
             generator=generator,
         )
         condition = self.action_condition(features, current_force, predicted_force)

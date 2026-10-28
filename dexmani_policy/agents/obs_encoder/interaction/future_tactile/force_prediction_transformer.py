@@ -14,6 +14,7 @@ class ForcePredictionTransformer(nn.Module):
         self,
         horizon: int,
         cond_dim: int,
+        force_dim: int,
         n_layer: int = 8,
         n_head: int = 4,
         n_emb: int = 256,
@@ -21,7 +22,7 @@ class ForcePredictionTransformer(nn.Module):
         p_drop_attn: float = 0.3,
     ) -> None:
         super().__init__()
-        self.input_emb = nn.Linear(3, n_emb)
+        self.input_emb = nn.Linear(force_dim, n_emb)
         self.pos_emb = nn.Parameter(torch.zeros(1, horizon, n_emb))
         self.drop = nn.Dropout(p_drop_emb)
         self.time_emb = SinusoidalTimestepEmbedding(n_emb)
@@ -44,7 +45,7 @@ class ForcePredictionTransformer(nn.Module):
             "mask", torch.full((horizon, horizon), float("-inf")).triu(1),
         )
         self.ln_f = nn.LayerNorm(n_emb)
-        self.head = nn.Linear(n_emb, 3)
+        self.head = nn.Linear(n_emb, force_dim)
         self.apply(self._init_weights)
 
     def _init_weights(self, module):

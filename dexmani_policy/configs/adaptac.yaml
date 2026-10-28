@@ -2,7 +2,7 @@ defaults:
   - common
   - _self_
 
-# AdapTac：未来力预测与当前/预测力引导的视觉触觉融合。
+# AdapTac 扩展：分指未来力预测、池化前双向交互与力引导融合。
 
 policy_name: adaptac
 
@@ -89,7 +89,7 @@ agent:
   num_training_steps: 100
   num_inference_steps: 20
   force_num_inference_steps: 20
-  force_scale: 1.0  # 单位 N，固定工程起点；不在恢复或推理时重新估计。
+  force_scale: 1.0  # 与原始力同单位的固定工程尺度；仿真为 N，恢复/推理不重估。
   force_loss_weight: 10.0
   force_predictor_config:
     n_layer: 8

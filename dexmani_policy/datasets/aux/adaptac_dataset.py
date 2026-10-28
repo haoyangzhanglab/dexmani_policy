@@ -12,15 +12,16 @@ class AdapTacDataset(RobotDataset):
         normalizer = super().get_normalizer({name: mode for name, mode in spec.items() if name != key})
         normalizer.fit_field(key, self.iter_normalization_data(key), mode=spec[key], last_n_dims=1)
         field = normalizer[key]
-        # The shared normalizer stores finger-vector fields as (5, 3).
-        field.scale = field.scale.expand(5, 3).clone()
-        field.offset = field.offset.expand(5, 3).clone()
+        # Broadcast the shared XYZ affine to the stored finger-vector layout.
+        shape = self.replay_buffer[key].shape[1:]
+        field.scale = field.scale.expand(shape).clone()
+        field.offset = field.offset.expand(shape).clone()
         return normalizer
 
     def build_sampler(self, episode_mask):
         sampler = super().build_sampler(episode_mask)
         start, end, sample_start = sampler.indices.T
-        query = np.clip(start + self.obs_horizon - 1 - sample_start, start, end - 1)
+        query = np.clip(start + self.action_start_index - sample_start, start, end - 1)
         episode_ends = self.replay_buffer.episode_ends
         ends = episode_ends[np.searchsorted(episode_ends, query, side="right")]
         sampler.indices = sampler.indices[query + 1 < ends]
@@ -28,14 +29,14 @@ class AdapTacDataset(RobotDataset):
 
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
-        query = self.sampler.sample_source_rows(idx)[self.obs_horizon - 1]
+        query = self.sampler.sample_source_rows(idx)[self.action_start_index]
         episode_ends = self.replay_buffer.episode_ends
         end = episode_ends[np.searchsorted(episode_ends, query, side="right")]
-        steps = self.horizon - self.obs_horizon + 1
+        steps = self.horizon - self.action_start_index
         # action[t] starts at the query; its resulting force is observed at t+1.
         force = self.replay_buffer.read(
             "finger_tactile_force", slice(query + 1, min(query + steps + 1, end))
-        ).sum(axis=1, dtype=np.float32)
+        ).astype(np.float32, copy=False)
         rows = np.minimum(np.arange(steps), len(force) - 1)
         data["future_force"] = torch.from_numpy(force[rows])
         return data
