@@ -7,11 +7,9 @@ Changes: native arm7+hand12, observation-only data, raw encoder export and resum
 """
 
 import copy
-import math
 import signal
 
 import torch
-from omegaconf import open_dict
 from torch import nn
 from torch.nn import functional as F
 
@@ -72,9 +70,6 @@ def train(cfg, checkpoint=None, max_updates=None):
     set_seed(cfg.training.seed)
     dataset, normalizer, loader = prepare_data(cfg, checkpoint)
     accumulation = cfg.training.loop.gradient_accumulation_steps
-    with open_dict(cfg):
-        cfg.data_summary = {'samples': len(dataset), 'batches_per_epoch': len(loader),
-                            'updates_per_epoch': math.ceil(len(loader) / accumulation)}
     model = CordViPPretrain(**cfg.model)
     model.normalizer = copy.deepcopy(normalizer)
     model.to(cfg.training.device)
@@ -91,7 +86,8 @@ def train(cfg, checkpoint=None, max_updates=None):
         print(f'[CordViP] Resume epoch {epoch} from its beginning; global_step={step}')
     stop_step = total if max_updates is None else min(total, step + max_updates)
     logger = ExperimentLogger(**cfg.workspace)
-    print(f'[CordViP] {dict(cfg.data_summary)}, batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}')
+    print(f'[CordViP] samples={len(dataset)}, batches_per_epoch={len(loader)}, '
+          f'batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}')
     stop_requested = False
 
     def request_stop(signum, frame):
@@ -133,10 +129,12 @@ def train(cfg, checkpoint=None, max_updates=None):
                     logger.log(to_log_scalars({'train/' + key: value / group_size for key, value in totals.items()}
                                              | {'train/lr': scheduler.get_last_lr()[0], 'train/epoch': current_epoch}), step)
                 totals = {}
-                if step % save_every == 0:
-                    save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
                 if step >= stop_step or stop_requested:
                     break
+                if step % save_every == 0:
+                    save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+            if stop_requested:
+                break
             if epoch > current_epoch:
                 if epoch % cfg.training.val_every_epochs == 0:
                     validation = dataset.get_validation_dataset()

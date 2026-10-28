@@ -87,6 +87,7 @@ def evaluate(model, dataset, batch_size, device):
     totals: dict[str, torch.Tensor] = {}
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     for batch in loader:
+        count = len(next(iter(batch["obs"].values())))
         _, metrics = model(dict_apply(batch, lambda x: x.to(device)))
-        accumulate_metrics(totals, metrics)
-    return {f"val/{key}": value / len(loader) for key, value in totals.items()}
+        accumulate_metrics(totals, {key: value * count for key, value in metrics.items()})
+    return {f"val/{key}": value / len(dataset) for key, value in totals.items()}

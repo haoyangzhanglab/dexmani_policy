@@ -16,7 +16,6 @@ class CordViPDataset(torch.utils.data.Dataset):
                  max_train_episodes=None, split_manifest=None, horizon=12,
                  obs_horizon=4, pad_before=3, pad_after=5):
         self.replay_buffer = ReplayBuffer(zarr_path, keys=(*self.sensor_modalities, "contact_map"))
-        self.zarr_path = self.replay_buffer.path
         self.horizon, self.obs_horizon = horizon, obs_horizon
         self.pad_before, self.pad_after = pad_before, pad_after
         for key in self.sensor_modalities[:2]:

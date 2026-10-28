@@ -3,7 +3,7 @@
 Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
 Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
 Changes: native observation-only data/affine; explicit pre-optimizer teacher update;
-local PointNet and epoch-boundary checkpoint resume. Active losses are unchanged.
+local PointNet and checkpoint resume. Active losses are unchanged.
 """
 
 import copy
@@ -11,7 +11,6 @@ import signal
 
 import torch
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-from omegaconf import open_dict
 from torch import nn
 from torch.nn import functional as F
 
@@ -102,8 +101,6 @@ def train(cfg, checkpoint=None, max_updates=None):
     set_seed(cfg.training.seed)
     dataset, normalizer, loader = prepare_data(cfg, checkpoint)
     cfg.training.loop.total_train_steps = cfg.training.num_epochs * len(loader)
-    with open_dict(cfg):
-        cfg.data_summary = {"samples": len(dataset), "batches_per_epoch": len(loader), "updates_per_epoch": len(loader)}
     model = AFROPretrain(**cfg.model)
     model.normalizer = copy.deepcopy(normalizer)
     model.to(cfg.training.device)
@@ -121,7 +118,8 @@ def train(cfg, checkpoint=None, max_updates=None):
     total = cfg.training.loop.total_train_steps
     stop_step = total if max_updates is None else min(total, step + max_updates)
     logger = ExperimentLogger(**cfg.workspace)
-    print(f"[AFRO] {dict(cfg.data_summary)}, batch={cfg.dataloader.batch_size}, total_updates={total}")
+    print(f"[AFRO] samples={len(dataset)}, batches_per_epoch={len(loader)}, "
+          f"batch={cfg.dataloader.batch_size}, total_updates={total}")
     stop_requested = False
 
     def request_stop(signum, frame):
@@ -156,12 +154,14 @@ def train(cfg, checkpoint=None, max_updates=None):
                                              | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch}), step)
                 if step >= stop_step or stop_requested:
                     break
+            if stop_requested:
+                break
             if epoch > current_epoch:
                 if epoch % cfg.training.val_every_epochs == 0:
                     validation = dataset.get_validation_dataset()
                     if validation is not None:
                         logger.log(to_log_scalars(evaluate(model, validation, cfg.dataloader.batch_size, cfg.training.device)), step)
-                if epoch % cfg.training.save_every_epochs == 0:
+                if epoch % cfg.training.save_every_epochs == 0 and step < stop_step and not stop_requested:
                     save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
         save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
         print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
