@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state
+from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.logging import accumulate_metrics
 from dexmani_policy.training.common.resume import resolve_input_recipe
 
@@ -60,12 +60,23 @@ def save_run(model, encoder, optimizer, scheduler, cfg, epoch, step):
 
 
 @torch.no_grad()
-def evaluate(model, dataset, batch_size, device):
-    model.eval()
-    totals: dict[str, torch.Tensor] = {}
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    for batch in loader:
-        count = len(next(iter(batch["obs"].values())))
-        _, metrics = model(dict_apply(batch, lambda x: x.to(device)))
-        accumulate_metrics(totals, {key: value * count for key, value in metrics.items()})
-    return {f"val/{key}": value / len(dataset) for key, value in totals.items()}
+def evaluate(model, dataset, batch_size, device, *, stop_requested):
+    if stop_requested():
+        return None
+    rng_state, training = get_rng_state(device), model.training
+    try:
+        model.eval()
+        totals: dict[str, torch.Tensor] = {}
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        for batch in loader:
+            if stop_requested():
+                return None
+            count = len(next(iter(batch["obs"].values())))
+            _, metrics = model(dict_apply(batch, lambda x: x.to(device)))
+            accumulate_metrics(totals, {key: value * count for key, value in metrics.items()})
+            if stop_requested():
+                return None
+        return {f"val/{key}": value / len(dataset) for key, value in totals.items()}
+    finally:
+        model.train(training)
+        set_rng_state(rng_state, device)

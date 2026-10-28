@@ -2,6 +2,7 @@ import copy
 
 import torch
 
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler
@@ -12,8 +13,11 @@ from dexmani_policy.datasets.common.validation import validate_fields
 class AFRODataset(torch.utils.data.Dataset):
     sensor_modalities = ("point_cloud",)
 
-    def __init__(self, zarr_path, *, seed=42, val_ratio=0.1, max_train_episodes=None,
+    def __init__(self, zarr_path, *, frame_stride, seed=42, val_ratio=0.1, max_train_episodes=None,
                  split_manifest=None, horizon=33, pad_before=0, pad_after=7):
+        self.frame_stride = positive_int(frame_stride, "frame_stride")
+        if len(range(0, horizon, self.frame_stride)) < 2:
+            raise ValueError("AFRO frame_stride must leave at least two sampled frames")
         self.replay_buffer = ReplayBuffer(zarr_path, keys=self.sensor_modalities)
         shape = self.replay_buffer["point_cloud"].shape
         if len(shape) != 3 or shape[2] < 3:
@@ -27,7 +31,6 @@ class AFRODataset(torch.utils.data.Dataset):
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
             raise ValueError("No AFRO training windows")
-        self.training_dataset: AFRODataset | None = None
         self._normalizer = None
 
     def build_sampler(self, mask):
@@ -37,12 +40,11 @@ class AFRODataset(torch.utils.data.Dataset):
         return len(self.sampler)
 
     def __getitem__(self, index):
-        sample = self.sampler.sample_sequence(index)
-        return {"obs": {"point_cloud": torch.as_tensor(sample["point_cloud"][..., :3])}}
+        rows = self.sampler.sample_source_rows(index)[::self.frame_stride]
+        points = self.replay_buffer.read("point_cloud", rows, columns=slice(0, 3))
+        return {"obs": {"point_cloud": torch.as_tensor(points)}}
 
     def get_normalizer(self, spec):
-        if self.training_dataset is not None:
-            return self.training_dataset.get_normalizer(spec)
         if self._normalizer is None:
             if set(spec) != set(self.sensor_modalities):
                 raise ValueError("AFRO normalization must declare only point_cloud")
@@ -60,5 +62,4 @@ class AFRODataset(torch.utils.data.Dataset):
             return None
         result = copy.copy(self)
         result.sampler = self.build_sampler(self.val_mask)
-        result.training_dataset = self
         return result if len(result) else None

@@ -1,6 +1,8 @@
+from itertools import islice
+
 import hydra
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from dexmani_policy.common.config import resolve_normalization_spec, FINGER_VECTOR_FIELDS, POINT_CLOUD_FIELDS, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
@@ -59,6 +61,35 @@ def close_data_loader(loader, iterator=None):
         iterator._shutdown_workers()
 
 
+class EpochBatchSampler(BatchSampler):
+    def __init__(self, dataset, batch_size, drop_last, *, shuffle, seed):
+        self.generator = torch.Generator()
+        sampler = RandomSampler(dataset, generator=self.generator) if shuffle else SequentialSampler(dataset)
+        super().__init__(sampler, batch_size, drop_last)
+        self.seed = seed
+        self.set_epoch(0)
+
+    @property
+    def batches_per_epoch(self):
+        return super().__len__()
+
+    def set_epoch(self, epoch, start_batch=0):
+        self.epoch, self.start_batch = epoch, start_batch
+
+    def __iter__(self):
+        self.generator.manual_seed(self.seed + self.epoch)
+        return islice(super().__iter__(), self.start_batch, None)
+
+    def __len__(self):
+        return self.batches_per_epoch - self.start_batch
+
+
+def epoch_position(global_step, batches_per_epoch, accumulation):
+    updates = (batches_per_epoch + accumulation - 1) // accumulation
+    epoch, update = divmod(global_step, updates)
+    return epoch, update * accumulation
+
+
 def build_train_loader(cfg, dataset):
     options = dict(cfg.dataloader)
     if options.get("num_workers", 0) == 0:
@@ -79,8 +110,13 @@ def build_train_loader(cfg, dataset):
             f"N={samples}, B={batch_size}, A={accumulation}; "
             "use drop_last=True or gradient_accumulation_steps=1"
         )
+    batch_sampler = EpochBatchSampler(
+        dataset, options.pop("batch_size"), options.pop("drop_last", False),
+        shuffle=options.pop("shuffle", False), seed=cfg.training.seed,
+    )
+    # Worker creation must not consume the sample permutation's RNG.
     generator = torch.Generator().manual_seed(cfg.training.seed)
-    loader = DataLoader(dataset, generator=generator, **options)
+    loader = DataLoader(dataset, batch_sampler=batch_sampler, generator=generator, **options)
     if len(loader) == 0:
         raise ValueError(
             "Training DataLoader is empty; check dataset length, batch_size and drop_last"

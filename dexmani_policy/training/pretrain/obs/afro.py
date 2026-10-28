@@ -7,6 +7,7 @@ local PointNet and checkpoint resume. Active losses are unchanged.
 """
 
 import signal
+import time
 
 import hydra
 import torch
@@ -15,11 +16,10 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
-from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
@@ -43,9 +43,8 @@ def vicreg_loss(prediction, target):
 
 
 class AFROPretrain(nn.Module):
-    def __init__(self, normalization, frame_stride=2):
+    def __init__(self, normalization):
         super().__init__()
-        self.frame_stride = positive_int(frame_stride, "frame_stride")
         self.visual = PointNet(3, 64, pooling="max")
         self.teacher = PointNet(3, 64, pooling="max")
         self.teacher.requires_grad_(False)
@@ -64,10 +63,7 @@ class AFROPretrain(nn.Module):
         points = batch["obs"]["point_cloud"]
         if "point_cloud" in self.normalizer.fields:
             points = self.normalizer["point_cloud"].normalize(points)
-        points = points[:, ::self.frame_stride]
         batch_size, frames = points.shape[:2]
-        if frames < 2:
-            raise ValueError("AFRO frame_stride must leave at least two sampled frames")
         points = points.flatten(0, 1)
         online = self.visual(points)["global_token"].reshape(batch_size, frames, 64)
         with torch.no_grad():
@@ -101,30 +97,33 @@ def train(cfg, checkpoint=None, max_updates=None):
     if cfg.training.loop.gradient_accumulation_steps != 1:
         raise ValueError("AFRO VICReg requires accumulation=1; a smaller batch is an explicit recipe change")
     set_seed(cfg.training.seed)
-    dataset = hydra.utils.instantiate(cfg.dataset)
+    dataset = hydra.utils.instantiate(cfg.dataset, frame_stride=cfg.model.frame_stride)
     cfg.dataset.split_manifest = dataset.split_manifest
     loader = build_train_loader(cfg, dataset)
-    cfg.training.loop.total_train_steps = cfg.training.num_epochs * len(loader)
-    model = AFROPretrain(cfg.normalization, **cfg.model)
+    batches_per_epoch = loader.batch_sampler.batches_per_epoch
+    cfg.training.loop.total_train_steps = cfg.training.num_epochs * batches_per_epoch
+    model = AFROPretrain(cfg.normalization)
     if checkpoint is None:
         model.normalizer.load_state_dict(dataset.get_normalizer(cfg.normalization).state_dict(), strict=True)
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
     scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
                               cfg.training.loop.total_train_steps)
-    epoch = step = 0
+    step = 0
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model_state"], strict=True)
         validate_normalizer_state(model.normalizer)
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         scheduler.load_state_dict(checkpoint["scheduler_state"])
-        epoch, step = checkpoint["epoch"], checkpoint["global_step"]
+        step = checkpoint["global_step"]
         set_rng_state(checkpoint["rng_state"], cfg.training.device)
-        print(f"[AFRO] Resume epoch {epoch} from its beginning; global_step={step}")
     total = cfg.training.loop.total_train_steps
+    epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
+    if checkpoint is not None:
+        print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
     logger = ExperimentLogger(**cfg.workspace)
-    print(f"[AFRO] samples={len(dataset)}, batches_per_epoch={len(loader)}, "
+    print(f"[AFRO] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, "
           f"batch={cfg.dataloader.batch_size}, total_updates={total}")
     stop_requested = False
 
@@ -136,10 +135,14 @@ def train(cfg, checkpoint=None, max_updates=None):
     try:
         logger.save_config(cfg)
         while step < stop_step and not stop_requested:
-            loader.generator.manual_seed(cfg.training.seed + epoch)
+            epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
+            loader.batch_sampler.set_epoch(epoch, start_batch)
             model.train()
             current_epoch = epoch
-            for index, batch in enumerate(loader):
+            step_start = data_wait_start = time.perf_counter()
+            data_wait = 0.0
+            for index, batch in enumerate(loader, start=start_batch):
+                data_wait += time.perf_counter() - data_wait_start
                 batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
                 optimizer.zero_grad(set_to_none=True)
                 loss, metrics = model(batch)
@@ -152,21 +155,30 @@ def train(cfg, checkpoint=None, max_updates=None):
                 model.update_teacher(current_epoch)
                 optimizer.step()
                 scheduler.step()
+                elapsed = time.perf_counter() - step_start
                 step += 1
-                if index + 1 == len(loader):
+                if index + 1 == batches_per_epoch:
                     epoch = current_epoch + 1
                 if step == 1 or step % cfg.training.loop.log_interval_steps == 0 or step == stop_step:
                     logger.log(to_log_scalars({"train/" + key: value for key, value in metrics.items()}
-                                             | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch}), step)
+                                             | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch,
+                                                "train/step_time": elapsed, "train/data_wait_time": data_wait}), step)
                 if step >= stop_step or stop_requested:
                     break
+                step_start = data_wait_start = time.perf_counter()
+                data_wait = 0.0
             if stop_requested:
                 break
             if epoch > current_epoch:
                 if epoch % cfg.training.val_every_epochs == 0:
                     validation = dataset.get_validation_dataset()
                     if validation is not None:
-                        logger.log(to_log_scalars(evaluate(model, validation, cfg.dataloader.batch_size, cfg.training.device)), step)
+                        metrics = evaluate(
+                            model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                            stop_requested=lambda: stop_requested,
+                        )
+                        if metrics is not None:
+                            logger.log(to_log_scalars(metrics), step)
                 if epoch % cfg.training.save_every_epochs == 0 and step < stop_step and not stop_requested:
                     save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
         save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)

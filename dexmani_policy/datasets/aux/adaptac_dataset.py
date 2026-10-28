@@ -15,9 +15,6 @@ class AdapTacDataset(RobotDataset):
         # The shared normalizer stores finger-vector fields as (5, 3).
         field.scale = field.scale.expand(5, 3).clone()
         field.offset = field.offset.expand(5, 3).clone()
-        field.input_stats = {
-            name: value.expand(5, 3).clone() for name, value in field.input_stats.items()
-        }
         return normalizer
 
     def build_sampler(self, episode_mask):

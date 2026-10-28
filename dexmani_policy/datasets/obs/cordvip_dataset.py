@@ -39,7 +39,6 @@ class CordViPDataset(torch.utils.data.Dataset):
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
             raise ValueError("No CordViP training windows")
-        self.training_dataset: CordViPDataset | None = None
         self._normalizer = None
 
     def build_sampler(self, mask):
@@ -61,8 +60,6 @@ class CordViPDataset(torch.utils.data.Dataset):
         }
 
     def get_normalizer(self, spec):
-        if self.training_dataset is not None:
-            return self.training_dataset.get_normalizer(spec)
         if self._normalizer is None:
             if set(spec) != set(self.sensor_modalities):
                 raise ValueError("CordViP normalization must declare its three observation fields")
@@ -83,5 +80,4 @@ class CordViPDataset(torch.utils.data.Dataset):
             return None
         result = copy.copy(self)
         result.sampler = self.build_sampler(self.val_mask)
-        result.training_dataset = self
         return result if len(result) else None

@@ -271,7 +271,5 @@ class RobotDataset(torch.utils.data.Dataset):
                     raise ValueError("action_ee requires xyz, rot6d and hand coordinates")
                 field.scale[3:9] = 1
                 field.offset[3:9] = 0
-                for name, value in (("min", -1), ("max", 1), ("mean", 0), ("std", 1)):
-                    field.input_stats[name][3:9] = value
         self._normalizer = normalizer
         return normalizer

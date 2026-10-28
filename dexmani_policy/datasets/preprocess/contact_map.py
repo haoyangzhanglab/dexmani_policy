@@ -36,8 +36,9 @@ def compute_contact_map(object_points, object_normals, hand_points, *, gamma=1.0
         stop = start + point_chunk_size
         difference = hand[None] - objects[start:stop, None]
         distance = np.linalg.norm(difference, axis=-1)
-        direction = difference / (distance[..., None] + 1e-8)
-        alignment = np.abs(np.einsum("ijk,ik->ij", direction, normals[start:stop]))
+        alignment = np.abs(
+            np.einsum("ijk,ik->ij", difference, normals[start:stop])
+        ) / (distance + 1e-8)
         minimum = (distance * np.exp(gamma * (1 - alignment))).min(axis=1)
         contacts[start:stop] = 1 - 2 * (1 / (1 + np.exp(-theta * minimum)) - 0.5)
     return contacts
@@ -56,6 +57,10 @@ def generate(zarr_path, output):
         shape = buffer[key].shape
         if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
             raise ValueError(f"Contact geometry requires {key}[T,N>0,C>=3]")
+    if buffer["object_pointcloud"].shape[1] != 1024:
+        raise ValueError("CordViP requires 1024 object points")
+    if buffer["joint_state"].shape[1:] != (19,):
+        raise ValueError("CordViP requires joint_state[T,19]")
     rows = int(buffer.episode_ends[-1])
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".contact-", dir=output.parent))

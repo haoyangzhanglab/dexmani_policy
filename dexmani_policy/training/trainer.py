@@ -21,7 +21,7 @@ from dexmani_policy.common.experiments import milestone_steps
 from dexmani_policy.common.io_util import atomic_path, close_resources
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.config import assemble_effective_config
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
@@ -110,7 +110,7 @@ class PolicyTrainer:
         self.max_grad_norm = cfg.training.get("max_grad_norm", 1.0)
         self.use_bfloat16 = cfg.training.get("use_bfloat16", False)
         self.amp_device_type = device.type
-        self.batches_per_epoch = len(self.train_loader)
+        self.batches_per_epoch = self.train_loader.batch_sampler.batches_per_epoch
         self.current_epoch = self.global_step = 0
 
         if checkpoint is not None:
@@ -125,7 +125,10 @@ class PolicyTrainer:
             self.scheduler.load_state_dict(checkpoint.scheduler_state)
             if ema_updater is not None:
                 ema_updater.optimization_step = checkpoint.ema_updater_step
-            self.current_epoch, self.global_step = checkpoint.epoch, checkpoint.global_step
+            self.global_step = checkpoint.global_step
+            self.current_epoch, _ = epoch_position(
+                self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
+            )
             if self.global_step > self.total_train_steps:
                 raise ValueError("Checkpoint global_step exceeds the training budget")
 
@@ -295,7 +298,7 @@ class PolicyTrainer:
         if self.global_step >= self.total_train_steps:
             return
         if self.global_step:
-            print(f"Resuming epoch {self.current_epoch} from its beginning, step {self.global_step}")
+            print(f"Resuming at step {self.global_step}, logical epoch {self.current_epoch}")
 
         if self.ema_model is not None:
             self.ema_model.eval()
@@ -304,7 +307,6 @@ class PolicyTrainer:
         prev_sigint = signal.signal(signal.SIGINT, self.signal_handler)
         prev_sigterm = signal.signal(signal.SIGTERM, self.signal_handler)
 
-        epoch = self.current_epoch
         self.step_pbar = tqdm(
             initial=self.global_step,
             total=self.total_train_steps,
@@ -316,7 +318,10 @@ class PolicyTrainer:
 
         try:
             while self.global_step < stop_step:
-                self.train_loader.generator.manual_seed(self.cfg.training.seed + epoch)
+                epoch, start_batch = epoch_position(
+                    self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
+                )
+                self.train_loader.batch_sampler.set_epoch(epoch, start_batch)
                 self.model.train()
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -327,7 +332,7 @@ class PolicyTrainer:
                 # Start before iterator creation, including the epoch's first data wait.
                 group_start_time = time.perf_counter()
                 data_wait_start = group_start_time
-                for micro_step, batch in enumerate(self.train_loader):
+                for micro_step, batch in enumerate(self.train_loader, start=start_batch):
                     group_data_wait += time.perf_counter() - data_wait_start
                     self.current_epoch = epoch
                     group_samples += batch["action"].shape[0]
@@ -380,7 +385,6 @@ class PolicyTrainer:
                     data_wait_start = time.perf_counter()
 
                 self.model.eval()
-                epoch = self.current_epoch
                 if self.stop_requested:
                     break
 

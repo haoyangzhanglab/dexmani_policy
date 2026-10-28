@@ -6,6 +6,7 @@ Changes: native arm7+hand12, observation-only data, raw encoder export and resum
 """
 
 import signal
+import time
 
 import hydra
 import torch
@@ -20,7 +21,7 @@ from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, save_run
@@ -72,6 +73,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     dataset = hydra.utils.instantiate(cfg.dataset)
     cfg.dataset.split_manifest = dataset.split_manifest
     loader = build_train_loader(cfg, dataset)
+    batches_per_epoch = loader.batch_sampler.batches_per_epoch
     accumulation = cfg.training.loop.gradient_accumulation_steps
     model = CordViPPretrain(cfg.normalization, **cfg.model)
     if checkpoint is None:
@@ -80,18 +82,20 @@ def train(cfg, checkpoint=None, max_updates=None):
     optimizer = torch.optim.AdamW(model.parameters(), **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
     scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
-    epoch = step = 0
+    step = 0
     if checkpoint is not None:
         model.load_state_dict(checkpoint['model_state'], strict=True)
         validate_normalizer_state(model.normalizer)
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         scheduler.load_state_dict(checkpoint['scheduler_state'])
-        epoch, step = checkpoint['epoch'], checkpoint['global_step']
+        step = checkpoint['global_step']
         set_rng_state(checkpoint['rng_state'], cfg.training.device)
-        print(f'[CordViP] Resume epoch {epoch} from its beginning; global_step={step}')
+    epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
+    if checkpoint is not None:
+        print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
     stop_step = total if max_updates is None else min(total, step + max_updates)
     logger = ExperimentLogger(**cfg.workspace)
-    print(f'[CordViP] samples={len(dataset)}, batches_per_epoch={len(loader)}, '
+    print(f'[CordViP] samples={len(dataset)}, batches_per_epoch={batches_per_epoch}, '
           f'batch={cfg.dataloader.batch_size}, accumulation={accumulation}, total_updates={total}')
     stop_requested = False
 
@@ -103,13 +107,17 @@ def train(cfg, checkpoint=None, max_updates=None):
     try:
         logger.save_config(cfg)
         while step < stop_step and not stop_requested:
-            loader.generator.manual_seed(cfg.training.seed + epoch)
+            epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
+            loader.batch_sampler.set_epoch(epoch, start_batch)
             model.train()
             current_epoch = epoch
             totals: dict[str, torch.Tensor] = {}
-            for index, batch in enumerate(loader):
+            step_start = data_wait_start = time.perf_counter()
+            data_wait = 0.0
+            for index, batch in enumerate(loader, start=start_batch):
+                data_wait += time.perf_counter() - data_wait_start
                 group_start = (index // accumulation) * accumulation
-                group_size = min(accumulation, len(loader) - group_start)
+                group_size = min(accumulation, batches_per_epoch - group_start)
                 if index == group_start:
                     optimizer.zero_grad(set_to_none=True)
                 batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
@@ -121,30 +129,40 @@ def train(cfg, checkpoint=None, max_updates=None):
                 if record:
                     accumulate_metrics(totals, metrics)
                 if index - group_start + 1 != group_size:
+                    data_wait_start = time.perf_counter()
                     continue
                 gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
                 if not torch.stack(gradients).all():
                     raise RuntimeError(f'Nonfinite CordViP gradient at step {step}')
                 optimizer.step()
                 scheduler.step()
+                elapsed = time.perf_counter() - step_start
                 step += 1
-                if index + 1 == len(loader):
+                if index + 1 == batches_per_epoch:
                     epoch = current_epoch + 1
                 if record:
                     logger.log(to_log_scalars({'train/' + key: value / group_size for key, value in totals.items()}
-                                             | {'train/lr': scheduler.get_last_lr()[0], 'train/epoch': current_epoch}), step)
+                                             | {'train/lr': scheduler.get_last_lr()[0], 'train/epoch': current_epoch,
+                                                'train/step_time': elapsed, 'train/data_wait_time': data_wait}), step)
                 totals = {}
                 if step >= stop_step or stop_requested:
                     break
                 if step % save_every == 0:
                     save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+                step_start = data_wait_start = time.perf_counter()
+                data_wait = 0.0
             if stop_requested:
                 break
             if epoch > current_epoch:
                 if epoch % cfg.training.val_every_epochs == 0:
                     validation = dataset.get_validation_dataset()
                     if validation is not None:
-                        logger.log(to_log_scalars(evaluate(model, validation, cfg.dataloader.batch_size, cfg.training.device)), step)
+                        metrics = evaluate(
+                            model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                            stop_requested=lambda: stop_requested,
+                        )
+                        if metrics is not None:
+                            logger.log(to_log_scalars(metrics), step)
         save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
         print(f'[CordViP] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}')
     finally:

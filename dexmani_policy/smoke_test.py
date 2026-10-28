@@ -206,7 +206,7 @@ def validate_checkpoint_state(cfg, trainer, checkpoint_path):
 def validate_policy_restoration(cfg, trainer, checkpoint_path, *, batch=None):
     """Compare raw/EMA predictions with restored policies after training."""
     if batch is None:
-        trainer.train_loader.generator.manual_seed(cfg.training.seed + trainer.current_epoch)
+        trainer.train_loader.batch_sampler.set_epoch(trainer.current_epoch)
         batch = next(iter(trainer.train_loader))
     obs = dict_apply(
         {key: value[:1] for key, value in batch["obs"].items()},
