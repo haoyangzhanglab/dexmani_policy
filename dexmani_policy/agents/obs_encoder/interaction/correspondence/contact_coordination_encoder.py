@@ -1,4 +1,4 @@
-"""PointROEncoder's active PointNet path from xuanxuanzzzii/cordvip.
+"""Contact and coordination feature extraction from CordViP, Section III-C.
 
 Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
 Source: train_policy/policy/CordViP/CordViP/CordViP/model/vision/encoder.py
@@ -7,21 +7,23 @@ Changes: local PointNet, native field names and arm7-before-hand12 state layout.
 
 from torch import nn
 
-from dexmani_policy.agents.obs_encoder.interaction.cordvip_transformer import Transformer
+from dexmani_policy.agents.obs_encoder.interaction.correspondence.cross_attention_transformer import (
+    CrossAttentionTransformer,
+)
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
 
 
-class CordViPEncoder(nn.Module):
+class ContactCoordinationEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.encoder_robot = PointNet(3, 1024, pooling="max")
         self.encoder_object = PointNet(3, 1024, pooling="max")
-        self.transformer_robot = Transformer(emb_dim=1024)
-        self.transformer_object = Transformer(emb_dim=1024)
+        self.transformer_robot = CrossAttentionTransformer(emb_dim=1024)
+        self.transformer_object = CrossAttentionTransformer(emb_dim=1024)
         self.hand_projection = nn.Linear(12, 64)
         self.arm_projection = nn.Linear(7, 64)
-        self.attn_hand = Transformer(emb_dim=64)
-        self.attn_arm = Transformer(emb_dim=64)
+        self.attn_hand = CrossAttentionTransformer(emb_dim=64)
+        self.attn_arm = CrossAttentionTransformer(emb_dim=64)
 
     def forward(self, observations):
         robot_points = observations["hand_pointcloud"]

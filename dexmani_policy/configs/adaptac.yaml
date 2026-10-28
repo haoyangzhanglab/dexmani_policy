@@ -1,0 +1,145 @@
+defaults:
+  - common
+  - _self_
+
+# AdapTac：未来力预测与当前/预测力引导的视觉触觉融合。
+
+policy_name: adaptac
+
+task_name: pick_apple_messy
+zarr_path: robot_data/${task_name}.zarr
+
+seed: 42
+horizon: 20
+n_obs_steps: 1
+n_action_steps: 8
+action_key: action
+action_dim: 19
+
+normalization:
+  joint_state: limits
+  action: auto
+  point_cloud: identity
+  finger_tactile_force: limits  # AdapTacDataset 按 XYZ 跨五指共享训练集统计。
+
+dataloader:
+  batch_size: 128
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: true
+
+dataset:
+  pc_dim: ${agent.pc_dim}
+  _target_: dexmani_policy.datasets.aux.adaptac_dataset.AdapTacDataset
+  action_key: ${action_key}
+  zarr_path: ${zarr_path}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps} - 1'}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  sensor_modalities: ["joint_state", "point_cloud", "finger_tactile_force"]
+  obs_horizon: ${n_obs_steps}
+
+  augmentation_cfg:
+    pc:
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+    state:
+      noise:       {noise_std: 0.0002, prob: 1.0}
+
+agent:
+  clip_sample: true
+  _target_: dexmani_policy.agents.policies.adaptac.AdapTacPolicy
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  action_dim: ${action_dim}
+
+  pc_dim: 6
+  feature_dim: 512
+  state_out_dim: 64
+  state_dim: 19
+  num_points: 1024
+
+  fps_random_config:
+    use_random: true
+    use_random_start: true
+    random_noise_scale: 0.0
+    use_shuffle_output: false
+
+  pc_encoder_config:
+    channels: 384
+    num_patches: 96
+    group_size: 32
+    depth: 4
+    num_heads: 8
+    mlp_ratio: 2.0
+    geometry_scale: 0.10
+    rope_scale: 0.05
+    rope_base: 100.0
+
+  diffusion_step_embed_dim: 256
+  down_dims: [256, 512]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+
+  num_training_steps: 100
+  num_inference_steps: 20
+  force_num_inference_steps: 20
+  force_scale: 1.0  # 单位 N，固定工程起点；不在恢复或推理时重新估计。
+  force_loss_weight: 10.0
+  force_predictor_config:
+    n_layer: 8
+    n_head: 4
+    n_emb: 256
+    p_drop_emb: 0.0
+    p_drop_attn: 0.3
+  fusion_num_heads: 8
+  fusion_dropout: 0.1
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+
+ema:
+  _target_: dexmani_policy.training.common.optimization.EMA
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+training:
+  seed: ${seed}
+  device: cuda:0
+  use_bfloat16: true
+  use_compile: false
+  use_ema: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    total_train_steps: 100000
+    log_interval_steps: 100
+    gradient_accumulation_steps: 1
+
+env_runner:
+  task_name: ${task_name}
+  env_kwargs:
+    control_mode: joint
+
+eval:
+  inference_steps: ${agent.num_inference_steps}
+  use_ema: true
+
+  action_steps: null
+  seeds: null
+
+  video:
+    enabled: true

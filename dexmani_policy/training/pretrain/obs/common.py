@@ -2,21 +2,18 @@ import argparse
 from pathlib import Path
 from typing import cast
 
-import hydra
 import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from dexmani_policy.common.config import load_policy_config, positive_int
 from dexmani_policy.common.io_util import atomic_path
-from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state
-from dexmani_policy.training.common.data import build_train_loader
 from dexmani_policy.training.common.logging import accumulate_metrics
 from dexmani_policy.training.common.resume import resolve_input_recipe
 
 
-def parse_run(method):
+def load_run(method):
     parser = argparse.ArgumentParser(description=f"Pretrain the {method} observation encoder")
     parser.add_argument("--config", default=f"pretrain/obs/{method}")
     parser.add_argument("--output-dir")
@@ -43,25 +40,6 @@ def parse_run(method):
         if path.exists():
             raise FileExistsError(f"Pretraining output already exists: {path}")
     return cfg, checkpoint, args.max_updates
-
-
-def prepare_data(cfg, checkpoint):
-    dataset = hydra.utils.instantiate(cfg.dataset)
-    cfg.dataset.split_manifest = dataset.split_manifest
-    if checkpoint is None:
-        normalizer = dataset.get_normalizer(cfg.normalization)
-    else:
-        shapes = {key: (19,) if key == "joint_state" else (3,)
-                  for key, mode in cfg.normalization.items() if mode != "identity"}
-        normalizer = LinearNormalizer(shapes)
-        normalizer.load_state_dict({
-            key.removeprefix("normalizer."): value
-            for key, value in checkpoint["model_state"].items() if key.startswith("normalizer.")
-        }, strict=True)
-        validate_normalizer_state(normalizer)
-        dataset._normalizer = normalizer
-    loader = build_train_loader(cfg, dataset)
-    return dataset, normalizer, loader
 
 
 def save_run(model, encoder, optimizer, scheduler, cfg, epoch, step):

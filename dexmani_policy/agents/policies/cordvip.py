@@ -5,7 +5,9 @@ from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D, validate_unet_horizon
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.obs_encoder.interaction.cordvip_encoder import CordViPEncoder
+from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordination_encoder import (
+    ContactCoordinationEncoder,
+)
 from dexmani_policy.agents.policies.base import BasePolicy
 
 
@@ -14,7 +16,7 @@ class CordViPObservationEncoder(nn.Module):
 
     def __init__(self, n_obs_steps):
         super().__init__()
-        self.encoder = CordViPEncoder()
+        self.encoder = ContactCoordinationEncoder()
         self.n_obs_steps = n_obs_steps
 
     def forward(self, obs):

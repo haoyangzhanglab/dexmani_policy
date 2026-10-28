@@ -25,7 +25,12 @@ class DQRISEObservationEncoder(nn.Module):
     consumed_observation_fields = ("joint_state", "point_cloud")
     out_dim = 256
     use_coord_only = False
-    validate_normalization = staticmethod(Sparse3DEncoder.validate_normalization)
+
+    @staticmethod
+    def validate_normalization(spec):
+        Sparse3DEncoder.validate_normalization(spec)
+        if spec.get("joint_state") != "limits":
+            raise ValueError("Sparse3D global observations require normalization.joint_state: limits")
 
     def __init__(
         self,
@@ -42,21 +47,18 @@ class DQRISEObservationEncoder(nn.Module):
             raise ValueError("Expected pc_dim=6, state_dim=19, n_obs_steps in (1, 2)")
         self.num_points = positive_int(num_points, "num_points")
         self.n_obs_steps = n_obs_steps
-        self.fps_random_config = dict(
+        fps_config = dict(
             use_random=True,
             use_random_start=True,
             use_shuffle_output=False,
             random_noise_scale=0.0,
         )
         if fps_random_config is not None:
-            self.fps_random_config.update(fps_random_config)
+            fps_config.update(fps_random_config)
 
-        config = dict(pc_encoder_config or {})
-        nested_fps = config.get("fps_random_config")
-        if nested_fps is not None and dict(nested_fps) != self.fps_random_config:
-            raise ValueError("Sparse3D patch FPS must match observation preprocessing FPS")
-        config["fps_random_config"] = dict(self.fps_random_config)
-        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **config)
+        self.pc_encoder = Sparse3DEncoder(
+            input_channels=pc_dim, fps_random_config=fps_config, **(pc_encoder_config or {}),
+        )
         self.state_mlp = StateEncoder(state_dim, positive_int(state_out_dim, "state_out_dim"))
         fused_dim = n_obs_steps * (self.pc_encoder.out_dim + state_out_dim)
         self.temporal_projection = nn.Sequential(
@@ -66,7 +68,10 @@ class DQRISEObservationEncoder(nn.Module):
 
     @property
     def effective_config(self):
-        return {"pc_encoder_config": self.pc_encoder.effective_config}
+        return {
+            "pc_encoder_config": self.pc_encoder.effective_config,
+            "fps_random_config": self.pc_encoder.fps_random_config,
+        }
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc, state = obs["point_cloud"], obs["joint_state"]
@@ -74,7 +79,7 @@ class DQRISEObservationEncoder(nn.Module):
             pc,
             self.num_points,
             self.use_coord_only,
-            self.fps_random_config,
+            self.pc_encoder.fps_random_config,
             training=self.training,
         )
         # Independent FPS has no cross-frame patch correspondence; pool before time fusion.
@@ -91,10 +96,6 @@ class DQRISEPolicy(BasePolicy):
         self, spec: dict[str, str], feature_dims: dict[str, int]
     ) -> None:
         validate_dq_normalization(spec)
-        if spec.get("joint_state") != "limits":
-            raise ValueError(
-                "Sparse3D global observations require normalization.joint_state: limits"
-            )
         super().set_normalization_spec(spec, feature_dims)
 
     def __init__(

@@ -42,6 +42,7 @@ class PolicyInfo:
     action_mode: str
     control_dt_s: float | None
     pointcloud_config: dict | None
+    pointcloud_num_points: int | None
     hand_pointcloud_config: dict | None
     depth_config: dict | None
     fingertip_link_names: tuple[str, ...] | None
@@ -84,6 +85,12 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         raise ValueError("LAMP requires NFE=1 and matching dataset/policy history")
 
     runtime = cfg.get("real_runtime") or {}
+    pointcloud_config = runtime.get("pointcloud")
+    # Real warmup must keep the raw input size, before the encoder's FPS.
+    pointcloud_num_points = (
+        pointcloud_config["num_points"]
+        if pointcloud_config is not None else agent.get("num_points")
+    )
     if "depth" in observation_fields:
         validate_depth_recipe(runtime["depth"])
     if "hand_pointcloud" in observation_fields:
@@ -107,7 +114,8 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         control_action_dim=metadata["control_action_dim"],
         action_mode={"action": "joint", "action_ee": "eef"}[cfg["action_key"]],
         control_dt_s=runtime.get("dt"),
-        pointcloud_config=runtime.get("pointcloud"),
+        pointcloud_config=pointcloud_config,
+        pointcloud_num_points=pointcloud_num_points,
         hand_pointcloud_config=runtime.get("hand_pointcloud"),
         depth_config=runtime.get("depth"),
         fingertip_link_names=tuple(links) if links is not None else None,

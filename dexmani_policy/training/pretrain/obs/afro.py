@@ -6,9 +6,9 @@ Changes: native observation-only data/affine; explicit pre-optimizer teacher upd
 local PointNet and checkpoint resume. Active losses are unchanged.
 """
 
-import copy
 import signal
 
+import hydra
 import torch
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from torch import nn
@@ -17,13 +17,13 @@ from torch.nn import functional as F
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
-from dexmani_policy.training.common.data import close_data_loader
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader
 from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
-from dexmani_policy.training.pretrain.obs.runtime import evaluate, parse_run, prepare_data, save_run
+from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, save_run
 
 
 def vicreg_loss(prediction, target):
@@ -43,7 +43,7 @@ def vicreg_loss(prediction, target):
 
 
 class AFROPretrain(nn.Module):
-    def __init__(self, frame_stride=2):
+    def __init__(self, normalization, frame_stride=2):
         super().__init__()
         self.frame_stride = positive_int(frame_stride, "frame_stride")
         self.visual = PointNet(3, 64, pooling="max")
@@ -51,7 +51,9 @@ class AFROPretrain(nn.Module):
         self.teacher.requires_grad_(False)
         self.idm = nn.Sequential(nn.Linear(64, 256), nn.GELU(), nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 16))
         self.fdm = DiTFeaturePredictor(64)
-        self.normalizer = LinearNormalizer()
+        self.normalizer = LinearNormalizer(
+            {"point_cloud": (3,)} if normalization["point_cloud"] != "identity" else {}
+        )
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=100, beta_start=0.0001, beta_end=0.02,
             beta_schedule="squaredcos_cap_v2", prediction_type="sample",
@@ -99,10 +101,13 @@ def train(cfg, checkpoint=None, max_updates=None):
     if cfg.training.loop.gradient_accumulation_steps != 1:
         raise ValueError("AFRO VICReg requires accumulation=1; a smaller batch is an explicit recipe change")
     set_seed(cfg.training.seed)
-    dataset, normalizer, loader = prepare_data(cfg, checkpoint)
+    dataset = hydra.utils.instantiate(cfg.dataset)
+    cfg.dataset.split_manifest = dataset.split_manifest
+    loader = build_train_loader(cfg, dataset)
     cfg.training.loop.total_train_steps = cfg.training.num_epochs * len(loader)
-    model = AFROPretrain(**cfg.model)
-    model.normalizer = copy.deepcopy(normalizer)
+    model = AFROPretrain(cfg.normalization, **cfg.model)
+    if checkpoint is None:
+        model.normalizer.load_state_dict(dataset.get_normalizer(cfg.normalization).state_dict(), strict=True)
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
     scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
@@ -110,6 +115,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     epoch = step = 0
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model_state"], strict=True)
+        validate_normalizer_state(model.normalizer)
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         scheduler.load_state_dict(checkpoint["scheduler_state"])
         epoch, step = checkpoint["epoch"], checkpoint["global_step"]
@@ -172,7 +178,7 @@ def train(cfg, checkpoint=None, max_updates=None):
 
 
 def main():
-    train(*parse_run("afro"))
+    train(*load_run("afro"))
 
 
 if __name__ == "__main__":

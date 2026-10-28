@@ -53,7 +53,7 @@ def make_warmup_observation(info, *, rgb_hw=None):
         elif name == "hand_pointcloud":
             shape, dtype = (info.hand_pointcloud_config["num_points"], 6), np.float32
         elif name == "point_cloud":
-            shape, dtype = (info.pointcloud_config["num_points"], 6), np.float32
+            shape, dtype = (info.pointcloud_num_points, 6), np.float32
         else:
             shape, dtype = _OBSERVATION_SHAPES[name], np.float32
         shape = (info.n_obs_steps, *shape)

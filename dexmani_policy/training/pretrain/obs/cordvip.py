@@ -1,46 +1,47 @@
 """CordViP contact/coordination pretraining from xuanxuanzzzii/cordvip.
 
 Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
-Sources: train_policy/policy/CordViP/CordViP/CordViP/policy/CordViP_pretrain.py
-and model/vision/create_fc.py (attributed upstream to SridharPandian/Holo-Dex).
+Source: train_policy/policy/CordViP/CordViP/CordViP/policy/CordViP_pretrain.py
 Changes: native arm7+hand12, observation-only data, raw encoder export and resume.
 """
 
-import copy
 import signal
 
+import hydra
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.agents.obs_encoder.interaction.cordvip_encoder import CordViPEncoder
+from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordination_encoder import (
+    ContactCoordinationEncoder,
+)
+from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import build_mlp
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
-from dexmani_policy.training.common.data import close_data_loader
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import get_scheduler
-from dexmani_policy.training.pretrain.obs.runtime import evaluate, parse_run, prepare_data, save_run
-
-
-def create_fc(input_dim, output_dim, hidden_dims):
-    layers = [nn.Linear(input_dim, hidden_dims[0]), nn.ReLU()]
-    for index in range(len(hidden_dims) - 1):
-        layers.extend((nn.Linear(hidden_dims[index], hidden_dims[index + 1]), nn.ReLU()))
-    layers.append(nn.Linear(hidden_dims[-1], output_dim))
-    return nn.Sequential(*layers)
+from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, save_run
 
 
 class CordViPPretrain(nn.Module):
-    def __init__(self, n_obs_steps=4, contact_loss_weight=1.0, arm_loss_weight=1.0, hand_loss_weight=1.0):
+    def __init__(self, normalization, n_obs_steps=4, contact_loss_weight=1.0, arm_loss_weight=1.0, hand_loss_weight=1.0):
         super().__init__()
-        self.obs_encoder = CordViPEncoder()
+        self.obs_encoder = ContactCoordinationEncoder()
         self.n_obs_steps = n_obs_steps
-        self.normalizer = LinearNormalizer()
-        self.linear_layer_pred_arm = create_fc(n_obs_steps * 2112, 7, [512, 256, 64])
-        self.linear_layer_pred_hand = create_fc(n_obs_steps * 2112, 12, [512, 256, 64])
-        self.predict_contact_map = create_fc(2048, 1024, [2048, 1024, 1024])
+        shapes = {'hand_pointcloud': (3,), 'object_pointcloud': (3,), 'joint_state': (19,)}
+        self.normalizer = LinearNormalizer({key: shape for key, shape in shapes.items() if normalization[key] != 'identity'})
+        self.linear_layer_pred_arm = build_mlp(
+            [n_obs_steps * 2112, 512, 256, 64, 7], activation=nn.ReLU, normalize=False,
+        )
+        self.linear_layer_pred_hand = build_mlp(
+            [n_obs_steps * 2112, 512, 256, 64, 12], activation=nn.ReLU, normalize=False,
+        )
+        self.predict_contact_map = build_mlp(
+            [2048, 2048, 1024, 1024, 1024], activation=nn.ReLU, normalize=False,
+        )
         self.contact_loss_weight = contact_loss_weight
         self.arm_loss_weight = arm_loss_weight
         self.hand_loss_weight = hand_loss_weight
@@ -68,10 +69,13 @@ def train(cfg, checkpoint=None, max_updates=None):
         raise ValueError('CordViP dataset and model must use matching observation steps')
     save_every = positive_int(cfg.training.save_every_updates, 'training.save_every_updates')
     set_seed(cfg.training.seed)
-    dataset, normalizer, loader = prepare_data(cfg, checkpoint)
+    dataset = hydra.utils.instantiate(cfg.dataset)
+    cfg.dataset.split_manifest = dataset.split_manifest
+    loader = build_train_loader(cfg, dataset)
     accumulation = cfg.training.loop.gradient_accumulation_steps
-    model = CordViPPretrain(**cfg.model)
-    model.normalizer = copy.deepcopy(normalizer)
+    model = CordViPPretrain(cfg.normalization, **cfg.model)
+    if checkpoint is None:
+        model.normalizer.load_state_dict(dataset.get_normalizer(cfg.normalization).state_dict(), strict=True)
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW(model.parameters(), **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
@@ -79,6 +83,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     epoch = step = 0
     if checkpoint is not None:
         model.load_state_dict(checkpoint['model_state'], strict=True)
+        validate_normalizer_state(model.normalizer)
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         scheduler.load_state_dict(checkpoint['scheduler_state'])
         epoch, step = checkpoint['epoch'], checkpoint['global_step']
@@ -149,7 +154,7 @@ def train(cfg, checkpoint=None, max_updates=None):
 
 
 def main():
-    train(*parse_run('cordvip'))
+    train(*load_run('cordvip'))
 
 
 if __name__ == '__main__':

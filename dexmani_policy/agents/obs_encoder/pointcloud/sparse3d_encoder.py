@@ -161,7 +161,7 @@ class Sparse3DEncoder(nn.Module):
         load_pointcloud_ops()
         self.effective_config = {
             key: value for key, value in config.items()
-            if key not in {"self", "input_channels", "__class__"}
+            if key not in {"self", "input_channels", "fps_random_config", "__class__"}
         }
         if input_channels not in (3, 6):
             raise ValueError("input_channels must be 3 (XYZ) or 6 (XYZRGB)")

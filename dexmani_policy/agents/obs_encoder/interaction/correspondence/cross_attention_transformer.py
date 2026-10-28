@@ -1,11 +1,9 @@
-"""Active Transformer from xuanxuanzzzii/cordvip, with unused branches removed.
+"""Cross-attention Transformer for CordViP's feature correspondences.
 
 Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
 Source: train_policy/policy/CordViP/CordViP/CordViP/model/vision/transformer.py
 Upstream attribution: https://github.com/r-pad/taxpose and
 https://github.com/WangYueFt/dcp/blob/master/model.py.
-Changes: remove unused masks/dropout/bidirectional outputs and identity modules;
-retain active operations, initialization and parameter layout.
 """
 
 import copy
@@ -16,7 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
-class Transformer(nn.Module):
+class CrossAttentionTransformer(nn.Module):
     def __init__(self, emb_dim):
         super().__init__()
         attention = MultiHeadedAttention(4, emb_dim)
@@ -27,9 +25,8 @@ class Transformer(nn.Module):
                                  copy.deepcopy(feed_forward))),
         )
 
-    def forward(self, src, tgt):
-        # The published code encodes tgt and decodes src, preserving src's time axis.
-        return self.model(tgt, src)
+    def forward(self, query: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        return self.model(context, query)
 
 
 def clones(module, count):
@@ -56,8 +53,8 @@ class EncoderDecoder(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
 
-    def forward(self, src, tgt):
-        return self.decoder(tgt, self.encoder(src))
+    def forward(self, context, query):
+        return self.decoder(query, self.encoder(context))
 
 
 class Decoder(nn.Module):

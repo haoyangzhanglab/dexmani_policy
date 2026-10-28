@@ -14,7 +14,7 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow）的 patch FPS 和 R3D 需要与已装 Torch/CUDA 匹配的 PyTorch3D 原生扩展；通用依赖不自动安装它。构造这些点云模型前可用 `python -c 'import pytorch3d.ops'` 检查后端。纯配置检查及 VQ/LAMP 手部预训练数据准备不需要 PyTorch3D；DP3 输入点数无需下采样时也不需要。实际 FPS/kNN 使用点缺少后端会明确报错，不自动替换算法。
+Sparse3D（SAT、DQ-RISE、LAMP、LatentFlow、AdapTac）的 patch FPS 和 R3D 需要与已装 Torch/CUDA 匹配的 PyTorch3D 原生扩展；通用依赖不自动安装它。构造这些点云模型前可用 `python -c 'import pytorch3d.ops'` 检查后端。纯配置检查及 VQ/LAMP 手部预训练数据准备不需要 PyTorch3D；DP3 输入点数无需下采样时也不需要。实际 FPS/kNN 使用点缺少后端会明确报错，不自动替换算法。
 
 ## 快速开始
 
@@ -136,6 +136,7 @@ experiments/<policy_name>/<task_name>/<run>/
 
 ## 技术文档
 
+- [AdapTac-Dex](docs/adaptac.md)：完整视觉触觉方法、未来力监督、验收及训练恢复命令
 - [项目架构](docs/项目架构.md)：整体设计、数据接口、训练恢复与部署
 - [手部动作表示](docs/手部动作表示.md)：手部动作建模及预训练
 - [观测预训练](docs/观测预训练.md)：AFRO/CordViP 配方、训练恢复与实测结果

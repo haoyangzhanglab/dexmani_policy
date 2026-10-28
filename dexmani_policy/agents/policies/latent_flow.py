@@ -35,24 +35,26 @@ class LatentFlowObservationEncoder(nn.Module):
         fps_random_config: dict | None = None,
     ) -> None:
         super().__init__()
-        config = dict(pc_encoder_config or {})
-        config.setdefault("fps_random_config", fps_random_config)
         self.num_points = positive_int(num_points, "num_points")
         self.n_obs_steps = positive_int(n_obs_steps, "n_obs_steps")
-        self.pc_encoder = Sparse3DEncoder(input_channels=pc_dim, **config)
+        self.pc_encoder = Sparse3DEncoder(
+            input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
+        )
         self.state_mlp = StateEncoder(state_dim, state_out_dim)
         self.use_coord_only = pc_dim == 3
-        self.fps_random_config = fps_random_config or {}
         self.out_dim = self.pc_encoder.out_dim + self.state_mlp.out_dim
 
     @property
     def effective_config(self):
-        return {"pc_encoder_config": self.pc_encoder.effective_config}
+        return {
+            "pc_encoder_config": self.pc_encoder.effective_config,
+            "fps_random_config": self.pc_encoder.fps_random_config,
+        }
 
     def forward(self, obs: dict) -> torch.Tensor:
         pc = preprocess_point_cloud(
             obs["point_cloud"], self.num_points, self.use_coord_only,
-            self.fps_random_config, training=self.training,
+            self.pc_encoder.fps_random_config, training=self.training,
         )
         patches = self.pc_encoder(pc)["tokens"]
         state = self.state_mlp(obs["joint_state"])
