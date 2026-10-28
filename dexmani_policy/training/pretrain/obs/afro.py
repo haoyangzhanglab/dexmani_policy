@@ -16,13 +16,13 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
 from dexmani_policy.training.common.data import close_data_loader
 from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
 from dexmani_policy.training.common.optimization import get_scheduler
-from dexmani_policy.training.common.resume import validate_source_recipe
 from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
 from dexmani_policy.training.pretrain.obs.runtime import evaluate, parse_run, prepare_data, save_run
 
@@ -46,9 +46,7 @@ def vicreg_loss(prediction, target):
 class AFROPretrain(nn.Module):
     def __init__(self, frame_stride=2):
         super().__init__()
-        if frame_stride not in (2, 4):
-            raise ValueError("AFRO frame_stride must be 2 (official code) or 4 (paper ablation)")
-        self.frame_stride = frame_stride
+        self.frame_stride = positive_int(frame_stride, "frame_stride")
         self.visual = PointNet(3, 64, pooling="max")
         self.teacher = PointNet(3, 64, pooling="max")
         self.teacher.requires_grad_(False)
@@ -67,6 +65,8 @@ class AFROPretrain(nn.Module):
             points = self.normalizer["point_cloud"].normalize(points)
         points = points[:, ::self.frame_stride]
         batch_size, frames = points.shape[:2]
+        if frames < 2:
+            raise ValueError("AFRO frame_stride must leave at least two sampled frames")
         points = points.flatten(0, 1)
         online = self.visual(points)["global_token"].reshape(batch_size, frames, 64)
         with torch.no_grad():
@@ -112,7 +112,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                               cfg.training.loop.total_train_steps)
     epoch = step = 0
     if checkpoint is not None:
-        validate_source_recipe(checkpoint["effective_config"], cfg)
         model.load_state_dict(checkpoint["model_state"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         scheduler.load_state_dict(checkpoint["scheduler_state"])

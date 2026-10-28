@@ -1,3 +1,19 @@
+dataset:
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: 100
+  split_manifest: null
+
+eval:
+  seed: 1024
+  selection_episodes: 25
+  episodes: 100
+
+env_runner:
+  env_kwargs:
+    randomize_model_id: true
+    randomize_table_height: true
+
 workspace:
   output_dir: ${hydra:runtime.output_dir}
 

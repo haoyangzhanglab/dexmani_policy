@@ -4,7 +4,7 @@ defaults:
 
 policy_name: cordvip
 task_name: pick_apple_messy
-zarr_path: robot_data/${task_name}.zarr
+zarr_path: robot_data/${task_name}.cordvip.zarr
 seed: 42
 horizon: 12
 n_obs_steps: 4
@@ -33,10 +33,6 @@ dataset:
   obs_horizon: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
-  seed: 42
-  val_ratio: 0.1
-  max_train_episodes: null
-  split_manifest: null
   sensor_modalities: [hand_pointcloud, object_pointcloud, joint_state]
   augmentation_cfg: null
 agent:
@@ -88,15 +84,10 @@ env_runner:
   task_name: ${task_name}
   env_kwargs:
     control_mode: joint
-    randomize_model_id: false
-    randomize_table_height: false
 eval:
-  seed: 1024
   inference_steps: 10
   use_ema: true
   action_steps: null
-  episodes: 70
-  selection_episodes: 25
   seeds: null
   video:
     enabled: false

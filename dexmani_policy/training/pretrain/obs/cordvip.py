@@ -16,13 +16,13 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.obs_encoder.interaction.cordvip_encoder import CordViPEncoder
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
 from dexmani_policy.training.common.data import close_data_loader
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import get_scheduler
-from dexmani_policy.training.common.resume import validate_source_recipe
 from dexmani_policy.training.pretrain.obs.runtime import evaluate, parse_run, prepare_data, save_run
 
 
@@ -68,6 +68,7 @@ class CordViPPretrain(nn.Module):
 def train(cfg, checkpoint=None, max_updates=None):
     if cfg.dataset.obs_horizon != cfg.model.n_obs_steps:
         raise ValueError('CordViP dataset and model must use matching observation steps')
+    save_every = positive_int(cfg.training.save_every_updates, 'training.save_every_updates')
     set_seed(cfg.training.seed)
     dataset, normalizer, loader = prepare_data(cfg, checkpoint)
     accumulation = cfg.training.loop.gradient_accumulation_steps
@@ -82,7 +83,6 @@ def train(cfg, checkpoint=None, max_updates=None):
     scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     epoch = step = 0
     if checkpoint is not None:
-        validate_source_recipe(checkpoint['effective_config'], cfg)
         model.load_state_dict(checkpoint['model_state'], strict=True)
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         scheduler.load_state_dict(checkpoint['scheduler_state'])
@@ -133,6 +133,8 @@ def train(cfg, checkpoint=None, max_updates=None):
                     logger.log(to_log_scalars({'train/' + key: value / group_size for key, value in totals.items()}
                                              | {'train/lr': scheduler.get_last_lr()[0], 'train/epoch': current_epoch}), step)
                 totals = {}
+                if step % save_every == 0:
+                    save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
                 if step >= stop_step or stop_requested:
                     break
             if epoch > current_epoch:
@@ -140,8 +142,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                     validation = dataset.get_validation_dataset()
                     if validation is not None:
                         logger.log(to_log_scalars(evaluate(model, validation, cfg.dataloader.batch_size, cfg.training.device)), step)
-                if epoch % cfg.training.save_every_epochs == 0:
-                    save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
         save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
         print(f'[CordViP] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}')
     finally:

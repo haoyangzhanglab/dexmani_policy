@@ -42,10 +42,6 @@ dataset:
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}  # 在 episode 末尾重复动作。
-  seed: 42
-  val_ratio: 0.1
-  max_train_episodes: null
-  split_manifest: null  # 可选；显式输入优先于上述 split 参数。
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
@@ -129,17 +125,12 @@ env_runner:
   task_name: ${task_name}
   env_kwargs:
     control_mode: joint
-    randomize_model_id: true
-    randomize_table_height: true
 
 eval:
-  seed: 1024
   inference_steps: ${agent.num_inference_steps}
   use_ema: false
 
   action_steps: null
-  episodes: 70
-  selection_episodes: 25
   seeds: null
 
   video:

@@ -14,8 +14,6 @@ class AFRODataset(torch.utils.data.Dataset):
 
     def __init__(self, zarr_path, *, seed=42, val_ratio=0.1, max_train_episodes=None,
                  split_manifest=None, horizon=33, pad_before=0, pad_after=7):
-        if (horizon, pad_before, pad_after) != (33, 0, 7):
-            raise ValueError("AFRO pretraining requires horizon=33 and padding=0/7")
         self.replay_buffer = ReplayBuffer(zarr_path, keys=self.sensor_modalities)
         self.zarr_path = self.replay_buffer.path
         shape = self.replay_buffer["point_cloud"].shape

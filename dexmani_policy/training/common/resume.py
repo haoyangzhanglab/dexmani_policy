@@ -13,7 +13,6 @@ from dexmani_policy.common.io_util import atomic_path
 
 ARTIFACT_LOCATION_FIELDS = {
     "agent.pretrained_path",
-    "dataset.contact_map_path",
     "lamp.prior_path",
     "codec.path",
     "codebook_path",

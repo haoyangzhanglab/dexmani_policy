@@ -80,17 +80,23 @@ def get_val_mask(n_episodes, val_ratio, seed):
 
 
 def split_episodes(buffer, *, manifest=None, val_ratio=0.1, seed=42, max_train_episodes=None):
+    if max_train_episodes is not None:
+        positive_int(max_train_episodes, "max_train_episodes")
     if manifest is not None:
         if isinstance(manifest, (str, Path)):
             manifest = json.loads(Path(manifest).expanduser().read_text())
         elif OmegaConf.is_config(manifest):
             manifest = OmegaConf.to_container(manifest, resolve=True)
-        return validate_split_manifest(manifest, buffer)
+        train, val, manifest = validate_split_manifest(manifest, buffer)
+        if max_train_episodes is not None and train.sum() > max_train_episodes:
+            raise ValueError(
+                f"Split manifest has {int(train.sum())} training episodes, "
+                f"exceeding max_train_episodes={max_train_episodes}"
+            )
+        return train, val, manifest
 
     if not 0 <= val_ratio < 1:
         raise ValueError("val_ratio must satisfy 0 <= val_ratio < 1")
-    if max_train_episodes is not None:
-        positive_int(max_train_episodes, "max_train_episodes")
     ids, trials = validate_episode_metadata(buffer.attrs, buffer.n_episodes)
     if trials is not None:
         sizes = Counter(trials[i] for i in ids)

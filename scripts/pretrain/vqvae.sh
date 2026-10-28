@@ -1,7 +1,7 @@
 #!/bin/bash
 # DQ-RISE 码本预训练：vqvae.sh [task_name] [key=value ...]
 # 结束后自动保存所选 best 的 codebook.npz；独立 exporter 仅用于重导出。
-# 可选传入 dataset.split_manifest；两阶段默认使用相同的显式 split 参数。
+# 同源两阶段传入相同 dataset.split_manifest，主策略仍检查训练回合上限。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,6 +24,6 @@ fi
 # conda run 避免激活脚本受 nounset 影响，并实时输出日志。
 exec conda run --no-capture-output -n policy \
     python -u -m dexmani_policy.training.pretrain.hand_prior.vqvae \
-    --config dqrise \
+    --config pretrain/hand_prior/vqvae \
     "${VQ_OVERRIDES[@]}" \
     "$@"

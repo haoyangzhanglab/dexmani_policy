@@ -230,7 +230,7 @@ class DQRISEPolicy(BasePolicy):
                 "do not match. Training/inference would use incompatible hand "
                 "coordinates. Rebuild the codebook with "
                 "python -m dexmani_policy.training.pretrain.hand_prior.vqvae "
-                "--config dqrise using this policy's data recipe and normalization."
+                "--config pretrain/hand_prior/vqvae using this policy's split manifest and normalization."
             )
 
     def require_codebook(self) -> None:

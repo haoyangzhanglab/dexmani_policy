@@ -49,16 +49,12 @@ dataset:
   zarr_path: ${zarr_path}
   action_key: ${action_key}
   pc_dim: ${agent.pc_dim}
-  seed: 0  # 数据划分/子集 seed，独立于训练 seed。
   data_semantics: ${data_semantics}
   source_id: null
   horizon: ${horizon}
   obs_horizon: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 0  # 仅补齐观测历史，不对未来动作做 padding。
-  val_ratio: 0.1
-  max_train_episodes: 80
-  split_manifest: null
   sensor_modalities: [joint_state, point_cloud]
   augmentation_cfg:
     pc:
@@ -149,16 +145,11 @@ env_runner:
   env_rebuild_interval: 1  # 每个 episode 重建环境。
   env_kwargs:
     control_mode: joint
-    randomize_model_id: true
-    randomize_table_height: true
 
 eval:
-  seed: 1024
   inference_steps: 10
   use_ema: true
   action_steps: null
-  episodes: 70
-  selection_episodes: 25
   seeds: null
 
   video:

@@ -322,7 +322,7 @@ def train(cfg):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="dqrise", help="Hydra config name or YAML path")
+    parser.add_argument("--config", default="pretrain/hand_prior/vqvae", help="Hydra config name or YAML path")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. vq_vae.device=cpu")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")

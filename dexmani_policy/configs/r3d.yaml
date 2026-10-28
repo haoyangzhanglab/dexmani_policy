@@ -37,12 +37,9 @@ dataset:
   _target_: ${eval:'"dexmani_policy.datasets.aux.r3d_dataset.R3DAuxDataset" if ${use_aux_ee} else "dexmani_policy.datasets.common.robot_dataset.RobotDataset"'}
   action_key: ${action_key}
   zarr_path: ${zarr_path}
-  seed: 42  # 数据划分/子集 seed，独立于训练 seed。
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
-  val_ratio: 0.0
-  max_train_episodes: 80
   sensor_modalities: ["joint_state", "point_cloud"]
   obs_horizon: ${n_obs_steps}
 
@@ -133,17 +130,12 @@ env_runner:
   task_name: ${task_name}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
-    randomize_model_id: true
-    randomize_table_height: true
 
 eval:
-  seed: 1024
   inference_steps: 10
   use_ema: true
 
   action_steps: null
-  episodes: 70
-  selection_episodes: 25
   seeds: null
 
   video:
