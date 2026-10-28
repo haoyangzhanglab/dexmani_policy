@@ -136,7 +136,6 @@ experiments/<policy_name>/<task_name>/<run>/
 
 ## 技术文档
 
-- [AdapTac-Dex](docs/adaptac.md)：完整视觉触觉方法、未来力监督、验收及训练恢复命令
 - [项目架构](docs/项目架构.md)：整体设计、数据接口、训练恢复与部署
 - [手部动作表示](docs/手部动作表示.md)：手部动作建模及预训练
 - [观测预训练](docs/观测预训练.md)：AFRO/CordViP 配方、训练恢复与实测结果
