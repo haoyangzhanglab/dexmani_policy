@@ -8,7 +8,7 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.evaluation.config import (
     build_parser,
-    parse_evaluation_overrides,
+    parse_overrides,
 )
 from dexmani_policy.evaluation.selection import run_pipeline
 
@@ -22,7 +22,7 @@ def main(argv=None):
     run_pipeline(
         exp_dir,
         load_experiment_config(exp_dir),
-        overrides=parse_evaluation_overrides(args.overrides),
+        overrides=parse_overrides(args.overrides),
     )
 
 

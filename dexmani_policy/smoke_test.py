@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from dexmani_policy.common.checkpoint import (
     load_checkpoint,
     policy_state_dict,
+    restore_policy,
 )
 from dexmani_policy.common.config import (
     POINT_CLOUD_FIELDS,
@@ -25,7 +26,6 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
-from dexmani_policy.common.checkpoint import restore_policy_agent
 from dexmani_policy.training.common.config import validate_config
 from dexmani_policy.training.common.data import (
     build_dataset_and_normalizer,
@@ -249,7 +249,7 @@ def validate_policy_restoration(cfg, trainer, checkpoint_path, *, batch=None):
     trainer.optimizer.state.clear()
     saved = load_experiment_config(trainer.logger.output_dir)
     for use_ema, expected in predictions.items():
-        restored = restore_policy_agent(
+        restored = restore_policy(
             saved, checkpoint_path, use_ema=use_ema, device=trainer.device
         )
         set_seed(cfg.training.seed)

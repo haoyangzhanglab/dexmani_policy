@@ -11,16 +11,6 @@ from dexmani_policy.common.config import PROJECT_ROOT
 from dexmani_policy.common.experiments import discover_milestone_checkpoints, milestone_steps
 from dexmani_policy.common.io_util import atomic_path
 
-ARTIFACT_LOCATION_FIELDS = {
-    "agent.pretrained_path",
-    "lamp.prior_path",
-    "codec.path",
-    "codebook_path",
-    "agent.prior_path",
-    "agent.codec_path",
-    "agent.codebook_path",
-}
-
 RESUME_OPERATIONAL_FIELDS = {
     "resume_from",
     "max_updates",
@@ -57,14 +47,14 @@ def validate_source_recipe(saved, current):
         saved = OmegaConf.to_container(saved, resolve=True)
     if OmegaConf.is_config(current):
         current = OmegaConf.to_container(current, resolve=True)
-    ignored = RESUME_OPERATIONAL_FIELDS | ARTIFACT_LOCATION_FIELDS | {"hand_data.provenance.zarr_path"}
+    ignored = RESUME_OPERATIONAL_FIELDS | {"dataset.zarr_path", "hand_data.provenance.zarr_path"}
     differences = []
 
     def compare(left, right, path=""):
         if isinstance(left, dict) and isinstance(right, dict):
             for key in sorted(left.keys() | right.keys()):
                 child_path = f"{path}.{key}" if path else key
-                if child_path in ignored or child_path == "dataset.zarr_path":
+                if child_path in ignored:
                     continue
                 if key not in left or key not in right:
                     differences.append(f"config.{child_path}: missing field")
@@ -110,7 +100,6 @@ def resolve_input_recipe(cfg, *, overrides, saved_config=None):
                 continue
             if (
                 key not in RESUME_OPERATIONAL_FIELDS
-                and key not in ARTIFACT_LOCATION_FIELDS
                 and not key.startswith("workspace.wandb_cfg.")
                 and key != "dataset.zarr_path"
             ):

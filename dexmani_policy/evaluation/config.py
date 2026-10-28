@@ -1,5 +1,3 @@
-"""Resolve evaluation inputs once; execution receives one runner and its seeds."""
-
 import argparse
 import json
 from dataclasses import dataclass, replace
@@ -10,11 +8,11 @@ from omegaconf import OmegaConf
 from dexmani_policy.common.config import (
     load_experiment_config,
     positive_int,
-    validate_action_key_consistency,
+    validate_action_mode,
 )
 from dexmani_policy.common.experiments import (
-    resolve_policy_checkpoint,
     resolve_milestone_path,
+    resolve_policy_checkpoint,
 )
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
 from dexmani_policy.evaluation.seeds import (
@@ -36,7 +34,7 @@ def build_parser(description):
 
 
 @dataclass(frozen=True)
-class EvaluationRequest:
+class EvalConfig:
     config: dict
     checkpoint: str
     use_ema: bool
@@ -48,7 +46,7 @@ class EvaluationRequest:
     source: dict
 
 
-def parse_evaluation_overrides(overrides):
+def parse_overrides(overrides):
     allowed = {
         "eval.seed",
         "eval.episodes",
@@ -67,7 +65,7 @@ def parse_evaluation_overrides(overrides):
     return OmegaConf.from_dotlist(overrides)
 
 
-def evaluation_seed_pool(cfg):
+def load_seed_pool(cfg):
     task = cfg["env_runner"]
     name = task["task_name"]
     seeds = task.get("eval_seeds")
@@ -79,7 +77,7 @@ def evaluation_seed_pool(cfg):
     return seeds
 
 
-def prepare_evaluation_config(cfg, overrides=None):
+def merge_eval_config(cfg, overrides=None):
     overrides = overrides or {}
     if set(overrides.get("env_runner", {})) & {
         "n_obs_steps",
@@ -90,8 +88,8 @@ def prepare_evaluation_config(cfg, overrides=None):
     return OmegaConf.to_container(OmegaConf.merge(cfg, overrides), resolve=True)
 
 
-def make_request(cfg, checkpoint, seeds, *, source) -> EvaluationRequest:
-    validate_action_key_consistency(cfg)
+def build_eval_config(cfg, checkpoint, seeds, *, source) -> EvalConfig:
+    validate_action_mode(cfg)
     options = dict(cfg["env_runner"])
     options.pop("eval_seeds", None)
     options.update(
@@ -99,25 +97,26 @@ def make_request(cfg, checkpoint, seeds, *, source) -> EvaluationRequest:
         sensor_modalities=cfg["dataset"]["sensor_modalities"],
         rgb_preprocessing=rgb_preprocessing_kwargs(cfg["dataset"]),
     )
-    if type(cfg["eval"]["video"]["enabled"]) is not bool:
-        raise ValueError("eval.video.enabled must be boolean")
 
-    use_ema = cfg["eval"]["use_ema"]
-    if type(use_ema) is not bool:
-        raise ValueError("eval.use_ema must be boolean")
-    steps = positive_int(cfg["eval"]["inference_steps"], "eval.inference_steps")
-    action_steps = cfg["eval"].get("action_steps")
-    action_steps = positive_int(
-        cfg["agent"]["n_action_steps"] if action_steps is None else action_steps,
-        "eval.action_steps",
-    )
+    evaluation = cfg["eval"]
+    for name, value in (
+        ("use_ema", evaluation["use_ema"]),
+        ("video.enabled", evaluation["video"]["enabled"]),
+    ):
+        if type(value) is not bool:
+            raise ValueError(f"eval.{name} must be boolean")
+    steps = positive_int(evaluation["inference_steps"], "eval.inference_steps")
+    action_steps = evaluation.get("action_steps")
+    if action_steps is None:
+        action_steps = cfg["agent"]["n_action_steps"]
+    positive_int(action_steps, "eval.action_steps")
     future_steps = cfg["agent"]["horizon"] - cfg["policy_metadata"]["action_start_index"]
     if action_steps > future_steps:
         raise ValueError(f"eval.action_steps must be <= future_steps ({future_steps})")
-    return EvaluationRequest(
+    return EvalConfig(
         config=cfg,
         checkpoint=str(checkpoint),
-        use_ema=use_ema,
+        use_ema=evaluation["use_ema"],
         inference_steps=steps,
         action_steps=action_steps,
         device=cfg["training"]["device"],
@@ -127,8 +126,8 @@ def make_request(cfg, checkpoint, seeds, *, source) -> EvaluationRequest:
     )
 
 
-def frozen_test_request(record, checkpoint, *, device=None) -> EvaluationRequest:
-    request = EvaluationRequest(**record["test_request"])
+def frozen_test_config(record, checkpoint, *, device=None) -> EvalConfig:
+    request = EvalConfig(**record["test_request"])
     return replace(
         request,
         checkpoint=str(checkpoint),
@@ -142,25 +141,23 @@ def frozen_test_request(record, checkpoint, *, device=None) -> EvaluationRequest
     )
 
 
-def resolve_evaluation_request(
+def load_eval_config(
     exp_dir, checkpoint="best", overrides=None, *, selection_record=None
-) -> EvaluationRequest:
+) -> EvalConfig:
     root = Path(exp_dir).expanduser().resolve()
+    overrides = overrides or {}
     if selection_record is not None:
-        override = overrides or {}
-        if set(override) - {"training"} or set(override.get("training", {})) - {"device"}:
-            raise ValueError(
-                "Frozen test permits only device/output changes; use ordinary evaluation for research overrides"
-            )
+        if set(overrides) - {"training"} or set(overrides.get("training", {})) - {"device"}:
+            raise ValueError("Frozen test only accepts training.device overrides")
         path = Path(selection_record).expanduser().resolve()
         reference = str(path.relative_to(root))
         record = json.loads(path.read_text())
         if record["status"] != "completed":
             raise ValueError("Selection has not completed successfully")
         record["selection_result"] = reference
-        return frozen_test_request(
+        return frozen_test_config(
             record, resolve_milestone_path(root, record["ckpt_relpath"]),
-            device=override.get("training", {}).get("device"),
+            device=overrides.get("training", {}).get("device"),
         )
 
     cfg = load_experiment_config(root)
@@ -173,20 +170,21 @@ def resolve_evaluation_request(
         raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
     if checkpoint == "best":
         inference = {key: defaults[key] for key in ("use_ema", "inference_steps", "action_steps")}
-        overrides = OmegaConf.merge({"eval": inference}, overrides or {})
+        overrides = OmegaConf.merge({"eval": inference}, overrides)
         source.update(selection_source)
-    cfg = prepare_evaluation_config(cfg, overrides)
-    seeds = cfg["eval"].get("seeds")
+    cfg = merge_eval_config(cfg, overrides)
+    evaluation = cfg["eval"]
+    seeds = evaluation.get("seeds")
     if seeds is None:
         seeds, _ = split_evaluation_seeds(
-            evaluation_seed_pool(cfg), cfg["eval"]["seed"], cfg["eval"]["episodes"]
+            load_seed_pool(cfg), evaluation["seed"], evaluation["episodes"]
         )
     else:
         validate_seed_pool(seeds)
         if not seeds:
             raise ValueError("eval.seeds must be nonempty")
-        validate_evaluation_seed(cfg["eval"]["seed"])
+        validate_evaluation_seed(evaluation["seed"])
         pool = cfg["env_runner"].get("eval_seeds")
         if pool is not None and set(seeds) - set(validate_seed_pool(pool)):
             raise ValueError("Requested seed is outside the declared task pool")
-    return make_request(cfg, path, seeds, source=source)
+    return build_eval_config(cfg, path, seeds, source=source)

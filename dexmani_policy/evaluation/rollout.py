@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.common.checkpoint import restore_policy_agent
+from dexmani_policy.common.checkpoint import restore_policy
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.artifacts import (
     create_run_directory,
@@ -14,11 +14,11 @@ from dexmani_policy.evaluation.artifacts import (
     write_failure,
     write_json,
 )
-from dexmani_policy.evaluation.config import EvaluationRequest
+from dexmani_policy.evaluation.config import EvalConfig
 from dexmani_policy.evaluation.metrics import compute_evaluation_statistics, validate_episodes
 
 
-def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None) -> tuple[dict, Path]:
+def evaluate_policy(request: EvalConfig, *, output_root, output_dir=None) -> tuple[dict, Path]:
     directory = create_run_directory(output_root, output_dir)
     path = directory / "result_details.json"
     record: dict = {"request": vars(request).copy(), "status": "running", "episodes": [], "statistics": None}
@@ -31,7 +31,7 @@ def evaluate_policy(request: EvaluationRequest, *, output_root, output_dir=None)
 
         set_seed(request.config["eval"]["seed"])
         record["runtime"] = runtime_provenance()
-        agent = restore_policy_agent(
+        agent = restore_policy(
             request.config, request.checkpoint, use_ema=request.use_ema, device=request.device
         )
         if "global_step" in request.source and request.source["global_step"] != agent.checkpoint_step:

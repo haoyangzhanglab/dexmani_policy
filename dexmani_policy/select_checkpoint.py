@@ -6,7 +6,7 @@ from dexmani_policy.common.config import (
     register_resolvers,
     set_project_root,
 )
-from dexmani_policy.evaluation.config import build_parser, parse_evaluation_overrides
+from dexmani_policy.evaluation.config import build_parser, parse_overrides
 from dexmani_policy.evaluation.selection import select_best_checkpoint
 
 
@@ -20,7 +20,7 @@ def main(argv=None):
     select_best_checkpoint(
         exp_dir,
         load_experiment_config(exp_dir),
-        overrides=parse_evaluation_overrides(args.overrides),
+        overrides=parse_overrides(args.overrides),
         output_dir=args.output_dir,
     )
 

@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.losses import diagonal_gaussian_kl
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
-from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.common.config import load_policy_config, positive_int, validate_normalization_config
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.hand_prior.lamp_dataset import (
@@ -28,7 +28,8 @@ def prepare_prior_data(cfg):
         raise ValueError("LAMP requires H=To=Ta=1")
     if cfg.dataset.history_steps != cfg.agent.history_steps or cfg.dataset.history_steps < 1:
         raise ValueError("LAMP history_steps must match and be positive")
-    spec = resolve_normalization_spec(cfg)
+    validate_normalization_config(cfg)
+    spec = cfg.normalization
     if spec["action"] != "identity" or spec["joint_state"] != "gaussian":
         raise ValueError("LAMP requires identity action and gaussian joint_state")
     buffer, train, val, split = prepare_hand_source(cfg, ["action", "joint_state"])

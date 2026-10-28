@@ -15,7 +15,7 @@ from dexmani_policy.common.checkpoint import (
     prepare_restore_config, save_checkpoint,
 )
 from dexmani_policy.common.config import (
-    positive_int, resolve_normalization_spec, validate_observation_fields,
+    positive_int, validate_observation_fields,
 )
 from dexmani_policy.common.experiments import milestone_steps
 from dexmani_policy.common.io_util import atomic_path, close_resources
@@ -40,7 +40,7 @@ class PolicyTrainer:
         if data_description["control_action_dim"] != model.control_action_dim:
             raise ValueError("Dataset primary action width must match policy control output")
         model.set_normalization_spec(
-            resolve_normalization_spec(cfg), data_description["normalization_dims"]
+            cfg.normalization, data_description["normalization_dims"]
         )
         if checkpoint is None:
             model.initialize_training(data_description)

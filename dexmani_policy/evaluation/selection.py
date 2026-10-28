@@ -15,10 +15,10 @@ from dexmani_policy.evaluation.artifacts import (
     write_json,
 )
 from dexmani_policy.evaluation.config import (
-    evaluation_seed_pool,
-    frozen_test_request,
-    make_request,
-    prepare_evaluation_config,
+    build_eval_config,
+    frozen_test_config,
+    load_seed_pool,
+    merge_eval_config,
 )
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
@@ -39,13 +39,13 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
     from dexmani_policy.evaluation.rollout import evaluate_policy
 
     root = Path(exp_dir).expanduser().resolve()
-    cfg = prepare_evaluation_config(
+    cfg = merge_eval_config(
         cfg, OmegaConf.merge({"eval": {"video": {"enabled": False}}}, overrides or {})
     )
     if cfg["eval"].get("seeds") is not None:
         raise ValueError("Selection uses its predeclared test/selection split, not eval.seeds")
     test, selection = split_evaluation_seeds(
-        evaluation_seed_pool(cfg),
+        load_seed_pool(cfg),
         cfg["eval"]["seed"],
         cfg["eval"]["episodes"],
         positive_int(cfg["eval"]["selection_episodes"], "eval.selection_episodes"),
@@ -59,7 +59,7 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
             f"Selection requires milestones {expected}; found {actual}; "
             f"missing steps: {sorted(expected.keys() - actual.keys())}"
         )
-    request = make_request(
+    request = build_eval_config(
         cfg,
         milestones[0].path,
         selection,
@@ -144,6 +144,6 @@ def run_pipeline(exp_dir, cfg, *, overrides=None) -> Path:
         except BlockingIOError as error:
             raise RuntimeError(f"Another eval pipeline is running for {root}") from error
         record, checkpoint = select_best_checkpoint(root, cfg, overrides=overrides)
-        request = frozen_test_request(record, checkpoint)
+        request = frozen_test_config(record, checkpoint)
         _, result_path = evaluate_policy(request, output_root=root / "eval_dexsim")
         return result_path

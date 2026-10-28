@@ -4,7 +4,7 @@ import hydra
 import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
-from dexmani_policy.common.config import resolve_normalization_spec, FINGER_VECTOR_FIELDS, POINT_CLOUD_FIELDS, normalization_feature_shapes
+from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, POINT_CLOUD_FIELDS, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.deployment.metadata import describe_real_runtime
 
@@ -13,7 +13,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     """Construct one admitted train/val source; resume only restores saved affine."""
     if cfg.get("resume_from") is not None and resume_checkpoint is None:
         raise ValueError("Resume requires the checkpoint loaded by the training entry point")
-    spec = resolve_normalization_spec(cfg)
+    spec = cfg.normalization
     dataset = hydra.utils.instantiate(cfg.dataset)
     buffer = dataset.replay_buffer
     dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}

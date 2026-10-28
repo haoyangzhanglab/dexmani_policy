@@ -12,10 +12,9 @@ from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
     load_policy_config,
-    normalization_dims_from_config,
     positive_int,
-    resolve_normalization_spec,
-    validate_action_key_consistency,
+    validate_action_mode,
+    validate_normalization_config,
 )
 from dexmani_policy.training.common.resume import resolve_input_recipe, resolve_resume_source
 
@@ -57,7 +56,7 @@ def validate_config(cfg):
             raise ValueError(f"dataset.{field} must explicitly reference {name}")
         if dataset[field] != cfg[name]:
             raise ValueError(f"dataset.{field} must match {name}")
-    resolve_normalization_spec(cfg, observation_fields=dataset.sensor_modalities)
+    validate_normalization_config(cfg)
 
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")
@@ -69,7 +68,7 @@ def validate_config(cfg):
     if cfg.optimizer.get("obs_lr") is not None and cfg.optimizer.obs_lr < 0:
         raise ValueError("optimizer.obs_lr must be non-negative (0 freezes obs_encoder parameters)")
 
-    validate_action_key_consistency(cfg)
+    validate_action_mode(cfg)
 
     print("Config validation passed")
 
@@ -88,7 +87,6 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
             effective.agent.update(model.effective_config)
         if effective.training.lr_scheduler == "cosine_min_lr":
             effective.training.lr_min_ratio = effective.training.get("lr_min_ratio", 0.1)
-    normalization_dims_from_config(effective)
     OmegaConf.resolve(effective)
     OmegaConf.set_readonly(effective, True)
     return effective

@@ -7,8 +7,8 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.evaluation.config import (
     build_parser,
-    parse_evaluation_overrides,
-    resolve_evaluation_request,
+    load_eval_config,
+    parse_overrides,
 )
 from dexmani_policy.evaluation.rollout import evaluate_policy
 
@@ -29,10 +29,10 @@ def main(argv=None):
     set_project_root()
     register_resolvers()
     exp_dir = PROJECT_ROOT / "experiments" / args.policy_name / args.task_name / args.exp_name
-    request = resolve_evaluation_request(
+    request = load_eval_config(
         exp_dir,
         args.checkpoint,
-        parse_evaluation_overrides(args.overrides),
+        parse_overrides(args.overrides),
         selection_record=args.selection_record,
     )
     evaluate_policy(request, output_root=exp_dir / "eval_dexsim", output_dir=args.output_dir)

@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import load_policy_config, positive_int, resolve_normalization_spec
+from dexmani_policy.common.config import load_policy_config, positive_int, validate_normalization_config
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 
 def prepare_policy_data(cfg):
-    spec = resolve_normalization_spec(cfg)
+    validate_normalization_config(cfg)
+    spec = cfg.normalization
     if spec["action"] not in {"auto", "limits"}:
         raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
     if cfg.agent.tcp_dim != 7:
