@@ -3,6 +3,7 @@
 本文是待执行的代码实施任务书，不代表 AdapTac 已实现或已通过训练、闭环评测。执行者应直接完成代码、配置、必要文档和针对性验证，不停留在再次讨论方案。
 
 - 核对日期：2026-10-28。
+- 范围更新：仅实现官方最终完整方法，不做对比或消融实验；保留已确认的现有编码器及项目数据/平台适配。
 - 目标仓库：haoyangzhanglab/dexmani_policy。
 - 当前代码基线：[1e1a5702a8e5b5b07e39a8b71d59a4bb27d0ca80](https://github.com/haoyangzhanglab/dexmani_policy/tree/1e1a5702a8e5b5b07e39a8b71d59a4bb27d0ca80)。
 - 官方实现基线：[kingchou007/adaptac-dex@60e2ef1b7b0a29f5d29f5d755e8fe6d048f69fa5](https://github.com/kingchou007/adaptac-dex/tree/60e2ef1b7b0a29f5d29f5d755e8fe6d048f69fa5)。
@@ -17,7 +18,7 @@
 2. 触觉编码器随机初始化，与主策略端到端联合训练。点云编码器也不新增外部预训练权重依赖。
 3. 移植官方未来力 Transformer 和 ForceGuidedCrossAttention，保留核心计算。
 4. 复用项目动作 U-Net、Diffusion、数据读取、归一化、训练、EMA、checkpoint、评测与推理接口。
-5. 提供完整方法及三组必要消融，能够通过统一入口训练、恢复和评测。
+5. 只提供官方最终完整方法这一条训练与推理路径，能够通过统一入口训练、恢复和评测；不实现对比基线或消融变体。
 6. 交付可运行配置、简洁说明与实际验证结果；缺少数据、GPU、原生扩展或仿真环境的项目如实标为未验证。
 
 本任务不包含独立触觉预训练、MAEGAT 权重移植、3DTacDex 预训练任务、taxel 编码器、多帧观测扩展、额外融合方法、RTC 新功能或真机控制。不要为这些能力预留框架。
@@ -34,7 +35,7 @@
 | 训练数据 | dataset.seed=42，val_ratio=0.1，max_train_episodes=100 | 最多100个训练 episodes，不是总数据只允许100个 episodes |
 | 选点与测试 | eval.seed=1024，每候选25回合选点，100回合冻结测试 | 删除旧方案的70回合测试值 |
 | checkpoint | common/experiments.py 的 milestone_steps 给出20/40/60/80/100%五个节点 | 沿用主策略训练和选点流程，不新增保存调度 |
-| 环境随机化 | common.yaml 开启 randomize_model_id、randomize_table_height | 继承，并与对照保持一致 |
+| 环境随机化 | common.yaml 开启 randomize_model_id、randomize_table_height | 直接继承项目统一设置 |
 | sampler | 只做窗口、episode mask、边界复制和字段读取 | 不添加 filter_valid，不扩大公共动作窗口 |
 | 归一化 | 训练 episodes 全部真实帧，每帧一次 | 不按辅助标签筛选后的窗口重算统计 |
 | 预训练基础设施 | 冗余预训练加载层、几何校验和大型验证脚本已被清理 | 不重新引入类似结构，不借用 AFRO/CordViP 的预训练路径 |
@@ -42,7 +43,7 @@
 
 显式 split_manifest 仍由现有 split.py 处理；超过训练 episode 上限也由现有逻辑处理。不得要求数据额外提供 source_id/episode_ids/trial_ids，不重复检查这些元数据，不创建 AdapTac 专用划分协议。
 
-跨策略统一的是数据预算、候选节点、选点/测试预算、环境与成功标准，不是强行把所有策略的 H/N/C、NFE、EMA、执行模式改成相同数值。AdapTac 四组内部消融则必须固定这些条件。
+复用项目统一的数据预算、候选节点、选点/测试预算、环境与成功标准，保留AdapTac自己的H/N/C、两头NFE和EMA设置。本任务只训练和评测完整方法，不安排跨策略比较或消融实验；正常checkpoint选点仍沿用项目流程。
 
 ## 3. 编码与架构要求
 
@@ -51,7 +52,7 @@
 - 尽量复用当前项目和官方实现，不重写已有 sampler、normalizer、DDIM 循环、优化器、EMA、checkpoint、runner。
 - 方法专属行为放在 AdapTac Policy、Dataset 和对应模型文件。公共模块不得出现 policy_name == "adaptac" 分支或未来力专属字段处理。
 - 禁止防御性编程、过度校验和过度工程化：不重复检查明确的内部 shape/dtype/有限值契约，不层层包装异常，不静默回退、补零掩盖坏数据或自动替换算法。
-- 只在新功能边界保留直接防止实际错误的检查，例如单帧支持范围、已知 variant、有限正 force_scale，以及现有 U-Net 长度约束。复用现成检查，不创建额外校验层。
+- 只在新功能边界保留直接防止实际错误的检查，例如单帧支持范围、有限正 force_scale，以及现有 U-Net 长度约束。复用现成检查，不创建额外校验层。
 - 不新增注册表、工厂、通用预测器框架、配置镜像、运行时能力探测、内容哈希、数据指纹、完整性清单、兼容迁移或缓存生命周期。
 - 不为了单个方法改造公共 API，不复制一套训练/评测入口。必要的小接口适配应局部、显式。
 - 配置键、参数分组、文件命名、注释与邻近实现一致。只解释时间偏移、梯度连接等不明显原因，不堆叠 docstring 和装饰性注释。
@@ -161,8 +162,8 @@ Sparse3D 保持 channels=384、num_heads=8。该实现要求每个 head 的维�
 | 力扩散包装被传入num_obs/obs_dim，实际签名要求n_obs_steps/obs_feature_dim | 按实际签名构造，或直接用移植backbone和项目Diffusion薄封装 |
 | FGAF前向调用缺少num_obs | 显式传入，默认1 |
 | 开启触觉后动作条件按1024维构造，但FGAF输出512维 | 以实际融合512维加状态64维推导576维动作条件 |
-| FGAF创建与num_force_prediction>0耦合 | current变体独立构造FGAF，不要求存在力预测器 |
-| 默认YAML关闭触觉与未来力预测 | 新配置默认full，明确启用两种输入及完整连接 |
+| FGAF创建与num_force_prediction>0耦合 | 完整方法始终构造力预测器与FGAF，不移植开关分支 |
+| 默认YAML关闭触觉与未来力预测 | 按最终完整方法明确启用两种输入、未来力监督与预测力引导 |
 
 ## 6. 数据集：只扩展未来力标签
 
@@ -205,7 +206,7 @@ K由H和N派生，不新增独立force_horizon配置。不预生成派生Zarr、
 
 批量筛选可以只从sampler.indices计算query行，避免不必要的全库[窗口数,H]矩阵；结果须与sample_source_rows语义一致。不为此修改公共sampler或新增索引框架。
 
-默认pad_before=N-1=0，pad_after=C-1=7。保留官方末帧重复思路，补齐力标签正常计入loss；不新增padding损失mask。丢弃所有尾部窗口或屏蔽补齐loss均属于后续独立实验。
+默认pad_before=N-1=0，pad_after=C-1=7。保留官方末帧重复思路，补齐力标签正常计入loss；不新增padding损失mask。本任务不实现丢弃全部尾部窗口或屏蔽补齐loss的替代路径。
 
 future_force不是观测模态、不是action_context，也不拼进action。action_dim和control_action_dim继续为19。
 
@@ -252,7 +253,7 @@ future_force不是观测模态、不是action_context，也不拼进action。act
 
 默认force_scale=1.0作为明确、可运行的起跑值，单位N；这不是数据校准结论。有训练数据时，一次性查看训练合力的数量级/分位数，决定正式实验尺度并写入配置；没有数据时保留该值并说明未校准，不阻塞实现。不要新增auto-scale协议、独立normalizer、校准缓存或外部权重依赖。
 
-首版不启用触觉噪声和触觉模态dropout。点云坐标噪声、颜色增强和状态噪声可复用项目现有配置，四组一致。不引入未同步处理力/状态/动作坐标的几何旋转增强。
+首版不启用触觉噪声和触觉模态dropout。点云坐标噪声、颜色增强和状态噪声复用项目现有配置。不引入未同步处理力/状态/动作坐标的几何旋转增强。
 
 ## 8. 训练算法与梯度
 
@@ -262,7 +263,7 @@ future_force不是观测模态、不是action_context，也不拼进action。act
 2. 为F采样独立高斯噪声和随机扩散时间u，使用现有scheduler.add_noise。
 3. 力Transformer单次前向预测干净力F_hat，prediction_type固定为sample。
 4. L_force = mean((F_hat-F)^2)，覆盖B、K、3；FP32归约。
-5. full变体将当前合力和F_hat拼接展平，送入FGAF。
+5. 将当前合力和F_hat拼接展平，送入FGAF。
 6. 融合特征与状态形成动作条件。
 7. 现有action normalizer处理action；动作Diffusion使用epsilon目标计算L_action。
 8. L_total = L_action + force_loss_weight * L_force。
@@ -273,7 +274,7 @@ F_hat进入FGAF前不得detach。动作loss必须能经FGAF回传到力预测器
 
 沿用动作头当前loss归约，不自行新增手臂/手部分组权重。日志保留loss、loss_action、loss_force及加权力loss，遵守log_metrics开关；日志tensor可以detach，参与融合的F_hat不能detach。
 
-不通过“将force_loss_weight设零但继续搭建全部分支”表达消融。分支是否构造和是否调用由variant清楚决定。
+力预测器、未来力辅助监督和当前/预测力共同引导始终存在。force_loss_weight仅是损失系数，不兼作分支开关；不新增关闭辅助监督、跳过预测力引导或替换融合方式的控制逻辑。
 
 ## 9. 力扩散封装与推理
 
@@ -309,24 +310,24 @@ Runtime传入的同一个generator依次传给力和动作采样；不在分支�
 
 首版按同步仿真路径验收，保持现有参数签名和执行模式语义，不顺便宣称或新增RTC支持。
 
-eval.inference_steps继续只控制动作头；force_num_inference_steps保存在agent配置中，首版固定20。不要修改公共评测覆盖白名单或增加force_steps专属分支。后续若研究同一权重的力NFE扫描，应另行设计显式研究入口，不篡改保存配置或checkpoint。
+eval.inference_steps继续只控制动作头；force_num_inference_steps保存在agent配置中，首版固定20。不要修改公共评测覆盖白名单或增加force_steps专属分支。本任务不新增力NFE扫描入口，不篡改保存配置或checkpoint。
 
 ## 10. 参数管理、编译与恢复
 
 AdapTacPolicy主要覆盖compute_loss、predict_action、optimizer_groups，以及需要时的compile_backbone。
 
 - obs_encoder包含全部编码器与视觉/触觉投影，使用obs_lr。
-- force_predictor、force_fusion、action_decoder及concat变体独立投影使用主lr。
+- force_predictor、force_fusion和action_decoder使用主lr。
 - 使用现有parameter_groups和build_optimizer的“每个可训练参数恰好一次”检查；不复制官方优化器或添加第二套检查。
 - 默认obs_lr=lr>0，不冻结触觉，不使用预训练触觉的小学习率配方。
 - 复用当前EMA、state_dict和checkpoint流程，新增模块作为Policy子模块自然保存；不单独导出力头权重。
-- force_scale、variant、力NFE、网络结构由保存配置恢复；不增加额外metadata文件。
+- force_scale、力NFE、网络结构由保存配置恢复；不增加额外metadata文件。
 - 若开启compile，新Policy同时覆盖动作和力backbone；不编译整个采样循环，不增加缓存/探测/回退机制。
 - 默认配置先关闭compile，以便使用现有smoke做eager训练与恢复验收；通过后允许用户开启已有training.use_compile。
 - 当前smoke恢复比较只显式解包action_decoder.model。不要为了AdapTac重构公共smoke；编译后的双头保存/恢复可在局部验证中将两个backbone恢复到eager后比较。
 - epoch级恢复不要求新增batch游标、worker状态快照或逐位重放保证。
 
-## 11. 配置与四组实验
+## 11. 官方完整方法的单份配置
 
 ### 11.1 单份主配置
 
@@ -353,7 +354,6 @@ AdapTacPolicy主要覆盖compute_loss、predict_action、optimizer_groups，以�
 | 力条件与mask | causal_attn=true、time_as_cond=true、n_cond_layers=0，条件宽度由特征推导 |
 | 力Diffusion | 100训练步、sample目标、20步DDIM、force_clip_sample=false |
 | FGAF | hidden512、heads8、FFN512、dropout0.1 |
-| variant | full |
 | force_scale | 1.0，起跑值；正式实验按训练数据确定后固定 |
 | force_loss_weight | 10.0，官方配置起点 |
 | force_num_inference_steps | 20，独立于动作推理步数 |
@@ -374,28 +374,24 @@ K、query宽度、condition宽度从已有维度推导，不要求用户重复�
 | lr_scheduler / warmup | cosine / 500 |
 | max_grad_norm | 1.0，复用现有裁剪 |
 | EMA | 启用，采用DP3的EMA配置，eval.use_ema一致 |
-| use_bfloat16 | true；FP32对照时显式关闭 |
+| use_bfloat16 | true；FP32数值一致性检查时显式关闭 |
 | use_compile | false起步；独立验证后可开启 |
 | loader | 沿用项目配置；小数据冒烟按实际batch与worker条件设置 |
 
-force_scale与force_loss_weight共同决定辅助项量级。先检查有限loss、有效梯度和短训练趋势，再考虑在开发条件下调整，不能在正式test上选择它们。默认值是可执行工程起点，不是经过验证的最优超参数。
+force_scale与force_loss_weight共同决定辅助项量级。沿用任务书给定的完整方法配方，只进行必要的训练数据尺度校准与有限loss/有效梯度检查，不安排损失权重搜索或参数对比，不能在正式test上选择它们。默认值是可执行工程起点，不是经过验证的最优超参数。
 
-### 11.2 一个variant枚举，四条明确路径
+### 11.2 只实现官方最终完整路径
 
-| variant | 融合 | 训练力头 | 预测力引导 | 推理力采样 |
-| --- | --- | --- | --- | --- |
-| concat | 视觉/触觉拼接后Linear(1024,512) | 否 | 否 | 否 |
-| current | 当前合力FGAF，force_dim=3 | 否 | 否 | 否 |
-| current_aux | 当前合力FGAF，force_dim=3 | 是 | 否 | 否 |
-| full | 当前与预测力FGAF，force_dim=3*(N+K) | 是 | 是 | 是 |
+固定启用视觉与触觉编码、未来力辅助监督、当前与预测力共同引导的FGAF，以及动作扩散：
 
-variant用四个字符串取值的简单参数即可，不需要Python Enum类。保持简单局部分支，不实现任意组合框架，不复制四套完整YAML。完整方法默认full，其余用agent.variant覆盖即可。不构造用不到的力头或融合模块，不以虚拟输出占位。
+- 训练：一次观测编码 → 未来力单次去噪预测与辅助loss → 当前/预测力FGAF → 动作loss → 联合优化。
+- 推理：一次观测编码 → 未来力DDIM采样 → 当前/预测力FGAF → 动作DDIM采样。
+- FGAF的force_dim始终为3*(N+K)，默认63；融合输出512维，拼接状态后的动作条件576维。
+- 只维护一份adaptac.yaml和一套Policy/Dataset路径，不添加variant参数、算法分支开关或消融配置。
+- 不实现直接拼接基线、仅当前力引导或仅辅助监督的替代路径，不预留这些分支的类、投影层和命令。
+- 源码数值一致性、数据时序、梯度和保存恢复检查属于实现验收，不是性能对比实验，仍需按第13节完成。
 
-四组统一使用AdapTacDataset及相同query筛选；concat/current虽然不消费未来标签，仍使用相同样本集合。无需为了省下少量低维标签读取再增加Dataset开关。
-
-固定编码器、初始化规则、状态输入、512维融合输出、576维动作条件、动作头、数据划分、归一化、增强、窗口、训练预算和评测协议。不同结构不保证逐参数初始化完全相同；不要为此新建RNG框架。报告参数量，不声称完全等参数。
-
-对照含义：current vs concat检查当前力引导融合整体；current_aux vs current检查辅助监督；full vs current_aux检查未来力参与引导。保留后两组比较，不能只做“有/无辅助loss”。
+“按官方最终版本”指上述完整方法机制。继续保留既定的现有编码器、19维动作、项目数据时序和训练/评测基础设施适配；不照抄官方未启用完整方法的默认YAML，也不引入官方预训练编码器依赖。
 
 ## 12. 文件组织与共享代码边界
 
@@ -412,7 +408,7 @@ variant用四个字符串取值的简单参数即可，不需要Python Enum类�
 
 必要时添加最小__init__.py。文件数不是考核目标；可以按实际代码体量做更简单的局部组织，但不能将所有逻辑塞进共享BasePolicy或创建多层框架。
 
-实现后添加简洁的docs/adaptac.md，说明方法、平台适配、输入/输出、尺度、训练/评测/恢复和四组命令；同步README或项目架构中与新增策略直接相关的入口说明。当前任务书保留为实施依据，不把尚未通过的验收写成完成状态。
+实现后添加简洁的docs/adaptac.md，说明完整方法、平台适配、输入/输出、尺度及单一路径的训练/评测/恢复命令；同步README或项目架构中与新增策略直接相关的入口说明。当前任务书保留为实施依据，不把尚未通过的验收写成完成状态。
 
 首版预期无需修改公共sampler、RobotDataset、normalizer、Diffusion、Trainer、Runner、checkpoint或评测器。若实际接口确实阻塞，只允许最小、通用且有调用方证据的修复；在交付中解释原因，不能添加AdapTac专属公共分支。
 
@@ -440,16 +436,15 @@ variant用四个字符串取值的简单参数即可，不需要Python Enum类�
 - 标签从query后一帧开始，动作起点保持query。
 - 未来标签可越过当前sample的buffer_end继续读，但不越过真实episode边界。
 - 尾部重复末帧，无任何真实后继的query被排除。
-- train/val使用一致逻辑，四个variant样本集合一致。
+- train/val使用一致的query筛选、时间偏移和边界补齐逻辑。
 - 原始五指向量先求和、再缩放，未来标签只缩放一次。
 - 归一化仍统计训练episode的真实帧，额外标签读取不改变动作统计。
 - 普通batch仍为obs/action，辅助标签只在顶层future_force。
 
 ### 13.3 联合训练、推理与恢复
 
-- 四种variant能构造、计算loss和预测；只构造实际使用的模块。
-- full中单独对L_action反向传播，确认梯度能到达force_predictor；不能只凭L_force的梯度证明连接正确。
-- current_aux中力头有辅助监督，但预测力不进入动作条件，推理不运行力采样。
+- 完整方法能构造、计算联合loss和预测；力预测器与FGAF始终参与对应路径。
+- 在局部梯度检查中单独对L_action反向传播，确认梯度能到达force_predictor；这是计算图正确性检查，不改变训练配方或构造消融模型。
 - 使用现有优化器覆盖检查确认无漏参、无重复；短训练后相关模块实际更新。
 - 移除future_force也能调用predict_action；输出future_actions形状和物理动作契约正确。
 - 在相同设备/数值设置与generator状态下，检查重复采样及raw/EMA保存恢复一致。
@@ -458,39 +453,39 @@ variant用四个字符串取值的简单参数即可，不需要Python Enum类�
 
 ### 13.4 闭环与效率
 
-资源具备时运行短闭环检查；正式研究实验使用第14节完整协议。记录实际完成的训练/评测，不把配置检查、合成数据或单步去噪MSE写成闭环成功率。
+资源具备时运行完整方法的短闭环检查；正式训练和评测使用第14节统一协议。记录实际完成的训练/评测，不把配置检查、合成数据或单步去噪MSE写成闭环成功率。
 
 如果测未来力误差，使用部署同款纯噪声DDIM采样并还原N单位；训练时单次去噪MSE不能充当真实预测精度。
 
-## 14. 正式实验协议与时间预算
+## 14. 完整方法的正式评测与时间预算
 
 继承common.yaml：最多100个训练episodes，每候选25回合selection，100回合冻结test，20/40/60/80/100%五个milestone；默认seed池至少125个不同seed。模块预训练不在此任务范围。
 
-- 四组使用相同train/val划分和训练预算，建议至少3个训练seed。
+- 只运行完整方法，按保存的train/val划分和训练预算训练；本任务不组织多seed、超参数搜索或方法对比实验矩阵。
 - 固定成功定义、回合时限、环境随机化、selection/test seeds、执行长度、EMA和动作NFE。
 - 正式test冻结后不用于调checkpoint、force_scale、loss权重、C或NFE。
-- 报告成功数/总数、成功率、现有成功步数统计、跨训练seed波动和完整query延迟。
-- Wilson区间是episode成功率区间，不代替训练seed方差。
+- 报告完整方法的成功数/总数、成功率、现有成功步数统计和完整query延迟。
+- Wilson区间按现有episode成功率统计，不据此声称跨训练seed稳定性。
 - 若补充论文AEL，失败episode按最大长度计入，单独计算；不把avg_steps_all改名为AEL。
 
 完整方法每次query为20次力去噪加20次动作去噪，两者有先后依赖，不能并行，不是单头20NFE的相同计算预算。
 
 计时覆盖预处理与传输、一次编码、力采样、融合、动作采样、反归一化与结果回传。复用Runtime.warmup做基础检查，正式延迟用真实观测与足够重复次数测量；不只报告动作头时间。
 
-当前正式评测不启用autocast/compile。训练compile加速不能直接表述为部署加速。加速实验应注明实际精度、硬件及两头NFE，不静默改变参考配置。
+当前正式评测不启用autocast/compile。训练compile加速不能直接表述为部署加速。记录实际精度、硬件及两头NFE，不组织加速方案对比或静默改变参考配置。
 
 按当前数据dt约0.0625秒，K=20最远预测时刻为当前之后1.25秒，C=8执行时长约0.5秒；同步重规划还受query延迟影响。记录数据实际dt，不把16Hz控制频率写成16Hz策略查询频率，不为匹配论文5Hz直接改变控制系统。
 
-先消除重复编码和多余高维读取，再评估采样步数。不得通过单纯增大C掩盖推理成本而忽略触觉反馈更新频率。
+效率优化限于消除重复编码、多余高维读取并复用现有训练能力；固定参考采样步数，不增加NFE扫描或执行长度对比。不得通过单纯增大C掩盖推理成本而忽略触觉反馈更新频率。
 
 ## 15. 实施顺序与可用命令
 
 按依赖顺序完成：
 
 1. 阅读当前接口，落实Dataset与物理力契约，完成索引检查。
-2. 移植两个官方核心模块，完成局部数值对照。
+2. 移植两个官方核心模块，完成局部数值一致性检查。
 3. 接入完整Policy、参数分组和单份主配置，完成eager短训练与恢复。
-4. 接入四种variant，检查分支行为和共同数据/动作条件。
+4. 检查完整方法的未来力监督、预测力引导、动作梯度与两阶段采样连接，清除未使用的算法开关。
 5. 补充运行文档、必要验证结果和真实资源下的闭环/延迟结果，清理冗余代码。
 
 实现后沿用现有入口。下列命令中的task/run占位符须替换为实际值；实际环境使用项目policy环境。
@@ -501,7 +496,7 @@ variant用四个字符串取值的简单参数即可，不需要Python Enum类�
     python dexmani_policy/smoke_test.py --data-only adaptac
     python dexmani_policy/smoke_test.py --max-updates 4 adaptac
 
-smoke的config_names是配置名或显式测试YAML路径，不是任意Hydra overrides。需要自定义任务、batch或variant时，使用临时配置或已有load_policy_config/validate_training函数，不为此扩展smoke CLI。测试配置保持输出目录、BF16/compile、batch和drop_last与实际资源一致。
+smoke的config_names是配置名或显式测试YAML路径，不是任意Hydra overrides。需要自定义任务或batch时，使用临时配置或已有load_policy_config/validate_training函数，不为此扩展smoke CLI。测试配置保持输出目录、BF16/compile、batch和drop_last与实际资源一致。
 
 使用现有训练入口短跑：
 
@@ -509,12 +504,9 @@ smoke的config_names是配置名或显式测试YAML路径，不是任意Hydra ov
       '+max_updates=4' training.use_compile=false \
       workspace.wandb_cfg=null
 
-四组正式训练通过同一配置启动，分别设置：
+完整方法正式训练：
 
-    bash scripts/training/train.sh adaptac 'task_name=<task>' agent.variant=concat
-    bash scripts/training/train.sh adaptac 'task_name=<task>' agent.variant=current
-    bash scripts/training/train.sh adaptac 'task_name=<task>' agent.variant=current_aux
-    bash scripts/training/train.sh adaptac 'task_name=<task>' agent.variant=full
+    bash scripts/training/train.sh adaptac 'task_name=<task>'
 
 恢复继续使用保存配方：
 
@@ -525,7 +517,7 @@ smoke的config_names是配置名或显式测试YAML路径，不是任意Hydra ov
 
     bash scripts/eval/eval_pipeline.sh adaptac <task> <run>
 
-不要为AdapTac新建训练shell、评测shell或调度器。完整100k训练、多seed和正式评测属于实验阶段，不能因为当前缺少资源而省略代码实现或虚构结果。
+不要为AdapTac新建训练shell、评测shell或调度器。完整方法的100k训练和正式评测按资源条件执行，不能因为当前缺少资源而省略代码实现或虚构结果；不额外运行对比/消融实验。
 
 ## 16. 交付标准
 
@@ -534,7 +526,7 @@ smoke的config_names是配置名或显式测试YAML路径，不是任意Hydra ov
 1. 实际修改的文件、功能和必要适配。
 2. 官方模块保留了什么，哪些只是接口修复，哪些属于编码器/平台替换。
 3. 执行过的命令、验证结果与资源条件；明确未执行项目。
-4. 配置、四组训练、恢复和正式评测的准确入口。
+4. 完整方法的配置、训练、恢复和正式评测准确入口。
 5. force_scale是否经过训练数据校准，是否做过真实闭环和完整延迟测量。
 6. 如修改共享代码，给出真实阻塞点及最小修改理由。
 7. 完成前检查diff，移除冗余开关、重复校验、未使用分支和无关变化。
