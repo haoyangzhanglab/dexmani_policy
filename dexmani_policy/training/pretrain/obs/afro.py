@@ -16,6 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
+from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
@@ -96,6 +97,8 @@ class AFROPretrain(nn.Module):
 def train(cfg, checkpoint=None, max_updates=None):
     if cfg.training.loop.gradient_accumulation_steps != 1:
         raise ValueError("AFRO VICReg requires accumulation=1; a smaller batch is an explicit recipe change")
+    positive_int(cfg.training.save_every_epochs, "training.save_every_epochs")
+    positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset, frame_stride=cfg.model.frame_stride)
     cfg.dataset.split_manifest = dataset.split_manifest
@@ -139,10 +142,9 @@ def train(cfg, checkpoint=None, max_updates=None):
             loader.batch_sampler.set_epoch(epoch, start_batch)
             model.train()
             current_epoch = epoch
-            step_start = data_wait_start = time.perf_counter()
-            data_wait = 0.0
+            step_start = time.perf_counter()
             for index, batch in enumerate(loader, start=start_batch):
-                data_wait += time.perf_counter() - data_wait_start
+                data_wait = time.perf_counter() - step_start
                 batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
                 optimizer.zero_grad(set_to_none=True)
                 loss, metrics = model(batch)
@@ -165,8 +167,7 @@ def train(cfg, checkpoint=None, max_updates=None):
                                                 "train/step_time": elapsed, "train/data_wait_time": data_wait}), step)
                 if step >= stop_step or stop_requested:
                     break
-                step_start = data_wait_start = time.perf_counter()
-                data_wait = 0.0
+                step_start = time.perf_counter()
             if stop_requested:
                 break
             if epoch > current_epoch:

@@ -1,4 +1,5 @@
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -60,7 +61,7 @@ def save_run(model, encoder, optimizer, scheduler, cfg, epoch, step):
 
 
 @torch.no_grad()
-def evaluate(model, dataset, batch_size, device, *, stop_requested):
+def evaluate(model, dataset, batch_size, device, *, stop_requested: Callable[[], bool]):
     if stop_requested():
         return None
     rng_state, training = get_rng_state(device), model.training

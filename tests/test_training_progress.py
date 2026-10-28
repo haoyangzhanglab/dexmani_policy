@@ -168,7 +168,7 @@ def test_pretrain_loops_resume(tmp_path, monkeypatch, method, accumulation):
         checkpoint = torch.load(tmp_path / str(segment) / 'resume.pt', weights_only=False)
         assert checkpoint['global_step'] == (segment + 1) * 6
         assert checkpoint['epoch'] == epoch_position((segment + 1) * 6, 10, accumulation)[0]
-        # Saved legacy epoch is only diagnostic; global_step owns restoration.
+        # global_step owns restoration; epoch is diagnostic.
         checkpoint['epoch'] = 0
     if method == 'afro':
         assert teacher_epochs == [0] * 10 + [1] * 10 + [2] * 10
@@ -180,6 +180,9 @@ def test_pretrain_loops_resume(tmp_path, monkeypatch, method, accumulation):
     reference = torch.load(tmp_path / 'continuous/resume.pt', weights_only=False)
     torch.testing.assert_close(checkpoint['model_state'], reference['model_state'], rtol=0, atol=0)
     assert checkpoint['scheduler_state'] == reference['scheduler_state']
+    for line in (tmp_path / 'continuous/metrics.jsonl').read_text().splitlines():
+        metrics = json.loads(line)
+        assert 0 <= metrics['train/data_wait_time'] <= metrics['train/step_time']
 
 
 @pytest.mark.parametrize('method', ['afro', 'cordvip'])
@@ -282,3 +285,17 @@ def test_public_loop_accumulation_progress(accumulation):
     assert full[0] == segmented[0]
     torch.testing.assert_close(full[1], segmented[1], rtol=0, atol=0)
     assert full[2] == segmented[2]
+
+
+@pytest.mark.parametrize('method,field', [
+    ('afro', 'save_every_epochs'), ('afro', 'val_every_epochs'),
+    ('cordvip', 'save_every_updates'), ('cordvip', 'val_every_epochs'),
+])
+@pytest.mark.parametrize('value', [0, -1, 1.5, True])
+def test_pretrain_intervals_fail_before_data_loading(monkeypatch, method, field, value):
+    module = importlib.import_module(f'dexmani_policy.training.pretrain.obs.{method}')
+    cfg = load_policy_config(f'pretrain/obs/{method}')
+    cfg.training[field] = value
+    monkeypatch.setattr(module.hydra.utils, 'instantiate', lambda *a, **k: pytest.fail('dataset opened'))
+    with pytest.raises(ValueError, match=f'training.{field}'):
+        module.train(cfg, max_updates=1)

@@ -7,6 +7,7 @@ from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.aux.adaptac_dataset import AdapTacDataset
 from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 from dexmani_policy.datasets.obs.afro_dataset import AFRODataset
+from dexmani_policy.datasets.obs.cordvip_dataset import CordViPDataset
 from dexmani_policy.datasets.preprocess import contact_map
 
 
@@ -63,10 +64,10 @@ def test_normalizer_reference_and_strict_state(mode, feature_dims):
         std, mean = flattened.std(0).float(), flattened.mean(0).float()
         scale = std.masked_fill(std < 1e-4, 1).reciprocal()
         offset = -mean * scale
-    old_state = {'fields.x.scale': scale.reshape(shape), 'fields.x.offset': offset.reshape(shape)}
-    torch.testing.assert_close(normalizer.state_dict(), old_state)
+    expected_state = {'fields.x.scale': scale.reshape(shape), 'fields.x.offset': offset.reshape(shape)}
+    torch.testing.assert_close(normalizer.state_dict(), expected_state)
     restored = LinearNormalizer({'x': shape})
-    restored.load_state_dict(old_state, strict=True)
+    restored.load_state_dict(expected_state, strict=True)
     torch.testing.assert_close(normalizer['x'].normalize(values), restored['x'].normalize(values))
     torch.testing.assert_close(normalizer['x'].unnormalize(normalizer['x'].normalize(values)), values.float())
     assert not hasattr(normalizer['x'], 'input_stats')
@@ -111,6 +112,7 @@ def test_contact_formula(scale, chunk):
 def test_contact_shapes_fail_before_output(tmp_path, monkeypatch, key, shape):
     fields = {'object_pointcloud': np.zeros((2, 1024, 3)), 'hand_pointcloud': np.zeros((2, 5, 3)), 'joint_state': np.zeros((2, 19))}
     fields[key] = np.zeros(shape)
+    fields['contact_map'] = np.zeros((2, 1024))
     # Empty point dimensions need nonzero chunk dimensions.
     group = zarr.open_group(str(tmp_path / 'source'), mode='w')
     group.create_group('meta').create_dataset('episode_ends', data=np.array([2]))
@@ -122,3 +124,47 @@ def test_contact_shapes_fail_before_output(tmp_path, monkeypatch, key, shape):
     with pytest.raises(ValueError):
         contact_map.generate(tmp_path / 'source', output)
     assert not output.parent.exists()
+    with pytest.raises(ValueError):
+        CordViPDataset(tmp_path / 'source')
+
+
+@pytest.mark.parametrize('obs_horizon', [1, 4, 12])
+def test_cordvip_reads_observation_rows_and_xyz(tmp_path, monkeypatch, obs_horizon):
+    rng = np.random.default_rng(42)
+    fields = {
+        'hand_pointcloud': rng.normal(size=(32, 7, 6)).astype(np.float32),
+        'object_pointcloud': rng.normal(size=(32, 1024, 6)).astype(np.float32),
+        'joint_state': rng.normal(size=(32, 19)).astype(np.float32),
+        'contact_map': rng.random(size=(32, 1024)).astype(np.float32),
+    }
+    write_zarr(tmp_path / 'data', fields, [16, 32])
+    dataset = CordViPDataset(tmp_path / 'data', obs_horizon=obs_horizon)
+    read = dataset.replay_buffer.read
+    calls = []
+
+    def record_read(key, rows, *, columns=None):
+        calls.append((key, len(rows), columns))
+        return read(key, rows, columns=columns)
+
+    for view in (dataset, dataset.get_validation_dataset()):
+        expected = [view.sampler.sample_sequence(index) for index in range(len(view))]
+        with monkeypatch.context() as patch:
+            patch.setattr(view.replay_buffer, 'read', record_read)
+            for index, window in enumerate(expected):
+                calls.clear()
+                batch = view[index]
+                for key, value in batch['obs'].items():
+                    reference = window[key][:obs_horizon]
+                    if key != 'joint_state':
+                        reference = reference[..., :3]
+                    np.testing.assert_array_equal(value, reference)
+                np.testing.assert_array_equal(batch['contact_map'], window['contact_map'][:obs_horizon])
+                assert calls == [
+                    ('hand_pointcloud', obs_horizon, slice(0, 3)),
+                    ('object_pointcloud', obs_horizon, slice(0, 3)),
+                    ('joint_state', obs_horizon, None),
+                    ('contact_map', obs_horizon, None),
+                ]
+    for invalid in (0, 13):
+        with pytest.raises(ValueError, match='obs_horizon'):
+            CordViPDataset(tmp_path / 'data', obs_horizon=invalid)

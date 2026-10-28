@@ -15,13 +15,15 @@ class CordViPDataset(torch.utils.data.Dataset):
     def __init__(self, zarr_path, *, seed=42, val_ratio=0.1,
                  max_train_episodes=None, split_manifest=None, horizon=12,
                  obs_horizon=4, pad_before=3, pad_after=5):
+        if not 1 <= obs_horizon <= horizon:
+            raise ValueError("obs_horizon must satisfy 1 <= N <= horizon")
         self.replay_buffer = ReplayBuffer(zarr_path, keys=(*self.sensor_modalities, "contact_map"))
         self.horizon, self.obs_horizon = horizon, obs_horizon
         self.pad_before, self.pad_after = pad_before, pad_after
         for key in self.sensor_modalities[:2]:
             shape = self.replay_buffer[key].shape
-            if len(shape) != 3 or shape[2] < 3:
-                raise ValueError(f"CordViP requires {key}[T,N,C>=3]")
+            if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
+                raise ValueError(f"CordViP requires {key}[T,N>0,C>=3]")
         if self.replay_buffer["object_pointcloud"].shape[1] != 1024:
             raise ValueError("CordViP contact head predicts 1024 object point labels")
         if self.replay_buffer["joint_state"].shape[1:] != (19,):
@@ -42,21 +44,22 @@ class CordViPDataset(torch.utils.data.Dataset):
         self._normalizer = None
 
     def build_sampler(self, mask):
-        return SequenceSampler(
-            self.replay_buffer, self.horizon, self.pad_before, self.pad_after, mask,
-            key_first_k={key: self.obs_horizon for key in self.replay_buffer.keys()},
-        )
+        return SequenceSampler(self.replay_buffer, self.horizon, self.pad_before, self.pad_after, mask)
 
     def __len__(self):
         return len(self.sampler)
 
     def __getitem__(self, index):
-        sample = self.sampler.sample_sequence(index)
-        for key in self.sensor_modalities[:2]:
-            sample[key] = sample[key][..., :3]
+        rows = self.sampler.sample_source_rows(index)[:self.obs_horizon]
+        obs = {
+            key: torch.as_tensor(self.replay_buffer.read(
+                key, rows, columns=None if key == "joint_state" else slice(0, 3),
+            ))
+            for key in self.sensor_modalities
+        }
         return {
-            "obs": {key: torch.as_tensor(sample[key]) for key in self.sensor_modalities},
-            "contact_map": torch.as_tensor(sample["contact_map"]),
+            "obs": obs,
+            "contact_map": torch.as_tensor(self.replay_buffer.read("contact_map", rows)),
         }
 
     def get_normalizer(self, spec):

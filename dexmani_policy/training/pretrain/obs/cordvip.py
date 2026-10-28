@@ -68,7 +68,8 @@ class CordViPPretrain(nn.Module):
 def train(cfg, checkpoint=None, max_updates=None):
     if cfg.dataset.obs_horizon != cfg.model.n_obs_steps:
         raise ValueError('CordViP dataset and model must use matching observation steps')
-    save_every = positive_int(cfg.training.save_every_updates, 'training.save_every_updates')
+    positive_int(cfg.training.save_every_updates, 'training.save_every_updates')
+    positive_int(cfg.training.val_every_epochs, 'training.val_every_epochs')
     set_seed(cfg.training.seed)
     dataset = hydra.utils.instantiate(cfg.dataset)
     cfg.dataset.split_manifest = dataset.split_manifest
@@ -147,7 +148,7 @@ def train(cfg, checkpoint=None, max_updates=None):
                 totals = {}
                 if step >= stop_step or stop_requested:
                     break
-                if step % save_every == 0:
+                if step % cfg.training.save_every_updates == 0:
                     save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
                 step_start = data_wait_start = time.perf_counter()
                 data_wait = 0.0

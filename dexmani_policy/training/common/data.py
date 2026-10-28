@@ -96,12 +96,16 @@ def build_train_loader(cfg, dataset):
         options["persistent_workers"] = False
         options.pop("prefetch_factor", None)
     samples = len(dataset)
-    batch_size = options["batch_size"]
+    batch_sampler = EpochBatchSampler(
+        dataset, options.pop("batch_size"), options.pop("drop_last", False),
+        shuffle=options.pop("shuffle", False), seed=cfg.training.seed,
+    )
+    batch_size = batch_sampler.batch_size
     accumulation = cfg.training.loop.gradient_accumulation_steps
-    batches = (samples + batch_size - 1) // batch_size
+    batches = batch_sampler.batches_per_epoch
     if (
         accumulation > 1
-        and not options.get("drop_last", False)
+        and not batch_sampler.drop_last
         and samples % batch_size
         and batches % accumulation != 1
     ):
@@ -110,10 +114,6 @@ def build_train_loader(cfg, dataset):
             f"N={samples}, B={batch_size}, A={accumulation}; "
             "use drop_last=True or gradient_accumulation_steps=1"
         )
-    batch_sampler = EpochBatchSampler(
-        dataset, options.pop("batch_size"), options.pop("drop_last", False),
-        shuffle=options.pop("shuffle", False), seed=cfg.training.seed,
-    )
     # Worker creation must not consume the sample permutation's RNG.
     generator = torch.Generator().manual_seed(cfg.training.seed)
     loader = DataLoader(dataset, batch_sampler=batch_sampler, generator=generator, **options)
