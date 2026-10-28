@@ -27,15 +27,9 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
         "normalization_dims": dims, "split_manifest": dataset.split_manifest,
         "action_key": dataset.action_key, "attrs": buffer.attrs,
         "zarr_path": buffer.path,
-        "point_counts": {key: int(buffer[key].shape[1])
-                         for key in POINT_CLOUD_FIELDS.intersection(dataset.sensor_modalities)},
         "action_start_index": dataset.action_start_index,
         "control_action_dim": buffer[dataset.action_key].shape[-1],
     }
-    if {"hand_pointcloud", "object_pointcloud"} <= set(dataset.sensor_modalities):
-        from dexmani_policy.datasets.common.geometry import observation_geometry, selected_geometry
-
-        description["observation_geometry"] = selected_geometry(observation_geometry(buffer), dataset.train_mask | dataset.val_mask)
     runtime = describe_real_runtime(buffer, dataset.sensor_modalities, cfg.task_name)
     if runtime is not None:
         description["real_runtime"] = runtime

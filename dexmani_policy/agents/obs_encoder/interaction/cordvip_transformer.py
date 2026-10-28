@@ -6,7 +6,6 @@ Upstream attribution: https://github.com/r-pad/taxpose and
 https://github.com/WangYueFt/dcp/blob/master/model.py.
 Changes: remove unused masks/dropout/bidirectional outputs and identity modules;
 retain active operations, initialization and parameter layout.
-MIT, Copyright (c) 2025 Aureleo; see licenses/CordViP.txt.
 """
 
 import copy

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from dexmani_policy.common.normalizer import LinearNormalizer
-from dexmani_policy.datasets.common.geometry import contact_source_metadata, selected_geometry
+from dexmani_policy.datasets.common.geometry import contact_source_metadata
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler
 from dexmani_policy.datasets.common.split import split_episodes
@@ -26,8 +26,10 @@ class CordViPDataset(torch.utils.data.Dataset):
         self.pad_before, self.pad_after = pad_before, pad_after
         for key in self.sensor_modalities[:2]:
             shape = self.replay_buffer[key].shape
-            if len(shape) != 3 or shape[1] != 1024 or shape[2] < 3:
-                raise ValueError(f"CordViP requires {key}[T,1024,C>=3]")
+            if len(shape) != 3 or shape[2] < 3:
+                raise ValueError(f"CordViP requires {key}[T,N,C>=3]")
+        if self.replay_buffer["object_pointcloud"].shape[1] != 1024:
+            raise ValueError("CordViP contact head predicts 1024 object point labels")
         if self.replay_buffer["joint_state"].shape[1:] != (19,):
             raise ValueError("CordViP requires arm7+hand12 joint_state")
         if self.contacts["contact_map"].shape != (int(self.replay_buffer.episode_ends[-1]), 1024):
@@ -44,7 +46,6 @@ class CordViPDataset(torch.utils.data.Dataset):
             val_ratio=val_ratio, max_train_episodes=max_train_episodes,
         )
         mask = self.train_mask | self.val_mask
-        self.observation_geometry = selected_geometry(source["observation_geometry"], mask)
         fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3), "joint_state": None}
         validate_fields(self.replay_buffer, mask, fields)
         validate_fields(self.contacts, mask, {"contact_map": None})

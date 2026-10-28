@@ -36,4 +36,4 @@ where = ["."]
 include = ["dexmani_policy*"]
 
 [tool.setuptools.package-data]
-dexmani_policy = ["configs/*.yaml", "configs/pretrain/obs/*.yaml", "licenses/*.txt"]
+dexmani_policy = ["configs/*.yaml", "configs/pretrain/obs/*.yaml"]

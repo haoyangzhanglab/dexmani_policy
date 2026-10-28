@@ -139,5 +139,4 @@ def inference_recipe(config):
         "action_key": config["action_key"],
         "task_name": config.get("task_name"),
         "real_runtime": config.get("real_runtime"),
-        "observation_geometry": config.get("observation_geometry"),
     }

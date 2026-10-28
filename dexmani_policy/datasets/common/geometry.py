@@ -25,12 +25,6 @@ def observation_geometry(buffer):
     return recipes
 
 
-def selected_geometry(recipes, episode_mask):
-    unique = {json.dumps(recipe, sort_keys=True): recipe
-              for recipe, selected in zip(recipes, episode_mask) if selected}
-    return [unique[key] for key in sorted(unique)]
-
-
 def contact_source_metadata(buffer):
     return {
         "source_id": buffer.attrs.get("source_id"),

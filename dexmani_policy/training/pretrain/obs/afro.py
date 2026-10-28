@@ -4,7 +4,6 @@ Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
 Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
 Changes: native observation-only data/affine; explicit pre-optimizer teacher update;
 local PointNet and epoch-boundary checkpoint resume. Active losses are unchanged.
-MIT, Copyright (c) 2025 Qiwei Liang; see licenses/AFRO.txt.
 """
 
 import copy
@@ -17,7 +16,6 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
-from dexmani_policy.agents.obs_encoder.pretrained import AFRO_ENCODER_CONFIG, AFRO_SHA
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
@@ -132,7 +130,6 @@ def train(cfg, checkpoint=None, max_updates=None):
         stop_requested = True
 
     previous = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
-    metadata = {"method": "afro", "encoder_config": AFRO_ENCODER_CONFIG, "upstream_sha": AFRO_SHA}
     try:
         logger.save_config(cfg)
         while step < stop_step and not stop_requested:
@@ -166,8 +163,8 @@ def train(cfg, checkpoint=None, max_updates=None):
                     if validation is not None:
                         logger.log(to_log_scalars(evaluate(model, validation, cfg.dataloader.batch_size, cfg.training.device)), step)
                 if epoch % cfg.training.save_every_epochs == 0:
-                    save_run(model, model.visual, metadata, dataset, optimizer, scheduler, cfg, epoch, step)
-        save_run(model, model.visual, metadata, dataset, optimizer, scheduler, cfg, epoch, step)
+                    save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
+        save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
         print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
     finally:
         for sig, handler in previous.items():

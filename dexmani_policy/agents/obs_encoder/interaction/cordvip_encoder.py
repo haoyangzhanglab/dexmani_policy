@@ -3,7 +3,6 @@
 Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
 Source: train_policy/policy/CordViP/CordViP/CordViP/model/vision/encoder.py
 Changes: local PointNet, native field names and arm7-before-hand12 state layout.
-MIT, Copyright (c) 2025 Aureleo; see licenses/CordViP.txt.
 """
 
 from torch import nn

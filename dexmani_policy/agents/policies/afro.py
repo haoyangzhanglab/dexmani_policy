@@ -1,10 +1,11 @@
+from pathlib import Path
+
 import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D, validate_unet_horizon
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
-from dexmani_policy.agents.obs_encoder.pretrained import AFRO_ENCODER_CONFIG, load_observation_encoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 
@@ -50,18 +51,13 @@ class AFROPolicy(BasePolicy):
         config.pretrained_path = None
 
     def initialize_training(self, data_description):
-        if data_description["point_counts"]["point_cloud"] != 1024:
-            raise ValueError("AFRO requires 1024 scene points")
         if self.pretrained_path is None:
             if self.freeze_visual:
                 raise ValueError("AFRO frozen visual requires pretrained_path; scratch requires freeze_visual=false")
             print("[AFRO] Scratch training with trainable visual encoder")
             return
-        state = load_observation_encoder(
-            self.pretrained_path, method="afro", encoder_config=AFRO_ENCODER_CONFIG,
-            data_description=data_description,
-        )
-        self.obs_encoder.visual.load_state_dict(state, strict=True)
+        payload = torch.load(Path(self.pretrained_path).expanduser(), map_location="cpu", weights_only=True)
+        self.obs_encoder.visual.load_state_dict(payload["encoder_state"], strict=True)
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
         return [

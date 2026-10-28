@@ -4,7 +4,6 @@ Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
 Sources: train_policy/policy/CordViP/CordViP/CordViP/policy/CordViP_pretrain.py
 and model/vision/create_fc.py (attributed upstream to SridharPandian/Holo-Dex).
 Changes: native arm7+hand12, observation-only data, raw encoder export and resume.
-MIT, Copyright (c) 2025 Aureleo; see licenses/CordViP.txt.
 """
 
 import copy
@@ -17,7 +16,6 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.obs_encoder.interaction.cordvip_encoder import CordViPEncoder
-from dexmani_policy.agents.obs_encoder.pretrained import CORDVIP_ENCODER_CONFIG, CORDVIP_SHA
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
@@ -101,9 +99,6 @@ def train(cfg, checkpoint=None, max_updates=None):
         stop_requested = True
 
     previous = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
-    metadata = {'method': 'cordvip', 'upstream_sha': CORDVIP_SHA,
-                'observation_geometry': dataset.observation_geometry,
-                'encoder_config': {**CORDVIP_ENCODER_CONFIG, 'observation_steps': cfg.model.n_obs_steps}}
     try:
         logger.save_config(cfg)
         while step < stop_step and not stop_requested:
@@ -146,8 +141,8 @@ def train(cfg, checkpoint=None, max_updates=None):
                     if validation is not None:
                         logger.log(to_log_scalars(evaluate(model, validation, cfg.dataloader.batch_size, cfg.training.device)), step)
                 if epoch % cfg.training.save_every_epochs == 0:
-                    save_run(model, model.obs_encoder, metadata, dataset, optimizer, scheduler, cfg, epoch, step)
-        save_run(model, model.obs_encoder, metadata, dataset, optimizer, scheduler, cfg, epoch, step)
+                    save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+        save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
         print(f'[CordViP] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}')
     finally:
         for sig, handler in previous.items():

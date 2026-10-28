@@ -4,7 +4,6 @@ Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
 Source: afro_workspace/model/transformer/DiT1D.py
 Changes: active 4-layer/4-head defaults; remove unused parameterization helpers
 and the unused pred_norm layer.
-License: MIT, Copyright (c) 2025 Qiwei Liang; see licenses/AFRO.txt.
 """
 
 import math

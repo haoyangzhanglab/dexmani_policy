@@ -64,20 +64,11 @@ def prepare_data(cfg, checkpoint):
     return dataset, normalizer, loader
 
 
-def save_run(model, encoder, metadata, dataset, optimizer, scheduler, cfg, epoch, step):
+def save_run(model, encoder, optimizer, scheduler, cfg, epoch, step):
     output = Path(cfg.workspace.output_dir)
     config = OmegaConf.to_container(cfg, resolve=True)
     payload = {
-        **metadata,
         "encoder_state": {key: value.detach().cpu() for key, value in encoder.state_dict().items()},
-        "normalizer_state": {key: value.detach().cpu() for key, value in model.normalizer.state_dict().items()},
-        "normalization": dict(cfg.normalization),
-        "pretrain_config": config,
-        "split_manifest": dataset.split_manifest,
-        "source": {"zarr_path": dataset.zarr_path,
-                   "source_id": dataset.replay_buffer.attrs.get("source_id"),
-                   "dt": dataset.replay_buffer.attrs.get("dt")},
-        "epoch": epoch, "global_step": step,
     }
     with atomic_path(output / "encoder.pt") as temporary:
         torch.save(payload, temporary)

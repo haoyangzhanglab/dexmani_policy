@@ -3,7 +3,6 @@
 Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
 Source: train_policy/script/contact_map.py
 Changes: chunked NumPy geometry, lazy Open3D import, native Zarr sidecar IO.
-MIT, Copyright (c) 2025 Aureleo; see licenses/CordViP.txt.
 """
 
 import argparse
@@ -14,7 +13,6 @@ import tempfile
 import numpy as np
 import zarr
 
-from dexmani_policy.agents.obs_encoder.pretrained import CORDVIP_SHA
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.datasets.common.geometry import contact_source_metadata
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
@@ -59,7 +57,7 @@ def generate(zarr_path, output):
     temporary = Path(tempfile.mkdtemp(prefix=".contact-", dir=output.parent))
     try:
         group = zarr.open_group(str(temporary), mode="w")
-        group.attrs.update(source=source, source_path=buffer.path, upstream_sha=CORDVIP_SHA,
+        group.attrs.update(source=source, source_path=buffer.path,
                            recipe={"gamma": 1.0, "theta": 10.0, "knn": 30})
         group.create_group("meta").create_dataset("episode_ends", data=buffer.episode_ends)
         labels = group.create_group("data").create_dataset(

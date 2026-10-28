@@ -1,10 +1,11 @@
+from pathlib import Path
+
 import torch
 from torch import nn
 
 from dexmani_policy.agents.action_decoders.backbones.unet1d import ConditionalUNet1D, validate_unet_horizon
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.interaction.cordvip_encoder import CordViPEncoder
-from dexmani_policy.agents.obs_encoder.pretrained import CORDVIP_ENCODER_CONFIG, load_observation_encoder
 from dexmani_policy.agents.policies.base import BasePolicy
 
 
@@ -47,17 +48,11 @@ class CordViPPolicy(BasePolicy):
         config.pretrained_path = None
 
     def initialize_training(self, data_description):
-        if any(data_description["point_counts"][key] != 1024 for key in ("hand_pointcloud", "object_pointcloud")):
-            raise ValueError("CordViP requires 1024 hand and 1024 shared object points")
         if self.pretrained_path is None:
             print("[CordViP] Scratch training; all observation encoder parameters are trainable")
             return
-        state = load_observation_encoder(
-            self.pretrained_path, method="cordvip",
-            encoder_config={**CORDVIP_ENCODER_CONFIG, "observation_steps": self.n_obs_steps},
-            data_description=data_description,
-        )
-        self.obs_encoder.encoder.load_state_dict(state, strict=True)
+        payload = torch.load(Path(self.pretrained_path).expanduser(), map_location="cpu", weights_only=True)
+        self.obs_encoder.encoder.load_state_dict(payload["encoder_state"], strict=True)
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
         return [

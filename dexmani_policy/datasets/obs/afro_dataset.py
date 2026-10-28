@@ -19,8 +19,8 @@ class AFRODataset(torch.utils.data.Dataset):
         self.replay_buffer = ReplayBuffer(zarr_path, keys=self.sensor_modalities)
         self.zarr_path = self.replay_buffer.path
         shape = self.replay_buffer["point_cloud"].shape
-        if len(shape) != 3 or shape[1] != 1024 or shape[2] < 3:
-            raise ValueError("AFRO requires point_cloud[T,1024,C>=3]")
+        if len(shape) != 3 or shape[2] < 3:
+            raise ValueError("AFRO requires point_cloud[T,N,C>=3]")
         self.horizon, self.pad_before, self.pad_after = horizon, pad_before, pad_after
         self.train_mask, self.val_mask, self.split_manifest = split_episodes(
             self.replay_buffer, manifest=split_manifest, seed=seed,
