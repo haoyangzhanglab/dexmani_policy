@@ -89,7 +89,6 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
             if key in data_description:
                 effective[key] = data_description[key]
         effective.dataset.split_manifest = data_description["split_manifest"]
-        effective.pop("real_runtime", None)
         effective.policy_metadata = metadata
         if checkpoint is None:
             effective.agent.update(model.effective_config)

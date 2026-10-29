@@ -22,8 +22,8 @@ Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹�
 # 检查配置接口与导入，无需数据或 GPU
 python -m dexmani_policy.test_tools.smoke_test --config-only dp3
 
-# 公共组件及 action/EMA/FPS/Dataset 契约，无需训练数据
-python -m dexmani_policy.test_tools.smoke_test --contracts-only --device cpu dp3
+# 检查实际数据的训练与验证 batch
+python -m dexmani_policy.test_tools.smoke_test --data-only --max-batches 2 dp3
 
 # 检查任务的数据路径
 python -m dexmani_policy.training.common.config \
@@ -39,8 +39,6 @@ bash scripts/training/train.sh dp3 \
 # Checkpoint 选点与独立测试
 bash scripts/eval/eval_pipeline.sh 'experiments/dp3/<task>/<run>'
 ```
-
-RGB 编码器独立自检使用 `python -m dexmani_policy.test_tools.rgb_encoder_check resnet`，也可选择 `dino` 或 `siglip`（需要对应模型资源）。
 
 配置检查不代表完整训练可运行。续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
@@ -75,10 +73,9 @@ bash scripts/training/train.sh adaptac tactile=real_patch 'zarr_path=<real_zarr>
 RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=sqrt(sum(x²)/N)`，然后固定执行 `x/S`，不去均值、不裁剪；非空全零字段使用 identity affine。aggregate 与 dense 独立统计，完整 FP32 affine 随 checkpoint 保存。非退化字段应满足 `mean(z²)≈1`，不要求均值为零。该变换保留零点、方向和相对幅度，不能消除异常峰值或跨源物理差异。
 
 ```bash
-# 四种配方的配置和合成链路检查，无需实际 Zarr；CPU 也检查 BF16 autocast
+# 四种触觉配方的配置检查，无需实际 Zarr
 for tactile in sim_force real_force real_taxel real_patch; do
   python -m dexmani_policy.test_tools.smoke_test --config-only --override "tactile=$tactile" adaptac
-  python -m dexmani_policy.test_tools.smoke_test --contracts-only --device cpu --override "tactile=$tactile" adaptac
 done
 
 # 实际数据短训、续训及保存恢复；按硬件资源设置 batch/worker
@@ -90,11 +87,11 @@ python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 
 bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/<run>'
 ```
 
-测试诊断集中在 `dexmani_policy/test_tools/`：`smoke_test.py` 提供 CLI，`smoke_checks.py` 提供配置、数据、短训与恢复公共流程，`common_contracts.py` 集中基础回归，`policy_contracts.py` 集中 AFRO/CordViP/SAT 专属检查，`adaptac_contracts.py` 集中触觉检查及合成数据。契约模块依赖公共检查，公共检查不反向导入契约模块或 CLI。`--contracts-only` 对任意策略运行 SceneAggregator、HandState/HandScene/触觉融合、action 配方、EMA 数值/恢复、原生 FPS、Dataset 与实际小型 DP3/LAMP 的 Runtime 回归，并按实际策略类追加检查：AFRO/CordViP 验证继承字段不再拟合及预训练文件缺失后的短训恢复，CordViP 另检查公开 inspect/load、XYZ/XYZRGB 和显式 warmup，SAT 验证公共短训恢复路径，AdapTac 验证触觉契约；修改 policy_name 不会跳过。检查使用临时合成数据，保留所选归一化和输入布局，缩小网络与执行预算。公共 FPS 和 DP3/LAMP Runtime 检查缺少原生后端时报告 not_run，不宣称通过；SAT/AdapTac 模型检查仍需该后端。
+`test_tools/smoke_test.py` 提供配置、数据 batch、短训和 checkpoint 续训检查。数据模式检查训练与验证 split 的核心形状及有限值，打印各字段的 shape/dtype，不额外拟合 normalizer。训练模式复用 `PolicyTrainer`，检查参数更新、checkpoint 保存加载和续训步数。
 
-AdapTac 契约检查使用缩小的 eager 网络、32 点点云和合成 episode，保留所选来源、encoder、normalization、horizon 和 point-cloud channels；梯度、guide 与恢复检查共用实际 Dataset 拟合的模型。短训命令使用实际配置，不再自动重复合成契约检查；`--compile` 仅用于短训模式。
+默认短训 4 次更新、续训 2 次；`--resume-updates 0` 关闭续训，总预算耗尽时明确打印未执行。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`；LAMP 同时传入符合 `info.action_context_shapes` 的 `action_context`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不需要 `real_runtime` 或原训练数据；续训仍需原数据及保存的数据划分。恢复直接使用 checkpoint 内置配置和严格 state_dict 加载，保留参数精度；不重拟合 affine 或迁移产物。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按配套、未手工篡改的内部产物使用。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`；LAMP 同时传入符合 `info.action_context_shapes` 的 `action_context`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复直接使用 checkpoint 内置配置和严格 state_dict 加载，保留参数精度；不重拟合 affine 或迁移产物。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按配套、未手工篡改的内部产物使用。
 
 数据边界必须区分来源：sim 是世界系 N，来自接触 impulse/physics_dt，再按控制周期子步进行有符号向量平均，目前没有 dense producer。real aggregate/dense 分别来自 SDK `calc_force`/`raw_force`，不是代码中的求和关系；单位为 `sdk_native_unknown_physical_scale`，轴为 `sdk_sensor_axes_not_world_frame`，canonical 尚未完整复制这些 raw 元信息。`fingertip_xyz` 只有位置，不能用于完成轴变换。五指顺序为 thumb/index/middle/ring/pinky，dense 保留 SDK 索引顺序。
 
@@ -102,7 +99,7 @@ future 标签从 query+1 的下一观测行开始，真实后继有效，重复�
 
 `real_taxel` 是基础 dense 选项；`real_patch` 使用未经 SDK 验证的 `RIGHT_T30_PATCH_ROWS` / `RIGHT_T16_PATCH_ROWS` 重建区域图，是带区域假设的实验选项。Patch 在 normalized dense 上计算 `w=||z||/(||z||+activity_scale)`，默认 activity_scale=1.0，须能表示为有限正 FP32 值；soft activity 不代表接触概率或标定面积。其 dense normalization 只允许 RMS/MaxAbs。零输入的描述为零，含 embedding/bias 的最终 token 可以非零。区域图仅保存在构造配方的 `region_ids` 中，运行时重建 mask。
 
-仿真公开入口 `SimRunner.run()` 在建环境前拒绝 real-source 触觉策略，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 可以恢复两种来源；来源与数值语义保存在模型和数据配置中，设备侧适配由独立的 real 项目负责。跨 sim/real 共享 checkpoint、混合统计、自动单位/坐标转换均不支持。合成 smoke、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
+仿真公开入口 `SimRunner.run()` 在建环境前拒绝 real-source 触觉策略，内部 `_run_episode()` 由它调用；下划线仅表示内部 API。通用离线 PolicyRuntime 可以恢复两种来源；来源与数值语义保存在模型和数据配置中，设备侧适配由独立的 real 项目负责。跨 sim/real 共享 checkpoint、混合统计、自动单位/坐标转换均不支持。smoke 检查、RMS 性质、patch 描述和 loss weight=1 不代表已证明任务成功率提高或配方最优。
 
 ## 实验产物
 

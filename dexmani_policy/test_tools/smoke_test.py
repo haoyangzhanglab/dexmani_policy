@@ -1,135 +1,217 @@
-"""Validate configs/data or exercise training and checkpoint restoration."""
+"""Check configs and data, or run bounded training and checkpoint resume."""
 
 import argparse
-import json
+import tempfile
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from itertools import islice
 from pathlib import Path
 
 import hydra
 import torch
+from omegaconf import OmegaConf, open_dict
+from torch.utils.data import DataLoader
 
-from dexmani_policy.common.config import set_project_root
+from dexmani_policy.common.checkpoint import load_checkpoint
+from dexmani_policy.common.config import load_policy_config, positive_int, set_project_root
+from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.test_tools.smoke_checks import (
-    load_smoke_config, smoke_output, validate_data_batch,
-    validate_dataset, validate_target_imports, validate_training,
-)
+from dexmani_policy.training.common.config import validate_config
+
+
+def load_smoke_config(config_name, overrides):
+    cfg = load_policy_config(config_name, overrides)
+    # Hydra compose does not create a runtime output directory.
+    cfg.workspace.output_dir = "/tmp/smoke_test_output"
+    OmegaConf.resolve(cfg)
+    validate_config(cfg)
+    return cfg
+
+
+def iter_hydra_targets(node):
+    if isinstance(node, dict):
+        if "_target_" in node:
+            yield node["_target_"]
+        for value in node.values():
+            yield from iter_hydra_targets(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from iter_hydra_targets(value)
+
+
+def validate_target_imports(cfg):
+    targets = list(iter_hydra_targets(OmegaConf.to_container(cfg, resolve=True)))
+    for target in targets:
+        hydra.utils.get_method(target)
+    return len(targets)
+
+
+def iter_batch_fields(batch):
+    for key, value in batch.items():
+        if isinstance(value, dict):
+            for field, tensor in value.items():
+                yield f"{key}.{field}", tensor
+        else:
+            yield key, value
+
+
+def validate_data_batch(batch, dataset, cfg):
+    batch_size = len(batch["action"])
+    assert batch["action"].shape == (batch_size, cfg.horizon, cfg.agent.action_dim), "action shape"
+    assert batch["obs"].keys() == set(dataset.sensor_modalities), "observation fields"
+    for key, value in batch["obs"].items():
+        assert value.shape[:2] == (batch_size, dataset.obs_horizon), f"obs.{key} shape"
+    for name, value in iter_batch_fields(batch):
+        assert value.shape[0] == batch_size, f"{name}: batch size"
+        assert value.device.type == "cpu", f"{name}: expected CPU data"
+        if value.is_floating_point() or value.is_complex():
+            assert torch.isfinite(value).all(), f"{name}: non-finite data"
+
+
+def validate_data_loader(loader, cfg, split, max_batches):
+    from dexmani_policy.training.common.data import close_data_loader
+
+    iterator = None
+    checked = 0
+    try:
+        iterator = iter(loader)
+        for checked, batch in enumerate(islice(iterator, max_batches), start=1):
+            validate_data_batch(batch, loader.dataset, cfg)
+            summary = ", ".join(
+                f"{key}={tuple(value.shape)} {value.dtype}"
+                for key, value in iter_batch_fields(batch)
+            )
+            print(f"[{split} batch {checked}] {summary}")
+        assert checked, f"{split}: no batches to check"
+    finally:
+        close_resources(lambda: close_data_loader(loader, iterator))
+    print(f"[{split}] windows={len(loader.dataset):,}, checked batches={checked}")
+
+
+def validate_dataset(cfg, max_batches):
+    from dexmani_policy.training.common.data import build_dataset, build_train_loader
+
+    positive_int(max_batches, "max_batches")
+    set_seed(cfg.training.seed)
+    cfg.dataloader.pin_memory = False
+    dataset, _ = build_dataset(cfg)
+    validate_data_loader(build_train_loader(cfg, dataset), cfg, "train", max_batches)
+    validation = dataset.get_validation_dataset()
+    if validation is None:
+        print("[validation] 无可用验证窗口")
+    else:
+        loader = DataLoader(validation, batch_size=cfg.dataloader.batch_size, num_workers=0)
+        validate_data_loader(loader, cfg, "validation", max_batches)
+
+
+def validate_parameter_updates(model, before):
+    changed = None
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        current = parameter.detach().cpu()
+        assert torch.isfinite(current).all(), f"Non-finite parameter: {name}"
+        if changed is None and not torch.equal(before[name], current):
+            changed = name
+    assert changed is not None, "No trainable parameter changed within the smoke budget"
+    return changed
+
+
+@contextmanager
+def smoke_output(output_dir: Path | None) -> Iterator[Path]:
+    if output_dir is None:
+        with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as temporary:
+            yield Path(temporary)
+    else:
+        directory = output_dir.resolve()
+        directory.mkdir(parents=True, exist_ok=False)
+        yield directory
+
+
+def validate_training(cfg, directory: Path, max_updates: int, resume_updates: int) -> int:
+    from dexmani_policy.training.common.data import build_dataset
+    from dexmani_policy.training.trainer import PolicyTrainer
+
+    set_seed(cfg.training.seed)
+    checkpoint = source = None
+    phases = [("train", max_updates)]
+    if resume_updates:
+        phases.append(("resume", resume_updates))
+    for phase, budget in phases:
+        if checkpoint is not None:
+            total_steps = checkpoint.effective_config["training"]["loop"]["total_train_steps"]
+            if checkpoint.global_step == total_steps:
+                print("[resume] 未执行：训练总预算已耗尽", flush=True)
+                break
+        run_cfg = OmegaConf.create(cfg if checkpoint is None else checkpoint.effective_config)
+        with open_dict(run_cfg):
+            run_cfg.workspace.output_dir = str(directory / phase)
+            run_cfg.workspace.wandb_cfg = None
+            if source is not None:
+                run_cfg.resume_from = str(source)
+        dataset, description = build_dataset(run_cfg)
+        start_step = 0 if checkpoint is None else checkpoint.global_step
+        with closing(PolicyTrainer(run_cfg, dataset, description, checkpoint=checkpoint)) as trainer:
+            assert trainer.global_step == start_step, "Resume step mismatch"
+            checkpoint = None
+            trainer.compile_models()
+            before = {
+                name: parameter.detach().to(device="cpu", copy=True)
+                for name, parameter in trainer.model.named_parameters() if parameter.requires_grad
+            }
+            trainer.train(max_updates=budget)
+            assert trainer.global_step == min(start_step + budget, trainer.total_train_steps), "Training step mismatch"
+            changed = validate_parameter_updates(trainer.model, before)
+            del before
+            step = trainer.global_step
+            source = (trainer.checkpoint_dir / "latest.pt").resolve()
+        del trainer
+        checkpoint = load_checkpoint(source, mmap=True)
+        assert checkpoint.global_step == step, "Checkpoint step mismatch"
+        print(f"[{phase}] step={step}; updated {changed}; checkpoint={source}", flush=True)
+    return step
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument(
-        "--config-only",
-        action="store_true",
-        help="Check config interfaces and target imports; model constraints are checked at construction/binding.",
-    )
-    modes.add_argument(
-        "--data-only", action="store_true", help="Check CPU data batches without building a model."
-    )
-    modes.add_argument(
-        "--contracts-only", action="store_true",
-        help="Run shared and policy contracts on synthetic data, including bounded training/restoration.",
-    )
+    modes.add_argument("--config-only", action="store_true", help="Check config interfaces and Hydra target imports.")
+    modes.add_argument("--data-only", action="store_true", help="Check CPU data batches without building a model.")
+    parser.add_argument("config_names", nargs="+", help="Hydra config names or explicit YAML paths.")
     parser.add_argument("--override", action="append", default=[], help="Repeatable Hydra override.")
-    parser.add_argument("--device", help="Override training.device for this smoke run.")
-    parser.add_argument(
-        "--compile", action="store_true",
-        help="Compile policy backbones during bounded training; requires training mode.",
-    )
-    parser.add_argument(
-        "--output-dir", type=Path,
-        help="Keep smoke artifacts in a new directory instead of a temporary directory.",
-    )
-    parser.add_argument(
-        "--max-batches",
-        type=int,
-        default=2,
-        help="Data-only batch budget per split (default: 2); does not limit statistics scans.",
-    )
-    parser.add_argument(
-        "config_names", nargs="+", help="Hydra config names or explicit test YAML paths."
-    )
-    parser.add_argument(
-        "--max-updates",
-        type=int,
-        default=4,
-        help="Initial training-update budget; does not change the saved recipe (default: 4).",
-    )
-    parser.add_argument(
-        "--resume-updates", type=int, default=2,
-        help="Additional updates after checkpoint resume; 0 disables this phase (default: 2).",
-    )
-    parser.add_argument(
-        "--rollout", action="store_true", help="Also run one simulation episode using the final checkpoint.",
-    )
+    parser.add_argument("--device", help="Override training.device.")
+    parser.add_argument("--output-dir", type=Path, help="Keep training artifacts in a new directory.")
+    parser.add_argument("--max-batches", type=int, default=2, help="Data-only batch budget per split (default: 2).")
+    parser.add_argument("--max-updates", type=int, default=4, help="Initial training-update budget (default: 4).")
+    parser.add_argument("--resume-updates", type=int, default=2, help="Additional updates; 0 disables resume (default: 2).")
     args = parser.parse_args(argv)
-    if args.compile and (args.config_only or args.data_only or args.contracts_only):
-        parser.error("--compile requires bounded training mode")
+    training = not (args.config_only or args.data_only)
+    if training:
+        positive_int(args.max_updates, "max_updates")
+        if args.resume_updates < 0:
+            parser.error("--resume-updates must be nonnegative")
 
     set_project_root()
+    if training and args.output_dir is not None and len(args.config_names) > 1:
+        args.output_dir.mkdir(parents=True, exist_ok=False)
     for config_name in args.config_names:
         print(f"\nValidating {config_name}", flush=True)
         cfg = load_smoke_config(config_name, args.override)
         if args.device is not None:
             cfg.training.device = args.device
-        if args.compile:
-            cfg.training.use_compile = True
-        output_dir = args.output_dir
-        if output_dir is not None and len(args.config_names) > 1:
-            output_dir = output_dir / cfg.policy_name
         if args.config_only:
-            print(f"✓ {config_name}: config and {validate_target_imports(cfg)} Hydra targets PASSED")
-            continue
-
-        from dexmani_policy.agents.policies.adaptac import AdapTacPolicy
-
-        policy_class = hydra.utils.get_class(cfg.agent._target_)
-        is_adaptac = issubclass(policy_class, AdapTacPolicy)
-        if is_adaptac:
-            from dexmani_policy.test_tools.adaptac_contracts import (
-                validate_adaptac_batch, validate_adaptac_contracts, validate_adaptac_deployment,
-            )
-        batch_check = validate_adaptac_batch if is_adaptac else validate_data_batch
-        status = "PASSED"
-        if args.data_only:
-            validate_dataset(cfg, max_batches=args.max_batches, batch_check=batch_check)
+            summary = f"config and {validate_target_imports(cfg)} Hydra targets"
+        elif args.data_only:
+            validate_dataset(cfg, args.max_batches)
             summary = "CPU data batches"
-        elif args.contracts_only:
-            from dexmani_policy.test_tools.common_contracts import validate_common_contracts
-
-            set_seed(cfg.training.seed)
-            with smoke_output(output_dir) as directory:
-                report = {"common": validate_common_contracts(torch.device(cfg.training.device))}
-                if is_adaptac:
-                    report.update(validate_adaptac_contracts(cfg))
-                from dexmani_policy.agents.policies.afro import AFROPolicy
-                from dexmani_policy.agents.policies.cordvip import CordViPPolicy
-                from dexmani_policy.agents.policies.sat import SATPolicy
-
-                if issubclass(policy_class, (AFROPolicy, CordViPPolicy)):
-                    from dexmani_policy.test_tools.policy_contracts import validate_pretrained_observation_transfer
-
-                    report["pretrained_observations"] = validate_pretrained_observation_transfer(cfg)
-                if issubclass(policy_class, SATPolicy):
-                    from dexmani_policy.test_tools.policy_contracts import validate_sat_training
-
-                    report["sat"] = validate_sat_training(cfg)
-                not_run = [
-                    f"{name}: {result['reason']}" for name, result in report["common"].items()
-                    if result["status"] == "not_run"
-                ]
-                if not_run:
-                    status = f"COMPLETED (not_run: {', '.join(not_run)})"
-                (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-            summary = "shared and policy contracts"
         else:
-            validate_training(
-                cfg, max_updates=args.max_updates, resume_updates=args.resume_updates,
-                rollout=args.rollout, output_dir=output_dir, batch_check=batch_check,
-                deployment_check=validate_adaptac_deployment if is_adaptac else None,
-            )
-            summary = "bounded training and checkpoint checks"
-        print(f"✓ {config_name}: {summary} {status}")
+            output_dir = args.output_dir
+            if output_dir is not None and len(args.config_names) > 1:
+                output_dir = output_dir / cfg.policy_name
+            with smoke_output(output_dir) as directory:
+                step = validate_training(cfg, directory, args.max_updates, args.resume_updates)
+            summary = f"training/checkpoint smoke (step={step})"
+        print(f"✓ {config_name}: {summary} PASSED", flush=True)
 
 
 if __name__ == "__main__":

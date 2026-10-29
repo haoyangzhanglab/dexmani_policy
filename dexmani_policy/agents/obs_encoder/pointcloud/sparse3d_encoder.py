@@ -10,7 +10,7 @@ from torch import nn
 
 from .ops import index_points, sample_point_patches, load_pointcloud_ops
 from .pointnet import build_mlp
-from .position import RotaryPositionEmbedding3D
+from .rope import RotaryPositionEmbedding3D
 
 
 class GeometricPatchEmbedding(nn.Module):
