@@ -32,7 +32,7 @@ def evaluate_policy(request: EvalConfig, *, output_root, output_dir=None) -> tup
         set_seed(request.config["eval"]["seed"])
         record["runtime"] = runtime_provenance()
         agent = restore_policy(
-            request.config, request.checkpoint, use_ema=request.use_ema, device=request.device
+            request.checkpoint, use_ema=request.use_ema, device=request.device
         )
         if "global_step" in request.source and request.source["global_step"] != agent.checkpoint_step:
             raise ValueError("Selected global_step differs from checkpoint state")

@@ -7,15 +7,11 @@ from pathlib import Path
 import hydra
 import torch
 
-from dexmani_policy.agents.policies.adaptac import AdapTacPolicy
 from dexmani_policy.common.config import set_project_root
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.smoke_checks import (
     load_smoke_config, smoke_output, validate_common_contracts, validate_data_batch,
     validate_dataset, validate_target_imports, validate_training,
-)
-from dexmani_policy.adaptac_contracts import (
-    validate_adaptac_batch, validate_adaptac_contracts, validate_adaptac_deployment,
 )
 
 
@@ -32,7 +28,7 @@ def main(argv=None):
     )
     modes.add_argument(
         "--contracts-only", action="store_true",
-        help="Run shared contracts and, for AdapTac, tactile contracts without real data or training.",
+        help="Run shared and policy contracts on synthetic data, including bounded training/restoration.",
     )
     parser.add_argument("--override", action="append", default=[], help="Repeatable Hydra override.")
     parser.add_argument("--device", help="Override training.device for this smoke run.")
@@ -81,12 +77,21 @@ def main(argv=None):
         output_dir = args.output_dir
         if output_dir is not None and len(args.config_names) > 1:
             output_dir = output_dir / cfg.policy_name
-        is_adaptac = issubclass(hydra.utils.get_class(cfg.agent._target_), AdapTacPolicy)
+        if args.config_only:
+            print(f"✓ {config_name}: config and {validate_target_imports(cfg)} Hydra targets PASSED")
+            continue
+
+        from dexmani_policy.agents.policies.adaptac import AdapTacPolicy
+
+        policy_class = hydra.utils.get_class(cfg.agent._target_)
+        is_adaptac = issubclass(policy_class, AdapTacPolicy)
+        if is_adaptac:
+            from dexmani_policy.adaptac_contracts import (
+                validate_adaptac_batch, validate_adaptac_contracts, validate_adaptac_deployment,
+            )
         batch_check = validate_adaptac_batch if is_adaptac else validate_data_batch
         status = "PASSED"
-        if args.config_only:
-            summary = f"config and {validate_target_imports(cfg)} Hydra targets"
-        elif args.data_only:
+        if args.data_only:
             validate_dataset(cfg, max_batches=args.max_batches, batch_check=batch_check)
             summary = "CPU data batches"
         elif args.contracts_only:
@@ -95,6 +100,18 @@ def main(argv=None):
                 report = {"common": validate_common_contracts(torch.device(cfg.training.device))}
                 if is_adaptac:
                     report.update(validate_adaptac_contracts(cfg))
+                from dexmani_policy.agents.policies.afro import AFROPolicy
+                from dexmani_policy.agents.policies.cordvip import CordViPPolicy
+                from dexmani_policy.agents.policies.sat import SATPolicy
+
+                if issubclass(policy_class, (AFROPolicy, CordViPPolicy)):
+                    from dexmani_policy.smoke_checks import validate_pretrained_observation_transfer
+
+                    report["pretrained_observations"] = validate_pretrained_observation_transfer(cfg)
+                if issubclass(policy_class, SATPolicy):
+                    from dexmani_policy.smoke_checks import validate_sat_training
+
+                    report["sat"] = validate_sat_training(cfg)
                 not_run = [
                     f"{name}: {result['reason']}" for name, result in report["common"].items()
                     if result["status"] == "not_run"
@@ -102,7 +119,7 @@ def main(argv=None):
                 if not_run:
                     status = f"COMPLETED (not_run: {', '.join(not_run)})"
                 (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-            summary = "shared and AdapTac contracts" if is_adaptac else "shared contracts"
+            summary = "shared and policy contracts"
         else:
             validate_training(
                 cfg, max_updates=args.max_updates, resume_updates=args.resume_updates,

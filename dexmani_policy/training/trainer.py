@@ -26,7 +26,7 @@ from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
 from dexmani_policy.training.common.optimization import build_optimizer, get_scheduler
-from dexmani_policy.training.common.resume import archive_resume_milestones, validate_source_recipe
+from dexmani_policy.training.common.resume import archive_resume_milestones
 
 
 class PolicyTrainer:
@@ -34,9 +34,7 @@ class PolicyTrainer:
         device = torch.device(cfg.training.device)
         model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
         model = hydra.utils.instantiate(model_cfg)
-        validate_observation_fields(
-            model, cfg.dataset.sensor_modalities, tactile_source=cfg.get("tactile_source"),
-        )
+        validate_observation_fields(model, cfg.dataset.sensor_modalities)
         if data_description["action_start_index"] != model.action_start_index:
             raise ValueError("Dataset/policy action_start_index mismatch")
         if data_description["control_action_dim"] != model.control_action_dim:
@@ -45,10 +43,12 @@ class PolicyTrainer:
             cfg.normalization, data_description["normalization_dims"], action_key=cfg.action_key,
         )
         if checkpoint is None:
-            model.initialize_training(data_description)
+            pretrained_state = model.initialize_training(data_description)
+            if pretrained_state is not None:
+                state = normalizer.state_dict()
+                state.update(pretrained_state)
+                normalizer.load_state_dict(state, strict=True)
             model.load_normalizer(normalizer)
-        if checkpoint is not None and dict(cfg.policy_metadata) != model.inference_metadata:
-            raise ValueError("Restored policy metadata differs from saved construction")
 
         if model.requires_ema_for_loss and not cfg.training.use_ema:
             raise ValueError(f"{type(model.action_decoder).__name__} requires training.use_ema=true")
@@ -113,7 +113,6 @@ class PolicyTrainer:
         self.current_epoch = self.global_step = 0
 
         if checkpoint is not None:
-            validate_source_recipe(checkpoint.effective_config, self.cfg)
             groups, saved = self.optimizer.param_groups, checkpoint.optimizer_state["param_groups"]
             if len(groups) != len(saved) or any(
                 a["param_names"] != b["param_names"] or a.get("clip_group") != b.get("clip_group")
@@ -148,7 +147,9 @@ class PolicyTrainer:
         self.checkpoint_dir = self.logger.output_dir / "checkpoints"
         try:
             if checkpoint is not None:
-                archive_resume_milestones(cfg.resume_from, self.logger.output_dir, checkpoint)
+                archive_resume_milestones(
+                    cfg.resume_from, self.logger.output_dir, max_step=checkpoint.global_step,
+                )
             self.logger.save_config(self.cfg)
             if checkpoint is not None:
                 set_rng_state(checkpoint.rng_state, device=device)

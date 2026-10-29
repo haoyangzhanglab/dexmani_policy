@@ -18,16 +18,12 @@ from torch.utils.data import DataLoader
 
 from dexmani_policy.common.checkpoint import load_checkpoint, policy_state_dict, restore_policy
 from dexmani_policy.common.config import (
-    POINT_CLOUD_FIELDS, load_experiment_config, load_policy_config, positive_int,
+    POINT_CLOUD_FIELDS, load_policy_config, positive_int,
 )
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state, set_seed
 from dexmani_policy.training.common.config import validate_config
-from dexmani_policy.training.common.data import (
-    build_dataset_and_normalizer, build_train_loader, close_data_loader,
-)
-from dexmani_policy.training.trainer import PolicyTrainer
 
 
 def load_smoke_config(config_name: str, overrides=()):
@@ -129,6 +125,8 @@ def validate_data_batch(batch, dataset, cfg):
 
 
 def validate_data_loader(loader, cfg, *, split, max_batches, batch_check=validate_data_batch):
+    from dexmani_policy.training.common.data import close_data_loader
+
     iterator = None
     checked = 0
     try:
@@ -148,6 +146,8 @@ def validate_data_loader(loader, cfg, *, split, max_batches, batch_check=validat
 
 
 def validate_dataset(cfg, *, max_batches=2, batch_check=validate_data_batch):
+    from dexmani_policy.training.common.data import build_dataset_and_normalizer, build_train_loader
+
     positive_int(max_batches, "max_batches")
     set_seed(cfg.training.seed)
     cfg.dataloader.pin_memory = False
@@ -202,6 +202,11 @@ def validate_checkpoint_state(cfg, trainer, checkpoint):
         if model is not None:
             torch.testing.assert_close(
                 policy_state_dict(model), state, rtol=0, atol=0, check_device=False
+            )
+            torch.testing.assert_close(
+                model.normalizer.state_dict(),
+                trainer.train_loader.dataset.get_normalizer(cfg.normalization).state_dict(),
+                rtol=0, atol=0, check_device=False,
             )
 
 
@@ -264,7 +269,7 @@ def capture_policy_predictions(model, ema_model, batch):
     )
 
 
-def validate_policy_restoration(saved_config, checkpoint_path, snapshot, *, device):
+def validate_policy_restoration(checkpoint_path, snapshot, *, device):
     """Check restored raw/EMA policies without owning or modifying a Trainer."""
     obs = dict_apply(snapshot["obs"], lambda x: x.to(device))
     kwargs = dict_apply(snapshot["prediction_kwargs"], lambda x: x.to(device))
@@ -272,7 +277,7 @@ def validate_policy_restoration(saved_config, checkpoint_path, snapshot, *, devi
     rng_state = get_rng_state(device)
     try:
         for use_ema, expected in snapshot["predictions"].items():
-            restored = restore_policy(saved_config, checkpoint_path, use_ema=use_ema, device=device)
+            restored = restore_policy(checkpoint_path, use_ema=use_ema, device=device)
             set_rng_state(snapshot["rng_state"], device)
             with torch.inference_mode():
                 actual = restored.predict_action(obs, **kwargs)["future_actions"].cpu()
@@ -302,6 +307,9 @@ def validate_training(
     batch_check=validate_data_batch, deployment_check=None,
 ):
     """Run the same bounded training/restoration checks for every policy."""
+    from dexmani_policy.training.common.data import build_dataset_and_normalizer
+    from dexmani_policy.training.trainer import PolicyTrainer
+
     positive_int(max_updates, "max_updates")
     if resume_updates < 0:
         raise ValueError("resume_updates must be nonnegative")
@@ -359,7 +367,7 @@ def validate_training(
                 del trainer
                 experiment = source.parent.parent
                 restored = validate_policy_restoration(
-                    load_experiment_config(experiment), source, snapshot, device=device,
+                    source, snapshot, device=device,
                 )
                 report["training"].append({
                     "phase": phase, "updates": checkpoint.global_step - start_step,
@@ -535,12 +543,14 @@ def validate_dataset_layouts():
     from dexmani_policy.datasets.aux.r3d_dataset import R3DAuxDataset
     from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
     from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
+    from dexmani_policy.datasets.obs.cordvip_dataset import CordViPDataset
     from dexmani_policy.training.pretrain.hand_prior.vqvae import prepare_policy_data
 
     split = dict(episode_ends=[8, 16, 24], train_indices=[0], val_indices=[1])
     rng = np.random.default_rng(3)
     arrays = {name: rng.normal(size=shape).astype(np.float32) for name, shape in {
         'action': (24, 19), 'action_ee': (24, 21), 'joint_state': (24, 19), 'point_cloud': (24, 5, 6),
+        'hand_pointcloud': (24, 5, 6), 'object_pointcloud': (24, 1024, 6), 'contact_map': (24, 1024),
     }.items()}
     windows = 0
     with tempfile.TemporaryDirectory(prefix='dataset-contract-') as directory:
@@ -549,6 +559,20 @@ def validate_dataset_layouts():
         root.create_dataset('meta/episode_ends', data=np.array(split['episode_ends']))
         for key, values in arrays.items():
             root.create_dataset(f'data/{key}', data=values, chunks=(3, *values.shape[1:]))
+        cordvip = CordViPDataset(directory, horizon=4, obs_horizon=2, pad_before=1,
+                                pad_after=2, split_manifest=split)
+        for view in (cordvip, cordvip.get_validation_dataset()):
+            for index in range(len(view)):
+                rows = view.sampler.sample_source_rows(index)[:2]
+                batch = view[index]
+                for key in view.sensor_modalities:
+                    expected = arrays[key][rows]
+                    if key in POINT_CLOUD_FIELDS:
+                        expected = expected[..., :3]
+                    np.testing.assert_array_equal(batch['obs'][key].numpy(), expected)
+                    assert batch['obs'][key].dtype == torch.float32
+                np.testing.assert_array_equal(batch['contact_map'].numpy(), arrays['contact_map'][rows])
+                windows += 1
         for cls in (RobotDataset, R3DAuxDataset, LatentFlowDataset):
             for pc_dim in (3, 6):
                 options = dict(data_semantics=HAND_ACTION_SEMANTICS) if cls is LatentFlowDataset else dict(pad_after=2)
@@ -629,10 +653,267 @@ def validate_dataset_layouts():
     return {'status': 'passed', 'windows': windows, 'hand_reads': 'one pass per selected field'}
 
 
+def validate_experiment_paths():
+    import os
+    from unittest import TestCase
+
+    from dexmani_policy.common.experiments import discover_milestone_checkpoints, resolve_policy_checkpoint
+    from dexmani_policy.training.common.resume import archive_resume_milestones
+
+    check = TestCase()
+    with tempfile.TemporaryDirectory(prefix='experiment-contract-') as directory:
+        root = Path(directory) / 'source'
+        checkpoints = root / 'checkpoints'
+        checkpoints.mkdir(parents=True)
+        files = [checkpoints / f'epoch=1-step={step}-milestone={pct}pct.pt' for step, pct in ((2, 20), (4, 40), (6, 60))]
+        for path in files:
+            path.write_bytes(path.name.encode())
+        (checkpoints / 'latest.pt').symlink_to(files[-1].name)
+        selection = dict(ckpt_relpath=str(files[0].relative_to(root)), global_step=2,
+                         inference=dict(use_ema=False, inference_steps=3, action_steps=2),
+                         selection_result='selection.json')
+        (root / 'best_ckpt.json').write_text(json.dumps(selection))
+        for experiment in (root, Path(os.path.relpath(root))):
+            assert [item.path for item in discover_milestone_checkpoints(experiment)] == files
+            for selector, expected in (('best', files[0]), ('latest', files[-1]), ('40pct', files[1]),
+                                       (files[0], files[0]), (os.path.relpath(files[0]), files[0])):
+                path, record = resolve_policy_checkpoint(experiment, selector)
+                assert path == expected
+                assert record == (selection if selector == 'best' else None)
+        assert resolve_policy_checkpoint(root, files[1].name, relative_to=checkpoints)[0] == files[1]
+        for selector in ('80pct', 'missing.pt'):
+            with check.assertRaises(FileNotFoundError):
+                resolve_policy_checkpoint(root, selector, relative_to=checkpoints)
+        outside = Path(directory) / 'outside.pt'
+        outside.write_bytes(b'outside')
+        (checkpoints / 'outside.pt').symlink_to(outside)
+        for selector in (outside, checkpoints / 'outside.pt', checkpoints):
+            expect_value_error(lambda: resolve_policy_checkpoint(root, selector))
+        with patch('torch.load', side_effect=AssertionError('archive must not deserialize')):
+            for max_step, expected in ((0, []), (4, files[:2])):
+                destination = Path(directory) / f'resume-{max_step}'
+                archive_resume_milestones(files[-1], destination, max_step=max_step)
+                actual = sorted((destination / 'checkpoints').iterdir())
+                assert [path.name for path in actual] == [path.name for path in expected]
+                assert [path.read_bytes() for path in actual] == [path.read_bytes() for path in expected]
+            with check.assertRaises(FileExistsError):
+                archive_resume_milestones(files[-1], destination, max_step=4)
+    return {'status': 'passed', 'checks': 'selectors, relative roots, experiment boundary, file-only archive'}
+
+
+def validate_resume_facts():
+    import copy
+    from types import SimpleNamespace
+
+    from dexmani_policy.training.common.config import assemble_effective_config
+
+    cfg = OmegaConf.create(dict(agent={}, dataset={}, training=dict(lr_scheduler='cosine')))
+    model = SimpleNamespace(inference_metadata={'control_action_dim': 19}, effective_config={})
+    description = dict(
+        normalization_dims={'action': 19}, real_runtime={'dt': 0.05},
+        hand_data=dict(contract={'dt': 0.05}, provenance={'source_id': 'same', 'zarr_path': '/old/data.zarr'}),
+        split_manifest=dict(episode_ends=[4], train_indices=[0], val_indices=[]),
+    )
+    saved = OmegaConf.to_container(assemble_effective_config(cfg, description, model), resolve=True)
+    checkpoint = SimpleNamespace(effective_config=saved)
+    moved = copy.deepcopy(description)
+    moved['hand_data']['provenance']['zarr_path'] = '/new/data.zarr'
+    resumed = assemble_effective_config(OmegaConf.create(saved), moved, model, checkpoint=checkpoint)
+    assert resumed.hand_data.provenance.zarr_path == '/new/data.zarr'
+    assert saved['hand_data']['provenance']['zarr_path'] == '/old/data.zarr'
+    assert moved['hand_data']['provenance']['zarr_path'] == '/new/data.zarr'
+    assert OmegaConf.is_readonly(resumed)
+    for key in ('normalization_dims', 'real_runtime', 'hand_data', 'policy_metadata'):
+        changed, actual_model = copy.deepcopy(moved), copy.deepcopy(model)
+        if key == 'policy_metadata':
+            actual_model.inference_metadata['control_action_dim'] = 18
+        elif key == 'normalization_dims':
+            changed[key]['action'] = 18
+        elif key == 'real_runtime':
+            changed[key]['dt'] = 0.1
+        else:
+            changed[key]['provenance']['source_id'] = 'different'
+        expect_value_error(lambda: assemble_effective_config(OmegaConf.create(saved), changed, actual_model, checkpoint=checkpoint))
+    for key in ('real_runtime', 'hand_data'):
+        changed = {name: value for name, value in moved.items() if name != key}
+        expect_value_error(lambda: assemble_effective_config(OmegaConf.create(saved), changed, model, checkpoint=checkpoint))
+    return {'status': 'passed', 'checks': 'relocation, actual data/model changes and missing metadata'}
+
+
 def validate_common_contracts(device):
     return {
+        'experiment_paths': validate_experiment_paths(),
+        'resume_facts': validate_resume_facts(),
         'action_recipes': validate_action_recipes(),
         'ema': validate_ema_updates(device),
         'fps': validate_fps(device),
         'datasets': validate_dataset_layouts(),
     }
+
+
+def validate_pretrained_observation_transfer(config):
+    import hydra
+    import zarr
+    from dexmani_policy.agents.policies.afro import AFROPolicy
+    from dexmani_policy.training.common.data import build_dataset_and_normalizer
+    from dexmani_policy.training.trainer import PolicyTrainer
+    from dexmani_policy.training.pretrain.obs.afro import AFROPretrain
+    from dexmani_policy.training.pretrain.obs.cordvip import CordViPPretrain
+    from dexmani_policy.training.pretrain.obs.common import save_run
+
+    is_afro = issubclass(hydra.utils.get_class(config.agent._target_), AFROPolicy)
+    method = 'afro' if is_afro else 'cordvip'
+    cfg = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
+    cfg.agent.update(dict(down_dims=[16, 32], diffusion_step_embed_dim=16, num_inference_steps=2))
+    cfg.dataset.augmentation_cfg = None
+    cfg.dataset.max_train_episodes = None
+    cfg.dataloader.update(dict(batch_size=2, num_workers=0, pin_memory=False))
+    cfg.training.update(dict(use_compile=False, use_bfloat16=False, use_ema=True, lr_warmup_steps=0))
+    cfg.training.loop.update(dict(total_train_steps=10, log_interval_steps=1, gradient_accumulation_steps=1))
+    cfg.optimizer.update(dict(lr=1e-4, obs_lr=1e-4))
+    cfg.workspace.wandb_cfg = None
+    with open_dict(cfg):
+        cfg.ema = {'_target_': 'dexmani_policy.training.common.optimization.EMA'}
+    fields = ('point_cloud',) if is_afro else ('hand_pointcloud', 'object_pointcloud', 'joint_state')
+    spec = {key: cfg.normalization[key] for key in fields}
+    pretrained = AFROPretrain(spec) if is_afro else CordViPPretrain(spec, n_obs_steps=cfg.n_obs_steps)
+    encoder = pretrained.visual if is_afro else pretrained.obs_encoder
+    for index, (key, field) in enumerate(pretrained.normalizer.fields.items()):
+        field.scale.fill_(2.5 + index)
+        field.offset.fill_(0 if spec[key] in {'rms', 'max_abs'} else -4.5 - index)
+    inherited = {key: value.clone() for key, value in pretrained.normalizer.state_dict().items()}
+
+    with tempfile.TemporaryDirectory(prefix=f'{method}-transfer-') as temporary:
+        directory = Path(temporary)
+        cfg.zarr_path = cfg.dataset.zarr_path = str(directory / 'data.zarr')
+        frames = max(8, cfg.horizon + 2)
+        ends = [frames, 2 * frames]
+        cfg.dataset.split_manifest = dict(episode_ends=ends, train_indices=[0], val_indices=[1])
+        root = zarr.open_group(cfg.dataset.zarr_path, mode='w')
+        root.create_dataset('meta/episode_ends', data=np.array(ends))
+        rng = np.random.default_rng(7)
+        for key in (*cfg.dataset.sensor_modalities, 'action'):
+            shape = (ends[-1], 8, cfg.agent.pc_dim) if key in POINT_CLOUD_FIELDS else (ends[-1], 19)
+            root.create_dataset(f'data/{key}', data=(rng.normal(size=shape) * 3 + 12).astype(np.float32))
+        export_cfg = load_policy_config(f'pretrain/obs/{method}')
+        export_cfg.normalization = spec
+        if not is_afro:
+            export_cfg.n_obs_steps = cfg.n_obs_steps
+        export_cfg.workspace.output_dir = str(directory)
+        export_cfg.training.device = 'cpu'
+        optimizer = torch.optim.AdamW(pretrained.parameters(), lr=1e-4)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1)
+        save_run(pretrained, encoder, optimizer, scheduler, export_cfg, 0, 0)
+        path = directory / 'encoder.pt'
+        payload = torch.load(path, weights_only=True)
+        assert set(payload) == {'encoder_state', 'normalizer_state'}
+        torch.testing.assert_close(payload['normalizer_state'], inherited, rtol=0, atol=0)
+        assert all(t.device.type == 'cpu' and not t.requires_grad for t in payload['encoder_state'].values())
+        assert all(t.device.type == 'cpu' and t.dtype == torch.float32 and not t.requires_grad
+                   for t in payload['normalizer_state'].values())
+        cfg.agent.pretrained_path = str(path)
+        dataset, normalizer, description = build_dataset_and_normalizer(cfg)
+        validation = dataset.get_validation_dataset()
+        downstream = {key: value.clone() for key, value in normalizer.state_dict().items()}
+        expected = {**downstream, **inherited}
+        assert all(not torch.equal(value, downstream[key]) for key, value in inherited.items()
+                   if key.endswith('.scale'))
+        batch = next(iter(DataLoader(dataset, batch_size=2)))
+        with torch.no_grad():
+            normalized = {key: pretrained.normalizer[key].normalize(batch['obs'][key])
+                          if key in pretrained.normalizer.fields else batch['obs'][key] for key in fields}
+            features = encoder(normalized['point_cloud'].flatten(0, 1))['global_token'] if is_afro else None
+        del optimizer, scheduler, encoder, pretrained, payload
+
+        def check_normalizer(value):
+            torch.testing.assert_close(value.state_dict(), expected, rtol=0, atol=0, check_device=False)
+            assert all(t.dtype == torch.float32 for t in value.buffers())
+
+        variants = ('frozen', 'finetune', 'scratch') if is_afro else ('finetune', 'scratch')
+        for variant in variants:
+            cfg.agent.pretrained_path = None if variant == 'scratch' else str(path)
+            if is_afro:
+                cfg.agent.freeze_visual = variant == 'frozen'
+            cfg.workspace.output_dir = str(directory / variant)
+            normalizer.load_state_dict(downstream, strict=True)
+            assert validation.get_normalizer(cfg.normalization) is normalizer
+            with patch('torch.load', wraps=torch.load) as load, closing(
+                PolicyTrainer(cfg, dataset, normalizer, description)
+            ) as trainer:
+                assert load.call_count == (0 if variant == 'scratch' else 1)
+                assert dataset.get_normalizer(cfg.normalization) is normalizer
+                assert validation.get_normalizer(cfg.normalization) is normalizer
+                assert all(t.device.type == 'cpu' for t in normalizer.buffers())
+                assert trainer.model.normalizer is not normalizer
+                torch.testing.assert_close(trainer.model.state_dict(), trainer.ema_model.state_dict(), rtol=0, atol=0)
+                if variant == 'scratch':
+                    torch.testing.assert_close(normalizer.state_dict(), downstream, rtol=0, atol=0)
+                    torch.testing.assert_close(trainer.model.normalizer.state_dict(), downstream, check_device=False)
+                else:
+                    for value in (normalizer, trainer.model.normalizer, trainer.ema_model.normalizer):
+                        check_normalizer(value)
+                    for key, value in normalizer.state_dict().items():
+                        assert value.data_ptr() != trainer.model.normalizer.state_dict()[key].data_ptr()
+                    processed = trainer.model.preprocess(dict_apply(batch['obs'], lambda t: t.to(trainer.device)))
+                    for key in fields:
+                        torch.testing.assert_close(processed[key].cpu(), normalized[key].flatten(0, 1))
+                    if is_afro:
+                        with torch.no_grad():
+                            actual = trainer.model.obs_encoder.visual(processed['point_cloud'])['global_token']
+                        torch.testing.assert_close(actual.cpu(), features)
+                        assert all(p.requires_grad == (variant == 'finetune')
+                                   for p in trainer.model.obs_encoder.visual.parameters())
+            del trainer
+
+        if is_afro:
+            cfg.agent.freeze_visual = True
+            invalid = hydra.utils.instantiate(cfg.agent)
+            expect_value_error(lambda: invalid.initialize_training(description))
+            del invalid
+        cfg.agent.pretrained_path = str(path)
+        incomplete = directory / 'missing_normalizer.pt'
+        torch.save({'encoder_state': torch.load(path, weights_only=True)['encoder_state']}, incomplete)
+        invalid = hydra.utils.instantiate(cfg.agent, pretrained_path=str(incomplete))
+        try:
+            invalid.initialize_training(description)
+        except KeyError as error:
+            assert error.args == ('normalizer_state',)
+        else:
+            raise AssertionError('Encoder package silently accepted missing normalization')
+        del invalid
+
+        def check_batch(batch, dataset, run_cfg):
+            validate_data_batch(batch, dataset, run_cfg)
+            check_normalizer(dataset.get_normalizer(run_cfg.normalization))
+            # validate_training calls this after saving, before inference restoration/resume.
+            path.unlink(missing_ok=True)
+
+        report = validate_training(cfg, max_updates=1, resume_updates=1, batch_check=check_batch)
+        assert not path.exists() and len(report['training']) == 2
+        return {'status': 'passed', 'variants': variants, 'training': report['training']}
+
+
+def validate_sat_training(config):
+    import zarr
+
+    cfg = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
+    cfg.agent.update(dict(n_layers=1, num_points=16, num_inference_steps=2))
+    cfg.agent.pc_encoder_config.update(dict(channels=48, num_heads=2, num_patches=4, group_size=4, depth=1))
+    cfg.dataset.augmentation_cfg = None
+    cfg.dataset.max_train_episodes = None
+    cfg.dataloader.update(dict(batch_size=2, num_workers=0, pin_memory=False))
+    cfg.training.update(dict(use_compile=False, use_bfloat16=False, lr_warmup_steps=0))
+    cfg.training.loop.update(dict(total_train_steps=10, log_interval_steps=1, gradient_accumulation_steps=1))
+    frames = max(20, cfg.horizon + 2)
+    ends = [frames, 2 * frames]
+    with tempfile.TemporaryDirectory(prefix='sat-contract-') as directory:
+        root = zarr.open_group(directory, mode='w')
+        root.create_dataset('meta/episode_ends', data=np.array(ends))
+        rng = np.random.default_rng(11)
+        shapes = {'point_cloud': (ends[-1], 16, cfg.agent.pc_dim),
+                  'joint_state': (ends[-1], 19), 'action': (ends[-1], 19)}
+        for key, shape in shapes.items():
+            root.create_dataset(f'data/{key}', data=rng.normal(size=shape).astype(np.float32))
+        cfg.zarr_path = cfg.dataset.zarr_path = directory
+        cfg.dataset.split_manifest = dict(episode_ends=ends, train_indices=[0], val_indices=[1])
+        return validate_training(cfg, max_updates=1, resume_updates=1)

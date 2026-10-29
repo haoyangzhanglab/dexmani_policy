@@ -68,6 +68,24 @@ def validate_config(cfg):
 
 
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
+    metadata = model.inference_metadata
+    if checkpoint is not None:
+        for key, actual in (
+            ("normalization_dims", data_description["normalization_dims"]),
+            ("real_runtime", data_description.get("real_runtime")),
+            ("hand_data", data_description.get("hand_data")),
+            ("policy_metadata", metadata),
+        ):
+            saved = checkpoint.effective_config.get(key)
+            if key == "hand_data":
+                saved, actual = copy.deepcopy(saved), copy.deepcopy(actual)
+                for data in (saved, actual):
+                    if data is not None and "provenance" in data:
+                        # Data relocation does not change hand semantics or holdouts.
+                        data["provenance"].pop("zarr_path")
+            if saved != actual:
+                raise ValueError(f"Resume data/model mismatch: {key}")
+
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
         for key in ("normalization_dims", "real_runtime", "hand_data"):
@@ -76,7 +94,7 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
         effective.dataset.split_manifest = data_description["split_manifest"]
         if "real_runtime" not in data_description:
             effective.pop("real_runtime", None)
-        effective.policy_metadata = model.inference_metadata
+        effective.policy_metadata = metadata
         if checkpoint is None:
             effective.agent.update(model.effective_config)
         if effective.training.lr_scheduler == "cosine_min_lr":

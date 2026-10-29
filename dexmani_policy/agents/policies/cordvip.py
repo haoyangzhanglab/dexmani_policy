@@ -8,7 +8,7 @@ from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordination_encoder import (
     ContactCoordinationEncoder,
 )
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import BasePolicy, module_parameter_group
 
 
 class CordViPObservationEncoder(nn.Module):
@@ -49,17 +49,16 @@ class CordViPPolicy(BasePolicy):
     def prepare_restore_config(cls, config):
         config.pretrained_path = None
 
-    def initialize_training(self, data_description):
+    def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
         if self.pretrained_path is None:
             print("[CordViP] Scratch training; all observation encoder parameters are trainable")
-            return
+            return None
         payload = torch.load(Path(self.pretrained_path).expanduser(), map_location="cpu", weights_only=True)
         self.obs_encoder.encoder.load_state_dict(payload["encoder_state"], strict=True)
+        return payload["normalizer_state"]
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay):
         return [
-            {"params": [p for p in self.action_decoder.parameters() if p.requires_grad],
-             "lr": lr, "weight_decay": weight_decay},
-            {"params": [p for p in self.obs_encoder.parameters() if p.requires_grad],
-             "lr": obs_lr, "weight_decay": obs_weight_decay},
+            module_parameter_group(self.action_decoder, lr=lr, weight_decay=weight_decay),
+            module_parameter_group(self.obs_encoder, lr=obs_lr, weight_decay=obs_weight_decay),
         ]

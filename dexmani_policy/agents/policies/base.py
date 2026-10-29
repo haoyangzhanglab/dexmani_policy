@@ -34,6 +34,14 @@ def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> li
     return groups
 
 
+def module_parameter_group(module: nn.Module, *, lr: float, weight_decay: float) -> dict:
+    """Apply one decay rate to all trainable parameters, in module order."""
+    return {
+        "params": [p for p in module.parameters() if p.requires_grad],
+        "lr": lr, "weight_decay": weight_decay,
+    }
+
+
 class BasePolicy(nn.Module):
     """Shared observation preprocessing, training and action-window interfaces."""
 
@@ -106,7 +114,6 @@ class BasePolicy(nn.Module):
         validate = getattr(self.obs_encoder, "validate_normalization", None)
         if validate is not None:
             validate(spec)
-        self.normalization_spec = dict(spec)
         self.normalization_dims = dict(feature_dims)
         if self.normalization_dims["action"] != self.action_dim:
             raise ValueError("Normalizer action width must match the full prediction layout")
@@ -114,8 +121,8 @@ class BasePolicy(nn.Module):
             key: feature_dims[key] for key, mode in spec.items() if mode != "identity"
         }))
 
-    def initialize_training(self, data_description) -> None:
-        """Initialize fresh weights against the data recipe; checkpoints skip this step."""
+    def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
+        """Initialize fresh weights and optionally return inherited normalization state."""
 
     def load_normalizer(self, normalizer: LinearNormalizer) -> None:
         self.normalizer.load_state_dict(normalizer.state_dict())

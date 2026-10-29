@@ -35,31 +35,28 @@ class CordViPDataset(torch.utils.data.Dataset):
             val_ratio=val_ratio, max_train_episodes=max_train_episodes,
         )
         mask = self.train_mask | self.val_mask
-        fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3),
-                  "joint_state": None, "contact_map": None}
-        validate_fields(self.replay_buffer, mask, fields)
         self.sampler = self.build_sampler(self.train_mask)
+        validate_fields(self.replay_buffer, mask, self.sampler.fields)
         if not len(self.sampler):
             raise ValueError("No CordViP training windows")
         self._normalizer = None
 
     def build_sampler(self, mask):
-        return SequenceSampler(self.replay_buffer, self.horizon, self.pad_before, self.pad_after, mask)
+        fields = {"hand_pointcloud": slice(0, 3), "object_pointcloud": slice(0, 3),
+                  "joint_state": None, "contact_map": None}
+        return SequenceSampler(
+            self.replay_buffer, self.horizon, self.pad_before, self.pad_after, mask,
+            fields=fields, key_first_k={key: self.obs_horizon for key in fields},
+        )
 
     def __len__(self):
         return len(self.sampler)
 
     def __getitem__(self, index):
-        rows = self.sampler.sample_source_rows(index)[:self.obs_horizon]
-        obs = {
-            key: torch.as_tensor(self.replay_buffer.read(
-                key, rows, columns=None if key == "joint_state" else slice(0, 3),
-            ))
-            for key in self.sensor_modalities
-        }
+        sample = self.sampler.sample_sequence(index)
         return {
-            "obs": obs,
-            "contact_map": torch.as_tensor(self.replay_buffer.read("contact_map", rows)),
+            "obs": {key: torch.as_tensor(sample[key]) for key in self.sensor_modalities},
+            "contact_map": torch.as_tensor(sample["contact_map"]),
         }
 
     def get_normalizer(self, spec):
@@ -70,7 +67,7 @@ class CordViPDataset(torch.utils.data.Dataset):
             for key, mode in spec.items():
                 if mode == "identity":
                     continue
-                columns = None if key == "joint_state" else slice(0, 3)
+                columns = self.sampler.fields[key]
                 chunks = (values for _, values in self.replay_buffer.iter_chunks(
                     key, columns=columns, episode_mask=self.train_mask,
                 ))

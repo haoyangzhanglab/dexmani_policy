@@ -1,4 +1,3 @@
-import math
 import os
 from collections.abc import Iterable
 from datetime import datetime
@@ -134,39 +133,14 @@ def validate_tactile_config(cfg):
 
 
 def normalization_feature_shapes(dims):
-    for key, shape in FIELD_FEATURE_SHAPES.items():
-        if key in dims and dims[key] != math.prod(shape):
-            raise ValueError(f"{key}: normalization width must be {math.prod(shape)} for shape {shape}")
     return {
         key: FIELD_FEATURE_SHAPES.get(key, (width,))
         for key, width in dims.items()
     }
 
 
-def validate_depth_recipe(recipe):
-    shape = recipe["shape"]
-    if len(shape) != 2:
-        raise ValueError("Depth recipe shape must be [H,W]")
-    for value in shape:
-        positive_int(value, "depth.shape")
-    scale = recipe["depth_scale_m"]
-    if (
-        recipe["dtype"] != "uint16"
-        or recipe["unit"] != "raw_counts"
-        or isinstance(scale, bool)
-        or not isinstance(scale, (int, float))
-        or not math.isfinite(scale)
-        or scale <= 0
-    ):
-        raise ValueError("Depth requires uint16 raw_counts and finite positive depth_scale_m")
-    return recipe
-
-
-def validate_observation_fields(agent, declared, *, tactile_source=None):
+def validate_observation_fields(agent, declared):
     consumed = set(agent.consumed_observation_fields)
-    source = require_tactile_source(consumed, getattr(agent, "tactile_source", None))
-    if source is not None and source != tactile_source:
-        raise ValueError("Policy tactile_source differs from the configured top-level source")
     declared = set(declared)
     missing = consumed - declared
     unused = declared - consumed

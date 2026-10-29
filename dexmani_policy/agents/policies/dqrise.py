@@ -16,7 +16,7 @@ from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import BasePolicy, module_parameter_group
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.hand_representation import validate_hand_coordinates, validate_pretraining_split
 
@@ -174,15 +174,8 @@ class DQRISEPolicy(BasePolicy):
 
     def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay) -> list[dict]:
         return [
-            {
-                "params": [p for p in module.parameters() if p.requires_grad],
-                "lr": rate,
-                "weight_decay": decay,
-            }
-            for module, rate, decay in (
-                (self.action_decoder, lr, weight_decay),
-                (self.obs_encoder, obs_lr, obs_weight_decay),
-            )
+            module_parameter_group(self.action_decoder, lr=lr, weight_decay=weight_decay),
+            module_parameter_group(self.obs_encoder, lr=obs_lr, weight_decay=obs_weight_decay),
         ]
 
     @classmethod

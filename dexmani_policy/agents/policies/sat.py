@@ -83,7 +83,7 @@ class SATObservationEncoder(nn.Module):
 
 
 class SATPolicy(BasePolicy):
-    """Structural Action Transformer with [B,Da,T] trajectory tokens."""
+    """Structural Action Transformer with joint-trajectory tokens and [B,T,Da] actions."""
 
     supported_action_keys = ("action",)
 
@@ -157,25 +157,3 @@ class SATPolicy(BasePolicy):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-
-    def compute_loss(self, batch: dict, *, log_metrics: bool = True) -> tuple[torch.Tensor, dict]:
-        condition = self.encode_observation(batch["obs"])
-        normalized_actions = self.normalizer["action"].normalize(batch["action"])
-        return self.action_decoder.compute_loss(
-            condition.unsqueeze(1), normalized_actions.transpose(1, 2), log_metrics=log_metrics
-        )
-
-    @torch.no_grad()
-    def predict_action_from_condition(
-        self, condition: torch.Tensor, inference_steps: int | None = None,
-        *, generator: torch.Generator | None = None,
-    ) -> dict[str, torch.Tensor]:
-        """Sample joint trajectories [B, Da, T] and return physical actions [B, T, Da]."""
-        prediction = self.action_decoder.predict_action(
-            condition.unsqueeze(1), (condition.shape[0], self.action_dim, self.horizon),
-            inference_steps=inference_steps, generator=generator,
-        )
-        prediction = prediction.transpose(1, 2)
-
-        prediction = self.normalizer["action"].unnormalize(prediction)
-        return self.format_action_output(prediction)

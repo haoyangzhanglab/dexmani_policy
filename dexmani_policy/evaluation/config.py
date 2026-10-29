@@ -12,7 +12,7 @@ from dexmani_policy.common.config import (
     validate_action_mode,
 )
 from dexmani_policy.common.experiments import (
-    resolve_milestone_path,
+    resolve_checkpoint_path,
     resolve_policy_checkpoint,
 )
 from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
@@ -160,22 +160,19 @@ def load_eval_config(
             raise ValueError("Selection has not completed successfully")
         record["selection_result"] = reference
         return frozen_test_config(
-            record, resolve_milestone_path(root, record["ckpt_relpath"]),
+            record, resolve_checkpoint_path(root, root / record["ckpt_relpath"]),
             device=overrides.get("training", {}).get("device"),
         )
 
     cfg = load_experiment_config(root)
     source = {"phase": "ordinary", "heldout_from_selection": False}
     checkpoint = str(checkpoint)
-    path, defaults, selection_source = resolve_policy_checkpoint(
-        root, checkpoint, cfg, relative_to=root / "checkpoints",
+    path, selection = resolve_policy_checkpoint(
+        root, checkpoint, relative_to=root / "checkpoints",
     )
-    if not path.is_relative_to(root / "checkpoints"):
-        raise ValueError("Checkpoint must be inside the selected experiment/checkpoints")
-    if checkpoint == "best":
-        inference = {key: defaults[key] for key in ("use_ema", "inference_steps", "action_steps")}
-        overrides = OmegaConf.merge({"eval": inference}, overrides)
-        source.update(selection_source)
+    if selection is not None:
+        overrides = OmegaConf.merge({"eval": selection["inference"]}, overrides)
+        source.update({key: selection[key] for key in ("selection_result", "global_step")})
     cfg = merge_eval_config(cfg, overrides)
     evaluation = cfg["eval"]
     seeds = evaluation.get("seeds")

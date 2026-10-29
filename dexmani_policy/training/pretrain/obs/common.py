@@ -48,6 +48,7 @@ def save_run(model, encoder, optimizer, scheduler, cfg, epoch, step):
     config = OmegaConf.to_container(cfg, resolve=True)
     payload = {
         "encoder_state": {key: value.detach().cpu() for key, value in encoder.state_dict().items()},
+        "normalizer_state": {key: value.detach().cpu() for key, value in model.normalizer.state_dict().items()},
     }
     with atomic_path(output / "encoder.pt") as temporary:
         torch.save(payload, temporary)

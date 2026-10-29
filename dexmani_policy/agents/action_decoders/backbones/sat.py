@@ -1,4 +1,4 @@
-"""Structural Action Transformer: each [B, Da, T] token is one joint trajectory."""
+"""Structural Action Transformer: [B,T,Da] I/O, internal joint-trajectory tokens."""
 
 import torch
 from torch import nn
@@ -203,11 +203,12 @@ class SAT(nn.Module):
         timestep: torch.Tensor,
         context: torch.Tensor,
     ) -> torch.Tensor:
-        if x.ndim != 3 or x.shape[1:] != (19, 16):
-            raise ValueError("SAT action must be [B,19,16]")
-        if context.shape != (x.shape[0], 1, 256):
-            raise ValueError("SAT context must be [B,1,256]")
-        x = self.x_embedder(x) + self.joint_embedding()
+        if x.ndim != 3 or x.shape[1:] != (16, 19):
+            raise ValueError("SAT action must be [B,16,19]")
+        if context.shape != (x.shape[0], 256):
+            raise ValueError("SAT context must be [B,256]")
+        x = self.x_embedder(x.transpose(1, 2)) + self.joint_embedding()
+        context = context.unsqueeze(1)
         time_c = self.timestep_embedder(batch_timesteps(timestep, x))
 
         # Observations attend only to observations; actions attend to both streams.
@@ -216,4 +217,4 @@ class SAT(nn.Module):
         for block in self.blocks:
             x = block(x, context, time_c, attn_mask)
 
-        return self.final_layer(x, time_c)
+        return self.final_layer(x, time_c).transpose(1, 2)

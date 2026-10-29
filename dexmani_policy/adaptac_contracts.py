@@ -58,7 +58,6 @@ def tactile_smoke_attrs(source, task_name="pick_apple_messy"):
 
 def validate_tactile_numerics():
     from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
-    from dexmani_policy.common.config import normalization_feature_shapes
     from dexmani_policy.datasets.common.validation import validate_tactile_source
 
     generator = torch.Generator().manual_seed(24)
@@ -124,7 +123,6 @@ def validate_tactile_numerics():
         validate_tactile_source(tactile_smoke_attrs(source), source)
         expect_value_error(lambda: validate_tactile_source(tactile_smoke_attrs(source), "real" if source == "sim" else "sim"))
         expect_value_error(lambda: validate_tactile_source({}, source))
-    expect_value_error(lambda: normalization_feature_shapes({"taxel_tactile_force": 3}))
     return {"status": "passed", "checks": "streaming, units, shapes, affine boundaries, patch descriptors, source"}
 
 
@@ -204,6 +202,9 @@ def validate_tactile_roundtrip(cfg):
         validate_adaptac_batch(batch, dataset, config)
         with closing(PolicyTrainer(config, dataset, normalizer, description)) as trainer:
             model = trainer.model
+            assert ("finger_tactile_force" in model.normalizer.fields) == (
+                config.normalization.finger_tactile_force != "identity"
+            )
             assert model.force_dim == 15 and model.force_fusion.force_proj.in_features == 15 * (config.horizon + 1)
             inputs = dict_apply(batch, lambda x: x.to(trainer.device))
             contract = validate_adaptac_model_contract(model, inputs)
@@ -220,11 +221,8 @@ def validate_tactile_roundtrip(cfg):
             old.effective_config["agent"]["clip_sample"] = False
             invalid_path = checkpoint_path.parent / "invalid_action.pt"
             save_checkpoint(invalid_path, old)
-            with patch("hydra.utils.instantiate", side_effect=AssertionError("invalid recipe must fail before construction")):
-                expect_value_error(lambda: restore_policy(old.effective_config, invalid_path, use_ema=False, device=cfg.training.device))
-            wrong_source = {**saved, "tactile_source": "sim" if cfg.tactile_source == "real" else "real"}
-            expect_value_error(lambda: restore_policy(wrong_source, checkpoint_path, use_ema=False, device=cfg.training.device))
-            restored = validate_policy_restoration(saved, checkpoint_path, snapshot, device=torch.device(cfg.training.device))
+            expect_value_error(lambda: restore_policy(invalid_path, use_ema=False, device=cfg.training.device))
+            restored = validate_policy_restoration(checkpoint_path, snapshot, device=torch.device(cfg.training.device))
             info = inspect_policy(config.workspace.output_dir, checkpoint="latest", weights="raw")
             observation = {k: v[0].numpy() for k, v in batch["obs"].items()}
             with closing(load_policy(info, device=cfg.training.device, seed=42)) as runtime:
@@ -326,9 +324,6 @@ def validate_adaptac_model_contract(model, batch):
     assert model.force_predictor.noise_scheduler.config.prediction_type == "sample"
     assert not model.force_predictor.noise_scheduler.config.clip_sample
     assert model.action_decoder.noise_scheduler.config.prediction_type == "epsilon"
-    assert ("finger_tactile_force" in model.normalizer.fields) == (
-        model.normalization_spec["finger_tactile_force"] != "identity"
-    )
     loss, metrics = model.compute_loss(batch, log_metrics=False)
     assert torch.isfinite(loss) and metrics == {}
     gradient_results = {}

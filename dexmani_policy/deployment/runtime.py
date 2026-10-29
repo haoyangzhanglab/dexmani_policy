@@ -21,7 +21,7 @@ def load_policy(info, *, device="cuda:0", seed=0):
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
     agent = restore_policy(
-        info.saved_config, info.checkpoint_path, use_ema=info.weights == "ema", device=device
+        info.checkpoint_path, use_ema=info.weights == "ema", device=device
     )
     return PolicyRuntime(agent, info, device=device, seed=seed)
 

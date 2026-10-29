@@ -36,18 +36,7 @@ def load_checkpoint(path: str | Path, *, mmap: bool = False) -> Checkpoint:
 
     # Project checkpoints contain trusted training state, not just tensors.
     payload = torch.load(path, map_location="cpu", weights_only=False, mmap=mmap)
-    checkpoint = Checkpoint(**payload)
-    raw = checkpoint.model_state
-    ema = checkpoint.ema_model_state
-    affine_keys = {key for key in raw if key.startswith("normalizer.")}
-    if ema is not None and affine_keys != {key for key in ema if key.startswith("normalizer.")}:
-        raise ValueError("Raw/EMA normalizer fields differ")
-    for key in affine_keys:
-        if raw[key].dtype != torch.float32:
-            raise ValueError(f"Normalizer buffer must be FP32: {key}")
-        if ema is not None and (ema[key].dtype != torch.float32 or not torch.equal(raw[key], ema[key])):
-            raise ValueError(f"Raw/EMA normalizer mismatch: {key}")
-    return checkpoint
+    return Checkpoint(**payload)
 
 
 def policy_state_dict(model) -> dict:
@@ -56,8 +45,6 @@ def policy_state_dict(model) -> dict:
 
 
 def load_policy_state(model, state):
-    from dexmani_policy.common.normalizer import validate_normalizer_state
-
     # Preserve checkpoint precision, including FP32 EMA parameters.
     for name, parameter in model.named_parameters():
         saved = state[name]
@@ -68,7 +55,6 @@ def load_policy_state(model, state):
         ):
             parameter.data = parameter.data.to(dtype=saved.dtype)
     model.load_state_dict(state, strict=True)
-    validate_normalizer_state(model.normalizer)
 
 
 def prepare_restore_config(agent_cfg):
@@ -83,17 +69,13 @@ def prepare_restore_config(agent_cfg):
     return agent_cfg
 
 
-def restore_policy(saved_config, checkpoint_path, *, use_ema, device):
+def restore_policy(checkpoint_path, *, use_ema, device):
     import hydra
 
-    from dexmani_policy.common.config import validate_observation_fields
     from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 
     checkpoint = load_checkpoint(checkpoint_path, mmap=True)
     cfg = checkpoint.effective_config
-    recipe = _inference_config(cfg)
-    if recipe != _inference_config(saved_config):
-        raise ValueError("Checkpoint inference recipe mismatch with saved config")
     state = checkpoint.ema_model_state if use_ema else checkpoint.model_state
     if state is None:
         raise ValueError("Requested EMA weights are absent; select raw explicitly")
@@ -103,15 +85,10 @@ def restore_policy(saved_config, checkpoint_path, *, use_ema, device):
 
     rng_state = get_rng_state()
     try:
-        agent = hydra.utils.instantiate(recipe["agent"])
+        agent = hydra.utils.instantiate(prepare_restore_config(cfg["agent"]))
     finally:
         set_rng_state(rng_state)
 
-    if agent.inference_metadata != cfg["policy_metadata"]:
-        raise ValueError("Restored policy metadata differs from saved construction")
-    validate_observation_fields(
-        agent, cfg["dataset"]["sensor_modalities"], tactile_source=cfg.get("tactile_source"),
-    )
     agent.checkpoint_step = global_step
     agent.set_normalization_spec(
         cfg["normalization"], cfg["normalization_dims"], action_key=cfg["action_key"],
@@ -121,29 +98,3 @@ def restore_policy(saved_config, checkpoint_path, *, use_ema, device):
     agent.to(device)
     agent.eval()
     return agent
-
-
-def _inference_config(config):
-    from dexmani_policy.common.config import validate_normalization_config, validate_tactile_config
-    from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
-
-    validate_normalization_config(config)
-    validate_tactile_config(config)
-
-    dataset = config["dataset"]
-    inputs = {
-        key: dataset.get(key) for key in ("sensor_modalities", "pc_dim", "history_steps")
-    }
-    inputs["rgb"] = rgb_preprocessing_kwargs(dataset)
-
-    return {
-        "agent": prepare_restore_config(config["agent"]),
-        "policy_metadata": config["policy_metadata"],
-        "inputs": inputs,
-        "normalization": config["normalization"],
-        "normalization_dims": config["normalization_dims"],
-        "action_key": config["action_key"],
-        "task_name": config.get("task_name"),
-        "real_runtime": config.get("real_runtime"),
-        "tactile_source": config.get("tactile_source"),
-    }

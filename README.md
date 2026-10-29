@@ -42,7 +42,7 @@ bash scripts/eval/eval_pipeline.sh dp3 '<task>' '<run>'
 
 配置检查不代表完整训练可运行。续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
-action 归一化由策略和动作表示固定：连续 joint 使用 `auto`（等价 `limits`），EEF 只使用分段 `auto`，rot6d 保持 identity；DQ、LAMP、LatentFlow/codec 和 R3D 辅助目标保留各自规则。`action=rms/gaussian/max_abs` 等非既定配方会在配置或恢复边界报错，关闭 clipping 也不能绕过。新训练拟合训练划分的 affine，续训、评测和部署复用保存值，不重新标定旧 checkpoint。
+action 归一化由策略和动作表示固定：连续 joint 使用 `auto`（等价 `limits`），EEF 只使用分段 `auto`，rot6d 保持 identity；DQ、LAMP、LatentFlow/codec 和 R3D 辅助目标保留各自规则。`action=rms/gaussian/max_abs` 等非既定配方会在配置或恢复边界报错，关闭 clipping 也不能绕过。新训练先拟合训练划分的 affine；使用 AFRO/CordViP 预训练包时，包内观测统计覆盖对应字段，其余保留下游值。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
 
 FPS 使用 PyTorch3D 原生随机起点。评测关闭随机起点、选点噪声和输出 shuffle；训练随机数消耗及距离并列时的选点可能与旧实现不同，checkpoint 结构兼容不代表随机轨迹逐位续接。
 
@@ -88,11 +88,11 @@ python dexmani_policy/smoke_test.py --max-updates 4 --resume-updates 2 \
 bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/<run>'
 ```
 
-`smoke_test.py` 保留 CLI；公共检查在 `smoke_checks.py`，触觉检查及合成数据在 `adaptac_contracts.py`，依赖不反向导入 CLI。`--contracts-only` 对任意策略运行公共 action 配方、EMA 数值/恢复、原生 FPS 和 Dataset 回归；AdapTac 按实际策略类追加触觉检查，修改 policy_name 不会跳过。公共 FPS 检查缺少原生后端时报告 not_run，不宣称通过；AdapTac 模型检查仍需该后端。
+`smoke_test.py` 保留 CLI；公共检查在 `smoke_checks.py`，触觉检查及合成数据在 `adaptac_contracts.py`，依赖不反向导入 CLI。`--contracts-only` 对任意策略运行公共 action 配方、EMA 数值/恢复、原生 FPS 和 Dataset 回归，并按实际策略类追加检查：AFRO/CordViP 验证统计迁移及预训练文件缺失后的短训恢复，SAT 验证公共短训恢复路径，AdapTac 验证触觉契约；修改 policy_name 不会跳过。检查使用临时合成数据，保留所选归一化和输入布局，缩小网络与执行预算。公共 FPS 检查缺少原生后端时报告 not_run，不宣称通过；SAT/AdapTac 模型检查仍需该后端。
 
-契约检查使用缩小的 eager 网络、32 点点云和合成 episode，保留所选来源、encoder、normalization、horizon 和 point-cloud channels；梯度、guide 与恢复检查共用实际 Dataset 拟合的模型。短训命令使用实际配置，不再自动重复合成契约检查；`--compile` 仅用于短训模式。
+AdapTac 契约检查使用缩小的 eager 网络、32 点点云和合成 episode，保留所选来源、encoder、normalization、horizon 和 point-cloud channels；梯度、guide 与恢复检查共用实际 Dataset 拟合的模型。短训命令使用实际配置，不再自动重复合成契约检查；`--compile` 仅用于短训模式。
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。推理不需要原训练数据；续训仍需原数据及保存的数据划分。恢复使用当前构造接口和严格 state_dict 加载，并核对保存配方；不转换参数、重拟合 affine 或迁移产物。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。推理不需要原训练数据；续训仍需原数据及保存的数据划分。恢复直接使用 checkpoint 内置配置和严格 state_dict 加载，保留参数精度；不重拟合 affine 或迁移产物。评测与部署选择的文件须位于当前实验的 checkpoints 目录；实验 config.yaml 与 checkpoint 按配套、未手工篡改的内部产物使用。
 
 数据边界必须区分来源：sim 是世界系 N，来自接触 impulse/physics_dt，再按控制周期子步进行有符号向量平均，目前没有 dense producer。real aggregate/dense 分别来自 SDK `calc_force`/`raw_force`，不是代码中的求和关系；单位为 `sdk_native_unknown_physical_scale`，轴为 `sdk_sensor_axes_not_world_frame`，canonical 尚未完整复制这些 raw 元信息。`fingertip_xyz` 只有位置，不能用于完成轴变换。五指顺序为 thumb/index/middle/ring/pinky，dense 保留 SDK 索引顺序。
 
