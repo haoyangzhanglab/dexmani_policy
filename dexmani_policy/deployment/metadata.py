@@ -27,11 +27,23 @@ class PolicyInfo:
     pc_dim: int | None
     supported_execution_modes: tuple[str, ...]
     action_context_shapes: dict
+    control_dt_s: float | None
+    depth_config: dict | None
+    pointcloud_config: dict | None
+    hand_pointcloud_config: dict | None
+    fingertip_link_names: tuple[str, ...] | None
+    tactile_source: str | None
+
+    @property
+    def hand_history_steps(self):
+        shape = self.action_context_shapes.get("hand_history")
+        return shape[0] if shape is not None else None
 
     def to_dict(self):
         result = {item.name: getattr(self, item.name) for item in fields(self)}
         result["experiment_dir"] = str(self.experiment_dir)
         result["checkpoint_path"] = str(self.checkpoint_path)
+        result["hand_history_steps"] = self.hand_history_steps
         return result
 
 
@@ -51,6 +63,8 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         raise ValueError("weights must be ema or raw")
     steps = positive_int(inference_steps, "inference_steps")
     agent, dataset, metadata = cfg["agent"], cfg["dataset"], cfg["policy_metadata"]
+    deployment = cfg.get("deployment_metadata", {})
+    fingertip_links = deployment.get("fingertip_link_names")
     return PolicyInfo(
         experiment_dir=directory,
         checkpoint_path=path,
@@ -71,4 +85,10 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         pc_dim=dataset.get("pc_dim"),
         supported_execution_modes=tuple(metadata["supported_execution_modes"]),
         action_context_shapes=metadata["action_context_shapes"],
+        control_dt_s=deployment.get("control_dt_s"),
+        depth_config=deployment.get("depth_config"),
+        pointcloud_config=deployment.get("pointcloud_config"),
+        hand_pointcloud_config=deployment.get("hand_pointcloud_config"),
+        fingertip_link_names=tuple(fingertip_links) if fingertip_links is not None else None,
+        tactile_source=cfg.get("tactile_source"),
     )

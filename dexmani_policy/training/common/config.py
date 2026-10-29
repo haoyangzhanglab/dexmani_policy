@@ -90,6 +90,7 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
                 effective[key] = data_description[key]
         effective.dataset.split_manifest = data_description["split_manifest"]
         effective.policy_metadata = metadata
+        effective.deployment_metadata = data_description["deployment_metadata"]
         if checkpoint is None:
             effective.agent.update(model.effective_config)
         if effective.training.lr_scheduler == "cosine_min_lr":

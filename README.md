@@ -93,6 +93,8 @@ bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/
 
 离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`；LAMP 同时传入符合 `info.action_context_shapes` 的 `action_context`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复直接使用 checkpoint 内置配置和严格 state_dict 加载，保留参数精度；不重拟合 affine 或迁移产物。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按配套、未手工篡改的内部产物使用。
 
+训练将 Canonical 的 `dt`、实际 depth 形状/尺度及已用点云、手模板和指尖配方保存为 `deployment_metadata`，沿配置和 checkpoint 保留；`PolicyInfo` 公开 Real 实际消费的配方与已验证的 `tactile_source`。`hand_history_steps` 由模型的 `action_context_shapes.hand_history` 派生，不使用观测 encoder 的历史长度。非 Canonical 或旧产物缺少的 Real 配方保持缺失，inspect 和纯策略推理仍可用，设备入口负责拒绝缺失事实。`processing_source` 仅用于定位加工代码与固定模板；修改数值加工或模板后须重新导出数据。
+
 数据边界必须区分来源：sim 是世界系 N，来自接触 impulse/physics_dt，再按控制周期子步进行有符号向量平均，目前没有 dense producer。real aggregate/dense 分别来自 SDK `calc_force`/`raw_force`，不是代码中的求和关系；单位为 `sdk_native_unknown_physical_scale`，轴为 `sdk_sensor_axes_not_world_frame`，canonical 尚未完整复制这些 raw 元信息。`fingertip_xyz` 只有位置，不能用于完成轴变换。五指顺序为 thumb/index/middle/ring/pinky，dense 保留 SDK 索引顺序。
 
 future 标签从 query+1 的下一观测行开始，真实后继有效，重复末帧补齐后缀不计力损失或误差。零净力、力相消、reset 零值和合法 SDK hold 不代表无效；real 两通道有独立时间戳及有界 previous-valid hold，后继行不能解释为精确瞬时动作后真值。沿用现有数据时钟与 freshness 准入，不插值或补零修复。
@@ -111,6 +113,8 @@ experiments/<policy_name>/<task_name>/<run>/
 
 设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验需保留配置、Checkpoint 和对应源码。
 
+Canonical 数据的 checkpoint resume 要求数据与保存的 split 都有非空 `source_id`。原样搬迁保留 ID，可继续 resume；重新导出的数据获得新 ID，不能复用旧 normalizer。旧数据仍可从头训练、指定 split 或读取评价；需要可靠 resume 时请显式重新导出并开始新实验。
+
 ## 文档
 
 - [项目架构](docs/项目架构.md)：目录职责、数据接口、训练恢复与部署
@@ -119,5 +123,3 @@ experiments/<policy_name>/<task_name>/<run>/
 - [观测预训练](docs/观测预训练.md)：AFRO/CordViP 数据准备、预训练与 encoder 加载
 - [仿真评测机制](docs/仿真评测机制.md)：选点、独立测试与单 Checkpoint 评测
 - [SSH 服务器训练部署](docs/SSH服务器训练部署.md)：远程训练、同步与管理
-
-Canonical 数据的 checkpoint resume 要求数据与保存的 split 都有非空 `source_id`。原样搬迁保留 ID，可继续 resume；重新导出的数据获得新 ID，不能复用旧 normalizer。旧数据仍可从头训练、指定 split 或读取评价；需要可靠 resume 时请显式重新导出并开始新实验。

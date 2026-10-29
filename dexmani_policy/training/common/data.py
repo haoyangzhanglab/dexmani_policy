@@ -35,6 +35,24 @@ def build_dataset(cfg, *, verbose=True):
         "action_start_index": dataset.action_start_index,
         "control_action_dim": buffer[dataset.action_key].shape[-1],
     }
+    deployment = {}
+    if buffer.attrs.get("format") == "dexmani.real.canonical":
+        deployment["control_dt_s"] = buffer.attrs.get("dt")
+        for modality, attr in (
+            ("point_cloud", "pointcloud_config"),
+            ("hand_pointcloud", "hand_pointcloud_config"),
+            ("fingertip_xyz", "fingertip_link_names"),
+        ):
+            if modality in dataset.sensor_modalities:
+                deployment[attr] = buffer.attrs.get(attr)
+        if "depth" in dataset.sensor_modalities:
+            deployment["depth_config"] = {
+                "shape": list(buffer["depth"].shape[1:]),
+                "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
+            }
+        if "processing_source" in buffer.attrs:
+            deployment["processing_source"] = buffer.attrs["processing_source"]
+    description["deployment_metadata"] = deployment
     if hasattr(dataset, "hand_data"):
         description["hand_data"] = dataset.hand_data
     if verbose:
