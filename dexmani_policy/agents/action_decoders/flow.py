@@ -70,22 +70,30 @@ class RectifiedFlow(nn.Module):
         actions: torch.Tensor,
         *,
         log_metrics: bool = True,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        return_features: bool = False,
+    ) -> (
+        tuple[torch.Tensor, dict[str, torch.Tensor]]
+        | tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]
+    ):
         xt, t, target_v = self.sample_training_pair(actions)
-        pred_v = self.model(x=xt, timestep=t, context=cond)
+        if return_features:
+            pred_v, features = self.model(x=xt, timestep=t, context=cond, return_features=True)
+        else:
+            pred_v = self.model(x=xt, timestep=t, context=cond)
         loss = F.mse_loss(pred_v, target_v)
 
-        if not log_metrics:
-            return loss, {}
-
-        with torch.no_grad():
-            metrics = {
-                "loss": loss.detach(),
-                "loss_action": loss.detach(),
-                "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
-                "target_v_magnitude": torch.sqrt(torch.mean(target_v**2)),
-                "t_mean": t.mean(),
-            }
+        metrics = {}
+        if log_metrics:
+            with torch.no_grad():
+                metrics = {
+                    "loss": loss.detach(),
+                    "loss_action": loss.detach(),
+                    "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
+                    "target_v_magnitude": torch.sqrt(torch.mean(target_v**2)),
+                    "t_mean": t.mean(),
+                }
+        if return_features:
+            return loss, metrics, features
         return loss, metrics
 
     @torch.no_grad()

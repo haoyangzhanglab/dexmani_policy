@@ -40,6 +40,8 @@ def validate_config(cfg):
     dataset = cfg.dataset
     if "history_steps" in cfg.agent and dataset.get("history_steps") != cfg.agent.history_steps:
         raise ValueError("Dataset/policy history_steps must match")
+    if "n_action_steps" in dataset and dataset.n_action_steps != cfg.n_action_steps:
+        raise ValueError("dataset.n_action_steps must match n_action_steps")
     if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
         raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
     if dataset.get("sensor_modalities") is None:

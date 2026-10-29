@@ -153,8 +153,10 @@ class DiTXOutput(nn.Module):
             drop=0,
         )
 
-    def forward(self, x):
-        return self.ffn_final(self.norm_final(x))
+    def forward(self, x, *, return_features: bool = False):
+        features = self.norm_final(x)
+        prediction = self.ffn_final(features)
+        return (prediction, features) if return_features else prediction
 
 
 class DiTX(nn.Module):
@@ -231,8 +233,9 @@ class DiTX(nn.Module):
         return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
 
     def forward(
-        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None
-    ) -> torch.Tensor:
+        self, x: torch.Tensor, timestep, context: torch.Tensor, *, context_kv=None,
+        return_features: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if x.ndim != 3 or x.shape[1] != self.horizon:
             raise ValueError("actions must have shape [B, horizon, action_dim]")
         if context.shape[0] != x.shape[0]:
@@ -250,7 +253,7 @@ class DiTX(nn.Module):
                 context_c,
                 context_kv=None if context_kv is None else context_kv[index],
             )
-        return self.final_layer(x)
+        return self.final_layer(x, return_features=return_features)
 
 
 class ConsistencyDiTX(nn.Module):

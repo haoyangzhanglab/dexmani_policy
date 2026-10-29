@@ -50,6 +50,19 @@ FPS 使用 PyTorch3D 原生随机起点。评测关闭随机起点、选点噪�
 
 DQ/LAMP 的手部预训练见 [手部动作表示](docs/手部动作表示.md)；AFRO/CordViP 需先导出 `encoder.pt`，流程见 [观测预训练](docs/观测预训练.md)。模块预训练使用各自预算。
 
+## InterAct-Dex 逐指触觉监督
+
+`interact_dex` 使用六个身体槽的手—场景—当前触觉表示及历史编码，通过 DiTX 生成 19D joint actions。支持 `tactile=sim_force` 和 `tactile=real_force`，分别使用各来源训练数据的 aggregate 触觉统计。
+
+```bash
+bash scripts/training/train.sh interact_dex tactile=sim_force 'zarr_path=<sim_zarr>'
+python -m dexmani_policy.test_tools.smoke_test --config-only --override tactile=real_force interact_dex
+```
+
+训练时，小型逐指读出头与动作输出 MLP 复用同一次 DiTX 前向的归一化隐状态，仅监督 `n_action_steps` 执行窗口内的后继触觉。标签保留在 batch 顶层，复用当前触觉统计计算 FP32 masked Smooth L1；不改变原采样窗口，也不作为动作条件。新增参数复用动作侧优化器设置、整策略 EMA 和严格 checkpoint 恢复。
+
+标准 YAML 的 `agent.interaction_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 保留无辅助头的动作路径。部署不执行读出头，保持原积分步数、KV 缓存和完整 `future_actions` 输出。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-逐指触觉监督)，代码检查和短训通过不代表闭环性能提升。
+
 ## AdapTac 触觉实验
 
 只需一个 `tactile=...` override 切换来源和观测编码。基础配置声明 `tactile_source: ???`，preset 显式填入 `sim` 或 `real`；agent/dataset 引用同一顶层值。触觉输入不允许来源缺失、null 或非法值；`fingertip_xyz` 单独存在不要求来源。四种配方均保留 `joint_state`、`point_cloud`，三种 encoder 都输出五个有序 64D token；future target 和 current guide 始终使用原始 aggregate 通道，固定 15D。

@@ -22,7 +22,8 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.aux.interact_dex_dataset.InterActDexDataset
+  n_action_steps: ${n_action_steps}
   tactile_source: ${tactile_source}
   pc_dim: ${agent.pc_dim}
   pad_after: ${eval:'${n_action_steps} - 1'}
@@ -37,6 +38,7 @@ dataset:
 
 agent:
   _target_: dexmani_policy.agents.policies.interact_dex.InterActDexPolicy
+  interaction_loss_weight: 0.1
   tactile_source: ${tactile_source}
   history_mixer: true
   pc_dim: 6

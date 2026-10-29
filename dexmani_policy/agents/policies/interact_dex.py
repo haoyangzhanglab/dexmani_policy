@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
@@ -12,7 +15,7 @@ from dexmani_policy.agents.obs_encoder.interaction.scene_aggregator import Scene
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder
-from dexmani_policy.agents.policies.base import BasePolicy
+from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
 from dexmani_policy.common.config import positive_int, require_tactile_source
 
 
@@ -126,7 +129,11 @@ class InterActDexPolicy(BasePolicy):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         num_inference_steps: int = 10,
+        interaction_loss_weight: float = 0.0,
     ) -> None:
+        interaction_loss_weight = float(interaction_loss_weight)
+        if not math.isfinite(interaction_loss_weight) or interaction_loss_weight < 0:
+            raise ValueError("interaction_loss_weight must be finite and non-negative")
         if (action_dim, state_dim) != (19, 19):
             raise ValueError("InterActDex requires 19D joint state and actions")
         require_tactile_source(("finger_tactile_force",), tactile_source)
@@ -173,3 +180,58 @@ class InterActDexPolicy(BasePolicy):
             n_action_steps=n_action_steps,
             action_dim=action_dim,
         )
+        self.interaction_loss_weight = interaction_loss_weight
+        self.interaction_head = nn.Sequential(
+            nn.Linear(hidden_dim, 128), nn.SiLU(), nn.Linear(128, 15),
+        ) if interaction_loss_weight > 0 else None
+
+    @property
+    def effective_config(self) -> dict:
+        return {**super().effective_config, "interaction_loss_weight": self.interaction_loss_weight}
+
+    def compute_loss(
+        self, batch: dict, *, log_metrics: bool = True, **kwargs,
+    ) -> tuple[torch.Tensor, dict]:
+        if self.interaction_head is None:
+            return super().compute_loss(batch, log_metrics=log_metrics, **kwargs)
+
+        batch_size = batch["action"].shape[0]
+        force = batch["future_force"]
+        valid = batch["future_force_valid"]
+        if force.shape != (batch_size, self.n_action_steps, 5, 3):
+            raise ValueError("future_force must have shape [B, n_action_steps, 5, 3]")
+        if valid.shape != (batch_size, self.n_action_steps):
+            raise ValueError("future_force_valid must have shape [B, n_action_steps]")
+
+        condition = self.encode_observation(batch["obs"])
+        actions = self.normalizer["action"].normalize(batch["action"])
+        action_loss, metrics, features = self.action_decoder.compute_loss(
+            condition, actions, log_metrics=log_metrics, return_features=True, **kwargs,
+        )
+        start = self.action_start_index
+        prediction = self.interaction_head(features[:, start : start + self.n_action_steps])
+        prediction = prediction.reshape(batch_size, self.n_action_steps, 5, 3)
+        target = self.normalizer["finger_tactile_force"].normalize(force)
+        element_loss = F.smooth_l1_loss(
+            prediction.float(), target.float(), reduction="none", beta=1.0,
+        )
+        mask = valid.float()
+        interaction_loss = (element_loss * mask[..., None, None]).sum() / (
+            15 * mask.sum().clamp_min(1)
+        )
+        weighted_loss = self.interaction_loss_weight * interaction_loss
+        loss = action_loss + weighted_loss
+        if log_metrics:
+            metrics.update(
+                loss=loss.detach(),
+                loss_interaction=interaction_loss.detach(),
+                loss_interaction_weighted=weighted_loss.detach(),
+                interaction_valid_fraction=mask.mean().detach(),
+            )
+        return loss, metrics
+
+    def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay) -> list[dict]:
+        groups = super().optimizer_groups(lr, obs_lr, weight_decay, obs_weight_decay)
+        if self.interaction_head is not None:
+            groups += parameter_groups(self.interaction_head, lr=lr, weight_decay=weight_decay)
+        return groups
