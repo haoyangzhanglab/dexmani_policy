@@ -5,7 +5,7 @@ import hydra
 import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
-from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, POINT_CLOUD_FIELDS, normalization_feature_shapes
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, normalization_feature_shapes
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.deployment.metadata import describe_real_runtime
 
@@ -18,7 +18,7 @@ def build_dataset_and_normalizer(cfg, *, resume_checkpoint=None, verbose=True):
     dataset = hydra.utils.instantiate(cfg.dataset)
     buffer = dataset.replay_buffer
     dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
-    for key in FINGER_VECTOR_FIELDS.intersection(dims):
+    for key in FIELD_FEATURE_SHAPES.keys() & dims.keys():
         dims[key] = prod(buffer[key].shape[1:])
     if dataset.pc_dim is not None:
         for key in POINT_CLOUD_FIELDS.intersection(dims):

@@ -7,7 +7,11 @@ from omegaconf import OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-FINGER_VECTOR_FIELDS = frozenset({"fingertip_xyz", "finger_tactile_force"})
+FIELD_FEATURE_SHAPES = {
+    "fingertip_xyz": (5, 3),
+    "finger_tactile_force": (5, 3),
+    "taxel_tactile_force": (5, 120, 3),
+}
 POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
 
 
@@ -88,7 +92,7 @@ def validate_action_mode(cfg) -> None:
 def validate_normalization_config(cfg):
     spec = cfg["normalization"]
     for key, mode in spec.items():
-        if mode not in {"identity", "limits", "gaussian", "auto"}:
+        if mode not in {"identity", "limits", "gaussian", "auto", "rms", "max_abs"}:
             raise ValueError(f"Invalid normalization mode for {key}: {mode!r}")
         if mode == "auto" and key != "action":
             raise ValueError("Normalization auto is only supported for action")
@@ -103,8 +107,11 @@ def validate_normalization_config(cfg):
 
 
 def normalization_feature_shapes(dims):
+    for key, shape in FIELD_FEATURE_SHAPES.items():
+        if key in dims and dims[key] != math.prod(shape):
+            raise ValueError(f"{key}: normalization width must be {math.prod(shape)} for shape {shape}")
     return {
-        key: (5, 3) if key in FINGER_VECTOR_FIELDS else (width,)
+        key: FIELD_FEATURE_SHAPES.get(key, (width,))
         for key, width in dims.items()
     }
 

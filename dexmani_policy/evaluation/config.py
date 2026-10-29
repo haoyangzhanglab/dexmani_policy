@@ -78,6 +78,8 @@ def load_seed_pool(cfg):
 
 
 def merge_eval_config(cfg, overrides=None):
+    if cfg.get("tactile_source") == "real":
+        raise ValueError("Simulation evaluation rejects real-source AdapTac")
     overrides = overrides or {}
     if set(overrides.get("env_runner", {})) & {
         "n_obs_steps",

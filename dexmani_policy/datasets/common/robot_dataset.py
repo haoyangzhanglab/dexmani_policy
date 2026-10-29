@@ -14,7 +14,7 @@ from dexmani_policy.common.image_util import (
     validate_rgb_preprocessing,
 )
 from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.common.config import FINGER_VECTOR_FIELDS, POINT_CLOUD_FIELDS, positive_int
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int
 from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
@@ -23,7 +23,7 @@ from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.datasets.common.split import split_episodes
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler
-from dexmani_policy.datasets.common.validation import validate_fields
+from dexmani_policy.datasets.common.validation import validate_fields, validate_tactile_source
 
 
 class RobotDataset(torch.utils.data.Dataset):
@@ -50,6 +50,7 @@ class RobotDataset(torch.utils.data.Dataset):
         rgb_keep_uint8: bool = False,
         split_manifest: str | dict | None = None,
         pc_dim: int | None = None,
+        tactile_source: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -75,6 +76,8 @@ class RobotDataset(torch.utils.data.Dataset):
         self.sensor_modalities = sensor_modalities
         self.replay_buffer = ReplayBuffer(zarr_path, keys=self.data_keys)
         self.zarr_path = self.replay_buffer.path
+        if tactile_source is not None:
+            validate_tactile_source(self.replay_buffer.attrs, tactile_source)
 
         if "rgb" in sensor_modalities:
             rgb = self.replay_buffer["rgb"]
@@ -93,9 +96,11 @@ class RobotDataset(torch.utils.data.Dataset):
             self.replay_buffer, manifest=split_manifest, val_ratio=val_ratio,
             seed=seed, max_train_episodes=max_train_episodes,
         )
-        for key in FINGER_VECTOR_FIELDS.intersection(sensor_modalities):
-            if self.replay_buffer[key].shape[1:] != (5, 3):
-                raise ValueError(f"{key} requires stored shape (T, 5, 3)")
+        for key in FIELD_FEATURE_SHAPES.keys() & set(sensor_modalities):
+            if self.replay_buffer[key].shape[1:] != FIELD_FEATURE_SHAPES[key]:
+                raise ValueError(f"{key} requires trailing shape {FIELD_FEATURE_SHAPES[key]} after its T axis")
+            if self.replay_buffer[key].dtype.kind != "f":
+                raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
         if len(self.replay_buffer[action_key].shape) != 2:
             raise ValueError("Stored actions must have shape [T,D]")
         validate_fields(self.replay_buffer, self.train_mask | self.val_mask, self.consumed_fields)
@@ -263,7 +268,7 @@ class RobotDataset(torch.utils.data.Dataset):
             normalizer.fit_field(
                 key, self.iter_normalization_data(key),
                 mode="limits" if mode == "auto" else mode,
-                last_n_dims=2 if key in FINGER_VECTOR_FIELDS else 1,
+                last_n_dims=len(FIELD_FEATURE_SHAPES.get(key, (0,))),
             )
             if key == "action" and mode == "auto" and self.action_key == "action_ee":
                 field = normalizer[key]

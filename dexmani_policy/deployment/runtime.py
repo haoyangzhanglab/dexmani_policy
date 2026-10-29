@@ -4,15 +4,13 @@ from typing import Any
 import numpy as np
 
 from dexmani_policy.common.checkpoint import restore_policy
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, positive_int
 
 
 _OBSERVATION_SHAPES = {
     "joint_state": (19,),
     "eef_pose": (9,),
-    "finger_tactile_force": (5, 3),
-    "fingertip_xyz": (5, 3),
-    "taxel_tactile_force": (5, 120, 3),
+    **FIELD_FEATURE_SHAPES,
     "camera_intrinsic": (9,),
     "camera_extrinsic": (12,),
     "tactile_valid": (5,),

@@ -26,16 +26,23 @@ from dexmani_policy.agents.obs_encoder.interaction.future_tactile.visuo_tactile_
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandForceEncoder
 from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
 
 
 class AdapTacObservationEncoder(nn.Module):
-    consumed_observation_fields = ("joint_state", "point_cloud", "finger_tactile_force")
-    validate_normalization = staticmethod(Sparse3DEncoder.validate_normalization)
+    @property
+    def consumed_observation_fields(self):
+        return ("joint_state", "point_cloud", *self.tactile_encoder.consumed_observation_fields)
+
+    def validate_normalization(self, spec):
+        Sparse3DEncoder.validate_normalization(spec)
+        validate = getattr(self.tactile_encoder, "validate_normalization", None)
+        if validate is not None:
+            validate(spec)
 
     def __init__(
         self,
+        tactile_encoder: nn.Module,
         pc_dim: int,
         state_dim: int,
         num_points: int,
@@ -51,7 +58,9 @@ class AdapTacObservationEncoder(nn.Module):
             input_channels=pc_dim, fps_random_config=fps_random_config, **(pc_encoder_config or {}),
         )
         self.visual_projection = nn.Linear(self.pc_encoder.out_dim, feature_dim)
-        self.tactile_encoder = XHandForceEncoder()
+        self.tactile_encoder = tactile_encoder
+        if (tactile_encoder.num_tokens, tactile_encoder.out_dim) != (5, 64):
+            raise ValueError("AdapTac requires five ordered 64D tactile tokens")
         self.interaction = VisuoTactileInteraction(
             self.pc_encoder.out_dim, self.tactile_encoder.out_dim, self.tactile_encoder.num_tokens,
         )
@@ -63,6 +72,7 @@ class AdapTacObservationEncoder(nn.Module):
     @property
     def effective_config(self) -> dict:
         return {
+            "tactile_encoder": self.tactile_encoder.effective_config,
             "pc_encoder_config": self.pc_encoder.effective_config,
             "fps_random_config": self.pc_encoder.fps_random_config,
         }
@@ -76,7 +86,7 @@ class AdapTacObservationEncoder(nn.Module):
             training=self.training,
         )
         visual, tactile = self.interaction(
-            self.pc_encoder(pc)["tokens"], self.tactile_encoder(obs["finger_tactile_force"]),
+            self.pc_encoder(pc)["tokens"], self.tactile_encoder(obs[self.tactile_encoder.input_key]),
         )
         visual = self.visual_projection(visual.mean(dim=1))
         tactile = self.tactile_projection(tactile.flatten(1))
@@ -93,6 +103,8 @@ class AdapTacPolicy(BasePolicy):
         n_obs_steps: int,
         n_action_steps: int,
         action_dim: int,
+        tactile_source: str,
+        tactile_encoder: nn.Module,
         pc_dim: int = 6,
         state_dim: int = 19,
         num_points: int = 1024,
@@ -109,18 +121,22 @@ class AdapTacPolicy(BasePolicy):
         num_training_steps: int = 100,
         num_inference_steps: int = 20,
         force_num_inference_steps: int = 20,
-        force_scale: float = 1.0,
-        force_loss_weight: float = 10.0,
+        force_loss_weight: float = 1.0,
         force_predictor_config: dict | None = None,
         fusion_num_heads: int = 8,
         fusion_dropout: float = 0.1,
     ) -> None:
         if (n_obs_steps, action_dim, state_dim) != (1, 19, 19):
             raise ValueError("AdapTac requires single-frame observations and 19D joint state/actions")
-        if not math.isfinite(force_scale) or force_scale <= 0:
-            raise ValueError("force_scale must be finite and positive")
+        if tactile_source not in {"sim", "real"}:
+            raise ValueError("tactile_source must be sim or real")
+        if tactile_source == "sim" and tactile_encoder.input_key != "finger_tactile_force":
+            raise ValueError("Sim has no dense taxel producer")
+        if not math.isfinite(force_loss_weight) or force_loss_weight < 0:
+            raise ValueError("force_loss_weight must be finite and nonnegative")
         validate_unet_horizon(horizon, down_dims)
         obs_encoder = AdapTacObservationEncoder(
+            tactile_encoder=tactile_encoder,
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,
@@ -146,7 +162,7 @@ class AdapTacPolicy(BasePolicy):
             clip_sample=clip_sample,
         )
         super().__init__(obs_encoder, action_decoder, horizon, n_obs_steps, n_action_steps, action_dim)
-        self.force_dim = math.prod(obs_encoder.tactile_encoder.input_shape)
+        self.force_dim = 15
         self.force_predictor = DiffusionForceHead(
             ForcePredictionTransformer(
                 horizon=self.future_steps,
@@ -165,11 +181,33 @@ class AdapTacPolicy(BasePolicy):
             num_heads=fusion_num_heads,
             dropout=fusion_dropout,
         )
-        self.force_scale = float(force_scale)
+        self.tactile_source = tactile_source
         self.force_loss_weight = force_loss_weight
 
-    def current_force(self, obs: dict) -> torch.Tensor:
-        return obs["finger_tactile_force"].float().flatten(-2) / self.force_scale
+    @classmethod
+    def prepare_restore_config(cls, config):
+        if "force_scale" in config or "tactile_encoder" not in config or "tactile_source" not in config:
+            raise ValueError("Legacy AdapTac force_scale/encoder-affine recipe is incompatible; restore with the original source code")
+
+    @property
+    def consumed_observation_fields(self):
+        return tuple(dict.fromkeys((*self.obs_encoder.consumed_observation_fields, "finger_tactile_force")))
+
+    @property
+    def inference_metadata(self):
+        return {**super().inference_metadata,
+                "consumed_observation_fields": list(self.consumed_observation_fields)}
+
+    def current_force(self, preprocessed: dict) -> torch.Tensor:
+        return preprocessed["finger_tactile_force"].float().reshape(-1, self.n_obs_steps, self.force_dim)
+
+    def normalize_force(self, force):
+        field = self.normalizer.fields
+        return field["finger_tactile_force"].normalize(force) if "finger_tactile_force" in field else force.float()
+
+    def unnormalize_force(self, force):
+        field = self.normalizer.fields
+        return field["finger_tactile_force"].unnormalize(force) if "finger_tactile_force" in field else force.float()
 
     def action_condition(self, features, current_force, predicted_force) -> torch.Tensor:
         visual, tactile, state = features
@@ -180,11 +218,13 @@ class AdapTacPolicy(BasePolicy):
     def compute_loss(
         self, batch: dict, *, log_metrics: bool = True, **kwargs: Any,
     ) -> tuple[torch.Tensor, dict]:
-        current_force = self.current_force(batch["obs"])
-        features = self.obs_encoder(self.preprocess(batch["obs"]))
+        obs = self.preprocess(batch["obs"])
+        current_force = self.current_force(obs)
+        features = self.obs_encoder(obs)
         force_loss, predicted_force = self.force_predictor.compute_loss_and_prediction(
             torch.cat(features[:2], dim=-1).unsqueeze(1),
-            batch["future_force"].float().flatten(-2) / self.force_scale,
+            self.normalize_force(batch["future_force"]).flatten(-2),
+            batch["future_force_valid"],
         )
         # The action objective also trains the force predictor through this prediction.
         condition = self.action_condition(features, current_force, predicted_force)
@@ -215,12 +255,13 @@ class AdapTacPolicy(BasePolicy):
         delay_steps: int = 0,
         rtc_guidance_cap: float = 0.0,
     ) -> dict[str, torch.Tensor]:
-        current_force = self.current_force(obs_dict)
-        features = self.obs_encoder(self.preprocess(obs_dict))
+        obs = self.preprocess(obs_dict)
+        current_force = self.current_force(obs)
+        features = self.obs_encoder(obs)
         predicted_force = self.force_predictor.predict_action(
             torch.cat(features[:2], dim=-1).unsqueeze(1),
             (current_force.shape[0], self.future_steps, self.force_dim),
-            generator=generator,
+            generator=generator, dtype=torch.float32,
         )
         condition = self.action_condition(features, current_force, predicted_force)
         return self.predict_action_from_condition(

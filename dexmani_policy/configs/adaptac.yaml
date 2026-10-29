@@ -1,6 +1,7 @@
 defaults:
   - common
   - _self_
+  - tactile: sim_force
 
 # AdapTac 扩展：分指未来力预测、池化前双向交互与力引导融合。
 
@@ -20,7 +21,6 @@ normalization:
   joint_state: limits
   action: auto
   point_cloud: identity
-  finger_tactile_force: limits  # AdapTacDataset 按 XYZ 跨五指共享训练集统计。
 
 dataloader:
   batch_size: 128
@@ -32,6 +32,7 @@ dataloader:
   drop_last: true
 
 dataset:
+  tactile_source: ${tactile_source}
   pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.aux.adaptac_dataset.AdapTacDataset
   action_key: ${action_key}
@@ -39,7 +40,6 @@ dataset:
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: ${eval:'${n_action_steps} - 1'}
-  sensor_modalities: ["joint_state", "point_cloud", "finger_tactile_force"]
   obs_horizon: ${n_obs_steps}
 
   augmentation_cfg:
@@ -50,6 +50,7 @@ dataset:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
+  tactile_source: ${tactile_source}
   clip_sample: true
   _target_: dexmani_policy.agents.policies.adaptac.AdapTacPolicy
   horizon: ${horizon}
@@ -89,8 +90,7 @@ agent:
   num_training_steps: 100
   num_inference_steps: 20
   force_num_inference_steps: 20
-  force_scale: 1.0  # 与原始力同单位的固定工程尺度；仿真为 N，恢复/推理不重估。
-  force_loss_weight: 10.0
+  force_loss_weight: 1.0
   force_predictor_config:
     n_layer: 8
     n_head: 4

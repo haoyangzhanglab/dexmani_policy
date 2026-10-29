@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
 
@@ -20,8 +19,9 @@ class DiffusionForceHead(Diffusion):
         )
 
     def compute_loss_and_prediction(
-        self, condition: torch.Tensor, force: torch.Tensor,
+        self, condition: torch.Tensor, force: torch.Tensor, valid: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        force = force.float()
         noise = torch.randn_like(force)
         timestep = torch.randint(
             self.noise_scheduler.config.num_train_timesteps,
@@ -33,5 +33,6 @@ class DiffusionForceHead(Diffusion):
             timestep=timestep,
             context=condition,
         )
-        loss = F.mse_loss(prediction.float(), force.float())
+        prediction = prediction.float()
+        loss = ((prediction - force).square() * valid[..., None]).sum() / (force.shape[-1] * valid.float().sum())
         return loss, prediction

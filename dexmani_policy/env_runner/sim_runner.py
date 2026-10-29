@@ -133,6 +133,8 @@ class SimRunner:
                     return bool(info["success"]), task_done_step
 
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
+        if getattr(agent, "tactile_source", None) == "real":
+            raise ValueError("Sim rollout rejects real-source AdapTac")
         env = None
         try:
             for index, seed in enumerate(seeds):

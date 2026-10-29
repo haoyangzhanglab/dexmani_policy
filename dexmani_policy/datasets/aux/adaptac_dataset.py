@@ -5,18 +5,10 @@ from dexmani_policy.datasets.common.robot_dataset import RobotDataset
 
 
 class AdapTacDataset(RobotDataset):
-    def get_normalizer(self, spec):
-        if self.is_validation or self._normalizer is not None:
-            return super().get_normalizer(spec)
-        key = "finger_tactile_force"
-        normalizer = super().get_normalizer({name: mode for name, mode in spec.items() if name != key})
-        normalizer.fit_field(key, self.iter_normalization_data(key), mode=spec[key], last_n_dims=1)
-        field = normalizer[key]
-        # Broadcast the shared XYZ affine to the stored finger-vector layout.
-        shape = self.replay_buffer[key].shape[1:]
-        field.scale = field.scale.expand(shape).clone()
-        field.offset = field.offset.expand(shape).clone()
-        return normalizer
+    def __init__(self, *args, tactile_source, sensor_modalities, **kwargs):
+        if "finger_tactile_force" not in sensor_modalities:
+            raise ValueError("AdapTac requires finger_tactile_force for its 15D future target and guide")
+        super().__init__(*args, tactile_source=tactile_source, sensor_modalities=sensor_modalities, **kwargs)
 
     def build_sampler(self, episode_mask):
         sampler = super().build_sampler(episode_mask)
@@ -33,10 +25,11 @@ class AdapTacDataset(RobotDataset):
         episode_ends = self.replay_buffer.episode_ends
         end = episode_ends[np.searchsorted(episode_ends, query, side="right")]
         steps = self.horizon - self.action_start_index
-        # action[t] starts at the query; its resulting force is observed at t+1.
+        # Next observation row; real SDK hold can retain an older sensor sample.
         force = self.replay_buffer.read(
             "finger_tactile_force", slice(query + 1, min(query + steps + 1, end))
-        ).astype(np.float32, copy=False)
-        rows = np.minimum(np.arange(steps), len(force) - 1)
-        data["future_force"] = torch.from_numpy(force[rows])
+        )
+        rows = np.arange(steps)
+        data["future_force"] = torch.from_numpy(force[np.minimum(rows, len(force) - 1)])
+        data["future_force_valid"] = torch.from_numpy(rows < len(force))
         return data

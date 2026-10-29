@@ -1,0 +1,9 @@
+# @package _global_
+tactile_source: real
+agent:
+  tactile_encoder:
+    _target_: dexmani_policy.agents.obs_encoder.xhand_tactile.XHandForceEncoder
+dataset:
+  sensor_modalities: [joint_state, point_cloud, finger_tactile_force]
+normalization:
+  finger_tactile_force: rms

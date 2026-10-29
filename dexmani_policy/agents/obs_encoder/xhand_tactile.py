@@ -1,8 +1,12 @@
 """Per-frame XHand force, taxel and regional patch encoders."""
 
+import math
+
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
 
 __all__ = ["XHandForceEncoder", "XHandTaxelEncoder", "XHandPatchEncoder"]
 
@@ -36,7 +40,7 @@ class XHandForceEncoder(nn.Module):
     num_tokens = 5
     frame_dim = 64
     input_key = "finger_tactile_force"
-    input_shape = (5, 3)
+    input_shape = FIELD_FEATURE_SHAPES[input_key]
 
     def __init__(self) -> None:
         super().__init__()
@@ -59,6 +63,10 @@ class XHandForceEncoder(nn.Module):
         return features
 
     @property
+    def effective_config(self):
+        return {"_target_": f"{type(self).__module__}.{type(self).__name__}"}
+
+    @property
     def out_dim(self) -> int:
         return self.frame_dim
 
@@ -73,7 +81,7 @@ class XHandTaxelEncoder(nn.Module):
     num_tokens = 5
     frame_dim = 64
     input_key = "taxel_tactile_force"
-    input_shape = (5, 120, 3)
+    input_shape = FIELD_FEATURE_SHAPES[input_key]
 
     def __init__(self) -> None:
         super().__init__()
@@ -98,6 +106,10 @@ class XHandTaxelEncoder(nn.Module):
         if tactile_valid is not None:
             features = torch.where(tactile_valid[..., None], features, 0.0)
         return features
+
+    @property
+    def effective_config(self):
+        return {"_target_": f"{type(self).__module__}.{type(self).__name__}"}
 
     @property
     def out_dim(self) -> int:
@@ -145,16 +157,20 @@ def right_hand_region_ids() -> torch.Tensor:
 
 
 class XHandPatchEncoder(nn.Module):
-    """ReTouch-inspired patch statistics and contact-aware pooling into five 64D tokens."""
+    """Regional force descriptors and soft-activity pooling into five 64D tokens."""
 
     num_tokens = 5
     num_regions = 5
     frame_dim = 64
     input_key = "taxel_tactile_force"
-    input_shape = (5, 120, 3)
+    input_shape = FIELD_FEATURE_SHAPES[input_key]
 
-    def __init__(self, region_ids: torch.Tensor | None = None) -> None:
+    def __init__(self, region_ids: torch.Tensor | None = None, activity_scale: float = 1.0) -> None:
         super().__init__()
+        activity_scale = torch.tensor(activity_scale, dtype=torch.float32).item()
+        if not math.isfinite(activity_scale) or activity_scale <= 0:
+            raise ValueError("activity_scale must be finite and positive in FP32")
+        self.activity_scale = activity_scale
         if region_ids is None:
             region_ids = right_hand_region_ids()
         labels = torch.as_tensor(region_ids)
@@ -166,11 +182,14 @@ class XHandPatchEncoder(nn.Module):
             torch.int64,
         ):
             raise ValueError("region_ids must be integer [5,120] in SDK taxel index order")
+        if (labels < 0).any() or (labels >= self.num_regions).any():
+            raise ValueError("region_ids must be in [0, 4]")
         patch_mask = F.one_hot(labels.long(), num_classes=self.num_regions).permute(0, 2, 1).bool()
         if not bool(patch_mask.any(dim=-1).all()):
             raise ValueError("each finger must have at least one taxel in each of five regions")
 
-        self.register_buffer("patch_mask", patch_mask)
+        # Rebuilt from effective_config.region_ids; no duplicate checkpoint state.
+        self.register_buffer("patch_mask", patch_mask, persistent=False)
         self.patch_mlp = nn.Sequential(nn.Linear(8, 256), nn.SiLU(), nn.Linear(256, self.frame_dim))
         self.finger_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
         self.region_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
@@ -179,40 +198,49 @@ class XHandPatchEncoder(nn.Module):
         self.attention_score = nn.Linear(self.frame_dim, 1)
         self.token_norm = nn.LayerNorm(self.frame_dim)
 
-    def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
-        x = prepare_tactile_input(
-            x, tactile_valid, self.input_shape, self.input_key, self.patch_mlp[0].weight.dtype
-        )
-        batch_shape = x.shape[:-3]
+    @property
+    def effective_config(self):
+        return {
+            "_target_": f"{type(self).__module__}.{type(self).__name__}",
+            "activity_scale": self.activity_scale,
+            "region_ids": self.patch_mask.long().argmax(dim=1).tolist(),
+        }
 
-        # Force norms, contact weights and reductions use float32 under autocast.
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            force = x.reshape(-1, 5, 120, 3).float()
+    @staticmethod
+    def validate_normalization(spec):
+        if spec["taxel_tactile_force"] not in {"rms", "max_abs"}:
+            raise ValueError("XHandPatchEncoder requires taxel_tactile_force rms or max_abs normalization")
+
+    def _patch_descriptors(self, z):
+        with torch.autocast(device_type=z.device.type, enabled=False):
+            force = z.reshape(-1, 5, 120, 3).float()
             magnitude = torch.linalg.vector_norm(force, dim=-1)
-            contact_weights = torch.sigmoid((magnitude - 1.0) / 0.5)
-            mask = self.patch_mask[None].float()
-            patch_weights = contact_weights[:, :, None, :] * mask
-            contact_mass = patch_weights.sum(dim=-1)
-            mean_force = (
-                torch.einsum("bfpt,bftc->bfpc", patch_weights, force)
-                / contact_mass.clamp_min(1e-6)[..., None]
-            )
+            activity = magnitude / (magnitude + self.activity_scale)
+            mask = self.patch_mask[None]
+            weights = activity[:, :, None, :] * mask
+            mass = weights.sum(dim=-1)
+            denominator = torch.where(mass > 0, mass, 1.0)
+            mean_force = torch.einsum("bfpt,bftc->bfpc", weights, force) / denominator[..., None]
             peak_force = (force.abs()[:, :, None, :, :] * mask[..., None]).amax(dim=-2)
-            contact_area = contact_mass / mask.sum(dim=-1)
+            activity_fraction = mass / mask.sum(dim=-1)
             strength = (magnitude[:, :, None, :] * mask).amax(dim=-1)
-            descriptors = torch.cat(
-                (mean_force, peak_force, contact_area[..., None], strength[..., None]), dim=-1
+            return torch.cat(
+                (mean_force, peak_force, activity_fraction[..., None], strength[..., None]), dim=-1
             )
 
+    def forward(self, x: torch.Tensor, tactile_valid: torch.Tensor | None = None) -> torch.Tensor:
+        x = prepare_tactile_input(x, tactile_valid, self.input_shape, self.input_key, torch.float32)
+        batch_shape = x.shape[:-3]
+        descriptors = self._patch_descriptors(x)
         patch_features = self.patch_mlp(descriptors)
         patch_features = (
             patch_features
             + self.finger_embedding[None, :, None, :]
             + self.region_embedding[None, None, :, :]
         )
-        # ReTouch Eq. (12): patch-level learned score + log contact-area prior.
+        # Soft activity biases pooling; it is not a calibrated contact probability.
         logits = self.attention_score(F.silu(patch_features)).squeeze(-1).float() + torch.log(
-            contact_area + 1e-6
+            descriptors[..., 6] + 1e-6
         )
         attention_weights = torch.softmax(logits, dim=-1)
         tokens = self.token_norm((attention_weights[..., None] * patch_features.float()).sum(dim=2))

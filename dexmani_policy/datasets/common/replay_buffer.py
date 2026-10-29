@@ -13,6 +13,9 @@ class ReplayBuffer:
         self.group = zarr.open_group(self.path, mode="r")
         fields = self.group["data"]
         self.field_names = tuple(dict.fromkeys(fields.keys() if keys is None else keys))
+        missing = set(self.field_names) - set(fields.keys())
+        if missing:
+            raise ValueError(f"Missing required data fields in {self.path}: {sorted(missing)}")
         self.data = {key: fields[key] for key in self.field_names}
         self.episode_ends = np.asarray(self.group["meta"]["episode_ends"])
         ends = self.episode_ends

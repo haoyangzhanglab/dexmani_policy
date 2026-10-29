@@ -1,6 +1,7 @@
 """Validate configs/data or exercise training and checkpoint restoration."""
 
 import argparse
+import hydra
 import importlib
 import importlib.util
 import json
@@ -10,13 +11,14 @@ import traceback
 from contextlib import ExitStack, closing, contextmanager
 from itertools import islice
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
 import torch
 import zarr
 from omegaconf import OmegaConf, open_dict
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 
 from dexmani_policy.common.checkpoint import (
     load_checkpoint,
@@ -45,8 +47,8 @@ from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.trainer import PolicyTrainer
 
 
-def load_smoke_config(config_name: str):
-    cfg = load_policy_config(config_name)
+def load_smoke_config(config_name: str, overrides=()):
+    cfg = load_policy_config(config_name, overrides)
     # Hydra compose does not create a runtime output directory.
     cfg.workspace.output_dir = "/tmp/smoke_test_output"
     OmegaConf.resolve(cfg)
@@ -92,6 +94,7 @@ def iter_batch_fields(batch):
     yield "action", batch["action"]
     if "future_force" in batch:
         yield "future_force", batch["future_force"]
+        yield "future_force_valid", batch["future_force_valid"]
     for section in ("obs", "action_context"):
         for key, value in batch.get(section, {}).items():
             yield f"{section}.{key}", value
@@ -133,6 +136,9 @@ def validate_data_batch(batch, dataset, cfg):
             (batch_size, cfg.horizon - cfg.n_obs_steps + 1, *obs["finger_tactile_force"].shape[-2:]),
             "future_force", torch.float32,
         )
+
+        validate_tensor_layout(batch["future_force_valid"], batch["future_force"].shape[:2], "future_force_valid", torch.bool)
+        assert batch["future_force_valid"].any(dim=1).all()
 
     context = batch.get("action_context", {})
     if not isinstance(context, dict):
@@ -243,7 +249,7 @@ def capture_policy_predictions(model, ema_model, batch):
     kwargs = dict_apply(prediction_kwargs, lambda x: x.to(device))
     rng_state = get_rng_state(device)
     predictions = {}
-    reports = {}
+    reports: dict[str, dict[str, float]] = {}
     for use_ema, policy in ((False, model), (True, ema_model)):
         if policy is None:
             continue
@@ -311,8 +317,8 @@ def validate_policy_restoration(saved_config, checkpoint_path, snapshot, *, devi
 @contextmanager
 def smoke_output(output_dir):
     if output_dir is None:
-        with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as directory:
-            yield Path(directory)
+        with tempfile.TemporaryDirectory(prefix="dexmani-smoke-") as temporary:
+            yield Path(temporary)
     else:
         directory = Path(output_dir).resolve()
         directory.mkdir(parents=True, exist_ok=False)
@@ -327,11 +333,8 @@ def validate_training(cfg, *, max_updates=4, resume_updates=2, rollout=False, ou
     device = torch.device(cfg.training.device)
     set_seed(cfg.training.seed)
     with smoke_output(output_dir) as directory:
-        report = {"device": str(device), "training": []}
+        report: dict[str, Any] = {"device": str(device), "training": []}
         try:
-            if cfg.policy_name == "adaptac":
-                report["contracts"] = validate_adaptac_contracts(device)
-                set_seed(cfg.training.seed)
             checkpoint = None
             source = None
             run_cfg = OmegaConf.create(cfg)
@@ -388,7 +391,6 @@ def validate_training(cfg, *, max_updates=4, resume_updates=2, rollout=False, ou
                 })
                 print(f"[{phase}] step={checkpoint.global_step}; updated {changed}", flush=True)
             if cfg.policy_name == "adaptac":
-                report["force_statistics"] = adaptac_force_statistics(dataset)
                 report["deployment"] = validate_adaptac_deployment(experiment, dataset, device)
             if rollout:
                 report["simulation"] = validate_simulation(experiment, device)
@@ -405,6 +407,191 @@ def validate_training(cfg, *, max_updates=4, resume_updates=2, rollout=False, ou
 ADAPTAC_FINGER_ORDER = ("thumb", "index", "middle", "ring", "pinky")
 
 
+def tactile_smoke_attrs(source, task_name="pick_apple_messy"):
+    attrs = {"task_name": task_name, "dt": 0.0625}
+    if source == "sim":
+        attrs.update(physics_dt=0.004166666666666667, frame_skip=15, action_dim=19,
+                     action_space="joint", obs_alignment="obs[t]_before_action[t]", robot_setup_json="{}")
+    else:
+        attrs.update(format="dexmani.real.canonical", pointcloud_config={"num_points": 32})
+    return attrs
+
+
+def expect_value_error(call):
+    try:
+        call()
+    except ValueError:
+        return
+    raise AssertionError("Expected ValueError")
+
+
+def validate_tactile_numerics():
+    from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
+    from dexmani_policy.common.config import normalization_feature_shapes
+    from dexmani_policy.datasets.common.validation import validate_tactile_source
+
+    generator = torch.Generator().manual_seed(24)
+    encoder = XHandPatchEncoder().eval()
+    for shape in ((5, 3), (5, 120, 3)):
+        x = torch.randn((7, *shape), generator=generator) * 7 - 2
+        for mode in ("rms", "max_abs", "limits", "gaussian"):
+            full, chunked = LinearNormalizer(), LinearNormalizer()
+            full.fit_field("x", [x], mode=mode, last_n_dims=len(shape))
+            chunked.fit_field("x", [x[:0], *x.split(2)], mode=mode, last_n_dims=len(shape))
+            torch.testing.assert_close(full.state_dict(), chunked.state_dict())
+            field = full["x"]
+            assert field.scale.shape == shape and field.scale.dtype == torch.float32
+            if mode == "gaussian":
+                torch.testing.assert_close(field.scale, x.std(dim=0).reciprocal())
+            elif mode == "limits":
+                torch.testing.assert_close(field.scale, 2 / (x.amax(dim=0) - x.amin(dim=0)))
+            z = field.normalize(x)
+            torch.testing.assert_close(field.unnormalize(z), x, atol=3e-6, rtol=1e-5)
+            if mode in {"rms", "max_abs"}:
+                assert not field.offset.any()
+                torch.testing.assert_close(field.normalize(2 * x), 2 * z)
+                assert field.normalize(x * 100).abs().max() > 1
+                rescaled = LinearNormalizer()
+                rescaled.fit_field("x", [x * 100], mode=mode, last_n_dims=len(shape))
+                z2 = rescaled["x"].normalize(x * 100)
+                torch.testing.assert_close(z, z2)
+                if mode == "rms":
+                    torch.testing.assert_close(z.square().mean(), torch.tensor(1.0))
+                if len(shape) == 3:
+                    torch.testing.assert_close(encoder._patch_descriptors(z), encoder._patch_descriptors(z2))
+        for mode in ("rms", "max_abs"):
+            for value in (0.0, -3.0, 4.0):
+                n = LinearNormalizer()
+                x = torch.full((2, *shape), value)
+                n.fit_field("x", [x], mode=mode, last_n_dims=len(shape))
+                torch.testing.assert_close(n["x"].normalize(x), torch.full_like(x, 0 if value == 0 else value / abs(value)))
+            for invalid in ([], [torch.full((1, *shape), float("nan"))],
+                            [torch.full((1, *shape), float("inf"))], [torch.full((1, *shape), 1e-40)]):
+                expect_value_error(lambda: LinearNormalizer().fit_field("x", invalid, mode=mode, last_n_dims=len(shape)))
+    zero = torch.zeros(2, 5, 120, 3)
+    descriptors = encoder._patch_descriptors(zero)
+    assert descriptors.shape == (2, 5, 5, 8) and not descriptors.any()
+    assert torch.isfinite(encoder(zero)).all()
+    ones = torch.ones_like(zero)
+    d = encoder._patch_descriptors(ones)
+    torch.testing.assert_close(d[..., :6], torch.ones_like(d[..., :6]))
+    torch.testing.assert_close(d[..., 6], torch.full_like(d[..., 6], 3 ** .5 / (3 ** .5 + 1)))
+    labels = (torch.tensor(encoder.effective_config["region_ids"]) + 1) % encoder.num_regions
+    custom = XHandPatchEncoder(region_ids=labels, activity_scale=2.0).eval()
+    restored = hydra.utils.instantiate(custom.effective_config).eval()
+    assert "patch_mask" not in custom.state_dict()
+    restored.load_state_dict(custom.state_dict(), strict=True)
+    torch.testing.assert_close(restored.patch_mask, custom.patch_mask)
+    torch.testing.assert_close(restored(z), custom(z))
+    for value in (0, -1, float("nan"), float("inf"), 1e-50, 1e40):
+        expect_value_error(lambda: XHandPatchEncoder(activity_scale=value))
+    for labels in (torch.zeros(5, 120, dtype=torch.long), torch.full((5, 120), 5), torch.zeros(5, 119)):
+        expect_value_error(lambda: XHandPatchEncoder(region_ids=labels))
+    for mode in ("identity", "limits", "gaussian"):
+        expect_value_error(lambda: encoder.validate_normalization({"taxel_tactile_force": mode}))
+    for source in ("sim", "real"):
+        validate_tactile_source(tactile_smoke_attrs(source), source)
+        expect_value_error(lambda: validate_tactile_source(tactile_smoke_attrs(source), "real" if source == "sim" else "sim"))
+        expect_value_error(lambda: validate_tactile_source({}, source))
+    expect_value_error(lambda: normalization_feature_shapes({"taxel_tactile_force": 3}))
+    return {"status": "passed", "checks": "streaming, units, shapes, affine boundaries, patch descriptors, source"}
+
+
+def validate_tactile_roundtrip(cfg):
+    from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
+    from dexmani_policy.datasets.common.robot_dataset import RobotDataset
+    from dexmani_policy.training.common.resume import resolve_input_recipe
+    from dexmani_policy.agents.policies.adaptac import AdapTacPolicy
+    from dexmani_policy.env_runner.sim_runner import SimRunner
+    from types import SimpleNamespace
+
+    config = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    config.agent.update(dict(num_points=32, feature_dim=32, state_out_dim=16,
+                             diffusion_step_embed_dim=32,
+                             down_dims=[32 * 2 ** i for i in range(len(cfg.agent.down_dims))]))
+    config.agent.pc_encoder_config.update(dict(channels=48, num_patches=8, group_size=8, depth=1))
+    config.agent.force_predictor_config.update(dict(n_layer=1, n_emb=32))
+    config.dataset.augmentation_cfg = None
+    config.dataset.max_train_episodes = None
+    config.dataloader.update(dict(batch_size=2, num_workers=0, pin_memory=False))
+    config.workspace.wandb_cfg = None
+    config.training.use_compile = False
+    config.training.use_bfloat16 = False
+    frames = max(24, config.horizon + 2)
+    ends = [frames, 2 * frames]
+    config.dataset.split_manifest = dict(episode_ends=ends, train_indices=[0], val_indices=[1])
+    rng = np.random.default_rng(2)
+    with tempfile.TemporaryDirectory(prefix="tactile-roundtrip-") as temp:
+        data_path = Path(temp) / "data.zarr"
+        config.zarr_path = config.dataset.zarr_path = str(data_path)
+        config.workspace.output_dir = str(Path(temp) / "experiment")
+        root = zarr.open_group(str(data_path), mode="w")
+        root.attrs.update(tactile_smoke_attrs(cfg.tactile_source, cfg.task_name))
+        root.create_dataset("meta/episode_ends", data=np.array(ends))
+        for key in [*config.dataset.sensor_modalities, "action"]:
+            shape = FIELD_FEATURE_SHAPES.get(key, (32, config.agent.pc_dim) if key == "point_cloud" else (19,))
+            values = rng.normal(size=(ends[-1], *shape)).astype(np.float32)
+            if key == "taxel_tactile_force":
+                values *= 100
+            elif key == "finger_tactile_force":
+                values[0, 1] = -values[0, 0]
+                values[0, 2:] = 0  # Zero net force remains a valid observation.
+            root.create_dataset(f"data/{key}", data=values, chunks=(7, *shape))
+        # Missing aggregate and wrong dense layout fail at the data boundary.
+        missing = list(config.dataset.sensor_modalities) + ["absent"]
+        expect_value_error(lambda: RobotDataset(str(data_path), sensor_modalities=missing))
+        if "taxel_tactile_force" in config.dataset.sensor_modalities:
+            data = root["data/taxel_tactile_force"][:]
+            del root["data/taxel_tactile_force"]
+            root.create_dataset("data/taxel_tactile_force", data=data[:, :, :-1])
+            expect_value_error(lambda: RobotDataset(str(data_path), sensor_modalities=config.dataset.sensor_modalities))
+            del root["data/taxel_tactile_force"]
+            root.create_dataset("data/taxel_tactile_force", data=data)
+        from dexmani_policy.datasets.aux.adaptac_dataset import AdapTacDataset
+
+        without_aggregate = [key for key in config.dataset.sensor_modalities if key != "finger_tactile_force"]
+        expect_value_error(lambda: AdapTacDataset(str(data_path), tactile_source=cfg.tactile_source, sensor_modalities=without_aggregate))
+        dataset, normalizer, description = build_dataset_and_normalizer(config)
+        for key in ("finger_tactile_force", "taxel_tactile_force"):
+            mode = config.normalization.get(key)
+            if mode in {"rms", "max_abs"}:
+                values = torch.from_numpy(root[f"data/{key}"][:frames]).double()
+                magnitude = values.square().mean().sqrt() if mode == "rms" else values.abs().max()
+                torch.testing.assert_close(normalizer[key].scale, magnitude.reciprocal().float().expand(FIELD_FEATURE_SHAPES[key]))
+        batch = default_collate([dataset[0], dataset[len(dataset) - 1]])
+        validate_data_batch(batch, dataset, config)
+        with closing(PolicyTrainer(config, dataset, normalizer, description)) as trainer:
+            model = trainer.model
+            assert model.force_dim == 15 and model.force_fusion.force_proj.in_features == 15 * (config.horizon + 1)
+            inputs = dict_apply(batch, lambda x: x.to(trainer.device))
+            contract = validate_adaptac_model_contract(model, inputs)
+            snapshot = capture_policy_predictions(model, trainer.ema_model, batch)
+            trainer.save_checkpoint("contract")
+            checkpoint_path = trainer.checkpoint_dir / "latest.pt"
+            saved = OmegaConf.to_container(trainer.cfg, resolve=True)
+        for override in ("tactile=sim_force", "normalization.finger_tactile_force=max_abs", "agent.force_loss_weight=0"):
+            expect_value_error(lambda: resolve_input_recipe(config, overrides=[override], saved_config=saved))
+        expect_value_error(lambda: AdapTacPolicy.prepare_restore_config({"force_scale": 1.0}))
+        data_path.rename(Path(temp) / "unavailable.zarr")
+        with patch.object(LinearNormalizer, "fit_field", side_effect=AssertionError("restore must not fit")):
+            wrong_source = {**saved, "tactile_source": "sim" if cfg.tactile_source == "real" else "real"}
+            expect_value_error(lambda: restore_policy(wrong_source, checkpoint_path, use_ema=False, device=cfg.training.device))
+            restored = validate_policy_restoration(saved, checkpoint_path, snapshot, device=torch.device(cfg.training.device))
+            info = inspect_policy(config.workspace.output_dir, checkpoint="latest", weights="raw")
+            observation = {k: v[0].numpy() for k, v in batch["obs"].items()}
+            with closing(load_policy(info, device=cfg.training.device, seed=42)) as runtime:
+                prediction = runtime.predict(observation)
+                runtime.reset_episode()
+                np.testing.assert_allclose(prediction, runtime.predict(observation))
+                assert prediction.shape == (config.horizon, 19)
+        runner = SimRunner("unused", 1, list(config.dataset.sensor_modalities), {})
+        expect_value_error(lambda: next(runner.run(SimpleNamespace(tactile_source="real"), seeds=[0], inference_steps=20, action_steps=8)))
+        from dexmani_policy.evaluation.config import merge_eval_config
+
+        expect_value_error(lambda: merge_eval_config({"tactile_source": "real"}))
+    return {"status": "passed", "source": cfg.tactile_source, "model": contract, "restoration": restored}
+
+
 def validate_adaptac_data_contract():
     from dexmani_policy.datasets.aux.adaptac_dataset import AdapTacDataset
 
@@ -413,16 +600,19 @@ def validate_adaptac_data_contract():
         100 * np.arange(ends[-1])[:, None, None]
         + 10 * np.arange(5)[None, :, None] + np.arange(3)[None, None, :]
     ).astype(np.float64)
+    force[1] = force[0]  # A held sample is still a valid observation row.
+    force[2] = 0
     force[10:13] += 100000  # Validation outliers must not affect the affine.
     action = np.broadcast_to(np.arange(ends[-1])[:, None], (ends[-1], 19)).astype(np.float32)
     with tempfile.TemporaryDirectory(prefix="adaptac-data-") as directory:
         root = zarr.open_group(directory, mode="w")
+        root.attrs.update(tactile_smoke_attrs("sim"))
         root.create_dataset("meta/episode_ends", data=ends)
         root.create_dataset("data/finger_tactile_force", data=force)
         root.create_dataset("data/joint_state", data=action)
         root.create_dataset("data/action", data=action)
         dataset = AdapTacDataset(
-            directory, sensor_modalities=["joint_state", "finger_tactile_force"],
+            directory, tactile_source="sim", sensor_modalities=["joint_state", "finger_tactile_force"],
             horizon=4, obs_horizon=1, pad_after=3,
             split_manifest={
                 "episode_ends": ends.tolist(), "train_indices": [0, 1, 3], "val_indices": [2],
@@ -440,6 +630,8 @@ def validate_adaptac_data_contract():
                 torch.testing.assert_close(batch["future_force"], torch.from_numpy(expected))
                 assert batch["future_force"].shape == (4, 5, 3)
                 assert batch["future_force"].dtype == torch.float32
+                torch.testing.assert_close(batch["future_force_valid"], torch.tensor(query + np.arange(1, 5) < end))
+                assert batch["future_force_valid"].any()
                 torch.testing.assert_close(
                     batch["future_force"].flatten(-2), torch.from_numpy(expected.reshape(4, -1)),
                 )
@@ -447,13 +639,13 @@ def validate_adaptac_data_contract():
             assert not set(queries).intersection(ends - 1)
         # At query 0, the final force row is beyond action[0:4].
         torch.testing.assert_close(dataset[0]["future_force"][-1], torch.from_numpy(force[4].astype(np.float32)))
-        spec = {"joint_state": "limits", "action": "limits", "finger_tactile_force": "limits"}
+        spec = {"joint_state": "limits", "action": "limits", "finger_tactile_force": "rms"}
         normalizer = dataset.get_normalizer(spec)
         real_train = force[np.r_[0:10, 13:14]].astype(np.float32)
         observed = np.concatenate(list(dataset.iter_normalization_data("finger_tactile_force")))
         np.testing.assert_array_equal(observed, real_train)
         reference = LinearNormalizer()
-        reference.fit_field("force", [real_train], last_n_dims=1)
+        reference.fit_field("force", [real_train], mode="rms", last_n_dims=2)
         field = normalizer["finger_tactile_force"]
         for name in ("scale", "offset"):
             torch.testing.assert_close(getattr(field, name), getattr(reference["force"], name).expand(5, 3))
@@ -464,24 +656,6 @@ def validate_adaptac_data_contract():
     }
 
 
-def validate_adaptac_interaction():
-    from dexmani_policy.agents.obs_encoder.interaction.future_tactile.visuo_tactile_interaction import (
-        VisuoTactileInteraction,
-    )
-
-    block = VisuoTactileInteraction(384, 64, 5).eval()
-    visual, tactile = torch.randn(2, 13, 384), torch.randn(2, 5, 64)
-    with torch.no_grad():
-        v, t = block.visual_norm(visual), block.tactile_norm(tactile)
-        e = block.finger_embedding
-        expected_t = tactile + block.tactile_attn(t + e, v, v, need_weights=False)[0]
-        expected_v = visual + block.visual_attn(v, t + e, t, need_weights=False)[0]
-        actual_v, actual_t = block(visual, tactile)
-        torch.testing.assert_close(actual_v, expected_v)
-        torch.testing.assert_close(actual_t, expected_t)
-    return {"status": "passed", "visual_tokens": 13, "finger_embedding_shape": list(e.shape)}
-
-
 def require_gradient(module, name):
     grads = [p.grad for p in module.parameters() if p.requires_grad and p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads), name
@@ -490,35 +664,18 @@ def require_gradient(module, name):
     return total
 
 
-def validate_adaptac_model_contract(device):
-    from dexmani_policy.agents.policies.adaptac import AdapTacPolicy
-
-    model = AdapTacPolicy(
-        horizon=4, n_obs_steps=1, n_action_steps=2, action_dim=19,
-        num_points=32, feature_dim=32, state_out_dim=16,
-        pc_encoder_config={"channels": 48, "num_patches": 8, "group_size": 8, "depth": 1},
-        diffusion_step_embed_dim=32, down_dims=(32, 64), force_scale=2.5,
-        force_predictor_config={"n_layer": 1, "n_emb": 32},
-    ).to(device)
-    spec = {
-        "joint_state": "limits", "action": "limits", "point_cloud": "identity",
-        "finger_tactile_force": "limits",
+def validate_adaptac_model_contract(model, batch):
+    device = next(model.parameters()).device
+    raw = batch["obs"]["finger_tactile_force"]
+    assert not raw[0].sum(-2).any()
+    batch_size = len(raw)
+    encoder = model.obs_encoder.tactile_encoder
+    tokens = encoder(model.preprocess(batch["obs"])[encoder.input_key])
+    assert tokens.shape == (batch_size, 5, 64) and model.force_dim == 15
+    assert set(model.obs_encoder.consumed_observation_fields) == {
+        "joint_state", "point_cloud", encoder.input_key,
     }
-    model.set_normalization_spec(spec, {"joint_state": 19, "action": 19, "finger_tactile_force": model.force_dim})
-    model.normalizer.to(device)
-    # A deliberately nonidentity encoder affine must never reach the physical guide.
-    model.normalizer["finger_tactile_force"].scale.fill_(0.3)
-    model.normalizer["finger_tactile_force"].offset.fill_(0.7)
-    raw = torch.zeros(2, 1, 5, 3, device=device)
-    raw[:, :, 0] = torch.tensor([2.0, -3.0, 4.0], device=device)
-    raw[:, :, 1] = -raw[:, :, 0]
-    assert not raw.sum(-2).any()
-    batch = {
-        "obs": {"joint_state": torch.randn(2, 1, 19, device=device),
-                "point_cloud": torch.randn(2, 1, 32, 6, device=device), "finger_tactile_force": raw},
-        "action": torch.randn(2, 4, 19, device=device),
-        "future_force": torch.arange(2 * 4 * model.force_dim, device=device).reshape(2, 4, 5, 3).float() / 30,
-    }
+    assert set(model.consumed_observation_fields) == set(batch["obs"])
     optimizer = build_optimizer(model, lr=1e-4, weight_decay=1e-6)
     ids = [id(p) for group in optimizer.param_groups for p in group["params"]]
     assert sorted(ids) == sorted(id(p) for p in model.parameters() if p.requires_grad)
@@ -526,10 +683,14 @@ def validate_adaptac_model_contract(device):
     assert model.force_predictor.noise_scheduler.config.prediction_type == "sample"
     assert not model.force_predictor.noise_scheduler.config.clip_sample
     assert model.action_decoder.noise_scheduler.config.prediction_type == "epsilon"
+    assert ("finger_tactile_force" in model.normalizer.fields) == (
+        model.normalization_spec["finger_tactile_force"] != "identity"
+    )
+    loss, metrics = model.compute_loss(batch, log_metrics=False)
+    assert torch.isfinite(loss) and metrics == {}
     gradient_results = {}
-    for use_bf16 in (False, True) if device.type == "cuda" else (False,):
+    for use_bf16 in (False, True):
         model.train().zero_grad(set_to_none=True)
-        model.force_loss_weight = 0.0
         captured = {}
 
         def force_output(module, args, output):
@@ -539,19 +700,28 @@ def validate_adaptac_model_contract(device):
         def fusion_input(module, args):
             captured["guide"] = args[2]
 
+        def tactile_input(module, args):
+            key = encoder.input_key
+            expected = batch["obs"][key]
+            if key in model.normalizer.fields:
+                expected = model.normalizer[key].normalize(expected)
+            torch.testing.assert_close(args[0], expected.flatten(0, 1))
+
         original = model.force_predictor.compute_loss_and_prediction
 
-        def supervised_prediction(condition, target):
-            torch.testing.assert_close(target, batch["future_force"].flatten(-2) / model.force_scale)
-            loss, prediction = original(condition, target)
-            assert target.shape == prediction.shape == (2, model.future_steps, model.force_dim)
+        def supervised_prediction(condition, target, valid):
+            torch.testing.assert_close(target, model.normalize_force(batch["future_force"]).flatten(-2))
+            loss, prediction = original(condition, target, valid)
+            assert target.shape == prediction.shape == (batch_size, model.future_steps, model.force_dim)
             assert loss.dtype == torch.float32
-            torch.testing.assert_close(loss, (prediction.float() - target).square().mean())
+            torch.testing.assert_close(loss, torch.nn.functional.mse_loss(prediction[valid], target[valid]))
             return loss, prediction
 
         with ExitStack() as stack:
+            stack.enter_context(patch.object(model, "force_loss_weight", 0.0))
             stack.enter_context(model.force_predictor.model.register_forward_hook(force_output))
             stack.enter_context(model.force_fusion.register_forward_pre_hook(fusion_input))
+            stack.enter_context(encoder.register_forward_pre_hook(tactile_input))
             stack.enter_context(patch.object(
                 model.force_predictor, "compute_loss_and_prediction", side_effect=supervised_prediction,
             ))
@@ -563,10 +733,11 @@ def validate_adaptac_model_contract(device):
         prediction = captured["prediction"]
         torch.testing.assert_close(
             captured["guide"],
-            torch.cat((raw.flatten(-2) / model.force_scale, prediction), dim=1).flatten(1),
+            torch.cat((model.normalize_force(raw).flatten(-2), prediction.float()), dim=1).flatten(1),
         )
         assert prediction.grad is not None and torch.isfinite(prediction.grad).all()
         assert prediction.grad.abs().sum() > 0
+        assert prediction.grad[~batch["future_force_valid"]].abs().sum() > 0
         interaction = model.obs_encoder.interaction
         modules = {"force_predictor": model.force_predictor, "tactile_attention": interaction.tactile_attn,
                    "visual_attention": interaction.visual_attn, "visual_encoder": model.obs_encoder.pc_encoder,
@@ -597,8 +768,11 @@ def validate_adaptac_model_contract(device):
         output = model.predict_action(batch["obs"], generator=generator)
         assert force_sample.call_args.kwargs["generator"] is generator
         assert action_sample.call_args.kwargs["generator"] is generator
-        assert list(output) == ["future_actions"] and output["future_actions"].shape == (2, 4, 19)
-        assert calls == ["interaction", "encode"] + ["force"] * 20 + ["action"] * 20
+        assert list(output) == ["future_actions"]
+        assert output["future_actions"].shape == (batch_size, model.future_steps, 19)
+        force_steps = model.force_predictor.num_inference_steps
+        action_steps = model.action_decoder.num_inference_steps
+        assert calls == ["interaction", "encode"] + ["force"] * force_steps + ["action"] * action_steps
         generator_after = generator.get_state()
         calls.clear()
         set_rng_state(rng, device)
@@ -608,19 +782,8 @@ def validate_adaptac_model_contract(device):
         assert torch.equal(generator_after, generator.get_state())
     return {
         "status": "passed", "action_only_gradient_l1": gradient_results,
-        "optimizer_parameters": len(ids), "force_scale": model.force_scale,
-        "sampling": "one encoding/interaction, independent 20+20 DDIM, generator reproducibility",
-    }
-
-
-def adaptac_force_statistics(dataset):
-    force = np.concatenate(list(dataset.iter_normalization_data("finger_tactile_force"))).astype(np.float64)
-    return {
-        "train_episodes": int(dataset.train_mask.sum()), "real_train_frames": len(force),
-        "finger_order": ADAPTAC_FINGER_ORDER, "unit": "raw dataset force units; consult producer contract",
-        "component_rms": np.sqrt(np.mean(force ** 2, axis=(0, 2))).tolist(),
-        "abs_percentiles": [50, 90, 95, 99, 100],
-        "per_finger_abs_percentiles": np.percentile(np.abs(force), [50, 90, 95, 99, 100], axis=(0, 2)).T.tolist(),
+        "optimizer_parameters": len(ids), "tactile_source": model.tactile_source,
+        "sampling": f"one encoding/interaction, independent {force_steps}+{action_steps} DDIM, generator reproducibility",
     }
 
 
@@ -630,70 +793,78 @@ def validate_adaptac_deployment(experiment, dataset, device):
     if validation is None:
         return {"status": "not_run", "reason": "no validation windows"}
     info = inspect_policy(experiment, checkpoint="latest")
-    indices = validation.sampler.indices
-    queries = validation.sampler.source_rows(indices)[:, 0]
-    ends = validation.replay_buffer.episode_ends
-    episode_ends = ends[np.searchsorted(ends, queries, side="right")]
-    eligible = np.flatnonzero(queries + info.future_steps < episode_ends)
-    if not len(eligible):
-        return {"status": "not_run", "reason": "no validation windows with K real successor frames"}
-    runtime = load_policy(info, device=str(device), seed=42)
-    model = runtime.agent
-    selected = np.sort(np.random.default_rng(42).choice(eligible, min(32, len(eligible)), replace=False))
-    samples = [validation[int(index)] for index in selected]
-    errors = []
-    generator = torch.Generator(device=device).manual_seed(42)
-    for start in range(0, len(samples), 4):
-        chunk = samples[start : start + 4]
-        obs = {name: torch.stack([item["obs"][name] for item in chunk]).to(device) for name in chunk[0]["obs"]}
-        features = model.obs_encoder(model.preprocess(obs))
-        predicted = model.force_predictor.predict_action(
-            torch.cat(features[:2], dim=-1).unsqueeze(1),
-            (len(chunk), model.future_steps, model.force_dim), generator=generator,
-        )
-        target = torch.stack([item["future_force"] for item in chunk])
-        error = predicted.float().cpu().reshape_as(target) * model.force_scale - target
-        assert torch.isfinite(error).all()
-        errors.append(error)
-    error = torch.cat(errors)
-    report = {
-        "status": "passed", "samples": len(error), "seed": 42,
-        "weights": info.weights, "unit": "raw dataset force units; consult producer contract",
-        "finger_order": ADAPTAC_FINGER_ORDER, "query_source_rows": queries[selected].tolist(),
-        "force_ddim_steps": model.force_predictor.num_inference_steps,
-        "per_finger_mae": error.abs().mean((0, 1, 3)).tolist(),
-        "per_finger_rmse": error.square().mean((0, 1, 3)).sqrt().tolist(),
-        "per_step_mae": error.abs().mean((0, 2, 3)).tolist(),
-        "per_step_rmse": error.square().mean((0, 2, 3)).sqrt().tolist(),
-        "per_step_per_finger_mae": error.abs().mean((0, 3)).tolist(),
-        "per_step_per_finger_rmse": error.square().mean((0, 3)).sqrt().tolist(),
-    }
-    observation = {name: value.numpy() for name, value in samples[0]["obs"].items()}
-    for _ in range(5):
-        runtime.predict(observation)
-    durations = []
-    for _ in range(20):
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        start = time.perf_counter()
-        runtime.predict(observation)
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        durations.append(1000 * (time.perf_counter() - start))
-    report["latency"] = {
-        "device": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
-        "batch_size": 1, "parameter_dtype": str(next(runtime.agent.parameters()).dtype),
-        "float32_matmul_precision": torch.get_float32_matmul_precision(),
-        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
-        "autocast": False, "warmups": 5, "queries": len(durations),
-        "mean_ms": float(np.mean(durations)), "median_ms": float(np.median(durations)),
-        "p95_ms": float(np.percentile(durations, 95)),
-        "includes": (
-            "host staging, transfer, normalization, encoding, interaction, "
-            "force DDIM, FGAF, action DDIM, CPU action output"
-        ),
-    }
-    return report
+    selected = np.sort(np.random.default_rng(42).choice(len(validation), min(32, len(validation)), replace=False))
+    queries = validation.sampler.source_rows(validation.sampler.indices[selected])[:, 0]
+    with closing(load_policy(info, device=str(device), seed=42)) as runtime:
+        model = runtime.agent
+        samples = [validation[int(index)] for index in selected]
+        errors, masks, zero_errors, persistence_errors = [], [], [], []
+        generator = torch.Generator(device=device).manual_seed(42)
+        for start in range(0, len(samples), 4):
+            chunk = samples[start : start + 4]
+            obs = {name: torch.stack([item["obs"][name] for item in chunk]).to(device) for name in chunk[0]["obs"]}
+            features = model.obs_encoder(model.preprocess(obs))
+            predicted = model.force_predictor.predict_action(
+                torch.cat(features[:2], dim=-1).unsqueeze(1),
+                (len(chunk), model.future_steps, model.force_dim), generator=generator, dtype=torch.float32,
+            )
+            target = torch.stack([item["future_force"] for item in chunk])
+            error = model.unnormalize_force(predicted.reshape(-1, model.future_steps, 5, 3)).cpu() - target
+            masks.append(torch.stack([item["future_force_valid"] for item in chunk]))
+            zero_errors.append(-target)
+            persistence_errors.append(obs["finger_tactile_force"].cpu() - target)
+            assert torch.isfinite(error).all()
+            errors.append(error)
+        error = torch.cat(errors)
+        valid = torch.cat(masks)
+
+        def force_metrics(error):
+            def window_rmse(stop):
+                mask = valid[:, :stop, None, None]
+                return ((error[:, :stop].square() * mask).sum() / (15 * mask.sum())).sqrt().item()
+            return {
+                "full_horizon_rmse": window_rmse(info.future_steps),
+                "execution_window_rmse": window_rmse(info.n_action_steps),
+                "per_finger_rmse": ((error.square() * valid[..., None, None]).sum((0, 1, 3))
+                                    / (3 * valid.sum())).sqrt().tolist(),
+            }
+
+        report = {
+            "status": "passed", "samples": len(error), "seed": 42,
+            "metric_kind": "pure_noise_forecasting", "valid_successors": valid.sum().item(),
+            "weights": info.weights,
+            "unit": "N, world axes" if model.tactile_source == "sim" else "SDK native unknown physical scale, sensor axes",
+            "finger_order": ADAPTAC_FINGER_ORDER, "query_source_rows": queries.tolist(),
+            "force_ddim_steps": model.force_predictor.num_inference_steps,
+            "forecast": force_metrics(error), "zero": force_metrics(torch.cat(zero_errors)),
+            "persistence": force_metrics(torch.cat(persistence_errors)),
+        }
+        observation = {name: value.numpy() for name, value in samples[0]["obs"].items()}
+        for _ in range(5):
+            runtime.predict(observation)
+        durations = []
+        for _ in range(20):
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            query_start = time.perf_counter()
+            runtime.predict(observation)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            durations.append(1000 * (time.perf_counter() - query_start))
+        report["latency"] = {
+            "device": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
+            "batch_size": 1, "parameter_dtype": str(next(runtime.agent.parameters()).dtype),
+            "float32_matmul_precision": torch.get_float32_matmul_precision(),
+            "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+            "autocast": False, "warmups": 5, "queries": len(durations),
+            "mean_ms": float(np.mean(durations)), "median_ms": float(np.median(durations)),
+            "p95_ms": float(np.percentile(durations, 95)),
+            "includes": (
+                "host staging, transfer, normalization, encoding, interaction, "
+                "force DDIM, FGAF, action DDIM, CPU action output"
+            ),
+        }
+        return report
 
 
 def validate_simulation(experiment, device):
@@ -710,11 +881,11 @@ def validate_simulation(experiment, device):
             "episodes": record["episodes"], "artifacts": str(path)}
 
 
-def validate_adaptac_contracts(device):
+def validate_adaptac_contracts(cfg):
     return {
+        "normalization_patch": validate_tactile_numerics(),
+        "roundtrip": validate_tactile_roundtrip(cfg),
         "data": validate_adaptac_data_contract(),
-        "interaction": validate_adaptac_interaction(),
-        "model": validate_adaptac_model_contract(device),
     }
 
 
@@ -733,10 +904,11 @@ def main(argv=None):
         "--contracts-only", action="store_true",
         help="Run focused AdapTac data/model contracts without real data or training.",
     )
+    parser.add_argument("--override", action="append", default=[], help="Repeatable Hydra override.")
     parser.add_argument("--device", help="Override training.device for this smoke run.")
     parser.add_argument(
         "--compile", action="store_true",
-        help="Compile both AdapTac backbones, or the configured policy backbone.",
+        help="Compile policy backbones during bounded training; requires training mode.",
     )
     parser.add_argument(
         "--output-dir", type=Path,
@@ -765,11 +937,13 @@ def main(argv=None):
         "--rollout", action="store_true", help="Also run one simulation episode using the final checkpoint.",
     )
     args = parser.parse_args(argv)
+    if args.compile and (args.config_only or args.data_only or args.contracts_only):
+        parser.error("--compile requires bounded training mode")
 
     set_project_root()
     for config_name in args.config_names:
         print(f"\nValidating {config_name}", flush=True)
-        cfg = load_smoke_config(config_name)
+        cfg = load_smoke_config(config_name, args.override)
         if args.device is not None:
             cfg.training.device = args.device
         if args.compile:
@@ -787,7 +961,7 @@ def main(argv=None):
                 parser.error("Focused contract checks are currently available for adaptac")
             set_seed(cfg.training.seed)
             with smoke_output(output_dir) as directory:
-                report = validate_adaptac_contracts(torch.device(cfg.training.device))
+                report = validate_adaptac_contracts(cfg)
                 (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
             summary = "AdapTac contracts"
         else:

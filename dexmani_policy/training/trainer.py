@@ -88,9 +88,6 @@ class PolicyTrainer:
                         or not torch.equal(parameter, averaged[name])
                     ):
                         raise ValueError(f"Raw/EMA frozen parameter mismatch: {name}")
-                for name, value in model.normalizer.named_buffers():
-                    if not torch.equal(value, ema_model.normalizer.get_buffer(name)):
-                        raise ValueError(f"Raw/EMA normalizer mismatch: {name}")
         model.to(device)
         if ema_model is not None:
             ema_model.to(device)

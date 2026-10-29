@@ -36,7 +36,18 @@ def load_checkpoint(path: str | Path, *, mmap: bool = False) -> Checkpoint:
 
     # Project checkpoints contain trusted training state, not just tensors.
     payload = torch.load(path, map_location="cpu", weights_only=False, mmap=mmap)
-    return Checkpoint(**payload)
+    checkpoint = Checkpoint(**payload)
+    raw = checkpoint.model_state
+    ema = checkpoint.ema_model_state
+    affine_keys = {key for key in raw if key.startswith("normalizer.")}
+    if ema is not None and affine_keys != {key for key in ema if key.startswith("normalizer.")}:
+        raise ValueError("Raw/EMA normalizer fields differ")
+    for key in affine_keys:
+        if raw[key].dtype != torch.float32:
+            raise ValueError(f"Normalizer buffer must be FP32: {key}")
+        if ema is not None and (ema[key].dtype != torch.float32 or not torch.equal(raw[key], ema[key])):
+            raise ValueError(f"Raw/EMA normalizer mismatch: {key}")
+    return checkpoint
 
 
 def policy_state_dict(model) -> dict:
@@ -98,6 +109,8 @@ def restore_policy(saved_config, checkpoint_path, *, use_ema, device):
 
     if agent.inference_metadata != cfg["policy_metadata"]:
         raise ValueError("Restored policy metadata differs from saved construction")
+    if hasattr(agent, "tactile_source") and agent.tactile_source != cfg.get("tactile_source"):
+        raise ValueError("Restored AdapTac tactile_source differs from saved top-level source")
     validate_observation_fields(agent, cfg["dataset"]["sensor_modalities"])
     agent.checkpoint_step = global_step
     agent.set_normalization_spec(cfg["normalization"], cfg["normalization_dims"])
@@ -126,4 +139,5 @@ def _inference_config(config):
         "action_key": config["action_key"],
         "task_name": config.get("task_name"),
         "real_runtime": config.get("real_runtime"),
+        "tactile_source": config.get("tactile_source"),
     }

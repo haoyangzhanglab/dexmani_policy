@@ -39,6 +39,9 @@ def prepare_training(cfg):
 
 def validate_config(cfg):
     agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
+    if not (cfg.get("tactile_source") == cfg.agent.get("tactile_source")
+            == cfg.dataset.get("tactile_source")):
+        raise ValueError("Top-level, agent and dataset tactile_source must agree")
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
         if cfg.agent[name] != cfg[name]:
             raise ValueError(f"agent.{name} must match {name}")
