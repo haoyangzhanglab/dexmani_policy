@@ -682,7 +682,7 @@ def validate_hand_scene_encoder(device):
     )
 
     set_seed(37)
-    observations, rotation, local_xyz = _hand_observations(device)
+    observations, rotation, _ = _hand_observations(device)
     anchors = torch.cat((observations['eef_pose'][:, None, :3], observations['fingertip_xyz']), 1).requires_grad_()
     rotation = rotation.requires_grad_()
     xyz = torch.cat((anchors.detach() + .002, anchors.detach() + torch.tensor([-.005, .004, .002], device=device)), 1)
@@ -706,8 +706,7 @@ def validate_hand_scene_encoder(device):
     model = HandSceneEncoder(surface_k=4).to(device)
     captured = {}
     with (
-        model.context.edge.register_forward_pre_hook(lambda _, args: captured.update(patch=args[0].detach())),
-        model.hand_shape.register_forward_pre_hook(lambda _, args: captured.update(shape=args[0].detach())),
+        model.context.rope.register_forward_pre_hook(lambda _, args: captured.update(positions=args[0].detach())),
         model.surface.register_forward_pre_hook(lambda _, args: captured.update(surface=args[0].detach())),
     ):
         output = model(points, patches, anchors, hand, rotation_world_from_eef=rotation,
@@ -716,8 +715,12 @@ def validate_hand_scene_encoder(device):
         assert output['hand_query'] is hand
         assert output['geometry_descriptor'].shape == (2, 6, 7)
         torch.testing.assert_close(output['interaction_center'], anchors, rtol=0, atol=0)
-        torch.testing.assert_close(first_inputs['shape'], (local_xyz / model.metric_scale).flatten(1))
-        torch.testing.assert_close(first_inputs['surface'], output['surface_relative'][:, 1:], rtol=0, atol=0)
+        torch.testing.assert_close(first_inputs['positions'][:, :6], (anchors - anchors[:, :1]) @ rotation)
+        torch.testing.assert_close(first_inputs['surface'], output['surface_relative'], rtol=0, atol=0)
+        torch.testing.assert_close(output['relation_update'], output['geometry_update'] + output['context_update'].float(), rtol=0, atol=0)
+        assert output['surface_features'].shape == (2, 6, 32)
+        assert not output['context_null_mass'].any()
+        assert not output['context_attention'].requires_grad
         for key in ('geometry_descriptor', 'surface_relative'):
             assert output[key].dtype == torch.float32 and not output[key].requires_grad
         assert not output['surface_relative'][~output['surface_valid']].any()
@@ -727,9 +730,9 @@ def validate_hand_scene_encoder(device):
         torch.testing.assert_close(output['surface_relative'], support['relative'] @ rotation[:, None])
         torch.testing.assert_close(output['geometry_descriptor'][..., :3], support['descriptor'][..., :3] @ rotation)
         torch.testing.assert_close(output['geometry_descriptor'][..., 3:], support['descriptor'][..., 3:], rtol=0, atol=0)
-        patch_relative = (torch.nan_to_num(centers)[:, None] - anchors[:, :, None]) @ rotation[:, None]
-        patch_relative = torch.where(patch_valid[:, None, :, None], patch_relative, 0.)
-        torch.testing.assert_close(first_inputs['patch'][..., :3], patch_relative / model.metric_scale)
+        patch_xyz = (torch.nan_to_num(centers) - anchors[:, :1]) @ rotation
+        patch_xyz = torch.where(patch_valid[..., None], patch_xyz, 0.)
+        torch.testing.assert_close(first_inputs['positions'][:, 6:], patch_xyz)
 
         with torch.no_grad():
             transform = torch.tensor([
@@ -746,7 +749,7 @@ def validate_hand_scene_encoder(device):
             )
             for key in first_inputs:
                 torch.testing.assert_close(captured[key], first_inputs[key], rtol=1e-4, atol=1e-5)
-            for key in ('geometry_descriptor', 'surface_relative', 'relation_update', 'context_update', 'finger_local',
+            for key in ('geometry_descriptor', 'surface_relative', 'relation_update', 'geometry_update', 'context_update', 'finger_local',
                         'context_attention', 'min_observed_distance'):
                 torch.testing.assert_close(transformed[key], output[key], rtol=1e-4, atol=1e-5)
             for key in ('surface_valid', 'has_reference', 'near_has_support'):
@@ -754,6 +757,15 @@ def validate_hand_scene_encoder(device):
             shared_context = model(points, patches, anchors, hand, rotation_world_from_eef=rotation,
                                    point_mask=point_mask, query_context=query_context[:, None])
             torch.testing.assert_close(shared_context['relation_update'], output['relation_update'], rtol=0, atol=0)
+            # Point-set and patch order must not affect a body's scene update.
+            order = torch.arange(points.shape[1] - 1, -1, -1, device=device)
+            patch_order = torch.tensor([2, 0, 1], device=device)
+            permuted = model(
+                points[:, order], {key: value[:, patch_order] for key, value in patches.items()},
+                anchors, hand, rotation_world_from_eef=rotation, point_mask=point_mask[:, order],
+                query_context=query_context,
+            )
+            torch.testing.assert_close(permuted['relation_update'], output['relation_update'], rtol=1e-4, atol=1e-5)
 
     (output['relation_update'] * torch.randn_like(output['relation_update'])).mean().backward()
     _check_finite_gradients(model)
@@ -777,9 +789,48 @@ def validate_hand_scene_encoder(device):
                 assert not missing[key].any(), key
             assert torch.isinf(missing['min_observed_distance']).all()
             torch.testing.assert_close(missing['context_null_mass'], torch.ones_like(missing['context_null_mass']), rtol=0, atol=0)
+    missing_patches = {**patches, 'mask': torch.zeros_like(patches['mask'])}
+    with torch.no_grad():
+        geometry_only = model(points, missing_patches, anchors, hand, rotation_world_from_eef=rotation,
+                              point_mask=point_mask, return_intermediate=True)
+        assert not geometry_only['context_update'].any()
+        torch.testing.assert_close(geometry_only['relation_update'], geometry_only['geometry_update'], rtol=0, atol=0)
+        scene_only = model(points, patches, anchors, hand, rotation_world_from_eef=rotation,
+                           point_mask=torch.zeros_like(point_mask), return_intermediate=True)
+        assert not scene_only['geometry_update'].any()
+        torch.testing.assert_close(scene_only['relation_update'], scene_only['context_update'].float(), rtol=0, atol=0)
+        # Moving only the scene must change its relation to fixed body queries.
+        shifted = model(points, {**patches, 'xyz': centers + .09}, anchors, hand,
+                        rotation_world_from_eef=rotation, point_mask=torch.zeros_like(point_mask),
+                        return_intermediate=True)
+        assert not torch.allclose(shifted['context_attention'][1], scene_only['context_attention'][1])
+        far = model(points + 10., missing_patches, anchors, hand, rotation_world_from_eef=rotation,
+                    point_mask=point_mask, return_intermediate=True)
+        assert far['has_reference'].all() and not far['near_has_support'].any()
+        assert not far['surface_features'].any() and torch.isfinite(far['relation_update']).all()
+
+    model.zero_grad(set_to_none=True)
+    missing = model(points[:, :0], {key: value[:, :0] for key, value in patches.items()},
+                    anchors, hand, rotation_world_from_eef=rotation)
+    missing['relation_update'].sum().backward()
+    _check_finite_gradients(model)
+    assert all(not parameter.grad.any() for parameter in model.parameters())
+
+    # Sparse3D's default 384-wide memory can feed a 192-wide body directly.
+    wide = HandSceneEncoder(scene_channels=384, surface_k=4).to(device)
+    wide_memory = torch.randn(2, 3, 384, device=device, requires_grad=True)
+    wide_output = wide(points, {**patches, 'tokens': wide_memory}, anchors, hand,
+                       rotation_world_from_eef=rotation, point_mask=point_mask)
+    assert wide_output['relation_update'].shape == (2, 6, 192)
+    wide_output['relation_update'].square().mean().backward()
+    _check_finite_gradients(wide)
+    assert torch.isfinite(wide_memory.grad).all() and wide_memory.grad.abs().sum() > 0
+    expect_value_error(lambda: model(points, {**patches, 'tokens': wide_memory}, anchors, hand,
+                                    rotation_world_from_eef=rotation))
+    expect_value_error(lambda: HandSceneEncoder(token_channels=64))
     expect_value_error(lambda: model(points, patches, anchors, hand, rotation_world_from_eef=rotation[:1]))
     return {'status': 'passed', 'device': str(device),
-            'checks': 'four EEF directions, rigid transforms, query context, coordinate/parameter gradients, empty/masked scenes'}
+            'checks': 'EEF RoPE, rigid transforms, permutations, query context, gradients, missing modalities, 384-wide scene'}
 
 
 def validate_gated_tactile_fusion(device):
