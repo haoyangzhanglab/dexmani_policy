@@ -26,8 +26,8 @@ from dexmani_policy.common.hand_representation import validate_hand_coordinates
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
-    build_runtime_codebook,
     deployment_diagnostics,
+    export_codebook,
 )
 
 logger = logging.getLogger(__name__)
@@ -301,11 +301,8 @@ def train(cfg):
 
     # Deployment diagnostics evaluate the selected best without changing selection.
     selected_path = output_dir / "vqvae_hand_best.pt"
-    selected = torch.load(selected_path, map_location="cpu", weights_only=True)
-    runtime_codebook = build_runtime_codebook(selected, selected_path, device="cpu")
     codebook_path = output_dir / "codebook.npz"
-    with atomic_path(codebook_path) as temporary:
-        runtime_codebook.save(temporary)
+    runtime_codebook = export_codebook(selected_path, codebook_path, device="cpu", overwrite=True)
     print(f"Saved selected runtime codebook: {codebook_path}")
     diagnostics = deployment_diagnostics(
         runtime_codebook, {"train": train_norm, "held_out": val_norm}

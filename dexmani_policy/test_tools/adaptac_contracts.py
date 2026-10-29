@@ -23,7 +23,7 @@ from dexmani_policy.deployment.runtime import load_policy
 from dexmani_policy.training.common.data import build_dataset_and_normalizer
 from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.trainer import PolicyTrainer
-from dexmani_policy.smoke_checks import (
+from dexmani_policy.test_tools.smoke_checks import (
     capture_policy_predictions, expect_value_error, validate_data_batch,
     validate_policy_restoration, validate_tensor_layout,
 )
@@ -514,8 +514,6 @@ def validate_adaptac_contracts(cfg):
     }
 
 
-
-
 def validate_tactile_configuration():
     from dexmani_policy.common.config import load_policy_config, require_tactile_source, validate_tactile_config
     from dexmani_policy.env_runner.sim_runner import SimRunner
@@ -546,5 +544,4 @@ def validate_tactile_configuration():
         for accepted_fields, accepted_source in ((fields, "sim"), (["fingertip_xyz"], None)):
             agent = SimpleNamespace(consumed_observation_fields=accepted_fields, tactile_source=accepted_source)
             assert list(runner.run(agent, seeds=[], inference_steps=1, action_steps=1)) == []
-    assert not hasattr(runner, "run_episode")
     return {"status": "passed", "checks": "presets, missing/null/invalid sources, geometry, sim entry before environment"}

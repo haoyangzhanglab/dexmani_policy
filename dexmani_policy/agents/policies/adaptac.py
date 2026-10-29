@@ -11,9 +11,6 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     validate_unet_horizon,
 )
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.obs_encoder.interaction.future_tactile.diffusion_force_head import (
-    DiffusionForceHead,
-)
 from dexmani_policy.agents.obs_encoder.interaction.future_tactile.force_guided_attention_fusion import (
     ForceGuidedAttentionFusion,
 )
@@ -93,6 +90,41 @@ class AdapTacObservationEncoder(nn.Module):
         tactile = self.tactile_projection(tactile.flatten(1))
         state = self.state_mlp(obs["joint_state"])
         return visual, tactile, state
+
+
+class DiffusionForceHead(Diffusion):
+    def __init__(
+        self,
+        model: nn.Module,
+        num_training_steps: int = 100,
+        num_inference_steps: int = 20,
+    ) -> None:
+        super().__init__(
+            model,
+            num_training_steps,
+            num_inference_steps,
+            prediction_type="sample",
+            clip_sample=False,
+        )
+
+    def compute_loss_and_prediction(
+        self, condition: torch.Tensor, force: torch.Tensor, valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        force = force.float()
+        noise = torch.randn_like(force)
+        timestep = torch.randint(
+            self.noise_scheduler.config.num_train_timesteps,
+            (force.shape[0],),
+            device=force.device,
+        )
+        prediction = self.model(
+            x=self.noise_scheduler.add_noise(force, noise, timestep),
+            timestep=timestep,
+            context=condition,
+        )
+        prediction = prediction.float()
+        loss = ((prediction - force).square() * valid[..., None]).sum() / (force.shape[-1] * valid.float().sum())
+        return loss, prediction
 
 
 class AdapTacPolicy(BasePolicy):

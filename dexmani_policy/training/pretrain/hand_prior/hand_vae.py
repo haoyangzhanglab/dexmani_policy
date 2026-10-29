@@ -186,7 +186,7 @@ def train(cfg, *, overwrite=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="hand_vae", help="Hydra config name or YAML path")
+    parser.add_argument("--config", default="pretrain/hand_prior/hand_vae", help="Hydra config name or YAML path")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, e.g. training.device=cpu")
     args = parser.parse_args()

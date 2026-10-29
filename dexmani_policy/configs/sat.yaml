@@ -6,14 +6,9 @@ defaults:
 
 policy_name: sat
 
-task_name: pick_apple_messy
-zarr_path: robot_data/${task_name}.zarr
-
-seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action
 action_dim: 19
 
 normalization:
@@ -23,23 +18,13 @@ normalization:
 
 dataloader:
   batch_size: 128
-  shuffle: true
-  num_workers: 8
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 2
   drop_last: true
 
 dataset:
   pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
-  action_key: ${action_key}
-  zarr_path: ${zarr_path}
-  horizon: ${horizon}
-  pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
   sensor_modalities: ["joint_state", "point_cloud"]
-  obs_horizon: ${n_obs_steps}
 
   augmentation_cfg:
     pc:
@@ -50,10 +35,6 @@ dataset:
 
 agent:
   _target_: dexmani_policy.agents.policies.sat.SATPolicy
-  horizon: ${horizon}
-  n_obs_steps: ${n_obs_steps}
-  n_action_steps: ${n_action_steps}
-  action_dim: ${action_dim}
 
   pc_dim: 6
   state_dim: 19
@@ -107,8 +88,6 @@ ema:
   max_value: 0.9999
 
 training:
-  seed: ${seed}
-  device: cuda:0
   use_bfloat16: true
   use_compile: true
   use_ema: true
@@ -117,20 +96,11 @@ training:
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-    log_interval_steps: 100
-    gradient_accumulation_steps: 1
 
 env_runner:
-  task_name: ${task_name}
   env_kwargs:
     control_mode: joint
 
 eval:
   inference_steps: ${agent.num_inference_steps}
   use_ema: true
-
-  action_steps: null
-  seeds: null
-
-  video:
-    enabled: true

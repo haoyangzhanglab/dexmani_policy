@@ -9,8 +9,8 @@ import torch
 
 from dexmani_policy.common.config import set_project_root
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.smoke_checks import (
-    load_smoke_config, smoke_output, validate_common_contracts, validate_data_batch,
+from dexmani_policy.test_tools.smoke_checks import (
+    load_smoke_config, smoke_output, validate_data_batch,
     validate_dataset, validate_target_imports, validate_training,
 )
 
@@ -86,7 +86,7 @@ def main(argv=None):
         policy_class = hydra.utils.get_class(cfg.agent._target_)
         is_adaptac = issubclass(policy_class, AdapTacPolicy)
         if is_adaptac:
-            from dexmani_policy.adaptac_contracts import (
+            from dexmani_policy.test_tools.adaptac_contracts import (
                 validate_adaptac_batch, validate_adaptac_contracts, validate_adaptac_deployment,
             )
         batch_check = validate_adaptac_batch if is_adaptac else validate_data_batch
@@ -95,6 +95,8 @@ def main(argv=None):
             validate_dataset(cfg, max_batches=args.max_batches, batch_check=batch_check)
             summary = "CPU data batches"
         elif args.contracts_only:
+            from dexmani_policy.test_tools.common_contracts import validate_common_contracts
+
             set_seed(cfg.training.seed)
             with smoke_output(output_dir) as directory:
                 report = {"common": validate_common_contracts(torch.device(cfg.training.device))}
@@ -105,11 +107,11 @@ def main(argv=None):
                 from dexmani_policy.agents.policies.sat import SATPolicy
 
                 if issubclass(policy_class, (AFROPolicy, CordViPPolicy)):
-                    from dexmani_policy.smoke_checks import validate_pretrained_observation_transfer
+                    from dexmani_policy.test_tools.policy_contracts import validate_pretrained_observation_transfer
 
                     report["pretrained_observations"] = validate_pretrained_observation_transfer(cfg)
                 if issubclass(policy_class, SATPolicy):
-                    from dexmani_policy.smoke_checks import validate_sat_training
+                    from dexmani_policy.test_tools.policy_contracts import validate_sat_training
 
                     report["sat"] = validate_sat_training(cfg)
                 not_run = [

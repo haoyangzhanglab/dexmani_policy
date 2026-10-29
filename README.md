@@ -20,10 +20,10 @@ Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹�
 
 ```bash
 # 检查配置接口与导入，无需数据或 GPU
-python dexmani_policy/smoke_test.py --config-only dp3
+python -m dexmani_policy.test_tools.smoke_test --config-only dp3
 
 # 公共 action/EMA/FPS/Dataset 契约，无需训练数据
-python dexmani_policy/smoke_test.py --contracts-only --device cpu dp3
+python -m dexmani_policy.test_tools.smoke_test --contracts-only --device cpu dp3
 
 # 检查任务的数据路径
 python -m dexmani_policy.training.common.config \
@@ -39,6 +39,8 @@ bash scripts/training/train.sh dp3 \
 # Checkpoint 选点与独立测试
 bash scripts/eval/eval_pipeline.sh dp3 '<task>' '<run>'
 ```
+
+RGB 编码器独立自检使用 `python -m dexmani_policy.test_tools.rgb_encoder_check resnet`，也可选择 `dino` 或 `siglip`（需要对应模型资源）。
 
 配置检查不代表完整训练可运行。续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
@@ -75,12 +77,12 @@ RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=
 ```bash
 # 四种配方的配置和合成链路检查，无需实际 Zarr；CPU 也检查 BF16 autocast
 for tactile in sim_force real_force real_taxel real_patch; do
-  python dexmani_policy/smoke_test.py --config-only --override "tactile=$tactile" adaptac
-  python dexmani_policy/smoke_test.py --contracts-only --device cpu --override "tactile=$tactile" adaptac
+  python -m dexmani_policy.test_tools.smoke_test --config-only --override "tactile=$tactile" adaptac
+  python -m dexmani_policy.test_tools.smoke_test --contracts-only --device cpu --override "tactile=$tactile" adaptac
 done
 
 # 实际数据短训、续训及保存恢复；按硬件资源设置 batch/worker
-python dexmani_policy/smoke_test.py --max-updates 4 --resume-updates 2 \
+python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 2 \
   --override tactile=real_taxel --override 'zarr_path=<real_zarr>' \
   --override 'task_name=<task>' adaptac
 
@@ -88,7 +90,7 @@ python dexmani_policy/smoke_test.py --max-updates 4 --resume-updates 2 \
 bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/<run>'
 ```
 
-`smoke_test.py` 保留 CLI；公共检查在 `smoke_checks.py`，触觉检查及合成数据在 `adaptac_contracts.py`，依赖不反向导入 CLI。`--contracts-only` 对任意策略运行公共 action 配方、EMA 数值/恢复、原生 FPS 和 Dataset 回归，并按实际策略类追加检查：AFRO/CordViP 验证统计迁移及预训练文件缺失后的短训恢复，SAT 验证公共短训恢复路径，AdapTac 验证触觉契约；修改 policy_name 不会跳过。检查使用临时合成数据，保留所选归一化和输入布局，缩小网络与执行预算。公共 FPS 检查缺少原生后端时报告 not_run，不宣称通过；SAT/AdapTac 模型检查仍需该后端。
+测试诊断集中在 `dexmani_policy/test_tools/`：`smoke_test.py` 提供 CLI，`smoke_checks.py` 提供配置、数据、短训与恢复公共流程，`common_contracts.py` 集中基础回归，`policy_contracts.py` 集中 AFRO/CordViP/SAT 专属检查，`adaptac_contracts.py` 集中触觉检查及合成数据。契约模块依赖公共检查，公共检查不反向导入契约模块或 CLI。`--contracts-only` 对任意策略运行公共 action 配方、EMA 数值/恢复、原生 FPS 和 Dataset 回归，并按实际策略类追加检查：AFRO/CordViP 验证统计迁移及预训练文件缺失后的短训恢复，SAT 验证公共短训恢复路径，AdapTac 验证触觉契约；修改 policy_name 不会跳过。检查使用临时合成数据，保留所选归一化和输入布局，缩小网络与执行预算。公共 FPS 检查缺少原生后端时报告 not_run，不宣称通过；SAT/AdapTac 模型检查仍需该后端。
 
 AdapTac 契约检查使用缩小的 eager 网络、32 点点云和合成 episode，保留所选来源、encoder、normalization、horizon 和 point-cloud channels；梯度、guide 与恢复检查共用实际 Dataset 拟合的模型。短训命令使用实际配置，不再自动重复合成契约检查；`--compile` 仅用于短训模式。
 

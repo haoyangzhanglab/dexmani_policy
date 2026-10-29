@@ -6,14 +6,9 @@ defaults:
 
 policy_name: r3d
 
-task_name: pick_apple_messy
-zarr_path: robot_data/${task_name}.zarr
-
-seed: 42
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_key: action  # action：关节；action_ee：末端。
 use_aux_ee: false  # 启用时要求 action_key=action，末端姿态仅作辅助预测。
 joint_dim: 19
 ee_dim: 9  # action_ee[:9]：位置 3 维 + rot6d 6 维。
@@ -26,22 +21,12 @@ normalization:
 
 dataloader:
   batch_size: 128
-  shuffle: true
-  num_workers: 8
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 2
   drop_last: true
 
 dataset:
   _target_: ${eval:'"dexmani_policy.datasets.aux.r3d_dataset.R3DAuxDataset" if ${use_aux_ee} else "dexmani_policy.datasets.common.robot_dataset.RobotDataset"'}
-  action_key: ${action_key}
-  zarr_path: ${zarr_path}
-  horizon: ${horizon}
-  pad_before: ${eval:'${n_obs_steps} - 1'}
   pad_after: 7
   sensor_modalities: ["joint_state", "point_cloud"]
-  obs_horizon: ${n_obs_steps}
 
   # 点 dropout 在 Uni3D 内执行。
   augmentation_cfg:
@@ -54,10 +39,6 @@ dataset:
 agent:
   clip_sample: true
   _target_: dexmani_policy.agents.policies.r3d.R3DPolicy
-  horizon: ${horizon}
-  n_obs_steps: ${n_obs_steps}
-  n_action_steps: ${n_action_steps}
-  action_dim: ${action_dim}
   use_aux_ee: ${use_aux_ee}
   joint_dim: ${joint_dim}
   ee_dim: ${ee_dim}
@@ -113,8 +94,6 @@ ema:
   max_value: 0.9999
 
 training:
-  seed: ${seed}
-  device: cuda:0
   use_bfloat16: true
   use_compile: true  # 仅编译 R3DTransformer。
   use_ema: true
@@ -123,20 +102,11 @@ training:
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-    log_interval_steps: 100
-    gradient_accumulation_steps: 1
 
 env_runner:
-  task_name: ${task_name}
   env_kwargs:
     control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
 eval:
   inference_steps: 10
   use_ema: true
-
-  action_steps: null
-  seeds: null
-
-  video:
-    enabled: true

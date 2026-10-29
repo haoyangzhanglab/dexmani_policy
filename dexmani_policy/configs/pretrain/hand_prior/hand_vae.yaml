@@ -1,3 +1,4 @@
+# @package _global_
 # HandVAE：从独立手部动作语料预训练时序 codec。
 task_name: pick_apple_messy
 zarr_path: robot_data/${task_name}.zarr

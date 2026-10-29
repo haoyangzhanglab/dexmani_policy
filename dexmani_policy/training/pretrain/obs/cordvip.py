@@ -19,12 +19,12 @@ from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordi
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import build_mlp
 from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import close_resources
-from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
-from dexmani_policy.common.pytorch_util import dict_apply, set_rng_state, set_seed
+from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import get_scheduler
-from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, save_run
+from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, restore_run, save_run
 
 
 class CordViPPretrain(nn.Module):
@@ -85,12 +85,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     step = 0
     if checkpoint is not None:
-        model.load_state_dict(checkpoint['model_state'], strict=True)
-        validate_normalizer_state(model.normalizer)
-        optimizer.load_state_dict(checkpoint['optimizer_state'])
-        scheduler.load_state_dict(checkpoint['scheduler_state'])
-        step = checkpoint['global_step']
-        set_rng_state(checkpoint['rng_state'], cfg.training.device)
+        step = restore_run(model, optimizer, scheduler, checkpoint, device=cfg.training.device)
     epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
     if checkpoint is not None:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")

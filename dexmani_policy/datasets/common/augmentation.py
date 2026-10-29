@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torchvision.transforms.v2 as v2
 
 BT601_LUMA = (0.299, 0.587, 0.114)
 
@@ -238,6 +237,8 @@ class ImageAugmentation:
         blur_prob=0.2,
         prob=1.0,
     ):
+        import torchvision.transforms.v2 as v2
+
         self.prob = prob
 
         self.color_jitter = v2.ColorJitter(
