@@ -119,3 +119,5 @@ experiments/<policy_name>/<task_name>/<run>/
 - [观测预训练](docs/观测预训练.md)：AFRO/CordViP 数据准备、预训练与 encoder 加载
 - [仿真评测机制](docs/仿真评测机制.md)：选点、独立测试与单 Checkpoint 评测
 - [SSH 服务器训练部署](docs/SSH服务器训练部署.md)：远程训练、同步与管理
+
+Canonical 数据的 checkpoint resume 要求数据与保存的 split 都有非空 `source_id`。原样搬迁保留 ID，可继续 resume；重新导出的数据获得新 ID，不能复用旧 normalizer。旧数据仍可从头训练、指定 split 或读取评价；需要可靠 resume 时请显式重新导出并开始新实验。
