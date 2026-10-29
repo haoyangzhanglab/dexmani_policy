@@ -1,5 +1,4 @@
-import inspect
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from torch import nn
@@ -21,6 +20,7 @@ def build_rgb_encoder(
     preprocessing = processor.config
     encoder_config = {key: value for key, value in config.items() if key not in preprocessing}
 
+    encoder: nn.Module
     if name == "resnet":
         from .resnet import ResNetEncoder
 
@@ -30,14 +30,6 @@ def build_rgb_encoder(
 
         encoder = ViTEncoder(name, **encoder_config)
 
-    defaults = {
-        key: parameter.default
-        for key, parameter in inspect.signature(type(encoder)).parameters.items()
-        if parameter.default is not inspect.Parameter.empty
-    }
-    encoder.effective_config = {**defaults, **encoder_config, **preprocessing}
-    if hasattr(encoder, "architecture"):
-        encoder.effective_config["architecture"] = encoder.architecture
     return encoder, processor
 
 
@@ -46,7 +38,7 @@ def example(name: Literal["resnet", "dino", "siglip"] = "resnet") -> None:
     encoder, processor = build_rgb_encoder(name)
     encoder.to(device).eval()
     images = torch.randint(256, (2, 2, 240, 320, 3), dtype=torch.uint8)
-    rgb = processor.process_images(images).to(
+    rgb = cast(torch.Tensor, processor.process_images(images)).to(
         device=device, dtype=next(encoder.backbone.parameters()).dtype
     )
     with torch.no_grad():

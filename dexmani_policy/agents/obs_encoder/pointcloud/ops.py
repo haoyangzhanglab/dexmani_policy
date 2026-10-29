@@ -41,53 +41,22 @@ def farthest_point_sample(
         raise ValueError("pointcloud must have at least three XYZ channels")
 
     xyz = pointcloud[..., :3]
-    B, N, _ = xyz.shape
-
-    if not use_random:
-        sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
-            points=xyz,
-            K=num_samples,
-        )
-        sampled_points = (
-            sampled_xyz if pointcloud.size(-1) == 3 else index_points(pointcloud, sample_idx)
-        )
-        return sampled_points.contiguous(), sample_idx
-
-    start_indices = None
-    if use_random_start:
-        start_indices = torch.randint(0, N, (B,), device=pointcloud.device)
-        modified_xyz = xyz.clone()
-        arange_b = torch.arange(B, device=pointcloud.device)
-        val_0 = modified_xyz[:, 0].clone()
-        modified_xyz[:, 0] = modified_xyz[arange_b, start_indices]
-        modified_xyz[arange_b, start_indices] = val_0
-    else:
-        modified_xyz = xyz
-
-    if random_noise_scale > 0:
-        noisy_xyz = modified_xyz + torch.randn_like(modified_xyz) * random_noise_scale
-    else:
-        noisy_xyz = modified_xyz
-
+    noisy = use_random and random_noise_scale > 0
+    sampling_xyz = xyz + torch.randn_like(xyz) * random_noise_scale if noisy else xyz
     sampled_xyz, sample_idx = torch3d_ops.sample_farthest_points(
-        points=noisy_xyz,
+        points=sampling_xyz,
         K=num_samples,
+        random_start_point=use_random and use_random_start,
     )
-
-    # Undo the initial swap to recover indices into the original cloud.
-    if use_random_start:
-        start = start_indices.unsqueeze(1)
-        is_zero = sample_idx == 0
-        is_start = sample_idx == start
-        sample_idx = torch.where(is_start, 0, torch.where(is_zero, start, sample_idx))
-
     shuffle_perm = None
-    if use_shuffle_output:
-        shuffle_perm = torch.rand(B, num_samples, device=pointcloud.device).argsort(dim=1)
+    if use_random and use_shuffle_output:
+        shuffle_perm = torch.rand(
+            xyz.shape[0], num_samples, device=pointcloud.device,
+        ).argsort(dim=1)
         sample_idx = torch.gather(sample_idx, 1, shuffle_perm)
 
     # Reuse native XYZ output when sampling did not perturb coordinates.
-    if random_noise_scale == 0.0 and pointcloud.size(-1) == 3:
+    if not noisy and pointcloud.size(-1) == 3:
         if shuffle_perm is not None:
             sampled_xyz = sampled_xyz.gather(
                 1,

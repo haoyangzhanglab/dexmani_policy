@@ -15,12 +15,13 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
+from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
 from dexmani_policy.common.config import load_policy_config, positive_int, validate_normalization_config
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.hand_prior.data import prepare_hand_source
-from dexmani_policy.datasets.common.validation import validate_fields
+from dexmani_policy.datasets.common.validation import check_finite
 from dexmani_policy.common.hand_representation import validate_hand_coordinates
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
@@ -35,16 +36,17 @@ logger = logging.getLogger(__name__)
 def prepare_policy_data(cfg):
     validate_normalization_config(cfg)
     spec = cfg.normalization
-    if spec["action"] not in {"auto", "limits"}:
-        raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
+    validate_dq_normalization(spec)
     if cfg.agent.tcp_dim != 7:
         raise ValueError("DQ/VQ requires tcp_dim=7")
     buffer, train, val, split = prepare_hand_source(cfg, ["action"])
     validate_hand_coordinates(buffer.attrs)
-    validate_fields(buffer, train | val, {"action": slice(7, 19)})
 
     def read_hand(mask):
-        chunks = [values for _, values in buffer.iter_chunks("action", columns=slice(7, 19), episode_mask=mask)]
+        chunks = []
+        for start, values in buffer.iter_chunks("action", columns=slice(7, 19), episode_mask=mask):
+            check_finite(buffer, "action", start, values, columns=slice(7, 19))
+            chunks.append(values)
         return np.concatenate(chunks) if chunks else np.empty((0, 12), dtype=np.float32)
 
     train_hand, val_hand = read_hand(train), read_hand(val)

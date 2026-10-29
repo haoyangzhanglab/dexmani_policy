@@ -39,10 +39,6 @@ class Diffusion(nn.Module):
         )
         self.num_inference_steps = num_inference_steps
 
-    def validate_normalization(self, spec):
-        if spec.get("action") == "gaussian" and self.noise_scheduler.config.clip_sample:
-            raise ValueError("Gaussian action normalization requires agent.clip_sample=false.")
-
     def compute_loss(
         self,
         cond: torch.Tensor,

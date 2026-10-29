@@ -52,10 +52,12 @@ class ResNetEncoder(nn.Module):
                 "group_norm is a separate full-finetuning recipe"
             )
 
-        self.model_name = model_name
+        self.effective_config = dict(
+            model_name=model_name, tune_mode=tune_mode, norm_mode=norm_mode,
+            global_token_type=global_token_type, out_dim=out_dim,
+            weights=weights, load_pretrained=load_pretrained,
+        )
         self.tune_mode = tune_mode
-        self.global_token_type = global_token_type
-        self.norm_mode = norm_mode
         self.output_stride = 32
 
         norm_layer = FrozenBatchNorm2d if norm_mode == "frozen_bn" else nn.BatchNorm2d

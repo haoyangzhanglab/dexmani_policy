@@ -26,7 +26,7 @@ class R3DAuxDataset(RobotDataset):
 
     def sample_to_data(self, sample):
         data = super().sample_to_data(sample)
-        data["action"] = np.concatenate((data["action"], sample["action_ee"][..., :9]), axis=-1)
+        data["action"] = np.concatenate((data["action"], sample["action_ee"]), axis=-1)
         return data
 
     def iter_normalization_data(self, key):
@@ -36,5 +36,7 @@ class R3DAuxDataset(RobotDataset):
         if self.is_validation:
             raise ValueError("Validation must reuse the training normalizer")
         for start, values in self.replay_buffer.iter_chunks(self.action_key, episode_mask=self.train_mask):
-            auxiliary = self.replay_buffer.read("action_ee", slice(start, start + len(values)), columns=slice(0, 9))
+            auxiliary = self.replay_buffer.read(
+                "action_ee", slice(start, start + len(values)), columns=self.consumed_fields["action_ee"],
+            )
             yield np.concatenate((values, auxiliary), axis=-1)

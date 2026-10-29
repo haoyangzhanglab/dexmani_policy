@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.nn as nn
@@ -30,7 +30,7 @@ class ViTEncoder(nn.Module):
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
         if OmegaConf.is_config(architecture):
-            architecture = OmegaConf.to_container(architecture, resolve=True)
+            architecture = cast(dict, OmegaConf.to_container(architecture, resolve=True))
         if kind == "dino":
             config = (
                 AutoConfig.for_model(**dict(architecture))
@@ -48,7 +48,11 @@ class ViTEncoder(nn.Module):
         else:
             raise ValueError(f"Unsupported ViT kind: {kind}")
         config._attn_implementation = "sdpa"
-        self.architecture = config.to_dict()
+        self.effective_config = dict(
+            model_name=model_name, tune_mode=tune_mode, global_token_type=global_token_type,
+            out_dim=out_dim, lora_dtype=lora_dtype, architecture=config.to_dict(),
+            load_pretrained=load_pretrained,
+        )
         if load_pretrained:
             self.backbone = model_class.from_pretrained(
                 model_name, config=config, torch_dtype=torch.bfloat16

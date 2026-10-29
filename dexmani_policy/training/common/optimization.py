@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.optim.lr_scheduler as lr_scheduler
+from torch.optim.swa_utils import get_ema_multi_avg_fn
 
 
 def build_optimizer(
@@ -80,12 +81,16 @@ class EMA:
     def step(self, new_model):
         decay = self.get_decay(self.optimization_step)
         # Fresh EMA copies raw weights; restored frozen parameters were checked before training.
+        groups: dict[tuple[torch.device, torch.dtype], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
         for param, ema_param in zip(new_model.parameters(), self.averaged_model.parameters()):
             if not param.requires_grad:
                 continue
-            value = param.detach().to(dtype=ema_param.dtype)
-            ema_param.mul_(decay)
-            ema_param.add_(value, alpha=1 - decay)
+            targets, sources = groups.setdefault((ema_param.device, ema_param.dtype), ([], []))
+            targets.append(ema_param)
+            sources.append(param.detach().to(device=ema_param.device, dtype=ema_param.dtype))
+        update = get_ema_multi_avg_fn(decay)
+        for targets, sources in groups.values():
+            update(targets, sources, self.optimization_step)
 
         self.optimization_step += 1
 

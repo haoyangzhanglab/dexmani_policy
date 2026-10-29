@@ -7,7 +7,7 @@ from dexmani_policy.common.config import positive_int
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler
 from dexmani_policy.datasets.common.split import split_episodes
-from dexmani_policy.datasets.common.validation import validate_fields
+from dexmani_policy.datasets.common.validation import check_finite
 from dexmani_policy.datasets.hand_prior.metadata import describe_hand_chunks
 
 
@@ -27,19 +27,19 @@ class HandChunkDataset(Dataset):
         )
         self.hand_data = describe_hand_chunks(self, data_semantics, source_id)
         selected = self.train_mask | self.val_mask
-        validate_fields(self.replay_buffer, selected, dict(action=slice(7, 19), joint_state=slice(7, 19)))
         self.sampler = SequenceSampler(self.replay_buffer, horizon, episode_mask=self.train_mask)
         if not len(self.sampler):
             raise ValueError("No training hand chunks: selected episodes are too short")
         self.is_validation = False
         self.validation_dataset = None
         # Only the small hand arrays are shared; no visual policy state is needed.
-        for key, name in (("action", "hand_actions"), ("joint_state", "hand_states")):
-            values = np.zeros((int(self.replay_buffer.episode_ends[-1]), 12), dtype=np.float32)
+        self.hand_actions = np.zeros((int(self.replay_buffer.episode_ends[-1]), 12), dtype=np.float32)
+        self.hand_states = np.zeros_like(self.hand_actions)
+        for key, values in (("action", self.hand_actions), ("joint_state", self.hand_states)):
             for start, chunk in self.replay_buffer.iter_chunks(key, columns=slice(7, 19), episode_mask=selected):
+                check_finite(self.replay_buffer, key, start, chunk, columns=slice(7, 19))
                 values[start:start + len(chunk)] = chunk
             values.flags.writeable = False
-            setattr(self, name, values)
 
     def __len__(self):
         return len(self.sampler)

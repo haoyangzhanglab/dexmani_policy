@@ -74,7 +74,6 @@ class LAMPRegressionHead(nn.Module):
 
 class LAMPPolicy(BasePolicy):
     supported_execution_modes = ("sync",)
-    requires_action_affine = False
     supported_action_keys = ("action",)
 
     def __init__(
@@ -169,10 +168,13 @@ class LAMPPolicy(BasePolicy):
         self.prior.validate_state()
         self.prior_initialized = True
 
-    def set_normalization_spec(self, spec, feature_dims) -> None:
-        if spec.get("action") != "identity" or spec.get("joint_state") != "gaussian":
+    @classmethod
+    def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
+        if (
+            action_key != "action" or spec.get("action") != "identity"
+            or spec.get("joint_state") != "gaussian"
+        ):
             raise ValueError("LAMP requires identity action and gaussian joint_state normalization")
-        super().set_normalization_spec(spec, feature_dims)
 
     def preprocess(self, obs_dict: dict) -> dict:
         result = super().preprocess(obs_dict)

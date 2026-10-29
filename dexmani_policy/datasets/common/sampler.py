@@ -50,8 +50,8 @@ class SequenceSampler:
         pad_before: int = 0,
         pad_after: int = 0,
         episode_mask: np.ndarray | None = None,
-        keys=None,
-        key_first_k=None,
+        fields: dict[str, slice | None] | None = None,
+        key_first_k: dict[str, int] | None = None,
     ):
         if sequence_length < 1 or not 0 <= pad_before < sequence_length or not 0 <= pad_after < sequence_length:
             raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
@@ -72,9 +72,9 @@ class SequenceSampler:
         self.indices = indices
         self.replay_buffer = replay_buffer
         self.sequence_length = sequence_length
-        self.keys = tuple(replay_buffer.keys() if keys is None else keys)
+        self.fields = dict.fromkeys(replay_buffer.keys()) if fields is None else dict(fields)
         self.key_first_k = dict(key_first_k or {})
-        if any(key not in self.keys or not 1 <= k <= sequence_length for key, k in self.key_first_k.items()):
+        if any(key not in self.fields or not 1 <= k <= sequence_length for key, k in self.key_first_k.items()):
             raise ValueError("key_first_k requires selected keys and 1 <= K <= sequence_length")
 
     def __len__(self):
@@ -95,10 +95,10 @@ class SequenceSampler:
     def sample_sequence(self, idx):
         result = {}
         rows = self.sample_source_rows(idx)
-        for key in self.keys:
+        for key, columns in self.fields.items():
             length = self.key_first_k.get(key, self.sequence_length)
             selected = rows[:length]
             start, end = int(selected[0]), int(selected[-1]) + 1
-            values = self.replay_buffer.read(key, slice(start, end))
+            values = self.replay_buffer.read(key, slice(start, end), columns=columns)
             result[key] = values if end - start == length else values[selected - start]
         return result

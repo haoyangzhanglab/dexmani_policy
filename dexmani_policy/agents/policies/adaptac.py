@@ -27,6 +27,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cl
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy, parameter_groups
+from dexmani_policy.common.config import require_tactile_source
 
 
 class AdapTacObservationEncoder(nn.Module):
@@ -128,8 +129,7 @@ class AdapTacPolicy(BasePolicy):
     ) -> None:
         if (n_obs_steps, action_dim, state_dim) != (1, 19, 19):
             raise ValueError("AdapTac requires single-frame observations and 19D joint state/actions")
-        if tactile_source not in {"sim", "real"}:
-            raise ValueError("tactile_source must be sim or real")
+        require_tactile_source(("finger_tactile_force",), tactile_source)
         if tactile_source == "sim" and tactile_encoder.input_key != "finger_tactile_force":
             raise ValueError("Sim has no dense taxel producer")
         if not math.isfinite(force_loss_weight) or force_loss_weight < 0:
@@ -183,11 +183,6 @@ class AdapTacPolicy(BasePolicy):
         )
         self.tactile_source = tactile_source
         self.force_loss_weight = force_loss_weight
-
-    @classmethod
-    def prepare_restore_config(cls, config):
-        if "force_scale" in config or "tactile_encoder" not in config or "tactile_source" not in config:
-            raise ValueError("Legacy AdapTac force_scale/encoder-affine recipe is incompatible; restore with the original source code")
 
     @property
     def consumed_observation_fields(self):

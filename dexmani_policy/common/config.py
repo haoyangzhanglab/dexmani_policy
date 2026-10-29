@@ -1,17 +1,22 @@
 import math
 import os
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from omegaconf import OmegaConf
 
+if TYPE_CHECKING:
+    from dexmani_policy.agents.policies.base import BasePolicy
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_ID = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-FIELD_FEATURE_SHAPES = {
-    "fingertip_xyz": (5, 3),
+TACTILE_FEATURE_SHAPES = {
     "finger_tactile_force": (5, 3),
     "taxel_tactile_force": (5, 120, 3),
 }
+FIELD_FEATURE_SHAPES = {"fingertip_xyz": (5, 3), **TACTILE_FEATURE_SHAPES}
 POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
 
 
@@ -90,6 +95,8 @@ def validate_action_mode(cfg) -> None:
 
 
 def validate_normalization_config(cfg):
+    import hydra
+
     spec = cfg["normalization"]
     for key, mode in spec.items():
         if mode not in {"identity", "limits", "gaussian", "auto", "rms", "max_abs"}:
@@ -104,6 +111,26 @@ def validate_normalization_config(cfg):
             f"Normalization field mismatch: missing={sorted(expected - spec.keys())}, "
             f"extra={sorted(spec.keys() - expected)}"
         )
+
+    agent_class: type[BasePolicy] = hydra.utils.get_class(cfg["agent"]["_target_"])
+    agent_class.validate_normalization_recipe(spec, action_key=cfg["action_key"])
+
+
+def require_tactile_source(fields: Iterable[str], source: str | None) -> str | None:
+    """Only force observations require an explicit production source."""
+    if TACTILE_FEATURE_SHAPES.keys() & set(fields):
+        if source not in ("real", "sim"):
+            raise ValueError("Tactile observations require tactile_source=real or sim")
+        return source
+    return None
+
+
+def validate_tactile_config(cfg):
+    source = require_tactile_source(cfg["dataset"]["sensor_modalities"], cfg.get("tactile_source"))
+    if source is not None and not (
+        source == cfg["agent"].get("tactile_source") == cfg["dataset"].get("tactile_source")
+    ):
+        raise ValueError("Top-level, agent and dataset tactile_source must agree")
 
 
 def normalization_feature_shapes(dims):
@@ -135,8 +162,11 @@ def validate_depth_recipe(recipe):
     return recipe
 
 
-def validate_observation_fields(agent, declared):
+def validate_observation_fields(agent, declared, *, tactile_source=None):
     consumed = set(agent.consumed_observation_fields)
+    source = require_tactile_source(consumed, getattr(agent, "tactile_source", None))
+    if source is not None and source != tactile_source:
+        raise ValueError("Policy tactile_source differs from the configured top-level source")
     declared = set(declared)
     missing = consumed - declared
     unused = declared - consumed

@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from dexmani_policy.common.config import require_tactile_source
 from dexmani_policy.common.image_util import preprocess_rgb_eval
 from dexmani_policy.common.io_util import close_resources
 
@@ -84,7 +85,7 @@ class SimRunner:
         actions = result["future_actions"][0, :action_steps]
         return np.ascontiguousarray(actions.cpu().numpy())
 
-    def run_episode(
+    def _run_episode(
         self,
         agent,
         env,
@@ -133,8 +134,11 @@ class SimRunner:
                     return bool(info["success"]), task_done_step
 
     def run(self, agent, *, seeds, inference_steps, action_steps, video_save_dir=None):
-        if getattr(agent, "tactile_source", None) == "real":
-            raise ValueError("Sim rollout rejects real-source AdapTac")
+        source = require_tactile_source(
+            agent.consumed_observation_fields, getattr(agent, "tactile_source", None),
+        )
+        if source == "real":
+            raise ValueError("Sim rollout requires sim-source tactile observations")
         env = None
         try:
             for index, seed in enumerate(seeds):
@@ -146,7 +150,7 @@ class SimRunner:
                         previous.close()
                     env = self.make_env(record_video=video_save_dir is not None)
 
-                success, steps = self.run_episode(
+                success, steps = self._run_episode(
                     agent, env, seed, inference_steps, action_steps=action_steps
                 )
                 video = None

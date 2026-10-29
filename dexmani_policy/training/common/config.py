@@ -2,9 +2,7 @@ import argparse
 import copy
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
@@ -15,11 +13,9 @@ from dexmani_policy.common.config import (
     positive_int,
     validate_action_mode,
     validate_normalization_config,
+    validate_tactile_config,
 )
 from dexmani_policy.training.common.resume import resolve_input_recipe, resolve_resume_source
-
-if TYPE_CHECKING:
-    from dexmani_policy.agents.policies.base import BasePolicy
 
 
 def prepare_training(cfg):
@@ -38,16 +34,10 @@ def prepare_training(cfg):
 
 
 def validate_config(cfg):
-    agent_class: type[BasePolicy] = hydra.utils.get_class(cfg.agent._target_)
-    if not (cfg.get("tactile_source") == cfg.agent.get("tactile_source")
-            == cfg.dataset.get("tactile_source")):
-        raise ValueError("Top-level, agent and dataset tactile_source must agree")
     for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
         if cfg.agent[name] != cfg[name]:
             raise ValueError(f"agent.{name} must match {name}")
     dataset = cfg.dataset
-    if dataset.action_key not in agent_class.supported_action_keys:
-        raise ValueError(f"{agent_class.__name__} does not support action_key={dataset.action_key}")
     if "history_steps" in cfg.agent and dataset.get("history_steps") != cfg.agent.history_steps:
         raise ValueError("Dataset/policy history_steps must match")
     if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
@@ -60,6 +50,7 @@ def validate_config(cfg):
         if dataset[field] != cfg[name]:
             raise ValueError(f"dataset.{field} must match {name}")
     validate_normalization_config(cfg)
+    validate_tactile_config(cfg)
 
     if cfg.get("max_updates") is not None:
         positive_int(cfg.max_updates, "max_updates")

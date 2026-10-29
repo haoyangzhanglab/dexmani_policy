@@ -37,7 +37,9 @@ class DPObservationEncoder(nn.Module):
 
     @property
     def effective_config(self):
-        return {"rgb_backbone_config": self.backbone.effective_config}
+        return {"rgb_backbone_config": {
+            **self.backbone.effective_config, **self.image_processor.config,
+        }}
 
     def forward(self, obs: dict) -> torch.Tensor:
         rgb = self.image_processor.process_images(obs["rgb"])

@@ -36,7 +36,7 @@ class LatentFlowDataset(RobotDataset):
         return SequenceSampler(
             self.replay_buffer, self.horizon + self.action_offset,
             self.pad_before, self.pad_after, episode_mask,
-            keys=self.data_keys, key_first_k={key: self.obs_horizon for key in self.sensor_modalities},
+            fields=self.consumed_fields, key_first_k={key: self.obs_horizon for key in self.sensor_modalities},
         )
 
     def sample_to_data(self, sample):

@@ -61,10 +61,11 @@ class R3DPolicy(BasePolicy):
         pc.update(use_pretrained_weights=False, pretrained_weights_path=None)
         config.pc_encoder_config = pc
 
-    def set_normalization_spec(self, spec, feature_dims) -> None:
+    @classmethod
+    def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
         if spec["point_cloud"] != "limits":
             raise ValueError("R3D fixed normalized point-cloud clamp requires limits normalization")
-        super().set_normalization_spec(spec, feature_dims)
+        super().validate_normalization_recipe(spec, action_key=action_key)
 
     def __init__(
         self,

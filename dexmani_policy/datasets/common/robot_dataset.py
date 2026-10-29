@@ -14,7 +14,9 @@ from dexmani_policy.common.image_util import (
     validate_rgb_preprocessing,
 )
 from dexmani_policy.common.pytorch_util import dict_apply
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int
+from dexmani_policy.common.config import (
+    FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int, require_tactile_source,
+)
 from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
@@ -28,7 +30,6 @@ from dexmani_policy.datasets.common.validation import validate_fields, validate_
 
 class RobotDataset(torch.utils.data.Dataset):
     training_dataset: "RobotDataset"
-
 
     def __init__(
         self,
@@ -76,7 +77,7 @@ class RobotDataset(torch.utils.data.Dataset):
         self.sensor_modalities = sensor_modalities
         self.replay_buffer = ReplayBuffer(zarr_path, keys=self.data_keys)
         self.zarr_path = self.replay_buffer.path
-        if tactile_source is not None:
+        if require_tactile_source(sensor_modalities, tactile_source) is not None:
             validate_tactile_source(self.replay_buffer.attrs, tactile_source)
 
         if "rgb" in sensor_modalities:
@@ -140,7 +141,7 @@ class RobotDataset(torch.utils.data.Dataset):
     def build_sampler(self, episode_mask):
         return SequenceSampler(
             self.replay_buffer, self.horizon, self.pad_before, self.pad_after, episode_mask,
-            keys=self.data_keys, key_first_k={key: self.obs_horizon for key in self.sensor_modalities},
+            fields=self.consumed_fields, key_first_k={key: self.obs_horizon for key in self.sensor_modalities},
         )
 
     def get_validation_dataset(self):
@@ -168,9 +169,6 @@ class RobotDataset(torch.utils.data.Dataset):
         return len(self.sampler)
 
     def sample_to_data(self, sample):
-        if self.pc_dim is not None:
-            for key in POINT_CLOUD_FIELDS.intersection(sample):
-                sample[key] = sample[key][..., : self.pc_dim]
         action = sample[self.action_key]
         return {
             "obs": {m: sample[m] for m in self.sensor_modalities},

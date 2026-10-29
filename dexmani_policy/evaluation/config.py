@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 from dexmani_policy.common.config import (
     load_experiment_config,
     positive_int,
+    require_tactile_source,
     validate_action_mode,
 )
 from dexmani_policy.common.experiments import (
@@ -78,8 +79,9 @@ def load_seed_pool(cfg):
 
 
 def merge_eval_config(cfg, overrides=None):
-    if cfg.get("tactile_source") == "real":
-        raise ValueError("Simulation evaluation rejects real-source AdapTac")
+    source = require_tactile_source(cfg["dataset"]["sensor_modalities"], cfg.get("tactile_source"))
+    if source == "real":
+        raise ValueError("Simulation evaluation requires sim-source tactile observations")
     overrides = overrides or {}
     if set(overrides.get("env_runner", {})) & {
         "n_obs_steps",

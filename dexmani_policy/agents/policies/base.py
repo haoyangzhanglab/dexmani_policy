@@ -37,7 +37,6 @@ def parameter_groups(module: nn.Module, *, lr: float, weight_decay: float) -> li
 class BasePolicy(nn.Module):
     """Shared observation preprocessing, training and action-window interfaces."""
 
-    requires_action_affine = True
     future_action_window = False
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
 
@@ -89,15 +88,24 @@ class BasePolicy(nn.Module):
 
     supported_execution_modes: tuple[str, ...] = ("sync", "async")
 
+    @classmethod
+    def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
+        if action_key not in cls.supported_action_keys:
+            raise ValueError(f"{cls.__name__} does not support action_key={action_key!r}")
+        allowed = ("auto", "limits") if action_key == "action" else ("auto",)
+        if spec["action"] not in allowed:
+            raise ValueError(
+                f"{cls.__name__} with {action_key} requires normalization.action "
+                f"in {allowed}; the action recipe is fixed"
+            )
+
     def set_normalization_spec(
-        self, spec: dict[str, str], feature_dims: dict[str, int]
+        self, spec: dict[str, str], feature_dims: dict[str, int], *, action_key: str
     ) -> None:
-        if self.requires_action_affine and spec["action"] == "identity":
-            raise ValueError("This policy requires fitted action affine parameters")
-        for component in (self.obs_encoder, self.action_decoder):
-            validate = getattr(component, "validate_normalization", None)
-            if validate is not None:
-                validate(spec)
+        self.validate_normalization_recipe(spec, action_key=action_key)
+        validate = getattr(self.obs_encoder, "validate_normalization", None)
+        if validate is not None:
+            validate(spec)
         self.normalization_spec = dict(spec)
         self.normalization_dims = dict(feature_dims)
         if self.normalization_dims["action"] != self.action_dim:

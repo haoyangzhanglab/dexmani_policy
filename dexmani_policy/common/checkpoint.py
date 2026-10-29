@@ -109,11 +109,13 @@ def restore_policy(saved_config, checkpoint_path, *, use_ema, device):
 
     if agent.inference_metadata != cfg["policy_metadata"]:
         raise ValueError("Restored policy metadata differs from saved construction")
-    if hasattr(agent, "tactile_source") and agent.tactile_source != cfg.get("tactile_source"):
-        raise ValueError("Restored AdapTac tactile_source differs from saved top-level source")
-    validate_observation_fields(agent, cfg["dataset"]["sensor_modalities"])
+    validate_observation_fields(
+        agent, cfg["dataset"]["sensor_modalities"], tactile_source=cfg.get("tactile_source"),
+    )
     agent.checkpoint_step = global_step
-    agent.set_normalization_spec(cfg["normalization"], cfg["normalization_dims"])
+    agent.set_normalization_spec(
+        cfg["normalization"], cfg["normalization_dims"], action_key=cfg["action_key"],
+    )
     load_policy_state(agent, state)
     del state
     agent.to(device)
@@ -122,7 +124,11 @@ def restore_policy(saved_config, checkpoint_path, *, use_ema, device):
 
 
 def _inference_config(config):
+    from dexmani_policy.common.config import validate_normalization_config, validate_tactile_config
     from dexmani_policy.common.image_util import rgb_preprocessing_kwargs
+
+    validate_normalization_config(config)
+    validate_tactile_config(config)
 
     dataset = config["dataset"]
     inputs = {

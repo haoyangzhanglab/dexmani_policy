@@ -12,7 +12,7 @@ from dexmani_policy.agents.action_decoders.backbones.unet1d import (
     validate_unet_horizon,
 )
 from dexmani_policy.agents.action_decoders.diffusion import Diffusion
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_dq_normalization
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
 from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
@@ -91,12 +91,6 @@ class DQRISEObservationEncoder(nn.Module):
 
 class DQRISEPolicy(BasePolicy):
     supported_action_keys = ("action",)
-
-    def set_normalization_spec(
-        self, spec: dict[str, str], feature_dims: dict[str, int]
-    ) -> None:
-        validate_dq_normalization(spec)
-        super().set_normalization_spec(spec, feature_dims)
 
     def __init__(
         self,
