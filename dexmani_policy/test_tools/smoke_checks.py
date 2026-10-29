@@ -139,12 +139,13 @@ def validate_data_loader(loader, cfg, *, split, max_batches, batch_check=validat
 
 
 def validate_dataset(cfg, *, max_batches=2, batch_check=validate_data_batch):
-    from dexmani_policy.training.common.data import build_dataset_and_normalizer, build_train_loader
+    from dexmani_policy.training.common.data import build_dataset, build_train_loader
 
     positive_int(max_batches, "max_batches")
     set_seed(cfg.training.seed)
     cfg.dataloader.pin_memory = False
-    dataset, _, _ = build_dataset_and_normalizer(cfg)
+    dataset, _ = build_dataset(cfg)
+    dataset.get_normalizer(cfg.normalization)
     loader = build_train_loader(cfg, dataset)
     validate_data_loader(loader, cfg, split="train", max_batches=max_batches, batch_check=batch_check)
     validation = dataset.get_validation_dataset()
@@ -300,7 +301,7 @@ def validate_training(
     batch_check=validate_data_batch, deployment_check=None,
 ):
     """Run the same bounded training/restoration checks for every policy."""
-    from dexmani_policy.training.common.data import build_dataset_and_normalizer
+    from dexmani_policy.training.common.data import build_dataset
     from dexmani_policy.training.trainer import PolicyTrainer
 
     positive_int(max_updates, "max_updates")
@@ -329,14 +330,11 @@ def validate_training(
                     run_cfg.workspace.wandb_cfg = None
                     if source is not None:
                         run_cfg.resume_from = str(source)
-                with (patch.object(LinearNormalizer, "fit_field", side_effect=AssertionError("resume must not fit"))
-                      if checkpoint is not None else nullcontext()):
-                    dataset, normalizer, description = build_dataset_and_normalizer(
-                        run_cfg, resume_checkpoint=checkpoint,
-                    )
-                with closing(PolicyTrainer(
-                    run_cfg, dataset, normalizer, description, checkpoint=checkpoint,
-                )) as trainer:
+                dataset, description = build_dataset(run_cfg)
+                with (
+                    patch.object(LinearNormalizer, "fit_field", side_effect=AssertionError("resume must not fit"))
+                    if checkpoint is not None else nullcontext()
+                ), closing(PolicyTrainer(run_cfg, dataset, description, checkpoint=checkpoint)) as trainer:
                     if checkpoint is not None:
                         validate_checkpoint_state(trainer.cfg, trainer, checkpoint)
                     checkpoint = None

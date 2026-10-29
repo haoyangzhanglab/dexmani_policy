@@ -25,9 +25,7 @@ from dexmani_policy.evaluation.seeds import (
 
 def build_parser(description):
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--policy-name", required=True)
-    parser.add_argument("--task-name", required=True)
-    parser.add_argument("--exp-name", required=True)
+    parser.add_argument("--experiment", required=True, help="Experiment directory or path relative to experiments/")
     parser.add_argument(
         "overrides", nargs="*", help="Canonical eval.*, env_runner.* and training.device dotlist"
     )
@@ -167,9 +165,7 @@ def load_eval_config(
     cfg = load_experiment_config(root)
     source = {"phase": "ordinary", "heldout_from_selection": False}
     checkpoint = str(checkpoint)
-    path, selection = resolve_policy_checkpoint(
-        root, checkpoint, relative_to=root / "checkpoints",
-    )
+    path, selection = resolve_policy_checkpoint(root, checkpoint)
     if selection is not None:
         overrides = OmegaConf.merge({"eval": selection["inference"]}, overrides)
         source.update({key: selection[key] for key in ("selection_result", "global_step")})

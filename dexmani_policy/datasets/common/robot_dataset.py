@@ -21,7 +21,7 @@ from dexmani_policy.datasets.common.augmentation import (
     AUGMENTATION_SPECS,
     random_sample_points,
 )
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.datasets.common.split import split_episodes
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler
@@ -254,14 +254,24 @@ class RobotDataset(torch.utils.data.Dataset):
         for _, values in self.replay_buffer.iter_chunks(field, columns=columns, episode_mask=self.train_mask):
             yield values
 
-    def get_normalizer(self, spec):
+    def get_normalizer(self, spec, *, initial_state=None):
         if self.is_validation:
-            return self.training_dataset.get_normalizer(spec)
+            return self.training_dataset.get_normalizer(spec, initial_state=initial_state)
         if self._normalizer is not None:
+            if initial_state is not None:
+                raise ValueError("Normalizer is already initialized; initial_state is only accepted once")
             return self._normalizer
-        normalizer = LinearNormalizer()
+        initial_state = {} if initial_state is None else initial_state
+        shapes = {
+            key: initial_state[f"fields.{key}.scale"].shape
+            for key, mode in spec.items()
+            if mode != "identity" and f"fields.{key}.scale" in initial_state
+        }
+        normalizer = LinearNormalizer(shapes)
+        normalizer.load_state_dict(initial_state, strict=True)
+        validate_normalizer_state(normalizer)
         for key, mode in spec.items():
-            if mode == "identity":
+            if mode == "identity" or key in normalizer.fields:
                 continue
             normalizer.fit_field(
                 key, self.iter_normalization_data(key),

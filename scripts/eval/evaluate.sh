@@ -7,18 +7,16 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    echo "Usage: bash scripts/eval/evaluate.sh <policy_name> <task_name> <exp_name> [args...]"
+    echo "Usage: bash scripts/eval/evaluate.sh <experiment> [args...]"
     echo
     exec conda run --no-capture-output -n policy python -m dexmani_policy.evaluate --help
 fi
 
-if [[ $# -lt 3 ]]; then
-    echo "Usage: bash scripts/eval/evaluate.sh <policy_name> <task_name> <exp_name> [args...]" >&2
+if [[ $# -lt 1 ]]; then
+    echo "Usage: bash scripts/eval/evaluate.sh <experiment> [args...]" >&2
     exit 1
 fi
 
 exec conda run --no-capture-output -n policy python -m dexmani_policy.evaluate \
-    --policy-name="$1" \
-    --task-name="$2" \
-    --exp-name="$3" \
-    "${@:4}"
+    --experiment="$1" \
+    "${@:2}"

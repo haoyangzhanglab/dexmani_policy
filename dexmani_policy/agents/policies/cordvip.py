@@ -9,6 +9,7 @@ from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordi
     ContactCoordinationEncoder,
 )
 from dexmani_policy.agents.policies.base import BasePolicy, module_parameter_group
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS
 
 
 class CordViPObservationEncoder(nn.Module):
@@ -20,7 +21,10 @@ class CordViPObservationEncoder(nn.Module):
         self.n_obs_steps = n_obs_steps
 
     def forward(self, obs):
-        sequence = {key: value.unflatten(0, (-1, self.n_obs_steps)) for key, value in obs.items()}
+        sequence = {
+            key: (value[..., :3] if key in POINT_CLOUD_FIELDS else value).unflatten(0, (-1, self.n_obs_steps))
+            for key, value in obs.items()
+        }
         return torch.cat(self.encoder(sequence), dim=-1).flatten(1)
 
 

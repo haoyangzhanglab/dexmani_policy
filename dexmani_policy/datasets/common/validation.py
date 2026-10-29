@@ -9,8 +9,8 @@ def validate_tactile_source(attrs, source):
             raise ValueError("tactile_source=real requires dexmani.real.canonical data")
     elif source == "sim":
         required = {
-            "task_name", "dt", "physics_dt", "frame_skip", "action_dim",
-            "action_space", "obs_alignment", "robot_setup_json",
+            "dt", "physics_dt", "frame_skip", "action_dim",
+            "action_space", "obs_alignment",
         }
         missing = required - attrs.keys()
         if attrs.get("format") is not None or missing:

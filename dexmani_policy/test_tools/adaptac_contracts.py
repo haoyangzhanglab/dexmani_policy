@@ -20,7 +20,7 @@ from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.deployment.metadata import inspect_policy
 from dexmani_policy.deployment.runtime import load_policy
-from dexmani_policy.training.common.data import build_dataset_and_normalizer
+from dexmani_policy.training.common.data import build_dataset
 from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.trainer import PolicyTrainer
 from dexmani_policy.test_tools.smoke_checks import (
@@ -123,6 +123,16 @@ def validate_tactile_numerics():
         validate_tactile_source(tactile_smoke_attrs(source), source)
         expect_value_error(lambda: validate_tactile_source(tactile_smoke_attrs(source), "real" if source == "sim" else "sim"))
         expect_value_error(lambda: validate_tactile_source({}, source))
+    minimal = tactile_smoke_attrs("sim")
+    for key in ("task_name", "robot_setup_json"):
+        minimal.pop(key)
+    validate_tactile_source(minimal, "sim")
+    for key, value in (
+        ("dt", 0), ("dt", float("nan")), ("dt", .1), ("physics_dt", -1),
+        ("frame_skip", 0), ("frame_skip", True), ("obs_alignment", "obs[t+1]"),
+        ("action_dim", 18), ("action_space", "unknown"), ("format", "dexmani.real.canonical"),
+    ):
+        expect_value_error(lambda: validate_tactile_source({**minimal, key: value}, "sim"))
     return {"status": "passed", "checks": "streaming, units, shapes, affine boundaries, patch descriptors, source"}
 
 
@@ -171,6 +181,8 @@ def validate_tactile_roundtrip(cfg):
     from dexmani_policy.training.common.resume import resolve_input_recipe
 
     with tactile_fixture(cfg) as (config, root):
+        for key in ("task_name", "robot_setup_json", "pointcloud_config"):
+            root.attrs.pop(key, None)
         data_path = Path(config.dataset.zarr_path)
         frames = int(root["meta/episode_ends"][0])
         # Missing aggregate and wrong dense layout fail at the data boundary.
@@ -191,16 +203,18 @@ def validate_tactile_roundtrip(cfg):
             expect_value_error(lambda: RobotDataset(
                 str(data_path), sensor_modalities=config.dataset.sensor_modalities, tactile_source=source,
             ))
-        dataset, normalizer, description = build_dataset_and_normalizer(config)
-        for key in ("finger_tactile_force", "taxel_tactile_force"):
-            mode = config.normalization.get(key)
-            if mode in {"rms", "max_abs"}:
-                values = torch.from_numpy(root[f"data/{key}"][:frames]).double()
-                magnitude = values.square().mean().sqrt() if mode == "rms" else values.abs().max()
-                torch.testing.assert_close(normalizer[key].scale, magnitude.reciprocal().float().expand(FIELD_FEATURE_SHAPES[key]))
+        dataset, description = build_dataset(config)
         batch = default_collate([dataset[0], dataset[len(dataset) - 1]])
         validate_adaptac_batch(batch, dataset, config)
-        with closing(PolicyTrainer(config, dataset, normalizer, description)) as trainer:
+        with closing(PolicyTrainer(config, dataset, description)) as trainer:
+            assert "real_runtime" not in description and "real_runtime" not in trainer.cfg
+            normalizer = dataset.get_normalizer(config.normalization)
+            for key in ("finger_tactile_force", "taxel_tactile_force"):
+                mode = config.normalization.get(key)
+                if mode in {"rms", "max_abs"}:
+                    values = torch.from_numpy(root[f"data/{key}"][:frames]).double()
+                    magnitude = values.square().mean().sqrt() if mode == "rms" else values.abs().max()
+                    torch.testing.assert_close(normalizer[key].scale, magnitude.reciprocal().float().expand(FIELD_FEATURE_SHAPES[key]))
             model = trainer.model
             assert ("finger_tactile_force" in model.normalizer.fields) == (
                 config.normalization.finger_tactile_force != "identity"

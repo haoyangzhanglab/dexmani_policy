@@ -168,7 +168,7 @@ def train(cfg, checkpoint=None, max_updates=None):
 
 
 def main():
-    train(*load_run('cordvip'))
+    train(*load_run('cordvip', resume_fields={'training.save_every_updates', 'training.val_every_epochs'}))
 
 
 if __name__ == '__main__':

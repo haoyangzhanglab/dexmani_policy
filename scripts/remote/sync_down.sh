@@ -171,6 +171,6 @@ if [[ -z "$DRY_RUN" ]]; then
     echo "=== sync_down: done ==="
     echo ""
     echo "Next steps:"
-    echo "  bash scripts/eval/select_checkpoint.sh <policy> <task> <exp_name>"
-    echo "  bash scripts/eval/evaluate.sh <policy> <task> <exp_name>"
+    echo "  bash scripts/eval/select_checkpoint.sh <experiment>"
+    echo "  bash scripts/eval/evaluate.sh <experiment>"
 fi

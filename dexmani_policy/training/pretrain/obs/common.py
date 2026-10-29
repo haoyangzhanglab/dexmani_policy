@@ -12,10 +12,10 @@ from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import validate_normalizer_state
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.logging import accumulate_metrics
-from dexmani_policy.training.common.resume import resolve_input_recipe
+from dexmani_policy.training.common.resume import RESUME_OPERATIONAL_FIELDS, resolve_input_recipe
 
 
-def load_run(method):
+def load_run(method, *, resume_fields):
     parser = argparse.ArgumentParser(description=f"Pretrain the {method} observation encoder")
     parser.add_argument("--config", default=f"pretrain/obs/{method}")
     parser.add_argument("--output-dir")
@@ -35,6 +35,7 @@ def load_run(method):
     cfg = resolve_input_recipe(
         cfg, overrides=args.overrides,
         saved_config=None if checkpoint is None else checkpoint["effective_config"],
+        operational_fields=RESUME_OPERATIONAL_FIELDS | resume_fields,
     )
     cfg.workspace.output_dir = output
     for name in ("encoder.pt", "resume.pt"):
