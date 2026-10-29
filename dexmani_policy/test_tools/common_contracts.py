@@ -158,6 +158,8 @@ def validate_fps(device):
 
 
 def validate_dataset_layouts():
+    from unittest import TestCase
+
     import zarr
     from dexmani_policy.common.hand_semantics import HAND_ACTION_SEMANTICS
     from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
@@ -240,6 +242,19 @@ def validate_dataset_layouts():
                 offset[3:9] = 0
             torch.testing.assert_close(normalizer['action'].scale, scale)
             torch.testing.assert_close(normalizer['action'].offset, offset)
+        inherited = normalizer.state_dict()
+        dataset = RobotDataset(directory, sensor_modalities=['joint_state'], action_key='action_ee', split_manifest=split)
+        spec = {'action': 'auto', 'joint_state': 'limits'}
+        for bad in (
+            {key: value for key, value in inherited.items() if key != 'fields.action.offset'},
+            {**inherited, 'fields.unused.scale': torch.ones(1)},
+        ):
+            with TestCase().assertRaises(RuntimeError):
+                dataset.get_normalizer(spec, initial_state=bad)
+        for value in (float('nan'), float('inf'), 0.):
+            bad = {**inherited, 'fields.action.scale': torch.full_like(inherited['fields.action.scale'], value)}
+            expect_value_error(lambda: dataset.get_normalizer(spec, initial_state=bad))
+        torch.testing.assert_close(dataset.get_normalizer(spec, initial_state=inherited).state_dict(), inherited)
         cfg = load_policy_config('dqrise')
         cfg.dataset.zarr_path = directory
         cfg.dataset.split_manifest = split
@@ -458,7 +473,8 @@ def validate_experiment_paths():
     import os
     from unittest import TestCase
 
-    from dexmani_policy.common.experiments import discover_milestone_checkpoints, resolve_policy_checkpoint
+    from dexmani_policy.common.experiments import discover_milestone_checkpoints, resolve_experiment, resolve_policy_checkpoint
+    from dexmani_policy.evaluation.config import build_parser
     from dexmani_policy.training.common.resume import archive_resume_milestones
 
     check = TestCase()
@@ -475,16 +491,18 @@ def validate_experiment_paths():
                          selection_result='selection.json')
         (root / 'best_ckpt.json').write_text(json.dumps(selection))
         for experiment in (root, Path(os.path.relpath(root))):
+            parsed = build_parser('test').parse_args(['--experiment', str(experiment), 'eval.seeds=[7]'])
+            assert resolve_experiment(parsed.experiment) == root
+            assert parsed.overrides == ['eval.seeds=[7]']
             assert [item.path for item in discover_milestone_checkpoints(experiment)] == files
             for selector, expected in (('best', files[0]), ('latest', files[-1]), ('40pct', files[1]),
-                                       (files[0], files[0]), (os.path.relpath(files[0]), files[0])):
+                                       (files[0], files[0]), (files[0].name, files[0])):
                 path, record = resolve_policy_checkpoint(experiment, selector)
                 assert path == expected
                 assert record == (selection if selector == 'best' else None)
-        assert resolve_policy_checkpoint(root, files[1].name, relative_to=checkpoints)[0] == files[1]
         for selector in ('80pct', 'missing.pt'):
             with check.assertRaises(FileNotFoundError):
-                resolve_policy_checkpoint(root, selector, relative_to=checkpoints)
+                resolve_policy_checkpoint(root, selector)
         outside = Path(directory) / 'outside.pt'
         outside.write_bytes(b'outside')
         (checkpoints / 'outside.pt').symlink_to(outside)
@@ -499,6 +517,9 @@ def validate_experiment_paths():
                 assert [path.read_bytes() for path in actual] == [path.read_bytes() for path in expected]
             with check.assertRaises(FileExistsError):
                 archive_resume_milestones(files[-1], destination, max_step=4)
+        moved = root.rename(Path(directory) / 'moved')
+        assert resolve_experiment(moved) == moved
+        assert resolve_policy_checkpoint(moved, 'best')[0] == moved / 'checkpoints' / files[0].name
     return {'status': 'passed', 'checks': 'selectors, relative roots, experiment boundary, file-only archive'}
 
 
@@ -507,15 +528,20 @@ def validate_resume_facts():
     from types import SimpleNamespace
 
     from dexmani_policy.training.common.config import assemble_effective_config
+    from dexmani_policy.training.common.resume import RESUME_OPERATIONAL_FIELDS, resolve_input_recipe
 
     cfg = OmegaConf.create(dict(agent={}, dataset={'zarr_path': '/old/data.zarr'}, training=dict(lr_scheduler='cosine')))
-    model = SimpleNamespace(inference_metadata={'control_action_dim': 19}, effective_config={})
+    model = SimpleNamespace(inference_metadata=dict(
+        control_action_dim=19, action_start_index=1, action_context_shapes={},
+        supported_execution_modes=['sync', 'async'],
+    ), effective_config={})
     description = dict(
-        normalization_dims={'action': 19}, real_runtime={'dt': 0.05},
+        normalization_dims={'action': 19},
         hand_data=dict(contract={'dt': 0.05}), zarr_path='/old/data.zarr',
         split_manifest=dict(source_id='same', episode_ends=[4], train_indices=[0], val_indices=[]),
     )
     saved = OmegaConf.to_container(assemble_effective_config(cfg, description, model), resolve=True)
+    saved['real_runtime'] = {'obsolete': 'ignored'}
     checkpoint = SimpleNamespace(effective_config=saved)
     moved = copy.deepcopy(description)
     moved['zarr_path'] = '/new/data.zarr'
@@ -526,23 +552,37 @@ def validate_resume_facts():
     assert saved['dataset']['zarr_path'] == '/old/data.zarr'
     assert resumed.hand_data == saved['hand_data'] == moved['hand_data']
     assert OmegaConf.is_readonly(resumed)
-    for key in ('normalization_dims', 'real_runtime', 'hand_data', 'policy_metadata', 'split_manifest'):
+    assert 'real_runtime' not in resumed
+    capability = copy.deepcopy(model)
+    capability.inference_metadata['supported_execution_modes'].append('rtc')
+    assemble_effective_config(OmegaConf.create(saved), moved, capability, checkpoint=checkpoint)
+    for key in ('normalization_dims', 'hand_data', 'split_manifest'):
         changed, actual_model = copy.deepcopy(moved), copy.deepcopy(model)
-        if key == 'policy_metadata':
-            actual_model.inference_metadata['control_action_dim'] = 18
-        elif key == 'normalization_dims':
+        if key == 'normalization_dims':
             changed[key]['action'] = 18
-        elif key == 'real_runtime':
-            changed[key]['dt'] = 0.1
         elif key == 'hand_data':
             changed[key]['contract']['dt'] = 0.1
         else:
             changed[key]['source_id'] = 'different'
         expect_value_error(lambda: assemble_effective_config(OmegaConf.create(saved), changed, actual_model, checkpoint=checkpoint))
-    for key in ('real_runtime', 'hand_data'):
-        changed = {name: value for name, value in moved.items() if name != key}
-        expect_value_error(lambda: assemble_effective_config(OmegaConf.create(saved), changed, model, checkpoint=checkpoint))
-    return {'status': 'passed', 'checks': 'relocation, actual data/model changes and missing metadata'}
+    changed = {name: value for name, value in moved.items() if name != 'hand_data'}
+    expect_value_error(lambda: assemble_effective_config(OmegaConf.create(saved), changed, model, checkpoint=checkpoint))
+    for key, value in (('control_action_dim', 18), ('action_start_index', 0), ('action_context_shapes', {'hand_history': [8, 12]})):
+        changed_model = copy.deepcopy(model)
+        changed_model.inference_metadata[key] = value
+        expect_value_error(lambda: assemble_effective_config(OmegaConf.create(saved), moved, changed_model, checkpoint=checkpoint))
+    intervals = {'training.save_every_updates', 'training.save_every_epochs', 'training.val_every_epochs'}
+    for key in intervals:
+        expect_value_error(lambda: resolve_input_recipe(cfg, overrides=[f'{key}=1'], saved_config=saved))
+    for saving in ('training.save_every_updates', 'training.save_every_epochs'):
+        fields = RESUME_OPERATIONAL_FIELDS | {saving, 'training.val_every_epochs'}
+        accepted = resolve_input_recipe(cfg, overrides=[f'{saving}=3', 'training.val_every_epochs=4'],
+                                        saved_config=saved, operational_fields=fields)
+        assert OmegaConf.select(accepted, saving) == 3 and accepted.training.val_every_epochs == 4
+        for key in (intervals - fields) | {'training.use_compile', 'max_updates'}:
+            expect_value_error(lambda: resolve_input_recipe(cfg, overrides=[f'{key}=1'], saved_config=saved,
+                                                            operational_fields=fields))
+    return {'status': 'passed', 'checks': 'relocation, capability-only changes, protected data/action facts, per-entry overrides'}
 
 
 def _check_finite_gradients(module):
@@ -905,7 +945,11 @@ def validate_hand_interaction_chain(device):
 
 
 def validate_common_contracts(device):
+    from dexmani_policy.test_tools.scene_aggregator_check import validate_scene_aggregator
+    from dexmani_policy.test_tools.policy_contracts import validate_runtime_modes
+
     return {
+        'scene_aggregator': validate_scene_aggregator(device),
         'hand_state_encoder': validate_hand_state_encoder(device),
         'hand_scene_encoder': validate_hand_scene_encoder(device),
         'gated_tactile_fusion': validate_gated_tactile_fusion(device),
@@ -913,6 +957,7 @@ def validate_common_contracts(device):
         'config_targets': validate_config_targets(),
         'experiment_paths': validate_experiment_paths(),
         'resume_facts': validate_resume_facts(),
+        'runtime_modes': validate_runtime_modes(device),
         'action_recipes': validate_action_recipes(),
         'ema': validate_ema_updates(device),
         'fps': validate_fps(device),

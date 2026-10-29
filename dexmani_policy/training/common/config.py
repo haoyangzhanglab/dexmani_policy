@@ -20,7 +20,7 @@ from dexmani_policy.training.common.resume import resolve_input_recipe, resolve_
 
 def prepare_training(cfg):
     source = resolve_resume_source(cfg.get("resume_from"))
-    checkpoint = load_checkpoint(source) if source is not None else None
+    checkpoint = load_checkpoint(source, mmap=True) if source is not None else None
     overrides = HydraConfig.get().overrides.task if source is not None else []
     effective_config = resolve_input_recipe(
         cfg, overrides=overrides, saved_config=None if checkpoint is None else checkpoint.effective_config,
@@ -74,22 +74,22 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
             raise ValueError("Resume data/model mismatch: split_manifest")
         for key, actual in (
             ("normalization_dims", data_description["normalization_dims"]),
-            ("real_runtime", data_description.get("real_runtime")),
             ("hand_data", data_description.get("hand_data")),
-            ("policy_metadata", metadata),
         ):
             saved = checkpoint.effective_config.get(key)
             if saved != actual:
                 raise ValueError(f"Resume data/model mismatch: {key}")
+        for key in ("action_start_index", "control_action_dim", "action_context_shapes"):
+            if checkpoint.effective_config["policy_metadata"][key] != metadata[key]:
+                raise ValueError(f"Resume data/model mismatch: policy_metadata.{key}")
 
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
-        for key in ("normalization_dims", "real_runtime", "hand_data"):
+        for key in ("normalization_dims", "hand_data"):
             if key in data_description:
                 effective[key] = data_description[key]
         effective.dataset.split_manifest = data_description["split_manifest"]
-        if "real_runtime" not in data_description:
-            effective.pop("real_runtime", None)
+        effective.pop("real_runtime", None)
         effective.policy_metadata = metadata
         if checkpoint is None:
             effective.agent.update(model.effective_config)

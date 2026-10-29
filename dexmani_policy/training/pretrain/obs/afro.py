@@ -186,7 +186,7 @@ def train(cfg, checkpoint=None, max_updates=None):
 
 
 def main():
-    train(*load_run("afro"))
+    train(*load_run("afro", resume_fields={"training.save_every_epochs", "training.val_every_epochs"}))
 
 
 if __name__ == "__main__":

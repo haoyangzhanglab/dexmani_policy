@@ -12,19 +12,16 @@ from dexmani_policy.common.io_util import atomic_path
 
 RESUME_OPERATIONAL_FIELDS = {
     "resume_from",
-    "max_updates",
     "workspace.output_dir",
     "workspace.wandb_cfg",
     "training.device",
-    "training.use_compile",
-    "training.compile_mode",
     "training.loop.log_interval_steps",
-    "training.save_every_updates",
-    "training.save_every_epochs",
-    "training.val_every_epochs",
     "dataloader.num_workers",
     "dataloader.persistent_workers",
     "dataloader.prefetch_factor",
+}
+POLICY_RESUME_FIELDS = RESUME_OPERATIONAL_FIELDS | {
+    "max_updates", "training.use_compile", "training.compile_mode",
 }
 
 
@@ -40,7 +37,7 @@ def resolve_resume_source(source):
     return str(path)
 
 
-def resolve_input_recipe(cfg, *, overrides, saved_config=None):
+def resolve_input_recipe(cfg, *, overrides, saved_config=None, operational_fields=POLICY_RESUME_FIELDS):
     """Use the saved recipe on resume, applying only explicit operational/location overrides."""
     from hydra.core.override_parser.overrides_parser import OverridesParser
 
@@ -66,7 +63,7 @@ def resolve_input_recipe(cfg, *, overrides, saved_config=None):
                     )
                 continue
             if (
-                key not in RESUME_OPERATIONAL_FIELDS
+                key not in operational_fields
                 and not key.startswith("workspace.wandb_cfg.")
                 and key != "dataset.zarr_path"
             ):

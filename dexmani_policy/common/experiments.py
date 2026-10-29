@@ -3,6 +3,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from dexmani_policy.common.config import PROJECT_ROOT
+
+
+def resolve_experiment(selector: str | Path) -> Path:
+    path = PROJECT_ROOT / Path(selector).expanduser()
+    if not path.is_dir():
+        path = PROJECT_ROOT / "experiments" / selector
+    return path.resolve(strict=True)
+
 
 def resolve_checkpoint_path(root: Path, path: Path) -> Path:
     path = path.resolve(strict=True)
@@ -44,10 +53,8 @@ def milestone_steps(total):
     return {(pct * total + 99) // 100: pct for pct in (20, 40, 60, 80, 100)}
 
 
-def resolve_policy_checkpoint(
-    root: Path, selector: str | Path, *, relative_to: Path | None = None,
-) -> tuple[Path, dict | None]:
-    """Return the concrete file and the best-selection record, if requested."""
+def resolve_policy_checkpoint(root: Path, selector: str | Path) -> tuple[Path, dict | None]:
+    """Resolve selectors and filenames within the experiment's checkpoints directory."""
     selector = str(selector)
     selected = None
     if selector == "best":
@@ -64,6 +71,6 @@ def resolve_policy_checkpoint(
         path = found.path
     else:
         path = Path(selector).expanduser()
-        if relative_to is not None and not path.is_absolute():
-            path = relative_to / path
+        if not path.is_absolute():
+            path = root / "checkpoints" / path
     return resolve_checkpoint_path(root, path), selected

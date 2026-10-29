@@ -30,7 +30,9 @@ from dexmani_policy.training.common.resume import archive_resume_milestones
 
 
 class PolicyTrainer:
-    def __init__(self, cfg, dataset, normalizer, data_description, *, checkpoint=None):
+    def __init__(self, cfg, dataset, data_description, *, checkpoint=None):
+        if cfg.get("resume_from") is not None and checkpoint is None:
+            raise ValueError("Resume requires the checkpoint loaded by the training entry point")
         device = torch.device(cfg.training.device)
         model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
         model = hydra.utils.instantiate(model_cfg)
@@ -44,10 +46,7 @@ class PolicyTrainer:
         )
         if checkpoint is None:
             pretrained_state = model.initialize_training(data_description)
-            if pretrained_state is not None:
-                state = normalizer.state_dict()
-                state.update(pretrained_state)
-                normalizer.load_state_dict(state, strict=True)
+            normalizer = dataset.get_normalizer(cfg.normalization, initial_state=pretrained_state)
             model.load_normalizer(normalizer)
 
         if model.requires_ema_for_loss and not cfg.training.use_ema:
@@ -90,6 +89,8 @@ class PolicyTrainer:
                         or not torch.equal(parameter, averaged[name])
                     ):
                         raise ValueError(f"Raw/EMA frozen parameter mismatch: {name}")
+            # Strict model restoration establishes the complete affine before caching it on CPU.
+            dataset.get_normalizer(cfg.normalization, initial_state=model.normalizer.state_dict())
         model.to(device)
         if ema_model is not None:
             ema_model.to(device)

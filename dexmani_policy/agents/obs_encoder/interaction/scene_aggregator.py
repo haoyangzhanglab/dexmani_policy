@@ -1,6 +1,7 @@
-"""Geometry-Aware Scene Aggregation."""
+"""Geometry-only region pooling followed by optional context-conditioned patch reading."""
 
 import math
+from typing import cast
 
 import torch
 from torch import Tensor, nn
@@ -13,7 +14,10 @@ def gather_tokens(tokens: Tensor, indices: Tensor) -> Tensor:
 
 @torch.no_grad()
 def sample_region_seeds(points: Tensor, count: int, mask: Tensor | None = None) -> Tensor:
-    """Centroid-initialized FPS with unique indices; masked coordinates must already be zero."""
+    """Centroid-initialized FPS with unique indices; masked coordinates must already be zero.
+
+    Exact distance ties use input order. Distinct indices can have identical coordinates.
+    """
     with torch.autocast(device_type=points.device.type, enabled=False):
         points = points.float()
         excluded = (
@@ -40,154 +44,129 @@ def sample_region_seeds(points: Tensor, count: int, mask: Tensor | None = None) 
         return torch.stack(seeds, 1)
 
 
-class RegionSelfAttention(nn.Module):
-    """Region self-attention with relative geometry in both attention biases and values."""
+class LocalGlobalCrossAttention(nn.Module):
+    """One patch read: soft local distance bias and distance-free global heads.
 
-    def __init__(self, channels: int, attention_dim: int, heads: int, scale: float) -> None:
-        super().__init__()
-        if min(channels, attention_dim, heads) < 1:
-            raise ValueError("relation dimensions must be positive")
-        if attention_dim % heads or attention_dim // heads < 2:
-            raise ValueError("relation head dimension must be an integer >= 2")
-        if not math.isfinite(scale) or scale <= 0:
-            raise ValueError("relation scale must be finite and positive")
+    The hard mode is an ablation using the sparse pooling prior for every head.
+    """
 
-        self.heads = heads
-        self.head_dim = attention_dim // heads
-        self.scale = scale
-        self.norm = nn.LayerNorm(channels)
-        self.qkv = nn.Linear(channels, 3 * attention_dim)
-        self.q_norm = nn.LayerNorm(self.head_dim)
-        self.k_norm = nn.LayerNorm(self.head_dim)
-        self.edge = nn.Sequential(nn.Linear(4, 32), nn.GELU(), nn.Linear(32, heads + attention_dim))
-        self.out = nn.Linear(attention_dim, channels)
-        self.gain = nn.Parameter(torch.full((channels,), 0.1))
-
-    def forward(self, tokens: Tensor, centers: Tensor) -> tuple[Tensor, Tensor]:
-        batch, regions, _ = tokens.shape
-        qkv = self.qkv(self.norm(tokens)).reshape(batch, regions, 3, self.heads, self.head_dim)
-        query, key, value = qkv.permute(2, 0, 3, 1, 4).unbind(0)
-        query, key = self.q_norm(query), self.k_norm(key)
-
-        with torch.autocast(device_type=tokens.device.type, enabled=False):
-            relative = (centers[:, None].float() - centers[:, :, None].float()) / self.scale
-            edge_input = torch.cat((relative, relative.norm(dim=-1, keepdim=True)), -1)
-        edge = self.edge(edge_input.to(self.edge[0].weight.dtype))
-        bias, edge_value = edge.split((self.heads, self.heads * self.head_dim), -1)
-        edge_value = edge_value.reshape(batch, regions, regions, self.heads, self.head_dim).permute(
-            0, 3, 1, 2, 4
-        )
-
-        with torch.autocast(device_type=tokens.device.type, enabled=False):
-            logits = query.float() @ key.float().transpose(-2, -1)
-            logits = logits / math.sqrt(self.head_dim) + bias.float().permute(0, 3, 1, 2)
-            attention = logits.softmax(-1)
-            message = attention @ value.float()
-            message = message + (attention[..., None] * edge_value.float()).sum(-2)
-            message = message.transpose(1, 2).reshape(batch, regions, -1)
-
-        update = self.out(message.to(self.out.weight.dtype))
-        return tokens + self.gain.to(tokens.dtype) * update.to(tokens.dtype), attention
-
-
-class RoutingPriorCrossAttention(nn.Module):
-    """Refine geometrically routed regions using content-aware patch attention."""
-
-    def __init__(self, channels: int, attention_dim: int, heads: int) -> None:
+    def __init__(
+        self, channels: int, attention_dim: int, heads: int, global_heads: int, mode: str
+    ) -> None:
         super().__init__()
         if min(channels, attention_dim, heads) < 1 or attention_dim % heads:
             raise ValueError("attention_dim must be positive and divisible by heads")
+        if not 0 <= global_heads <= heads:
+            raise ValueError("global_heads must be between zero and heads")
+        if mode not in ("soft", "hard"):
+            raise ValueError("refinement_mode must be 'soft' or 'hard'")
 
         self.heads = heads
         self.head_dim = attention_dim // heads
+        self.global_heads = global_heads
+        self.mode = mode
         self.query_norm = nn.LayerNorm(channels)
         self.memory_norm = nn.LayerNorm(channels)
         self.q = nn.Linear(channels, attention_dim, bias=False)
         self.kv = nn.Linear(channels, 2 * attention_dim, bias=False)
         self.out = nn.Linear(attention_dim, channels)
 
-    def forward(self, query: Tensor, memory: Tensor, prior: Tensor) -> Tensor:
+    def attention_bias(
+        self, geometry_bias: Tensor, pool_weight: Tensor, patch_mask: Tensor | None
+    ) -> Tensor:
+        if self.mode == "hard":
+            bias = pool_weight.clamp_min(1e-30).log().masked_fill(pool_weight <= 0, -torch.inf)
+            bias = bias[:, None].expand(-1, self.heads, -1, -1)
+        else:
+            local = geometry_bias[:, None].expand(-1, self.heads - self.global_heads, -1, -1)
+            global_bias = torch.zeros_like(geometry_bias[:, None]).expand(
+                -1, self.global_heads, -1, -1
+            )
+            bias = torch.cat((local, global_bias), dim=1)
+        if patch_mask is not None:
+            bias = bias.masked_fill(~patch_mask[:, None, None], -torch.inf)
+        return bias
+
+    def forward(self, query: Tensor, memory: Tensor, bias: Tensor) -> Tensor:
         batch, regions, _ = query.shape
         patches = memory.shape[1]
         query = self.q(self.query_norm(query.to(self.q.weight.dtype)))
-        key, value = self.kv(self.memory_norm(memory.to(self.kv.weight.dtype))).chunk(2, dim=-1)
+        memory = self.memory_norm(memory.to(self.kv.weight.dtype))
+        key, value = self.kv(memory).chunk(2, dim=-1)
         query = query.reshape(batch, regions, self.heads, self.head_dim).transpose(1, 2)
         key = key.reshape(batch, patches, self.heads, self.head_dim).transpose(1, 2)
         value = value.reshape(batch, patches, self.heads, self.head_dim).transpose(1, 2)
-
-        # Routing is trained through pooled tokens; detach its prior for efficient SDPA.
-        weight = prior.detach().float()
-        bias = weight.clamp_min(1e-30).log().masked_fill(weight <= 0, -torch.inf)
         refined = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=bias[:, None].to(query.dtype), dropout_p=0.0
+            query, key, value, attn_mask=bias.to(query.dtype), dropout_p=0.0
         )
         return self.out(refined.transpose(1, 2).reshape(batch, regions, -1))
 
 
 class SceneAggregator(nn.Module):
-    """Compress spatial patches into geometric regions, then encode inter-region relations."""
+    """Compress [B,M,D] patches into K regions in the input metric coordinate frame.
+
+    Valid tokens/XYZ must be finite; masked entries may contain NaN/Inf. Every
+    sample needs at least K valid patches. Centers (m), covariance (m^2), and
+    mass (patch assignment count) describe only the geometric partition.
+    FPS indices are not persistent identities. This is not SE(3)-equivariant.
+    """
 
     def __init__(
         self,
         token_channels: int = 192,
         num_scene_tokens: int = 12,
         *,
-        route_dim: int = 64,
-        routing_steps: int = 2,
         nearest_slots: int = 3,
         geometry_scale: float = 0.10,
         position_scale: float = 1.0,
-        use_relation: bool = True,
-        relation_dim: int = 64,
-        relation_heads: int = 4,
         mlp_ratio: float = 2.0,
-        use_cross_refinement: bool = False,
+        use_cross_refinement: bool = True,
         refinement_dim: int = 128,
         refinement_heads: int = 4,
+        global_heads: int = 1,
+        refinement_mode: str = "soft",
+        query_source: str = "region",
     ) -> None:
         super().__init__()
         for name, value in (
             ("token_channels", token_channels),
             ("num_scene_tokens", num_scene_tokens),
-            ("route_dim", route_dim),
-            ("routing_steps", routing_steps),
             ("nearest_slots", nearest_slots),
         ):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name, value in (("geometry_scale", geometry_scale), ("position_scale", position_scale)):
-            if not math.isfinite(value) or value <= 0:
+        for name, scale in (("geometry_scale", geometry_scale), ("position_scale", position_scale)):
+            if not math.isfinite(scale) or scale <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         hidden = int(token_channels * mlp_ratio)
         if hidden < 1:
             raise ValueError("mlp_ratio creates an empty hidden layer")
+        if query_source not in ("region", "learned"):
+            raise ValueError("query_source must be 'region' or 'learned'")
 
         self.token_channels = token_channels
         self.num_scene_tokens = num_scene_tokens
-        self.routing_steps = routing_steps
         self.nearest_slots = nearest_slots
         self.geometry_scale = float(geometry_scale)
         self.position_scale = float(position_scale)
 
-        self.route_norm = nn.LayerNorm(token_channels)
-        self.route_projection = nn.Linear(token_channels, route_dim, bias=False)
-        self.semantic_scale_logit = nn.Parameter(torch.zeros(()))
         self.geometry_embed = nn.Sequential(
             nn.Linear(9, 64), nn.GELU(), nn.Linear(64, token_channels)
         )
         self.cross_refinement = (
-            RoutingPriorCrossAttention(token_channels, refinement_dim, refinement_heads)
+            LocalGlobalCrossAttention(
+                token_channels, refinement_dim, refinement_heads, global_heads, refinement_mode
+            )
             if use_cross_refinement
             else None
         )
         self.refinement_gain = (
             nn.Parameter(torch.full((token_channels,), 0.1)) if use_cross_refinement else None
         )
-        self.relation = (
-            RegionSelfAttention(token_channels, relation_dim, relation_heads, self.geometry_scale)
-            if use_relation
-            else None
-        )
+        self.learned_query = None
+        if use_cross_refinement and query_source == "learned":
+            self.learned_query = nn.Parameter(torch.empty(1, num_scene_tokens, token_channels))
+            nn.init.normal_(self.learned_query, std=0.02)
         self.ffn_norm = nn.LayerNorm(token_channels)
         self.ffn = nn.Sequential(
             nn.Linear(token_channels, hidden), nn.GELU(), nn.Linear(hidden, token_channels)
@@ -202,7 +181,9 @@ class SceneAggregator(nn.Module):
         return_intermediate: bool = False,
         *,
         patch_mask: Tensor | None = None,
+        query_context: Tensor | None = None,
     ) -> dict[str, Tensor]:
+        """query_context [B,D] is caller-encoded current information, used only in Q."""
         if patch_token.ndim != 3 or patch_token.shape[-1] != self.token_channels:
             raise ValueError("patch_token must be [B,M,token_channels]")
         if not patch_token.shape[0] or patch_token.shape[1] < self.num_scene_tokens:
@@ -211,12 +192,19 @@ class SceneAggregator(nn.Module):
             raise ValueError("patch_center must be [B,M,3]")
         if not patch_token.is_floating_point() or not patch_center.is_floating_point():
             raise TypeError("tokens and XYZ must be floating point")
+        if query_context is not None:
+            if query_context.shape != (patch_token.shape[0], self.token_channels):
+                raise ValueError("query_context must be [B,token_channels]")
+            if not query_context.is_floating_point():
+                raise TypeError("query_context must be floating point")
 
         tokens, points = patch_token, patch_center.float()
         valid = None
         if patch_mask is not None:
             if patch_mask.shape != tokens.shape[:2] or patch_mask.dtype != torch.bool:
                 raise ValueError("patch_mask must be bool [B,M]")
+            # Torch 2.4 Inductor drops _assert_async; keep this boundary check
+            # in Python, accepting a graph break for masked compiled calls.
             if not (patch_mask.sum(-1) >= self.num_scene_tokens).all():
                 raise ValueError("each sample needs at least K valid patches")
             valid = patch_mask[:, None]
@@ -228,38 +216,26 @@ class SceneAggregator(nn.Module):
         anchors = gather_tokens(points, seed_indices)
         with torch.autocast(device_type=tokens.device.type, enabled=False):
             distance2 = (anchors[:, :, None] - points[:, None]).square().sum(-1)
-            # The Cauchy prior retains feature-dependent routing at larger spatial separations.
             geometry_bias = -torch.log1p(distance2 / self.geometry_scale**2)
 
         with torch.no_grad():
             nearest = distance2.topk(min(self.nearest_slots, regions), dim=1, largest=False).indices
             allowed = torch.zeros_like(distance2, dtype=torch.bool).scatter_(1, nearest, True)
+            # Each unique seed index owns itself, even for coincident coordinates.
             ownership = torch.zeros_like(allowed).scatter_(2, seed_indices[..., None], True)
             allowed = torch.where(ownership.any(dim=1, keepdim=True), ownership, allowed)
             if valid is not None:
                 allowed = allowed & valid
-            excluded = ~allowed
 
-        keys = self.route_projection(self.route_norm(tokens.to(self.route_projection.weight.dtype)))
         with torch.autocast(device_type=tokens.device.type, enabled=False):
-            keys = F.normalize(keys.float(), dim=-1, eps=1e-6)
-            transposed_keys = keys.transpose(-2, -1)
-            prototypes = gather_tokens(keys, seed_indices)
-            scale = 4.0 * self.semantic_scale_logit.float().sigmoid()
-
-            for step in range(self.routing_steps):
-                logits = scale * (prototypes @ transposed_keys) + geometry_bias
-                logits = logits.masked_fill(excluded, -torch.inf)
-                if valid is not None:
-                    logits = torch.where(valid, logits, 0.0)  # Avoid all-inf softmax on padding.
-                assignment = logits.softmax(dim=1)
-                if valid is not None:
-                    assignment = assignment * valid
-                mass = assignment.sum(-1)
-                weight = assignment / mass.clamp_min(1e-12)[..., None]
-                if step + 1 < self.routing_steps:
-                    prototypes = F.normalize(weight @ keys, dim=-1, eps=1e-6)
-
+            logits = geometry_bias.masked_fill(~allowed, -torch.inf)
+            if valid is not None:
+                logits = torch.where(valid, logits, 0.0)
+            assignment = logits.softmax(dim=1)
+            if valid is not None:
+                assignment = assignment * valid
+            mass = assignment.sum(-1)
+            weight = assignment / mass[..., None]  # Seed ownership guarantees nonempty regions.
             pooled = weight @ tokens.float()
             centers = weight @ points
             # Centered moments avoid cancellation in E[xx^T] - E[x]E[x]^T.
@@ -276,23 +252,25 @@ class SceneAggregator(nn.Module):
             descriptor = torch.cat((centers / self.position_scale, upper), -1)
 
         geometry = self.geometry_embed(descriptor.to(self.geometry_embed[0].weight.dtype))
-        base_tokens = pooled.to(geometry.dtype) + geometry
+        # Keep pooled features and small learned residuals in FP32 under autocast.
+        base_tokens = pooled + geometry.float()
         scene_tokens = base_tokens
-        refinement_update = None
+        refinement_update = attention_bias = None
         if self.cross_refinement is not None:
-            refinement_update = self.cross_refinement(scene_tokens, tokens, weight)
-            scene_tokens = scene_tokens + self.refinement_gain.to(
-                scene_tokens.dtype
-            ) * refinement_update.to(scene_tokens.dtype)
-        relation_attention = None
-        if self.relation is not None:
-            scene_tokens, relation_attention = self.relation(scene_tokens, centers)
-        scene_tokens = scene_tokens + self.ffn_gain.to(scene_tokens.dtype) * self.ffn(
-            self.ffn_norm(scene_tokens)
-        )
+            query = (
+                base_tokens if self.learned_query is None
+                else self.learned_query.float().expand_as(base_tokens)
+            )
+            if query_context is not None:
+                query = query + query_context[:, None].float()
+            attention_bias = self.cross_refinement.attention_bias(geometry_bias, weight, patch_mask)
+            refinement_update = self.cross_refinement(query, tokens, attention_bias)
+            scene_tokens = scene_tokens + cast(Tensor, self.refinement_gain).float() * refinement_update.float()
+        normalized = self.ffn_norm(scene_tokens.to(self.ffn_norm.weight.dtype))
+        scene_tokens = scene_tokens + self.ffn_gain.float() * self.ffn(normalized).float()
 
         output = {
-            "scene_token": self.norm(scene_tokens),
+            "scene_token": self.norm(scene_tokens.to(self.norm.weight.dtype)),
             "scene_center": centers,
             "scene_covariance": covariance,
             "scene_mass": mass,
@@ -303,15 +281,14 @@ class SceneAggregator(nn.Module):
                 assignment=assignment,
                 pool_weight=weight,
                 anchor_indices=seed_indices,
-                routing_anchors=anchors,
-                routing_allowed=allowed,
+                region_anchors=anchors,
+                pool_support=allowed,
                 pooled_token=pooled,
                 base_scene_token=base_tokens,
             )
             if refinement_update is not None:
                 output["refinement_update"] = refinement_update
-            if relation_attention is not None:
-                output["relation_attention"] = relation_attention
+                output["attention_bias"] = attention_bias
         return output
 
     @property
