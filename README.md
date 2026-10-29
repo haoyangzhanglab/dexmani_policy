@@ -93,7 +93,7 @@ bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/
 
 离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`；LAMP 同时传入符合 `info.action_context_shapes` 的 `action_context`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复直接使用 checkpoint 内置配置和严格 state_dict 加载，保留参数精度；不重拟合 affine 或迁移产物。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按配套、未手工篡改的内部产物使用。
 
-训练将 Canonical 的 `dt`、实际 depth 形状/尺度及已用点云、手模板和指尖配方保存为 `deployment_metadata`，沿配置和 checkpoint 保留；`PolicyInfo` 公开 Real 实际消费的配方与已验证的 `tactile_source`。`hand_history_steps` 由模型的 `action_context_shapes.hand_history` 派生，不使用观测 encoder 的历史长度。非 Canonical 或旧产物缺少的 Real 配方保持缺失，inspect 和纯策略推理仍可用，设备入口负责拒绝缺失事实。`processing_source` 仅用于定位加工代码与固定模板；修改数值加工或模板后须重新导出数据。
+训练将 Canonical 实际使用的数值配方保存到配置和 checkpoint，由公开 `PolicyInfo` 提供给 Real。非 Canonical 的训练、inspect 和纯策略推理不要求真机配方；设备入口负责拒绝缺失事实。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 
 数据边界必须区分来源：sim 是世界系 N，来自接触 impulse/physics_dt，再按控制周期子步进行有符号向量平均，目前没有 dense producer。real aggregate/dense 分别来自 SDK `calc_force`/`raw_force`，不是代码中的求和关系；单位为 `sdk_native_unknown_physical_scale`，轴为 `sdk_sensor_axes_not_world_frame`，canonical 尚未完整复制这些 raw 元信息。`fingertip_xyz` 只有位置，不能用于完成轴变换。五指顺序为 thumb/index/middle/ring/pinky，dense 保留 SDK 索引顺序。
 

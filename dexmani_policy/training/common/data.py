@@ -13,12 +13,16 @@ def build_dataset(cfg, *, verbose=True):
     spec = cfg.normalization
     dataset = hydra.utils.instantiate(cfg.dataset)
     buffer = dataset.replay_buffer
-    if cfg.get("resume_from") is not None and buffer.attrs.get("format") == "dexmani.real.canonical":
-        if not buffer.attrs.get("source_id") or not dataset.split_manifest.get("source_id"):
-            raise ValueError(
-                "Canonical checkpoint resume requires source_id in both the dataset and saved split; "
-                "re-export legacy data and start a new experiment for reliable resume"
-            )
+    # RobotDataset 已核对 split 与数据身份一致；resume 额外拒绝双方都没有 ID。
+    if (
+        cfg.get("resume_from") is not None
+        and buffer.attrs.get("format") == "dexmani.real.canonical"
+        and buffer.attrs.get("source_id") is None
+    ):
+        raise ValueError(
+            "Canonical checkpoint resume requires source_id in both the dataset and saved split; "
+            "re-export legacy data and start a new experiment for reliable resume"
+        )
     dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
     for key in FIELD_FEATURE_SHAPES.keys() & dims.keys():
         dims[key] = prod(buffer[key].shape[1:])
