@@ -1,0 +1,327 @@
+CODEX 任务书：interact-dex A1 策略实施
+
+仓库：haoyangzhanglab/dexmani_policy
+设计核对基准：049fc1046bb2678ac839b5ce1cb47600e93ffe17
+任务性质：实现可训练、可保存恢复、可走现有部署接口的 A1 策略。直接完成代码，不再写方案。
+本文件是用户明确要求的唯一任务书；实施阶段不要新增任何说明文档、任务清单副本或测试组件。
+
+一、目标与不可变边界
+
+策略标识 policy_name 为 interact-dex，配置名与 Python 模块名为 interact_dex。
+A1 默认启用身体交互历史；不是先交付 A0 再等待下一轮指令。
+动作模型固定为普通 DiTX，8 层、hidden_dim=768、n_head=8、mlp_ratio=4。
+动作训练只有标准条件 Flow Matching 的速度 MSE，推理为从高斯噪声到动作的 Euler 积分。
+不要使用 ConsistencyDiTX/ConsistencyFlow、teacher consistency、reflow、蒸馏、learned prior、CFG、RTC guidance、动作 codec、辅助接触/力预测损失或世界模型。
+EMA 仅沿用现有权重平滑与评测机制，不参与 teacher loss。
+保持 action_key=action，19D 绝对关节目标（arm7 + hand12），不接 action_ee。
+默认 horizon=16、n_obs_steps=4、n_action_steps=4、num_inference_steps=10。
+复用现有 RobotDataset、BasePolicy、训练器、checkpoint 与部署链路。
+
+本次触觉范围明确限定为 aggregate force：
+- 正式支持已有 tactile=sim_force 和 tactile=real_force。
+- 沿用 XHandForceEncoder，输入 finger_tactile_force，输出五个 64D token。
+- real_taxel/real_patch 不属于本次交付。不要为它们新增过滤、反射、兼容层或假装消费未使用字段。
+- 不修改旧 tactile presets，避免影响 AdapTac。
+- 本任务不包含训练完整实验、真机执行、论文图表、研究文档或外部数据下载。
+
+二、先读现有代码，再修改
+
+先读 AGENTS.md，并检查 git status，保留已有工作区改动。重点阅读：
+dexmani_policy/agents/policies/base.py
+dexmani_policy/agents/policies/maniflow.py
+dexmani_policy/agents/policies/adaptac.py
+dexmani_policy/agents/action_decoders/backbones/ditx.py
+dexmani_policy/agents/action_decoders/flow.py
+dexmani_policy/agents/obs_encoder/proprio.py
+dexmani_policy/agents/obs_encoder/xhand_tactile.py
+dexmani_policy/agents/obs_encoder/pointcloud/sparse3d_encoder.py
+dexmani_policy/agents/obs_encoder/pointcloud/ops.py
+dexmani_policy/agents/obs_encoder/interaction/hand_scene.py
+dexmani_policy/agents/obs_encoder/interaction/gated_tactile_fusion.py
+dexmani_policy/agents/obs_encoder/interaction/scene_aggregator.py
+dexmani_policy/common/config.py
+dexmani_policy/common/normalizer.py
+dexmani_policy/common/checkpoint.py
+dexmani_policy/training/common/config.py
+dexmani_policy/training/common/data.py
+dexmani_policy/deployment/metadata.py
+dexmani_policy/deployment/runtime.py
+dexmani_policy/configs/common.yaml
+dexmani_policy/configs/maniflow.yaml
+dexmani_policy/configs/adaptac.yaml
+dexmani_policy/configs/tactile/sim_force.yaml
+dexmani_policy/configs/tactile/real_force.yaml
+
+可以读取现有文档澄清坐标、数据时序和部署契约，不要新增或改写文档。
+如实际分支已前进，以当前实现的真实签名为准完成局部适配；不能因接口变动静默改变本任务的算法、损失或动作语义。
+
+三、文件组织与代码风格
+
+预计只新增：
+1. dexmani_policy/agents/policies/interact_dex.py
+   包含 InterActDexObservationEncoder 和 InterActDexPolicy。
+   遵循 maniflow.py 中 observation encoder 与 policy 同文件的组织。
+2. dexmani_policy/agents/obs_encoder/interaction/hand_history.py
+   包含 HandHistoryEncoder，职责仅为六个身体槽的空间与时间混合。
+3. dexmani_policy/configs/interact_dex.yaml
+   一份完整、可由现有 Hydra 入口加载的训练/推理配方。
+
+已有模块能满足接口时直接复用，不复制实现，不新增 registry、factory、adapter、通用配置系统或专属 trainer。
+如果现有调用方确实阻止接入，只做有调用证据的最小修补；不得借机重构其他策略或修改全局默认行为。
+不要为了 export 增改空 __init__.py；当前直接模块导入和 Hydra _target_ 足够时保持原样。
+不增加依赖、测试目录、测试文件、测试框架、smoke 脚本、benchmark 脚本、notebook、可视化或日志框架。
+不新增/修改 README、AGENTS、Markdown、PDF、报告或其它交付文档；本任务书保持不变。
+命名、类型标注、导入、排版和中文说明沿用邻近代码。注释只解释必要的维度、坐标、掩码或 residual 约束。
+不机械补 docstring，不添加装饰性分隔，不做无关格式化，不用 try/except 或默认值掩盖真实接口错误。
+只在策略入口、配置或真实形状边界做必要校验，避免多层重复防御。
+
+四、观测与归一化契约
+
+外部输入：
+joint_state          [B,T,19]
+point_cloud          [B,T,N,6]，默认 N=1024
+eef_pose             [B,T,9]
+fingertip_xyz        [B,T,5,3]
+finger_tactile_force [B,T,5,3]
+默认 T=4。数据按 obs[t] 在 action[t] 之前的既有语义使用。
+
+BasePolicy.preprocess 已执行归一化并合并 B/T；新 observation encoder 收到的是 [B*T,...]。
+不要再次归一化、再次 flatten B/T，或在每个模块内部猜测时间维。
+由 n_obs_steps 恢复时间轴，必要边界检查总帧数可整除 T。
+
+归一化：
+joint_state: limits
+action: auto
+point_cloud: identity
+eef_pose: identity
+fingertip_xyz: identity
+finger_tactile_force: rms
+
+point_cloud XYZ、eef_pose 平移、fingertip_xyz、anchor_xyz 必须保留同一世界坐标系的米制几何。
+eef_pose 的旋转是已有列式 rot6d。复用 HandStateEncoder 的解释，不改成行式，不重复做局部坐标变换。
+腕槽表示 EEF 原点，不能当作掌心或触觉传感器坐标系。
+归一化后的关节用于状态编码；几何运算继续使用原始位姿/位置。
+真实 aggregate SDK force 与仿真世界系牛顿值不能直接共享尺度或假设同一坐标轴；按当前数据 source 单独拟合并保存 normalizer。
+不要用指尖位置推造触觉传感器旋转，不把 force 当作 XYZ 旋转。
+有效零触觉不是缺失。不要从数值是否为零推导 tactile_valid。
+当前标准数据契约没有要求 tactile_valid，本版不扩展 dataset/runtime 字段或新做缺测增强；正常输入不传 mask，复用融合模块既有行为。
+默认不启用 modality dropout，尤其不能把几何字段分别清零后继续当作有效坐标。
+
+五、A1 observation encoder 的确定数据流
+
+令 M=B*T，D=192，S=6，K=12。
+
+1. 按已有 preprocess_point_cloud 处理点数和 XYZRGB；将同一份处理后的米制点云同时传给 Sparse3D 与 HandSceneEncoder。
+   Sparse3D 配置沿用现有实现：
+   channels=384，num_patches=96，group_size=32，depth=4，
+   num_heads=8，mlp_ratio=2.0，geometry_scale=0.10，rope_scale=0.05，rope_base=100.0。
+   patches = pc_encoder(pc)
+   patches["tokens"]: [M,96,384]
+   patches["xyz"]:    [M,96,3]
+   patches["mask"]:   [M,96]
+
+2. 调用 HandStateEncoder(joint_state, eef_pose, fingertip_xyz)，宽度192。
+   hand["hand_tokens"]: [M,6,192]
+   hand["anchor_xyz"]: [M,6,3]
+   hand["rotation_world_from_eef"]: [M,3,3]
+   槽位固定为 wrist/thumb/index/middle/ring/pinky。
+   HandStateEncoder 已有 keypoint embedding，不再复制一套身体身份 embedding。
+
+3. HandSceneEncoder 显式指定 scene_channels=384，身体 token 宽度192；局部几何其余参数沿用当前默认。
+   relation = hand_scene(
+       pc, patches, hand["anchor_xyz"], hand["hand_tokens"],
+       rotation_world_from_eef=hand["rotation_world_from_eef"],
+   )
+   该分支必须读取未压缩的96个patches。不能先执行全局12区域压缩再供手指查询。
+
+4. GatedTactileFusion(token_channels=192, tactile_encoder=已有实例)。
+   由 fusion 持有 tactile_encoder；不要把同一个模块重复注册到另一路属性。
+   interaction = tactile_fusion(
+       relation, tactile=obs["finger_tactile_force"]
+   )["interaction_tokens"]
+   这里传的是已按 rms 归一化的原始五指力，不是提前编码的 tactile tokens。
+   fusion 内部会执行触觉编码，禁止重复编码。
+   返回值已经是完整 H + Δscene + gΔtactile，外层不要再次加 H、relation_update 或额外残差。
+
+5. 独立的全局场景分支：
+   scene_aggregator = SceneAggregator(token_channels=384, ...)
+   使用当前默认12区域及 refinement 结构。
+   scene = scene_aggregator(
+       patches["tokens"], patches["xyz"], patch_mask=patches["mask"]
+   )["scene_token"]
+   注意实际返回键是单数 scene_token。
+   用一个 Linear(384,192) 投影，得到 [M,12,192]。
+   不增加 query_context 分支，不构建物体级跟踪，不把 FPS 区域编号当作跨帧身份。
+
+6. interaction 恢复 [B,T,6,192]，执行下一节 HandHistoryEncoder。
+   scene 恢复 [B,T,12,192]。
+   condition = torch.cat((interaction, scene), dim=2).flatten(1,2)
+   得到 [B,T*18,192]，默认 [B,72,192]。
+   obs_token_dim=192。
+   展平顺序必须是 frame-major：t0的6身体+12场景，然后t1，再t2、t3。
+   不能先放四帧所有身体，再放四帧所有场景；DiTX 会按每18个token注入同一帧的时间位置。
+   返回浮点条件时确保 FP32，使现有 RectifiedFlow 的噪声与 Euler 累加保持 FP32；网络内部仍可按现有 autocast 使用 BF16。
+   不给已自带时间位置的 DiTX 再增加一套额外的最终 context 时间编码。
+
+Sparse3D 与 SceneAggregator 的现有非空点云/有效patch前提继续成立。不实现全视觉缺失 fallback。
+可见表面距离不是接触真值，融合 gate 不是接触概率；不要为这些中间量加新的监督或语义标签。
+
+六、HandHistoryEncoder 的精确结构
+
+默认 history_mixer=true，开关位于 agent 配置；false 仅供 A0 消融。
+输入输出严格保持 [B,T,6,192]，保留全部T帧。
+模块挂在 observation encoder 下，保证现有 optimizer_groups 自动覆盖参数。
+
+按以下次序实现两个 Pre-LN 残差块，各只有一次注意力和一次FFN：
+
+空间块：
+- reshape 为 [B*T,6,192]。
+- LayerNorm -> MultiheadAttention(192,4,batch_first=True,dropout=0.0)，残差相加。
+- LayerNorm -> Linear(192,384) -> GELU -> Linear(384,192)，残差相加。
+- 六个槽位在同一帧内相互读取，不跨时间。
+
+时间块：
+- 恢复后 permute 为 [B,6,T,192]，再 reshape 为 [B*6,T,192]。
+- 加入一个 learned time embedding [1,T,192]，按 std=0.02 初始化。
+- 使用同样的 Pre-LN attention+FFN 残差结构，宽度192，4heads，FFN384，dropout=0。
+- 每条序列只对应同一个身体槽，不能混入其他手指或batch。
+- 因果mask只屏蔽严格未来位置，允许自身和过去位置。
+- nn.MultiheadAttention 的 bool mask 中 True=禁止读取；不要照搬 SDPA 的相反含义。
+- mask 可注册为 persistent=False 的 buffer，随模块迁移设备，不新增跨调用缓存。
+- 恢复 [B,T,6,192] 返回。
+
+小残差使用FP32累加，遵循现有交互模块习惯；不要给每个算子包一层通用dtype适配。
+不额外增加外层 U + history(U)，模块自身已经执行完整残差。
+不添加第二套身体身份 embedding、recurrent state、记忆队列、跨episode状态、动态深度或额外门控。
+history_mixer=false 时跳过整个模块及其时间embedding，不留未使用的历史编码器参数。
+12个场景token不进入这段时间注意力；DiTX已有完整四帧场景条件。
+空间/时间两个块是观测编码器的一部分，不改变动作DiTX的8层约束。
+
+七、策略与标准 Flow Matching 接线
+
+InterActDexPolicy 继承 BasePolicy，supported_action_keys=("action",)。
+构造 observation encoder、普通 DiTX、RectifiedFlow 后调用 BasePolicy.__init__。
+参照 ManiFlowPolicy 的直接构造风格，但不要复制一致性模型或相关参数。
+普通 DiTX：
+n_layers=8，hidden_dim=768，n_head=8，mlp_ratio=4.0，
+timestep_embed_dim=128，p_drop_attn=0.1，
+qkv_bias=false，qk_norm=false，
+horizon=16，action_dim=19，n_obs_steps=4，obs_token_dim=192。
+不得出现 target_t_embed_dim、target_t、flow_batch_ratio 等一致性训练参数。
+普通 DiTX 不接收 pre_norm_modality；不要把 ConsistencyDiTX 的该参数传给它。
+
+RectifiedFlow 必须显式指定：
+t_sample_mode="uniform"
+time_shift_alpha=1.0
+num_inference_steps=10
+不把 num_flow_train_timesteps 解释为 uniform 连续训练时的离散网格，不把它与推理NFE绑定。
+
+训练：
+z ~ N(0,I)，t ~ Uniform(0,1)，与专家归一化动作 A 独立采样；
+x_t=(1-t)*z+t*A；
+target_v=A-z；
+loss=mean((v_theta(x_t,t,C)-target_v)^2)。
+这是唯一训练损失；复用 RectifiedFlow.compute_loss，不另写同名损失实现。
+requires_ema_for_loss 应自然为 false。
+
+推理：
+x_0 ~ N(0,I)
+对 j=0..N-1：
+x_{j+1}=x_j+v_theta(x_j,j/N,C)/N
+不改积分方向、终点、噪声先验，不添加裁剪/温度/引导/后处理机制。
+沿用已有 generator、inference_steps override 和一次ODE求解内的context K/V复用，不做跨观测缓存。
+
+尽量完整继承 BasePolicy 的 compute_loss、predict_action、format_action_output、optimizer_groups 和 metadata 行为。
+标准配置 action_start_index=T-1=3；完整输出 [B,16,19]，反归一化后由 BasePolicy 返回 future_actions [B,13,19]。
+由现有执行器取前4步，不在策略内再次截为4步，也不把16解释为16个未来执行步。
+继承现有sync/async支持，不新增RTC执行能力。
+不要在policy中复刻训练循环、动作归一化或checkpoint逻辑。
+
+八、配置与现有入口的完整衔接
+
+interact_dex.yaml 的 defaults 顺序为：
+common
+tactile: sim_force
+_self_
+
+_self_ 最后是必要条件：旧 tactile preset 的 sensor_modalities 不包含 eef_pose/fingertip_xyz，必须由本策略完整覆盖。
+不要在 _self_ 中再次设置 tactile_source: ???；source由所选preset提供。
+agent.tactile_source 与 dataset.tactile_source 都引用根配置的 tactile_source。
+
+dataset：
+_target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+sensor_modalities: [joint_state, point_cloud, eef_pose, fingertip_xyz, finger_tactile_force]
+pc_dim: 引用 agent.pc_dim
+horizon、obs_horizon、pad_before 继承 common
+pad_after: n_action_steps-1，即默认3，沿用已有eval resolver风格
+不得换成 AdapTacDataset，不新增未来力标签/aux dataset。
+
+normalization 在本配置声明 joint_state/action/point_cloud/eef_pose/fingertip_xyz；
+finger_tactile_force:rms 由force preset合入。
+最终 normalization 字段必须严格等于 sensor_modalities 加 action，且模型 consumed_observation_fields 与 sensor_modalities 严格相等。
+不要放宽现有 validator，不虚报 consumed 字段来绕过检查。
+observation encoder 声明五个实际读取字段，validate_normalization 检查三项几何identity、力的零保持尺度以及现有Sparse3D/tactile要求。
+策略构造边界确认 tactile_source 为 sim/real，tactile_encoder.input_key 为 finger_tactile_force，输出为5个64D token。
+仅支持force是本任务的范围边界，不编造dense/patch适配。
+
+policy_name: interact-dex
+agent._target_: dexmani_policy.agents.policies.interact_dex.InterActDexPolicy
+agent.history_mixer: true
+pc_dim=6，state_dim=19，num_points=1024。
+FPS配置沿用Sparse3D相邻策略，训练允许既有随机采样，输出不要人为打乱身体/时间顺序。
+点云增强沿用已有小幅坐标噪声与颜色增强；不添加只改变点云、不同时改变腕指坐标的刚体变换。
+force augmentation 与 modality dropout 默认关闭。
+
+训练配方：
+batch_size=128，drop_last=true；
+optimizer lr=1e-4，obs_lr=1e-4，weight_decay=1e-3，obs_weight_decay=1e-6，betas=[0.9,0.95]；
+EMA沿用已有配置；use_ema=true，use_bfloat16=true，use_compile=false；
+cosine，warmup500，max_grad_norm=1.0，total_train_steps=100000；
+env_runner.env_kwargs.control_mode=joint；
+eval.inference_steps 引用 agent.num_inference_steps，eval.use_ema=true。
+不添加新的训练调度、参数分组机制或实验脚本；显存不足可通过既有batch和梯度累积配置覆盖。
+
+effective_config：
+遵循当前 observation encoder -> BasePolicy -> assemble_effective_config 的路径。
+只返回 InterActDexPolicy 构造函数实际接收的键；
+保存 Sparse3D 的实际 effective_config、触觉encoder的实际 effective_config，以及必要的本策略配置。
+history_mixer、时间窗口和source必须由保存的有效配置恢复；不依赖恢复时默认配置猜测。
+tactile encoder 的 effective_config 仍保留可由Hydra还原的 _target_。
+不要让effective_config返回不存在的构造参数。
+已有 checkpoint/部署机制能消费该配置时不修改它们。
+
+九、必要验证：执行检查，不新增验证组件
+
+验证命令使用现有项目环境、现有入口或临时 python stdin，临时输出放仓库外。
+不添加/修改 tests、test_tools、pytest 配置或测试依赖，也不提交任何临时脚本。
+不把禁止新增测试文件误解为可以不检查实际运行。
+
+完成以下与风险直接相关的检查：
+1. 查看最终diff与语法/import，确认只有本任务必要源码/配置变化；无残留临时文件、报告、无关格式化。
+2. 在项目环境分别compose默认sim_force与tactile=real_force，检查完整五字段、归一化集合、source一致、history_mixer默认开启、8层普通DiTX与uniform RectifiedFlow。
+   也compose agent.history_mixer=false，确认只是关闭历史模块，不改变观测、数据或动作生成器。
+3. 用实际可用数据取得一个batch；在支持Sparse3D算子的设备上运行loss、backward和少量优化步骤，以及一次predict_action。
+   核对 condition=[B,72,192]、完整动作=[B,16,19]、future_actions=[B,13,19]，数值有限。
+   普通DiTX的输出层/AdaLN零初始化可能让首个backward的观测梯度为零，不能据此判定接线失败或修改既有初始化。
+   如检查历史模块训练连通性，放在若干实际优化步后，且不得人为填充梯度。
+4. 对HistoryEncoder在eval模式做一次临时因果检查：只改变较晚帧，较早帧的历史输出应保持不变；同时核对reshape没有混batch/手指。
+   这只验证HistoryEncoder的因果性，不错误地要求最终动作对最新观测不敏感。
+5. 在现有checkpoint路径做保存/恢复或等价小规模往返检查，确认normalizer、source、history_mixer、所有模型参数和推理metadata能恢复。
+   使用固定输入和随机generator状态比较恢复前后推理结果；控制既有FPS等随机来源，不承诺训练态bitwise一致。
+6. 确认既有策略与tactile presets没有被无意改变；已有训练/部署调用不要求新入口。
+
+没有数据、CUDA、点云算子或项目依赖时，明确指出哪项未执行和具体阻塞。
+不得用虚构数据源、替换实现、跳过核心模块或创建测试框架掩盖环境缺失。
+必要时用合成张量完成接口级检查，但必须标明这不等于真实数据/部署验证。
+不运行100k完整训练、不启动真机、不凭shape通过宣称性能有效。
+
+十、完成定义与交付
+
+只有A1训练与推理路径完整接入，才算代码实施完成；不能只提交配置、类壳、TODO或A0。
+模型仅包含一个8层动作DiTX和标准RectifiedFlow，HistoryEncoder默认启用，训练损失只有FM。
+张量时序、几何单位、触觉source、残差次数和checkpoint恢复均符合以上契约。
+预计新增3个实现/配置文件；其它文件仅允许有具体接入必要性的最小修补。
+不扩展研究范围，不附带文档或测试资产。
+最终用中文在对话中简要列出：实际修改、关键实现、实际执行的验证及结果、尚未验证项、可直接使用的现有训练入口命令。
+命令必须先核对仓库当前入口；默认以 --config-name interact_dex 启动，并给出 tactile=real_force 的覆盖用法。
+不要把总结写进仓库，不修改本任务书，不把任务书复制成README或计划文档。
