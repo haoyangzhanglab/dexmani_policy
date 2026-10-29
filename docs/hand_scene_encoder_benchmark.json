@@ -1,0 +1,109 @@
+{
+  "scope": "Synthetic module-only CPU benchmark; no policy or GPU performance claim.",
+  "timing_limitation": "Shared runtime shows large wall-clock variance; inspect IQR and both runs. CPU model unavailable from cpuinfo.",
+  "baseline_commit": "ebdacf9f029ab6a23a6a3575380e6e036748bd4c",
+  "runs": [
+    {
+      "torch": "2.4.1+cpu",
+      "device": "cpu",
+      "threads": 1,
+      "autocast": "fp32",
+      "points": 1024,
+      "patches": 96,
+      "token_channels": 192,
+      "surface_k": 32,
+      "return_intermediate": false,
+      "baseline_ref": "ebdacf9",
+      "results": [
+        {
+          "model": "baseline",
+          "batch": 1,
+          "parameters": 248804,
+          "forward_median_ms": 2.8000130005239043,
+          "forward_iqr_ms": 1.3795565009786515,
+          "forward_backward_median_ms": 6.201053001859691,
+          "forward_backward_iqr_ms": 1.6941799985943362
+        },
+        {
+          "model": "current",
+          "batch": 1,
+          "parameters": 157472,
+          "forward_median_ms": 2.0634675020119175,
+          "forward_iqr_ms": 0.7385307526419638,
+          "forward_backward_median_ms": 4.456121503608301,
+          "forward_backward_iqr_ms": 1.5615619995514862
+        },
+        {
+          "model": "baseline",
+          "batch": 32,
+          "parameters": 248804,
+          "forward_median_ms": 46.99653900024714,
+          "forward_iqr_ms": 4.6109257455100305,
+          "forward_backward_median_ms": 93.19463599968003,
+          "forward_backward_iqr_ms": 6.7911125006503426
+        },
+        {
+          "model": "current",
+          "batch": 32,
+          "parameters": 157472,
+          "forward_median_ms": 22.25091099535348,
+          "forward_iqr_ms": 3.6989355030527804,
+          "forward_backward_median_ms": 49.77563099964755,
+          "forward_backward_iqr_ms": 7.0716999980504625
+        }
+      ],
+      "min_run_time": 1.0
+    },
+    {
+      "torch": "2.4.1+cpu",
+      "device": "cpu",
+      "threads": 1,
+      "autocast": "fp32",
+      "points": 1024,
+      "patches": 96,
+      "token_channels": 192,
+      "surface_k": 32,
+      "return_intermediate": false,
+      "baseline_ref": "ebdacf9",
+      "results": [
+        {
+          "model": "baseline",
+          "batch": 1,
+          "parameters": 248804,
+          "forward_median_ms": 2.780959002848249,
+          "forward_iqr_ms": 0.9465670009376481,
+          "forward_backward_median_ms": 6.446587001846638,
+          "forward_backward_iqr_ms": 1.8614159962453414
+        },
+        {
+          "model": "current",
+          "batch": 1,
+          "parameters": 157472,
+          "forward_median_ms": 2.768266000202857,
+          "forward_iqr_ms": 2.3441738994733896,
+          "forward_backward_median_ms": 10.639113002980594,
+          "forward_backward_iqr_ms": 3.899319992342498
+        },
+        {
+          "model": "baseline",
+          "batch": 32,
+          "parameters": 248804,
+          "forward_median_ms": 129.16721000146936,
+          "forward_iqr_ms": 31.00872249342501,
+          "forward_backward_median_ms": 270.66563100379426,
+          "forward_backward_iqr_ms": 57.83810449793236
+        },
+        {
+          "model": "current",
+          "batch": 32,
+          "parameters": 157472,
+          "forward_median_ms": 27.395746001275256,
+          "forward_iqr_ms": 6.80490449667559,
+          "forward_backward_median_ms": 71.0113410023041,
+          "forward_backward_iqr_ms": 96.45756899772095
+        }
+      ],
+      "min_run_time": 3.0
+    }
+  ]
+}
