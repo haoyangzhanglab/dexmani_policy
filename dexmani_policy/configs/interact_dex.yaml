@@ -53,7 +53,7 @@ agent:
     channels: 384
     num_patches: 96
     group_size: 32
-    depth: 4
+    depth: 2
     num_heads: 8
     mlp_ratio: 2.0
     geometry_scale: 0.10

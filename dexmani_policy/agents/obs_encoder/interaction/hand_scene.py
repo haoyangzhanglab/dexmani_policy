@@ -74,6 +74,7 @@ class SpatialCrossAttention(nn.Module):
         super().__init__()
         self.heads = num_heads
         self.head_dim = channels // num_heads
+        self.metric_scale = metric_scale
         self.query_norm = nn.LayerNorm(channels)
         self.memory_norm = nn.LayerNorm(scene_channels)
         self.q = nn.Linear(channels, channels)
@@ -111,7 +112,14 @@ class SpatialCrossAttention(nn.Module):
         available = valid.any(-1, keepdim=True)
         # Only empty scenes can read the zero K/V slot.
         allowed = torch.cat((valid, ~available), -1)
-        message = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed[:, None, None])
+        with torch.autocast(device_type=q.device.type, enabled=False):
+            distance2 = (memory_xyz[:, None].float() - query_xyz[:, :, None].float()).square().sum(-1)
+            distance_bias = -torch.log1p(distance2 / self.metric_scale**2)
+            # Wrist and the final head read globally; the zero K/V slot has no distance bias.
+            attention_bias = distance_bias.new_zeros(batch, self.heads, queries, patches + 1)
+            attention_bias[:, :-1, 1:, :patches] = distance_bias[:, None, 1:]
+        attention_bias = attention_bias.masked_fill(~allowed[:, None, None], -torch.inf).to(q)
+        message = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
         message = message.transpose(1, 2).reshape(batch, queries, channels)
         output = self.out(message.to(self.out.weight.dtype))
 
@@ -119,7 +127,7 @@ class SpatialCrossAttention(nn.Module):
         if return_attention:
             with torch.no_grad(), torch.autocast(device_type=q.device.type, enabled=False):
                 logits = (q.float() @ k.float().transpose(-1, -2)) / math.sqrt(self.head_dim)
-                attention = logits.masked_fill(~allowed[:, None, None], -torch.inf).softmax(-1)
+                attention = (logits + attention_bias.float()).softmax(-1)
                 attention = attention.transpose(1, 2)
         return output, attention
 
