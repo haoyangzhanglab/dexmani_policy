@@ -1,4 +1,4 @@
-"""Shared action, EMA, point-cloud, dataset and experiment regression checks."""
+"""Shared component, action, EMA, point-cloud, dataset and experiment regression checks."""
 
 import json
 import tempfile
@@ -362,8 +362,135 @@ def validate_resume_facts():
     return {'status': 'passed', 'checks': 'relocation, actual data/model changes and missing metadata'}
 
 
+def validate_gated_tactile_fusion(device):
+    from dexmani_policy.agents.obs_encoder.interaction.gated_tactile_fusion import GatedTactileFusion
+    from dexmani_policy.agents.obs_encoder.interaction.hand_scene_encoder import HandSceneEncoder
+    from dexmani_policy.agents.obs_encoder.proprio import HandSpatialEncoder
+    from dexmani_policy.agents.obs_encoder.xhand_tactile import (
+        XHandForceEncoder, XHandTaxelEncoder, XHandPatchEncoder,
+    )
+
+    def check_gradients(module):
+        for name, parameter in module.named_parameters():
+            assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
+
+    def check_backward(model, output, active):
+        model.zero_grad(set_to_none=True)
+        output['interaction_tokens'].square().mean().backward()
+        check_gradients(model)
+        if active:
+            for name in ('tactile_encoder', 'self_attn', 'ffn', 'q', 'kv', 'proj', 'gate_mlp'):
+                assert any(p.grad.abs().sum() > 0 for p in getattr(model, name).parameters()), name
+            assert model.finger_embedding.grad.abs().sum() > 0
+            assert model.summary_token.grad.abs().sum() > 0
+        else:
+            assert all(not p.grad.any() for p in model.parameters())
+
+    set_seed(31)
+    valid = torch.tensor([[True] * 5, [False, True, False, True, False], [False] * 5], device=device)
+    hand_scene = {
+        'hand_query': torch.randn(3, 6, 192, device=device, requires_grad=True),
+        'relation_update': torch.randn(3, 6, 192, device=device, requires_grad=True),
+        'geometry_descriptor': torch.rand(3, 6, 7, device=device),
+    }
+    baseline = hand_scene['hand_query'].detach() + hand_scene['relation_update'].detach()
+    bf16 = device.type == 'cpu' or (device.type == 'cuda' and torch.cuda.is_bf16_supported())
+    encoders = (XHandForceEncoder, XHandTaxelEncoder, XHandPatchEncoder)
+    for encoder_type in encoders:
+        model = GatedTactileFusion(tactile_encoder=encoder_type()).to(device)
+        assert model.out_dim == 192 and model.out_shape == (6, 192)
+        tactile = torch.randn(3, *model.input_shape, device=device, requires_grad=True)
+        output = model(hand_scene, tactile=tactile, tactile_valid=valid, return_intermediate=True)
+        shapes = {'interaction_tokens': (3, 6, 192), 'tactile_tokens': (3, 5, 64),
+                  'tactile_summary': (3, 64), 'tactile_valid': (3, 5), 'gate': (3, 6),
+                  'tactile_update': (3, 6, 192)}
+        assert output.keys() == shapes.keys()
+        for key, shape in shapes.items():
+            assert output[key].shape == shape and torch.isfinite(output[key]).all(), key
+        torch.testing.assert_close(output['tactile_valid'], valid)
+        torch.testing.assert_close(output['gate'][:2], torch.full_like(output['gate'][:2], .1), rtol=0, atol=.02)
+        torch.testing.assert_close(output['interaction_tokens'], baseline + output['tactile_update'], rtol=0, atol=0)
+        torch.testing.assert_close(output['interaction_tokens'][2], baseline[2], rtol=0, atol=0)
+        assert not output['gate'][2].any() and not output['tactile_update'][2].any()
+        check_backward(model, output, active=True)
+        assert torch.isfinite(tactile.grad).all() and not tactile.grad[~valid].any()
+        assert tactile.grad[valid].abs().sum() > 0
+        for key in ('hand_query', 'relation_update'):
+            assert torch.isfinite(hand_scene[key].grad).all()
+
+        with torch.no_grad():
+            default = model(hand_scene, tactile=tactile, tactile_valid=valid)
+            assert set(default) == {'interaction_tokens'}
+            torch.testing.assert_close(default['interaction_tokens'], output['interaction_tokens'], rtol=0, atol=0)
+            # A missing frame cannot change other frames, and masked finite placeholders are irrelevant.
+            for row in range(3):
+                single = model({k: v[row:row + 1] for k, v in hand_scene.items()},
+                               tactile=tactile[row:row + 1], tactile_valid=valid[row:row + 1],
+                               return_intermediate=True)
+                torch.testing.assert_close(single, {k: v[row:row + 1] for k, v in output.items()})
+            changed = tactile.detach().clone()
+            changed[~valid] = 17.0
+            torch.testing.assert_close(
+                model(hand_scene, tactile=changed, tactile_valid=valid, return_intermediate=True),
+                output, rtol=0, atol=0,
+            )
+            zero = model(hand_scene, tactile=torch.zeros_like(tactile), return_intermediate=True)
+            assert zero['tactile_valid'].all() and (zero['gate'] > 0).all()
+            assert (zero['tactile_update'].abs().sum(-1) > 0).all()
+            torch.testing.assert_close(
+                zero, model(hand_scene, tactile=torch.zeros_like(tactile),
+                            tactile_valid=torch.ones_like(valid), return_intermediate=True), rtol=0, atol=0,
+            )
+            no_geometry = {**hand_scene, 'relation_update': torch.zeros_like(baseline),
+                           'geometry_descriptor': torch.zeros_like(hand_scene['geometry_descriptor'])}
+            touch = model(no_geometry, tactile=tactile, tactile_valid=valid, return_intermediate=True)
+            # All six queries can update even when their own finger or all geometric evidence is absent.
+            assert (touch['gate'][:2] > 0).all()
+            assert (touch['tactile_update'][:2].abs().sum(-1) > 0).all()
+            zero_touch = model(no_geometry, tactile=torch.zeros_like(tactile), tactile_valid=valid)
+            assert (touch['interaction_tokens'][:2] - zero_touch['interaction_tokens'][:2]).abs().sum() > 0
+
+        for values, mask in ((tactile, torch.zeros_like(valid)), (None, None), (None, torch.zeros_like(valid))):
+            missing = model(hand_scene, tactile=values, tactile_valid=mask, return_intermediate=True)
+            torch.testing.assert_close(missing['interaction_tokens'], baseline, rtol=0, atol=0)
+            assert not missing['gate'].any() and not missing['tactile_update'].any()
+            check_backward(model, missing, active=False)
+        expect_value_error(lambda: model(hand_scene, tactile_valid=valid))
+        if bf16:
+            with torch.autocast(device.type, dtype=torch.bfloat16):
+                mixed = model(hand_scene, tactile=tactile, tactile_valid=valid, return_intermediate=True)
+            assert all(torch.isfinite(value).all() for value in mixed.values())
+            torch.testing.assert_close(mixed['interaction_tokens'][2], baseline[2], rtol=0, atol=0)
+            assert not mixed['gate'][2].any() and not mixed['tactile_update'][2].any()
+            check_backward(model, mixed, active=True)
+
+    # Real hand/scene encoders with synthetic patches; the second scene has no geometric support.
+    spatial, scene, model = HandSpatialEncoder().to(device), HandSceneEncoder(surface_k=4).to(device), GatedTactileFusion().to(device)
+    anchors = torch.randn(2, 6, 3, device=device) * .05
+    points = torch.cat((anchors + .002, anchors + .004), 1)
+    patches = {'tokens': torch.randn(2, 3, 192, device=device, requires_grad=True),
+               'xyz': points[:, :3], 'mask': torch.tensor([[True] * 3, [False] * 3], device=device)}
+    hand = spatial(anchors)
+    encoded = scene(points, patches, anchors, hand, point_mask=patches['mask'][:, :1].expand(-1, 12))
+    assert not encoded['relation_update'][1].any() and not encoded['geometry_descriptor'][1].any()
+    assert torch.isinf(encoded['min_observed_distance'][1]).all()
+    fused = model(encoded, tactile=torch.randn(2, *model.input_shape, device=device), return_intermediate=True)
+    assert torch.isfinite(fused['interaction_tokens']).all() and fused['tactile_update'][1].abs().sum() > 0
+    torch.testing.assert_close(fused['interaction_tokens'], hand + encoded['relation_update'] + fused['tactile_update'], rtol=0, atol=0)
+    torch.testing.assert_close(model(encoded)['interaction_tokens'], hand + encoded['relation_update'], rtol=0, atol=0)
+    check_backward(model, fused, active=True)
+    for module in (spatial, scene):
+        check_gradients(module)
+        assert any(p.grad.abs().sum() > 0 for p in module.parameters())
+    assert torch.isfinite(patches['tokens'].grad).all() and patches['tokens'].grad[0].abs().sum() > 0
+    return {'status': 'passed', 'device': str(device), 'encoders': [cls.__name__ for cls in encoders],
+            'bf16': 'passed' if bf16 else 'not_run: unsupported device',
+            'checks': 'gradients, masking, valid zeros, missing graph, geometric independence, hand-scene chain'}
+
+
 def validate_common_contracts(device):
     return {
+        'gated_tactile_fusion': validate_gated_tactile_fusion(device),
         'config_targets': validate_config_targets(),
         'experiment_paths': validate_experiment_paths(),
         'resume_facts': validate_resume_facts(),
