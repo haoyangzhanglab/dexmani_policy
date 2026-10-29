@@ -1,0 +1,104 @@
+defaults:
+  - common
+  - tactile: sim_force
+  - _self_
+
+policy_name: interact-dex
+
+horizon: 16
+n_obs_steps: 4
+n_action_steps: 4
+action_dim: 19
+
+normalization:
+  joint_state: limits
+  action: auto
+  point_cloud: identity
+  eef_pose: identity
+  fingertip_xyz: identity
+
+dataloader:
+  batch_size: 128
+  drop_last: true
+
+dataset:
+  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+  tactile_source: ${tactile_source}
+  pc_dim: ${agent.pc_dim}
+  pad_after: ${eval:'${n_action_steps} - 1'}
+  sensor_modalities: [joint_state, point_cloud, eef_pose, fingertip_xyz, finger_tactile_force]
+
+  augmentation_cfg:
+    pc:
+      coord_noise: {noise_std: 0.002, prob: 1.0}
+      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
+    state:
+      noise:       {noise_std: 0.0002, prob: 1.0}
+
+agent:
+  _target_: dexmani_policy.agents.policies.interact_dex.InterActDexPolicy
+  tactile_source: ${tactile_source}
+  history_mixer: true
+  pc_dim: 6
+  state_dim: 19
+  num_points: 1024
+
+  fps_random_config:
+    use_random: true
+    use_random_start: true
+    random_noise_scale: 0.0
+    use_shuffle_output: false
+
+  pc_encoder_config:
+    channels: 384
+    num_patches: 96
+    group_size: 32
+    depth: 4
+    num_heads: 8
+    mlp_ratio: 2.0
+    geometry_scale: 0.10
+    rope_scale: 0.05
+    rope_base: 100.0
+
+  n_layers: 8
+  hidden_dim: 768
+  n_head: 8
+  mlp_ratio: 4.0
+  timestep_embed_dim: 128
+  p_drop_attn: 0.1
+  qkv_bias: false
+  qk_norm: false
+  num_inference_steps: 10
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.95]
+  obs_lr: 1.0e-4
+  obs_weight_decay: 1.0e-6
+
+ema:
+  _target_: dexmani_policy.training.common.optimization.EMA
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+training:
+  use_bfloat16: true
+  use_compile: false
+  use_ema: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  loop:
+    total_train_steps: 100000
+
+env_runner:
+  env_kwargs:
+    control_mode: joint
+
+eval:
+  inference_steps: ${agent.num_inference_steps}
+  use_ema: true
