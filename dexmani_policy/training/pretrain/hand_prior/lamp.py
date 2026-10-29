@@ -1,4 +1,4 @@
-"""Train the LAMP prior on eligible policy source rows."""
+"""Train the LAMP prior on selected demonstration episodes."""
 
 from __future__ import annotations
 
@@ -15,11 +15,8 @@ from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
 from dexmani_policy.common.config import load_policy_config, positive_int, validate_normalization_config
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.lamp_dataset import (
-    describe_lamp_data, hand_history_for_rows, load_hand_history,
-)
-from dexmani_policy.datasets.hand_prior.data import prepare_hand_source
-from dexmani_policy.datasets.common.validation import check_finite, validate_fields
+from dexmani_policy.datasets.hand_prior.data import describe_lamp_data, load_hand_source
+from dexmani_policy.datasets.hand_prior.lamp_dataset import hand_history_for_rows, load_hand_history
 from dexmani_policy.training.common.optimization import get_scheduler
 
 
@@ -32,25 +29,23 @@ def prepare_prior_data(cfg):
     spec = cfg.normalization
     if spec["action"] != "identity" or spec["joint_state"] != "gaussian":
         raise ValueError("LAMP requires identity action and gaussian joint_state")
-    buffer, train, val, split = prepare_hand_source(cfg, ["action", "joint_state"])
+    buffer, train, val, split = load_hand_source(cfg, ["action", "joint_state"])
     hand_data = describe_lamp_data(
         buffer.attrs, action_key=cfg.dataset.action_key, horizon=cfg.dataset.horizon,
         obs_horizon=cfg.dataset.obs_horizon, pad_before=cfg.dataset.pad_before,
         pad_after=cfg.dataset.pad_after, history_steps=cfg.dataset.history_steps,
     )
-    validate_fields(buffer, train | val, {"action": slice(7, 19)})
-    actions, bootstrap = load_hand_history(buffer, train | val)
-    starts = np.r_[0, buffer.episode_ends[:-1]]
-    for episode in np.flatnonzero(train | val):
-        check_finite(buffer, "joint_state", int(starts[episode]), bootstrap[episode:episode + 1], slice(7, 19))
+    selected = train | val
+    actions, bootstrap, episode_ends, _ = load_hand_history(buffer, selected)
+    starts = np.r_[0, episode_ends[:-1]]
 
     def rows(mask):
         if not mask.any():
             return np.empty(0, dtype=np.int64)
-        return np.concatenate([np.arange(starts[i], buffer.episode_ends[i]) for i in np.flatnonzero(mask)])
+        return np.concatenate([np.arange(starts[i], episode_ends[i]) for i in np.flatnonzero(mask[selected])])
 
     return dict(
-        hand_actions=actions, bootstrap=bootstrap, episode_ends=buffer.episode_ends,
+        hand_actions=actions, bootstrap=bootstrap, episode_ends=episode_ends,
         history_steps=cfg.dataset.history_steps, train_rows=rows(train), val_rows=rows(val),
         hand_data=hand_data, split_manifest=split,
     )

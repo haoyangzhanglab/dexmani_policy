@@ -15,7 +15,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.hand_representation import validate_hand_chunk_compatibility
+from dexmani_policy.common.hand_semantics import validate_codec_data
 
 
 class LatentFlowObservationEncoder(nn.Module):
@@ -192,9 +192,7 @@ class LatentFlowPolicy(BasePolicy):
             raise ValueError("Fresh LatentFlow training requires codec_path")
         payload = load_hand_vae(self.codec_path, self.codec)
         self.codec_metadata = payload["metadata"]
-        validate_hand_chunk_compatibility(
-            self.codec_metadata["hand_data"], data_description["hand_data"]
-        )
+        validate_codec_data(self.codec_metadata, data_description)
         self.codec_initialized = True
 
     def validate_restored_codec(self, module: torch.nn.Module, incompatible_keys) -> None:
@@ -273,7 +271,7 @@ class LatentFlowPolicy(BasePolicy):
         latent_loss = F.mse_loss(pred_v[..., self.arm_dim :], target_v[..., self.arm_dim :])
         flow_loss = self.arm_loss_weight * arm_loss + self.latent_loss_weight * latent_loss
         loss = flow_loss
-        metrics = {}
+        metrics: dict[str, torch.Tensor] = {}
         if self.decoded_loss_weight:
             hand_reference = reference[:, self.arm_dim :]
             # Our flow goes noise -> data, reversing the paper's time coordinate.

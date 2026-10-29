@@ -37,6 +37,7 @@ class ReplayBuffer:
                 raise ValueError(
                     f"Data field {key!r}: shape={shape}, expected time dimension {ends[-1]}"
                 )
+        self.episode_ends = ends.astype(np.int64, copy=False)
         self.attrs = dict(self.group.attrs)
         self.pid = os.getpid()
 

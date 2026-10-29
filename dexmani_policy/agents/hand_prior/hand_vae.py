@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.hand_representation import HAND_ACTION_SEMANTICS
+from dexmani_policy.common.hand_semantics import HAND_ACTION_SEMANTICS
 
 
 class HandVAE(nn.Module):
@@ -178,5 +178,7 @@ def validate_codec_metadata(metadata, model_config):
         raise ValueError("HandVAE metadata horizon mismatch")
     if not math.isfinite(contract["dt"]) or contract["dt"] <= 0:
         raise ValueError("HandVAE requires positive finite dt")
+    if not metadata["split_manifest"]["train_indices"] or not metadata["split_manifest"]["val_indices"]:
+        raise ValueError("HandVAE metadata requires nonempty training and held-out validation episodes")
     if metadata["loss_reduction"]["kl"] != "mean_over_batch_time_latent":
         raise ValueError("HandVAE KL reduction mismatch")

@@ -18,7 +18,6 @@ dataset:
   _target_: dexmani_policy.datasets.hand_prior.hand_chunk_dataset.HandChunkDataset
   zarr_path: ${zarr_path}
   data_semantics: ${data_semantics}
-  source_id: null
   horizon: ${horizon}
   seed: ${seed}
   val_ratio: 0.1

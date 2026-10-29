@@ -14,15 +14,14 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
+from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import load_policy_config, positive_int, validate_normalization_config
-from dexmani_policy.common.normalizer import LinearNormalizer
+from dexmani_policy.common.hand_semantics import validate_hand_coordinates
 from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.data import prepare_hand_source
-from dexmani_policy.datasets.common.validation import check_finite
-from dexmani_policy.common.hand_representation import validate_hand_coordinates
+from dexmani_policy.datasets.hand_prior.data import load_hand_array, load_hand_source
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
@@ -39,17 +38,11 @@ def prepare_policy_data(cfg):
     validate_dq_normalization(spec)
     if cfg.agent.tcp_dim != 7:
         raise ValueError("DQ/VQ requires tcp_dim=7")
-    buffer, train, val, split = prepare_hand_source(cfg, ["action"])
+    buffer, train, val, split = load_hand_source(cfg, ["action"])
     validate_hand_coordinates(buffer.attrs)
 
-    def read_hand(mask):
-        chunks = []
-        for start, values in buffer.iter_chunks("action", columns=slice(7, 19), episode_mask=mask):
-            check_finite(buffer, "action", start, values, columns=slice(7, 19))
-            chunks.append(values)
-        return np.concatenate(chunks) if chunks else np.empty((0, 12), dtype=np.float32)
-
-    train_hand, val_hand = read_hand(train), read_hand(val)
+    train_hand = load_hand_array(buffer, "action", train)
+    val_hand = load_hand_array(buffer, "action", val)
     normalizer = LinearNormalizer()
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
     metadata = dict(

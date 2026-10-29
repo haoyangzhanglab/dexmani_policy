@@ -7,14 +7,15 @@ from dexmani_policy.common.config import positive_int
 from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
 from dexmani_policy.datasets.common.sampler import SequenceSampler
 from dexmani_policy.datasets.common.split import split_episodes
-from dexmani_policy.datasets.common.validation import check_finite
-from dexmani_policy.datasets.hand_prior.metadata import describe_hand_chunks
+from dexmani_policy.datasets.hand_prior.data import (
+    compact_episode_offsets, describe_hand_chunks, load_hand_array,
+)
 
 
 class HandChunkDataset(Dataset):
     def __init__(
         self, zarr_path, *, data_semantics, horizon=32, seed=0, val_ratio=0.1,
-        max_train_episodes=None, split_manifest=None, source_id=None,
+        max_train_episodes=None, split_manifest=None,
     ):
         if positive_int(horizon, "horizon") < 3:
             raise ValueError("HandVAE horizon must be at least 3 for second differences")
@@ -25,21 +26,18 @@ class HandChunkDataset(Dataset):
             self.replay_buffer, manifest=split_manifest, val_ratio=val_ratio,
             seed=seed, max_train_episodes=max_train_episodes,
         )
-        self.hand_data = describe_hand_chunks(self, data_semantics, source_id)
+        self.hand_data = describe_hand_chunks(self, data_semantics)
         selected = self.train_mask | self.val_mask
         self.sampler = SequenceSampler(self.replay_buffer, horizon, episode_mask=self.train_mask)
         if not len(self.sampler):
             raise ValueError("No training hand chunks: selected episodes are too short")
         self.is_validation = False
         self.validation_dataset = None
-        # Only the small hand arrays are shared; no visual policy state is needed.
-        self.hand_actions = np.zeros((int(self.replay_buffer.episode_ends[-1]), 12), dtype=np.float32)
-        self.hand_states = np.zeros_like(self.hand_actions)
-        for key, values in (("action", self.hand_actions), ("joint_state", self.hand_states)):
-            for start, chunk in self.replay_buffer.iter_chunks(key, columns=slice(7, 19), episode_mask=selected):
-                check_finite(self.replay_buffer, key, start, chunk, columns=slice(7, 19))
-                values[start:start + len(chunk)] = chunk
-            values.flags.writeable = False
+
+        self.hand_row_offsets = compact_episode_offsets(self.replay_buffer.episode_ends, selected)
+        self.hand_actions = load_hand_array(self.replay_buffer, "action", selected)
+        self.hand_states = load_hand_array(self.replay_buffer, "joint_state", selected)
+        self.hand_actions.flags.writeable = self.hand_states.flags.writeable = False
 
     def __len__(self):
         return len(self.sampler)
@@ -56,10 +54,12 @@ class HandChunkDataset(Dataset):
                 self.validation_dataset = validation
         return self.validation_dataset
 
-    def raw_hand_batch(self, indices):
+    def sample_chunks(self, indices):
         rows = self.sampler.source_rows(self.sampler.indices[indices])
+        episodes = np.searchsorted(self.replay_buffer.episode_ends, rows[:, 0], side="right")
+        rows += self.hand_row_offsets[episodes, None]
         return self.hand_actions[rows], self.hand_states[rows[:, 0]]
 
     def __getitem__(self, idx):
-        actions, q0 = self.raw_hand_batch(np.array([idx]))
+        actions, q0 = self.sample_chunks([idx])
         return {"action": actions[0], "reference_state": q0[0]}

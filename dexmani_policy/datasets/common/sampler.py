@@ -56,7 +56,7 @@ class SequenceSampler:
         if sequence_length < 1 or not 0 <= pad_before < sequence_length or not 0 <= pad_after < sequence_length:
             raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
 
-        episode_ends = np.asarray(replay_buffer.episode_ends, dtype=np.int64)
+        episode_ends = replay_buffer.episode_ends
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
         else:

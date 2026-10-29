@@ -12,7 +12,7 @@ from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse
 from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.common.hand_representation import validate_pretraining_split
+from dexmani_policy.common.hand_semantics import validate_pretraining_split
 
 
 class LAMPObservationEncoder(nn.Module):
@@ -158,8 +158,7 @@ class LAMPPolicy(BasePolicy):
         if any(current[key] != pretrained[key] for key in ("action_key", "dt", "history_steps")):
             raise ValueError("LAMP prior/policy action history or time semantics mismatch")
         validate_pretraining_split(
-            data_description["split_manifest"],
-            metadata["hand_data"], metadata["split_manifest"],
+            data_description["split_manifest"], metadata["split_manifest"],
         )
         self.prior_initialized = True
 

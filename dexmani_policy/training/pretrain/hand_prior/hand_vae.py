@@ -31,18 +31,33 @@ def build_codec_dataset(cfg):
 
 
 def fit_relative_statistics(dataset, batch_size=4096, std_floor=1e-6):
-    """Population moments over full train windows; repeated rows retain their own q0."""
+    """Rolling moments over full train windows, preserving each query's reference state."""
     if dataset.is_validation:
         raise ValueError("Validation must reuse training codec statistics")
     total = np.zeros(12, dtype=np.float64)
     squared = np.zeros(12, dtype=np.float64)
     count = 0
-    for start in range(0, len(dataset), batch_size):
-        actions, q0 = dataset.raw_hand_batch(np.arange(start, min(start + batch_size, len(dataset))))
-        relative = actions.astype(np.float64) - q0[:, None].astype(np.float64)
-        total += relative.sum(axis=(0, 1))
-        squared += np.square(relative).sum(axis=(0, 1))
-        count += relative.shape[0] * relative.shape[1]
+    horizon = dataset.horizon
+    ends = dataset.replay_buffer.episode_ends
+    starts = np.r_[0, ends[:-1]]
+    for episode in np.flatnonzero(dataset.train_mask):
+        first = int(starts[episode] + dataset.hand_row_offsets[episode])
+        stop = int(ends[episode] + dataset.hand_row_offsets[episode])
+        for start in range(first, stop - horizon + 1, batch_size):
+            query_stop = min(start + batch_size, stop - horizon + 1)
+            actions = dataset.hand_actions[start:query_stop + horizon - 1].astype(np.float64)
+            q0 = dataset.hand_states[start:query_stop].astype(np.float64)
+            # A shared origin reduces cancellation without changing command minus reference.
+            origin = actions[0].copy()
+            actions -= origin
+            q0 -= origin
+            prefix = np.concatenate((np.zeros((1, 12)), actions.cumsum(axis=0)))
+            prefix_square = np.concatenate((np.zeros((1, 12)), np.square(actions).cumsum(axis=0)))
+            window_sum = prefix[horizon:] - prefix[:-horizon]
+            window_square = prefix_square[horizon:] - prefix_square[:-horizon]
+            total += (window_sum - horizon * q0).sum(axis=0)
+            squared += (window_square - 2 * q0 * window_sum + horizon * np.square(q0)).sum(axis=0)
+            count += (query_stop - start) * horizon
     mean = total / count
     std = np.sqrt(np.maximum(squared / count - np.square(mean), 0)).clip(min=std_floor)
     if not np.isfinite(mean).all() or not np.isfinite(std).all():
@@ -54,7 +69,7 @@ def fit_relative_statistics(dataset, batch_size=4096, std_floor=1e-6):
 
 
 def codec_batch(dataset, indices, device):
-    actions, q0 = dataset.raw_hand_batch(indices)
+    actions, q0 = dataset.sample_chunks(indices)
     return torch.as_tensor(actions, device=device), torch.as_tensor(q0, device=device)
 
 
@@ -160,6 +175,7 @@ def train(cfg, *, overwrite=False):
                 codec.validate_state()
                 metadata = dict(
                     model_config=codec.model_config, hand_data=dataset.hand_data,
+                    split_manifest=dataset.split_manifest, zarr_path=dataset.zarr_path,
                     relative_statistics=statistics,
                     loss_reduction={
                         "kl": "mean_over_batch_time_latent",

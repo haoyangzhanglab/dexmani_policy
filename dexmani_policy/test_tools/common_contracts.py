@@ -159,13 +159,15 @@ def validate_fps(device):
 
 def validate_dataset_layouts():
     import zarr
-    from dexmani_policy.common.hand_representation import HAND_ACTION_SEMANTICS
+    from dexmani_policy.common.hand_semantics import HAND_ACTION_SEMANTICS
     from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
     from dexmani_policy.datasets.common.robot_dataset import RobotDataset
     from dexmani_policy.datasets.aux.r3d_dataset import R3DAuxDataset
     from dexmani_policy.datasets.hand_prior.latent_flow_dataset import LatentFlowDataset
     from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
+    from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
     from dexmani_policy.datasets.obs.cordvip_dataset import CordViPDataset
+    from dexmani_policy.training.pretrain.hand_prior.lamp import prepare_prior_data, prior_batch
     from dexmani_policy.training.pretrain.hand_prior.vqvae import prepare_policy_data
 
     split = dict(episode_ends=[8, 16, 24], train_indices=[0], val_indices=[1])
@@ -253,18 +255,47 @@ def validate_dataset_layouts():
         assert reads == {'action': 16, 'joint_state': 16}
         np.testing.assert_array_equal(hand.hand_actions[:16], arrays['action'][:16, 7:19])
         assert not hand.hand_actions.flags.writeable and not hand.hand_states.flags.writeable
+        for view in (hand, hand.get_validation_dataset()):
+            indices = np.array([len(view) - 1, 0, 1])
+            actions, states = view.sample_chunks(indices)
+            np.testing.assert_array_equal(actions, np.stack([view[i]['action'] for i in indices]))
+            np.testing.assert_array_equal(states, np.stack([view[i]['reference_state'] for i in indices]))
         reads = dict.fromkeys(reads, 0)
         with patch.object(ReplayBuffer, 'read', read):
             train, val, normalizer, _ = prepare_policy_data(cfg)
         assert reads == {'action': 16, 'joint_state': 0}
         torch.testing.assert_close(normalizer['hand'].unnormalize(train), torch.from_numpy(arrays['action'][:8, 7:19]))
         torch.testing.assert_close(normalizer['hand'].unnormalize(val), torch.from_numpy(arrays['action'][8:16, 7:19]))
+
+        lamp_cfg = load_policy_config('lamp')
+        lamp_cfg.dataset.zarr_path = directory
+        lamp_cfg.dataset.split_manifest = split
+        lamp_cfg.lamp.history_steps = 3
+        reads = dict.fromkeys(reads, 0)
+        with patch.object(ReplayBuffer, 'read', read):
+            prior = prepare_prior_data(lamp_cfg)
+        assert reads == {'action': 16, 'joint_state': 2}
+        lamp = LAMPDataset(directory, sensor_modalities=['joint_state'], history_steps=3, split_manifest=split)
+        assert prior['hand_data'] == lamp.hand_data
+        for view, row_key in ((lamp, 'train_rows'), (lamp.get_validation_dataset(), 'val_rows')):
+            for index, row in enumerate(prior[row_key]):
+                start = 0 if row < 8 else 8
+                expected = np.stack([
+                    arrays['action'][t, 7:19] if t >= start else arrays['joint_state'][start, 7:19]
+                    for t in range(row - 3, row)
+                ])
+                history, target = prior_batch(prior, np.array([row]), 'cpu')
+                np.testing.assert_array_equal(history[0], expected)
+                np.testing.assert_array_equal(target[0], arrays['action'][row, 7:19])
+                np.testing.assert_array_equal(view[index]['action_context']['hand_history'], expected)
+
         for bad in (np.nan, np.inf):
             root['data/action'][9, 10] = bad
             with patch.object(LinearNormalizer, 'fit_field', side_effect=AssertionError('validate before fitting')):
                 for build in (
                     lambda: HandChunkDataset(directory, horizon=4, data_semantics=HAND_ACTION_SEMANTICS, split_manifest=split),
                     lambda: prepare_policy_data(cfg),
+                    lambda: prepare_prior_data(lamp_cfg),
                 ):
                     try:
                         build()
@@ -272,7 +303,155 @@ def validate_dataset_layouts():
                         assert 'row=9, channel=(10,)' in str(error), error
                     else:
                         raise AssertionError('Invalid validation frame was accepted')
-    return {'status': 'passed', 'windows': windows, 'hand_reads': 'one pass per selected field'}
+
+    with tempfile.TemporaryDirectory(prefix='relative-windows-') as directory:
+        split = dict(episode_ends=[1030, 1038, 1046], train_indices=[0, 2], val_indices=[1])
+        root = zarr.open_group(directory, mode='w')
+        root.attrs.update(dt=.0625)
+        root.create_dataset('meta/episode_ends', data=np.array(split['episode_ends']))
+        values = {key: rng.normal(size=(1046, 19)).astype(np.float32) for key in ('action', 'joint_state')}
+        for key, array in values.items():
+            root.create_dataset(f'data/{key}', data=array, chunks=(64, 19))
+        dataset = LatentFlowDataset(directory, sensor_modalities=['joint_state'], horizon=4, obs_horizon=3,
+                                    data_semantics=HAND_ACTION_SEMANTICS, split_manifest=split)
+        batches = list(dataset.iter_normalization_data('action'))
+        assert [len(batch) for batch in batches] == [1024 * 4, 3 * 4, 5 * 4]
+        queries = np.r_[np.arange(1027), np.arange(1038, 1043)]
+        expected = values['action'][queries[:, None] + np.arange(4)] - values['joint_state'][queries, None]
+        np.testing.assert_array_equal(np.concatenate(batches), expected.reshape(-1, 19))
+    return {'status': 'passed', 'windows': windows, 'hand_reads': 'one pass per selected field',
+            'hand_priors': 'chunk batching, LAMP bootstrap/history, relative windows across batches and episodes'}
+
+
+def validate_hand_prior_contracts():
+    import copy
+    import zarr
+
+    from dexmani_policy.common.hand_semantics import (
+        HAND_ACTION_SEMANTICS, validate_codec_data, validate_pretraining_split,
+    )
+    from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
+    from dexmani_policy.datasets.hand_prior.lamp_dataset import LAMPDataset
+    from dexmani_policy.training.pretrain.hand_prior.hand_vae import fit_relative_statistics
+    from dexmani_policy.training.pretrain.hand_prior.lamp import prepare_prior_data, prior_batch
+    from dexmani_policy.training.pretrain.hand_prior.vqvae import prepare_policy_data
+
+    rng = np.random.default_rng(31)
+    lengths = np.array([7, 49, 5000, 53, 3000])
+    ends, starts = lengths.cumsum(), np.r_[0, lengths.cumsum()[:-1]]
+    split = dict(source_id='hand-contract', episode_ids=[f'ep-{i}' for i in range(5)],
+                 episode_ends=ends.tolist(), train_indices=[0, 3], val_indices=[1])
+    selected_rows = np.concatenate([np.arange(starts[i], ends[i]) for i in (0, 1, 3)])
+    arrays = {key: rng.normal(size=(ends[-1], 19)).astype(np.float32) for key in ('action', 'joint_state')}
+    for values in arrays.values():
+        values[starts[2] + 1, 10] = np.nan
+
+    with tempfile.TemporaryDirectory(prefix='hand-priors-') as directory:
+        root = zarr.open_group(directory, mode='w')
+        root.attrs.update(dt=.0625, source_id=split['source_id'], episode_ids=split['episode_ids'])
+        root.create_dataset('meta/episode_ends', data=ends.astype(np.uint64))
+        for key, values in arrays.items():
+            root.create_dataset(f'data/{key}', data=values, chunks=(128, 19))
+
+        for horizon in (3, 8, 32):
+            hand = HandChunkDataset(directory, data_semantics=HAND_ACTION_SEMANTICS,
+                                    horizon=horizon, split_manifest=split)
+            assert hand.replay_buffer.episode_ends.dtype == np.int64
+            assert hand.hand_row_offsets[3] == -lengths[2]
+            assert hand.hand_actions.shape == hand.hand_states.shape == (len(selected_rows), 12)
+            assert not hand.hand_actions.flags.writeable and not hand.hand_states.flags.writeable
+            np.testing.assert_array_equal(hand.hand_actions, arrays['action'][selected_rows, 7:19])
+            np.testing.assert_array_equal(hand.hand_states, arrays['joint_state'][selected_rows, 7:19])
+            for view in (hand, hand.get_validation_dataset()):
+                assert view.hand_actions is hand.hand_actions and view.hand_states is hand.hand_states
+                rows = view.sampler.source_rows(view.sampler.indices)
+                actions, q0 = view.sample_chunks(np.arange(len(view)))
+                np.testing.assert_array_equal(actions, arrays['action'][rows, 7:19])
+                np.testing.assert_array_equal(q0, arrays['joint_state'][rows[:, 0], 7:19])
+            actions, q0 = hand.sample_chunks(np.arange(len(hand)))
+            relative = actions.astype(np.float64) - q0[:, None].astype(np.float64)
+            for batch_size in (1, 13, 128):
+                mean, std, statistics = fit_relative_statistics(hand, batch_size)
+                np.testing.assert_allclose(mean, relative.mean((0, 1)), rtol=1e-6, atol=1e-7)
+                np.testing.assert_allclose(std, relative.std((0, 1)).clip(min=1e-6), rtol=1e-6, atol=1e-7)
+                assert statistics['frames'] == len(hand) * horizon and type(statistics['frames']) is int
+            expect_value_error(lambda: fit_relative_statistics(hand.get_validation_dataset()))
+
+        lamp_split = {**split, 'train_indices': [3]}
+        lamp = LAMPDataset(directory, sensor_modalities=['joint_state'], history_steps=8,
+                           split_manifest=lamp_split)
+        cfg = load_policy_config('lamp')
+        cfg.dataset.zarr_path, cfg.dataset.split_manifest = directory, lamp_split
+        prior = prepare_prior_data(cfg)
+        assert prior['hand_actions'].shape == lamp.hand_actions.shape == (lengths[[1, 3]].sum(), 12)
+        assert prior['bootstrap'].shape == lamp.hand_state_bootstrap.shape == (2, 12)
+        assert not lamp.hand_actions.flags.writeable and not lamp.hand_state_bootstrap.flags.writeable
+        for view, key in ((lamp, 'train_rows'), (lamp.get_validation_dataset(), 'val_rows')):
+            assert view.hand_actions is lamp.hand_actions
+            for index, local_row in enumerate(prior[key]):
+                row = view.sampler.sample_source_rows(index)[0]
+                episode = np.searchsorted(ends, row, side='right')
+                start = starts[episode]
+                expected = np.stack([
+                    arrays['action'][t, 7:19] if t >= start else arrays['joint_state'][start, 7:19]
+                    for t in range(row - 8, row)
+                ])
+                history, target = prior_batch(prior, np.array([local_row]), 'cpu')
+                np.testing.assert_array_equal(history[0], expected)
+                np.testing.assert_array_equal(target[0], arrays['action'][row, 7:19])
+                np.testing.assert_array_equal(view[index]['action_context']['hand_history'], expected)
+        cfg.dataset.split_manifest = {**lamp_split, 'val_indices': []}
+        no_val = prepare_prior_data(cfg)
+        assert not len(no_val['val_rows']) and no_val['hand_actions'].shape == (lengths[3], 12)
+
+        cfg = load_policy_config('dqrise')
+        cfg.dataset.zarr_path = directory
+        for validation in ([1], []):
+            cfg.dataset.split_manifest = {**split, 'val_indices': validation}
+            train, val, normalizer, _ = prepare_policy_data(cfg)
+            train_rows = np.r_[np.arange(ends[0]), np.arange(starts[3], ends[3])]
+            expected_val = arrays['action'][starts[1]:ends[1], 7:19] if validation else np.empty((0, 12))
+            np.testing.assert_allclose(normalizer['hand'].unnormalize(train),
+                                       arrays['action'][train_rows, 7:19], rtol=1e-5, atol=1e-6)
+            np.testing.assert_allclose(normalizer['hand'].unnormalize(val), expected_val, rtol=1e-5, atol=1e-6)
+
+        data = dict(hand_data=hand.hand_data, split_manifest=hand.split_manifest, zarr_path=directory)
+        assert set(hand.hand_data) == {'contract', 'semantics_evidence'}
+        validate_codec_data(data, data)
+        validate_pretraining_split(data['split_manifest'], data['split_manifest'])
+        reordered = copy.deepcopy(data)
+        reordered['split_manifest'].update(episode_ids=split['episode_ids'][::-1],
+                                            episode_ends=lengths[::-1].cumsum().tolist(),
+                                            train_indices=[1, 4], val_indices=[3])
+        validate_codec_data(reordered, data)
+        independent = copy.deepcopy(data)
+        independent['split_manifest'].update(source_id='other', train_indices=[1], val_indices=[0])
+        validate_codec_data(independent, data)
+        for key, value in (('source_id', 'other'), ('train_indices', [3]), ('val_indices', [3])):
+            changed = {**data['split_manifest'], key: value}
+            expect_value_error(lambda: validate_pretraining_split(data['split_manifest'], changed))
+        conflict = copy.deepcopy(data)
+        conflict['split_manifest'].update(train_indices=[0, 1], val_indices=[3])
+        expect_value_error(lambda: validate_codec_data(conflict, data))
+        conflict = copy.deepcopy(independent)
+        conflict['hand_data']['contract']['dt'] = .1
+        expect_value_error(lambda: validate_codec_data(conflict, data))
+        fallback = copy.deepcopy(data)
+        fallback['split_manifest'].update(source_id=None, episode_ids=None)
+        validate_codec_data(fallback, fallback)
+
+        for noise in (0., 1e-4):
+            for key in arrays:
+                root[f'data/{key}'][:] = (2 + noise * rng.normal(size=arrays[key].shape)).astype(np.float32)
+            hand = HandChunkDataset(directory, data_semantics=HAND_ACTION_SEMANTICS,
+                                    horizon=8, split_manifest=split)
+            actions, q0 = hand.sample_chunks(np.arange(len(hand)))
+            relative = actions.astype(np.float64) - q0[:, None].astype(np.float64)
+            mean, std, _ = fit_relative_statistics(hand, batch_size=13)
+            np.testing.assert_allclose(mean, relative.mean((0, 1)), rtol=1e-6, atol=1e-10)
+            np.testing.assert_allclose(std, relative.std((0, 1)).clip(min=1e-6), rtol=1e-6, atol=1e-10)
+    return {'status': 'passed', 'selected_frames': len(selected_rows), 'source_frames': int(ends[-1]),
+            'checks': 'compact arrays, unsigned source boundaries, rolling moments, LAMP/VQ data, canonical splits'}
 
 
 def validate_experiment_paths():
@@ -329,23 +508,25 @@ def validate_resume_facts():
 
     from dexmani_policy.training.common.config import assemble_effective_config
 
-    cfg = OmegaConf.create(dict(agent={}, dataset={}, training=dict(lr_scheduler='cosine')))
+    cfg = OmegaConf.create(dict(agent={}, dataset={'zarr_path': '/old/data.zarr'}, training=dict(lr_scheduler='cosine')))
     model = SimpleNamespace(inference_metadata={'control_action_dim': 19}, effective_config={})
     description = dict(
         normalization_dims={'action': 19}, real_runtime={'dt': 0.05},
-        hand_data=dict(contract={'dt': 0.05}, provenance={'source_id': 'same', 'zarr_path': '/old/data.zarr'}),
-        split_manifest=dict(episode_ends=[4], train_indices=[0], val_indices=[]),
+        hand_data=dict(contract={'dt': 0.05}), zarr_path='/old/data.zarr',
+        split_manifest=dict(source_id='same', episode_ends=[4], train_indices=[0], val_indices=[]),
     )
     saved = OmegaConf.to_container(assemble_effective_config(cfg, description, model), resolve=True)
     checkpoint = SimpleNamespace(effective_config=saved)
     moved = copy.deepcopy(description)
-    moved['hand_data']['provenance']['zarr_path'] = '/new/data.zarr'
-    resumed = assemble_effective_config(OmegaConf.create(saved), moved, model, checkpoint=checkpoint)
-    assert resumed.hand_data.provenance.zarr_path == '/new/data.zarr'
-    assert saved['hand_data']['provenance']['zarr_path'] == '/old/data.zarr'
-    assert moved['hand_data']['provenance']['zarr_path'] == '/new/data.zarr'
+    moved['zarr_path'] = '/new/data.zarr'
+    moved_cfg = OmegaConf.create(saved)
+    moved_cfg.dataset.zarr_path = moved['zarr_path']
+    resumed = assemble_effective_config(moved_cfg, moved, model, checkpoint=checkpoint)
+    assert resumed.dataset.zarr_path == '/new/data.zarr'
+    assert saved['dataset']['zarr_path'] == '/old/data.zarr'
+    assert resumed.hand_data == saved['hand_data'] == moved['hand_data']
     assert OmegaConf.is_readonly(resumed)
-    for key in ('normalization_dims', 'real_runtime', 'hand_data', 'policy_metadata'):
+    for key in ('normalization_dims', 'real_runtime', 'hand_data', 'policy_metadata', 'split_manifest'):
         changed, actual_model = copy.deepcopy(moved), copy.deepcopy(model)
         if key == 'policy_metadata':
             actual_model.inference_metadata['control_action_dim'] = 18
@@ -353,8 +534,10 @@ def validate_resume_facts():
             changed[key]['action'] = 18
         elif key == 'real_runtime':
             changed[key]['dt'] = 0.1
+        elif key == 'hand_data':
+            changed[key]['contract']['dt'] = 0.1
         else:
-            changed[key]['provenance']['source_id'] = 'different'
+            changed[key]['source_id'] = 'different'
         expect_value_error(lambda: assemble_effective_config(OmegaConf.create(saved), changed, actual_model, checkpoint=checkpoint))
     for key in ('real_runtime', 'hand_data'):
         changed = {name: value for name, value in moved.items() if name != key}
@@ -498,4 +681,5 @@ def validate_common_contracts(device):
         'ema': validate_ema_updates(device),
         'fps': validate_fps(device),
         'datasets': validate_dataset_layouts(),
+        'hand_priors': validate_hand_prior_contracts(),
     }

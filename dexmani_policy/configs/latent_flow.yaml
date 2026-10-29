@@ -39,7 +39,6 @@ dataset:
   _target_: dexmani_policy.datasets.hand_prior.latent_flow_dataset.LatentFlowDataset
   pc_dim: ${agent.pc_dim}
   data_semantics: ${data_semantics}
-  source_id: null
   pad_after: 0  # 仅补齐观测历史，不对未来动作做 padding。
   sensor_modalities: [joint_state, point_cloud]
   augmentation_cfg:

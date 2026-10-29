@@ -70,6 +70,8 @@ def validate_config(cfg):
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     metadata = model.inference_metadata
     if checkpoint is not None:
+        if checkpoint.effective_config["dataset"]["split_manifest"] != data_description["split_manifest"]:
+            raise ValueError("Resume data/model mismatch: split_manifest")
         for key, actual in (
             ("normalization_dims", data_description["normalization_dims"]),
             ("real_runtime", data_description.get("real_runtime")),
@@ -77,12 +79,6 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
             ("policy_metadata", metadata),
         ):
             saved = checkpoint.effective_config.get(key)
-            if key == "hand_data":
-                saved, actual = copy.deepcopy(saved), copy.deepcopy(actual)
-                for data in (saved, actual):
-                    if data is not None and "provenance" in data:
-                        # Data relocation does not change hand semantics or holdouts.
-                        data["provenance"].pop("zarr_path")
             if saved != actual:
                 raise ValueError(f"Resume data/model mismatch: {key}")
 
