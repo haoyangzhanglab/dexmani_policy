@@ -7,12 +7,12 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from ..proprio import HandSpatialEncoder
+from ..proprio import HandStateEncoder
 from ..xhand_tactile import XHandForceEncoder
 
 
 class GatedTactileFusion(nn.Module):
-    KEYPOINTS = HandSpatialEncoder.KEYPOINTS
+    KEYPOINTS = HandStateEncoder.KEYPOINTS
 
     def __init__(
         self,
@@ -83,7 +83,7 @@ class GatedTactileFusion(nn.Module):
         tactile_valid: Tensor | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, Tensor]:
-        """Return complete [N,6,D] tokens; callers must not add hand_query again."""
+        """Return complete [N,6,D] tokens; callers must not add hand or scene residuals again."""
         # FP32 residuals preserve small tactile updates under BF16 autocast.
         x = hand_scene["hand_query"].float() + hand_scene["relation_update"].float()
         batch = x.shape[0]

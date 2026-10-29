@@ -22,7 +22,7 @@ Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹�
 # 检查配置接口与导入，无需数据或 GPU
 python -m dexmani_policy.test_tools.smoke_test --config-only dp3
 
-# 公共 action/EMA/FPS/Dataset 契约，无需训练数据
+# 公共组件及 action/EMA/FPS/Dataset 契约，无需训练数据
 python -m dexmani_policy.test_tools.smoke_test --contracts-only --device cpu dp3
 
 # 检查任务的数据路径
@@ -90,7 +90,7 @@ python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 
 bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/<run>'
 ```
 
-测试诊断集中在 `dexmani_policy/test_tools/`：`smoke_test.py` 提供 CLI，`smoke_checks.py` 提供配置、数据、短训与恢复公共流程，`common_contracts.py` 集中基础回归，`policy_contracts.py` 集中 AFRO/CordViP/SAT 专属检查，`adaptac_contracts.py` 集中触觉检查及合成数据。契约模块依赖公共检查，公共检查不反向导入契约模块或 CLI。`--contracts-only` 对任意策略运行公共 action 配方、EMA 数值/恢复、原生 FPS 和 Dataset 回归，并按实际策略类追加检查：AFRO/CordViP 验证统计迁移及预训练文件缺失后的短训恢复，SAT 验证公共短训恢复路径，AdapTac 验证触觉契约；修改 policy_name 不会跳过。检查使用临时合成数据，保留所选归一化和输入布局，缩小网络与执行预算。公共 FPS 检查缺少原生后端时报告 not_run，不宣称通过；SAT/AdapTac 模型检查仍需该后端。
+测试诊断集中在 `dexmani_policy/test_tools/`：`smoke_test.py` 提供 CLI，`smoke_checks.py` 提供配置、数据、短训与恢复公共流程，`common_contracts.py` 集中基础回归，`policy_contracts.py` 集中 AFRO/CordViP/SAT 专属检查，`adaptac_contracts.py` 集中触觉检查及合成数据。契约模块依赖公共检查，公共检查不反向导入契约模块或 CLI。`--contracts-only` 对任意策略运行 HandState/HandScene/触觉融合、action 配方、EMA 数值/恢复、原生 FPS 和 Dataset 回归，并按实际策略类追加检查：AFRO/CordViP 验证统计迁移及预训练文件缺失后的短训恢复，SAT 验证公共短训恢复路径，AdapTac 验证触觉契约；修改 policy_name 不会跳过。检查使用临时合成数据，保留所选归一化和输入布局，缩小网络与执行预算。公共 FPS 检查缺少原生后端时报告 not_run，不宣称通过；SAT/AdapTac 模型检查仍需该后端。
 
 AdapTac 契约检查使用缩小的 eager 网络、32 点点云和合成 episode，保留所选来源、encoder、normalization、horizon 和 point-cloud channels；梯度、guide 与恢复检查共用实际 Dataset 拟合的模型。短训命令使用实际配置，不再自动重复合成契约检查；`--compile` 仅用于短训模式。
 

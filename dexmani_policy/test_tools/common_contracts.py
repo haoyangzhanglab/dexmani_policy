@@ -545,22 +545,213 @@ def validate_resume_facts():
     return {'status': 'passed', 'checks': 'relocation, actual data/model changes and missing metadata'}
 
 
+def _check_finite_gradients(module):
+    for name, parameter in module.named_parameters():
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
+
+
+def _hand_observations(device):
+    rotation = torch.tensor([
+        [[.6, -.8, 0.], [.8, .6, 0.], [0., 0., 1.]],
+        [[1., 0., 0.], [0., .8, -.6], [0., .6, .8]],
+    ], device=device)
+    origin = torch.tensor([[0., 0., 0.], [.25, -.1, .35]], device=device)
+    local_xyz = torch.tensor([
+        [-.04, .03, .02], [.025, .09, .01], [0., .105, .02],
+        [-.025, .09, .01], [-.045, .065, 0.],
+    ], device=device).expand(2, -1, -1)
+    observations = {
+        'joint_state': torch.linspace(-.6, .7, 38, device=device).reshape(2, 19),
+        'eef_pose': torch.cat((origin, rotation[..., :, 0], rotation[..., :, 1]), -1),
+        'fingertip_xyz': local_xyz @ rotation.transpose(-1, -2) + origin[:, None],
+    }
+    return observations, rotation, local_xyz
+
+
+def validate_hand_state_encoder(device):
+    from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder
+
+    set_seed(31)
+    observations, rotation, local_xyz = _hand_observations(device)
+    joints, pose, fingertips = (observations[key] for key in ('joint_state', 'eef_pose', 'fingertip_xyz'))
+    for frequencies in (2, 0):
+        model = HandStateEncoder(num_frequencies=frequencies).to(device)
+        assert model.KEYPOINTS == ('wrist', 'thumb', 'index', 'middle', 'ring', 'pinky')
+        assert model.out_dim == 192 and model.out_shape == (6, 192)
+        position_dim = 3 + 6 * frequencies
+        assert model.position_mlp[0].in_features == position_dim
+        assert model.arm_mlp[0].in_features == 13
+        assert model.finger_mlp[0].in_features == 3 + position_dim
+        captured = {}
+        with (
+            model.position_mlp.register_forward_pre_hook(lambda _, args: captured.update(position=args[0].detach())),
+            model.arm_mlp.register_forward_pre_hook(lambda _, args: captured.update(arm=args[0].detach())),
+            model.finger_mlp.register_forward_pre_hook(lambda _, args: captured.update(finger=args[0].detach())),
+        ):
+            output = model(**observations)
+        shapes = {'hand_tokens': (2, 6, 192), 'anchor_xyz': (2, 6, 3), 'rotation_world_from_eef': (2, 3, 3)}
+        assert output.keys() == shapes.keys()
+        for key, shape in shapes.items():
+            assert output[key].shape == shape and torch.isfinite(output[key]).all(), key
+        for key in ('anchor_xyz', 'rotation_world_from_eef'):
+            assert output[key].dtype == torch.float32
+        torch.testing.assert_close(output['rotation_world_from_eef'], rotation)
+        torch.testing.assert_close(output['anchor_xyz'], torch.cat((pose[:, None, :3], fingertips), 1), rtol=0, atol=0)
+        torch.testing.assert_close(captured['position'][..., :3], output['anchor_xyz'] / model.position_scale)
+        torch.testing.assert_close(captured['arm'], torch.cat((joints[:, :7], pose[:, 3:]), -1))
+        torch.testing.assert_close(captured['finger'][..., 3:6], local_xyz / model.hand_scale)
+        padded = joints.new_zeros(2, 5, 3)
+        padded[:, :2] = joints[:, 7:13].reshape(2, 2, 3)
+        padded[:, 2:, :2] = joints[:, 13:].reshape(2, 3, 2)
+        torch.testing.assert_close(captured['finger'][..., :3], padded, rtol=0, atol=0)
+
+        with torch.no_grad():
+            baseline = output['hand_tokens']
+            for slot, (start, end) in enumerate(((7, 10), (10, 13), (13, 15), (15, 17), (17, 19)), 1):
+                changed = joints.clone()
+                changed[:, start:end] += .4
+                delta = (model(changed, pose, fingertips)['hand_tokens'] - baseline).abs().sum(-1)
+                assert (delta[:, slot] > 1e-5).all()
+                assert not delta[:, torch.arange(6, device=device) != slot].any()
+            changed = joints.clone()
+            changed[:, :7] += .4
+            delta = (model(changed, pose, fingertips)['hand_tokens'] - baseline).abs().sum(-1)
+            assert (delta > 1e-5).all()
+            for row in range(2):
+                single = model(**{key: value[row:row + 1] for key, value in observations.items()})
+                torch.testing.assert_close(single, {key: value[row:row + 1] for key, value in output.items()})
+
+        # LayerNorm makes an unweighted squared norm almost constant.
+        (output['hand_tokens'] * torch.randn_like(output['hand_tokens'])).mean().backward()
+        _check_finite_gradients(model)
+        for name in ('position_mlp', 'arm_mlp', 'finger_mlp'):
+            assert all(parameter.grad.abs().sum() > 0 for parameter in getattr(model, name).parameters()), name
+
+    expect_value_error(lambda: HandStateEncoder(num_frequencies=-1))
+    expect_value_error(lambda: HandStateEncoder(hand_scale=0))
+    expect_value_error(lambda: model(joints[:, :18], pose, fingertips))
+    expect_value_error(lambda: model(joints, pose[:1], fingertips))
+    expect_value_error(lambda: model(joints, pose, fingertips[:, :4]))
+    return {'status': 'passed', 'device': str(device),
+            'checks': 'column rotations, batched frames, interfaces, joint groups, MLP gradients, Fourier/none'}
+
+
+def validate_hand_scene_encoder(device):
+    from dexmani_policy.agents.obs_encoder.interaction.hand_scene_encoder import (
+        HandSceneEncoder, query_surface_neighbors,
+    )
+
+    set_seed(37)
+    observations, rotation, local_xyz = _hand_observations(device)
+    anchors = torch.cat((observations['eef_pose'][:, None, :3], observations['fingertip_xyz']), 1).requires_grad_()
+    rotation = rotation.requires_grad_()
+    xyz = torch.cat((anchors.detach() + .002, anchors.detach() + torch.tensor([-.005, .004, .002], device=device)), 1)
+    points = torch.cat((xyz, torch.rand_like(xyz)), -1)
+    points[:, -1, :3] = torch.nan
+    points[1, -3, :3] = torch.inf
+    points.requires_grad_()
+    point_mask = torch.ones(2, 12, dtype=torch.bool, device=device)
+    point_mask[:, -2:] = False
+    centers = anchors[:, [0, 2, 4]].detach() + .008
+    centers[0, 2] = torch.nan
+    centers.requires_grad_()
+    memory = torch.randn(2, 3, 192, device=device)
+    memory[1, 2] = torch.nan
+    memory.requires_grad_()
+    patches = {'tokens': memory, 'xyz': centers,
+               'mask': torch.tensor([[True, False, True], [True, True, True]], device=device)}
+    patch_valid = torch.tensor([[True, False, False], [True, True, False]], device=device)
+    hand = torch.randn(2, 6, 192, device=device, requires_grad=True)
+    query_context = torch.randn(2, 192, device=device, requires_grad=True)
+    model = HandSceneEncoder(surface_k=4).to(device)
+    captured = {}
+    with (
+        model.context.edge.register_forward_pre_hook(lambda _, args: captured.update(patch=args[0].detach())),
+        model.hand_shape.register_forward_pre_hook(lambda _, args: captured.update(shape=args[0].detach())),
+        model.surface.register_forward_pre_hook(lambda _, args: captured.update(surface=args[0].detach())),
+    ):
+        output = model(points, patches, anchors, hand, rotation_world_from_eef=rotation,
+                       point_mask=point_mask, query_context=query_context, return_intermediate=True)
+        first_inputs = dict(captured)
+        assert output['hand_query'] is hand
+        assert output['geometry_descriptor'].shape == (2, 6, 7)
+        torch.testing.assert_close(output['interaction_center'], anchors, rtol=0, atol=0)
+        torch.testing.assert_close(first_inputs['shape'], (local_xyz / model.metric_scale).flatten(1))
+        torch.testing.assert_close(first_inputs['surface'], output['surface_relative'][:, 1:], rtol=0, atol=0)
+        for key in ('geometry_descriptor', 'surface_relative'):
+            assert output[key].dtype == torch.float32 and not output[key].requires_grad
+        assert not output['surface_relative'][~output['surface_valid']].any()
+        assert not output['context_attention'][..., :-1].masked_select(~patch_valid[:, None, None]).any()
+
+        support = query_surface_neighbors(points[..., :3], anchors, 4, model.surface_radius, model.metric_scale, point_mask)
+        torch.testing.assert_close(output['surface_relative'], support['relative'] @ rotation[:, None])
+        torch.testing.assert_close(output['geometry_descriptor'][..., :3], support['descriptor'][..., :3] @ rotation)
+        torch.testing.assert_close(output['geometry_descriptor'][..., 3:], support['descriptor'][..., 3:], rtol=0, atol=0)
+        patch_relative = (torch.nan_to_num(centers)[:, None] - anchors[:, :, None]) @ rotation[:, None]
+        patch_relative = torch.where(patch_valid[:, None, :, None], patch_relative, 0.)
+        torch.testing.assert_close(first_inputs['patch'][..., :3], patch_relative / model.metric_scale)
+
+        with torch.no_grad():
+            transform = torch.tensor([
+                [[1., 0., 0.], [0., .6, -.8], [0., .8, .6]],
+                [[.8, 0., .6], [0., 1., 0.], [-.6, 0., .8]],
+            ], device=device)
+            translation = torch.tensor([[.1, -.2, .05], [-.12, .08, -.04]], device=device)[:, None]
+            transformed_points = torch.cat((points[..., :3] @ transform.transpose(-1, -2) + translation, points[..., 3:]), -1)
+            transformed_patches = {**patches, 'xyz': centers @ transform.transpose(-1, -2) + translation}
+            transformed = model(
+                transformed_points, transformed_patches, anchors @ transform.transpose(-1, -2) + translation,
+                hand, rotation_world_from_eef=transform @ rotation, point_mask=point_mask,
+                query_context=query_context[:, None].expand(-1, 6, -1), return_intermediate=True,
+            )
+            for key in first_inputs:
+                torch.testing.assert_close(captured[key], first_inputs[key], rtol=1e-4, atol=1e-5)
+            for key in ('geometry_descriptor', 'surface_relative', 'relation_update', 'context_update', 'finger_local',
+                        'context_attention', 'min_observed_distance'):
+                torch.testing.assert_close(transformed[key], output[key], rtol=1e-4, atol=1e-5)
+            for key in ('surface_valid', 'has_reference', 'near_has_support'):
+                torch.testing.assert_close(transformed[key], output[key], rtol=0, atol=0)
+            shared_context = model(points, patches, anchors, hand, rotation_world_from_eef=rotation,
+                                   point_mask=point_mask, query_context=query_context[:, None])
+            torch.testing.assert_close(shared_context['relation_update'], output['relation_update'], rtol=0, atol=0)
+
+    (output['relation_update'] * torch.randn_like(output['relation_update'])).mean().backward()
+    _check_finite_gradients(model)
+    assert all(parameter.grad.abs().sum() > 0 for parameter in model.parameters())
+    for value in (hand, query_context, memory):
+        assert value.grad is not None and torch.isfinite(value.grad).all() and value.grad.abs().sum() > 0
+    assert not memory.grad[~patch_valid].any()
+    assert all(value.grad is None for value in (anchors, rotation, centers, points))
+
+    with torch.no_grad():
+        for empty in (False, True):
+            cloud = points[:, :0] if empty else points
+            missing_patches = {key: value[:, :0] for key, value in patches.items()} if empty else {
+                **patches, 'mask': torch.zeros_like(patches['mask']),
+            }
+            missing = model(cloud, missing_patches, anchors, hand, rotation_world_from_eef=rotation,
+                            point_mask=torch.zeros(cloud.shape[:2], dtype=torch.bool, device=device),
+                            return_intermediate=True)
+            for key in ('relation_update', 'geometry_descriptor', 'surface_relative', 'surface_valid',
+                        'finger_local', 'has_reference', 'near_has_support'):
+                assert not missing[key].any(), key
+            assert torch.isinf(missing['min_observed_distance']).all()
+            torch.testing.assert_close(missing['context_null_mass'], torch.ones_like(missing['context_null_mass']), rtol=0, atol=0)
+    expect_value_error(lambda: model(points, patches, anchors, hand, rotation_world_from_eef=rotation[:1]))
+    return {'status': 'passed', 'device': str(device),
+            'checks': 'four EEF directions, rigid transforms, query context, coordinate/parameter gradients, empty/masked scenes'}
+
+
 def validate_gated_tactile_fusion(device):
     from dexmani_policy.agents.obs_encoder.interaction.gated_tactile_fusion import GatedTactileFusion
-    from dexmani_policy.agents.obs_encoder.interaction.hand_scene_encoder import HandSceneEncoder
-    from dexmani_policy.agents.obs_encoder.proprio import HandSpatialEncoder
     from dexmani_policy.agents.obs_encoder.xhand_tactile import (
         XHandForceEncoder, XHandTaxelEncoder, XHandPatchEncoder,
     )
 
-    def check_gradients(module):
-        for name, parameter in module.named_parameters():
-            assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
-
     def check_backward(model, output, active):
         model.zero_grad(set_to_none=True)
         output['interaction_tokens'].square().mean().backward()
-        check_gradients(model)
+        _check_finite_gradients(model)
         if active:
             for name in ('tactile_encoder', 'self_attn', 'ffn', 'q', 'kv', 'proj', 'gate_mlp'):
                 assert any(p.grad.abs().sum() > 0 for p in getattr(model, name).parameters()), name
@@ -647,33 +838,78 @@ def validate_gated_tactile_fusion(device):
             assert not mixed['gate'][2].any() and not mixed['tactile_update'][2].any()
             check_backward(model, mixed, active=True)
 
-    # Real hand/scene encoders with synthetic patches; the second scene has no geometric support.
-    spatial, scene, model = HandSpatialEncoder().to(device), HandSceneEncoder(surface_k=4).to(device), GatedTactileFusion().to(device)
-    anchors = torch.randn(2, 6, 3, device=device) * .05
+    return {'status': 'passed', 'device': str(device), 'encoders': [cls.__name__ for cls in encoders],
+            'bf16': 'passed' if bf16 else 'not_run: unsupported device',
+            'checks': 'gradients, masking, valid zeros, missing graph, geometric independence'}
+
+
+def validate_hand_interaction_chain(device):
+    from dexmani_policy.agents.obs_encoder.interaction.gated_tactile_fusion import GatedTactileFusion
+    from dexmani_policy.agents.obs_encoder.interaction.hand_scene_encoder import HandSceneEncoder
+    from dexmani_policy.agents.obs_encoder.proprio import HandStateEncoder
+
+    set_seed(41)
+    state = HandStateEncoder().to(device)
+    scene = HandSceneEncoder(surface_k=4).to(device)
+    fusion = GatedTactileFusion().to(device)
+    observations, rotation, _ = _hand_observations(device)
+    anchors = torch.cat((observations['eef_pose'][:, None, :3], observations['fingertip_xyz']), 1)
     points = torch.cat((anchors + .002, anchors + .004), 1)
     patches = {'tokens': torch.randn(2, 3, 192, device=device, requires_grad=True),
                'xyz': points[:, :3], 'mask': torch.tensor([[True] * 3, [False] * 3], device=device)}
-    hand = spatial(anchors)
-    encoded = scene(points, patches, anchors, hand, point_mask=patches['mask'][:, :1].expand(-1, 12))
-    assert not encoded['relation_update'][1].any() and not encoded['geometry_descriptor'][1].any()
-    assert torch.isinf(encoded['min_observed_distance'][1]).all()
-    fused = model(encoded, tactile=torch.randn(2, *model.input_shape, device=device), return_intermediate=True)
-    assert torch.isfinite(fused['interaction_tokens']).all() and fused['tactile_update'][1].abs().sum() > 0
-    torch.testing.assert_close(fused['interaction_tokens'], hand + encoded['relation_update'] + fused['tactile_update'], rtol=0, atol=0)
-    torch.testing.assert_close(model(encoded)['interaction_tokens'], hand + encoded['relation_update'], rtol=0, atol=0)
-    check_backward(model, fused, active=True)
-    for module in (spatial, scene):
-        check_gradients(module)
-        assert any(p.grad.abs().sum() > 0 for p in module.parameters())
-    assert torch.isfinite(patches['tokens'].grad).all() and patches['tokens'].grad[0].abs().sum() > 0
-    return {'status': 'passed', 'device': str(device), 'encoders': [cls.__name__ for cls in encoders],
-            'bf16': 'passed' if bf16 else 'not_run: unsupported device',
-            'checks': 'gradients, masking, valid zeros, missing graph, geometric independence, hand-scene chain'}
+    point_mask = patches['mask'][:, :1].expand(-1, 12)
+    tactile = torch.randn(2, *fusion.input_shape, device=device, requires_grad=True)
+    tactile_valid = torch.tensor([[True, False, True, False, True], [True] * 5], device=device)
+    loss_weights = torch.randn(2, 6, 192, device=device)
+    bf16 = device.type == 'cpu' or (device.type == 'cuda' and torch.cuda.is_bf16_supported())
+    for mixed in ((False, True) if bf16 else (False,)):
+        for module in (state, scene, fusion):
+            module.zero_grad(set_to_none=True)
+        patches['tokens'].grad = tactile.grad = None
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=mixed):
+            hand = state(**observations)
+            encoded = scene(points, patches, hand['anchor_xyz'], hand['hand_tokens'],
+                            rotation_world_from_eef=hand['rotation_world_from_eef'],
+                            point_mask=point_mask, return_intermediate=True)
+            fused = fusion(encoded, tactile=tactile, tactile_valid=tactile_valid, return_intermediate=True)
+            missing = fusion(encoded, return_intermediate=True)
+        assert encoded['hand_query'] is hand['hand_tokens']
+        for key in ('anchor_xyz', 'rotation_world_from_eef'):
+            assert hand[key].dtype == torch.float32
+        for key in ('interaction_center', 'geometry_descriptor', 'surface_relative', 'min_observed_distance'):
+            assert encoded[key].dtype == torch.float32
+        torch.testing.assert_close(hand['rotation_world_from_eef'], rotation)
+        torch.testing.assert_close(encoded['interaction_center'], anchors, rtol=0, atol=0)
+        assert not encoded['relation_update'][1].any() and not encoded['geometry_descriptor'][1].any()
+        assert torch.isinf(encoded['min_observed_distance'][1]).all()
+        assert fused['interaction_tokens'].shape == (2, 6, 192)
+        assert torch.isfinite(fused['interaction_tokens']).all()
+        assert (fused['tactile_update'][1].abs().sum(-1) > 0).all()
+        baseline = hand['hand_tokens'].float() + encoded['relation_update'].float()
+        torch.testing.assert_close(fused['interaction_tokens'], baseline + fused['tactile_update'], rtol=0, atol=0)
+        torch.testing.assert_close(missing['interaction_tokens'], baseline, rtol=0, atol=0)
+        assert not missing['gate'].any() and not missing['tactile_update'].any()
+
+        (fused['interaction_tokens'] * loss_weights).mean().backward()
+        for module in (state, scene, fusion):
+            _check_finite_gradients(module)
+            assert any(parameter.grad.abs().sum() > 0 for parameter in module.parameters())
+        for name in ('position_mlp', 'arm_mlp', 'finger_mlp'):
+            assert all(parameter.grad.abs().sum() > 0 for parameter in getattr(state, name).parameters()), name
+        assert torch.isfinite(patches['tokens'].grad).all() and patches['tokens'].grad[0].abs().sum() > 0
+        assert not patches['tokens'].grad[1].any()
+        assert torch.isfinite(tactile.grad).all() and not tactile.grad[~tactile_valid].any()
+        assert tactile.grad[tactile_valid].abs().sum() > 0
+    return {'status': 'passed', 'device': str(device), 'bf16': 'passed' if bf16 else 'not_run: unsupported device',
+            'checks': 'measured hand-state/scene/tactile chain, single residuals, gradients, empty geometry, FP32 metadata'}
 
 
 def validate_common_contracts(device):
     return {
+        'hand_state_encoder': validate_hand_state_encoder(device),
+        'hand_scene_encoder': validate_hand_scene_encoder(device),
         'gated_tactile_fusion': validate_gated_tactile_fusion(device),
+        'hand_interaction_chain': validate_hand_interaction_chain(device),
         'config_targets': validate_config_targets(),
         'experiment_paths': validate_experiment_paths(),
         'resume_facts': validate_resume_facts(),

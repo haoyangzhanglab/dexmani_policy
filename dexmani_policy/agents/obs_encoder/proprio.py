@@ -1,4 +1,4 @@
-"""Proprioceptive state and wrist–fingertip spatial encoders."""
+"""Proprioceptive state and measured wrist–fingertip state encoders."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class StateEncoder(nn.Module):
@@ -18,7 +19,7 @@ class StateEncoder(nn.Module):
     ):
         super().__init__()
         self.out_dim = out_dim
-        layers = []
+        layers: list[nn.Module] = []
         input_dim = state_dim
         for hidden_dim in hidden_dims:
             layers.extend((nn.Linear(input_dim, hidden_dim), nn.ReLU(inplace=True)))
@@ -51,8 +52,22 @@ class FourierPositionEmbedding3D(nn.Module):
         return torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(start_dim=-2)
 
 
-class HandSpatialEncoder(nn.Module):
-    """Encode finite world-frame XYZ [BT,6,3] as wrist–fingertip tokens [BT,6,D]."""
+def _rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
+    """Decode consecutive rotation columns; caller supplies FP32 outside autocast."""
+    a1, a2 = rotation_6d[..., :3], rotation_6d[..., 3:]
+    b1 = F.normalize(a1, dim=-1)
+    b2 = F.normalize(a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1, dim=-1)
+    b3 = torch.linalg.cross(b1, b2, dim=-1)
+    return torch.stack((b1, b2, b3), dim=-1)
+
+
+class HandStateEncoder(nn.Module):
+    """Encode normalized joints and measured world-frame geometry as six body tokens.
+
+    Inputs share one observation time; N is the caller's flattened batch/time.
+    The wrist slot uses the eef_pose origin and axes, not a palm or sensor frame.
+    Geometry stays in physical units; no normalizer or FK is applied here.
+    """
 
     KEYPOINTS = ("wrist", "thumb", "index", "middle", "ring", "pinky")
 
@@ -63,11 +78,12 @@ class HandSpatialEncoder(nn.Module):
         position_scale: float = 0.25,
         hand_scale: float = 0.10,
         num_frequencies: int = 2,
-        use_wrist_offset: bool = True,
     ) -> None:
         super().__init__()
         if token_dim < 2 or hidden_dim < 1:
             raise ValueError("token_dim >= 2 and hidden_dim >= 1 prevent degenerate features")
+        if type(num_frequencies) is not int or num_frequencies < 0:
+            raise ValueError("num_frequencies must be a nonnegative integer")
         for name, scale in (
             ("position_scale", position_scale),
             ("hand_scale", hand_scale),
@@ -79,46 +95,86 @@ class HandSpatialEncoder(nn.Module):
         self.position_scale = float(position_scale)
         self.hand_scale = float(hand_scale)
         self.position_pe = FourierPositionEmbedding3D(num_frequencies) if num_frequencies else None
+        position_dim = 3 + (self.position_pe.out_dim if self.position_pe is not None else 0)
         self.position_mlp = nn.Sequential(
-            nn.Linear(3 + 6 * num_frequencies, hidden_dim),
+            nn.Linear(position_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, token_dim),
         )
-        self.relative_proj = nn.Linear(3, token_dim, bias=False) if use_wrist_offset else None
-        if self.relative_proj is not None:
-            # Start as the absolute-only model; the linear weights still learn.
-            nn.init.zeros_(self.relative_proj.weight)
+        self.arm_mlp = nn.Sequential(
+            nn.Linear(7 + 6, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, token_dim),
+        )
+        self.finger_mlp = nn.Sequential(
+            nn.Linear(3 + position_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, token_dim),
+        )
         self.keypoint_embedding = nn.Parameter(torch.empty(1, 6, token_dim))
         nn.init.normal_(self.keypoint_embedding, std=0.02)
         self.output_norm = nn.LayerNorm(token_dim)
 
-    def forward(self, xyz: torch.Tensor) -> torch.Tensor:
-        if xyz.ndim != 3 or xyz.shape[1:] != (6, 3):
-            raise ValueError("xyz must have shape [BT,6,3]")
-        if not xyz.is_floating_point():
-            raise TypeError("xyz must be floating point, preferably FP32")
+    def _position_features(self, xyz: torch.Tensor, scale: float) -> torch.Tensor:
+        scaled = xyz / scale
+        if self.position_pe is None:
+            return scaled
+        return torch.cat((scaled, self.position_pe(math.pi * scaled)), -1)
 
-        with torch.autocast(device_type=xyz.device.type, enabled=False):
-            points = xyz.float()
-            scaled = points / self.position_scale
-            features = scaled
-            if self.position_pe is not None:
-                features = torch.cat((scaled, self.position_pe(math.pi * scaled)), -1)
-            if self.relative_proj is not None:
-                offsets = (points - points[:, :1]) / self.hand_scale
+    def forward(
+        self,
+        joint_state: torch.Tensor,
+        eef_pose: torch.Tensor,
+        fingertip_xyz: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Consume joints [N,19], raw xyz+column-6D pose [N,9], raw fingertips [N,5,3].
+
+        Return hand_tokens [N,6,D], FP32 world anchor_xyz [N,6,3] and
+        FP32 rotation_world_from_eef [N,3,3], shared with HandSceneEncoder.
+        """
+        if joint_state.ndim != 2 or joint_state.shape[1] != 19:
+            raise ValueError("joint_state must have shape [N,19]")
+        batch = joint_state.shape[0]
+        if eef_pose.shape != (batch, 9) or fingertip_xyz.shape != (batch, 5, 3):
+            raise ValueError("eef_pose/fingertip_xyz must have shape [N,9] / [N,5,3]")
+        if not all(value.is_floating_point() for value in (joint_state, eef_pose, fingertip_xyz)):
+            raise TypeError("joint_state, eef_pose and fingertip_xyz must be floating point")
+
+        with torch.autocast(device_type=eef_pose.device.type, enabled=False):
+            joints = joint_state.float()
+            anchors = torch.cat((eef_pose[:, None, :3].float(), fingertip_xyz.float()), 1)
+            rotation = _rotation_6d_to_matrix(eef_pose[:, 3:].float())
+            rot6d = torch.cat((rotation[..., :, 0], rotation[..., :, 1]), -1)
+            local_xyz = (anchors[:, 1:] - anchors[:, :1]) @ rotation
+            position_features = self._position_features(anchors, self.position_scale)
+            local_features = self._position_features(local_xyz, self.hand_scale)
+            finger_joints = torch.stack(
+                (joints[:, 7:10], joints[:, 10:13], F.pad(joints[:, 13:15], (0, 1)),
+                 F.pad(joints[:, 15:17], (0, 1)), F.pad(joints[:, 17:19], (0, 1))),
+                1,
+            )
+            arm_features = torch.cat((joints[:, :7], rot6d), -1)
+            finger_features = torch.cat((finger_joints, local_features), -1)
 
         dtype = self.position_mlp[0].weight.dtype
-        tokens = self.position_mlp(features.to(dtype)).float()
-        if self.relative_proj is not None:
-            tokens = tokens + self.relative_proj(offsets.to(dtype)).float()
+        position = self.position_mlp(position_features.to(dtype)).float()
+        shared_state = self.arm_mlp(arm_features.to(dtype)).float()[:, None]
+        finger_state = self.finger_mlp(finger_features.to(dtype)).float()
+        tokens = torch.cat((position[:, :1], position[:, 1:] + finger_state), 1)
         # FP32 additions preserve small identity/residual updates under BF16 autocast.
-        tokens = tokens + self.keypoint_embedding.float()
-        return self.output_norm(tokens.to(self.output_norm.weight.dtype))
+        tokens = tokens + shared_state + self.keypoint_embedding.float()
+        return {
+            "hand_tokens": self.output_norm(tokens.to(self.output_norm.weight.dtype)),
+            "anchor_xyz": anchors,
+            "rotation_world_from_eef": rotation,
+        }
 
     @property
     def out_dim(self) -> int:
+        """Width of hand_tokens."""
         return self.token_dim
 
     @property
     def out_shape(self) -> tuple[int, int]:
+        """Per-frame shape of hand_tokens."""
         return (6, self.token_dim)

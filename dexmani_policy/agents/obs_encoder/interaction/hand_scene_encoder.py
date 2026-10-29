@@ -68,7 +68,7 @@ def query_surface_neighbors(
 
 
 class GeometricCrossAttention(nn.Module):
-    """Cross-attention with relative geometry in attention biases and values."""
+    """Cross-attend with EEF-frame offsets; invalid directions are already zeroed."""
 
     def __init__(self, channels: int, sigmas: Sequence[float], metric_scale: float) -> None:
         super().__init__()
@@ -99,7 +99,7 @@ class GeometricCrossAttention(nn.Module):
         value = self.v(memory).reshape(batch, patches, self.heads, self.head_dim)
 
         with torch.autocast(device_type=query.device.type, enabled=False):
-            relative = torch.where(valid[:, None, :, None], relative.float(), 0.0)
+            relative = relative.float()
             distance = relative.norm(dim=-1)
             geometry = torch.cat((relative, distance[..., None]), -1) / self.metric_scale
         edge = self.edge(geometry.to(self.edge[0].weight.dtype))
@@ -126,7 +126,7 @@ class GeometricCrossAttention(nn.Module):
 
 
 class LocalSurfaceEncoder(nn.Module):
-    """Encode fingertip neighborhoods with a shared point MLP and mean/max pooling."""
+    """Encode EEF-frame neighborhoods; invalid coordinates are zeroed by the query."""
 
     def __init__(self, radius: float) -> None:
         super().__init__()
@@ -135,7 +135,7 @@ class LocalSurfaceEncoder(nn.Module):
 
     def forward(self, relative: Tensor, valid: Tensor) -> Tensor:
         with torch.autocast(device_type=relative.device.type, enabled=False):
-            relative = torch.where(valid[..., None], relative.float(), 0.0) / self.radius
+            relative = relative.float() / self.radius
             features = torch.cat((relative, relative.norm(dim=-1, keepdim=True)), -1)
         features = self.mlp(features.to(self.mlp[0].weight.dtype))
 
@@ -188,50 +188,68 @@ class HandSceneEncoder(nn.Module):
         anchor_xyz: Tensor,
         hand_tokens: Tensor,
         *,
+        rotation_world_from_eef: Tensor,
         point_mask: Tensor | None = None,
         query_context: Tensor | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, Tensor]:
-        """Return wrist/thumb/index/middle/ring/pinky updates; caller applies the residual."""
+        """Return scene increments alongside the original hand_tokens as hand_query.
+
+        Patches contain tokens [N,M,D], xyz [N,M,3] and bool mask [N,M], as
+        returned by Sparse3DEncoder; token width must match hand_tokens.
+        Anchors, patch centers and pointcloud XYZ remain in world meters. The
+        measured [N,3,3] rotation maps EEF axes into the world; all relative
+        directions, including geometry_descriptor[..., :3], use EEF axes.
+        GatedTactileFusion applies the scene and tactile residuals exactly once.
+        """
         memory, centers, token_valid = patches["tokens"], patches["xyz"], patches["mask"]
         batch, channels = memory.shape[0], self.token_channels
         if anchor_xyz.shape != (batch, 6, 3) or hand_tokens.shape != (batch, 6, channels):
-            raise ValueError("anchors/hand_tokens must be [BT,6,3] / [BT,6,D]")
+            raise ValueError("anchor_xyz/hand_tokens must be [N,6,3] / [N,6,D]")
+        if rotation_world_from_eef.shape != (batch, 3, 3):
+            raise ValueError("rotation_world_from_eef must be [N,3,3]")
+
+        with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
+            anchors = anchor_xyz.float()
+            rotation = rotation_world_from_eef.float()
+            shape = torch.einsum("n...c,ncd->n...d", anchors[:, 1:] - anchors[:, :1], rotation)
+            shape = (shape / self.metric_scale).flatten(1)
+            valid = token_valid & torch.isfinite(centers).all(-1) & torch.isfinite(memory).all(-1)
+            patch_relative = torch.where(
+                valid[:, None, :, None], centers.float()[:, None] - anchors[:, :, None], 0.0
+            )
+            patch_relative = torch.einsum(
+                "n...c,ncd->n...d", patch_relative, rotation
+            )
+            support = query_surface_neighbors(
+                pointcloud[..., :3], anchors, self.surface_k, self.surface_radius,
+                self.metric_scale, point_mask,
+            )
+            surface_relative = torch.einsum("n...c,ncd->n...d", support["relative"], rotation)
+            geometry = torch.cat(
+                (torch.einsum("n...c,ncd->n...d", support["descriptor"][..., :3], rotation),
+                 support["descriptor"][..., 3:]),
+                -1,
+            )
+            has_evidence = valid.any(-1)[:, None] | support["has_reference"]
 
         query = hand_tokens.float()
         if query_context is not None:
             if query_context.ndim == 2:
                 query_context = query_context[:, None]
             if query_context.shape not in ((batch, 1, channels), (batch, 6, channels)):
-                raise ValueError("query_context must be [BT,D], [BT,1,D] or [BT,6,D]")
+                raise ValueError("query_context must be [N,D], [N,1,D] or [N,6,D]")
             query = query + query_context.float()
 
-        with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
-            anchors = anchor_xyz.float()
-            shape = ((anchors[:, 1:] - anchors[:, :1]) / self.metric_scale).flatten(1)
-            valid = token_valid & torch.isfinite(centers).all(-1) & torch.isfinite(memory).all(-1)
-            centers = torch.where(valid[..., None], centers.float(), 0.0)
-            relative = centers[:, None] - anchors[:, :, None]
         shape = self.hand_shape(shape.to(self.hand_shape.weight.dtype)).float()
         query = torch.cat((query[:, :1] + shape[:, None], query[:, 1:]), 1)
-        context, attention = self.context(query, memory, relative, valid)
-
-        support = query_surface_neighbors(
-            pointcloud[..., :3],
-            anchors,
-            self.surface_k,
-            self.surface_radius,
-            self.metric_scale,
-            point_mask,
-        )
-        geometry = support["descriptor"]
-        local = self.surface(support["relative"][:, 1:], support["valid"][:, 1:])
+        context, attention = self.context(query, memory, patch_relative, valid)
+        local = self.surface(surface_relative[:, 1:], support["valid"][:, 1:])
 
         wrist = torch.cat((context[:, :1].float(), geometry[:, :1]), -1)
         finger = torch.cat((context[:, 1:].float(), local, geometry[:, 1:]), -1)
         wrist = self.wrist_fusion(wrist.to(self.wrist_fusion.weight.dtype))
         finger = self.finger_fusion(finger.to(self.finger_fusion.weight.dtype))
-        has_evidence = valid.any(-1)[:, None] | support["has_reference"]
         update = torch.where(has_evidence[..., None], torch.cat((wrist, finger), 1), 0.0)
 
         output = {
@@ -251,7 +269,7 @@ class HandSceneEncoder(nn.Module):
                 context_attention=attention,
                 context_null_mass=attention[..., -1],
                 finger_local=local,
-                surface_relative=support["relative"],
+                surface_relative=surface_relative,
                 surface_valid=support["valid"],
             )
         return output
