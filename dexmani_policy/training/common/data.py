@@ -54,8 +54,6 @@ def build_dataset(cfg, *, verbose=True):
                 "shape": list(buffer["depth"].shape[1:]),
                 "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
             }
-        if "processing_source" in buffer.attrs:
-            deployment["processing_source"] = buffer.attrs["processing_source"]
     description["deployment_metadata"] = deployment
     if hasattr(dataset, "hand_data"):
         description["hand_data"] = dataset.hand_data

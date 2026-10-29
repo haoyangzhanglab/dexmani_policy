@@ -111,7 +111,16 @@ future 标签从 query+1 的下一观测行开始，真实后继有效，重复�
 experiments/<policy_name>/<task_name>/<run>/
 ```
 
-设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验需保留配置、Checkpoint 和对应源码。
+设置 `workspace.wandb_cfg=null` 可仅保留本地 JSONL 日志。复现实验需保留配置、Checkpoint 和对应源码，并在实验目录的人工记录中关联数据身份与各阶段的版本，例如：
+
+```text
+source_id: <实际 Canonical source_id>
+导出 Real commit SHA: <导出时的完整 SHA>
+训练 Policy commit SHA: <训练时的完整 SHA>
+手模板路径: assets/pointcloud_template/hand/hand_<num_points>.npz
+```
+
+Git 已跟踪的模板可用对应提交和路径恢复；不同处理阶段使用不同版本时分别记录仓库、SHA 和模板路径。未提交的代码或自定义模板应随实验手动归档，或先提交再记录。缺少历史记录时如实注明未知，不猜测补写。修改加工算法或模板后须重新导出数据。
 
 Canonical 数据的 checkpoint resume 要求数据与保存的 split 都有非空 `source_id`。原样搬迁保留 ID，可继续 resume；重新导出的数据获得新 ID，不能复用旧 normalizer。旧数据仍可从头训练、指定 split 或读取评价；需要可靠 resume 时请显式重新导出并开始新实验。
 
