@@ -6,7 +6,7 @@ from dexmani_policy.common.config import (
     set_project_root,
 )
 from dexmani_policy.common.experiments import resolve_experiment
-from dexmani_policy.evaluation.config import (
+from dexmani_policy.evaluation.protocol import (
     build_parser,
     parse_overrides,
 )

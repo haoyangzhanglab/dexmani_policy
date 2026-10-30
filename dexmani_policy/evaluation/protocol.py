@@ -23,17 +23,8 @@ from dexmani_policy.evaluation.seeds import (
 )
 
 
-def build_parser(description):
-    parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--experiment", required=True, help="Experiment directory or path relative to experiments/")
-    parser.add_argument(
-        "overrides", nargs="*", help="Canonical eval.*, env_runner.* and training.device dotlist"
-    )
-    return parser
-
-
 @dataclass(frozen=True)
-class EvalConfig:
+class EvalProtocol:
     config: dict
     checkpoint: str
     use_ema: bool
@@ -43,6 +34,17 @@ class EvalConfig:
     runner_options: dict
     seeds: list[int]
     source: dict
+
+
+def build_parser(description):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        "--experiment", required=True, help="Experiment directory or path relative to experiments/"
+    )
+    parser.add_argument(
+        "overrides", nargs="*", help="Canonical eval.*, env_runner.* and training.device dotlist"
+    )
+    return parser
 
 
 def parse_overrides(overrides):
@@ -66,14 +68,14 @@ def parse_overrides(overrides):
 
 def load_seed_pool(cfg):
     task = cfg["env_runner"]
-    name = task["task_name"]
     seeds = task.get("eval_seeds")
-    if seeds is None:
-        from dexmani_sim import DATA_DIR
+    if seeds is not None:
+        return seeds
 
-        path = DATA_DIR / "eval_seeds" / f"{name}.txt"
-        seeds = [int(value) for value in path.read_text().split()]
-    return seeds
+    from dexmani_sim import DATA_DIR
+
+    path = DATA_DIR / "eval_seeds" / f"{task['task_name']}.txt"
+    return [int(value) for value in path.read_text().split()]
 
 
 def merge_eval_config(cfg, overrides=None):
@@ -90,7 +92,7 @@ def merge_eval_config(cfg, overrides=None):
     return OmegaConf.to_container(OmegaConf.merge(cfg, overrides), resolve=True)
 
 
-def build_eval_config(cfg, checkpoint, seeds, *, source) -> EvalConfig:
+def build_eval_protocol(cfg, checkpoint, seeds, *, source) -> EvalProtocol:
     validate_action_mode(cfg)
     options = dict(cfg["env_runner"])
     options.pop("eval_seeds", None)
@@ -111,11 +113,11 @@ def build_eval_config(cfg, checkpoint, seeds, *, source) -> EvalConfig:
     action_steps = evaluation.get("action_steps")
     if action_steps is None:
         action_steps = cfg["agent"]["n_action_steps"]
-    positive_int(action_steps, "eval.action_steps")
+    action_steps = positive_int(action_steps, "eval.action_steps")
     future_steps = cfg["agent"]["horizon"] - cfg["policy_metadata"]["action_start_index"]
     if action_steps > future_steps:
         raise ValueError(f"eval.action_steps must be <= future_steps ({future_steps})")
-    return EvalConfig(
+    return EvalProtocol(
         config=cfg,
         checkpoint=str(checkpoint),
         use_ema=evaluation["use_ema"],
@@ -128,8 +130,8 @@ def build_eval_config(cfg, checkpoint, seeds, *, source) -> EvalConfig:
     )
 
 
-def frozen_test_config(record, checkpoint, *, device=None) -> EvalConfig:
-    request = EvalConfig(**record["test_request"])
+def frozen_test_protocol(record, checkpoint, *, device=None) -> EvalProtocol:
+    request = EvalProtocol(**record["test_request"])
     return replace(
         request,
         checkpoint=str(checkpoint),
@@ -143,28 +145,27 @@ def frozen_test_config(record, checkpoint, *, device=None) -> EvalConfig:
     )
 
 
-def load_eval_config(
+def load_eval_protocol(
     exp_dir, checkpoint="best", overrides=None, *, selection_record=None
-) -> EvalConfig:
+) -> EvalProtocol:
     root = Path(exp_dir).expanduser().resolve()
     overrides = overrides or {}
     if selection_record is not None:
         if set(overrides) - {"training"} or set(overrides.get("training", {})) - {"device"}:
             raise ValueError("Frozen test only accepts training.device overrides")
         path = Path(selection_record).expanduser().resolve()
-        reference = str(path.relative_to(root))
         record = json.loads(path.read_text())
         if record["status"] != "completed":
             raise ValueError("Selection has not completed successfully")
-        record["selection_result"] = reference
-        return frozen_test_config(
-            record, resolve_checkpoint_path(root, root / record["ckpt_relpath"]),
+        record["selection_result"] = str(path.relative_to(root))
+        return frozen_test_protocol(
+            record,
+            resolve_checkpoint_path(root, root / record["ckpt_relpath"]),
             device=overrides.get("training", {}).get("device"),
         )
 
     cfg = load_experiment_config(root)
     source = {"phase": "ordinary", "heldout_from_selection": False}
-    checkpoint = str(checkpoint)
     path, selection = resolve_policy_checkpoint(root, checkpoint)
     if selection is not None:
         overrides = OmegaConf.merge({"eval": selection["inference"]}, overrides)
@@ -177,11 +178,11 @@ def load_eval_config(
             load_seed_pool(cfg), evaluation["seed"], evaluation["episodes"]
         )
     else:
-        validate_seed_pool(seeds)
+        seeds = validate_seed_pool(seeds)
         if not seeds:
             raise ValueError("eval.seeds must be nonempty")
         validate_evaluation_seed(evaluation["seed"])
         pool = cfg["env_runner"].get("eval_seeds")
-        if pool is not None and set(seeds) - set(validate_seed_pool(pool)):
+        if pool is not None and not set(seeds).issubset(validate_seed_pool(pool)):
             raise ValueError("Requested seed is outside the declared task pool")
-    return build_eval_config(cfg, path, seeds, source=source)
+    return build_eval_protocol(cfg, path, seeds, source=source)

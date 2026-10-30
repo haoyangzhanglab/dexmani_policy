@@ -6,8 +6,8 @@ from dexmani_policy.common.config import (
     set_project_root,
 )
 from dexmani_policy.common.experiments import resolve_experiment
-from dexmani_policy.evaluation.config import build_parser, parse_overrides
-from dexmani_policy.evaluation.selection import select_best_checkpoint
+from dexmani_policy.evaluation.protocol import build_parser, parse_overrides
+from dexmani_policy.evaluation.selection import select_checkpoint
 
 
 def main(argv=None):
@@ -17,7 +17,7 @@ def main(argv=None):
     set_project_root()
     register_resolvers()
     exp_dir = resolve_experiment(args.experiment)
-    select_best_checkpoint(
+    select_checkpoint(
         exp_dir,
         load_experiment_config(exp_dir),
         overrides=parse_overrides(args.overrides),

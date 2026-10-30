@@ -1,5 +1,3 @@
-"""Evaluation records and runtime metadata."""
-
 import json
 import platform
 import tempfile
