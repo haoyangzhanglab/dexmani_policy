@@ -14,14 +14,16 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
+from dexmani_policy.agents.hand_prior.codebook import (
+    codebook_chunk_size, codebook_distances, validate_dq_normalization, validate_hand_coordinates,
+)
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import load_policy_config, positive_int, read_split_manifest, validate_normalization_config
-from dexmani_policy.common.hand_semantics import validate_hand_coordinates
+from dexmani_policy.common.config import load_policy_config, positive_int, read_split_manifest
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_motion import load_hand_array, load_hand_source
+from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
+from dexmani_policy.datasets.split import split_episodes
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
@@ -32,19 +34,35 @@ from dexmani_policy.training.pretrain.hand_prior.codebook import (
 logger = logging.getLogger(__name__)
 
 
-def prepare_policy_data(cfg):
-    validate_normalization_config(cfg)
+def load_hand_array(buffer, episode_mask):
+    count = np.diff(np.r_[0, buffer.episode_ends])[episode_mask].sum()
+    values = np.empty((count, 12), dtype=np.float32)
+    cursor = 0
+    for start, chunk in buffer.iter_chunks("action", columns=slice(7, 19), episode_mask=episode_mask):
+        check_finite(buffer, "action", start, chunk, columns=slice(7, 19))
+        values[cursor:cursor + len(chunk)] = chunk
+        cursor += len(chunk)
+    return values
+
+
+def prepare_hand_data(cfg):
+    if cfg.get("resume_from") is not None:
+        raise ValueError("VQ pretraining does not support resume_from")
     spec = cfg.normalization
     validate_dq_normalization(spec)
-    if cfg.agent.tcp_dim != 7:
-        raise ValueError("DQ/VQ requires tcp_dim=7")
-    buffer, train, val, split = load_hand_source(
-        cfg, ["action"], split_manifest=read_split_manifest(cfg.dataset.split_manifest),
+    if cfg.dataset.action_key != "action":
+        raise ValueError("VQ pretraining requires arm7+hand12 joint commands")
+    buffer = EpisodeStore(cfg.dataset.zarr_path, keys=["action"])
+    if buffer["action"].shape[1:] != (19,):
+        raise ValueError("VQ pretraining requires action shape [T,19]")
+    train, val, split = split_episodes(
+        buffer, manifest=read_split_manifest(cfg.dataset.split_manifest), seed=cfg.dataset.seed,
+        val_ratio=cfg.dataset.val_ratio, max_train_episodes=cfg.dataset.max_train_episodes,
     )
     validate_hand_coordinates(buffer.attrs)
 
-    train_hand = load_hand_array(buffer, "action", train)
-    val_hand = load_hand_array(buffer, "action", val)
+    train_hand = load_hand_array(buffer, train)
+    val_hand = load_hand_array(buffer, val)
     normalizer = LinearNormalizer()
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
     metadata = dict(
@@ -62,14 +80,11 @@ def prepare_policy_data(cfg):
 @torch.no_grad()
 def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
     """Evaluate a fixed model's runtime lookup and optional VQ reconstruction."""
-    positive_int(chunk_size, "chunk_size")
+    chunk_size = codebook_chunk_size(vqvae.codebook_size ** vqvae.num_groups, chunk_size)
     training = vqvae.training
     vqvae.eval()
     try:
         prototypes, _ = build_hand_prototypes(vqvae)
-        chunk_size = min(
-            chunk_size, max(1, (16 * 1024 * 1024) // (len(prototypes) * 4))
-        )
         sums = torch.zeros(3, device=device, dtype=torch.float64)
         lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
         count = 0
@@ -81,10 +96,7 @@ def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
                 recon_loss, commitment_loss, _, recon_mse = vqvae(batch)
                 sums += torch.stack((recon_loss, commitment_loss, recon_mse)).double() * n
             for values in batch.float().split(chunk_size):
-                with torch.autocast(device_type=values.device.type, enabled=False):
-                    distances = torch.cdist(
-                        values, prototypes, compute_mode="donot_use_mm_for_euclid_dist",
-                    )
+                distances = codebook_distances(values, prototypes)
                 lookup_sum += distances.amin(-1).double().square().sum()
         if not count:
             raise ValueError("VQ evaluation loader is empty")
@@ -103,9 +115,7 @@ def train(cfg):
     import matplotlib.pyplot as plt
 
     recipe = cfg.vq_vae
-    hand_dim = cfg.agent.action_dim - cfg.agent.tcp_dim
-    if (recipe.num_groups, recipe.codebook_size) != (cfg.agent.codebook_num_groups, cfg.agent.codebook_size):
-        raise ValueError("VQ num_groups/codebook_size must match the target policy")
+    hand_dim = 12
     for name in ("num_epochs", "batch_size", "save_epochs", "codebook_report_epochs"):
         positive_int(recipe[name], name)
     if not 0 <= recipe.max_grad_norm < float("inf") or recipe.warmup_steps < 0:
@@ -119,7 +129,7 @@ def train(cfg):
     logger.info("VQ run: %s", output_dir.resolve())
     device = torch.device(recipe.device)
     set_seed(recipe.seed)
-    train_norm, val_norm, normalizer, split_metadata = prepare_policy_data(cfg)
+    train_norm, val_norm, normalizer, split_metadata = prepare_hand_data(cfg)
     train_ds = TensorDataset(torch.from_numpy(train_norm))
     val_ds = TensorDataset(torch.from_numpy(val_norm))
     if len(train_ds) < recipe.batch_size:
@@ -278,10 +288,10 @@ def train(cfg):
     # Deployment diagnostics evaluate the selected best without changing selection.
     selected_path = output_dir / "vqvae_hand_best.pt"
     codebook_path = output_dir / "codebook.npz"
-    runtime_codebook = export_codebook(selected_path, codebook_path, device="cpu")
+    runtime_codebook, codebook_metadata = export_codebook(selected_path, codebook_path, device="cpu")
     print(f"Saved selected runtime codebook: {codebook_path}")
     diagnostics = deployment_diagnostics(
-        runtime_codebook, {"train": train_norm, "held_out": val_norm}
+        runtime_codebook, {"train": train_norm, "held_out": val_norm}, metadata=codebook_metadata,
     )
     with atomic_path(output_dir / "codebook_diagnostics.json") as temporary:
         temporary.write_text(json.dumps(diagnostics, indent=2, allow_nan=False) + "\n")

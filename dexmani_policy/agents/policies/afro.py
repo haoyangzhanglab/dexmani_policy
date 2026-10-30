@@ -19,6 +19,10 @@ class AFROObservationEncoder(nn.Module):
         self.state = StateEncoder(19, 64, (64,))
         self.n_obs_steps = n_obs_steps
 
+    @property
+    def out_dim(self) -> int:
+        return self.visual.out_dim + self.state.out_dim
+
     def forward(self, obs):
         features = torch.cat((self.visual(obs["point_cloud"][..., :3])["global_token"], self.state(obs["joint_state"])), -1)
         return features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
@@ -39,7 +43,7 @@ class AFROPolicy(BasePolicy):
         obs_encoder = AFROObservationEncoder(n_obs_steps)
         obs_encoder.visual.requires_grad_(not freeze_visual)
         backbone = ConditionalUNet1D(
-            action_dim, n_obs_steps * 128, diffusion_step_embed_dim,
+            action_dim, n_obs_steps * obs_encoder.out_dim, diffusion_step_embed_dim,
             down_dims, kernel_size, n_groups, cond_predict_scale,
         )
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)

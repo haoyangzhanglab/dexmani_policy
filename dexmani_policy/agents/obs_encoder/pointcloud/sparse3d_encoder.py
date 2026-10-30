@@ -8,8 +8,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from dexmani_policy.agents.modules import build_mlp
+
 from .ops import index_points, sample_point_patches, load_pointcloud_ops
-from .pointnet import build_mlp
 from .rope import RotaryPositionEmbedding3D
 
 

@@ -30,7 +30,6 @@ class SimRunner:
 
         self.obs_buffer: dict[str, np.ndarray] = {}
         self.obs_cursor = 0
-        self.hand_history: np.ndarray | None = None
 
     def update_obs(self, observation: dict[str, np.ndarray]):
         position = self.obs_cursor % self.n_obs_steps
@@ -67,20 +66,13 @@ class SimRunner:
     def reset(self):
         self.obs_buffer.clear()
         self.obs_cursor = 0
-        self.hand_history = None
 
     @torch.no_grad()
     def predict_action_chunk(
         self, obs_batch, agent, inference_steps: int | None = None, *, action_steps: int, generator=None
     ) -> np.ndarray:
-        kwargs: dict[str, Any] = {}
-        if self.hand_history is not None:
-            history = torch.as_tensor(
-                self.hand_history, dtype=torch.float32, device=obs_batch["joint_state"].device
-            )
-            kwargs["action_context"] = {"hand_history": history.unsqueeze(0)}
         result = agent.predict_action(
-            obs_dict=obs_batch, inference_steps=inference_steps, generator=generator, **kwargs
+            obs_dict=obs_batch, inference_steps=inference_steps, generator=generator
         )
         actions = result["future_actions"][0, :action_steps]
         return np.ascontiguousarray(actions.cpu().numpy())
@@ -98,13 +90,6 @@ class SimRunner:
         obs, _ = env.reset(seed=episode_seed)
         self.reset()
         self.update_obs(obs)
-        shapes = agent.inference_metadata["action_context_shapes"]
-        if "hand_history" in shapes:
-            from dexmani_policy.agents.hand_prior.motion_prior import initial_hand_history
-
-            history_steps, hand_dim = shapes["hand_history"]
-            self.hand_history = initial_hand_history(obs["joint_state"][-hand_dim:], history_steps)
-
         device = next(agent.parameters()).device
         # Environment and policy own separate random streams.
         generator = torch.Generator(device=device).manual_seed(episode_seed)
@@ -119,12 +104,6 @@ class SimRunner:
             )
             for action in action_chunk:
                 obs, _, done, truncated, info = env.step(action)
-                if self.hand_history is not None:
-                    from dexmani_policy.agents.hand_prior.motion_prior import append_hand_history
-
-                    self.hand_history = append_hand_history(
-                        self.hand_history, info["executed_joint_action"][-self.hand_history.shape[-1]:],
-                    )
                 self.update_obs(obs)
 
                 if info["success_condition"] and task_done_step is None:

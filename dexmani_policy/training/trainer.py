@@ -26,6 +26,7 @@ from dexmani_policy.training.common.logging import (
 )
 from dexmani_policy.training.common.optimization import build_optimizer, build_scheduler
 from dexmani_policy.training.common.resume import archive_resume_milestones
+from dexmani_policy.training.common.signals import training_signal_handlers
 
 
 class PolicyTrainer:
@@ -94,7 +95,7 @@ class PolicyTrainer:
         self.optimizer = build_optimizer(model, **cfg.optimizer)
         self.scheduler = build_scheduler(
             self.optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
-            cfg.training.loop.total_train_steps, cfg.training.get("lr_min_ratio", 0.1),
+            cfg.training.loop.total_train_steps,
         )
         self.cfg = assemble_effective_config(cfg, data_description, model, checkpoint=checkpoint)
         self.total_train_steps = cfg.training.loop.total_train_steps
@@ -108,10 +109,10 @@ class PolicyTrainer:
         if checkpoint is not None:
             groups, saved = self.optimizer.param_groups, checkpoint.optimizer_state["param_groups"]
             if len(groups) != len(saved) or any(
-                a["param_names"] != b["param_names"] or a.get("clip_group") != b.get("clip_group")
+                a["param_names"] != b["param_names"]
                 for a, b in zip(groups, saved)
             ):
-                raise ValueError("Optimizer parameter or clipping groups changed")
+                raise ValueError("Optimizer parameter groups changed")
             self.optimizer.load_state_dict(checkpoint.optimizer_state)
             self.scheduler.load_state_dict(checkpoint.scheduler_state)
             if ema_updater is not None:
@@ -123,9 +124,9 @@ class PolicyTrainer:
             if self.global_step > self.total_train_steps:
                 raise ValueError("Checkpoint global_step exceeds the training budget")
 
-        self.clip_groups: dict[str | None, list[torch.nn.Parameter]] = {}
-        for group in self.optimizer.param_groups:
-            self.clip_groups.setdefault(group.get("clip_group"), []).extend(group["params"])
+        self.trainable_parameters = [
+            param for group in self.optimizer.param_groups for param in group["params"]
+        ]
         self.last_grad_norm = self.last_clip_ratio = None
         self.stop_requested = False
         self.step_pbar = None
@@ -162,11 +163,9 @@ class PolicyTrainer:
 
     def optimizer_step(self):
         if self.max_grad_norm > 0:
-            norms = [
-                torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm, error_if_nonfinite=True)
-                for params in self.clip_groups.values()
-            ]
-            self.last_grad_norm = torch.stack(norms).max().detach()
+            self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.trainable_parameters, self.max_grad_norm, error_if_nonfinite=True
+            ).detach()
             self.last_clip_ratio = self.last_grad_norm / self.max_grad_norm
         else:
             finite = [
@@ -292,106 +291,101 @@ class PolicyTrainer:
             self.ema_model.eval()
 
         self.stop_requested = False
-        prev_sigint = signal.signal(signal.SIGINT, self.signal_handler)
-        prev_sigterm = signal.signal(signal.SIGTERM, self.signal_handler)
+        with training_signal_handlers(self.signal_handler):
+            self.step_pbar = tqdm(
+                initial=self.global_step,
+                total=self.total_train_steps,
+                desc="Steps",
+                position=0,
+                mininterval=5.0,
+                miniters=1,
+            )
 
-        self.step_pbar = tqdm(
-            initial=self.global_step,
-            total=self.total_train_steps,
-            desc="Steps",
-            position=0,
-            mininterval=5.0,
-            miniters=1,
-        )
+            iterator = None
+            try:
+                while self.global_step < stop_step:
+                    epoch, start_batch = epoch_position(
+                        self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
+                    )
+                    self.train_loader.batch_sampler.set_epoch(epoch, start_batch)
+                    self.model.train()
+                    self.optimizer.zero_grad(set_to_none=True)
 
-        iterator = None
-        try:
-            while self.global_step < stop_step:
-                epoch, start_batch = epoch_position(
-                    self.global_step, self.batches_per_epoch, self.gradient_accumulation_steps
-                )
-                self.train_loader.batch_sampler.set_epoch(epoch, start_batch)
-                self.model.train()
-                self.optimizer.zero_grad(set_to_none=True)
-
-                num_batches = self.batches_per_epoch
-                # Start before iterator creation, including the epoch's first data wait.
-                group_start_time = time.perf_counter()
-                iterator = iter(self.train_loader)
-                group_data_wait = time.perf_counter() - group_start_time
-                for group_start in range(
-                    start_batch, num_batches, self.gradient_accumulation_steps
-                ):
-                    self.current_epoch = epoch
-                    group_size = min(self.gradient_accumulation_steps, num_batches - group_start)
-                    record_group = (self.global_step + 1) % self.log_interval_steps == 0
-                    group_metric_sums: dict[str, torch.Tensor | float] = {}
-                    group_samples = 0
-                    for group_pos in range(group_size):
-                        data_wait_start = time.perf_counter()
-                        batch = next(iterator)
-                        group_data_wait += time.perf_counter() - data_wait_start
-                        group_samples += batch["action"].shape[0]
-                        log_dict = self.train_microbatch(
-                            batch, loss_divisor=group_size, log_metrics=record_group,
-                        )
-                        if record_group and group_pos + 1 < group_size:
-                            accumulate_metrics(group_metric_sums, log_dict)
-
-                    self.optimizer_step()
-                    group_elapsed = time.perf_counter() - group_start_time
-                    # Keep the final metric reduction outside the measured update.
-                    if record_group:
-                        accumulate_metrics(group_metric_sums, log_dict)
-                    self.global_step += 1
-                    if group_start + group_size == num_batches:
-                        self.current_epoch = epoch + 1
-                    if record_group:
-                        group_metrics = {
-                            key: value / group_size
-                            for key, value in group_metric_sums.items()
-                        }
-                        self.log_step(
-                            group_metrics, group_samples, group_elapsed, group_data_wait
-                        )
-
-                    pct = self.milestone_steps.get(self.global_step)
-                    if pct is not None:
-                        self.save_checkpoint(f"milestone={pct:02d}pct")
-                    if self.global_step >= stop_step or self.stop_requested:
-                        break
-                    # Exclude this update's logging/checkpoint work from the next one.
+                    num_batches = self.batches_per_epoch
+                    # Start before iterator creation, including the epoch's first data wait.
                     group_start_time = time.perf_counter()
-                    group_data_wait = 0.0
-                iterator = None
+                    iterator = iter(self.train_loader)
+                    group_data_wait = time.perf_counter() - group_start_time
+                    for group_start in range(
+                        start_batch, num_batches, self.gradient_accumulation_steps
+                    ):
+                        self.current_epoch = epoch
+                        group_size = min(self.gradient_accumulation_steps, num_batches - group_start)
+                        record_group = (self.global_step + 1) % self.log_interval_steps == 0
+                        group_metric_sums: dict[str, torch.Tensor | float] = {}
+                        group_samples = 0
+                        for group_pos in range(group_size):
+                            data_wait_start = time.perf_counter()
+                            batch = next(iterator)
+                            group_data_wait += time.perf_counter() - data_wait_start
+                            group_samples += batch["action"].shape[0]
+                            log_dict = self.train_microbatch(
+                                batch, loss_divisor=group_size, log_metrics=record_group,
+                            )
+                            if record_group and group_pos + 1 < group_size:
+                                accumulate_metrics(group_metric_sums, log_dict)
 
-                self.model.eval()
-                if self.stop_requested:
-                    break
+                        self.optimizer_step()
+                        group_elapsed = time.perf_counter() - group_start_time
+                        # Keep the final metric reduction outside the measured update.
+                        if record_group:
+                            accumulate_metrics(group_metric_sums, log_dict)
+                        self.global_step += 1
+                        if group_start + group_size == num_batches:
+                            self.current_epoch = epoch + 1
+                        if record_group:
+                            group_metrics = {
+                                key: value / group_size
+                                for key, value in group_metric_sums.items()
+                            }
+                            self.log_step(
+                                group_metrics, group_samples, group_elapsed, group_data_wait
+                            )
 
-            if self.stop_requested and self.global_step > 0:
-                print(
-                    f"Training interrupted at step {self.global_step}/{self.total_train_steps}",
-                    flush=True,
-                )
-                self.save_checkpoint("interrupt")
-            elif self.global_step < self.total_train_steps:
-                self.save_checkpoint("bounded")
-                print(f"Bounded run stopped at step {self.global_step}/{self.total_train_steps}")
+                        pct = self.milestone_steps.get(self.global_step)
+                        if pct is not None:
+                            self.save_checkpoint(f"milestone={pct:02d}pct")
+                        if self.global_step >= stop_step or self.stop_requested:
+                            break
+                        # Exclude this update's logging/checkpoint work from the next one.
+                        group_start_time = time.perf_counter()
+                        group_data_wait = 0.0
+                    iterator = None
 
-        finally:
-            callbacks = [
-                lambda: signal.signal(signal.SIGINT, prev_sigint),
-                lambda: signal.signal(signal.SIGTERM, prev_sigterm),
-            ]
+                    self.model.eval()
+                    if self.stop_requested:
+                        break
 
-            if iterator is not None:
-                callbacks.append(lambda: close_data_loader(self.train_loader, iterator))
-            if self.step_pbar is not None:
-                if self.step_pbar.n != self.global_step:
-                    # Show the actual stop step without metrics from an older step.
-                    self.step_pbar.set_postfix({}, refresh=False)
-                    self.step_pbar.n = self.global_step
-                callbacks.append(self.step_pbar.close)
+                if self.stop_requested and self.global_step > 0:
+                    print(
+                        f"Training interrupted at step {self.global_step}/{self.total_train_steps}",
+                        flush=True,
+                    )
+                    self.save_checkpoint("interrupt")
+                elif self.global_step < self.total_train_steps:
+                    self.save_checkpoint("bounded")
+                    print(f"Bounded run stopped at step {self.global_step}/{self.total_train_steps}")
 
-            close_resources(*callbacks)
+            finally:
+                callbacks = []
+
+                if iterator is not None:
+                    callbacks.append(lambda: close_data_loader(self.train_loader, iterator))
+                if self.step_pbar is not None:
+                    if self.step_pbar.n != self.global_step:
+                        # Show the actual stop step without metrics from an older step.
+                        self.step_pbar.set_postfix({}, refresh=False)
+                        self.step_pbar.n = self.global_step
+                    callbacks.append(self.step_pbar.close)
+
+                close_resources(*callbacks)

@@ -1,8 +1,0 @@
-# @package _global_
-defaults:
-  - /lamp
-  - _self_
-
-# Module pretraining keeps its own data range; a shared manifest is explicit.
-dataset:
-  max_train_episodes: null

@@ -7,8 +7,9 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from dexmani_policy.agents.modules import build_mlp
+
 from .ops import index_points, sample_point_patches, load_pointcloud_ops
-from .pointnet import build_mlp
 
 logger = logging.getLogger(__name__)
 

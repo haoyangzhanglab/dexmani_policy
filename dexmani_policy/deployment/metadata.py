@@ -25,7 +25,6 @@ class PolicyInfo:
     rgb_preprocessing: dict
     pc_dim: int | None
     supported_execution_modes: tuple[str, ...]
-    action_context_shapes: dict
     control_dt_s: float | None
     depth_config: dict | None
     pointcloud_config: dict | None
@@ -37,17 +36,11 @@ class PolicyInfo:
     def future_steps(self) -> int:
         return self.horizon - self.action_start_index
 
-    @property
-    def hand_history_steps(self):
-        shape = self.action_context_shapes.get("hand_history")
-        return shape[0] if shape is not None else None
-
     def to_dict(self):
         result = {item.name: getattr(self, item.name) for item in fields(self)}
         result["experiment_dir"] = str(self.experiment_dir)
         result["checkpoint_path"] = str(self.checkpoint_path)
         result["future_steps"] = self.future_steps
-        result["hand_history_steps"] = self.hand_history_steps
         return result
 
 
@@ -87,7 +80,6 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         rgb_preprocessing=rgb_preprocessing_kwargs(dataset),
         pc_dim=dataset.get("pc_dim"),
         supported_execution_modes=tuple(metadata["supported_execution_modes"]),
-        action_context_shapes=metadata["action_context_shapes"],
         control_dt_s=deployment.get("control_dt_s"),
         depth_config=deployment.get("depth_config"),
         pointcloud_config=deployment.get("pointcloud_config"),

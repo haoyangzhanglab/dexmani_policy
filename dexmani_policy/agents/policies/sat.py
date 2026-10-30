@@ -77,7 +77,6 @@ class SATPolicy(BasePolicy):
 
     @classmethod
     def prepare_restore_config(cls, config) -> None:
-        rgb = config.get("rgb_backbone_config")
-        if rgb is None or rgb.get("architecture") is None:
-            raise ValueError("Dense checkpoints require saved DINO architecture for offline restoration")
-        rgb["load_pretrained"] = False
+        config["rgb_backbone_config"] = SpatialObservationEncoder.prepare_rgb_restore_config(
+            config.get("rgb_backbone_config")
+        )

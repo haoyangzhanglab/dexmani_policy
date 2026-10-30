@@ -2,7 +2,6 @@
 # Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
 # Source: train_policy/policy/CordViP/CordViP/CordViP/policy/CordViP_pretrain.py
 
-import signal
 import time
 
 import hydra
@@ -13,7 +12,7 @@ from torch.nn import functional as F
 from dexmani_policy.agents.obs_encoder.interaction.correspondence.contact_coordination_encoder import (
     ContactCoordinationEncoder,
 )
-from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import build_mlp
+from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.common.config import positive_int, read_split_manifest
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
@@ -21,6 +20,7 @@ from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
+from dexmani_policy.training.common.signals import training_signal_handlers
 from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, restore_run, save_run
 
 
@@ -31,14 +31,17 @@ class CordViPPretrain(nn.Module):
         self.n_obs_steps = n_obs_steps
         shapes = {'hand_pointcloud': (3,), 'object_pointcloud': (3,), 'joint_state': (19,)}
         self.normalizer = LinearNormalizer({key: shape for key, shape in shapes.items() if normalization[key] != 'identity'})
+        robot_dim, object_dim, hand_dim, arm_dim = self.obs_encoder.output_dims
+        visual_dim = robot_dim + object_dim
+        # The pretraining recipe cross-conditions arm and hand prediction.
         self.linear_layer_pred_arm = build_mlp(
-            [n_obs_steps * 2112, 512, 256, 64, 7], activation=nn.ReLU, normalize=False,
+            [n_obs_steps * (visual_dim + hand_dim), 512, 256, 64, 7], activation=nn.ReLU, normalize=False,
         )
         self.linear_layer_pred_hand = build_mlp(
-            [n_obs_steps * 2112, 512, 256, 64, 12], activation=nn.ReLU, normalize=False,
+            [n_obs_steps * (visual_dim + arm_dim), 512, 256, 64, 12], activation=nn.ReLU, normalize=False,
         )
         self.predict_contact_map = build_mlp(
-            [2048, 2048, 1024, 1024, 1024], activation=nn.ReLU, normalize=False,
+            [visual_dim, 2048, 1024, 1024, 1024], activation=nn.ReLU, normalize=False,
         )
         self.contact_loss_weight = contact_loss_weight
         self.arm_loss_weight = arm_loss_weight
@@ -100,86 +103,84 @@ def train(cfg, checkpoint=None, max_updates=None):
         nonlocal stop_requested
         stop_requested = True
 
-    previous = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
     iterator = None
-    try:
-        logger.save_config(cfg)
-        while step < stop_step and not stop_requested:
-            epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
-            loader.batch_sampler.set_epoch(epoch, start_batch)
-            model.train()
-            current_epoch = epoch
-            step_start = time.perf_counter()
-            iterator = iter(loader)
-            data_wait = time.perf_counter() - step_start
-            for group_start in range(start_batch, batches_per_epoch, accumulation):
-                group_size = min(accumulation, batches_per_epoch - group_start)
-                record = (
-                    step == 0
-                    or (step + 1) % cfg.training.loop.log_interval_steps == 0
-                    or step + 1 == stop_step
-                )
-                totals: dict[str, torch.Tensor] = {}
-                optimizer.zero_grad(set_to_none=True)
-                for _ in range(group_size):
-                    data_wait_start = time.perf_counter()
-                    batch = next(iterator)
-                    data_wait += time.perf_counter() - data_wait_start
-                    batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
-                    loss, metrics = model(batch)
-                    if not torch.isfinite(loss):
-                        raise RuntimeError(f'Nonfinite CordViP loss at step {step}')
-                    (loss / group_size).backward()
-                    if record:
-                        accumulate_metrics(totals, metrics)
-                gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
-                if not torch.stack(gradients).all():
-                    raise RuntimeError(f'Nonfinite CordViP gradient at step {step}')
-                optimizer.step()
-                scheduler.step()
-                elapsed = time.perf_counter() - step_start
-                step += 1
-                if group_start + group_size == batches_per_epoch:
-                    epoch = current_epoch + 1
-                if record:
-                    logger.log(
-                        to_log_scalars(
-                            {'train/' + key: value / group_size for key, value in totals.items()}
-                            | {
-                                'train/lr': scheduler.get_last_lr()[0],
-                                'train/epoch': current_epoch,
-                                'train/step_time': elapsed,
-                                'train/data_wait_time': data_wait,
-                            }
-                        ),
-                        step,
-                    )
-                if step >= stop_step or stop_requested:
-                    break
-                if step % cfg.training.save_every_updates == 0:
-                    save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+    with training_signal_handlers(request_stop):
+        try:
+            logger.save_config(cfg)
+            while step < stop_step and not stop_requested:
+                epoch, start_batch = epoch_position(step, batches_per_epoch, accumulation)
+                loader.batch_sampler.set_epoch(epoch, start_batch)
+                model.train()
+                current_epoch = epoch
                 step_start = time.perf_counter()
-                data_wait = 0.0
-            iterator = None
-            if stop_requested:
-                break
-            if (
-                epoch > current_epoch
-                and epoch % cfg.training.val_every_epochs == 0
-                and validation is not None
-            ):
-                metrics = evaluate(
-                    model, validation, cfg.dataloader.batch_size, cfg.training.device,
-                    stop_requested=lambda: stop_requested,
-                )
-                if metrics is not None:
-                    logger.log(to_log_scalars(metrics), step)
-        save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
-        print(f'[CordViP] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}')
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
-        close_resources(lambda: close_data_loader(loader, iterator), logger.close)
+                iterator = iter(loader)
+                data_wait = time.perf_counter() - step_start
+                for group_start in range(start_batch, batches_per_epoch, accumulation):
+                    group_size = min(accumulation, batches_per_epoch - group_start)
+                    record = (
+                        step == 0
+                        or (step + 1) % cfg.training.loop.log_interval_steps == 0
+                        or step + 1 == stop_step
+                    )
+                    totals: dict[str, torch.Tensor] = {}
+                    optimizer.zero_grad(set_to_none=True)
+                    for _ in range(group_size):
+                        data_wait_start = time.perf_counter()
+                        batch = next(iterator)
+                        data_wait += time.perf_counter() - data_wait_start
+                        batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
+                        loss, metrics = model(batch)
+                        if not torch.isfinite(loss):
+                            raise RuntimeError(f'Nonfinite CordViP loss at step {step}')
+                        (loss / group_size).backward()
+                        if record:
+                            accumulate_metrics(totals, metrics)
+                    gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
+                    if not torch.stack(gradients).all():
+                        raise RuntimeError(f'Nonfinite CordViP gradient at step {step}')
+                    optimizer.step()
+                    scheduler.step()
+                    elapsed = time.perf_counter() - step_start
+                    step += 1
+                    if group_start + group_size == batches_per_epoch:
+                        epoch = current_epoch + 1
+                    if record:
+                        logger.log(
+                            to_log_scalars(
+                                {'train/' + key: value / group_size for key, value in totals.items()}
+                                | {
+                                    'train/lr': scheduler.get_last_lr()[0],
+                                    'train/epoch': current_epoch,
+                                    'train/step_time': elapsed,
+                                    'train/data_wait_time': data_wait,
+                                }
+                            ),
+                            step,
+                        )
+                    if step >= stop_step or stop_requested:
+                        break
+                    if step % cfg.training.save_every_updates == 0:
+                        save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+                    step_start = time.perf_counter()
+                    data_wait = 0.0
+                iterator = None
+                if stop_requested:
+                    break
+                if (
+                    epoch > current_epoch
+                    and epoch % cfg.training.val_every_epochs == 0
+                    and validation is not None
+                ):
+                    metrics = evaluate(
+                        model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                        stop_requested=lambda: stop_requested,
+                    )
+                    if metrics is not None:
+                        logger.log(to_log_scalars(metrics), step)
+            save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
+            print(f'[CordViP] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}')
+        finally:
+            close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 
 
 def main():

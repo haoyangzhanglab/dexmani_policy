@@ -22,6 +22,12 @@ class SpatialObservationEncoder(nn.Module):
     out_dim = 256
 
     @staticmethod
+    def prepare_rgb_restore_config(rgb):
+        if rgb is None or rgb.get("architecture") is None:
+            raise ValueError("Dense checkpoints require saved DINO architecture for offline restoration")
+        return {**rgb, "load_pretrained": False}
+
+    @staticmethod
     def validate_normalization(spec: dict[str, str]) -> None:
         Sparse3DEncoder.validate_normalization(spec)
         if spec.get("joint_state") != "limits":
@@ -102,7 +108,7 @@ class SpatialObservationEncoder(nn.Module):
         projection = project_points(
             points[..., :3], obs["camera_intrinsic"].reshape(-1, 1, 3, 3),
             obs["camera_extrinsic"].reshape(-1, 1, 3, 4),
-            image_transform[:, None], rgb.shape[-2:],
+            image_transform[:, None], (rgb.shape[-2], rgb.shape[-1]),
         )
 
         member_weight = None

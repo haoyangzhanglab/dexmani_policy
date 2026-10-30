@@ -81,20 +81,6 @@ class PolicyRuntime:
 
         return tensors
 
-    def _prepare_action_context(self, action_context):
-        if action_context is None:
-            return {}
-        shapes = self.info.action_context_shapes
-        if not isinstance(action_context, dict) or set(action_context) - shapes.keys():
-            raise ValueError("Unsupported action_context fields")
-        context = {}
-        for name, value in action_context.items():
-            value = np.asarray(value)
-            if value.shape != tuple(shapes[name]) or value.dtype.kind not in "fiu":
-                raise ValueError(f"Invalid physical action_context.{name}")
-            context[name] = self._prepare_numeric_tensor(value, f"physical action_context.{name}")
-        return context
-
     def _prepare_rtc(self, rtc_prefix, delay_steps, rtc_guidance_cap):
         if rtc_prefix is None:
             if delay_steps:
@@ -114,14 +100,11 @@ class PolicyRuntime:
             rtc_guidance_cap=rtc_guidance_cap,
         )
 
-    def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
+    def predict(self, observation, *, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
         import torch
 
         tensors = self.prepare_observations(observation)
-        context = self._prepare_action_context(action_context)
         kwargs = self._prepare_rtc(rtc_prefix, delay_steps, rtc_guidance_cap)
-        if context:
-            kwargs["action_context"] = context
 
         with torch.inference_mode():
             result = self.agent.predict_action(
@@ -132,7 +115,7 @@ class PolicyRuntime:
         prediction = result["future_actions"][0].to(device="cpu", dtype=torch.float64).numpy()
         return np.ascontiguousarray(prediction)
 
-    def warmup(self, observation, *, samples=5, action_context=None, rtc_delay=0, rtc_guidance_cap=None):
+    def warmup(self, observation, *, samples=5, rtc_delay=0, rtc_guidance_cap=None):
         positive_int(samples, "samples")
         future_steps = self.info.future_steps
         if type(rtc_delay) is not int or not 0 <= rtc_delay <= future_steps:
@@ -142,19 +125,19 @@ class PolicyRuntime:
             durations = []
             for _ in range(samples):
                 start = time.perf_counter_ns()
-                self.predict(observation, action_context=action_context, **kwargs)
+                self.predict(observation, **kwargs)
                 durations.append((time.perf_counter_ns() - start) / 1e9)
             return tuple(durations)
 
         generator_state = self.generator.get_state()
         try:
             # Exclude initialization and reuse its physical prediction for RTC warmup.
-            prefix = self.predict(observation, action_context=action_context)
+            prefix = self.predict(observation)
             bootstrap = measure()
             steady = bootstrap
             if rtc_guidance_cap is not None:
                 kwargs = dict(rtc_prefix=prefix, delay_steps=rtc_delay, rtc_guidance_cap=rtc_guidance_cap)
-                self.predict(observation, action_context=action_context, **kwargs)
+                self.predict(observation, **kwargs)
                 steady = measure(**kwargs)
             return {"bootstrap": bootstrap, "steady": steady}
         finally:

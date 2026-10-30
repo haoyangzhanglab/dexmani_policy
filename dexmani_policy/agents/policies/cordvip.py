@@ -20,6 +20,10 @@ class CordViPObservationEncoder(nn.Module):
         self.encoder = ContactCoordinationEncoder()
         self.n_obs_steps = n_obs_steps
 
+    @property
+    def out_dim(self) -> int:
+        return self.encoder.out_dim
+
     def forward(self, obs):
         sequence = {
             key: (value[..., :3] if key in POINT_CLOUD_FIELDS else value).unflatten(0, (-1, self.n_obs_steps))
@@ -42,7 +46,7 @@ class CordViPPolicy(BasePolicy):
         validate_unet_horizon(horizon, down_dims)
         obs_encoder = CordViPObservationEncoder(n_obs_steps)
         backbone = ConditionalUNet1D(
-            action_dim, n_obs_steps * 2176, diffusion_step_embed_dim,
+            action_dim, n_obs_steps * obs_encoder.out_dim, diffusion_step_embed_dim,
             down_dims, kernel_size, n_groups, cond_predict_scale,
         )
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)

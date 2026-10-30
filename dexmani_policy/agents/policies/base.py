@@ -45,7 +45,6 @@ def module_parameter_group(module: nn.Module, *, lr: float, weight_decay: float)
 class BasePolicy(nn.Module):
     """Shared observation preprocessing, training and action-window interfaces."""
 
-    future_action_window = False
     supported_action_keys: tuple[str, ...] = ("action", "action_ee")
 
     def __init__(
@@ -61,7 +60,7 @@ class BasePolicy(nn.Module):
         super().__init__()
         validate_action_window(
             horizon, n_obs_steps, n_action_steps,
-            action_start_index=0 if self.future_action_window else n_obs_steps - 1,
+            action_start_index=n_obs_steps - 1,
         )
         positive_int(action_dim, "action_dim")
         self.obs_encoder = obs_encoder
@@ -84,7 +83,7 @@ class BasePolicy(nn.Module):
 
     @property
     def action_start_index(self) -> int:
-        return 0 if self.future_action_window else self.n_obs_steps - 1
+        return self.n_obs_steps - 1
 
     @property
     def future_steps(self) -> int:
@@ -245,16 +244,11 @@ class BasePolicy(nn.Module):
         return {"future_actions": prediction[:, self.action_start_index :, : self.control_action_dim]}
 
     @property
-    def action_context_shapes(self) -> dict:
-        return {}
-
-    @property
     def inference_metadata(self) -> dict:
         return {
             "action_start_index": self.action_start_index,
             "control_action_dim": self.control_action_dim,
             "supported_execution_modes": list(self.supported_execution_modes),
-            "action_context_shapes": self.action_context_shapes,
         }
 
     def compile_backbone(self, **compile_kwargs: Any) -> None:

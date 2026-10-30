@@ -9,6 +9,8 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from dexmani_policy.agents.hand_prior.codebook import codebook_distances
+from dexmani_policy.agents.modules import build_mlp
 from dexmani_policy.common.config import positive_int
 
 
@@ -31,9 +33,7 @@ def sample_vectors(samples: Tensor, count: int) -> Tensor:
 def kmeans(samples: Tensor, num_clusters: int, num_iters: int) -> tuple[Tensor, Tensor]:
     means = sample_vectors(samples, num_clusters)
     for _ in range(num_iters):
-        indices = torch.cdist(
-            samples, means, compute_mode="donot_use_mm_for_euclid_dist",
-        ).argmin(-1)
+        indices = codebook_distances(samples, means).argmin(-1)
         counts = samples.new_zeros(num_clusters).scatter_add_(
             0, indices, samples.new_ones(len(samples)),
         )
@@ -47,11 +47,10 @@ class HandStateMLP(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, hidden_dim: int, num_layers: int) -> None:
         super().__init__()
         positive_int(num_layers, "num_layers")
-        layers: list[nn.Module] = []
-        for _ in range(num_layers):
-            layers.extend((nn.Linear(input_dim, hidden_dim), nn.ReLU()))
-            input_dim = hidden_dim
-        self.trunk = nn.Sequential(*layers)
+        self.trunk = build_mlp(
+            [input_dim] + [hidden_dim] * num_layers,
+            activation=nn.ReLU, normalize=False, activate_last=True,
+        )
         self.head = nn.Linear(hidden_dim, output_dim)
         self.apply(orthogonal_init)
 
@@ -134,10 +133,7 @@ class EMAVectorQuantizer(nn.Module):
                     raise RuntimeError("Initialize the codebook in training before evaluation")
                 self.initialize(samples)
 
-            # Direct differences preserve the nearest index for nearly coincident codes.
-            distances = torch.cdist(
-                samples, self.embed, compute_mode="donot_use_mm_for_euclid_dist",
-            )
+            distances = codebook_distances(samples, self.embed)
             indices = distances.argmin(-1)
             quantized = F.embedding(indices, self.embed).reshape_as(x)
             commitment = F.mse_loss(quantized.detach(), x.float())

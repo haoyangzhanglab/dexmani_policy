@@ -38,8 +38,6 @@ def validate_config(cfg):
         if cfg.agent[name] != cfg[name]:
             raise ValueError(f"agent.{name} must match {name}")
     dataset = cfg.dataset
-    if "history_steps" in cfg.agent and dataset.get("history_steps") != cfg.agent.history_steps:
-        raise ValueError("Dataset/policy history_steps must match")
     if "n_action_steps" in dataset and dataset.n_action_steps != cfg.n_action_steps:
         raise ValueError("dataset.n_action_steps must match n_action_steps")
     if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
@@ -70,29 +68,20 @@ def validate_config(cfg):
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     metadata = model.inference_metadata
     if checkpoint is not None:
-        for key, actual in (
-            ("normalization_dims", data_description["normalization_dims"]),
-            ("hand_data", data_description.get("hand_data")),
-        ):
-            saved = checkpoint.effective_config.get(key)
-            if saved != actual:
-                raise ValueError(f"Resume data/model mismatch: {key}")
-        for key in ("action_start_index", "control_action_dim", "action_context_shapes"):
+        if checkpoint.effective_config["normalization_dims"] != data_description["normalization_dims"]:
+            raise ValueError("Resume data/model mismatch: normalization_dims")
+        for key in ("action_start_index", "control_action_dim"):
             if checkpoint.effective_config["policy_metadata"][key] != metadata[key]:
                 raise ValueError(f"Resume data/model mismatch: policy_metadata.{key}")
 
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
-        for key in ("normalization_dims", "hand_data"):
-            if key in data_description:
-                effective[key] = data_description[key]
+        effective.normalization_dims = data_description["normalization_dims"]
         effective.dataset.split_manifest = data_description["split_manifest"]
         effective.policy_metadata = metadata
         effective.deployment_metadata = data_description["deployment_metadata"]
         if checkpoint is None:
             effective.agent.update(model.effective_config)
-        if effective.training.lr_scheduler == "cosine_min_lr":
-            effective.training.lr_min_ratio = effective.training.get("lr_min_ratio", 0.1)
     OmegaConf.resolve(effective)
     OmegaConf.set_readonly(effective, True)
     return effective

@@ -8,10 +8,10 @@ import torch
 
 from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
 from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
+from dexmani_policy.agents.hand_prior.artifacts import load_codebook
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_hand_coordinates
 from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
 from dexmani_policy.agents.policies.base import BasePolicy
-from dexmani_policy.common.hand_semantics import validate_hand_coordinates, validate_pretraining_split
 
 
 class DQRISEPolicy(BasePolicy):
@@ -103,23 +103,20 @@ class DQRISEPolicy(BasePolicy):
 
     @classmethod
     def prepare_restore_config(cls, config) -> None:
-        rgb = config.get("rgb_backbone_config")
-        if rgb is None or rgb.get("architecture") is None:
-            raise ValueError("Dense checkpoints require saved DINO architecture for offline restoration")
-        rgb["load_pretrained"] = False
+        config["rgb_backbone_config"] = SpatialObservationEncoder.prepare_rgb_restore_config(
+            config.get("rgb_backbone_config")
+        )
         config["codebook_path"] = None
 
     def initialize_training(self, data_description) -> None:
         if self.codebook_path is None:
             raise ValueError("Fresh DQ-RISE training requires codebook_path")
         validate_hand_coordinates(data_description["attrs"])
-        self.hand_codebook.load(self.codebook_path)
-        metadata = self.hand_codebook.artifact_metadata
+        metadata = load_codebook(self.codebook_path, self.hand_codebook)
         if data_description["action_key"] != "action" or metadata["hand_data"]["action_key"] != "action":
             raise ValueError("DQ-RISE requires joint policy data and a codebook pretrained with action_key=action")
-        validate_pretraining_split(
-            data_description["split_manifest"], metadata["split_manifest"],
-        )
+        if data_description["split_manifest"] != metadata["split_manifest"]:
+            raise ValueError("Pretraining/policy split mismatch")
 
     def validate_restored_codebook(self, module: torch.nn.Module, incompatible_keys) -> None:
         self.validate_codebook_normalizer()

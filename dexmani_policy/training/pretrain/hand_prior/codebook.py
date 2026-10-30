@@ -6,9 +6,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, validate_dq_normalization
+from dexmani_policy.agents.hand_prior.artifacts import save_codebook
+from dexmani_policy.agents.hand_prior.codebook import (
+    HandStateCodebook, codebook_chunk_size, validate_dq_normalization,
+)
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import positive_int
 from dexmani_policy.common.io_util import atomic_path
 
 
@@ -33,7 +35,7 @@ def build_hand_prototypes(model: HandVQVAE) -> tuple[torch.Tensor, torch.Tensor]
 
 
 @torch.no_grad()
-def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=False) -> HandStateCodebook:
+def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=False) -> tuple[HandStateCodebook, dict]:
     """Decode and order the selected VQ checkpoint, then publish its runtime table."""
     output = Path(output_path)
     if output.suffix != ".npz":
@@ -74,7 +76,7 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
         "max_violation": float((decoded.abs() - 1).clamp_min(0).max()),
         "pca_explained_variance_ratio": variance_ratio,
     }
-    codebook.artifact_metadata = {
+    metadata = {
         "model_config": checkpoint["model_config"],
         "hand_data": split["hand_data"],
         "split_manifest": split["split_manifest"],
@@ -99,20 +101,19 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
         warnings.warn(f"Decoded hand states were clamped to [-1, 1]: {diagnostics}", RuntimeWarning)
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output, overwrite=overwrite) as temporary:
-        codebook.save(temporary)
-    return codebook
+        save_codebook(temporary, codebook, metadata)
+    return codebook, metadata
 
 
 @torch.no_grad()
-def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
+def deployment_diagnostics(codebook, splits, *, metadata, chunk_size=4096):
     """Measure actual lookup errors in normalized and physical hand coordinates."""
-    positive_int(chunk_size, "chunk_size")
+    chunk_size = codebook_chunk_size(codebook.num_codes, chunk_size)
     device, width = codebook.sorted_hand_poses.device, codebook.hand_dim
-    chunk_size = min(chunk_size, max(1, (16 * 1024 * 1024) // (codebook.num_codes * 4)))
     report = {
         "distance_space": "HandStateCodebook normalized squared Euclidean",
-        "source_checkpoint": codebook.artifact_metadata["source_checkpoint"],
-        "selection": codebook.artifact_metadata["selection"],
+        "source_checkpoint": metadata["source_checkpoint"],
+        "selection": metadata["selection"],
         "splits": {},
     }
     scale = codebook.hand_normalizer_scale.cpu().double()

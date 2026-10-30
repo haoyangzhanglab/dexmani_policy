@@ -14,14 +14,13 @@ from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
 from dexmani_policy.agents.action_decoders.backbones.sat import SAT
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
+from dexmani_policy.agents.hand_prior.artifacts import load_codebook
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
-from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
 from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.dp3 import DP3Policy
 from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
-from dexmani_policy.common.hand_semantics import HAND_ACTION_SEMANTICS
 from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.codebook import deployment_diagnostics, export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
@@ -258,8 +257,14 @@ def check_codebook_pipeline(device):
             split_metadata=dict(normalization_spec={"action": "auto"}, hand_data={"action_key": "action"},
                                 split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
         ), checkpoint)
-        table = export_codebook(checkpoint, artifact)
-        report = deployment_diagnostics(table, {"validation": rows.numpy()}, chunk_size=5)
+        table, metadata = export_codebook(checkpoint, artifact)
+        loaded_table = HandStateCodebook(
+            model.hand_dim, num_groups=model.num_groups, codebook_size=model.codebook_size,
+        )
+        assert load_codebook(artifact, loaded_table) == metadata
+        for name, value in table.state_dict().items():
+            torch.testing.assert_close(value, loaded_table.state_dict()[name], rtol=0, atol=0)
+        report = deployment_diagnostics(table, {"validation": rows.numpy()}, metadata=metadata, chunk_size=5)
         torch.testing.assert_close(torch.tensor(metrics["lookup_mse"]),
                                    torch.tensor(report["splits"]["validation"]["lookup_mse"]), rtol=1e-5, atol=1e-7)
         assert sum(report["splits"]["validation"]["prototype_counts"]) == len(rows)
@@ -285,7 +290,8 @@ def check_codebook_pipeline(device):
             spec, dims, action_key="action",
         )
         policy.initialize_training(dict(
-            attrs=dict(hand_joint_order=HAND_ACTION_SEMANTICS["joint_order"][1:], hand_units="radians"),
+            attrs=dict(hand_joint_order=["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
+                       hand_units="radians"),
             action_key="action", split_manifest=manifest,
         ))
         policy.to(device)
@@ -374,12 +380,6 @@ def check_policies(device):
         opt.step()
     for value, replay in zip(policy.state_dict().values(), restored.state_dict().values()):
         torch.testing.assert_close(value, replay, rtol=0, atol=0)
-
-    codec = HandVAE(horizon=4, latent_dim=3, hidden_dim=16, n_layers=1, n_heads=4).to(device).freeze()
-    latent = torch.randn(2, 4, 3, device=device, requires_grad=True)
-    codec.decode(latent, torch.randn(2, 12, device=device)).square().mean().backward()
-    assert latent.grad is not None and latent.grad.abs().sum() > 0
-    assert all(p.grad is None for p in codec.parameters())
 
 
 def main():

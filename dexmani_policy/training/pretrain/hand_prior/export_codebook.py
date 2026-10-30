@@ -15,10 +15,10 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
-    codebook = export_codebook(args.checkpoint, args.output, device=args.device, overwrite=args.overwrite)
+    codebook, metadata = export_codebook(args.checkpoint, args.output, device=args.device, overwrite=args.overwrite)
     print(f"Exported {codebook.num_codes} hand states to {args.output}")
     print("Layer weights:", codebook.layer_weights.tolist())
-    print(json.dumps(codebook.artifact_metadata["export_diagnostics"], indent=2))
+    print(json.dumps(metadata["export_diagnostics"], indent=2))
 
 
 if __name__ == "__main__":

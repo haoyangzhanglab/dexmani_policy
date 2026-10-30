@@ -2,21 +2,41 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
-from pathlib import Path
 
-import numpy as np
 import torch
 from torch import Tensor, nn
 
 from dexmani_policy.common.config import positive_int
 
 
+def validate_hand_coordinates(attrs):
+    order = ["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"]
+    if (
+        attrs.get("hand_joint_order", order) != order
+        or attrs.get("hand_units", "radians") != "radians"
+    ):
+        raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
+
+
 def validate_dq_normalization(spec):
     """DQ/VQ hand prototypes require the existing bounded action coordinates."""
     if spec.get("action") not in {"auto", "limits"}:
         raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
+
+
+def codebook_chunk_size(num_codes: int, requested: int) -> int:
+    """Budget 16 MiB for an FP32 distance matrix, always allowing at least one row."""
+    positive_int(requested, "chunk_size")
+    return min(requested, max(1, (16 * 1024 * 1024) // (num_codes * 4)))
+
+
+def codebook_distances(values: Tensor, prototypes: Tensor) -> Tensor:
+    """Direct FP32 distances preserve nearest indices for nearly coincident poses."""
+    with torch.autocast(device_type=values.device.type, enabled=False):
+        return torch.cdist(
+            values.float(), prototypes.float(), compute_mode="donot_use_mm_for_euclid_dist",
+        )
 
 
 class HandStateCodebook(nn.Module):
@@ -45,7 +65,6 @@ class HandStateCodebook(nn.Module):
         self.register_buffer("layer_weights", torch.empty(0))
         self.register_buffer("hand_normalizer_scale", torch.empty(0))
         self.register_buffer("hand_normalizer_offset", torch.empty(0))
-        self.artifact_metadata: dict = {}
 
     @property
     def num_codes(self) -> int:
@@ -129,11 +148,7 @@ class HandStateCodebook(nn.Module):
         hand = hand.float()
         if not torch.isfinite(hand).all():
             raise ValueError("Hand states must be finite before encoding")
-        with torch.autocast(device_type=hand.device.type, enabled=False):
-            distances = torch.cdist(
-                hand.reshape(-1, self.hand_dim), self.sorted_hand_poses.float(),
-                compute_mode="donot_use_mm_for_euclid_dist",
-            )
+        distances = codebook_distances(hand.reshape(-1, self.hand_dim), self.sorted_hand_poses)
         indices = distances.argmin(-1).reshape(hand.shape[:-1])
         continuous = indices.float() / max(self.num_codes - 1, 1) * 2.0 - 1.0
         return continuous.unsqueeze(-1), indices
@@ -145,36 +160,6 @@ class HandStateCodebook(nn.Module):
         scaled = (continuous.clamp(-1.0, 1.0) + 1.0) * 0.5 * (self.num_codes - 1)
         indices = torch.floor(scaled + 0.5).long().clamp(0, self.num_codes - 1)
         return self.sorted_hand_poses[indices], indices
-
-    def save(self, path: str | Path) -> None:
-        values = self.prepare_buffers({name: getattr(self, name) for name in self.BUFFER_NAMES})
-        payload = {name: value.cpu().numpy() for name, value in values.items()}
-        metadata = json.dumps(self.artifact_metadata, sort_keys=True, allow_nan=False)
-        payload.update(
-            pose_space=np.asarray("normalized"),
-            hand_dim=np.asarray(self.hand_dim),
-            num_groups=np.asarray(self.num_groups),
-            codebook_size=np.asarray(self.codebook_size),
-            metadata_json=np.asarray(metadata),
-        )
-        # An open file prevents NumPy from silently appending a second suffix.
-        with open(path, "wb") as file:
-            np.savez(file, **payload)
-
-    def load(self, path: str | Path) -> None:
-        with np.load(Path(path).expanduser(), allow_pickle=False) as data:
-            if data["pose_space"].item() != "normalized":
-                raise ValueError("Hand codebook requires normalized poses; regenerate the codebook")
-            dimensions = tuple(
-                data[name].item()
-                for name in ("hand_dim", "num_groups", "codebook_size")
-            )
-            if dimensions != (self.hand_dim, self.num_groups, self.codebook_size):
-                raise ValueError(f"Hand codebook dimensions do not match Policy: {dimensions}")
-            values = {name: torch.from_numpy(data[name]) for name in self.BUFFER_NAMES}
-            metadata = json.loads(data["metadata_json"].item())
-        self.set_buffers(values)
-        self.artifact_metadata = metadata
 
     def extra_repr(self) -> str:
         return f"hand_dim={self.hand_dim}, num_codes={self.num_codes}, loaded={self.is_loaded}"

@@ -56,8 +56,6 @@ def build_dataset(cfg):
                 "depth_scale_m": buffer.attrs.get("depth_scale_m_per_unit"),
             }
     description["deployment_metadata"] = deployment
-    if hasattr(dataset, "hand_data"):
-        description["hand_data"] = dataset.hand_data
     print(f"[Dataset] {dataset.training_summary()}")
     return dataset, description
 

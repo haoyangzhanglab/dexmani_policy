@@ -2,7 +2,6 @@
 # Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
 # Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
 
-import signal
 import time
 
 import hydra
@@ -19,6 +18,7 @@ from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
+from dexmani_policy.training.common.signals import training_signal_handlers
 from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
 from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, restore_run, save_run
 
@@ -128,58 +128,56 @@ def train(cfg, checkpoint=None, max_updates=None):
         nonlocal stop_requested
         stop_requested = True
 
-    previous = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
-    try:
-        logger.save_config(cfg)
-        while step < stop_step and not stop_requested:
-            epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
-            loader.batch_sampler.set_epoch(epoch, start_batch)
-            model.train()
-            current_epoch = epoch
-            step_start = time.perf_counter()
-            for index, batch in enumerate(loader, start=start_batch):
-                data_wait = time.perf_counter() - step_start
-                batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
-                optimizer.zero_grad(set_to_none=True)
-                loss, metrics = model(batch)
-                if not torch.isfinite(loss):
-                    raise RuntimeError(f"Nonfinite AFRO loss at step {step}")
-                loss.backward()
-                gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
-                if not torch.stack(gradients).all():
-                    raise RuntimeError(f"Nonfinite AFRO gradient at step {step}")
-                model.update_teacher(current_epoch)
-                optimizer.step()
-                scheduler.step()
-                elapsed = time.perf_counter() - step_start
-                step += 1
-                if index + 1 == batches_per_epoch:
-                    epoch = current_epoch + 1
-                if step == 1 or step % cfg.training.loop.log_interval_steps == 0 or step == stop_step:
-                    logger.log(to_log_scalars({"train/" + key: value for key, value in metrics.items()}
-                                             | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch,
-                                                "train/step_time": elapsed, "train/data_wait_time": data_wait}), step)
-                if step >= stop_step or stop_requested:
-                    break
+    with training_signal_handlers(request_stop):
+        try:
+            logger.save_config(cfg)
+            while step < stop_step and not stop_requested:
+                epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
+                loader.batch_sampler.set_epoch(epoch, start_batch)
+                model.train()
+                current_epoch = epoch
                 step_start = time.perf_counter()
-            if stop_requested:
-                break
-            if epoch > current_epoch:
-                if epoch % cfg.training.val_every_epochs == 0 and validation is not None:
-                    metrics = evaluate(
-                        model, validation, cfg.dataloader.batch_size, cfg.training.device,
-                        stop_requested=lambda: stop_requested,
-                    )
-                    if metrics is not None:
-                        logger.log(to_log_scalars(metrics), step)
-                if epoch % cfg.training.save_every_epochs == 0 and step < stop_step and not stop_requested:
-                    save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
-        save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
-        print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
-        close_resources(lambda: close_data_loader(loader), logger.close)
+                for index, batch in enumerate(loader, start=start_batch):
+                    data_wait = time.perf_counter() - step_start
+                    batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
+                    optimizer.zero_grad(set_to_none=True)
+                    loss, metrics = model(batch)
+                    if not torch.isfinite(loss):
+                        raise RuntimeError(f"Nonfinite AFRO loss at step {step}")
+                    loss.backward()
+                    gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
+                    if not torch.stack(gradients).all():
+                        raise RuntimeError(f"Nonfinite AFRO gradient at step {step}")
+                    model.update_teacher(current_epoch)
+                    optimizer.step()
+                    scheduler.step()
+                    elapsed = time.perf_counter() - step_start
+                    step += 1
+                    if index + 1 == batches_per_epoch:
+                        epoch = current_epoch + 1
+                    if step == 1 or step % cfg.training.loop.log_interval_steps == 0 or step == stop_step:
+                        logger.log(to_log_scalars({"train/" + key: value for key, value in metrics.items()}
+                                                 | {"train/lr": scheduler.get_last_lr()[0], "train/epoch": current_epoch,
+                                                    "train/step_time": elapsed, "train/data_wait_time": data_wait}), step)
+                    if step >= stop_step or stop_requested:
+                        break
+                    step_start = time.perf_counter()
+                if stop_requested:
+                    break
+                if epoch > current_epoch:
+                    if epoch % cfg.training.val_every_epochs == 0 and validation is not None:
+                        metrics = evaluate(
+                            model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                            stop_requested=lambda: stop_requested,
+                        )
+                        if metrics is not None:
+                            logger.log(to_log_scalars(metrics), step)
+                    if epoch % cfg.training.save_every_epochs == 0 and step < stop_step and not stop_requested:
+                        save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
+            save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
+            print(f"[AFRO] Saved encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}")
+        finally:
+            close_resources(lambda: close_data_loader(loader), logger.close)
 
 
 def main():
