@@ -19,7 +19,6 @@ class PolicyInfo:
     n_action_steps: int
     horizon: int
     action_start_index: int
-    future_steps: int
     action_dim: int
     control_action_dim: int
     action_mode: str
@@ -35,6 +34,10 @@ class PolicyInfo:
     tactile_source: str | None
 
     @property
+    def future_steps(self) -> int:
+        return self.horizon - self.action_start_index
+
+    @property
     def hand_history_steps(self):
         shape = self.action_context_shapes.get("hand_history")
         return shape[0] if shape is not None else None
@@ -43,6 +46,7 @@ class PolicyInfo:
         result = {item.name: getattr(self, item.name) for item in fields(self)}
         result["experiment_dir"] = str(self.experiment_dir)
         result["checkpoint_path"] = str(self.checkpoint_path)
+        result["future_steps"] = self.future_steps
         result["hand_history_steps"] = self.hand_history_steps
         return result
 
@@ -63,7 +67,7 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         raise ValueError("weights must be ema or raw")
     steps = positive_int(inference_steps, "inference_steps")
     agent, dataset, metadata = cfg["agent"], cfg["dataset"], cfg["policy_metadata"]
-    deployment = cfg.get("deployment_metadata", {})
+    deployment = cfg["deployment_metadata"]
     fingertip_links = deployment.get("fingertip_link_names")
     return PolicyInfo(
         experiment_dir=directory,
@@ -77,7 +81,6 @@ def inspect_policy(experiment, checkpoint="best", weights=None, inference_steps=
         n_action_steps=agent["n_action_steps"],
         horizon=agent["horizon"],
         action_start_index=metadata["action_start_index"],
-        future_steps=agent["horizon"] - metadata["action_start_index"],
         action_dim=agent["action_dim"],
         control_action_dim=metadata["control_action_dim"],
         action_mode={"action": "joint", "action_ee": "eef"}[cfg["action_key"]],

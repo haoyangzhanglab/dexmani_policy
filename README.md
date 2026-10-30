@@ -117,7 +117,7 @@ bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/
 
 默认短训 4 次更新、续训 2 次；`--resume-updates 0` 关闭续训，总预算耗尽时明确打印未执行。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`；LAMP 同时传入符合 `info.action_context_shapes` 的 `action_context`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复直接使用 checkpoint 内置配置和严格 state_dict 加载，保留参数精度；不重拟合 affine 或迁移产物。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按配套、未手工篡改的内部产物使用。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`；LAMP 同时传入符合 `info.action_context_shapes` 的 `action_context`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复使用 checkpoint 内置配置和严格张量赋值，直接复用保存的 affine 与参数精度。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按当前训练入口生成的配套内部产物使用。
 
 训练将 Canonical 实际使用的数值配方保存到配置和 checkpoint，由公开 `PolicyInfo` 提供给 Real。非 Canonical 的训练、inspect 和纯策略推理不要求真机配方；设备入口负责拒绝缺失事实。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 

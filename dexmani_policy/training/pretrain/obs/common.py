@@ -64,6 +64,7 @@ def save_run(model, encoder, optimizer, scheduler, cfg, epoch, step):
 
 
 def restore_run(model, optimizer, scheduler, checkpoint, *, device) -> int:
+    # The optimizer already owns these Parameters, so restore their values in place.
     model.load_state_dict(checkpoint["model_state"], strict=True)
     validate_normalizer_state(model.normalizer)
     optimizer.load_state_dict(checkpoint["optimizer_state"])

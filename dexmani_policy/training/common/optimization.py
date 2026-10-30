@@ -80,7 +80,7 @@ class EMA:
     @torch.no_grad()
     def step(self, new_model):
         decay = self.get_decay(self.optimization_step)
-        # Fresh EMA copies raw weights; restored frozen parameters were checked before training.
+        # Frozen parameters are copied at initialization and remain unchanged.
         groups: dict[tuple[torch.device, torch.dtype], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
         for param, ema_param in zip(new_model.parameters(), self.averaged_model.parameters()):
             if not param.requires_grad:

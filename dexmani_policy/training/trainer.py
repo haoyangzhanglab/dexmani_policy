@@ -11,8 +11,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import (
-    Checkpoint, load_policy_state, policy_state_dict,
-    prepare_restore_config, save_checkpoint,
+    Checkpoint, policy_state_dict, prepare_restore_config, save_checkpoint,
 )
 from dexmani_policy.common.config import (
     positive_int, validate_observation_fields,
@@ -77,18 +76,12 @@ class PolicyTrainer:
             ema_updater = hydra.utils.instantiate(cfg.ema, model=ema_model)
 
         if checkpoint is not None:
-            load_policy_state(model, checkpoint.model_state)
+            # Assignment replaces Parameters; restore before constructing the optimizer.
+            model.load_state_dict(checkpoint.model_state, strict=True, assign=True)
             if ema_model is not None:
                 if checkpoint.ema_model_state is None or checkpoint.ema_updater_step is None:
                     raise ValueError("Resume checkpoint is missing EMA state")
-                load_policy_state(ema_model, checkpoint.ema_model_state)
-                averaged = dict(ema_model.named_parameters())
-                for name, parameter in model.named_parameters():
-                    if not parameter.requires_grad and (
-                        parameter.dtype != averaged[name].dtype
-                        or not torch.equal(parameter, averaged[name])
-                    ):
-                        raise ValueError(f"Raw/EMA frozen parameter mismatch: {name}")
+                ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
             # Strict model restoration establishes the complete affine before caching it on CPU.
             dataset.get_normalizer(cfg.normalization, initial_state=model.normalizer.state_dict())
         model.to(device)

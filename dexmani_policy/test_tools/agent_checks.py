@@ -168,8 +168,10 @@ def check_rgb(device):
         if mode == "freeze":
             assert not model.backbone.training and all(p.grad is None for p in model.backbone.parameters())
         optimizer.step()
-        restored = ViTEncoder("siglip", **model.effective_config).to(device)
-        restored.load_state_dict(model.state_dict(), strict=True)
+        restored = ViTEncoder("siglip", **model.effective_config)
+        snapshot = {name: value.clone() for name, value in model.state_dict().items()}
+        restored.load_state_dict(snapshot, strict=True, assign=True)
+        restored.to(device)
         restored_optimizer = torch.optim.AdamW((p for p in restored.parameters() if p.requires_grad), lr=1e-3)
         restored_optimizer.load_state_dict(optimizer.state_dict())
         assert list(dict(model.named_parameters())) == list(dict(restored.named_parameters()))
@@ -383,7 +385,8 @@ def check_policies(device):
     saved = torch.load(storage, map_location=device, weights_only=True)
     restored = DP3Policy(**kwargs)
     restored.set_normalization_spec(spec, dims, action_key="action")
-    restored.to(device).load_state_dict(saved["model"], strict=True)
+    restored.load_state_dict(saved["model"], strict=True, assign=True)
+    restored.to(device)
     new_optimizer = build_optimizer(restored, lr=1e-4, weight_decay=1e-6)
     assert [g["param_names"] for g in optimizer.param_groups] == [g["param_names"] for g in new_optimizer.param_groups]
     new_optimizer.load_state_dict(saved["optimizer"])

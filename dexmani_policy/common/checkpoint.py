@@ -44,19 +44,6 @@ def policy_state_dict(model) -> dict:
     return {name.replace("_orig_mod.", ""): value for name, value in model.state_dict().items()}
 
 
-def load_policy_state(model, state):
-    # Preserve checkpoint precision, including FP32 EMA parameters.
-    for name, parameter in model.named_parameters():
-        saved = state[name]
-        if (
-            parameter.dtype != saved.dtype
-            and parameter.is_floating_point()
-            and saved.is_floating_point()
-        ):
-            parameter.data = parameter.data.to(dtype=saved.dtype)
-    model.load_state_dict(state, strict=True)
-
-
 def prepare_restore_config(agent_cfg):
     import hydra
     from omegaconf import OmegaConf
@@ -93,7 +80,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
     agent.set_normalization_spec(
         cfg["normalization"], cfg["normalization_dims"], action_key=cfg["action_key"],
     )
-    load_policy_state(agent, state)
+    agent.load_state_dict(state, strict=True, assign=True)
     del state
     agent.to(device)
     agent.eval()

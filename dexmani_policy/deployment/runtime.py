@@ -1,5 +1,4 @@
 import time
-from typing import Any
 
 import numpy as np
 
@@ -11,8 +10,16 @@ _OBSERVATION_SHAPES = {
     "joint_state": (19,),
     "eef_pose": (9,),
     **FIELD_FEATURE_SHAPES,
-    "tactile_valid": (5,),
 }
+
+
+def _contiguous_numpy(value, dtype=None):
+    with np.errstate(over="ignore"):
+        value = np.asarray(value, dtype=dtype, order="C")
+    # NumPy considers negative strides on singleton axes contiguous; Torch rejects them.
+    if any(stride < 0 for stride in value.strides):
+        value = value.copy(order="C")
+    return value
 
 
 def load_policy(info, *, device="cuda:0", seed=0):
@@ -21,26 +28,29 @@ def load_policy(info, *, device="cuda:0", seed=0):
     agent = restore_policy(
         info.checkpoint_path, use_ema=info.weights == "ema", device=device
     )
-    return PolicyRuntime(agent, info, device=device, seed=seed)
+    return PolicyRuntime(agent, info, seed=seed)
 
 
 class PolicyRuntime:
-    def __init__(self, agent, info, *, device, seed):
+    def __init__(self, agent, info, *, seed):
         import torch
 
         self.agent = agent
         self.info = info
-        self.generator = torch.Generator(device=device)
-        self.device = device
-        self.seed = seed
-        self.reset_episode()
+        self.generator = torch.Generator(device=next(agent.parameters()).device).manual_seed(seed)
 
     def reset_episode(self):
-        self.generator.manual_seed(self.seed)
+        self.generator.manual_seed(self.generator.initial_seed())
 
-    def prepare_observations(self, observation):
+    def _prepare_numeric_tensor(self, value, label):
         import torch
 
+        value = _contiguous_numpy(value, dtype=np.float32)
+        if not np.isfinite(value).all():
+            raise ValueError(f"Nonfinite {label}")
+        return torch.from_numpy(value).unsqueeze(0).to(self.generator.device)
+
+    def prepare_observations(self, observation):
         from dexmani_policy.common.image_util import preprocess_rgb_eval
 
         tensors = {}
@@ -62,59 +72,56 @@ class PolicyRuntime:
             if name == "rgb":
                 if value.ndim != 4 or value.shape[-1] != 3 or value.dtype != np.uint8:
                     raise ValueError("RGB input requires shape (T, H, W, 3) and dtype uint8")
-                tensor = preprocess_rgb_eval(value, **self.info.rgb_preprocessing)
+                tensor = preprocess_rgb_eval(_contiguous_numpy(value), **self.info.rgb_preprocessing)
+                tensors[name] = tensor.unsqueeze(0).to(self.generator.device)
             else:
-                dtype = None if name == "tactile_valid" else torch.float32
-                tensor = torch.as_tensor(np.ascontiguousarray(value), dtype=dtype)
-            if tensor.is_floating_point() and not torch.isfinite(tensor).all():
-                raise ValueError(f"Nonfinite policy observation after preprocessing: {name}")
-            tensors[name] = tensor.unsqueeze(0).to(self.device)
+                tensors[name] = self._prepare_numeric_tensor(
+                    value, f"policy observation after preprocessing: {name}",
+                )
 
         return tensors
+
+    def _prepare_action_context(self, action_context):
+        if action_context is None:
+            return {}
+        shapes = self.info.action_context_shapes
+        if not isinstance(action_context, dict) or set(action_context) - shapes.keys():
+            raise ValueError("Unsupported action_context fields")
+        context = {}
+        for name, value in action_context.items():
+            value = np.asarray(value)
+            if value.shape != tuple(shapes[name]) or value.dtype.kind not in "fiu":
+                raise ValueError(f"Invalid physical action_context.{name}")
+            context[name] = self._prepare_numeric_tensor(value, f"physical action_context.{name}")
+        return context
+
+    def _prepare_rtc(self, rtc_prefix, delay_steps, rtc_guidance_cap):
+        if rtc_prefix is None:
+            if delay_steps:
+                raise ValueError("No prefix requires delay_steps=0")
+            return {}
+        prefix = np.asarray(rtc_prefix)
+        if (
+            prefix.ndim != 2
+            or prefix.shape[1] != self.info.control_action_dim
+            or prefix.dtype.kind not in "fiu"
+            or not 0 <= delay_steps <= len(prefix) <= self.info.future_steps
+        ):
+            raise ValueError("Invalid physical RTC prefix")
+        return dict(
+            rtc_prefix=self._prepare_numeric_tensor(prefix, "physical RTC prefix"),
+            delay_steps=delay_steps,
+            rtc_guidance_cap=rtc_guidance_cap,
+        )
 
     def predict(self, observation, *, action_context=None, rtc_prefix=None, delay_steps=0, rtc_guidance_cap=0.0):
         import torch
 
         tensors = self.prepare_observations(observation)
-        dimensions = self.agent.control_action_dim
-        kwargs: dict[str, Any] = {}
-
-        if action_context is not None:
-            shapes = self.info.action_context_shapes
-            if not isinstance(action_context, dict) or set(action_context) - shapes.keys():
-                raise ValueError("Unsupported action_context fields")
-            context = {}
-            for name, value in action_context.items():
-                value = np.asarray(value)
-                if value.shape != tuple(shapes[name]) or value.dtype.kind not in "fiu":
-                    raise ValueError(f"Invalid physical action_context.{name}")
-                tensor = torch.as_tensor(np.ascontiguousarray(value), dtype=torch.float32)
-                if not torch.isfinite(tensor).all():
-                    raise ValueError(f"Nonfinite physical action_context.{name}")
-                context[name] = tensor[None].to(self.device)
-            if context:
-                kwargs["action_context"] = context
-
-        if rtc_prefix is not None:
-            prefix = np.asarray(rtc_prefix)
-            future_steps = self.info.future_steps
-            if (
-                prefix.ndim != 2
-                or prefix.shape[1] != dimensions
-                or prefix.dtype.kind not in "fiu"
-                or not 0 <= delay_steps <= len(prefix) <= future_steps
-            ):
-                raise ValueError("Invalid physical RTC prefix")
-            prefix_tensor = torch.as_tensor(np.ascontiguousarray(prefix), dtype=torch.float32)
-            if not torch.isfinite(prefix_tensor).all():
-                raise ValueError("Nonfinite physical RTC prefix")
-            kwargs.update(
-                rtc_prefix=prefix_tensor[None].to(self.device),
-                delay_steps=delay_steps,
-                rtc_guidance_cap=rtc_guidance_cap,
-            )
-        elif delay_steps:
-            raise ValueError("No prefix requires delay_steps=0")
+        context = self._prepare_action_context(action_context)
+        kwargs = self._prepare_rtc(rtc_prefix, delay_steps, rtc_guidance_cap)
+        if context:
+            kwargs["action_context"] = context
 
         with torch.inference_mode():
             result = self.agent.predict_action(
