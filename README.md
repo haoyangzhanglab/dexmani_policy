@@ -88,9 +88,22 @@ bash scripts/training/train.sh interact_dex tactile=sim_force 'zarr_path=<sim_za
 python -m dexmani_policy.test_tools.smoke_test --config-only --override tactile=real_force interact_dex
 ```
 
-训练时，小型逐指读出头与动作输出 MLP 复用同一次 DiTX 前向的归一化隐状态，仅监督 `n_action_steps` 执行窗口内的后继触觉。标签保留在 batch 顶层，复用当前触觉统计计算 FP32 masked Smooth L1；不改变原采样窗口，也不作为动作条件。新增参数复用动作侧优化器设置、整策略 EMA 和严格 checkpoint 恢复。
+当前方案按优先级集中落实四项改动：
 
-标准 YAML 的 `agent.interaction_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 保留无辅助头的动作路径。部署不执行读出头，保持原积分步数、KV 缓存和完整 `future_actions` 输出。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-逐指触觉监督)，代码检查和短训通过不代表闭环性能提升。
+1. **观测端未来力监督**：最后观测帧的五指历史特征通过共享小型 MLP 预测 `future_force_offsets=[1,4,8,13]`，与 `n_action_steps` 解耦，不读取含噪动作。标签留在 batch 顶层，按 episode 边界计算有效性；合法零值有效。sim 当前力旋转到各自观测末端系，未来力统一旋转到查询末端系；real 保留未标定的 SDK 通道约定。
+2. **arm/hand 分组动作损失**：7D arm 和 12D hand 各自求均值，权重各 0.5，避免维数决定两组相对权重。
+3. **同指触觉融合**：每指通过共享门控 MLP 融合自身触觉，腕槽读取有效指均值；跨指通信集中在 HandHistory，移除触觉模块内部的两层注意力。
+4. **场景上下文引导交互**：先得到十二个场景 token，其均值进入 HandScene 查询；保留每帧六个交互 token 加十二个场景 token、单个 DiTX 和原有采样内 K/V 缓存。
+
+标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。训练仅编码一次观测；部署跳过未来力头，保持完整 `future_actions` 输出。小头使用动作侧优化器设置并随整策略 EMA 保存。新融合结构和辅助头需要重新训练，不兼容旧版 InterAct-Dex checkpoint 的严格恢复。
+
+空间 FiLM、抓取中心描述、未来几何重建、目标力条件及额外 VLM/动作专家暂不接入默认路径。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-逐指触觉监督)。功能检查不代替闭环性能验证：
+
+```bash
+python -m unittest dexmani_policy.test_tools.test_interact_dex -v
+```
+
+该 CPU 检查覆盖数据边界、损失/梯度、同指隔离、BF16、保存恢复和推理接口；仅在检查中以 Torch 采样替代原生 FPS/kNN，不验证 PyTorch3D/CUDA 后端。
 
 ## AdapTac 触觉实验
 

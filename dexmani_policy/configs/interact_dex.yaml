@@ -9,6 +9,7 @@ horizon: 16
 n_obs_steps: 4
 n_action_steps: 4
 action_dim: 19
+future_force_offsets: [1, 4, 8, 13]
 
 normalization:
   joint_state: limits
@@ -23,7 +24,7 @@ dataloader:
 
 dataset:
   _target_: dexmani_policy.datasets.variants.tactile.InterActDexDataset
-  n_action_steps: ${n_action_steps}
+  future_force_offsets: ${future_force_offsets}
   tactile_source: ${tactile_source}
   pc_dim: ${agent.pc_dim}
   pad_after: ${eval:'${n_action_steps} - 1'}
@@ -38,7 +39,8 @@ dataset:
 
 agent:
   _target_: dexmani_policy.agents.policies.interact_dex.InterActDexPolicy
-  interaction_loss_weight: 0.1
+  future_force_loss_weight: 0.1
+  future_force_offsets: ${future_force_offsets}
   tactile_source: ${tactile_source}
   history_mixer: true
   pc_dim: 6
