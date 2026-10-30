@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from dexmani_policy.agents.obs_encoder.pointcloud.pointnet import PointNet
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.config import positive_int, read_split_manifest
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
@@ -100,7 +100,10 @@ def train(cfg, checkpoint=None, max_updates=None):
     positive_int(cfg.training.save_every_epochs, "training.save_every_epochs")
     positive_int(cfg.training.val_every_epochs, "training.val_every_epochs")
     set_seed(cfg.training.seed)
-    dataset = hydra.utils.instantiate(cfg.dataset, frame_stride=cfg.model.frame_stride)
+    dataset = hydra.utils.instantiate(
+        cfg.dataset, frame_stride=cfg.model.frame_stride, _convert_="all",
+        split_manifest=read_split_manifest(cfg.dataset.split_manifest),
+    )
     cfg.dataset.split_manifest = dataset.split_manifest
     loader = build_train_loader(cfg, dataset)
     batches_per_epoch = loader.batch_sampler.batches_per_epoch
@@ -108,6 +111,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     model = AFROPretrain(cfg.normalization)
     if checkpoint is None:
         model.normalizer.load_state_dict(dataset.get_normalizer(cfg.normalization).state_dict(), strict=True)
+    validation = dataset.get_validation_dataset()
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
     scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
@@ -167,7 +171,6 @@ def train(cfg, checkpoint=None, max_updates=None):
                 break
             if epoch > current_epoch:
                 if epoch % cfg.training.val_every_epochs == 0:
-                    validation = dataset.get_validation_dataset()
                     if validation is not None:
                         metrics = evaluate(
                             model, validation, cfg.dataloader.batch_size, cfg.training.device,

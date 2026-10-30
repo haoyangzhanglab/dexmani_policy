@@ -14,6 +14,17 @@ python -m pip install -e .
 
 Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹配的 PyTorch3D 原生扩展。仿真评测依赖 `dexmani_sim`。
 
+数据准备与完整检查使用独立工具，普通 Dataset 构造只做必要结构检查，不再完整扫描浮点字段：
+
+```bash
+python -m dexmani_policy.datasets.tools.check_data --zarr-path INPUT
+python -m dexmani_policy.datasets.tools.make_split --zarr-path INPUT --output split.json \
+  --seed 42 --val-ratio 0.1 --max-train-episodes 100
+python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output OUTPUT
+```
+
+接触标签生成需要 Open3D；另外两个工具及常规数据读取不加载它。目录、数据接口和检查责任见[项目架构](docs/项目架构.md#数据接口)。
+
 ## 快速开始
 
 以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。配置位于 `dexmani_policy/configs/`，训练数据默认位于 `robot_data/<task>.zarr`。

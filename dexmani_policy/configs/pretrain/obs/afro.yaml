@@ -6,7 +6,7 @@ normalization:
 model:
   frame_stride: 2
 dataset:
-  _target_: dexmani_policy.datasets.obs.afro_dataset.AFRODataset
+  _target_: dexmani_policy.datasets.pretrain.afro.AFROPretrainDataset
   zarr_path: ${zarr_path}
   horizon: 33
   pad_before: 0

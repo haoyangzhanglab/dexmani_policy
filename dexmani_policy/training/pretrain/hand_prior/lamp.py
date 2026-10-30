@@ -12,11 +12,11 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.losses import diagonal_gaussian_kl
 from dexmani_policy.agents.hand_prior.motion_prior import HandMotionPrior
-from dexmani_policy.common.config import load_policy_config, positive_int, validate_normalization_config
+from dexmani_policy.common.config import load_policy_config, positive_int, read_split_manifest, validate_normalization_config
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.data import describe_lamp_data, load_hand_source
-from dexmani_policy.datasets.hand_prior.lamp_dataset import hand_history_for_rows, load_hand_history
+from dexmani_policy.datasets.hand_motion import load_hand_source
+from dexmani_policy.datasets.variants.lamp import describe_lamp_data, hand_history_for_rows, load_hand_history
 from dexmani_policy.training.common.optimization import get_scheduler
 
 
@@ -29,7 +29,9 @@ def prepare_prior_data(cfg):
     spec = cfg.normalization
     if spec["action"] != "identity" or spec["joint_state"] != "gaussian":
         raise ValueError("LAMP requires identity action and gaussian joint_state")
-    buffer, train, val, split = load_hand_source(cfg, ["action", "joint_state"])
+    buffer, train, val, split = load_hand_source(
+        cfg, ["action", "joint_state"], split_manifest=read_split_manifest(cfg.dataset.split_manifest),
+    )
     hand_data = describe_lamp_data(
         buffer.attrs, action_key=cfg.dataset.action_key, horizon=cfg.dataset.horizon,
         obs_horizon=cfg.dataset.obs_horizon, pad_before=cfg.dataset.pad_before,

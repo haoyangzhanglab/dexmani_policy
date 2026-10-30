@@ -16,12 +16,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from dexmani_policy.agents.hand_prior.codebook import validate_dq_normalization
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.config import load_policy_config, positive_int, validate_normalization_config
+from dexmani_policy.common.config import load_policy_config, positive_int, read_split_manifest, validate_normalization_config
 from dexmani_policy.common.hand_semantics import validate_hand_coordinates
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.data import load_hand_array, load_hand_source
+from dexmani_policy.datasets.hand_motion import load_hand_array, load_hand_source
 from dexmani_policy.training.common.optimization import get_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
@@ -38,7 +38,9 @@ def prepare_policy_data(cfg):
     validate_dq_normalization(spec)
     if cfg.agent.tcp_dim != 7:
         raise ValueError("DQ/VQ requires tcp_dim=7")
-    buffer, train, val, split = load_hand_source(cfg, ["action"])
+    buffer, train, val, split = load_hand_source(
+        cfg, ["action"], split_manifest=read_split_manifest(cfg.dataset.split_manifest),
+    )
     validate_hand_coordinates(buffer.attrs)
 
     train_hand = load_hand_array(buffer, "action", train)

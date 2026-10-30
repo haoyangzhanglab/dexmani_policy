@@ -25,7 +25,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.hand_prior.lamp_dataset.LAMPDataset
+  _target_: dexmani_policy.datasets.variants.lamp.LAMPDataset
   pc_dim: ${agent.pc_dim}
   pad_after: 0
   sensor_modalities: [joint_state, point_cloud]

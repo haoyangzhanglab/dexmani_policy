@@ -26,7 +26,7 @@ dataloader:
 
 dataset:
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   pad_after: ${eval:'${n_action_steps} - 1'}  # 在 episode 末尾重复动作。
   sensor_modalities: ["joint_state", "point_cloud"]
 

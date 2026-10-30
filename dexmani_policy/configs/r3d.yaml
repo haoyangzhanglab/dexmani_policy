@@ -24,7 +24,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: ${eval:'"dexmani_policy.datasets.aux.r3d_dataset.R3DAuxDataset" if ${use_aux_ee} else "dexmani_policy.datasets.common.robot_dataset.RobotDataset"'}
+  _target_: ${eval:'"dexmani_policy.datasets.variants.r3d.R3DDataset" if ${use_aux_ee} else "dexmani_policy.datasets.demonstration.DemonstrationDataset"'}
   pad_after: 7
   sensor_modalities: ["joint_state", "point_cloud"]
 

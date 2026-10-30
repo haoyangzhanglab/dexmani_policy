@@ -5,7 +5,7 @@ import numpy as np
 import zarr
 
 
-class ReplayBuffer:
+class EpisodeStore:
     """Read-only Zarr arrays with process-local handles."""
 
     def __init__(self, zarr_path, *, keys=None):
@@ -13,9 +13,6 @@ class ReplayBuffer:
         self.group = zarr.open_group(self.path, mode="r")
         fields = self.group["data"]
         self.field_names = tuple(dict.fromkeys(fields.keys() if keys is None else keys))
-        missing = set(self.field_names) - set(fields.keys())
-        if missing:
-            raise ValueError(f"Missing required data fields in {self.path}: {sorted(missing)}")
         self.data = {key: fields[key] for key in self.field_names}
         self.episode_ends = np.asarray(self.group["meta"]["episode_ends"])
         ends = self.episode_ends
@@ -46,7 +43,7 @@ class ReplayBuffer:
         state["group"] = state["pid"] = state["data"] = None
         return state
 
-    def get_arrays(self):
+    def _arrays(self):
         if self.group is None or self.pid != os.getpid():
             self.group = zarr.open_group(self.path, mode="r")
             self.data = {key: self.group["data"][key] for key in self.field_names}
@@ -59,11 +56,8 @@ class ReplayBuffer:
         dtype = np.float32 if np.issubdtype(arr.dtype, np.floating) else arr.dtype
         return np.asarray(arr[selection], dtype=dtype)
 
-    def chunk_rows(self, key):
-        return self[key].chunks[0]
-
     def iter_chunks(self, key, *, columns=None, episode_mask=None):
-        step = self.chunk_rows(key)
+        step = self[key].chunks[0]
         mask = np.ones(self.n_episodes, dtype=bool) if episode_mask is None else episode_mask
         # Merge adjacent episodes, then bound reads by both selected spans and chunks.
         first = np.flatnonzero(mask & ~np.r_[False, mask[:-1]])
@@ -84,7 +78,19 @@ class ReplayBuffer:
         return self.field_names
 
     def __getitem__(self, key):
-        return self.get_arrays()[key]
+        return self._arrays()[key]
 
-    def __contains__(self, key):
-        return key in self.field_names
+
+def check_finite(buffer, key, start, values, columns=None):
+    invalid = ~np.isfinite(values)
+    if not invalid.any():
+        return
+    location = [int(index) for index in np.unravel_index(invalid.argmax(), invalid.shape)]
+    row = int(start + location[0])
+    episode = int(np.searchsorted(buffer.episode_ends, row, side="right"))
+    if columns is not None:
+        location[-1] = int(np.arange(buffer[key].shape[-1])[columns][location[-1]])
+    raise ValueError(
+        f"Nonfinite data: path={buffer.path}, field={key}, episode={episode}, "
+        f"row={row}, channel={tuple(location[1:])}"
+    )

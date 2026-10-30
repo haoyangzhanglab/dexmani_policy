@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Iterable
 from datetime import datetime
@@ -52,6 +53,14 @@ def load_experiment_config(experiment_dir):
     return OmegaConf.to_container(
         OmegaConf.load(Path(experiment_dir) / "config.yaml"), resolve=True
     )
+
+
+def read_split_manifest(value):
+    if isinstance(value, (str, Path)):
+        return json.loads(Path(value).expanduser().read_text())
+    if OmegaConf.is_config(value):
+        return OmegaConf.to_container(value, resolve=True)
+    return value
 
 
 def positive_int(value: int, name: str) -> int:

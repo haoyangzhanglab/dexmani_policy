@@ -1,11 +1,11 @@
 import numba
 import numpy as np
 
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
+from dexmani_policy.datasets.episode_store import EpisodeStore
 
 
 @numba.jit(nopython=True)
-def create_sequence_indices(
+def window_indices(
     episode_ends: np.ndarray,
     sequence_length: int,
     episode_mask: np.ndarray,
@@ -45,24 +45,26 @@ def create_sequence_indices(
 class SequenceSampler:
     def __init__(
         self,
-        replay_buffer: ReplayBuffer,
+        episode_store: EpisodeStore,
         sequence_length: int,
         pad_before: int = 0,
         pad_after: int = 0,
         episode_mask: np.ndarray | None = None,
         fields: dict[str, slice | None] | None = None,
-        key_first_k: dict[str, int] | None = None,
+        field_horizons: dict[str, int] | None = None,
     ):
         if sequence_length < 1 or not 0 <= pad_before < sequence_length or not 0 <= pad_after < sequence_length:
             raise ValueError("Require positive sequence_length and 0 <= padding < sequence_length")
 
-        episode_ends = replay_buffer.episode_ends
+        episode_ends = episode_store.episode_ends
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
         else:
             episode_mask = np.asarray(episode_mask, dtype=bool)
+            if episode_mask.shape != episode_ends.shape:
+                raise ValueError("episode_mask must have one entry per episode")
 
-        indices = create_sequence_indices(
+        indices = window_indices(
             episode_ends,
             sequence_length=sequence_length,
             pad_before=pad_before,
@@ -70,12 +72,12 @@ class SequenceSampler:
             episode_mask=episode_mask,
         )
         self.indices = indices
-        self.replay_buffer = replay_buffer
+        self.episode_store = episode_store
         self.sequence_length = sequence_length
-        self.fields = dict.fromkeys(replay_buffer.keys()) if fields is None else dict(fields)
-        self.key_first_k = dict(key_first_k or {})
-        if any(key not in self.fields or not 1 <= k <= sequence_length for key, k in self.key_first_k.items()):
-            raise ValueError("key_first_k requires selected keys and 1 <= K <= sequence_length")
+        self.fields = dict.fromkeys(episode_store.keys()) if fields is None else dict(fields)
+        self.field_horizons = dict(field_horizons or {})
+        if any(key not in self.fields or not 1 <= k <= sequence_length for key, k in self.field_horizons.items()):
+            raise ValueError("field_horizons requires selected keys and 1 <= K <= sequence_length")
 
     def __len__(self):
         return len(self.indices)
@@ -96,9 +98,9 @@ class SequenceSampler:
         result = {}
         rows = self.sample_source_rows(idx)
         for key, columns in self.fields.items():
-            length = self.key_first_k.get(key, self.sequence_length)
+            length = self.field_horizons.get(key, self.sequence_length)
             selected = rows[:length]
             start, end = int(selected[0]), int(selected[-1]) + 1
-            values = self.replay_buffer.read(key, slice(start, end), columns=columns)
+            values = self.episode_store.read(key, slice(start, end), columns=columns)
             result[key] = values if end - start == length else values[selected - start]
         return result

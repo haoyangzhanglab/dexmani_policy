@@ -1,9 +1,4 @@
-"""Build a self-contained CordViP Zarr with offline contact labels.
-
-Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
-Source: train_policy/script/contact_map.py
-Changes: chunked NumPy geometry, lazy Open3D import and native Zarr IO.
-"""
+"""Build a self-contained CordViP Zarr with offline contact labels."""
 
 import argparse
 from pathlib import Path
@@ -14,8 +9,10 @@ import numpy as np
 import zarr
 
 from dexmani_policy.common.io_util import close_resources
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.common.validation import check_finite
+from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
+
+
+CHUNK_ROWS = 16
 
 
 def estimate_normals(points):
@@ -52,7 +49,7 @@ def generate(zarr_path, output):
     keys = ["hand_pointcloud", "object_pointcloud", "joint_state"]
     if "action" in source["data"]:
         keys.append("action")
-    buffer = ReplayBuffer(zarr_path, keys=keys)
+    buffer = EpisodeStore(zarr_path, keys=keys)
     for key in keys[:2]:
         shape = buffer[key].shape
         if len(shape) != 3 or shape[1] < 1 or shape[2] < 3:
@@ -78,22 +75,22 @@ def generate(zarr_path, output):
         for key in keys:
             array = buffer[key]
             copied = data.create_dataset(
-                key, shape=array.shape, chunks=(16, *array.shape[1:]),
+                key, shape=array.shape, chunks=(CHUNK_ROWS, *array.shape[1:]),
                 dtype=array.dtype, compressor=array.compressor,
             )
             copied.attrs.update(dict(array.attrs))
         labels = data.create_dataset(
             "contact_map", shape=(rows, buffer["object_pointcloud"].shape[1]),
-            chunks=(16, buffer["object_pointcloud"].shape[1]), dtype="float32",
+            chunks=(CHUNK_ROWS, buffer["object_pointcloud"].shape[1]), dtype="float32",
         )
-        for start in range(0, rows, 16):
-            stop = min(start + 16, rows)
+        for start in range(0, rows, CHUNK_ROWS):
+            stop = min(start + CHUNK_ROWS, rows)
             points = {}
             for key in keys:
                 values = buffer[key][start:stop]
                 data[key][start:stop] = values
                 if key in keys[:2]:
-                    # Match the original ReplayBuffer.read precision for label computation.
+                    # Geometry uses FP32 floating XYZ; copied arrays keep their stored dtype.
                     dtype = np.float32 if np.issubdtype(values.dtype, np.floating) else values.dtype
                     xyz = np.asarray(values[..., :3], dtype=dtype)
                     check_finite(buffer, key, start, xyz, slice(0, 3))

@@ -22,7 +22,7 @@ dataloader:
 
 dataset:
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   pad_after: 7
   sensor_modalities: ["joint_state", "point_cloud"]
 

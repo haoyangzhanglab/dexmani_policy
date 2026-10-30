@@ -12,7 +12,7 @@ model:
   arm_loss_weight: 1.0
   hand_loss_weight: 1.0
 dataset:
-  _target_: dexmani_policy.datasets.obs.cordvip_dataset.CordViPDataset
+  _target_: dexmani_policy.datasets.pretrain.cordvip.CordViPPretrainDataset
   zarr_path: ${zarr_path}
   horizon: 12
   obs_horizon: ${n_obs_steps}

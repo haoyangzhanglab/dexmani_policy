@@ -15,7 +15,7 @@ data_semantics:
   window: query_future_full_horizon
 
 dataset:
-  _target_: dexmani_policy.datasets.hand_prior.hand_chunk_dataset.HandChunkDataset
+  _target_: dexmani_policy.datasets.pretrain.hand_chunks.HandChunkDataset
   zarr_path: ${zarr_path}
   data_semantics: ${data_semantics}
   horizon: ${horizon}

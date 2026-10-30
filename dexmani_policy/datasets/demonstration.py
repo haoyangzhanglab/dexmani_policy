@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -17,25 +18,52 @@ from dexmani_policy.common.pytorch_util import dict_apply
 from dexmani_policy.common.config import (
     FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, positive_int, require_tactile_source,
 )
-from dexmani_policy.datasets.common.augmentation import (
+from dexmani_policy.datasets.transforms import (
     AUGMENTATION_SPECS,
     random_sample_points,
 )
 from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
-from dexmani_policy.datasets.common.split import split_episodes
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.common.sampler import SequenceSampler
-from dexmani_policy.datasets.common.validation import validate_fields, validate_tactile_source
+from dexmani_policy.datasets.split import split_episodes
+from dexmani_policy.datasets.episode_store import EpisodeStore
+from dexmani_policy.datasets.sampler import SequenceSampler
 
 
-class RobotDataset(torch.utils.data.Dataset):
-    training_dataset: "RobotDataset"
+def validate_tactile_source(attrs, source):
+    if source == "real":
+        if attrs.get("format") != "dexmani.real.canonical":
+            raise ValueError("tactile_source=real requires dexmani.real.canonical data")
+    elif source == "sim":
+        required = {"dt", "physics_dt", "frame_skip", "action_dim", "action_space", "obs_alignment"}
+        missing = required - attrs.keys()
+        if attrs.get("format") is not None or missing:
+            raise ValueError(
+                "tactile_source=sim requires sim exporter metadata; "
+                f"format={attrs.get('format')!r}, missing={sorted(missing)}"
+            )
+        physics_dt, skip = attrs["physics_dt"], attrs["frame_skip"]
+        if (
+            type(skip) is not int or skip <= 0
+            or type(physics_dt) not in (float, int) or not math.isfinite(physics_dt) or physics_dt <= 0
+            or attrs["obs_alignment"] != "obs[t]_before_action[t]"
+            or attrs["action_space"] not in {"joint", "ee"} or attrs["action_dim"] != 19
+        ):
+            raise ValueError("Invalid sim exporter tactile/timing contract")
+    else:
+        raise ValueError(f"tactile_source must be sim or real, got {source!r}")
+    dt = attrs.get("dt")
+    if type(dt) not in (float, int) or not math.isfinite(dt) or dt <= 0:
+        raise ValueError("Tactile data requires finite positive dt")
+    if source == "sim" and not math.isclose(dt, physics_dt * skip, rel_tol=1e-6, abs_tol=0):
+        raise ValueError("Sim dt must equal physics_dt * frame_skip")
 
+
+class DemonstrationDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         zarr_path: str,
         *,
         sensor_modalities: list[str],
+        obs_horizon: int,
         seed: int = 42,
         horizon: int = 1,
         pad_before: int = 0,
@@ -44,12 +72,11 @@ class RobotDataset(torch.utils.data.Dataset):
         max_train_episodes: int | None = None,
         augmentation_cfg: dict | None = None,
         action_key: str = "action",
-        obs_horizon: int | None = None,
         rgb_preprocess_size: tuple[int, int] | None = None,
         rgb_random_crop_size: tuple[int, int] | None = None,
         rgb_color_aug: Callable | None = None,
         rgb_keep_uint8: bool = False,
-        split_manifest: str | dict | None = None,
+        split_manifest: dict | None = None,
         pc_dim: int | None = None,
         tactile_source: str | None = None,
     ) -> None:
@@ -62,30 +89,30 @@ class RobotDataset(torch.utils.data.Dataset):
         if pc_dim is not None and (type(pc_dim) is not int or pc_dim not in (3, 6)):
             raise ValueError("pc_dim must be 3 (XYZ), 6 (XYZRGB), or None (all stored channels)")
         self.pc_dim = pc_dim
-        self.obs_horizon = horizon if obs_horizon is None else obs_horizon
+        self.obs_horizon = obs_horizon
         if not 1 <= self.obs_horizon <= horizon:
             raise ValueError("obs_horizon must satisfy 1 <= N <= horizon")
         self.rgb_preprocess_size = rgb_preprocess_size
         self.rgb_random_crop_size = rgb_random_crop_size
         self.rgb_color_aug = rgb_color_aug
         self.rgb_keep_uint8 = rgb_keep_uint8
-        self.is_validation = False
+        self.training_dataset: DemonstrationDataset | None = None
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
 
         self.sensor_modalities = sensor_modalities
-        self.replay_buffer = ReplayBuffer(zarr_path, keys=self.data_keys)
-        self.zarr_path = self.replay_buffer.path
+        self.episode_store = EpisodeStore(zarr_path, keys=self.data_keys)
+        self.zarr_path = self.episode_store.path
         if require_tactile_source(sensor_modalities, tactile_source) is not None:
-            validate_tactile_source(self.replay_buffer.attrs, tactile_source)
+            validate_tactile_source(self.episode_store.attrs, tactile_source)
 
         if "rgb" in sensor_modalities:
-            rgb = self.replay_buffer["rgb"]
+            rgb = self.episode_store["rgb"]
             if len(rgb.shape) != 4 or rgb.shape[-1] != 3 or rgb.dtype != np.uint8:
                 raise ValueError("Stored RGB must have shape (T, H, W, 3) and dtype uint8")
         for key in POINT_CLOUD_FIELDS.intersection(sensor_modalities):
-            shape = self.replay_buffer[key].shape
+            shape = self.episode_store[key].shape
             if len(shape) != 3:
                 raise ValueError(f"Stored {key} must have shape [T,N,C]")
             if pc_dim is not None and shape[-1] < pc_dim:
@@ -94,21 +121,20 @@ class RobotDataset(torch.utils.data.Dataset):
         self.build_augmentors()
 
         self.train_mask, self.val_mask, self.split_manifest = split_episodes(
-            self.replay_buffer, manifest=split_manifest, val_ratio=val_ratio,
+            self.episode_store, manifest=split_manifest, val_ratio=val_ratio,
             seed=seed, max_train_episodes=max_train_episodes,
         )
         for key in FIELD_FEATURE_SHAPES.keys() & set(sensor_modalities):
-            if self.replay_buffer[key].shape[1:] != FIELD_FEATURE_SHAPES[key]:
+            if self.episode_store[key].shape[1:] != FIELD_FEATURE_SHAPES[key]:
                 raise ValueError(f"{key} requires trailing shape {FIELD_FEATURE_SHAPES[key]} after its T axis")
-            if self.replay_buffer[key].dtype.kind != "f":
+            if self.episode_store[key].dtype.kind != "f":
                 raise ValueError(f"Stored {key} must be floating point; observations are read as FP32")
-        if len(self.replay_buffer[action_key].shape) != 2:
+        if len(self.episode_store[action_key].shape) != 2:
             raise ValueError("Stored actions must have shape [T,D]")
-        validate_fields(self.replay_buffer, self.train_mask | self.val_mask, self.consumed_fields)
         self.sampler = self.build_sampler(self.train_mask)
         if not len(self.sampler):
             raise ValueError("No training sequence windows: selected episodes are too short")
-        self.validation_dataset: RobotDataset | None = None
+        self.validation_dataset: DemonstrationDataset | None = None
         self._normalizer: LinearNormalizer | None = None
 
     @property
@@ -125,7 +151,7 @@ class RobotDataset(torch.utils.data.Dataset):
 
     @property
     def action_dim(self):
-        return self.replay_buffer[self.action_key].shape[-1]
+        return self.episode_store[self.action_key].shape[-1]
 
     @property
     def action_start_index(self):
@@ -140,12 +166,12 @@ class RobotDataset(torch.utils.data.Dataset):
 
     def build_sampler(self, episode_mask):
         return SequenceSampler(
-            self.replay_buffer, self.horizon, self.pad_before, self.pad_after, episode_mask,
-            fields=self.consumed_fields, key_first_k={key: self.obs_horizon for key in self.sensor_modalities},
+            self.episode_store, self.horizon, self.pad_before, self.pad_after, episode_mask,
+            fields=self.consumed_fields, field_horizons={key: self.obs_horizon for key in self.sensor_modalities},
         )
 
     def get_validation_dataset(self):
-        if self.is_validation:
+        if self.training_dataset is not None:
             return self
         if self.validation_dataset is not None:
             return self.validation_dataset
@@ -161,7 +187,6 @@ class RobotDataset(torch.utils.data.Dataset):
         val_set.augmentation_cfg = None
         val_set.augmentors = {}
         val_set.random_keep_points = None
-        val_set.is_validation = True
         self.validation_dataset = val_set
         return val_set
 
@@ -176,7 +201,7 @@ class RobotDataset(torch.utils.data.Dataset):
         }
 
     def preprocess_rgb(self, rgb, resize_hw: tuple[int, int]):
-        if self.is_validation:
+        if self.training_dataset is not None:
             return preprocess_rgb_eval(
                 rgb,
                 resize_hw=resize_hw,
@@ -216,7 +241,7 @@ class RobotDataset(torch.utils.data.Dataset):
             if "point_cloud" not in self.sensor_modalities:
                 raise ValueError("random_keep_points requires the point_cloud modality")
             positive_int(self.random_keep_points, "random_keep_points")
-            shape = self.replay_buffer["point_cloud"].shape
+            shape = self.episode_store["point_cloud"].shape
             if shape[1] < self.random_keep_points:
                 raise ValueError(
                     f"point_cloud N={shape[1]} must be >= random_keep_points={self.random_keep_points}"
@@ -228,7 +253,7 @@ class RobotDataset(torch.utils.data.Dataset):
             if config:
                 if (
                     section == "pc" and key in {"color", "color_noise"}
-                    and (self.pc_dim or self.replay_buffer["point_cloud"].shape[-1]) < 6
+                    and (self.pc_dim or self.episode_store["point_cloud"].shape[-1]) < 6
                 ):
                     if config.get("prob", 1) > 0:
                         raise ValueError(
@@ -239,7 +264,7 @@ class RobotDataset(torch.utils.data.Dataset):
                 self.augmentors.setdefault(modality, []).append(cls(**config))
 
     def apply_augmentation(self, data):
-        """ReplayBuffer reads own their storage, so augmentation can run in place."""
+        """EpisodeStore reads own their storage, so augmentation can run in place."""
         for modality, augs in self.augmentors.items():
             x = data["obs"][modality]
             for aug in augs:
@@ -247,15 +272,15 @@ class RobotDataset(torch.utils.data.Dataset):
                     aug.augment(x)
 
     def iter_normalization_data(self, key):
-        if self.is_validation:
+        if self.training_dataset is not None:
             raise ValueError("Validation must reuse the training normalizer")
         field = self.action_key if key == "action" else key
         columns = self.consumed_fields[field]
-        for _, values in self.replay_buffer.iter_chunks(field, columns=columns, episode_mask=self.train_mask):
+        for _, values in self.episode_store.iter_chunks(field, columns=columns, episode_mask=self.train_mask):
             yield values
 
     def get_normalizer(self, spec, *, initial_state=None):
-        if self.is_validation:
+        if self.training_dataset is not None:
             return self.training_dataset.get_normalizer(spec, initial_state=initial_state)
         if self._normalizer is not None:
             if initial_state is not None:

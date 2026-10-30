@@ -17,7 +17,7 @@ dataloader:
   batch_size: 256
   drop_last: false
 dataset:
-  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   pc_dim: ${agent.pc_dim}
   pad_after: ${eval:'${n_action_steps} - 1'}
   sensor_modalities: [hand_pointcloud, object_pointcloud, joint_state]

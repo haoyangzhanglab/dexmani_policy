@@ -36,7 +36,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.hand_prior.latent_flow_dataset.LatentFlowDataset
+  _target_: dexmani_policy.datasets.variants.latent_flow.LatentFlowDataset
   pc_dim: ${agent.pc_dim}
   data_semantics: ${data_semantics}
   pad_after: 0  # 仅补齐观测历史，不对未来动作做 padding。

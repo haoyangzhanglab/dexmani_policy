@@ -25,7 +25,7 @@ dataloader:
 dataset:
   tactile_source: ${tactile_source}
   pc_dim: ${agent.pc_dim}
-  _target_: dexmani_policy.datasets.aux.adaptac_dataset.AdapTacDataset
+  _target_: dexmani_policy.datasets.variants.tactile.AdapTacDataset
   pad_after: ${eval:'${n_action_steps} - 1'}
 
   augmentation_cfg:

@@ -13,10 +13,10 @@ from omegaconf import OmegaConf
 
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
 from dexmani_policy.agents.hand_prior.losses import diagonal_gaussian_kl
-from dexmani_policy.common.config import load_policy_config, positive_int
+from dexmani_policy.common.config import load_policy_config, positive_int, read_split_manifest
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
-from dexmani_policy.datasets.hand_prior.hand_chunk_dataset import HandChunkDataset
+from dexmani_policy.datasets.pretrain.hand_chunks import HandChunkDataset
 
 
 def build_codec_dataset(cfg):
@@ -24,7 +24,9 @@ def build_codec_dataset(cfg):
         raise TypeError("HandVAE pretraining requires HandChunkDataset")
     if cfg.dataset.horizon != cfg.horizon or cfg.dataset.seed != cfg.seed:
         raise ValueError("HandVAE dataset horizon/seed must match the training configuration")
-    dataset = hydra.utils.instantiate(cfg.dataset)
+    dataset = hydra.utils.instantiate(
+        cfg.dataset, _convert_="all", split_manifest=read_split_manifest(cfg.dataset.split_manifest),
+    )
     if dataset.get_validation_dataset() is None:
         raise ValueError("HandVAE training requires a nonempty held-out validation split")
     return dataset
@@ -38,7 +40,7 @@ def fit_relative_statistics(dataset, batch_size=4096, std_floor=1e-6):
     squared = np.zeros(12, dtype=np.float64)
     count = 0
     horizon = dataset.horizon
-    ends = dataset.replay_buffer.episode_ends
+    ends = dataset.episode_store.episode_ends
     starts = np.r_[0, ends[:-1]]
     for episode in np.flatnonzero(dataset.train_mask):
         first = int(starts[episode] + dataset.hand_row_offsets[episode])

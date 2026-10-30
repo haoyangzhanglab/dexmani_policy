@@ -47,8 +47,6 @@ def validate_config(cfg):
     if dataset.get("sensor_modalities") is None:
         raise ValueError("dataset.sensor_modalities must be explicit")
     for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
-        if field not in dataset:
-            raise ValueError(f"dataset.{field} must explicitly reference {name}")
         if dataset[field] != cfg[name]:
             raise ValueError(f"dataset.{field} must match {name}")
     validate_normalization_config(cfg)
@@ -72,8 +70,6 @@ def validate_config(cfg):
 def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     metadata = model.inference_metadata
     if checkpoint is not None:
-        if checkpoint.effective_config["dataset"]["split_manifest"] != data_description["split_manifest"]:
-            raise ValueError("Resume data/model mismatch: split_manifest")
         for key, actual in (
             ("normalization_dims", data_description["normalization_dims"]),
             ("hand_data", data_description.get("hand_data")),

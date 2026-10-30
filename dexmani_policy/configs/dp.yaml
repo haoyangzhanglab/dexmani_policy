@@ -21,7 +21,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: dexmani_policy.datasets.common.robot_dataset.RobotDataset
+  _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   pad_after: 7
   sensor_modalities: ["joint_state", "rgb"]
   rgb_preprocess_size: [240, 240]
@@ -30,7 +30,7 @@ dataset:
 
   # 配置颜色增强时，训练与评测均使用浮点插值。
   rgb_color_aug:
-    _target_: dexmani_policy.datasets.common.augmentation.ImageAugmentation
+    _target_: dexmani_policy.datasets.transforms.ImageAugmentation
     brightness: 0.3
     contrast: 0.2
     saturation: 0.2

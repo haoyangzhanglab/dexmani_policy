@@ -239,49 +239,27 @@ class ImageAugmentation:
     ):
         import torchvision.transforms.v2 as v2
 
-        self.prob = prob
-
-        self.color_jitter = v2.ColorJitter(
-            brightness=brightness,
-            contrast=contrast,
-            saturation=saturation,
-            hue=hue,
-        )
-        self.grayscale = v2.RandomGrayscale(p=grayscale_prob) if grayscale_prob > 0 else None
-
-        self.noise = v2.GaussianNoise(mean=0.0, sigma=noise_std) if noise_std > 0 else None
-        self.noise_prob = noise_prob
-
-        self.blur = (
-            v2.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma) if blur_kernel > 0 else None
-        )
-        self.blur_prob = blur_prob
+        operations = []
+        if prob > 0:
+            if any((brightness, contrast, saturation, hue)):
+                operations.append(v2.ColorJitter(
+                    brightness=brightness, contrast=contrast, saturation=saturation, hue=hue,
+                ))
+            if grayscale_prob > 0:
+                operations.append(v2.RandomGrayscale(p=grayscale_prob))
+            if noise_std > 0 and noise_prob > 0:
+                operations.append(v2.RandomApply([v2.GaussianNoise(mean=0.0, sigma=noise_std)], p=noise_prob))
+            if blur_kernel > 0 and blur_prob > 0:
+                operations.append(v2.RandomApply([
+                    v2.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma),
+                ], p=blur_prob))
+        self.transform = v2.Compose(operations) if operations else torch.nn.Identity()
+        if operations and 0 < prob < 1:
+            self.transform = v2.RandomApply([self.transform], p=prob)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (T, 3, H, W) float32 [0, 1] → same shape."""
-        # Preserve RNG consumption: prob=1 omits the outer probability draw.
-        need_prob = self.prob < 1.0
-        n_rand = 3 if need_prob else 2
-        rand_vals = torch.rand(n_rand, device=x.device)
-
-        if need_prob and rand_vals[0].item() > self.prob:
-            return x
-
-        noise_idx = 1 if need_prob else 0
-        blur_idx = 2 if need_prob else 1
-
-        x = self.color_jitter(x)
-
-        if self.grayscale is not None:
-            x = self.grayscale(x)
-
-        if self.noise is not None and rand_vals[noise_idx].item() <= self.noise_prob:
-            x = self.noise(x)
-
-        if self.blur is not None and rand_vals[blur_idx].item() <= self.blur_prob:
-            x = self.blur(x)
-
-        return x.clamp(0, 1)
+        # Transform decisions and color parameters are shared across the T-frame window.
+        return self.transform(x).clamp(0, 1)
 
 
 # NumPy transforms run in this order before point subsampling and RGB processing.

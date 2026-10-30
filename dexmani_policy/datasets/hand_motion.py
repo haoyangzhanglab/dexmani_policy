@@ -3,27 +3,26 @@ import math
 import numpy as np
 
 from dexmani_policy.common.hand_semantics import HAND_ACTION_SEMANTICS, validate_hand_coordinates
-from dexmani_policy.datasets.common.replay_buffer import ReplayBuffer
-from dexmani_policy.datasets.common.split import split_episodes
-from dexmani_policy.datasets.common.validation import check_finite
+from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
+from dexmani_policy.datasets.split import split_episodes
 
 
-def load_hand_source(cfg, keys):
+def load_hand_source(cfg, keys, *, split_manifest: dict | None):
     if cfg.get("resume_from") is not None:
         raise ValueError("Prepare hand artifacts from a fresh policy config, not resume_from")
     if cfg.dataset.action_key != "action" or cfg.agent.action_dim != 19:
         raise ValueError("Hand pretraining requires action=arm7+hand12 joint commands")
-    buffer = ReplayBuffer(cfg.dataset.zarr_path, keys=keys)
+    buffer = EpisodeStore(cfg.dataset.zarr_path, keys=keys)
     if buffer["action"].shape[1:] != (19,):
         raise ValueError("Hand pretraining requires action shape [T,19]")
     train, val, split = split_episodes(
-        buffer, manifest=cfg.dataset.get("split_manifest"), seed=cfg.dataset.seed,
+        buffer, manifest=split_manifest, seed=cfg.dataset.seed,
         val_ratio=cfg.dataset.val_ratio, max_train_episodes=cfg.dataset.max_train_episodes,
     )
     return buffer, train, val, split
 
 
-def compact_episode_offsets(episode_ends, episode_mask):
+def episode_row_offsets(episode_ends, episode_mask):
     starts = np.r_[0, episode_ends[:-1]]
     lengths = (episode_ends - starts) * episode_mask
     return np.r_[0, lengths.cumsum()[:-1]] - starts
@@ -40,7 +39,7 @@ def load_hand_array(buffer, key, episode_mask):
     return values
 
 
-def _recorded_dt(attrs):
+def recorded_dt(attrs):
     dt = attrs.get("dt")
     if type(dt) not in (int, float) or not math.isfinite(dt) or dt <= 0:
         raise ValueError("Hand motion data requires finite positive recorded dt")
@@ -50,7 +49,7 @@ def _recorded_dt(attrs):
 def describe_hand_chunks(dataset, data_semantics):
     if data_semantics != HAND_ACTION_SEMANTICS:
         raise ValueError("Hand chunks require the declared arm7/XHand12 absolute-command semantics")
-    buffer = dataset.replay_buffer
+    buffer = dataset.episode_store
     for key in ("action", "joint_state"):
         if buffer[key].shape[1:] != (19,):
             raise ValueError(f"{key} must have shape [T,19]")
@@ -64,16 +63,6 @@ def describe_hand_chunks(dataset, data_semantics):
     validate_hand_coordinates(attrs)
 
     return {
-        "contract": dict(HAND_ACTION_SEMANTICS, horizon=dataset.horizon, dt=_recorded_dt(attrs)),
+        "contract": dict(HAND_ACTION_SEMANTICS, horizon=dataset.horizon, dt=recorded_dt(attrs)),
         "semantics_evidence": evidence,
-    }
-
-
-def describe_lamp_data(attrs, *, action_key, horizon, obs_horizon, pad_before, pad_after, history_steps):
-    validate_hand_coordinates(attrs)
-    return {
-        "action_key": action_key, "dt": _recorded_dt(attrs),
-        "horizon": horizon, "obs_horizon": obs_horizon,
-        "pad_before": pad_before, "pad_after": pad_after,
-        "history_steps": history_steps,
     }

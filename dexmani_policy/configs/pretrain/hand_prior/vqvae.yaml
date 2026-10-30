@@ -5,7 +5,4 @@ defaults:
 
 # Module pretraining keeps its own data range; a shared manifest is explicit.
 dataset:
-  seed: 42
-  val_ratio: 0.1
   max_train_episodes: null
-  split_manifest: null

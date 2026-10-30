@@ -5,23 +5,24 @@ import hydra
 import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS
+from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, read_split_manifest
 
 
 def build_dataset(cfg, *, verbose=True):
     """Admit one train/val source before choosing the model's affine initialization."""
     spec = cfg.normalization
-    dataset = hydra.utils.instantiate(cfg.dataset)
-    buffer = dataset.replay_buffer
-    # RobotDataset 已核对 split 与数据身份一致；resume 额外拒绝双方都没有 ID。
+    dataset = hydra.utils.instantiate(
+        cfg.dataset, _convert_="all", split_manifest=read_split_manifest(cfg.dataset.split_manifest),
+    )
+    buffer = dataset.episode_store
+    # DemonstrationDataset 已核对 split 与数据身份一致；resume 额外拒绝双方都没有 ID。
     if (
         cfg.get("resume_from") is not None
         and buffer.attrs.get("format") == "dexmani.real.canonical"
         and buffer.attrs.get("source_id") is None
     ):
         raise ValueError(
-            "Canonical checkpoint resume requires source_id in both the dataset and saved split; "
-            "re-export legacy data and start a new experiment for reliable resume"
+            "Canonical checkpoint resume requires source_id in both the dataset and saved split"
         )
     dims = {key: int(buffer[key].shape[-1]) for key, mode in spec.items() if key != "action" and mode != "identity"}
     for key in FIELD_FEATURE_SHAPES.keys() & dims.keys():
