@@ -68,6 +68,7 @@ class RectifiedFlow(nn.Module):
         cond: torch.Tensor,
         actions: torch.Tensor,
         *,
+        dim_groups: dict[str, tuple[int, int, float]] | None = None,
         log_metrics: bool = True,
         return_features: bool = False,
     ) -> (
@@ -79,18 +80,27 @@ class RectifiedFlow(nn.Module):
             pred_v, features = self.model(x=xt, timestep=t, context=cond, return_features=True)
         else:
             pred_v = self.model(x=xt, timestep=t, context=cond)
-        loss = F.mse_loss(pred_v, target_v)
-
         metrics = {}
+        if dim_groups is None:
+            loss = F.mse_loss(pred_v, target_v)
+        else:
+            group_losses = []
+            for name, (start, end, weight) in dim_groups.items():
+                group_loss = F.mse_loss(pred_v[..., start:end].float(), target_v[..., start:end].float())
+                group_losses.append(weight * group_loss)
+                if log_metrics:
+                    metrics[f"loss_{name}"] = group_loss.detach()
+            loss = torch.stack(group_losses).sum()
+
         if log_metrics:
             with torch.no_grad():
-                metrics = {
+                metrics.update({
                     "loss": loss.detach(),
                     "loss_action": loss.detach(),
                     "pred_v_magnitude": torch.sqrt(torch.mean(pred_v**2)),
                     "target_v_magnitude": torch.sqrt(torch.mean(target_v**2)),
                     "t_mean": t.mean(),
-                }
+                })
         if return_features:
             return loss, metrics, features
         return loss, metrics

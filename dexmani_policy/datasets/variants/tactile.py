@@ -1,20 +1,21 @@
 import numpy as np
 import torch
 
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.common.config import validate_future_force_offsets
 from dexmani_policy.datasets.demonstration import DemonstrationDataset
 
 
-def read_future_force(store, query, steps):
+def read_future_force(store, query, offsets):
     episode_ends = store.episode_ends
     end = episode_ends[np.searchsorted(episode_ends, query, side="right")]
+    target_rows = query + np.asarray(offsets, dtype=np.int64)
     # The terminal query uses the final real row as fill, with no valid supervision.
+    rows = np.minimum(target_rows, end - 1)
     force = store.read(
         "finger_tactile_force",
-        slice(min(query + 1, end - 1), min(query + steps + 1, end)),
+        slice(rows[0], rows[-1] + 1),
     )
-    rows = np.arange(steps)
-    return force[np.minimum(rows, len(force) - 1)], rows < end - query - 1
+    return force[rows - rows[0]], target_rows < end
 
 
 class AdapTacDataset(DemonstrationDataset):
@@ -35,25 +36,24 @@ class AdapTacDataset(DemonstrationDataset):
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
         query = self.sampler.sample_source_rows(idx)[self.action_start_index]
-        force, valid = read_future_force(self.episode_store, query, self.horizon - self.action_start_index)
+        offsets = range(1, self.horizon - self.action_start_index + 1)
+        force, valid = read_future_force(self.episode_store, query, offsets)
         data["future_force"] = torch.from_numpy(force)
         data["future_force_valid"] = torch.from_numpy(valid)
         return data
 
 
 class InterActDexDataset(DemonstrationDataset):
-    def __init__(self, *args, n_action_steps, sensor_modalities, **kwargs):
-        self.n_action_steps = positive_int(n_action_steps, "n_action_steps")
+    def __init__(self, *args, future_force_offsets, sensor_modalities, **kwargs):
+        self.future_force_offsets = validate_future_force_offsets(future_force_offsets)
         if "finger_tactile_force" not in sensor_modalities:
             raise ValueError("InterAct-Dex requires finger_tactile_force for its future target")
         super().__init__(*args, sensor_modalities=sensor_modalities, **kwargs)
-        if self.action_start_index + self.n_action_steps > self.horizon:
-            raise ValueError("action_start_index + n_action_steps must not exceed horizon")
 
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
         query = self.sampler.sample_source_rows(idx)[self.action_start_index]
-        force, valid = read_future_force(self.episode_store, query, self.n_action_steps)
+        force, valid = read_future_force(self.episode_store, query, self.future_force_offsets)
         data["future_force"] = torch.from_numpy(force)
         data["future_force_valid"] = torch.from_numpy(valid)
         return data
