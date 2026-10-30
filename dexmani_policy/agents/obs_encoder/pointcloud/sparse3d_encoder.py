@@ -166,9 +166,8 @@ class Sparse3DEncoder(nn.Module):
             tokens = block(tokens, cos, sin)
         return self.norm(tokens)
 
-    def forward(
-        self, pointcloud: torch.Tensor, *, return_geometry: bool = False
-    ) -> dict[str, torch.Tensor]:
+    def encode_patches(self, pointcloud: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Sample once and encode local geometry, absolute position and shared 3D RoPE."""
         if (
             pointcloud.ndim != 3
             or pointcloud.shape[0] == 0
@@ -200,17 +199,31 @@ class Sparse3DEncoder(nn.Module):
         # Preserve absolute metric position as content alongside relative geometry/RoPE.
         position = self.position_embedding(centers.to(self.position_embedding[0].weight.dtype))
         tokens = tokens + position.to(tokens.dtype)
-        outputs = {
-            "tokens": self.encode_global(tokens, cos, sin),
+        return {
+            "tokens": tokens,
             "xyz": centers,
             "mask": torch.ones(centers.shape[:2], device=xyz.device, dtype=torch.bool),
+            "center_indices": center_indices,
+            "neighbor_indices": neighbors,
+            "patch_radius": radius,
+            "relative_xyz": relative_xyz,
+            "rope_cos": cos,
+            "rope_sin": sin,
+        }
+
+    def forward(
+        self, pointcloud: torch.Tensor, *, return_geometry: bool = False
+    ) -> dict[str, torch.Tensor]:
+        patches = self.encode_patches(pointcloud)
+        outputs = {
+            "tokens": self.encode_global(patches["tokens"], patches["rope_cos"], patches["rope_sin"]),
+            "xyz": patches["xyz"],
+            "mask": patches["mask"],
         }
         if return_geometry:
-            outputs.update(
-                center_indices=center_indices,
-                neighbor_indices=neighbors,
-                patch_radius=radius,
-            )
+            outputs.update({key: patches[key] for key in (
+                "center_indices", "neighbor_indices", "patch_radius",
+            )})
         return outputs
 
     @property

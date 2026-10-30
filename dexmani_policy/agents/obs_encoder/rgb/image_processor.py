@@ -113,11 +113,8 @@ class ImageProcessor(torch.nn.Module):
         images: np.ndarray | torch.Tensor,
         *,
         return_transform: bool = False,
-        input_transform: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Normalize uint8/[0,1] RGB; optional raw-to-final transforms use half-pixel resizing."""
-        if input_transform is not None and not return_transform:
-            raise ValueError("input_transform requires return_transform=True")
         images = to_rgb_tensor(images)
         leading_shape = images.shape[:-3]
         flat_images = images.reshape(-1, *images.shape[-3:])
@@ -126,16 +123,6 @@ class ImageProcessor(torch.nn.Module):
             if self.interpolation == "nearest" and tuple(output_hw) != images.shape[-2:]:
                 raise ValueError("tracked nearest resize does not use the half-pixel convention")
             transform = resize_image_transform(images.shape[-2:], output_hw, device=images.device)
-            if input_transform is not None:
-                if input_transform.shape[-2:] != (3, 3):
-                    raise ValueError("input_transform must end in [3,3]")
-                with (
-                    torch.no_grad(),
-                    torch.autocast(device_type=images.device.type, enabled=False),
-                ):
-                    prior = input_transform.to(device=images.device, dtype=torch.float32)
-                    # Geometry must not inherit the trainer's global TF32 matmul precision.
-                    transform = (transform[:, :, None] * prior[..., None, :, :]).sum(-2)
             transform = torch.broadcast_to(transform, (*leading_shape, 3, 3))
 
         if self.image_size is not None and self.image_size != images.shape[-2:]:

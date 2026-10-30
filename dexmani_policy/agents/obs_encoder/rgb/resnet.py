@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from typing import Literal
 
 import torch
@@ -58,7 +57,6 @@ class ResNetEncoder(nn.Module):
             weights=weights, load_pretrained=load_pretrained,
         )
         self.tune_mode = tune_mode
-        self.output_stride = 32
 
         norm_layer = FrozenBatchNorm2d if norm_mode == "frozen_bn" else nn.BatchNorm2d
         backbone = getattr(torchvision.models, model_name)(
@@ -106,11 +104,3 @@ class ResNetEncoder(nn.Module):
             "patch_tokens": patch_tokens.reshape(*leading_shape, *patch_tokens.shape[1:]),
             "global_token": global_token.reshape(*leading_shape, *global_token.shape[1:]),
         }
-
-    def tokens_to_feature_map(
-        self, patch_tokens: torch.Tensor, image_hw: Sequence[int]
-    ) -> torch.Tensor:
-        feature_h = (int(image_hw[0]) + self.output_stride - 1) // self.output_stride
-        feature_w = (int(image_hw[1]) + self.output_stride - 1) // self.output_stride
-
-        return patch_tokens.unflatten(-2, (feature_h, feature_w)).movedim(-1, -3).contiguous()

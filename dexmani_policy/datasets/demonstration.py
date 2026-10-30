@@ -20,6 +20,7 @@ from dexmani_policy.common.config import (
 )
 from dexmani_policy.datasets.transforms import (
     AUGMENTATION_SPECS,
+    PointCoordinateNoise,
     random_sample_points,
 )
 from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
@@ -119,6 +120,14 @@ class DemonstrationDataset(torch.utils.data.Dataset):
                 raise ValueError(f"Stored {key} does not satisfy configured pc_dim")
         self.augmentation_cfg = augmentation_cfg
         self.build_augmentors()
+        if {"point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"} <= set(sensor_modalities):
+            if rgb_preprocess_size is not None:
+                raise ValueError("Calibrated RGB must stay raw in Dataset; resize in the encoder ImageProcessor")
+            if any(
+                isinstance(aug, PointCoordinateNoise) and aug.prob > 0 and aug.noise_std > 0
+                for aug in self.augmentors.get("point_cloud", ())
+            ):
+                raise ValueError("Calibrated RGB/point clouds cannot use independent XYZ coordinate noise")
 
         self.train_mask, self.val_mask, self.split_manifest = split_episodes(
             self.episode_store, manifest=split_manifest, val_ratio=val_ratio,

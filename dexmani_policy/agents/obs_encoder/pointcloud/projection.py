@@ -39,18 +39,18 @@ def projection_from_pixels(
 
 @torch.no_grad()
 def project_points(
-    points_base: torch.Tensor,
+    points_source: torch.Tensor,
     intrinsics: torch.Tensor,
-    T_camera_from_base: torch.Tensor,
+    T_camera_from_source: torch.Tensor,
     image_transform: torch.Tensor,
     image_hw: tuple[int, int],
     *,
     confidence: torch.Tensor | None = None,
 ) -> PointProjection:
-    """Project base XYZ [BT,N,3] through cameras [BT,V,...] into detached FP32 grids."""
-    with torch.autocast(device_type=points_base.device.type, enabled=False):
-        points = points_base.float()
-        transform = T_camera_from_base.float()
+    """Project source-frame XYZ [BT,N,3] through cameras [BT,V,...] into FP32 grids."""
+    with torch.autocast(device_type=points_source.device.type, enabled=False):
+        points = points_source.float()
+        transform = T_camera_from_source.float()
         # Explicit FP32 products avoid TF32 rounding at image boundaries.
         camera = (points[:, None, :, None, :] * transform[..., None, :3, :3]).sum(-1)
         camera.add_(transform[..., None, :3, 3])

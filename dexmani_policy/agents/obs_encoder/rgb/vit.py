@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from typing import Literal, cast
 
 import torch
@@ -122,14 +121,3 @@ class ViTEncoder(nn.Module):
             "patch_tokens": patch_tokens.reshape(*leading_shape, *patch_tokens.shape[1:]),
             "global_token": global_token.reshape(*leading_shape, *global_token.shape[1:]),
         }
-
-    def tokens_to_feature_map(
-        self, patch_tokens: torch.Tensor, image_hw: Sequence[int]
-    ) -> torch.Tensor:
-        height, width = int(image_hw[0]), int(image_hw[1])
-        if height % self.patch_size or width % self.patch_size:
-            raise ValueError(
-                f"Input size {(height, width)} must be divisible by patch size {self.patch_size}."
-            )
-        grid = (height // self.patch_size, width // self.patch_size)
-        return patch_tokens.unflatten(-2, grid).movedim(-1, -3).contiguous()

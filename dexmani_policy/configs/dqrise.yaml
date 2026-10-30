@@ -2,22 +2,24 @@ defaults:
   - common
   - _self_
 
-# DQ-RISE：扩散预测手臂关节与量化手姿索引。
+# DQ-RISE：共享 dense observation，flow 预测 7 维手臂关节和 1 维连续码本索引。
 
 policy_name: dqrise
 
-horizon: 20
-n_obs_steps: 1
-n_action_steps: 16
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
 action_dim: 19
 
 normalization:
   joint_state: limits
   action: auto
   point_cloud: identity  # 保留 XYZ 物理坐标。
+  rgb: identity
+  camera_intrinsic: identity
+  camera_extrinsic: identity
 
-tcp_dim: 7  # 手臂关节维度。
-
+tcp_dim: 7
 codebook_path: null  # 新训练须提供与数据配方和归一化匹配的码本。
 
 dataloader:
@@ -27,28 +29,23 @@ dataloader:
 dataset:
   pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
-  pad_after: ${eval:'${n_action_steps} - 1'}  # 在 episode 末尾重复动作。
-  sensor_modalities: ["joint_state", "point_cloud"]
+  pad_after: 7
+  sensor_modalities: ["joint_state", "point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"]
+  rgb_keep_uint8: true
 
   augmentation_cfg:
-    pc:
-      coord_noise: {noise_std: 0.002, prob: 1.0}
-      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  clip_sample: true
   _target_: dexmani_policy.agents.policies.dqrise.DQRISEPolicy
   tcp_dim: ${tcp_dim}
   codebook_path: ${codebook_path}
-
   codebook_num_groups: ${vq_vae.num_groups}
   codebook_size: ${vq_vae.codebook_size}
 
-  pc_dim: 6
+  pc_dim: 3
   state_dim: 19
-  state_out_dim: 64
   num_points: 1024
 
   fps_random_config:
@@ -58,43 +55,59 @@ agent:
     random_noise_scale: 0.0
 
   pc_encoder_config:
-    channels: 384
+    channels: 192
     num_patches: 96
     group_size: 32
-    depth: 4
+    depth: 2
     num_heads: 8
     mlp_ratio: 2.0
     geometry_scale: 0.10
     rope_scale: 0.05
     rope_base: 100.0
 
-  diffusion_step_embed_dim: 256
-  down_dims: [256, 512]
-  kernel_size: 5
-  n_groups: 8
-  cond_predict_scale: true
+  rgb_backbone_config:
+    model_name: facebook/dinov2-small
+    tune_mode: freeze
+    image_size: [224, 224]
 
-  num_training_steps: 100
-  num_inference_steps: 20
-  prediction_type: epsilon
+  fusion_stage: pre_global
+  semantic_pool_sigma: 0.04
+
+  n_layers: 8
+  hidden_dim: 256
+  n_head: 8
+  mlp_ratio: 4.0
+  p_drop_attn: 0.0
+  qkv_bias: true
+  qk_norm: true
+
+  num_inference_steps: 10
 
   modality_dropout_probs:
     joint_state: 0.0
 
 optimizer:
-  lr: 3.0e-4
+  lr: 1.0e-4
   weight_decay: 1.0e-6
-  betas: [0.9, 0.999]
-  obs_lr: 3.0e-4
+  betas: [0.95, 0.999]
+  obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
+
+ema:
+  _target_: dexmani_policy.training.common.optimization.EMA
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
 
 training:
   use_bfloat16: true
   use_compile: true
-  use_ema: false
+  use_ema: true
   lr_scheduler: cosine
-  lr_warmup_steps: 2000
-  max_grad_norm: 0.0
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
 
@@ -104,7 +117,7 @@ env_runner:
 
 eval:
   inference_steps: ${agent.num_inference_steps}
-  use_ema: false
+  use_ema: true
 
 # VQ-VAE 预训练复用策略的数据与归一化配置。
 vq_vae:

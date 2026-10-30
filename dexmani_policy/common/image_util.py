@@ -28,7 +28,7 @@ def validate_rgb_preprocessing(resize_hw, crop_hw, color_augmentation=None):
 
 
 def resize_image_transform(input_hw, output_hw, *, device=None) -> torch.Tensor:
-    """FP32 pixel-center affine for (H, W) resize with align_corners=False."""
+    """FP32 resize affine for integer pixel centers and align_corners=False."""
     import torch
 
     sy, sx = (dst / src for src, dst in zip(input_hw, output_hw))

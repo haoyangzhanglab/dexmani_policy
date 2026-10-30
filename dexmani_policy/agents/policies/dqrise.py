@@ -1,92 +1,17 @@
-"""DQ-RISE: diffusion over arm joints and quantized hand-state indices."""
+"""DQ-RISE: flow matching over arm joints and quantized hand-state indices."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import torch
-from torch import nn
 
-from dexmani_policy.agents.action_decoders.backbones.unet1d import (
-    ConditionalUNet1D,
-    validate_unet_horizon,
-)
-from dexmani_policy.agents.action_decoders.diffusion import Diffusion
+from dexmani_policy.agents.action_decoders.backbones.ditx import DiTX
+from dexmani_policy.agents.action_decoders.flow import RectifiedFlow
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
-from dexmani_policy.agents.obs_encoder.pointcloud.ops import preprocess_point_cloud
-from dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder import Sparse3DEncoder
-from dexmani_policy.agents.obs_encoder.proprio import StateEncoder
-from dexmani_policy.agents.policies.base import BasePolicy, module_parameter_group
-from dexmani_policy.common.config import positive_int
+from dexmani_policy.agents.obs_encoder.spatial import SpatialObservationEncoder
+from dexmani_policy.agents.policies.base import BasePolicy
 from dexmani_policy.common.hand_semantics import validate_hand_coordinates, validate_pretraining_split
-
-
-class DQRISEObservationEncoder(nn.Module):
-    consumed_observation_fields = ("joint_state", "point_cloud")
-    out_dim = 256
-    use_coord_only = False
-
-    @staticmethod
-    def validate_normalization(spec):
-        Sparse3DEncoder.validate_normalization(spec)
-        if spec.get("joint_state") != "limits":
-            raise ValueError("Sparse3D global observations require normalization.joint_state: limits")
-
-    def __init__(
-        self,
-        pc_dim: int = 6,
-        state_dim: int = 19,
-        num_points: int = 1024,
-        n_obs_steps: int = 2,
-        state_out_dim: int = 64,
-        pc_encoder_config: dict | None = None,
-        fps_random_config: dict | None = None,
-    ) -> None:
-        super().__init__()
-        if (pc_dim, state_dim) != (6, 19) or n_obs_steps not in (1, 2):
-            raise ValueError("Expected pc_dim=6, state_dim=19, n_obs_steps in (1, 2)")
-        self.num_points = positive_int(num_points, "num_points")
-        self.n_obs_steps = n_obs_steps
-        fps_config = dict(
-            use_random=True,
-            use_random_start=True,
-            use_shuffle_output=False,
-            random_noise_scale=0.0,
-        )
-        if fps_random_config is not None:
-            fps_config.update(fps_random_config)
-
-        self.pc_encoder = Sparse3DEncoder(
-            input_channels=pc_dim, fps_random_config=fps_config, **(pc_encoder_config or {}),
-        )
-        self.state_mlp = StateEncoder(state_dim, positive_int(state_out_dim, "state_out_dim"))
-        fused_dim = n_obs_steps * (self.pc_encoder.out_dim + state_out_dim)
-        self.temporal_projection = nn.Sequential(
-            nn.LayerNorm(fused_dim),
-            nn.Linear(fused_dim, self.out_dim),
-        )
-
-    @property
-    def effective_config(self):
-        return {
-            "pc_encoder_config": self.pc_encoder.effective_config,
-            "fps_random_config": self.pc_encoder.fps_random_config,
-        }
-
-    def forward(self, obs: dict) -> torch.Tensor:
-        pc, state = obs["point_cloud"], obs["joint_state"]
-        pc = preprocess_point_cloud(
-            pc,
-            self.num_points,
-            self.use_coord_only,
-            self.pc_encoder.fps_random_config,
-            training=self.training,
-        )
-        # Independent FPS has no cross-frame patch correspondence; pool before time fusion.
-        pc_features = self.pc_encoder(pc)["tokens"].mean(dim=1)
-        features = torch.cat((pc_features, self.state_mlp(state)), dim=-1)
-        features = features.unflatten(0, (-1, self.n_obs_steps)).flatten(1)
-        return self.temporal_projection(features)
 
 
 class DQRISEPolicy(BasePolicy):
@@ -94,62 +19,67 @@ class DQRISEPolicy(BasePolicy):
 
     def __init__(
         self,
-        horizon: int,
-        n_obs_steps: int,
-        n_action_steps: int,
-        action_dim: int,
+        horizon: int = 16,
+        n_obs_steps: int = 2,
+        n_action_steps: int = 8,
+        action_dim: int = 19,
         tcp_dim: int = 7,
         codebook_path: str | None = None,
         codebook_num_groups: int = 2,
         codebook_size: int = 4,
-        pc_dim: int = 6,
+        pc_dim: int = 3,
         state_dim: int = 19,
         num_points: int = 1024,
-        state_out_dim: int = 64,
         pc_encoder_config: dict | None = None,
         fps_random_config: dict | None = None,
-        diffusion_step_embed_dim: int = 256,
-        down_dims: tuple[int, ...] = (256, 512),
-        kernel_size: int = 5,
-        n_groups: int = 8,
-        num_training_steps: int = 100,
-        num_inference_steps: int = 20,
-        prediction_type: str = "epsilon",
-        cond_predict_scale: bool = True,
+        rgb_backbone_config: dict | None = None,
+        fusion_stage: str = "post_global",
+        semantic_pool_sigma: float | None = None,
+        n_layers: int = 8,
+        hidden_dim: int = 256,
+        n_head: int = 8,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        qk_norm: bool = True,
+        p_drop_attn: float = 0.0,
+        timestep_embed_dim: int = 128,
+        num_inference_steps: int = 10,
         modality_dropout_probs: dict | None = None,
-        clip_sample: bool = True,
     ) -> None:
-        if (n_obs_steps, action_dim, tcp_dim) != (1, 19, 7):
-            raise ValueError("DQ-RISE requires n_obs_steps=1 and joint action=7+12")
-        validate_unet_horizon(horizon, down_dims)
-
+        if (n_obs_steps, action_dim, tcp_dim) != (2, 19, 7):
+            raise ValueError("DQ-RISE requires n_obs_steps=2 and joint action=7+12")
         hand_dim = action_dim - tcp_dim
-        diffusion_action_dim = tcp_dim + 1
-
-        obs_encoder = DQRISEObservationEncoder(
+        flow_action_dim = tcp_dim + 1
+        obs_encoder = SpatialObservationEncoder(
             pc_dim=pc_dim,
             state_dim=state_dim,
             num_points=num_points,
             n_obs_steps=n_obs_steps,
-            state_out_dim=state_out_dim,
             pc_encoder_config=pc_encoder_config,
             fps_random_config=fps_random_config,
+            rgb_backbone_config=rgb_backbone_config,
+            fusion_stage=fusion_stage,
+            semantic_pool_sigma=semantic_pool_sigma,
         )
-        backbone = ConditionalUNet1D(
-            input_dim=diffusion_action_dim,
-            context_dim=obs_encoder.out_dim,
-            diffusion_step_embed_dim=diffusion_step_embed_dim,
-            down_dims=down_dims,
-            kernel_size=kernel_size,
-            n_groups=n_groups,
-            cond_predict_scale=cond_predict_scale,
+        backbone = DiTX(
+            horizon=horizon,
+            action_dim=flow_action_dim,
+            n_obs_steps=n_obs_steps,
+            obs_token_dim=obs_encoder.out_dim,
+            timestep_embed_dim=timestep_embed_dim,
+            hidden_dim=hidden_dim,
+            n_layers=n_layers,
+            n_head=n_head,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            p_drop_attn=p_drop_attn,
         )
-        action_decoder = Diffusion(
-            backbone,
-            num_training_steps,
-            num_inference_steps,
-            prediction_type,
-            clip_sample=clip_sample,
+        action_decoder = RectifiedFlow(
+            model=backbone,
+            num_inference_steps=num_inference_steps,
+            t_sample_mode="uniform",
+            time_shift_alpha=1.0,
         )
         super().__init__(
             obs_encoder=obs_encoder,
@@ -160,10 +90,9 @@ class DQRISEPolicy(BasePolicy):
             action_dim=action_dim,
             modality_dropout_probs=modality_dropout_probs,
         )
-
         self.tcp_dim = tcp_dim
         self.hand_dim = hand_dim
-        self.diffusion_action_dim = diffusion_action_dim
+        self.flow_action_dim = flow_action_dim
         self.hand_codebook = HandStateCodebook(
             hand_dim=hand_dim,
             num_groups=codebook_num_groups,
@@ -172,15 +101,13 @@ class DQRISEPolicy(BasePolicy):
         self.codebook_path = codebook_path
         self.register_load_state_dict_post_hook(self.validate_restored_codebook)
 
-    def optimizer_groups(self, lr, obs_lr, weight_decay, obs_weight_decay) -> list[dict]:
-        return [
-            module_parameter_group(self.action_decoder, lr=lr, weight_decay=weight_decay),
-            module_parameter_group(self.obs_encoder, lr=obs_lr, weight_decay=obs_weight_decay),
-        ]
-
     @classmethod
     def prepare_restore_config(cls, config) -> None:
-        config.codebook_path = None
+        rgb = config.get("rgb_backbone_config")
+        if rgb is None or rgb.get("architecture") is None:
+            raise ValueError("Dense checkpoints require saved DINO architecture for offline restoration")
+        rgb["load_pretrained"] = False
+        config["codebook_path"] = None
 
     def initialize_training(self, data_description) -> None:
         if self.codebook_path is None:
@@ -240,9 +167,9 @@ class DQRISEPolicy(BasePolicy):
         index, discrete_idx = self.hand_codebook.encode(hand_part)
         index = index.to(arm_part.dtype)
 
-        diffusion_target = torch.cat([arm_part, index], dim=-1)
+        flow_target = torch.cat([arm_part, index], dim=-1)
         action_loss, loss_dict = self.action_decoder.compute_loss(
-            condition, diffusion_target, log_metrics=log_metrics, **kwargs,
+            condition, flow_target, log_metrics=log_metrics, **kwargs,
         )
 
         if not log_metrics:
@@ -271,7 +198,7 @@ class DQRISEPolicy(BasePolicy):
             raise NotImplementedError("DQ-RISE does not support RTC")
         self.require_codebook()
         reduced_action = self.action_decoder.predict_action(
-            condition, (condition.shape[0], self.horizon, self.diffusion_action_dim),
+            condition, (condition.shape[0], self.horizon, self.flow_action_dim),
             inference_steps=inference_steps, generator=generator,
         )
 
@@ -284,15 +211,15 @@ class DQRISEPolicy(BasePolicy):
         prediction = self.normalizer["action"].unnormalize(normalized_full_action)
         return {
             **self.format_action_output(prediction),
-            "pred_code_index": discrete_idx,
-            "pred_code_continuous": idx_pred,
+            "pred_code_index": discrete_idx[:, self.action_start_index :],
+            "pred_code_continuous": idx_pred[:, self.action_start_index :],
         }
 
     def extra_repr(self) -> str:
         return (
             f"action_dim={self.action_dim}, tcp_dim={self.tcp_dim}, "
             f"hand_dim={self.hand_dim}, "
-            f"diffusion_action_dim={self.diffusion_action_dim}, "
+            f"flow_action_dim={self.flow_action_dim}, "
             f"codes={self.hand_codebook.num_codes}, "
             f"codebook_loaded={self.hand_codebook.is_loaded}"
         )

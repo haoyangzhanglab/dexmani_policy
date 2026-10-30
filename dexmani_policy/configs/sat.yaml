@@ -2,7 +2,7 @@ defaults:
   - common
   - _self_
 
-# SAT：将动作维度作为 token 的结构化 flow 策略。
+# SAT：共享 spatial observation，每个关节的完整轨迹形成一个结构化动作 token。
 
 policy_name: sat
 
@@ -15,6 +15,9 @@ normalization:
   joint_state: limits
   action: auto
   point_cloud: identity  # 保留 XYZ 物理坐标。
+  rgb: identity
+  camera_intrinsic: identity
+  camera_extrinsic: identity
 
 dataloader:
   batch_size: 128
@@ -24,21 +27,18 @@ dataset:
   pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
   pad_after: 7
-  sensor_modalities: ["joint_state", "point_cloud"]
+  sensor_modalities: ["joint_state", "point_cloud", "rgb", "camera_intrinsic", "camera_extrinsic"]
+  rgb_keep_uint8: true
 
   augmentation_cfg:
-    pc:
-      coord_noise: {noise_std: 0.002, prob: 1.0}
-      color:       {brightness: 0.125, contrast: 0.5, saturation: 0.5, hue: 0.0, prob: 1.0}
     state:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
   _target_: dexmani_policy.agents.policies.sat.SATPolicy
 
-  pc_dim: 6
+  pc_dim: 3
   state_dim: 19
-  state_out_dim: 64
   num_points: 1024
 
   fps_random_config:
@@ -48,26 +48,32 @@ agent:
     random_noise_scale: 0.0
 
   pc_encoder_config:
-    channels: 384
+    channels: 192
     num_patches: 96
     group_size: 32
-    depth: 4
+    depth: 2
     num_heads: 8
     mlp_ratio: 2.0
     geometry_scale: 0.10
     rope_scale: 0.05
     rope_base: 100.0
 
+  rgb_backbone_config:
+    model_name: facebook/dinov2-small
+    tune_mode: freeze
+    image_size: [224, 224]
+
+  fusion_stage: pre_global
+  semantic_pool_sigma: 0.04
+
   n_layers: 8
   hidden_dim: 256
   n_head: 8
   mlp_ratio: 4.0
   p_drop_attn: 0.0
-  qkv_bias: true
-  qk_norm: true
+  timestep_embed_dim: 256
 
   num_inference_steps: 10
-  t_sample_mode_for_flow: uniform
 
   modality_dropout_probs:
     joint_state: 0.0

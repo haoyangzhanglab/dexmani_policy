@@ -15,7 +15,7 @@
 | `sync_data.sh` | `REMOTE_DATA` |
 | `sync_down.sh` / `tail_log.sh` | `REMOTE_EXP` / `SERVER_EXP` |
 
-提前创建持久存储，将远端源码目录的 `data/`、`robot_data/`、`experiments/` 接到相应位置；launcher 不会准备存储。Uni3D 权重可随 `data/pretrained/uni3d/` 同步，其他 pretrained_models/HF 缓存须单独准备。迁移机器时统一调整相关路径，避免只改一处。
+提前创建持久存储，将远端源码目录的 `data/`、`robot_data/`、`experiments/` 接到相应位置；launcher 不会准备存储。Uni3D 权重可随 `data/pretrained/uni3d/` 同步；SAT/DQ-RISE 的 `facebook/dinov2-small` 位于 HF 缓存，须在远端单独准备，其他 pretrained_models/HF 缓存同理。下载与缓存位置见 [数据目录说明](../data/README.md)。迁移机器时统一调整相关路径，避免只改一处。
 
 ## 启动与源码副本
 

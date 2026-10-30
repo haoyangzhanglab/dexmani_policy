@@ -17,7 +17,6 @@ def build_patch_correspondence(
     *,
     image_token_valid: torch.Tensor | None = None,
     member_weight: torch.Tensor | None = None,
-    pooling: str = "uniform",
 ) -> dict[str, torch.Tensor]:
     """Build FP32 image-grid pooling weights; coverage/confidence always use geometric weights."""
     grid_xy, confidence = projection
@@ -40,8 +39,6 @@ def build_patch_correspondence(
         or image_token_valid.shape != (batch, views, grid_h, grid_w)
     ):
         raise ValueError("image_token_valid must be bool [BT,V,Hf,Wf]")
-    if pooling not in {"uniform", "reliability"}:
-        raise ValueError("pooling must be 'uniform' or 'reliability'")
 
     with torch.autocast(device_type=grid_xy.device.type, enabled=False):
         coordinates = grid_xy.float()
@@ -101,13 +98,6 @@ def build_patch_correspondence(
         member_prior = supported / torch.where(count > 0, count, 1)[..., None]
         member_confidence = index_points(reliability, neighbor_idx)
         quality_confidence = (member_confidence * member_prior).sum(-1)
-        if pooling == "reliability":
-            reliability_weight = torch.where(member_prior > 0, member_confidence, 0.0)
-            maximum = reliability_weight.amax(-1, keepdim=True)
-            reliability_weight = reliability_weight / torch.where(maximum > 0, maximum, 1)
-            weighted = member_prior * reliability_weight
-            weight_sum = weighted.sum(-1, keepdim=True)
-            member_prior = weighted / torch.where(weight_sum > 0, weight_sum, 1)
 
         member_idx = index_points(token_idx.permute(0, 2, 1, 3), neighbor_idx)
         member_edges = index_points(point_weight.permute(0, 2, 1, 3), neighbor_idx)
@@ -134,8 +124,6 @@ class FeatureAlignment(nn.Module):
         image_channels: int,
         token_channels: int = 192,
         gate_init: float = 0.1,
-        *,
-        pooling: str = "uniform",
     ) -> None:
         super().__init__()
         if min(image_channels, token_channels) <= 0:
@@ -143,7 +131,6 @@ class FeatureAlignment(nn.Module):
         if not 0 < gate_init < 1:
             raise ValueError("gate_init must be in (0,1)")
 
-        self.pooling = pooling
         self.image_norm = nn.LayerNorm(image_channels)
         self.proj = nn.Linear(image_channels, token_channels)
         self.geometry_norm = nn.LayerNorm(token_channels)
@@ -174,7 +161,6 @@ class FeatureAlignment(nn.Module):
             (image_grid.shape[2], image_grid.shape[3]),
             image_token_valid=image_token_valid,
             member_weight=member_weight,
-            pooling=self.pooling,
         )
         if spatial_tokens.ndim != 3 or spatial_tokens.shape[:2] != neighbor_idx.shape[:2]:
             raise ValueError(

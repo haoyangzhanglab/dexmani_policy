@@ -18,10 +18,11 @@ data/
 - **下载**: 运行 `bash scripts/utils/download_pretrained.sh`
 - **配置路径**: `pretrained_weights_path: data/pretrained/uni3d`
 
-### 其他预训练模型
+### DINOv2-small（SAT / DQ-RISE 和默认 RGB 策略）
 
-DINOv2 / CLIP / SigLIP 等视觉骨干网络由 `transformers` 库自动从 HuggingFace Hub
-下载缓存至 `~/.cache/huggingface/`，无需手动管理。
+`bash scripts/utils/download_pretrained.sh` 同时将 `facebook/dinov2-small` 的 `config.json` 和 `model.safetensors` 下载到 HuggingFace Hub 缓存，默认位于 `~/.cache/huggingface/`，也遵循 `HF_HOME` 等既有环境设置。已有 Uni3D 权重时仍会准备 DINO 缓存；重复运行复用已有文件。
+
+CLIP / SigLIP 或其他 DINO 型号由 `transformers` 按实际配置下载到同一 HF 缓存。首次离线训练前需先准备对应型号；完整策略 checkpoint 内嵌架构与参数，恢复无需这些初始文件。
 
 ## 训练数据
 

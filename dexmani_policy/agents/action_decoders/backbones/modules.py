@@ -57,7 +57,7 @@ class SelfAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, *, query_start=0):
+    def forward(self, x):
         batch, length, channels = x.shape
         qkv = (
             self.qkv(x)
@@ -66,12 +66,12 @@ class SelfAttention(nn.Module):
         )
         q, k, v = qkv.unbind(0)
         x = F.scaled_dot_product_attention(
-            self.q_norm(q[:, :, query_start:]),
+            self.q_norm(q),
             self.k_norm(k),
             v,
             dropout_p=self.attn_drop if self.training else 0.0,
         )
-        x = x.transpose(1, 2).reshape(batch, length - query_start, channels)
+        x = x.transpose(1, 2).reshape(batch, length, channels)
         return self.proj_drop(self.proj(x))
 
 

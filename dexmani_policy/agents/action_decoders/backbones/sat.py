@@ -1,16 +1,14 @@
-"""Structural Action Transformer: [B,T,Da] I/O, internal joint-trajectory tokens."""
+"""Structural Action Transformer over joint trajectories, with flow-matching I/O."""
+import math
 
 import torch
 from torch import nn
-from timm.models.vision_transformer import Mlp, RmsNorm
-
-from dexmani_policy.common.config import positive_int
+from torch.nn import functional as F
+from timm.models.vision_transformer import Mlp
 
 from .modules import (
-    AdaLNOutput,
-    SelfAttention,
-    TimestepMLP,
-    WEIGHT_INIT_STD,
+    DiTTimestepEmbedding,
+    add_temporal_embedding,
     approximate_gelu,
     batch_timesteps,
     initialize_linear,
@@ -18,116 +16,80 @@ from .modules import (
 )
 
 
-class XHandJointEmbedding(nn.Module):
-    """Canonical xArm7/XHand control order; axes are in local URDF frames."""
-
-    # Group: arm/thumb/index/middle/ring/pinky; role: arm/bend/joint1/joint2.
-    # Axis: +Z/+Y/+X/-X/-Z in local URDF frames, not world directions.
-    metadata = {
-        "joint_ids": tuple(range(19)),
-        "group_ids": (0,) * 7 + (1,) * 3 + (2,) * 3 + (3,) * 2 + (4,) * 2 + (5,) * 2,
-        "role_ids": (0,) * 7 + (1, 2, 3) + (1, 2, 3) + (2, 3) * 3,
-        "axis_ids": (0,) * 7 + (4, 2, 2) + (3, 1, 1) + (1, 1) * 3,
-    }
-
-    def __init__(self, hidden_dim: int = 256):
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int):
         super().__init__()
-        self.joint = nn.Embedding(19, hidden_dim)
-        self.group = nn.Embedding(6, hidden_dim)
-        self.role = nn.Embedding(4, hidden_dim)
-        self.axis = nn.Embedding(5, hidden_dim)
-        for name, values in self.metadata.items():
-            self.register_buffer(name, torch.tensor(values, dtype=torch.long))
-        self.initialize_weights()
+        self.scale = math.sqrt(dim)
+        self.g = nn.Parameter(torch.ones(1))
 
-    def initialize_weights(self):
-        for embedding in (self.joint, self.group, self.role, self.axis):
-            nn.init.normal_(embedding.weight, mean=0.0, std=0.005)
+    def forward(self, x):
+        return F.normalize(x, dim=-1) * self.scale * self.g
 
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-    ):
-        for name, values in self.metadata.items():
-            value = state_dict.get(prefix + name)
-            if value is not None and (
-                value.dtype != torch.long
-                or not torch.equal(value.cpu(), torch.tensor(values, dtype=torch.long))
-            ):
-                error_msgs.append(f"{prefix + name} must match canonical xArm7/XHand metadata")
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-        )
 
-    def forward(self) -> torch.Tensor:
-        return (
-            self.joint(self.joint_ids)
-            + self.group(self.group_ids)
-            + self.role(self.role_ids)
-            + self.axis(self.axis_ids)
-        )
+class StructuralAttention(nn.Module):
+    def __init__(self, dim: int, num_heads: int, p_drop_attn: float = 0.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = 64
+        self.inner_dim = num_heads * self.head_dim
+        self.p_drop_attn = p_drop_attn
+        self.rmsnorm = nn.RMSNorm(dim)
+        self.to_kv = nn.Linear(dim, 2 * self.inner_dim, bias=False)
+        self.to_actions_qkvg = nn.Linear(dim, 4 * self.inner_dim, bias=False)
+        self.to_actions_out = nn.Linear(self.inner_dim, dim, bias=False)
+
+    def prepare_kv(self, context):
+        batch, length, _ = context.shape
+        kv = self.to_kv(self.rmsnorm(context))
+        return kv.reshape(batch, length, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4).unbind(0)
+
+    def forward(self, actions, context, *, context_kv=None):
+        batch, length, _ = actions.shape
+        qkvg = self.to_actions_qkvg(actions)
+        q, k, v, gate = qkvg.reshape(
+            batch, length, 4, self.num_heads, self.head_dim,
+        ).permute(2, 0, 3, 1, 4).unbind(0)
+        context_k, context_v = self.prepare_kv(context) if context_kv is None else context_kv
+        k = torch.cat((context_k, k), dim=2)
+        v = torch.cat((context_v, v), dim=2)
+
+        scores = (q / math.sqrt(self.head_dim)) @ k.transpose(-2, -1)
+        attention = (50.0 * torch.tanh(scores / 50.0)).softmax(dim=-1)
+        attention = F.dropout(attention, self.p_drop_attn, training=self.training)
+        update = (attention @ v) * gate.sigmoid()
+        update = update.transpose(1, 2).reshape(batch, length, self.inner_dim)
+        return self.to_actions_out(update)
 
 
 class SATBlock(nn.Module):
-    """Read a fixed observation token and update only action trajectories."""
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
-        qk_norm: bool = True,
-        p_drop_attn: float = 0.0,
-    ):
+    def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0, p_drop_attn: float = 0.0):
         super().__init__()
+        self.norm1 = RMSNorm(dim)
+        self.attn = StructuralAttention(dim, num_heads, p_drop_attn)
+        self.norm2 = RMSNorm(dim)
+        self.mlp = Mlp(dim, int(dim * mlp_ratio), act_layer=approximate_gelu, drop=0.0)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
 
-        self.attn = SelfAttention(
-            dim=hidden_size,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_norm=qk_norm,
-            attn_drop=p_drop_attn,
-            proj_drop=p_drop_attn,
+    def forward(self, actions, context, time_c, *, context_kv=None):
+        shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = (
+            self.adaLN_modulation(time_c).chunk(6, dim=-1)
         )
+        query = modulate(self.norm1(actions), shift_attn, scale_attn)
+        actions = actions + gate_attn[:, None] * self.attn(query, context, context_kv=context_kv)
+        return actions + gate_mlp[:, None] * self.mlp(modulate(self.norm2(actions), shift_mlp, scale_mlp))
 
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.mlp = Mlp(
-            in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
-            act_layer=approximate_gelu,
-            drop=0.0,
-        )
 
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.obs_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+class SATOutput(nn.Module):
+    def __init__(self, dim: int, horizon: int):
+        super().__init__()
+        self.norm_final = RMSNorm(dim)
+        self.linear = nn.Linear(dim, horizon)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 2 * dim))
 
-        self.adaln_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True),
-        )
-
-    def forward(
-        self,
-        x_action: torch.Tensor,
-        c_obs: torch.Tensor,
-        time_c: torch.Tensor,
-    ) -> torch.Tensor:
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_modulation(
-            time_c
-        ).chunk(6, dim=-1)
-
-        x_norm = modulate(self.norm1(x_action), shift_msa, scale_msa)
-        c_obs_norm = self.obs_norm(c_obs)
-        x_attn_out = self.attn(
-            torch.cat([c_obs_norm, x_norm], dim=1), query_start=c_obs.shape[1],
-        )
-        x_action = x_action + gate_msa.unsqueeze(1) * x_attn_out
-
-        x_norm = modulate(self.norm2(x_action), shift_mlp, scale_mlp)
-        x_action = x_action + gate_mlp.unsqueeze(1) * self.mlp(x_norm)
-
-        return x_action
+    def forward(self, actions, time_c):
+        # The official final layer uses chunk 0 as scale and chunk 1 as shift.
+        scale, shift = self.adaLN_modulation(time_c).chunk(2, dim=-1)
+        return self.linear(modulate(self.norm_final(actions), shift, scale))
 
 
 class SAT(nn.Module):
@@ -135,84 +97,65 @@ class SAT(nn.Module):
         self,
         horizon: int,
         action_dim: int,
-        hidden_dim: int = 256,
+        n_obs_steps: int,
+        obs_token_dim: int,
+        timestep_embed_dim: int = 256,
         n_layers: int = 8,
+        hidden_dim: int = 256,
         n_head: int = 8,
         mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
-        qk_norm: bool = True,
         p_drop_attn: float = 0.0,
-    ):
+    ) -> None:
         super().__init__()
+        if action_dim != 19 or hidden_dim % 4:
+            raise ValueError("SAT requires 19 xArm7/XHand joints and hidden_dim divisible by 4")
+        self.horizon = horizon
+        self.action_dim = action_dim
+        self.n_obs_steps = n_obs_steps
+        self.hidden_dim = hidden_dim
 
-        if (horizon, action_dim, hidden_dim) != (16, 19, 256):
-            raise ValueError("SAT requires horizon=16, action_dim=19, hidden_dim=256")
+        self.x_embedder = nn.Sequential(nn.Linear(horizon, 64), nn.Mish(), nn.Linear(64, hidden_dim // 2))
+        self.robot_embed = nn.Embedding(2, hidden_dim // 4)
+        self.joint_embed = nn.Embedding(12, hidden_dim // 4)
+        self.register_buffer("robot_ids", torch.tensor([0] * 7 + [1] * 12), persistent=False)
+        self.register_buffer("joint_ids", torch.tensor([*range(7), *range(12)]), persistent=False)
 
-        positive_int(n_layers, "n_layers")
-
-        self.x_embedder = nn.Sequential(
-            nn.Linear(horizon, 64),
-            nn.Mish(),
-            nn.Linear(64, hidden_dim),
-        )
-
-        self.joint_embedding = XHandJointEmbedding(hidden_dim)
-
-        self.timestep_embedder = TimestepMLP(
-            pos_emb_dim=128,
-            output_dim=hidden_dim,
-        )
-
+        self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
+        self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
+        self.t_embedder = DiTTimestepEmbedding(hidden_dim, timestep_embed_dim)
         self.blocks = nn.ModuleList(
-            [
-                SATBlock(
-                    hidden_size=hidden_dim,
-                    num_heads=n_head,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    qk_norm=qk_norm,
-                    p_drop_attn=p_drop_attn,
-                )
-                for _ in range(n_layers)
-            ]
+            SATBlock(hidden_dim, n_head, mlp_ratio, p_drop_attn) for _ in range(n_layers)
         )
-
-        self.final_layer = AdaLNOutput(hidden_dim, horizon, RmsNorm(hidden_dim, eps=1e-6))
-
+        self.final_layer = SATOutput(hidden_dim, horizon)
         self.initialize_weights()
 
     def initialize_weights(self):
         self.apply(initialize_linear)
-
-        for layer in (*self.x_embedder, *self.timestep_embedder.net):
-            if isinstance(layer, nn.Linear):
-                nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
-
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         for block in self.blocks:
-            nn.init.zeros_(block.adaln_modulation[-1].weight)
-            nn.init.zeros_(block.adaln_modulation[-1].bias)
-
-        nn.init.zeros_(self.final_layer.adaln_modulation[-1].weight)
-        nn.init.zeros_(self.final_layer.adaln_modulation[-1].bias)
+            nn.init.zeros_(block.adaLN_modulation[-1].weight)
+            nn.init.zeros_(block.adaLN_modulation[-1].bias)
+        nn.init.zeros_(self.final_layer.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.final_layer.adaLN_modulation[-1].bias)
         nn.init.zeros_(self.final_layer.linear.weight)
         nn.init.zeros_(self.final_layer.linear.bias)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        timestep: torch.Tensor,
-        context: torch.Tensor,
-    ) -> torch.Tensor:
-        if x.ndim != 3 or x.shape[1:] != (16, 19):
-            raise ValueError("SAT action must be [B,16,19]")
-        if context.shape != (x.shape[0], 256):
-            raise ValueError("SAT context must be [B,256]")
-        x = self.x_embedder(x.transpose(1, 2))
-        x = x + self.joint_embedding().to(x.dtype)
-        context = context.unsqueeze(1)
-        time_c = self.timestep_embedder(batch_timesteps(timestep, x))
+    def embed_context(self, context):
+        tokens = self.context_embedder(context)
+        return add_temporal_embedding(tokens, self.context_frame_pos_embed.to(tokens.dtype))
 
-        for block in self.blocks:
-            x = block(x, context, time_c)
+    def prepare_context_kv(self, context):
+        if self.training:
+            return None
+        tokens = self.embed_context(context)
+        return tuple(block.attn.prepare_kv(tokens) for block in self.blocks)
 
-        return self.final_layer(x, time_c).transpose(1, 2)
+    def forward(self, x, timestep, context, *, context_kv=None):
+        trajectory = self.x_embedder(x.transpose(1, 2))
+        descriptor = torch.cat((self.robot_embed(self.robot_ids), self.joint_embed(self.joint_ids)), dim=-1)
+        actions = torch.cat((trajectory, descriptor.to(trajectory.dtype).expand(x.shape[0], -1, -1)), dim=-1)
+        time_c = self.t_embedder(batch_timesteps(timestep, x, dtype=torch.float32))
+        tokens = self.embed_context(context) if context_kv is None else None
+        for i, block in enumerate(self.blocks):
+            actions = block(actions, tokens, time_c, context_kv=None if context_kv is None else context_kv[i])
+        return self.final_layer(actions, time_c).transpose(1, 2)

@@ -1,7 +1,6 @@
 """Focused numerical and synthetic policy checks: python -m dexmani_policy.test_tools.agent_checks."""
 
 import argparse
-import copy
 import io
 import tempfile
 from pathlib import Path
@@ -11,10 +10,9 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from dexmani_policy.agents.action_decoders.backbones.modules import modulate
 from dexmani_policy.agents.action_decoders.backbones.dit import DiT
 from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
-from dexmani_policy.agents.action_decoders.backbones.sat import SAT, SATBlock
+from dexmani_policy.agents.action_decoders.backbones.sat import SAT
 from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
 from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
 from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
@@ -22,44 +20,11 @@ from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
 from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
 from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
 from dexmani_policy.agents.policies.dp3 import DP3Policy
-from dexmani_policy.agents.policies.dqrise import DQRISEObservationEncoder, DQRISEPolicy
-from dexmani_policy.agents.policies.sat import SATObservationEncoder
+from dexmani_policy.agents.policies.dqrise import DQRISEPolicy
 from dexmani_policy.common.hand_semantics import HAND_ACTION_SEMANTICS
 from dexmani_policy.training.common.optimization import build_optimizer
 from dexmani_policy.training.pretrain.hand_prior.codebook import deployment_diagnostics, export_codebook
 from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
-
-
-def check_sat(device):
-    block = SATBlock(32, 4).to(device=device, dtype=torch.float64)
-    torch.nn.init.normal_(block.adaln_modulation[-1].weight, std=0.1)
-    reference = copy.deepcopy(block)
-    inputs = [torch.randn(2, n, 32, device=device, dtype=torch.float64, requires_grad=True)
-              for n in (19, 1)]
-    inputs.append(torch.randn(2, 32, device=device, dtype=torch.float64, requires_grad=True))
-    reference_inputs = [x.detach().clone().requires_grad_() for x in inputs]
-    actual = block(*inputs)
-
-    action, obs, time = reference_inputs
-    shift, scale, gate, shift_mlp, scale_mlp, gate_mlp = reference.adaln_modulation(time).chunk(6, -1)
-    tokens = torch.cat((reference.obs_norm(obs), modulate(reference.norm1(action), shift, scale)), 1)
-    attn = reference.attn
-    q, k, v = attn.qkv(tokens).reshape(2, 20, 3, 4, 8).permute(2, 0, 3, 1, 4).unbind(0)
-    mask = tokens.new_zeros(20, 20)
-    mask[0, 1:] = -torch.inf
-    update = F.scaled_dot_product_attention(attn.q_norm(q), attn.k_norm(k), v, attn_mask=mask)
-    update = attn.proj(update.transpose(1, 2).reshape(2, 20, 32))[:, 1:]
-    expected = action + gate[:, None] * update
-    expected = expected + gate_mlp[:, None] * reference.mlp(
-        modulate(reference.norm2(expected), shift_mlp, scale_mlp),
-    )
-    torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
-    actual.square().mean().backward()
-    expected.square().mean().backward()
-    for a, b in zip(inputs + list(block.parameters()), reference_inputs + list(reference.parameters())):
-        assert a.grad is not None and torch.isfinite(a.grad).all()
-        torch.testing.assert_close(a.grad, b.grad, rtol=1e-9, atol=1e-10)
-    assert actual.abs().sum() > 0 and inputs[1].grad is not None and inputs[1].grad.abs().sum() > 0
 
 
 def check_time(device):
@@ -87,7 +52,8 @@ def check_time(device):
 
 def check_precision(device):
     models = (
-        (SAT(16, 19, n_layers=1), "blocks", (2, 16, 19), (2, 256)),
+        (SAT(16, 19, 2, 256, hidden_dim=32, n_head=4, n_layers=1, p_drop_attn=0.0),
+         "blocks", (2, 16, 19), (2, 194, 256)),
         (DiT(4, 3, 16, n_emb=32, num_heads=4, n_layers=1), "blocks", (2, 4, 3), (2, 16)),
         (ConsistencyDiTX(4, 3, 2, 16, hidden_dim=32, n_head=4, n_layers=1),
          "ditx_blocks", (2, 4, 3), (2, 4, 16)),
@@ -298,27 +264,47 @@ def check_codebook_pipeline(device):
                                    torch.tensor(report["splits"]["validation"]["lookup_mse"]), rtol=1e-5, atol=1e-7)
         assert sum(report["splits"]["validation"]["prototype_counts"]) == len(rows)
         policy = DQRISEPolicy(
-            4, 1, 2, 19, codebook_path=str(artifact), num_points=32,
-            pc_encoder_config=dict(channels=48, num_patches=8, group_size=4, depth=1, num_heads=4),
-            down_dims=(16, 32), diffusion_step_embed_dim=16, num_training_steps=10, num_inference_steps=2,
+            4, 2, 2, 19, codebook_path=str(artifact), n_layers=1, hidden_dim=32, n_head=4,
+            num_inference_steps=2, num_points=32,
+            pc_encoder_config=dict(channels=48, num_patches=8, group_size=4, depth=2, num_heads=4),
+            fps_random_config=dict(use_random=False),
+            # Tiny random DINO only checks the codebook/policy pipeline.
+            rgb_backbone_config=dict(
+                model_name="random-dinov2-test", tune_mode="freeze", load_pretrained=False,
+                image_size=(28, 28), architecture=dict(
+                    model_type="dinov2", hidden_size=24, intermediate_size=48,
+                    num_hidden_layers=1, num_attention_heads=4, image_size=28, patch_size=14,
+                ),
+            ),
         )
+        spec = dict(joint_state="limits", point_cloud="identity", rgb="identity",
+                    camera_intrinsic="identity", camera_extrinsic="identity", action="auto")
+        dims = dict(joint_state=19, point_cloud=3, rgb=3,
+                    camera_intrinsic=9, camera_extrinsic=12, action=19)
         policy.set_normalization_spec(
-            dict(joint_state="limits", point_cloud="identity", action="auto"),
-            dict(joint_state=19, point_cloud=6, action=19), action_key="action",
+            spec, dims, action_key="action",
         )
         policy.initialize_training(dict(
             attrs=dict(hand_joint_order=HAND_ACTION_SEMANTICS["joint_order"][1:], hand_units="radians"),
             action_key="action", split_manifest=manifest,
         ))
         policy.to(device)
-        obs = dict(joint_state=torch.randn(2, 1, 19, device=device),
-                   point_cloud=torch.rand(2, 1, 32, 6, device=device))
+        xyz = torch.rand(2, 2, 32, 3, device=device) * 0.2 - 0.1
+        xyz[..., 2] += 1
+        intrinsics = torch.tensor([[40., 0., 15.5], [0., 40., 11.5], [0., 0., 1.]], device=device)
+        extrinsics = torch.eye(4, device=device)[:3]
+        obs = dict(
+            joint_state=torch.randn(2, 2, 19, device=device), point_cloud=xyz,
+            rgb=torch.randint(256, (2, 2, 24, 32, 3), dtype=torch.uint8, device=device),
+            camera_intrinsic=intrinsics.flatten().expand(2, 2, -1).clone(),
+            camera_extrinsic=extrinsics.flatten().expand(2, 2, -1).clone(),
+        )
         with torch.autocast(device.type, dtype=torch.bfloat16):
             loss, _ = policy.compute_loss(dict(obs=obs, action=torch.rand(2, 4, 19, device=device)))
         loss.backward()
         assert torch.isfinite(loss)
         prediction = policy.eval().predict_action(obs)["future_actions"]
-        assert prediction.shape == (2, 4, 19) and torch.isfinite(prediction).all()
+        assert prediction.shape == (2, 3, 19) and torch.isfinite(prediction).all()
         try:
             policy.predict_action_from_condition(
                 torch.zeros(2, 256, device=device), rtc_prefix=prediction[:, :1],
@@ -330,19 +316,6 @@ def check_codebook_pipeline(device):
 
 
 def check_policies(device):
-    for cls, steps in ((SATObservationEncoder, 2), (DQRISEObservationEncoder, 1)):
-        encoder = cls(num_points=64, n_obs_steps=steps, pc_encoder_config=dict(
-            channels=48, num_patches=8, group_size=8, depth=1, num_heads=4,
-        )).to(device).eval()
-        obs = dict(point_cloud=torch.rand(2 * steps, 96, 6, device=device, requires_grad=True),
-                   joint_state=torch.randn(2 * steps, 19, device=device, requires_grad=True))
-        with torch.autocast(device.type, dtype=torch.bfloat16):
-            features = encoder(obs)
-        features.float().square().mean().backward()
-        assert features.shape == (2, 256) and torch.isfinite(features).all()
-        assert all(x.grad is not None and torch.isfinite(x.grad).all() and x.grad.abs().sum() > 0
-                   for x in obs.values())
-
     kwargs: dict[str, Any] = dict(horizon=8, n_obs_steps=2, n_action_steps=3, action_dim=19, encoder_type="dp3",
                   pc_dim=3, pc_out_dim=16, state_dim=19, num_points=64, state_out_dim=8,
                   down_dims=(32, 64), diffusion_step_embed_dim=32, n_groups=8,
@@ -416,7 +389,7 @@ def main():
     device = torch.device(args.device)
     torch.manual_seed(7)
     torch.set_num_threads(4)
-    for check in (check_sat, check_time, check_precision, check_tactile, check_rgb, check_vq,
+    for check in (check_time, check_precision, check_tactile, check_rgb, check_vq,
                   check_codebook, check_codebook_pipeline, check_policies):
         check(device)
         print(f"PASS {check.__name__} ({device})", flush=True)

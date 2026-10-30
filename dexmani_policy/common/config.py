@@ -16,7 +16,12 @@ TACTILE_FEATURE_SHAPES = {
     "finger_tactile_force": (5, 3),
     "taxel_tactile_force": (5, 120, 3),
 }
-FIELD_FEATURE_SHAPES = {"fingertip_xyz": (5, 3), **TACTILE_FEATURE_SHAPES}
+FIELD_FEATURE_SHAPES = {
+    "fingertip_xyz": (5, 3),
+    "camera_intrinsic": (9,),
+    "camera_extrinsic": (12,),
+    **TACTILE_FEATURE_SHAPES,
+}
 POINT_CLOUD_FIELDS = frozenset({"point_cloud", "hand_pointcloud", "object_pointcloud"})
 
 

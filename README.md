@@ -61,6 +61,24 @@ FPS 使用 PyTorch3D 原生随机起点。评测关闭随机起点、选点噪�
 
 DQ/LAMP 的手部预训练见 [手部动作表示](docs/手部动作表示.md)；AFRO/CordViP 需先导出 `encoder.pt`，流程见 [观测预训练](docs/观测预训练.md)。模块预训练使用各自预算。
 
+## SAT / DQ-RISE dense observation
+
+两策略共用两帧 XYZ、RGB、标定和 joint state 编码器，保留 `[B,194,256]` 空间/状态 token，并统一标准 uniform flow matching、10 步 Euler 和 `Nobs=2,H=16,C=8`。SAT 参照[官方动作头](https://github.com/XiaohanLei/SAT/blob/cd7c0a8877d6090a9a85ebee0ceca961830b3654/sim/sat/model/diffusion/sat.py)，以 19 个关节轨迹 token 预测 19D joints；DQ 保留普通 DiTX，预测 7D arm 和连续码本索引后 lookup。动作表示和动作头结构均有差异，两者不是纯动作表示对照。新 YAML 使用 `agent.fusion_stage=pre_global`、`agent.semantic_pool_sigma=0.04`，DINOv2-small 默认冻结。
+
+```bash
+bash scripts/utils/download_pretrained.sh  # 准备 Uni3D 及 DINOv2-small，重复运行复用缓存。
+python -m dexmani_policy.test_tools.smoke_test --config-only sat dqrise
+python -m dexmani_policy.test_tools.agent_checks --device cpu
+bash scripts/training/train.sh sat 'task_name=<task>'
+bash scripts/training/train.sh dqrise 'task_name=<task>' 'codebook_path=<codebook.npz>'
+# B0：晚融合、均匀权重；B4：在新默认基础上单独启用既有 LoRA。
+bash scripts/training/train.sh sat 'task_name=<task>' \
+  agent.fusion_stage=post_global agent.semantic_pool_sigma=null
+bash scripts/training/train.sh sat 'task_name=<task>' agent.rgb_backbone_config.tune_mode=lora
+```
+
+小型检查使用随机视觉模型，不代表闭环性能。数据流、B0–B4 配置覆盖与恢复约定见 [观测编码](docs/项目架构.md#观测编码)；初始权重及 HF 缓存位置见 [数据目录说明](data/README.md)。
+
 ## InterAct-Dex 逐指触觉监督
 
 `interact_dex` 使用六个身体槽的手—场景—当前触觉表示及历史编码，通过 DiTX 生成 19D joint actions。支持 `tactile=sim_force` 和 `tactile=real_force`，分别使用各来源训练数据的 aggregate 触觉统计。
