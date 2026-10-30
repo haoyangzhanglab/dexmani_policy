@@ -57,10 +57,10 @@ class HandMotionPrior(nn.Module):
     def decode(self, z: Tensor) -> Tensor:
         return self.decoder(z)
 
-    def compute_loss(self, history: Tensor, target: Tensor, beta: float, *, epsilon=None):
+    def compute_loss(self, history: Tensor, target: Tensor, beta: float):
         with torch.autocast(device_type=history.device.type, enabled=False):
             mu, log_var = self.encode_history(history.float())
-            epsilon = torch.randn_like(mu) if epsilon is None else epsilon
+            epsilon = torch.randn_like(mu)
             z = mu + torch.exp(0.5 * log_var) * epsilon
             reconstruction = (self.decode(z) - target.float()).square().mean()
             kl = diagonal_gaussian_kl(mu, log_var)

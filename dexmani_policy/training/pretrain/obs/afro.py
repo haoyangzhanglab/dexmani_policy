@@ -1,10 +1,6 @@
-"""AFRO observation pretraining, adapted from KolaKivy/AFRO.
-
-Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
-Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
-Changes: native observation-only data/affine; explicit pre-optimizer teacher update;
-local PointNet and checkpoint resume. Active losses are unchanged.
-"""
+"""AFRO observation pretraining adapted from KolaKivy/AFRO."""
+# Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
+# Source: afro_workspace/policy/afro.py and AFRO_Pretrain.py.
 
 import signal
 import time
@@ -22,7 +18,7 @@ from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger, to_log_scalars
-from dexmani_policy.training.common.optimization import get_scheduler
+from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.obs.afro_dit import DiTFeaturePredictor
 from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, restore_run, save_run
 
@@ -55,9 +51,7 @@ class AFROPretrain(nn.Module):
             {"point_cloud": (3,)} if normalization["point_cloud"] != "identity" else {}
         )
         self.noise_scheduler = DDIMScheduler(
-            num_train_timesteps=100, beta_start=0.0001, beta_end=0.02,
-            beta_schedule="squaredcos_cap_v2", prediction_type="sample",
-            clip_sample=True, set_alpha_to_one=True, steps_offset=0,
+            num_train_timesteps=100, beta_schedule="squaredcos_cap_v2",
         )
 
     def forward(self, batch):
@@ -76,7 +70,9 @@ class AFROPretrain(nn.Module):
         ):
             latent = self.idm(following - current).reshape(-1, 16)
             target = target.reshape(-1, 64)
-            timestep = torch.randint(0, 100, (len(target),), device=target.device, dtype=torch.long)
+            timestep = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, (len(target),), device=target.device,
+            )
             noise = torch.randn_like(target)
             prediction = self.fdm(self.noise_scheduler.add_noise(target, noise, timestep),
                                   timestep, current.reshape(-1, 64), latent)
@@ -89,7 +85,7 @@ class AFROPretrain(nn.Module):
 
     @torch.no_grad()
     def update_teacher(self, epoch):
-        momentum = 0.996 + 0.004 * min(max(epoch, 0), 300) / 300
+        momentum = 0.996 + 0.004 * min(epoch, 300) / 300
         for target, online in zip(self.teacher.parameters(), self.visual.parameters()):
             target.mul_(momentum).add_(online, alpha=1 - momentum)
 
@@ -107,19 +103,18 @@ def train(cfg, checkpoint=None, max_updates=None):
     cfg.dataset.split_manifest = dataset.split_manifest
     loader = build_train_loader(cfg, dataset)
     batches_per_epoch = loader.batch_sampler.batches_per_epoch
-    cfg.training.loop.total_train_steps = cfg.training.num_epochs * batches_per_epoch
+    total = cfg.training.num_epochs * batches_per_epoch
+    cfg.training.loop.total_train_steps = total
     model = AFROPretrain(cfg.normalization)
     if checkpoint is None:
         model.normalizer.load_state_dict(dataset.get_normalizer(cfg.normalization).state_dict(), strict=True)
     validation = dataset.get_validation_dataset()
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), **cfg.optimizer)
-    scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps,
-                              cfg.training.loop.total_train_steps)
+    scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     step = 0
     if checkpoint is not None:
         step = restore_run(model, optimizer, scheduler, checkpoint, device=cfg.training.device)
-    total = cfg.training.loop.total_train_steps
     epoch, start_batch = epoch_position(step, batches_per_epoch, 1)
     if checkpoint is not None:
         print(f"Resume epoch={epoch}, batch={start_batch}, global_step={step}")
@@ -170,14 +165,13 @@ def train(cfg, checkpoint=None, max_updates=None):
             if stop_requested:
                 break
             if epoch > current_epoch:
-                if epoch % cfg.training.val_every_epochs == 0:
-                    if validation is not None:
-                        metrics = evaluate(
-                            model, validation, cfg.dataloader.batch_size, cfg.training.device,
-                            stop_requested=lambda: stop_requested,
-                        )
-                        if metrics is not None:
-                            logger.log(to_log_scalars(metrics), step)
+                if epoch % cfg.training.val_every_epochs == 0 and validation is not None:
+                    metrics = evaluate(
+                        model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                        stop_requested=lambda: stop_requested,
+                    )
+                    if metrics is not None:
+                        logger.log(to_log_scalars(metrics), step)
                 if epoch % cfg.training.save_every_epochs == 0 and step < stop_step and not stop_requested:
                     save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)
         save_run(model, model.visual, optimizer, scheduler, cfg, epoch, step)

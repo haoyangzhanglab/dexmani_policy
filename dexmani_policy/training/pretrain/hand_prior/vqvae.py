@@ -22,7 +22,7 @@ from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.hand_motion import load_hand_array, load_hand_source
-from dexmani_policy.training.common.optimization import get_scheduler
+from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import (
     build_hand_prototypes,
     deployment_diagnostics,
@@ -78,8 +78,8 @@ def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
             n = batch.shape[0]
             count += n
             if reconstruction:
-                enc, vq, _, mse = vqvae(batch)
-                sums += torch.stack((enc, vq, mse)).double() * n
+                recon_loss, commitment_loss, _, recon_mse = vqvae(batch)
+                sums += torch.stack((recon_loss, commitment_loss, recon_mse)).double() * n
             for values in batch.float().split(chunk_size):
                 distances = (values[:, None] - prototypes).square_().sum(-1)
                 lookup_sum += distances.amin(-1).double().sum()
@@ -94,32 +94,6 @@ def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
         return metrics
     finally:
         vqvae.train(training)
-
-
-def save_checkpoint(
-    path: str | Path,
-    *,
-    epoch: int,
-    vqvae: torch.nn.Module,
-    normalizer: LinearNormalizer,
-    recipe,
-    split_metadata: dict,
-    metrics: dict,
-) -> None:
-    payload = {
-        "epoch": int(epoch),
-        "model_state_dict": vqvae.state_dict(),
-        "normalizer_state_dict": normalizer.state_dict(),
-        "training_config": OmegaConf.to_container(recipe, resolve=True),
-        "model_config": vqvae.model_config,
-        "split_metadata": split_metadata,
-        "metrics": metrics,
-    }
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with atomic_path(path) as temporary:
-        torch.save(payload, temporary)
-    logger.info("checkpoint saved: %s", path)
 
 
 def train(cfg):
@@ -183,7 +157,7 @@ def train(cfg):
         weight_decay=recipe.weight_decay,
     )
     total_steps = len(train_loader) * recipe.num_epochs
-    scheduler = get_scheduler(
+    scheduler = build_scheduler(
         optimizer, "cosine", num_warmup_steps=recipe.warmup_steps, num_training_steps=total_steps
     )
 
@@ -206,9 +180,9 @@ def train(cfg):
 
         for (batch,) in train_loader:
             batch = batch.to(device, non_blocking=True)
-            enc_loss, vq_loss, indices, recon_mse = vqvae(batch)
-            total_loss = recipe.enc_loss_weight * enc_loss + recipe.vq_loss_weight * vq_loss
             optimizer.zero_grad(set_to_none=True)
+            recon_loss, commitment_loss, indices, recon_mse = vqvae(batch)
+            total_loss = recipe.enc_loss_weight * recon_loss + recipe.vq_loss_weight * commitment_loss
             if not torch.isfinite(total_loss):
                 raise FloatingPointError("Nonfinite VQ training loss")
             total_loss.backward()
@@ -216,10 +190,10 @@ def train(cfg):
                 torch.nn.utils.clip_grad_norm_(
                     vqvae.parameters(), recipe.max_grad_norm, error_if_nonfinite=True
                 )
-            elif not all(
-                torch.isfinite(p.grad).all() for p in vqvae.parameters() if p.grad is not None
-            ):
-                raise FloatingPointError("Nonfinite VQ gradient")
+            else:
+                gradients = [torch.isfinite(p.grad).all() for p in vqvae.parameters() if p.grad is not None]
+                if not torch.stack(gradients).all():
+                    raise FloatingPointError("Nonfinite VQ gradient")
             lr = optimizer.param_groups[0]["lr"]
             optimizer.step()
             scheduler.step()
@@ -227,7 +201,7 @@ def train(cfg):
             with torch.no_grad():
                 if report_usage:
                     usage.scatter_add_(1, indices.T, torch.ones_like(indices.T))
-                sums += torch.stack((enc_loss, vq_loss, recon_mse)).double() * batch.shape[0]
+                sums += torch.stack((recon_loss, commitment_loss, recon_mse)).double() * batch.shape[0]
             train_count += batch.shape[0]
 
         train_metrics = dict(zip(("enc", "vq", "mse"), (sums / train_count).tolist()))
@@ -248,7 +222,7 @@ def train(cfg):
             "lr": lr,
         }
         logger.info(
-            "epoch %4d | lr %.2e | train enc %.5f vq %.5f recon_mse %.5f",
+            "epoch %4d | lr %.2e | train recon %.5f commitment %.5f recon_mse %.5f",
             epoch,
             metrics["lr"],
             metrics["train_enc"],
@@ -258,7 +232,7 @@ def train(cfg):
         if has_validation:
             metrics.update({f"val_{key}": selection_metrics[key] for key in ("enc", "vq", "mse")})
             logger.info(
-                "validation | enc %.5f vq %.5f recon_mse %.5f",
+                "validation | recon %.5f commitment %.5f recon_mse %.5f",
                 metrics["val_enc"], metrics["val_vq"], metrics["val_mse"],
             )
         logger.info("%s %.7f", selection_metric, metrics[selection_metric])
@@ -272,16 +246,20 @@ def train(cfg):
             checkpoint_paths.append(output_dir / "vqvae_hand_best.pt")
         if epoch == recipe.num_epochs:
             checkpoint_paths.append(output_dir / "vqvae_hand_last.pt")
-        for checkpoint_path in checkpoint_paths:
-            save_checkpoint(
-                checkpoint_path,
-                epoch=epoch,
-                vqvae=vqvae,
-                normalizer=normalizer,
-                recipe=recipe,
-                split_metadata=split_metadata,
-                metrics=metrics,
-            )
+        if checkpoint_paths:
+            payload = {
+                "epoch": int(epoch),
+                "model_state_dict": vqvae.state_dict(),
+                "normalizer_state_dict": normalizer.state_dict(),
+                "training_config": OmegaConf.to_container(recipe, resolve=True),
+                "model_config": vqvae.model_config,
+                "split_metadata": split_metadata,
+                "metrics": metrics,
+            }
+            for checkpoint_path in checkpoint_paths:
+                with atomic_path(checkpoint_path) as temporary:
+                    torch.save(payload, temporary)
+                logger.info("checkpoint saved: %s", checkpoint_path)
 
         if report_usage:
             for group in range(recipe.num_groups):

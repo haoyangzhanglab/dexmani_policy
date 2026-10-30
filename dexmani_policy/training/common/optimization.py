@@ -95,7 +95,7 @@ class EMA:
         self.optimization_step += 1
 
 
-def cosine_with_min_lr(
+def build_cosine_min_lr_scheduler(
     optimizer,
     num_warmup_steps: int,
     num_training_steps: int,
@@ -109,19 +109,16 @@ def cosine_with_min_lr(
     def lr_lambda(step: int) -> float:
         step = min(step, num_training_steps - 1)
         if step < num_warmup_steps:
-            return float(step) / float(max(1, num_warmup_steps - 1))
-        progress = float(step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
-        )
-        progress = min(1.0, progress)
+            return step / max(1, num_warmup_steps - 1)
+        progress = (step - num_warmup_steps) / (num_training_steps - num_warmup_steps)
         return lr_min_ratio + (1.0 - lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     return lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def get_scheduler(optimizer, name, num_warmup_steps, num_training_steps, lr_min_ratio=0.1):
+def build_scheduler(optimizer, name, num_warmup_steps, num_training_steps, lr_min_ratio=0.1):
     if name == "cosine_min_lr":
-        return cosine_with_min_lr(optimizer, num_warmup_steps, num_training_steps, lr_min_ratio)
+        return build_cosine_min_lr_scheduler(optimizer, num_warmup_steps, num_training_steps, lr_min_ratio)
     from diffusers.optimization import get_scheduler as diffusion_scheduler
 
     return diffusion_scheduler(

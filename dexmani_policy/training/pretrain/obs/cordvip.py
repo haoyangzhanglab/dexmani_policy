@@ -1,9 +1,6 @@
-"""CordViP contact/coordination pretraining from xuanxuanzzzii/cordvip.
-
-Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
-Source: train_policy/policy/CordViP/CordViP/CordViP/policy/CordViP_pretrain.py
-Changes: native arm7+hand12, observation-only data, raw encoder export and resume.
-"""
+"""CordViP contact/coordination pretraining from xuanxuanzzzii/cordvip."""
+# Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
+# Source: train_policy/policy/CordViP/CordViP/CordViP/policy/CordViP_pretrain.py
 
 import signal
 import time
@@ -23,7 +20,7 @@ from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
 from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
-from dexmani_policy.training.common.optimization import get_scheduler
+from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.obs.common import evaluate, load_run, restore_run, save_run
 
 
@@ -52,8 +49,9 @@ class CordViPPretrain(nn.Module):
                for key, value in batch['obs'].items()}
         robot_pc, object_pc, hand_state, arm_state = self.obs_encoder(obs)
         contact = self.predict_contact_map(torch.cat((robot_pc, object_pc), dim=-1))
-        hand_condition = torch.cat((robot_pc.flatten(1), object_pc.flatten(1), hand_state.flatten(1)), dim=1)
-        arm_condition = torch.cat((robot_pc.flatten(1), object_pc.flatten(1), arm_state.flatten(1)), dim=1)
+        robot_flat, object_flat = robot_pc.flatten(1), object_pc.flatten(1)
+        hand_condition = torch.cat((robot_flat, object_flat, hand_state.flatten(1)), dim=1)
+        arm_condition = torch.cat((robot_flat, object_flat, arm_state.flatten(1)), dim=1)
         arm = self.linear_layer_pred_arm(hand_condition)
         hand = self.linear_layer_pred_hand(arm_condition)
         target = obs['joint_state'][:, self.n_obs_steps - 1]
@@ -85,7 +83,7 @@ def train(cfg, checkpoint=None, max_updates=None):
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW(model.parameters(), **cfg.optimizer)
     total = cfg.training.loop.total_train_steps
-    scheduler = get_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
+    scheduler = build_scheduler(optimizer, cfg.training.lr_scheduler, cfg.training.lr_warmup_steps, total)
     step = 0
     if checkpoint is not None:
         step = restore_run(model, optimizer, scheduler, checkpoint, device=cfg.training.device)
@@ -103,6 +101,7 @@ def train(cfg, checkpoint=None, max_updates=None):
         stop_requested = True
 
     previous = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    iterator = None
     try:
         logger.save_config(cfg)
         while step < stop_step and not stop_requested:
@@ -110,26 +109,29 @@ def train(cfg, checkpoint=None, max_updates=None):
             loader.batch_sampler.set_epoch(epoch, start_batch)
             model.train()
             current_epoch = epoch
-            totals: dict[str, torch.Tensor] = {}
-            step_start = data_wait_start = time.perf_counter()
-            data_wait = 0.0
-            for index, batch in enumerate(loader, start=start_batch):
-                data_wait += time.perf_counter() - data_wait_start
-                group_start = (index // accumulation) * accumulation
+            step_start = time.perf_counter()
+            iterator = iter(loader)
+            data_wait = time.perf_counter() - step_start
+            for group_start in range(start_batch, batches_per_epoch, accumulation):
                 group_size = min(accumulation, batches_per_epoch - group_start)
-                if index == group_start:
-                    optimizer.zero_grad(set_to_none=True)
-                batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
-                loss, metrics = model(batch)
-                if not torch.isfinite(loss):
-                    raise RuntimeError(f'Nonfinite CordViP loss at step {step}')
-                (loss / group_size).backward()
-                record = step == 0 or (step + 1) % cfg.training.loop.log_interval_steps == 0 or step + 1 == stop_step
-                if record:
-                    accumulate_metrics(totals, metrics)
-                if index - group_start + 1 != group_size:
+                record = (
+                    step == 0
+                    or (step + 1) % cfg.training.loop.log_interval_steps == 0
+                    or step + 1 == stop_step
+                )
+                totals: dict[str, torch.Tensor] = {}
+                optimizer.zero_grad(set_to_none=True)
+                for _ in range(group_size):
                     data_wait_start = time.perf_counter()
-                    continue
+                    batch = next(iterator)
+                    data_wait += time.perf_counter() - data_wait_start
+                    batch = dict_apply(batch, lambda x: x.to(cfg.training.device, non_blocking=True))
+                    loss, metrics = model(batch)
+                    if not torch.isfinite(loss):
+                        raise RuntimeError(f'Nonfinite CordViP loss at step {step}')
+                    (loss / group_size).backward()
+                    if record:
+                        accumulate_metrics(totals, metrics)
                 gradients = [torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]
                 if not torch.stack(gradients).all():
                     raise RuntimeError(f'Nonfinite CordViP gradient at step {step}')
@@ -137,36 +139,47 @@ def train(cfg, checkpoint=None, max_updates=None):
                 scheduler.step()
                 elapsed = time.perf_counter() - step_start
                 step += 1
-                if index + 1 == batches_per_epoch:
+                if group_start + group_size == batches_per_epoch:
                     epoch = current_epoch + 1
                 if record:
-                    logger.log(to_log_scalars({'train/' + key: value / group_size for key, value in totals.items()}
-                                             | {'train/lr': scheduler.get_last_lr()[0], 'train/epoch': current_epoch,
-                                                'train/step_time': elapsed, 'train/data_wait_time': data_wait}), step)
-                totals = {}
+                    logger.log(
+                        to_log_scalars(
+                            {'train/' + key: value / group_size for key, value in totals.items()}
+                            | {
+                                'train/lr': scheduler.get_last_lr()[0],
+                                'train/epoch': current_epoch,
+                                'train/step_time': elapsed,
+                                'train/data_wait_time': data_wait,
+                            }
+                        ),
+                        step,
+                    )
                 if step >= stop_step or stop_requested:
                     break
                 if step % cfg.training.save_every_updates == 0:
                     save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
-                step_start = data_wait_start = time.perf_counter()
+                step_start = time.perf_counter()
                 data_wait = 0.0
+            iterator = None
             if stop_requested:
                 break
-            if epoch > current_epoch:
-                if epoch % cfg.training.val_every_epochs == 0:
-                    if validation is not None:
-                        metrics = evaluate(
-                            model, validation, cfg.dataloader.batch_size, cfg.training.device,
-                            stop_requested=lambda: stop_requested,
-                        )
-                        if metrics is not None:
-                            logger.log(to_log_scalars(metrics), step)
+            if (
+                epoch > current_epoch
+                and epoch % cfg.training.val_every_epochs == 0
+                and validation is not None
+            ):
+                metrics = evaluate(
+                    model, validation, cfg.dataloader.batch_size, cfg.training.device,
+                    stop_requested=lambda: stop_requested,
+                )
+                if metrics is not None:
+                    logger.log(to_log_scalars(metrics), step)
         save_run(model, model.obs_encoder, optimizer, scheduler, cfg, epoch, step)
         print(f'[CordViP] Saved raw encoder.pt and resume.pt at epoch={epoch}, step={step}/{total}')
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-        close_resources(lambda: close_data_loader(loader), logger.close)
+        close_resources(lambda: close_data_loader(loader, iterator), logger.close)
 
 
 def main():

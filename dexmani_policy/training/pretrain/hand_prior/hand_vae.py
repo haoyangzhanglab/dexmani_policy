@@ -154,6 +154,7 @@ def train(cfg, *, overwrite=False):
             order = rng.permutation(len(dataset))
         start = batch * recipe.batch_size
         actions, q0 = codec_batch(dataset, order[start : start + recipe.batch_size], recipe.device)
+        optimizer.zero_grad(set_to_none=True)
         mu, log_var = codec.encode(actions, q0)
         z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
         reconstruction = codec.reconstruction_loss(codec.decode(z, q0), codec.normalize_actions(actions, q0))
@@ -162,7 +163,6 @@ def train(cfg, *, overwrite=False):
         loss = reconstruction + beta * kl
         if not torch.isfinite(loss):
             raise ValueError(f"HandVAE loss became nonfinite at step {step}")
-        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(codec.parameters(), recipe.clip_grad, error_if_nonfinite=True)
         optimizer.step()
@@ -189,7 +189,10 @@ def train(cfg, *, overwrite=False):
                 )
                 payload = dict(
                     model_config=codec.model_config,
-                    state_dict={k: v.detach().cpu().clone() for k, v in codec.state_dict().items()},
+                    state_dict={
+                        key: value.detach().to(device="cpu", copy=True)
+                        for key, value in codec.state_dict().items()
+                    },
                     metadata=metadata, config=OmegaConf.to_container(cfg, resolve=True), metrics=metrics,
                 )
                 with atomic_path(output, overwrite=overwrite or best_mae < float("inf")) as temporary:

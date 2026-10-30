@@ -8,7 +8,7 @@ from torch.utils.data import BatchSampler, DataLoader, RandomSampler, Sequential
 from dexmani_policy.common.config import FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS, read_split_manifest
 
 
-def build_dataset(cfg, *, verbose=True):
+def build_dataset(cfg):
     """Admit one train/val source before choosing the model's affine initialization."""
     spec = cfg.normalization
     dataset = hydra.utils.instantiate(
@@ -58,8 +58,7 @@ def build_dataset(cfg, *, verbose=True):
     description["deployment_metadata"] = deployment
     if hasattr(dataset, "hand_data"):
         description["hand_data"] = dataset.hand_data
-    if verbose:
-        print(f"[Dataset] {dataset.training_summary()}")
+    print(f"[Dataset] {dataset.training_summary()}")
     return dataset, description
 
 

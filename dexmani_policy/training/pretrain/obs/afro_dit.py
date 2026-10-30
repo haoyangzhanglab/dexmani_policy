@@ -1,10 +1,6 @@
-"""AFRO feature DiT, adapted from KolaKivy/AFRO.
-
-Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
-Source: afro_workspace/model/transformer/DiT1D.py
-Changes: active 4-layer/4-head defaults; remove unused parameterization helpers
-and the unused pred_norm layer.
-"""
+"""AFRO feature DiT adapted from KolaKivy/AFRO."""
+# Commit: 283024a49e2c14bc030debf15383a4e7ee73836d
+# Source: afro_workspace/model/transformer/DiT1D.py
 
 import torch
 from torch import nn
@@ -47,12 +43,9 @@ class DiTFeaturePredictor(nn.Module):
     ):
         super().__init__()
         self.noise_proj = nn.Linear(input_dim, hidden_size)
-
         self.vis_proj = nn.Linear(input_dim, hidden_size)
         self.act_proj = nn.Linear(16, hidden_size)
-
         self.pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
-
         self.t_embedder = DiTTimestepEmbedding(hidden_size, frequency_embedding_size=timestep_embed_dim)
         self.ca_proj = nn.Sequential(
             nn.Linear(hidden_size * 3, hidden_size, bias=True),
@@ -76,21 +69,16 @@ class DiTFeaturePredictor(nn.Module):
             nn.init.constant_(last.weight, 0.0)
             nn.init.constant_(last.bias, 0.0)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        nn.init.constant_(self.output_layer.bias, 0.0)
 
     def forward(self, z, t, vis, act):
-        n0 = self.noise_proj(z)                 # (B, H)
-        x = n0.unsqueeze(1)                     # (B, 1, H)
-        x = x + self.pos_embed
+        x = self.noise_proj(z).unsqueeze(1) + self.pos_embed
 
-        t_emb = self.t_embedder(t)              # (B, H)
-        v = self.vis_proj(vis)                  # (B, H)
-        a = self.act_proj(act)                  # (B, H)
-        c = self.ca_proj(torch.cat([t_emb, v, a], dim=-1))  # (B, H)
+        t_emb = self.t_embedder(t)
+        v = self.vis_proj(vis)
+        a = self.act_proj(act)
+        c = self.ca_proj(torch.cat([t_emb, v, a], dim=-1))
 
         for blk in self.blocks:
             x = blk(x, c)
 
-        token_out = x[:, 0, :]                  # (B, H)
-        pred = self.output_layer(token_out)     # (B, D)
-        return pred
+        return self.output_layer(x[:, 0, :])

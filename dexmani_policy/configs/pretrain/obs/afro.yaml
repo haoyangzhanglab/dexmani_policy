@@ -20,12 +20,9 @@ dataloader:
   shuffle: true
   num_workers: 8
   pin_memory: true
-  persistent_workers: false
-  drop_last: false
 optimizer:
   lr: 1.0e-4
   betas: [0.95, 0.999]
-  eps: 1.0e-8
   weight_decay: 1.0e-6
 training:
   seed: 42

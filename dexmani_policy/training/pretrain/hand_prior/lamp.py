@@ -17,7 +17,7 @@ from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.hand_motion import load_hand_source
 from dexmani_policy.datasets.variants.lamp import describe_lamp_data, hand_history_for_rows, load_hand_history
-from dexmani_policy.training.common.optimization import get_scheduler
+from dexmani_policy.training.common.optimization import build_scheduler
 
 
 def prepare_prior_data(cfg):
@@ -62,9 +62,10 @@ def prior_batch(dataset, rows, device):
 
 
 def kl_weight(update, beta, warmup_steps):
-    if warmup_steps == 0 or update >= max(1, warmup_steps - 1):
+    duration = max(1, warmup_steps - 1)
+    if warmup_steps == 0 or update >= duration:
         return beta
-    return beta * update / max(1, warmup_steps - 1)
+    return beta * update / duration
 
 
 @torch.no_grad()
@@ -74,19 +75,21 @@ def evaluate(prior, dataset, rows, batch_size):
     training = prior.training
     prior.eval()
     try:
-        totals = torch.zeros(3, dtype=torch.float64, device=next(prior.parameters()).device)
-        physical_squared = torch.zeros(prior.hand_dim, device=next(prior.parameters()).device)
+        device = next(prior.parameters()).device
+        totals = torch.zeros(3, dtype=torch.float64, device=device)
+        physical_squared = torch.zeros(prior.hand_dim, device=device)
         physical_absolute = torch.zeros_like(physical_squared)
         frame_rmse = []
         for start in range(0, len(rows), batch_size):
             selected = rows[start : start + batch_size]
-            history, target = prior_batch(dataset, selected, next(prior.parameters()).device)
+            history, target = prior_batch(dataset, selected, device)
             mu, log_var = prior.encode_history(history)
             error = prior.decode(mu) - target
-            reconstruction = error.square().mean()
-            physical_squared += error.square().sum(0)
+            squared_error = error.square()
+            reconstruction = squared_error.mean()
+            physical_squared += squared_error.sum(0)
             physical_absolute += error.abs().sum(0)
-            frame_rmse.append(error.square().mean(-1).sqrt().cpu())
+            frame_rmse.append(squared_error.mean(-1).sqrt().cpu())
             copy_error = (history[:, -1] - target).square().mean()
             kl = diagonal_gaussian_kl(mu, log_var)
             totals += torch.stack((reconstruction, copy_error, kl)).double() * len(selected)
@@ -126,7 +129,7 @@ def save_prior(path, prior, hand_data, cfg, step, metrics, split_manifest):
         "coordinate_space": prior.coordinate_space,
         "model_config": dict(prior.model_config),
         "model_state_dict": {
-            key: value.detach().cpu().clone() for key, value in prior.state_dict().items()
+            key: value.detach().cpu() for key, value in prior.state_dict().items()
         },
         "metadata": metadata,
         "dataset_config": {
@@ -179,7 +182,7 @@ def train(cfg, *, overwrite=False):
     optimizer = torch.optim.AdamW(
         prior.parameters(), lr=recipe.lr, betas=(0.9, 0.999), weight_decay=recipe.weight_decay
     )
-    scheduler = get_scheduler(
+    scheduler = build_scheduler(
         optimizer, "cosine_min_lr", num_warmup_steps=recipe.warmup_steps,
         num_training_steps=recipe.steps, lr_min_ratio=recipe.min_lr / recipe.lr,
     )
@@ -200,11 +203,11 @@ def train(cfg, *, overwrite=False):
         if recipe.noise_std > 0:
             history = history + torch.randn_like(history) * recipe.noise_std
         beta = kl_weight(update, recipe.beta, recipe.beta_warmup)
+        optimizer.zero_grad(set_to_none=True)
         loss, reconstruction, kl = prior.compute_loss(history, target, beta)
         if not torch.isfinite(loss):
             raise ValueError(f"Prior loss became nonfinite at step {step}")
         lr = optimizer.param_groups[0]["lr"]
-        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(prior.parameters(), recipe.clip_grad, error_if_nonfinite=True)
         optimizer.step()
