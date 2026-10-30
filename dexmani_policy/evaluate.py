@@ -5,9 +5,9 @@ from dexmani_policy.common.config import (
     set_project_root,
 )
 from dexmani_policy.common.experiments import resolve_experiment
-from dexmani_policy.evaluation.config import (
+from dexmani_policy.evaluation.protocol import (
     build_parser,
-    load_eval_config,
+    load_eval_protocol,
     parse_overrides,
 )
 from dexmani_policy.evaluation.rollout import evaluate_policy
@@ -29,13 +29,13 @@ def main(argv=None):
     set_project_root()
     register_resolvers()
     exp_dir = resolve_experiment(args.experiment)
-    request = load_eval_config(
+    protocol = load_eval_protocol(
         exp_dir,
         args.checkpoint,
         parse_overrides(args.overrides),
         selection_record=args.selection_record,
     )
-    evaluate_policy(request, output_root=exp_dir / "eval_dexsim", output_dir=args.output_dir)
+    evaluate_policy(protocol, output_root=exp_dir / "eval_dexsim", output_dir=args.output_dir)
 
 
 if __name__ == "__main__":

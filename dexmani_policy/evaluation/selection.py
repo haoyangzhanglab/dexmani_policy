@@ -1,5 +1,3 @@
-"""Evaluate milestone checkpoints with a fixed budget and publish the best."""
-
 import fcntl
 import traceback
 from dataclasses import replace
@@ -14,41 +12,40 @@ from dexmani_policy.evaluation.artifacts import (
     write_failure,
     write_json,
 )
-from dexmani_policy.evaluation.config import (
-    build_eval_config,
-    frozen_test_config,
+from dexmani_policy.evaluation.protocol import (
+    build_eval_protocol,
+    frozen_test_protocol,
     load_seed_pool,
     merge_eval_config,
 )
 from dexmani_policy.evaluation.seeds import split_evaluation_seeds
 
 
-def rank_selection_results(results):
-    def rank(result):
-        stats = result["statistics"]
-        avg = stats["avg_steps"]
-        return (
-            stats["success_rate"],
-            -(avg if avg is not None else float("inf")),
-            result["global_step"],
-        )
-    return max(results, key=rank)
+def candidate_score(candidate):
+    stats = candidate["statistics"]
+    steps = stats["avg_steps"]
+    return (
+        stats["success_rate"],
+        -(steps if steps is not None else float("inf")),
+        candidate["global_step"],
+    )
 
 
-def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> tuple[dict, Path]:
+def select_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> tuple[dict, Path]:
     from dexmani_policy.evaluation.rollout import evaluate_policy
 
     root = Path(exp_dir).expanduser().resolve()
     cfg = merge_eval_config(
         cfg, OmegaConf.merge({"eval": {"video": {"enabled": False}}}, overrides or {})
     )
-    if cfg["eval"].get("seeds") is not None:
+    evaluation = cfg["eval"]
+    if evaluation.get("seeds") is not None:
         raise ValueError("Selection uses its predeclared test/selection split, not eval.seeds")
     test, selection = split_evaluation_seeds(
         load_seed_pool(cfg),
-        cfg["eval"]["seed"],
-        cfg["eval"]["episodes"],
-        positive_int(cfg["eval"]["selection_episodes"], "eval.selection_episodes"),
+        evaluation["seed"],
+        evaluation["episodes"],
+        positive_int(evaluation["selection_episodes"], "eval.selection_episodes"),
     )
 
     milestones = discover_milestone_checkpoints(root)
@@ -59,7 +56,7 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
             f"Selection requires milestones {expected}; found {actual}; "
             f"missing steps: {sorted(expected.keys() - actual.keys())}"
         )
-    request = build_eval_config(
+    protocol = build_eval_protocol(
         cfg,
         milestones[0].path,
         selection,
@@ -73,43 +70,39 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
         raise ValueError("Selection output must remain inside experiment/eval_ckpt_selector")
     directory = create_run_directory(output_root, output_dir)
     path = directory / "selection_result.json"
-    test_request = replace(
-        request, seeds=test, source={"phase": "test", "heldout_from_selection": True}
+    test_protocol = replace(
+        protocol, seeds=test, source={"phase": "test", "heldout_from_selection": True}
     )
-    request = replace(
-        request, config={**cfg, "eval": {**cfg["eval"], "video": {"enabled": False}}}
+    protocol = replace(
+        protocol, config={**cfg, "eval": {**evaluation, "video": {"enabled": False}}}
     )
     record = {
         "status": "running",
         "selection_result": str(path.relative_to(root)),
         "selection_seeds": selection,
-        "test_request": vars(test_request).copy(),
+        "test_request": vars(test_protocol).copy(),
         "candidates": [
             {"checkpoint": str(m.path.relative_to(root)), "global_step": m.global_step}
             for m in milestones
         ],
-        "candidate_results": [],
     }
     write_json(path, record, overwrite=False)
 
-    results = []
     try:
-        for milestone in milestones:
+        for candidate in record["candidates"]:
             result, result_path = evaluate_policy(
                 replace(
-                    request,
-                    checkpoint=str(milestone.path),
-                    source={**request.source, "global_step": milestone.global_step},
+                    protocol,
+                    checkpoint=str(root / candidate["checkpoint"]),
+                    source={**protocol.source, "global_step": candidate["global_step"]},
                 ),
                 output_root=directory / "candidates",
             )
-            record["candidate_results"].append(str(result_path.relative_to(root)))
-            results.append({
-                "checkpoint": str(milestone.path.relative_to(root)),
-                **{key: result[key] for key in ("statistics", "global_step")},
-            })
+            candidate.update(
+                result=str(result_path.relative_to(root)), statistics=result["statistics"]
+            )
 
-        candidate = rank_selection_results(results)
+        candidate = max(record["candidates"], key=candidate_score)
         checkpoint = root / candidate["checkpoint"]
         record["test_request"]["checkpoint"] = str(checkpoint)
         record.update(
@@ -117,13 +110,17 @@ def select_best_checkpoint(exp_dir, cfg, *, overrides=None, output_dir=None) -> 
             ckpt_relpath=candidate["checkpoint"],
             global_step=candidate["global_step"],
             inference={
-                key: getattr(request, key) for key in ("use_ema", "inference_steps", "action_steps")
+                key: getattr(protocol, key)
+                for key in ("use_ema", "inference_steps", "action_steps")
             },
         )
         write_json(path, record)
         write_json(
             root / "best_ckpt.json",
-            {key: record[key] for key in ("ckpt_relpath", "global_step", "inference", "selection_result")},
+            {
+                key: record[key]
+                for key in ("ckpt_relpath", "global_step", "inference", "selection_result")
+            },
         )
     except BaseException:
         record.update(status="failed", error=traceback.format_exc())
@@ -143,7 +140,7 @@ def run_pipeline(exp_dir, cfg, *, overrides=None) -> Path:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise RuntimeError(f"Another eval pipeline is running for {root}") from error
-        record, checkpoint = select_best_checkpoint(root, cfg, overrides=overrides)
-        request = frozen_test_config(record, checkpoint)
-        _, result_path = evaluate_policy(request, output_root=root / "eval_dexsim")
+        record, checkpoint = select_checkpoint(root, cfg, overrides=overrides)
+        protocol = frozen_test_protocol(record, checkpoint)
+        _, result_path = evaluate_policy(protocol, output_root=root / "eval_dexsim")
         return result_path

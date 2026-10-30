@@ -28,9 +28,8 @@ def split_evaluation_seeds(pool, eval_seed, episodes, selection_episodes=0):
     pool = sorted(validate_seed_pool(pool))
     if len(pool) < episodes + selection_episodes:
         raise ValueError(
-            f"Seed pool size={len(pool)}, reserved selection={selection_episodes}, "
-            f"available={max(0, len(pool) - selection_episodes)}, requested episodes={episodes}. "
-            "Set eval.episodes explicitly or provide a larger seed pool."
+            f"Seed pool has {len(pool)} seeds; need {episodes} test + "
+            f"{selection_episodes} selection seeds"
         )
     random.Random(eval_seed).shuffle(pool)
     return pool[:episodes], pool[episodes : episodes + selection_episodes]

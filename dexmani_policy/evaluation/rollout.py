@@ -1,12 +1,10 @@
-"""Run a resolved evaluation request and save its results."""
-
 import os
 import traceback
 from contextlib import closing
 from pathlib import Path
 
-from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.common.checkpoint import restore_policy
+from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.env_runner.sim_runner import SimRunner
 from dexmani_policy.evaluation.artifacts import (
     create_run_directory,
@@ -14,14 +12,19 @@ from dexmani_policy.evaluation.artifacts import (
     write_failure,
     write_json,
 )
-from dexmani_policy.evaluation.config import EvalConfig
-from dexmani_policy.evaluation.metrics import compute_evaluation_statistics, validate_episodes
+from dexmani_policy.evaluation.metrics import summarize_episodes
+from dexmani_policy.evaluation.protocol import EvalProtocol
 
 
-def evaluate_policy(request: EvalConfig, *, output_root, output_dir=None) -> tuple[dict, Path]:
+def evaluate_policy(request: EvalProtocol, *, output_root, output_dir=None) -> tuple[dict, Path]:
     directory = create_run_directory(output_root, output_dir)
     path = directory / "result_details.json"
-    record: dict = {"request": vars(request).copy(), "status": "running", "episodes": [], "statistics": None}
+    record = {
+        "request": vars(request).copy(),
+        "status": "running",
+        "episodes": [],
+        "statistics": None,
+    }
     write_json(path, record, overwrite=False)
 
     try:
@@ -59,8 +62,7 @@ def evaluate_policy(request: EvalConfig, *, output_root, output_dir=None) -> tup
         ) as episodes:
             record["episodes"].extend(episodes)
 
-        validate_episodes(record["episodes"], runner.task_name, request.seeds)
-        record["statistics"] = compute_evaluation_statistics(record["episodes"])
+        record["statistics"] = summarize_episodes(record["episodes"])
         record["status"] = "completed"
         write_json(path, record)
     except BaseException:
