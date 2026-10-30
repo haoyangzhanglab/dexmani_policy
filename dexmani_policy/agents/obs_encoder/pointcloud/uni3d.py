@@ -198,32 +198,12 @@ class Uni3DEncoder(nn.Module):
             if key.startswith("pc_encoder.")
         }
 
-        missing_keys, unexpected_keys = self.load_state_dict(processed_state_dict, strict=False)
-
-        total_expected = len(self.state_dict())
-        loaded = total_expected - len(missing_keys)
-        ratio = loaded / total_expected
-
-        if missing_keys:
-            logger.info("[Uni3DEncoder] Missing keys: %s", missing_keys)
-        if unexpected_keys:
-            logger.info("[Uni3DEncoder] Unexpected keys: %s", unexpected_keys)
-
-        # Reject checkpoints that miss most of this encoder.
-        if ratio < 0.5:
-            raise ValueError(
-                f"[Uni3DEncoder] Only {loaded}/{total_expected} ({ratio:.1%}) "
-                f"expected keys loaded from {safetensors_path} — checkpoint is likely "
-                f"for a different model."
-            )
-
-        logger.info(
-            "[Uni3DEncoder] Pretrained weights loaded from %s (%d/%d keys, %.1f%%)",
-            safetensors_path,
-            loaded,
-            total_expected,
-            ratio * 100,
-        )
+        # Fourier positions belong to this policy, outside the pretrained segmentation trunk.
+        pretrained = nn.ModuleDict({
+            name: module for name, module in self.named_children() if name != "pe_layer"
+        })
+        pretrained.load_state_dict(processed_state_dict, strict=True)
+        logger.info("[Uni3DEncoder] Pretrained weights loaded from %s", safetensors_path)
 
     @property
     def out_dim(self):

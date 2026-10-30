@@ -82,7 +82,7 @@ class Diffusion(nn.Module):
                 if log_metrics:
                     loss_dict[f"loss_{name}"] = group_loss.detach()
                 group_losses.append(group_loss * weight)
-            loss = sum(group_losses)
+            loss = torch.stack(group_losses).sum()
         else:
             loss = F.mse_loss(pred, target)
 
@@ -137,8 +137,9 @@ class Diffusion(nn.Module):
             from dexmani_policy.agents.action_decoders.sampling.rtc import prepare_schedule
 
             prepare_schedule(self.noise_scheduler, num_steps, rtc_guidance_cap)
+        else:
+            self.noise_scheduler.set_timesteps(num_steps)
         sample = torch.randn(action_shape, device=cond.device, dtype=dtype, generator=generator)
-        self.noise_scheduler.set_timesteps(num_steps)
         timesteps = self.noise_scheduler.timesteps.to(sample.device)
         for index, timestep in enumerate(self.noise_scheduler.timesteps.tolist()):
             output = self.model(x=sample, timestep=timesteps[index], context=cond)

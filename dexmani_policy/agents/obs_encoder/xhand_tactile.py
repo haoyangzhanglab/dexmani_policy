@@ -184,12 +184,14 @@ class XHandPatchEncoder(nn.Module):
             raise ValueError("region_ids must be integer [5,120] in SDK taxel index order")
         if (labels < 0).any() or (labels >= self.num_regions).any():
             raise ValueError("region_ids must be in [0, 4]")
-        patch_mask = F.one_hot(labels.long(), num_classes=self.num_regions).permute(0, 2, 1).bool()
-        if not bool(patch_mask.any(dim=-1).all()):
+        labels = labels.to(dtype=torch.long, copy=True)
+        region_sizes = labels.new_zeros(5, self.num_regions).scatter_add_(1, labels, torch.ones_like(labels))
+        if not bool((region_sizes > 0).all()):
             raise ValueError("each finger must have at least one taxel in each of five regions")
 
         # Rebuilt from effective_config.region_ids; no duplicate checkpoint state.
-        self.register_buffer("patch_mask", patch_mask, persistent=False)
+        self.register_buffer("region_ids", labels, persistent=False)
+        self.register_buffer("region_sizes", region_sizes, persistent=False)
         self.patch_mlp = nn.Sequential(nn.Linear(8, 256), nn.SiLU(), nn.Linear(256, self.frame_dim))
         self.finger_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
         self.region_embedding = nn.Parameter(torch.empty(5, self.frame_dim))
@@ -203,7 +205,7 @@ class XHandPatchEncoder(nn.Module):
         return {
             "_target_": f"{type(self).__module__}.{type(self).__name__}",
             "activity_scale": self.activity_scale,
-            "region_ids": self.patch_mask.long().argmax(dim=1).tolist(),
+            "region_ids": self.region_ids.tolist(),
         }
 
     @staticmethod
@@ -216,14 +218,21 @@ class XHandPatchEncoder(nn.Module):
             force = z.reshape(-1, 5, 120, 3).float()
             magnitude = torch.linalg.vector_norm(force, dim=-1)
             activity = magnitude / (magnitude + self.activity_scale)
-            mask = self.patch_mask[None]
-            weights = activity[:, :, None, :] * mask
-            mass = weights.sum(dim=-1)
+            region = self.region_ids[None].expand(force.shape[0], -1, -1)
+            shape = (force.shape[0], 5, self.num_regions)
+            mass = activity.new_zeros(shape).scatter_add_(2, region, activity)
             denominator = torch.where(mass > 0, mass, 1.0)
-            mean_force = torch.einsum("bfpt,bftc->bfpc", weights, force) / denominator[..., None]
-            peak_force = (force.abs()[:, :, None, :, :] * mask[..., None]).amax(dim=-2)
-            activity_fraction = mass / mask.sum(dim=-1)
-            strength = (magnitude[:, :, None, :] * mask).amax(dim=-1)
+            force_region = region[..., None].expand_as(force)
+            mean_force = force.new_zeros(*shape, 3).scatter_add_(
+                2, force_region, force * activity[..., None],
+            ) / denominator[..., None]
+            peak_force = force.new_zeros(*shape, 3).scatter_reduce_(
+                2, force_region, force.abs(), reduce="amax", include_self=False,
+            )
+            activity_fraction = mass / self.region_sizes
+            strength = magnitude.new_zeros(shape).scatter_reduce_(
+                2, region, magnitude, reduce="amax", include_self=False,
+            )
             return torch.cat(
                 (mean_force, peak_force, activity_fraction[..., None], strength[..., None]), dim=-1
             )

@@ -232,10 +232,6 @@ class AdapTacPolicy(BasePolicy):
         field = self.normalizer.fields
         return field["finger_tactile_force"].normalize(force) if "finger_tactile_force" in field else force.float()
 
-    def unnormalize_force(self, force):
-        field = self.normalizer.fields
-        return field["finger_tactile_force"].unnormalize(force) if "finger_tactile_force" in field else force.float()
-
     def action_condition(self, features, current_force, predicted_force) -> torch.Tensor:
         visual, tactile, state = features
         guide = torch.cat((current_force, predicted_force), dim=1).flatten(1)

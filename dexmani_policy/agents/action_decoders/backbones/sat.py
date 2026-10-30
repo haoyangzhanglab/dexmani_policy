@@ -112,7 +112,6 @@ class SATBlock(nn.Module):
         x_action: torch.Tensor,
         c_obs: torch.Tensor,
         time_c: torch.Tensor,
-        attn_mask: torch.Tensor,
     ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_modulation(
             time_c
@@ -120,8 +119,9 @@ class SATBlock(nn.Module):
 
         x_norm = modulate(self.norm1(x_action), shift_msa, scale_msa)
         c_obs_norm = self.obs_norm(c_obs)
-        combined = self.attn(torch.cat([c_obs_norm, x_norm], dim=1), attn_mask=attn_mask)
-        x_attn_out = combined[:, c_obs.shape[1] :]
+        x_attn_out = self.attn(
+            torch.cat([c_obs_norm, x_norm], dim=1), query_start=c_obs.shape[1],
+        )
         x_action = x_action + gate_msa.unsqueeze(1) * x_attn_out
 
         x_norm = modulate(self.norm2(x_action), shift_mlp, scale_mlp)
@@ -207,14 +207,12 @@ class SAT(nn.Module):
             raise ValueError("SAT action must be [B,16,19]")
         if context.shape != (x.shape[0], 256):
             raise ValueError("SAT context must be [B,256]")
-        x = self.x_embedder(x.transpose(1, 2)) + self.joint_embedding()
+        x = self.x_embedder(x.transpose(1, 2))
+        x = x + self.joint_embedding().to(x.dtype)
         context = context.unsqueeze(1)
         time_c = self.timestep_embedder(batch_timesteps(timestep, x))
 
-        # Observations attend only to observations; actions attend to both streams.
-        attn_mask = x.new_zeros(20, 20)
-        attn_mask[0, 1:] = float("-inf")
         for block in self.blocks:
-            x = block(x, context, time_c, attn_mask)
+            x = block(x, context, time_c)
 
         return self.final_layer(x, time_c).transpose(1, 2)

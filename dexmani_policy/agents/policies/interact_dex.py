@@ -93,7 +93,7 @@ class InterActDexObservationEncoder(nn.Module):
             relation, tactile=obs["finger_tactile_force"],
         )["interaction_tokens"]
         scene = self.scene_aggregator(
-            patches["tokens"], patches["xyz"], patch_mask=patches["mask"],
+            patches["tokens"], patches["xyz"],
         )["scene_token"]
         scene = self.scene_projection(scene).unflatten(0, (-1, self.n_obs_steps))
         interaction = interaction.unflatten(0, (-1, self.n_obs_steps))

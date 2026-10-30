@@ -19,11 +19,7 @@ def build_patch_correspondence(
     member_weight: torch.Tensor | None = None,
     pooling: str = "uniform",
 ) -> dict[str, torch.Tensor]:
-    """Build FP32 pooling weights [BT,M,V*Hf*Wf] on a uniform final-image grid.
-
-    image_token_valid is bool [BT,V,Hf,Wf]; member_weight is [BT,M,K].
-    Coverage and confidence always use geometric weights, regardless of pooling mode.
-    """
+    """Build FP32 image-grid pooling weights; coverage/confidence always use geometric weights."""
     grid_xy, confidence = projection
     if grid_xy.ndim != 4 or grid_xy.shape[-1] != 2:
         raise ValueError("grid_xy must be [BT,V,N,2]")
@@ -167,10 +163,7 @@ class FeatureAlignment(nn.Module):
         member_weight: torch.Tensor | None = None,
         return_intermediate: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """Fuse spatial tokens [BT,M,D3] with a uniform image grid [BT,V,Hf,Wf,Di].
-
-        Projection and neighbors share Sparse3D point order; native ResNet grids do not apply.
-        """
+        """Fuse a uniform image grid with tokens; projection/neighbors share Sparse3D point order."""
         if image_grid.ndim != 5 or image_grid.shape[:2] != projection.grid_xy.shape[:2]:
             raise ValueError(
                 "image_grid must be [BT,V,Hf,Wf,Di] with the same batch and views as projection"
@@ -178,7 +171,7 @@ class FeatureAlignment(nn.Module):
         geometry = build_patch_correspondence(
             neighbor_idx,
             projection,
-            image_grid.shape[2:4],
+            (image_grid.shape[2], image_grid.shape[3]),
             image_token_valid=image_token_valid,
             member_weight=member_weight,
             pooling=self.pooling,

@@ -37,7 +37,6 @@ class RectifiedFlow(nn.Module):
 
         self.model = model
         self.num_inference_steps = num_inference_steps
-        self.num_flow_train_timesteps = num_flow_train_timesteps
         self.t_sample_mode = t_sample_mode
         self.time_shift_alpha = time_shift_alpha
         self.time_sampler = TimeSampler(
@@ -154,7 +153,6 @@ class ConsistencyFlow(nn.Module):
 
         self.model = model
         self.num_inference_steps = num_inference_steps
-        self.denoise_timesteps = denoise_timesteps
         self.flow_batch_ratio = flow_batch_ratio
         self.t_sample_mode_for_flow = t_sample_mode_for_flow
         self.t_sample_mode_for_consistency = t_sample_mode_for_consistency
@@ -238,12 +236,9 @@ class ConsistencyFlow(nn.Module):
         cond: torch.Tensor,
         actions: torch.Tensor,
         *,
-        ema_decoder: nn.Module | None = None,
+        ema_decoder: nn.Module,
         log_metrics: bool = True,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if ema_decoder is None:
-            raise RuntimeError("ConsistencyFlow requires an EMA action decoder during training")
-
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | int]]:
         ema_model = ema_decoder.model
         batch_size = actions.shape[0]
 
@@ -281,7 +276,7 @@ class ConsistencyFlow(nn.Module):
             return loss, {}
 
         with torch.no_grad():
-            metrics = {
+            metrics: dict[str, torch.Tensor | int] = {
                 "loss": loss.detach(),
                 "loss_action": loss.detach(),
                 "loss_flow": loss_flow.detach(),

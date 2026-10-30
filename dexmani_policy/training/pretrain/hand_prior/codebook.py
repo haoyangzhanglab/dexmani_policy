@@ -108,7 +108,7 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
     """Measure actual lookup errors in normalized and physical hand coordinates."""
     positive_int(chunk_size, "chunk_size")
     device, width = codebook.sorted_hand_poses.device, codebook.hand_dim
-    chunk_size = min(chunk_size, max(1, (16 * 1024 * 1024) // (codebook.num_codes * width * 4)))
+    chunk_size = min(chunk_size, max(1, (16 * 1024 * 1024) // (codebook.num_codes * 4)))
     report = {
         "distance_space": "HandStateCodebook normalized squared Euclidean",
         "source_checkpoint": codebook.artifact_metadata["source_checkpoint"],
@@ -158,7 +158,7 @@ def deployment_diagnostics(codebook, splits, *, chunk_size=4096):
                 "sample_rmse_quantiles": dict(
                     zip(
                         ("p50", "p90", "p95", "p99", "max"),
-                        np.quantile(per_sample[space], [0.5, 0.9, 0.95, 0.99, 1]).tolist(),
+                        np.quantile(per_sample[space], [0.5, 0.9, 0.95, 0.99, 1], axis=0).tolist(),
                     )
                 ),
             }

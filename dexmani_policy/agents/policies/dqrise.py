@@ -229,7 +229,7 @@ class DQRISEPolicy(BasePolicy):
             )
 
     def compute_loss(
-        self, batch: dict[str, Any], *, log_metrics: bool = True
+        self, batch: dict[str, Any], *, log_metrics: bool = True, **kwargs: Any,
     ) -> tuple[torch.Tensor, dict]:
         self.require_codebook()
         condition = self.encode_observation(batch["obs"])
@@ -242,7 +242,7 @@ class DQRISEPolicy(BasePolicy):
 
         diffusion_target = torch.cat([arm_part, index], dim=-1)
         action_loss, loss_dict = self.action_decoder.compute_loss(
-            condition, diffusion_target, log_metrics=log_metrics
+            condition, diffusion_target, log_metrics=log_metrics, **kwargs,
         )
 
         if not log_metrics:
@@ -250,7 +250,8 @@ class DQRISEPolicy(BasePolicy):
 
         with torch.no_grad():
             num_codes = self.hand_codebook.num_codes
-            counts = torch.bincount(discrete_idx.flatten(), minlength=num_codes).float()
+            counts = torch.zeros(num_codes, device=discrete_idx.device, dtype=torch.float32)
+            counts.scatter_add_(0, discrete_idx.flatten(), counts.new_ones(discrete_idx.numel()))
             probabilities = counts / counts.sum().clamp_min(1.0)
             entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
             loss_dict["batch_nn_code_entropy"] = entropy
@@ -262,7 +263,12 @@ class DQRISEPolicy(BasePolicy):
     def predict_action_from_condition(
         self, condition: torch.Tensor, inference_steps: int | None = None,
         *, generator: torch.Generator | None = None,
-    ) -> dict:
+        rtc_prefix: torch.Tensor | None = None,
+        delay_steps: int = 0,
+        rtc_guidance_cap: float = 0.0,
+    ) -> dict[str, torch.Tensor]:
+        if rtc_prefix is not None or delay_steps or rtc_guidance_cap:
+            raise NotImplementedError("DQ-RISE does not support RTC")
         self.require_codebook()
         reduced_action = self.action_decoder.predict_action(
             condition, (condition.shape[0], self.horizon, self.diffusion_action_dim),

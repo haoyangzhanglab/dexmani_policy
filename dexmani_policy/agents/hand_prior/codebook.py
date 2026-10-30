@@ -45,7 +45,7 @@ class HandStateCodebook(nn.Module):
         self.register_buffer("layer_weights", torch.empty(0))
         self.register_buffer("hand_normalizer_scale", torch.empty(0))
         self.register_buffer("hand_normalizer_offset", torch.empty(0))
-        self.artifact_metadata = {}
+        self.artifact_metadata: dict = {}
 
     @property
     def num_codes(self) -> int:
@@ -129,8 +129,12 @@ class HandStateCodebook(nn.Module):
         hand = hand.float()
         if not torch.isfinite(hand).all():
             raise ValueError("Hand states must be finite before encoding")
-        distances = (hand.unsqueeze(-2) - self.sorted_hand_poses).square_().sum(-1)
-        indices = distances.argmin(-1)
+        with torch.autocast(device_type=hand.device.type, enabled=False):
+            distances = torch.cdist(
+                hand.reshape(-1, self.hand_dim), self.sorted_hand_poses.float(),
+                compute_mode="donot_use_mm_for_euclid_dist",
+            )
+        indices = distances.argmin(-1).reshape(hand.shape[:-1])
         continuous = indices.float() / max(self.num_codes - 1, 1) * 2.0 - 1.0
         return continuous.unsqueeze(-1), indices
 

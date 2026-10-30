@@ -68,7 +68,7 @@ def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
     try:
         prototypes, _ = build_hand_prototypes(vqvae)
         chunk_size = min(
-            chunk_size, max(1, (16 * 1024 * 1024) // (prototypes.numel() * 4))
+            chunk_size, max(1, (16 * 1024 * 1024) // (len(prototypes) * 4))
         )
         sums = torch.zeros(3, device=device, dtype=torch.float64)
         lookup_sum = torch.zeros((), device=device, dtype=torch.float64)
@@ -81,8 +81,11 @@ def evaluate_vq(vqvae, loader, device, *, reconstruction=True, chunk_size=4096):
                 recon_loss, commitment_loss, _, recon_mse = vqvae(batch)
                 sums += torch.stack((recon_loss, commitment_loss, recon_mse)).double() * n
             for values in batch.float().split(chunk_size):
-                distances = (values[:, None] - prototypes).square_().sum(-1)
-                lookup_sum += distances.amin(-1).double().sum()
+                with torch.autocast(device_type=values.device.type, enabled=False):
+                    distances = torch.cdist(
+                        values, prototypes, compute_mode="donot_use_mm_for_euclid_dist",
+                    )
+                lookup_sum += distances.amin(-1).double().square().sum()
         if not count:
             raise ValueError("VQ evaluation loader is empty")
         lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
@@ -275,7 +278,7 @@ def train(cfg):
     # Deployment diagnostics evaluate the selected best without changing selection.
     selected_path = output_dir / "vqvae_hand_best.pt"
     codebook_path = output_dir / "codebook.npz"
-    runtime_codebook = export_codebook(selected_path, codebook_path, device="cpu", overwrite=True)
+    runtime_codebook = export_codebook(selected_path, codebook_path, device="cpu")
     print(f"Saved selected runtime codebook: {codebook_path}")
     diagnostics = deployment_diagnostics(
         runtime_codebook, {"train": train_norm, "held_out": val_norm}

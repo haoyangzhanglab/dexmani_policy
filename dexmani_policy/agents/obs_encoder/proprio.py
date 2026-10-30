@@ -62,12 +62,7 @@ def _rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
 
 
 class HandStateEncoder(nn.Module):
-    """Encode normalized joints and measured world-frame geometry as six body tokens.
-
-    Inputs share one observation time; N is the caller's flattened batch/time.
-    The wrist slot uses the eef_pose origin and axes, not a palm or sensor frame.
-    Geometry stays in physical units; no normalizer or FK is applied here.
-    """
+    """Encode aligned joints and measured world geometry; the wrist uses the EEF frame."""
 
     KEYPOINTS = ("wrist", "thumb", "index", "middle", "ring", "pinky")
 
@@ -127,11 +122,7 @@ class HandStateEncoder(nn.Module):
         eef_pose: torch.Tensor,
         fingertip_xyz: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Consume joints [N,19], raw xyz+column-6D pose [N,9], raw fingertips [N,5,3].
-
-        Return hand_tokens [N,6,D], FP32 world anchor_xyz [N,6,3] and
-        FP32 rotation_world_from_eef [N,3,3], shared with HandSceneEncoder.
-        """
+        """Consume flattened frames with raw meter positions and consecutive rotation columns."""
         if joint_state.ndim != 2 or joint_state.shape[1] != 19:
             raise ValueError("joint_state must have shape [N,19]")
         batch = joint_state.shape[0]
@@ -171,10 +162,8 @@ class HandStateEncoder(nn.Module):
 
     @property
     def out_dim(self) -> int:
-        """Width of hand_tokens."""
         return self.token_dim
 
     @property
     def out_shape(self) -> tuple[int, int]:
-        """Per-frame shape of hand_tokens."""
         return (6, self.token_dim)

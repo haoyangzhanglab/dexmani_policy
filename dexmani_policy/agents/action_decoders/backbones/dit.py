@@ -37,12 +37,12 @@ class DiTBlock(nn.Module):
             nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
 
-    def forward(self, x, c, attn_mask=None):
+    def forward(self, x, c):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_modulation(
             c
         ).chunk(6, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa), attn_mask=attn_mask
+            modulate(self.norm1(x), shift_msa, scale_msa)
         )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
@@ -118,7 +118,8 @@ class DiT(nn.Module):
     def forward(self, x, timestep, context):
         t = batch_timesteps(timestep, x)
 
-        x = self.x_embedder(x) + self.pos_embed.to(device=x.device, dtype=x.dtype)
+        x = self.x_embedder(x)
+        x = x + self.pos_embed.to(dtype=x.dtype)
         t_emb = self.time_embedder(t)
 
         context = context.reshape(context.shape[0], -1)

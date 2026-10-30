@@ -127,29 +127,21 @@ class R3DTransformer(nn.Module):
             pos_emb_dim=timestep_embed_dim, output_dim=timestep_embed_dim
         )
 
-        self.joint_dim = joint_dim
-        self.ee_dim = ee_dim if use_aux_ee else None
-
-        n_heads = 1 + int(use_aux_ee)
-        n_tokens = n_heads * horizon
-
-        self.joint_action_proj = nn.Linear(joint_dim, embedding_dim) if use_aux_ee else None
-        self.ee_action_proj = nn.Linear(ee_dim, embedding_dim) if use_aux_ee else None
-
-        self.joint_output_proj = nn.Linear(embedding_dim, joint_dim) if use_aux_ee else None
-        self.ee_output_proj = nn.Linear(embedding_dim, ee_dim) if use_aux_ee else None
-
-        self.action_proj = None if use_aux_ee else nn.Linear(action_dim, embedding_dim)
-        self.output_proj = None if use_aux_ee else nn.Linear(embedding_dim, action_dim)
-
         if use_aux_ee:
-            mask = torch.zeros(n_tokens, n_tokens)
+            if joint_dim is None or ee_dim is None:
+                raise ValueError("Auxiliary EE prediction requires joint_dim and ee_dim")
+            self.joint_action_proj = nn.Linear(joint_dim, embedding_dim)
+            self.ee_action_proj = nn.Linear(ee_dim, embedding_dim)
+            self.joint_output_proj = nn.Linear(embedding_dim, joint_dim)
+            self.ee_output_proj = nn.Linear(embedding_dim, ee_dim)
 
+            mask = torch.zeros(2 * horizon, 2 * horizon)
             # Joint queries must not attend to auxiliary EE tokens.
             mask[:horizon, horizon:] = float("-inf")
             self.register_buffer("self_attn_mask", mask, persistent=False)
         else:
-            self.register_buffer("self_attn_mask", torch.empty(0), persistent=False)
+            self.action_proj = nn.Linear(action_dim, embedding_dim)
+            self.output_proj = nn.Linear(embedding_dim, action_dim)
 
         self.global_cond_proj = nn.Linear(timestep_embed_dim + self.obs_feature_dim, embedding_dim)
 
@@ -170,24 +162,28 @@ class R3DTransformer(nn.Module):
 
     def forward(self, x, timestep, context):
         B, H, _ = x.shape
-        N = context.shape[1]
         obs_feat, pc_pe = context.split((self.obs_feature_dim, self.pc_pe_dim), dim=-1)
 
-        if self.action_proj is not None:
-            queries = self.action_proj(x)
-            query_pe = self.temporal_pe_horizon[:, :H, :].expand(B, -1, -1)
-            self_attn_mask = None
-        else:
-            joint = self.joint_action_proj(x[..., : self.joint_dim])
-            ee = self.ee_action_proj(x[..., self.joint_dim : self.joint_dim + self.ee_dim])
+        if self.use_aux_ee:
+            joint_dim = self.joint_action_proj.in_features
+            ee_dim = self.ee_action_proj.in_features
+            joint = self.joint_action_proj(x[..., :joint_dim])
+            ee = self.ee_action_proj(x[..., joint_dim : joint_dim + ee_dim])
             queries = torch.cat([joint, ee], dim=1)
             query_pe = self.temporal_pe_horizon.repeat(1, 2, 1).expand(B, -1, -1)
             self_attn_mask = self.self_attn_mask
+        else:
+            queries = self.action_proj(x)
+            query_pe = self.temporal_pe_horizon[:, :H, :].expand(B, -1, -1)
+            self_attn_mask = None
 
         timestep = batch_timesteps(timestep, x)
         t_emb = self.timestep_encoder(timestep)
-        t_emb = t_emb.unsqueeze(1).expand(-1, N, -1)
-        keys = self.global_cond_proj(torch.cat([t_emb, obs_feat], dim=-1))
+        projection = self.global_cond_proj
+        time_dim = t_emb.shape[-1]
+        keys = F.linear(obs_feat, projection.weight[:, time_dim:]) + F.linear(
+            t_emb, projection.weight[:, :time_dim], projection.bias,
+        ).unsqueeze(1)
 
         context_pe = add_temporal_embedding(pc_pe, self.temporal_pe_obs)
 
@@ -195,8 +191,8 @@ class R3DTransformer(nn.Module):
         for layer in self.layers:
             output = layer(output, keys, query_pe, context_pe, self_attn_mask)
 
-        if self.output_proj is not None:
-            return self.output_proj(output)
-        joint = self.joint_output_proj(output[:, :H])
-        ee = self.ee_output_proj(output[:, H : 2 * H])
-        return torch.cat([joint, ee], dim=-1)
+        if self.use_aux_ee:
+            joint = self.joint_output_proj(output[:, :H])
+            ee = self.ee_output_proj(output[:, H : 2 * H])
+            return torch.cat([joint, ee], dim=-1)
+        return self.output_proj(output)

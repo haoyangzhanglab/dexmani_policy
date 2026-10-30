@@ -14,10 +14,7 @@ def gather_tokens(tokens: Tensor, indices: Tensor) -> Tensor:
 
 @torch.no_grad()
 def sample_region_seeds(points: Tensor, count: int, mask: Tensor | None = None) -> Tensor:
-    """Centroid-initialized FPS with unique indices; masked coordinates must already be zero.
-
-    Exact distance ties use input order. Distinct indices can have identical coordinates.
-    """
+    """Centroid-initialized FPS; masked XYZ are zero, unique indices break ties by input order."""
     with torch.autocast(device_type=points.device.type, enabled=False):
         points = points.float()
         excluded = (
@@ -45,10 +42,7 @@ def sample_region_seeds(points: Tensor, count: int, mask: Tensor | None = None) 
 
 
 class LocalGlobalCrossAttention(nn.Module):
-    """One patch read: soft local distance bias and distance-free global heads.
-
-    The hard mode is an ablation using the sparse pooling prior for every head.
-    """
+    """Read local/global patches, or use the sparse pooling prior for the hard-mask ablation."""
 
     def __init__(
         self, channels: int, attention_dim: int, heads: int, global_heads: int, mode: str
@@ -103,13 +97,7 @@ class LocalGlobalCrossAttention(nn.Module):
 
 
 class SceneAggregator(nn.Module):
-    """Compress [B,M,D] patches into K regions in the input metric coordinate frame.
-
-    Valid tokens/XYZ must be finite; masked entries may contain NaN/Inf. Every
-    sample needs at least K valid patches. Centers (m), covariance (m^2), and
-    mass (patch assignment count) describe only the geometric partition.
-    FPS indices are not persistent identities. This is not SE(3)-equivariant.
-    """
+    """Pool at least K finite patches into metric regions; masked entries may be nonfinite."""
 
     def __init__(
         self,
@@ -203,8 +191,7 @@ class SceneAggregator(nn.Module):
         if patch_mask is not None:
             if patch_mask.shape != tokens.shape[:2] or patch_mask.dtype != torch.bool:
                 raise ValueError("patch_mask must be bool [B,M]")
-            # Torch 2.4 Inductor drops _assert_async; keep this boundary check
-            # in Python, accepting a graph break for masked compiled calls.
+            # Torch 2.4 Inductor drops _assert_async, so masked calls keep this Python boundary.
             if not (patch_mask.sum(-1) >= self.num_scene_tokens).all():
                 raise ValueError("each sample needs at least K valid patches")
             valid = patch_mask[:, None]

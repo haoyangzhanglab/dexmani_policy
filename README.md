@@ -113,6 +113,8 @@ bash scripts/training/train.sh adaptac '+resume_from=experiments/adaptac/<task>/
 
 `test_tools/smoke_test.py` 提供配置、数据 batch、短训和 checkpoint 续训检查。数据模式检查训练与验证 split 的核心形状及有限值，打印各字段的 shape/dtype，不额外拟合 normalizer。训练模式复用 `PolicyTrainer`，检查参数更新、checkpoint 保存加载和续训步数。
 
+`python -m dexmani_policy.test_tools.agent_checks --device cuda` 提供无需数据集或预训练权重的 agents 数值回归与合成短训；也支持 `--device cpu`，点云检查使用实际 PyTorch3D 后端。覆盖及组件计时边界见[项目架构](docs/项目架构.md#agents-优化依据与验证)。
+
 默认短训 4 次更新、续训 2 次；`--resume-updates 0` 关闭续训，总预算耗尽时明确打印未执行。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
 离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`；LAMP 同时传入符合 `info.action_context_shapes` 的 `action_context`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复直接使用 checkpoint 内置配置和严格 state_dict 加载，保留参数精度；不重拟合 affine 或迁移产物。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按配套、未手工篡改的内部产物使用。

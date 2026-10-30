@@ -79,14 +79,10 @@ def guided_inference(
             )[:, offset : offset + length, :control_dim]
             residual = weights * (prefix - denoised.detach())
             # The prefix VJP still propagates to the entire action chunk; weights enter once.
-            correction = (
-                torch.autograd.grad(denoised, sample, grad_outputs=residual, allow_unused=True)[0]
-                if denoised.requires_grad else None
-            )
+            correction = torch.autograd.grad(denoised, sample, grad_outputs=residual)[0]
 
         sample = scheduler.step(output.detach(), timestep, sample, generator=generator).prev_sample
-        if correction is not None:
-            sample.add_(guidance[i] * correction)
+        sample.add_(guidance[i] * correction)
 
     if scheduler.config.clip_sample:
         sample.clamp_(-scheduler.config.clip_sample_range, scheduler.config.clip_sample_range)

@@ -115,12 +115,7 @@ class ImageProcessor(torch.nn.Module):
         return_transform: bool = False,
         input_transform: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Normalize RGB; float inputs must be finite and in [0,1].
-
-        return_transform adds raw->final matrices [...,3,3], matching image leading dimensions.
-        input_transform broadcasts to [...,3,3]; omission treats input pixels as raw.
-        Tracked resizing uses bilinear/bicubic with align_corners=False.
-        """
+        """Normalize uint8/[0,1] RGB; optional raw-to-final transforms use half-pixel resizing."""
         if input_transform is not None and not return_transform:
             raise ValueError("input_transform requires return_transform=True")
         images = to_rgb_tensor(images)

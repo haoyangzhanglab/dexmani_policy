@@ -35,7 +35,9 @@ class HandVAE(nn.Module):
             n_layers=n_layers,
             n_heads=n_heads,
         )
-        self.model_config = {key: positive_int(value, key) for key, value in dimensions.items()}
+        self.model_config: dict[str, int | float] = {
+            key: positive_int(value, key) for key, value in dimensions.items()
+        }
         if horizon < 3:
             raise ValueError("HandVAE horizon must be at least 3 for second differences")
         if not math.isfinite(mlp_ratio) or mlp_ratio <= 0:

@@ -220,7 +220,6 @@ class DiTX(nn.Module):
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
         nn.init.zeros_(self.final_layer.ffn_final.fc2.weight)
-        nn.init.zeros_(self.final_layer.ffn_final.fc2.bias)
 
     def embed_context(self, context):
         tokens = self.context_embedder(context)
@@ -354,7 +353,6 @@ class ConsistencyDiTX(nn.Module):
         nn.init.zeros_(self.timestep_and_target_t_fusion.bias)
 
         nn.init.zeros_(self.final_layer.ffn_final.fc2.weight)
-        nn.init.zeros_(self.final_layer.ffn_final.fc2.bias)
 
     def embed_context(self, context):
         tokens = self.context_embedder(context)
@@ -368,7 +366,8 @@ class ConsistencyDiTX(nn.Module):
         return tuple(block.cross_attn.prepare_kv(context_c) for block in self.ditx_blocks)
 
     def forward(self, x, timestep, target_t, context, *, context_kv=None):
-        x = self.input_embedder(x) + self.input_pos_embed.to(dtype=x.dtype)
+        x = self.input_embedder(x)
+        x = x + self.input_pos_embed.to(dtype=x.dtype)
 
         timestep = batch_timesteps(timestep, x)
         timestep_embed = self.timestep_embedder(timestep)

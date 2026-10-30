@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 import torch
 from torch import Tensor, nn
@@ -30,10 +31,13 @@ def sample_vectors(samples: Tensor, count: int) -> Tensor:
 def kmeans(samples: Tensor, num_clusters: int, num_iters: int) -> tuple[Tensor, Tensor]:
     means = sample_vectors(samples, num_clusters)
     for _ in range(num_iters):
-        indices = torch.cdist(samples, means).argmin(-1)
-        counts = torch.bincount(indices, minlength=num_clusters)
-        sums = torch.zeros_like(means)
-        sums.scatter_add_(0, indices[:, None].expand_as(samples), samples)
+        indices = torch.cdist(
+            samples, means, compute_mode="donot_use_mm_for_euclid_dist",
+        ).argmin(-1)
+        counts = samples.new_zeros(num_clusters).scatter_add_(
+            0, indices, samples.new_ones(len(samples)),
+        )
+        sums = torch.zeros_like(means).index_add_(0, indices, samples)
         centers = sums / counts.clamp_min(1)[:, None]
         means = torch.where(counts[:, None] == 0, means, centers)
     return means, counts
@@ -43,7 +47,7 @@ class HandStateMLP(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, hidden_dim: int, num_layers: int) -> None:
         super().__init__()
         positive_int(num_layers, "num_layers")
-        layers = []
+        layers: list[nn.Module] = []
         for _ in range(num_layers):
             layers.extend((nn.Linear(input_dim, hidden_dim), nn.ReLU()))
             input_dim = hidden_dim
@@ -103,9 +107,12 @@ class EMAVectorQuantizer(nn.Module):
 
     @torch.no_grad()
     def update_codebook(self, samples: Tensor, indices: Tensor) -> None:
-        assignments = F.one_hot(indices, self.codebook_size).to(samples.dtype)
-        self.cluster_size.lerp_(assignments.sum(0), 1 - self.decay)
-        self.embed_avg.lerp_(assignments.T @ samples, 1 - self.decay)
+        counts = samples.new_zeros(self.codebook_size).scatter_add_(
+            0, indices, samples.new_ones(len(samples)),
+        )
+        sums = torch.zeros_like(self.embed_avg).index_add_(0, indices, samples)
+        self.cluster_size.lerp_(counts, 1 - self.decay)
+        self.embed_avg.lerp_(sums, 1 - self.decay)
         total = self.cluster_size.sum()
         counts = (self.cluster_size + self.eps) / (total + self.codebook_size * self.eps) * total
         self.embed.copy_(self.embed_avg / counts[:, None])
@@ -127,11 +134,10 @@ class EMAVectorQuantizer(nn.Module):
                     raise RuntimeError("Initialize the codebook in training before evaluation")
                 self.initialize(samples)
 
-            distances = (
-                samples.square().sum(-1, keepdim=True)
-                + self.embed.square().sum(-1)[None]
-                - 2 * (samples @ self.embed.T)
-            ).clamp_min_(1e-12)
+            # Direct differences preserve the nearest index for nearly coincident codes.
+            distances = torch.cdist(
+                samples, self.embed, compute_mode="donot_use_mm_for_euclid_dist",
+            )
             indices = distances.argmin(-1)
             quantized = F.embedding(indices, self.embed).reshape_as(x)
             commitment = F.mse_loss(quantized.detach(), x.float())
@@ -167,7 +173,7 @@ class ResidualVectorQuantizer(nn.Module):
             output = output + weight * quantized
             indices.append(index)
             losses.append(loss)
-        return output, torch.stack(indices, -1), torch.stack(losses)
+        return cast(Tensor, output), torch.stack(indices, -1), torch.stack(losses)
 
 
 class HandVQVAE(nn.Module):

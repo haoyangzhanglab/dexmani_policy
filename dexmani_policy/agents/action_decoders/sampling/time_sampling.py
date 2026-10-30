@@ -8,40 +8,7 @@ from torch.distributions import Beta
 from dexmani_policy.common.config import positive_int
 
 
-def sample_logit_normal(
-    batch_size: int, m: float = 0.0, s: float = 1.0, device: str = "cuda"
-) -> torch.Tensor:
-    u = torch.normal(mean=m, std=s, size=(batch_size,), device=device)
-    return torch.sigmoid(u)
-
-
-def sample_mode(batch_size: int, s: float = 1.29, device: str = "cuda") -> torch.Tensor:
-    u = torch.rand(batch_size, device=device)
-    t = 1 - u - s * (torch.cos(torch.pi / 2 * u) ** 2 - 1 + u)
-    return torch.clamp(t, 0, 1)
-
-
-def sample_cosmap(batch_size: int, device: str = "cuda") -> torch.Tensor:
-    u = torch.rand(batch_size, device=device)
-    t = 1 - 1 / (torch.tan(torch.pi / 2 * u) + 1)
-    return torch.clamp(t, 0, 1)
-
-
-def sample_beta(
-    batch_size: int,
-    s: float = 0.999,
-    alpha: float = 1.0,
-    beta: float = 1.5,
-    device: str = "cuda",
-) -> torch.Tensor:
-    beta_dist = Beta(
-        torch.tensor(alpha, device=device),
-        torch.tensor(beta, device=device),
-    )
-    return s * beta_dist.sample((batch_size,))
-
-
-def sample_dyadic(batch_size: int, num_steps: int, device: str = "cuda") -> torch.Tensor:
+def sample_dyadic(batch_size: int, num_steps: int, device: str | torch.device) -> torch.Tensor:
     """Stratify the batch over dyadic time grids, including the zero-time remainder."""
     log2_sections = math.floor(math.log2(num_steps)) + 1
     if batch_size < log2_sections:
@@ -70,12 +37,12 @@ def shift_time_to_noise(t: torch.Tensor, alpha: float) -> torch.Tensor:
     return t / (1.0 + (alpha - 1.0) * (1.0 - t))
 
 
-def euler_time_grid(num_steps, reference):
+def euler_time_grid(num_steps: int, reference: torch.Tensor) -> torch.Tensor:
     step_size = 1.0 / num_steps
     return torch.tensor(
         [step * step_size for step in range(num_steps)],
         device=reference.device,
-        dtype=reference.dtype,
+        dtype=torch.float32,
     )
 
 
@@ -90,6 +57,9 @@ class TimeSampler:
         beta_alpha: float = 1.0,
         beta_beta: float = 1.5,
     ) -> None:
+        concentrations = torch.tensor((beta_alpha, beta_beta), dtype=torch.float32, device="cpu")
+        if not (torch.isfinite(concentrations) & (concentrations > 0)).all():
+            raise ValueError("Beta concentrations must be positive and finite in FP32")
         self.num_steps = positive_int(num_steps, "num_steps")
         self.lognorm_m = lognorm_m
         self.lognorm_s = lognorm_s
@@ -102,13 +72,22 @@ class TimeSampler:
         if mode == "uniform":
             return torch.rand(batch_size, device=device)
         if mode == "lognorm":
-            return sample_logit_normal(batch_size, self.lognorm_m, self.lognorm_s, device)
+            u = torch.normal(mean=self.lognorm_m, std=self.lognorm_s, size=(batch_size,), device=device)
+            return torch.sigmoid(u)
         if mode == "mode":
-            return sample_mode(batch_size, self.mode_s, device)
+            u = torch.rand(batch_size, device=device)
+            t = 1 - u - self.mode_s * (torch.cos(torch.pi / 2 * u) ** 2 - 1 + u)
+            return t.clamp(0, 1)
         if mode == "cosmap":
-            return sample_cosmap(batch_size, device)
+            u = torch.rand(batch_size, device=device)
+            return (1 - 1 / (torch.tan(torch.pi / 2 * u) + 1)).clamp(0, 1)
         if mode == "beta":
-            return sample_beta(batch_size, self.beta_s, self.beta_alpha, self.beta_beta, device)
+            distribution = Beta(
+                torch.tensor(self.beta_alpha, device=device, dtype=torch.float32),
+                torch.tensor(self.beta_beta, device=device, dtype=torch.float32),
+                validate_args=False,
+            )
+            return self.beta_s * distribution.sample(torch.Size((batch_size,)))
         if mode == "discrete":
             return (
                 torch.randint(0, self.num_steps, (batch_size,), device=device).float()

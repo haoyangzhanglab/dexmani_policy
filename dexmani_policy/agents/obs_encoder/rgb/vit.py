@@ -44,6 +44,7 @@ class ViTEncoder(nn.Module):
                 if architecture is not None
                 else SiglipVisionConfig.from_pretrained(model_name)
             )
+            config.vision_use_head = global_token_type == "pooler"
             model_class = SiglipVisionModel
         else:
             raise ValueError(f"Unsupported ViT kind: {kind}")

@@ -1,0 +1,423 @@
+"""Focused numerical and synthetic policy checks: python -m dexmani_policy.test_tools.agent_checks."""
+
+import argparse
+import copy
+import io
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+
+from dexmani_policy.agents.action_decoders.backbones.modules import modulate
+from dexmani_policy.agents.action_decoders.backbones.dit import DiT
+from dexmani_policy.agents.action_decoders.backbones.ditx import ConsistencyDiTX
+from dexmani_policy.agents.action_decoders.backbones.sat import SAT, SATBlock
+from dexmani_policy.agents.action_decoders.sampling.time_sampling import TimeSampler, euler_time_grid
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook
+from dexmani_policy.agents.hand_prior.hand_vae import HandVAE
+from dexmani_policy.agents.hand_prior.vqvae import EMAVectorQuantizer, HandVQVAE
+from dexmani_policy.agents.obs_encoder.rgb.vit import ViTEncoder
+from dexmani_policy.agents.obs_encoder.xhand_tactile import XHandPatchEncoder
+from dexmani_policy.agents.policies.dp3 import DP3Policy
+from dexmani_policy.agents.policies.dqrise import DQRISEObservationEncoder, DQRISEPolicy
+from dexmani_policy.agents.policies.sat import SATObservationEncoder
+from dexmani_policy.common.hand_semantics import HAND_ACTION_SEMANTICS
+from dexmani_policy.training.common.optimization import build_optimizer
+from dexmani_policy.training.pretrain.hand_prior.codebook import deployment_diagnostics, export_codebook
+from dexmani_policy.training.pretrain.hand_prior.vqvae import evaluate_vq
+
+
+def check_sat(device):
+    block = SATBlock(32, 4).to(device=device, dtype=torch.float64)
+    torch.nn.init.normal_(block.adaln_modulation[-1].weight, std=0.1)
+    reference = copy.deepcopy(block)
+    inputs = [torch.randn(2, n, 32, device=device, dtype=torch.float64, requires_grad=True)
+              for n in (19, 1)]
+    inputs.append(torch.randn(2, 32, device=device, dtype=torch.float64, requires_grad=True))
+    reference_inputs = [x.detach().clone().requires_grad_() for x in inputs]
+    actual = block(*inputs)
+
+    action, obs, time = reference_inputs
+    shift, scale, gate, shift_mlp, scale_mlp, gate_mlp = reference.adaln_modulation(time).chunk(6, -1)
+    tokens = torch.cat((reference.obs_norm(obs), modulate(reference.norm1(action), shift, scale)), 1)
+    attn = reference.attn
+    q, k, v = attn.qkv(tokens).reshape(2, 20, 3, 4, 8).permute(2, 0, 3, 1, 4).unbind(0)
+    mask = tokens.new_zeros(20, 20)
+    mask[0, 1:] = -torch.inf
+    update = F.scaled_dot_product_attention(attn.q_norm(q), attn.k_norm(k), v, attn_mask=mask)
+    update = attn.proj(update.transpose(1, 2).reshape(2, 20, 32))[:, 1:]
+    expected = action + gate[:, None] * update
+    expected = expected + gate_mlp[:, None] * reference.mlp(
+        modulate(reference.norm2(expected), shift_mlp, scale_mlp),
+    )
+    torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
+    actual.square().mean().backward()
+    expected.square().mean().backward()
+    for a, b in zip(inputs + list(block.parameters()), reference_inputs + list(reference.parameters())):
+        assert a.grad is not None and torch.isfinite(a.grad).all()
+        torch.testing.assert_close(a.grad, b.grad, rtol=1e-9, atol=1e-10)
+    assert actual.abs().sum() > 0 and inputs[1].grad is not None and inputs[1].grad.abs().sum() > 0
+
+
+def check_time(device):
+    grid = euler_time_grid(1024, torch.empty((), device=device, dtype=torch.bfloat16))
+    assert grid.dtype == torch.float32 and grid.unique().numel() == 1024
+    assert grid[0] == 0 and grid[-1] < 1 and (grid[1:] > grid[:-1]).all()
+    sampler = TimeSampler(10)
+    rng = torch.random.get_rng_state() if device.type == "cpu" else torch.cuda.get_rng_state(device)
+    expected = 0.999 * torch.distributions.Beta(
+        torch.tensor(1.0, device=device), torch.tensor(1.5, device=device),
+    ).sample(torch.Size((128,)))
+    if device.type == "cpu":
+        torch.random.set_rng_state(rng)
+    else:
+        torch.cuda.set_rng_state(rng, device)
+    assert torch.equal(expected, sampler.sample(128, "beta", device))
+    for value in (0, -1, float("nan"), float("inf"), 1e-99, 1e99):
+        try:
+            TimeSampler(10, beta_alpha=value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Accepted invalid FP32 beta concentration: {value}")
+
+
+def check_precision(device):
+    models = (
+        (SAT(16, 19, n_layers=1), "blocks", (2, 16, 19), (2, 256)),
+        (DiT(4, 3, 16, n_emb=32, num_heads=4, n_layers=1), "blocks", (2, 4, 3), (2, 16)),
+        (ConsistencyDiTX(4, 3, 2, 16, hidden_dim=32, n_head=4, n_layers=1),
+         "ditx_blocks", (2, 4, 3), (2, 4, 16)),
+    )
+    for model, blocks, action_shape, context_shape in models:
+        model.to(device)
+        seen = []
+        hook = getattr(model, blocks)[0].register_forward_pre_hook(lambda _, args: seen.append(args[0].dtype))
+        kwargs = dict(x=torch.randn(action_shape, device=device), timestep=torch.rand(2, device=device),
+                      context=torch.randn(context_shape, device=device))
+        if isinstance(model, ConsistencyDiTX):
+            kwargs["target_t"] = torch.rand(2, device=device)
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            output = model(**kwargs)
+        hook.remove()
+        assert seen == [torch.bfloat16] and torch.isfinite(output).all()
+
+
+def check_tactile(device):
+    encoder = XHandPatchEncoder().to(device)
+    for mode in ("random", "zero", "ties"):
+        x = torch.randn(2, 5, 120, 3, device=device)
+        if mode == "zero":
+            x.zero_()
+        elif mode == "ties":
+            x = x.sign()
+        x.requires_grad_()
+        mask = (encoder.region_ids[:, None] == torch.arange(5, device=device)[None, :, None])[None]
+        magnitude = torch.linalg.vector_norm(x, dim=-1)
+        weights = magnitude / (magnitude + encoder.activity_scale)
+        weights = weights[:, :, None] * mask
+        mass = weights.sum(-1)
+        mean = torch.einsum("bfpt,bftc->bfpc", weights, x) / torch.where(mass > 0, mass, 1)[..., None]
+        expected = torch.cat((
+            mean, (x.abs()[:, :, None] * mask[..., None]).amax(-2),
+            (mass / mask.sum(-1))[..., None],
+            (magnitude[:, :, None] * mask).amax(-1)[..., None],
+        ), -1)
+        actual = encoder._patch_descriptors(x)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        probe = torch.randn_like(actual)
+        reference_grad, = torch.autograd.grad((expected * probe).mean(), x)
+        new_grad, = torch.autograd.grad((actual * probe).mean(), x)
+        torch.testing.assert_close(reference_grad, new_grad, rtol=1e-5, atol=1e-6)
+    for all_missing in (False, True):
+        valid = torch.ones(2, 5, dtype=torch.bool, device=device)
+        valid[:, 1:] = False
+        if all_missing:
+            valid.zero_()
+        x = torch.randn(2, 5, 120, 3, device=device).masked_fill(~valid[..., None, None], float("nan"))
+        x.requires_grad_()
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            tokens = encoder(x, tactile_valid=valid)
+        tokens.float().square().sum().backward()
+        assert torch.isfinite(tokens).all() and x.grad is not None and torch.isfinite(x.grad).all()
+        assert (tokens[~valid] == 0).all() and (x.grad[~valid] == 0).all()
+    config = encoder.effective_config.copy()
+    config.pop("_target_")
+    restored = XHandPatchEncoder(**config).to(device)
+    restored.load_state_dict(encoder.state_dict(), strict=True)
+
+
+def check_rgb(device):
+    architecture = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+                        num_attention_heads=4, image_size=32, patch_size=16)
+    for mode in ("freeze", "full", "lora"):
+        model = ViTEncoder("siglip", "random", tune_mode=mode, out_dim=16,
+                           architecture=architecture, load_pretrained=False).to(device)
+        assert not hasattr(model.backbone.vision_model, "head")
+        assert model.effective_config["architecture"]["vision_use_head"] is False
+        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-3)
+        rgb = torch.randn(2, 3, 32, 32, device=device)
+        model.train()
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            loss = model(rgb)["global_token"].float().square().mean()
+        loss.backward()
+        assert model.proj.weight.grad is not None and model.proj.weight.grad.abs().sum() > 0
+        if mode == "freeze":
+            assert not model.backbone.training and all(p.grad is None for p in model.backbone.parameters())
+        optimizer.step()
+        restored = ViTEncoder("siglip", **model.effective_config).to(device)
+        restored.load_state_dict(model.state_dict(), strict=True)
+        restored_optimizer = torch.optim.AdamW((p for p in restored.parameters() if p.requires_grad), lr=1e-3)
+        restored_optimizer.load_state_dict(optimizer.state_dict())
+        assert list(dict(model.named_parameters())) == list(dict(restored.named_parameters()))
+        with torch.no_grad():
+            torch.testing.assert_close(model.eval()(rgb)["global_token"],
+                                       restored.eval()(rgb)["global_token"], rtol=0, atol=0)
+    pooler = ViTEncoder("siglip", "random", global_token_type="pooler", architecture=architecture,
+                        load_pretrained=False).to(device)
+    assert hasattr(pooler.backbone.vision_model, "head")
+    with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
+        assert torch.isfinite(pooler(rgb)["global_token"]).all()
+
+
+def check_vq(device):
+    quantizer = EMAVectorQuantizer(12, 4).to(device)
+    for _ in range(4):
+        x = torch.randn(32, 12, device=device, requires_grad=True)
+        state = {k: v.clone() for k, v in quantizer.state_dict().items()}
+        expected_indices = (x.detach()[:, None] - state["embed"]).square().sum(-1).argmin(-1)
+        assignment = F.one_hot(expected_indices, 4).float()
+        counts = state["cluster_size"].lerp(assignment.sum(0), 1 - quantizer.decay)
+        sums = state["embed_avg"].lerp(assignment.T @ x.detach(), 1 - quantizer.decay)
+        smoothed = (counts + quantizer.eps) / (counts.sum() + 4 * quantizer.eps) * counts.sum()
+        output, indices, loss = quantizer(x)
+        assert torch.equal(indices, expected_indices)
+        torch.testing.assert_close(quantizer.cluster_size, counts)
+        torch.testing.assert_close(quantizer.embed_avg, sums, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(quantizer.embed, sums / smoothed[:, None], rtol=1e-5, atol=1e-6)
+        output.sum().backward()
+        torch.testing.assert_close(x.grad, torch.ones_like(x))
+        assert torch.isfinite(loss)
+
+    quantizer.eval()
+    with torch.no_grad():
+        quantizer.embed.fill_(3)
+        quantizer.embed[0].fill_(1)
+        quantizer.embed[0, 0] += 1e-4
+        quantizer.embed[1].fill_(1)
+    with torch.autocast(device.type, dtype=torch.bfloat16):
+        assert quantizer(torch.ones(1, 12, device=device))[1].item() == 1
+
+    initialized = EMAVectorQuantizer(3, 4, kmeans_init=True, kmeans_iters=2).to(device)
+    initialized(torch.zeros(8, 3, device=device))
+    assert initialized.is_initialized and initialized.cluster_size.sum() > 0
+    restored = EMAVectorQuantizer(3, 4, kmeans_init=True).to(device)
+    restored.load_state_dict(initialized.state_dict(), strict=True)
+    assert restored.is_initialized
+    restored.eval()(torch.zeros(8, 3, device=device))
+
+    dead = EMAVectorQuantizer(3, 4, threshold_ema_dead_code=2).to(device)
+    dead.update_codebook(torch.ones(8, 3, device=device), torch.zeros(8, device=device, dtype=torch.long))
+    assert (dead.cluster_size >= 2).all()
+    torch.testing.assert_close(dead.embed_avg[1:], dead.embed[1:] * 2)
+
+    vae = HandVQVAE(12, [1] * 12, latent_dim=8, hidden_dim=16, num_layers=2).to(device)
+    optimizer = torch.optim.AdamW(vae.parameters(), lr=1e-3)
+    for _ in range(3):
+        optimizer.zero_grad(set_to_none=True)
+        reconstruction, commitment, _, _ = vae(torch.randn(16, 12, device=device))
+        (reconstruction + commitment).backward()
+        assert vae.quantizer.layer_weights.grad is not None and vae.quantizer.layer_weights.grad.abs().sum() > 0
+        optimizer.step()
+    loaded = HandVQVAE(**vae.model_config).to(device)
+    loaded.load_state_dict(vae.state_dict(), strict=True)
+    assert all(torch.isfinite(p).all() for p in loaded.parameters())
+
+
+def check_codebook(device):
+    for size in (256, 512):
+        table = HandStateCodebook(12, num_groups=1, codebook_size=size).to(device)
+        table.set_buffers(dict(
+            sorted_hand_poses=torch.randn(size, 12, device=device),
+            pca_permutation=torch.arange(size, device=device),
+            layer_weights=torch.ones(1, device=device),
+            hand_normalizer_scale=torch.ones(12, device=device),
+            hand_normalizer_offset=torch.zeros(12, device=device),
+        ))
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            _, index = table.decode(torch.tensor([-2, -1, 1, 2], device=device, dtype=dtype))
+            assert index.tolist() == [0, 0, size - 1, size - 1]
+        for invalid in (float("nan"), float("inf"), -float("inf")):
+            try:
+                table.decode(torch.tensor([invalid], device=device))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Nonfinite code index was accepted")
+        with torch.no_grad():
+            table.sorted_hand_poses.fill_(3)
+            table.sorted_hand_poses[0].fill_(1)
+            table.sorted_hand_poses[0, 0] += 1e-4
+            table.sorted_hand_poses[1].fill_(1)
+        for shape in ((12,), (2, 12), (2, 3, 12)):
+            continuous, indices = table.encode(torch.ones(shape, device=device))
+            assert indices.shape == shape[:-1] and (indices == 1).all()
+            assert continuous.shape == (*shape[:-1], 1)
+        restored = HandStateCodebook(12, num_groups=1, codebook_size=size).to(device)
+        restored.load_state_dict(table.state_dict(), strict=True)
+
+
+def check_codebook_pipeline(device):
+    model = HandVQVAE(12, [1] * 12, latent_dim=8, hidden_dim=16, num_layers=1).to(device)
+    rows = torch.randn(19, 12).clamp(-1, 1)
+    loader = DataLoader(TensorDataset(rows), batch_size=7)
+    before = {key: value.clone() for key, value in model.state_dict().items()}
+    metrics = evaluate_vq(model, loader, device, reconstruction=False, chunk_size=5)
+    assert model.training
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+    manifest = dict(source_id="agent-check", episode_ends=[10, 19], episode_ids=["train", "val"],
+                    train_indices=[0], val_indices=[1])
+    with tempfile.TemporaryDirectory(prefix="dexmani-codebook-check-") as directory:
+        checkpoint, artifact = Path(directory) / "vq.pt", Path(directory) / "codebook.npz"
+        torch.save(dict(
+            model_config=model.model_config, model_state_dict=model.state_dict(), epoch=1,
+            metrics={"val_lookup_mse": metrics["lookup_mse"]},
+            normalizer_state_dict={"fields.hand.scale": torch.ones(12), "fields.hand.offset": torch.zeros(12)},
+            split_metadata=dict(normalization_spec={"action": "auto"}, hand_data={"action_key": "action"},
+                                split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
+        ), checkpoint)
+        table = export_codebook(checkpoint, artifact)
+        report = deployment_diagnostics(table, {"validation": rows.numpy()}, chunk_size=5)
+        torch.testing.assert_close(torch.tensor(metrics["lookup_mse"]),
+                                   torch.tensor(report["splits"]["validation"]["lookup_mse"]), rtol=1e-5, atol=1e-7)
+        assert sum(report["splits"]["validation"]["prototype_counts"]) == len(rows)
+        policy = DQRISEPolicy(
+            4, 1, 2, 19, codebook_path=str(artifact), num_points=32,
+            pc_encoder_config=dict(channels=48, num_patches=8, group_size=4, depth=1, num_heads=4),
+            down_dims=(16, 32), diffusion_step_embed_dim=16, num_training_steps=10, num_inference_steps=2,
+        )
+        policy.set_normalization_spec(
+            dict(joint_state="limits", point_cloud="identity", action="auto"),
+            dict(joint_state=19, point_cloud=6, action=19), action_key="action",
+        )
+        policy.initialize_training(dict(
+            attrs=dict(hand_joint_order=HAND_ACTION_SEMANTICS["joint_order"][1:], hand_units="radians"),
+            action_key="action", split_manifest=manifest,
+        ))
+        policy.to(device)
+        obs = dict(joint_state=torch.randn(2, 1, 19, device=device),
+                   point_cloud=torch.rand(2, 1, 32, 6, device=device))
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            loss, _ = policy.compute_loss(dict(obs=obs, action=torch.rand(2, 4, 19, device=device)))
+        loss.backward()
+        assert torch.isfinite(loss)
+        prediction = policy.eval().predict_action(obs)["future_actions"]
+        assert prediction.shape == (2, 4, 19) and torch.isfinite(prediction).all()
+        try:
+            policy.predict_action_from_condition(
+                torch.zeros(2, 256, device=device), rtc_prefix=prediction[:, :1],
+            )
+        except NotImplementedError:
+            pass
+        else:
+            raise AssertionError("DQ-RISE accepted an unsupported RTC prefix")
+
+
+def check_policies(device):
+    for cls, steps in ((SATObservationEncoder, 2), (DQRISEObservationEncoder, 1)):
+        encoder = cls(num_points=64, n_obs_steps=steps, pc_encoder_config=dict(
+            channels=48, num_patches=8, group_size=8, depth=1, num_heads=4,
+        )).to(device).eval()
+        obs = dict(point_cloud=torch.rand(2 * steps, 96, 6, device=device, requires_grad=True),
+                   joint_state=torch.randn(2 * steps, 19, device=device, requires_grad=True))
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            features = encoder(obs)
+        features.float().square().mean().backward()
+        assert features.shape == (2, 256) and torch.isfinite(features).all()
+        assert all(x.grad is not None and torch.isfinite(x.grad).all() and x.grad.abs().sum() > 0
+                   for x in obs.values())
+
+    kwargs: dict[str, Any] = dict(horizon=8, n_obs_steps=2, n_action_steps=3, action_dim=19, encoder_type="dp3",
+                  pc_dim=3, pc_out_dim=16, state_dim=19, num_points=64, state_out_dim=8,
+                  down_dims=(32, 64), diffusion_step_embed_dim=32, n_groups=8,
+                  num_training_steps=10, num_inference_steps=2)
+    policy = DP3Policy(**kwargs)
+    spec = dict(joint_state="limits", point_cloud="identity", action="auto")
+    dims = dict(joint_state=19, point_cloud=3, action=19)
+    policy.set_normalization_spec(spec, dims, action_key="action")
+    policy.to(device)
+    with torch.no_grad():
+        policy.normalizer["action"].scale.copy_(torch.linspace(0.5, 1.5, 19, device=device))
+        policy.normalizer["action"].offset.copy_(torch.linspace(-0.2, 0.2, 19, device=device))
+    obs = dict(joint_state=torch.randn(2, 2, 19, device=device),
+               point_cloud=torch.rand(2, 2, 64, 3, device=device))
+    optimizer = build_optimizer(policy, lr=1e-4, weight_decay=1e-6)
+    for _ in range(3):
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            loss, _ = policy.compute_loss(dict(obs=obs, action=torch.randn(2, 8, 19, device=device)))
+        loss.backward()
+        assert torch.isfinite(loss)
+        optimizer.step()
+    policy.eval()
+    with torch.inference_mode():
+        ordinary = policy.predict_action(
+            obs, generator=torch.Generator(device=device).manual_seed(17),
+        )["future_actions"]
+        zero = policy.predict_action(
+            obs, rtc_prefix=ordinary[:, :3], rtc_guidance_cap=0,
+            generator=torch.Generator(device=device).manual_seed(17),
+        )["future_actions"]
+        guided = policy.predict_action(obs, rtc_prefix=ordinary[:, :3], delay_steps=1,
+                                       rtc_guidance_cap=2)["future_actions"]
+    assert ordinary.shape == zero.shape == guided.shape == (2, 7, 19)
+    torch.testing.assert_close(ordinary, zero, rtol=0, atol=0)
+    assert torch.isfinite(guided).all()
+    storage = io.BytesIO()
+    torch.save(dict(model=policy.state_dict(), optimizer=optimizer.state_dict()), storage)
+    storage.seek(0)
+    saved = torch.load(storage, map_location=device, weights_only=True)
+    restored = DP3Policy(**kwargs)
+    restored.set_normalization_spec(spec, dims, action_key="action")
+    restored.to(device).load_state_dict(saved["model"], strict=True)
+    new_optimizer = build_optimizer(restored, lr=1e-4, weight_decay=1e-6)
+    assert [g["param_names"] for g in optimizer.param_groups] == [g["param_names"] for g in new_optimizer.param_groups]
+    new_optimizer.load_state_dict(saved["optimizer"])
+    actions = torch.randn(2, 8, 19, device=device)
+    for model, opt in ((policy, optimizer), (restored, new_optimizer)):
+        model.train()
+        opt.zero_grad(set_to_none=True)
+        torch.manual_seed(29)
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            resumed_loss, _ = model.compute_loss(dict(obs=obs, action=actions))
+        resumed_loss.backward()
+        opt.step()
+    for value, replay in zip(policy.state_dict().values(), restored.state_dict().values()):
+        torch.testing.assert_close(value, replay, rtol=0, atol=0)
+
+    codec = HandVAE(horizon=4, latent_dim=3, hidden_dim=16, n_layers=1, n_heads=4).to(device).freeze()
+    latent = torch.randn(2, 4, 3, device=device, requires_grad=True)
+    codec.decode(latent, torch.randn(2, 12, device=device)).square().mean().backward()
+    assert latent.grad is not None and latent.grad.abs().sum() > 0
+    assert all(p.grad is None for p in codec.parameters())
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    args = parser.parse_args()
+    device = torch.device(args.device)
+    torch.manual_seed(7)
+    torch.set_num_threads(4)
+    for check in (check_sat, check_time, check_precision, check_tactile, check_rgb, check_vq,
+                  check_codebook, check_codebook_pipeline, check_policies):
+        check(device)
+        print(f"PASS {check.__name__} ({device})", flush=True)
+
+
+if __name__ == "__main__":
+    main()

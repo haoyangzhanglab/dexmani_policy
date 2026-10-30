@@ -1,9 +1,5 @@
-"""Contact and coordination feature extraction from CordViP, Section III-C.
-
-Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
-Source: train_policy/policy/CordViP/CordViP/CordViP/model/vision/encoder.py
-Changes: local PointNet, native field names and arm7-before-hand12 state layout.
-"""
+"""CordViP Section III-C with local PointNet and arm7-before-hand12 state layout."""
+# Source: xuanxuanzzzii/cordvip@ad6d441abe7b0480cf79b0311db266965c1313b6, train_policy/policy/CordViP/CordViP/CordViP/model/vision/encoder.py.
 
 from torch import nn
 

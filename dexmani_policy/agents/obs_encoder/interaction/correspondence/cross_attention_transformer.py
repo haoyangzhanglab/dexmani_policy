@@ -1,13 +1,8 @@
-"""Cross-attention Transformer for CordViP's feature correspondences.
-
-Commit: ad6d441abe7b0480cf79b0311db266965c1313b6
-Source: train_policy/policy/CordViP/CordViP/CordViP/model/vision/transformer.py
-Upstream attribution: https://github.com/r-pad/taxpose and
-https://github.com/WangYueFt/dcp/blob/master/model.py.
-"""
+"""Cross-attention Transformer for CordViP's feature correspondences."""
+# Source: xuanxuanzzzii/cordvip@ad6d441abe7b0480cf79b0311db266965c1313b6, train_policy/policy/CordViP/CordViP/CordViP/model/vision/transformer.py.
+# Upstream: https://github.com/r-pad/taxpose and https://github.com/WangYueFt/dcp/blob/master/model.py.
 
 import copy
-import math
 
 import torch
 from torch import nn
@@ -128,12 +123,11 @@ class MultiHeadedAttention(nn.Module):
     def forward(self, query, key, value):
         batch_size = query.size(0)
         query, key, value = [
-            linear(x).view(batch_size, -1, self.heads, self.head_dim).transpose(1, 2).contiguous()
+            linear(x).view(batch_size, -1, self.heads, self.head_dim).transpose(1, 2)
             for linear, x in zip(self.linears, (query, key, value))
         ]
-        scores = torch.matmul(query, key.transpose(-2, -1).contiguous()) / math.sqrt(self.head_dim)
-        x = torch.matmul(F.softmax(scores, dim=-1), value)
-        x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.heads * self.head_dim)
+        x = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0)
+        x = x.transpose(1, 2).reshape(batch_size, -1, self.heads * self.head_dim)
         return self.linears[-1](x)
 
 
