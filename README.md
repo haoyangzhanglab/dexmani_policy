@@ -9,10 +9,12 @@ Python 3.10+，使用 Conda `policy` 环境，先安装匹配设备的 PyTorch /
 ```bash
 conda activate policy
 python -m pip install -r requirements.txt
-python -m pip install -e .
+python -m pip install -e . --no-deps
 ```
 
 Sparse3D、R3D 及需要 FPS/kNN 的点云路径还需安装与 Torch/CUDA 匹配的 PyTorch3D 原生扩展。仿真评测依赖 `dexmani_sim`。
+
+`pyproject.toml` 声明直接依赖和必要 API 范围；`requirements.txt` 固定已验证环境版本。更新依赖时只在环境文件维护精确版本，不顺带升级。文本组件所需 transformers/tokenizers 等依赖继续保留。
 
 数据准备与完整检查使用独立工具，普通 Dataset 构造只做必要结构检查，不再完整扫描浮点字段：
 
@@ -30,11 +32,9 @@ python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output O
 以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。配置位于 `dexmani_policy/configs/`，训练数据默认位于 `robot_data/<task>.zarr`。
 
 ```bash
-# 检查配置接口与导入，无需数据或 GPU
-python -m dexmani_policy.test_tools.smoke_test --config-only dp3
-
-# 检查实际数据的训练与验证 batch
-python -m dexmani_policy.test_tools.smoke_test --data-only --max-batches 2 dp3
+# 用实际数据完成短训、保存和原目录恢复；按硬件设置 batch/worker
+python -m dexmani_policy.test_tools.smoke_test dp3 --max-updates 2 --resume-updates 1 \
+  --override 'task_name=<task>' --override dataloader.num_workers=0
 
 # 检查任务的数据路径
 python -m dexmani_policy.training.common.config \
@@ -43,21 +43,31 @@ python -m dexmani_policy.training.common.config \
 # 训练，支持 Hydra 配置覆盖
 bash scripts/training/train.sh dp3 'task_name=<task>'
 
-# 从已有实验恢复到新的运行目录
-bash scripts/training/train.sh dp3 \
-  '+resume_from=experiments/dp3/<task>/<run>'
+# 从同一实验目录的 latest.pt 恢复完整状态
+python -m dexmani_policy.training.common.resume \
+  --run experiments/dp3/<task>/<run> --device cuda:0 --num-workers 4
 
-# Checkpoint 选点与独立测试
-bash scripts/eval/eval_pipeline.sh 'experiments/dp3/<task>/<run>'
+# 单个 Checkpoint 评测
+python -m dexmani_policy.evaluate \
+  --checkpoint <run>/checkpoints/latest.pt --weights ema --inference-steps 10 \
+  --episodes 100 --seed 1024
+
+# 显式候选选点与独立测试，输出为该 run 中新的选点目录
+python -m dexmani_policy.eval_pipeline \
+  --checkpoints <run>/checkpoints/<a>.pt <run>/checkpoints/<b>.pt \
+  --weights ema --inference-steps 10 --selection-episodes 25 --test-episodes 100 \
+  --seed 1024 --output-dir <run>/eval_ckpt_selector/<new-evaluation>
 ```
 
 配置检查不代表完整训练可运行。续训复用 Checkpoint 中的训练配方、数据划分和 normalizer，根据已完成的 optimizer updates 从下一个 batch 继续；不保证随机增强或编译计算逐位重放。
 
-action 归一化由策略和动作表示固定：连续 joint 使用 `auto`（等价 `limits`），EEF 只使用分段 `auto`，rot6d 保持 identity；DQ 和 R3D 辅助目标保留各自规则。`action=rms/gaussian/max_abs` 等非既定配方会在配置或恢复边界报错，关闭 clipping 也不能绕过。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
+action 归一化由策略和动作表示固定：连续 joint 使用 `auto`（等价 `limits`），EEF 只使用分段 `auto`，rot6d 保持 identity；DQ 和 R3D 辅助目标保留各自规则。`normalization.action=rms/gaussian/max_abs` 等非既定配方会在 fresh 配置边界报错，关闭 clipping 也不能绕过；恢复直接使用已保存的 affine。新训练先确定 affine 来源；AFRO/CordViP 预训练包内的观测统计直接继承，仅对剩余字段拟合训练划分的统计。续训、评测和部署复用完整策略 checkpoint 保存的最终统计。
+
+本轮清理改变了 checkpoint 构造配置和状态布局；旧实验使用对应旧提交读取，不自动猜测格式，也不使用宽松加载。
 
 FPS 使用 PyTorch3D 原生随机起点。评测关闭随机起点、选点噪声和输出 shuffle；训练随机数消耗及距离并列时的选点可能与旧实现不同，checkpoint 结构兼容不代表随机轨迹逐位续接。
 
-主策略默认最多使用 100 个训练 episodes，在 20/40/60/80/100% optimizer updates 保存 Checkpoint，以 25 回合选点、100 回合独立测试，选点与测试 seed 分离。正式选点要求训练预算对应的完整 Checkpoint 集合。
+主策略默认最多使用 100 个训练 episodes，在 20/40/60/80/100% optimizer updates 保存 Checkpoint，以 25 回合选点、100 回合独立测试，选点与测试 seed 分离。选点使用显式候选列表和相同评测预算。
 
 DQ-RISE 的手部预训练见 [手部动作表示](docs/手部动作表示.md)；AFRO/CordViP 需先导出 `encoder.pt`，流程见 [观测预训练](docs/观测预训练.md)。模块预训练使用各自预算。
 
@@ -67,7 +77,6 @@ DQ-RISE 的手部预训练见 [手部动作表示](docs/手部动作表示.md)�
 
 ```bash
 bash scripts/utils/download_pretrained.sh  # 准备 Uni3D 及 DINOv2-small，重复运行复用缓存。
-python -m dexmani_policy.test_tools.smoke_test --config-only sat dqrise
 python -m dexmani_policy.test_tools.agent_checks --device cpu
 bash scripts/training/train.sh sat 'task_name=<task>'
 bash scripts/training/train.sh dqrise 'task_name=<task>' 'initialization.codebook=<codebook.npz>'
@@ -85,7 +94,8 @@ bash scripts/training/train.sh sat 'task_name=<task>' agent.rgb_backbone_config.
 
 ```bash
 bash scripts/training/train.sh interact_dex tactile=sim_force 'zarr_path=<sim_zarr>'
-python -m dexmani_policy.test_tools.smoke_test --config-only --override tactile=real_force interact_dex
+python -m dexmani_policy.test_tools.smoke_test interact_dex \
+  --override tactile=real_force --override 'zarr_path=<real_zarr>'
 ```
 
 当前方案按优先级集中落实四项改动：
@@ -128,11 +138,6 @@ bash scripts/training/train.sh adaptac tactile=real_patch 'zarr_path=<real_zarr>
 RMS 使用训练划分的全部真实原始标量拟合一个字段级尺度 `S=sqrt(sum(x²)/N)`，然后固定执行 `x/S`，不去均值、不裁剪；非空全零字段使用 identity affine。aggregate 与 dense 独立统计，完整 FP32 affine 随 checkpoint 保存。非退化字段应满足 `mean(z²)≈1`，不要求均值为零。该变换保留零点、方向和相对幅度，不能消除异常峰值或跨源物理差异。
 
 ```bash
-# 四种触觉配方的配置检查，无需实际 Zarr
-for tactile in sim_force real_force real_taxel real_patch; do
-  python -m dexmani_policy.test_tools.smoke_test --config-only --override "tactile=$tactile" adaptac
-done
-
 # 实际数据短训、续训及保存恢复；按硬件资源设置 batch/worker
 python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 2 \
   --override tactile=real_taxel --override 'zarr_path=<real_zarr>' \
@@ -142,13 +147,13 @@ python -m dexmani_policy.test_tools.smoke_test --max-updates 4 --resume-updates 
 python -m dexmani_policy.training.common.resume --run experiments/adaptac/<task>/<run>
 ```
 
-`test_tools/smoke_test.py` 提供配置、数据 batch、短训和 checkpoint 续训检查。数据模式检查训练与验证 split 的核心形状及有限值，打印各字段的 shape/dtype，不额外拟合 normalizer。训练模式复用 `PolicyTrainer`，检查参数更新、checkpoint 保存加载和续训步数。
+`test_tools/smoke_test.py` 每次接收一个配置，调用正式 `prepare_training/run_training` 短训、保存，再用 `prepare_resume` 在原目录恢复。多配置检查使用 shell 循环；配置组合直接调用 `load_policy_config`，数据准备使用独立 `check_data`，不在 smoke 中建立第二套配置或扫描流程。
 
 `python -m dexmani_policy.test_tools.agent_checks --device cuda` 提供无需数据集或预训练权重的 agents 数值回归与合成短训；也支持 `--device cpu`，点云检查使用实际 PyTorch3D 后端。覆盖及组件计时边界见[项目架构](docs/项目架构.md#agents-优化依据与验证)。
 
-默认短训 4 次更新、续训 2 次；`--resume-updates 0` 关闭续训，总预算耗尽时明确打印未执行。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
+默认短训 4 次更新、续训 2 次，两段执行上限独立于研究总预算，首次短训后须仍有可恢复的更新。`--output-dir` 保留新目录中的训练产物，否则使用临时目录。编译和 BF16 沿用训练配置，可通过 `--override training.use_compile=false` 关闭编译；其他配方同样使用重复的 `--override` 覆盖。
 
-离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复使用 checkpoint 内置配置和严格张量赋值，直接复用保存的 affine 与参数精度。inspect 与评测的相对 checkpoint 文件路径统一以实验 checkpoints 目录解析，选择的文件须位于该目录；实验 config.yaml 与 checkpoint 按当前训练入口生成的配套内部产物使用。
+离线恢复可用 `inspect_policy(experiment, checkpoint="latest", weights="raw")` 与 `load_policy(info, device="cpu")`，二者从 `dexmani_policy.deployment` 导入。调用 `policy.warmup(observation, samples=3)` 显式提供观测样本，然后调用 `policy.predict(observation)`。原始历史可不同长，调用方须保证最后 N 帧对齐。推理不读取训练数据；续训仍需原数据及保存的数据划分。恢复使用同一 checkpoint 的实际配置与严格张量赋值，直接复用保存的 affine 与参数精度，不读取外部 config.yaml。公开 inspect 的相对 checkpoint 文件路径仍以实验 checkpoints 目录解析；完整 `future_actions` 及 Runtime 返回接口保留。
 
 训练将 Canonical 实际使用的数值配方保存到配置和 checkpoint，由公开 `PolicyInfo` 提供给 Real。非 Canonical 的训练、inspect 和纯策略推理不要求真机配方；设备入口负责拒绝缺失事实。字段来源和动作上下文约定见[部署边界](docs/项目架构.md#离线推理与部署边界)。
 

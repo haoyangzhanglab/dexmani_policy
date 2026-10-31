@@ -27,4 +27,4 @@ cd "$ROOT_DIR"
 
 # Keep Conda activation hooks outside this shell's nounset mode and stream logs.
 exec conda run --no-capture-output -n policy \
-    python -u dexmani_policy/train.py --config-name="${CONFIG}" "$@"
+    python -u -m dexmani_policy.train --config-name="${CONFIG}" "$@"
