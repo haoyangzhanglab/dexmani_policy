@@ -11,7 +11,6 @@ tactile_source: ???
 horizon: 20
 n_obs_steps: 1
 n_action_steps: 8
-action_dim: 19
 
 normalization:
   joint_state: limits
@@ -23,10 +22,7 @@ dataloader:
   drop_last: true
 
 dataset:
-  tactile_source: ${tactile_source}
-  pc_dim: ${agent.pc_dim}
   _target_: dexmani_policy.datasets.variants.tactile.AdapTacDataset
-  pad_after: ${eval:'${n_action_steps} - 1'}
 
   augmentation_cfg:
     pc:
@@ -36,7 +32,6 @@ dataset:
       noise:       {noise_std: 0.0002, prob: 1.0}
 
 agent:
-  tactile_source: ${tactile_source}
   clip_sample: true
   _target_: dexmani_policy.agents.policies.adaptac.AdapTacPolicy
 
@@ -89,27 +84,14 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
-ema:
-  _target_: dexmani_policy.training.common.optimization.EMA
-  update_after_step: 0
-  inv_gamma: 1.0
-  power: 0.75
-  min_value: 0.0
-  max_value: 0.9999
-
 training:
   use_bfloat16: true
   use_compile: false
   use_ema: true
-  lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-
-env_runner:
-  env_kwargs:
-    control_mode: joint
 
 eval:
   inference_steps: ${agent.num_inference_steps}

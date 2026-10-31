@@ -208,11 +208,6 @@ class XHandPatchEncoder(nn.Module):
             "region_ids": self.region_ids.tolist(),
         }
 
-    @staticmethod
-    def validate_normalization(spec):
-        if spec["taxel_tactile_force"] not in {"rms", "max_abs"}:
-            raise ValueError("XHandPatchEncoder requires taxel_tactile_force rms or max_abs normalization")
-
     def _patch_descriptors(self, z):
         with torch.autocast(device_type=z.device.type, enabled=False):
             force = z.reshape(-1, 5, 120, 3).float()

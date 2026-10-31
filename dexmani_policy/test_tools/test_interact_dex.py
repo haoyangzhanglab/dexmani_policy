@@ -19,7 +19,7 @@ from dexmani_policy.agents.obs_encoder.interaction.gated_tactile_fusion import G
 from dexmani_policy.agents.obs_encoder.interaction.scene_aggregator import sample_region_seeds
 from dexmani_policy.agents.obs_encoder.pointcloud.ops import index_points
 from dexmani_policy.common.checkpoint import Checkpoint, restore_policy, save_checkpoint
-from dexmani_policy.common.config import load_policy_config, validate_future_force_offsets
+from dexmani_policy.common.config import load_policy_config, validate_future_force_offsets, normalization_feature_shapes
 from dexmani_policy.datasets.variants.tactile import InterActDexDataset, read_future_force
 from dexmani_policy.training.common.config import validate_config
 
@@ -61,7 +61,7 @@ class InterActDexChecks(unittest.TestCase):
         model = hydra.utils.instantiate(cfg.agent)
         dims = dict(action=19, joint_state=19, point_cloud=6, eef_pose=9,
                     fingertip_xyz=15, finger_tactile_force=15)
-        model.set_normalization_spec(dict(cfg.normalization), dims, action_key="action")
+        model.configure_normalizer(dims, normalization_feature_shapes({key: dims[key] for key, mode in cfg.normalization.items() if mode != "identity"}))
         return model, cfg, dims
 
     def batch(self):
@@ -260,6 +260,7 @@ class InterActDexChecks(unittest.TestCase):
         effective = OmegaConf.to_container(cfg, resolve=True)
         effective["agent"].update(model.effective_config)
         effective["normalization_dims"] = dims
+        effective["normalizer_shapes"] = {key: list(field.scale.shape) for key, field in model.normalizer.fields.items()}
         checkpoint = Checkpoint(0, 1, model.state_dict(), None, optimizer.state_dict(), {}, None, {}, effective)
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             path = save_checkpoint(Path(directory) / "policy.pt", checkpoint)
@@ -287,14 +288,12 @@ class InterActDexChecks(unittest.TestCase):
         self.assertIn("loss_arm", metrics)
         self.assertIn("loss_hand", metrics)
 
-    def test_config_rejects_mismatched_offset_semantics(self):
+    def test_config_assembles_offset_semantics(self):
         for source in ("sim", "real"):
             cfg = load_policy_config("interact_dex", [f"tactile={source}_force"])
             validate_config(cfg)
-            wrong = copy.deepcopy(cfg)
-            wrong.dataset.future_force_offsets = [1, 2, 3, 4]
-            with self.assertRaisesRegex(ValueError, "future_force_offsets"):
-                validate_config(wrong)
+            self.assertEqual(list(cfg.dataset.future_force_offsets), list(cfg.future_force_offsets))
+            self.assertEqual(list(cfg.agent.future_force_offsets), list(cfg.future_force_offsets))
 
 
 if __name__ == "__main__":

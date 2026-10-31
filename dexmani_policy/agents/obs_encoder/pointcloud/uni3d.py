@@ -120,7 +120,6 @@ class Uni3DEncoder(nn.Module):
         embed_dim=256,
         num_group=512,
         group_size=32,
-        pc_in_channels=6,
         patch_dropout=0.0,
         drop_path_rate=0.0,
         use_pretrained_weights=False,
@@ -128,13 +127,6 @@ class Uni3DEncoder(nn.Module):
         fps_random_config=None,
     ):
         super().__init__()
-        if type(pc_in_channels) is not int or pc_in_channels != 6:
-            raise ValueError(
-                f"Uni3D pc_in_channels must be the integer 6, got {pc_in_channels!r}; "
-                "it is the internal patch feature width. XYZ input is padded with "
-                "zero RGB and does not require pc_in_channels=3."
-            )
-
         import timm
 
         self.transformer = timm.create_model(
@@ -144,7 +136,7 @@ class Uni3DEncoder(nn.Module):
         self.embed_dim = embed_dim
 
         self.patch_embed = PointNetPatchEmbedding(
-            in_channels=pc_in_channels,
+            in_channels=6,
             out_channels=512,
             num_patches=num_group,
             patch_size=group_size,
@@ -214,7 +206,7 @@ class Uni3DEncoder(nn.Module):
         if pcd.ndim != 3 or (pcd.shape[-1] != 3 and pcd.shape[-1] < 6):
             raise ValueError(
                 "Uni3D point cloud must have shape [B,N,C] with C=3 (XYZ) or "
-                "C>=6 (first six channels are XYZRGB); keep pc_in_channels=6 "
+                "C>=6 (first six channels are XYZRGB); keep internal six-channel features "
                 "even for XYZ input, which is padded with zero RGB."
             )
         if pcd.shape[-1] == 3:

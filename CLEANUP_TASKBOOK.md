@@ -82,7 +82,7 @@
 | --- | --- | --- | --- | --- |
 | [x] | M0 基线与必要对照 | 必需 | 确认当前实现、保护范围和少量行为对照 | 无 |
 | [x] | M1 确定冗余清理 | P2/P3 | 删除无效恢复 hook、闲置属性和采样/脚本转发 | M0 |
-| [ ] | M2 配置、数据与归一化 | P1 | 组装一次，Policy 持有 affine，Dataset 无回指/缓存 | M1 |
+| [x] | M2 配置、数据与归一化 | P1 | 组装一次，Policy 持有 affine，Dataset 无回指/缓存 | M1 |
 | [ ] | M3 初始化与 DQ 状态 | P1/P2 | fresh/restore 分开；码本只持运行必需状态 | M2 |
 | [ ] | M4 续训与预训练生命周期 | P1/P2 | 同目录续训、完整恢复、按需导出/诊断 | M2、M3 |
 | [ ] | M5 内部观测接口与封装 | P2 | 明确 Tensor 布局、收窄内部协议、展平固定壳层 | M2；相关路径需 M3 |
@@ -166,6 +166,8 @@ M1 完成：无效恢复 hook、六处 out_shape、sampler 批包装和 VQ 参�
 - 没有用另一个“normalizer service”替代 Dataset 缓存，也没有给每个模块补一个空校验接口。
 
 **主要文件**：`common/config.py`、`common/normalizer.py`、`configs/`、`training/common/{config,data}.py`、`training/trainer.py`、`datasets/{demonstration,split}.py`、`datasets/pretrain/`、`datasets/variants/r3d.py`、`agents/policies/base.py`。
+
+M2 完成：配置派生改为普通函数，共享 EMA/cosine 默认收敛；Dataset 回指/缓存与多轮配方校验退出，Policy 独持 affine，checkpoint 保存实际字段形状。10 方法关键配方与基线一致；joint/EEF/R3D/触觉/AFRO/CordViP 六场景统计逐值对照、train-only/验证无增强/继承不重拟合/错误 affine 检查通过；InterAct 10 项及 agent_checks CPU 8 组通过。未验证 CUDA/真实训练。
 
 ### M3：分离 fresh 初始化，缩小 DQ 运行状态
 

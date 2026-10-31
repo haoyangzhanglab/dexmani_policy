@@ -107,11 +107,6 @@ class GlobalTransformerBlock(nn.Module):
 class Sparse3DEncoder(nn.Module):
     """Encode finite, unpadded metric point clouds into sparse contextual tokens."""
 
-    @staticmethod
-    def validate_normalization(spec):
-        if spec.get("point_cloud") != "identity":
-            raise ValueError("Sparse3DEncoder requires normalization.point_cloud: identity (metric XYZ)")
-
     def __init__(
         self,
         input_channels: int = 6,

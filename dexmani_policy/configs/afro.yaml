@@ -6,7 +6,6 @@ policy_name: afro
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
-action_dim: 19
 normalization:
   joint_state: limits
   action: auto
@@ -16,8 +15,6 @@ dataloader:
   drop_last: false
 dataset:
   _target_: dexmani_policy.datasets.demonstration.DemonstrationDataset
-  pc_dim: ${agent.pc_dim}
-  pad_after: ${eval:'${n_action_steps} - 1'}
   sensor_modalities: [point_cloud, joint_state]
   augmentation_cfg: null
 agent:
@@ -46,14 +43,12 @@ training:
   use_bfloat16: false
   use_compile: false
   use_ema: false
-  lr_scheduler: cosine
   lr_warmup_steps: 0
   max_grad_norm: 0
   loop:
     total_train_steps: 100000
 env_runner:
   env_kwargs:
-    control_mode: joint
 eval:
   inference_steps: 10
   use_ema: false

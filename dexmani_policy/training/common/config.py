@@ -9,6 +9,7 @@ from omegaconf import OmegaConf, open_dict
 from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.config import (
     PROJECT_ROOT,
+    assemble_policy_config,
     load_policy_config,
     positive_int,
     validate_action_mode,
@@ -29,26 +30,12 @@ def prepare_training(cfg):
         effective_config.resume_from = source
         # Resume writes into this invocation's directory, never the source run.
         effective_config.workspace.output_dir = cfg.workspace.output_dir
+    assemble_policy_config(effective_config)
     validate_config(effective_config)
     return effective_config, checkpoint
 
 
 def validate_config(cfg):
-    for name in ("horizon", "n_obs_steps", "n_action_steps", "action_dim"):
-        if cfg.agent[name] != cfg[name]:
-            raise ValueError(f"agent.{name} must match {name}")
-    dataset = cfg.dataset
-    if "n_action_steps" in dataset and dataset.n_action_steps != cfg.n_action_steps:
-        raise ValueError("dataset.n_action_steps must match n_action_steps")
-    if "future_force_offsets" in cfg.agent and dataset.get("future_force_offsets") != cfg.agent.future_force_offsets:
-        raise ValueError("Dataset/policy future_force_offsets must match")
-    if dataset.get("pc_dim") is not None and dataset.pc_dim != cfg.agent.get("pc_dim"):
-        raise ValueError("Dataset pc_dim must match the actual Agent point-cloud channels")
-    if dataset.get("sensor_modalities") is None:
-        raise ValueError("dataset.sensor_modalities must be explicit")
-    for field, name in (("horizon", "horizon"), ("obs_horizon", "n_obs_steps")):
-        if dataset[field] != cfg[name]:
-            raise ValueError(f"dataset.{field} must match {name}")
     validate_normalization_config(cfg)
     validate_tactile_config(cfg)
 
@@ -79,6 +66,7 @@ def assemble_effective_config(cfg, data_description, model, *, checkpoint=None):
     effective = copy.deepcopy(cfg)
     with open_dict(effective):
         effective.normalization_dims = data_description["normalization_dims"]
+        effective.normalizer_shapes = {key: list(field.scale.shape) for key, field in model.normalizer.fields.items()}
         effective.dataset.split_manifest = data_description["split_manifest"]
         effective.policy_metadata = metadata
         effective.deployment_metadata = data_description["deployment_metadata"]

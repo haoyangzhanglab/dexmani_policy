@@ -28,14 +28,11 @@ class ResNetEncoder(nn.Module):
         model_name: str = "resnet18",
         tune_mode: Literal["freeze", "full"] = "full",
         norm_mode: Literal["batch_norm", "frozen_bn", "group_norm"] = "group_norm",
-        global_token_type: Literal["avg"] = "avg",
         out_dim: int | None = None,
         weights=None,
         load_pretrained: bool = True,
     ):
         super().__init__()
-        if global_token_type != "avg":
-            raise ValueError(f"Unsupported global_token_type: {global_token_type}")
         if norm_mode not in ("batch_norm", "frozen_bn", "group_norm"):
             raise ValueError(
                 f"Unsupported norm_mode: {norm_mode!r}; expected batch_norm, frozen_bn, or group_norm"
@@ -53,7 +50,7 @@ class ResNetEncoder(nn.Module):
 
         self.effective_config = dict(
             model_name=model_name, tune_mode=tune_mode, norm_mode=norm_mode,
-            global_token_type=global_token_type, out_dim=out_dim,
+            out_dim=out_dim,
             weights=weights, load_pretrained=load_pretrained,
         )
         self.tune_mode = tune_mode

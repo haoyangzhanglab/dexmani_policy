@@ -55,15 +55,6 @@ class InterActDexObservationEncoder(nn.Module):
         self.scene_projection = nn.Linear(self.pc_encoder.out_dim, self.obs_token_dim)
         self.hand_history = HandHistoryEncoder(n_obs_steps) if history_mixer else None
 
-    @staticmethod
-    def validate_normalization(spec):
-        Sparse3DEncoder.validate_normalization(spec)
-        for field in ("eef_pose", "fingertip_xyz"):
-            if spec[field] != "identity":
-                raise ValueError(f"InterActDex requires normalization.{field}: identity")
-        if spec["finger_tactile_force"] not in {"rms", "max_abs"}:
-            raise ValueError("InterActDex requires finger_tactile_force rms or max_abs normalization")
-
     @property
     def effective_config(self) -> dict:
         return {

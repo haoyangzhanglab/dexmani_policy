@@ -12,23 +12,26 @@ dataloader:
   prefetch_factor: 2
 
 dataset:
-  action_key: ${action_key}
-  zarr_path: ${zarr_path}
-  horizon: ${horizon}
-  obs_horizon: ${n_obs_steps}
-  pad_before: ${eval:'${n_obs_steps} - 1'}
   seed: 42  # 数据划分与训练 seed 独立。
   val_ratio: 0.1
   max_train_episodes: 100
   split_manifest: null
 
 agent:
-  horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   action_dim: ${action_dim}
 
+ema:
+  _target_: dexmani_policy.training.common.optimization.EMA
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
 training:
+  lr_scheduler: cosine
   seed: ${seed}
   device: cuda:0
   loop:
@@ -36,7 +39,6 @@ training:
     gradient_accumulation_steps: 1
 
 env_runner:
-  task_name: ${task_name}
   env_kwargs:
     randomize_model_id: true
     randomize_table_height: true

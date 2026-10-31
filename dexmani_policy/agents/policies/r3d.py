@@ -55,12 +55,6 @@ class R3DObservationEncoder(nn.Module):
 class R3DPolicy(BasePolicy):
     supported_execution_modes = ("sync", "async", "rtc")
 
-    @classmethod
-    def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
-        if spec["point_cloud"] != "limits":
-            raise ValueError("R3D fixed normalized point-cloud clamp requires limits normalization")
-        super().validate_normalization_recipe(spec, action_key=action_key)
-
     def __init__(
         self,
         horizon: int,

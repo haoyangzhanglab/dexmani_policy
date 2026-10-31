@@ -12,7 +12,6 @@ n_action_steps: 8
 use_aux_ee: false  # 启用时要求 action_key=action，末端姿态仅作辅助预测。
 joint_dim: 19
 ee_dim: 9  # action_ee[:9]：位置 3 维 + rot6d 6 维。
-action_dim: ${eval:'${joint_dim} + ${ee_dim} if ${use_aux_ee} else (21 if ${eq:${action_key},action_ee} else ${joint_dim})'}
 
 normalization:
   joint_state: limits
@@ -24,8 +23,6 @@ dataloader:
   drop_last: true
 
 dataset:
-  _target_: ${eval:'"dexmani_policy.datasets.variants.r3d.R3DDataset" if ${use_aux_ee} else "dexmani_policy.datasets.demonstration.DemonstrationDataset"'}
-  pad_after: 7
   sensor_modalities: ["joint_state", "point_cloud"]
 
   # 点 dropout 在 Uni3D 内执行。
@@ -52,7 +49,6 @@ agent:
     embed_dim: 256
     num_group: 512
     group_size: 32
-    pc_in_channels: 6  # Uni3D 内部 XYZRGB 特征维度，固定为 6。
     patch_dropout: 0.0
     drop_path_rate: 0.2
     use_pretrained_weights: true
@@ -71,9 +67,6 @@ agent:
   mlp_dim: 2048
   attention_downsample_rate: 2
 
-  modality_dropout_probs:
-    joint_state: 0.0
-
   num_training_steps: 100
   num_inference_steps: 10
   prediction_type: sample
@@ -85,27 +78,14 @@ optimizer:
   obs_lr: 1.0e-4
   obs_weight_decay: 1.0e-6
 
-ema:
-  _target_: dexmani_policy.training.common.optimization.EMA
-  update_after_step: 0
-  inv_gamma: 1.0
-  power: 0.75
-  min_value: 0.0
-  max_value: 0.9999
-
 training:
   use_bfloat16: true
   use_compile: true  # 仅编译 R3DTransformer。
   use_ema: true
-  lr_scheduler: cosine
   lr_warmup_steps: 500
   max_grad_norm: 1.0
   loop:
     total_train_steps: 100000
-
-env_runner:
-  env_kwargs:
-    control_mode: ${eval:'"ee" if ${eq:${action_key},action_ee} else "joint"'}
 
 eval:
   inference_steps: 10

@@ -27,15 +27,6 @@ class SpatialObservationEncoder(nn.Module):
             raise ValueError("Dense checkpoints require saved DINO architecture for offline restoration")
         return {**rgb, "load_pretrained": False}
 
-    @staticmethod
-    def validate_normalization(spec: dict[str, str]) -> None:
-        Sparse3DEncoder.validate_normalization(spec)
-        if spec.get("joint_state") != "limits":
-            raise ValueError("Spatial observations require normalization.joint_state: limits")
-        for key in ("rgb", "camera_intrinsic", "camera_extrinsic"):
-            if spec.get(key) != "identity":
-                raise ValueError(f"Spatial observations require normalization.{key}: identity")
-
     def __init__(
         self,
         pc_dim: int = 3,

@@ -286,9 +286,7 @@ def check_codebook_pipeline(device):
                     camera_intrinsic="identity", camera_extrinsic="identity", action="auto")
         dims = dict(joint_state=19, point_cloud=3, rgb=3,
                     camera_intrinsic=9, camera_extrinsic=12, action=19)
-        policy.set_normalization_spec(
-            spec, dims, action_key="action",
-        )
+        policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
         policy.initialize_training(dict(
             attrs=dict(hand_joint_order=["thumb:3", "index:3", "middle:2", "ring:2", "pinky:2"],
                        hand_units="radians"),
@@ -329,7 +327,7 @@ def check_policies(device):
     policy = DP3Policy(**kwargs)
     spec = dict(joint_state="limits", point_cloud="identity", action="auto")
     dims = dict(joint_state=19, point_cloud=3, action=19)
-    policy.set_normalization_spec(spec, dims, action_key="action")
+    policy.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
     policy.to(device)
     with torch.no_grad():
         policy.normalizer["action"].scale.copy_(torch.linspace(0.5, 1.5, 19, device=device))
@@ -363,7 +361,7 @@ def check_policies(device):
     storage.seek(0)
     saved = torch.load(storage, map_location=device, weights_only=True)
     restored = DP3Policy(**kwargs)
-    restored.set_normalization_spec(spec, dims, action_key="action")
+    restored.configure_normalizer(dims, {key: (dims[key],) for key, mode in spec.items() if mode != "identity"})
     restored.load_state_dict(saved["model"], strict=True, assign=True)
     restored.to(device)
     new_optimizer = build_optimizer(restored, lr=1e-4, weight_decay=1e-6)

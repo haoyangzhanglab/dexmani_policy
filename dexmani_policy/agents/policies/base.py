@@ -5,7 +5,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int, validate_action_window, normalization_feature_shapes
+from dexmani_policy.common.config import POINT_CLOUD_FIELDS, positive_int, validate_action_window
 from dexmani_policy.common.normalizer import LinearNormalizer
 
 
@@ -95,36 +95,15 @@ class BasePolicy(nn.Module):
 
     supported_execution_modes: tuple[str, ...] = ("sync", "async")
 
-    @classmethod
-    def validate_normalization_recipe(cls, spec: dict[str, str], *, action_key: str) -> None:
-        if action_key not in cls.supported_action_keys:
-            raise ValueError(f"{cls.__name__} does not support action_key={action_key!r}")
-        allowed = ("auto", "limits") if action_key == "action" else ("auto",)
-        if spec["action"] not in allowed:
-            raise ValueError(
-                f"{cls.__name__} with {action_key} requires normalization.action "
-                f"in {allowed}; the action recipe is fixed"
-            )
-
-    def set_normalization_spec(
-        self, spec: dict[str, str], feature_dims: dict[str, int], *, action_key: str
-    ) -> None:
-        self.validate_normalization_recipe(spec, action_key=action_key)
-        validate = getattr(self.obs_encoder, "validate_normalization", None)
-        if validate is not None:
-            validate(spec)
+    def configure_normalizer(self, feature_dims, feature_shapes) -> None:
         self.normalization_dims = dict(feature_dims)
-        if self.normalization_dims["action"] != self.action_dim:
-            raise ValueError("Normalizer action width must match the full prediction layout")
-        self.normalizer = LinearNormalizer(normalization_feature_shapes({
-            key: feature_dims[key] for key, mode in spec.items() if mode != "identity"
-        }))
+        self.normalizer = LinearNormalizer(feature_shapes)
 
     def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
         """Initialize fresh weights and optionally return inherited normalization state."""
 
     def load_normalizer(self, normalizer: LinearNormalizer) -> None:
-        self.normalizer.load_state_dict(normalizer.state_dict())
+        self.normalizer = normalizer
 
     @property
     def requires_ema_for_loss(self) -> bool:

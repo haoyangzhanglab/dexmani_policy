@@ -17,7 +17,9 @@ from dexmani_policy.common.config import positive_int, read_split_manifest
 from dexmani_policy.common.io_util import close_resources
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import dict_apply, set_seed
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
+from dexmani_policy.training.common.data import (
+    build_train_loader, close_data_loader, epoch_position, fit_normalizer,
+)
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.common.signals import training_signal_handlers
@@ -81,7 +83,10 @@ def train(cfg, checkpoint=None, max_updates=None):
     accumulation = cfg.training.loop.gradient_accumulation_steps
     model = CordViPPretrain(cfg.normalization, **cfg.model)
     if checkpoint is None:
-        model.normalizer.load_state_dict(dataset.get_normalizer(cfg.normalization).state_dict(), strict=True)
+        model.normalizer = fit_normalizer(
+            dataset, cfg.normalization,
+            feature_dims={"hand_pointcloud": 3, "object_pointcloud": 3, "joint_state": 19},
+        )
     validation = dataset.get_validation_dataset()
     model.to(cfg.training.device)
     optimizer = torch.optim.AdamW(model.parameters(), **cfg.optimizer)

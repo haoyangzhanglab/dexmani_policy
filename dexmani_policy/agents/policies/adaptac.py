@@ -32,12 +32,6 @@ class AdapTacObservationEncoder(nn.Module):
     def consumed_observation_fields(self):
         return ("joint_state", "point_cloud", *self.tactile_encoder.consumed_observation_fields)
 
-    def validate_normalization(self, spec):
-        Sparse3DEncoder.validate_normalization(spec)
-        validate = getattr(self.tactile_encoder, "validate_normalization", None)
-        if validate is not None:
-            validate(spec)
-
     def __init__(
         self,
         tactile_encoder: nn.Module,

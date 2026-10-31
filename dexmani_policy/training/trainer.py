@@ -20,7 +20,7 @@ from dexmani_policy.common.experiments import milestone_steps
 from dexmani_policy.common.io_util import atomic_path, close_resources
 from dexmani_policy.common.pytorch_util import dict_apply, get_rng_state, set_rng_state
 from dexmani_policy.training.common.config import assemble_effective_config
-from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position
+from dexmani_policy.training.common.data import build_train_loader, close_data_loader, epoch_position, fit_normalizer
 from dexmani_policy.training.common.logging import (
     ExperimentLogger, accumulate_metrics, print_param_count, print_training_recipe, to_log_scalars,
 )
@@ -41,12 +41,14 @@ class PolicyTrainer:
             raise ValueError("Dataset/policy action_start_index mismatch")
         if data_description["control_action_dim"] != model.control_action_dim:
             raise ValueError("Dataset primary action width must match policy control output")
-        model.set_normalization_spec(
-            cfg.normalization, data_description["normalization_dims"], action_key=cfg.action_key,
+        model.configure_normalizer(
+            data_description["normalization_dims"],
+            {} if checkpoint is None else checkpoint.effective_config["normalizer_shapes"],
         )
         if checkpoint is None:
             pretrained_state = model.initialize_training(data_description)
-            normalizer = dataset.get_normalizer(cfg.normalization, initial_state=pretrained_state)
+            normalizer = fit_normalizer(dataset, cfg.normalization, initial_state=pretrained_state,
+                                        feature_dims=data_description["normalization_dims"])
             model.load_normalizer(normalizer)
 
         if model.requires_ema_for_loss and not cfg.training.use_ema:
@@ -83,8 +85,6 @@ class PolicyTrainer:
                 if checkpoint.ema_model_state is None or checkpoint.ema_updater_step is None:
                     raise ValueError("Resume checkpoint is missing EMA state")
                 ema_model.load_state_dict(checkpoint.ema_model_state, strict=True, assign=True)
-            # Strict model restoration establishes the complete affine before caching it on CPU.
-            dataset.get_normalizer(cfg.normalization, initial_state=model.normalizer.state_dict())
         model.to(device)
         if ema_model is not None:
             ema_model.to(device)

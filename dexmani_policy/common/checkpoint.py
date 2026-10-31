@@ -77,9 +77,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
         set_rng_state(rng_state)
 
     agent.checkpoint_step = global_step
-    agent.set_normalization_spec(
-        cfg["normalization"], cfg["normalization_dims"], action_key=cfg["action_key"],
-    )
+    agent.configure_normalizer(cfg["normalization_dims"], cfg["normalizer_shapes"])
     agent.load_state_dict(state, strict=True, assign=True)
     del state
     agent.to(device)
