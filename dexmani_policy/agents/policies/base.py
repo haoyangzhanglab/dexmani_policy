@@ -156,8 +156,6 @@ class BasePolicy(nn.Module):
         condition = self.encode_observation(obs_dict)
         if rtc_prefix is None:
             return self.predict_action_from_condition(condition, inference_steps=inference_steps, generator=generator)
-        if "rtc" not in self.supported_execution_modes:
-            raise NotImplementedError("This policy does not support RTC")
         return self.predict_action_from_condition(
             condition,
             inference_steps=inference_steps,

@@ -19,20 +19,8 @@ def build_patch_correspondence(
 ) -> dict[str, torch.Tensor]:
     """Build FP32 image-grid pooling weights; coverage/confidence always use geometric weights."""
     grid_xy, confidence = projection
-    if grid_xy.ndim != 3 or grid_xy.shape[-1] != 2:
-        raise ValueError("grid_xy must be [BT,N,2]")
-    if not grid_xy.is_floating_point() or confidence.dtype != torch.float32:
-        raise ValueError("projection requires floating coordinates and FP32 confidence")
-    if confidence.shape != grid_xy.shape[:-1]:
-        raise ValueError("confidence must match grid_xy [BT,N]")
-    batch, points, _ = grid_xy.shape
+    batch = grid_xy.shape[0]
     grid_h, grid_w = patch_grid_size
-    if min(points, grid_h, grid_w) <= 0:
-        raise ValueError("points and grid dimensions must be positive")
-    if neighbor_idx.ndim != 3 or neighbor_idx.shape[0] != batch or neighbor_idx.shape[-1] == 0:
-        raise ValueError("neighbor_idx must be [BT,M,K] with K > 0")
-    if member_weight is not None and member_weight.shape != neighbor_idx.shape:
-        raise ValueError("member_weight must match neighbor_idx [BT,M,K]")
     with torch.autocast(device_type=grid_xy.device.type, enabled=False):
         coordinates = grid_xy.float()
         valid = (
@@ -135,21 +123,12 @@ class FeatureAlignment(nn.Module):
         member_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Fuse a uniform image grid with tokens; projection/neighbors share Sparse3D point order."""
-        if image_grid.ndim != 4 or image_grid.shape[0] != projection.grid_xy.shape[0]:
-            raise ValueError(
-                "image_grid must be [BT,Hf,Wf,Di] with the same batch as projection"
-            )
         geometry = build_patch_correspondence(
             neighbor_idx,
             projection,
             (image_grid.shape[1], image_grid.shape[2]),
             member_weight=member_weight,
         )
-        if spatial_tokens.ndim != 3 or spatial_tokens.shape[:2] != neighbor_idx.shape[:2]:
-            raise ValueError(
-                "spatial_tokens must be [BT,M,D3] with the same batch and patches as neighbor_idx"
-            )
-
         weight = geometry["pool_weight"]
         image = image_grid.flatten(1, 2)
         # Unreferenced NaN/Inf must not contaminate bmm through zero weights.

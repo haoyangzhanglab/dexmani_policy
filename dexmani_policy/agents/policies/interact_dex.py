@@ -66,8 +66,6 @@ class InterActDexObservationEncoder(nn.Module):
         }
 
     def forward(self, obs: dict) -> torch.Tensor:
-        if obs["joint_state"].shape[0] % self.n_obs_steps:
-            raise ValueError("Flattened observation frames must be divisible by n_obs_steps")
         pc = preprocess_point_cloud(
             obs["point_cloud"], self.num_points,
             self.pc_encoder.fps_random_config, training=self.training,
@@ -90,7 +88,7 @@ class InterActDexObservationEncoder(nn.Module):
         # Fusion already includes both the hand and scene residuals.
         interaction = self.tactile_fusion(
             relation, tactile=tactile,
-        )["interaction_tokens"]
+        )
         scene = scene.unflatten(0, (-1, self.n_obs_steps))
         interaction = interaction.unflatten(0, (-1, self.n_obs_steps))
         if self.hand_history is not None:

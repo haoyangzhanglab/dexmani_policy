@@ -125,7 +125,6 @@ class SceneAggregator(nn.Module):
         if query_source not in ("region", "learned"):
             raise ValueError("query_source must be 'region' or 'learned'")
 
-        self.token_channels = token_channels
         self.num_scene_tokens = num_scene_tokens
         self.nearest_slots = nearest_slots
         self.geometry_scale = float(geometry_scale)
@@ -160,14 +159,8 @@ class SceneAggregator(nn.Module):
         patch_token: Tensor,
         patch_center: Tensor,
     ) -> Tensor:
-        if patch_token.ndim != 3 or patch_token.shape[-1] != self.token_channels:
-            raise ValueError("patch_token must be [B,M,token_channels]")
         if not patch_token.shape[0] or patch_token.shape[1] < self.num_scene_tokens:
             raise ValueError("nonempty batch and M >= num_scene_tokens are required")
-        if patch_center.shape != (*patch_token.shape[:2], 3):
-            raise ValueError("patch_center must be [B,M,3]")
-        if not patch_token.is_floating_point() or not patch_center.is_floating_point():
-            raise TypeError("tokens and XYZ must be floating point")
         tokens, points = patch_token, patch_center.float()
         regions = self.num_scene_tokens
         seed_indices = sample_region_seeds(points, regions)
@@ -219,7 +212,3 @@ class SceneAggregator(nn.Module):
         scene_tokens = scene_tokens + self.ffn_gain.float() * self.ffn(normalized).float()
 
         return self.norm(scene_tokens.to(self.norm.weight.dtype))
-
-    @property
-    def out_dim(self) -> int:
-        return self.token_channels

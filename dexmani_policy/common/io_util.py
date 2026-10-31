@@ -10,11 +10,11 @@ from pathlib import Path
 
 @contextmanager
 def atomic_path(
-    path: str | os.PathLike[str], *, overwrite: bool = True, suffix: str = ".tmp"
+    path: str | os.PathLike[str], *, overwrite: bool = True
 ) -> Iterator[Path]:
     """Publish a temporary sibling path atomically after the writer succeeds."""
     path = Path(path)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".dexmani-publish-", suffix=suffix)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".dexmani-publish-", suffix=".tmp")
     os.close(fd)
     temporary = Path(name)
 

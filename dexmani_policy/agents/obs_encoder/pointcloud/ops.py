@@ -4,14 +4,8 @@ import torch
 
 
 def load_pointcloud_ops():
-    try:
-        import pytorch3d.ops
-    except (ImportError, OSError) as error:
-        raise ImportError(
-            "This FPS/kNN path requires PyTorch3D built for the installed Torch/CUDA. "
-            "Install the matching native backend as described in README; "
-            "DP3 without point downsampling does not require it."
-        ) from error
+    import pytorch3d.ops
+
     return pytorch3d.ops
 
 

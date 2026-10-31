@@ -64,8 +64,6 @@ def _rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
 class HandStateEncoder(nn.Module):
     """Encode aligned joints and measured world geometry; the wrist uses the EEF frame."""
 
-    KEYPOINTS = ("wrist", "thumb", "index", "middle", "ring", "pinky")
-
     def __init__(
         self,
         token_dim: int = 192,
@@ -86,7 +84,6 @@ class HandStateEncoder(nn.Module):
             if not math.isfinite(scale) or scale <= 0:
                 raise ValueError(f"{name} must be finite and positive")
 
-        self.token_dim = token_dim
         self.position_scale = float(position_scale)
         self.hand_scale = float(hand_scale)
         self.position_pe = FourierPositionEmbedding3D(num_frequencies) if num_frequencies else None
@@ -125,12 +122,6 @@ class HandStateEncoder(nn.Module):
         """Consume flattened frames with raw meter positions and consecutive rotation columns."""
         if joint_state.ndim != 2 or joint_state.shape[1] != 19:
             raise ValueError("joint_state must have shape [N,19]")
-        batch = joint_state.shape[0]
-        if eef_pose.shape != (batch, 9) or fingertip_xyz.shape != (batch, 5, 3):
-            raise ValueError("eef_pose/fingertip_xyz must have shape [N,9] / [N,5,3]")
-        if not all(value.is_floating_point() for value in (joint_state, eef_pose, fingertip_xyz)):
-            raise TypeError("joint_state, eef_pose and fingertip_xyz must be floating point")
-
         with torch.autocast(device_type=eef_pose.device.type, enabled=False):
             joints = joint_state.float()
             anchors = torch.cat((eef_pose[:, None, :3].float(), fingertip_xyz.float()), 1)
@@ -159,7 +150,3 @@ class HandStateEncoder(nn.Module):
             "anchor_xyz": anchors,
             "rotation_world_from_eef": rotation,
         }
-
-    @property
-    def out_dim(self) -> int:
-        return self.token_dim

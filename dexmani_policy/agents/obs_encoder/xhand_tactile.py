@@ -6,34 +6,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dexmani_policy.common.config import FIELD_FEATURE_SHAPES
-
 __all__ = ["XHandForceEncoder", "XHandTaxelEncoder", "XHandPatchEncoder"]
 
 
-def prepare_tactile_input(
-    x: torch.Tensor,
-    input_shape: tuple[int, ...],
-    input_key: str,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Inputs are five finite, normalized finger observations, including valid zero force."""
-    feature_dims = len(input_shape)
-    if x.ndim not in (feature_dims + 1, feature_dims + 2) or x.shape[-feature_dims:] != input_shape:
-        raise ValueError(
-            f"{input_key}: expected [B,{input_shape}] or [B,T,{input_shape}], got {tuple(x.shape)}"
-        )
-
-    return x.to(dtype=dtype)
-
-
 class XHandForceEncoder(nn.Module):
-    """Normalized [B,(T,)5,3] -> [B,(T,)5,64] with one shared 3-layer MLP."""
+    """Normalized [BT,5,3] -> [BT,5,64] with one shared 3-layer MLP."""
 
     num_tokens = 5
     frame_dim = 64
     input_key = "finger_tactile_force"
-    input_shape = FIELD_FEATURE_SHAPES[input_key]
 
     def __init__(self) -> None:
         super().__init__()
@@ -46,12 +27,7 @@ class XHandForceEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = prepare_tactile_input(
-            x, self.input_shape, self.input_key, self.net[0].weight.dtype
-        )
-        features = self.net(x)
-
-        return features
+        return self.net(x.to(dtype=self.net[0].weight.dtype))
 
     @property
     def effective_config(self):
@@ -67,12 +43,11 @@ class XHandForceEncoder(nn.Module):
 
 
 class XHandTaxelEncoder(nn.Module):
-    """Normalized [B,(T,)5,120,3] -> [B,(T,)5,64] with KineDex 1D CNN."""
+    """Normalized [BT,5,120,3] -> [BT,5,64] with KineDex 1D CNN."""
 
     num_tokens = 5
     frame_dim = 64
     input_key = "taxel_tactile_force"
-    input_shape = FIELD_FEATURE_SHAPES[input_key]
 
     def __init__(self) -> None:
         super().__init__()
@@ -85,16 +60,9 @@ class XHandTaxelEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = prepare_tactile_input(
-            x, self.input_shape, self.input_key, self.net[0].weight.dtype
-        )
-        batch_shape = x.shape[:-3]
-        fingers = x.reshape(-1, 120, 3).transpose(1, 2)
-        features = (
-            self.net(fingers).squeeze(-1).reshape(*batch_shape, self.num_tokens, self.frame_dim)
-        )
-
-        return features
+        x = x.to(dtype=self.net[0].weight.dtype)
+        fingers = x.flatten(0, 1).transpose(1, 2)
+        return self.net(fingers).squeeze(-1).reshape(x.shape[0], self.num_tokens, self.frame_dim)
 
     @property
     def effective_config(self):
@@ -152,7 +120,6 @@ class XHandPatchEncoder(nn.Module):
     num_regions = 5
     frame_dim = 64
     input_key = "taxel_tactile_force"
-    input_shape = FIELD_FEATURE_SHAPES[input_key]
 
     def __init__(self, region_ids: torch.Tensor | None = None, activity_scale: float = 1.0) -> None:
         super().__init__()
@@ -199,7 +166,7 @@ class XHandPatchEncoder(nn.Module):
 
     def _patch_descriptors(self, z):
         with torch.autocast(device_type=z.device.type, enabled=False):
-            force = z.reshape(-1, 5, 120, 3).float()
+            force = z.float()
             magnitude = torch.linalg.vector_norm(force, dim=-1)
             activity = magnitude / (magnitude + self.activity_scale)
             region = self.region_ids[None].expand(force.shape[0], -1, -1)
@@ -222,8 +189,6 @@ class XHandPatchEncoder(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = prepare_tactile_input(x, self.input_shape, self.input_key, torch.float32)
-        batch_shape = x.shape[:-3]
         descriptors = self._patch_descriptors(x)
         patch_features = self.patch_mlp(descriptors)
         patch_features = (
@@ -237,9 +202,7 @@ class XHandPatchEncoder(nn.Module):
         )
         attention_weights = torch.softmax(logits, dim=-1)
         tokens = self.token_norm((attention_weights[..., None] * patch_features.float()).sum(dim=2))
-        features = tokens.reshape(*batch_shape, self.num_tokens, self.frame_dim)
-
-        return features
+        return tokens
 
     @property
     def out_dim(self) -> int:

@@ -43,8 +43,7 @@ def select_checkpoint(checkpoints, *, weights=None, inference_steps=None, action
                   inference=dict(use_ema=weights == "ema", inference_steps=inference_steps, action_steps=action_steps),
                   device=str(device), test_video=video, candidates=[])
     for checkpoint in checkpoints:
-        step = load_checkpoint(checkpoint).global_step
-        record["candidates"].append(dict(checkpoint=str(checkpoint.relative_to(root)), global_step=step))
+        record["candidates"].append(dict(checkpoint=str(checkpoint.relative_to(root))))
     write_json(path, record, overwrite=False)
     try:
         for index, candidate in enumerate(record["candidates"]):
@@ -52,7 +51,8 @@ def select_checkpoint(checkpoints, *, weights=None, inference_steps=None, action
                 root / candidate["checkpoint"], weights=weights, inference_steps=inference_steps,
                 action_steps=action_steps, seeds=selection, seed=seed, device=device, video=False,
                 output_dir=directory / "candidates" / str(index))
-            candidate.update(result=str(result_path.relative_to(root)), statistics=result["statistics"])
+            candidate.update(result=str(result_path.relative_to(root)), statistics=result["statistics"],
+                             global_step=result["global_step"])
         winner = max(record["candidates"], key=candidate_score)
         record.update(status="completed", ckpt_relpath=winner["checkpoint"], global_step=winner["global_step"])
         write_json(path, record)

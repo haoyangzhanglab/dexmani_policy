@@ -6,13 +6,10 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor, nn
 
-from ..proprio import HandStateEncoder
 from ..xhand_tactile import XHandForceEncoder
 
 
 class GatedTactileFusion(nn.Module):
-    KEYPOINTS = HandStateEncoder.KEYPOINTS
-
     def __init__(
         self,
         token_channels: int = 192,
@@ -21,8 +18,6 @@ class GatedTactileFusion(nn.Module):
     ) -> None:
         super().__init__()
         self.tactile_encoder = XHandForceEncoder() if tactile_encoder is None else tactile_encoder
-        self.token_channels = token_channels
-
         tactile_dim = self.tactile_encoder.out_dim
         self.query_norm = nn.LayerNorm(token_channels)
         self.tactile_norm = nn.LayerNorm(tactile_dim)
@@ -47,7 +42,7 @@ class GatedTactileFusion(nn.Module):
         hand_scene: Mapping[str, Tensor],
         *,
         tactile: Tensor,
-    ) -> dict[str, Tensor]:
+    ) -> Tensor:
         """Return complete [N,6,D] tokens; callers must not add hand or scene residuals again."""
         # FP32 residuals preserve small tactile updates under BF16 autocast.
         x = hand_scene["hand_query"].float() + hand_scene["relation_update"].float()
@@ -65,8 +60,4 @@ class GatedTactileFusion(nn.Module):
         gate = self.gate_mlp(gate_input.to(self.gate_mlp[0].weight.dtype)).float().sigmoid()
         tactile_update = gate * delta
 
-        return {"interaction_tokens": x + tactile_update}
-
-    @property
-    def out_dim(self) -> int:
-        return self.token_channels
+        return x + tactile_update

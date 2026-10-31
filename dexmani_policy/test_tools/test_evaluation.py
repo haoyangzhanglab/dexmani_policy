@@ -52,8 +52,9 @@ class EvaluationChecks(unittest.TestCase):
                 stats = {'success_rate': 0.5, 'avg_steps': 10 if step == 2 else 8}
                 path = settings['output_dir'] / 'result_details.json'
                 path.parent.mkdir(parents=True)
-                write_json(path, {'statistics': stats})
-                return {'statistics': stats}, path
+                result = {'global_step': step, 'statistics': stats}
+                write_json(path, result)
+                return result, path
 
             with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=score):
                 path = run_pipeline(candidates, weights='ema', inference_steps=3, action_steps=2,

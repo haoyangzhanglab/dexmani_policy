@@ -92,8 +92,6 @@ class ImageProcessor(torch.nn.Module):
         return_transform: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Consume [BT,3,H,W]; transforms use half-pixel resizing."""
-        if images.ndim != 4 or images.shape[1] != 3 or images.dtype != torch.float32:
-            raise ValueError("RGB processor requires float32 [BT,3,H,W] in [0,1]")
         if return_transform:
             output_hw = self.image_size or images.shape[-2:]
             if self.interpolation == "nearest" and tuple(output_hw) != images.shape[-2:]:

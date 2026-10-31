@@ -38,8 +38,6 @@ def load_run(method):
             source = source / "resume.pt"
         checkpoint = torch.load(source, map_location="cpu", weights_only=False)
         cfg = OmegaConf.create(checkpoint["effective_config"])
-        if not OmegaConf.is_dict(cfg.dataset.get("split_manifest")):
-            raise ValueError("Resume requires the saved dataset.split_manifest")
         cfg.workspace.output_dir = str(source.parent)
     else:
         cfg = load_policy_config(args.config or f"pretrain/obs/{method}", args.overrides)

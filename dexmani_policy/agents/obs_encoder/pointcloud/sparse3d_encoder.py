@@ -10,7 +10,7 @@ from torch import nn
 
 from dexmani_policy.agents.modules import build_mlp
 
-from .ops import index_points, sample_point_patches, load_pointcloud_ops
+from .ops import index_points, sample_point_patches
 from .rope import RotaryPositionEmbedding3D
 
 
@@ -123,7 +123,6 @@ class Sparse3DEncoder(nn.Module):
     ):
         config = locals().copy()
         super().__init__()
-        load_pointcloud_ops()
         self.effective_config = {
             key: value for key, value in config.items()
             if key not in {"self", "input_channels", "fps_random_config", "__class__"}

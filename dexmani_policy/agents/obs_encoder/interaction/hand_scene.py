@@ -126,7 +126,6 @@ class HandSceneEncoder(nn.Module):
         if not math.isfinite(surface_radius) or surface_radius <= 0:
             raise ValueError("surface_radius must be finite and positive")
 
-        self.token_channels = token_channels
         self.metric_scale = metric_scale
         self.surface_k = surface_k
         self.surface_radius = surface_radius
@@ -142,16 +141,10 @@ class HandSceneEncoder(nn.Module):
         hand_tokens: Tensor,
         *,
         rotation_world_from_eef: Tensor,
-        query_context: Tensor | None = None,
+        query_context: Tensor,
     ) -> dict[str, Tensor]:
-        """XYZ use world meters; rotation maps EEF axes to world; return scene increments."""
+        """XYZ use world meters; rotation maps EEF axes to world; scene context is [N,D]."""
         memory, centers = patches["tokens"], patches["xyz"]
-        batch, channels = memory.shape[0], self.token_channels
-        if anchor_xyz.shape != (batch, 6, 3) or hand_tokens.shape != (batch, 6, channels):
-            raise ValueError("anchor_xyz/hand_tokens must be [N,6,3] / [N,6,D]")
-        if rotation_world_from_eef.shape != (batch, 3, 3):
-            raise ValueError("rotation_world_from_eef must be [N,3,3]")
-
         with torch.no_grad(), torch.autocast(device_type=pointcloud.device.type, enabled=False):
             anchors = anchor_xyz.float()
             rotation = rotation_world_from_eef.float()
@@ -177,11 +170,7 @@ class HandSceneEncoder(nn.Module):
         geometry_update = self.geometry_projection(
             torch.cat((local, geometry), -1).to(self.geometry_projection.weight.dtype)
         ).float()
-        query = hand_tokens.float() + geometry_update
-        if query_context is not None:
-            if query_context.ndim == 2:
-                query_context = query_context[:, None]
-            query = query + query_context.float()
+        query = hand_tokens.float() + geometry_update + query_context[:, None].float()
 
         context = self.context(query, memory, query_xyz, memory_xyz)
         update = geometry_update + context.float()
@@ -190,7 +179,3 @@ class HandSceneEncoder(nn.Module):
             "relation_update": update,
             "geometry_descriptor": geometry,
         }
-
-    @property
-    def out_dim(self) -> int:
-        return self.token_channels

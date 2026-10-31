@@ -47,7 +47,6 @@ class InterActDexChecks(unittest.TestCase):
         stack = ExitStack()
         self.addCleanup(stack.close)
         module = "dexmani_policy.agents.obs_encoder.pointcloud.sparse3d_encoder"
-        stack.enter_context(patch(f"{module}.load_pointcloud_ops"))
         stack.enter_context(patch(f"{module}.sample_point_patches", side_effect=sample_cpu_patches))
 
     def make_policy(self, *overrides):
@@ -111,13 +110,13 @@ class InterActDexChecks(unittest.TestCase):
         relation = dict(hand_query=torch.randn(2, 6, 192), relation_update=torch.randn(2, 6, 192),
                         geometry_descriptor=torch.randn(2, 6, 7))
         force = torch.randn(2, 5, 3)
-        before = fusion(relation, tactile=force)["interaction_tokens"]
+        before = fusion(relation, tactile=force)
         changed = force.clone()
         changed[:, 2] += 3
-        after = fusion(relation, tactile=changed)["interaction_tokens"]
+        after = fusion(relation, tactile=changed)
         torch.testing.assert_close(before[:, [1, 2, 4, 5]], after[:, [1, 2, 4, 5]], rtol=0, atol=0)
         self.assertGreater((before[:, [0, 3]] - after[:, [0, 3]]).abs().sum().item(), 0)
-        zeros = fusion(relation, tactile=torch.zeros_like(force))["interaction_tokens"]
+        zeros = fusion(relation, tactile=torch.zeros_like(force))
         self.assertTrue(torch.isfinite(zeros).all())
         zeros.square().mean().backward()
         self.assertGreater(fusion.fusion_mlp[-1].weight.grad.abs().sum().item(), 0)
