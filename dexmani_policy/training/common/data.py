@@ -34,7 +34,7 @@ def fit_normalizer(dataset, spec, *, feature_dims, initial_state=None):
         normalizer.fit_field(
             key, dataset.iter_normalization_data(key),
             mode=mode,
-            last_n_dims=len(FIELD_FEATURE_SHAPES.get(key, (0,))),
+            last_n_dims=len(expected_shapes[key]),
         )
         if key == "action" and dataset.action_key == "action_ee":
             field = normalizer[key]

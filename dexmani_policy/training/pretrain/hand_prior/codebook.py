@@ -7,9 +7,7 @@ import numpy as np
 import torch
 
 from dexmani_policy.agents.hand_prior.artifacts import save_codebook
-from dexmani_policy.agents.hand_prior.codebook import (
-    HandStateCodebook, codebook_chunk_size, validate_dq_normalization,
-)
+from dexmani_policy.agents.hand_prior.codebook import HandStateCodebook, codebook_chunk_size
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.io_util import atomic_path
 
@@ -47,7 +45,8 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     split = checkpoint["split_metadata"]
-    validate_dq_normalization(split["normalization_spec"])
+    if split["normalization_spec"]["action"] != "limits":
+        raise ValueError("DQ/VQ hand prototypes require action normalization limits")
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
     codebook = HandStateCodebook(model.hand_dim, model.num_groups, model.codebook_size)
     poses, decoded = build_hand_prototypes(model)

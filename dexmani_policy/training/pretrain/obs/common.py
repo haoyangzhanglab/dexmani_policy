@@ -58,7 +58,8 @@ def load_run(method):
         positive_int(args.log_interval, "--log-interval")
         cfg.training.loop.log_interval_steps = args.log_interval
     if args.zarr_path is not None:
-        cfg.dataset.zarr_path = args.zarr_path
+        cfg.zarr_path = args.zarr_path
+        cfg.dataset.zarr_path = cfg.zarr_path
     if checkpoint is None:
         for name in ("encoder.pt", "resume.pt"):
             path = Path(cfg.workspace.output_dir) / name

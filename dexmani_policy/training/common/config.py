@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 
 import hydra
+from hydra._internal.utils import get_args_parser
+from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.config import (
@@ -36,17 +38,23 @@ def config_name(config):
 
 
 def validate_config_cli(arguments):
-    for index, argument in enumerate(arguments):
-        flag, separator, value = argument.partition("=")
-        if flag in {"-cp", "-cd"} or flag.startswith(("--config-p", "--config-d")):
-            raise ValueError("The config root is fixed to dexmani_policy/configs")
-        if flag.lstrip("+~").split("@", 1)[0] == "hydra.searchpath":
+    args = get_args_parser().parse_args(arguments)
+    if args.config_path is not None or args.config_dir is not None:
+        raise ValueError("The config root is fixed to dexmani_policy/configs")
+    if args.experimental_rerun is not None:
+        raise ValueError("Use repository config names for fresh training or the explicit resume entrypoint")
+    if args.config_name is not None:
+        config_name(args.config_name)
+    _validate_config_overrides(args.overrides)
+
+
+def _validate_config_overrides(overrides):
+    for override in OverridesParser.create().parse_overrides(overrides):
+        key = override.key_or_group
+        if key == "hydra.searchpath" or key.startswith("hydra.searchpath.") or (
+            key == "hydra" and "searchpath" in (override.value() or {})
+        ):
             raise ValueError("hydra.searchpath cannot change the repository config sources")
-        if flag == "-cn" or flag.startswith("--config-n"):
-            if separator:
-                config_name(value)
-            elif index + 1 < len(arguments):
-                config_name(arguments[index + 1])
 
 
 def validate_config_sources(hydra_cfg):
@@ -57,7 +65,7 @@ def validate_config_sources(hydra_cfg):
 def load_policy_config(config, overrides=()):
     name = config_name(config)
     overrides = list(overrides)
-    validate_config_cli(overrides)
+    _validate_config_overrides(overrides)
     register_resolvers()
     with hydra.initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
         cfg = hydra.compose(config_name=name, overrides=overrides, return_hydra_config=True)

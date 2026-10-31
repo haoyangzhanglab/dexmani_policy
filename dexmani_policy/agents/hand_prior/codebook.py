@@ -17,12 +17,6 @@ def validate_hand_coordinates(attrs):
         raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
 
 
-def validate_dq_normalization(spec):
-    """DQ/VQ hand prototypes require the existing bounded action coordinates."""
-    if spec.get("action") not in {"auto", "limits"}:
-        raise ValueError("DQ/VQ hand prototypes require action normalization auto or limits")
-
-
 def codebook_chunk_size(num_codes: int, requested: int) -> int:
     """Budget 16 MiB for an FP32 distance matrix, always allowing at least one row."""
     positive_int(requested, "chunk_size")

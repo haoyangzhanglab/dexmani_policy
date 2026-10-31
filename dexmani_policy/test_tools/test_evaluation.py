@@ -5,8 +5,8 @@ import io
 import json
 import tempfile
 import unittest
-from dataclasses import replace
 from contextlib import redirect_stderr
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,8 +14,8 @@ import torch
 from omegaconf import open_dict
 
 from dexmani_policy.common.checkpoint import load_checkpoint, save_checkpoint
-from dexmani_policy.deployment.metadata import inspect_policy
 from dexmani_policy.common.io_util import write_json
+from dexmani_policy.deployment.metadata import inspect_policy
 from dexmani_policy.evaluation.selection import candidate_score, run_pipeline
 from dexmani_policy.evaluation.rollout import create_run_directory, evaluate_policy
 from dexmani_policy.test_tools import test_training_resume
@@ -57,11 +57,11 @@ class EvaluationChecks(unittest.TestCase):
 
             with patch('dexmani_policy.evaluation.selection.evaluate_policy', side_effect=score):
                 path = run_pipeline(candidates, weights='ema', inference_steps=3, action_steps=2,
-                                    selection_episodes=2, test_episodes=3, device='cpu',
+                                    selection_episodes=2, test_episodes=3, device=torch.device('cpu'),
                                     output_dir=run / 'comparison')
             record = json.loads(path.read_text())
             self.assertEqual(record['global_step'], 6)
-            self.assertNotIn('test_request', record)
+            self.assertEqual(record['device'], 'cpu')
             self.assertEqual(len(record['candidates']), 3)
             self.assertEqual(len(calls), 4)
             for _, settings in calls[:3]:

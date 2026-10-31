@@ -35,13 +35,13 @@ def select_checkpoint(checkpoints, *, weights=None, inference_steps=None, action
     test, selection = split_evaluation_seeds(load_seed_pool(cfg), seed, test_episodes,
                                              positive_int(selection_episodes, "selection_episodes"))
     if output_dir is not None and not Path(output_dir).expanduser().resolve().is_relative_to(root):
-        raise ValueError("Until external best consumers migrate, selection output must remain inside the run")
+        raise ValueError("Selection output must remain inside the training run")
     directory = create_run_directory(root / "eval_ckpt_selector", output_dir)
     path = directory / "selection_result.json"
     record = dict(status="running", selection_result=str(path.relative_to(root)),
                   selection_seeds=selection, test_seeds=test, seed=seed,
                   inference=dict(use_ema=weights == "ema", inference_steps=inference_steps, action_steps=action_steps),
-                  device=device, test_video=video, candidates=[])
+                  device=str(device), test_video=video, candidates=[])
     for checkpoint in checkpoints:
         step = load_checkpoint(checkpoint).global_step
         record["candidates"].append(dict(checkpoint=str(checkpoint.relative_to(root)), global_step=step))
@@ -67,7 +67,7 @@ def run_pipeline(checkpoints, **options):
     if not checkpoints:
         raise ValueError("Candidates must be nonempty")
     root = Path(checkpoints[0]).expanduser().resolve(strict=True).parent.parent
-    # Preserve the existing best publication lock until actual external consumers migrate.
+    # Serialize selection and best publication for this training run.
     with (root / ".pipeline.lock").open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

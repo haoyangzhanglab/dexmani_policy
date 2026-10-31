@@ -73,11 +73,37 @@ class ConfigRecipeChecks(unittest.TestCase):
             with self.subTest(config=name), self.assertRaisesRegex(ValueError, "Config"):
                 load_policy_config(name)
         for arguments in (["-cp", "/tmp"], ["--config-dir=/tmp"], ["--config-p=/tmp"],
-                          ["--config-n=../outside"]):
+                          ["--config-n=../outside"], ["--experimental-rerun=/tmp/job.pickle"]):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 validate_config_cli(arguments)
         with self.assertRaisesRegex(ValueError, "searchpath"):
             load_policy_config("dp3", ["hydra.searchpath=[file:///tmp]"])
+
+    def test_hydra_cli_checks_dictionary_sources_before_config_output(self):
+        command = [sys.executable, '-m', 'dexmani_policy.train', '--config-name=dp3', '--cfg', 'job']
+        for override in ('hydra={searchpath:[file:///tmp]}', '+hydra.searchpath.0=file:///tmp'):
+            with self.subTest(override=override):
+                result = subprocess.run([*command, override], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('searchpath cannot change', result.stderr)
+                self.assertNotIn('policy_name: dp3', result.stdout)
+        result = subprocess.run([*command, 'hydra={run:{dir:/tmp/dexmani-config-output}}'],
+                                check=True, capture_output=True, text=True)
+        self.assertIn('policy_name: dp3', result.stdout)
+
+    def test_observation_pretrain_data_override_updates_saved_recipe(self):
+        from dexmani_policy.training.pretrain.obs.common import load_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            data = str(Path(temporary) / 'moved.zarr')
+            for method in ('afro', 'cordvip'):
+                with self.subTest(method=method), patch.object(sys, 'argv', [
+                    'pretrain', '--zarr-path', data, '--output-dir', temporary,
+                ]):
+                    cfg, checkpoint, _ = load_run(method)
+                    self.assertIsNone(checkpoint)
+                    self.assertEqual(cfg.zarr_path, data)
+                    self.assertEqual(cfg.dataset.zarr_path, data)
 
 
 class SplitChecks(unittest.TestCase):

@@ -29,7 +29,7 @@ python -m dexmani_policy.datasets.tools.contact_map --zarr-path INPUT --output O
 
 ## 快速开始
 
-以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。配置只接受 `dexmani_policy/configs/` 下的名称或相对子路径（如 `dp3`、`pretrain/obs/afro`，可带 `.yaml`），不接受外部 YAML、配置根目录切换或 `hydra.searchpath`。训练数据默认位于 `robot_data/<task>.zarr`。
+以下命令从仓库根目录执行，将 `<task>`、`<run>` 替换为实际名称。配置只接受 `dexmani_policy/configs/` 下的名称或相对子路径（如 `dp3`、`pretrain/obs/afro`，可带 `.yaml`），不接受外部 YAML、配置根目录切换、`hydra.searchpath` 或 Hydra `--experimental-rerun`；续训使用下述显式 resume 入口。训练数据默认位于 `robot_data/<task>.zarr`。
 
 ```bash
 # 用实际数据完成短训、保存和原目录恢复；按硬件设置 batch/worker

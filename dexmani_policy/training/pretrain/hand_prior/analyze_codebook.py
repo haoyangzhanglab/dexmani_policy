@@ -9,7 +9,7 @@ import torch
 
 from dexmani_policy.agents.hand_prior.codebook import validate_hand_coordinates
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
-from dexmani_policy.common.io_util import atomic_path
+from dexmani_policy.common.io_util import write_json
 from dexmani_policy.common.normalizer import LinearNormalizer, validate_normalizer_state
 from dexmani_policy.datasets.episode_store import EpisodeStore
 from dexmani_policy.datasets.split import split_episodes
@@ -46,8 +46,7 @@ def analyze(checkpoint_path, output_dir, *, device="cpu", zarr_path=None, chunk_
         _, _, indices, _ = model(torch.as_tensor(rows, device=device))
         usage.scatter_add_(1, indices.T, torch.ones_like(indices.T))
     report["train_quantizer_group_counts"] = usage.cpu().tolist()
-    with atomic_path(output / "codebook_diagnostics.json") as temporary:
-        temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    write_json(output / "codebook_diagnostics.json", report)
     for group, counts in enumerate(usage.cpu()):
         fig, ax = plt.subplots(figsize=(6, 3))
         ax.bar(np.arange(model.codebook_size), counts.numpy())
