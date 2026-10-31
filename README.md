@@ -105,13 +105,7 @@ InterAct-Dex 包含以下四部分：
 
 标准 YAML 的 `agent.future_force_loss_weight=0.1` 是未经闭环调优的初始值，Python 默认 `0.0` 不创建辅助头。训练仅编码一次观测；部署跳过未来力头，保持完整 `future_actions` 输出。小头使用动作侧优化器设置并随整策略 EMA 保存。
 
-空间 FiLM、抓取中心描述、未来几何重建、目标力条件及额外 VLM/动作专家暂不接入默认路径。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-逐指触觉监督)。功能检查不代替闭环性能验证：
-
-```bash
-python -m unittest dexmani_policy.test_tools.test_interact_dex -v
-```
-
-该 CPU 检查覆盖数据边界、损失/梯度、同指隔离、BF16、保存恢复和推理接口；仅在检查中以 Torch 采样替代原生 FPS/kNN，不验证 PyTorch3D/CUDA 后端。
+空间 FiLM、抓取中心描述、未来几何重建、目标力条件及额外 VLM/动作专家暂不接入默认路径。时序及边界契约见[项目架构](docs/项目架构.md#interact-dex-逐指触觉监督)。
 
 ## AdapTac 触觉实验
 
