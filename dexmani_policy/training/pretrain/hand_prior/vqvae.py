@@ -45,9 +45,6 @@ def load_hand_array(buffer, episode_mask):
 def prepare_hand_data(cfg):
     if cfg.get("resume_from") is not None:
         raise ValueError("VQ pretraining does not support resume_from")
-    spec = cfg.normalization
-    if cfg.dataset.action_key != "action":
-        raise ValueError("VQ pretraining requires arm7+hand12 joint commands")
     buffer = EpisodeStore(cfg.dataset.zarr_path, keys=["action"])
     if buffer["action"].shape[1:] != (19,):
         raise ValueError("VQ pretraining requires action shape [T,19]")
@@ -62,10 +59,10 @@ def prepare_hand_data(cfg):
     normalizer = LinearNormalizer()
     normalizer.fit_field("hand", (train_hand[start:start + 8192] for start in range(0, len(train_hand), 8192)), mode="limits")
     metadata = dict(
-        hand_data={"action_key": cfg.dataset.action_key}, split_manifest=split,
+        hand_data={"action_key": "action"}, split_manifest=split,
         dataset_config={key: cfg.dataset[key] for key in (
-            "zarr_path", "action_key", "seed", "val_ratio", "max_train_episodes",
-        )}, normalization_spec={"action": spec["action"]},
+            "zarr_path", "seed", "val_ratio", "max_train_episodes",
+        )},
     )
     metadata["dataset_config"]["zarr_path"] = buffer.path
     train_hand = normalizer["hand"].normalize(train_hand).numpy()

@@ -45,8 +45,6 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     split = checkpoint["split_metadata"]
-    if split["normalization_spec"]["action"] != "limits":
-        raise ValueError("DQ/VQ hand prototypes require action normalization limits")
     model = HandVQVAE.from_checkpoint(checkpoint, device=device).eval()
     codebook = HandStateCodebook(model.hand_dim, model.num_groups, model.codebook_size)
     poses, decoded = build_hand_prototypes(model)
@@ -71,7 +69,6 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
         "model_config": checkpoint["model_config"],
         "hand_data": split["hand_data"],
         "split_manifest": split["split_manifest"],
-        "normalization_spec": split["normalization_spec"],
         "ordering": "decoded_prototype_pca1_ascending",
         "selection": {
             "selection_step": int(checkpoint["epoch"]),

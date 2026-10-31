@@ -19,7 +19,7 @@ from dexmani_policy.common.checkpoint import load_checkpoint
 from dexmani_policy.common.pytorch_util import get_rng_state, set_rng_state
 from dexmani_policy.train import run_training
 from dexmani_policy.training.common.config import (
-    load_policy_config, prepare_training, validate_config, validate_config_cli,
+    load_policy_config, prepare_training, validate_config,
 )
 from dexmani_policy.training.common.logging import ExperimentLogger
 from dexmani_policy.training.common.resume import prepare_resume
@@ -72,24 +72,6 @@ class ConfigRecipeChecks(unittest.TestCase):
         for name in ("/tmp/outside.yaml", "../configs/dp3", "~/.config/policy.yaml"):
             with self.subTest(config=name), self.assertRaisesRegex(ValueError, "Config"):
                 load_policy_config(name)
-        for arguments in (["-cp", "/tmp"], ["--config-dir=/tmp"], ["--config-p=/tmp"],
-                          ["--config-n=../outside"], ["--experimental-rerun=/tmp/job.pickle"]):
-            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
-                validate_config_cli(arguments)
-        with self.assertRaisesRegex(ValueError, "searchpath"):
-            load_policy_config("dp3", ["hydra.searchpath=[file:///tmp]"])
-
-    def test_hydra_cli_checks_dictionary_sources_before_config_output(self):
-        command = [sys.executable, '-m', 'dexmani_policy.train', '--config-name=dp3', '--cfg', 'job']
-        for override in ('hydra={searchpath:[file:///tmp]}', '+hydra.searchpath.0=file:///tmp'):
-            with self.subTest(override=override):
-                result = subprocess.run([*command, override], capture_output=True, text=True)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('searchpath cannot change', result.stderr)
-                self.assertNotIn('policy_name: dp3', result.stdout)
-        result = subprocess.run([*command, 'hydra={run:{dir:/tmp/dexmani-config-output}}'],
-                                check=True, capture_output=True, text=True)
-        self.assertIn('policy_name: dp3', result.stdout)
 
     def test_observation_pretrain_data_override_updates_saved_recipe(self):
         from dexmani_policy.training.pretrain.obs.common import load_run

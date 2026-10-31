@@ -5,8 +5,6 @@ from datetime import datetime
 from pathlib import Path
 
 import hydra
-from hydra._internal.utils import get_args_parser
-from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf, open_dict
 
 from dexmani_policy.common.config import (
@@ -28,50 +26,14 @@ def config_name(config):
     path = Path(config)
     if path.is_absolute() or ".." in path.parts or not str(config) or str(config).startswith("~"):
         raise ValueError("Config must be a name or relative path under dexmani_policy/configs")
-    name = path.with_suffix("").as_posix() if path.suffix == ".yaml" else path.as_posix()
-    source = (CONFIG_ROOT / f"{name}.yaml").resolve()
-    if not source.is_relative_to(CONFIG_ROOT):
-        raise ValueError("Config must stay under dexmani_policy/configs")
-    if not source.is_file():
-        raise FileNotFoundError(f"Repository config does not exist: {source}")
-    return name
-
-
-def validate_config_cli(arguments):
-    args = get_args_parser().parse_args(arguments)
-    if args.config_path is not None or args.config_dir is not None:
-        raise ValueError("The config root is fixed to dexmani_policy/configs")
-    if args.experimental_rerun is not None:
-        raise ValueError("Use repository config names for fresh training or the explicit resume entrypoint")
-    if args.config_name is not None:
-        config_name(args.config_name)
-    _validate_config_overrides(args.overrides)
-
-
-def _validate_config_overrides(overrides):
-    for override in OverridesParser.create().parse_overrides(overrides):
-        key = override.key_or_group
-        if key == "hydra.searchpath" or key.startswith("hydra.searchpath.") or (
-            key == "hydra" and "searchpath" in (override.value() or {})
-        ):
-            raise ValueError("hydra.searchpath cannot change the repository config sources")
-
-
-def validate_config_sources(hydra_cfg):
-    if hydra_cfg.searchpath:
-        raise ValueError("hydra.searchpath cannot change the repository config sources")
+    return path.with_suffix("").as_posix() if path.suffix == ".yaml" else path.as_posix()
 
 
 def load_policy_config(config, overrides=()):
     name = config_name(config)
-    overrides = list(overrides)
-    _validate_config_overrides(overrides)
     register_resolvers()
     with hydra.initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
-        cfg = hydra.compose(config_name=name, overrides=overrides, return_hydra_config=True)
-    validate_config_sources(cfg.hydra)
-    with open_dict(cfg):
-        del cfg.hydra
+        cfg = hydra.compose(config_name=name, overrides=list(overrides))
     return assemble_policy_config(cfg)
 
 

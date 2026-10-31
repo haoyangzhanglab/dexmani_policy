@@ -280,20 +280,10 @@ def check_codebook_pipeline(device):
             model_config=model.model_config, model_state_dict=model.state_dict(), epoch=1,
             metrics={"val_lookup_mse": metrics["lookup_mse"]},
             normalizer_state_dict={"fields.hand.scale": torch.ones(12), "fields.hand.offset": torch.zeros(12)},
-            split_metadata=dict(normalization_spec={"action": "limits"}, hand_data={"action_key": "action"},
+            split_metadata=dict(hand_data={"action_key": "action"},
                                 split_manifest=manifest, selection_split="validation", selection_metric="val_lookup_mse"),
         ), checkpoint)
         table, metadata = export_codebook(checkpoint, artifact)
-        unsupported_state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        unsupported_state["split_metadata"]["normalization_spec"]["action"] = "auto"
-        unsupported = Path(directory) / "unsupported.pt"
-        torch.save(unsupported_state, unsupported)
-        try:
-            export_codebook(unsupported, Path(directory) / "unsupported.npz")
-        except ValueError as error:
-            assert "normalization limits" in str(error)
-        else:
-            raise AssertionError("VQ export accepted an obsolete normalization recipe")
         loaded_table = HandStateCodebook(
             model.hand_dim, num_groups=model.num_groups, codebook_size=model.codebook_size,
         )
