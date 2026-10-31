@@ -21,12 +21,6 @@ class SpatialObservationEncoder(nn.Module):
     )
     out_dim = 256
 
-    @staticmethod
-    def prepare_rgb_restore_config(rgb):
-        if rgb is None or rgb.get("architecture") is None:
-            raise ValueError("Dense checkpoints require saved DINO architecture for offline restoration")
-        return {**rgb, "load_pretrained": False}
-
     def __init__(
         self,
         pc_dim: int = 3,
@@ -58,7 +52,7 @@ class SpatialObservationEncoder(nn.Module):
         }
         pc_config = {"channels": 192, "depth": 2, "num_heads": 8, **(pc_encoder_config or {})}
         rgb_config = {
-            "model_name": "facebook/dinov2-small", "tune_mode": "freeze",
+            "tune_mode": "freeze",
             **(rgb_backbone_config or {}),
         }
 

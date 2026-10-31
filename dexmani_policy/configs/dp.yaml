@@ -6,6 +6,9 @@ defaults:
 
 policy_name: dp
 
+initialization:
+  rgb: facebook/dinov2-small
+
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
@@ -48,7 +51,6 @@ agent:
 
   rgb_backbone_name: dino
   rgb_backbone_config:
-    model_name: facebook/dinov2-small
     tune_mode: lora
     lora_dtype: float32
     image_size: [224, 224]

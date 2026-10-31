@@ -32,6 +32,9 @@ def prepare_training(cfg):
         effective_config.workspace.output_dir = cfg.workspace.output_dir
     assemble_policy_config(effective_config)
     validate_config(effective_config)
+    if checkpoint is None:
+        from dexmani_policy.agents.obs_encoder.rgb.build import prepare_initialization
+        prepare_initialization(effective_config)
     return effective_config, checkpoint
 
 

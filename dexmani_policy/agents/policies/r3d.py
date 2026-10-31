@@ -131,9 +131,6 @@ class R3DPolicy(BasePolicy):
             modality_dropout_probs=modality_dropout_probs,
         )
 
-    def initialize_training(self, data_description) -> None:
-        self.obs_encoder.pc_encoder.initialize_training()
-
     def loss_groups(self) -> dict[str, tuple[int, int, float]] | None:
         if not self.use_aux_ee:
             return None

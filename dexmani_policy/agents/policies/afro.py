@@ -32,7 +32,7 @@ class AFROPolicy(BasePolicy):
     supported_action_keys = ("action",)
 
     def __init__(self, horizon=16, n_obs_steps=2, n_action_steps=8, action_dim=19,
-                 state_dim=19, pc_dim=3, pretrained_path=None, freeze_visual=True,
+                 state_dim=19, pc_dim=3, freeze_visual=True,
                  down_dims=(512, 1024, 2048), diffusion_step_embed_dim=128,
                  kernel_size=5, n_groups=8, cond_predict_scale=True,
                  num_training_steps=100, num_inference_steps=10,
@@ -48,15 +48,15 @@ class AFROPolicy(BasePolicy):
         )
         decoder = Diffusion(backbone, num_training_steps, num_inference_steps, prediction_type, clip_sample)
         super().__init__(obs_encoder, decoder, horizon, n_obs_steps, n_action_steps, action_dim)
-        self.pretrained_path, self.freeze_visual = pretrained_path, freeze_visual
+        self.freeze_visual = freeze_visual
 
-    def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
-        if self.pretrained_path is None:
+    def initialize_training(self, data_description, pretrained_path) -> dict[str, torch.Tensor] | None:
+        if pretrained_path is None:
             if self.freeze_visual:
                 raise ValueError("AFRO frozen visual requires pretrained_path; scratch requires freeze_visual=false")
             print("[AFRO] Scratch training with trainable visual encoder")
             return None
-        payload = torch.load(Path(self.pretrained_path).expanduser(), map_location="cpu", weights_only=True)
+        payload = torch.load(Path(pretrained_path).expanduser(), map_location="cpu", weights_only=True)
         self.obs_encoder.visual.load_state_dict(payload["encoder_state"], strict=True)
         return payload["normalizer_state"]
 

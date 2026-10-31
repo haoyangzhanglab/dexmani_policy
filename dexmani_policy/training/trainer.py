@@ -11,7 +11,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from tqdm import tqdm
 
 from dexmani_policy.common.checkpoint import (
-    Checkpoint, policy_state_dict, prepare_restore_config, save_checkpoint,
+    Checkpoint, policy_state_dict, save_checkpoint,
 )
 from dexmani_policy.common.config import (
     positive_int, validate_observation_fields,
@@ -34,8 +34,7 @@ class PolicyTrainer:
         if cfg.get("resume_from") is not None and checkpoint is None:
             raise ValueError("Resume requires the checkpoint loaded by the training entry point")
         device = torch.device(cfg.training.device)
-        model_cfg = cfg.agent if checkpoint is None else prepare_restore_config(cfg.agent)
-        model = hydra.utils.instantiate(model_cfg)
+        model = hydra.utils.instantiate(cfg.agent)
         validate_observation_fields(model, cfg.dataset.sensor_modalities)
         if data_description["action_start_index"] != model.action_start_index:
             raise ValueError("Dataset/policy action_start_index mismatch")
@@ -46,9 +45,25 @@ class PolicyTrainer:
             {} if checkpoint is None else checkpoint.effective_config["normalizer_shapes"],
         )
         if checkpoint is None:
-            pretrained_state = model.initialize_training(data_description)
+            sources = cfg.get("initialization", {})
+            method = cfg.policy_name
+            if method == "dp":
+                model.obs_encoder.backbone.initialize_weights(sources.get("rgb"))
+            elif method in {"sat", "dqrise"}:
+                model.obs_encoder.rgb_encoder.initialize_weights(sources.get("rgb"))
+            elif method == "r3d":
+                model.obs_encoder.pc_encoder.initialize_weights(sources.get("uni3d"))
+            pretrained_state = None
+            hand_affine = None
+            if method == "dqrise":
+                hand_affine = model.initialize_training(data_description, sources.get("codebook"))
+            elif method in {"afro", "cordvip"}:
+                pretrained_state = model.initialize_training(data_description, sources.get("encoder"))
             normalizer = fit_normalizer(dataset, cfg.normalization, initial_state=pretrained_state,
                                         feature_dims=data_description["normalization_dims"])
+            if hand_affine is not None:
+                normalizer["action"].scale[-model.hand_dim:].copy_(hand_affine["scale"])
+                normalizer["action"].offset[-model.hand_dim:].copy_(hand_affine["offset"])
             model.load_normalizer(normalizer)
 
         if model.requires_ema_for_loss and not cfg.training.use_ema:

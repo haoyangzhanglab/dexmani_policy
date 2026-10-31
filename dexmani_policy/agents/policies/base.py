@@ -73,10 +73,6 @@ class BasePolicy(nn.Module):
         self.normalizer = LinearNormalizer()
         self.normalization_dims: dict[str, int] = {}
 
-    @classmethod
-    def prepare_restore_config(cls, config) -> None:
-        """Adjust only external initialization options on a private constructor config."""
-
     @property
     def effective_config(self) -> dict:
         return dict(getattr(self.obs_encoder, "effective_config", {}))
@@ -98,9 +94,6 @@ class BasePolicy(nn.Module):
     def configure_normalizer(self, feature_dims, feature_shapes) -> None:
         self.normalization_dims = dict(feature_dims)
         self.normalizer = LinearNormalizer(feature_shapes)
-
-    def initialize_training(self, data_description) -> dict[str, torch.Tensor] | None:
-        """Initialize fresh weights and optionally return inherited normalization state."""
 
     def load_normalizer(self, normalizer: LinearNormalizer) -> None:
         self.normalizer = normalizer

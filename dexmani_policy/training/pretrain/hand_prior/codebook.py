@@ -59,15 +59,7 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
     state = checkpoint["normalizer_state_dict"]
     scale = state["fields.hand.scale"].detach().float().cpu()
     offset = state["fields.hand.offset"].detach().float().cpu()
-    codebook.set_buffers(
-        {
-            "sorted_hand_poses": poses[permutation],
-            "pca_permutation": permutation,
-            "layer_weights": weights.cpu(),
-            "hand_normalizer_scale": scale,
-            "hand_normalizer_offset": offset,
-        }
-    )
+    codebook.set_prototypes(poses[permutation])
     variance_ratio = float(np.nan_to_num(pca.explained_variance_ratio_[0], nan=0.0))
     diagnostics = {
         "decoder_min_before_clamp": float(decoded.min()),
@@ -101,12 +93,15 @@ def export_codebook(checkpoint_path, output_path, *, device="cpu", overwrite=Fal
         warnings.warn(f"Decoded hand states were clamped to [-1, 1]: {diagnostics}", RuntimeWarning)
     output.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(output, overwrite=overwrite) as temporary:
-        save_codebook(temporary, codebook, metadata)
+        save_codebook(
+            temporary, codebook, metadata, pca_permutation=permutation,
+            layer_weights=weights, hand_affine={"scale": scale, "offset": offset},
+        )
     return codebook, metadata
 
 
 @torch.no_grad()
-def deployment_diagnostics(codebook, splits, *, metadata, chunk_size=4096):
+def deployment_diagnostics(codebook, splits, *, metadata, hand_scale, chunk_size=4096):
     """Measure actual lookup errors in normalized and physical hand coordinates."""
     chunk_size = codebook_chunk_size(codebook.num_codes, chunk_size)
     device, width = codebook.sorted_hand_poses.device, codebook.hand_dim
@@ -116,7 +111,7 @@ def deployment_diagnostics(codebook, splits, *, metadata, chunk_size=4096):
         "selection": metadata["selection"],
         "splits": {},
     }
-    scale = codebook.hand_normalizer_scale.cpu().double()
+    scale = hand_scale.cpu().double()
     spaces = ("normalized", "physical")
     for name, rows in splits.items():
         count = len(rows)

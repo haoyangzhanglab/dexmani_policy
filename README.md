@@ -70,7 +70,7 @@ bash scripts/utils/download_pretrained.sh  # 准备 Uni3D 及 DINOv2-small，重
 python -m dexmani_policy.test_tools.smoke_test --config-only sat dqrise
 python -m dexmani_policy.test_tools.agent_checks --device cpu
 bash scripts/training/train.sh sat 'task_name=<task>'
-bash scripts/training/train.sh dqrise 'task_name=<task>' 'codebook_path=<codebook.npz>'
+bash scripts/training/train.sh dqrise 'task_name=<task>' 'initialization.codebook=<codebook.npz>'
 # B0：晚融合、均匀权重；B4：在新默认基础上单独启用既有 LoRA。
 bash scripts/training/train.sh sat 'task_name=<task>' \
   agent.fusion_stage=post_global agent.semantic_pool_sigma=null

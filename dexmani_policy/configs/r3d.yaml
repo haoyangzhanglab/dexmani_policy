@@ -6,6 +6,9 @@ defaults:
 
 policy_name: r3d
 
+initialization:
+  uni3d: data/pretrained/uni3d
+
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
@@ -51,8 +54,6 @@ agent:
     group_size: 32
     patch_dropout: 0.0
     drop_path_rate: 0.2
-    use_pretrained_weights: true
-    pretrained_weights_path: data/pretrained/uni3d
 
   fps_random_config:
     use_random: true

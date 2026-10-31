@@ -292,6 +292,7 @@ def train(cfg):
     print(f"Saved selected runtime codebook: {codebook_path}")
     diagnostics = deployment_diagnostics(
         runtime_codebook, {"train": train_norm, "held_out": val_norm}, metadata=codebook_metadata,
+        hand_scale=normalizer["hand"].scale,
     )
     with atomic_path(output_dir / "codebook_diagnostics.json") as temporary:
         temporary.write_text(json.dumps(diagnostics, indent=2, allow_nan=False) + "\n")

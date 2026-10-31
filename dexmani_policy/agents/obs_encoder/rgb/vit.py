@@ -12,52 +12,37 @@ class ViTEncoder(nn.Module):
     def __init__(
         self,
         kind: Literal["dino", "siglip"],
-        model_name: str,
         tune_mode: Literal["freeze", "full", "lora"] = "freeze",
         global_token_type: Literal["avg", "cls", "pooler"] = "avg",
         out_dim: int | None = None,
         lora_dtype: Literal["backbone", "float32"] = "backbone",
         architecture: dict | None = None,
-        load_pretrained: bool = True,
     ):
         super().__init__()
         token_types = ("avg", "cls", "pooler") if kind == "dino" else ("avg", "pooler")
         if global_token_type not in token_types:
             raise ValueError(f"Unsupported global_token_type: {global_token_type}")
 
-        self.model_name = model_name
+        self.kind = kind
         self.tune_mode = tune_mode
         self.global_token_type = global_token_type
         if OmegaConf.is_config(architecture):
             architecture = cast(dict, OmegaConf.to_container(architecture, resolve=True))
+        if architecture is None:
+            raise ValueError("ViTEncoder requires an explicit architecture; resolve it before construction")
         if kind == "dino":
-            config = (
-                AutoConfig.for_model(**dict(architecture))
-                if architecture is not None
-                else AutoConfig.from_pretrained(model_name)
-            )
-            model_class = AutoModel
+            config = AutoConfig.for_model(**dict(architecture))
         elif kind == "siglip":
-            config = (
-                SiglipVisionConfig.from_dict(dict(architecture))
-                if architecture is not None
-                else SiglipVisionConfig.from_pretrained(model_name)
-            )
+            config = SiglipVisionConfig.from_dict(dict(architecture))
             config.vision_use_head = global_token_type == "pooler"
-            model_class = SiglipVisionModel
         else:
             raise ValueError(f"Unsupported ViT kind: {kind}")
         config._attn_implementation = "sdpa"
         self.effective_config = dict(
-            model_name=model_name, tune_mode=tune_mode, global_token_type=global_token_type,
+            tune_mode=tune_mode, global_token_type=global_token_type,
             out_dim=out_dim, lora_dtype=lora_dtype, architecture=config.to_dict(),
-            load_pretrained=load_pretrained,
         )
-        if load_pretrained:
-            self.backbone = model_class.from_pretrained(
-                model_name, config=config, torch_dtype=torch.bfloat16
-            )
-        elif kind == "dino":
+        if kind == "dino":
             self.backbone = AutoModel.from_config(config, torch_dtype=torch.bfloat16)
         else:
             self.backbone = SiglipVisionModel(config).to(dtype=torch.bfloat16)
@@ -92,6 +77,21 @@ class ViTEncoder(nn.Module):
 
         self.backbone.train(self.training and tune_mode != "freeze")
 
+    def initialize_weights(self, source: str | None) -> None:
+        if source is None:
+            return
+        backbone = self.backbone.get_base_model() if self.tune_mode == "lora" else self.backbone
+        model_class = AutoModel if self.kind == "dino" else SiglipVisionModel
+        pretrained = model_class.from_pretrained(source, config=backbone.config, torch_dtype=torch.bfloat16)
+        source_state = pretrained.state_dict()
+        state = backbone.state_dict()
+        # PEFT inserts base_layer around adapted Linear modules; adapters stay freshly initialized.
+        base_keys = {key: key.replace(".base_layer.", ".") for key in state if ".lora_" not in key}
+        if set(base_keys.values()) != set(source_state):
+            raise ValueError("Pretrained RGB parameters do not match the configured architecture")
+        state.update({key: source_state[source_key] for key, source_key in base_keys.items()})
+        backbone.load_state_dict(state, strict=True)
+
     def train(self, mode: bool = True):
         super().train(mode)
         if self.tune_mode == "freeze":
@@ -114,7 +114,7 @@ class ViTEncoder(nn.Module):
             global_token = self.project_features(outputs.last_hidden_state[:, 0])
         else:
             if outputs.pooler_output is None:
-                raise ValueError(f"{self.model_name} does not provide pooler_output")
+                raise ValueError(f"{self.kind} does not provide pooler_output")
             global_token = self.project_features(outputs.pooler_output)
 
         return {

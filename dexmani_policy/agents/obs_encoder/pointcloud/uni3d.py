@@ -122,8 +122,6 @@ class Uni3DEncoder(nn.Module):
         group_size=32,
         patch_dropout=0.0,
         drop_path_rate=0.0,
-        use_pretrained_weights=False,
-        pretrained_weights_path=None,
         fps_random_config=None,
     ):
         super().__init__()
@@ -158,25 +156,12 @@ class Uni3DEncoder(nn.Module):
             if name in ("cls_token", "pos_embed") or name.startswith("patch_embed."):
                 p.requires_grad_(False)
 
-        self.use_pretrained_weights = use_pretrained_weights
-        self.pretrained_weights_path = pretrained_weights_path
-
-    def initialize_training(self):
-        if self.use_pretrained_weights:
-            self.load_pretrained_weights(self.pretrained_weights_path)
-        else:
+    def initialize_weights(self, source: str | None):
+        """Load the local R3D trunk only for fresh training."""
+        if source is None:
             logger.info("[Uni3DEncoder] Random initialization (training from scratch)")
-
-    def load_pretrained_weights(self, pretrained_weights_path):
-        """Load local R3D weights; fresh random initialization is an explicit training choice."""
-        if pretrained_weights_path is None:
-            raise ValueError(
-                "[Uni3DEncoder] use_pretrained_weights=True but "
-                "pretrained_weights_path is None. Provide the path or set "
-                "use_pretrained_weights=False to train from scratch."
-            )
-
-        weights_dir = Path(pretrained_weights_path)
+            return
+        weights_dir = Path(source).expanduser()
         if not weights_dir.is_absolute():
             weights_dir = Path(__file__).resolve().parents[4] / weights_dir
         safetensors_path = weights_dir / "model.safetensors"

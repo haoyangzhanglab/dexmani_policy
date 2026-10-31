@@ -3,6 +3,7 @@
 import argparse
 import json
 
+import numpy as np
 import torch
 
 from dexmani_policy.training.pretrain.hand_prior.codebook import export_codebook
@@ -17,7 +18,8 @@ def main():
     args = parser.parse_args()
     codebook, metadata = export_codebook(args.checkpoint, args.output, device=args.device, overwrite=args.overwrite)
     print(f"Exported {codebook.num_codes} hand states to {args.output}")
-    print("Layer weights:", codebook.layer_weights.tolist())
+    with np.load(args.output, allow_pickle=False) as artifact:
+        print("Layer weights:", artifact["layer_weights"].tolist())
     print(json.dumps(metadata["export_diagnostics"], indent=2))
 
 

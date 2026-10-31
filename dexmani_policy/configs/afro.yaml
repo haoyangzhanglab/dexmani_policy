@@ -3,6 +3,8 @@ defaults:
   - _self_
 
 policy_name: afro
+initialization:
+  encoder: null
 horizon: 16
 n_obs_steps: 2
 n_action_steps: 8
@@ -21,7 +23,6 @@ agent:
   _target_: dexmani_policy.agents.policies.afro.AFROPolicy
   state_dim: 19
   pc_dim: 3
-  pretrained_path: null
   freeze_visual: true
   down_dims: [512, 1024, 2048]
   diffusion_step_embed_dim: 128

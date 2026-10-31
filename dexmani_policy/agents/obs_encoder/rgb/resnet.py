@@ -29,35 +29,23 @@ class ResNetEncoder(nn.Module):
         tune_mode: Literal["freeze", "full"] = "full",
         norm_mode: Literal["batch_norm", "frozen_bn", "group_norm"] = "group_norm",
         out_dim: int | None = None,
-        weights=None,
-        load_pretrained: bool = True,
     ):
         super().__init__()
         if norm_mode not in ("batch_norm", "frozen_bn", "group_norm"):
             raise ValueError(
                 f"Unsupported norm_mode: {norm_mode!r}; expected batch_norm, frozen_bn, or group_norm"
             )
-        if (
-            load_pretrained
-            and weights is not None
-            and tune_mode == "freeze"
-            and norm_mode == "group_norm"
-        ):
-            raise ValueError(
-                "Frozen pretrained ResNet requires batch_norm/frozen_bn; "
-                "group_norm is a separate full-finetuning recipe"
-            )
-
         self.effective_config = dict(
             model_name=model_name, tune_mode=tune_mode, norm_mode=norm_mode,
             out_dim=out_dim,
-            weights=weights, load_pretrained=load_pretrained,
         )
         self.tune_mode = tune_mode
+        self.model_name = model_name
+        self.norm_mode = norm_mode
 
         norm_layer = FrozenBatchNorm2d if norm_mode == "frozen_bn" else nn.BatchNorm2d
         backbone = getattr(torchvision.models, model_name)(
-            weights=weights if load_pretrained else None, norm_layer=norm_layer
+            weights=None, norm_layer=norm_layer
         )
 
         if norm_mode == "group_norm":
@@ -81,6 +69,17 @@ class ResNetEncoder(nn.Module):
             raise ValueError(f"Unsupported tune_mode: {tune_mode}")
         self.backbone.requires_grad_(tune_mode == "full")
         self.backbone.train(self.training and tune_mode != "freeze")
+
+    def initialize_weights(self, source: str | None) -> None:
+        if source is None:
+            return
+        if self.tune_mode == "freeze" and self.norm_mode == "group_norm":
+            raise ValueError("Frozen pretrained ResNet requires batch_norm/frozen_bn")
+        norm_layer = FrozenBatchNorm2d if self.norm_mode == "frozen_bn" else nn.BatchNorm2d
+        pretrained = getattr(torchvision.models, self.model_name)(weights=source, norm_layer=norm_layer)
+        if self.norm_mode == "group_norm":
+            pretrained = convert_group_norm(pretrained)
+        self.backbone.load_state_dict(nn.Sequential(*list(pretrained.children())[:-2]).state_dict(), strict=True)
 
     def train(self, mode: bool = True):
         super().train(mode)

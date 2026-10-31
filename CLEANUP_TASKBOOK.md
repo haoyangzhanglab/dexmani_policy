@@ -83,7 +83,7 @@
 | [x] | M0 基线与必要对照 | 必需 | 确认当前实现、保护范围和少量行为对照 | 无 |
 | [x] | M1 确定冗余清理 | P2/P3 | 删除无效恢复 hook、闲置属性和采样/脚本转发 | M0 |
 | [x] | M2 配置、数据与归一化 | P1 | 组装一次，Policy 持有 affine，Dataset 无回指/缓存 | M1 |
-| [ ] | M3 初始化与 DQ 状态 | P1/P2 | fresh/restore 分开；码本只持运行必需状态 | M2 |
+| [x] | M3 初始化与 DQ 状态 | P1/P2 | fresh/restore 分开；码本只持运行必需状态 | M2 |
 | [ ] | M4 续训与预训练生命周期 | P1/P2 | 同目录续训、完整恢复、按需导出/诊断 | M2、M3 |
 | [ ] | M5 内部观测接口与封装 | P2 | 明确 Tensor 布局、收窄内部协议、展平固定壳层 | M2；相关路径需 M3 |
 | [ ] | M6 评测与部署 | P1/P2 | 简单评测函数、显式选模、同源部署配置 | M3、M4；公开接口切换需实际消费者 |
@@ -203,6 +203,8 @@ M2 完成：配置派生改为普通函数，共享 EMA/cosine 默认收敛；Da
 - VQ 导出/诊断仍可运行；不把“运行时不用”误判为“科研记录无价值”。
 
 **主要文件**：`agents/obs_encoder/rgb/`、`agents/obs_encoder/pointcloud/uni3d.py`、`common/checkpoint.py`、`agents/hand_prior/{artifacts,codebook}.py`、`agents/policies/dqrise.py`、`training/pretrain/hand_prior/`。
+
+M3 完成：fresh 来源移到 initialization，RGB/HF/Uni3D 构造无外部加载；恢复 hook 退出。DQ 运行仅固定原型 buffer，NPZ 继续保留 affine/PCA/权重/split，hand affine 在 fresh 唯一安装。tiny DINO/SigLIP × freeze/full/LoRA 的真实本地初始加载及删源后 strict 恢复输出/梯度一致；ResNet 默认、DQ物理编解码/raw与EMA删源恢复、坏产物/split/strict错误边界、InterAct10项与agent_checks8组通过。实际数据准入和fresh组装通过；真实Uni3D初始包、CUDA及完整训练未验证。保护文件hash一致。
 
 ### M4：续训直达原 run，预训练各管各的生命周期
 

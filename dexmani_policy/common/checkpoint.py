@@ -44,18 +44,6 @@ def policy_state_dict(model) -> dict:
     return {name.replace("_orig_mod.", ""): value for name, value in model.state_dict().items()}
 
 
-def prepare_restore_config(agent_cfg):
-    import hydra
-    from omegaconf import OmegaConf
-
-    if OmegaConf.is_config(agent_cfg):
-        agent_cfg = OmegaConf.to_container(agent_cfg, resolve=True)
-    agent_cfg = OmegaConf.create(agent_cfg)
-    agent_class: type[BasePolicy] = hydra.utils.get_class(agent_cfg._target_)
-    agent_class.prepare_restore_config(agent_cfg)
-    return agent_cfg
-
-
 def restore_policy(checkpoint_path, *, use_ema, device):
     import hydra
 
@@ -72,7 +60,7 @@ def restore_policy(checkpoint_path, *, use_ema, device):
 
     rng_state = get_rng_state()
     try:
-        agent = hydra.utils.instantiate(prepare_restore_config(cfg["agent"]))
+        agent = hydra.utils.instantiate(cfg["agent"])
     finally:
         set_rng_state(rng_state)
 
