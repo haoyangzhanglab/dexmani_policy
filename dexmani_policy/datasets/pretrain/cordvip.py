@@ -1,7 +1,7 @@
 import torch
 
 from dexmani_policy.datasets.episode_store import EpisodeStore
-from dexmani_policy.datasets.pretrain.common import ObservationPretrainDataset
+from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 from dexmani_policy.datasets.sampler import SequenceSampler
 
 

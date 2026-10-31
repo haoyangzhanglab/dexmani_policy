@@ -9,7 +9,7 @@ from dexmani_policy.common.config import (
     FIELD_FEATURE_SHAPES, POINT_CLOUD_FIELDS,
 )
 from dexmani_policy.common.normalizer import LinearNormalizer, normalization_feature_shapes, validate_normalizer_state
-from dexmani_policy.datasets.pretrain.common import ObservationPretrainDataset
+from dexmani_policy.datasets.pretrain import ObservationPretrainDataset
 from dexmani_policy.datasets.split import read_split_manifest
 
 

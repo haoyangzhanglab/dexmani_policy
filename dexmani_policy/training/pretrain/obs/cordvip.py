@@ -24,7 +24,7 @@ from dexmani_policy.training.common.data import (
 )
 from dexmani_policy.training.common.logging import ExperimentLogger, accumulate_metrics, to_log_scalars
 from dexmani_policy.training.common.optimization import build_scheduler
-from dexmani_policy.training.common.signals import training_signal_handlers
+from dexmani_policy.training.common import training_signal_handlers
 from dexmani_policy.training.pretrain.obs.common import (
     evaluate, export_encoder, load_run, restore_run, save_run,
 )
