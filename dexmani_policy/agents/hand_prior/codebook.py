@@ -21,12 +21,6 @@ def validate_hand_coordinates(attrs):
         raise ValueError("Hand data must use XHand thumb/index/middle/ring/pinky order in radians")
 
 
-def codebook_chunk_size(num_codes: int, requested: int) -> int:
-    """Budget 16 MiB for an FP32 distance matrix, always allowing at least one row."""
-    positive_int(requested, "chunk_size")
-    return min(requested, max(1, (16 * 1024 * 1024) // (num_codes * 4)))
-
-
 def codebook_distances(values: Tensor, prototypes: Tensor) -> Tensor:
     """Direct FP32 distances preserve nearest indices for nearly coincident poses."""
     with torch.autocast(device_type=values.device.type, enabled=False):
@@ -70,9 +64,6 @@ class HandStateCodebook(nn.Module):
         """Map normalized states to continuous and discrete nearest-prototype indices."""
         if hand.ndim == 0 or hand.shape[-1] != self.hand_dim:
             raise ValueError(f"Expected hand width {self.hand_dim}, got shape {tuple(hand.shape)}")
-        hand = hand.float()
-        if not torch.isfinite(hand).all():
-            raise ValueError("Hand states must be finite before encoding")
         distances = codebook_distances(hand.reshape(-1, self.hand_dim), self.sorted_hand_poses)
         indices = distances.argmin(-1).reshape(hand.shape[:-1])
         continuous = indices.float() / max(self.num_codes - 1, 1) * 2.0 - 1.0

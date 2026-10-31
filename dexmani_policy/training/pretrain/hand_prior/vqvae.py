@@ -15,20 +15,26 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
 from dexmani_policy.agents.hand_prior.codebook import (
-    codebook_chunk_size, codebook_distances, validate_hand_coordinates,
+    codebook_distances, validate_hand_coordinates,
 )
 from dexmani_policy.agents.hand_prior.vqvae import HandVQVAE
 from dexmani_policy.common.config import positive_int
-from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.common.io_util import atomic_path
 from dexmani_policy.common.normalizer import LinearNormalizer
 from dexmani_policy.common.pytorch_util import set_seed
 from dexmani_policy.datasets.episode_store import EpisodeStore, check_finite
 from dexmani_policy.datasets.split import split_episodes
+from dexmani_policy.training.common.config import load_policy_config
 from dexmani_policy.training.common.optimization import build_scheduler
 from dexmani_policy.training.pretrain.hand_prior.codebook import build_hand_prototypes, export_codebook
 
 logger = logging.getLogger(__name__)
+
+
+def codebook_chunk_size(num_codes: int, requested: int) -> int:
+    """Budget 16 MiB for an FP32 distance matrix, always allowing at least one row."""
+    positive_int(requested, "chunk_size")
+    return min(requested, max(1, (16 * 1024 * 1024) // (num_codes * 4)))
 
 
 def load_hand_array(buffer, episode_mask):
@@ -67,9 +73,8 @@ def prepare_hand_data(cfg):
 
 
 @torch.no_grad()
-def evaluate_vq(vqvae, loader, device, *, chunk_size=4096):
+def evaluate_vq(vqvae, loader, device):
     """Evaluate a fixed model's runtime lookup error."""
-    chunk_size = codebook_chunk_size(vqvae.codebook_size ** vqvae.num_groups, chunk_size)
     training = vqvae.training
     vqvae.eval()
     try:
@@ -78,11 +83,9 @@ def evaluate_vq(vqvae, loader, device, *, chunk_size=4096):
         count = 0
         for (batch,) in loader:
             batch = batch.to(device, non_blocking=True)
-            n = batch.shape[0]
-            count += n
-            for values in batch.float().split(chunk_size):
-                distances = codebook_distances(values, prototypes)
-                lookup_sum += distances.amin(-1).double().square().sum()
+            count += batch.shape[0]
+            distances = codebook_distances(batch, prototypes)
+            lookup_sum += distances.amin(-1).double().square().sum()
         if not count:
             raise ValueError("VQ evaluation loader is empty")
         lookup_mse = float(lookup_sum / (count * vqvae.hand_dim))
@@ -126,7 +129,7 @@ def train(cfg):
     has_validation = len(val_ds) > 0
     selection_loader = DataLoader(
         val_ds if has_validation else train_ds,
-        batch_size=recipe.batch_size,
+        batch_size=codebook_chunk_size(recipe.codebook_size ** recipe.num_groups, 4096),
         pin_memory=device.type == "cuda",
         generator=torch.Generator().manual_seed(recipe.seed),
     )
@@ -150,6 +153,7 @@ def train(cfg):
         lr=recipe.lr,
         betas=tuple(recipe.betas),
         weight_decay=recipe.weight_decay,
+        fused=device.type == "cuda",
     )
     total_steps = len(train_loader) * recipe.num_epochs
     scheduler = build_scheduler(

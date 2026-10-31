@@ -2,7 +2,7 @@ defaults:
   - common
   - _self_
 
-# SAT 动作表示 + DiTX-8 的本地适配；保留共享 spatial observation 和标准 flow。
+# SAT 动作表示 + DiTX 的本地适配；保留共享 spatial observation 和标准 flow。
 
 policy_name: sat
 
@@ -57,13 +57,13 @@ agent:
   fusion_stage: pre_global
   semantic_pool_sigma: 0.04
 
-  n_layers: 8
-  hidden_dim: 256
+  n_layers: 6
+  hidden_dim: 768
   n_head: 8
   mlp_ratio: 4.0
-  p_drop_attn: 0.0
-  qkv_bias: true
-  qk_norm: true
+  p_drop_attn: 0.1
+  qkv_bias: false
+  qk_norm: false
   timestep_embed_dim: 128
 
   num_inference_steps: 10

@@ -307,15 +307,17 @@ def check_vq(device):
     torch.testing.assert_close(dead.embed_avg[1:], dead.embed[1:] * 2)
 
     vae = HandVQVAE(12, [1] * 12, latent_dim=8, hidden_dim=16, num_layers=2).to(device)
-    optimizer = torch.optim.AdamW(vae.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(vae.parameters(), lr=1e-3, fused=device.type == "cuda")
     for _ in range(3):
         optimizer.zero_grad(set_to_none=True)
         reconstruction, commitment, _ = vae(torch.randn(16, 12, device=device))
         (reconstruction + commitment).backward()
         assert vae.quantizer.layer_weights.grad is not None and vae.quantizer.layer_weights.grad.abs().sum() > 0
         optimizer.step()
-    loaded = HandVQVAE(**vae.model_config).to(device)
-    loaded.load_state_dict(vae.state_dict(), strict=True)
+    loaded = HandVQVAE.from_checkpoint({
+        "model_config": vae.model_config,
+        "model_state_dict": {name: value.cpu() for name, value in vae.state_dict().items()},
+    }, device=device)
     assert all(torch.isfinite(p).all() for p in loaded.parameters())
 
 
@@ -352,7 +354,7 @@ def check_codebook_pipeline(device):
     rows = torch.randn(19, 12).clamp(-1, 1)
     loader = DataLoader(TensorDataset(rows), batch_size=7)
     before = {key: value.clone() for key, value in model.state_dict().items()}
-    metrics = evaluate_vq(model, loader, device, chunk_size=5)
+    metrics = evaluate_vq(model, loader, device)
     assert model.training
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, before[key], rtol=0, atol=0)

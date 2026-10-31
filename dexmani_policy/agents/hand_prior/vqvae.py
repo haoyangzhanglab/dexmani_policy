@@ -248,6 +248,6 @@ class HandVQVAE(nn.Module):
 
     @classmethod
     def from_checkpoint(cls, checkpoint: dict, *, device: str | torch.device = "cpu") -> HandVQVAE:
-        model = cls(**checkpoint["model_config"]).to(device)
+        model = cls(**checkpoint["model_config"])
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-        return model
+        return model.to(device)
